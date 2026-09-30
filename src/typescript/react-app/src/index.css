@@ -1,0 +1,63 @@
+:root {
+  --paper: #f5f4ef;
+  --ink: #17201d;
+  --muted: #78817d;
+  --line: #d9ddd6;
+  --line-soft: #e9ebe6;
+  --soft: #f0f1ec;
+  --green: #23816a;
+  --green-dark: #17604f;
+  --green-wash: #e1f0e9;
+  --coral: #c65c42;
+  --coral-wash: #f8e9e4;
+  --amber: #bc8a2d;
+  --mono: 'IBM Plex Mono', 'SFMono-Regular', Consolas, monospace;
+
+  font-family: 'Avenir Next', Avenir, 'Segoe UI', sans-serif;
+  color: var(--ink);
+  background-color: var(--paper);
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  min-width: 320px;
+  min-height: 100vh;
+  margin: 0;
+  background-image: repeating-linear-gradient(
+    0deg,
+    transparent,
+    transparent 31px,
+    rgb(23 32 29 / 2.5%) 32px
+  );
+}
+
+button,
+input {
+  font: inherit;
+}
+
+#root {
+  min-height: 100vh;
+}
+
+::selection {
+  color: var(--ink);
+  background: #c7e4d8;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    scroll-behavior: auto !important;
+  }
+}

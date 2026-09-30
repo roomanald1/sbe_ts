@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<sbe:messageSchema xmlns:sbe="http://fixprotocol.io/2016/sbe"
+                   package="example"
+                   id="1"
+                   version="1">
+
+    <types>
+        <type name="symbol" primitiveType="char" length="8"/>
+        <composite name="messageHeader">
+            <type name="blockLength" primitiveType="uint16"/>
+            <type name="templateId" primitiveType="uint16"/>
+            <type name="schemaId" primitiveType="uint16"/>
+            <type name="version" primitiveType="uint16"/>
+        </composite>
+    </types>
+
+    <message name="SymbolPrice" id="1">
+        <field name="symbol" id="1" type="symbol"/>
+        <field name="price" id="2" type="double"/>
+    </message>
+
+</sbe:messageSchema>

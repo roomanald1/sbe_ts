@@ -1,0 +1,10 @@
+[package]
+name = "example"
+version = "0.1.0"
+authors = ["sbetool"]
+description = "null"
+edition = "2018"
+
+[lib]
+name = "example"
+path = "src/lib.rs"

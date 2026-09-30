@@ -1,0 +1,2 @@
+src/rust/rust_sbe_publisher/target/*
+src/typescript/node_modules/*
