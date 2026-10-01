@@ -224,6 +224,14 @@ tbody tr:first-child td {
   font: 600 14px/1 var(--mono);
 }
 
+.price-up {
+  color: var(--green);
+}
+
+.price-down {
+  color: var(--coral);
+}
+
 .empty-state {
   height: 118px;
   color: var(--muted);

@@ -16,16 +16,6 @@ const timeFormatter = new Intl.DateTimeFormat(undefined, {
   second: '2-digit',
 });
 
-const SymbolPriceRow = React.memo(function SymbolPriceRow({ tick }: { tick: SymbolPriceTick }) {
-  return (
-    <tr>
-      <td><span className="symbol-tag">{tick.symbol}</span></td>
-      <td className="price-cell">{priceFormatter.format(tick.price)}</td>
-      <td className="time-cell">{timeFormatter.format(tick.receivedAt)}</td>
-    </tr>
-  );
-});
-
 
 function App() {
   const [connection, setConnection] = React.useState<Connection | undefined>(undefined);
@@ -48,20 +38,25 @@ function App() {
     if (!connection) return undefined;
 
     const symbols = new Map<string, SymbolPriceTick>();
-
+    const ticks: SymbolPriceTick[] = []; // stable
+    let version = 0;
     return connection.data.pipe(
       map(data => decodeSymbolPrice(data, symbols)),
       filter((tick): tick is SymbolPriceTick => tick !== undefined),
       auditTime(50),
-      map(() => Array.from(symbols.values()))
+      map(() => {
+        ticks.length = 0;
+        symbols.forEach(t => ticks.push(t));
+        return ({ ticks, version: version++ });
+      })
     );
   }, [connection]);
 
-  const ticks$ = useObservable(ticksObservable, [], [ticksObservable]);
+  const ticks$ = useObservable(ticksObservable, {ticks:[], version: 0}, [ticksObservable]);
 
   return (
     <main className="terminal">
-      <Header error$={error$} ticks$={ticks$} state$={state$}/>
+      <Header error$={error$} ticks$={ticks$.ticks} state$={state$} />
 
       <section className="feed-section" aria-label="Live symbol price events">
         <div className="feed-toolbar">
@@ -80,14 +75,18 @@ function App() {
               </tr>
             </thead>
             <tbody>
-              {(ticks$?.length ?? 0) === 0 ? (
+              {(ticks$?.ticks.length ?? 0) === 0 ? (
                 <tr>
                   <td className="empty-state" colSpan={4}>
                     {state$ === 'connected' ? 'Waiting for the first SBE message…' : 'Connecting to the publisher…'}
                   </td>
                 </tr>
-              ) : ticks$?.map((tick) => (
-                <SymbolPriceRow key={tick.symbol} tick={tick} />
+              ) : ticks$?.ticks.map((tick) => (
+                <tr key={tick.symbol}>
+                  <td><span className="symbol-tag">{tick.symbol}</span></td>
+                  <td className={`price-cell price-${tick.direction}`}>{priceFormatter.format(tick.price)}</td>
+                  <td className="time-cell">{timeFormatter.format(tick.receivedAt)}</td>
+                </tr>
               ))}
             </tbody>
           </table>
