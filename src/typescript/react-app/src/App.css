@@ -170,6 +170,33 @@ th,
   background: var(--soft);
 }
 
+.symbol-grid {
+  height: 458px;
+  width: 100%;
+}
+
+.symbol-grid-cell {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.grid-symbol {
+  color: var(--muted);
+  font: 500 11px/1 var(--mono);
+}
+
+.grid-price {
+  font: 600 11px/1 var(--mono);
+}
+
+.grid-price-empty {
+  color: var(--muted);
+}
+
 .table-scroll {
   overflow-x: auto;
 }
