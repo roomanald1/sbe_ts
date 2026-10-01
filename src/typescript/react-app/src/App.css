@@ -1,7 +1,6 @@
 .terminal {
-  width: min(1040px, 100%);
+  width: min(1240px, 100%);
   margin: 0 auto;
-  padding: 0 40px 32px;
   box-sizing: border-box;
 }
 
@@ -186,7 +185,7 @@ th,
 
 .grid-symbol {
   color: var(--muted);
-  font: 500 11px/1 var(--mono);
+  font: 500 9px/1 var(--mono);
 }
 
 .grid-price {
