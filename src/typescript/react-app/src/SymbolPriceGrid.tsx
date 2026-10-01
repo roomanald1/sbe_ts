@@ -101,7 +101,7 @@ export function SymbolPriceGrid({ changedTicks }: SymbolPriceGridProps) {
             cellRenderer: SymbolGridCellRenderer,
             sortable: false,
             resizable: false,
-            flex: 1,
+            width: 120,
             minWidth: 96,
         })),
         []);
@@ -115,6 +115,7 @@ export function SymbolPriceGrid({ changedTicks }: SymbolPriceGridProps) {
             </div>
             <div className="symbol-grid">
                 <AgGridReact<SymbolGridRow>
+                    suppressColumnMoveAnimation={true}
                     rowData={rowData}
                     columnDefs={columnDefs}
                     getRowId={params => String(params.data.rowIndex)}

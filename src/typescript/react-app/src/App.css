@@ -14,7 +14,7 @@
 
 .brand-lockup,
 .connection-status,
-.feed-toolbar > div,
+.feed-toolbar>div,
 .footer-note {
   display: flex;
   align-items: center;
@@ -154,7 +154,7 @@ th,
   border-bottom: 1px solid var(--line);
 }
 
-.feed-toolbar > div {
+.feed-toolbar>div {
   gap: 11px;
 }
 
@@ -175,21 +175,21 @@ th,
 }
 
 .symbol-grid-cell {
-  width: 100%;
-  height: 100%;
   display: flex;
-  align-items: center;
   justify-content: space-between;
-  gap: 8px;
+  width: 100%;
+  gap: 2px;
 }
 
 .grid-symbol {
   color: var(--muted);
-  font: 500 9px/1 var(--mono);
+  font: 500 10px/1 var(--mono);
+  flex: 0 0 60px;
 }
 
 .grid-price {
   font: 600 11px/1 var(--mono);
+  flex: 0 0 60px;
 }
 
 .grid-price-empty {
@@ -272,7 +272,9 @@ tbody tr:first-child td {
 }
 
 @keyframes pulse {
-  50% { opacity: 0.35; }
+  50% {
+    opacity: 0.35;
+  }
 }
 
 @media (max-width: 640px) {
