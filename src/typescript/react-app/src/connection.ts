@@ -100,7 +100,7 @@ export class Connection {
         const TransportClass = websocketModule.default.default;
 
         const transport = new TransportClass({
-            url: `ws://${options.host}:${options.port}`,
+            url: `wss://${options.host}`,
             wsCreator: (url: string) => new WebSocket(url),
         }, BufferEncoders);
 
