@@ -2,7 +2,7 @@ use anyhow::Result;
 use rsocket_rust::prelude::*;
 use rsocket_rust_transport_websocket::WebsocketServerTransport;
 use sbe_schema::{SBE_BLOCK_LENGTH, SymbolPriceEncoder, WriteBuf, message_header_codec};
-use std::pin::Pin;
+use std::{env, pin::Pin};
 use tokio::time::{Duration, sleep};
 
 fn encode_symbol_price(symbol: [u8; 8], price: f64) -> Vec<u8> {
@@ -19,13 +19,16 @@ fn encode_symbol_price(symbol: [u8; 8], price: f64) -> Vec<u8> {
 
 #[tokio::main]
 async fn main() {
-    println!("RSocket WebSocket server on ws://0.0.0.0:9001");
+    // Read PORT from environment (Render requirement)
+    let port = env::var("PORT").unwrap_or_else(|_| "10000".to_string());
+    let addr = format!("0.0.0.0:{port}");
+
+    println!("RSocket WebSocket server on ws://{addr}");
 
     RSocketFactory::receive()
-        .transport(WebsocketServerTransport::from("0.0.0.0:9001"))
+        .transport(WebsocketServerTransport::from(addr))
         .acceptor(Box::new(|setup, _socket| {
             println!("socket establish: setup={:?}", setup);
-
             Ok(Box::new(ServerResponder))
         }))
         .serve()
