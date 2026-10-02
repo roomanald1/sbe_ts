@@ -3,10 +3,54 @@ import './App.css'
 import { Connection } from './connection';
 import { useObservable } from './use_observable';
 import { decodeSymbolPrice, type SymbolPriceTick } from './types/symbol_price';
-import { bufferTime, filter, map } from 'rxjs';
+import { bufferTime, filter, map, type Observable } from 'rxjs';
 import { Header } from './Header';
 import { SymbolPriceGrid } from './SymbolPriceGrid';
 import { SymbolPriceTable } from './SymbolPriceTable';
+
+type IndexedSymbolPriceTick = {
+  index: number;
+  tick: SymbolPriceTick;
+};
+
+type TicksUpdate = {
+  ticks: SymbolPriceTick[];
+  changedTicks: IndexedSymbolPriceTick[];
+};
+
+function createTicksObservable(connection: Connection | undefined): Observable<TicksUpdate> | undefined {
+  if (!connection) return undefined;
+
+  const symbols = new Map<string, SymbolPriceTick>();
+  const symbolIndices = new Map<string, number>();
+  const ticks: SymbolPriceTick[] = [];
+  return connection.data.pipe(
+    map(data => decodeSymbolPrice(data, symbols)),
+    filter((tick): tick is SymbolPriceTick => tick !== undefined),
+    bufferTime(50),
+    filter(changedTicks => changedTicks.length > 0),
+    map(changedTicks => {
+      const latestChangedTicks = new Map<number, SymbolPriceTick>();
+      changedTicks.forEach(tick => {
+        let index = symbolIndices.get(tick.symbol);
+        if (index === undefined) {
+          index = ticks.length;
+          symbolIndices.set(tick.symbol, index);
+        }
+
+        const latestTick = symbols.get(tick.symbol);
+        if (!latestTick) return;
+
+        ticks[index] = latestTick;
+        latestChangedTicks.set(index, latestTick);
+      });
+      return {
+        ticks,
+        changedTicks: Array.from(latestChangedTicks, ([index, tick]) => ({ index, tick })),
+      };
+    })
+  );
+}
 
 function App() {
   const [connection, setConnection] = React.useState<Connection | undefined>(undefined);
@@ -26,39 +70,7 @@ function App() {
   const state$ = useObservable(connection?.connection_state, 'connecting', [connection])
   const error$ = useObservable(connection?.error_message, undefined, [connection])
 
-  const ticksObservable = React.useMemo(() => {
-    if (!connection) return undefined;
-
-    const symbols = new Map<string, SymbolPriceTick>();
-    const symbolIndices = new Map<string, number>();
-    const ticks: SymbolPriceTick[] = [];
-    return connection.data.pipe(
-      map(data => decodeSymbolPrice(data, symbols)),
-      filter((tick): tick is SymbolPriceTick => tick !== undefined),
-      bufferTime(50),
-      filter(changedTicks => changedTicks.length > 0),
-      map(changedTicks => {
-        const latestChangedTicks = new Map<number, SymbolPriceTick>();
-        changedTicks.forEach(tick => {
-          let index = symbolIndices.get(tick.symbol);
-          if (index === undefined) {
-            index = ticks.length;
-            symbolIndices.set(tick.symbol, index);
-          }
-
-          const latestTick = symbols.get(tick.symbol);
-          if (!latestTick) return;
-
-          ticks[index] = latestTick;
-          latestChangedTicks.set(index, latestTick);
-        });
-        return {
-          ticks,
-          changedTicks: Array.from(latestChangedTicks, ([index, tick]) => ({ index, tick })),
-        };
-      })
-    );
-  }, [connection]);
+  const ticksObservable = React.useMemo(() => createTicksObservable(connection), [connection]);
 
   const ticks$ = useObservable(ticksObservable, { ticks: [], changedTicks: [] }, [ticksObservable]);
 
