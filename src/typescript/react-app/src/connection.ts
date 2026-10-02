@@ -1,9 +1,20 @@
 import { BehaviorSubject } from "rxjs";
-import { BufferEncoders, RSocketClient } from 'rsocket-core';
+import { BufferEncoder, BufferEncoders, RSocketClient, type Encoder } from 'rsocket-core';
 
 import * as WebSocketClient from 'rsocket-websocket-client';
 
 export type ConnectionState = 'connecting' | 'connected' | 'reconnecting';
+
+const BufferDataEncoder: Encoder<Buffer> = {
+    ...BufferEncoder,
+    encode: (value, buffer, start, end) => {
+        if (!Buffer.isBuffer(value)) {
+            throw new TypeError('RSocket data must be a Buffer');
+        }
+        buffer.set(value, start);
+        return end;
+    },
+};
 
 export class Connection {
     private cancelled: boolean = false;
@@ -91,13 +102,17 @@ export class Connection {
         };
         const TransportClass = websocketModule.default.default;
 
-        const url = import.meta.env.DEV
+        const url = import.meta.env.VITE_RSOCKET_URL ?? (import.meta.env.DEV
             ? 'ws://localhost:10000'
-            : 'wss://sbe-ts.onrender.com';
+            : 'wss://sbe-ts.onrender.com');
+        const encoders = {
+            ...BufferEncoders,
+            data: BufferDataEncoder,
+        };
         const transport = new TransportClass({
             url,
             wsCreator: (url: string) => new WebSocket(url),
-        }, BufferEncoders);
+        }, encoders);
 
         const client = new RSocketClient({
             setup: setupOptions,
