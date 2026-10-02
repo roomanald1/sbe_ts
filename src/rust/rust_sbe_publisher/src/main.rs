@@ -19,10 +19,10 @@ fn encode_symbol_price(symbol: [u8; 8], price: f64) -> Vec<u8> {
 
 #[tokio::main]
 async fn main() {
-    println!("RSocket WebSocket server on ws://127.0.0.1:9001");
+    println!("RSocket WebSocket server on ws://0.0.0.0:9001");
 
     RSocketFactory::receive()
-        .transport(WebsocketServerTransport::from("127.0.0.1:9001"))
+        .transport(WebsocketServerTransport::from("0.0.0.0:9001"))
         .acceptor(Box::new(|setup, _socket| {
             println!("socket establish: setup={:?}", setup);
 

@@ -22,6 +22,8 @@ export class Connection {
     public data: BehaviorSubject<unknown | undefined> = new BehaviorSubject<unknown | undefined>(undefined);
 
     public async connect() {
+        if (this.socket) return;//already connected
+
         console.log("Connecting")
         const scheduleReconnect = (message: string) => {
             if (this.cancelled || this.retryTimer !== undefined) return;
@@ -59,12 +61,13 @@ export class Connection {
                 data: Buffer.alloc(0),
             }).subscribe({
                 onSubscribe: (sub) => {
-                    console.log("OnSubscribe")
+                    console.log("OnSubscribe");
+                    this.retryAttempt = 0;
                     this.subscription = sub;
                     this.connection_state.next('connected');
                     this.error_message.next(undefined);
                     requestNext = () => {
-                        sub.request(1) 
+                        sub.request(1)
                     };
                     requestNext();
                 },
@@ -110,10 +113,13 @@ export class Connection {
     }
 
     public dispose() {
-      this.cancelled = true;
-      if (this.retryTimer !== undefined) clearTimeout(this.retryTimer);
-      this.subscription?.cancel();
-      this.socket?.close();
+        this.cancelled = true;
+        if (this.retryTimer !== undefined) {
+            clearTimeout(this.retryTimer);
+            this.retryTimer = undefined;
+        }
+        this.subscription?.cancel();
+        try { this.socket?.close(); } catch { }
     }
 }
 
