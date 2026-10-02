@@ -1,4 +1,4 @@
-export function Header(props: {ticks$: any, state$: any, error$: any}) {
+export function Header(props: {state$: any, error$: any, feedUrl: string}) {
     return <>
         <header className="topbar">
             <div className="brand-lockup">
@@ -13,14 +13,9 @@ export function Header(props: {ticks$: any, state$: any, error$: any}) {
 
         <section className="page-heading">
             <div>
-                <p className="eyebrow">RSocket feed · 127.0.0.1:9001</p>
-                <h1>Symbol prices</h1>
+                <p className="eyebrow">RSocket feed · {props.feedUrl}</p>
+                <h1>RSocket SBE</h1>
                 <p className="subheading">SBE binary stream, decoded in the browser</p>
-            </div>
-            <div className="feed-summary" aria-live="polite">
-                <span className="summary-label">SYMBOLS</span>
-                <strong className="symbol-count">{props.ticks$?.length.toString().padStart(2, '0')}</strong>
-                <span className="summary-unit">latest prices</span>
             </div>
         </section>
 

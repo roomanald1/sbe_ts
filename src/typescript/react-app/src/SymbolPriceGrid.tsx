@@ -23,18 +23,32 @@ type IndexedSymbolPriceTick = {
     tick: SymbolPriceTick;
 };
 
+function createSymbolGridRows(ticks: SymbolPriceTick[]): SymbolGridRow[] {
+    const rows = Array.from({ length: 10 }, (_, rowIndex) => ({
+        rowIndex,
+        cells: Array<SymbolGridCell>(10).fill(undefined),
+    }));
+
+    ticks.slice(0, 100).forEach((tick, index) => {
+        rows[Math.floor(index / 10)].cells[index % 10] = tick;
+    });
+
+    return rows;
+}
+
 const priceFormatter = new Intl.NumberFormat(undefined, {
     minimumFractionDigits: 2,
     maximumFractionDigits: 4,
 });
 
 const gridTheme = themeQuartz.withParams({
-    accentColor: '#23816a',
-    backgroundColor: '#ffffff',
-    borderColor: '#d9ddd6',
-    foregroundColor: '#17201d',
-    headerBackgroundColor: '#f0f1ec',
-    headerTextColor: '#78817d',
+    accentColor: '#8296ad',
+    backgroundColor: '#0d0f12',
+    borderColor: '#242a31',
+    foregroundColor: '#e7e7e7',
+    headerBackgroundColor: '#11151a',
+    headerTextColor: '#a0a6ad',
+    rowHoverColor: '#141b24',
 });
 
 function SymbolGridCellRenderer({ value }: ICellRendererParams<SymbolGridRow, SymbolGridCell>) {
@@ -78,14 +92,12 @@ function updateSymbolGridRows(
 }
 
 type SymbolPriceGridProps = {
+    ticks: SymbolPriceTick[];
     changedTicks: IndexedSymbolPriceTick[];
 };
 
-export function SymbolPriceGrid({ changedTicks }: SymbolPriceGridProps) {
-    const [rowData, setRowData] = React.useState<SymbolGridRow[]>(() => Array.from({ length: 10 }, (_, rowIndex) => ({
-        rowIndex,
-        cells: Array<SymbolGridCell>(10).fill(undefined),
-    })));
+export function SymbolPriceGrid({ ticks, changedTicks }: SymbolPriceGridProps) {
+    const [rowData, setRowData] = React.useState<SymbolGridRow[]>(() => createSymbolGridRows(ticks));
 
     React.useEffect(() => {
         if (changedTicks.length === 0) return;
@@ -111,7 +123,9 @@ export function SymbolPriceGrid({ changedTicks }: SymbolPriceGridProps) {
             <div className="feed-toolbar">
                 <div>
                     <span className="live-indicator" />
+                    <span className="toolbar-title">Market overview</span>
                 </div>
+                <span className="toolbar-meta">100 instruments</span>
             </div>
             <div className="symbol-grid">
                 <AgGridReact<SymbolGridRow>

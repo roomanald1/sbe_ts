@@ -36,6 +36,7 @@ export function SymbolPriceTable({ ticks, state }: SymbolPriceTableProps) {
                     <span className="live-indicator" />
                     <span className="toolbar-title">Incoming events</span>
                 </div>
+                <span className="toolbar-meta">LATEST TICKS</span>
             </div>
             <div className="table-scroll">
                 <table>

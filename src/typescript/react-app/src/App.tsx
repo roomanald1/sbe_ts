@@ -10,6 +10,7 @@ import { SymbolPriceTable } from './SymbolPriceTable';
 
 function App() {
   const [connection, setConnection] = React.useState<Connection | undefined>(undefined);
+  const [dataView, setDataView] = React.useState<'grid' | 'table'>('grid');
 
   React.useEffect(() => {
     const currentConnection = new Connection();
@@ -63,9 +64,28 @@ function App() {
 
   return (
     <main className="terminal">
-      <Header error$={error$} ticks$={ticks$.ticks} state$={state$} />
-      <SymbolPriceGrid changedTicks={ticks$.changedTicks} />
-      <SymbolPriceTable ticks={ticks$.ticks} state={state$} />
+      <Header error$={error$} state$={state$} feedUrl={connection?.url ?? ''} />
+      <div className="view-switcher" role="group" aria-label="Choose data view">
+        <button
+          type="button"
+          aria-pressed={dataView === 'grid'}
+          onClick={() => setDataView('grid')}
+        >
+          Grid
+        </button>
+        <button
+          type="button"
+          aria-pressed={dataView === 'table'}
+          onClick={() => setDataView('table')}
+        >
+          Table
+        </button>
+      </div>
+      {dataView === 'grid' ? (
+        <SymbolPriceGrid ticks={ticks$.ticks} changedTicks={ticks$.changedTicks} />
+      ) : (
+        <SymbolPriceTable ticks={ticks$.ticks} state={state$} />
+      )}
     </main>
   )
 }
@@ -73,5 +93,3 @@ function App() {
 
 
 export default App
-
-

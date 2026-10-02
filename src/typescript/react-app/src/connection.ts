@@ -17,6 +17,9 @@ const BufferDataEncoder: Encoder<Buffer> = {
 };
 
 export class Connection {
+    public readonly url = import.meta.env.VITE_RSOCKET_URL ?? (import.meta.env.DEV
+        ? 'ws://localhost:10000'
+        : 'wss://sbe-ts.onrender.com');
     private cancelled: boolean = false;
     private socket: Awaited<ReturnType<typeof this.createClient>> | undefined;
     private subscription: { cancel: () => void } | undefined;
@@ -102,15 +105,12 @@ export class Connection {
         };
         const TransportClass = websocketModule.default.default;
 
-        const url = import.meta.env.VITE_RSOCKET_URL ?? (import.meta.env.DEV
-            ? 'ws://localhost:10000'
-            : 'wss://sbe-ts.onrender.com');
         const encoders = {
             ...BufferEncoders,
             data: BufferDataEncoder,
         };
         const transport = new TransportClass({
-            url,
+            url: this.url,
             wsCreator: (url: string) => new WebSocket(url),
         }, encoders);
 
