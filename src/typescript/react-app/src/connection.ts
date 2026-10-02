@@ -46,8 +46,8 @@ export class Connection {
         this.connection_state.next(this.retryAttempt === 0 ? 'connecting' : 'reconnecting');
         try {
             const rsocket = await this.createClient({
-                host: '127.0.0.1',
-                port: 9001,
+                host: 'sbe-ts.onrender.com',
+                port: 10000,
             });
 
             if (this.cancelled) {
