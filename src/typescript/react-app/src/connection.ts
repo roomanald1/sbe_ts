@@ -4,10 +4,6 @@ import { BufferEncoders, RSocketClient } from 'rsocket-core';
 import * as WebSocketClient from 'rsocket-websocket-client';
 
 export type ConnectionState = 'connecting' | 'connected' | 'reconnecting';
-type ClientOptions = {
-    host: string;
-    port: number;
-};
 
 export class Connection {
     private cancelled: boolean = false;
@@ -44,10 +40,7 @@ export class Connection {
 
         this.connection_state.next(this.retryAttempt === 0 ? 'connecting' : 'reconnecting');
         try {
-            const rsocket = await this.createClient({
-                host: 'sbe-ts.onrender.com',
-                port: 10000,
-            });
+            const rsocket = await this.createClient();
 
             if (this.cancelled) {
                 rsocket.close();
@@ -84,7 +77,7 @@ export class Connection {
     }
 
 
-    private async createClient(options: ClientOptions) {
+    private async createClient() {
         const setupOptions = {
             keepAlive: 30000,
             lifetime: 120000,
@@ -98,8 +91,11 @@ export class Connection {
         };
         const TransportClass = websocketModule.default.default;
 
+        const url = import.meta.env.DEV
+            ? 'ws://localhost:10000'
+            : 'wss://sbe-ts.onrender.com';
         const transport = new TransportClass({
-            url: `wss://${options.host}:${options.port}`,
+            url,
             wsCreator: (url: string) => new WebSocket(url),
         }, BufferEncoders);
 
