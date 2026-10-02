@@ -1,6 +1,5 @@
 import { BehaviorSubject } from "rxjs";
 import { BufferEncoders, RSocketClient } from 'rsocket-core';
-import { Buffer } from 'buffer';
 
 import * as WebSocketClient from 'rsocket-websocket-client';
 
@@ -122,4 +121,3 @@ export class Connection {
         try { this.socket?.close(); } catch { }
     }
 }
-
