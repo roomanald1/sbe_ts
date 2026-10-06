@@ -1,42 +1,86 @@
 import { useQuery } from "@tanstack/react-query";
 import React from "react";
+import { AgGridReact } from "ag-grid-react";
+import {
+    ClientSideRowModelModule,
+    ModuleRegistry,
+    themeQuartz,
+    type ColDef,
+    type ICellRendererParams,
+} from "ag-grid-community";
+
+ModuleRegistry.registerModules([ClientSideRowModelModule]);
 
 type User = {
     id: number;
     last_logged_in: number;
 };
 
-type UserPage = {
+type UserPageResponse = {
     data: User[];
     has_more: boolean;
 };
 
-type LoginChanges = {
-    changedUserIds: number[];
-    latestLoginByUser: Map<number, number>;
+type UserPage = UserPageResponse & {
+    pageIndex: number;
 };
 
-function detectLoginChanges(
-    users: readonly User[],
-    previousLoginByUser: ReadonlyMap<number, number>,
-): LoginChanges {
-    const latestLoginByUser = new Map(previousLoginByUser);
-    const changedUserIds: number[] = [];
+type UserGridRow = {
+    pageIndex: number;
+    rowIndex: number;
+    users: (User | undefined)[];
+};
 
-    for (const user of users) {
-        const previousLogin = previousLoginByUser.get(user.id);
-        if (previousLogin !== undefined && previousLogin !== user.last_logged_in) {
-            changedUserIds.push(user.id);
-        }
-        latestLoginByUser.set(user.id, user.last_logged_in);
-    }
+type UserGridCell = User | undefined;
 
-    return { changedUserIds, latestLoginByUser };
+function createUserGridRows(users: readonly User[], pageIndex: number): UserGridRow[] {
+    const rows = Array.from({ length: 10 }, (_, rowIndex) => ({
+        pageIndex,
+        rowIndex,
+        users: Array<UserGridCell>(10).fill(undefined),
+    }));
+
+    users.slice(0, 100).forEach((user, index) => {
+        rows[Math.floor(index / 10)].users[index % 10] = user;
+    });
+
+    return rows;
 }
 
-function isUserPage(value: unknown): value is UserPage {
+function updateUserGridRows(
+    currentRows: UserGridRow[],
+    users: readonly User[],
+    pageIndex: number,
+): UserGridRow[] {
+    if (currentRows[0]?.pageIndex !== pageIndex) {
+        return createUserGridRows(users, pageIndex);
+    }
+
+    const previousUsers = new Map<number, User>();
+    currentRows.forEach(row => {
+        row.users.forEach(user => {
+            if (user) previousUsers.set(user.id, user);
+        });
+    });
+
+    const stableUsers = users.slice(0, 100).map(user => {
+        const previousUser = previousUsers.get(user.id);
+        return previousUser?.last_logged_in === user.last_logged_in ? previousUser : user;
+    });
+    const nextRows = createUserGridRows(stableUsers, pageIndex);
+
+    return nextRows.map((nextRow, rowIndex) => {
+        const previousRow = currentRows[rowIndex];
+        return previousRow
+            && nextRow.users.every((user, index) => user === previousRow.users[index])
+            ? previousRow
+            : nextRow;
+    });
+}
+
+function isUserPage(value: unknown): value is UserPageResponse {
     if (typeof value !== "object" || value === null) return false;
-    const candidate = value as Partial<UserPage>;
+    const candidate = value as Partial<UserPageResponse>;
     return Array.isArray(candidate.data)
         && typeof candidate.has_more === "boolean"
         && candidate.data.every(user =>
@@ -59,25 +103,51 @@ async function get_users(page: number): Promise<UserPage> {
     if (!isUserPage(result)) {
         throw new Error("The users API returned invalid data. Restart the Rust API to include last_logged_in timestamps.");
     }
-    return result;
+    return { ...result, pageIndex: page };
 }
 
-function formatLastLoggedIn(timestamp: number): string {
-    return new Date(timestamp * 1000).toLocaleString(undefined, {
-        month: "short",
-        day: "2-digit",
-        hour: "2-digit",
-        minute: "2-digit",
-        second: "2-digit",
-        hourCycle: "h23",
-    });
+const lastLoginFormatter = new Intl.DateTimeFormat(undefined, {
+    month: "short",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hourCycle: "h23",
+});
+
+const userGridTheme = themeQuartz.withParams({
+    accentColor: "#8296ad",
+    backgroundColor: "#0d0f12",
+    borderColor: "#242a31",
+    foregroundColor: "#e7e7e7",
+    headerBackgroundColor: "#11151a",
+    headerTextColor: "#a0a6ad",
+    rowHoverColor: "transparent",
+});
+
+const emptyUsers: User[] = [];
+const defaultUserColumnDef: ColDef<UserGridRow, UserGridCell> = {
+    sortable: true,
+    resizable: true,
+};
+
+function UserGridCellRenderer({ value }: ICellRendererParams<UserGridRow, UserGridCell>) {
+    if (!value) return null;
+
+    return (
+        <div className="users-grid-card">
+            <span className="users-grid-id">U{String(value.id).padStart(5, "0")}</span>
+            <span className="users-grid-last-login">
+                {lastLoginFormatter.format(new Date(value.last_logged_in * 1000))}
+            </span>
+        </div>
+    );
 }
 
 export function Users() {
     const [page, setPage] = React.useState(0);
     const [pageInput, setPageInput] = React.useState("1");
-    const [flashingUsers, setFlashingUsers] = React.useState<ReadonlySet<number>>(() => new Set());
-    const previousLoginByUser = React.useRef(new Map<number, number>());
+    const [rowData, setRowData] = React.useState<UserGridRow[]>(() => createUserGridRows(emptyUsers, 0));
     const { isError, data, error, isFetching } = useQuery({
         queryKey: ['users', page],
         queryFn: () => get_users(page),
@@ -87,23 +157,21 @@ export function Users() {
 
     React.useEffect(() => {
         if (!data) return;
-
-        const changes = detectLoginChanges(data.data, previousLoginByUser.current);
-        previousLoginByUser.current = changes.latestLoginByUser;
-
-        if (changes.changedUserIds.length === 0) return;
-
-        setFlashingUsers(current => new Set([...current, ...changes.changedUserIds]));
+        setRowData(currentRows => updateUserGridRows(currentRows, data.data, data.pageIndex));
     }, [data]);
 
-    function clearUserFlash(userId: number) {
-        setFlashingUsers(current => {
-            if (!current.has(userId)) return current;
-            const next = new Set(current);
-            next.delete(userId);
-            return next;
-        });
-    }
+    const columnDefs = React.useMemo<ColDef<UserGridRow, UserGridCell>[]>(() =>
+        Array.from({ length: 10 }, (_, columnIndex) => ({
+            colId: `users-${columnIndex}`,
+            valueGetter: params => params.data?.users[columnIndex],
+            cellRenderer: UserGridCellRenderer,
+            enableCellChangeFlash: true,
+            sortable: false,
+            resizable: false,
+            flex: 1,
+            minWidth: 112,
+        })),
+        []);
 
     function goToPage(event: React.FormEvent<HTMLFormElement>) {
         event.preventDefault();
@@ -128,26 +196,30 @@ export function Users() {
     }
 
     return (
-        <section className="users-panel" aria-label="Users">
+        <section className="feed-section users-panel" aria-label="Users">
+            <div className="feed-toolbar">
+                <div>
+                    <span className="live-indicator" />
+                    <span className="toolbar-title">User directory</span>
+                </div>
+                <span className="toolbar-meta">{data?.data.length ?? 0} USERS</span>
+            </div>
             {isError && <p className="users-error">{error?.message}</p>}
-            <ul className="users-list" aria-label={`Users on page ${page + 1}`}>
-                {data?.data.map((user) => (
-                    <li
-                        className={`user-card${flashingUsers.has(user.id) ? " user-card-flash" : ""}`}
-                        key={user.id}
-                        onAnimationEnd={() => clearUserFlash(user.id)}
-                    >
-                        <span className="user-card-label">USER</span>
-                        <span className="user-card-id">{String(user.id).padStart(5, "0")}</span>
-                        <span className="user-last-login">
-                            LAST SEEN
-                            <time dateTime={new Date(user.last_logged_in * 1000).toISOString()}>
-                                {formatLastLoggedIn(user.last_logged_in)}
-                            </time>
-                        </span>
-                    </li>
-                ))}
-            </ul>
+            <div className="users-grid">
+                <AgGridReact<UserGridRow>
+                    suppressColumnMoveAnimation
+                    rowData={rowData}
+                    columnDefs={columnDefs}
+                    defaultColDef={defaultUserColumnDef}
+                    getRowId={params => `${params.data.pageIndex}:${params.data.rowIndex}`}
+                    theme={userGridTheme}
+                    rowHeight={46}
+                    headerHeight={0}
+                    cellFlashDuration={700}
+                    cellFadeDuration={500}
+                    suppressCellFocus
+                />
+            </div>
             <div className="users-pagination">
                 <div className="users-page-status">
                     <span className="users-page-number">PAGE {String(page + 1).padStart(2, "0")}</span>
