@@ -1,8 +1,11 @@
 use anyhow::Result;
+use axum::{Json, Router, extract::Path, http::StatusCode, routing::get};
 use rsocket_rust::prelude::*;
 use rsocket_rust_transport_websocket::WebsocketServerTransport;
 use sbe_schema::{SBE_BLOCK_LENGTH, SymbolPriceEncoder, WriteBuf, message_header_codec};
-use std::{env, pin::Pin};
+use serde::Serialize;
+use serde_json::Value;
+use std::{env, net::SocketAddr, pin::Pin, sync::Arc};
 use tokio::time::{Duration, sleep};
 
 fn encode_symbol_price(symbol: [u8; 8], price: f64) -> Vec<u8> {
@@ -34,6 +37,95 @@ async fn main() {
         .serve()
         .await
         .unwrap();
+
+    let mut users = Vec::with_capacity(10000);
+    for i in 0..10000 {
+        users.push(User { id: i });
+    }
+    let users = Arc::new(users);
+
+    let app = Router::new().route(
+        "/users/{page}",
+        get({
+            let users = Arc::clone(&users);
+            move |path| get_user_page(path, users)
+        }),
+    );
+
+    let addr = SocketAddr::from(([127, 0, 0, 1], 3000));
+    println!("Listening on {}", addr);
+
+    let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await.unwrap();
+
+    axum::serve(listener, app).await.unwrap();
+}
+
+#[tokio::test]
+async fn rest_main() {
+    let mut users = Vec::with_capacity(10000);
+    for i in 0..10000 {
+        users.push(User { id: i });
+    }
+    let users = Arc::new(users);
+
+    let app = Router::new().route(
+        "/users/{page}",
+        get({
+            let users = Arc::clone(&users);
+            move |path| get_user_page(path, users)
+        }),
+    );
+
+    let addr = SocketAddr::from(([127, 0, 0, 1], 3000));
+    println!("Listening on {}", addr);
+
+    let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await.unwrap();
+
+    axum::serve(listener, app).await.unwrap();
+}
+
+async fn get_user_page(Path(page): Path<i32>, users: Arc<Vec<User>>) -> Result<Json<Value>, (StatusCode, String)> {
+    let page_size: usize = 100;
+    let start = page as usize * page_size;
+    let end = start + page_size;
+
+    if start >= users.len() {
+        return Err((StatusCode::NOT_FOUND, "Page exceeds total length".into()));
+    }
+
+    let number_of_items = if end > users.len() {
+        users.len() - start
+    } else {
+        page_size
+    };
+
+    let has_more =             number_of_items == page_size && start + page_size < users.len();
+    let users = users
+        .iter()
+        .skip(start)
+        .take(number_of_items)
+        .cloned()
+        .collect::<Vec<_>>();
+
+    Ok(Json(
+        serde_json::to_value(Response {
+            data: users,
+            has_more,
+            error: None,
+        })
+        .unwrap(),
+    ))
+}
+#[derive(Clone, Copy, Debug, Serialize)]
+struct User {
+    id: u64,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct Response {
+    data: Vec<User>,
+    has_more: bool,
+    error: Option<String>,
 }
 
 struct ServerResponder;

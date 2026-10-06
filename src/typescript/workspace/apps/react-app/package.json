@@ -10,6 +10,7 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@tanstack/react-query": "^5.104.1",
     "@types/rsocket-core": "^0.0.11",
     "@types/rsocket-websocket-client": "^0.0.7",
     "ag-grid-community": "^36.2.0",

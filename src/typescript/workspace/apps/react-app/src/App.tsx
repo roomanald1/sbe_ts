@@ -7,6 +7,7 @@ import { bufferTime, filter, map, type Observable } from 'rxjs';
 import { Header } from './Header';
 import { SymbolPriceGrid } from './SymbolPriceGrid';
 import { SymbolPriceTable } from './SymbolPriceTable';
+import { Users } from './Users';
 
 type IndexedSymbolPriceTick = {
   index: number;
@@ -54,7 +55,7 @@ function createTicksObservable(connection: Connection | undefined): Observable<T
 
 function App() {
   const [connection, setConnection] = React.useState<Connection | undefined>(undefined);
-  const [dataView, setDataView] = React.useState<'grid' | 'table'>('grid');
+  const [dataView, setDataView] = React.useState<'grid' | 'table' | 'user'>('grid');
 
   React.useEffect(() => {
     const currentConnection = new Connection();
@@ -92,11 +93,23 @@ function App() {
         >
           Table
         </button>
+        <button
+          type="button"
+          aria-pressed={dataView === 'user'}
+          onClick={() => setDataView('user')}
+        >
+          User
+        </button>
       </div>
-      {dataView === 'grid' ? (
+
+      {dataView === 'grid' && (
         <SymbolPriceGrid ticks={ticks$.ticks} changedTicks={ticks$.changedTicks} />
-      ) : (
+      )}
+      {dataView === 'table' &&(
         <SymbolPriceTable ticks={ticks$.ticks} state={state$} />
+      )}
+      {dataView === 'user' &&(
+        <Users />
       )}
     </main>
   )
