@@ -1,0 +1,12 @@
+#!/usr/bin/env sh
+set -eu
+
+workspace_dir="$(CDPATH= cd -- "$(dirname -- "$0")/src/typescript/workspace" && pwd)"
+
+if [ ! -x "$workspace_dir/node_modules/.bin/nx" ]; then
+  printf 'Nx is not installed. Run: npm --prefix src/typescript/workspace install\n' >&2
+  exit 1
+fi
+
+cd "$workspace_dir"
+exec ./node_modules/.bin/nx "$@"

@@ -1,0 +1,21 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Debug Rust publisher",
+      "type": "lldb",
+      "request": "launch",
+      "cargo": {
+        "args": ["build", "--bin=rust_sbe_publisher"],
+        "filter": {
+          "name": "rust_sbe_publisher",
+          "kind": "bin"
+        }
+      },
+      "cwd": "${workspaceFolder}/src/rust/rust_sbe_publisher",
+      "env": {
+        "PORT": "10000"
+      }
+    }
+  ]
+}

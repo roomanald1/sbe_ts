@@ -407,7 +407,7 @@ tbody tr:first-child td {
 }
 
 .user-card {
-  min-height: 78px;
+  min-height: 100px;
   display: flex;
   flex-direction: column;
   justify-content: space-between;
@@ -424,6 +424,24 @@ tbody tr:first-child td {
   background: linear-gradient(145deg, #1c2733, #12161b 76%);
 }
 
+.user-card-flash {
+  animation: user-card-flash 1.4s ease-out;
+}
+
+@keyframes user-card-flash {
+  0% {
+    border-color: var(--blue);
+    background: #24374a;
+    box-shadow: 0 0 20px rgb(105 174 252 / 42%);
+  }
+
+  100% {
+    border-color: #242a31;
+    background: linear-gradient(145deg, #171c22, #111316 76%);
+    box-shadow: none;
+  }
+}
+
 .user-card-label,
 .users-page-number {
   color: var(--muted);
@@ -435,6 +453,24 @@ tbody tr:first-child td {
   color: var(--blue-bright);
   font: 600 17px/1 var(--mono);
   font-variant-numeric: tabular-nums;
+}
+
+.user-last-login {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding-top: 8px;
+  border-top: 1px solid var(--line-soft);
+  color: var(--muted);
+  font: 700 8px/1 var(--mono);
+  letter-spacing: 0.06em;
+}
+
+.user-last-login time {
+  color: #aeb8c4;
+  font-weight: 500;
+  letter-spacing: 0;
+  white-space: normal;
 }
 
 .users-pagination {
@@ -606,7 +642,7 @@ tbody tr:first-child td {
   }
 
   .user-card {
-    min-height: 70px;
+    min-height: 94px;
     padding: 9px;
   }
 

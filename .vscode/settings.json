@@ -1,0 +1,3 @@
+{
+  "rust-analyzer.linkedProjects": ["src/rust/rust_sbe_publisher/Cargo.toml"]
+}
