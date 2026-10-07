@@ -4,7 +4,7 @@ import type { SymbolPriceTick } from './types/symbol_price';
 
 const priceFormatter = new Intl.NumberFormat(undefined, {
     minimumFractionDigits: 2,
-    maximumFractionDigits: 4,
+    maximumFractionDigits: 10,
 });
 
 const timeFormatter = new Intl.DateTimeFormat(undefined, {
@@ -21,7 +21,7 @@ type SymbolPriceTableProps = {
 const SymbolPriceRow = memo(function SymbolPriceRow({ tick }: { tick: SymbolPriceTick }) {
     return (
         <tr>
-            <td><span className="symbol-tag">{tick.symbol}</span></td>
+            <td><span className="symbol-tag" title={tick.symbol}>{tick.symbol}</span></td>
             <td className={`price-cell price-${tick.direction}`}>{priceFormatter.format(tick.price)}</td>
             <td className="time-cell">{timeFormatter.format(tick.receivedAt)}</td>
         </tr>
@@ -39,7 +39,12 @@ export function SymbolPriceTable({ ticks, state }: SymbolPriceTableProps) {
                 <span className="toolbar-meta">LATEST TICKS</span>
             </div>
             <div className="table-scroll">
-                <table>
+                <table className="tick-table">
+                    <colgroup>
+                        <col className="tick-symbol-column" />
+                        <col className="tick-price-column" />
+                        <col className="tick-time-column" />
+                    </colgroup>
                     <thead>
                         <tr>
                             <th scope="col">SYMBOL</th>

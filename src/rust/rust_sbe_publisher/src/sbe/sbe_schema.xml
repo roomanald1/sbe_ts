@@ -2,10 +2,10 @@
 <sbe:messageSchema xmlns:sbe="http://fixprotocol.io/2016/sbe"
                    package="example"
                    id="1"
-                   version="1">
+                   version="2">
 
     <types>
-        <type name="symbol" primitiveType="char" length="8"/>
+        <type name="symbol" primitiveType="char" length="32"/>
         <composite name="messageHeader">
             <type name="blockLength" primitiveType="uint16"/>
             <type name="templateId" primitiveType="uint16"/>

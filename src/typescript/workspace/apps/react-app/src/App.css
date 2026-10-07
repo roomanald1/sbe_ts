@@ -154,11 +154,18 @@ th,
   display: none;
 }
 
+.feed-controls {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
 .view-switcher {
   display: flex;
   width: fit-content;
   gap: 4px;
-  margin: 0 0 14px auto;
   padding: 4px;
   border: 1px solid #242a31;
   border-radius: 7px;
@@ -258,27 +265,34 @@ th,
 }
 
 .symbol-grid {
-  height: var(--view-body-height);
   width: 100%;
 }
 
 .symbol-grid-cell {
   display: flex;
-  justify-content: space-between;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: center;
   width: 100%;
-  gap: 2px;
+  gap: 4px;
 }
 
 .grid-symbol {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   color: var(--muted);
   font: 500 10px/1 var(--mono);
   letter-spacing: 0.015em;
-  flex: 0 0 60px;
 }
 
 .grid-price {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   font: 600 11px/1 var(--mono);
-  flex: 0 0 60px;
   transition: filter 160ms ease;
 }
 
@@ -300,6 +314,22 @@ table {
   border-collapse: collapse;
   text-align: left;
   font-variant-numeric: tabular-nums;
+}
+
+.tick-table {
+  table-layout: fixed;
+}
+
+.tick-symbol-column {
+  width: 28%;
+}
+
+.tick-price-column {
+  width: 32%;
+}
+
+.tick-time-column {
+  width: 40%;
 }
 
 th {
@@ -355,6 +385,9 @@ tbody tr:first-child td {
 
 .symbol-tag {
   display: inline-grid;
+  max-width: 100%;
+  overflow: hidden;
+  padding: 0 6px;
   min-width: 32px;
   height: 25px;
   place-items: center;
@@ -363,12 +396,16 @@ tbody tr:first-child td {
   background: #202020;
   color: var(--blue-bright);
   font: 700 12px/1 var(--mono);
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .price-cell {
+  overflow: hidden;
   color: var(--ink);
   font: 600 14px/1 var(--mono);
   letter-spacing: 0.015em;
+  text-overflow: ellipsis;
 }
 
 .price-up {
@@ -607,16 +644,17 @@ tbody tr:first-child td {
     justify-content: center;
   }
 
+  .feed-controls {
+    align-items: flex-start;
+    flex-wrap: wrap;
+  }
+
   .users-pagination-actions button {
     flex: 1;
   }
 
   .feed-toolbar {
     padding: 0 12px;
-  }
-
-  .symbol-grid {
-    height: var(--view-body-height);
   }
 
   th,

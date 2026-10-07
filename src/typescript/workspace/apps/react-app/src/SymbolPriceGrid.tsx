@@ -8,6 +8,7 @@ import {
     type ICellRendererParams,
 } from 'ag-grid-community';
 import type { SymbolPriceTick } from './types/symbol_price';
+import type { FeedSource } from './connection';
 
 ModuleRegistry.registerModules([ClientSideRowModelModule]);
 
@@ -16,11 +17,6 @@ type SymbolGridCell = SymbolPriceTick | undefined;
 type SymbolGridRow = {
     rowIndex: number;
     cells: SymbolGridCell[];
-};
-
-type IndexedSymbolPriceTick = {
-    index: number;
-    tick: SymbolPriceTick;
 };
 
 function createSymbolGridRows(ticks: SymbolPriceTick[]): SymbolGridRow[] {
@@ -38,7 +34,7 @@ function createSymbolGridRows(ticks: SymbolPriceTick[]): SymbolGridRow[] {
 
 const priceFormatter = new Intl.NumberFormat(undefined, {
     minimumFractionDigits: 2,
-    maximumFractionDigits: 4,
+    maximumFractionDigits: 10,
 });
 
 const gridTheme = themeQuartz.withParams({
@@ -56,65 +52,31 @@ function SymbolGridCellRenderer({ value }: ICellRendererParams<SymbolGridRow, Sy
 
     return (
         <div className="symbol-grid-cell">
-            <span className="grid-symbol">{value.symbol}</span>
+            <span className="grid-symbol" title={value.symbol}>{value.symbol}</span>
             <span className={`grid-price price-${value.direction}`}>{priceFormatter.format(value.price)}</span>
         </div>
     );
 }
 
-function updateSymbolGridRows(
-    currentRows: SymbolGridRow[],
-    changedTicks: IndexedSymbolPriceTick[],
-): SymbolGridRow[] {
-    const changedCellsByRow = new Map<number, SymbolGridCell[]>();
-
-    changedTicks.forEach(({ index, tick }) => {
-        if (index < 0 || index >= 100) return;
-
-        const rowIndex = Math.floor(index / 10);
-        const columnIndex = index % 10;
-        let cells = changedCellsByRow.get(rowIndex);
-        if (!cells) {
-            cells = currentRows[rowIndex].cells.slice();
-            changedCellsByRow.set(rowIndex, cells);
-        }
-
-        cells[columnIndex] = tick;
-    });
-
-    if (changedCellsByRow.size === 0) return currentRows;
-
-    const nextRows = currentRows.slice();
-    changedCellsByRow.forEach((cells, rowIndex) => {
-        nextRows[rowIndex] = { ...currentRows[rowIndex], cells };
-    });
-    return nextRows;
-}
-
 type SymbolPriceGridProps = {
     ticks: SymbolPriceTick[];
-    changedTicks: IndexedSymbolPriceTick[];
+    feedSource: FeedSource;
 };
 
-export function SymbolPriceGrid({ ticks, changedTicks }: SymbolPriceGridProps) {
-    const [rowData, setRowData] = React.useState<SymbolGridRow[]>(() => createSymbolGridRows(ticks));
-
-    React.useEffect(() => {
-        if (changedTicks.length === 0) return;
-
-        setRowData(currentRows => updateSymbolGridRows(currentRows, changedTicks));
-    }, [changedTicks]);
-
+export function SymbolPriceGrid({ ticks, feedSource }: SymbolPriceGridProps) {
+    const rowData = createSymbolGridRows(ticks);
     const columnDefs = React.useMemo<ColDef<SymbolGridRow, SymbolGridCell>[]>(() =>
         Array.from({ length: 10 }, (_, columnIndex) => ({
             headerName: `${columnIndex * 10}-${columnIndex * 10 + 9}`,
             colId: `symbols-${columnIndex}`,
             valueGetter: params => params.data?.cells[columnIndex],
             cellRenderer: SymbolGridCellRenderer,
+            equals: (previous, next) =>
+                previous?.symbol === next?.symbol && previous?.price === next?.price,
             sortable: false,
             resizable: false,
-            width: 120,
-            minWidth: 96,
+            flex: 1,
+            minWidth: 0,
         })),
         []);
 
@@ -125,17 +87,23 @@ export function SymbolPriceGrid({ ticks, changedTicks }: SymbolPriceGridProps) {
                     <span className="live-indicator" />
                     <span className="toolbar-title">Market overview</span>
                 </div>
-                <span className="toolbar-meta">100 instruments</span>
+                <span className="toolbar-meta">
+                    {feedSource === 'okx' ? 'Top 100 · 24h volume' : '100 synthetic symbols · fast'}
+                </span>
             </div>
             <div className="symbol-grid">
                 <AgGridReact<SymbolGridRow>
                     suppressColumnMoveAnimation={true}
+                    suppressHorizontalScroll
                     rowData={rowData}
                     columnDefs={columnDefs}
                     getRowId={params => String(params.data.rowIndex)}
                     theme={gridTheme}
+                    domLayout="autoHeight"
                     rowHeight={42}
                     headerHeight={0}
+                    cellFlashDuration={500}
+                    cellFadeDuration={900}
                     suppressCellFocus
                 />
             </div>

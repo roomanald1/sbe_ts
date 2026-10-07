@@ -4,6 +4,7 @@ import { BufferEncoder, BufferEncoders, RSocketClient, type Encoder } from 'rsoc
 import * as WebSocketClient from 'rsocket-websocket-client';
 
 export type ConnectionState = 'connecting' | 'connected' | 'reconnecting';
+export type FeedSource = 'okx' | 'synthetic';
 
 const BufferDataEncoder: Encoder<Buffer> = {
     ...BufferEncoder,
@@ -17,6 +18,12 @@ const BufferDataEncoder: Encoder<Buffer> = {
 };
 
 export class Connection {
+    private readonly source: FeedSource;
+
+    public constructor(source: FeedSource = 'okx') {
+        this.source = source;
+    }
+
     public readonly url = import.meta.env.VITE_RSOCKET_URL ?? (import.meta.env.DEV
         ? 'ws://localhost:10000'
         : 'wss://sbe-ts.onrender.com');
@@ -34,6 +41,8 @@ export class Connection {
         if (this.socket) return;//already connected
 
         console.log("Connecting")
+        let requestNext: (() => void) | undefined;
+        let syntheticPending = 0;
         const scheduleReconnect = (message: string) => {
             if (this.cancelled || this.retryTimer !== undefined) return;
 
@@ -61,10 +70,9 @@ export class Connection {
                 return;
             }
             this.socket = rsocket;
-            let requestNext: (() => void) | undefined;
 
             rsocket.requestStream({
-                data: Buffer.alloc(0),
+                data: Buffer.from(this.source),
             }).subscribe({
                 onSubscribe: (sub) => {
                     console.log("OnSubscribe");
@@ -72,14 +80,25 @@ export class Connection {
                     this.subscription = sub;
                     this.connection_state.next('connected');
                     this.error_message.next(undefined);
-                    requestNext = () => {
-                        sub.request(1)
-                    };
-                    requestNext();
+                    if (this.source === 'synthetic') {
+                        requestNext = () => sub.request(500);
+                        sub.request(1000);
+                    } else {
+                        requestNext = () => sub.request(1);
+                        requestNext();
+                    }
                 },
                 onNext: (payload) => {
                     this.data.next(payload.data)
-                    requestNext?.();
+                    if (this.source === 'synthetic') {
+                        syntheticPending += 1;
+                        if (syntheticPending >= 500) {
+                            syntheticPending = 0;
+                            requestNext?.();
+                        }
+                    } else {
+                        requestNext?.();
+                    }
                 },
                 onError: (error) => scheduleReconnect(error.message ?? 'RSocket stream disconnected'),
                 onComplete: () => scheduleReconnect('Stream completed; reconnecting'),

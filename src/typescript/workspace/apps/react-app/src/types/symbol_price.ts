@@ -7,8 +7,8 @@ export type SymbolPriceTick = {
 
 const asciiDecoder = new TextDecoder('ascii');
 
-// Reusable buffer for symbol (fixed 8 bytes)
-const symbolBuf = new Uint8Array(8);
+// Reusable buffer for symbol (fixed 32 bytes)
+const symbolBuf = new Uint8Array(32);
 
 export function decodeSymbolPrice(
     data: unknown,
@@ -33,13 +33,13 @@ export function decodeSymbolPrice(
 
     // symbol decode (no allocations)
     const symbolStart = HEADER_LENGTH;
-    for (let i = 0; i < 8; i++) symbolBuf[i] = data[symbolStart + i];
+    for (let i = 0; i < 32; i++) symbolBuf[i] = data[symbolStart + i];
 
-    let symbol = asciiDecoder.decode(symbolBuf);
+    let symbol = asciiDecoder.decode(symbolBuf).trimEnd();
     const nullPos = symbol.indexOf('\0');
     if (nullPos !== -1) symbol = symbol.slice(0, nullPos);
 
-    const priceOffset = HEADER_LENGTH + 8;
+    const priceOffset = HEADER_LENGTH + 32;
     const price = view.getFloat64(priceOffset, true);
     const prev = symbols?.get(symbol);
     const previousPrice = prev?.price;
