@@ -2,8 +2,8 @@ use anyhow::Result;
 use rsocket_rust::prelude::*;
 use rsocket_rust_transport_websocket::WebsocketServerTransport;
 use sbe_schema::{SBE_BLOCK_LENGTH, SymbolPriceEncoder, WriteBuf, message_header_codec};
-use std::{env, pin::Pin};
-use tokio::sync::broadcast::{self};
+use std::{env, pin::Pin, sync::Arc};
+use tokio::sync::broadcast::{self, Sender};
 use tokio::time::{Duration, sleep};
 
 use crate::okx::{get_instrument_data, subscribe};
@@ -12,8 +12,12 @@ pub const SYMBOL_LENGTH: usize = 32;
 const PRICE_UPDATE_CAPACITY: usize = 4096;
 
 pub async fn serve() -> Result<()> {
-    let instrument_data = get_instrument_data().await?;
-    let (price_updates, _) = broadcast::channel::<(String, f64)>(PRICE_UPDATE_CAPACITY);
+    let instrument_data = get_instrument_data()
+        .await?
+        .into_iter()
+        .map(Arc::<str>::from)
+        .collect::<Vec<_>>();
+    let (price_updates, _) = broadcast::channel::<(Arc<str>, f64)>(PRICE_UPDATE_CAPACITY);
     let sub_sender = price_updates.clone();
     let sub = subscribe(&instrument_data, sub_sender);
 
@@ -32,8 +36,7 @@ pub async fn serve() -> Result<()> {
         }))
         .serve();
 
-    let (_ws_result, r_socket_result) = tokio::join!(sub, r_socket);
-    r_socket_result?;
+    tokio::try_join!(sub, r_socket)?;
     Ok(())
 }
 
@@ -43,21 +46,25 @@ fn encode_symbol_price(symbol: &str, price: f64) -> Result<Vec<u8>> {
         "instrument ID does not fit the SBE symbol field: {symbol}"
     );
 
+    let mut symbol_bytes = [b' '; SYMBOL_LENGTH];
+    symbol_bytes[..symbol.len()].copy_from_slice(symbol.as_bytes());
+    Ok(encode_symbol_price_bytes(&symbol_bytes, price))
+}
+
+fn encode_symbol_price_bytes(symbol: &[u8; SYMBOL_LENGTH], price: f64) -> Vec<u8> {
     let header_length = message_header_codec::ENCODED_LENGTH;
     let mut buffer = vec![0; header_length + SBE_BLOCK_LENGTH as usize];
 
     let mut encoder = SymbolPriceEncoder::default().wrap(WriteBuf::new(&mut buffer), header_length);
-    let mut symbol_bytes = [b' '; SYMBOL_LENGTH];
-    symbol_bytes[..symbol.len()].copy_from_slice(symbol.as_bytes());
-    encoder.symbol(symbol_bytes);
+    encoder.symbol(*symbol);
     encoder.price(price);
     drop(encoder.header(0));
 
-    Ok(buffer)
+    buffer
 }
 
 struct ServerResponder {
-    price_updates: broadcast::Sender<(String, f64)>,
+    price_updates: Sender<(Arc<str>, f64)>,
 }
 
 impl RSocket for ServerResponder {
@@ -83,8 +90,9 @@ impl RSocket for ServerResponder {
                 }
 
                 let (symbol, price) = synthetic_price_update(round, symbol_index);
-                let result = encode_symbol_price(&symbol, price)
-                    .map(|data| Payload::builder().set_data(data).build());
+                let result = Ok(Payload::builder()
+                    .set_data(encode_symbol_price_bytes(&symbol, price))
+                    .build());
                 let next_state = if symbol_index == 99 {
                     (round.wrapping_add(1), 0)
                 } else {
@@ -95,19 +103,20 @@ impl RSocket for ServerResponder {
             .boxed()
         } else {
             futures_util::stream::unfold(self.price_updates.subscribe(), |mut updates| async move {
-                match updates.recv().await {
-                    Ok((instrument, price)) => {
-                        let result = encode_symbol_price(&instrument, price)
-                            .map(|data| Payload::builder().set_data(data).build());
-                        Some((result, updates))
+                loop {
+                    match updates.recv().await {
+                        Ok((instrument, price)) => {
+                            let result = encode_symbol_price(&instrument, price)
+                                .map(|data| Payload::builder().set_data(data).build());
+                            break Some((result, updates));
+                        }
+                        Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                            eprintln!(
+                                "RSocket price stream recovered after skipping {skipped} updates"
+                            );
+                        }
+                        Err(broadcast::error::RecvError::Closed) => break None,
                     }
-                    Err(broadcast::error::RecvError::Lagged(skipped)) => Some((
-                        Err(anyhow::anyhow!(
-                            "RSocket price stream fell behind and skipped {skipped} updates"
-                        )),
-                        updates,
-                    )),
-                    Err(broadcast::error::RecvError::Closed) => None,
                 }
             })
             .boxed()
@@ -183,8 +192,12 @@ impl RSocket for ServerResponder {
     }
 }
 
-fn synthetic_price_update(round: u64, symbol_index: usize) -> (String, f64) {
-    let symbol = format!("SYM{symbol_index:03}");
+fn synthetic_price_update(round: u64, symbol_index: usize) -> ([u8; SYMBOL_LENGTH], f64) {
+    let mut symbol = [b' '; SYMBOL_LENGTH];
+    symbol[..3].copy_from_slice(b"SYM");
+    symbol[3] = b'0' + (symbol_index / 100) as u8;
+    symbol[4] = b'0' + ((symbol_index / 10) % 10) as u8;
+    symbol[5] = b'0' + (symbol_index % 10) as u8;
     let base_price = 25.0 + symbol_index as f64 * 4.75;
     let phase = round as f64 * 0.17 + symbol_index as f64 * 1.91;
     let movement = phase.sin() * 0.004 + (phase * 0.37).cos() * 0.001;
@@ -199,7 +212,10 @@ fn is_synthetic_request(payload: &Payload) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{encode_symbol_price, is_synthetic_request, synthetic_price_update};
+    use super::{
+        encode_symbol_price, encode_symbol_price_bytes, is_synthetic_request,
+        synthetic_price_update,
+    };
     use rsocket_rust::prelude::Payload;
 
     #[test]
@@ -224,9 +240,11 @@ mod tests {
         let (symbol, first_price) = synthetic_price_update(0, 0);
         let (_, next_price) = synthetic_price_update(1, 0);
 
-        assert_eq!(symbol, "SYM000");
+        assert_eq!(&symbol[..6], b"SYM000");
+        assert!(symbol[6..].iter().all(|byte| *byte == b' '));
         assert_ne!(first_price, next_price);
         assert!(first_price.is_finite() && first_price > 0.0);
+        assert_eq!(encode_symbol_price_bytes(&symbol, first_price).len(), 48);
     }
 
     #[test]

@@ -1,7 +1,9 @@
 use anyhow::Result;
-use futures_util::{SinkExt, StreamExt};
+use futures_util::{SinkExt, StreamExt, TryStreamExt};
 use reqwest::header::USER_AGENT;
+use serde::Deserialize;
 use serde_json::{Value, json};
+use std::{collections::HashSet, sync::Arc};
 use tokio::sync::broadcast::Sender;
 use tokio_tungstenite::{connect_async, tungstenite::Utf8Bytes};
 
@@ -60,10 +62,27 @@ fn select_top_instruments(tickers: &[Value]) -> Result<Vec<String>> {
         .collect())
 }
 
+#[derive(Deserialize)]
+struct TickerMessage<'a> {
+    #[serde(borrow)]
+    data: Option<Vec<Ticker<'a>>>,
+    event: Option<&'a str>,
+    msg: Option<&'a str>,
+}
+
+#[derive(Deserialize)]
+struct Ticker<'a> {
+    #[serde(rename = "instId", borrow)]
+    instrument: &'a str,
+    #[serde(borrow)]
+    last: &'a str,
+}
+
 pub async fn subscribe(
-    instrument_data: &Vec<String>,
-    price_updates: Sender<(String, f64)>,
+    instrument_data: &[Arc<str>],
+    price_updates: Sender<(Arc<str>, f64)>,
 ) -> Result<()> {
+    let instrument_lookup = Arc::new(instrument_data.iter().cloned().collect::<HashSet<_>>());
     let (incoming_ws, _) = connect_async("wss://ws.okx.com:8443/ws/v5/public")
         .await
         .map_err(|error| anyhow::anyhow!("failed to connect to OKX WebSocket: {error}"))?;
@@ -71,55 +90,48 @@ pub async fn subscribe(
     println!("OKX WebSocket handshake has been successfully completed");
     let (mut write, read) = incoming_ws.split();
     let ws = {
-        let price_updates = price_updates.clone();
-        read.for_each(move |message| {
+        let instrument_lookup = instrument_lookup.clone();
+        let read = read.map(|message| message.map_err(anyhow::Error::from));
+        read.try_for_each(move |message| {
+            let instrument_lookup = instrument_lookup.clone();
             let price_updates = price_updates.clone();
             async move {
-                let message = match message {
-                    Ok(message) => message,
-                    Err(error) => {
-                        eprintln!("OKX WebSocket receive error: {error}");
-                        return;
-                    }
-                };
                 let text = match message.to_text() {
                     Ok(text) => text,
                     Err(error) => {
                         eprintln!("Ignoring non-text OKX WebSocket message: {error}");
-                        return;
+                        return Ok(());
                     }
                 };
-                let json = match serde_json::from_str::<Value>(text) {
-                    Ok(json) => json,
+                let update = match serde_json::from_str::<TickerMessage<'_>>(text) {
+                    Ok(update) => update,
                     Err(error) => {
                         eprintln!("Ignoring invalid OKX JSON message: {error}");
-                        return;
+                        return Ok(());
                     }
                 };
 
-                if json.get("event").and_then(Value::as_str) == Some("error") {
-                    eprintln!("OKX subscription error: {json}");
-                    return;
+                if update.event == Some("error") {
+                    anyhow::bail!(
+                        "OKX subscription error: {}",
+                        update.msg.unwrap_or("unknown subscription error")
+                    );
                 }
 
-                if let Some(items) = json.get("data").and_then(Value::as_array) {
+                if let Some(items) = update.data {
                     for item in items {
-                        let Some(instrument) = item.get("instId").and_then(Value::as_str) else {
+                        let Some(instrument) = instrument_lookup.get(item.instrument) else {
                             continue;
                         };
-                        let Some(price) = item
-                            .get("last")
-                            .and_then(Value::as_str)
-                            .and_then(|price| price.parse::<f64>().ok())
-                        else {
+                        let Ok(price) = item.last.parse::<f64>() else {
                             continue;
                         };
-                        if !price.is_finite() || price <= 0.0 {
-                            continue;
+                        if price.is_finite() && price > 0.0 {
+                            let _ = price_updates.send((Arc::clone(instrument), price));
                         }
-                        let _ = price_updates.send((instrument.to_owned(), price));
                     }
                 }
+                Ok(())
             }
         })
     };
@@ -127,7 +139,7 @@ pub async fn subscribe(
     for (batch_index, instruments) in instrument_data.chunks(240).enumerate() {
         let args = instruments
             .iter()
-            .map(|instrument| json!({ "channel": "tickers", "instId": instrument }))
+            .map(|instrument| json!({ "channel": "tickers", "instId": instrument.as_ref() }))
             .collect::<Vec<_>>();
         let request = json!({
             "op": "subscribe",
@@ -142,12 +154,13 @@ pub async fn subscribe(
             .await?;
     }
 
-    Ok(ws.await)
+    ws.await?;
+    anyhow::bail!("OKX WebSocket stream ended")
 }
 
 #[cfg(test)]
 mod tests {
-    use super::select_top_instruments;
+    use super::{TickerMessage, select_top_instruments};
     use serde_json::json;
 
     #[test]
@@ -179,5 +192,16 @@ mod tests {
         assert_eq!(selected.len(), 100);
         assert_eq!(selected[0], "COIN109-USDT");
         assert_eq!(selected[99], "COIN010-USDT");
+    }
+
+    #[test]
+    fn ticker_updates_borrow_instrument_and_price_from_json() {
+        let text =
+            r#"{"arg":{"channel":"tickers"},"data":[{"instId":"BTC-USDT","last":"84000.5"}]}"#;
+        let message: TickerMessage<'_> = serde_json::from_str(text).unwrap();
+        let ticker = &message.data.unwrap()[0];
+
+        assert_eq!(ticker.instrument, "BTC-USDT");
+        assert_eq!(ticker.last, "84000.5");
     }
 }
