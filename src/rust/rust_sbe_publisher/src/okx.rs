@@ -1,4 +1,5 @@
 use anyhow::Result;
+use bytes::Bytes;
 use futures_util::{SinkExt, StreamExt, TryStreamExt};
 use reqwest::header::USER_AGENT;
 use serde::Deserialize;
@@ -7,7 +8,7 @@ use std::{collections::HashSet, sync::Arc};
 use tokio::sync::broadcast::Sender;
 use tokio_tungstenite::{connect_async, tungstenite::Utf8Bytes};
 
-use crate::websocket::SYMBOL_LENGTH;
+use crate::websocket::{SYMBOL_LENGTH, encode_symbol_price};
 
 pub async fn get_instrument_data() -> Result<Vec<String>> {
     let request_url = "https://www.okx.com/api/v5/market/tickers?instType=SPOT";
@@ -78,10 +79,7 @@ struct Ticker<'a> {
     last: &'a str,
 }
 
-pub async fn subscribe(
-    instrument_data: &[Arc<str>],
-    price_updates: Sender<(Arc<str>, f64)>,
-) -> Result<()> {
+pub async fn subscribe(instrument_data: &[Arc<str>], price_updates: Sender<Bytes>) -> Result<()> {
     let instrument_lookup = Arc::new(instrument_data.iter().cloned().collect::<HashSet<_>>());
     let (incoming_ws, _) = connect_async("wss://ws.okx.com:8443/ws/v5/public")
         .await
@@ -127,7 +125,8 @@ pub async fn subscribe(
                             continue;
                         };
                         if price.is_finite() && price > 0.0 {
-                            let _ = price_updates.send((Arc::clone(instrument), price));
+                            let encoded = encode_symbol_price(instrument, price)?;
+                            let _ = price_updates.send(encoded);
                         }
                     }
                 }

@@ -6,6 +6,8 @@ import * as WebSocketClient from 'rsocket-websocket-client';
 export type ConnectionState = 'connecting' | 'connected' | 'reconnecting';
 export type FeedSource = 'okx' | 'synthetic';
 
+const REQUEST_BATCH_SIZE = 500;
+
 const BufferDataEncoder: Encoder<Buffer> = {
     ...BufferEncoder,
     encode: (value, buffer, start, end) => {
@@ -42,7 +44,7 @@ export class Connection {
 
         console.log("Connecting")
         let requestNext: (() => void) | undefined;
-        let syntheticPending = 0;
+        let updatesSinceRequest = 0;
         const scheduleReconnect = (message: string) => {
             if (this.cancelled || this.retryTimer !== undefined) return;
 
@@ -81,22 +83,18 @@ export class Connection {
                     this.connection_state.next('connected');
                     this.error_message.next(undefined);
                     if (this.source === 'synthetic') {
-                        requestNext = () => sub.request(500);
+                        requestNext = () => sub.request(REQUEST_BATCH_SIZE);
                         sub.request(1000);
                     } else {
-                        requestNext = () => sub.request(1);
+                        requestNext = () => sub.request(REQUEST_BATCH_SIZE);
                         requestNext();
                     }
                 },
                 onNext: (payload) => {
                     this.data.next(payload.data)
-                    if (this.source === 'synthetic') {
-                        syntheticPending += 1;
-                        if (syntheticPending >= 500) {
-                            syntheticPending = 0;
-                            requestNext?.();
-                        }
-                    } else {
+                    updatesSinceRequest += 1;
+                    if (updatesSinceRequest >= REQUEST_BATCH_SIZE) {
+                        updatesSinceRequest = 0;
                         requestNext?.();
                     }
                 },

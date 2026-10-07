@@ -1,4 +1,5 @@
 use anyhow::Result;
+use bytes::Bytes;
 use rsocket_rust::prelude::*;
 use rsocket_rust_transport_websocket::WebsocketServerTransport;
 use sbe_schema::{SBE_BLOCK_LENGTH, SymbolPriceEncoder, WriteBuf, message_header_codec};
@@ -17,7 +18,7 @@ pub async fn serve() -> Result<()> {
         .into_iter()
         .map(Arc::<str>::from)
         .collect::<Vec<_>>();
-    let (price_updates, _) = broadcast::channel::<(Arc<str>, f64)>(PRICE_UPDATE_CAPACITY);
+    let (price_updates, _) = broadcast::channel::<Bytes>(PRICE_UPDATE_CAPACITY);
     let sub_sender = price_updates.clone();
     let sub = subscribe(&instrument_data, sub_sender);
 
@@ -40,7 +41,7 @@ pub async fn serve() -> Result<()> {
     Ok(())
 }
 
-fn encode_symbol_price(symbol: &str, price: f64) -> Result<Vec<u8>> {
+pub(crate) fn encode_symbol_price(symbol: &str, price: f64) -> Result<Bytes> {
     anyhow::ensure!(
         symbol.is_ascii() && symbol.len() <= SYMBOL_LENGTH,
         "instrument ID does not fit the SBE symbol field: {symbol}"
@@ -48,7 +49,7 @@ fn encode_symbol_price(symbol: &str, price: f64) -> Result<Vec<u8>> {
 
     let mut symbol_bytes = [b' '; SYMBOL_LENGTH];
     symbol_bytes[..symbol.len()].copy_from_slice(symbol.as_bytes());
-    Ok(encode_symbol_price_bytes(&symbol_bytes, price))
+    Ok(Bytes::from(encode_symbol_price_bytes(&symbol_bytes, price)))
 }
 
 fn encode_symbol_price_bytes(symbol: &[u8; SYMBOL_LENGTH], price: f64) -> Vec<u8> {
@@ -64,7 +65,7 @@ fn encode_symbol_price_bytes(symbol: &[u8; SYMBOL_LENGTH], price: f64) -> Vec<u8
 }
 
 struct ServerResponder {
-    price_updates: Sender<(Arc<str>, f64)>,
+    price_updates: Sender<Bytes>,
 }
 
 impl RSocket for ServerResponder {
@@ -105,10 +106,8 @@ impl RSocket for ServerResponder {
             futures_util::stream::unfold(self.price_updates.subscribe(), |mut updates| async move {
                 loop {
                     match updates.recv().await {
-                        Ok((instrument, price)) => {
-                            let result = encode_symbol_price(&instrument, price)
-                                .map(|data| Payload::builder().set_data(data).build());
-                            break Some((result, updates));
+                        Ok(data) => {
+                            break Some((Ok(Payload::new(Some(data), None)), updates));
                         }
                         Err(broadcast::error::RecvError::Lagged(skipped)) => {
                             eprintln!(

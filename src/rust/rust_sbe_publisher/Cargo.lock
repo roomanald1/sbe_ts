@@ -1354,6 +1354,7 @@ dependencies = [
  "anyhow",
  "async-stream",
  "axum",
+ "bytes",
  "example",
  "futures-util",
  "reqwest",
