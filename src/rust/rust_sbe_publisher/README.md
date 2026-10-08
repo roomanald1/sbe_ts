@@ -70,3 +70,7 @@ longer phases, `--levels=1,50,100` to limit subscriber counts, or
 `--url=ws://127.0.0.1:10000` to target another local instance. This test uses
 the live OKX feed and the shared-payload production path; requests and network
 conditions can vary between runs.
+
+The OKX WebSocket subscription reconnects after transport errors or unexpected
+stream termination. Retry delays use exponential backoff from 1 to 30 seconds
+and reset after a connection has remained up for at least 60 seconds.

@@ -6,9 +6,14 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{collections::HashSet, sync::Arc};
 use tokio::sync::broadcast::Sender;
+use tokio::time::{Duration, Instant, sleep};
 use tokio_tungstenite::{connect_async, tungstenite::Utf8Bytes};
 
 use crate::websocket::{SYMBOL_LENGTH, encode_symbol_price};
+
+const INITIAL_RECONNECT_DELAY: Duration = Duration::from_secs(1);
+const MAX_RECONNECT_DELAY: Duration = Duration::from_secs(30);
+const STABLE_CONNECTION_DURATION: Duration = Duration::from_secs(60);
 
 pub async fn get_instrument_data() -> Result<Vec<String>> {
     let request_url = "https://www.okx.com/api/v5/market/tickers?instType=SPOT";
@@ -81,6 +86,40 @@ struct Ticker<'a> {
 
 pub async fn subscribe(instrument_data: &[Arc<str>], price_updates: Sender<Bytes>) -> Result<()> {
     let instrument_lookup = Arc::new(instrument_data.iter().cloned().collect::<HashSet<_>>());
+    let mut retry_delay = INITIAL_RECONNECT_DELAY;
+
+    loop {
+        let attempt_started = Instant::now();
+        let result = subscribe_once(
+            instrument_data,
+            Arc::clone(&instrument_lookup),
+            price_updates.clone(),
+        )
+        .await;
+
+        retry_delay = retry_delay_after_failure(retry_delay, attempt_started.elapsed());
+
+        match result {
+            Ok(()) => eprintln!(
+                "OKX WebSocket stream ended; reconnecting in {}s",
+                retry_delay.as_secs()
+            ),
+            Err(error) => eprintln!(
+                "OKX WebSocket subscription failed: {error:#}; reconnecting in {}s",
+                retry_delay.as_secs()
+            ),
+        }
+
+        sleep(retry_delay).await;
+        retry_delay = (retry_delay * 2).min(MAX_RECONNECT_DELAY);
+    }
+}
+
+async fn subscribe_once(
+    instrument_data: &[Arc<str>],
+    instrument_lookup: Arc<HashSet<Arc<str>>>,
+    price_updates: Sender<Bytes>,
+) -> Result<()> {
     let (incoming_ws, _) = connect_async("wss://ws.okx.com:8443/ws/v5/public")
         .await
         .map_err(|error| anyhow::anyhow!("failed to connect to OKX WebSocket: {error}"))?;
@@ -88,7 +127,6 @@ pub async fn subscribe(instrument_data: &[Arc<str>], price_updates: Sender<Bytes
     println!("OKX WebSocket handshake has been successfully completed");
     let (mut write, read) = incoming_ws.split();
     let ws = {
-        let instrument_lookup = instrument_lookup.clone();
         let read = read.map(|message| message.map_err(anyhow::Error::from));
         read.try_for_each(move |message| {
             let instrument_lookup = instrument_lookup.clone();
@@ -157,10 +195,41 @@ pub async fn subscribe(instrument_data: &[Arc<str>], price_updates: Sender<Bytes
     anyhow::bail!("OKX WebSocket stream ended")
 }
 
+fn retry_delay_after_failure(current_delay: Duration, connection_duration: Duration) -> Duration {
+    if connection_duration >= STABLE_CONNECTION_DURATION {
+        INITIAL_RECONNECT_DELAY
+    } else {
+        current_delay
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{TickerMessage, select_top_instruments};
+    use super::{
+        INITIAL_RECONNECT_DELAY, MAX_RECONNECT_DELAY, STABLE_CONNECTION_DURATION, TickerMessage,
+        retry_delay_after_failure, select_top_instruments,
+    };
     use serde_json::json;
+    use std::time::Duration;
+
+    #[test]
+    fn reconnect_delay_resets_after_a_stable_connection() {
+        assert_eq!(
+            retry_delay_after_failure(
+                MAX_RECONNECT_DELAY,
+                STABLE_CONNECTION_DURATION + Duration::from_secs(1)
+            ),
+            INITIAL_RECONNECT_DELAY
+        );
+    }
+
+    #[test]
+    fn reconnect_delay_is_retained_after_a_short_connection() {
+        assert_eq!(
+            retry_delay_after_failure(Duration::from_secs(8), Duration::from_secs(5)),
+            Duration::from_secs(8)
+        );
+    }
 
     #[test]
     fn selects_top_spot_instruments_by_24_hour_quote_volume() {
