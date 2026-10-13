@@ -74,3 +74,9 @@ conditions can vary between runs.
 The OKX WebSocket subscription reconnects after transport errors or unexpected
 stream termination. Retry delays use exponential backoff from 1 to 30 seconds
 and reset after a connection has remained up for at least 60 seconds.
+
+In the OKX grid or table, click an instrument symbol to open its live top-five
+order-book depth. The `books5` WebSocket subscription is opened for that
+instrument only while its book stream is active; closing the popup cancels the
+stream and releases its WebSocket connection. Book depth is sent as the SBE
+`BookDepth` message (template ID 2); symbol prices remain template ID 1.

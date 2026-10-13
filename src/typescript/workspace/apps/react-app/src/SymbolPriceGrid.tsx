@@ -47,23 +47,35 @@ const gridTheme = themeQuartz.withParams({
     rowHoverColor: '#141b24',
 });
 
-function SymbolGridCellRenderer({ value }: ICellRendererParams<SymbolGridRow, SymbolGridCell>) {
+function SymbolGridCellRenderer({
+    value,
+    onSelectSymbol,
+}: ICellRendererParams<SymbolGridRow, SymbolGridCell> & {
+    onSelectSymbol?: (symbol: string) => void;
+}) {
     if (!value) return null;
 
     return (
-        <div className="symbol-grid-cell">
+        <button
+            className="symbol-grid-cell-button"
+            type="button"
+            onClick={() => onSelectSymbol?.(value.symbol)}
+            disabled={!onSelectSymbol}
+            aria-label={`Show ${value.symbol} order book`}
+        >
             <span className="grid-symbol" title={value.symbol}>{value.symbol}</span>
             <span className={`grid-price price-${value.direction}`}>{priceFormatter.format(value.price)}</span>
-        </div>
+        </button>
     );
 }
 
 type SymbolPriceGridProps = {
     ticks: SymbolPriceTick[];
     feedSource: FeedSource;
+    onSelectSymbol?: (symbol: string) => void;
 };
 
-export function SymbolPriceGrid({ ticks, feedSource }: SymbolPriceGridProps) {
+export function SymbolPriceGrid({ ticks, feedSource, onSelectSymbol }: SymbolPriceGridProps) {
     const rowData = createSymbolGridRows(ticks);
     const columnDefs = React.useMemo<ColDef<SymbolGridRow, SymbolGridCell>[]>(() =>
         Array.from({ length: 10 }, (_, columnIndex) => ({
@@ -71,6 +83,7 @@ export function SymbolPriceGrid({ ticks, feedSource }: SymbolPriceGridProps) {
             colId: `symbols-${columnIndex}`,
             valueGetter: params => params.data?.cells[columnIndex],
             cellRenderer: SymbolGridCellRenderer,
+            cellRendererParams: { onSelectSymbol },
             equals: (previous, next) =>
                 previous?.symbol === next?.symbol && previous?.price === next?.price,
             sortable: false,
@@ -78,7 +91,7 @@ export function SymbolPriceGrid({ ticks, feedSource }: SymbolPriceGridProps) {
             flex: 1,
             minWidth: 0,
         })),
-        []);
+        [onSelectSymbol]);
 
     return (
         <section className="feed-section" aria-label="Live symbol price grid">

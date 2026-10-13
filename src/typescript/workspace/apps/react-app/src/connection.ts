@@ -30,28 +30,39 @@ export class Connection {
         ? 'ws://localhost:10000'
         : 'wss://sbe-ts.onrender.com');
     private cancelled: boolean = false;
+    private lifecycleGeneration = 0;
     private socket: Awaited<ReturnType<typeof this.createClient>> | undefined;
     private subscription: { cancel: () => void } | undefined;
+    private bookSubscription: { cancel: () => void } | undefined;
+    private selectedBook: string | undefined;
+    private activeBook: string | undefined;
     private retryTimer: ReturnType<typeof setTimeout> | undefined;
     private retryAttempt = 0;
 
     public connection_state: BehaviorSubject<ConnectionState> = new BehaviorSubject<ConnectionState>('connecting');
-    public error_message: BehaviorSubject<String | undefined> = new BehaviorSubject<String | undefined>(undefined);
+    public error_message: BehaviorSubject<string | undefined> = new BehaviorSubject<string | undefined>(undefined);
     public data: BehaviorSubject<unknown | undefined> = new BehaviorSubject<unknown | undefined>(undefined);
+    public book_data: BehaviorSubject<unknown | undefined> = new BehaviorSubject<unknown | undefined>(undefined);
+    public book_error: BehaviorSubject<string | undefined> = new BehaviorSubject<string | undefined>(undefined);
 
     public async connect() {
         if (this.socket) return;//already connected
 
+        this.cancelled = false;
+        const generation = ++this.lifecycleGeneration;
         console.log("Connecting")
         let requestNext: (() => void) | undefined;
         let updatesSinceRequest = 0;
         const scheduleReconnect = (message: string) => {
-            if (this.cancelled || this.retryTimer !== undefined) return;
+            if (this.cancelled || generation !== this.lifecycleGeneration || this.retryTimer !== undefined) return;
 
             this.connection_state.next('reconnecting');
             this.error_message.next(message);
             this.subscription?.cancel();
             this.subscription = undefined;
+            this.bookSubscription?.cancel();
+            this.bookSubscription = undefined;
+            this.activeBook = undefined;
             this.socket?.close();
             this.socket = undefined;
 
@@ -59,7 +70,9 @@ export class Connection {
             this.retryAttempt += 1;
             this.retryTimer = setTimeout(() => {
                 this.retryTimer = undefined;
-                void this.connect();
+                if (generation === this.lifecycleGeneration && !this.cancelled) {
+                    void this.connect();
+                }
             }, delay);
         };
 
@@ -67,7 +80,7 @@ export class Connection {
         try {
             const rsocket = await this.createClient();
 
-            if (this.cancelled) {
+            if (this.cancelled || generation !== this.lifecycleGeneration) {
                 rsocket.close();
                 return;
             }
@@ -77,11 +90,16 @@ export class Connection {
                 data: Buffer.from(this.source),
             }).subscribe({
                 onSubscribe: (sub) => {
+                    if (this.cancelled || generation !== this.lifecycleGeneration) {
+                        sub.cancel();
+                        return;
+                    }
                     console.log("OnSubscribe");
                     this.retryAttempt = 0;
                     this.subscription = sub;
                     this.connection_state.next('connected');
                     this.error_message.next(undefined);
+                    this.startBookSubscription();
                     if (this.source === 'synthetic') {
                         requestNext = () => sub.request(REQUEST_BATCH_SIZE);
                         sub.request(1000);
@@ -91,6 +109,7 @@ export class Connection {
                     }
                 },
                 onNext: (payload) => {
+                    if (this.cancelled || generation !== this.lifecycleGeneration) return;
                     this.data.next(payload.data)
                     updatesSinceRequest += 1;
                     if (updatesSinceRequest >= REQUEST_BATCH_SIZE) {
@@ -105,6 +124,64 @@ export class Connection {
         } catch (error) {
             scheduleReconnect(error instanceof Error ? error.message : 'Unable to connect to RSocket server');
         }
+    }
+
+    public selectBook(instrument: string | undefined) {
+        if (this.selectedBook === instrument) return;
+
+        this.selectedBook = instrument;
+        this.bookSubscription?.cancel();
+        this.bookSubscription = undefined;
+        this.activeBook = undefined;
+        this.book_data.next(undefined);
+        this.book_error.next(undefined);
+        this.startBookSubscription();
+    }
+
+    private startBookSubscription() {
+        const socket = this.socket;
+        const instrument = this.selectedBook;
+        if (!socket || !instrument || this.activeBook === instrument) return;
+
+        this.activeBook = instrument;
+        let updatesSinceRequest = 0;
+        let requestNext: (() => void) | undefined;
+        socket.requestStream({
+            data: Buffer.from(`book:${instrument}`),
+        }).subscribe({
+            onSubscribe: subscription => {
+                if (this.selectedBook !== instrument) {
+                    subscription.cancel();
+                    return;
+                }
+                this.bookSubscription = subscription;
+                requestNext = () => subscription.request(REQUEST_BATCH_SIZE);
+                requestNext();
+            },
+            onNext: payload => {
+                if (this.selectedBook === instrument) {
+                    this.book_data.next(payload.data);
+                    this.book_error.next(undefined);
+                    updatesSinceRequest += 1;
+                    if (updatesSinceRequest >= REQUEST_BATCH_SIZE) {
+                        updatesSinceRequest = 0;
+                        requestNext?.();
+                    }
+                }
+            },
+            onError: error => {
+                if (this.selectedBook !== instrument) return;
+                this.bookSubscription = undefined;
+                this.activeBook = undefined;
+                this.book_error.next(error.message ?? 'Order book stream disconnected');
+            },
+            onComplete: () => {
+                if (this.selectedBook !== instrument) return;
+                this.bookSubscription = undefined;
+                this.activeBook = undefined;
+                this.book_error.next('Order book stream completed');
+            },
+        });
     }
 
 
@@ -141,11 +218,13 @@ export class Connection {
 
     public dispose() {
         this.cancelled = true;
+        this.lifecycleGeneration += 1;
         if (this.retryTimer !== undefined) {
             clearTimeout(this.retryTimer);
             this.retryTimer = undefined;
         }
         this.subscription?.cancel();
-        try { this.socket?.close(); } catch { }
+        this.bookSubscription?.cancel();
+        this.socket?.close();
     }
 }

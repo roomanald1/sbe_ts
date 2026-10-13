@@ -21,3 +21,7 @@ tokio-tungstenite = { version = "0.30.0", features = ["rustls-tls-native-roots"]
 [[bench]]
 name = "sbe_encoding"
 harness = false
+
+[[bench]]
+name = "order_book"
+harness = false

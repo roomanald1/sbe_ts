@@ -1,16 +1,17 @@
 use anyhow::Result;
 use bytes::Bytes;
+use futures_util::StreamExt;
 use rsocket_rust::prelude::*;
 use rsocket_rust_transport_websocket::WebsocketServerTransport;
-use sbe_schema::{SBE_BLOCK_LENGTH, SymbolPriceEncoder, WriteBuf, message_header_codec};
-use std::{env, pin::Pin, sync::Arc};
-use tokio::sync::broadcast::{self, Sender};
+use std::{collections::HashSet, env, pin::Pin, sync::Arc};
+use tokio::sync::{broadcast, mpsc};
 use tokio::time::{Duration, sleep};
 
-use crate::okx::{get_instrument_data, subscribe};
+use crate::encoders::{SYMBOL_LENGTH, encode_symbol_price_bytes};
+use crate::okx::connectivity::{get_instrument_data, subscribe, subscribe_book_once};
 
-pub const SYMBOL_LENGTH: usize = 32;
 const PRICE_UPDATE_CAPACITY: usize = 4096;
+const BOOK_UPDATE_CAPACITY: usize = 32;
 
 pub async fn serve() -> Result<()> {
     let instrument_data = get_instrument_data()
@@ -18,10 +19,10 @@ pub async fn serve() -> Result<()> {
         .into_iter()
         .map(Arc::<str>::from)
         .collect::<Vec<_>>();
+    let instrument_lookup = Arc::new(instrument_data.iter().cloned().collect::<HashSet<_>>());
     let (price_updates, _) = broadcast::channel::<Bytes>(PRICE_UPDATE_CAPACITY);
     let sub_sender = price_updates.clone();
     let sub = subscribe(&instrument_data, sub_sender);
-
     let port = env::var("PORT").unwrap_or_else(|_| "10000".to_string());
     let addr = format!("0.0.0.0:{port}");
 
@@ -33,6 +34,7 @@ pub async fn serve() -> Result<()> {
             println!("socket establish: setup={:?}", setup);
             Ok(Box::new(ServerResponder {
                 price_updates: price_updates.clone(),
+                instrument_lookup: Arc::clone(&instrument_lookup),
             }))
         }))
         .serve();
@@ -41,31 +43,9 @@ pub async fn serve() -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn encode_symbol_price(symbol: &str, price: f64) -> Result<Bytes> {
-    anyhow::ensure!(
-        symbol.is_ascii() && symbol.len() <= SYMBOL_LENGTH,
-        "instrument ID does not fit the SBE symbol field: {symbol}"
-    );
-
-    let mut symbol_bytes = [b' '; SYMBOL_LENGTH];
-    symbol_bytes[..symbol.len()].copy_from_slice(symbol.as_bytes());
-    Ok(Bytes::from(encode_symbol_price_bytes(&symbol_bytes, price)))
-}
-
-fn encode_symbol_price_bytes(symbol: &[u8; SYMBOL_LENGTH], price: f64) -> Vec<u8> {
-    let header_length = message_header_codec::ENCODED_LENGTH;
-    let mut buffer = vec![0; header_length + SBE_BLOCK_LENGTH as usize];
-
-    let mut encoder = SymbolPriceEncoder::default().wrap(WriteBuf::new(&mut buffer), header_length);
-    encoder.symbol(*symbol);
-    encoder.price(price);
-    drop(encoder.header(0));
-
-    buffer
-}
-
 struct ServerResponder {
-    price_updates: Sender<Bytes>,
+    price_updates: tokio::sync::broadcast::Sender<Bytes>,
+    instrument_lookup: Arc<HashSet<Arc<str>>>,
 }
 
 impl RSocket for ServerResponder {
@@ -79,6 +59,24 @@ impl RSocket for ServerResponder {
                 + 'static,
         >,
     > {
+        if let Some(instrument) = requested_book_instrument(&payload) {
+            if !instrument.is_ascii() || instrument.is_empty() || instrument.len() > SYMBOL_LENGTH {
+                return Box::pin(futures_util::stream::once(async {
+                    Err(anyhow::anyhow!("invalid OKX book instrument request"))
+                }));
+            }
+            let Some(instrument) = self.instrument_lookup.get(instrument) else {
+                let instrument = instrument.to_owned();
+                return Box::pin(futures_util::stream::once(async move {
+                    Err(anyhow::anyhow!(
+                        "instrument is not available in the current OKX subscription: {instrument}"
+                    ))
+                }));
+            };
+            println!("Subscribing to OKX books for {instrument}");
+            return book_request_stream(instrument.to_string());
+        }
+
         let synthetic = is_synthetic_request(&payload);
         println!(
             "RSocket request stream source: {}",
@@ -191,6 +189,31 @@ impl RSocket for ServerResponder {
     }
 }
 
+fn requested_book_instrument(payload: &Payload) -> Option<&str> {
+    let data = payload.data()?;
+    let request = std::str::from_utf8(data.as_ref()).ok()?;
+    request.strip_prefix("book:")
+}
+
+fn book_request_stream(
+    instrument: String,
+) -> Pin<Box<dyn Stream<Item = Result<Payload, anyhow::Error>> + Send + 'static>> {
+    let (sender, receiver) = mpsc::channel(BOOK_UPDATE_CAPACITY);
+    tokio::spawn(async move {
+        if let Err(error) = subscribe_book_once(&instrument, sender.clone()).await {
+            let _ = sender.send(Err(error)).await;
+        }
+    });
+    let stream = futures_util::stream::unfold(receiver, |mut receiver| async move {
+        receiver.recv().await.map(|item| {
+            let item = item.map(|bytes| Payload::new(Some(bytes), None));
+            (item, receiver)
+        })
+    })
+    .boxed();
+    Box::pin(stream)
+}
+
 fn synthetic_price_update(round: u64, symbol_index: usize) -> ([u8; SYMBOL_LENGTH], f64) {
     let mut symbol = [b' '; SYMBOL_LENGTH];
     symbol[..3].copy_from_slice(b"SYM");
@@ -211,28 +234,9 @@ fn is_synthetic_request(payload: &Payload) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        encode_symbol_price, encode_symbol_price_bytes, is_synthetic_request,
-        synthetic_price_update,
-    };
+    use super::{is_synthetic_request, requested_book_instrument, synthetic_price_update};
+    use crate::encoders::encode_symbol_price_bytes;
     use rsocket_rust::prelude::Payload;
-
-    #[test]
-    fn encodes_full_instrument_id_and_price_in_sbe_payload() {
-        let payload = encode_symbol_price("1INCH-USDT", 1.25).unwrap();
-        let mut expected_symbol = [b' '; 32];
-        expected_symbol[..10].copy_from_slice(b"1INCH-USDT");
-        assert_eq!(&payload[8..40], expected_symbol);
-        assert_eq!(
-            f64::from_le_bytes(payload[40..48].try_into().unwrap()),
-            1.25
-        );
-    }
-
-    #[test]
-    fn rejects_instrument_ids_that_exceed_the_sbe_field() {
-        assert!(encode_symbol_price("123456789012345678901234567890123", 1.0).is_err());
-    }
 
     #[test]
     fn synthetic_updates_produce_fast_feed_symbols_and_vary_by_round() {
@@ -250,9 +254,13 @@ mod tests {
     fn selects_synthetic_stream_only_for_synthetic_request_payload() {
         let synthetic = Payload::builder().set_data(b"synthetic".to_vec()).build();
         let okx = Payload::builder().set_data(b"okx".to_vec()).build();
+        let book = Payload::builder()
+            .set_data(b"book:BTC-USDT".to_vec())
+            .build();
 
         assert!(is_synthetic_request(&synthetic));
         assert!(!is_synthetic_request(&okx));
         assert!(!is_synthetic_request(&Payload::new(None, None)));
+        assert_eq!(requested_book_instrument(&book), Some("BTC-USDT"));
     }
 }

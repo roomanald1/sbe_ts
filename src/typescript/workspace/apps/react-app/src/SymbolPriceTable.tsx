@@ -16,19 +16,36 @@ const timeFormatter = new Intl.DateTimeFormat(undefined, {
 type SymbolPriceTableProps = {
     ticks: SymbolPriceTick[];
     state: ConnectionState;
+    onSelectSymbol?: (symbol: string) => void;
 };
 
-const SymbolPriceRow = memo(function SymbolPriceRow({ tick }: { tick: SymbolPriceTick }) {
+const SymbolPriceRow = memo(function SymbolPriceRow({
+    tick,
+    onSelectSymbol,
+}: {
+    tick: SymbolPriceTick;
+    onSelectSymbol?: (symbol: string) => void;
+}) {
     return (
         <tr>
-            <td><span className="symbol-tag" title={tick.symbol}>{tick.symbol}</span></td>
+            <td>
+                <button
+                    className="symbol-tag symbol-book-button"
+                    type="button"
+                    onClick={() => onSelectSymbol?.(tick.symbol)}
+                    disabled={!onSelectSymbol}
+                    aria-label={`Show ${tick.symbol} order book`}
+                >
+                    {tick.symbol}
+                </button>
+            </td>
             <td className={`price-cell price-${tick.direction}`}>{priceFormatter.format(tick.price)}</td>
             <td className="time-cell">{timeFormatter.format(tick.receivedAt)}</td>
         </tr>
     );
 });
 
-export function SymbolPriceTable({ ticks, state }: SymbolPriceTableProps) {
+export function SymbolPriceTable({ ticks, state, onSelectSymbol }: SymbolPriceTableProps) {
     return (
         <section className="feed-section" aria-label="Live symbol price events">
             <div className="feed-toolbar">
@@ -59,7 +76,13 @@ export function SymbolPriceTable({ ticks, state }: SymbolPriceTableProps) {
                                     {state === 'connected' ? 'Waiting for the first SBE message…' : 'Connecting to the publisher…'}
                                 </td>
                             </tr>
-                        ) : ticks.map(tick => <SymbolPriceRow key={tick.symbol} tick={tick} />)}
+                        ) : ticks.map(tick => (
+                            <SymbolPriceRow
+                                key={tick.symbol}
+                                tick={tick}
+                                onSelectSymbol={onSelectSymbol}
+                            />
+                        ))}
                     </tbody>
                 </table>
             </div>

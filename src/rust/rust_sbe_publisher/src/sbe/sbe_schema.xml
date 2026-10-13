@@ -2,7 +2,7 @@
 <sbe:messageSchema xmlns:sbe="http://fixprotocol.io/2016/sbe"
                    package="example"
                    id="1"
-                   version="2">
+                   version="4">
 
     <types>
         <type name="symbol" primitiveType="char" length="32"/>
@@ -17,6 +17,39 @@
     <message name="SymbolPrice" id="1">
         <field name="symbol" id="1" type="symbol"/>
         <field name="price" id="2" type="double"/>
+    </message>
+
+    <message name="BookDepth" id="2">
+        <field name="symbol" id="1" type="symbol"/>
+        <field name="timestamp" id="2" type="uint64"/>
+        <field name="bidPrice0" id="3" type="double"/>
+        <field name="bidSize0" id="4" type="double"/>
+        <field name="bidPrice1" id="5" type="double"/>
+        <field name="bidSize1" id="6" type="double"/>
+        <field name="bidPrice2" id="7" type="double"/>
+        <field name="bidSize2" id="8" type="double"/>
+        <field name="bidPrice3" id="9" type="double"/>
+        <field name="bidSize3" id="10" type="double"/>
+        <field name="bidPrice4" id="11" type="double"/>
+        <field name="bidSize4" id="12" type="double"/>
+        <field name="bidPrice5" id="13" type="double"/>
+        <field name="bidSize5" id="14" type="double"/>
+        <field name="bidPrice6" id="15" type="double"/>
+        <field name="bidSize6" id="16" type="double"/>
+        <field name="askPrice0" id="17" type="double"/>
+        <field name="askSize0" id="18" type="double"/>
+        <field name="askPrice1" id="19" type="double"/>
+        <field name="askSize1" id="20" type="double"/>
+        <field name="askPrice2" id="21" type="double"/>
+        <field name="askSize2" id="22" type="double"/>
+        <field name="askPrice3" id="23" type="double"/>
+        <field name="askSize3" id="24" type="double"/>
+        <field name="askPrice4" id="25" type="double"/>
+        <field name="askSize4" id="26" type="double"/>
+        <field name="askPrice5" id="27" type="double"/>
+        <field name="askSize5" id="28" type="double"/>
+        <field name="askPrice6" id="29" type="double"/>
+        <field name="askSize6" id="30" type="double"/>
     </message>
 
 </sbe:messageSchema>
