@@ -200,8 +200,23 @@ fn book_request_stream(
 ) -> Pin<Box<dyn Stream<Item = Result<Payload, anyhow::Error>> + Send + 'static>> {
     let (sender, receiver) = mpsc::channel(BOOK_UPDATE_CAPACITY);
     tokio::spawn(async move {
-        if let Err(error) = subscribe_book_once(&instrument, sender.clone()).await {
-            let _ = sender.send(Err(error)).await;
+        let mut retry_delay = Duration::from_secs(1);
+        loop {
+            if sender.is_closed() {
+                break;
+            }
+
+            match subscribe_book_once(&instrument, sender.clone()).await {
+                Ok(()) => break,
+                Err(error) => {
+                    eprintln!("OKX book stream for {instrument} failed: {error:#}; retrying in {}s", retry_delay.as_secs());
+                    tokio::select! {
+                        _ = sender.closed() => break,
+                        _ = sleep(retry_delay) => {}
+                    }
+                    retry_delay = (retry_delay * 2).min(Duration::from_secs(30));
+                }
+            }
         }
     });
     let stream = futures_util::stream::unfold(receiver, |mut receiver| async move {
