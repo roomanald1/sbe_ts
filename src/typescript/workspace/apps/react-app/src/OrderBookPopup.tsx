@@ -1,7 +1,8 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
+import { NEVER, throttleTime } from 'rxjs';
 import { useObservable } from './use_observable';
 import { Connection } from './connection';
-import { decodeBookDepth, type BookDepth, type BookLevel } from './types/symbol_price';
+import { decodeBookDepth, type BookLevel } from './types/symbol_price';
 
 type OrderBookPopupProps = {
     symbol: string;
@@ -19,8 +20,14 @@ const priceFormatter = new Intl.NumberFormat(undefined, {
     maximumFractionDigits: 10,
 });
 
+const midFormatter = new Intl.NumberFormat(undefined, {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+});
+
 const sizeFormatter = new Intl.NumberFormat(undefined, {
-    maximumFractionDigits: 8,
+    minimumFractionDigits: 4,
+    maximumFractionDigits: 4,
 });
 
 function DepthRows({
@@ -101,30 +108,21 @@ function DepthBalance({ bids, asks }: { bids: BookLevel[]; asks: BookLevel[] }) 
 }
 
 export function OrderBookPopup({ symbol, connection, onClose, symbols = [], onSymbolChange, mode = 'popup' }: OrderBookPopupProps) {
-    const bookData = useObservable(connection.book_data, undefined, [connection]);
-    const error = useObservable(connection.book_error, undefined, [connection]);
-    const depth = decodeBookDepth(bookData);
-    const latestDepthRef = useRef<BookDepth | undefined>(depth);
-
     const [frozen, setFrozen] = useState(false);
-    const [displayDepth, setDisplayDepth] = useState<BookDepth | undefined>(depth);
+    const displayBookData = useMemo(
+        () => frozen
+            ? NEVER
+            : connection.book_data.pipe(throttleTime(DISPLAY_INTERVAL_MS, undefined, { leading: true, trailing: true })),
+        [connection, frozen],
+    );
+    const bookData = useObservable(displayBookData, undefined, [connection]);
+    const error = useObservable(connection.book_error, undefined, [connection]);
+    const displayDepth = decodeBookDepth(bookData);
 
     useEffect(() => {
         connection.selectBook(symbol);
         return () => connection.selectBook(undefined);
     }, [connection, symbol]);
-
-    useEffect(() => {
-        latestDepthRef.current = depth;
-    }, [depth]);
-
-    useEffect(() => {
-        if (frozen) return;
-        const interval = window.setInterval(() => {
-            setDisplayDepth(current => latestDepthRef.current === current ? current : latestDepthRef.current);
-        }, DISPLAY_INTERVAL_MS);
-        return () => window.clearInterval(interval);
-    }, [frozen]);
 
     useEffect(() => {
         const closeOnEscape = (event: KeyboardEvent) => {
@@ -216,7 +214,7 @@ export function OrderBookPopup({ symbol, connection, onClose, symbols = [], onSy
                             <div className="book-market-metrics">
                                 <div className="book-market-metric">
                                     <span>MID</span>
-                                    <strong>{mid === undefined ? '—' : priceFormatter.format(mid)}</strong>
+                                    <strong>{mid === undefined ? '—' : midFormatter.format(mid)}</strong>
                                 </div>
                                 <div className="book-market-metric">
                                     <span>SPREAD</span>
