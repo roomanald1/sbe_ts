@@ -5,6 +5,7 @@ type PriceChangeChartViewProps = {
     data: PriceChartData;
     onSymbolChange: (symbol: string) => void;
     onSelectSymbol?: (symbol: string) => void;
+    showSymbolSelector?: boolean;
 };
 
 const CHART_HEIGHT = 340;
@@ -23,6 +24,7 @@ export function PriceChangeChartView({
     data,
     onSymbolChange,
     onSelectSymbol,
+    showSymbolSelector = true,
 }: PriceChangeChartViewProps) {
     const {
         symbols,
@@ -75,7 +77,7 @@ export function PriceChangeChartView({
                     <span className="live-indicator" />
                     <span className="toolbar-title">Price history</span>
                 </div>
-                <label className="chart-symbol-control">
+                {showSymbolSelector && <label className="chart-symbol-control">
                     <span>SYMBOL</span>
                     <select
                         aria-label="Chart symbol"
@@ -84,7 +86,7 @@ export function PriceChangeChartView({
                     >
                         {symbols.map(item => <option key={item} value={item}>{item}</option>)}
                     </select>
-                </label>
+                </label>}
             </div>
             {!ready ? (
                 <div className="book-popup-message">

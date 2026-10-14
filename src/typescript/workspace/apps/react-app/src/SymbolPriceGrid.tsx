@@ -73,9 +73,10 @@ type SymbolPriceGridProps = {
     ticks: SymbolPriceTick[];
     feedSource: FeedSource;
     onSelectSymbol?: (symbol: string) => void;
+    compact?: boolean;
 };
 
-export function SymbolPriceGrid({ ticks, feedSource, onSelectSymbol }: SymbolPriceGridProps) {
+export function SymbolPriceGrid({ ticks, feedSource, onSelectSymbol, compact = false }: SymbolPriceGridProps) {
     const rowData = createSymbolGridRows(ticks);
     const columnDefs = React.useMemo<ColDef<SymbolGridRow, SymbolGridCell>[]>(() =>
         Array.from({ length: 10 }, (_, columnIndex) => ({
@@ -94,7 +95,7 @@ export function SymbolPriceGrid({ ticks, feedSource, onSelectSymbol }: SymbolPri
         [onSelectSymbol]);
 
     return (
-        <section className="feed-section" aria-label="Live symbol price grid">
+        <section className={compact ? "feed-section compact-market-panel" : "feed-section"} aria-label="Live symbol price grid">
             <div className="feed-toolbar">
                 <div>
                     <span className="live-indicator" />
@@ -113,7 +114,7 @@ export function SymbolPriceGrid({ ticks, feedSource, onSelectSymbol }: SymbolPri
                     getRowId={params => String(params.data.rowIndex)}
                     theme={gridTheme}
                     domLayout="autoHeight"
-                    rowHeight={42}
+                    rowHeight={compact ? 24 : 42}
                     headerHeight={0}
                     cellFlashDuration={500}
                     cellFadeDuration={900}

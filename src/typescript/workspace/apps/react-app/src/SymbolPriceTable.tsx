@@ -17,6 +17,7 @@ type SymbolPriceTableProps = {
     ticks: SymbolPriceTick[];
     state: ConnectionState;
     onSelectSymbol?: (symbol: string) => void;
+    maxRows?: number;
 };
 
 const SymbolPriceRow = memo(function SymbolPriceRow({
@@ -45,9 +46,10 @@ const SymbolPriceRow = memo(function SymbolPriceRow({
     );
 });
 
-export function SymbolPriceTable({ ticks, state, onSelectSymbol }: SymbolPriceTableProps) {
+export function SymbolPriceTable({ ticks, state, onSelectSymbol, maxRows }: SymbolPriceTableProps) {
+    const visibleTicks = maxRows === undefined ? ticks : ticks.slice(0, maxRows);
     return (
-        <section className="feed-section" aria-label="Live symbol price events">
+        <section className={maxRows === undefined ? "feed-section" : "feed-section compact-market-panel"} aria-label="Live symbol price events">
             <div className="feed-toolbar">
                 <div>
                     <span className="live-indicator" />
@@ -76,7 +78,7 @@ export function SymbolPriceTable({ ticks, state, onSelectSymbol }: SymbolPriceTa
                                     {state === 'connected' ? 'Waiting for the first SBE message…' : 'Connecting to the publisher…'}
                                 </td>
                             </tr>
-                        ) : ticks.map(tick => (
+                        ) : visibleTicks.map(tick => (
                             <SymbolPriceRow
                                 key={tick.symbol}
                                 tick={tick}

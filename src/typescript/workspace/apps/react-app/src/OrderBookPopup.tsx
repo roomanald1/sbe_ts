@@ -11,6 +11,7 @@ type OrderBookPopupProps = {
     symbols?: string[];
     onSymbolChange?: (symbol: string) => void;
     mode?: 'popup' | 'view';
+    showSymbolSelector?: boolean;
 };
 
 const DISPLAY_INTERVAL_MS = 250;
@@ -107,7 +108,7 @@ function DepthBalance({ bids, asks }: { bids: BookLevel[]; asks: BookLevel[] }) 
     );
 }
 
-export function OrderBookPopup({ symbol, connection, onClose, symbols = [], onSymbolChange, mode = 'popup' }: OrderBookPopupProps) {
+export function OrderBookPopup({ symbol, connection, onClose, symbols = [], onSymbolChange, mode = 'popup', showSymbolSelector = true }: OrderBookPopupProps) {
     const [frozen, setFrozen] = useState(false);
     const displayBookData = useMemo(
         () => frozen
@@ -156,12 +157,12 @@ export function OrderBookPopup({ symbol, connection, onClose, symbols = [], onSy
                     <span className="live-indicator" />
                     <span className="toolbar-title">Order book</span>
                 </div>
-                <label className="chart-symbol-control">
+                {showSymbolSelector && <label className="chart-symbol-control">
                     <span>SYMBOL</span>
                     <select aria-label="Book symbol" value={symbol} onChange={event => onSymbolChange?.(event.target.value)}>
                         {symbols.map(item => <option key={item} value={item}>{item}</option>)}
                     </select>
-                </label>
+                </label>}
             </div>}
             <section
                 className={mode === 'view' ? 'book-popup book-view' : 'book-popup'}

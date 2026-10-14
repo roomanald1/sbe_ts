@@ -6,10 +6,15 @@ type PriceChangeChartProps = {
     changes: PriceChanges;
     onSelectSymbol?: (symbol: string) => void;
     initialSymbol?: string;
+    selectedSymbol?: string;
+    onSymbolChange?: (symbol: string) => void;
+    showSymbolSelector?: boolean;
 };
 
-export function PriceChangeChart({ changes, onSelectSymbol, initialSymbol }: PriceChangeChartProps) {
-    const [selectedSymbol, setSelectedSymbol] = useState(initialSymbol ?? '');
+export function PriceChangeChart({ changes, onSelectSymbol, initialSymbol, selectedSymbol: controlledSymbol, onSymbolChange, showSymbolSelector = true }: PriceChangeChartProps) {
+    const [localSymbol, setLocalSymbol] = useState(initialSymbol ?? '');
+    const selectedSymbol = controlledSymbol ?? localSymbol;
+    const changeSymbol = onSymbolChange ?? setLocalSymbol;
     const data = useMemo(
         () => createPriceChartData(changes.ticks, changes.histories, selectedSymbol),
         [changes, selectedSymbol],
@@ -18,8 +23,9 @@ export function PriceChangeChart({ changes, onSelectSymbol, initialSymbol }: Pri
     return (
         <PriceChangeChartView
             data={data}
-            onSymbolChange={setSelectedSymbol}
+            onSymbolChange={changeSymbol}
             onSelectSymbol={onSelectSymbol}
+            showSymbolSelector={showSymbolSelector}
         />
     );
 }
