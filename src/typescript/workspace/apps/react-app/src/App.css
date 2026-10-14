@@ -1203,6 +1203,19 @@ tbody tr:first-child td {
   flex: 1;
 }
 
+.market-dashboard .symbol-grid-cell {
+  gap: 2px;
+}
+
+.market-dashboard .grid-symbol {
+  font-size: 8px;
+}
+
+.market-dashboard .grid-price {
+  font-size: 8px;
+  letter-spacing: -0.04em;
+}
+
 .market-dashboard .table-scroll {
   height: auto;
   min-height: 0;
