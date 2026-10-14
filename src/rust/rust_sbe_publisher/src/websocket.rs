@@ -1,6 +1,6 @@
 use anyhow::Result;
 use bytes::Bytes;
-use futures_util::StreamExt;
+use futures_util::{Stream, StreamExt};
 use rsocket_rust::prelude::*;
 use rsocket_rust_transport_websocket::WebsocketServerTransport;
 use std::{collections::HashSet, env, pin::Pin, sync::Arc};
@@ -74,7 +74,10 @@ impl RSocket for ServerResponder {
                 }));
             };
             println!("Subscribing to OKX books for {instrument}");
-            return book_request_stream(instrument.to_string());
+            return log_stream_end(
+                book_request_stream(instrument.to_string()),
+                format!("RSocket UI disconnected or cancelled the OKX book stream for {instrument}"),
+            );
         }
 
         let synthetic = is_synthetic_request(&payload);
@@ -119,7 +122,7 @@ impl RSocket for ServerResponder {
             .boxed()
         };
 
-        Box::pin(stream)
+        log_stream_end(stream, "RSocket UI disconnected or cancelled the market price stream".to_owned())
     }
 
     #[doc = " Metadata-Push interaction model of RSocket."]
@@ -187,6 +190,32 @@ impl RSocket for ServerResponder {
     fn request_channel(&self, reqs: Flux<Result<Payload>>) -> Flux<Result<Payload>> {
         todo!()
     }
+}
+
+struct StreamEndLog(String);
+
+impl Drop for StreamEndLog {
+    fn drop(&mut self) {
+        println!("{}", self.0);
+    }
+}
+
+fn log_stream_end<S>(
+    stream: S,
+    message: String,
+) -> Pin<Box<dyn Stream<Item = Result<Payload, anyhow::Error>> + Send + 'static>>
+where
+    S: Stream<Item = Result<Payload, anyhow::Error>> + Send + Unpin + 'static,
+{
+    Box::pin(futures_util::stream::unfold(
+        (stream, StreamEndLog(message)),
+        |(mut stream, end_log)| async move {
+            stream
+                .next()
+                .await
+                .map(|item| (item, (stream, end_log)))
+        },
+    ))
 }
 
 fn requested_book_instrument(payload: &Payload) -> Option<&str> {

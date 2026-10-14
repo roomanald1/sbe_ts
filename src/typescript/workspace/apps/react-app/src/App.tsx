@@ -14,7 +14,14 @@ function App() {
   React.useEffect(() => {
     void connection.connect();
 
+    const disposeOnPageHide = () => {
+      console.info('[book] UI page is unloading; disposing subscriptions');
+      connection.dispose();
+    };
+    window.addEventListener('pagehide', disposeOnPageHide);
+
     return () => {
+      window.removeEventListener('pagehide', disposeOnPageHide);
       connection.dispose();
     };
   }, [connection]);

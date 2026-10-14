@@ -177,7 +177,7 @@ export function OrderBookPopup({ symbol, connection, onClose, symbols = [], onSy
                     </div>
                     <div className="book-popup-header-actions">
                         <span className={`book-stream-status${frozen ? ' is-frozen' : ''}`}>
-                            {frozen ? 'FROZEN' : 'LIVE · 4 Hz'}
+                            {frozen ? 'FROZEN' : 'LIVE'}
                         </span>
                         <button
                             className="book-freeze-button"
