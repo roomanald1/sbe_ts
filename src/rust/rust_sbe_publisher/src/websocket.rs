@@ -203,6 +203,7 @@ fn book_request_stream(
         let mut retry_delay = Duration::from_secs(1);
         loop {
             if sender.is_closed() {
+                println!("UI unsubscribed from OKX book stream for {instrument} before connection setup");
                 break;
             }
 

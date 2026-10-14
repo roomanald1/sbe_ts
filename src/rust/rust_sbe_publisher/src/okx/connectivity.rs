@@ -166,7 +166,21 @@ pub(crate) async fn subscribe_book_once(
     let mut ask_book = Vec::new();
     loop {
         tokio::select! {
-            _ = updates.closed() => return Ok(()),
+            _ = updates.closed() => {
+                println!("UI unsubscribed from OKX books for {instrument}");
+                let request = json!({
+                    "op": "unsubscribe",
+                    "args": [{ "channel": "books", "instId": instrument }]
+                });
+                write
+                    .send(tokio_tungstenite::tungstenite::Message::Text(
+                        Utf8Bytes::from(request.to_string()),
+                    ))
+                    .await
+                    .map_err(|error| anyhow::anyhow!("failed to send OKX books unsubscribe for {instrument}: {error}"))?;
+                println!("Sent OKX books unsubscribe for {instrument}");
+                return Ok(());
+            },
             message = read.next() => {
                 let Some(message) = message else {
                     anyhow::bail!("OKX book WebSocket stream ended");

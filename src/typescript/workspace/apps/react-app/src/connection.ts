@@ -60,9 +60,7 @@ export class Connection {
             this.error_message.next(message);
             this.subscription?.cancel();
             this.subscription = undefined;
-            this.bookSubscription?.cancel();
-            this.bookSubscription = undefined;
-            this.activeBook = undefined;
+            this.cancelBookSubscription('connection reconnecting');
             this.socket?.close();
             this.socket = undefined;
 
@@ -130,9 +128,7 @@ export class Connection {
         if (this.selectedBook === instrument) return;
 
         this.selectedBook = instrument;
-        this.bookSubscription?.cancel();
-        this.bookSubscription = undefined;
-        this.activeBook = undefined;
+        this.cancelBookSubscription(instrument ? 'symbol changed to ' + instrument : 'book view closed');
         this.book_data.next(undefined);
         this.book_error.next(undefined);
         this.startBookSubscription();
@@ -151,6 +147,7 @@ export class Connection {
         }).subscribe({
             onSubscribe: subscription => {
                 if (this.selectedBook !== instrument) {
+                    console.info('[book] UI unsubscribing from ' + instrument + ' (selection changed before subscribe completed)');
                     subscription.cancel();
                     return;
                 }
@@ -184,6 +181,15 @@ export class Connection {
         });
     }
 
+
+    private cancelBookSubscription(reason: string) {
+        if (this.bookSubscription) {
+            console.info('[book] UI unsubscribing from ' + (this.activeBook ?? this.selectedBook ?? 'unknown symbol') + ' (' + reason + ')');
+            this.bookSubscription.cancel();
+        }
+        this.bookSubscription = undefined;
+        this.activeBook = undefined;
+    }
 
     private async createClient() {
         const setupOptions = {
@@ -224,7 +230,7 @@ export class Connection {
             this.retryTimer = undefined;
         }
         this.subscription?.cancel();
-        this.bookSubscription?.cancel();
+        this.cancelBookSubscription('connection disposed');
         this.socket?.close();
     }
 }
