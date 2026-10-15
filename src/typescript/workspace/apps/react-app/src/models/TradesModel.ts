@@ -55,6 +55,10 @@ export class TradesModel {
     this.feed = feed;
     this.expiryTimer = setInterval(() => this.removeExpiredTrades(), 1000);
     this.dataSub = feed.data.subscribe((raw) => {
+      if (raw === undefined) {
+        this.state$.next({ symbol, trades: [] });
+        return;
+      }
       const trade = decodeTradeTick(raw);
       if (!trade || trade.symbol !== symbol) return;
       const cutoff = Date.now() - TRADE_RETENTION_MS;

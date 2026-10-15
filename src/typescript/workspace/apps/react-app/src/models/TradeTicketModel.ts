@@ -1,9 +1,10 @@
-import { BehaviorSubject } from 'rxjs';
+﻿import { BehaviorSubject } from 'rxjs';
 import type { BookFeed, Connection } from '../connection';
 import { decodeBookDepth, type BookDepth } from '../types/symbol_price';
+import { getLimitPriceMarkWarning } from './limit_price_guard';
 
 type Side = 'buy' | 'sell';
-type OrderType = 'ioc' | 'limit';
+type OrderType = 'ioc' | 'limit' | 'vwap';
 type Props = { symbol: string; initialSide: Side; connection: Connection };
 export type TradeTicketState = {
   symbol: string;
@@ -16,6 +17,13 @@ export type TradeTicketState = {
   busy: boolean;
   message: string;
   currentPrice?: number;
+  limitPriceWarning?: string;
+  confirmedLimitPrice?: string;
+  durationMinutes: string;
+  participationRate: string;
+  vwapRunId?: string;
+  vwapStatus?: string;
+  vwapExecutedQuantity?: number;
 };
 export class TradeTicketModel {
   readonly props$: BehaviorSubject<Props>;
@@ -23,6 +31,7 @@ export class TradeTicketModel {
   private feed?: BookFeed;
   private dataSub?: { unsubscribe(): void };
   private errorSub?: { unsubscribe(): void };
+  private vwapTimer?: ReturnType<typeof setInterval>;
   constructor(props: Props) {
     this.props$ = new BehaviorSubject(props);
     this.state$ = new BehaviorSubject<TradeTicketState>({
@@ -34,6 +43,9 @@ export class TradeTicketModel {
       busy: false,
       bookError: '',
       message: '',
+      confirmedLimitPrice: undefined,
+      durationMinutes: '60',
+      participationRate: '10',
     });
   }
   readonly getSnapshot = () => this.state$.value;
@@ -54,6 +66,7 @@ export class TradeTicketModel {
         book: undefined,
         bookError: '',
         side: props.initialSide,
+        confirmedLimitPrice: undefined,
       });
       this.start();
     }
@@ -61,10 +74,15 @@ export class TradeTicketModel {
   start(): void {
     if (this.feed) return;
     const { connection, symbol } = this.props$.value;
+    void this.loadActiveVwap(symbol);
     const key = 'order-ticket:' + symbol;
     const feed = connection.openBook(key, symbol);
     this.feed = feed;
     this.dataSub = feed.data.subscribe((raw) => {
+      if (raw === undefined) {
+        this.update({ book: undefined, currentPrice: undefined });
+        return;
+      }
       const book = decodeBookDepth(raw);
       if (book?.symbol === symbol) this.update({ book, bookError: '' });
     });
@@ -73,6 +91,8 @@ export class TradeTicketModel {
     });
   }
   stop(): void {
+    if (this.vwapTimer) clearInterval(this.vwapTimer);
+    this.vwapTimer = undefined;
     const feed = this.feed;
     if (!feed) return;
     this.dataSub?.unsubscribe();
@@ -86,34 +106,57 @@ export class TradeTicketModel {
     this.update({ side });
   }
   setOrderType(orderType: OrderType): void {
-    this.update({ orderType });
+    this.update({ orderType, confirmedLimitPrice: undefined });
   }
   setQuantity(quantity: string): void {
     this.update({ quantity });
   }
+  setDurationMinutes(durationMinutes: string): void {
+    this.update({ durationMinutes });
+  }
+  setParticipationRate(participationRate: string): void {
+    this.update({ participationRate });
+  }
   setLimitPrice(limitPrice: string): void {
-    this.update({ limitPrice });
+    this.update({ limitPrice, confirmedLimitPrice: undefined, message: '' });
   }
   async submit(): Promise<void> {
     const state = this.state$.value;
     const quantity = Number(state.quantity);
     const limitPrice = Number(state.limitPrice);
+    const durationMinutes = Number(state.durationMinutes);
+    const participationRate = Number(state.participationRate) / 100;
     if (
       !Number.isFinite(quantity) ||
       quantity <= 0 ||
       (state.orderType === 'limit' &&
-        (!Number.isFinite(limitPrice) || limitPrice <= 0))
+        (!Number.isFinite(limitPrice) || limitPrice <= 0)) ||
+      (state.orderType === 'vwap' &&
+        (!Number.isInteger(durationMinutes) || durationMinutes < 5 || durationMinutes > 390 ||
+          !Number.isFinite(participationRate) || participationRate < 0.01 || participationRate > 1))
     )
       return;
+    if (
+      state.orderType === 'limit' &&
+      state.limitPriceWarning &&
+      state.confirmedLimitPrice !== state.limitPrice
+    ) {
+      this.update({
+        confirmedLimitPrice: state.limitPrice,
+        message: state.limitPriceWarning + ' Submit again to confirm this price.',
+      });
+      return;
+    }
     this.update({ busy: true, message: '' });
     try {
-      const response = await fetch('/positions/orders', {
+      const isVwap = state.orderType === 'vwap';
+      const response = await fetch(isVwap ? '/positions/vwap' : '/positions/orders', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           symbol: state.symbol,
           side: state.side,
-          order_type: state.orderType,
+          ...(isVwap ? { duration_minutes: durationMinutes, max_participation_rate: participationRate } : { order_type: state.orderType }),
           quantity,
           ...(state.orderType === 'limit' ? { limit_price: limitPrice } : {}),
         }),
@@ -125,10 +168,14 @@ export class TradeTicketModel {
         );
       }
       const result = (await response.json()) as {
-        filled_quantity: number;
-        remaining_quantity: number;
-        average_execution_price?: number;
+        filled_quantity?: number; remaining_quantity?: number; average_execution_price?: number;
+        id?: string; status?: string; executed_quantity?: number;
       };
+      if (isVwap && result.id) {
+        this.update({ vwapRunId: result.id, vwapStatus: result.status ?? 'running', vwapExecutedQuantity: result.executed_quantity ?? 0, message: 'VWAP execution started.' });
+        this.startVwapPolling(result.id);
+        return;
+      }
       const fillText =
         'Filled ' +
         result.filled_quantity +
@@ -137,10 +184,11 @@ export class TradeTicketModel {
           : '');
       this.update({
         message:
-          result.remaining_quantity > 0
+          (result.remaining_quantity ?? 0) > 0
             ? fillText + '; ' + result.remaining_quantity + ' resting'
             : fillText,
         quantity: '',
+        confirmedLimitPrice: undefined,
       });
     } catch (reason) {
       this.update({
@@ -150,6 +198,38 @@ export class TradeTicketModel {
       this.update({ busy: false });
     }
   }
+  private async loadActiveVwap(symbol: string): Promise<void> {
+    try {
+      const response = await fetch('/positions/vwap');
+      if (!response.ok) return;
+      const data = (await response.json()) as { runs: Array<{ id: string; symbol: string; status: string; executed_quantity: number }> };
+      if (!this.feed || this.props$.value.symbol !== symbol) return;
+      const run = [...data.runs].reverse().find((item) => item.symbol === symbol && item.status === 'running');
+      if (!run) return;
+      this.update({ orderType: 'vwap', vwapRunId: run.id, vwapStatus: run.status, vwapExecutedQuantity: run.executed_quantity, message: 'Resumed monitoring VWAP execution.' });
+      this.startVwapPolling(run.id);
+    } catch { /* execution status can be loaded on the next ticket open */ }
+  }
+  private startVwapPolling(runId: string): void {
+    if (this.vwapTimer) clearInterval(this.vwapTimer);
+    this.vwapTimer = setInterval(async () => {
+      try {
+        const response = await fetch('/positions/vwap');
+        if (!response.ok) return;
+        const data = (await response.json()) as { runs: Array<{ id: string; status: string; executed_quantity: number; error?: string }> };
+        const run = data.runs.find((item) => item.id === runId);
+        if (!run) return;
+        this.update({ vwapStatus: run.status, vwapExecutedQuantity: run.executed_quantity, message: run.error ?? ('VWAP ' + run.status + ' · filled ' + run.executed_quantity) });
+        if (run.status !== 'running') { clearInterval(this.vwapTimer); this.vwapTimer = undefined; }
+      } catch { /* polling retries on the next interval */ }
+    }, 1000);
+  }
+  async cancelVwap(): Promise<void> {
+    const id = this.state$.value.vwapRunId;
+    if (!id) return;
+    try { await fetch('/positions/vwap/' + encodeURIComponent(id), { method: 'DELETE' }); }
+    finally { this.update({ vwapStatus: 'cancelled', message: 'VWAP execution cancelled.' }); }
+  }
   private update(update: Partial<TradeTicketState>): void {
     const next = { ...this.state$.value, ...update };
     const book = next.book;
@@ -157,6 +237,16 @@ export class TradeTicketModel {
       book?.bids[0] && book.asks[0]
         ? (book.bids[0].price + book.asks[0].price) / 2
         : (book?.bids[0]?.price ?? book?.asks[0]?.price);
+    next.limitPriceWarning =
+      next.orderType === 'limit'
+        ? getLimitPriceMarkWarning(next.limitPrice, next.currentPrice)
+        : undefined;
+    if (!next.limitPriceWarning) next.confirmedLimitPrice = undefined;
     this.state$.next(next);
   }
 }
+
+
+
+
+

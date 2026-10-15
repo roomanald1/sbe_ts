@@ -1,4 +1,4 @@
-import { useEffect, useMemo } from 'react';
+﻿import { useEffect, useMemo } from 'react';
 import type { Connection } from '../connection';
 import { TradeTicketModel } from '../models/TradeTicketModel';
 import { useBehaviorSnapshot } from '../use_behavior_snapshot';
@@ -50,7 +50,7 @@ export function TradeTicketPopup({
             aria-label="Close trade popup"
             onClick={onClose}
           >
-            ×
+            {'×'}
           </button>
         </header>
         <form
@@ -76,11 +76,12 @@ export function TradeTicketPopup({
             <select
               value={state.orderType}
               onChange={(event) =>
-                model.setOrderType(event.target.value as 'ioc' | 'limit')
+                model.setOrderType(event.target.value as 'ioc' | 'limit' | 'vwap')
               }
             >
               <option value="ioc">Immediate or cancel</option>
               <option value="limit">Limit</option>
+              <option value="vwap">VWAP execution</option>
             </select>
           </label>
           <label>
@@ -94,6 +95,18 @@ export function TradeTicketPopup({
               onChange={(event) => model.setQuantity(event.target.value)}
             />
           </label>
+          {state.orderType === 'vwap' && (
+            <>
+              <label>
+                DURATION (MINUTES)
+                <input type="number" min="5" max="390" step="1" required value={state.durationMinutes} onChange={(event) => model.setDurationMinutes(event.target.value)} />
+              </label>
+              <label>
+                MAX MARKET PARTICIPATION (%)
+                <input type="number" min="1" max="100" step="1" required value={state.participationRate} onChange={(event) => model.setParticipationRate(event.target.value)} />
+              </label>
+            </>
+          )}
           {state.orderType === 'limit' && (
             <label>
               <span className="limit-price-label">
@@ -103,7 +116,7 @@ export function TradeTicketPopup({
                   {state.currentPrice === undefined
                     ? state.bookError
                       ? 'Unavailable'
-                      : 'Loading…'
+                      : 'Loadingâ€¦'
                     : state.currentPrice.toPrecision(8) +
                       ' ' +
                       (state.symbol.split('-')[1] ?? '')}
@@ -117,6 +130,11 @@ export function TradeTicketPopup({
                 value={state.limitPrice}
                 onChange={(event) => model.setLimitPrice(event.target.value)}
               />
+              {state.limitPriceWarning && (
+                <small className="limit-price-warning" role="alert">
+                  {state.limitPriceWarning}
+                </small>
+              )}
             </label>
           )}
           <div className="trade-popup-quote">
@@ -124,7 +142,9 @@ export function TradeTicketPopup({
             <strong>
               {state.orderType === 'ioc'
                 ? 'Match available book depth now'
-                : 'Match now, rest any remainder'}
+                : state.orderType === 'limit'
+                  ? 'Match now, rest any remainder'
+                  : 'Run a U-shaped 78-bin schedule using live trade volume'}
             </strong>
           </div>
           <button
@@ -133,14 +153,26 @@ export function TradeTicketPopup({
             disabled={
               state.busy ||
               !state.quantity ||
-              (state.orderType === 'limit' && !state.limitPrice)
+              (state.orderType === 'limit' && !state.limitPrice) ||
+              (state.orderType === 'vwap' && !!state.vwapRunId && state.vwapStatus === 'running')
             }
           >
-            {state.busy ? 'Submitting…' : 'Confirm ' + state.side}
+            {state.orderType === 'vwap' && state.vwapStatus === 'running'
+              ? 'VWAP running'
+              : state.busy
+                ? 'Submittingâ€¦'
+              : state.limitPriceWarning &&
+                  state.confirmedLimitPrice === state.limitPrice
+                ? 'Confirm price and ' + state.side
+                : 'Confirm ' + state.side}
           </button>
+          {state.orderType === 'vwap' && state.vwapStatus === 'running' && (
+            <button type="button" onClick={() => void model.cancelVwap()}>Cancel VWAP</button>
+          )}
         </form>
         {state.message && <p role="status">{state.message}</p>}
       </section>
     </div>
   );
 }
+

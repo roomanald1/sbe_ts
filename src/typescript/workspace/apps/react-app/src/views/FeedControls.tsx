@@ -7,6 +7,7 @@ import { Users } from './Users';
 import { Positions } from './Positions';
 import { Fills } from './Fills';
 import { Pnl } from './Pnl';
+import { CloseInsights } from './CloseInsights';
 import { TradeTicketPopup } from './TradeTicketPopup';
 import { OrderBookPopup } from './OrderBookPopup';
 import { TradesView } from './TradesView';
@@ -28,7 +29,8 @@ type DashboardWidgetType =
   | 'trades'
   | 'positions'
   | 'fills'
-  | 'pnl';
+  | 'pnl'
+  | 'close-insights';
 type DashboardWidget = {
   id: string;
   type: DashboardWidgetType;
@@ -53,6 +55,7 @@ const DASHBOARD_WIDGET_TYPES: DashboardWidgetType[] = [
   'positions',
   'fills',
   'pnl',
+  'close-insights',
 ];
 const DEFAULT_WIDGET_TYPES: DashboardWidgetType[] = [
   'grid',
@@ -75,6 +78,7 @@ const WIDGET_LABELS: Record<DashboardWidgetType, string> = {
   positions: 'Orders',
   fills: 'Fills',
   pnl: 'P&L',
+  'close-insights': 'Close-out insights',
 };
 
 function makeWidget(
@@ -394,6 +398,7 @@ export function FeedControls({
     y: number;
   } | null>(null);
   const [layoutNameInput, setLayoutNameInput] = useState('');
+  const [layoutRenameOpen, setLayoutRenameOpen] = useState(false);
   const priceChangesModel = useMemo(
     () => new PriceChangesModel(connection),
     [connection],
@@ -491,6 +496,23 @@ export function FeedControls({
     );
     setActiveLayoutId(id);
     setLayoutNameInput('');
+  };
+  const renameLayout = () => {
+    const name = layoutNameInput.trim();
+    if (!name) return;
+    const duplicate = savedLayouts.some(
+      (layout) =>
+        layout.id !== activeLayoutId &&
+        layout.name.toLocaleLowerCase() === name.toLocaleLowerCase(),
+    );
+    if (duplicate) return;
+    setSavedLayouts((current) =>
+      current.map((layout) =>
+        layout.id === activeLayoutId ? { ...layout, name } : layout,
+      ),
+    );
+    setLayoutNameInput('');
+    setLayoutRenameOpen(false);
   };
   const addWidget = (type: DashboardWidgetType) => {
     setDashboardWidgets((current) => {
@@ -622,6 +644,9 @@ export function FeedControls({
         break;
       case 'pnl':
         content = <Pnl connection={connection} />;
+        break;
+      case 'close-insights':
+        content = <CloseInsights />;
         break;
       case 'trades':
         content =
@@ -823,10 +848,25 @@ export function FeedControls({
                 ))}
               </select>
             </label>
+            <button
+              className="workspace-save-button"
+              type="button"
+              aria-label="Rename workspace layout"
+              onClick={() => {
+                const activeLayout = savedLayouts.find(
+                  (layout) => layout.id === activeLayoutId,
+                );
+                if (!activeLayout) return;
+                setLayoutNameInput(activeLayout.name);
+                setLayoutRenameOpen(true);
+              }}
+            >
+              Rename
+            </button>
             <input
               className="workspace-name-input"
               aria-label="Workspace layout name"
-              placeholder="Save layout as…"
+              placeholder="Save layout as..."
               value={layoutNameInput}
               onChange={(event) => setLayoutNameInput(event.target.value)}
               onKeyDown={(event) => {
@@ -966,6 +1006,46 @@ export function FeedControls({
         </div>
       ) : (
         <Users />
+      )}
+      {layoutRenameOpen && (
+        <div
+          className="workspace-rename-backdrop"
+          role="presentation"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) setLayoutRenameOpen(false);
+          }}
+        >
+          <section
+            className="workspace-rename-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="workspace-rename-title"
+          >
+            <h2 id="workspace-rename-title">Rename workspace layout</h2>
+            <form
+              onSubmit={(event) => {
+                event.preventDefault();
+                renameLayout();
+              }}
+            >
+              <label htmlFor="workspace-rename-input">Layout name</label>
+              <input
+                id="workspace-rename-input"
+                autoFocus
+                value={layoutNameInput}
+                onChange={(event) => setLayoutNameInput(event.target.value)}
+              />
+              <div className="workspace-rename-actions">
+                <button type="button" onClick={() => setLayoutRenameOpen(false)}>
+                  Cancel
+                </button>
+                <button type="submit" disabled={!layoutNameInput.trim()}>
+                  Rename
+                </button>
+              </div>
+            </form>
+          </section>
+        </div>
       )}
       {tradeRequest && (
         <TradeTicketPopup

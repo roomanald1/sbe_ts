@@ -52,6 +52,10 @@ export class OrderBookModel {
             throttleTime(250, undefined, { leading: true, trailing: true }),
           )
     ).subscribe((raw) => {
+      if (raw === undefined) {
+        this.patch({ depth: undefined });
+        return;
+      }
       const depth = decodeBookDepth(raw);
       if (depth?.symbol === symbol) this.patch({ depth, error: undefined });
     });

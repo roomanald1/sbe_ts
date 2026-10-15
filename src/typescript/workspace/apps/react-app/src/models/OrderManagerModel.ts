@@ -1,9 +1,10 @@
-import { BehaviorSubject } from 'rxjs';
+﻿import { BehaviorSubject } from 'rxjs';
 import type { BookFeed, Connection } from '../connection';
 import { decodeBookDepth, type BookDepth } from '../types/symbol_price';
+import { getLimitPriceMarkWarning } from './limit_price_guard';
 
 type TradeSide = 'buy' | 'sell';
-type OrderType = 'ioc' | 'limit';
+type OrderType = 'ioc' | 'limit' | 'vwap';
 type RestingOrder = {
   id: string;
   symbol: string;
@@ -14,6 +15,21 @@ type RestingOrder = {
   timestamp: number;
 };
 type OrdersResponse = { orders: RestingOrder[] };
+export type VwapRun = {
+  id: string;
+  symbol: string;
+  side: TradeSide;
+  quantity: number;
+  executed_quantity: number;
+  duration_minutes: number;
+  started_at: number;
+  status: string;
+  market_vwap: number;
+  execution_vwap: number;
+  slippage: number;
+  error?: string;
+};
+type VwapRunsResponse = { runs: VwapRun[] };
 type FeedEntry = {
   feed: BookFeed;
   data: { unsubscribe(): void };
@@ -34,8 +50,16 @@ export type OrderManagerState = {
   orderType: OrderType;
   limitPrice: string;
   orders: RestingOrder[];
+  vwapRuns: VwapRun[];
   rows: OrderRow[];
   selectedCurrentPrice?: number;
+  limitPriceWarning?: string;
+  confirmedLimitPrice?: string;
+  durationMinutes: string;
+  participationRate: string;
+  vwapRunId?: string;
+  vwapStatus?: string;
+  vwapExecutedQuantity?: number;
   loading: boolean;
   submitting: boolean;
   error?: string;
@@ -51,6 +75,7 @@ export class OrderManagerModel {
   readonly state$: BehaviorSubject<OrderManagerState>;
   private activeFeeds = new Map<string, FeedEntry>();
   private timer?: ReturnType<typeof setInterval>;
+  private vwapTimer?: ReturnType<typeof setInterval>;
   constructor(props: OrderManagerProps) {
     this.props$ = new BehaviorSubject(props);
     this.state$ = new BehaviorSubject<OrderManagerState>({
@@ -62,7 +87,10 @@ export class OrderManagerModel {
       quantity: '',
       orderType: 'ioc',
       limitPrice: '',
+      durationMinutes: '60',
+      participationRate: '10',
       orders: [],
+      vwapRuns: [],
       rows: [],
       loading: true,
       submitting: false,
@@ -94,15 +122,18 @@ export class OrderManagerModel {
     if (this.timer) return;
     this.syncFeeds();
     void this.refreshOrders();
+    void this.loadActiveVwap(this.state$.value.selectedSymbol);
     this.timer = setInterval(() => void this.refreshOrders(), 5000);
   }
   stop(): void {
+    if (this.vwapTimer) clearInterval(this.vwapTimer);
+    this.vwapTimer = undefined;
     if (this.timer) clearInterval(this.timer);
     this.timer = undefined;
     this.closeFeeds();
   }
   setSymbol(selectedSymbol: string): void {
-    this.patch({ selectedSymbol });
+    this.patch({ selectedSymbol, confirmedLimitPrice: undefined });
     this.syncFeeds();
   }
   setSide(side: TradeSide): void {
@@ -112,10 +143,16 @@ export class OrderManagerModel {
     this.patch({ quantity });
   }
   setOrderType(orderType: OrderType): void {
-    this.patch({ orderType });
+    this.patch({ orderType, confirmedLimitPrice: undefined });
+  }
+  setDurationMinutes(durationMinutes: string): void {
+    this.patch({ durationMinutes });
+  }
+  setParticipationRate(participationRate: string): void {
+    this.patch({ participationRate });
   }
   setLimitPrice(limitPrice: string): void {
-    this.patch({ limitPrice });
+    this.patch({ limitPrice, confirmedLimitPrice: undefined, error: undefined });
   }
   async refreshOrders(): Promise<void> {
     try {
@@ -143,23 +180,40 @@ export class OrderManagerModel {
     const state = this.state$.value;
     const quantity = Number(state.quantity);
     const limitPrice = Number(state.limitPrice);
+    const durationMinutes = Number(state.durationMinutes);
+    const participationRate = Number(state.participationRate) / 100;
     if (
       !state.selectedSymbol ||
       !Number.isFinite(quantity) ||
       quantity <= 0 ||
       (state.orderType === 'limit' &&
-        (!Number.isFinite(limitPrice) || limitPrice <= 0))
+        (!Number.isFinite(limitPrice) || limitPrice <= 0)) ||
+      (state.orderType === 'vwap' &&
+        (!Number.isInteger(durationMinutes) || durationMinutes < 5 || durationMinutes > 390 ||
+          !Number.isFinite(participationRate) || participationRate < 0.01 || participationRate > 1))
     )
       return;
+    if (
+      state.orderType === 'limit' &&
+      state.limitPriceWarning &&
+      state.confirmedLimitPrice !== state.limitPrice
+    ) {
+      this.patch({
+        confirmedLimitPrice: state.limitPrice,
+        error: state.limitPriceWarning + ' Submit again to confirm this price.',
+      });
+      return;
+    }
     this.patch({ submitting: true, error: undefined });
     try {
-      const response = await fetch('/positions/orders', {
+      const isVwap = state.orderType === 'vwap';
+      const response = await fetch(isVwap ? '/positions/vwap' : '/positions/orders', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           symbol: state.selectedSymbol,
           side: state.side,
-          order_type: state.orderType,
+          ...(isVwap ? { duration_minutes: durationMinutes, max_participation_rate: participationRate } : { order_type: state.orderType }),
           quantity,
           ...(state.orderType === 'limit' ? { limit_price: limitPrice } : {}),
         }),
@@ -169,20 +223,25 @@ export class OrderManagerModel {
         throw new Error(detail || 'Order rejected (' + response.status + ')');
       }
       const result = (await response.json()) as {
-        filled_quantity: number;
-        remaining_quantity: number;
+        filled_quantity?: number; remaining_quantity?: number; id?: string; status?: string; executed_quantity?: number;
       };
+      if (isVwap && result.id) {
+        this.patch({ vwapRunId: result.id, vwapStatus: result.status ?? 'running', vwapExecutedQuantity: result.executed_quantity ?? 0, vwapRuns: [...this.state$.value.vwapRuns.filter((run) => run.id !== result.id), result as VwapRun], error: undefined, quantity: '', orderType: 'ioc' });
+        this.startVwapPolling(result.id);
+        return;
+      }
       await this.refreshOrders();
       this.patch({
         error:
-          result.remaining_quantity > 0
+          (result.remaining_quantity ?? 0) > 0
             ? 'Filled ' +
-              qtyFormat.format(result.filled_quantity) +
+              qtyFormat.format(result.filled_quantity ?? 0) +
               '; ' +
-              qtyFormat.format(result.remaining_quantity) +
+              qtyFormat.format(result.remaining_quantity ?? 0) +
               ' resting'
-            : 'Filled ' + qtyFormat.format(result.filled_quantity),
+            : 'Filled ' + qtyFormat.format(result.filled_quantity ?? 0),
         quantity: '',
+        confirmedLimitPrice: undefined,
       });
     } catch (reason) {
       this.patch({
@@ -190,6 +249,44 @@ export class OrderManagerModel {
       });
     } finally {
       this.patch({ submitting: false });
+    }
+  }
+  private async loadActiveVwap(symbol: string): Promise<void> {
+    try {
+      const response = await fetch('/positions/vwap');
+      if (!response.ok || !symbol || this.state$.value.selectedSymbol !== symbol) return;
+      const data = (await response.json()) as VwapRunsResponse;
+      this.patch({ vwapRuns: data.runs });
+      const run = [...data.runs].reverse().find((item) => item.symbol === symbol && item.status === 'running');
+      if (!run) return;
+      this.patch({ vwapRunId: run.id, vwapStatus: run.status, vwapExecutedQuantity: run.executed_quantity });
+      this.startVwapPolling(run.id);
+    } catch { /* retry when Orders is reopened */ }
+  }
+  private startVwapPolling(runId: string): void {
+    if (this.vwapTimer) clearInterval(this.vwapTimer);
+    this.vwapTimer = setInterval(async () => {
+      try {
+        const response = await fetch('/positions/vwap');
+        if (!response.ok) return;
+        const data = (await response.json()) as VwapRunsResponse;
+        const run = data.runs.find((item) => item.id === runId);
+        this.patch({ vwapRuns: data.runs });
+        if (!run) return;
+        this.patch({ vwapStatus: run.status, vwapExecutedQuantity: run.executed_quantity });
+        if (run.status !== 'running') { clearInterval(this.vwapTimer); this.vwapTimer = undefined; }
+      } catch { /* retry on the next interval */ }
+    }, 1000);
+  }
+  async cancelVwap(runId = this.state$.value.vwapRunId): Promise<void> {
+    if (!runId) return;
+    try {
+      const response = await fetch('/positions/vwap/' + encodeURIComponent(runId), { method: 'DELETE' });
+      if (!response.ok) throw new Error((await response.text()) || 'Could not cancel VWAP execution');
+      const vwapRuns = this.state$.value.vwapRuns.map((run) => run.id === runId ? { ...run, status: 'cancelled' } : run);
+      this.patch({ vwapRuns, vwapStatus: 'cancelled', error: undefined });
+    } catch (reason) {
+      this.patch({ error: reason instanceof Error ? reason.message : 'Could not cancel VWAP execution' });
     }
   }
   async cancelOrder(id: string): Promise<void> {
@@ -227,7 +324,17 @@ export class OrderManagerModel {
       book?.bids[0] && book.asks[0]
         ? (book.bids[0].price + book.asks[0].price) / 2
         : (book?.bids[0]?.price ?? book?.asks[0]?.price);
-    return { ...state, rows, selectedCurrentPrice };
+    const limitPriceWarning =
+      state.orderType === 'limit'
+        ? getLimitPriceMarkWarning(state.limitPrice, selectedCurrentPrice)
+        : undefined;
+    return {
+      ...state,
+      rows,
+      selectedCurrentPrice,
+      limitPriceWarning,
+      confirmedLimitPrice: limitPriceWarning ? state.confirmedLimitPrice : undefined,
+    };
   }
   private syncFeeds(): void {
     const state = this.state$.value;
@@ -241,6 +348,12 @@ export class OrderManagerModel {
       if (this.activeFeeds.has(symbol)) continue;
       const feed = this.connection.openBook('order-manager:' + symbol, symbol);
       const data = feed.data.subscribe((raw) => {
+        if (raw === undefined) {
+          const books = { ...this.state$.value.books };
+          delete books[symbol];
+          this.patch({ books });
+          return;
+        }
         const depth = decodeBookDepth(raw);
         if (!depth || depth.symbol !== symbol) return;
         this.patch({
@@ -281,3 +394,5 @@ export class OrderManagerModel {
     this.activeFeeds.clear();
   }
 }
+
+

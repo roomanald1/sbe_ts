@@ -99,6 +99,11 @@ export class PnlModel {
       if (this.feeds.has(symbol)) continue;
       const feed = this.connection.openBook('pnl-mark:' + symbol, symbol);
       const data = feed.data.subscribe((raw) => {
+        if (raw === undefined) {
+          delete this.books[symbol];
+          this.publishState();
+          return;
+        }
         const depth = decodeBookDepth(raw);
         if (!depth || depth.symbol !== symbol) return;
         this.books[symbol] = depth;
@@ -175,3 +180,4 @@ export class PnlModel {
     });
   }
 }
+

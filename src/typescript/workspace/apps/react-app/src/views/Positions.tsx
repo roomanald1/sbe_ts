@@ -35,10 +35,13 @@ const quoteCurrency = (symbol: string) => symbol.split('-')[1] ?? '';
 
 type PositionGridRow = {
   id: string;
+  kind: 'order' | 'vwap';
+  status: string;
   symbol: string;
   side: TradeSide;
+  executed: number;
   remaining: number;
-  limitPrice: number;
+  limitPrice?: number;
   current?: number;
   quote: string;
   bookError?: string;
@@ -68,11 +71,16 @@ function CancelOrderCell({
   model,
 }: ICellRendererParams<PositionGridRow> & { model: OrderManagerModel }) {
   if (!data) return null;
+  if (data.kind === 'vwap' && data.status !== 'running') return null;
   return (
     <button
       className="positions-cancel-button"
       type="button"
-      onClick={() => void model.cancelOrder(data.id)}
+      onClick={() =>
+        void (data.kind === 'vwap'
+          ? model.cancelVwap(data.id)
+          : model.cancelOrder(data.id))
+      }
     >
       Cancel
     </button>
@@ -101,22 +109,41 @@ export function Positions({
   const selectedSymbol = state.selectedSymbol;
   const current = state.selectedCurrentPrice;
   const rowData = useMemo<PositionGridRow[]>(
-    () =>
-      state.rows.map(({ order, current: mark, bookError }) => ({
+    () => [
+      ...state.rows.map(({ order, current: mark, bookError }) => ({
         id: order.id,
+        kind: 'order' as const,
+        status: 'Resting',
         symbol: order.symbol,
         side: order.side,
+        executed: order.quantity - order.remaining_quantity,
         remaining: order.remaining_quantity,
         limitPrice: order.limit_price,
         current: mark,
         quote: quoteCurrency(order.symbol),
         bookError,
       })),
-    [state.rows],
+      ...state.vwapRuns
+        .filter(
+          (run) => run.status !== 'completed' && run.status !== 'cancelled',
+        )
+        .map((run) => ({
+          id: run.id,
+          kind: 'vwap' as const,
+          status: run.status,
+          symbol: run.symbol,
+          side: run.side,
+          executed: run.executed_quantity,
+          remaining: Math.max(run.quantity - run.executed_quantity, 0),
+          quote: quoteCurrency(run.symbol),
+        })),
+    ],
+    [state.rows, state.vwapRuns],
   );
   const columnDefs = useMemo<ColDef<PositionGridRow>[]>(
     () => [
       { field: 'symbol', headerName: 'Symbol', minWidth: 90 },
+      { field: 'status', headerName: 'Status', minWidth: 105 },
       {
         field: 'side',
         headerName: 'Side',
@@ -125,6 +152,14 @@ export function Positions({
         cellClass: ({ value }) =>
           value === 'buy' ? 'pnl-positive' : 'pnl-negative',
         valueFormatter: ({ value }) => String(value ?? '').toUpperCase(),
+      },
+      {
+        field: 'executed',
+        headerName: 'Executed',
+        minWidth: 68,
+        filter: 'agNumberColumnFilter',
+        valueFormatter: ({ value }) =>
+          value === undefined ? '' : quantityFormatter.format(value),
       },
       {
         field: 'remaining',
@@ -150,11 +185,13 @@ export function Positions({
         minWidth: 90,
         filter: 'agNumberColumnFilter',
         valueFormatter: ({ value, data }) =>
-          value === undefined
-            ? data?.bookError
-              ? 'Unavailable'
-              : 'Loading…'
-            : moneyFormatter.format(value) + ' ' + (data?.quote ?? ''),
+          data?.kind !== 'order'
+            ? ''
+            : value === undefined
+              ? data.bookError
+                ? 'Unavailable'
+                : 'Loading...'
+              : moneyFormatter.format(value) + ' ' + (data.quote ?? ''),
       },
       {
         colId: 'actions',
@@ -212,11 +249,12 @@ export function Positions({
           <select
             value={state.orderType}
             onChange={(event) =>
-              model.setOrderType(event.target.value as 'ioc' | 'limit')
+              model.setOrderType(event.target.value as 'ioc' | 'limit' | 'vwap')
             }
           >
             <option value="ioc">Immediate or cancel</option>
             <option value="limit">Limit</option>
+            <option value="vwap">VWAP execution</option>
           </select>
         </label>
         <label>
@@ -231,6 +269,38 @@ export function Positions({
             placeholder="0.00"
           />
         </label>
+        {state.orderType === 'vwap' && (
+          <>
+            <label>
+              <span>DURATION (MINUTES)</span>
+              <input
+                type="number"
+                min="5"
+                max="390"
+                step="1"
+                required
+                value={state.durationMinutes}
+                onChange={(event) =>
+                  model.setDurationMinutes(event.target.value)
+                }
+              />
+            </label>
+            <label>
+              <span>MAX MARKET PARTICIPATION (%)</span>
+              <input
+                type="number"
+                min="1"
+                max="100"
+                step="1"
+                required
+                value={state.participationRate}
+                onChange={(event) =>
+                  model.setParticipationRate(event.target.value)
+                }
+              />
+            </label>
+          </>
+        )}
         {state.orderType === 'limit' && (
           <label>
             <span className="limit-price-label">
@@ -240,7 +310,7 @@ export function Positions({
                 {current === undefined
                   ? state.bookErrors[selectedSymbol]
                     ? 'Unavailable'
-                    : 'Loading…'
+                    : 'Loading...'
                   : moneyFormatter.format(current) +
                     ' ' +
                     quoteCurrency(selectedSymbol)}
@@ -255,6 +325,11 @@ export function Positions({
               onChange={(event) => model.setLimitPrice(event.target.value)}
               placeholder="0.00"
             />
+            {state.limitPriceWarning && (
+              <small className="limit-price-warning" role="alert">
+                {state.limitPriceWarning}
+              </small>
+            )}
           </label>
         )}
         <button
@@ -267,10 +342,13 @@ export function Positions({
           }
         >
           {state.submitting
-            ? 'Submitting…'
-            : state.side === 'buy'
-              ? 'Buy'
-              : 'Sell'}
+            ? 'Submitting...'
+            : state.limitPriceWarning &&
+                state.confirmedLimitPrice === state.limitPrice
+              ? 'Confirm price and ' + state.side
+              : state.side === 'buy'
+                ? 'Buy'
+                : 'Sell'}
         </button>
       </form>
       {state.error && (
@@ -290,12 +368,18 @@ export function Positions({
           headerHeight={38}
           suppressColumnMoveAnimation
         />
-        {!state.loading && state.orders.length === 0 && (
-          <p className="positions-empty">No resting orders.</p>
-        )}
-        {state.loading && state.orders.length === 0 && (
-          <p className="positions-empty">Loading resting orders…</p>
-        )}
+        {!state.loading &&
+          state.orders.length === 0 &&
+          state.vwapRuns.length === 0 && (
+            <p className="positions-empty">
+              No open orders or VWAP executions.
+            </p>
+          )}
+        {state.loading &&
+          state.orders.length === 0 &&
+          state.vwapRuns.length === 0 && (
+            <p className="positions-empty">Loading orders...</p>
+          )}
       </div>
     </section>
   );

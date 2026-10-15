@@ -1,4 +1,4 @@
-import { useEffect, useId, useMemo } from 'react';
+import { useEffect, useId, useMemo, useRef } from 'react';
 import { AgGridReact } from 'ag-grid-react';
 import {
   CellStyleModule,
@@ -75,6 +75,7 @@ export function TradesView({
     [],
   );
   const state = useBehaviorSnapshot(model.state$);
+  const gridRowsByTrade = useRef(new WeakMap<RecentTrade, TradeGridRow>());
 
   useEffect(() => {
     model.updateProps({ connection, symbol, streamKey: key });
@@ -85,11 +86,15 @@ export function TradesView({
   }, [model]);
 
   const rowData = useMemo<TradeGridRow[]>(
-    () =>
-      state.trades.map(({ timestamp, ...trade }) => ({
-        ...trade,
-        time: new Date(timestamp),
-      })),
+    () => state.trades.map((trade) => {
+      const existingRow = gridRowsByTrade.current.get(trade);
+      if (existingRow) return existingRow;
+
+      const { timestamp, ...tradeData } = trade;
+      const row = { ...tradeData, time: new Date(timestamp) };
+      gridRowsByTrade.current.set(trade, row);
+      return row;
+    }),
     [state.trades],
   );
   const columnDefs = useMemo<ColDef<TradeGridRow>[]>(
