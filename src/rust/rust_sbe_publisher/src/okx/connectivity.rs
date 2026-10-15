@@ -9,7 +9,7 @@ use tokio::sync::{broadcast::Sender, mpsc};
 use tokio::time::{Duration, Instant, sleep};
 use tokio_tungstenite::{connect_async, tungstenite::Utf8Bytes};
 
-use crate::encoders::{SYMBOL_LENGTH, encode_book_depth, encode_symbol_price};
+use crate::encoders::{SYMBOL_LENGTH, encode_book_depth, encode_symbol_price, encode_trade_tick};
 
 const INITIAL_RECONNECT_DELAY: Duration = Duration::from_secs(1);
 const MAX_RECONNECT_DELAY: Duration = Duration::from_secs(30);
@@ -112,6 +112,89 @@ struct BookUpdate<'a> {
 }
 
 const BOOK_DEPTH: usize = 7;
+
+#[derive(Deserialize)]
+struct TradeMessage<'a> {
+    #[serde(borrow)]
+    data: Option<Vec<Trade<'a>>>,
+    event: Option<&'a str>,
+    msg: Option<&'a str>,
+}
+
+#[derive(Deserialize)]
+struct Trade<'a> {
+    #[serde(rename = "instId", borrow)]
+    instrument: &'a str,
+    #[serde(rename = "tradeId", borrow)]
+    trade_id: &'a str,
+    #[serde(borrow)]
+    px: &'a str,
+    #[serde(borrow)]
+    sz: &'a str,
+    #[serde(borrow)]
+    side: &'a str,
+    #[serde(borrow)]
+    ts: &'a str,
+}
+
+pub(crate) async fn subscribe_trades_once(
+    instrument: &str,
+    updates: mpsc::Sender<Result<Bytes>>,
+) -> Result<()> {
+    let (incoming_ws, _) = connect_async("wss://ws.okx.com:8443/ws/v5/public")
+        .await
+        .map_err(|error| anyhow::anyhow!("failed to connect to OKX trades WebSocket: {error}"))?;
+    let (mut write, mut read) = incoming_ws.split();
+    let request =
+        json!({"op": "subscribe", "args": [{ "channel": "trades", "instId": instrument }]});
+    write
+        .send(tokio_tungstenite::tungstenite::Message::Text(
+            Utf8Bytes::from(request.to_string()),
+        ))
+        .await?;
+    loop {
+        tokio::select! {
+            _ = updates.closed() => {
+                let request = json!({"op": "unsubscribe", "args": [{ "channel": "trades", "instId": instrument }]});
+                let _ = write.send(tokio_tungstenite::tungstenite::Message::Text(Utf8Bytes::from(request.to_string()))).await;
+                return Ok(());
+            }
+            message = read.next() => {
+                let Some(message) = message else { anyhow::bail!("OKX trades WebSocket stream ended") };
+                let message = message?;
+                if !message.is_text() { continue; }
+                let text = message.to_text()?;
+                let update: TradeMessage<'_> = match serde_json::from_str(text) { Ok(update) => update, Err(error) => { eprintln!("Ignoring invalid OKX trades JSON message: {error}"); continue; } };
+                if update.event == Some("error") { anyhow::bail!("OKX trades subscription error: {}", update.msg.unwrap_or("unknown error")); }
+                let Some(trades) = update.data else { continue; };
+                for trade in trades {
+                    if trade.instrument != instrument {
+                        continue;
+                    }
+                    let (Ok(price), Ok(size), Ok(timestamp)) = (
+                        trade.px.parse::<f64>(),
+                        trade.sz.parse::<f64>(),
+                        trade.ts.parse::<u64>(),
+                    ) else {
+                        continue;
+                    };
+                    let encoded = encode_trade_tick(
+                        instrument,
+                        trade.trade_id,
+                        timestamp,
+                        price,
+                        size,
+                        trade.side,
+                    )?;
+                    updates
+                        .send(Ok(encoded))
+                        .await
+                        .map_err(|_| anyhow::anyhow!("trades stream receiver was dropped"))?;
+                }
+            }
+        }
+    }
+}
 
 pub async fn subscribe(instrument_data: &[Arc<str>], price_updates: Sender<Bytes>) -> Result<()> {
     let instrument_lookup = Arc::new(instrument_data.iter().cloned().collect::<HashSet<_>>());
@@ -243,13 +326,20 @@ pub(crate) async fn subscribe_book_once(
 
 fn apply_book_side(book: &mut Vec<(f64, f64)>, rows: &[Vec<&str>]) -> Result<()> {
     for (row_index, row) in rows.iter().enumerate() {
-        anyhow::ensure!(row.len() >= 2, "book row {row_index} must contain price and size");
-        let price = row[0].parse::<f64>()
+        anyhow::ensure!(
+            row.len() >= 2,
+            "book row {row_index} must contain price and size"
+        );
+        let price = row[0]
+            .parse::<f64>()
             .map_err(|error| anyhow::anyhow!("invalid price in book row {row_index}: {error}"))?;
-        let size = row[1].parse::<f64>()
+        let size = row[1]
+            .parse::<f64>()
             .map_err(|error| anyhow::anyhow!("invalid size in book row {row_index}: {error}"))?;
-        anyhow::ensure!(price.is_finite() && price > 0.0 && size.is_finite() && size >= 0.0,
-            "book row {row_index} contains an invalid price or size");
+        anyhow::ensure!(
+            price.is_finite() && price > 0.0 && size.is_finite() && size >= 0.0,
+            "book row {row_index} contains an invalid price or size"
+        );
         if let Some(index) = book.iter().position(|(book_price, _)| *book_price == price) {
             if size == 0.0 {
                 book.remove(index);
@@ -265,10 +355,12 @@ fn apply_book_side(book: &mut Vec<(f64, f64)>, rows: &[Vec<&str>]) -> Result<()>
 
 fn top_book_side(book: &[(f64, f64)], bids: bool) -> [(f64, f64); BOOK_DEPTH] {
     let mut levels = book.to_vec();
-    levels.sort_by(|left, right| if bids {
-        right.0.total_cmp(&left.0)
-    } else {
-        left.0.total_cmp(&right.0)
+    levels.sort_by(|left, right| {
+        if bids {
+            right.0.total_cmp(&left.0)
+        } else {
+            left.0.total_cmp(&right.0)
+        }
     });
     let mut top = [(0.0, 0.0); BOOK_DEPTH];
     for (index, level) in levels.into_iter().take(BOOK_DEPTH).enumerate() {
@@ -368,9 +460,9 @@ fn retry_delay_after_failure(current_delay: Duration, connection_duration: Durat
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_book_side, top_book_side, BOOK_DEPTH, BookMessage, INITIAL_RECONNECT_DELAY, MAX_RECONNECT_DELAY,
-        STABLE_CONNECTION_DURATION, TickerMessage, retry_delay_after_failure,
-        select_top_instruments,
+        BOOK_DEPTH, BookMessage, INITIAL_RECONNECT_DELAY, MAX_RECONNECT_DELAY,
+        STABLE_CONNECTION_DURATION, TickerMessage, apply_book_side, retry_delay_after_failure,
+        select_top_instruments, top_book_side,
     };
     use serde_json::json;
     use std::time::Duration;

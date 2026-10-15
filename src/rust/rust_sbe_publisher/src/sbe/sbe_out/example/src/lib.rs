@@ -3,10 +3,12 @@
 #![allow(non_camel_case_types)]
 use ::core::{convert::TryInto};
 
+pub mod trade_tick_codec;
 pub mod book_depth_codec;
 pub mod message_header_codec;
 pub mod symbol_price_codec;
 
+pub use trade_tick_codec::*;
 pub use book_depth_codec::*;
 pub use message_header_codec::*;
 pub use symbol_price_codec::*;

@@ -80,3 +80,14 @@ order-book depth. The `books5` WebSocket subscription is opened for that
 instrument only while its book stream is active; closing the popup cancels the
 stream and releases its WebSocket connection. Book depth is sent as the SBE
 `BookDepth` message (template ID 2); symbol prices remain template ID 1.
+
+
+## positions
+
+- GET /positions returns non-zero net positions and realized P&L rebuilt from fills.
+- GET /positions/trades returns the persisted fill history.
+- GET /positions/orders returns open resting limit orders.
+- POST /positions/orders submits { symbol, side, order_type, quantity, limit_price? }, where order_type is ioc or limit. The Rust service matches the request against its own live seven-level OKX book and persists resulting fills. IOC remainder is cancelled; an unfilled limit remainder rests until it becomes executable.
+- DELETE /positions/orders/{id} cancels an open limit order.
+
+The Rust service stores fills and open orders in a JSON ledger and restores both on startup. By default it uses positions.json in the service working directory. Set POSITIONS_FILE to an absolute path on persistent storage when running in a container or deployment. Open order symbols reconnect to OKX on startup. Unrealized P&L remains marked by the UI using the live book feed.

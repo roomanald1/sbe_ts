@@ -1,0 +1,721 @@
+{
+  "trades": [
+    {
+      "id": "1792053291133-0",
+      "symbol": "SOL-TRY",
+      "side": "buy",
+      "quantity": 1.0,
+      "execution_price": 5092.4,
+      "timestamp": 1792053291133
+    },
+    {
+      "id": "1792053302929-1",
+      "symbol": "HYPE-USDC",
+      "side": "buy",
+      "quantity": 1.0,
+      "execution_price": 80.2037942,
+      "timestamp": 1792053302929
+    },
+    {
+      "id": "1792053321633-2",
+      "symbol": "BTC-USDC",
+      "side": "buy",
+      "quantity": 1.0,
+      "execution_price": 81235.40295825599,
+      "timestamp": 1792053321633
+    },
+    {
+      "id": "1792053339706-3",
+      "symbol": "BTC-USDC",
+      "side": "sell",
+      "quantity": 1.0,
+      "execution_price": 81196.934778437,
+      "timestamp": 1792053339706
+    },
+    {
+      "id": "1792053355052-4",
+      "symbol": "HYPE-USDC",
+      "side": "sell",
+      "quantity": 1.0,
+      "execution_price": 80.1416464,
+      "timestamp": 1792053355052
+    },
+    {
+      "id": "1792053458080-5",
+      "symbol": "HYPE-USDC",
+      "side": "sell",
+      "quantity": 1.0,
+      "execution_price": 80.049,
+      "timestamp": 1792053458080
+    },
+    {
+      "id": "1792053488371-6",
+      "symbol": "HYPE-USDC",
+      "side": "sell",
+      "quantity": 1.0,
+      "execution_price": 80.043,
+      "timestamp": 1792053488371
+    },
+    {
+      "id": "1792053501448-7",
+      "symbol": "HYPE-USDC",
+      "side": "buy",
+      "quantity": 2.0,
+      "execution_price": 80.0781529,
+      "timestamp": 1792053501448
+    },
+    {
+      "id": "1792053692616-8",
+      "symbol": "HYPE-USDT",
+      "side": "sell",
+      "quantity": 1.0,
+      "execution_price": 80.073,
+      "timestamp": 1792053692616
+    },
+    {
+      "id": "1792053768711-9",
+      "symbol": "ADA-USDT",
+      "side": "buy",
+      "quantity": 1.0,
+      "execution_price": 0.2222,
+      "timestamp": 1792053768711
+    },
+    {
+      "id": "1792053867306-10",
+      "symbol": "XRP-TRY",
+      "side": "buy",
+      "quantity": 0.1,
+      "execution_price": 65.0,
+      "timestamp": 1792053867306
+    },
+    {
+      "id": "1792054123410-11",
+      "symbol": "SOL-TRY",
+      "side": "buy",
+      "quantity": 0.5,
+      "execution_price": 5102.1,
+      "timestamp": 1792054123410
+    },
+    {
+      "id": "1792054160184-12",
+      "symbol": "XRP-TRY",
+      "side": "sell",
+      "quantity": 1.0,
+      "execution_price": 65.02,
+      "timestamp": 1792054160184
+    },
+    {
+      "id": "1792054174957-13",
+      "symbol": "XRP-TRY",
+      "side": "sell",
+      "quantity": 1.5,
+      "execution_price": 65.03,
+      "timestamp": 1792054174957
+    },
+    {
+      "id": "1792054185807-14",
+      "symbol": "XRP-TRY",
+      "side": "buy",
+      "quantity": 2.4,
+      "execution_price": 65.09624649999999,
+      "timestamp": 1792054185807
+    },
+    {
+      "id": "1792054200940-15",
+      "symbol": "SOL-TRY",
+      "side": "sell",
+      "quantity": 1.5,
+      "execution_price": 5099.3,
+      "timestamp": 1792054200940
+    },
+    {
+      "id": "1792054976233-0-16",
+      "symbol": "XSOXL-USDT",
+      "side": "buy",
+      "quantity": 0.89024,
+      "execution_price": 103.93,
+      "timestamp": 1792054976233
+    },
+    {
+      "id": "1792054976233-1-16",
+      "symbol": "XSOXL-USDT",
+      "side": "buy",
+      "quantity": 0.10975999999999995,
+      "execution_price": 103.95,
+      "timestamp": 1792054976233
+    },
+    {
+      "id": "1792055009236-0-18",
+      "symbol": "BTC-USDC",
+      "side": "buy",
+      "quantity": 0.0246128,
+      "execution_price": 81269.9,
+      "timestamp": 1792055009236
+    },
+    {
+      "id": "1792055009236-1-18",
+      "symbol": "BTC-USDC",
+      "side": "buy",
+      "quantity": 0.0030762,
+      "execution_price": 81271.5,
+      "timestamp": 1792055009236
+    },
+    {
+      "id": "1792055009236-2-18",
+      "symbol": "BTC-USDC",
+      "side": "buy",
+      "quantity": 0.01772635,
+      "execution_price": 81274.4,
+      "timestamp": 1792055009236
+    },
+    {
+      "id": "1792055009236-3-18",
+      "symbol": "BTC-USDC",
+      "side": "buy",
+      "quantity": 0.002461,
+      "execution_price": 81280.0,
+      "timestamp": 1792055009236
+    },
+    {
+      "id": "1792055009236-4-18",
+      "symbol": "BTC-USDC",
+      "side": "buy",
+      "quantity": 0.12302967,
+      "execution_price": 81281.2,
+      "timestamp": 1792055009236
+    },
+    {
+      "id": "1792055009236-5-18",
+      "symbol": "BTC-USDC",
+      "side": "buy",
+      "quantity": 0.00716971,
+      "execution_price": 81283.0,
+      "timestamp": 1792055009236
+    },
+    {
+      "id": "1792055009236-6-18",
+      "symbol": "BTC-USDC",
+      "side": "buy",
+      "quantity": 0.23394747,
+      "execution_price": 81285.3,
+      "timestamp": 1792055009236
+    },
+    {
+      "id": "1792055009288-0-25",
+      "symbol": "BTC-USDC",
+      "side": "buy",
+      "quantity": 0.02461236,
+      "execution_price": 81271.4,
+      "timestamp": 1792055009288
+    },
+    {
+      "id": "1792055009288-1-25",
+      "symbol": "BTC-USDC",
+      "side": "buy",
+      "quantity": 0.02080245,
+      "execution_price": 81274.4,
+      "timestamp": 1792055009288
+    },
+    {
+      "id": "1792055009288-2-25",
+      "symbol": "BTC-USDC",
+      "side": "buy",
+      "quantity": 0.002461,
+      "execution_price": 81280.0,
+      "timestamp": 1792055009288
+    },
+    {
+      "id": "1792055009288-3-25",
+      "symbol": "BTC-USDC",
+      "side": "buy",
+      "quantity": 0.12302967,
+      "execution_price": 81281.2,
+      "timestamp": 1792055009288
+    },
+    {
+      "id": "1792055009288-4-25",
+      "symbol": "BTC-USDC",
+      "side": "buy",
+      "quantity": 1.41707132,
+      "execution_price": 81283.0,
+      "timestamp": 1792055009288
+    },
+    {
+      "id": "1792055868426-0-30",
+      "symbol": "HYPE-USDT",
+      "side": "buy",
+      "quantity": 1.0,
+      "execution_price": 79.863,
+      "timestamp": 1792055868426
+    },
+    {
+      "id": "1792055912834-0-31",
+      "symbol": "ADA-USDT",
+      "side": "sell",
+      "quantity": 1.0,
+      "execution_price": 0.2221,
+      "timestamp": 1792055912834
+    },
+    {
+      "id": "1792055950930-0-32",
+      "symbol": "XSOXL-USDT",
+      "side": "sell",
+      "quantity": 0.00606,
+      "execution_price": 104.29,
+      "timestamp": 1792055950930
+    },
+    {
+      "id": "1792055950930-1-32",
+      "symbol": "XSOXL-USDT",
+      "side": "sell",
+      "quantity": 0.5,
+      "execution_price": 104.25,
+      "timestamp": 1792055950930
+    },
+    {
+      "id": "1792055950930-2-32",
+      "symbol": "XSOXL-USDT",
+      "side": "sell",
+      "quantity": 0.4939400000000001,
+      "execution_price": 104.24,
+      "timestamp": 1792055950930
+    },
+    {
+      "id": "1792056958634-0-35",
+      "symbol": "USDC-USDT",
+      "side": "buy",
+      "quantity": 1.0,
+      "execution_price": 1.00122,
+      "timestamp": 1792056958634
+    },
+    {
+      "id": "1792056984804-0-36",
+      "symbol": "USDC-USDT",
+      "side": "sell",
+      "quantity": 5.0,
+      "execution_price": 1.00121,
+      "timestamp": 1792056984804
+    },
+    {
+      "id": "1792056998174-0-37",
+      "symbol": "USDC-USDT",
+      "side": "buy",
+      "quantity": 4.0,
+      "execution_price": 1.00122,
+      "timestamp": 1792056998174
+    },
+    {
+      "id": "1792067285509-0-38",
+      "symbol": "AAVE-USDT",
+      "side": "buy",
+      "quantity": 0.03,
+      "execution_price": 148.63,
+      "timestamp": 1792067285509
+    },
+    {
+      "id": "1792067285509-1-38",
+      "symbol": "AAVE-USDT",
+      "side": "buy",
+      "quantity": 0.220869,
+      "execution_price": 148.64,
+      "timestamp": 1792067285509
+    },
+    {
+      "id": "1792067285509-2-38",
+      "symbol": "AAVE-USDT",
+      "side": "buy",
+      "quantity": 0.220869,
+      "execution_price": 148.65,
+      "timestamp": 1792067285509
+    },
+    {
+      "id": "1792067285509-3-38",
+      "symbol": "AAVE-USDT",
+      "side": "buy",
+      "quantity": 0.926739,
+      "execution_price": 148.66,
+      "timestamp": 1792067285509
+    },
+    {
+      "id": "1792067285509-4-38",
+      "symbol": "AAVE-USDT",
+      "side": "buy",
+      "quantity": 3.601522999999999,
+      "execution_price": 148.67,
+      "timestamp": 1792067285509
+    },
+    {
+      "id": "1792067317160-0-43",
+      "symbol": "AAVE-USDT",
+      "side": "sell",
+      "quantity": 0.672229,
+      "execution_price": 148.79,
+      "timestamp": 1792067317160
+    },
+    {
+      "id": "1792067317160-1-43",
+      "symbol": "AAVE-USDT",
+      "side": "sell",
+      "quantity": 0.015,
+      "execution_price": 148.78,
+      "timestamp": 1792067317160
+    },
+    {
+      "id": "1792067317160-2-43",
+      "symbol": "AAVE-USDT",
+      "side": "sell",
+      "quantity": 0.360084,
+      "execution_price": 148.77,
+      "timestamp": 1792067317160
+    },
+    {
+      "id": "1792067317160-3-43",
+      "symbol": "AAVE-USDT",
+      "side": "sell",
+      "quantity": 0.289113,
+      "execution_price": 148.76,
+      "timestamp": 1792067317160
+    },
+    {
+      "id": "1792067317160-4-43",
+      "symbol": "AAVE-USDT",
+      "side": "sell",
+      "quantity": 0.1545,
+      "execution_price": 148.75,
+      "timestamp": 1792067317160
+    },
+    {
+      "id": "1792067317160-5-43",
+      "symbol": "AAVE-USDT",
+      "side": "sell",
+      "quantity": 0.015,
+      "execution_price": 148.74,
+      "timestamp": 1792067317160
+    },
+    {
+      "id": "1792067317160-6-43",
+      "symbol": "AAVE-USDT",
+      "side": "sell",
+      "quantity": 0.304131,
+      "execution_price": 148.73,
+      "timestamp": 1792067317160
+    },
+    {
+      "id": "1792067341706-0-50",
+      "symbol": "AAVE-USDT",
+      "side": "sell",
+      "quantity": 0.133593,
+      "execution_price": 148.77,
+      "timestamp": 1792067341706
+    },
+    {
+      "id": "1792067341706-1-50",
+      "symbol": "AAVE-USDT",
+      "side": "sell",
+      "quantity": 0.015,
+      "execution_price": 148.76,
+      "timestamp": 1792067341706
+    },
+    {
+      "id": "1792067341706-2-50",
+      "symbol": "AAVE-USDT",
+      "side": "sell",
+      "quantity": 0.420864,
+      "execution_price": 148.75,
+      "timestamp": 1792067341706
+    },
+    {
+      "id": "1792067341706-3-50",
+      "symbol": "AAVE-USDT",
+      "side": "sell",
+      "quantity": 0.015,
+      "execution_price": 148.74,
+      "timestamp": 1792067341706
+    },
+    {
+      "id": "1792067341706-4-50",
+      "symbol": "AAVE-USDT",
+      "side": "sell",
+      "quantity": 0.435864,
+      "execution_price": 148.73,
+      "timestamp": 1792067341706
+    },
+    {
+      "id": "1792067341706-5-50",
+      "symbol": "AAVE-USDT",
+      "side": "sell",
+      "quantity": 0.560446,
+      "execution_price": 148.72,
+      "timestamp": 1792067341706
+    },
+    {
+      "id": "1792067341706-6-50",
+      "symbol": "AAVE-USDT",
+      "side": "sell",
+      "quantity": 0.015,
+      "execution_price": 148.71,
+      "timestamp": 1792067341706
+    },
+    {
+      "id": "1792067374825-0-57",
+      "symbol": "AAVE-USDT",
+      "side": "sell",
+      "quantity": 0.102581,
+      "execution_price": 148.8,
+      "timestamp": 1792067374825
+    },
+    {
+      "id": "1792067374825-1-57",
+      "symbol": "AAVE-USDT",
+      "side": "sell",
+      "quantity": 0.277263,
+      "execution_price": 148.78,
+      "timestamp": 1792067374825
+    },
+    {
+      "id": "1792067374825-2-57",
+      "symbol": "AAVE-USDT",
+      "side": "sell",
+      "quantity": 0.015,
+      "execution_price": 148.77,
+      "timestamp": 1792067374825
+    },
+    {
+      "id": "1792067374825-3-57",
+      "symbol": "AAVE-USDT",
+      "side": "sell",
+      "quantity": 0.547842,
+      "execution_price": 148.76,
+      "timestamp": 1792067374825
+    },
+    {
+      "id": "1792067374825-4-57",
+      "symbol": "AAVE-USDT",
+      "side": "sell",
+      "quantity": 0.592498,
+      "execution_price": 148.75,
+      "timestamp": 1792067374825
+    },
+    {
+      "id": "1792067374825-5-57",
+      "symbol": "AAVE-USDT",
+      "side": "sell",
+      "quantity": 0.058992000000000044,
+      "execution_price": 148.74,
+      "timestamp": 1792067374825
+    },
+    {
+      "id": "1792067574206-0-63",
+      "symbol": "BTC-USDC",
+      "side": "buy",
+      "quantity": 0.0015,
+      "execution_price": 80638.1,
+      "timestamp": 1792067574206
+    },
+    {
+      "id": "1792067574206-1-63",
+      "symbol": "BTC-USDC",
+      "side": "buy",
+      "quantity": 0.00310053,
+      "execution_price": 80640.2,
+      "timestamp": 1792067574206
+    },
+    {
+      "id": "1792067574206-2-63",
+      "symbol": "BTC-USDC",
+      "side": "buy",
+      "quantity": 0.12400609,
+      "execution_price": 80641.2,
+      "timestamp": 1792067574206
+    },
+    {
+      "id": "1792067574206-3-63",
+      "symbol": "BTC-USDC",
+      "side": "buy",
+      "quantity": 0.19840974,
+      "execution_price": 80645.3,
+      "timestamp": 1792067574206
+    },
+    {
+      "id": "1792067574206-4-63",
+      "symbol": "BTC-USDC",
+      "side": "buy",
+      "quantity": 0.27281339,
+      "execution_price": 80649.3,
+      "timestamp": 1792067574206
+    },
+    {
+      "id": "1792067574206-5-63",
+      "symbol": "BTC-USDC",
+      "side": "buy",
+      "quantity": 0.0371,
+      "execution_price": 80657.8,
+      "timestamp": 1792067574206
+    },
+    {
+      "id": "1792067574206-6-63",
+      "symbol": "BTC-USDC",
+      "side": "buy",
+      "quantity": 0.02115081,
+      "execution_price": 80663.1,
+      "timestamp": 1792067574206
+    },
+    {
+      "id": "1792067574266-0-70",
+      "symbol": "BTC-USDC",
+      "side": "buy",
+      "quantity": 0.0015,
+      "execution_price": 80638.1,
+      "timestamp": 1792067574266
+    },
+    {
+      "id": "1792067574266-1-70",
+      "symbol": "BTC-USDC",
+      "side": "buy",
+      "quantity": 0.00310032,
+      "execution_price": 80645.3,
+      "timestamp": 1792067574266
+    },
+    {
+      "id": "1792067574266-2-70",
+      "symbol": "BTC-USDC",
+      "side": "buy",
+      "quantity": 0.12399824,
+      "execution_price": 80646.3,
+      "timestamp": 1792067574266
+    },
+    {
+      "id": "1792067574266-3-70",
+      "symbol": "BTC-USDC",
+      "side": "buy",
+      "quantity": 0.19839718,
+      "execution_price": 80650.4,
+      "timestamp": 1792067574266
+    },
+    {
+      "id": "1792067574266-4-70",
+      "symbol": "BTC-USDC",
+      "side": "buy",
+      "quantity": 0.27279612,
+      "execution_price": 80654.4,
+      "timestamp": 1792067574266
+    },
+    {
+      "id": "1792067574266-5-70",
+      "symbol": "BTC-USDC",
+      "side": "buy",
+      "quantity": 0.0371,
+      "execution_price": 80657.8,
+      "timestamp": 1792067574266
+    },
+    {
+      "id": "1792067574266-6-70",
+      "symbol": "BTC-USDC",
+      "side": "buy",
+      "quantity": 0.02115081,
+      "execution_price": 80663.1,
+      "timestamp": 1792067574266
+    },
+    {
+      "id": "1792067574366-0-77",
+      "symbol": "BTC-USDC",
+      "side": "buy",
+      "quantity": 0.0015,
+      "execution_price": 80638.1,
+      "timestamp": 1792067574366
+    },
+    {
+      "id": "1792067574366-1-77",
+      "symbol": "BTC-USDC",
+      "side": "buy",
+      "quantity": 0.00310032,
+      "execution_price": 80645.3,
+      "timestamp": 1792067574366
+    },
+    {
+      "id": "1792067574366-2-77",
+      "symbol": "BTC-USDC",
+      "side": "buy",
+      "quantity": 0.12399824,
+      "execution_price": 80646.3,
+      "timestamp": 1792067574366
+    },
+    {
+      "id": "1792067574366-3-77",
+      "symbol": "BTC-USDC",
+      "side": "buy",
+      "quantity": 0.19839718,
+      "execution_price": 80650.4,
+      "timestamp": 1792067574366
+    },
+    {
+      "id": "1792067574366-4-77",
+      "symbol": "BTC-USDC",
+      "side": "buy",
+      "quantity": 0.27279612,
+      "execution_price": 80654.4,
+      "timestamp": 1792067574366
+    },
+    {
+      "id": "1792067574366-5-77",
+      "symbol": "BTC-USDC",
+      "side": "buy",
+      "quantity": 0.0371,
+      "execution_price": 80657.8,
+      "timestamp": 1792067574366
+    },
+    {
+      "id": "1792067574366-6-77",
+      "symbol": "BTC-USDC",
+      "side": "buy",
+      "quantity": 0.02115081,
+      "execution_price": 80663.1,
+      "timestamp": 1792067574366
+    },
+    {
+      "id": "1792067574465-0-84",
+      "symbol": "BTC-USDC",
+      "side": "buy",
+      "quantity": 0.00139,
+      "execution_price": 80638.1,
+      "timestamp": 1792067574465
+    },
+    {
+      "id": "1792067574465-1-84",
+      "symbol": "BTC-USDC",
+      "side": "buy",
+      "quantity": 0.024444100000000236,
+      "execution_price": 80648.8,
+      "timestamp": 1792067574465
+    }
+  ],
+  "orders": [
+    {
+      "id": "order-1792056631497-0",
+      "symbol": "BTC-USDC",
+      "side": "sell",
+      "quantity": 2.0,
+      "remaining_quantity": 2.0,
+      "limit_price": 81302.0,
+      "timestamp": 1792056631497
+    },
+    {
+      "id": "order-1792067437630-1",
+      "symbol": "BTC-USDC",
+      "side": "buy",
+      "quantity": 2.0,
+      "remaining_quantity": 2.0,
+      "limit_price": 80001.0,
+      "timestamp": 1792067437630
+    },
+    {
+      "id": "order-1792067465665-2",
+      "symbol": "BTC-USDC",
+      "side": "sell",
+      "quantity": 2.0,
+      "remaining_quantity": 2.0,
+      "limit_price": 810000.0,
+      "timestamp": 1792067465665
+    }
+  ]
+}

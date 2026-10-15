@@ -36,8 +36,17 @@ body {
   min-height: 100vh;
   margin: 0;
   background-image:
-    radial-gradient(ellipse at 50% -24rem, rgb(76 139 207 / 11%), transparent 44rem),
-    repeating-linear-gradient(0deg, transparent, transparent 31px, rgb(255 255 255 / 1.5%) 32px);
+    radial-gradient(
+      ellipse at 50% -24rem,
+      rgb(76 139 207 / 11%),
+      transparent 44rem
+    ),
+    repeating-linear-gradient(
+      0deg,
+      transparent,
+      transparent 31px,
+      rgb(255 255 255 / 1.5%) 32px
+    );
 }
 
 button,

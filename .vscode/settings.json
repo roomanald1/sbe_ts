@@ -1,3 +1,14 @@
 {
-  "rust-analyzer.linkedProjects": ["src/rust/rust_sbe_publisher/Cargo.toml"]
+  "rust-analyzer.linkedProjects": ["src/rust/rust_sbe_publisher/Cargo.toml"],
+  "editor.formatOnSave": true,
+  "editor.tabSize": 2,
+  "[typescript]": {
+    "editor.defaultFormatter": "vscode.typescript-language-features"
+  },
+  "[typescriptreact]": {
+    "editor.defaultFormatter": "vscode.typescript-language-features"
+  },
+  "[html]": {
+    "editor.defaultFormatter": "vscode.html-language-features"
+  }
 }

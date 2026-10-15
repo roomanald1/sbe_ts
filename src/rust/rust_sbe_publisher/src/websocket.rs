@@ -8,10 +8,13 @@ use tokio::sync::{broadcast, mpsc};
 use tokio::time::{Duration, sleep};
 
 use crate::encoders::{SYMBOL_LENGTH, encode_symbol_price_bytes};
-use crate::okx::connectivity::{get_instrument_data, subscribe, subscribe_book_once};
+use crate::okx::connectivity::{
+    get_instrument_data, subscribe, subscribe_book_once, subscribe_trades_once,
+};
 
 const PRICE_UPDATE_CAPACITY: usize = 4096;
 const BOOK_UPDATE_CAPACITY: usize = 32;
+const TRADE_UPDATE_CAPACITY: usize = 32;
 
 pub async fn serve() -> Result<()> {
     let instrument_data = get_instrument_data()
@@ -59,6 +62,29 @@ impl RSocket for ServerResponder {
                 + 'static,
         >,
     > {
+        if let Some(instrument) = requested_trade_instrument(&payload) {
+            if !instrument.is_ascii() || instrument.is_empty() || instrument.len() > SYMBOL_LENGTH {
+                return Box::pin(futures_util::stream::once(async {
+                    Err(anyhow::anyhow!("invalid OKX trades instrument request"))
+                }));
+            }
+            let Some(instrument) = self.instrument_lookup.get(instrument) else {
+                let instrument = instrument.to_owned();
+                return Box::pin(futures_util::stream::once(async move {
+                    Err(anyhow::anyhow!(
+                        "instrument is not available in the current OKX subscription: {instrument}"
+                    ))
+                }));
+            };
+            println!("Subscribing to OKX trades for {instrument}");
+            return log_stream_end(
+                trade_request_stream(instrument.to_string()),
+                format!(
+                    "RSocket UI disconnected or cancelled the OKX trades stream for {instrument}"
+                ),
+            );
+        }
+
         if let Some(instrument) = requested_book_instrument(&payload) {
             if !instrument.is_ascii() || instrument.is_empty() || instrument.len() > SYMBOL_LENGTH {
                 return Box::pin(futures_util::stream::once(async {
@@ -76,7 +102,9 @@ impl RSocket for ServerResponder {
             println!("Subscribing to OKX books for {instrument}");
             return log_stream_end(
                 book_request_stream(instrument.to_string()),
-                format!("RSocket UI disconnected or cancelled the OKX book stream for {instrument}"),
+                format!(
+                    "RSocket UI disconnected or cancelled the OKX book stream for {instrument}"
+                ),
             );
         }
 
@@ -122,7 +150,10 @@ impl RSocket for ServerResponder {
             .boxed()
         };
 
-        log_stream_end(stream, "RSocket UI disconnected or cancelled the market price stream".to_owned())
+        log_stream_end(
+            stream,
+            "RSocket UI disconnected or cancelled the market price stream".to_owned(),
+        )
     }
 
     #[doc = " Metadata-Push interaction model of RSocket."]
@@ -209,13 +240,47 @@ where
 {
     Box::pin(futures_util::stream::unfold(
         (stream, StreamEndLog(message)),
-        |(mut stream, end_log)| async move {
-            stream
-                .next()
-                .await
-                .map(|item| (item, (stream, end_log)))
-        },
+        |(mut stream, end_log)| async move { stream.next().await.map(|item| (item, (stream, end_log))) },
     ))
+}
+
+fn requested_trade_instrument(payload: &Payload) -> Option<&str> {
+    let data = payload.data()?;
+    let request = std::str::from_utf8(data.as_ref()).ok()?;
+    request.strip_prefix("trades:")
+}
+
+fn trade_request_stream(
+    instrument: String,
+) -> Pin<Box<dyn Stream<Item = Result<Payload, anyhow::Error>> + Send + 'static>> {
+    let (sender, receiver) = mpsc::channel(TRADE_UPDATE_CAPACITY);
+    tokio::spawn(async move {
+        let mut retry_delay = Duration::from_secs(1);
+        loop {
+            if sender.is_closed() {
+                break;
+            }
+            match subscribe_trades_once(&instrument, sender.clone()).await {
+                Ok(()) => break,
+                Err(error) => {
+                    eprintln!(
+                        "OKX trades stream for {instrument} failed: {error:#}; retrying in {}s",
+                        retry_delay.as_secs()
+                    );
+                    tokio::select! { _ = sender.closed() => break, _ = sleep(retry_delay) => {} }
+                    retry_delay = (retry_delay * 2).min(Duration::from_secs(30));
+                }
+            }
+        }
+    });
+    let stream = futures_util::stream::unfold(receiver, |mut receiver| async move {
+        receiver.recv().await.map(|item| {
+            let item = item.map(|bytes| Payload::new(Some(bytes), None));
+            (item, receiver)
+        })
+    })
+    .boxed();
+    Box::pin(stream)
 }
 
 fn requested_book_instrument(payload: &Payload) -> Option<&str> {
@@ -232,14 +297,19 @@ fn book_request_stream(
         let mut retry_delay = Duration::from_secs(1);
         loop {
             if sender.is_closed() {
-                println!("UI unsubscribed from OKX book stream for {instrument} before connection setup");
+                println!(
+                    "UI unsubscribed from OKX book stream for {instrument} before connection setup"
+                );
                 break;
             }
 
             match subscribe_book_once(&instrument, sender.clone()).await {
                 Ok(()) => break,
                 Err(error) => {
-                    eprintln!("OKX book stream for {instrument} failed: {error:#}; retrying in {}s", retry_delay.as_secs());
+                    eprintln!(
+                        "OKX book stream for {instrument} failed: {error:#}; retrying in {}s",
+                        retry_delay.as_secs()
+                    );
                     tokio::select! {
                         _ = sender.closed() => break,
                         _ = sleep(retry_delay) => {}

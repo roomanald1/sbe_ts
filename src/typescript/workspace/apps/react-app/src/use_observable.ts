@@ -1,10 +1,10 @@
-import { useEffect, useState } from "react";
-import type { Observable } from "rxjs";
+import { useEffect, useState } from 'react';
+import type { Observable } from 'rxjs';
 
 export function useObservable<T>(
   observable: Observable<T> | undefined,
   initial: T,
-  deps: any[]
+  deps: any[],
 ): T {
   const [value, setValue] = useState<T>(initial);
 
@@ -13,7 +13,7 @@ export function useObservable<T>(
 
     const sub = observable.subscribe({
       next: setValue,
-      error: (err) => console.error("Observable error:", err),
+      error: (err) => console.error('Observable error:', err),
     });
 
     return () => sub.unsubscribe();

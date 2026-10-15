@@ -11,14 +11,15 @@ use std::{
 
 pub async fn serve() -> anyhow::Result<()> {
     let users = Arc::new(create_users(10_000));
-
-    let app = Router::new().route(
-        "/users/{page}",
-        get({
-            let users = Arc::clone(&users);
-            move |path| get_user_page(path, users)
-        }),
-    );
+    let app = Router::new()
+        .route(
+            "/users/{page}",
+            get({
+                let users = Arc::clone(&users);
+                move |path| get_user_page(path, users)
+            }),
+        )
+        .merge(crate::positions::router().await?);
 
     let addr = SocketAddr::from(([127, 0, 0, 1], 3000));
     println!("Listening on {}", addr);

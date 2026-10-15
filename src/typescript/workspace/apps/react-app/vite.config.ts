@@ -1,25 +1,29 @@
-import { defineConfig } from 'vite'
-import react from '@vitejs/plugin-react'
-import { nodePolyfills } from 'vite-plugin-node-polyfills'
+import { defineConfig } from 'vite';
+import react from '@vitejs/plugin-react';
+import { nodePolyfills } from 'vite-plugin-node-polyfills';
 
 const apiProxy = {
   '/users': {
     target: 'http://localhost:3000',
     changeOrigin: true,
   },
-}
+  '/positions': {
+    target: 'http://localhost:3000',
+    changeOrigin: true,
+  },
+};
 
 export default defineConfig({
   plugins: [
     react(),
     nodePolyfills({
       globals: {
-        Buffer: true,   // expose Buffer globally
-      }
-    })
+        Buffer: true, // expose Buffer globally
+      },
+    }),
   ],
   define: {
-    global: {},        // required for some Node polyfills
+    global: {}, // required for some Node polyfills
   },
   server: {
     proxy: apiProxy,
@@ -27,4 +31,4 @@ export default defineConfig({
   preview: {
     proxy: apiProxy,
   },
-})
+});
