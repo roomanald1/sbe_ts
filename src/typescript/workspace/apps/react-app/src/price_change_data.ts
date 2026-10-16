@@ -8,6 +8,7 @@ export type PriceHistorySample = {
   price: number;
 };
 
+
 export type PriceChanges = {
   ticks: SymbolPriceTick[];
   histories: Map<string, PriceHistorySample[]>;
@@ -71,7 +72,7 @@ function createPriceChangesObservable(
 
         const latestTick = symbols.get(tick.symbol);
         if (!latestTick) return;
-        if (ticks[index]?.price !== latestTick.price) {
+        if (ticks[index]?.price !== latestTick.price || ticks[index]?.volatility1m !== latestTick.volatility1m || ticks[index]?.volatility5m !== latestTick.volatility5m || ticks[index]?.receivedAt !== latestTick.receivedAt) {
           ticks[index] = latestTick;
         }
 

@@ -4,6 +4,7 @@ import { decodeBookDepth, type BookDepth } from '../types/symbol_price';
 import type { Position } from './PositionTypes';
 
 type PositionsResponse = { positions: Position[]; trade_count: number };
+type UsdRatesResponse = { rates: Record<string, number>; updated_at: number };
 type ActiveFeed = {
   feed: BookFeed;
   data: { unsubscribe(): void };
@@ -13,12 +14,22 @@ export type PnlRow = {
   position: Position;
   mark?: number;
   unrealized?: number;
+  realizedUsd?: number;
+  unrealizedUsd?: number;
+  feesPaidUsd?: number;
   bookError?: string;
+  exposure?: number;
+  exposureUsd?: number;
+  averageEntryUsd?: number;
+  markTimestamp?: number;
 };
 export type PnlTotal = {
   realized: number;
   unrealized: number;
+  feesPaid: number;
   hasUnmarkedExposure: boolean;
+  hasUnconvertedPnl: boolean;
+  missingCurrencies: string[];
 };
 export type PnlState = {
   rows: PnlRow[];
@@ -38,13 +49,16 @@ export class PnlModel {
     loading: true,
   });
   private positions: Position[] = [];
+  private usdRates: Record<string, number> = {};
   private books: Record<string, BookDepth> = {};
   private errors: Record<string, string> = {};
   private feeds = new Map<string, ActiveFeed>();
   private timer?: ReturnType<typeof setInterval>;
   private connection: Connection;
-  constructor(connection: Connection) {
+  private readonly feedKeyPrefix: string;
+  constructor(connection: Connection, feedKeyPrefix = 'pnl-mark') {
     this.connection = connection;
+    this.feedKeyPrefix = feedKeyPrefix;
     this.props$ = new BehaviorSubject({ connection });
   }
   getSnapshot = (): PnlState => this.state$.value;
@@ -72,21 +86,29 @@ export class PnlModel {
   }
   async refresh(): Promise<void> {
     try {
-      const response = await fetch('/positions');
-      if (!response.ok)
-        throw new Error(
-          'Could not load fill-based P&L (' + response.status + ')',
-        );
-      const data = (await response.json()) as PositionsResponse;
+      const positionsResponse = await fetch('/positions');
+      if (!positionsResponse.ok)
+        throw new Error('Could not load fill-based P&L (' + positionsResponse.status + ')');
+      const data = (await positionsResponse.json()) as PositionsResponse;
       if (!Array.isArray(data.positions))
         throw new Error('The positions API returned invalid data');
       this.positions = data.positions;
       this.syncFeeds();
-      this.publishState();
+      try {
+        const ratesResponse = await fetch('/positions/usd-rates');
+        if (!ratesResponse.ok)
+          throw new Error('Could not load OKX USD conversion rates (' + ratesResponse.status + ')');
+        const rates = (await ratesResponse.json()) as UsdRatesResponse;
+        if (!rates.rates || typeof rates.rates !== 'object')
+          throw new Error('The USD rates API returned invalid data');
+        this.usdRates = rates.rates;
+        this.publishState();
+      } catch (reason) {
+        this.usdRates = {};
+        this.publishState(reason instanceof Error ? reason.message : 'Could not load USD conversion rates');
+      }
     } catch (reason) {
-      this.publishState(
-        reason instanceof Error ? reason.message : 'Could not load P&L',
-      );
+      this.publishState(reason instanceof Error ? reason.message : 'Could not load P&L');
     }
   }
   private syncFeeds(): void {
@@ -97,7 +119,7 @@ export class PnlModel {
     );
     for (const symbol of symbols) {
       if (this.feeds.has(symbol)) continue;
-      const feed = this.connection.openBook('pnl-mark:' + symbol, symbol);
+      const feed = this.connection.openBook(this.feedKeyPrefix + ':' + symbol, symbol);
       const data = feed.data.subscribe((raw) => {
         if (raw === undefined) {
           delete this.books[symbol];
@@ -134,50 +156,66 @@ export class PnlModel {
   private publishState(error?: string): void {
     const rows = this.positions.map((position) => {
       const book = this.books[position.symbol];
-      const mark =
-        position.quantity > 0
-          ? book?.bids[0]?.price
-          : position.quantity < 0
-            ? book?.asks[0]?.price
-            : undefined;
+      const mark = position.quantity > 0
+        ? book?.bids[0]?.price
+        : position.quantity < 0
+          ? book?.asks[0]?.price
+          : undefined;
+      const currency = quoteCurrency(position.symbol);
+      const rate = this.usdRates[currency];
+      const unrealized = mark === undefined
+        ? undefined
+        : (mark - position.average_entry_price) * position.quantity - (position.entry_fees ?? 0) - Math.abs(position.quantity * mark) * (position.estimated_exit_fee_rate ?? 0);
       return {
         position,
         mark,
-        unrealized:
-          mark === undefined
-            ? undefined
-            : (mark - position.average_entry_price) * position.quantity,
+        exposure: mark === undefined ? undefined : Math.abs(position.quantity * mark),
+        exposureUsd: mark === undefined || rate === undefined ? undefined : Math.abs(position.quantity * mark) * rate,
+        averageEntryUsd: rate === undefined ? undefined : position.average_entry_price * rate,
+        markTimestamp: mark === undefined ? undefined : book?.timestamp,
+        unrealized,
+        realizedUsd: rate === undefined ? undefined : position.realized_pnl * rate,
+        feesPaidUsd: rate === undefined ? undefined : position.fees_paid * rate,
+        unrealizedUsd: unrealized === undefined || rate === undefined ? undefined : unrealized * rate,
         bookError: this.errors[position.symbol],
       };
     });
-    const totals: Record<string, PnlTotal> = {};
+    const total: PnlTotal = {
+      realized: 0,
+      unrealized: 0,
+      feesPaid: 0,
+      hasUnmarkedExposure: false,
+      hasUnconvertedPnl: false,
+      missingCurrencies: [],
+    };
+    const missing = new Set<string>();
     for (const row of rows) {
-      const currency = quoteCurrency(row.position.symbol);
-      const total =
-        totals[currency] ??
-        (totals[currency] = {
-          realized: 0,
-          unrealized: 0,
-          hasUnmarkedExposure: false,
-        });
-      total.realized += row.position.realized_pnl;
-      if (Math.abs(row.position.quantity) > 1e-12) {
+      const hasRealized = Math.abs(row.position.realized_pnl) > 1e-12;
+      const hasExposure = Math.abs(row.position.quantity) > 1e-12;
+      if (row.realizedUsd === undefined && hasRealized || row.unrealizedUsd === undefined && hasExposure && row.unrealized !== undefined) {
+        total.hasUnconvertedPnl = true;
+        missing.add(quoteCurrency(row.position.symbol));
+      }
+      if (row.realizedUsd !== undefined) total.realized += row.realizedUsd;
+      if (row.feesPaidUsd !== undefined) total.feesPaid += row.feesPaidUsd;
+      if (hasExposure) {
         if (row.unrealized === undefined) total.hasUnmarkedExposure = true;
-        else total.unrealized += row.unrealized;
+        else if (row.unrealizedUsd !== undefined) total.unrealized += row.unrealizedUsd;
       }
     }
-    const visibleRows = rows.filter(
-      (row) =>
-        Math.abs(row.position.quantity) > 1e-12 ||
-        Math.abs(row.position.realized_pnl) > 1e-12,
+    total.missingCurrencies = [...missing].sort();
+    const visibleRows = rows.filter((row) =>
+      Math.abs(row.position.quantity) > 1e-12 ||
+      Math.abs(row.position.realized_pnl) > 1e-12,
     );
     this.state$.next({
       rows: visibleRows,
-      totals,
-      currencies: Object.keys(totals).sort(),
+      totals: visibleRows.length ? { USD: total } : {},
+      currencies: visibleRows.length ? ['USD'] : [],
       loading: false,
       error,
     });
   }
 }
+
 

@@ -2,6 +2,7 @@ mod encoders;
 mod okx;
 mod positions;
 mod rest;
+mod signals;
 mod vwap;
 mod websocket;
 

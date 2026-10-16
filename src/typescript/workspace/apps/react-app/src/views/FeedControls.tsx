@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react';
 import type { Connection, ConnectionState, FeedSource } from '../connection';
 import { SymbolPriceGrid } from './SymbolPriceGrid';
 import { SymbolPriceTable } from './SymbolPriceTable';
@@ -7,10 +7,15 @@ import { Users } from './Users';
 import { Positions } from './Positions';
 import { Fills } from './Fills';
 import { Pnl } from './Pnl';
+import { Account } from './Account';
+import { PortfolioRisk } from './PortfolioRisk';
 import { CloseInsights } from './CloseInsights';
+import { Hedging } from './Hedging';
 import { TradeTicketPopup } from './TradeTicketPopup';
 import { OrderBookPopup } from './OrderBookPopup';
 import { TradesView } from './TradesView';
+import { MarketLiquidity } from './MarketLiquidity';
+import { BestSignalsView, SignalHistoryView, SignalPerformanceView } from './SignalInfoViews';
 import { PriceChangesModel } from '../price_change_data';
 import { useBehaviorSnapshot } from '../use_behavior_snapshot';
 
@@ -27,10 +32,17 @@ type DashboardWidgetType =
   | 'chart'
   | 'book'
   | 'trades'
+  | 'liquidity'
+  | 'signals'
+  | 'signal-history'
+  | 'signal-performance'
   | 'positions'
   | 'fills'
   | 'pnl'
-  | 'close-insights';
+  | 'account'
+  | 'risk'
+  | 'close-insights'
+  | 'hedging';
 type DashboardWidget = {
   id: string;
   type: DashboardWidgetType;
@@ -52,16 +64,24 @@ const DASHBOARD_WIDGET_TYPES: DashboardWidgetType[] = [
   'chart',
   'book',
   'trades',
+  'liquidity',
+  'signals',
+  'signal-history',
+  'signal-performance',
   'positions',
   'fills',
   'pnl',
+  'account',
+  'risk',
   'close-insights',
+  'hedging',
 ];
 const DEFAULT_WIDGET_TYPES: DashboardWidgetType[] = [
   'grid',
   'table',
   'chart',
   'book',
+  'risk',
 ];
 const DASHBOARD_COLUMNS = 24;
 const DEFAULT_WIDGET_WIDTH = DASHBOARD_COLUMNS / 2;
@@ -71,14 +91,21 @@ const DASHBOARD_LAYOUTS_KEY = 'market-dashboard-layouts';
 const DASHBOARD_ACTIVE_LAYOUT_KEY = 'market-dashboard-active-layout';
 const WIDGET_LABELS: Record<DashboardWidgetType, string> = {
   grid: 'Market overview',
-  table: 'Incoming events',
+  table: 'Pair volatility',
   chart: 'Price history',
   book: 'Order book',
   trades: 'Recent trades',
+  liquidity: 'Market liquidity',
+  signals: 'Best signals',
+  'signal-history': 'Signal history',
+  'signal-performance': 'Signal performance',
   positions: 'Orders',
   fills: 'Fills',
   pnl: 'P&L',
+  account: 'Account',
+  risk: 'Portfolio Risk',
   'close-insights': 'Close-out insights',
+  hedging: 'Hedging',
 };
 
 function makeWidget(
@@ -374,8 +401,8 @@ export function FeedControls({
     symbol: string;
     side: 'buy' | 'sell';
   }>();
-  const openTrade = (symbol: string, side: 'buy' | 'sell' = 'buy') =>
-    setTradeRequest({ symbol, side });
+  const openTrade = useCallback((symbol: string, side: 'buy' | 'sell' = 'buy') =>
+    setTradeRequest({ symbol, side }), []);
   const [savedLayouts, setSavedLayouts] =
     useState<SavedDashboardLayout[]>(loadSavedLayouts);
   const [activeLayoutId, setActiveLayoutId] = useState(() => {
@@ -403,16 +430,48 @@ export function FeedControls({
     () => new PriceChangesModel(connection),
     [connection],
   );
+  const [spotSymbols, setSpotSymbols] = useState<string[]>([]);
+  useEffect(() => {
+    let active = true;
+    const loadSpotSymbols = async () => {
+      try {
+        const response = await fetch('/instruments');
+        if (!response.ok) throw new Error('Could not load spot instruments');
+        const data = await response.json() as { symbols?: unknown };
+        if (active && Array.isArray(data.symbols)) {
+          setSpotSymbols(data.symbols.filter((symbol): symbol is string => typeof symbol === 'string'));
+        }
+      } catch (error) {
+        console.warn('Could not load the full OKX spot instrument list', error);
+      }
+    };
+    void loadSpotSymbols();
+    const timer = setInterval(() => void loadSpotSymbols(), 15 * 60 * 1000);
+    return () => {
+      active = false;
+      clearInterval(timer);
+    };
+  }, []);
   const priceChanges = useBehaviorSnapshot(priceChangesModel.state$);
+  const [dragPriceChanges, setDragPriceChanges] = useState<typeof priceChanges | null>(null);
+  const widgetPriceChanges = dragPriceChanges ?? priceChanges;
   useEffect(() => {
     priceChangesModel.start();
     return () => priceChangesModel.stop();
   }, [priceChangesModel]);
-  const bookSymbols = priceChanges.ticks.map((tick) => tick.symbol);
-  const sortedBookSymbols = [...bookSymbols].sort((left, right) =>
-    left.localeCompare(right),
+  const bookSymbols = useMemo(
+    () => widgetPriceChanges.ticks.map((tick) => tick.symbol),
+    [widgetPriceChanges.ticks],
   );
-  const selectedNewWidgetSymbol = bookSymbols[0] ?? '';
+  const sortedBookSymbols = useMemo(
+    () => [...bookSymbols].sort((left, right) => left.localeCompare(right)),
+    [bookSymbols],
+  );
+  const selectionSymbols = useMemo(
+    () => feedSource === 'okx' && spotSymbols.length > 0 ? spotSymbols : sortedBookSymbols,
+    [feedSource, spotSymbols, sortedBookSymbols],
+  );
+  const selectedNewWidgetSymbol = bookSymbols[0] ?? selectionSymbols[0] ?? '';
 
   useEffect(() => {
     setSavedLayouts((current) => {
@@ -607,26 +666,27 @@ export function FeedControls({
       case 'grid':
         content = (
           <SymbolPriceGrid
-            ticks={priceChanges.ticks}
+            ticks={widgetPriceChanges.ticks}
             feedSource={feedSource}
             compact={compact}
-            onSelectSymbol={(symbol) => openTrade(symbol)}
+            onSelectSymbol={openTrade}
           />
         );
         break;
       case 'table':
         content = (
           <SymbolPriceTable
-            ticks={priceChanges.ticks}
+            ticks={widgetPriceChanges.ticks}
+            histories={widgetPriceChanges.histories}
             state={connectionState}
-            onSelectSymbol={(symbol) => openTrade(symbol)}
+            onSelectSymbol={openTrade}
           />
         );
         break;
       case 'chart':
         content = (
           <PriceChangeChart
-            changes={priceChanges}
+            changes={widgetPriceChanges}
             selectedSymbol={symbol}
             onSymbolChange={(value) => updateWidgetSymbol(widget.id, value)}
             showSymbolSelector
@@ -636,17 +696,26 @@ export function FeedControls({
         break;
       case 'positions':
         content = (
-          <Positions connection={connection} symbols={sortedBookSymbols} />
+          <Positions connection={connection} symbols={selectionSymbols} paused={draggingWidgetId !== null} />
         );
         break;
       case 'fills':
-        content = <Fills />;
+        content = <Fills paused={draggingWidgetId !== null} />;
         break;
       case 'pnl':
-        content = <Pnl connection={connection} />;
+        content = <Pnl connection={connection} paused={draggingWidgetId !== null} />;
+        break;
+      case 'account':
+        content = <Account />;
+        break;
+      case 'risk':
+        content = <PortfolioRisk connection={connection} paused={draggingWidgetId !== null} />;
         break;
       case 'close-insights':
-        content = <CloseInsights />;
+        content = <CloseInsights histories={widgetPriceChanges.histories} paused={draggingWidgetId !== null} />;
+        break;
+      case 'hedging':
+        content = <Hedging paused={draggingWidgetId !== null} />;
         break;
       case 'trades':
         content =
@@ -654,9 +723,10 @@ export function FeedControls({
             <TradesView
               streamKey={widget.id}
               symbol={symbol}
-              symbols={sortedBookSymbols}
+              symbols={selectionSymbols}
               onSymbolChange={(value) => updateWidgetSymbol(widget.id, value)}
               connection={connection}
+              paused={draggingWidgetId !== null}
             />
           ) : (
             <section className="feed-section" aria-label="Recent trades">
@@ -666,6 +736,22 @@ export function FeedControls({
             </section>
           );
         break;
+      case 'liquidity':
+        content = feedSource === 'okx' ? (
+          <MarketLiquidity streamKey={widget.id} symbol={symbol} symbols={selectionSymbols} onSymbolChange={(value) => updateWidgetSymbol(widget.id, value)} connection={connection} paused={draggingWidgetId !== null} />
+        ) : (
+          <section className="feed-section" aria-label="Market liquidity"><div className="book-popup-message">Market liquidity indicators are available with the OKX feed.</div></section>
+        );
+        break;
+      case 'signals':
+        content = <BestSignalsView onTradeSymbol={openTrade} />;
+        break;
+      case 'signal-history':
+        content = <SignalHistoryView paused={draggingWidgetId !== null} />;
+        break;
+      case 'signal-performance':
+        content = <SignalPerformanceView paused={draggingWidgetId !== null} />;
+        break;
       case 'book':
         content =
           feedSource === 'okx' ? (
@@ -673,7 +759,7 @@ export function FeedControls({
               streamKey={widget.id}
               mode="view"
               symbol={symbol}
-              symbols={sortedBookSymbols}
+              symbols={selectionSymbols}
               onSymbolChange={(value) => updateWidgetSymbol(widget.id, value)}
               showSymbolSelector
               onTrade={openTrade}
@@ -694,7 +780,9 @@ export function FeedControls({
       WIDGET_LABELS[widget.type] +
       (widget.type === 'chart' ||
       widget.type === 'book' ||
-      widget.type === 'trades'
+      widget.type === 'trades' ||
+      widget.type === 'liquidity' ||
+      widget.type === 'signals'
         ? ' for ' + symbol
         : '');
     return (
@@ -727,14 +815,16 @@ export function FeedControls({
             document.body.appendChild(ghost);
             event.dataTransfer.setDragImage(ghost, 18, 18);
             window.setTimeout(() => ghost.remove(), 0);
+            setDragPriceChanges(priceChanges);
             setDraggingWidgetId(widget.id);
           }}
           onDragEnd={() => {
+            setDragPriceChanges(null);
             setDraggingWidgetId(null);
             setDropPreview(null);
           }}
         >
-          ⠿
+          <span className="dashboard-widget-drag-icon" aria-hidden="true" />
         </button>
         <button
           className="dashboard-widget-remove"
@@ -743,7 +833,7 @@ export function FeedControls({
           title="Remove widget"
           onClick={() => removeWidget(widget.id)}
         >
-          ×
+          <span className="dashboard-widget-remove-icon" aria-hidden="true" />
         </button>
         {content}
         <div
@@ -967,6 +1057,7 @@ export function FeedControls({
               event.currentTarget,
             );
             if (landing) moveWidget(widgetId, landing.x, landing.y);
+            setDragPriceChanges(null);
             setDraggingWidgetId(null);
             setDropPreview(null);
           }}

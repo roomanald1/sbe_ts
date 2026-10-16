@@ -1,4 +1,4 @@
-﻿import { BehaviorSubject } from 'rxjs';
+import { BehaviorSubject } from 'rxjs';
 import type { BookFeed, Connection } from '../connection';
 import { decodeBookDepth, type BookDepth } from '../types/symbol_price';
 import { getLimitPriceMarkWarning } from './limit_price_guard';
@@ -13,6 +13,8 @@ type RestingOrder = {
   remaining_quantity: number;
   limit_price: number;
   timestamp: number;
+  maker_fee_rate: number;
+  estimated_fee: number;
 };
 type OrdersResponse = { orders: RestingOrder[] };
 export type VwapRun = {
@@ -53,6 +55,9 @@ export type OrderManagerState = {
   vwapRuns: VwapRun[];
   rows: OrderRow[];
   selectedCurrentPrice?: number;
+  estimatedFee?: number;
+  makerFeeRate: number;
+  takerFeeRate: number;
   limitPriceWarning?: string;
   confirmedLimitPrice?: string;
   durationMinutes: string;
@@ -65,11 +70,6 @@ export type OrderManagerState = {
   error?: string;
 };
 type OrderManagerProps = { connection: Connection; symbols: string[] };
-const qtyFormat = new Intl.NumberFormat(undefined, {
-  minimumFractionDigits: 0,
-  maximumFractionDigits: 8,
-});
-
 export class OrderManagerModel {
   readonly props$: BehaviorSubject<OrderManagerProps>;
   readonly state$: BehaviorSubject<OrderManagerState>;
@@ -89,6 +89,8 @@ export class OrderManagerModel {
       limitPrice: '',
       durationMinutes: '60',
       participationRate: '10',
+      makerFeeRate: 0.0008,
+      takerFeeRate: 0.001,
       orders: [],
       vwapRuns: [],
       rows: [],
@@ -121,6 +123,7 @@ export class OrderManagerModel {
   start(): void {
     if (this.timer) return;
     this.syncFeeds();
+    void this.loadFeeRates();
     void this.refreshOrders();
     void this.loadActiveVwap(this.state$.value.selectedSymbol);
     this.timer = setInterval(() => void this.refreshOrders(), 5000);
@@ -153,6 +156,14 @@ export class OrderManagerModel {
   }
   setLimitPrice(limitPrice: string): void {
     this.patch({ limitPrice, confirmedLimitPrice: undefined, error: undefined });
+  }
+  private async loadFeeRates(): Promise<void> {
+    try {
+      const response = await fetch("/positions/fee-rates");
+      if (!response.ok) return;
+      const rates = await response.json() as { maker: number; taker: number };
+      if (Number.isFinite(rates.maker) && Number.isFinite(rates.taker)) this.patch({ makerFeeRate: rates.maker, takerFeeRate: rates.taker });
+    } catch { /* use displayed paper fee defaults until rates load */ }
   }
   async refreshOrders(): Promise<void> {
     try {
@@ -232,14 +243,7 @@ export class OrderManagerModel {
       }
       await this.refreshOrders();
       this.patch({
-        error:
-          (result.remaining_quantity ?? 0) > 0
-            ? 'Filled ' +
-              qtyFormat.format(result.filled_quantity ?? 0) +
-              '; ' +
-              qtyFormat.format(result.remaining_quantity ?? 0) +
-              ' resting'
-            : 'Filled ' + qtyFormat.format(result.filled_quantity ?? 0),
+        error: undefined,
         quantity: '',
         confirmedLimitPrice: undefined,
       });
@@ -324,6 +328,10 @@ export class OrderManagerModel {
       book?.bids[0] && book.asks[0]
         ? (book.bids[0].price + book.asks[0].price) / 2
         : (book?.bids[0]?.price ?? book?.asks[0]?.price);
+    const requestedQuantity = Number(state.quantity);
+    const feePrice = state.orderType === "limit" && Number(state.limitPrice) > 0 ? Number(state.limitPrice) : selectedCurrentPrice;
+    const feeRate = state.orderType === "limit" ? state.makerFeeRate : state.takerFeeRate;
+    const estimatedFee = Number.isFinite(requestedQuantity) && requestedQuantity > 0 && feePrice !== undefined ? requestedQuantity * feePrice * feeRate : undefined;
     const limitPriceWarning =
       state.orderType === 'limit'
         ? getLimitPriceMarkWarning(state.limitPrice, selectedCurrentPrice)
@@ -332,6 +340,7 @@ export class OrderManagerModel {
       ...state,
       rows,
       selectedCurrentPrice,
+      estimatedFee,
       limitPriceWarning,
       confirmedLimitPrice: limitPriceWarning ? state.confirmedLimitPrice : undefined,
     };
@@ -394,5 +403,8 @@ export class OrderManagerModel {
     this.activeFeeds.clear();
   }
 }
+
+
+
 
 

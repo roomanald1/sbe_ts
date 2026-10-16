@@ -1,4 +1,5 @@
-import { useEffect, useMemo } from 'react';
+import { memo, useEffect, useMemo } from 'react';
+import { usePausedValue } from '../use_paused_value';
 import { AgGridReact } from 'ag-grid-react';
 import {
   ClientSideRowModelModule,
@@ -46,8 +47,12 @@ type PnlGridRow = {
   quantity: number;
   averageEntry?: number;
   mark?: number;
-  realized: number;
+  realized?: number;
   unrealized?: number;
+  feesPaid?: number;
+  returnPct?: number;
+  lastTrade: number;
+  markTimestamp?: number;
   quote: string;
   bookError?: string;
 };
@@ -61,7 +66,7 @@ const defaultPnlColDef: ColDef<PnlGridRow> = {
   minWidth: 68,
 };
 
-export function Pnl({ connection }: { connection: Connection }) {
+function PnlComponent({ connection, paused = false }: { connection: Connection; paused?: boolean }) {
   const model = useMemo(() => new PnlModel(connection), []);
   useEffect(() => {
     model.setConnection(connection);
@@ -74,23 +79,34 @@ export function Pnl({ connection }: { connection: Connection }) {
     model.state$,
   );
   const rowData = useMemo<PnlGridRow[]>(
-    () =>
-      rows.map(({ position, mark, unrealized, bookError }) => ({
+    () => rows.map(({ position, mark, unrealized, realizedUsd, unrealizedUsd, feesPaidUsd, averageEntryUsd, markTimestamp, bookError }) => ({
         symbol: position.symbol,
         quantity: position.quantity,
         averageEntry:
-          position.quantity === 0 ? undefined : position.average_entry_price,
+          position.quantity === 0 ? undefined : averageEntryUsd,
         mark,
-        realized: position.realized_pnl,
-        unrealized,
+        realized: realizedUsd,
+        unrealized: unrealizedUsd,
+        feesPaid: feesPaidUsd,
+        returnPct:
+          position.average_entry_price > 0 && unrealized !== undefined
+            ? (unrealized / (Math.abs(position.quantity) * position.average_entry_price)) * 100
+            : undefined,
+        lastTrade: position.last_trade_timestamp,
+        markTimestamp,
         quote: quoteCurrency(position.symbol),
         bookError,
       })),
     [rows],
   );
+  const displayedRowData = usePausedValue(rowData, paused);
   const columnDefs = useMemo<ColDef<PnlGridRow>[]>(
     () => [
       { field: 'symbol', headerName: 'Instrument', minWidth: 90 },
+      { field: 'feesPaid', headerName: 'Fees paid', minWidth: 90, valueFormatter: ({ value }) => value == null ? 'N/A' : moneyFormatter.format(value) + ' USD' },
+      { field: 'returnPct', headerName: 'Return %', minWidth: 75, valueFormatter: ({ value }) => value == null ? '—' : value.toFixed(2) + '%' },
+      { field: 'lastTrade', headerName: 'Last trade', minWidth: 75, valueFormatter: ({ value }) => value ? Math.max(0, Math.floor((Date.now() - value) / 86400000)) + 'd' : '—' },
+      { field: 'markTimestamp', headerName: 'Mark age', minWidth: 85, valueFormatter: ({ value }) => value ? Math.max(0, Math.floor((Date.now() - value) / 1000)) + 's' : '—' },
       {
         field: 'quantity',
         headerName: 'Net qty',
@@ -107,13 +123,13 @@ export function Pnl({ connection }: { connection: Connection }) {
       },
       {
         field: 'averageEntry',
-        headerName: 'Avg entry',
+        headerName: 'Avg entry (USD)',
         minWidth: 85,
         filter: 'agNumberColumnFilter',
         valueFormatter: ({ value, data }) =>
           value == null
             ? '—'
-            : moneyFormatter.format(value) + ' ' + (data?.quote ?? ''),
+            : moneyFormatter.format(value) + ' USD / ' + (data?.symbol.split('-')[0] ?? 'unit'),
       },
       {
         field: 'mark',
@@ -140,10 +156,10 @@ export function Pnl({ connection }: { connection: Connection }) {
             : value > 0
               ? 'pnl-positive'
               : 'pnl-negative',
-        valueFormatter: ({ value, data }) =>
+        valueFormatter: ({ value }) =>
           value == null
             ? ''
-            : moneyFormatter.format(value) + ' ' + (data?.quote ?? ''),
+            : moneyFormatter.format(value) + ' USD',
       },
       {
         field: 'unrealized',
@@ -156,10 +172,10 @@ export function Pnl({ connection }: { connection: Connection }) {
             : value > 0
               ? 'pnl-positive'
               : 'pnl-negative',
-        valueFormatter: ({ value, data }) =>
+        valueFormatter: ({ value }) =>
           value == null
             ? '—'
-            : moneyFormatter.format(value) + ' ' + (data?.quote ?? ''),
+            : moneyFormatter.format(value) + ' USD',
       },
     ],
     [],
@@ -180,17 +196,18 @@ export function Pnl({ connection }: { connection: Connection }) {
             const combined = total.realized + total.unrealized;
             return (
               <div className="position-total-card" key={currency}>
-                <span>{currency} P&amp;L</span>
+                <span>USD P&amp;L</span>
                 <strong
                   className={combined >= 0 ? 'pnl-positive' : 'pnl-negative'}
                 >
-                  {moneyFormatter.format(combined)} {currency}
+                  {total.hasUnconvertedPnl ? 'Unavailable' : moneyFormatter.format(combined) + ' USD'}
                 </strong>
                 <small>
-                  Realized {moneyFormatter.format(total.realized)} · Unrealized{' '}
+                  Fees {moneyFormatter.format(total.feesPaid)} USD - Realized {moneyFormatter.format(total.realized)} USD · Unrealized{' '}
                   {total.hasUnmarkedExposure
                     ? 'Loading mark…'
-                    : moneyFormatter.format(total.unrealized)}
+                    : moneyFormatter.format(total.unrealized) + ' USD'}
+                  {total.hasUnconvertedPnl && ' · Missing OKX USD rate: ' + total.missingCurrencies.join(', ')}
                 </small>
               </div>
             );
@@ -199,7 +216,7 @@ export function Pnl({ connection }: { connection: Connection }) {
       )}
       <div className="data-grid-wrap pnl-grid-wrap pnl-exposure-wrap">
         <AgGridReact<PnlGridRow>
-          rowData={rowData}
+          rowData={displayedRowData}
           columnDefs={columnDefs}
           defaultColDef={defaultPnlColDef}
           getRowId={({ data }) => data.symbol}
@@ -221,3 +238,5 @@ export function Pnl({ connection }: { connection: Connection }) {
     </section>
   );
 }
+
+export const Pnl = memo(PnlComponent);

@@ -1,4 +1,4 @@
-import { useEffect, useMemo } from 'react';
+import { memo, useEffect, useMemo } from 'react';
 import {
   SymbolPriceGridModel,
   type SymbolPriceGridProps,
@@ -54,7 +54,7 @@ function SymbolGridCellRenderer({
           {value.symbol}
         </span>
         <span className={`grid-price price-${value.direction}`}>
-          {priceFormatter.format(value.price)}
+          {priceFormatter.format(value.price)} <span className="grid-volatility">5M {value.volatility5m === undefined ? "N/A" : value.volatility5m.toFixed(3) + "%"}</span>
         </span>
       </button>
       {model.getSnapshot().onTradeSymbol && (
@@ -83,7 +83,7 @@ function SymbolGridCellRenderer({
   );
 }
 
-export function SymbolPriceGrid(props: SymbolPriceGridProps) {
+export const SymbolPriceGrid = memo(function SymbolPriceGrid(props: SymbolPriceGridProps) {
   const model = useMemo(
     () =>
       new SymbolPriceGridModel({ ...props, compact: props.compact ?? false }),
@@ -110,7 +110,7 @@ export function SymbolPriceGrid(props: SymbolPriceGridProps) {
         cellRenderer: SymbolGridCellRenderer,
         cellRendererParams: { model },
         equals: (previous, next) =>
-          previous?.symbol === next?.symbol && previous?.price === next?.price,
+          previous?.symbol === next?.symbol && previous?.price === next?.price && previous?.volatility1m === next?.volatility1m && previous?.volatility5m === next?.volatility5m,
         sortable: false,
         resizable: false,
         flex: 1,
@@ -142,11 +142,11 @@ export function SymbolPriceGrid(props: SymbolPriceGridProps) {
           domLayout="autoHeight"
           rowHeight={compact ? 24 : 42}
           headerHeight={0}
-          cellFlashDuration={500}
-          cellFadeDuration={900}
+
+
           suppressCellFocus
         />
       </div>
     </section>
   );
-}
+});

@@ -2,6 +2,8 @@ export type SymbolPriceTick = {
   symbol: string;
   price: number;
   direction: 'up' | 'down';
+  volatility1m?: number;
+  volatility5m?: number;
   receivedAt: number;
 };
 
@@ -37,7 +39,7 @@ export function decodeSymbolPrice(
   data: unknown,
   symbols?: Map<string, SymbolPriceTick>,
 ): SymbolPriceTick | undefined {
-  if (!(data instanceof Uint8Array) || data.byteLength < HEADER_LENGTH + 40)
+  if (!(data instanceof Uint8Array) || data.byteLength < HEADER_LENGTH + 56)
     return;
 
   // Reuse DataView by storing it on the Uint8Array
@@ -68,6 +70,10 @@ export function decodeSymbolPrice(
 
   const priceOffset = HEADER_LENGTH + 32;
   const price = view.getFloat64(priceOffset, true);
+  const rawVolatility1m = view.getFloat64(priceOffset + 8, true);
+  const rawVolatility5m = view.getFloat64(priceOffset + 16, true);
+  const volatility1m = Number.isFinite(rawVolatility1m) ? rawVolatility1m : undefined;
+  const volatility5m = Number.isFinite(rawVolatility5m) ? rawVolatility5m : undefined;
   const prev = symbols?.get(symbol);
   const previousPrice = prev?.price;
   const direction: SymbolPriceTick['direction'] =
@@ -81,6 +87,8 @@ export function decodeSymbolPrice(
     symbol,
     price,
     direction,
+    volatility1m,
+    volatility5m,
     receivedAt: Date.now(),
   };
 

@@ -1,9 +1,11 @@
 import { BehaviorSubject } from 'rxjs';
 import type { ConnectionState } from '../connection';
 import type { SymbolPriceTick } from '../types/symbol_price';
+import type { PriceHistorySample } from '../price_change_data';
 
 export type SymbolPriceTableProps = {
   ticks: SymbolPriceTick[];
+  histories: Map<string, PriceHistorySample[]>;
   state: ConnectionState;
   maxRows?: number;
   onSelectSymbol?: (symbol: string) => void;

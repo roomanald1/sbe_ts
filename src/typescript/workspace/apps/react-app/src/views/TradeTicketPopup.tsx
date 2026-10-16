@@ -1,4 +1,5 @@
 ﻿import { useEffect, useMemo } from 'react';
+import { createPortal } from 'react-dom';
 import type { Connection } from '../connection';
 import { TradeTicketModel } from '../models/TradeTicketModel';
 import { useBehaviorSnapshot } from '../use_behavior_snapshot';
@@ -26,7 +27,7 @@ export function TradeTicketPopup({
     model.start();
     return () => model.stop();
   }, [model]);
-  return (
+  return createPortal((
     <div
       className="trade-popup-backdrop"
       role="presentation"
@@ -137,16 +138,51 @@ export function TradeTicketPopup({
               )}
             </label>
           )}
-          <div className="trade-popup-quote">
-            <span>ORDER</span>
-            <strong>
-              {state.orderType === 'ioc'
-                ? 'Match available book depth now'
-                : state.orderType === 'limit'
-                  ? 'Match now, rest any remainder'
-                  : 'Run a U-shaped 78-bin schedule using live trade volume'}
-            </strong>
+          <div className="trade-preview" aria-live="polite">
+            <div className="trade-preview-item">
+              <span>BEST BID / ASK</span>
+              <strong>
+                {state.bestBid !== undefined && state.bestAsk !== undefined
+                  ? `${state.bestBid.toPrecision(8)} / ${state.bestAsk.toPrecision(8)}`
+                  : state.bookError || 'Waiting for book'}
+              </strong>
+            </div>
+            <div className="trade-preview-item">
+              <span>SPREAD</span>
+              <strong>
+                {state.spread !== undefined
+                  ? `${state.spread.toPrecision(6)} (${state.currentPrice ? `${(state.spread / state.currentPrice * 100).toFixed(3)}%` : ''})`
+                  : '—'}
+              </strong>
+            </div>
+            <div className="trade-preview-item">
+              <span>ESTIMATED NOTIONAL · MID</span>
+              <strong>
+                {state.estimatedNotional !== undefined
+                  ? `${state.estimatedNotional.toPrecision(8)} ${state.symbol.split('-')[1] ?? ''}`
+                  : 'Enter quantity'}
+              </strong>
+            </div>
+            <div className="trade-preview-item">
+              <span>ESTIMATED FEE ({((state.orderType === "limit" ? state.makerFeeRate : state.takerFeeRate) * 100).toFixed(3)}%)</span>
+              <strong>{state.estimatedFee === undefined ? "Unavailable" : state.estimatedFee.toPrecision(8) + " " + (state.symbol.split("-")[1] ?? "")}</strong>
+            </div>
+            <div className="trade-preview-item trade-preview-book">
+              <span>VISIBLE BOOK ESTIMATE</span>
+              {state.estimatedFillQuantity !== undefined ? (
+                <strong>
+                  {state.estimatedFillQuantity.toPrecision(8)} of {state.quantity}
+                  {' · '}avg {state.estimatedFillAverage?.toPrecision(8)}
+                  {state.estimatedUnfilledQuantity
+                    ? <small>{state.estimatedUnfilledQuantity.toPrecision(8)} beyond displayed depth</small>
+                    : null}
+                </strong>
+              ) : (
+                <strong>Unavailable</strong>
+              )}
+            </div>
           </div>
+
           <button
             className={'paper-trade-submit is-' + state.side}
             type="submit"
@@ -173,6 +209,8 @@ export function TradeTicketPopup({
         {state.message && <p role="status">{state.message}</p>}
       </section>
     </div>
-  );
+  ), document.body);
 }
+
+
 

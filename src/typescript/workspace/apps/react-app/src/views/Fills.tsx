@@ -1,4 +1,5 @@
-import { useEffect, useMemo } from 'react';
+import { memo, useEffect, useMemo } from 'react';
+import { usePausedValue } from '../use_paused_value';
 import { AgGridReact } from 'ag-grid-react';
 import {
   ClientSideRowModelModule,
@@ -58,7 +59,7 @@ const defaultFillColDef: ColDef<FillGridRow> = {
   minWidth: 60,
 };
 
-export function Fills() {
+function FillsComponent({ paused = false }: { paused?: boolean }) {
   const model = useMemo(() => new FillsModel(), []);
   useEffect(() => {
     model.start();
@@ -75,6 +76,7 @@ export function Fills() {
       })),
     [fills],
   );
+  const displayedRowData = usePausedValue(rowData, paused);
   const columnDefs = useMemo<ColDef<FillGridRow>[]>(
     () => [
       {
@@ -115,6 +117,18 @@ export function Fills() {
             : numberFormatter.format(value) + ' ' + (data?.quote ?? ''),
       },
       {
+        field: 'fee',
+        headerName: 'Fee',
+        minWidth: 80,
+        valueFormatter: ({ value, data }) => value == null ? 'N/A' : numberFormatter.format(value) + ' ' + (data?.fee_currency || data?.quote || ''),
+      },
+      {
+        field: 'fee_liquidity',
+        headerName: 'Liquidity',
+        minWidth: 78,
+        valueFormatter: ({ value }) => value ? String(value).toUpperCase() : 'N/A',
+      },
+      {
         field: 'value',
         headerName: 'Value',
         headerTooltip: 'Quantity multiplied by execution price',
@@ -141,7 +155,7 @@ export function Fills() {
       )}
       <div className="data-grid-wrap fills-grid-wrap fills-table-wrap">
         <AgGridReact<FillGridRow>
-          rowData={rowData}
+          rowData={displayedRowData}
           columnDefs={columnDefs}
           defaultColDef={defaultFillColDef}
           getRowId={({ data }) => data.id}
@@ -161,3 +175,5 @@ export function Fills() {
     </section>
   );
 }
+
+export const Fills = memo(FillsComponent);

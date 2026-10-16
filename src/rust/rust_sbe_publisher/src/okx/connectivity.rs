@@ -4,7 +4,11 @@ use futures_util::{SinkExt, StreamExt, TryStreamExt};
 use reqwest::header::USER_AGENT;
 use serde::Deserialize;
 use serde_json::{Value, json};
-use std::{collections::HashSet, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet, VecDeque},
+    sync::{Arc, Mutex},
+    time::{SystemTime, UNIX_EPOCH},
+};
 use tokio::sync::{broadcast::Sender, mpsc};
 use tokio::time::{Duration, Instant, sleep};
 use tokio_tungstenite::{connect_async, tungstenite::Utf8Bytes};
@@ -14,6 +18,65 @@ use crate::encoders::{SYMBOL_LENGTH, encode_book_depth, encode_symbol_price, enc
 const INITIAL_RECONNECT_DELAY: Duration = Duration::from_secs(1);
 const MAX_RECONNECT_DELAY: Duration = Duration::from_secs(30);
 const STABLE_CONNECTION_DURATION: Duration = Duration::from_secs(60);
+const VOLATILITY_HISTORY_MS: u64 = 300_000;
+
+#[derive(Default)]
+pub(crate) struct RollingVolatility {
+    samples: VecDeque<(u64, f64)>,
+}
+
+impl RollingVolatility {
+    pub(crate) fn update(&mut self, timestamp_ms: u64, price: f64) -> (f64, f64) {
+        if let Some(&(last_timestamp, _)) = self.samples.back() {
+            if timestamp_ms < last_timestamp {
+                return self.values(timestamp_ms);
+            }
+            if timestamp_ms == last_timestamp {
+                if let Some(last_sample) = self.samples.back_mut() {
+                    last_sample.1 = price;
+                }
+                return self.values(timestamp_ms);
+            }
+        }
+
+        self.samples.push_back((timestamp_ms, price));
+        let oldest_to_keep = timestamp_ms.saturating_sub(VOLATILITY_HISTORY_MS);
+        while self.samples.len() > 2 && self.samples[1].0 < oldest_to_keep {
+            self.samples.pop_front();
+        }
+        self.values(timestamp_ms)
+    }
+
+    fn values(&self, timestamp_ms: u64) -> (f64, f64) {
+        (
+            self.realized_volatility(timestamp_ms, 60_000),
+            self.realized_volatility(timestamp_ms, 300_000),
+        )
+    }
+
+    fn realized_volatility(&self, timestamp_ms: u64, window_ms: u64) -> f64 {
+        let cutoff = timestamp_ms.saturating_sub(window_ms);
+        let mut squared_returns = 0.0;
+        let mut return_count = 0;
+        let mut samples = self.samples.iter();
+        let Some(mut previous) = samples.next() else {
+            return f64::NAN;
+        };
+        for current in samples {
+            if current.0 > cutoff {
+                let log_return = (current.1 / previous.1).ln();
+                squared_returns += log_return * log_return;
+                return_count += 1;
+            }
+            previous = current;
+        }
+        if return_count == 0 {
+            f64::NAN
+        } else {
+            squared_returns.sqrt() * 100.0
+        }
+    }
+}
 
 pub async fn get_instrument_data() -> Result<Vec<String>> {
     let request_url = "https://www.okx.com/api/v5/market/tickers?instType=SPOT";
@@ -34,6 +97,34 @@ pub async fn get_instrument_data() -> Result<Vec<String>> {
         .and_then(Value::as_array)
         .ok_or_else(|| anyhow::anyhow!("OKX spot tickers response is missing data"))?;
     select_top_instruments(tickers)
+}
+
+pub async fn get_all_spot_instruments() -> Result<Vec<String>> {
+    let request_url = "https://www.okx.com/api/v5/public/instruments?instType=SPOT";
+    let response = reqwest::Client::new()
+        .get(request_url)
+        .header(USER_AGENT, "rust-web-api-client")
+        .send()
+        .await?
+        .error_for_status()?;
+    let json: Value = serde_json::from_str(&response.text().await?)?;
+    let instruments = json
+        .get("data")
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow::anyhow!("OKX spot instruments response is missing data"))?;
+    let mut symbols = instruments
+        .iter()
+        .filter_map(|instrument| {
+            let symbol = instrument.get("instId")?.as_str()?;
+            let is_live = instrument.get("state").and_then(Value::as_str) == Some("live");
+            (is_live && symbol.is_ascii() && symbol.len() <= SYMBOL_LENGTH)
+                .then(|| symbol.to_owned())
+        })
+        .collect::<Vec<_>>();
+    symbols.sort_unstable();
+    symbols.dedup();
+    anyhow::ensure!(!symbols.is_empty(), "OKX returned no live spot instruments");
+    Ok(symbols)
 }
 
 fn select_top_instruments(tickers: &[Value]) -> Result<Vec<String>> {
@@ -82,6 +173,8 @@ struct Ticker<'a> {
     instrument: &'a str,
     #[serde(borrow)]
     last: &'a str,
+    #[serde(borrow)]
+    ts: Option<&'a str>,
 }
 
 #[derive(Deserialize)]
@@ -135,6 +228,73 @@ struct Trade<'a> {
     side: &'a str,
     #[serde(borrow)]
     ts: &'a str,
+}
+
+#[derive(Clone, Debug)]
+pub struct TickerSample {
+    pub instrument: String,
+    pub price: f64,
+    pub timestamp: u64,
+}
+
+pub async fn subscribe_ticker_samples(
+    instruments: &[String],
+    updates: mpsc::Sender<TickerSample>,
+) -> Result<()> {
+    let (incoming_ws, _) = connect_async("wss://ws.okx.com:8443/ws/v5/public")
+        .await
+        .map_err(|error| {
+            anyhow::anyhow!("failed to connect to OKX hedge ticker stream: {error}")
+        })?;
+    let (mut write, mut read) = incoming_ws.split();
+    for (batch_index, batch) in instruments.chunks(240).enumerate() {
+        let args = batch
+            .iter()
+            .map(|instrument| json!({ "channel": "tickers", "instId": instrument }))
+            .collect::<Vec<_>>();
+        let request = json!({
+            "op": "subscribe",
+            "id": (batch_index + 1).to_string(),
+            "args": args,
+        });
+        write
+            .send(tokio_tungstenite::tungstenite::Message::Text(
+                Utf8Bytes::from(request.to_string()),
+            ))
+            .await?;
+        if batch_index + 1 < instruments.chunks(240).len() {
+            sleep(Duration::from_millis(500)).await;
+        }
+    }
+    loop {
+        tokio::select! {
+            _ = updates.closed() => return Ok(()),
+            message = read.next() => {
+                let Some(message) = message else { anyhow::bail!("OKX hedge ticker stream ended") };
+                let message = message?;
+                if !message.is_text() { continue; }
+                let update = match serde_json::from_str::<TickerMessage<'_>>(message.to_text()?) {
+                    Ok(update) => update,
+                    Err(error) => { eprintln!("Ignoring invalid OKX hedge ticker JSON: {error}"); continue; }
+                };
+                if update.event == Some("error") {
+                    anyhow::bail!("OKX hedge ticker subscription error: {}", update.msg.unwrap_or("unknown error"));
+                }
+                for ticker in update.data.unwrap_or_default() {
+                    let (Some(timestamp), Ok(price)) = (
+                        ticker.ts.and_then(|value| value.parse::<u64>().ok()),
+                        ticker.last.parse::<f64>(),
+                    ) else { continue; };
+                    if !price.is_finite() || price <= 0.0 { continue; }
+                    updates.send(TickerSample {
+                        instrument: ticker.instrument.to_owned(),
+                        price,
+                        timestamp,
+                    }).await.map_err(|_| anyhow::anyhow!("hedge ticker sample receiver was dropped"))?;
+                }
+            }
+        }
+    }
 }
 
 pub(crate) async fn subscribe_trades_once(
@@ -380,11 +540,14 @@ async fn subscribe_once(
 
     println!("OKX WebSocket handshake has been successfully completed");
     let (mut write, read) = incoming_ws.split();
+    let volatility_by_instrument =
+        Arc::new(Mutex::new(HashMap::<String, RollingVolatility>::new()));
     let ws = {
         let read = read.map(|message| message.map_err(anyhow::Error::from));
         read.try_for_each(move |message| {
             let instrument_lookup = instrument_lookup.clone();
             let price_updates = price_updates.clone();
+            let volatility_by_instrument = Arc::clone(&volatility_by_instrument);
             async move {
                 let text = match message.to_text() {
                     Ok(text) => text,
@@ -417,7 +580,27 @@ async fn subscribe_once(
                             continue;
                         };
                         if price.is_finite() && price > 0.0 {
-                            let encoded = encode_symbol_price(instrument, price)?;
+                            let timestamp_ms = item
+                                .ts
+                                .and_then(|value| value.parse::<u64>().ok())
+                                .unwrap_or_else(|| {
+                                    SystemTime::now()
+                                        .duration_since(UNIX_EPOCH)
+                                        .unwrap_or_default()
+                                        .as_millis() as u64
+                                });
+                            let (volatility_1m, volatility_5m) = volatility_by_instrument
+                                .lock()
+                                .expect("volatility state lock poisoned")
+                                .entry(instrument.to_string())
+                                .or_default()
+                                .update(timestamp_ms, price);
+                            let encoded = encode_symbol_price(
+                                instrument,
+                                price,
+                                volatility_1m,
+                                volatility_5m,
+                            )?;
                             let _ = price_updates.send(encoded);
                         }
                     }

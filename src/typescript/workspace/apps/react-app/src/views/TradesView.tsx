@@ -1,4 +1,5 @@
-import { useEffect, useId, useMemo, useRef } from 'react';
+import { memo, useEffect, useId, useMemo, useRef } from 'react';
+import { usePausedValue } from '../use_paused_value';
 import { AgGridReact } from 'ag-grid-react';
 import {
   CellStyleModule,
@@ -30,6 +31,7 @@ type TradesViewProps = {
   symbols?: string[];
   onSymbolChange?: (symbol: string) => void;
   streamKey?: string;
+  paused?: boolean;
 };
 
 type TradeGridRow = Omit<RecentTrade, 'timestamp'> & { time: Date };
@@ -61,12 +63,13 @@ const defaultTradeColDef: ColDef<TradeGridRow> = {
   minWidth: 68,
 };
 
-export function TradesView({
+export function TradesViewComponent({
   symbol,
   connection,
   symbols = [],
   onSymbolChange,
   streamKey,
+  paused = false,
 }: TradesViewProps) {
   const generatedKey = useId();
   const key = streamKey ?? generatedKey;
@@ -97,6 +100,7 @@ export function TradesView({
     }),
     [state.trades],
   );
+  const displayedRowData = usePausedValue(rowData, paused);
   const columnDefs = useMemo<ColDef<TradeGridRow>[]>(
     () => [
       {
@@ -162,7 +166,7 @@ export function TradesView({
       )}
       <div className="data-grid-wrap fills-grid-wrap trades-grid-wrap">
         <AgGridReact<TradeGridRow>
-          rowData={rowData}
+          rowData={displayedRowData}
           columnDefs={columnDefs}
           defaultColDef={defaultTradeColDef}
           getRowId={({ data }) => data.tradeId}
@@ -179,3 +183,5 @@ export function TradesView({
     </section>
   );
 }
+
+export const TradesView = memo(TradesViewComponent);

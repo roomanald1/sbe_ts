@@ -24,8 +24,15 @@ const BOOK_DEPTH: usize = 7;
 const EPSILON: f64 = 1e-12;
 
 pub async fn router() -> anyhow::Result<Router> {
-    let store = Arc::new(PositionStore::load().await?);
-    let symbols = store
+    let spot_symbols = Arc::new(match crate::okx::connectivity::get_all_spot_instruments().await {
+        Ok(symbols) => symbols,
+        Err(error) => {
+            eprintln!("Unable to load full spot list for hedge sampling: {error:#}; falling back to top tickers");
+            crate::okx::connectivity::get_instrument_data().await?
+        }
+    });
+    let store = Arc::new(PositionStore::load(Arc::clone(&spot_symbols)).await?);
+    let mut symbols = store
         .ledger
         .lock()
         .await
@@ -33,11 +40,42 @@ pub async fn router() -> anyhow::Result<Router> {
         .iter()
         .map(|order| order.symbol.clone())
         .collect::<std::collections::HashSet<_>>();
+    symbols.extend(summarize_positions(&store.ledger.lock().await.trades).positions.into_iter()
+        .filter(|position| position.quantity.abs() > EPSILON)
+        .map(|position| position.symbol));
     for symbol in symbols {
         store.ensure_subscription(&symbol);
     }
+    let (sample_sender, mut sample_receiver) = mpsc::channel(4096);
+    let ticker_symbols = Arc::clone(&spot_symbols);
+    let ticker_sender = sample_sender.clone();
+    tokio::spawn(async move {
+        loop {
+            if let Err(error) = crate::okx::connectivity::subscribe_ticker_samples(
+                ticker_symbols.as_slice(),
+                ticker_sender.clone(),
+            ).await {
+                eprintln!("OKX hedge ticker sampler disconnected: {error:#}; reconnecting");
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
+        }
+    });
+    let sample_store = Arc::clone(&store);
+    tokio::spawn(async move {
+        while let Some(sample) = sample_receiver.recv().await {
+            sample_store.record_ticker_sample(sample).await;
+        }
+    });
     Ok(Router::new()
         .route("/positions", get(get_positions))
+        .route("/positions/account", get(get_account))
+        .route("/account", get(get_account))
+        .route("/positions/account/topups", post(top_up_account))
+        .route("/account/topups", post(top_up_account))
+        .route("/instruments", get(get_spot_instruments))
+        .route("/positions/usd-rates", get(get_usd_rates))
+        .route("/positions/fee-rates", get(get_fee_rates))
+        .route("/positions/hedge-candidates", get(get_hedge_candidates))
         .route("/positions/insights", get(get_close_insights))
         .route("/positions/trades", get(get_position_trades))
         .route("/positions/vwap", get(get_vwap_runs).post(start_vwap))
@@ -49,6 +87,57 @@ pub async fn router() -> anyhow::Result<Router> {
             axum::routing::delete(cancel_order),
         )
         .with_state(store))
+}
+
+#[derive(Serialize)]
+struct SpotInstrumentsResponse {
+    symbols: Vec<String>,
+}
+
+async fn get_spot_instruments(
+    State(store): State<Arc<PositionStore>>,
+) -> Json<SpotInstrumentsResponse> {
+    Json(SpotInstrumentsResponse { symbols: store.spot_symbols.as_ref().clone() })
+}
+
+#[derive(Serialize)]
+struct UsdRatesResponse {
+    rates: BTreeMap<String, f64>,
+    updated_at: u64,
+}
+
+async fn get_usd_rates() -> Result<Json<UsdRatesResponse>, (StatusCode, String)> {
+    let response = reqwest::Client::new()
+        .get("https://www.okx.com/api/v5/market/index-tickers?quoteCcy=USD")
+        .send()
+        .await
+        .map_err(|error| (StatusCode::BAD_GATEWAY, format!("OKX USD index request failed: {error}")))?
+        .error_for_status()
+        .map_err(|error| (StatusCode::BAD_GATEWAY, format!("OKX USD index request failed: {error}")))?
+        .text()
+        .await
+        .map_err(|error| (StatusCode::BAD_GATEWAY, format!("Could not read OKX USD index response: {error}")))?;
+    let response: serde_json::Value = serde_json::from_str(&response)
+        .map_err(|error| (StatusCode::BAD_GATEWAY, format!("Invalid OKX USD index response: {error}")))?;
+    let data = response.get("data").and_then(serde_json::Value::as_array)
+        .ok_or_else(|| (StatusCode::BAD_GATEWAY, "OKX USD index response has no data".to_owned()))?;
+    let mut rates = BTreeMap::from([("USD".to_owned(), 1.0)]);
+    let mut updated_at = 0;
+    for item in data {
+        let Some(instrument) = item.get("instId").and_then(serde_json::Value::as_str) else { continue; };
+        let Some((currency, quote)) = instrument.split_once('-') else { continue; };
+        if quote != "USD" { continue; }
+        let Some(rate) = item.get("idxPx").and_then(serde_json::Value::as_str).and_then(|value| value.parse::<f64>().ok()) else { continue; };
+        if !rate.is_finite() || rate <= 0.0 { continue; }
+        rates.insert(currency.to_owned(), rate);
+        if let Some(timestamp) = item.get("ts").and_then(serde_json::Value::as_str).and_then(|value| value.parse::<u64>().ok()) {
+            updated_at = updated_at.max(timestamp);
+        }
+    }
+    if rates.len() == 1 {
+        return Err((StatusCode::BAD_GATEWAY, "OKX returned no usable USD index rates".to_owned()));
+    }
+    Ok(Json(UsdRatesResponse { rates, updated_at }))
 }
 
 #[derive(Deserialize)]
@@ -97,7 +186,17 @@ struct PositionTrade {
     side: TradeSide,
     quantity: f64,
     execution_price: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    reference_price: Option<f64>,
     timestamp: u64,
+    #[serde(default)]
+    fee: f64,
+    #[serde(default)]
+    fee_currency: String,
+    #[serde(default)]
+    fee_rate: f64,
+    #[serde(default)]
+    fee_liquidity: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -109,6 +208,10 @@ struct RestingOrder {
     remaining_quantity: f64,
     limit_price: f64,
     timestamp: u64,
+    #[serde(default)]
+    maker_fee_rate: f64,
+    #[serde(default)]
+    estimated_fee: f64,
 }
 
 #[derive(Deserialize)]
@@ -133,6 +236,9 @@ struct Position {
     quantity: f64,
     average_entry_price: f64,
     realized_pnl: f64,
+    entry_fees: f64,
+    fees_paid: f64,
+    estimated_exit_fee_rate: f64,
     last_trade_timestamp: u64,
 }
 #[derive(Serialize)]
@@ -145,11 +251,37 @@ struct TradesResponse {
     trades: Vec<PositionTrade>,
 }
 #[derive(Serialize)]
+struct HedgeCandidate {
+    symbol: String,
+    correlation: Option<f64>,
+    paired_samples: usize,
+    latest_price: Option<f64>,
+}
+#[derive(Serialize)]
+struct HedgePosition {
+    symbol: String,
+    quantity: f64,
+    latest_price: Option<f64>,
+    candidates: Vec<HedgeCandidate>,
+}
+#[derive(Serialize)]
+struct HedgePairCorrelation {
+    symbol_a: String,
+    symbol_b: String,
+    correlation: Option<f64>,
+}
+#[derive(Serialize)]
+struct HedgeCandidatesResponse {
+    positions: Vec<HedgePosition>,
+    pair_correlations: Vec<HedgePairCorrelation>,
+}
+#[derive(Serialize)]
 struct OrdersResponse {
     orders: Vec<RestingOrder>,
 }
 #[derive(Serialize)]
 struct OrderResponse {
+    estimated_fee: f64,
     filled_quantity: f64,
     remaining_quantity: f64,
     average_execution_price: Option<f64>,
@@ -166,9 +298,28 @@ struct BookSnapshot {
     asks: Vec<BookLevel>,
 }
 
-#[derive(Default, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
+struct AccountTopup { amount: f64, timestamp: u64 }
+#[derive(Deserialize)]
+struct TopupRequest { amount: f64 }
+#[derive(Serialize)]
+struct AccountResponse { currency: &'static str, cash: f64, equity: f64, realized_pnl: f64, unrealized_pnl: f64, fees_paid: f64, equity_available: bool, initial_cash: f64, topups: Vec<AccountTopup> }
+#[derive(Serialize)]
+struct FeeRatesResponse { maker: f64, taker: f64 }
+struct FeeRates { maker: f64, taker: f64 }
+fn configured_fee_rates() -> FeeRates {
+    let parse = |name: &str, default: f64| std::env::var(name).ok().and_then(|value| value.parse::<f64>().ok()).filter(|value| value.is_finite() && *value >= 0.0 && *value <= 0.1).unwrap_or(default);
+    FeeRates { maker: -parse("PAPER_OKX_SPOT_MAKER_FEE_RATE", 0.0008), taker: -parse("PAPER_OKX_SPOT_TAKER_FEE_RATE", 0.001) }
+}
+fn default_account_cash() -> f64 { std::env::var("PAPER_ACCOUNT_INITIAL_CASH").ok().and_then(|value| value.parse().ok()).filter(|value: &f64| value.is_finite() && *value > 0.0).unwrap_or(10_000.0) }
+
+#[derive(Clone, Default, Serialize, Deserialize)]
 struct Ledger {
     trades: Vec<PositionTrade>,
+    #[serde(default = "default_account_cash")]
+    initial_cash: f64,
+    #[serde(default)]
+    topups: Vec<AccountTopup>,
     #[serde(default)]
     orders: Vec<RestingOrder>,
 }
@@ -177,31 +328,39 @@ struct PositionStore {
     ledger: Mutex<Ledger>,
     books: Mutex<HashMap<String, BookSnapshot>>,
     price_samples: Mutex<HashMap<String, Vec<(u64, f64)>>>,
+    hedge_samples: Mutex<HashMap<String, Vec<(u64, f64)>>>,
     book_changed: Notify,
     subscriptions: StdMutex<HashMap<String, mpsc::Sender<anyhow::Result<Bytes>>>>,
+    spot_symbols: Arc<Vec<String>>,
     vwap_runs: Mutex<HashMap<String, VwapRunEntry>>,
 }
 
 impl PositionStore {
-    async fn load() -> anyhow::Result<Self> {
+    async fn load(spot_symbols: Arc<Vec<String>>) -> anyhow::Result<Self> {
         let path = std::env::var_os("POSITIONS_FILE")
             .map(PathBuf::from)
             .unwrap_or(std::env::current_dir()?.join("positions.json"));
-        let ledger = match tokio::fs::read(&path).await {
+        let mut ledger = match tokio::fs::read(&path).await {
             Ok(bytes) => {
                 let value: serde_json::Value = serde_json::from_slice(&bytes)?;
                 if value.is_array() {
                     Ledger {
                         trades: serde_json::from_value(value)?,
+                        initial_cash: default_account_cash(),
+                        topups: Vec::new(),
                         orders: Vec::new(),
                     }
                 } else {
                     serde_json::from_value(value)?
                 }
             }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ledger::default(),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ledger { initial_cash: default_account_cash(), ..Ledger::default() },
             Err(error) => return Err(error.into()),
         };
+        for order in &mut ledger.orders {
+            if order.maker_fee_rate == 0.0 { order.maker_fee_rate = configured_fee_rates().maker; }
+            order.estimated_fee = order.remaining_quantity * order.limit_price * -order.maker_fee_rate;
+        }
         println!(
             "Loaded {} paper fills and {} resting orders from {}",
             ledger.trades.len(),
@@ -213,8 +372,10 @@ impl PositionStore {
             ledger: Mutex::new(ledger),
             books: Mutex::new(HashMap::new()),
             price_samples: Mutex::new(HashMap::new()),
+            hedge_samples: Mutex::new(HashMap::new()),
             book_changed: Notify::new(),
             subscriptions: StdMutex::new(HashMap::new()),
+            spot_symbols,
             vwap_runs: Mutex::new(HashMap::new()),
         })
     }
@@ -228,6 +389,15 @@ impl PositionStore {
         tokio::fs::rename(temp, &self.path).await?;
         Ok(())
     }
+    async fn record_ticker_sample(&self, sample: crate::okx::connectivity::TickerSample) {
+        let mut histories = self.hedge_samples.lock().await;
+        let samples = histories.entry(sample.instrument).or_default();
+        if samples.last().map_or(true, |(timestamp, _)| sample.timestamp.saturating_sub(*timestamp) >= 10_000) {
+            samples.push((sample.timestamp, sample.price));
+            samples.retain(|(timestamp, _)| sample.timestamp.saturating_sub(*timestamp) <= 30 * 60_000);
+        }
+    }
+
     fn ensure_subscription(self: &Arc<Self>, symbol: &str) {
         let mut subscriptions = self
             .subscriptions
@@ -315,11 +485,13 @@ impl PositionStore {
                 }
                 let quantity = remaining.min(level.size);
                 if quantity > EPSILON {
-                    fills.push((order.side.clone(), quantity, level.price));
+                    let fee_rate = if order.maker_fee_rate == 0.0 { configured_fee_rates().maker } else { order.maker_fee_rate };
+                    fills.push((order.side.clone(), quantity, level.price, fee_rate));
                     remaining -= quantity;
                 }
             }
             order.remaining_quantity = remaining.max(0.0);
+            order.estimated_fee = order.remaining_quantity * order.limit_price * -order.maker_fee_rate;
         }
         ledger
             .orders
@@ -327,14 +499,19 @@ impl PositionStore {
         if !fills.is_empty() {
             let timestamp = now_ms()?;
             let trade_offset = ledger.trades.len();
-            for (index, (side, quantity, execution_price)) in fills.into_iter().enumerate() {
+            for (index, (side, quantity, execution_price, fee_rate)) in fills.into_iter().enumerate() {
                 ledger.trades.push(PositionTrade {
                     id: format!("{timestamp}-{index}-{}", trade_offset),
                     symbol: symbol.to_owned(),
                     side,
                     quantity,
                     execution_price,
+                    reference_price: None,
                     timestamp,
+                    fee: quantity * execution_price * -fee_rate,
+                    fee_currency: symbol.split_once('-').map(|(_, quote)| quote.to_owned()).unwrap_or_default(),
+                    fee_rate,
+                    fee_liquidity: "maker".to_owned(),
                 });
             }
             self.persist(&ledger).await?;
@@ -380,6 +557,22 @@ async fn start_vwap(
             "Participation rate must be between 1% and 100%".into(),
         ));
     }
+    store.ensure_subscription(&symbol);
+    if store.books.lock().await.get(&symbol).is_none() {
+        let wait = async {
+            loop {
+                let notified = store.book_changed.notified();
+                if store.books.lock().await.contains_key(&symbol) { break; }
+                notified.await;
+            }
+        };
+        timeout(Duration::from_secs(8), wait).await.map_err(|_| (StatusCode::SERVICE_UNAVAILABLE, "Waiting for live OKX book timed out".to_owned()))?;
+    }
+    let side_book = store.books.lock().await.get(&symbol).cloned().ok_or((StatusCode::SERVICE_UNAVAILABLE, "Live book is required to reserve VWAP buying power".to_owned()))?;
+    let price = match request.side { TradeSide::Buy => side_book.asks.iter().map(|level| level.price).fold(0.0_f64, f64::max), TradeSide::Sell => side_book.bids.first().map(|level| level.price).unwrap_or(0.0) };
+    if price <= 0.0 { return Err((StatusCode::SERVICE_UNAVAILABLE, "Live reference price unavailable for VWAP".into())); }
+    let account_ledger = store.ledger.lock().await;
+    ensure_paper_capacity(&store, &account_ledger, &symbol, &request.side, request.quantity, price, configured_fee_rates().taker).await?;
     let timestamp = now_ms().map_err(internal_error)?;
     let id = format!("vwap-{timestamp}-{}", symbol.to_ascii_lowercase());
     let status = Arc::new(Mutex::new(VwapRunStatus {
@@ -405,6 +598,7 @@ async fn start_vwap(
         },
     );
     store.ensure_subscription(&symbol);
+    drop(account_ledger);
     let initial_status = status.lock().await.clone();
     tokio::spawn(run_vwap(
         Arc::clone(&store),
@@ -571,6 +765,7 @@ async fn execute_vwap_child(
         TradeSide::Buy => &book.asks,
         TradeSide::Sell => &book.bids,
     };
+    let reference_price = levels.first().map(|level| level.price);
     let mut remaining = quantity;
     let mut fills = Vec::new();
     for level in levels {
@@ -588,6 +783,7 @@ async fn execute_vwap_child(
         return Ok((0.0, None));
     }
     let average = fills.iter().map(|(qty, price)| qty * price).sum::<f64>() / filled;
+    let fee_rate = configured_fee_rates().taker;
     let timestamp = now_ms().map_err(|error| error.to_string())?;
     let mut ledger = store.ledger.lock().await;
     let offset = ledger.trades.len();
@@ -598,7 +794,12 @@ async fn execute_vwap_child(
             side: side.clone(),
             quantity: qty,
             execution_price,
+            reference_price,
             timestamp,
+            fee: qty * execution_price * -fee_rate,
+            fee_currency: symbol.split_once('-').map(|(_, quote)| quote.to_owned()).unwrap_or_default(),
+            fee_rate,
+            fee_liquidity: "taker".to_owned(),
         });
     }
     store
@@ -608,9 +809,228 @@ async fn execute_vwap_child(
     Ok((filled, Some(average)))
 }
 
-async fn get_positions(State(store): State<Arc<PositionStore>>) -> Json<PositionsResponse> {
+async fn get_fee_rates() -> Json<FeeRatesResponse> {
+    let rates = configured_fee_rates();
+    Json(FeeRatesResponse { maker: rates.maker.abs(), taker: rates.taker.abs() })
+}
+async fn account_snapshot(store: &PositionStore, ledger: &Ledger) -> Result<AccountResponse, (StatusCode, String)> {
+    let rates = get_usd_rates().await?.0.rates;
+    let mut cash = ledger.initial_cash + ledger.topups.iter().map(|topup| topup.amount).sum::<f64>();
+    let mut fees_paid = 0.0;
+    let mut equity_available = true;
+    for trade in &ledger.trades {
+        let quote = trade.symbol.split_once('-').map(|(_, quote)| quote).unwrap_or_default();
+        if let Some(rate) = rates.get(quote) {
+            let notional = trade.quantity * trade.execution_price * rate;
+            cash += match trade.side { TradeSide::Buy => -notional, TradeSide::Sell => notional };
+            let fee = trade.fee * rate;
+            cash -= fee;
+            fees_paid += fee;
+        } else if trade.quantity * trade.execution_price > 0.0 {
+            equity_available = false;
+        }
+    }
+    let positions = summarize_positions(&ledger.trades).positions;
+    let books = store.books.lock().await;
+    let mut equity = cash;
+    let mut realized_pnl = 0.0;
+    let mut unrealized_pnl = 0.0;
+    for position in positions.iter().filter(|position| position.quantity.abs() > EPSILON) {
+        let quote = position.symbol.split_once('-').map(|(_, quote)| quote).unwrap_or_default();
+        let Some(rate) = rates.get(quote) else { equity_available = false; continue; };
+        realized_pnl += position.realized_pnl * rate;
+        let Some(book) = books.get(&position.symbol) else { equity_available = false; continue; };
+        let mark = if position.quantity > 0.0 { book.bids.first() } else { book.asks.first() };
+        let Some(mark) = mark else { equity_available = false; continue; };
+        let marked_value = position.quantity * mark.price * rate;
+        equity += marked_value;
+        let gross_unrealized = (mark.price - position.average_entry_price) * position.quantity;
+        let close_fee = position.quantity.abs() * mark.price * position.estimated_exit_fee_rate;
+        unrealized_pnl += (gross_unrealized - position.entry_fees - close_fee) * rate;
+    }
+    Ok(AccountResponse { currency: "USD", cash, equity, realized_pnl, unrealized_pnl, fees_paid, equity_available, initial_cash: ledger.initial_cash, topups: ledger.topups.clone() })
+}
+async fn ensure_paper_capacity(store: &PositionStore, ledger: &Ledger, symbol: &str, side: &TradeSide, quantity: f64, price: f64, fee_rate: f64) -> Result<(), (StatusCode, String)> {
+    let rates = get_usd_rates().await?.0.rates;
+    let quote = symbol.split_once('-').map(|(_, quote)| quote).unwrap_or_default();
+    let quote_rate = *rates.get(quote).ok_or((StatusCode::SERVICE_UNAVAILABLE, format!("No OKX USD conversion rate for {quote}")))?;
+    let account = account_snapshot(store, ledger).await?;
+    if !account.equity_available { return Err((StatusCode::SERVICE_UNAVAILABLE, "Account equity cannot be valued until every open position has a live mark and USD conversion rate".into())); }
+    let mut reserved_buying_power = 0.0;
+    for order in &ledger.orders {
+        if matches!(order.side, TradeSide::Buy) {
+            let order_quote = order.symbol.split_once('-').map(|(_, quote)| quote).unwrap_or_default();
+            let rate = *rates.get(order_quote).ok_or((StatusCode::SERVICE_UNAVAILABLE, format!("No OKX USD conversion rate for {order_quote}")))?;
+            reserved_buying_power += (order.remaining_quantity * order.limit_price + order.estimated_fee) * rate;
+        }
+    }
+    let runs = store.vwap_runs.lock().await;
+    let books = store.books.lock().await;
+    let mut reserved_sell = 0.0;
+    for entry in runs.values() {
+        let status = entry.status.lock().await;
+        if status.status != "running" { continue; }
+        let remaining = (status.quantity - status.executed_quantity).max(0.0);
+        if matches!(status.side, TradeSide::Buy) {
+            let run_quote = status.symbol.split_once('-').map(|(_, quote)| quote).unwrap_or_default();
+            let rate = *rates.get(run_quote).ok_or((StatusCode::SERVICE_UNAVAILABLE, format!("No OKX USD conversion rate for {run_quote}")))?;
+            let run_price = books.get(&status.symbol).and_then(|book| book.asks.first()).map(|level| level.price).ok_or((StatusCode::SERVICE_UNAVAILABLE, "Cannot reserve VWAP without a live ask price".into()))?;
+            reserved_buying_power += remaining * run_price * rate * (1.0 - configured_fee_rates().taker);
+        } else if status.symbol == symbol {
+            reserved_sell += remaining;
+        }
+    }
+    if matches!(side, TradeSide::Buy) {
+        let required = quantity * price * quote_rate * (1.0 - fee_rate);
+        let available = account.cash - reserved_buying_power;
+        if required > available + EPSILON { return Err((StatusCode::CONFLICT, format!("Insufficient paper account buying power: need {:.2} USD, have {:.2} USD", required, available.max(0.0)))); }
+    } else {
+        let held = summarize_positions(&ledger.trades).positions.into_iter().find(|position| position.symbol == symbol).map(|position| position.quantity.max(0.0)).unwrap_or(0.0);
+        let reserved = ledger.orders.iter().filter(|order| order.symbol == symbol && matches!(order.side, TradeSide::Sell)).map(|order| order.remaining_quantity).sum::<f64>() + reserved_sell;
+        if quantity > held - reserved + EPSILON { return Err((StatusCode::CONFLICT, "Insufficient unreserved base asset to sell".into())); }
+        if quantity * price * quote_rate * (1.0 - fee_rate) > account.equity { return Err((StatusCode::CONFLICT, "Sell order exceeds paper account equity".into())); }
+    }
+    Ok(())
+}
+async fn get_account(State(store): State<Arc<PositionStore>>) -> Result<Json<AccountResponse>, (StatusCode, String)> {
+    let ledger = store.ledger.lock().await.clone();
+    Ok(Json(account_snapshot(&store, &ledger).await?))
+}
+async fn top_up_account(State(store): State<Arc<PositionStore>>, Json(request): Json<TopupRequest>) -> Result<Json<AccountResponse>, (StatusCode, String)> {
+    if !request.amount.is_finite() || request.amount <= 0.0 { return Err((StatusCode::BAD_REQUEST, "Top-up amount must be positive".into())); }
+    let mut ledger = store.ledger.lock().await;
+    ledger.topups.push(AccountTopup { amount: request.amount, timestamp: now_ms().map_err(internal_error)? });
+    store.persist(&ledger).await.map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, format!("Unable to persist account top-up: {error}")))?;
+    Ok(Json(account_snapshot(&store, &ledger).await?))
+}async fn get_positions(State(store): State<Arc<PositionStore>>) -> Json<PositionsResponse> {
     let ledger = store.ledger.lock().await;
     Json(summarize_positions(&ledger.trades))
+}
+
+async fn get_hedge_candidates(
+    State(store): State<Arc<PositionStore>>,
+) -> Json<HedgeCandidatesResponse> {
+    let positions = summarize_positions(&store.ledger.lock().await.trades)
+        .positions
+        .into_iter()
+        .filter(|position| position.quantity.abs() > EPSILON)
+        .collect::<Vec<_>>();
+    for position in &positions {
+        store.ensure_subscription(&position.symbol);
+    }
+    let histories = store.hedge_samples.lock().await.clone();
+    let mut pair_correlations = Vec::new();
+    for left_index in 0..positions.len() {
+        for right_index in (left_index + 1)..positions.len() {
+            let left = &positions[left_index];
+            let right = &positions[right_index];
+            let left_key = hedge_history_key(&left.symbol);
+            let right_key = hedge_history_key(&right.symbol);
+            let left_samples = histories.get(&left_key).map(Vec::as_slice).unwrap_or(&[]);
+            let right_samples = histories.get(&right_key).map(Vec::as_slice).unwrap_or(&[]);
+            let (correlation, _) = return_correlation(left_samples, right_samples);
+            pair_correlations.push(HedgePairCorrelation {
+                symbol_a: left.symbol.clone(),
+                symbol_b: right.symbol.clone(),
+                correlation,
+            });
+        }
+    }
+    let response = positions
+        .into_iter()
+        .map(|position| {
+            let position_key = hedge_history_key(&position.symbol);
+            let quote = position_key.split_once('-').map(|(_, quote)| quote);
+            let position_samples = histories.get(&position_key).map(Vec::as_slice).unwrap_or(&[]);
+            let mut candidates: Vec<HedgeCandidate> = store.spot_symbols
+                .iter()
+                .filter(|symbol| {
+                    symbol.as_str() != position.symbol
+                        && quote.is_some_and(|quote| symbol.split_once('-').is_some_and(|(_, candidate_quote)| candidate_quote == quote))
+                })
+                .map(|symbol| {
+                    let samples = histories.get(symbol).map(Vec::as_slice).unwrap_or(&[]);
+                    let (correlation, paired_samples) = return_correlation(position_samples, samples);
+                    HedgeCandidate {
+                        symbol: symbol.clone(),
+                        correlation,
+                        paired_samples,
+                        latest_price: samples.last().map(|(_, price)| *price),
+                    }
+                })
+                .collect();
+            candidates.sort_by(|left: &HedgeCandidate, right: &HedgeCandidate| {
+                match (left.correlation, right.correlation) {
+                    (Some(left), Some(right)) => left.total_cmp(&right),
+                    (Some(_), None) => std::cmp::Ordering::Less,
+                    (None, Some(_)) => std::cmp::Ordering::Greater,
+                    (None, None) => right.paired_samples.cmp(&left.paired_samples),
+                }
+                .then_with(|| left.symbol.cmp(&right.symbol))
+            });
+            candidates.truncate(10);
+            HedgePosition {
+                symbol: position.symbol,
+                quantity: position.quantity,
+                latest_price: position_samples.last().map(|(_, price)| *price),
+                candidates,
+            }
+        })
+        .collect();
+    Json(HedgeCandidatesResponse { positions: response, pair_correlations })
+}
+
+fn hedge_history_key(symbol: &str) -> String {
+    let mut parts = symbol.split('-');
+    match (parts.next(), parts.next()) {
+        (Some(base), Some(quote)) => format!("{base}-{quote}"),
+        _ => symbol.to_owned(),
+    }
+}
+fn return_correlation(a: &[(u64, f64)], b: &[(u64, f64)]) -> (Option<f64>, usize) {
+    const BUCKET_MS: u64 = 10_000;
+    let bucket_prices = |samples: &[(u64, f64)]| {
+        samples
+            .iter()
+            .filter(|(_, price)| price.is_finite() && *price > 0.0)
+            .map(|(timestamp, price)| (timestamp / BUCKET_MS, *price))
+            .collect::<HashMap<_, _>>()
+    };
+    let left = bucket_prices(a);
+    let right = bucket_prices(b);
+    let mut shared_buckets = left
+        .keys()
+        .copied()
+        .filter(|bucket| right.contains_key(bucket))
+        .collect::<Vec<_>>();
+    shared_buckets.sort_unstable();
+    let returns = shared_buckets
+        .windows(2)
+        .map(|buckets| {
+            let previous = buckets[0];
+            let current = buckets[1];
+            (
+                (left[&current] / left[&previous]).ln(),
+                (right[&current] / right[&previous]).ln(),
+            )
+        })
+        .filter(|(x, y)| x.is_finite() && y.is_finite())
+        .collect::<Vec<_>>();
+    let count = returns.len();
+    if count < 10 {
+        return (None, count);
+    }
+    let mean_a = returns.iter().map(|(x, _)| x).sum::<f64>() / count as f64;
+    let mean_b = returns.iter().map(|(_, y)| y).sum::<f64>() / count as f64;
+    let covariance = returns.iter().map(|(x, y)| (x - mean_a) * (y - mean_b)).sum::<f64>();
+    let variance_a = returns.iter().map(|(x, _)| (x - mean_a).powi(2)).sum::<f64>();
+    let variance_b = returns.iter().map(|(_, y)| (y - mean_b).powi(2)).sum::<f64>();
+    let correlation = if variance_a > 0.0 && variance_b > 0.0 {
+        Some((covariance / (variance_a * variance_b).sqrt()).clamp(-1.0, 1.0))
+    } else {
+        None
+    };
+    (correlation.filter(|value| value.is_finite()), count)
 }
 #[derive(Serialize)]
 struct CloseInsight {
@@ -618,7 +1038,10 @@ struct CloseInsight {
     close_side: TradeSide,
     close_quantity: f64,
     close_price: Option<f64>,
+    current_price: Option<f64>,
+    breakeven_price: Option<f64>,
     close_pnl: Option<f64>,
+    close_fee: Option<f64>,
     depth_covers_position: bool,
     profitable_close_probability_5m: Option<f64>,
     probability_samples: usize,
@@ -648,8 +1071,33 @@ async fn get_close_insights(State(store): State<Arc<PositionStore>>) -> Json<Clo
             }
         }
         let depth_covers_position = remaining <= EPSILON;
-        let close_price = if depth_covers_position && position.quantity.abs() > EPSILON { Some(notional / position.quantity.abs()) } else { None };
-        let close_pnl = close_price.map(|price| (price - position.average_entry_price) * position.quantity);
+        let current_price = books.get(&position.symbol).and_then(|book| {
+            let bid = book.bids.first()?.price;
+            let ask = book.asks.first()?.price;
+            let mid = (bid + ask) / 2.0;
+            (bid.is_finite() && ask.is_finite() && bid > 0.0 && ask >= bid && mid.is_finite()).then_some(mid)
+        });
+        let close_price = if depth_covers_position && position.quantity.abs() > EPSILON {
+            let average = notional / position.quantity.abs();
+            (notional.is_finite() && notional > 0.0 && average.is_finite() && average > 0.0)
+                .then_some(average)
+        } else { None };
+        let breakeven_price = {
+            let quantity = position.quantity.abs();
+            let fee_rate = position.estimated_exit_fee_rate;
+            let (numerator, denominator) = if closing_long {
+                (position.average_entry_price * quantity + position.entry_fees, quantity * (1.0 - fee_rate))
+            } else {
+                (position.average_entry_price * quantity - position.entry_fees, quantity * (1.0 + fee_rate))
+            };
+            (numerator.is_finite() && denominator.is_finite() && numerator > 0.0 && denominator > 0.0)
+                .then_some(numerator / denominator)
+                .filter(|price| price.is_finite() && *price > 0.0)
+        };
+        let close_fee = close_price.map(|price| position.quantity.abs() * price * position.estimated_exit_fee_rate);
+        let close_pnl = close_price
+            .map(|price| (price - position.average_entry_price) * position.quantity - position.entry_fees - position.quantity.abs() * price * position.estimated_exit_fee_rate)
+            .filter(|pnl| pnl.is_finite());
         let samples = histories.get(&position.symbol).map(Vec::as_slice).unwrap_or(&[]);
         let probability = if samples.len() >= 31 && close_price.is_some() {
             let returns: Vec<f64> = samples.windows(2).filter_map(|pair| {
@@ -668,7 +1116,7 @@ async fn get_close_insights(State(store): State<Arc<PositionStore>>) -> Json<Clo
                 } else { None }
             } else { None }
         } else { None };
-        CloseInsight { symbol: position.symbol, close_side, close_quantity: position.quantity.abs(), close_price, close_pnl, depth_covers_position, profitable_close_probability_5m: probability, probability_samples: samples.len() }
+        CloseInsight { symbol: position.symbol, close_side, close_quantity: position.quantity.abs(), close_price, current_price, breakeven_price, close_pnl, close_fee, depth_covers_position, profitable_close_probability_5m: probability, probability_samples: samples.len() }
     }).collect();
     Json(CloseInsightsResponse { insights })
 }
@@ -711,19 +1159,13 @@ async fn close_profitable(
         .ok_or((StatusCode::SERVICE_UNAVAILABLE, "Live order book unavailable".into()))?;
     let levels = if position.quantity > 0.0 { &book.bids } else { &book.asks };
     let mut remaining = position.quantity.abs();
-    let mut value = 0.0;
     for level in levels {
         let size = remaining.min(level.size);
-        value += size * level.price;
         remaining -= size;
         if remaining <= EPSILON { break; }
     }
     if remaining > EPSILON {
         return Err((StatusCode::CONFLICT, "Visible book depth cannot cover the full position".into()));
-    }
-    let estimated_pnl = (value / position.quantity.abs() - position.average_entry_price) * position.quantity;
-    if estimated_pnl <= 0.0 {
-        return Err((StatusCode::CONFLICT, "Position is no longer estimated profitable at the live book".into()));
     }
     submit_order(
         State(store),
@@ -751,6 +1193,9 @@ async fn submit_order(
             "Quantity must be finite and greater than zero".into(),
         ));
     }
+    let fee_rates = configured_fee_rates();
+    let maker_fee_rate = fee_rates.maker;
+    let taker_fee_rate = fee_rates.taker;
     let is_limit = matches!(request.order_type, OrderType::Limit);
     let limit_price = if is_limit {
         let p = request.limit_price.unwrap_or(f64::NAN);
@@ -794,6 +1239,7 @@ async fn submit_order(
         TradeSide::Buy => &book.asks,
         TradeSide::Sell => &book.bids,
     };
+    let reference_price = levels.first().map(|level| level.price);
     let mut remaining = request.quantity;
     let mut fills = Vec::new();
     for level in levels {
@@ -818,6 +1264,8 @@ async fn submit_order(
     };
     let timestamp = now_ms().map_err(internal_error)?;
     let mut ledger = store.ledger.lock().await;
+    let reserve_price = if matches!(request.side, TradeSide::Buy) { levels.iter().map(|level| level.price).fold(0.0_f64, f64::max) } else { reference_price.unwrap_or(0.0) };
+    ensure_paper_capacity(&store, &ledger, &symbol, &request.side, request.quantity, reserve_price, taker_fee_rate).await?;
     let start = ledger.trades.len();
     for (index, (quantity, execution_price)) in fills.into_iter().enumerate() {
         ledger.trades.push(PositionTrade {
@@ -826,7 +1274,12 @@ async fn submit_order(
             side: request.side.clone(),
             quantity,
             execution_price,
+            reference_price,
             timestamp,
+            fee: quantity * execution_price * -taker_fee_rate,
+            fee_currency: symbol.split_once('-').map(|(_, quote)| quote.to_owned()).unwrap_or_default(),
+            fee_rate: taker_fee_rate,
+            fee_liquidity: "taker".to_owned(),
         });
     }
     let order = if is_limit && remaining > EPSILON {
@@ -838,6 +1291,8 @@ async fn submit_order(
             remaining_quantity: remaining,
             limit_price: limit_price.unwrap(),
             timestamp,
+            maker_fee_rate,
+            estimated_fee: remaining * limit_price.unwrap() * -maker_fee_rate,
         };
         ledger.orders.push(order.clone());
         Some(order)
@@ -852,6 +1307,7 @@ async fn submit_order(
     }
     Ok(Json(OrderResponse {
         filled_quantity,
+        estimated_fee: ledger.trades[start..].iter().map(|trade| trade.fee).sum::<f64>(),
         remaining_quantity: remaining,
         average_execution_price,
         order,
@@ -932,6 +1388,9 @@ fn summarize_positions(trades: &[PositionTrade]) -> PositionsResponse {
             quantity: 0.0,
             average_entry_price: 0.0,
             realized_pnl: 0.0,
+            entry_fees: 0.0,
+            fees_paid: 0.0,
+            estimated_exit_fee_rate: 0.0,
             last_trade_timestamp: trade.timestamp,
         });
         apply_trade(position, trade);
@@ -944,33 +1403,39 @@ fn summarize_positions(trades: &[PositionTrade]) -> PositionsResponse {
 }
 fn apply_trade(position: &mut Position, trade: &PositionTrade) {
     let old = position.quantity;
-    let incoming = match trade.side {
-        TradeSide::Buy => trade.quantity,
-        TradeSide::Sell => -trade.quantity,
-    };
+    position.fees_paid += trade.fee;
+    let incoming = match trade.side { TradeSide::Buy => trade.quantity, TradeSide::Sell => -trade.quantity };
+    position.estimated_exit_fee_rate = if trade.fee_rate == 0.0 { configured_fee_rates().taker.abs() } else { trade.fee_rate.abs() };
     if old == 0.0 || old.signum() == incoming.signum() {
         let total = old.abs() + incoming.abs();
-        position.average_entry_price = (old.abs() * position.average_entry_price
-            + incoming.abs() * trade.execution_price)
-            / total;
+        position.average_entry_price = (old.abs() * position.average_entry_price + incoming.abs() * trade.execution_price) / total;
         position.quantity = old + incoming;
+        position.entry_fees += trade.fee;
         return;
     }
     let closed = old.abs().min(incoming.abs());
-    position.realized_pnl += closed
-        * if old > 0.0 {
-            trade.execution_price - position.average_entry_price
-        } else {
-            position.average_entry_price - trade.execution_price
-        };
+    let entry_fee_closed = position.entry_fees * (closed / old.abs());
+    let closing_fee = trade.fee * (closed / incoming.abs());
+    let gross = closed * if old > 0.0 { trade.execution_price - position.average_entry_price } else { position.average_entry_price - trade.execution_price };
+    position.realized_pnl += gross - entry_fee_closed - closing_fee;
     let net = old + incoming;
     if net.abs() < EPSILON {
         position.quantity = 0.0;
         position.average_entry_price = 0.0;
+        position.entry_fees = 0.0;
+    } else if net.signum() != old.signum() {
+        position.average_entry_price = trade.execution_price;
+        position.entry_fees = (trade.fee - closing_fee).max(0.0);
+        position.quantity = net;
     } else {
-        if net.signum() != old.signum() {
-            position.average_entry_price = trade.execution_price;
-        }
+        position.entry_fees -= entry_fee_closed;
         position.quantity = net;
     }
 }
+
+
+
+
+
+
+

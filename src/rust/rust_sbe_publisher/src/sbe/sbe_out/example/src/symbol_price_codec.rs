@@ -3,10 +3,10 @@ use crate::*;
 pub use encoder::*;
 pub use decoder::*;
 
-pub const SBE_BLOCK_LENGTH: u16 = 40;
+pub const SBE_BLOCK_LENGTH: u16 = 56;
 pub const SBE_TEMPLATE_ID: u16 = 1;
 pub const SBE_SCHEMA_ID: u16 = 1;
-pub const SBE_SCHEMA_VERSION: u16 = 5;
+pub const SBE_SCHEMA_VERSION: u16 = 7;
 
 pub mod encoder {
     use super::*;
@@ -120,6 +120,20 @@ pub mod encoder {
         #[inline]
         pub fn price(&mut self, value: f64) {
             let offset = self.offset + 32;
+            self.get_buf_mut().put_f64_at(offset, value);
+        }
+        /// primitive field 'volatility1m'
+        /// - encodedOffset: 40
+        /// - encodedLength: 8
+        #[inline]
+        pub fn volatility_1m(&mut self, value: f64) {
+            let offset = self.offset + 40;
+            self.get_buf_mut().put_f64_at(offset, value);
+        }
+
+        #[inline]
+        pub fn volatility_5m(&mut self, value: f64) {
+            let offset = self.offset + 48;
             self.get_buf_mut().put_f64_at(offset, value);
         }
 
@@ -238,6 +252,16 @@ pub mod decoder {
         #[inline]
         pub fn price(&self) -> f64 {
             self.get_buf().get_f64_at(self.offset + 32)
+        }
+        /// primitive field - 'REQUIRED'
+        #[inline]
+        pub fn volatility_1m(&self) -> f64 {
+            self.get_buf().get_f64_at(self.offset + 40)
+        }
+
+        #[inline]
+        pub fn volatility_5m(&self) -> f64 {
+            self.get_buf().get_f64_at(self.offset + 48)
         }
 
     }

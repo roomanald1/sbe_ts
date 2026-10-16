@@ -1,4 +1,5 @@
-import { useEffect, useMemo } from 'react';
+import { memo, useEffect, useMemo } from 'react';
+import { usePausedValue } from '../use_paused_value';
 import { AgGridReact } from 'ag-grid-react';
 import {
   ClientSideRowModelModule,
@@ -42,9 +43,15 @@ type PositionGridRow = {
   executed: number;
   remaining: number;
   limitPrice?: number;
+  estimatedFee?: number;
   current?: number;
   quote: string;
   bookError?: string;
+  progress?: number;
+  etaMinutes?: number;
+  executionVwap?: number;
+  marketVwap?: number;
+  slippage?: number;
 };
 
 const positionsGridTheme = themeQuartz.withParams({
@@ -87,12 +94,14 @@ function CancelOrderCell({
   );
 }
 
-export function Positions({
+function PositionsComponent({
   connection,
   symbols,
+  paused = false,
 }: {
   connection: Connection;
   symbols: string[];
+  paused?: boolean;
 }) {
   const model = useMemo(
     () => new OrderManagerModel({ connection, symbols }),
@@ -119,15 +128,12 @@ export function Positions({
         executed: order.quantity - order.remaining_quantity,
         remaining: order.remaining_quantity,
         limitPrice: order.limit_price,
+        estimatedFee: order.estimated_fee,
         current: mark,
         quote: quoteCurrency(order.symbol),
         bookError,
       })),
-      ...state.vwapRuns
-        .filter(
-          (run) => run.status !== 'completed' && run.status !== 'cancelled',
-        )
-        .map((run) => ({
+      ...state.vwapRuns.slice(-20).map((run) => ({
           id: run.id,
           kind: 'vwap' as const,
           status: run.status,
@@ -135,11 +141,19 @@ export function Positions({
           side: run.side,
           executed: run.executed_quantity,
           remaining: Math.max(run.quantity - run.executed_quantity, 0),
+          progress: run.quantity > 0 ? Math.min(run.executed_quantity / run.quantity, 1) * 100 : 0,
+          etaMinutes: run.executed_quantity > 0 && run.started_at < Date.now()
+            ? (Math.max(run.quantity - run.executed_quantity, 0) / (run.executed_quantity / ((Date.now() - run.started_at) / 60000)))
+            : undefined,
+          executionVwap: run.executed_quantity > 0 ? run.execution_vwap : undefined,
+          marketVwap: run.executed_quantity > 0 ? run.market_vwap : undefined,
+          slippage: run.executed_quantity > 0 ? run.slippage : undefined,
           quote: quoteCurrency(run.symbol),
         })),
     ],
     [state.rows, state.vwapRuns],
   );
+  const displayedRowData = usePausedValue(rowData, paused);
   const columnDefs = useMemo<ColDef<PositionGridRow>[]>(
     () => [
       { field: 'symbol', headerName: 'Symbol', minWidth: 90 },
@@ -170,6 +184,36 @@ export function Positions({
           value === undefined ? '' : quantityFormatter.format(value),
       },
       {
+        field: 'progress',
+        headerName: 'Filled',
+        minWidth: 88,
+        valueFormatter: ({ value, data }) => data?.kind === 'vwap' && value != null ? value.toFixed(1) + '%' : '',
+      },
+      {
+        field: 'etaMinutes',
+        headerName: 'Pace ETA',
+        minWidth: 82,
+        valueFormatter: ({ value, data }) => data?.kind === 'vwap' && value != null && Number.isFinite(value) ? Math.ceil(value) + ' min' : data?.kind === 'vwap' ? '—' : '',
+      },
+      {
+        field: 'executionVwap',
+        headerName: 'Exec VWAP',
+        minWidth: 92,
+        valueFormatter: ({ value, data }) => data?.kind === 'vwap' && value != null ? moneyFormatter.format(value) + ' ' + data.quote : '',
+      },
+      {
+        field: 'marketVwap',
+        headerName: 'Market VWAP',
+        minWidth: 92,
+        valueFormatter: ({ value, data }) => data?.kind === 'vwap' && value != null ? moneyFormatter.format(value) + ' ' + data.quote : '',
+      },
+      {
+        field: 'slippage',
+        headerName: 'VWAP delta',
+        minWidth: 92,
+        valueFormatter: ({ value, data }) => data?.kind === 'vwap' && value != null ? moneyFormatter.format(value) + ' ' + data.quote : '',
+      },
+      {
         field: 'limitPrice',
         headerName: 'Limit',
         minWidth: 90,
@@ -180,6 +224,11 @@ export function Positions({
             : moneyFormatter.format(value) + ' ' + (data?.quote ?? ''),
       },
       {
+        field: 'estimatedFee',
+        headerName: 'Est. fee',
+        minWidth: 80,
+        valueFormatter: ({ value, data }) => value == null || data?.kind !== 'order' ? '' : moneyFormatter.format(value) + ' ' + data.quote,
+      },      {
         field: 'current',
         headerName: 'Current',
         minWidth: 90,
@@ -332,6 +381,7 @@ export function Positions({
             )}
           </label>
         )}
+        <p className="order-fee-estimate">Estimated fee ({((state.orderType === "limit" ? state.makerFeeRate : state.takerFeeRate) * 100).toFixed(3)}%): {state.estimatedFee === undefined ? "Waiting for price" : moneyFormatter.format(state.estimatedFee) + " " + quoteCurrency(selectedSymbol)}</p>
         <button
           className={'paper-trade-submit is-' + state.side}
           type="submit"
@@ -358,7 +408,7 @@ export function Positions({
       )}
       <div className="data-grid-wrap positions-grid-wrap">
         <AgGridReact<PositionGridRow>
-          rowData={rowData}
+          rowData={displayedRowData}
           columnDefs={columnDefs}
           defaultColDef={defaultPositionColDef}
           getRowId={({ data }) => data.id}
@@ -384,3 +434,5 @@ export function Positions({
     </section>
   );
 }
+
+export const Positions = memo(PositionsComponent);

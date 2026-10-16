@@ -6,7 +6,7 @@ pub use decoder::*;
 pub const SBE_BLOCK_LENGTH: u16 = 89;
 pub const SBE_TEMPLATE_ID: u16 = 3;
 pub const SBE_SCHEMA_ID: u16 = 1;
-pub const SBE_SCHEMA_VERSION: u16 = 5;
+pub const SBE_SCHEMA_VERSION: u16 = 7;
 
 pub mod encoder {
     use super::*;

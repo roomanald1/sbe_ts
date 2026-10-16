@@ -11,6 +11,7 @@ use std::{
 
 pub async fn serve() -> anyhow::Result<()> {
     let users = Arc::new(create_users(10_000));
+    let signal_store = crate::signals::SignalStore::from_environment()?;
     let app = Router::new()
         .route(
             "/users/{page}",
@@ -19,7 +20,8 @@ pub async fn serve() -> anyhow::Result<()> {
                 move |path| get_user_page(path, users)
             }),
         )
-        .merge(crate::positions::router().await?);
+        .merge(crate::positions::router().await?)
+        .merge(signal_store.router());
 
     let addr = SocketAddr::from(([127, 0, 0, 1], 3000));
     println!("Listening on {}", addr);

@@ -1,5 +1,9 @@
 ﻿# Agent notes
 
+## Git on the WSL workspace
+
+- Run Git commands from the repository root. If using Windows Git (`C:\Program Files\Git\cmd\git.exe`) against this WSL workspace via its UNC path and Git reports `dubious ownership`, add this repository to Windows Git's global safe-directory list: `git config --global --add safe.directory '%(prefix)///wsl.localhost/Ubuntu/home/ronnie/dev/sbe_ts'`. This is a one-time per-user setup. Prefer using WSL Git from `/home/ronnie/dev/sbe_ts` when available.
+
 ## Project map
 
 - Frontend: `src/typescript/workspace/apps/react-app`.
@@ -17,6 +21,7 @@
 - Exclude `positions.json` from broad searches with -g `!positions.json`: it is a large runtime fill ledger, not source. Avoid generated SBE output unless the schema or encoding is part of the task.
 
 ## Project conventions
+- Use AG Grid for tabular data in views instead of native HTML tables, matching the shared data-grid styling. Style inputs and selects with existing app form/control styles rather than browser defaults.
 
 - Keep business logic in model classes; React views render model state and forward user actions to models.
 - Follow existing RxJS patterns and clean up subscriptions. For a new feed, trace the existing backend-to-frontend path and check subscription cleanup.
@@ -27,3 +32,11 @@
 - Run frontend targets from the repo root with `./nx <target> react-app`. Nx caches `build`, `lint`, and `typecheck`; `serve` and `preview` are continuous.
 - Cargo reuses build artifacts in the crate's `target` directory. Avoid cleaning caches unless stale output is suspected.
 - Prefer the narrowest relevant validation; avoid broad builds or tests unless requested or needed.
+
+## Shell command hygiene
+
+- Run commands from the WSL repository root and use repository-relative paths that exist. Confirm paths mentioned in errors with rg --files or test -e before using them.
+- If Bash startup emits errors from /home/ronnie/.profile, use a non-login shell when supported. Treat startup output as a profile configuration issue; do not copy it into a command or execute it.
+- Use rg for source searches. Use fixed-string mode (rg -F) for literal text containing regex metacharacters; quote and escape regex patterns deliberately.
+- Put only executable command text in the command field. Do not paste terminal output, error lines, diff markers, or explanatory prose there.
+

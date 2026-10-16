@@ -11,6 +11,10 @@ const apiProxy = {
     target: 'http://localhost:3000',
     changeOrigin: true,
   },
+  '/signals': {
+    target: 'http://localhost:3000',
+    changeOrigin: true,
+  },
 };
 
 export default defineConfig({

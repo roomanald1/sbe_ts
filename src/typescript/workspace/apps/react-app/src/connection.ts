@@ -25,6 +25,8 @@ export type BookFeed = {
   error: BehaviorSubject<string | undefined>;
 };
 
+export type SignalFeed = BookFeed;
+
 type ActiveTradeFeed = TradeFeed & {
   subscription?: { cancel: () => void; request: (count: number) => void };
   active: boolean;
@@ -34,6 +36,7 @@ type ActiveBookFeed = BookFeed & {
   subscription?: { cancel: () => void; request: (count: number) => void };
   active: boolean;
 };
+type ActiveSignalFeed = SignalFeed & { subscription?: { cancel: () => void; request: (count: number) => void }; active: boolean };
 
 const REQUEST_BATCH_SIZE = 500;
 
@@ -66,6 +69,7 @@ export class Connection {
   private subscription: { cancel: () => void } | undefined;
   private readonly bookFeeds = new Map<string, ActiveBookFeed>();
   private readonly tradeFeeds = new Map<string, ActiveTradeFeed>();
+  private readonly signalFeeds = new Map<string, ActiveSignalFeed>();
   private retryTimer: ReturnType<typeof setTimeout> | undefined;
   private retryAttempt = 0;
 
@@ -99,6 +103,7 @@ export class Connection {
       this.subscription = undefined;
       this.cancelBookSubscriptions('connection reconnecting');
       this.cancelTradeSubscriptions('connection reconnecting');
+      this.cancelSignalSubscriptions();
       this.socket?.close();
       this.socket = undefined;
 
@@ -141,6 +146,7 @@ export class Connection {
             this.error_message.next(undefined);
             this.startBookSubscriptions();
             this.startTradeSubscriptions();
+            this.startSignalSubscriptions();
             if (this.source === 'synthetic') {
               requestNext = () => sub.request(REQUEST_BATCH_SIZE);
               sub.request(1000);
@@ -187,6 +193,50 @@ export class Connection {
     this.bookFeeds.set(key, feed);
     this.startBookSubscription(feed);
     return feed;
+  }
+
+  public openSignals(key: string, symbol: string): SignalFeed {
+    const existing = this.signalFeeds.get(key);
+    if (existing?.symbol === symbol) return existing;
+    if (existing) this.closeSignals(key, existing);
+    const feed: ActiveSignalFeed = { key, symbol, data: new BehaviorSubject<unknown | undefined>(undefined), error: new BehaviorSubject<string | undefined>(undefined), active: false };
+    this.signalFeeds.set(key, feed);
+    this.startSignalSubscription(feed);
+    return feed;
+  }
+
+  public closeSignals(key: string, feed: SignalFeed) {
+    const active = this.signalFeeds.get(key);
+    if (!active || active !== feed) return;
+    active.subscription?.cancel(); active.subscription = undefined; active.active = false;
+    this.signalFeeds.delete(key); active.data.complete(); active.error.complete();
+  }
+
+  private cancelSignalSubscriptions() {
+    for (const feed of this.signalFeeds.values()) {
+      feed.subscription?.cancel(); feed.subscription = undefined; feed.active = false; feed.data.next(undefined);
+    }
+  }
+
+  private startSignalSubscriptions() { for (const feed of this.signalFeeds.values()) this.startSignalSubscription(feed); }
+
+  private startSignalSubscription(feed: ActiveSignalFeed) {
+    const socket = this.socket; const generation = this.lifecycleGeneration;
+    if (!socket || feed.active || this.signalFeeds.get(feed.key) !== feed) return;
+    feed.active = true; let received = 0; let requestNext: (() => void) | undefined;
+    socket.requestStream({ data: Buffer.from('signals:' + feed.symbol) }).subscribe({
+      onSubscribe: (subscription) => {
+        if (this.signalFeeds.get(feed.key) !== feed || this.socket !== socket || this.lifecycleGeneration !== generation) { subscription.cancel(); return; }
+        feed.subscription = subscription; requestNext = () => subscription.request(REQUEST_BATCH_SIZE); requestNext();
+      },
+      onNext: (payload) => {
+        if (this.signalFeeds.get(feed.key) !== feed || this.socket !== socket || this.lifecycleGeneration !== generation) return;
+        feed.data.next(payload.data); feed.error.next(undefined); received += 1;
+        if (received >= REQUEST_BATCH_SIZE) { received = 0; requestNext?.(); }
+      },
+      onError: (error) => { if (this.signalFeeds.get(feed.key) !== feed || this.socket !== socket) return; feed.subscription = undefined; feed.active = false; feed.error.next(error.message ?? 'Signal stream disconnected'); },
+      onComplete: () => { if (this.signalFeeds.get(feed.key) !== feed || this.socket !== socket) return; feed.subscription = undefined; feed.active = false; feed.error.next('Signal stream completed'); },
+    });
   }
 
   public openTrades(key: string, symbol: string): TradeFeed {
@@ -436,6 +486,7 @@ export class Connection {
     for (const feed of this.bookFeeds.values()) this.closeBook(feed.key, feed);
     for (const feed of this.tradeFeeds.values())
       this.closeTrades(feed.key, feed);
+    for (const feed of this.signalFeeds.values()) this.closeSignals(feed.key, feed);
     this.socket?.close();
   }
 }
