@@ -19,10 +19,15 @@ const INITIAL_RECONNECT_DELAY: Duration = Duration::from_secs(1);
 const MAX_RECONNECT_DELAY: Duration = Duration::from_secs(30);
 const STABLE_CONNECTION_DURATION: Duration = Duration::from_secs(60);
 const VOLATILITY_HISTORY_MS: u64 = 300_000;
+const OKX_IDLE_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(20);
 
 #[derive(Default)]
 pub(crate) struct RollingVolatility {
     samples: VecDeque<(u64, f64)>,
+    minute_returns: VecDeque<(u64, f64)>,
+    window_returns: VecDeque<(u64, f64)>,
+    minute_squared_sum: f64,
+    window_squared_sum: f64,
 }
 
 impl RollingVolatility {
@@ -35,11 +40,26 @@ impl RollingVolatility {
                 if let Some(last_sample) = self.samples.back_mut() {
                     last_sample.1 = price;
                 }
+                if self.samples.len() > 1 {
+                    let previous = self.samples[self.samples.len() - 2].1;
+                    let squared = (price / previous).ln().powi(2);
+                    self.replace_latest_return(timestamp_ms, squared);
+                }
                 return self.values(timestamp_ms);
             }
         }
 
+        let previous_price = self.samples.back().map(|sample| sample.1);
         self.samples.push_back((timestamp_ms, price));
+        if let Some(previous_price) = previous_price {
+            let squared = (price / previous_price).ln().powi(2);
+            self.prune_returns(timestamp_ms);
+            self.minute_returns.push_back((timestamp_ms, squared));
+            self.window_returns.push_back((timestamp_ms, squared));
+            self.minute_squared_sum += squared;
+            self.window_squared_sum += squared;
+        }
+
         let oldest_to_keep = timestamp_ms.saturating_sub(VOLATILITY_HISTORY_MS);
         while self.samples.len() > 2 && self.samples[1].0 < oldest_to_keep {
             self.samples.pop_front();
@@ -47,10 +67,58 @@ impl RollingVolatility {
         self.values(timestamp_ms)
     }
 
+    fn prune_returns(&mut self, timestamp_ms: u64) {
+        let minute_cutoff = timestamp_ms.saturating_sub(60_000);
+        while self
+            .minute_returns
+            .front()
+            .is_some_and(|(time, _)| *time <= minute_cutoff)
+        {
+            if let Some((_, squared)) = self.minute_returns.pop_front() {
+                self.minute_squared_sum -= squared;
+            }
+        }
+        let window_cutoff = timestamp_ms.saturating_sub(VOLATILITY_HISTORY_MS);
+        while self
+            .window_returns
+            .front()
+            .is_some_and(|(time, _)| *time <= window_cutoff)
+        {
+            if let Some((_, squared)) = self.window_returns.pop_front() {
+                self.window_squared_sum -= squared;
+            }
+        }
+    }
+
+    fn replace_latest_return(&mut self, timestamp_ms: u64, squared: f64) {
+        if let Some((time, previous)) = self.minute_returns.back_mut() {
+            if *time == timestamp_ms {
+                self.minute_squared_sum += squared - *previous;
+                *previous = squared;
+            }
+        }
+        if let Some((time, previous)) = self.window_returns.back_mut() {
+            if *time == timestamp_ms {
+                self.window_squared_sum += squared - *previous;
+                *previous = squared;
+            }
+        }
+    }
+
     fn values(&self, timestamp_ms: u64) -> (f64, f64) {
+        if self
+            .samples
+            .back()
+            .is_some_and(|(time, _)| *time == timestamp_ms)
+        {
+            return (
+                volatility_from_sum(self.minute_squared_sum, self.minute_returns.len()),
+                volatility_from_sum(self.window_squared_sum, self.window_returns.len()),
+            );
+        }
         (
             self.realized_volatility(timestamp_ms, 60_000),
-            self.realized_volatility(timestamp_ms, 300_000),
+            self.realized_volatility(timestamp_ms, VOLATILITY_HISTORY_MS),
         )
     }
 
@@ -70,11 +138,15 @@ impl RollingVolatility {
             }
             previous = current;
         }
-        if return_count == 0 {
-            f64::NAN
-        } else {
-            squared_returns.sqrt() * 100.0
-        }
+        volatility_from_sum(squared_returns, return_count)
+    }
+}
+
+fn volatility_from_sum(squared_returns: f64, return_count: usize) -> f64 {
+    if return_count == 0 {
+        f64::NAN
+    } else {
+        squared_returns.max(0.0).sqrt() * 100.0
     }
 }
 
@@ -97,6 +169,51 @@ pub async fn get_instrument_data() -> Result<Vec<String>> {
         .and_then(Value::as_array)
         .ok_or_else(|| anyhow::anyhow!("OKX spot tickers response is missing data"))?;
     select_top_instruments(tickers)
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct SpotInstrumentPrecision {
+    pub symbol: String,
+    #[serde(rename = "tickSz")]
+    pub tick_size: String,
+    #[serde(rename = "lotSz")]
+    pub lot_size: String,
+}
+
+pub async fn get_spot_instrument_precisions() -> Result<Vec<SpotInstrumentPrecision>> {
+    let response = reqwest::Client::new()
+        .get("https://www.okx.com/api/v5/public/instruments?instType=SPOT")
+        .header(USER_AGENT, "rust-web-api-client")
+        .send()
+        .await?
+        .error_for_status()?;
+    let json: Value = serde_json::from_str(&response.text().await?)?;
+    let instruments = json
+        .get("data")
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow::anyhow!("OKX spot instruments response is missing data"))?;
+    let mut result = instruments
+        .iter()
+        .filter_map(|instrument| {
+            let symbol = instrument.get("instId")?.as_str()?;
+            let is_live = instrument.get("state").and_then(Value::as_str) == Some("live");
+            let tick_size = instrument.get("tickSz")?.as_str()?;
+            let lot_size = instrument.get("lotSz")?.as_str()?;
+            (is_live && symbol.is_ascii() && symbol.len() <= SYMBOL_LENGTH).then(|| {
+                SpotInstrumentPrecision {
+                    symbol: symbol.to_owned(),
+                    tick_size: tick_size.to_owned(),
+                    lot_size: lot_size.to_owned(),
+                }
+            })
+        })
+        .collect::<Vec<_>>();
+    result.sort_unstable_by(|a, b| a.symbol.cmp(&b.symbol));
+    anyhow::ensure!(
+        !result.is_empty(),
+        "OKX returned no live spot instrument precisions"
+    );
+    Ok(result)
 }
 
 pub async fn get_all_spot_instruments() -> Result<Vec<String>> {
@@ -297,7 +414,7 @@ pub async fn subscribe_ticker_samples(
     }
 }
 
-pub(crate) async fn subscribe_trades_once(
+pub async fn subscribe_trades_once(
     instrument: &str,
     updates: mpsc::Sender<Result<Bytes>>,
 ) -> Result<()> {
@@ -312,8 +429,14 @@ pub(crate) async fn subscribe_trades_once(
             Utf8Bytes::from(request.to_string()),
         ))
         .await?;
+    let heartbeat = tokio::time::sleep(OKX_IDLE_HEARTBEAT_INTERVAL);
+    tokio::pin!(heartbeat);
     loop {
         tokio::select! {
+            _ = &mut heartbeat => {
+                write.send(tokio_tungstenite::tungstenite::Message::Text(Utf8Bytes::from("ping"))).await?;
+                heartbeat.as_mut().reset(tokio::time::Instant::now() + OKX_IDLE_HEARTBEAT_INTERVAL);
+            }
             _ = updates.closed() => {
                 let request = json!({"op": "unsubscribe", "args": [{ "channel": "trades", "instId": instrument }]});
                 let _ = write.send(tokio_tungstenite::tungstenite::Message::Text(Utf8Bytes::from(request.to_string()))).await;
@@ -322,8 +445,10 @@ pub(crate) async fn subscribe_trades_once(
             message = read.next() => {
                 let Some(message) = message else { anyhow::bail!("OKX trades WebSocket stream ended") };
                 let message = message?;
+                heartbeat.as_mut().reset(tokio::time::Instant::now() + OKX_IDLE_HEARTBEAT_INTERVAL);
                 if !message.is_text() { continue; }
                 let text = message.to_text()?;
+                if text == "pong" { continue; }
                 let update: TradeMessage<'_> = match serde_json::from_str(text) { Ok(update) => update, Err(error) => { eprintln!("Ignoring invalid OKX trades JSON message: {error}"); continue; } };
                 if update.event == Some("error") { anyhow::bail!("OKX trades subscription error: {}", update.msg.unwrap_or("unknown error")); }
                 let Some(trades) = update.data else { continue; };
@@ -387,7 +512,7 @@ pub async fn subscribe(instrument_data: &[Arc<str>], price_updates: Sender<Bytes
     }
 }
 
-pub(crate) async fn subscribe_book_once(
+pub async fn subscribe_book_once(
     instrument: &str,
     updates: mpsc::Sender<Result<Bytes>>,
 ) -> Result<()> {
@@ -404,11 +529,17 @@ pub(crate) async fn subscribe_book_once(
             Utf8Bytes::from(request.to_string()),
         ))
         .await?;
+    let heartbeat = tokio::time::sleep(OKX_IDLE_HEARTBEAT_INTERVAL);
+    tokio::pin!(heartbeat);
 
     let mut bid_book = Vec::new();
     let mut ask_book = Vec::new();
     loop {
         tokio::select! {
+            _ = &mut heartbeat => {
+                write.send(tokio_tungstenite::tungstenite::Message::Text(Utf8Bytes::from("ping"))).await?;
+                heartbeat.as_mut().reset(tokio::time::Instant::now() + OKX_IDLE_HEARTBEAT_INTERVAL);
+            }
             _ = updates.closed() => {
                 println!("UI unsubscribed from OKX books for {instrument}");
                 let request = json!({
@@ -429,6 +560,7 @@ pub(crate) async fn subscribe_book_once(
                     anyhow::bail!("OKX book WebSocket stream ended");
                 };
                 let message = message?;
+                heartbeat.as_mut().reset(tokio::time::Instant::now() + OKX_IDLE_HEARTBEAT_INTERVAL);
                 let text = match message.to_text() {
                     Ok(text) => text,
                     Err(error) => {
@@ -436,6 +568,7 @@ pub(crate) async fn subscribe_book_once(
                         continue;
                     }
                 };
+                if text == "pong" { continue; }
                 let update = match serde_json::from_str::<BookMessage<'_>>(text) {
                     Ok(update) => update,
                     Err(error) => {

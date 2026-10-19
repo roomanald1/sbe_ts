@@ -1,9 +1,12 @@
-import { useEffect, useId, useMemo } from 'react';
+import { formatForSymbol } from '../instrument_precision';
+import { useEffect, useId, useMemo, useState } from 'react';
 import { FeedToolbar } from './FeedToolbar';
 import { Connection } from '../connection';
 import { OrderBookModel } from '../models/OrderBookModel';
 import { useBehaviorSnapshot } from '../use_behavior_snapshot';
 import type { BookLevel } from '../types/symbol_price';
+
+const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 0 });
 
 type OrderBookPopupProps = {
   symbol: string;
@@ -17,29 +20,21 @@ type OrderBookPopupProps = {
   onTrade?: (symbol: string, side: 'buy' | 'sell') => void;
 };
 
-const priceFormatter = new Intl.NumberFormat(undefined, {
-  minimumFractionDigits: 2,
-  maximumFractionDigits: 10,
-});
 
-const midFormatter = new Intl.NumberFormat(undefined, {
-  minimumFractionDigits: 2,
-  maximumFractionDigits: 2,
-});
 
-const sizeFormatter = new Intl.NumberFormat(undefined, {
-  minimumFractionDigits: 4,
-  maximumFractionDigits: 4,
-});
 
 function DepthRows({
   levels,
   side,
   maximumSideDepth,
+  symbol,
+  quoteDepth = false,
 }: {
   levels: BookLevel[];
   side: 'bid' | 'ask';
   maximumSideDepth: number;
+  symbol: string;
+  quoteDepth?: boolean;
 }) {
   if (levels.length === 0) {
     return <div className="book-empty">Waiting for {side} depth…</div>;
@@ -56,25 +51,25 @@ function DepthRows({
           <span
             className={`book-depth-bar book-depth-bar-${side}`}
             style={{
-              width: `${(level.cumulativeSize / maximumSideDepth) * 50}%`,
+              width: `${((quoteDepth ? (level.cumulativeNotional ?? level.cumulativeSize * level.price) : level.cumulativeSize) / maximumSideDepth) * 50}%`,
               ...(side === 'bid' ? { right: '50%' } : { left: '50%' }),
             }}
           />
           {side === 'bid' ? (
             <span className="book-level-quantity book-level-quantity-bid">
-              <strong>{sizeFormatter.format(level.size)}</strong>
-              <small>Σ {sizeFormatter.format(level.cumulativeSize)}</small>
+              <strong>{formatForSymbol(level.size, symbol, 'quantity')}</strong>
+              <small>Σ {quoteDepth ? money.format(level.cumulativeNotional ?? level.cumulativeSize * level.price) : formatForSymbol(level.cumulativeSize, symbol, 'quantity')}</small>
             </span>
           ) : (
             <span className="book-level-empty" aria-hidden="true" />
           )}
           <span className={`book-level-price book-level-price-${side}`}>
-            {priceFormatter.format(level.price)}
+            {formatForSymbol(level.price, symbol, 'price')}
           </span>
           {side === 'ask' ? (
             <span className="book-level-quantity book-level-quantity-ask">
-              <strong>{sizeFormatter.format(level.size)}</strong>
-              <small>Σ {sizeFormatter.format(level.cumulativeSize)}</small>
+              <strong>{formatForSymbol(level.size, symbol, 'quantity')}</strong>
+              <small>Σ {quoteDepth ? money.format(level.cumulativeNotional ?? level.cumulativeSize * level.price) : formatForSymbol(level.cumulativeSize, symbol, 'quantity')}</small>
             </span>
           ) : (
             <span className="book-level-empty" aria-hidden="true" />
@@ -88,12 +83,14 @@ function DepthRows({
 function DepthBalance({
   bids,
   asks,
+  label,
 }: {
   bids: BookLevel[];
   asks: BookLevel[];
+  label: string;
 }) {
-  const bidTotal = bids.at(-1)?.cumulativeSize ?? 0;
-  const askTotal = asks.at(-1)?.cumulativeSize ?? 0;
+  const bidTotal = label === '50' ? (bids.at(-1)?.cumulativeNotional ?? 0) : (bids.at(-1)?.cumulativeSize ?? 0);
+  const askTotal = label === '50' ? (asks.at(-1)?.cumulativeNotional ?? 0) : (asks.at(-1)?.cumulativeSize ?? 0);
   const total = bidTotal + askTotal;
   if (total <= 0) return null;
 
@@ -103,10 +100,10 @@ function DepthBalance({
   return (
     <div
       className="book-balance"
-      aria-label={`Top-seven depth: bids ${Math.round(bidShare)}%, asks ${Math.round(askShare)}%`}
+      aria-label={'Top-' + label + ' depth: bids ' + Math.round(bidShare) + '%, asks ' + Math.round(askShare) + '%'}
     >
       <div className="book-balance-labels">
-        <span>TOP 7 DEPTH</span>
+        <span>TOP {label} DEPTH</span>
         <span>
           <strong className="book-balance-bid">
             {Math.round(bidShare)}% BID
@@ -131,6 +128,31 @@ function DepthBalance({
   );
 }
 
+function SweepSummary({ bids, asks, mid, symbol }: { bids: BookLevel[]; asks: BookLevel[]; mid: number; symbol: string }) {
+  const estimate = (levels: BookLevel[], target: number) => {
+    let remaining = target, quantity = 0, notional = 0;
+    for (const level of levels) {
+      const available = level.price * level.size;
+      const taken = Math.min(remaining, available);
+      quantity += taken / level.price;
+      notional += taken;
+      remaining -= taken;
+      if (remaining <= 0) break;
+    }
+    if (quantity <= 0) return '—';
+    const average = notional / quantity;
+    const impactBps = Math.abs(average / mid - 1) * 10000;
+    return remaining > 0 ? 'partial · ' + Math.round(notional).toLocaleString() + ' USD' : formatForSymbol(average, symbol, 'price') + ' · ' + impactBps.toFixed(2) + ' bps';
+  };
+  return <div className="book-sweep-summary">
+    <strong>ESTIMATED MARKET SWEEP</strong>
+    <span className="book-sweep-note">Static snapshot · before fees · displayed book only</span>
+    {[250, 500, 1000].map((amount) => <div className="book-sweep-row" key={amount}>
+      <span>USD {amount}</span><span>Buy: {estimate(asks, amount)}</span><span>Sell: {estimate(bids, amount)}</span>
+    </div>)}
+  </div>;
+}
+
 export function OrderBookPopup({
   symbol,
   connection,
@@ -142,6 +164,7 @@ export function OrderBookPopup({
   streamKey,
   onTrade,
 }: OrderBookPopupProps) {
+  const [depthMode, setDepthMode] = useState<'7' | '50'>('7');
   const generatedStreamKey = useId();
   const bookKey = streamKey ?? generatedStreamKey;
   const model = useMemo(
@@ -165,9 +188,10 @@ export function OrderBookPopup({
   }, [mode, onClose]);
   const frozen = state.frozen;
   const error = state.error;
-  const visibleDepth = state.depth?.symbol === symbol ? state.depth : undefined;
-  const maximumBidDepth = visibleDepth?.bids.at(-1)?.cumulativeSize ?? 0;
-  const maximumAskDepth = visibleDepth?.asks.at(-1)?.cumulativeSize ?? 0;
+  const selectedDepth = depthMode === '50' ? state.deepDepth : state.depth;
+  const visibleDepth = selectedDepth?.symbol === symbol ? selectedDepth : undefined;
+  const maximumBidDepth = depthMode === '50' ? (visibleDepth?.bids.at(-1)?.cumulativeNotional ?? 0) : (visibleDepth?.bids.at(-1)?.cumulativeSize ?? 0);
+  const maximumAskDepth = depthMode === '50' ? (visibleDepth?.asks.at(-1)?.cumulativeNotional ?? 0) : (visibleDepth?.asks.at(-1)?.cumulativeSize ?? 0);
   const spread =
     visibleDepth?.bids[0] && visibleDepth.asks[0]
       ? visibleDepth.asks[0].price - visibleDepth.bids[0].price
@@ -239,6 +263,10 @@ export function OrderBookPopup({
                 </button>
               </>
             )}
+            <div className="book-depth-mode" role="group" aria-label="Displayed order book depth">
+              <button type="button" aria-pressed={depthMode === '7'} onClick={() => setDepthMode('7')}>7 levels</button>
+              <button type="button" aria-pressed={depthMode === '50'} onClick={() => setDepthMode('50')}>50 levels</button>
+            </div>
             <span className={`book-stream-status${frozen ? ' is-frozen' : ''}`}>
               {frozen ? 'FROZEN' : 'LIVE'}
             </span>
@@ -263,9 +291,9 @@ export function OrderBookPopup({
           </div>
         </header>
         <div className="book-popup-columns" aria-hidden="true">
-          <span>BID SIZE</span>
+          <span>{depthMode === '50' ? 'CUMULATIVE QUOTE DEPTH' : 'BID SIZE'}</span>
           <span>PRICE</span>
-          <span>ASK SIZE</span>
+          <span>{depthMode === '50' ? 'CUMULATIVE QUOTE DEPTH' : 'ASK SIZE'}</span>
         </div>
         {error ? (
           <div className="book-popup-message book-popup-error">{error}</div>
@@ -280,19 +308,21 @@ export function OrderBookPopup({
               levels={visibleDepth.asks}
               side="ask"
               maximumSideDepth={maximumAskDepth || 1}
+              symbol={symbol}
+              quoteDepth={depthMode === '50'}
             />
             <div className="book-spread">
               <div className="book-market-metrics">
                 <div className="book-market-metric">
                   <span>MID</span>
                   <strong>
-                    {mid === undefined ? '—' : midFormatter.format(mid)}
+                    {mid === undefined ? '—' : formatForSymbol(mid, symbol, 'price')}
                   </strong>
                 </div>
                 <div className="book-market-metric">
                   <span>SPREAD</span>
                   <strong>
-                    {spread === undefined ? '—' : priceFormatter.format(spread)}
+                    {spread === undefined ? '—' : formatForSymbol(spread, symbol, 'price')}
                   </strong>
                 </div>
               </div>
@@ -300,18 +330,21 @@ export function OrderBookPopup({
                 {new Date(visibleDepth.timestamp).toLocaleTimeString()}
               </time>
             </div>
+            {mid !== undefined && depthMode === '50' && (symbol.endsWith('-USDT') || symbol.endsWith('-USDC')) && <SweepSummary bids={visibleDepth.bids} asks={visibleDepth.asks} mid={mid} symbol={symbol} />}
             <DepthRows
               levels={visibleDepth.bids}
               side="bid"
               maximumSideDepth={maximumBidDepth || 1}
+              symbol={symbol}
+              quoteDepth={depthMode === '50'}
             />
-            <DepthBalance bids={visibleDepth.bids} asks={visibleDepth.asks} />
+            <DepthBalance bids={visibleDepth.bids} asks={visibleDepth.asks} label={depthMode} />
           </>
         )}
         <footer className="book-popup-footer">
           {visibleDepth
-            ? `Snapshot ${new Date(visibleDepth.timestamp).toLocaleTimeString()}${frozen ? ' · paused' : ''}`
-            : 'Live updates begin after selection'}
+            ? 'Snapshot ' + new Date(visibleDepth.timestamp).toLocaleTimeString() + (depthMode === '50' ? ' · 50 levels from OKX REST' : ' · 7 live levels') + (frozen ? ' · paused' : '')
+            : (depthMode === '50' ? 'Waiting for the 50-level OKX snapshot…' : 'Live updates begin after selection')}
         </footer>
       </section>
     </div>

@@ -1,3 +1,4 @@
+import { formatForSymbol } from '../instrument_precision';
 import { memo, useEffect, useId, useMemo, useState } from 'react';
 import { usePausedValue } from '../use_paused_value';
 import { AgGridReact } from 'ag-grid-react';
@@ -102,7 +103,7 @@ export function MarketLiquidityComponent({
       {
         field: 'bidSize',
         headerName: 'Bid qty',
-        valueFormatter: ({ value }) => number.format(value ?? 0),
+        valueFormatter: ({ value }) => formatForSymbol(value ?? 0, symbol, 'quantity'),
       },
       {
         field: 'bidQuote',
@@ -112,7 +113,7 @@ export function MarketLiquidityComponent({
       {
         field: 'askSize',
         headerName: 'Ask qty',
-        valueFormatter: ({ value }) => number.format(value ?? 0),
+        valueFormatter: ({ value }) => formatForSymbol(value ?? 0, symbol, 'quantity'),
       },
       {
         field: 'askQuote',
@@ -183,11 +184,11 @@ export function MarketLiquidityComponent({
               <input type="number" min="0" step="any" value={quantity} onChange={(event) => setQuantity(event.target.value)} />
             </label>
             <span>
-              Average {slippage?.averagePrice === undefined ? '—' : number.format(slippage.averagePrice)}
+              Average {slippage?.averagePrice === undefined ? '—' : formatForSymbol(slippage.averagePrice, symbol, 'price')}
               {' · '}Slippage {slippage?.slippageBps?.toFixed(2) ?? '—'} bps
             </span>
             {(slippage?.unfilledQuantity ?? 0) > 0 && (
-              <small>{number.format(slippage!.unfilledQuantity)} beyond displayed depth.</small>
+              <small>{formatForSymbol(slippage!.unfilledQuantity, symbol, 'quantity')} beyond displayed depth.</small>
             )}
             <small>Estimate walks the displayed book; deeper orders may have additional slippage.</small>
           </div>
@@ -196,7 +197,7 @@ export function MarketLiquidityComponent({
               <h3>Liquidity gaps ≥ 0.1%</h3>
               {gaps.length ? gaps.slice(0, 6).map((gap, index) => (
                 <p key={index} className={gap.side === 'bid' ? 'liquidity-bid' : 'liquidity-ask'}>
-                  {gap.side.toUpperCase()} {number.format(gap.from)}–{number.format(gap.to)} · {gap.gapPercent.toFixed(3)}%
+                  {gap.side.toUpperCase()} {formatForSymbol(gap.from, symbol, 'price')}–{formatForSymbol(gap.to, symbol, 'price')} · {gap.gapPercent.toFixed(3)}%
                 </p>
               )) : <p>No wide level gaps detected.</p>}
             </div>
@@ -204,7 +205,7 @@ export function MarketLiquidityComponent({
               <h3>Large or unusual trades</h3>
               {state.unusualTrades.length ? state.unusualTrades.slice(0, 6).map((trade) => (
                 <p key={trade.tradeId} className={trade.side === 'buy' ? 'liquidity-bid' : 'liquidity-ask'}>
-                  {trade.side.toUpperCase()} {number.format(trade.size)} · {quote.format(trade.price * trade.size)} quote
+                  {trade.side.toUpperCase()} {formatForSymbol(trade.size, symbol, 'quantity')} · {quote.format(trade.price * trade.size)} quote
                 </p>
               )) : <p>Waiting for trades ≥ 10,000 quote or 5× recent median.</p>}
             </div>

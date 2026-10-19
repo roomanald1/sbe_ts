@@ -1,4 +1,5 @@
-import { memo, useEffect, useMemo } from 'react';
+import { formatForSymbol } from '../instrument_precision';
+import { memo, useEffect, useMemo, useState } from 'react';
 import { AgGridReact } from 'ag-grid-react';
 import {
   CellStyleModule,
@@ -16,13 +17,10 @@ import { useBehaviorSnapshot } from '../use_behavior_snapshot';
 import { FeedToolbar } from './FeedToolbar';
 import type { SymbolPriceTick } from '../types/symbol_price';
 import type { PriceHistorySample } from '../price_change_data';
+import { PriceHistoryPopup } from './PriceHistoryPopup';
 
 ModuleRegistry.registerModules([ClientSideRowModelModule, CellStyleModule]);
 
-const priceFormatter = new Intl.NumberFormat(undefined, {
-  minimumFractionDigits: 2,
-  maximumFractionDigits: 10,
-});
 const timeFormatter = new Intl.DateTimeFormat(undefined, {
   hour: 'numeric',
   minute: '2-digit',
@@ -42,6 +40,7 @@ type TickGridRow = SymbolPriceTick & { receivedAt: number };
 
 function SymbolCellRenderer({
   value,
+  data,
   model,
 }: ICellRendererParams<TickGridRow, string> & {
   model: SymbolPriceTableModel;
@@ -51,9 +50,9 @@ function SymbolCellRenderer({
     <button
       className="symbol-tag symbol-book-button"
       type="button"
-      onClick={() => model.selectSymbol(value)}
+      onClick={() => model.selectSymbol(value, data?.direction === 'down' ? 'sell' : 'buy')}
       disabled={!model.getSnapshot().onSelectSymbol}
-      aria-label={'Show ' + value + ' order book'}
+      aria-label={'Open ' + (data?.direction === 'down' ? 'sell' : 'buy') + ' order for ' + value}
     >
       {value}
     </button>
@@ -63,8 +62,10 @@ function SymbolCellRenderer({
 function SparklineCellRenderer({
   value,
   model,
+  onShowTrend,
 }: ICellRendererParams<TickGridRow, string> & {
   model: SymbolPriceTableModel;
+  onShowTrend: (symbol: string) => void;
 }) {
   if (!value) return null;
   const history = model.getSnapshot().histories.get(value)?.slice(-60) ?? [];
@@ -80,9 +81,11 @@ function SparklineCellRenderer({
   const direction = prices.at(-1)! >= prices[0] ? 'up' : 'down';
 
   return (
+    <button className="trend-cell-button" type="button" aria-label={'View ' + value + ' price chart'} title="View price chart" onClick={() => onShowTrend(value)}>
     <svg className={`pair-sparkline sparkline-${direction}`} viewBox="0 0 64 20" role="img" aria-label={`${value} recent price trend`}>
       <polyline points={points} fill="none" stroke="currentColor" strokeWidth="1.5" />
     </svg>
+    </button>
   );
 }
 export const SymbolPriceTable = memo(function SymbolPriceTable(props: SymbolPriceTableProps) {
@@ -91,6 +94,7 @@ export const SymbolPriceTable = memo(function SymbolPriceTable(props: SymbolPric
     model.setProps(props);
   }, [model, props.ticks, props.state, props.onSelectSymbol, props.maxRows, props.histories]);
   const view = useBehaviorSnapshot(model.state$);
+  const [trendSymbol, setTrendSymbol] = useState<string>();
   const rowData = view.visibleTicks as TickGridRow[];
   const columnDefs = useMemo<ColDef<TickGridRow>[]>(
     () => [
@@ -106,7 +110,7 @@ export const SymbolPriceTable = memo(function SymbolPriceTable(props: SymbolPric
         headerName: 'PRICE',
         minWidth: 90,
         cellClass: ({ data }) => data ? 'price-cell price-' + data.direction : undefined,
-        valueFormatter: ({ value }) => value == null ? '' : priceFormatter.format(value),
+        valueFormatter: ({ value, data }) => value == null ? '' : formatForSymbol(value, data?.symbol ?? '', 'price'),
       },
       {
         field: 'symbol',
@@ -116,7 +120,7 @@ export const SymbolPriceTable = memo(function SymbolPriceTable(props: SymbolPric
         maxWidth: 88,
         sortable: false,
         cellRenderer: SparklineCellRenderer,
-        cellRendererParams: { model },
+        cellRendererParams: { model, onShowTrend: setTrendSymbol },
       },
       {
         field: 'volatility1m',
@@ -180,6 +184,7 @@ export const SymbolPriceTable = memo(function SymbolPriceTable(props: SymbolPric
           <p className="positions-empty">{view.emptyMessage}</p>
         )}
       </div>
+      {trendSymbol && <PriceHistoryPopup symbol={trendSymbol} history={view.histories.get(trendSymbol) ?? []} onClose={() => setTrendSymbol(undefined)} />}
     </section>
   );
 });

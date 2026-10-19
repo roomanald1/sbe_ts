@@ -1,3 +1,4 @@
+import { formatForSymbol } from '../instrument_precision';
 import { memo, useEffect, useMemo } from 'react';
 import { usePausedValue } from '../use_paused_value';
 import { AgGridReact } from 'ag-grid-react';
@@ -24,11 +25,7 @@ ModuleRegistry.registerModules([
 
 const moneyFormatter = new Intl.NumberFormat(undefined, {
   minimumFractionDigits: 2,
-  maximumFractionDigits: 8,
-});
-const quantityFormatter = new Intl.NumberFormat(undefined, {
-  minimumFractionDigits: 0,
-  maximumFractionDigits: 8,
+  maximumFractionDigits: 2,
 });
 const quoteCurrency = (symbol: string) => symbol.split('-')[1] ?? '';
 
@@ -118,8 +115,8 @@ function PnlComponent({ connection, paused = false }: { connection: Connection; 
             : value > 0
               ? 'pnl-positive'
               : 'pnl-negative',
-        valueFormatter: ({ value }) =>
-          value == null ? '' : quantityFormatter.format(value),
+        valueFormatter: ({ value, data }) =>
+          value == null ? '' : formatForSymbol(value, data?.symbol ?? '', 'quantity'),
       },
       {
         field: 'averageEntry',
@@ -129,7 +126,7 @@ function PnlComponent({ connection, paused = false }: { connection: Connection; 
         valueFormatter: ({ value, data }) =>
           value == null
             ? '—'
-            : moneyFormatter.format(value) + ' USD / ' + (data?.symbol.split('-')[0] ?? 'unit'),
+            : formatForSymbol(value, data?.symbol ?? '', 'price') + ' USD / ' + (data?.symbol.split('-')[0] ?? 'unit'),
       },
       {
         field: 'mark',
@@ -143,7 +140,7 @@ function PnlComponent({ connection, paused = false }: { connection: Connection; 
               : data?.bookError
                 ? 'Unavailable'
                 : 'Loading…'
-            : moneyFormatter.format(value) + ' ' + (data?.quote ?? ''),
+            : formatForSymbol(value, data?.symbol ?? '', 'price') + ' ' + (data?.quote ?? ''),
       },
       {
         field: 'realized',

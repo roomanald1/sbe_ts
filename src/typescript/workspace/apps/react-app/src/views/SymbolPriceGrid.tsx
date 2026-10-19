@@ -1,3 +1,4 @@
+import { formatForSymbol } from '../instrument_precision';
 import { memo, useEffect, useMemo } from 'react';
 import {
   SymbolPriceGridModel,
@@ -18,10 +19,6 @@ import {
 
 ModuleRegistry.registerModules([ClientSideRowModelModule]);
 
-const priceFormatter = new Intl.NumberFormat(undefined, {
-  minimumFractionDigits: 2,
-  maximumFractionDigits: 10,
-});
 
 const gridTheme = themeQuartz.withParams({
   accentColor: '#8296ad',
@@ -46,15 +43,15 @@ function SymbolGridCellRenderer({
       <button
         className="symbol-grid-cell-button"
         type="button"
-        onClick={() => model.selectSymbol(value.symbol)}
+        onClick={() => model.selectSymbol(value.symbol, value.direction === 'down' ? 'sell' : 'buy')}
         disabled={!model.getSnapshot().onSelectSymbol}
-        aria-label={`Show ${value.symbol} order book`}
+        aria-label={"Open " + (value.direction === 'down' ? 'sell' : 'buy') + ' order for ' + value.symbol}
       >
         <span className="grid-symbol" title={value.symbol}>
           {value.symbol}
         </span>
         <span className={`grid-price price-${value.direction}`}>
-          {priceFormatter.format(value.price)} <span className="grid-volatility">5M {value.volatility5m === undefined ? "N/A" : value.volatility5m.toFixed(3) + "%"}</span>
+          {formatForSymbol(value.price, value.symbol, 'price')} <span className="grid-volatility">5M {value.volatility5m === undefined ? "N/A" : value.volatility5m.toFixed(3) + "%"}</span>
         </span>
       </button>
       {model.getSnapshot().onTradeSymbol && (
@@ -63,7 +60,7 @@ function SymbolGridCellRenderer({
             type="button"
             onClick={(event) => {
               event.stopPropagation();
-              model.tradeSymbol(value.symbol);
+              model.tradeSymbol(value.symbol, 'buy');
             }}
           >
             Buy
@@ -72,7 +69,7 @@ function SymbolGridCellRenderer({
             type="button"
             onClick={(event) => {
               event.stopPropagation();
-              model.tradeSymbol(value.symbol);
+              model.tradeSymbol(value.symbol, 'sell');
             }}
           >
             Sell

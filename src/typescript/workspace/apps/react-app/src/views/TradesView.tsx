@@ -1,3 +1,4 @@
+import { formatForSymbol } from '../instrument_precision';
 import { memo, useEffect, useId, useMemo, useRef } from 'react';
 import { usePausedValue } from '../use_paused_value';
 import { AgGridReact } from 'ag-grid-react';
@@ -36,10 +37,6 @@ type TradesViewProps = {
 
 type TradeGridRow = Omit<RecentTrade, 'timestamp'> & { time: Date };
 
-const numberFormatter = new Intl.NumberFormat(undefined, {
-  minimumFractionDigits: 2,
-  maximumFractionDigits: 10,
-});
 const timeFormatter = new Intl.DateTimeFormat(undefined, {
   dateStyle: 'short',
   timeStyle: 'medium',
@@ -126,14 +123,14 @@ export function TradesViewComponent({
         cellClass: ({ data }) =>
           data?.side === 'buy' ? 'pnl-positive' : 'pnl-negative',
         valueFormatter: ({ value }) =>
-          value == null ? '' : numberFormatter.format(value),
+          value == null ? '' : formatForSymbol(value, symbol, 'price'),
       },
       {
         field: 'size',
         headerName: 'Size',
         filter: 'agNumberColumnFilter',
         valueFormatter: ({ value }) =>
-          value == null ? '' : numberFormatter.format(value),
+          value == null ? '' : formatForSymbol(value, symbol, 'quantity'),
       },
     ],
     [],

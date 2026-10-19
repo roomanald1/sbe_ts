@@ -9,11 +9,17 @@ export type SignalComponents = {
   volatility_1m_percent: number | null;
   trend_5m_percent?: number | null;
   trend_5m_volatility_units?: number | null;
+  mispricing_vs_vwap_bps?: number | null;
+  pressure_without_price_move?: number | null;
+  aggressor_cost_bps?: number | null;
 };
 export type SignalSnapshot = {
   symbol: string;
   timestamp: number;
-  direction: 'bullish' | 'neutral' | 'bearish';
+  direction: 'bullish' | 'neutral' | 'bearish' | 'ranging';
+  ranging_probability?: number | null;
+  range_lower_bound?: number | null;
+  range_upper_bound?: number | null;
   score: number;
   strength: number;
   components: SignalComponents;

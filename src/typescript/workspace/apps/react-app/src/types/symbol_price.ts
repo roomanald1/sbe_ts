@@ -20,6 +20,7 @@ export type BookLevel = {
   price: number;
   size: number;
   cumulativeSize: number;
+  cumulativeNotional?: number;
 };
 
 export type BookDepth = {
@@ -39,8 +40,29 @@ export function decodeSymbolPrice(
   data: unknown,
   symbols?: Map<string, SymbolPriceTick>,
 ): SymbolPriceTick | undefined {
-  if (!(data instanceof Uint8Array) || data.byteLength < HEADER_LENGTH + 56)
-    return;
+  if (!(data instanceof Uint8Array)) return;
+  return decodeSymbolPriceAt(data, symbols, 0);
+}
+
+export function decodeSymbolPriceBatch(
+  data: unknown,
+  symbols?: Map<string, SymbolPriceTick>,
+): SymbolPriceTick[] {
+  if (!(data instanceof Uint8Array)) return [];
+  const ticks: SymbolPriceTick[] = [];
+  for (let offset = 0; offset + SYMBOL_PRICE_MESSAGE_LENGTH <= data.byteLength; offset += SYMBOL_PRICE_MESSAGE_LENGTH) {
+    const tick = decodeSymbolPriceAt(data, symbols, offset);
+    if (tick) ticks.push(tick);
+  }
+  return ticks;
+}
+
+function decodeSymbolPriceAt(
+  data: Uint8Array,
+  symbols: Map<string, SymbolPriceTick> | undefined,
+  offset: number,
+): SymbolPriceTick | undefined {
+  if (data.byteLength - offset < SYMBOL_PRICE_MESSAGE_LENGTH) return;
 
   // Reuse DataView by storing it on the Uint8Array
   const cachedData = data as CachedDataView;
@@ -50,8 +72,8 @@ export function decodeSymbolPrice(
     cachedData._view = view;
   }
 
-  const templateId = view.getUint16(2, true);
-  const schemaId = view.getUint16(4, true);
+  const templateId = view.getUint16(offset + 2, true);
+  const schemaId = view.getUint16(offset + 4, true);
 
   if (
     templateId !== SYMBOL_PRICE_TEMPLATE_ID ||
@@ -61,14 +83,14 @@ export function decodeSymbolPrice(
   }
 
   // symbol decode (no allocations)
-  const symbolStart = HEADER_LENGTH;
+  const symbolStart = offset + HEADER_LENGTH;
   for (let i = 0; i < 32; i++) symbolBuf[i] = data[symbolStart + i];
 
   let symbol = asciiDecoder.decode(symbolBuf).trimEnd();
   const nullPos = symbol.indexOf('\0');
   if (nullPos !== -1) symbol = symbol.slice(0, nullPos);
 
-  const priceOffset = HEADER_LENGTH + 32;
+  const priceOffset = offset + HEADER_LENGTH + 32;
   const price = view.getFloat64(priceOffset, true);
   const rawVolatility1m = view.getFloat64(priceOffset + 8, true);
   const rawVolatility5m = view.getFloat64(priceOffset + 16, true);
@@ -196,6 +218,7 @@ function decodeBookSide(view: DataView, firstPriceOffset: number): BookLevel[] {
 }
 
 const HEADER_LENGTH = 8;
+const SYMBOL_PRICE_MESSAGE_LENGTH = HEADER_LENGTH + 32 + 24;
 const SYMBOL_PRICE_TEMPLATE_ID = 1;
 const SYMBOL_PRICE_SCHEMA_ID = 1;
 const BOOK_DEPTH_TEMPLATE_ID = 2;

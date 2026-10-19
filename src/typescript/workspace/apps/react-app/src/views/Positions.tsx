@@ -1,3 +1,4 @@
+import { formatForSymbol } from '../instrument_precision';
 import { memo, useEffect, useMemo } from 'react';
 import { usePausedValue } from '../use_paused_value';
 import { AgGridReact } from 'ag-grid-react';
@@ -9,12 +10,14 @@ import {
   TextFilterModule,
   themeQuartz,
   type ColDef,
+  type ColGroupDef,
   type ICellRendererParams,
 } from 'ag-grid-community';
 import { FeedToolbar } from './FeedToolbar';
 import type { Connection } from '../connection';
 import { OrderManagerModel } from '../models/OrderManagerModel';
 import { useBehaviorSnapshot } from '../use_behavior_snapshot';
+import { getOrderTypeDescription } from '../order_type_descriptions';
 
 ModuleRegistry.registerModules([
   ClientSideRowModelModule,
@@ -24,29 +27,28 @@ ModuleRegistry.registerModules([
 ]);
 
 type TradeSide = 'buy' | 'sell';
-const moneyFormatter = new Intl.NumberFormat(undefined, {
-  minimumFractionDigits: 2,
-  maximumFractionDigits: 8,
-});
-const quantityFormatter = new Intl.NumberFormat(undefined, {
-  minimumFractionDigits: 0,
-  maximumFractionDigits: 8,
-});
 const quoteCurrency = (symbol: string) => symbol.split('-')[1] ?? '';
 
 type PositionGridRow = {
   id: string;
-  kind: 'order' | 'vwap';
+  kind: 'order' | 'vwap' | 'barrier';
+  orderType: string;
+  expiresAt?: number;
+  orderTimeInForce?: 'gtc' | 'gtd';
   status: string;
   symbol: string;
   side: TradeSide;
   executed: number;
   remaining: number;
   limitPrice?: number;
+  triggerDirection?: 'above' | 'below';
+  executionType?: 'market' | 'limit';
+  activationLimit?: number;
   estimatedFee?: number;
   current?: number;
   quote: string;
   bookError?: string;
+  error?: string;
   progress?: number;
   etaMinutes?: number;
   executionVwap?: number;
@@ -79,6 +81,7 @@ function CancelOrderCell({
 }: ICellRendererParams<PositionGridRow> & { model: OrderManagerModel }) {
   if (!data) return null;
   if (data.kind === 'vwap' && data.status !== 'running') return null;
+  if (data.kind === 'barrier' && data.status !== 'armed') return null;
   return (
     <button
       className="positions-cancel-button"
@@ -115,13 +118,14 @@ function PositionsComponent({
     model.start();
     return () => model.stop();
   }, [model]);
-  const selectedSymbol = state.selectedSymbol;
-  const current = state.selectedCurrentPrice;
   const rowData = useMemo<PositionGridRow[]>(
     () => [
       ...state.rows.map(({ order, current: mark, bookError }) => ({
         id: order.id,
         kind: 'order' as const,
+        orderType: order.post_only ? 'Post-only limit' : order.time_in_force === 'gtd' ? 'GTD limit' : 'Limit',
+        expiresAt: order.expires_at,
+        orderTimeInForce: order.time_in_force,
         status: 'Resting',
         symbol: order.symbol,
         side: order.side,
@@ -133,9 +137,30 @@ function PositionsComponent({
         quote: quoteCurrency(order.symbol),
         bookError,
       })),
+      ...state.barrierOrders.map((order) => ({
+        id: order.id,
+        kind: 'barrier' as const,
+        orderType: order.order_kind || 'Barrier',
+        status: order.status,
+        error: order.error,
+        symbol: order.symbol,
+        side: order.side,
+        executed: order.filled_quantity,
+        remaining: order.remaining_quantity,
+        limitPrice: order.trigger_price,
+        triggerDirection: order.trigger_direction,
+        executionType: order.execution_type,
+        activationLimit: order.limit_price,
+        current: state.books[order.symbol]?.bids[0] && state.books[order.symbol]?.asks[0]
+          ? ((state.books[order.symbol]!.bids[0].price + state.books[order.symbol]!.asks[0].price) / 2)
+          : (state.books[order.symbol]?.bids[0]?.price ?? state.books[order.symbol]?.asks[0]?.price),
+        quote: quoteCurrency(order.symbol),
+        bookError: state.bookErrors[order.symbol],
+      })),
       ...state.vwapRuns.slice(-20).map((run) => ({
           id: run.id,
           kind: 'vwap' as const,
+          orderType: run.strategy === 'twap' ? 'TWAP' : 'VWAP',
           status: run.status,
           symbol: run.symbol,
           side: run.side,
@@ -151,13 +176,14 @@ function PositionsComponent({
           quote: quoteCurrency(run.symbol),
         })),
     ],
-    [state.rows, state.vwapRuns],
+    [state.rows, state.barrierOrders, state.vwapRuns, state.books, state.bookErrors],
   );
   const displayedRowData = usePausedValue(rowData, paused);
   const columnDefs = useMemo<ColDef<PositionGridRow>[]>(
     () => [
       { field: 'symbol', headerName: 'Symbol', minWidth: 90 },
-      { field: 'status', headerName: 'Status', minWidth: 105 },
+      { field: 'orderType', headerName: 'Type', minWidth: 92, tooltipValueGetter: ({ value }) => getOrderTypeDescription(value) },
+      { field: 'status', headerName: 'Status', minWidth: 105, tooltipField: 'error' },
       {
         field: 'side',
         headerName: 'Side',
@@ -172,75 +198,88 @@ function PositionsComponent({
         headerName: 'Executed',
         minWidth: 68,
         filter: 'agNumberColumnFilter',
-        valueFormatter: ({ value }) =>
-          value === undefined ? '' : quantityFormatter.format(value),
+        valueFormatter: ({ value, data }) =>
+          value === undefined ? '' : formatForSymbol(value, data?.symbol ?? '', 'quantity'),
       },
       {
         field: 'remaining',
         headerName: 'Remaining',
         minWidth: 68,
         filter: 'agNumberColumnFilter',
-        valueFormatter: ({ value }) =>
-          value === undefined ? '' : quantityFormatter.format(value),
+        valueFormatter: ({ value, data }) =>
+          value === undefined ? '' : formatForSymbol(value, data?.symbol ?? '', 'quantity'),
       },
+      ...(state.vwapRuns.length > 0 ? [{
+        headerName: 'VWAP',
+        marryChildren: true,
+        children: [
+          {
+            field: 'progress',
+            headerName: 'Filled',
+            minWidth: 88,
+            valueFormatter: ({ value, data }: { value: number | undefined; data: PositionGridRow | undefined }) => data?.kind === 'vwap' && value != null ? value.toFixed(1) + '%' : '',
+          },
+          {
+            field: 'etaMinutes',
+            headerName: 'Pace ETA',
+            minWidth: 82,
+            valueFormatter: ({ value, data }: { value: number | undefined; data: PositionGridRow | undefined }) => data?.kind === 'vwap' && value != null && Number.isFinite(value) ? Math.ceil(value) + ' min' : data?.kind === 'vwap' ? '—' : '',
+          },
+          {
+            field: 'executionVwap',
+            headerName: 'Exec VWAP',
+            minWidth: 92,
+            valueFormatter: ({ value, data }: { value: number | undefined; data: PositionGridRow | undefined }) => data?.kind === 'vwap' && value != null ? formatForSymbol(value, data.symbol, 'price') + ' ' + data.quote : '',
+          },
+          {
+            field: 'marketVwap',
+            headerName: 'Market VWAP',
+            minWidth: 92,
+            valueFormatter: ({ value, data }: { value: number | undefined; data: PositionGridRow | undefined }) => data?.kind === 'vwap' && value != null ? formatForSymbol(value, data.symbol, 'price') + ' ' + data.quote : '',
+          },
+          {
+            field: 'slippage',
+            headerName: 'VWAP delta',
+            minWidth: 92,
+            valueFormatter: ({ value, data }: { value: number | undefined; data: PositionGridRow | undefined }) => data?.kind === 'vwap' && value != null ? formatForSymbol(value, data.symbol, 'price') + ' ' + data.quote : '',
+          },
+        ],
+      } satisfies ColGroupDef<PositionGridRow>] : []),
       {
-        field: 'progress',
-        headerName: 'Filled',
-        minWidth: 88,
-        valueFormatter: ({ value, data }) => data?.kind === 'vwap' && value != null ? value.toFixed(1) + '%' : '',
-      },
-      {
-        field: 'etaMinutes',
-        headerName: 'Pace ETA',
-        minWidth: 82,
-        valueFormatter: ({ value, data }) => data?.kind === 'vwap' && value != null && Number.isFinite(value) ? Math.ceil(value) + ' min' : data?.kind === 'vwap' ? '—' : '',
-      },
-      {
-        field: 'executionVwap',
-        headerName: 'Exec VWAP',
-        minWidth: 92,
-        valueFormatter: ({ value, data }) => data?.kind === 'vwap' && value != null ? moneyFormatter.format(value) + ' ' + data.quote : '',
-      },
-      {
-        field: 'marketVwap',
-        headerName: 'Market VWAP',
-        minWidth: 92,
-        valueFormatter: ({ value, data }) => data?.kind === 'vwap' && value != null ? moneyFormatter.format(value) + ' ' + data.quote : '',
-      },
-      {
-        field: 'slippage',
-        headerName: 'VWAP delta',
-        minWidth: 92,
-        valueFormatter: ({ value, data }) => data?.kind === 'vwap' && value != null ? moneyFormatter.format(value) + ' ' + data.quote : '',
+        field: 'expiresAt',
+        headerName: 'Expires',
+        minWidth: 105,
+        valueFormatter: ({ value, data }) => data?.kind === 'order' && value ? new Date(value).toLocaleString() : '',
       },
       {
         field: 'limitPrice',
-        headerName: 'Limit',
+        headerName: 'Limit / barrier',
         minWidth: 90,
         filter: 'agNumberColumnFilter',
         valueFormatter: ({ value, data }) =>
           value === undefined
             ? ''
-            : moneyFormatter.format(value) + ' ' + (data?.quote ?? ''),
+            : (data?.kind === 'barrier' ? (data.triggerDirection === 'above' ? 'Above ' : 'Below ') : '') + formatForSymbol(value, data?.symbol ?? '', 'price') + (data?.kind === 'barrier' && data.executionType === 'limit' && data.activationLimit ? ' → limit ' + formatForSymbol(data.activationLimit, data.symbol, 'price') : '') + ' ' + (data?.quote ?? ''),
       },
       {
         field: 'estimatedFee',
         headerName: 'Est. fee',
         minWidth: 80,
-        valueFormatter: ({ value, data }) => value == null || data?.kind !== 'order' ? '' : moneyFormatter.format(value) + ' ' + data.quote,
-      },      {
+        valueFormatter: ({ value, data }) => value == null || data?.kind !== 'order' ? '' : formatForSymbol(value, data.symbol, 'price') + ' ' + data.quote,
+      },
+      {
         field: 'current',
         headerName: 'Current',
         minWidth: 90,
         filter: 'agNumberColumnFilter',
         valueFormatter: ({ value, data }) =>
-          data?.kind !== 'order'
+          !data || data.kind === 'vwap'
             ? ''
             : value === undefined
               ? data.bookError
                 ? 'Unavailable'
                 : 'Loading...'
-              : moneyFormatter.format(value) + ' ' + (data.quote ?? ''),
+              : formatForSymbol(value, data.symbol, 'price') + ' ' + (data.quote ?? ''),
       },
       {
         colId: 'actions',
@@ -256,151 +295,11 @@ function PositionsComponent({
         maxWidth: 64,
       },
     ],
-    [model],
+    [model, state.vwapRuns.length],
   );
   return (
     <section className="feed-section positions-page" aria-label="Orders">
       <FeedToolbar title="Orders" />
-      <form
-        className="paper-trade-form"
-        aria-label="Place order"
-        onSubmit={(event) => {
-          event.preventDefault();
-          void model.submit();
-        }}
-      >
-        <label>
-          <span>INSTRUMENT</span>
-          <select
-            value={selectedSymbol}
-            onChange={(event) => model.setSymbol(event.target.value)}
-            disabled={!state.symbols.length}
-          >
-            {state.symbols.map((symbol) => (
-              <option key={symbol} value={symbol}>
-                {symbol}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label>
-          <span>SIDE</span>
-          <select
-            value={state.side}
-            onChange={(event) => model.setSide(event.target.value as TradeSide)}
-          >
-            <option value="buy">Buy</option>
-            <option value="sell">Sell</option>
-          </select>
-        </label>
-        <label>
-          <span>ORDER TYPE</span>
-          <select
-            value={state.orderType}
-            onChange={(event) =>
-              model.setOrderType(event.target.value as 'ioc' | 'limit' | 'vwap')
-            }
-          >
-            <option value="ioc">Immediate or cancel</option>
-            <option value="limit">Limit</option>
-            <option value="vwap">VWAP execution</option>
-          </select>
-        </label>
-        <label>
-          <span>QUANTITY</span>
-          <input
-            type="number"
-            min="0.00000001"
-            step="any"
-            required
-            value={state.quantity}
-            onChange={(event) => model.setQuantity(event.target.value)}
-            placeholder="0.00"
-          />
-        </label>
-        {state.orderType === 'vwap' && (
-          <>
-            <label>
-              <span>DURATION (MINUTES)</span>
-              <input
-                type="number"
-                min="5"
-                max="390"
-                step="1"
-                required
-                value={state.durationMinutes}
-                onChange={(event) =>
-                  model.setDurationMinutes(event.target.value)
-                }
-              />
-            </label>
-            <label>
-              <span>MAX MARKET PARTICIPATION (%)</span>
-              <input
-                type="number"
-                min="1"
-                max="100"
-                step="1"
-                required
-                value={state.participationRate}
-                onChange={(event) =>
-                  model.setParticipationRate(event.target.value)
-                }
-              />
-            </label>
-          </>
-        )}
-        {state.orderType === 'limit' && (
-          <label>
-            <span className="limit-price-label">
-              <span>LIMIT PRICE</span>
-              <small className="current-instrument-price">
-                MARK{' '}
-                {current === undefined
-                  ? state.bookErrors[selectedSymbol]
-                    ? 'Unavailable'
-                    : 'Loading...'
-                  : moneyFormatter.format(current) +
-                    ' ' +
-                    quoteCurrency(selectedSymbol)}
-              </small>
-            </span>
-            <input
-              type="number"
-              min="0.00000001"
-              step="any"
-              required
-              value={state.limitPrice}
-              onChange={(event) => model.setLimitPrice(event.target.value)}
-              placeholder="0.00"
-            />
-            {state.limitPriceWarning && (
-              <small className="limit-price-warning" role="alert">
-                {state.limitPriceWarning}
-              </small>
-            )}
-          </label>
-        )}
-        <p className="order-fee-estimate">Estimated fee ({((state.orderType === "limit" ? state.makerFeeRate : state.takerFeeRate) * 100).toFixed(3)}%): {state.estimatedFee === undefined ? "Waiting for price" : moneyFormatter.format(state.estimatedFee) + " " + quoteCurrency(selectedSymbol)}</p>
-        <button
-          className={'paper-trade-submit is-' + state.side}
-          type="submit"
-          disabled={
-            state.submitting ||
-            !state.quantity ||
-            (state.orderType === 'limit' && !state.limitPrice)
-          }
-        >
-          {state.submitting
-            ? 'Submitting...'
-            : state.limitPriceWarning &&
-                state.confirmedLimitPrice === state.limitPrice
-              ? 'Confirm price and ' + state.side
-              : state.side === 'buy'
-                ? 'Buy'
-                : 'Sell'}
-        </button>
-      </form>
       {state.error && (
         <div className="positions-error" role="alert">
           {state.error}
@@ -411,15 +310,18 @@ function PositionsComponent({
           rowData={displayedRowData}
           columnDefs={columnDefs}
           defaultColDef={defaultPositionColDef}
+          className="orders-grid"
           getRowId={({ data }) => data.id}
           theme={positionsGridTheme}
           domLayout="autoHeight"
           rowHeight={34}
-          headerHeight={38}
+          headerHeight={30}
+          groupHeaderHeight={18}
           suppressColumnMoveAnimation
         />
         {!state.loading &&
           state.orders.length === 0 &&
+          state.barrierOrders.length === 0 &&
           state.vwapRuns.length === 0 && (
             <p className="positions-empty">
               No open orders or VWAP executions.

@@ -15,7 +15,7 @@ import { FeedToolbar } from './FeedToolbar';
 type HedgeCorrelationResponse = { pair_correlations?: { symbol_a: string; symbol_b: string; correlation: number | null }[]; positions?: { symbol: string; candidates?: { symbol: string; correlation: number | null }[] }[] };
 
 ModuleRegistry.registerModules([ClientSideRowModelModule]);
-const moneyFormatter = new Intl.NumberFormat(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 8 });
+const moneyFormatter = new Intl.NumberFormat(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const riskGridTheme = themeQuartz.withParams({
   accentColor: '#8296ad',
   backgroundColor: '#0d0f12',

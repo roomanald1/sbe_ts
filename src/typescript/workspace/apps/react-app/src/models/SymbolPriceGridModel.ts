@@ -7,8 +7,8 @@ export type SymbolPriceGridProps = {
   ticks: SymbolPriceTick[];
   feedSource: 'okx' | 'synthetic';
   compact: boolean;
-  onSelectSymbol?: (symbol: string) => void;
-  onTradeSymbol?: (symbol: string) => void;
+  onSelectSymbol?: (symbol: string, side: 'buy' | 'sell') => void;
+  onTradeSymbol?: (symbol: string, side: 'buy' | 'sell') => void;
 };
 export type SymbolPriceGridState = SymbolPriceGridProps & {
   rows: SymbolGridRow[];
@@ -44,10 +44,10 @@ export class SymbolPriceGridModel {
     this.props$.next(props);
     this.state$.next({ ...props, rows: createRows(props.ticks) });
   }
-  selectSymbol(symbol: string): void {
-    this.props$.value.onSelectSymbol?.(symbol);
+  selectSymbol(symbol: string, side: 'buy' | 'sell'): void {
+    this.props$.value.onSelectSymbol?.(symbol, side);
   }
-  tradeSymbol(symbol: string): void {
-    this.props$.value.onTradeSymbol?.(symbol);
+  tradeSymbol(symbol: string, side: 'buy' | 'sell'): void {
+    this.props$.value.onTradeSymbol?.(symbol, side);
   }
 }

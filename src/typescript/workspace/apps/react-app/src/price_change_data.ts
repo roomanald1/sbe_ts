@@ -1,6 +1,6 @@
-import { bufferTime, filter, map, of, switchMap, type Observable } from 'rxjs';
+import { bufferTime, filter, from, map, mergeMap, of, switchMap, type Observable } from 'rxjs';
 import type { Connection } from './connection';
-import { decodeSymbolPrice, type SymbolPriceTick } from './types/symbol_price';
+import { decodeSymbolPriceBatch, type SymbolPriceTick } from './types/symbol_price';
 import { BehaviorSubject } from 'rxjs';
 
 export type PriceHistorySample = {
@@ -44,8 +44,7 @@ function createPriceChangesObservable(
     switchMap((state) =>
       state === 'connected'
         ? connection.data.pipe(
-            map((data) => decodeSymbolPrice(data, symbols)),
-            filter((tick): tick is SymbolPriceTick => tick !== undefined),
+            mergeMap((data) => from(decodeSymbolPriceBatch(data, symbols))),
             bufferTime(50),
             filter((changedTicks) => changedTicks.length > 0),
             map((changedTicks) => ({ reset: false as const, changedTicks })),

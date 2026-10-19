@@ -8,7 +8,7 @@ export type SymbolPriceTableProps = {
   histories: Map<string, PriceHistorySample[]>;
   state: ConnectionState;
   maxRows?: number;
-  onSelectSymbol?: (symbol: string) => void;
+  onSelectSymbol?: (symbol: string, side: 'buy' | 'sell') => void;
 };
 export type SymbolPriceTableState = SymbolPriceTableProps & {
   visibleTicks: SymbolPriceTick[];
@@ -43,7 +43,7 @@ export class SymbolPriceTableModel {
     this.props$.next(props);
     this.state$.next(toState(props));
   }
-  selectSymbol(symbol: string): void {
-    this.props$.value.onSelectSymbol?.(symbol);
+  selectSymbol(symbol: string, side: 'buy' | 'sell'): void {
+    this.props$.value.onSelectSymbol?.(symbol, side);
   }
 }

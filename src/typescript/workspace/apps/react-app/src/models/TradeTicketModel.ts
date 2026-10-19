@@ -1,10 +1,13 @@
+import { alignsToStep, getInstrumentPrecision } from '../instrument_precision';
 import { BehaviorSubject } from 'rxjs';
 import type { BookFeed, Connection } from '../connection';
 import { decodeBookDepth, type BookDepth } from '../types/symbol_price';
 import { getLimitPriceMarkWarning } from './limit_price_guard';
 
 type Side = 'buy' | 'sell';
-type OrderType = 'ioc' | 'limit' | 'vwap';
+type OrderType = 'market' | 'ioc' | 'limit' | 'vwap' | 'twap' | 'barrier' | 'stop-market' | 'stop-limit' | 'trailing-stop' | 'post-only-limit' | 'fok' | 'gtd';
+type BarrierDirection = 'above' | 'below';
+type TrailingMode = 'amount' | 'percent';
 type Props = { symbol: string; initialSide: Side; connection: Connection };
 export type TradeTicketState = {
   symbol: string;
@@ -14,6 +17,11 @@ export type TradeTicketState = {
   orderType: OrderType;
   quantity: string;
   limitPrice: string;
+  barrierPrice: string;
+  barrierDirection: BarrierDirection;
+  trailingValue: string;
+  trailingMode: TrailingMode;
+  expiresAtLocal: string;
   busy: boolean;
   message: string;
   currentPrice?: number;
@@ -50,6 +58,9 @@ export class TradeTicketModel {
       orderType: 'ioc' as OrderType,
       quantity: '',
       limitPrice: '',
+      barrierPrice: '',
+      barrierDirection: props.initialSide === 'sell' ? 'above' : 'below',
+      trailingValue: '', trailingMode: 'percent', expiresAtLocal: '',
       busy: false,
       bookError: '',
       message: '',
@@ -116,7 +127,7 @@ export class TradeTicketModel {
     this.errorSub = undefined;
   }
   setSide(side: Side): void {
-    this.update({ side });
+    this.update({ side, barrierDirection: side === 'sell' ? 'above' : 'below' });
   }
   setOrderType(orderType: OrderType): void {
     this.update({ orderType, confirmedLimitPrice: undefined });
@@ -133,6 +144,13 @@ export class TradeTicketModel {
   setLimitPrice(limitPrice: string): void {
     this.update({ limitPrice, confirmedLimitPrice: undefined, message: '' });
   }
+  setBarrierPrice(barrierPrice: string): void {
+    this.update({ barrierPrice, message: '' });
+  }
+  setBarrierDirection(barrierDirection: BarrierDirection): void { this.update({ barrierDirection }); }
+  setTrailingValue(trailingValue: string): void { this.update({ trailingValue, message: '' }); }
+  setTrailingMode(trailingMode: TrailingMode): void { this.update({ trailingMode }); }
+  setExpiresAtLocal(expiresAtLocal: string): void { this.update({ expiresAtLocal, message: '' }); }
   private async loadFeeRates(): Promise<void> {
     try {
       const response = await fetch("/positions/fee-rates");
@@ -145,20 +163,30 @@ export class TradeTicketModel {
     const state = this.state$.value;
     const quantity = Number(state.quantity);
     const limitPrice = Number(state.limitPrice);
+    const barrierPrice = Number(state.barrierPrice);
     const durationMinutes = Number(state.durationMinutes);
+    const trailingValue = Number(state.trailingValue);
+    const expiresAt = state.expiresAtLocal ? new Date(state.expiresAtLocal).getTime() : undefined;
+    const hasLimit = ['limit', 'stop-limit', 'post-only-limit', 'gtd'].includes(state.orderType);
+    const hasTrigger = ['barrier', 'stop-market', 'stop-limit'].includes(state.orderType);
     const participationRate = Number(state.participationRate) / 100;
+    const instrument = await getInstrumentPrecision(state.symbol);
+    if (instrument && (!alignsToStep(quantity, instrument.lotSz) || (hasLimit && !alignsToStep(limitPrice, instrument.tickSz)) || (hasTrigger && !alignsToStep(barrierPrice, instrument.tickSz)))) {
+      this.update({ message: 'Quantity or price does not match this instrument tick or lot size.' }); return;
+    }
     if (
       !Number.isFinite(quantity) ||
       quantity <= 0 ||
-      (state.orderType === 'limit' &&
-        (!Number.isFinite(limitPrice) || limitPrice <= 0)) ||
-      (state.orderType === 'vwap' &&
-        (!Number.isInteger(durationMinutes) || durationMinutes < 5 || durationMinutes > 390 ||
-          !Number.isFinite(participationRate) || participationRate < 0.01 || participationRate > 1))
+      (hasLimit && (!Number.isFinite(limitPrice) || limitPrice <= 0)) ||
+      (hasTrigger && (!Number.isFinite(barrierPrice) || barrierPrice <= 0)) ||
+      (state.orderType === 'trailing-stop' && (!Number.isFinite(trailingValue) || trailingValue <= 0 || (state.trailingMode === 'percent' && trailingValue >= 100))) ||
+      (state.orderType === 'gtd' && (!expiresAt || expiresAt <= Date.now())) ||
+      ((state.orderType === 'vwap' || state.orderType === 'twap') && (!Number.isInteger(durationMinutes) || durationMinutes < 5 || durationMinutes > 390)) ||
+      (state.orderType === 'vwap' && (!Number.isFinite(participationRate) || participationRate < 0.01 || participationRate > 1))
     )
       return;
     if (
-      state.orderType === 'limit' &&
+      hasLimit &&
       state.limitPriceWarning &&
       state.confirmedLimitPrice !== state.limitPrice
     ) {
@@ -171,15 +199,21 @@ export class TradeTicketModel {
     this.update({ busy: true, message: '' });
     try {
       const isVwap = state.orderType === 'vwap';
-      const response = await fetch(isVwap ? '/positions/vwap' : '/positions/orders', {
+      const isTwap = state.orderType === 'twap';
+      const scheduled = isVwap || isTwap;
+      const requestOrderType = state.orderType === 'gtd' ? 'limit' : state.orderType;
+      const response = await fetch(isVwap ? '/positions/vwap' : isTwap ? '/positions/twap' : '/positions/orders', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           symbol: state.symbol,
           side: state.side,
-          ...(isVwap ? { duration_minutes: durationMinutes, max_participation_rate: participationRate } : { order_type: state.orderType }),
+          ...(scheduled ? { duration_minutes: durationMinutes, ...(isVwap ? { max_participation_rate: participationRate } : {}) } : { order_type: requestOrderType }),
           quantity,
-          ...(state.orderType === 'limit' ? { limit_price: limitPrice } : {}),
+          ...(hasLimit ? { limit_price: limitPrice } : {}),
+          ...(hasTrigger ? { trigger_price: barrierPrice, trigger_direction: state.barrierDirection } : {}),
+          ...(state.orderType === 'trailing-stop' ? (state.trailingMode === 'amount' ? { trailing_amount: trailingValue } : { trailing_percent: trailingValue / 100 }) : {}),
+          ...(state.orderType === 'gtd' ? { time_in_force: 'gtd', expires_at: expiresAt } : {}),
         }),
       });
       if (!response.ok) {
@@ -191,9 +225,14 @@ export class TradeTicketModel {
       const result = (await response.json()) as {
         filled_quantity?: number; remaining_quantity?: number; average_execution_price?: number; estimated_fee?: number;
         id?: string; status?: string; executed_quantity?: number;
+        barrier_order?: { id: string; status: string; trigger_price: number; trigger_direction: BarrierDirection; order_kind?: string };
       };
-      if (isVwap && result.id) {
-        this.update({ vwapRunId: result.id, vwapStatus: result.status ?? 'running', vwapExecutedQuantity: result.executed_quantity ?? 0, message: 'VWAP execution started.' });
+      if (result.barrier_order) {
+        this.update({ message: (result.barrier_order.order_kind ?? 'Barrier') + ' order ' + result.barrier_order.id + ' armed ' + result.barrier_order.trigger_direction + ' ' + result.barrier_order.trigger_price + '.', quantity: '', barrierPrice: '' });
+        return;
+      }
+      if (scheduled && result.id) {
+        this.update({ vwapRunId: result.id, vwapStatus: result.status ?? 'running', vwapExecutedQuantity: result.executed_quantity ?? 0, message: (isTwap ? 'TWAP' : 'VWAP') + ' execution started.' });
         this.startVwapPolling(result.id);
         return;
       }
@@ -223,11 +262,11 @@ export class TradeTicketModel {
     try {
       const response = await fetch('/positions/vwap');
       if (!response.ok) return;
-      const data = (await response.json()) as { runs: Array<{ id: string; symbol: string; status: string; executed_quantity: number }> };
+      const data = (await response.json()) as { runs: Array<{ id: string; symbol: string; status: string; executed_quantity: number; strategy?: string }> };
       if (!this.feed || this.props$.value.symbol !== symbol) return;
       const run = [...data.runs].reverse().find((item) => item.symbol === symbol && item.status === 'running');
       if (!run) return;
-      this.update({ orderType: 'vwap', vwapRunId: run.id, vwapStatus: run.status, vwapExecutedQuantity: run.executed_quantity, message: 'Resumed monitoring VWAP execution.' });
+      this.update({ orderType: run.strategy === 'twap' ? 'twap' : 'vwap', vwapRunId: run.id, vwapStatus: run.status, vwapExecutedQuantity: run.executed_quantity, message: 'Resumed monitoring ' + (run.strategy === 'twap' ? 'TWAP' : 'VWAP') + ' execution.' });
       this.startVwapPolling(run.id);
     } catch { /* execution status can be loaded on the next ticket open */ }
   }
@@ -237,10 +276,10 @@ export class TradeTicketModel {
       try {
         const response = await fetch('/positions/vwap');
         if (!response.ok) return;
-        const data = (await response.json()) as { runs: Array<{ id: string; status: string; executed_quantity: number; error?: string }> };
+        const data = (await response.json()) as { runs: Array<{ id: string; status: string; executed_quantity: number; error?: string; strategy?: string }> };
         const run = data.runs.find((item) => item.id === runId);
         if (!run) return;
-        this.update({ vwapStatus: run.status, vwapExecutedQuantity: run.executed_quantity, message: run.error ?? ('VWAP ' + run.status + ' · filled ' + run.executed_quantity) });
+        this.update({ vwapStatus: run.status, vwapExecutedQuantity: run.executed_quantity, message: run.error ?? ((run.strategy === 'twap' ? 'TWAP ' : 'VWAP ') + run.status + ' · filled ' + run.executed_quantity) });
         if (run.status !== 'running') { clearInterval(this.vwapTimer); this.vwapTimer = undefined; }
       } catch { /* polling retries on the next interval */ }
     }, 1000);
@@ -249,7 +288,7 @@ export class TradeTicketModel {
     const id = this.state$.value.vwapRunId;
     if (!id) return;
     try { await fetch('/positions/vwap/' + encodeURIComponent(id), { method: 'DELETE' }); }
-    finally { this.update({ vwapStatus: 'cancelled', message: 'VWAP execution cancelled.' }); }
+    finally { this.update({ vwapStatus: 'cancelled', message: (this.state$.value.orderType === 'twap' ? 'TWAP' : 'VWAP') + ' execution cancelled.' }); }
   }
   private update(update: Partial<TradeTicketState>): void {
     const next = { ...this.state$.value, ...update };
@@ -293,8 +332,9 @@ export class TradeTicketModel {
         ? getLimitPriceMarkWarning(next.limitPrice, next.currentPrice)
         : undefined;
     if (!next.limitPriceWarning) next.confirmedLimitPrice = undefined;
-    const feeRate = next.orderType === "limit" ? next.makerFeeRate : next.takerFeeRate;
-    const feePrice = next.orderType === "limit" && Number(next.limitPrice) > 0 ? Number(next.limitPrice) : (next.estimatedFillAverage ?? next.currentPrice);
+    const makerOrder = ['limit', 'stop-limit', 'post-only-limit', 'gtd'].includes(next.orderType);
+    const feeRate = makerOrder ? next.makerFeeRate : next.takerFeeRate;
+    const feePrice = makerOrder && Number(next.limitPrice) > 0 ? Number(next.limitPrice) : (next.estimatedFillAverage ?? next.currentPrice);
     const feeQuantity = next.orderType === "ioc" && next.estimatedFillQuantity !== undefined ? next.estimatedFillQuantity : (next.orderType === "ioc" && next.book ? 0 : requestedQuantity);
     next.estimatedFee = feePrice !== undefined && validQuantity ? feeQuantity * feePrice * feeRate : undefined;
     this.state$.next(next);

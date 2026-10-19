@@ -10,6 +10,11 @@ export type PositionTrade = {
   fee_currency?: string;
   fee_rate?: number;
   fee_liquidity?: 'maker' | 'taker';
+  decision_timestamp?: number;
+  decision_price?: number;
+  decision_mid_price?: number;
+  slippage?: number;
+  slippage_bps?: number;
 };
 export type Position = {
   symbol: string;

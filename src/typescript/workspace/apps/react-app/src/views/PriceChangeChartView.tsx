@@ -1,3 +1,4 @@
+import { formatForSymbol } from '../instrument_precision';
 import { useEffect, useId, useRef } from 'react';
 import { FeedToolbar } from './FeedToolbar';
 import type { PriceChartData } from '../price_change_data';
@@ -11,10 +12,6 @@ type PriceChangeChartViewProps = {
   onTrade?: (side: 'buy' | 'sell') => void;
 };
 
-const priceFormatter = new Intl.NumberFormat(undefined, {
-  minimumFractionDigits: 2,
-  maximumFractionDigits: 10,
-});
 const percentFormatter = new Intl.NumberFormat(undefined, {
   minimumFractionDigits: 2,
   maximumFractionDigits: 2,
@@ -141,11 +138,11 @@ export function PriceChangeChartView({
           <div className="price-chart-summary">
             <div>
               <span className="price-chart-label">LAST PRICE</span>
-              <strong>{priceFormatter.format(latestPrice)}</strong>
+              <strong>{formatForSymbol(latestPrice, symbol, 'price')}</strong>
             </div>
             <div className={changeClass}>
               <span className="price-chart-label">CHANGE</span>
-              <strong>{priceFormatter.format(priceChange)}</strong>
+              <strong>{formatForSymbol(priceChange, symbol, 'price')}</strong>
               <small>{percentFormatter.format(percentChange ?? 0)}%</small>
             </div>
             {onTrade && (
@@ -203,7 +200,7 @@ export function PriceChangeChartView({
                       y={y + 3}
                       style={{ fontSize: axisFontSize }}
                     >
-                      {priceFormatter.format(price)}
+                      {formatForSymbol(price, symbol, 'price')}
                     </text>
                   </g>
                 );

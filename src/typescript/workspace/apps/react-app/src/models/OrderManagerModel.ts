@@ -1,10 +1,12 @@
+import { alignsToStep, getInstrumentPrecision } from '../instrument_precision';
 import { BehaviorSubject } from 'rxjs';
 import type { BookFeed, Connection } from '../connection';
 import { decodeBookDepth, type BookDepth } from '../types/symbol_price';
 import { getLimitPriceMarkWarning } from './limit_price_guard';
 
 type TradeSide = 'buy' | 'sell';
-type OrderType = 'ioc' | 'limit' | 'vwap';
+type OrderType = 'ioc' | 'limit' | 'vwap' | 'barrier';
+type BarrierDirection = 'above' | 'below';
 type RestingOrder = {
   id: string;
   symbol: string;
@@ -13,10 +15,33 @@ type RestingOrder = {
   remaining_quantity: number;
   limit_price: number;
   timestamp: number;
+  expires_at?: number;
+  time_in_force?: 'gtc' | 'gtd';
+  post_only?: boolean;
   maker_fee_rate: number;
   estimated_fee: number;
 };
-type OrdersResponse = { orders: RestingOrder[] };
+type BarrierOrder = {
+  id: string;
+  symbol: string;
+  side: TradeSide;
+  quantity: number;
+  remaining_quantity: number;
+  filled_quantity: number;
+  trigger_price: number;
+  trigger_direction: BarrierDirection;
+  order_kind?: 'barrier' | 'profit-target' | 'stop-market' | 'stop-limit' | 'trailing-stop';
+  execution_type?: 'market' | 'limit';
+  limit_price?: number;
+  trailing_amount?: number;
+  trailing_percent?: number;
+  created_at: number;
+  triggered_at?: number;
+  status: string;
+  average_execution_price?: number;
+  error?: string;
+};
+type OrdersResponse = { orders: RestingOrder[]; barrier_orders?: BarrierOrder[] };
 export type VwapRun = {
   id: string;
   symbol: string;
@@ -24,6 +49,7 @@ export type VwapRun = {
   quantity: number;
   executed_quantity: number;
   duration_minutes: number;
+  strategy?: 'vwap' | 'twap';
   started_at: number;
   status: string;
   market_vwap: number;
@@ -51,7 +77,10 @@ export type OrderManagerState = {
   quantity: string;
   orderType: OrderType;
   limitPrice: string;
+  barrierPrice: string;
+  barrierDirection: BarrierDirection;
   orders: RestingOrder[];
+  barrierOrders: BarrierOrder[];
   vwapRuns: VwapRun[];
   rows: OrderRow[];
   selectedCurrentPrice?: number;
@@ -87,11 +116,14 @@ export class OrderManagerModel {
       quantity: '',
       orderType: 'ioc',
       limitPrice: '',
+      barrierPrice: '',
+      barrierDirection: 'below',
       durationMinutes: '60',
       participationRate: '10',
       makerFeeRate: 0.0008,
       takerFeeRate: 0.001,
       orders: [],
+      barrierOrders: [],
       vwapRuns: [],
       rows: [],
       loading: true,
@@ -140,7 +172,7 @@ export class OrderManagerModel {
     this.syncFeeds();
   }
   setSide(side: TradeSide): void {
-    this.patch({ side });
+    this.patch({ side, barrierDirection: side === 'sell' ? 'above' : 'below' });
   }
   setQuantity(quantity: string): void {
     this.patch({ quantity });
@@ -156,6 +188,12 @@ export class OrderManagerModel {
   }
   setLimitPrice(limitPrice: string): void {
     this.patch({ limitPrice, confirmedLimitPrice: undefined, error: undefined });
+  }
+  setBarrierPrice(barrierPrice: string): void {
+    this.patch({ barrierPrice, error: undefined });
+  }
+  setBarrierDirection(barrierDirection: BarrierDirection): void {
+    this.patch({ barrierDirection });
   }
   private async loadFeeRates(): Promise<void> {
     try {
@@ -175,7 +213,7 @@ export class OrderManagerModel {
       const data = (await response.json()) as OrdersResponse;
       if (!Array.isArray(data.orders))
         throw new Error('The orders API returned invalid data');
-      this.patch({ orders: data.orders, loading: false, error: undefined });
+      this.patch({ orders: data.orders, barrierOrders: data.barrier_orders ?? [], loading: false, error: undefined });
       this.syncFeeds();
     } catch (reason) {
       this.patch({
@@ -191,14 +229,20 @@ export class OrderManagerModel {
     const state = this.state$.value;
     const quantity = Number(state.quantity);
     const limitPrice = Number(state.limitPrice);
+    const barrierPrice = Number(state.barrierPrice);
     const durationMinutes = Number(state.durationMinutes);
     const participationRate = Number(state.participationRate) / 100;
+    const instrument = await getInstrumentPrecision(state.selectedSymbol);
+    if (instrument && (!alignsToStep(quantity, instrument.lotSz) || (state.orderType === 'limit' && !alignsToStep(limitPrice, instrument.tickSz)) || (state.orderType === 'barrier' && !alignsToStep(barrierPrice, instrument.tickSz)))) {
+      this.patch({ error: 'Quantity or price does not match this instrument tick or lot size.' }); return;
+    }
     if (
       !state.selectedSymbol ||
       !Number.isFinite(quantity) ||
       quantity <= 0 ||
       (state.orderType === 'limit' &&
         (!Number.isFinite(limitPrice) || limitPrice <= 0)) ||
+      (state.orderType === 'barrier' && (!Number.isFinite(barrierPrice) || barrierPrice <= 0)) ||
       (state.orderType === 'vwap' &&
         (!Number.isInteger(durationMinutes) || durationMinutes < 5 || durationMinutes > 390 ||
           !Number.isFinite(participationRate) || participationRate < 0.01 || participationRate > 1))
@@ -227,6 +271,7 @@ export class OrderManagerModel {
           ...(isVwap ? { duration_minutes: durationMinutes, max_participation_rate: participationRate } : { order_type: state.orderType }),
           quantity,
           ...(state.orderType === 'limit' ? { limit_price: limitPrice } : {}),
+          ...(state.orderType === 'barrier' ? { trigger_price: barrierPrice, trigger_direction: state.barrierDirection } : {}),
         }),
       });
       if (!response.ok) {
@@ -235,7 +280,13 @@ export class OrderManagerModel {
       }
       const result = (await response.json()) as {
         filled_quantity?: number; remaining_quantity?: number; id?: string; status?: string; executed_quantity?: number;
+        barrier_order?: BarrierOrder;
       };
+      if (result.barrier_order) {
+        await this.refreshOrders();
+        this.patch({ quantity: '', barrierPrice: '', error: undefined });
+        return;
+      }
       if (isVwap && result.id) {
         this.patch({ vwapRunId: result.id, vwapStatus: result.status ?? 'running', vwapExecutedQuantity: result.executed_quantity ?? 0, vwapRuns: [...this.state$.value.vwapRuns.filter((run) => run.id !== result.id), result as VwapRun], error: undefined, quantity: '', orderType: 'ioc' });
         this.startVwapPolling(result.id);
@@ -302,6 +353,7 @@ export class OrderManagerModel {
       if (!response.ok) throw new Error(await response.text());
       this.patch({
         orders: this.state$.value.orders.filter((order) => order.id !== id),
+        barrierOrders: this.state$.value.barrierOrders.filter((order) => order.id !== id),
       });
       this.syncFeeds();
     } catch (reason) {
@@ -351,6 +403,7 @@ export class OrderManagerModel {
       [
         state.selectedSymbol,
         ...state.orders.map((order) => order.symbol),
+        ...state.barrierOrders.filter((order) => order.status === 'armed').map((order) => order.symbol),
       ].filter(Boolean),
     );
     for (const symbol of symbols) {

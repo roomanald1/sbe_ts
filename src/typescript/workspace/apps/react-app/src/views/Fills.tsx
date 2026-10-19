@@ -1,3 +1,4 @@
+import { formatForSymbol } from '../instrument_precision';
 import { memo, useEffect, useMemo } from 'react';
 import { usePausedValue } from '../use_paused_value';
 import { AgGridReact } from 'ag-grid-react';
@@ -26,7 +27,7 @@ ModuleRegistry.registerModules([
 
 const numberFormatter = new Intl.NumberFormat(undefined, {
   minimumFractionDigits: 2,
-  maximumFractionDigits: 8,
+  maximumFractionDigits: 2,
 });
 const timeFormatter = new Intl.DateTimeFormat(undefined, {
   dateStyle: 'short',
@@ -102,8 +103,8 @@ function FillsComponent({ paused = false }: { paused?: boolean }) {
         headerTooltip: 'Quantity',
         minWidth: 60,
         filter: 'agNumberColumnFilter',
-        valueFormatter: ({ value }) =>
-          value == null ? '' : numberFormatter.format(value),
+        valueFormatter: ({ value, data }) =>
+          value == null ? '' : formatForSymbol(value, data?.symbol ?? '', 'quantity'),
       },
       {
         field: 'execution_price',
@@ -114,7 +115,7 @@ function FillsComponent({ paused = false }: { paused?: boolean }) {
         valueFormatter: ({ value, data }) =>
           value == null
             ? ''
-            : numberFormatter.format(value) + ' ' + (data?.quote ?? ''),
+            : formatForSymbol(value, data?.symbol ?? '', 'price') + ' ' + (data?.quote ?? ''),
       },
       {
         field: 'fee',
@@ -129,6 +130,36 @@ function FillsComponent({ paused = false }: { paused?: boolean }) {
         valueFormatter: ({ value }) => value ? String(value).toUpperCase() : 'N/A',
       },
       {
+        field: 'decision_price',
+        headerName: 'Touch at submit',
+        headerTooltip: 'Best bid for a sell close or best ask for a buy close when the IOC was submitted',
+        minWidth: 112,
+        valueFormatter: ({ value, data }) => value == null ? 'N/A' : formatForSymbol(value, data?.symbol ?? '', 'price') + ' ' + (data?.quote ?? ''),
+      },
+      {
+        field: 'decision_mid_price',
+        headerName: 'Mid at submit',
+        headerTooltip: 'Mid-price between best bid and ask when the IOC was submitted',
+        minWidth: 105,
+        valueFormatter: ({ value, data }) => value == null ? 'N/A' : formatForSymbol(value, data?.symbol ?? '', 'price') + ' ' + (data?.quote ?? ''),
+      },
+      {
+        field: 'slippage',
+        headerName: 'Slippage',
+        headerTooltip: 'Execution price versus the submission touch, signed so positive means a better fill',
+        minWidth: 92,
+        cellClass: ({ value }) => value == null || value === 0 ? undefined : value > 0 ? 'pnl-positive' : 'pnl-negative',
+        valueFormatter: ({ value, data }) => value == null ? 'N/A' : formatForSymbol(value, data?.symbol ?? '', 'price') + ' ' + (data?.quote ?? ''),
+      },
+      {
+        field: 'slippage_bps',
+        headerName: 'Slippage (bps)',
+        headerTooltip: 'Signed slippage in basis points versus the submission touch; positive means better execution',
+        minWidth: 108,
+        cellClass: ({ value }) => value == null || value === 0 ? undefined : value > 0 ? 'pnl-positive' : 'pnl-negative',
+        valueFormatter: ({ value }) => value == null ? 'N/A' : (value > 0 ? '+' : '') + Number(value).toFixed(2),
+      },
+      {
         field: 'value',
         headerName: 'Value',
         headerTooltip: 'Quantity multiplied by execution price',
@@ -137,7 +168,7 @@ function FillsComponent({ paused = false }: { paused?: boolean }) {
         valueFormatter: ({ value, data }) =>
           value == null
             ? ''
-            : numberFormatter.format(value) + ' ' + (data?.quote ?? ''),
+            : value.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + ' ' + (data?.quote ?? ''),
       },
     ],
     [],

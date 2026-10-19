@@ -29,6 +29,21 @@ export type SignalWalkForwardRow = {
   five_minute_trend_sample_count: number;
   five_minute_trend_match_rate?: number | null;
   five_minute_trend_average_net_return_percent?: number | null;
+  logistic_direction_match_rate?: number | null;
+  logistic_average_net_return_percent?: number | null;
+  logistic_positive_net_rate?: number | null;
+  logistic_selected_signals: number;
+  signal_long: SignalWalkForwardSideMetrics;
+  signal_short: SignalWalkForwardSideMetrics;
+  logistic_long: SignalWalkForwardSideMetrics;
+  logistic_short: SignalWalkForwardSideMetrics;
+};
+export type SignalWalkForwardSideMetrics = {
+  sample_count: number;
+  direction_match_rate?: number | null;
+  average_net_return_percent?: number | null;
+  positive_net_rate?: number | null;
+  positive_net_rate_lower_95?: number | null;
 };
 export type SignalInfoState = {
   best: SignalSnapshot[];
@@ -54,34 +69,25 @@ export class SignalInfoModel {
     this.timer = undefined;
   }
   private async refresh() {
-    const [best, history, performance, walkForward] = await Promise.allSettled([
-      fetch('/signals/best').then(async (response) => {
-        if (!response.ok) throw new Error('Could not load best signals');
-        return await response.json() as SignalSnapshot[];
-      }),
-      fetch('/signals/history').then(async (response) => {
-        if (!response.ok) throw new Error('Could not load signal history');
-        return await response.json() as SignalSnapshot[];
-      }),
-      fetch('/signals/performance').then(async (response) => {
-        if (!response.ok) throw new Error('Could not load signal performance');
-        return await response.json() as SignalPerformanceRow[];
-      }),
-      fetch('/signals/walk-forward').then(async (response) => {
-        if (!response.ok) throw new Error('Could not load walk-forward evaluation');
-        return await response.json() as SignalWalkForwardRow[];
-      }),
-    ]);
-    const previous = this.state$.value;
-    this.state$.next({
-      best: best.status === 'fulfilled' ? best.value : previous.best,
-      history: history.status === 'fulfilled' ? history.value : previous.history,
-      performance: performance.status === 'fulfilled' ? performance.value : previous.performance,
-      walkForward: walkForward.status === 'fulfilled' ? walkForward.value : previous.walkForward,
-      bestError: best.status === 'rejected' ? 'Best signals are unavailable.' : undefined,
-      historyError: history.status === 'rejected' ? 'Signal history is unavailable.' : undefined,
-      performanceError: performance.status === 'rejected' ? 'Signal performance is unavailable.' : undefined,
-      walkForwardError: walkForward.status === 'rejected' ? 'Walk-forward evaluation is unavailable.' : undefined,
-    });
+    try {
+      const response = await fetch('/signals/dashboard');
+      if (!response.ok) throw new Error('Could not load signal dashboard');
+      const dashboard = await response.json() as {
+        best: SignalSnapshot[];
+        history: SignalSnapshot[];
+        performance: SignalPerformanceRow[];
+        walkForward: SignalWalkForwardRow[];
+      };
+      this.state$.next(dashboard);
+    } catch {
+      const previous = this.state$.value;
+      this.state$.next({
+        ...previous,
+        bestError: 'Best signals are unavailable.',
+        historyError: 'Signal history is unavailable.',
+        performanceError: 'Signal performance is unavailable.',
+        walkForwardError: 'Walk-forward evaluation is unavailable.',
+      });
+    }
   }
 }

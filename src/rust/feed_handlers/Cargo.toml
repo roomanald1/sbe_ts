@@ -1,23 +1,22 @@
 [package]
-name = "rust_sbe_publisher"
+name = "feed_handlers"
 version = "0.1.0"
 edition = "2024"
 
 [dependencies]
 anyhow = "1.0.104"
-async-stream = "0.3.6"
 axum = "0.8.9"
+async-stream = "0.3.6"
 bytes = "1.12.1"
 futures-util = "0.3.34"
-reqwest = "0.13.5"
+reqwest = { version = "0.13.5", features = ["json"] }
 rsocket_rust = "0.7.5"
 rsocket_rust_transport_websocket = "0.7.4"
 sbe_schema = { package = "example", path = "src/sbe/sbe_out/example" }
-serde = { version= "1.0.229", features = ["derive"]}
 serde_json = "1.0.151"
-tokio = { version = "1.53.1", features = ["fs", "io-util", "sync", "time"] }
 tokio-tungstenite = { version = "0.30.0", features = ["rustls-tls-native-roots"] }
-
+serde = { version = "1.0.229", features = ["derive"] }
+tokio = { version = "1.53.1", features = ["fs", "io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
 [[bench]]
 name = "sbe_encoding"
 harness = false
@@ -25,4 +24,3 @@ harness = false
 [[bench]]
 name = "order_book"
 harness = false
-

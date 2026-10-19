@@ -1,3 +1,4 @@
+import { formatForSymbol } from '../instrument_precision';
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { usePausedValue } from '../use_paused_value';
 import { AgGridReact } from 'ag-grid-react';
@@ -25,7 +26,6 @@ type HedgeGridRow = {
   quantity?: number;
   correlation?: number | null;
 };
-const qtyFormat = new Intl.NumberFormat(undefined, { maximumFractionDigits: 8 });
 
 const gridTheme = themeQuartz.withParams({
   accentColor: '#8296ad',
@@ -154,7 +154,7 @@ function HedgingComponent({ paused = false }: { paused?: boolean }) {
       field: 'quantity',
       headerName: 'Net qty',
       width: 105,
-      valueFormatter: ({ value, data }) => data?.kind === 'candidate' || value == null ? '' : qtyFormat.format(value),
+      valueFormatter: ({ value, data }) => data?.kind === 'candidate' || value == null ? '' : formatForSymbol(value, data?.symbol ?? '', 'quantity'),
     },
     {
       field: 'correlation',

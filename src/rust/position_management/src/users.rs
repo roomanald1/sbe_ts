@@ -4,31 +4,13 @@ use serde_json::Value;
 use std::{
     collections::hash_map::DefaultHasher,
     hash::{Hash, Hasher},
-    net::SocketAddr,
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
 
-pub async fn serve() -> anyhow::Result<()> {
+pub fn router() -> Router {
     let users = Arc::new(create_users(10_000));
-    let signal_store = crate::signals::SignalStore::from_environment()?;
-    let app = Router::new()
-        .route(
-            "/users/{page}",
-            get({
-                let users = Arc::clone(&users);
-                move |path| get_user_page(path, users)
-            }),
-        )
-        .merge(crate::positions::router().await?)
-        .merge(signal_store.router());
-
-    let addr = SocketAddr::from(([127, 0, 0, 1], 3000));
-    println!("Listening on {}", addr);
-
-    let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await?;
-    axum::serve(listener, app).await?;
-    Ok(())
+    Router::new().route("/users/{page}", get(move |path| get_user_page(path, Arc::clone(&users))))
 }
 
 async fn get_user_page(

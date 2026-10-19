@@ -1,0 +1,66 @@
+{
+  "directions": {
+    "bearish": {
+      "n": 9206,
+      "costed": 6202
+    },
+    "bullish": {
+      "n": 8478,
+      "costed": 5640
+    },
+    "neutral": {
+      "n": 57402,
+      "costed": 0
+    },
+    "ranging": {
+      "n": 17764,
+      "costed": 0
+    }
+  },
+  "horizons": {
+    "60": {
+      "n": 3192,
+      "median_cost_pct": 0.21017372010949648,
+      "median_abs_move_pct": 0.04958841614598475,
+      "oracle_positive_pct": 7.769423558897243,
+      "negative_costs": 22,
+      "late_over_30s_pct": 0.40726817042606517
+    },
+    "300": {
+      "n": 1056,
+      "median_cost_pct": 0.20947328533535964,
+      "median_abs_move_pct": 0.10428722227169285,
+      "oracle_positive_pct": 27.367424242424242,
+      "negative_costs": 17,
+      "late_over_30s_pct": 0.8522727272727273
+    },
+    "900": {
+      "n": 336,
+      "median_cost_pct": 0.20784396231957586,
+      "median_abs_move_pct": 0.14593148100537912,
+      "oracle_positive_pct": 35.416666666666664,
+      "negative_costs": 15,
+      "late_over_30s_pct": 1.7857142857142858
+    },
+    "3600": {
+      "n": 41,
+      "median_cost_pct": 0.21205647453214055,
+      "median_abs_move_pct": 0.1401610865445213,
+      "oracle_positive_pct": 29.26829268292683,
+      "negative_costs": 1,
+      "late_over_30s_pct": 4.878048780487805
+    }
+  },
+  "feature_coverage": {
+    "trend1": 79830,
+    "momentum": 83506,
+    "flow": 76560,
+    "book": 92807,
+    "volatility": 92850,
+    "trend5": 63505,
+    "trend5_units": 58804,
+    "vwap": 61252,
+    "pressure": 33649,
+    "aggressor_cost": 75229
+  }
+}

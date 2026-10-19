@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react';
+import { registerInstrumentPrecisions, type InstrumentPrecision } from '../instrument_precision';
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import type { Connection, ConnectionState, FeedSource } from '../connection';
 import { SymbolPriceGrid } from './SymbolPriceGrid';
 import { SymbolPriceTable } from './SymbolPriceTable';
@@ -11,11 +12,13 @@ import { Account } from './Account';
 import { PortfolioRisk } from './PortfolioRisk';
 import { CloseInsights } from './CloseInsights';
 import { Hedging } from './Hedging';
+import { AutoTrader } from './AutoTrader';
 import { TradeTicketPopup } from './TradeTicketPopup';
+import { RangeOrderPopup } from './RangeOrderPopup';
 import { OrderBookPopup } from './OrderBookPopup';
 import { TradesView } from './TradesView';
 import { MarketLiquidity } from './MarketLiquidity';
-import { BestSignalsView, SignalHistoryView, SignalPerformanceView } from './SignalInfoViews';
+import { BestSignalsView, SignalHistoryView, SignalPerformanceView, WalkForwardView } from './SignalInfoViews';
 import { PriceChangesModel } from '../price_change_data';
 import { useBehaviorSnapshot } from '../use_behavior_snapshot';
 
@@ -36,13 +39,15 @@ type DashboardWidgetType =
   | 'signals'
   | 'signal-history'
   | 'signal-performance'
+  | 'walk-forward'
   | 'positions'
   | 'fills'
   | 'pnl'
   | 'account'
   | 'risk'
   | 'close-insights'
-  | 'hedging';
+  | 'hedging'
+  | 'auto-trader';
 type DashboardWidget = {
   id: string;
   type: DashboardWidgetType;
@@ -68,6 +73,7 @@ const DASHBOARD_WIDGET_TYPES: DashboardWidgetType[] = [
   'signals',
   'signal-history',
   'signal-performance',
+  'walk-forward',
   'positions',
   'fills',
   'pnl',
@@ -75,6 +81,7 @@ const DASHBOARD_WIDGET_TYPES: DashboardWidgetType[] = [
   'risk',
   'close-insights',
   'hedging',
+  'auto-trader',
 ];
 const DEFAULT_WIDGET_TYPES: DashboardWidgetType[] = [
   'grid',
@@ -99,6 +106,7 @@ const WIDGET_LABELS: Record<DashboardWidgetType, string> = {
   signals: 'Best signals',
   'signal-history': 'Signal history',
   'signal-performance': 'Signal performance',
+  'walk-forward': 'Walk-forward evaluation',
   positions: 'Orders',
   fills: 'Fills',
   pnl: 'P&L',
@@ -106,6 +114,7 @@ const WIDGET_LABELS: Record<DashboardWidgetType, string> = {
   risk: 'Portfolio Risk',
   'close-insights': 'Close-out insights',
   hedging: 'Hedging',
+  'auto-trader': 'Auto Trader',
 };
 
 function makeWidget(
@@ -401,6 +410,7 @@ export function FeedControls({
     symbol: string;
     side: 'buy' | 'sell';
   }>();
+  const [rangeOrderRequest, setRangeOrderRequest] = useState<{ symbol: string; lower: number; upper: number }>();
   const openTrade = useCallback((symbol: string, side: 'buy' | 'sell' = 'buy') =>
     setTradeRequest({ symbol, side }), []);
   const [savedLayouts, setSavedLayouts] =
@@ -419,11 +429,8 @@ export function FeedControls({
   );
   const [widgetStoreOpen, setWidgetStoreOpen] = useState(false);
   const [draggingWidgetId, setDraggingWidgetId] = useState<string | null>(null);
-  const [dropPreview, setDropPreview] = useState<{
-    widgetId: string;
-    x: number;
-    y: number;
-  } | null>(null);
+  const [resizePreview, setResizePreview] = useState<{ id: string; x: number; y: number; w: number; h: number } | null>(null);
+  const dropPreviewRef = useRef<HTMLDivElement>(null);
   const [layoutNameInput, setLayoutNameInput] = useState('');
   const [layoutRenameOpen, setLayoutRenameOpen] = useState(false);
   const priceChangesModel = useMemo(
@@ -437,8 +444,9 @@ export function FeedControls({
       try {
         const response = await fetch('/instruments');
         if (!response.ok) throw new Error('Could not load spot instruments');
-        const data = await response.json() as { symbols?: unknown };
+        const data = await response.json() as { symbols?: unknown; instruments?: InstrumentPrecision[] };
         if (active && Array.isArray(data.symbols)) {
+          registerInstrumentPrecisions(data.instruments ?? []);
           setSpotSymbols(data.symbols.filter((symbol): symbol is string => typeof symbol === 'string'));
         }
       } catch (error) {
@@ -669,7 +677,7 @@ export function FeedControls({
             ticks={widgetPriceChanges.ticks}
             feedSource={feedSource}
             compact={compact}
-            onSelectSymbol={openTrade}
+            onSelectSymbol={(symbol, side) => openTrade(symbol, side)}
           />
         );
         break;
@@ -679,7 +687,7 @@ export function FeedControls({
             ticks={widgetPriceChanges.ticks}
             histories={widgetPriceChanges.histories}
             state={connectionState}
-            onSelectSymbol={openTrade}
+            onSelectSymbol={(symbol, side) => openTrade(symbol, side)}
           />
         );
         break;
@@ -712,10 +720,13 @@ export function FeedControls({
         content = <PortfolioRisk connection={connection} paused={draggingWidgetId !== null} />;
         break;
       case 'close-insights':
-        content = <CloseInsights histories={widgetPriceChanges.histories} paused={draggingWidgetId !== null} />;
+        content = <CloseInsights histories={widgetPriceChanges.histories} paused={draggingWidgetId !== null} onTradeSymbol={openTrade} />;
         break;
       case 'hedging':
         content = <Hedging paused={draggingWidgetId !== null} />;
+        break;
+      case 'auto-trader':
+        content = <AutoTrader />;
         break;
       case 'trades':
         content =
@@ -744,13 +755,16 @@ export function FeedControls({
         );
         break;
       case 'signals':
-        content = <BestSignalsView onTradeSymbol={openTrade} />;
+        content = <BestSignalsView onTradeSymbol={openTrade} onRangeOrders={setRangeOrderRequest} />;
         break;
       case 'signal-history':
-        content = <SignalHistoryView paused={draggingWidgetId !== null} />;
+        content = <SignalHistoryView paused={draggingWidgetId !== null} onTradeSymbol={openTrade} />;
         break;
       case 'signal-performance':
-        content = <SignalPerformanceView paused={draggingWidgetId !== null} />;
+        content = <SignalPerformanceView paused={draggingWidgetId !== null} onTradeSymbol={openTrade} />;
+        break;
+      case 'walk-forward':
+        content = <WalkForwardView paused={draggingWidgetId !== null} onTradeSymbol={openTrade} />;
         break;
       case 'book':
         content =
@@ -821,7 +835,7 @@ export function FeedControls({
           onDragEnd={() => {
             setDragPriceChanges(null);
             setDraggingWidgetId(null);
-            setDropPreview(null);
+            if (dropPreviewRef.current) dropPreviewRef.current.style.display = 'none';
           }}
         >
           <span className="dashboard-widget-drag-icon" aria-hidden="true" />
@@ -835,7 +849,15 @@ export function FeedControls({
         >
           <span className="dashboard-widget-remove-icon" aria-hidden="true" />
         </button>
-        {content}
+        {connectionState === 'connected' ? (
+          content
+        ) : (
+          <section className="feed-section" aria-label={description}>
+            <div className="book-popup-message">
+              Waiting for the market data connection.
+            </div>
+          </section>
+        )}
         <div
           className="dashboard-widget-resize"
           role="separator"
@@ -858,17 +880,20 @@ export function FeedControls({
               gap;
             const unitH = rowHeight + gap;
             const handle = event.currentTarget;
+            let nextW = startW;
+            let nextH = startH;
             handle.setPointerCapture(event.pointerId);
-            const move = (pointerEvent: PointerEvent) =>
-              resizeWidget(
-                widget.id,
-                startW + Math.round((pointerEvent.clientX - startX) / unitW),
-                startH + Math.round((pointerEvent.clientY - startY) / unitH),
-              );
-            const up = () => {
+            const move = (pointerEvent: PointerEvent) => {
+              nextW = Math.max(4, Math.min(DASHBOARD_COLUMNS, startW + Math.round((pointerEvent.clientX - startX) / unitW)));
+              nextH = Math.max(4, startH + Math.round((pointerEvent.clientY - startY) / unitH));
+              setResizePreview({ id: widget.id, x: Math.min(widget.x, DASHBOARD_COLUMNS - nextW), y: widget.y, w: nextW, h: nextH });
+            };
+            const up = (pointerEvent: PointerEvent) => {
               handle.removeEventListener('pointermove', move);
               handle.removeEventListener('pointerup', up);
               handle.removeEventListener('pointercancel', up);
+              if (pointerEvent.type === 'pointerup' && (nextW !== startW || nextH !== startH)) resizeWidget(widget.id, nextW, nextH);
+              setResizePreview(null);
               if (handle.hasPointerCapture(event.pointerId))
                 handle.releasePointerCapture(event.pointerId);
             };
@@ -1027,21 +1052,22 @@ export function FeedControls({
               dashboardWidgets,
               event.currentTarget,
             );
-            if (landing)
-              setDropPreview((current) =>
-                current &&
-                current.widgetId === widgetId &&
-                current.x === landing.x &&
-                current.y === landing.y
-                  ? current
-                  : { widgetId, x: landing.x, y: landing.y },
-              );
+            const preview = dropPreviewRef.current;
+            if (preview) {
+              if (!landing) {
+                preview.style.display = 'none';
+              } else {
+                preview.style.display = 'block';
+                preview.style.gridColumn = landing.x + 1 + ' / span ' + (dashboardWidgets.find((widget) => widget.id === widgetId)?.w ?? DEFAULT_WIDGET_WIDTH);
+                preview.style.gridRow = landing.y + 1 + ' / span ' + (dashboardWidgets.find((widget) => widget.id === widgetId)?.h ?? DEFAULT_WIDGET_HEIGHT);
+              }
+            }
           }}
           onDragLeave={(event) => {
             if (
               !event.currentTarget.contains(event.relatedTarget as Node | null)
             )
-              setDropPreview(null);
+              if (dropPreviewRef.current) dropPreviewRef.current.style.display = 'none';
           }}
           onDrop={(event) => {
             event.preventDefault();
@@ -1059,35 +1085,21 @@ export function FeedControls({
             if (landing) moveWidget(widgetId, landing.x, landing.y);
             setDragPriceChanges(null);
             setDraggingWidgetId(null);
-            setDropPreview(null);
+            if (dropPreviewRef.current) dropPreviewRef.current.style.display = 'none';
           }}
         >
           {dashboardWidgets.map((widget) => renderWidget(widget, true))}
-          {dropPreview &&
-            dashboardWidgets.some(
-              (widget) => widget.id === dropPreview.widgetId,
-            ) && (
-              <div
-                className="dashboard-drop-preview"
-                aria-hidden="true"
-                style={{
-                  gridColumn:
-                    dropPreview.x +
-                    1 +
-                    ' / span ' +
-                    (dashboardWidgets.find(
-                      (widget) => widget.id === dropPreview.widgetId,
-                    )?.w ?? DEFAULT_WIDGET_WIDTH),
-                  gridRow:
-                    dropPreview.y +
-                    1 +
-                    ' / span ' +
-                    (dashboardWidgets.find(
-                      (widget) => widget.id === dropPreview.widgetId,
-                    )?.h ?? DEFAULT_WIDGET_HEIGHT),
-                }}
-              />
-            )}
+          {resizePreview && (
+            <div
+              className="dashboard-resize-preview"
+              aria-hidden="true"
+              style={{
+                gridColumn: resizePreview.x + 1 + ' / span ' + resizePreview.w,
+                gridRow: resizePreview.y + 1 + ' / span ' + resizePreview.h,
+              }}
+            />
+          )}
+          <div ref={dropPreviewRef} className="dashboard-drop-preview" aria-hidden="true" style={{ display: 'none' }} />
           {dashboardWidgets.length === 0 && (
             <div className="dashboard-empty-state">
               <strong>Your dashboard is empty</strong>
@@ -1138,6 +1150,7 @@ export function FeedControls({
           </section>
         </div>
       )}
+      {rangeOrderRequest && <RangeOrderPopup request={rangeOrderRequest} onClose={() => setRangeOrderRequest(undefined)} />}
       {tradeRequest && (
         <TradeTicketPopup
           key={tradeRequest.symbol + tradeRequest.side}
