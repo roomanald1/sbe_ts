@@ -52,11 +52,20 @@ export class AutoTraderModel {
   async refresh() {
     try {
       const [statusResponse, activityResponse] = await Promise.all([fetch('/positions/auto-trader'), fetch('/positions/auto-trader/activity')]);
-      if (!statusResponse.ok || !activityResponse.ok) throw new Error();
+      if (!statusResponse.ok) throw await this.responseError('status', statusResponse);
+      if (!activityResponse.ok) throw await this.responseError('activity', activityResponse);
       const status = await statusResponse.json() as TraderStatus;
       const activity = await activityResponse.json() as { orders: AutoTraderOrder[]; pnl_breakdown: AutoTraderPnlBreakdown[]; realized_pnl: number; unrealized_pnl?: number | null; exit_learning_samples: number; learning_samples: number; learning_win_rate?: number; preferred_order_type?: string };
       this.state$.next({ ...this.state$.value, enabled: status.enabled, maxOrderNotional: this.limitsDirty ? this.state$.value.maxOrderNotional : String(status.max_order_notional), dailyNotionalLimit: this.limitsDirty ? this.state$.value.dailyNotionalLimit : String(status.daily_notional_limit), usedNotionalToday: status.used_notional_today, dailyRealizedLossLimit: this.limitsDirty ? this.state$.value.dailyRealizedLossLimit : String(status.daily_realized_loss_limit), explorationPercent: this.limitsDirty ? this.state$.value.explorationPercent : String(status.exploration_percent), maxOpenPositions: this.limitsDirty ? this.state$.value.maxOpenPositions : String(status.max_open_positions), stopLossPercent: status.stop_loss_percent, takeProfitPercent: status.take_profit_percent, lastDecision: status.last_decision ?? '', lastDecisionAt: status.last_decision_at ?? 0, orders: activity.orders, pnlBreakdown: activity.pnl_breakdown, realizedPnl: activity.realized_pnl, unrealizedPnl: activity.unrealized_pnl, exitLearningSamples: activity.exit_learning_samples, learningSamples: activity.learning_samples, learningWinRate: activity.learning_win_rate, preferredOrderType: activity.preferred_order_type, loading: false, error: undefined });
-    } catch { this.state$.next({ ...this.state$.value, loading: false, error: 'Could not load Auto Trader status and activity.' }); }
+    } catch (error) {
+      console.error('Auto Trader status/activity refresh failed:', error);
+      this.state$.next({ ...this.state$.value, loading: false, error: error instanceof Error ? error.message : 'Could not load Auto Trader status and activity.' });
+    }
+  }
+
+  private async responseError(endpoint: 'status' | 'activity', response: Response) {
+    const detail = (await response.text()).trim();
+    return new Error('Could not load Auto Trader ' + endpoint + ' (' + response.status + ')' + (detail ? ': ' + detail : '.'));
   }
 
   async setEnabled(enabled: boolean) {
