@@ -40,7 +40,7 @@ pub async fn serve() -> Result<()> {
     let all_spot_instruments = match get_all_spot_instruments().await {
         Ok(symbols) => symbols,
         Err(error) => {
-            eprintln!(
+            crate::service_log!("ERROR", 
                 "Unable to load full spot instrument lookup: {error:#}; using top ticker symbols"
             );
             instrument_data.iter().map(ToString::to_string).collect()
@@ -117,12 +117,12 @@ pub async fn serve() -> Result<()> {
     let port = env::var("PORT").unwrap_or_else(|_| "10000".to_string());
     let addr = format!("0.0.0.0:{port}");
 
-    println!("RSocket WebSocket server on ws://{addr}");
+    crate::service_log!("INFO", "RSocket WebSocket server on ws://{addr}");
 
     let r_socket = RSocketFactory::receive()
         .transport(WebsocketServerTransport::from(addr))
         .acceptor(Box::new(move |setup, _socket| {
-            println!("socket establish: setup={:?}", setup);
+            crate::service_log!("INFO", "socket establish: setup={:?}", setup);
             Ok(Box::new(ServerResponder {
                 price_updates: ticker_batches.clone(),
                 instrument_lookup: Arc::clone(&instrument_lookup),
@@ -223,7 +223,7 @@ impl RSocket for ServerResponder {
                     ))
                 }));
             };
-            println!("Subscribing to OKX trades for {instrument}");
+            crate::service_log!("INFO", "Subscribing to OKX trades for {instrument}");
             return log_stream_end(
                 trade_request_stream(instrument.to_string()),
                 format!(
@@ -246,7 +246,7 @@ impl RSocket for ServerResponder {
                     ))
                 }));
             };
-            println!("Subscribing to OKX books for {instrument}");
+            crate::service_log!("INFO", "Subscribing to OKX books for {instrument}");
             return log_stream_end(
                 book_request_stream(instrument.to_string()),
                 format!(
@@ -256,7 +256,7 @@ impl RSocket for ServerResponder {
         }
 
         let synthetic = is_synthetic_request(&payload);
-        println!(
+        crate::service_log!("INFO", 
             "RSocket request stream source: {}",
             if synthetic { "synthetic" } else { "OKX" }
         );
@@ -302,7 +302,7 @@ impl RSocket for ServerResponder {
                             break Some((Ok(Payload::new(Some(data), None)), updates));
                         }
                         Err(broadcast::error::RecvError::Lagged(skipped)) => {
-                            eprintln!(
+                            crate::service_log!("ERROR", 
                                 "RSocket price stream recovered after skipping {skipped} updates"
                             );
                         }
@@ -390,7 +390,7 @@ struct StreamEndLog(String);
 
 impl Drop for StreamEndLog {
     fn drop(&mut self) {
-        println!("{}", self.0);
+        crate::service_log!("INFO", "{}", self.0);
     }
 }
 
@@ -459,11 +459,11 @@ async fn send_signal_event(
                 Ok(bytes) => {
                     let _ = output.send(bytes);
                 }
-                Err(error) => eprintln!("Insights signal API response failed: {error}"),
+                Err(error) => crate::service_log!("ERROR", "Insights signal API response failed: {error}"),
             },
-            Err(error) => eprintln!("Insights signal API returned an error: {error}"),
+            Err(error) => crate::service_log!("ERROR", "Insights signal API returned an error: {error}"),
         },
-        Err(error) => eprintln!("Insights signal API request failed: {error}"),
+        Err(error) => crate::service_log!("ERROR", "Insights signal API request failed: {error}"),
     }
 }
 
@@ -579,7 +579,7 @@ fn trade_request_stream(
                         match subscribe_trades_once(&instrument, tx).await {
                             Ok(()) => break,
                             Err(error) => {
-                                eprintln!(
+                                crate::service_log!("ERROR", 
                                     "Shared trades subscription for {instrument} failed: {error:#}"
                                 );
                                 forward.abort();
@@ -637,7 +637,7 @@ fn book_request_stream(
                         match subscribe_book_once(&instrument, tx).await {
                             Ok(()) => break,
                             Err(error) => {
-                                eprintln!(
+                                crate::service_log!("ERROR", 
                                     "Shared book subscription for {instrument} failed: {error:#}"
                                 );
                                 forward.abort();

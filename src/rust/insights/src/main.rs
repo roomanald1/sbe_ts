@@ -1,3 +1,4 @@
+mod logging;
 use axum::{Json, Router, http::StatusCode, routing::get};
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, sync::{Arc, OnceLock}, time::{SystemTime, UNIX_EPOCH}};
@@ -109,7 +110,7 @@ async fn poll_external_market_features(store: SignalStore) {
                 options_atm_iv: option_summary.0, options_25d_skew: option_summary.1, options_expiry_timestamp: option_summary.2,
             };
             let has_data = features.funding_rate.is_some() || features.open_interest_contracts.is_some() || features.mark_price.is_some() || features.options_atm_iv.is_some() || features.options_25d_skew.is_some();
-            if has_data { if let Err(error) = store.append_external_market_features(&features).await { eprintln!("Failed to store {underlying} derivatives/options context: {error}"); } }
+            if has_data { if let Err(error) = store.append_external_market_features(&features).await { crate::service_log!("ERROR", "Failed to store {underlying} derivatives/options context: {error}"); } }
         }
     }
 }
@@ -302,7 +303,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/internal/signals/event", axum::routing::post(ingest_signal_event).with_state(signal_runtime))
         .merge(signal_store.router());
     let listener = tokio::net::TcpListener::bind(("0.0.0.0", 3004)).await?;
-    println!("Insights service listening on http://0.0.0.0:3004");
+    crate::service_log!("INFO", "Insights service listening on http://0.0.0.0:3004");
     axum::serve(listener, app).await?;
     Ok(())
 }

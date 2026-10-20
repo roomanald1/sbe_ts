@@ -152,7 +152,7 @@ fn volatility_from_sum(squared_returns: f64, return_count: usize) -> f64 {
 
 pub async fn get_instrument_data() -> Result<Vec<String>> {
     let request_url = "https://www.okx.com/api/v5/market/tickers?instType=SPOT";
-    println!("{}", request_url);
+    crate::service_log!("INFO", "{}", request_url);
 
     let client = reqwest::Client::new();
     let response = client
@@ -392,7 +392,7 @@ pub async fn subscribe_ticker_samples(
                 if !message.is_text() { continue; }
                 let update = match serde_json::from_str::<TickerMessage<'_>>(message.to_text()?) {
                     Ok(update) => update,
-                    Err(error) => { eprintln!("Ignoring invalid OKX hedge ticker JSON: {error}"); continue; }
+                    Err(error) => { crate::service_log!("ERROR", "Ignoring invalid OKX hedge ticker JSON: {error}"); continue; }
                 };
                 if update.event == Some("error") {
                     anyhow::bail!("OKX hedge ticker subscription error: {}", update.msg.unwrap_or("unknown error"));
@@ -449,7 +449,7 @@ pub async fn subscribe_trades_once(
                 if !message.is_text() { continue; }
                 let text = message.to_text()?;
                 if text == "pong" { continue; }
-                let update: TradeMessage<'_> = match serde_json::from_str(text) { Ok(update) => update, Err(error) => { eprintln!("Ignoring invalid OKX trades JSON message: {error}"); continue; } };
+                let update: TradeMessage<'_> = match serde_json::from_str(text) { Ok(update) => update, Err(error) => { crate::service_log!("ERROR", "Ignoring invalid OKX trades JSON message: {error}"); continue; } };
                 if update.event == Some("error") { anyhow::bail!("OKX trades subscription error: {}", update.msg.unwrap_or("unknown error")); }
                 let Some(trades) = update.data else { continue; };
                 for trade in trades {
@@ -497,11 +497,11 @@ pub async fn subscribe(instrument_data: &[Arc<str>], price_updates: Sender<Bytes
         retry_delay = retry_delay_after_failure(retry_delay, attempt_started.elapsed());
 
         match result {
-            Ok(()) => eprintln!(
+            Ok(()) => crate::service_log!("ERROR", 
                 "OKX WebSocket stream ended; reconnecting in {}s",
                 retry_delay.as_secs()
             ),
-            Err(error) => eprintln!(
+            Err(error) => crate::service_log!("ERROR", 
                 "OKX WebSocket subscription failed: {error:#}; reconnecting in {}s",
                 retry_delay.as_secs()
             ),
@@ -541,7 +541,7 @@ pub async fn subscribe_book_once(
                 heartbeat.as_mut().reset(tokio::time::Instant::now() + OKX_IDLE_HEARTBEAT_INTERVAL);
             }
             _ = updates.closed() => {
-                println!("UI unsubscribed from OKX books for {instrument}");
+                crate::service_log!("INFO", "UI unsubscribed from OKX books for {instrument}");
                 let request = json!({
                     "op": "unsubscribe",
                     "args": [{ "channel": "books", "instId": instrument }]
@@ -552,7 +552,7 @@ pub async fn subscribe_book_once(
                     ))
                     .await
                     .map_err(|error| anyhow::anyhow!("failed to send OKX books unsubscribe for {instrument}: {error}"))?;
-                println!("Sent OKX books unsubscribe for {instrument}");
+                crate::service_log!("INFO", "Sent OKX books unsubscribe for {instrument}");
                 return Ok(());
             },
             message = read.next() => {
@@ -564,7 +564,7 @@ pub async fn subscribe_book_once(
                 let text = match message.to_text() {
                     Ok(text) => text,
                     Err(error) => {
-                        eprintln!("Ignoring non-text OKX book message: {error}");
+                        crate::service_log!("ERROR", "Ignoring non-text OKX book message: {error}");
                         continue;
                     }
                 };
@@ -572,7 +572,7 @@ pub async fn subscribe_book_once(
                 let update = match serde_json::from_str::<BookMessage<'_>>(text) {
                     Ok(update) => update,
                     Err(error) => {
-                        eprintln!("Ignoring invalid OKX book JSON message: {error}");
+                        crate::service_log!("ERROR", "Ignoring invalid OKX book JSON message: {error}");
                         continue;
                     }
                 };
@@ -671,7 +671,7 @@ async fn subscribe_once(
         .await
         .map_err(|error| anyhow::anyhow!("failed to connect to OKX WebSocket: {error}"))?;
 
-    println!("OKX WebSocket handshake has been successfully completed");
+    crate::service_log!("INFO", "OKX WebSocket handshake has been successfully completed");
     let (mut write, read) = incoming_ws.split();
     let volatility_by_instrument =
         Arc::new(Mutex::new(HashMap::<String, RollingVolatility>::new()));
@@ -685,14 +685,14 @@ async fn subscribe_once(
                 let text = match message.to_text() {
                     Ok(text) => text,
                     Err(error) => {
-                        eprintln!("Ignoring non-text OKX WebSocket message: {error}");
+                        crate::service_log!("ERROR", "Ignoring non-text OKX WebSocket message: {error}");
                         return Ok(());
                     }
                 };
                 let update = match serde_json::from_str::<TickerMessage<'_>>(text) {
                     Ok(update) => update,
                     Err(error) => {
-                        eprintln!("Ignoring invalid OKX JSON message: {error}");
+                        crate::service_log!("ERROR", "Ignoring invalid OKX JSON message: {error}");
                         return Ok(());
                     }
                 };
@@ -753,7 +753,7 @@ async fn subscribe_once(
             "id": (batch_index + 1).to_string(),
             "args": args
         });
-        println!("Subscribing to {}", request);
+        crate::service_log!("INFO", "Subscribing to {}", request);
         let request = Utf8Bytes::from(request.to_string());
 
         write

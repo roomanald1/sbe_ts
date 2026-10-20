@@ -1,3 +1,4 @@
+mod logging;
 use axum::{Router, body::Body, extract::State, http::{Request, StatusCode, header::{CONTENT_LENGTH, HOST, TRANSFER_ENCODING}}, response::Response, routing::{any, get}};
 use std::sync::Arc;
 #[derive(Clone)]
@@ -24,6 +25,6 @@ async fn main() -> anyhow::Result<()> {
  let gateway = Router::new().fallback(any(proxy)).with_state(gateway_state);
  let app = Router::new().route("/health", get(|| async { "ok" })).merge(gateway).merge(execution::vwap_api::router()).merge(execution::orders_api::router());
  let listener = tokio::net::TcpListener::bind(("0.0.0.0", 3003)).await?;
- println!("Execution service listening on http://0.0.0.0:3003");
+ crate::service_log!("INFO", "Execution service listening on http://0.0.0.0:3003");
  axum::serve(listener, app).await?; Ok(())
 }

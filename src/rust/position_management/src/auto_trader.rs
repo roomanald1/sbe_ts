@@ -240,7 +240,7 @@ pub fn router() -> Router {
     tokio::spawn(async move {
         let mut ticker = interval(Duration::from_secs(5));
         loop { ticker.tick().await; if worker_state.enabled.load(Ordering::Relaxed) {
-            if let Err(error) = run_cycle(&worker_state).await { eprintln!("Auto trader cycle failed: {}", error.1); }
+            if let Err(error) = run_cycle(&worker_state).await { crate::service_log!("ERROR", "Auto trader cycle failed: {}", error.1); }
         } }
     });
     Router::new()
@@ -364,7 +364,7 @@ async fn run_cycle(state: &AutoTraderState) -> Result<CycleResult, (StatusCode, 
     if !settings.last_risk_note.is_empty() { message.push_str(" · "); message.push_str(&settings.last_risk_note); }
     settings.last_decision = message;
     settings.last_decision_at = now;
-    if let Err(error) = persist_settings(&state.settings_path, &settings) { eprintln!("Could not persist Auto Trader decision: {}", error.1); }
+    if let Err(error) = persist_settings(&state.settings_path, &settings) { crate::service_log!("ERROR", "Could not persist Auto Trader decision: {}", error.1); }
     result
 }
 

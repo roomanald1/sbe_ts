@@ -5,3 +5,4 @@ src/rust/feed_handlers/target/*
 src/rust/insights/target/*
 src/rust/position_management/target/*
 src/rust/service_gateway/target/*
+logs/*

@@ -18,7 +18,7 @@ use std::{
 };
 use tokio::{
     sync::{Mutex, Notify, mpsc},
-    time::{Duration, timeout},
+    time::{Duration, Instant, timeout},
 };
 
 const SYMBOL_PRICE_MESSAGE_LENGTH: usize = 64;
@@ -26,6 +26,8 @@ const BOOK_DEPTH: usize = 7;
 const NUM_VWAP_BINS: usize = 78;
 const EPSILON: f64 = 1e-12;
 static HTTP_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+static USD_RATE_CACHE: OnceLock<Mutex<Option<(Instant, UsdRatesResponse)>>> = OnceLock::new();
+const USD_RATE_CACHE_TTL: Duration = Duration::from_secs(15);
 
 pub async fn router() -> anyhow::Result<Router> {
     let spot_symbols = Arc::new(crate::feed_client::spot_symbols().await?);
@@ -62,7 +64,7 @@ pub async fn router() -> anyhow::Result<Router> {
                         }
                     }
                 },
-                Err(error) => eprintln!("FeedHandlers ticker API disconnected: {error:#}"),
+                Err(error) => crate::service_log!("ERROR", "FeedHandlers ticker API disconnected: {error:#}"),
             }
             tokio::time::sleep(Duration::from_secs(1)).await;
         }
@@ -102,7 +104,7 @@ async fn expire_orders_loop(store: Arc<PositionStore>) {
         let old_len = ledger.orders.len();
         ledger.orders.retain(|order| order.expires_at.is_none_or(|expires| expires > now));
         if ledger.orders.len() != old_len {
-            if let Err(error) = store.persist(&ledger).await { eprintln!("Could not persist GTD expiry: {error}"); }
+            if let Err(error) = store.persist(&ledger).await { crate::service_log!("ERROR", "Could not persist GTD expiry: {error}"); }
         }
     }
 }
@@ -135,7 +137,7 @@ async fn barrier_order_loop(store: Arc<PositionStore>) {
                     if let Some(order) = ledger.barrier_orders.iter_mut().find(|order| order.id == barrier.id && order.status == "armed") {
                         order.extreme_price = effective_barrier.extreme_price;
                         order.trigger_price = effective_barrier.trigger_price;
-                        if let Err(error) = store.persist(&ledger).await { eprintln!("Could not persist trailing stop {}: {error}", barrier.id); }
+                        if let Err(error) = store.persist(&ledger).await { crate::service_log!("ERROR", "Could not persist trailing stop {}: {error}", barrier.id); }
                     }
                 }
             }
@@ -150,7 +152,7 @@ async fn barrier_order_loop(store: Arc<PositionStore>) {
                 ledger.barrier_orders[index].status = "triggering".to_owned();
                 ledger.barrier_orders[index].triggered_at = Some(now);
                 if let Err(error) = store.persist(&ledger).await {
-                    eprintln!("Could not persist triggered barrier {}: {error}", barrier.id);
+                    crate::service_log!("ERROR", "Could not persist triggered barrier {}: {error}", barrier.id);
                     ledger.barrier_orders[index].status = "armed".to_owned();
                     ledger.barrier_orders[index].triggered_at = None;
                     continue;
@@ -181,19 +183,26 @@ async fn barrier_order_loop(store: Arc<PositionStore>) {
                 }
             }
             if let Err(error) = store.persist(&ledger).await {
-                eprintln!("Could not persist barrier execution {}: {error}", claimed.id);
+                crate::service_log!("ERROR", "Could not persist barrier execution {}: {error}", claimed.id);
             }
         }
     }
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 struct UsdRatesResponse {
     rates: BTreeMap<String, f64>,
     updated_at: u64,
 }
 
 async fn get_usd_rates() -> Result<Json<UsdRatesResponse>, (StatusCode, String)> {
+    let cache = USD_RATE_CACHE.get_or_init(|| Mutex::new(None));
+    let mut cached = cache.lock().await;
+    if let Some((created, rates)) = cached.as_ref() {
+        if created.elapsed() < USD_RATE_CACHE_TTL {
+            return Ok(Json(rates.clone()));
+        }
+    }
     let response = HTTP_CLIENT.get_or_init(reqwest::Client::new)
         .get("https://www.okx.com/api/v5/market/index-tickers?quoteCcy=USD")
         .send()
@@ -224,7 +233,9 @@ async fn get_usd_rates() -> Result<Json<UsdRatesResponse>, (StatusCode, String)>
     if rates.len() == 1 {
         return Err((StatusCode::BAD_GATEWAY, "OKX returned no usable USD index rates".to_owned()));
     }
-    Ok(Json(UsdRatesResponse { rates, updated_at }))
+    let rates = UsdRatesResponse { rates, updated_at };
+    *cached = Some((Instant::now(), rates.clone()));
+    Ok(Json(rates))
 }
 
 #[derive(Deserialize)]
@@ -549,7 +560,7 @@ impl PositionStore {
                 order.error = Some("Backend restarted during barrier execution; review fills before replacing this order".to_owned());
             }
         }
-        println!(
+        crate::service_log!("INFO", 
             "Loaded {} paper fills and {} resting orders from {}",
             ledger.trades.len(),
             ledger.orders.len(),
@@ -601,7 +612,7 @@ impl PositionStore {
         let subscription_symbol = symbol.clone();
         let log_symbol = symbol.clone();
         tokio::spawn(async move {
-            println!("Paper order manager subscribing to OKX books for {symbol}");
+            crate::service_log!("INFO", "Paper order manager subscribing to OKX books for {symbol}");
             while let Some(result) = receiver.recv().await {
                 match result {
                     Ok(bytes) => {
@@ -621,12 +632,12 @@ impl PositionStore {
                             }
                             store.book_changed.notify_waiters();
                             if let Err(error) = store.match_resting(&symbol).await {
-                                eprintln!("Unable to match resting orders for {symbol}: {error:#}");
+                                crate::service_log!("ERROR", "Unable to match resting orders for {symbol}: {error:#}");
                             }
                         }
                     }
                     Err(error) => {
-                        eprintln!("Paper order book stream for {symbol} failed: {error:#}")
+                        crate::service_log!("ERROR", "Paper order book stream for {symbol} failed: {error:#}")
                     }
                 }
             }
@@ -640,7 +651,7 @@ impl PositionStore {
                 }
                 .await
                 {
-                    eprintln!(
+                    crate::service_log!("ERROR", 
                         "Paper OKX book subscription for {log_symbol} disconnected: {error:#}; retrying"
                     );
                     tokio::time::sleep(Duration::from_secs(1)).await;
@@ -900,7 +911,7 @@ async fn run_vwap(
                     while let Some(item) = stream.next().await { sender.send(item).await.map_err(|_| anyhow::anyhow!("trade consumer stopped"))?; }
                     Ok::<(), anyhow::Error>(())
                 }.await {
-                eprintln!("VWAP trade feed for {trade_symbol} disconnected: {error:#}; retrying");
+                crate::service_log!("ERROR", "VWAP trade feed for {trade_symbol} disconnected: {error:#}; retrying");
                 tokio::time::sleep(Duration::from_secs(1)).await;
             }
         }
@@ -939,8 +950,8 @@ async fn run_vwap(
         let market_result = match client.post(format!("{execution_base}/internal/vwap/managers/{manager_id}/market"))
             .json(&serde_json::json!({"trade_qty":trade_qty,"trade_price":trade_price,"elapsed_bin_secs":elapsed_in_bin,"target_bin":target_bin}))
             .send().await.and_then(|response| response.error_for_status().map_err(Into::into)) {
-                Ok(response) => match response.json::<serde_json::Value>().await { Ok(value) => value, Err(error) => { eprintln!("Execution scheduler response failed: {error}"); continue; } },
-                Err(error) => { eprintln!("Execution scheduler request failed: {error}"); continue; }
+                Ok(response) => match response.json::<serde_json::Value>().await { Ok(value) => value, Err(error) => { crate::service_log!("ERROR", "Execution scheduler response failed: {error}"); continue; } },
+                Err(error) => { crate::service_log!("ERROR", "Execution scheduler request failed: {error}"); continue; }
             };
         let scheduler_state = market_result.clone();
         if let Some(action) = market_result.get("action").filter(|action| !action.is_null()) {
@@ -954,7 +965,7 @@ async fn run_vwap(
                     Ok((filled, average_price)) => {
                         if let Err(error) = client.post(format!("{execution_base}/internal/vwap/managers/{manager_id}/fill"))
                             .json(&serde_json::json!({"fill_price":average_price.unwrap_or(trade_price),"filled_qty":filled})).send().await {
-                            eprintln!("Execution fill report failed: {error}");
+                            crate::service_log!("ERROR", "Execution fill report failed: {error}");
                         }
                     }
                     Err(error) => {
