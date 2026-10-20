@@ -137,7 +137,7 @@ export const SymbolPriceGrid = memo(function SymbolPriceGrid(props: SymbolPriceG
           getRowId={(params) => String(params.data.rowIndex)}
           theme={gridTheme}
           domLayout="autoHeight"
-          rowHeight={compact ? 24 : 42}
+          rowHeight={compact ? 22 : 28}
           headerHeight={0}
 
 

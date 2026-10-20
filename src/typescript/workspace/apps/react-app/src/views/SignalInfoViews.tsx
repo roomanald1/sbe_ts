@@ -70,7 +70,7 @@ export function BestSignalsView({ onTradeSymbol, onRangeOrders }: { onTradeSymbo
     <FeedToolbar title="Best signals across top spot markets" />
     <p className="signal-info-note">Ranked by backend signal strength across the ten highest-turnover spot pairs. The five-minute trend is context only and does not affect the live score. “5m Trend / Vol” shows the move in recent volatility units. Snapshot refreshes every 15 seconds.</p>
     {state.bestError && <div className="positions-error">{state.bestError}</div>}
-    <div className="data-grid-wrap signal-info-grid"><AgGridReact<BestSignalRow> rowData={rows} columnDefs={columns} defaultColDef={{ sortable: true, resizable: true, flex: 1, minWidth: 80 }} theme={gridTheme} domLayout="autoHeight" rowHeight={34} headerHeight={38} /></div>
+    <div className="data-grid-wrap signal-info-grid"><AgGridReact<BestSignalRow> rowData={rows} columnDefs={columns} defaultColDef={{ sortable: true, resizable: true, flex: 1, minWidth: 80 }} theme={gridTheme} domLayout="autoHeight" rowHeight={26} headerHeight={28} /></div>
     {rows.length === 0 && <p className="positions-empty">Waiting for fresh signals from the backend.</p>}
   </section>;
 }
@@ -96,7 +96,7 @@ function SignalHistoryViewComponent({ paused = false, onTradeSymbol }: { paused?
   return <section className="feed-section signal-info-panel" aria-label="Signal history">
     <FeedToolbar title="Recent signal history" />
     {state.historyError && <div className="positions-error">{state.historyError}</div>}
-    <div className="data-grid-wrap signal-info-grid"><AgGridReact<HistoryRow> rowData={displayedRowData} columnDefs={columns} defaultColDef={{ sortable: true, resizable: true, flex: 1, minWidth: 80 }} theme={gridTheme} domLayout="autoHeight" rowHeight={34} headerHeight={38} /></div>
+    <div className="data-grid-wrap signal-info-grid"><AgGridReact<HistoryRow> rowData={displayedRowData} columnDefs={columns} defaultColDef={{ sortable: true, resizable: true, flex: 1, minWidth: 80 }} theme={gridTheme} domLayout="autoHeight" rowHeight={26} headerHeight={28} /></div>
     {rows.length === 0 && <p className="positions-empty">No stored signal snapshots yet.</p>}
   </section>;
 }
@@ -122,7 +122,7 @@ function SignalPerformanceViewComponent({ paused = false, onTradeSymbol }: { pau
     <FeedToolbar title="Signal outcome tracking" />
     <p className="signal-info-note">Direction hit rates exclude neutral signals. Older stored outcomes count toward Total N but lack direction and cost data. Net returns use fresh top-of-book entry/exit quotes and the configured taker fee; order size and market impact are not simulated.</p>
     {state.performanceError && <div className="positions-error">{state.performanceError}</div>}
-    <div className="data-grid-wrap signal-info-grid"><AgGridReact<SignalPerformanceRow> rowData={displayedRowData} columnDefs={columns} defaultColDef={{ sortable: true, resizable: true, flex: 1, minWidth: 80 }} theme={gridTheme} domLayout="autoHeight" rowHeight={34} headerHeight={38} /></div>
+    <div className="data-grid-wrap signal-info-grid"><AgGridReact<SignalPerformanceRow> rowData={displayedRowData} columnDefs={columns} defaultColDef={{ sortable: true, resizable: true, flex: 1, minWidth: 80 }} theme={gridTheme} domLayout="autoHeight" rowHeight={26} headerHeight={28} /></div>
     {state.performance.length === 0 && <p className="positions-empty">Cost-aware outcome samples begin after one minute; 5-minute, 15-minute and 1-hour rows appear as those horizons mature.</p>}
 
   </section>;
@@ -166,7 +166,7 @@ function WalkForwardViewComponent({ paused = false, onTradeSymbol }: { paused?: 
     <FeedToolbar title="Walk-forward model evaluation" />
     <p className="signal-info-note">Each test prediction is evaluated against later, non-overlapping outcomes. Long and short results are split for the strength filter and logistic model. The 95% lower bound estimates uncertainty in the positive-net rate; side samples under 30 are preliminary. Logistic regression learns from 1m trend, 10s momentum, trade flow and book imbalance. Returns use recorded execution costs; order size and market impact are not included.</p>
     {state.walkForwardError && <div className="positions-error">{state.walkForwardError}</div>}
-    <div className="data-grid-wrap signal-info-grid walk-forward-grid"><AgGridReact<SignalWalkForwardRow> rowData={displayedRows} columnDefs={walkForwardColumns} defaultColDef={{ sortable: true, resizable: true, flex: 1, minWidth: 80 }} theme={gridTheme} domLayout="autoHeight" rowHeight={34} headerHeight={38} /></div>
+    <div className="data-grid-wrap signal-info-grid walk-forward-grid"><AgGridReact<SignalWalkForwardRow> rowData={displayedRows} columnDefs={walkForwardColumns} defaultColDef={{ sortable: true, resizable: true, flex: 1, minWidth: 80 }} theme={gridTheme} domLayout="autoHeight" rowHeight={26} headerHeight={28} /></div>
     {displayedRows.length === 0 && <p className="positions-empty">Walk-forward rows appear after at least 30 eligible, non-overlapping costed outcomes are available for a symbol and horizon. This can take 30 minutes for the 1-minute horizon and much longer for longer horizons.</p>}
   </section>;
 }

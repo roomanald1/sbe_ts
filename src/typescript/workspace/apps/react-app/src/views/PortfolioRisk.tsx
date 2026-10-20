@@ -192,8 +192,8 @@ function PortfolioRiskComponent({ connection, paused = false }: { connection: Co
           getRowId={({ data }) => data.symbol}
           theme={riskGridTheme}
           domLayout="autoHeight"
-          rowHeight={32}
-          headerHeight={38}
+          rowHeight={26}
+          headerHeight={28}
           suppressColumnMoveAnimation
         />
         {!loading && rowData.length === 0 && <p className="positions-empty">No open positions to assess.</p>}

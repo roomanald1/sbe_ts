@@ -176,8 +176,8 @@ export const SymbolPriceTable = memo(function SymbolPriceTable(props: SymbolPric
           getRowId={({ data }) => data.symbol}
           theme={tickGridTheme}
           domLayout="normal"
-          rowHeight={view.maxRows === undefined ? 32 : 26}
-          headerHeight={32}
+          rowHeight={view.maxRows === undefined ? 28 : 24}
+          headerHeight={28}
           suppressColumnMoveAnimation
         />
         {rowData.length === 0 && (

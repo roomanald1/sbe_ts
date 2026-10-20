@@ -1,0 +1,10 @@
+apiVersion: 1
+providers:
+  - name: SBE TS
+    orgId: 1
+    folder: SBE TS
+    type: file
+    disableDeletion: false
+    editable: true
+    options:
+      path: /var/lib/grafana/dashboards

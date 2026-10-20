@@ -1,7 +1,7 @@
 //! Signal-driven intraday paper trader with bounded, configurable order sizing.
-use axum::{extract::State, http::StatusCode, routing::{get, post}, Json, Router};
+use axum::{extract::State, http::StatusCode, routing::get, Json, Router};
 use serde::{Deserialize, Serialize};
-use std::{collections::BTreeMap, path::PathBuf, sync::{Arc, atomic::{AtomicBool, Ordering}}, time::{SystemTime, UNIX_EPOCH}};
+use std::{collections::BTreeMap, path::PathBuf, sync::{Arc, atomic::{AtomicBool, Ordering}}, time::{Instant, SystemTime, UNIX_EPOCH}};
 use tokio::{sync::Mutex, time::{Duration, interval}};
 
 const DEFAULT_MAX_ORDER_NOTIONAL: f64 = 100.0;
@@ -22,12 +22,13 @@ const MIN_SIDE_POSITIVE_NET_RATE: f64 = 0.55;
 const MIN_SIDE_POSITIVE_NET_LOWER_95: f64 = 0.45;
 const SIGNAL_COOLDOWN_MS: u64 = 30_000;
 const POST_STOP_REENTRY_COOLDOWN_MS: u64 = 120_000;
-const EXPLORATION_NOTIONAL_FRACTION: f64 = 0.10;
+const EXPLORATION_NOTIONAL_FRACTION: f64 = 0.05;
 const MIN_EXPLORATION_EVIDENCE_SAMPLES: usize = 10;
 const MAX_ENTRIES_PER_AUTO_POSITION: u32 = 1;
 const NEGATIVE_EVIDENCE_FLOOR: f64 = 0.45;
 const MATERIAL_STRENGTH_CHANGE: f64 = 0.02;
 const MIN_EXECUTION_LEARNING_SAMPLES: usize = 10;
+const PARAMETER_PROFILE_COUNT: usize = 3;
 const DEFAULT_DAILY_REALIZED_LOSS_LIMIT: f64 = 10.0;
 const MIN_DAILY_REALIZED_LOSS_LIMIT: f64 = 5.0;
 const MIN_STOP_LOSS_PERCENT: f64 = 0.25;
@@ -36,6 +37,7 @@ const MIN_TAKE_PROFIT_PERCENT: f64 = 0.40;
 const MAX_TAKE_PROFIT_PERCENT: f64 = 2.00;
 const EXIT_POLICY_ADJUSTMENT_STEP: f64 = 0.05;
 const MIN_EXIT_POLICY_SAMPLES: usize = 10;
+const MIN_EXIT_REWARD_RISK_RATIO: f64 = 1.5;
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -46,19 +48,23 @@ struct Signal { symbol: String, direction: String, strength: f64, timestamp: u64
     #[serde(default)] ranging_probability: Option<f64>,
     #[serde(default)] components: SignalComponents,
 }
-#[derive(Default, Deserialize)]
+#[derive(Default, Deserialize, Serialize)]
 struct SignalComponents {
     momentum_10s_percent: Option<f64>, trend_5m_volatility_units: Option<f64>,
+    #[serde(default)] trade_flow_imbalance: Option<f64>,
+    #[serde(default)] book_imbalance: Option<f64>,
     volatility_1m_percent: Option<f64>, mispricing_vs_vwap_bps: Option<f64>,
     pressure_without_price_move: Option<f64>, aggressor_cost_bps: Option<f64>,
 }
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 struct WalkForward {
     symbol: String, horizon_seconds: u64,
     #[serde(default)] all_signal_long: SideWalkForwardMetrics,
     #[serde(default)] all_signal_short: SideWalkForwardMetrics,
+    #[serde(default)] research_logistic_long: SideWalkForwardMetrics,
+    #[serde(default)] research_logistic_short: SideWalkForwardMetrics,
 }
-#[derive(Default, Deserialize)]
+#[derive(Default, Deserialize, Serialize)]
 struct SideWalkForwardMetrics {
     sample_count: usize,
     direction_match_rate: Option<f64>,
@@ -146,6 +152,11 @@ struct Settings {
     #[serde(default)] daily_loss_limit_reduced: bool,
     #[serde(default = "default_stop_loss_percent")] stop_loss_percent: f64,
     #[serde(default = "default_take_profit_percent")] take_profit_percent: f64,
+    #[serde(default = "default_vwap_duration")] vwap_duration_minutes: u64,
+    #[serde(default = "default_vwap_participation")] vwap_participation_percent: f64,
+    #[serde(default = "default_limit_offset")] limit_offset_bps: f64,
+    #[serde(default = "default_trigger_offset")] trigger_offset_bps: f64,
+    #[serde(default = "default_trailing_distance")] trailing_distance_percent: f64,
     #[serde(default)] closed_trade_returns_percent: Vec<f64>,
     #[serde(default)] daily_realized_pnl: f64,
     #[serde(default)] pnl_utc_day: String,
@@ -168,18 +179,28 @@ fn default_exploration_percent() -> f64 { EXPLORATION_NOTIONAL_FRACTION * 100.0 
 fn default_max_open_positions() -> usize { 20 }
 fn default_stop_loss_percent() -> f64 { 0.50 }
 fn default_take_profit_percent() -> f64 { 0.80 }
+fn default_vwap_duration() -> u64 { 5 }
+fn default_vwap_participation() -> f64 { 20.0 }
+fn default_limit_offset() -> f64 { 0.0 }
+fn default_trigger_offset() -> f64 { 20.0 }
+fn default_trailing_distance() -> f64 { 0.10 }
 fn default_daily_limit() -> f64 { DEFAULT_DAILY_NOTIONAL }
 impl Default for Settings {
-    fn default() -> Self { Self { max_order_notional: default_order_limit(), daily_notional_limit: default_daily_limit(), used_notional_today: 0.0, realized_pnl: 0.0, daily_realized_loss_limit: default_daily_loss_limit(), exploration_percent: default_exploration_percent(), max_open_positions: default_max_open_positions(), daily_loss_limit_reduced: false, stop_loss_percent: default_stop_loss_percent(), take_profit_percent: default_take_profit_percent(), closed_trade_returns_percent: Vec::new(), daily_realized_pnl: 0.0, pnl_utc_day: utc_day(), utc_day: utc_day(), orders: Vec::new(), positions: BTreeMap::new(), learning: BTreeMap::new(), last_hedge_at: BTreeMap::new(), last_decision: String::new(), last_decision_at: 0, last_risk_note: String::new(), risk_limited_sizing: false, last_signal_at: BTreeMap::new(), last_signal_direction: BTreeMap::new(), last_signal_strength: BTreeMap::new() } }
+    fn default() -> Self { Self { max_order_notional: default_order_limit(), daily_notional_limit: default_daily_limit(), used_notional_today: 0.0, realized_pnl: 0.0, daily_realized_loss_limit: default_daily_loss_limit(), exploration_percent: default_exploration_percent(), max_open_positions: default_max_open_positions(), daily_loss_limit_reduced: false, stop_loss_percent: default_stop_loss_percent(), take_profit_percent: default_take_profit_percent(), vwap_duration_minutes: default_vwap_duration(), vwap_participation_percent: default_vwap_participation(), limit_offset_bps: default_limit_offset(), trigger_offset_bps: default_trigger_offset(), trailing_distance_percent: default_trailing_distance(), closed_trade_returns_percent: Vec::new(), daily_realized_pnl: 0.0, pnl_utc_day: utc_day(), utc_day: utc_day(), orders: Vec::new(), positions: BTreeMap::new(), learning: BTreeMap::new(), last_hedge_at: BTreeMap::new(), last_decision: String::new(), last_decision_at: 0, last_risk_note: String::new(), risk_limited_sizing: false, last_signal_at: BTreeMap::new(), last_signal_direction: BTreeMap::new(), last_signal_strength: BTreeMap::new() } }
 }
 #[derive(Serialize)]
-struct StatusResponse { enabled: bool, max_order_notional: f64, daily_notional_limit: f64, daily_realized_loss_limit: f64, exploration_percent: f64, max_open_positions: usize, stop_loss_percent: f64, take_profit_percent: f64, used_notional_today: f64, last_decision: String, last_decision_at: u64 }
+struct StatusResponse { enabled: bool, max_order_notional: f64, daily_notional_limit: f64, daily_realized_loss_limit: f64, exploration_percent: f64, max_open_positions: usize, stop_loss_percent: f64, take_profit_percent: f64, vwap_duration_minutes: u64, vwap_participation_percent: f64, limit_offset_bps: f64, trigger_offset_bps: f64, trailing_distance_percent: f64, used_notional_today: f64, last_decision: String, last_decision_at: u64 }
 #[derive(Deserialize)]
 struct SettingsRequest {
     max_order_notional: f64, daily_notional_limit: f64, daily_realized_loss_limit: f64,
     exploration_percent: f64, max_open_positions: usize,
     #[serde(default)] stop_loss_percent: Option<f64>,
     #[serde(default)] take_profit_percent: Option<f64>,
+    #[serde(default)] vwap_duration_minutes: Option<u64>,
+    #[serde(default)] vwap_participation_percent: Option<f64>,
+    #[serde(default)] limit_offset_bps: Option<f64>,
+    #[serde(default)] trigger_offset_bps: Option<f64>,
+    #[serde(default)] trailing_distance_percent: Option<f64>,
 }
 #[derive(Deserialize)]
 struct EnabledRequest { enabled: bool }
@@ -194,6 +215,7 @@ struct TraderOrder {
     side: String,
     order_type: String,
     #[serde(default)] purpose: String,
+    #[serde(default)] decision_id: Option<String>,
     quantity: f64,
     filled_quantity: f64,
     average_price: Option<f64>,
@@ -206,7 +228,7 @@ struct TraderOrder {
     realized_pnl: f64,
 }
 #[derive(Clone, Default, Serialize, Deserialize)]
-struct TraderPosition { quantity: f64, average_entry_price: f64, entry_fees: f64, realized_pnl: f64, #[serde(default)] entries: u32, #[serde(default)] entry_order_type: String, #[serde(default)] entry_context: String, #[serde(default)] protective_stops: Vec<ProtectiveStop> }
+struct TraderPosition { quantity: f64, average_entry_price: f64, entry_fees: f64, realized_pnl: f64, #[serde(default)] entries: u32, #[serde(default)] entry_order_type: String, #[serde(default)] entry_context: String, #[serde(default)] entry_decision_id: Option<String>, #[serde(default)] protective_stops: Vec<ProtectiveStop> }
 #[derive(Clone, Default, Serialize, Deserialize)]
 struct ProtectiveStop { barrier_id: String, order_timestamp: u64, quantity: f64, processed_quantity: f64, processed_notional: f64, processed_fee: f64 }
 #[derive(Clone, Default, Serialize, Deserialize)]
@@ -214,7 +236,7 @@ struct LearningStats { samples: usize, positive: usize, realized_pnl: f64 }
 #[derive(Serialize)]
 struct PnlBreakdown { symbol: String, direction: String, purpose: String, realized_pnl: f64, outcomes: usize }
 #[derive(Serialize)]
-struct ActivityResponse { orders: Vec<TraderOrder>, pnl_breakdown: Vec<PnlBreakdown>, realized_pnl: f64, unrealized_pnl: Option<f64>, exit_learning_samples: usize, learning_samples: usize, learning_win_rate: Option<f64>, preferred_order_type: Option<String> }
+struct ActivityResponse { orders: Vec<TraderOrder>, pnl_breakdown: Vec<PnlBreakdown>, realized_pnl: f64, unrealized_pnl: Option<f64>, exit_learning_samples: usize, closed_trade_average_return_percent: Option<f64>, closed_trade_wins: usize, closed_trade_losses: usize, closed_trade_flat: usize, learning_samples: usize, learning_win_rate: Option<f64>, preferred_order_type: Option<String>, parameter_profile_samples: [usize; 3] }
 #[derive(Serialize)]
 struct CycleResult { status: &'static str, reason: Option<String>, symbol: Option<String>, side: Option<String>, quantity: Option<f64>, order_type: Option<String>, order_response: Option<serde_json::Value> }
 
@@ -246,7 +268,6 @@ pub fn router() -> Router {
     Router::new()
         .route("/positions/auto-trader", get(get_status).put(set_enabled))
         .route("/positions/auto-trader/settings", axum::routing::put(update_settings))
-        .route("/positions/auto-trader/run-once", post(run_once))
         .route("/positions/auto-trader/activity", get(get_activity))
         .with_state(state)
 }
@@ -268,6 +289,11 @@ async fn update_settings(State(state): State<AutoTraderState>, Json(request): Js
         || !request.exploration_percent.is_finite() || !(0.0..=100.0).contains(&request.exploration_percent)
         || request.stop_loss_percent.is_some_and(|value| !value.is_finite() || !(MIN_STOP_LOSS_PERCENT..=MAX_STOP_LOSS_PERCENT).contains(&value))
         || request.take_profit_percent.is_some_and(|value| !value.is_finite() || !(MIN_TAKE_PROFIT_PERCENT..=MAX_TAKE_PROFIT_PERCENT).contains(&value))
+        || request.vwap_duration_minutes.is_some_and(|value| !(5..=390).contains(&value))
+        || request.vwap_participation_percent.is_some_and(|value| !value.is_finite() || !(1.0..=50.0).contains(&value))
+        || request.limit_offset_bps.is_some_and(|value| !value.is_finite() || !(-10.0..=10.0).contains(&value))
+        || request.trigger_offset_bps.is_some_and(|value| !value.is_finite() || !(5.0..=100.0).contains(&value))
+        || request.trailing_distance_percent.is_some_and(|value| !value.is_finite() || !(0.05..=1.0).contains(&value))
         || !(1..=20).contains(&request.max_open_positions) {
         return Err((StatusCode::BAD_REQUEST, "Order and total notional limits must be positive with total notional at least the per-order limit; daily loss cap must be positive, exploration must be between 0% and 100%, and max open positions must be between 1 and 20".into()));
     }
@@ -283,12 +309,17 @@ async fn update_settings(State(state): State<AutoTraderState>, Json(request): Js
     settings.max_open_positions = request.max_open_positions;
     if let Some(value) = request.stop_loss_percent { settings.stop_loss_percent = value; }
     if let Some(value) = request.take_profit_percent { settings.take_profit_percent = value; }
+    if let Some(value) = request.vwap_duration_minutes { settings.vwap_duration_minutes = value; }
+    if let Some(value) = request.vwap_participation_percent { settings.vwap_participation_percent = value; }
+    if let Some(value) = request.limit_offset_bps { settings.limit_offset_bps = value; }
+    if let Some(value) = request.trigger_offset_bps { settings.trigger_offset_bps = value; }
+    if let Some(value) = request.trailing_distance_percent { settings.trailing_distance_percent = value; }
     persist_settings(&state.settings_path, &settings)?;
     Ok(Json(status(&state, &settings)))
 }
 fn status(state: &AutoTraderState, settings: &Settings) -> StatusResponse {
     StatusResponse { enabled: state.enabled.load(Ordering::Relaxed), max_order_notional: settings.max_order_notional,
-        daily_notional_limit: settings.daily_notional_limit, daily_realized_loss_limit: settings.daily_realized_loss_limit, exploration_percent: settings.exploration_percent, max_open_positions: settings.max_open_positions, stop_loss_percent: settings.stop_loss_percent, take_profit_percent: settings.take_profit_percent, used_notional_today: settings.used_notional_today,
+        daily_notional_limit: settings.daily_notional_limit, daily_realized_loss_limit: settings.daily_realized_loss_limit, exploration_percent: settings.exploration_percent, max_open_positions: settings.max_open_positions, stop_loss_percent: settings.stop_loss_percent, take_profit_percent: settings.take_profit_percent, vwap_duration_minutes: settings.vwap_duration_minutes, vwap_participation_percent: settings.vwap_participation_percent, limit_offset_bps: settings.limit_offset_bps, trigger_offset_bps: settings.trigger_offset_bps, trailing_distance_percent: settings.trailing_distance_percent, used_notional_today: settings.used_notional_today,
         last_decision: settings.last_decision.clone(), last_decision_at: settings.last_decision_at }
 }
 async fn get_activity(State(state): State<AutoTraderState>) -> Json<ActivityResponse> {
@@ -332,7 +363,12 @@ async fn get_activity(State(state): State<AutoTraderState>) -> Json<ActivityResp
         complete.then_some(total)
     };
     let settings = state.settings.lock().await;
-    let exit_learning_samples = settings.closed_trade_returns_percent.len();
+    let closed_returns = &settings.closed_trade_returns_percent;
+    let exit_learning_samples = closed_returns.len();
+    let closed_trade_average_return_percent = (exit_learning_samples > 0).then(|| closed_returns.iter().sum::<f64>() / exit_learning_samples as f64);
+    let closed_trade_wins = closed_returns.iter().filter(|value| **value > 1e-12).count();
+    let closed_trade_losses = closed_returns.iter().filter(|value| **value < -1e-12).count();
+    let closed_trade_flat = exit_learning_samples - closed_trade_wins - closed_trade_losses;
     let learning_samples = settings.learning.values().map(|stats| stats.samples).sum();
     let learning_positive = settings.learning.values().map(|stats| stats.positive).sum::<usize>();
     let preferred_order_type = ALL_ORDER_TYPES.iter().filter_map(|kind| {
@@ -343,13 +379,10 @@ async fn get_activity(State(state): State<AutoTraderState>) -> Json<ActivityResp
         (stats.samples >= MIN_EXECUTION_LEARNING_SAMPLES && stats.positive as f64 / stats.samples as f64 >= 0.55)
             .then_some((format!("{kind:?}"), stats.realized_pnl / stats.samples as f64))
     }).filter(|(_, pnl)| *pnl > 0.0).max_by(|a, b| a.1.total_cmp(&b.1)).map(|(kind, _)| kind);
-    Json(ActivityResponse { orders, pnl_breakdown, realized_pnl, unrealized_pnl, exit_learning_samples, learning_samples,
-        learning_win_rate: (learning_samples > 0).then_some(learning_positive as f64 / learning_samples as f64), preferred_order_type })
-}
-
-async fn run_once(State(state): State<AutoTraderState>) -> Result<Json<CycleResult>, (StatusCode, String)> {
-    if !state.enabled.load(Ordering::Relaxed) { return Ok(Json(skipped("Enable Auto Trader before running a cycle"))); }
-    run_cycle(&state).await.map(Json)
+    let parameter_profile_samples = std::array::from_fn(|profile| settings.learning.iter()
+        .filter(|(key, _)| key.contains(&format!(":P{profile}:"))).map(|(_, stats)| stats.samples).sum());
+    Json(ActivityResponse { orders, pnl_breakdown, realized_pnl, unrealized_pnl, exit_learning_samples, closed_trade_average_return_percent, closed_trade_wins, closed_trade_losses, closed_trade_flat, learning_samples,
+        learning_win_rate: (learning_samples > 0).then_some(learning_positive as f64 / learning_samples as f64), preferred_order_type, parameter_profile_samples })
 }
 
 async fn run_cycle(state: &AutoTraderState) -> Result<CycleResult, (StatusCode, String)> {
@@ -393,13 +426,7 @@ async fn run_cycle_inner(state: &AutoTraderState) -> Result<CycleResult, (Status
     let dashboard_response = client.get(format!("{insights_url}/signals/auto-trader-dashboard")).send().await.map_err(upstream_error)?.error_for_status().map_err(upstream_error)?;
     let dashboard_payload: serde_json::Value = dashboard_response.json().await.map_err(upstream_error)?;
     let dashboard: Dashboard = serde_json::from_value(dashboard_payload).map_err(|error| (StatusCode::BAD_GATEWAY, format!("Auto Trader signal payload could not be decoded: {error}")))?;
-    let (learned_strength_floor, exploration_score_floor) = {
-        let settings = state.settings.lock().await;
-        (
-            adaptive_strength_floor(&settings.learning),
-            adaptive_exploration_score_floor(&settings.learning),
-        )
-    };
+    let learning = state.settings.lock().await.learning.clone();
     let mut signals = dashboard.best;
     let mut inferred_direction_count = 0;
     for signal in &mut signals {
@@ -411,7 +438,6 @@ async fn run_cycle_inner(state: &AutoTraderState) -> Result<CycleResult, (Status
     }
     let open_positions = state.settings.lock().await.positions.iter()
         .filter(|(_, position)| position.quantity.abs() > 1e-12).map(|(symbol, position)| (symbol.clone(), position.clone())).collect::<BTreeMap<_, _>>();
-    let now_ms = now.saturating_mul(1000);
     let fresh_directional = signals.iter().filter(|signal| {
         if signal.stale || now.saturating_sub(signal.timestamp / 1000) > 60 || !matches!(signal.direction.as_str(), "bullish" | "bearish") { return false; }
         open_positions.get(&signal.symbol).is_none_or(|position| {
@@ -419,28 +445,49 @@ async fn run_cycle_inner(state: &AutoTraderState) -> Result<CycleResult, (Status
             position.quantity.signum() == signal_quantity && position.entries < MAX_ENTRIES_PER_AUTO_POSITION
         })
     }).collect::<Vec<_>>();
-    let strength_qualified = fresh_directional.iter().filter(|signal| signal.strength.is_finite() && signal.strength >= learned_strength_floor).copied().collect::<Vec<_>>();
-    let exploration_qualified = fresh_directional.iter().filter(|signal| signal.strength.is_finite() && signal.strength >= MIN_EXPLORATION_STRENGTH && signal.score.is_finite() && signal.score.abs() >= exploration_score_floor).copied().collect::<Vec<_>>();
+    let strength_qualified = fresh_directional.iter().filter(|signal| {
+        let context = market_context(signal);
+        signal.strength.is_finite() && signal.strength >= adaptive_strength_floor(&learning, &context)
+    }).copied().collect::<Vec<_>>();
+    let exploration_qualified = fresh_directional.iter().filter(|signal| {
+        let context = market_context(signal);
+        !context.ends_with(":mixed")
+            && signal.strength.is_finite()
+            && signal.strength >= MIN_EXPLORATION_STRENGTH
+            && signal.score.is_finite()
+            && signal.score.abs() >= adaptive_exploration_score_floor(&learning, &context)
+    }).copied().collect::<Vec<_>>();
     let strict_candidate = strength_qualified.iter().copied().filter(|signal| {
-        let side_evidence = dashboard.walk_forward.iter()
-            .find(|item| item.symbol == signal.symbol && (60..=300).contains(&item.horizon_seconds))
-            .map(|item| if signal.direction == "bullish" { &item.all_signal_long } else { &item.all_signal_short });
+        let walk_forward = dashboard.walk_forward.iter()
+            .find(|item| item.symbol == signal.symbol && (60..=300).contains(&item.horizon_seconds));
+        let side_evidence = walk_forward.map(|item| if signal.direction == "bullish" { &item.all_signal_long } else { &item.all_signal_short });
+        let research_evidence = walk_forward.map(|item| if signal.direction == "bullish" { &item.research_logistic_long } else { &item.research_logistic_short });
         side_evidence.is_some_and(|evidence| {
+            let research_supports = research_evidence.is_none_or(|research| {
+                research.sample_count < MIN_SIDE_WALK_FORWARD_SAMPLES
+                    || research.average_net_return_percent.is_some_and(|net| net > 0.0)
+            });
             evidence.sample_count >= MIN_SIDE_WALK_FORWARD_SAMPLES
                 && evidence.direction_match_rate.is_some_and(|rate| rate >= MIN_SIDE_DIRECTION_MATCH_RATE)
                 && evidence.average_net_return_percent.is_some_and(|net| net > 0.0)
                 && evidence.positive_net_rate.is_some_and(|rate| rate >= MIN_SIDE_POSITIVE_NET_RATE)
                 && evidence.positive_net_rate_lower_95.is_some_and(|rate| rate >= MIN_SIDE_POSITIVE_NET_LOWER_95)
+                && research_supports
         })
     }).max_by(|a, b| a.strength.total_cmp(&b.strength));
     let (signal, exploratory) = if let Some(signal) = strict_candidate {
         (signal, false)
     } else {
         let exploratory = exploration_qualified.iter().copied().filter(|signal| {
-            let side_evidence = dashboard.walk_forward.iter()
-                .find(|item| item.symbol == signal.symbol && (60..=300).contains(&item.horizon_seconds))
-                .map(|item| if signal.direction == "bullish" { &item.all_signal_long } else { &item.all_signal_short });
-            side_evidence.is_none_or(|evidence| {
+            let walk_forward = dashboard.walk_forward.iter()
+                .find(|item| item.symbol == signal.symbol && (60..=300).contains(&item.horizon_seconds));
+            let side_evidence = walk_forward.map(|item| if signal.direction == "bullish" { &item.all_signal_long } else { &item.all_signal_short });
+            let research_evidence = walk_forward.map(|item| if signal.direction == "bullish" { &item.research_logistic_long } else { &item.research_logistic_short });
+            let research_supports = research_evidence.is_none_or(|evidence| {
+                evidence.sample_count < MIN_SIDE_WALK_FORWARD_SAMPLES
+                    || evidence.average_net_return_percent.is_some_and(|net| net > 0.0)
+            });
+            research_supports && side_evidence.is_none_or(|evidence| {
                 evidence.sample_count < MIN_EXPLORATION_EVIDENCE_SAMPLES
                     || (evidence.average_net_return_percent.is_some_and(|net| net > 0.0)
                         && evidence.positive_net_rate.is_some_and(|rate| rate >= NEGATIVE_EVIDENCE_FLOOR))
@@ -454,10 +501,28 @@ async fn run_cycle_inner(state: &AutoTraderState) -> Result<CycleResult, (Status
                         && (evidence.average_net_return_percent.is_none_or(|net| net <= 0.0)
                             || evidence.positive_net_rate.is_none_or(|rate| rate < NEGATIVE_EVIDENCE_FLOOR)))
             }).count();
-            return Ok(skipped(&format!("No tradeable bias: fresh directional {}/{} ({} inferred from neutral score); learned floor {:.2} passed {}; exploration strength floor {:.2}; raw score floor {:.2} passed {}; {} candidate(s) blocked by negative walk-forward history", fresh_directional.len(), signals.len(), inferred_direction_count, learned_strength_floor, strength_qualified.len(), MIN_EXPLORATION_STRENGTH, exploration_score_floor, exploration_qualified.len(), blocked_by_negative)));
+            let reason = format!("No tradeable bias: fresh directional {}/{} ({} inferred from neutral score); contextual learned strength floors passed {}; exploration strength floor {:.2}; contextual raw-score floors passed {}; {} candidate(s) blocked by negative walk-forward history", fresh_directional.len(), signals.len(), inferred_direction_count, strength_qualified.len(), MIN_EXPLORATION_STRENGTH, exploration_qualified.len(), blocked_by_negative);
+            if let Some(candidate) = fresh_directional.iter().copied().max_by(|a, b| a.strength.total_cmp(&b.strength)) {
+                let evidence = dashboard.walk_forward.iter().find(|item| item.symbol == candidate.symbol && (60..=300).contains(&item.horizon_seconds));
+                let payload = signal_audit_payload(candidate, "decision", now.saturating_mul(1000), "skipped", Some(&reason), Some(true), evidence);
+                store_auto_trader_audit(&client, &payload).await;
+            }
+            return Ok(skipped(&reason));
         };
         (signal, true)
     };
+    let evidence = dashboard.walk_forward.iter().find(|item| item.symbol == signal.symbol && (60..=300).contains(&item.horizon_seconds));
+    let selected_payload = signal_audit_payload(
+        signal,
+        "decision",
+        now.saturating_mul(1000),
+        "selected",
+        Some(if exploratory { "exploratory candidate selected" } else { "strict walk-forward candidate selected" }),
+        Some(exploratory),
+        evidence,
+    );
+    store_auto_trader_audit(&client, &selected_payload).await;
+    let decision_id = signal_decision_id(signal);
     let position_url = std::env::var("POSITION_MANAGEMENT_URL").unwrap_or_else(|_| "http://127.0.0.1:3002".into());
     if !signal.symbol.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'-') { return Ok(skipped("Selected insight has an invalid instrument symbol")); }
     let inputs: serde_json::Value = client.get(format!("{position_url}/internal/insights-inputs?symbol={}", signal.symbol)).send().await.map_err(upstream_error)?.error_for_status().map_err(upstream_error)?.json().await.map_err(upstream_error)?;
@@ -507,15 +572,38 @@ async fn run_cycle_inner(state: &AutoTraderState) -> Result<CycleResult, (Status
         if !settings.last_risk_note.is_empty() { settings.last_risk_note.push_str(" · "); }
         settings.last_risk_note.push_str("small paper-exploration size; no reliable same-side walk-forward edge yet");
     }
+    let baseline_params = ExecutionParameters { vwap_duration_minutes: settings.vwap_duration_minutes, vwap_participation_rate: settings.vwap_participation_percent / 100.0, limit_offset_bps: settings.limit_offset_bps, trigger_offset_bps: settings.trigger_offset_bps, trailing_distance_percent: settings.trailing_distance_percent };
     let baseline_type = choose_order_type(&signal);
     let context = market_context(&signal);
     let Some(order_type) = adapt_order_type(baseline_type, &context, &settings.learning) else {
         return Ok(skipped("Recent closed auto-trades show no profitable order type with enough samples"));
     };
+    let profile = choose_parameter_profile(order_type, &context, &settings.learning, exploratory);
+    let execution_params = parameter_profile(baseline_params, profile);
+    let learning_context = format!("{context}:P{profile}");
     drop(settings);
     let side = if signal.direction == "bullish" { "buy" } else { "sell" };
     let deep_book = assess_deep_book(&client, &signal.symbol, side == "buy", notional).await
         .map_err(|error| (StatusCode::BAD_GATEWAY, error))?;
+    // Walk-forward net returns include configured taker fees, but not the live
+    // spread/sweep cost of this particular order. Avoid trading when that
+    // incremental round-trip cost would consume the measured edge.
+    if let Some(evidence) = evidence {
+        let side_edge = if signal.direction == "bullish" {
+            evidence.all_signal_long.average_net_return_percent
+        } else {
+            evidence.all_signal_short.average_net_return_percent
+        };
+        if let (Some(edge_percent), Some(assessment)) = (side_edge, deep_book) {
+            let spread_bps = (ask - bid) / mid * 10_000.0;
+            let incremental_cost_percent = (spread_bps + 2.0 * assessment.impact_bps) / 100.0;
+            if edge_percent.is_finite() && incremental_cost_percent.is_finite() && incremental_cost_percent >= edge_percent {
+                return Ok(skipped(&format!(
+                    "Estimated spread and sweep cost ({incremental_cost_percent:.3}%) consumes the measured walk-forward edge ({edge_percent:.3}%)"
+                )));
+            }
+        }
+    }
     let deep_book_note = if let Some(assessment) = deep_book {
         if !assessment.impact_bps.is_finite() || assessment.impact_bps > DEEP_BOOK_BAND_BPS {
             return Ok(skipped(&format!("Deep book cannot support a {} {side} order with impact under {:.0} bps", signal.symbol, DEEP_BOOK_BAND_BPS)));
@@ -538,7 +626,7 @@ async fn run_cycle_inner(state: &AutoTraderState) -> Result<CycleResult, (Status
         settings.last_signal_at.insert(signal_key.clone(), timestamp);
         settings.last_signal_direction.insert(signal_key.clone(), signal.direction.clone());
         settings.last_signal_strength.insert(signal_key, signal.strength);
-        settings.orders.push(TraderOrder { timestamp, triggered_at: None, symbol: signal.symbol.clone(), side: side.to_owned(), order_type: format!("{order_type:?}"), purpose: "signal".into(), quantity, filled_quantity: 0.0, average_price: None, reserved_notional: notional,
+        settings.orders.push(TraderOrder { timestamp, triggered_at: None, symbol: signal.symbol.clone(), side: side.to_owned(), order_type: format!("{order_type:?} · P{profile}"), purpose: "signal".into(), decision_id: Some(decision_id.clone()), quantity, filled_quantity: 0.0, average_price: None, reserved_notional: notional,
             book_bid_depth_10bps: deep_book.map(|assessment| assessment.bid_depth_10bps),
             book_ask_depth_10bps: deep_book.map(|assessment| assessment.ask_depth_10bps),
             book_depth_imbalance_10bps: deep_book.map(|assessment| assessment.depth_imbalance_10bps),
@@ -554,7 +642,8 @@ async fn run_cycle_inner(state: &AutoTraderState) -> Result<CycleResult, (Status
         persist_settings(&state.settings_path, &settings)?;
         return Ok(skipped("Auto Trader was disabled before order submission"));
     }
-    let response = match submit_configured_order(&client, &position_url, &signal.symbol, side, quantity, notional, bid, ask, order_type).await {
+    let submit_started = Instant::now();
+    let response = match submit_configured_order(&client, &position_url, &signal.symbol, side, quantity, notional, bid, ask, order_type, execution_params).await {
         Ok(response) => response,
         Err(error) => {
             let mut settings = state.settings.lock().await;
@@ -563,13 +652,18 @@ async fn run_cycle_inner(state: &AutoTraderState) -> Result<CycleResult, (Status
             return Err(error);
         }
     };
+    let submit_response_ms = submit_started.elapsed().as_secs_f64() * 1000.0;
     let mut settings = state.settings.lock().await;
     reset_daily_budget(&mut settings);
     let filled = response.get("filled_quantity").and_then(serde_json::Value::as_f64).unwrap_or(0.0);
     let average_price = response.get("average_execution_price").and_then(serde_json::Value::as_f64);
     let fee = response.get("estimated_fee").and_then(serde_json::Value::as_f64).unwrap_or(0.0).abs();
     let (realized_delta, learned_type) = if filled > 0.0 {
-        average_price.map(|price| apply_auto_fill(&mut settings.positions, &signal.symbol, side, filled, price, fee, &format!("{order_type:?}"), &context)).unwrap_or_default()
+        let result = average_price.map(|price| apply_auto_fill(&mut settings.positions, &signal.symbol, side, filled, price, fee, &format!("{order_type:?}"), &learning_context)).unwrap_or_default();
+        if let Some(position) = settings.positions.get_mut(&signal.symbol) {
+            position.entry_decision_id = Some(decision_id.clone());
+        }
+        result
     } else { (0.0, None) };
     settings.realized_pnl += realized_delta;
     settings.daily_realized_pnl += realized_delta;
@@ -589,6 +683,34 @@ async fn run_cycle_inner(state: &AutoTraderState) -> Result<CycleResult, (Status
     settings.used_notional_today = allocated_notional(&settings);
     persist_settings(&state.settings_path, &settings)?;
     drop(settings);
+    let mut audit_payload = signal_audit_payload(signal, "entry", timestamp, status, None, Some(exploratory), evidence);
+    audit_payload["order_type"] = serde_json::json!(format!("{order_type:?}"));
+    audit_payload["order_quantity"] = serde_json::json!(quantity);
+    audit_payload["filled_quantity"] = serde_json::json!(filled);
+    audit_payload["average_price"] = serde_json::json!(average_price);
+    audit_payload["fees"] = serde_json::json!(fee);
+    audit_payload["realized_pnl"] = serde_json::json!(realized_delta);
+    let response_received_at = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64;
+    let implementation_shortfall_bps = average_price.map(|price| if side == "buy" { (price / mid - 1.0) * 10_000.0 } else { (1.0 - price / mid) * 10_000.0 });
+    let fee_bps = (filled > 0.0 && mid > 0.0).then(|| fee / (filled * mid) * 10_000.0);
+    audit_payload["side"] = serde_json::json!(side);
+    audit_payload["decision_mid_price"] = serde_json::json!(mid);
+    audit_payload["submitted_at"] = serde_json::json!(timestamp);
+    audit_payload["response_received_at"] = serde_json::json!(response_received_at);
+    audit_payload["submit_response_ms"] = serde_json::json!(submit_response_ms);
+    audit_payload["fill_rate"] = serde_json::json!((filled / quantity).clamp(0.0, 1.0));
+    audit_payload["implementation_shortfall_bps"] = serde_json::json!(implementation_shortfall_bps);
+    audit_payload["fee_bps"] = serde_json::json!(fee_bps);
+    audit_payload["all_in_cost_bps"] = serde_json::json!(implementation_shortfall_bps.zip(fee_bps).map(|(shortfall, fees)| shortfall + fees));
+    audit_payload["bid"] = serde_json::json!(bid);
+    audit_payload["ask"] = serde_json::json!(ask);
+    audit_payload["spread_bps"] = serde_json::json!((ask - bid) / mid * 10_000.0);
+    audit_payload["book_bid_depth_10bps"] = serde_json::json!(deep_book.map(|assessment| assessment.bid_depth_10bps));
+    audit_payload["book_ask_depth_10bps"] = serde_json::json!(deep_book.map(|assessment| assessment.ask_depth_10bps));
+    audit_payload["book_depth_imbalance_10bps"] = serde_json::json!(deep_book.map(|assessment| assessment.depth_imbalance_10bps));
+    audit_payload["estimated_sweep_bps"] = serde_json::json!(deep_book.map(|assessment| assessment.impact_bps));
+    audit_payload["execution_response"] = response.clone();
+    store_auto_trader_audit(&client, &audit_payload).await;
     let stop_armed = if filled > 0.0 {
         if let Some(entry_price) = average_price {
             match arm_protective_stop(&client, &position_url, state, &signal.symbol, side, filled, entry_price, fee).await {
@@ -633,6 +755,7 @@ async fn maybe_exit_auto_position(client: &reqwest::Client, base: &str, state: &
         let reason = if return_fraction <= -stop_loss_percent / 100.0 { Some("stop-loss") }
             else if return_fraction >= take_profit_percent / 100.0 { Some("take-profit") } else { None };
         let Some(reason) = reason else { continue; };
+        let entry_decision_id = position.entry_decision_id.clone();
         let protected_quantity = position.protective_stops.iter().map(|stop| (stop.quantity - stop.processed_quantity).max(0.0)).sum::<f64>();
         if reason == "stop-loss" && protected_quantity + 1e-12 >= position.quantity.abs() {
             // The server-side barrier is already watching this price; don't race it with a second IOC.
@@ -650,9 +773,10 @@ async fn maybe_exit_auto_position(client: &reqwest::Client, base: &str, state: &
             let mut settings = state.settings.lock().await;
             reset_daily_budget(&mut settings);
             settings.used_notional_today = allocated_notional(&settings);
-            settings.orders.push(TraderOrder { timestamp, triggered_at: None, symbol: symbol.clone(), side: side.into(), order_type: "Ioc".into(), purpose: reason.into(), quantity, filled_quantity: 0.0, average_price: None, reserved_notional: notional, book_bid_depth_10bps: None, book_ask_depth_10bps: None, book_depth_imbalance_10bps: None, estimated_sweep_bps: None, status: "submitting".into(), realized_pnl: 0.0 });
+            settings.orders.push(TraderOrder { timestamp, triggered_at: None, symbol: symbol.clone(), side: side.into(), order_type: "Ioc".into(), purpose: reason.into(), decision_id: None, quantity, filled_quantity: 0.0, average_price: None, reserved_notional: notional, book_bid_depth_10bps: None, book_ask_depth_10bps: None, book_depth_imbalance_10bps: None, estimated_sweep_bps: None, status: "submitting".into(), realized_pnl: 0.0 });
         }
-        let response = match submit_configured_order(client, base, &symbol, side, quantity, notional, bid, ask, AutoOrderType::Ioc).await {
+        let submit_started = Instant::now();
+        let response = match submit_configured_order(client, base, &symbol, side, quantity, notional, bid, ask, AutoOrderType::Ioc, ExecutionParameters::default()).await {
             Ok(response) => response,
             Err(error) => {
                 let mut settings = state.settings.lock().await;
@@ -661,6 +785,7 @@ async fn maybe_exit_auto_position(client: &reqwest::Client, base: &str, state: &
                 return Err(error);
             }
         };
+        let submit_response_ms = submit_started.elapsed().as_secs_f64() * 1000.0;
         let mut settings = state.settings.lock().await;
         let filled = response["filled_quantity"].as_f64().unwrap_or(0.0);
         let average_price = response["average_execution_price"].as_f64();
@@ -690,6 +815,27 @@ async fn maybe_exit_auto_position(client: &reqwest::Client, base: &str, state: &
             order.status = if filled > 0.0 { "filled" } else { "accepted" }.into();
         }
         persist_settings(&state.settings_path, &settings)?;
+        drop(settings);
+        if let Some(decision_id) = entry_decision_id {
+            let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64;
+            let payload = serde_json::json!({
+                "decision_id": decision_id, "stage": format!("exit:{timestamp}"), "timestamp": now, "symbol": symbol,
+                "status": if filled > 0.0 { "filled" } else { "accepted" }, "reason": reason,
+                "exit_order_type": "Ioc", "exit_order_quantity": quantity, "exit_filled_quantity": filled,
+                "exit_average_price": average_price, "exit_fees": fee, "realized_pnl": realized_pnl,
+                "net_return_percent": if entry_notional > 0.0 { Some(realized_pnl / entry_notional * 100.0) } else { None },
+                "side": side,
+                "decision_mid_price": (bid + ask) / 2.0,
+                "submitted_at": timestamp,
+                "response_received_at": now,
+                "submit_response_ms": submit_response_ms,
+                "fill_rate": if quantity > 0.0 { (filled / quantity).clamp(0.0, 1.0) } else { 0.0 },
+                "implementation_shortfall_bps": average_price.map(|price| if side == "buy" { (price / ((bid + ask) / 2.0) - 1.0) * 10_000.0 } else { (1.0 - price / ((bid + ask) / 2.0)) * 10_000.0 }),
+                "fee_bps": if filled > 0.0 { Some(fee / (filled * ((bid + ask) / 2.0)) * 10_000.0) } else { None },
+                "exit_bid": bid, "exit_ask": ask
+            });
+            store_auto_trader_audit(client, &payload).await;
+        }
         return Ok(Some(CycleResult { status: "order_submitted", reason: Some(format!("Auto-trader {reason} at {:.4}%", return_fraction * 100.0)), symbol: Some(symbol), side: Some(side.into()), quantity: Some(quantity), order_type: Some("Ioc exit".into()), order_response: Some(response) }));
     }
     Ok(None)
@@ -725,7 +871,7 @@ async fn arm_protective_stop(client: &reqwest::Client, base: &str, state: &AutoT
     let mut settings = state.settings.lock().await;
     if let Some(position) = settings.positions.get_mut(symbol).filter(|position| position.quantity.abs() > 1e-12 && position.quantity.signum() == if is_long { 1.0 } else { -1.0 }) {
         position.protective_stops.push(ProtectiveStop { barrier_id: id, order_timestamp: timestamp, quantity, processed_quantity: 0.0, processed_notional: 0.0, processed_fee: 0.0 });
-        settings.orders.push(TraderOrder { timestamp, triggered_at: None, symbol: symbol.to_owned(), side: side.to_owned(), order_type: "StopMarket".into(), purpose: "stop-loss".into(), quantity, filled_quantity: 0.0, average_price: None, reserved_notional: 0.0, book_bid_depth_10bps: None, book_ask_depth_10bps: None, book_depth_imbalance_10bps: None, estimated_sweep_bps: None, status: "armed".into(), realized_pnl: 0.0 });
+        settings.orders.push(TraderOrder { timestamp, triggered_at: None, symbol: symbol.to_owned(), side: side.to_owned(), order_type: "StopMarket".into(), purpose: "stop-loss".into(), decision_id: None, quantity, filled_quantity: 0.0, average_price: None, reserved_notional: 0.0, book_bid_depth_10bps: None, book_ask_depth_10bps: None, book_depth_imbalance_10bps: None, estimated_sweep_bps: None, status: "armed".into(), realized_pnl: 0.0 });
         if settings.orders.len() > 500 { let excess = settings.orders.len() - 500; settings.orders.drain(..excess); }
         persist_settings(&state.settings_path, &settings)?;
     } else {
@@ -763,6 +909,7 @@ async fn sync_protective_stops(client: &reqwest::Client, base: &str, state: &Aut
             let side = if barrier["side"].as_str() == Some("buy") { "buy" } else { "sell" };
             let fill_price = delta_notional / delta_quantity;
             let mut settings = state.settings.lock().await;
+            let entry_decision_id = settings.positions.get(&symbol).and_then(|position| position.entry_decision_id.clone());
             let entry_price_before = settings.positions.get(&symbol).map(|position| position.average_entry_price).filter(|price| *price > 0.0).unwrap_or(fill_price);
             let (realized_delta, learned_key) = apply_auto_fill(&mut settings.positions, &symbol, side, delta_quantity, fill_price, delta_fee, "StopMarket", "stop-loss");
             settings.realized_pnl += realized_delta;
@@ -796,6 +943,22 @@ async fn sync_protective_stops(client: &reqwest::Client, base: &str, state: &Aut
                 }
             }
             persist_settings(&state.settings_path, &settings)?;
+            let cumulative_pnl = settings.orders.iter().find(|order| order.timestamp == stop.order_timestamp).map(|order| order.realized_pnl).unwrap_or(realized_delta);
+            drop(settings);
+            if let Some(decision_id) = entry_decision_id {
+                let update_timestamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64;
+                let payload = serde_json::json!({
+                    "decision_id": decision_id, "stage": format!("exit:stop:{}", stop.order_timestamp), "timestamp": update_timestamp,
+                    "observed_at": update_timestamp, "symbol": symbol, "side": barrier["side"],
+                    "status": status, "reason": "stop-loss", "exit_order_type": "StopMarket",
+                    "submitted_at": barrier["triggered_at"],
+                    "exit_order_quantity": stop.quantity, "exit_filled_quantity": total_filled,
+                    "exit_average_price": barrier["average_execution_price"],
+                    "exit_fees": total_fee, "realized_pnl": cumulative_pnl,
+                    "net_return_percent": if entry_price_before > 0.0 { Some(cumulative_pnl / (total_filled * entry_price_before).max(1e-12) * 100.0) } else { None }
+                });
+                store_auto_trader_audit(client, &payload).await;
+            }
         }
         if !matches!(status, "armed" | "triggering") {
             let mut settings = state.settings.lock().await;
@@ -959,7 +1122,7 @@ async fn maybe_place_portfolio_hedge(client: &reqwest::Client, base: &str, state
     let quantity = notional / (price * quote_rate);
     settings.used_notional_today = allocated_notional(&settings);
     settings.last_hedge_at.insert(symbol.clone(), timestamp);
-    settings.orders.push(TraderOrder { timestamp, triggered_at: None, symbol: symbol.clone(), side: side.clone(), order_type: "Ioc".into(), purpose: "portfolio-hedge".into(), quantity, filled_quantity: 0.0, average_price: None, reserved_notional: notional, book_bid_depth_10bps: None, book_ask_depth_10bps: None, book_depth_imbalance_10bps: None, estimated_sweep_bps: None, status: "submitting".into(), realized_pnl: 0.0 });
+    settings.orders.push(TraderOrder { timestamp, triggered_at: None, symbol: symbol.clone(), side: side.clone(), order_type: "Ioc".into(), purpose: "portfolio-hedge".into(), decision_id: None, quantity, filled_quantity: 0.0, average_price: None, reserved_notional: notional, book_bid_depth_10bps: None, book_ask_depth_10bps: None, book_depth_imbalance_10bps: None, estimated_sweep_bps: None, status: "submitting".into(), realized_pnl: 0.0 });
     if settings.orders.len() > 500 { let excess = settings.orders.len() - 500; settings.orders.drain(..excess); }
     persist_settings(&state.settings_path, &settings)?;
     drop(settings);
@@ -980,7 +1143,7 @@ async fn maybe_place_portfolio_hedge(client: &reqwest::Client, base: &str, state
         ensure_protective_stops(client, base, state).await?;
         return Ok(Some(skipped("Auto Trader was disabled before hedge submission")));
     }
-    let response = match submit_configured_order(client, base, &symbol, &side, quantity, notional, price, price, AutoOrderType::Ioc).await {
+    let response = match submit_configured_order(client, base, &symbol, &side, quantity, notional, price, price, AutoOrderType::Ioc, ExecutionParameters::default()).await {
         Ok(response) => response,
         Err(error) => {
             let mut settings = state.settings.lock().await;
@@ -1035,6 +1198,52 @@ fn apply_auto_fill(positions: &mut BTreeMap<String, TraderPosition>, symbol: &st
 }
 
 
+fn signal_decision_id(signal: &Signal) -> String {
+    format!("{}|{}|{}", signal.timestamp, signal.symbol, signal.direction)
+}
+
+fn signal_audit_payload(
+    signal: &Signal,
+    stage: &str,
+    timestamp: u64,
+    status: &str,
+    reason: Option<&str>,
+    exploratory: Option<bool>,
+    evidence: Option<&WalkForward>,
+) -> serde_json::Value {
+    let evidence_metrics = evidence.map(|item| serde_json::json!({
+        "horizon_seconds": item.horizon_seconds,
+        "metrics": if signal.direction == "bullish" { &item.all_signal_long } else { &item.all_signal_short },
+    }));
+    serde_json::json!({
+        "decision_id": signal_decision_id(signal),
+        "stage": stage,
+        "timestamp": timestamp,
+        "signal_timestamp": signal.timestamp,
+        "symbol": signal.symbol,
+        "direction": signal.direction,
+        "score": signal.score,
+        "strength": signal.strength,
+        "ranging_probability": signal.ranging_probability,
+        "market_context": market_context(signal),
+        "signal_components": signal.components,
+        "exploratory": exploratory,
+        "walk_forward_evidence": evidence_metrics,
+        "status": status,
+        "reason": reason,
+    })
+}
+
+async fn store_auto_trader_audit(client: &reqwest::Client, payload: &serde_json::Value) {
+    let base = std::env::var("INSIGHTS_URL").unwrap_or_else(|_| "http://127.0.0.1:3004".into());
+    match client.post(format!("{base}/signals/auto-trader-audit"))
+        .timeout(Duration::from_secs(2)).json(payload).send().await {
+        Ok(response) if response.status().is_success() => {}
+        Ok(response) => crate::service_log!("WARN", "Auto-trader audit write failed with status {}", response.status()),
+        Err(error) => crate::service_log!("WARN", "Auto-trader audit write failed: {}", error),
+    }
+}
+
 fn market_context(signal: &Signal) -> String {
     let regime = if signal.ranging_probability.unwrap_or(0.0) >= 0.65 { "range" }
     else if signal.components.trend_5m_volatility_units.unwrap_or(0.0).abs() >= 1.5 { "trend" }
@@ -1044,44 +1253,73 @@ fn market_context(signal: &Signal) -> String {
 }
 
 const ALL_ORDER_TYPES: [AutoOrderType; 12] = [AutoOrderType::Market, AutoOrderType::Ioc, AutoOrderType::Fok, AutoOrderType::Limit, AutoOrderType::Gtd, AutoOrderType::PostOnlyLimit, AutoOrderType::Barrier, AutoOrderType::StopMarket, AutoOrderType::StopLimit, AutoOrderType::TrailingStop, AutoOrderType::Vwap, AutoOrderType::Twap];
-fn adaptive_strength_floor(learning: &BTreeMap<String, LearningStats>) -> f64 {
-    let totals = learning.values().fold(LearningStats::default(), |mut total, stats| {
-        total.samples += stats.samples; total.positive += stats.positive; total.realized_pnl += stats.realized_pnl; total
-    });
-    if totals.samples >= 5 && totals.positive as f64 / (totals.samples as f64) < 0.45 { 0.5 } else { MIN_STRENGTH }
-}
-
-fn adaptive_exploration_score_floor(learning: &BTreeMap<String, LearningStats>) -> f64 {
-    let totals = learning.values().fold(LearningStats::default(), |mut total, stats| {
+fn context_learning_stats(learning: &BTreeMap<String, LearningStats>, context: &str) -> LearningStats {
+    let prefix = format!("{context}:");
+    learning.iter().filter(|(key, _)| key.starts_with(&prefix)).map(|(_, stats)| stats).fold(LearningStats::default(), |mut total, stats| {
         total.samples += stats.samples;
         total.positive += stats.positive;
+        total.realized_pnl += stats.realized_pnl;
         total
-    });
-    let win_rate = totals.positive as f64 / totals.samples.max(1) as f64;
-    if totals.samples >= 20 && win_rate < 0.30 {
+    })
+}
+
+fn adaptive_strength_floor(learning: &BTreeMap<String, LearningStats>, context: &str) -> f64 {
+    let stats = context_learning_stats(learning, context);
+    if stats.samples >= 5 && stats.positive as f64 / (stats.samples as f64) < 0.45 { 0.5 } else { MIN_STRENGTH }
+}
+
+fn adaptive_exploration_score_floor(learning: &BTreeMap<String, LearningStats>, context: &str) -> f64 {
+    let stats = context_learning_stats(learning, context);
+    let win_rate = stats.positive as f64 / stats.samples.max(1) as f64;
+    if stats.samples >= 20 && win_rate < 0.30 {
         0.50
-    } else if totals.samples >= 10 && win_rate < 0.45 {
+    } else if stats.samples >= 10 && win_rate < 0.45 {
         0.40
     } else {
         MIN_EXPLORATION_SCORE
     }
 }
+fn order_type_learning_stats(context: &str, kind: AutoOrderType, learning: &BTreeMap<String, LearningStats>) -> LearningStats {
+    let prefix = format!("{context}:P");
+    let suffix = format!(":{kind:?}");
+    learning.iter().filter(|(key, _)| key.starts_with(&prefix) && key.ends_with(&suffix))
+        .map(|(_, stats)| stats).fold(learning.get(&format!("{context}:{kind:?}")).cloned().unwrap_or_default(), |mut total, item| {
+            total.samples += item.samples; total.positive += item.positive; total.realized_pnl += item.realized_pnl; total
+        })
+}
+
 fn adapt_order_type(baseline: AutoOrderType, context: &str, learning: &BTreeMap<String, LearningStats>) -> Option<AutoOrderType> {
     let candidates = ALL_ORDER_TYPES.iter().copied().filter_map(|kind| {
-        let stats = learning.get(&format!("{context}:{kind:?}"))?;
+        let stats = order_type_learning_stats(context, kind, learning);
         let average_pnl = stats.realized_pnl / stats.samples.max(1) as f64;
         let positive_rate = stats.positive as f64 / stats.samples.max(1) as f64;
-        (stats.samples >= MIN_EXECUTION_LEARNING_SAMPLES && average_pnl > 0.0 && positive_rate >= 0.55)
-            .then_some((kind, average_pnl))
+        (stats.samples >= MIN_EXECUTION_LEARNING_SAMPLES && average_pnl > 0.0 && positive_rate >= 0.55).then_some((kind, average_pnl))
     }).collect::<Vec<_>>();
     if candidates.is_empty() {
-        let baseline_stats = learning.get(&format!("{context}:{baseline:?}"));
-        return match baseline_stats {
-            Some(stats) if stats.samples >= MIN_EXECUTION_LEARNING_SAMPLES => None,
-            _ => Some(AutoOrderType::Ioc),
-        };
+        // Falling back to IOC must not bypass a mature losing record for the
+        // fallback order type when the signal's preferred type is still unknown.
+        let has_mature_unprofitable_fallback = [baseline, AutoOrderType::Ioc].into_iter().any(|kind| {
+            let stats = order_type_learning_stats(context, kind, learning);
+            stats.samples >= MIN_EXECUTION_LEARNING_SAMPLES
+                && (stats.realized_pnl / stats.samples.max(1) as f64 <= 0.0
+                    || stats.positive as f64 / (stats.samples.max(1) as f64) < 0.55)
+        });
+        return if has_mature_unprofitable_fallback { None } else { Some(AutoOrderType::Ioc) };
     }
     candidates.into_iter().max_by(|a, b| a.1.total_cmp(&b.1)).map(|(kind, _)| kind)
+}
+
+fn choose_parameter_profile(kind: AutoOrderType, context: &str, learning: &BTreeMap<String, LearningStats>, explore: bool) -> usize {
+    let profiles = (0..PARAMETER_PROFILE_COUNT).map(|profile| {
+        let stats = learning.get(&format!("{context}:P{profile}:{kind:?}")).cloned().unwrap_or_default();
+        (profile, stats)
+    }).collect::<Vec<_>>();
+    let proven = profiles.iter().filter(|(_, stats)| stats.samples >= MIN_EXECUTION_LEARNING_SAMPLES
+        && stats.realized_pnl > 0.0 && stats.positive as f64 / stats.samples as f64 >= 0.55)
+        .max_by(|a, b| (a.1.realized_pnl / a.1.samples as f64).total_cmp(&(b.1.realized_pnl / b.1.samples as f64)));
+    if let Some((profile, _)) = proven { return *profile; }
+    if explore { return profiles.iter().min_by_key(|(_, stats)| stats.samples).map(|(profile, _)| *profile).unwrap_or(0); }
+    0
 }
 
 fn choose_order_type(signal: &Signal) -> AutoOrderType {
@@ -1106,32 +1344,46 @@ fn choose_order_type(signal: &Signal) -> AutoOrderType {
     else { AutoOrderType::Ioc }
 }
 
-async fn submit_configured_order(client: &reqwest::Client, base: &str, symbol: &str, side: &str, quantity: f64, notional: f64, bid: f64, ask: f64, kind: AutoOrderType) -> Result<serde_json::Value, (StatusCode, String)> {
+#[derive(Clone, Copy)]
+struct ExecutionParameters { vwap_duration_minutes: u64, vwap_participation_rate: f64, limit_offset_bps: f64, trigger_offset_bps: f64, trailing_distance_percent: f64 }
+impl Default for ExecutionParameters { fn default() -> Self { Self { vwap_duration_minutes: default_vwap_duration(), vwap_participation_rate: default_vwap_participation() / 100.0, limit_offset_bps: default_limit_offset(), trigger_offset_bps: default_trigger_offset(), trailing_distance_percent: default_trailing_distance() } } }
+fn parameter_profile(mut params: ExecutionParameters, profile: usize) -> ExecutionParameters {
+    match profile {
+        1 => { params.vwap_duration_minutes = (params.vwap_duration_minutes * 3 / 4).clamp(5, 390); params.vwap_participation_rate = (params.vwap_participation_rate * 1.25).min(0.50); params.limit_offset_bps = (params.limit_offset_bps - 2.0).max(-10.0); params.trigger_offset_bps = (params.trigger_offset_bps * 0.75).max(5.0); params.trailing_distance_percent = (params.trailing_distance_percent * 0.75).max(0.05); },
+        2 => { params.vwap_duration_minutes = (params.vwap_duration_minutes * 3 / 2).clamp(5, 390); params.vwap_participation_rate = (params.vwap_participation_rate * 0.75).max(0.01); params.limit_offset_bps = (params.limit_offset_bps + 2.0).min(10.0); params.trigger_offset_bps = (params.trigger_offset_bps * 1.25).min(100.0); params.trailing_distance_percent = (params.trailing_distance_percent * 1.25).min(1.0); },
+        _ => {}
+    }
+    params
+}
+
+fn offset_limit(side: &str, bid: f64, ask: f64, offset_bps: f64) -> f64 { let reference = if side == "buy" { bid } else { ask }; reference * (1.0 + (if side == "buy" { -offset_bps } else { offset_bps }) / 10_000.0) }
+
+async fn submit_configured_order(client: &reqwest::Client, base: &str, symbol: &str, side: &str, quantity: f64, notional: f64, bid: f64, ask: f64, kind: AutoOrderType, params: ExecutionParameters) -> Result<serde_json::Value, (StatusCode, String)> {
     let mut body = serde_json::json!({ "symbol": symbol, "side": side, "quantity": quantity, "measure_execution_quality": true });
     let endpoint = match kind {
         AutoOrderType::Vwap | AutoOrderType::Twap => {
-            body["duration_minutes"] = serde_json::json!(5);
-            if matches!(kind, AutoOrderType::Vwap) { body["max_participation_rate"] = serde_json::json!(0.2); }
+            body["duration_minutes"] = serde_json::json!(params.vwap_duration_minutes);
+            if matches!(kind, AutoOrderType::Vwap) { body["max_participation_rate"] = serde_json::json!(params.vwap_participation_rate); }
             if matches!(kind, AutoOrderType::Twap) { body["strategy"] = serde_json::json!("twap"); }
             "/positions/vwap"
         }
         _ => {
             body["order_type"] = serde_json::json!(match kind { AutoOrderType::Market => "market", AutoOrderType::Ioc => "ioc", AutoOrderType::Fok => "fok", AutoOrderType::Limit | AutoOrderType::Gtd => "limit", AutoOrderType::PostOnlyLimit => "post-only-limit", AutoOrderType::Barrier => "barrier", AutoOrderType::StopMarket => "stop-market", AutoOrderType::StopLimit => "stop-limit", AutoOrderType::TrailingStop => "trailing-stop", _ => unreachable!() });
             match kind {
-                AutoOrderType::Limit => body["limit_price"] = serde_json::json!(if side == "buy" { bid } else { ask }),
-                AutoOrderType::Gtd => { body["limit_price"] = serde_json::json!(if side == "buy" { bid } else { ask }); body["time_in_force"] = serde_json::json!("gtd"); body["expires_at"] = serde_json::json!(SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64 + 300_000); },
-                AutoOrderType::PostOnlyLimit => body["limit_price"] = serde_json::json!(if side == "buy" { bid } else { ask }),
+                AutoOrderType::Limit => body["limit_price"] = serde_json::json!(offset_limit(side, bid, ask, params.limit_offset_bps)),
+                AutoOrderType::Gtd => { body["limit_price"] = serde_json::json!(offset_limit(side, bid, ask, params.limit_offset_bps)); body["time_in_force"] = serde_json::json!("gtd"); body["expires_at"] = serde_json::json!(SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64 + 300_000); },
+                AutoOrderType::PostOnlyLimit => body["limit_price"] = serde_json::json!(offset_limit(side, bid, ask, params.limit_offset_bps)),
                 AutoOrderType::Barrier | AutoOrderType::StopMarket => {
-                    body["trigger_price"] = serde_json::json!(if side == "buy" { ask * 1.002 } else { bid * 0.998 });
+                    body["trigger_price"] = serde_json::json!(if side == "buy" { ask * (1.0 + params.trigger_offset_bps / 10_000.0) } else { bid * (1.0 - params.trigger_offset_bps / 10_000.0) });
                     body["trigger_direction"] = serde_json::json!(if side == "buy" { "above" } else { "below" });
                 }
                 AutoOrderType::StopLimit => {
-                    let trigger = if side == "buy" { ask * 1.002 } else { bid * 0.998 };
+                    let trigger = if side == "buy" { ask * (1.0 + params.trigger_offset_bps / 10_000.0) } else { bid * (1.0 - params.trigger_offset_bps / 10_000.0) };
                     body["trigger_price"] = serde_json::json!(trigger);
                     body["trigger_direction"] = serde_json::json!(if side == "buy" { "above" } else { "below" });
-                    body["limit_price"] = serde_json::json!(if side == "buy" { trigger * 1.001 } else { trigger * 0.999 });
+                    body["limit_price"] = serde_json::json!(if side == "buy" { trigger * (1.0 + params.limit_offset_bps / 10_000.0) } else { trigger * (1.0 - params.limit_offset_bps / 10_000.0) });
                 }
-                AutoOrderType::TrailingStop => body["trailing_percent"] = serde_json::json!(0.001),
+                AutoOrderType::TrailingStop => body["trailing_percent"] = serde_json::json!(params.trailing_distance_percent / 100.0),
                 _ => {}
             }
             "/positions/orders"
@@ -1152,18 +1404,16 @@ fn adapt_exit_policy(settings: &mut Settings) {
     let recent = &settings.closed_trade_returns_percent[samples.saturating_sub(20)..];
     let average = recent.iter().sum::<f64>() / recent.len() as f64;
     let positive_rate = recent.iter().filter(|value| **value > 0.0).count() as f64 / recent.len() as f64;
-    if average < 0.0 {
-        // Poor signal outcomes do not justify tightening the stop: that makes the
-        // system exit closer to normal quote noise and can turn losses into churn.
-        // Keep the risk boundary fixed until we have evidence to change it.
-        settings.take_profit_percent = (settings.take_profit_percent - EXIT_POLICY_ADJUSTMENT_STEP).max(MIN_TAKE_PROFIT_PERCENT);
-    } else if positive_rate >= 0.60 {
+    // Poor win rate or negative expectancy is an entry-quality problem. Cutting
+    // the target in response shrinks winners while leaving the stop fixed, making
+    // the required break-even win rate even higher. Learn exits upward only after
+    // recent outcomes are profitable, and preserve at least a 1.5:1 reward/risk.
+    if average > 0.0 && positive_rate >= 0.60 {
         settings.take_profit_percent = (settings.take_profit_percent + EXIT_POLICY_ADJUSTMENT_STEP).min(MAX_TAKE_PROFIT_PERCENT);
-    } else if positive_rate < 0.45 {
-        settings.take_profit_percent = (settings.take_profit_percent - EXIT_POLICY_ADJUSTMENT_STEP).max(MIN_TAKE_PROFIT_PERCENT);
     }
     settings.stop_loss_percent = settings.stop_loss_percent.clamp(MIN_STOP_LOSS_PERCENT, MAX_STOP_LOSS_PERCENT);
-    settings.take_profit_percent = settings.take_profit_percent.clamp(MIN_TAKE_PROFIT_PERCENT, MAX_TAKE_PROFIT_PERCENT);
+    let reward_risk_floor = (settings.stop_loss_percent * MIN_EXIT_REWARD_RISK_RATIO).min(MAX_TAKE_PROFIT_PERCENT);
+    settings.take_profit_percent = settings.take_profit_percent.max(reward_risk_floor).clamp(MIN_TAKE_PROFIT_PERCENT, MAX_TAKE_PROFIT_PERCENT);
 }
 
 fn skipped(reason: &str) -> CycleResult { CycleResult { status: "skipped", reason: Some(reason.into()), symbol: None, side: None, quantity: None, order_type: None, order_response: None } }

@@ -314,8 +314,8 @@ function PositionsComponent({
           getRowId={({ data }) => data.id}
           theme={positionsGridTheme}
           domLayout="autoHeight"
-          rowHeight={34}
-          headerHeight={30}
+          rowHeight={26}
+          headerHeight={26}
           groupHeaderHeight={18}
           suppressColumnMoveAnimation
         />

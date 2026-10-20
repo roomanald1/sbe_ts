@@ -116,8 +116,8 @@ function CloseInsightsComponent({ histories = new Map<string, PriceHistorySample
           getRowId={({ data }) => data.position.symbol}
           theme={gridTheme}
           domLayout="autoHeight"
-          rowHeight={34}
-          headerHeight={38}
+          rowHeight={26}
+          headerHeight={28}
           suppressColumnMoveAnimation
         />
         {!state.loading && rowData.length === 0 && <p className="positions-empty">No open positions.</p>}

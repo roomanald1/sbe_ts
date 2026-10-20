@@ -1324,14 +1324,35 @@ struct PositionMarketInput {
 }
 #[derive(Deserialize, Default)]
 struct InsightsInputQuery { symbol: Option<String> }
-async fn get_insights_inputs(State(store): State<Arc<PositionStore>>, Query(query): Query<InsightsInputQuery>) -> Json<PositionInsightsInput> {
+async fn get_insights_inputs(State(store): State<Arc<PositionStore>>, Query(query): Query<InsightsInputQuery>) -> Result<Json<PositionInsightsInput>, (StatusCode, String)> {
     let positions = summarize_positions(&store.ledger.lock().await.trades).positions
         .into_iter().filter(|position| position.quantity.abs() > EPSILON).collect::<Vec<_>>();
     let mut symbols = positions.iter().map(|position| position.symbol.clone()).collect::<std::collections::BTreeSet<_>>();
-    if let Some(symbol) = query.symbol.map(|symbol| symbol.to_ascii_uppercase()).filter(|symbol| valid_position_symbol(symbol) && store.spot_symbols.iter().any(|spot| spot == symbol)) {
-        symbols.insert(symbol);
+    let requested_symbol = query.symbol.map(|symbol| symbol.to_ascii_uppercase()).filter(|symbol| valid_position_symbol(symbol) && store.spot_symbols.iter().any(|spot| spot == symbol));
+    if let Some(symbol) = requested_symbol.as_ref() {
+        symbols.insert(symbol.clone());
     }
     for symbol in &symbols { store.ensure_subscription(symbol); }
+    // A newly requested instrument has no cached book until its RSocket and OKX
+    // subscriptions deliver the first snapshot. Wait for that event, with a bounded
+    // timeout so a failed feed cannot leave the HTTP request hanging indefinitely.
+    if let Some(symbol) = requested_symbol {
+        let wait_for_snapshot = async {
+            loop {
+                let notified = store.book_changed.notified();
+                tokio::pin!(notified);
+                notified.as_mut().enable();
+                let ready = store.books.lock().await.get(&symbol)
+                    .is_some_and(|book| !book.bids.is_empty() && !book.asks.is_empty());
+                if ready { break; }
+                notified.await;
+            }
+        };
+        timeout(Duration::from_secs(8), wait_for_snapshot).await.map_err(|_| (
+            StatusCode::SERVICE_UNAVAILABLE,
+            format!("Timed out waiting for the first live OKX book snapshot for {symbol}"),
+        ))?;
+    }
     let books = store.books.lock().await;
     let histories = store.price_samples.lock().await;
     let markets = symbols.into_iter().map(|symbol| {
@@ -1342,7 +1363,7 @@ async fn get_insights_inputs(State(store): State<Arc<PositionStore>>, Query(quer
             price_samples: histories.get(&symbol).cloned().unwrap_or_default(),
         })
     }).collect();
-    Json(PositionInsightsInput { positions, markets })
+    Ok(Json(PositionInsightsInput { positions, markets }))
 }
 
 async fn get_position_trades(State(store): State<Arc<PositionStore>>) -> Json<TradesResponse> {

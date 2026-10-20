@@ -192,8 +192,8 @@ function FillsComponent({ paused = false }: { paused?: boolean }) {
           getRowId={({ data }) => data.id}
           theme={fillsGridTheme}
           domLayout="autoHeight"
-          rowHeight={32}
-          headerHeight={38}
+          rowHeight={26}
+          headerHeight={28}
           suppressColumnMoveAnimation
         />
         {!loading && fills.length === 0 && (

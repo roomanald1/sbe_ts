@@ -218,8 +218,8 @@ function HedgingComponent({ paused = false }: { paused?: boolean }) {
             rowClassRules={{ 'hedging-child-row': ({ data }) => data?.kind === 'candidate' }}
             theme={gridTheme}
             domLayout="autoHeight"
-            rowHeight={34}
-            headerHeight={36}
+            rowHeight={26}
+            headerHeight={28}
             suppressColumnMoveAnimation
           />
         </div>

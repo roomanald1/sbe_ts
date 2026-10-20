@@ -1,9 +1,10 @@
 mod logging;
+mod daily_summary;
 use axum::{Json, Router, http::StatusCode, routing::get};
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, sync::{Arc, OnceLock}, time::{SystemTime, UNIX_EPOCH}};
 use tokio::sync::Mutex;
-use insights::signals::{ExternalMarketFeatures, SignalEngine, SignalSnapshot, SignalStore};
+use insights::signals::{ExternalMarketFeatures, SignalEngine, SignalSnapshot, SignalStore, StoredSignalRecord};
 
 
 #[derive(Clone, Deserialize)]
@@ -122,45 +123,51 @@ async fn ingest_signal_event(
     if request.symbol.is_empty() || !request.symbol.is_ascii() || request.symbol.len() > 32 {
         return Err((StatusCode::BAD_REQUEST, "Invalid signal symbol".to_owned()));
     }
-    let mut engines = runtime.engines.lock().await;
-    let (btc_context, eth_context) = match &request.event {
-        SignalFeedEvent::Tick { timestamp } => (
-            engines.get("BTC-USDT").map_or((None, None), |reference| reference.return_context(*timestamp)),
-            engines.get("ETH-USDT").map_or((None, None), |reference| reference.return_context(*timestamp)),
-        ),
-        _ => ((None, None), (None, None)),
-    };
-    let engine = engines.entry(request.symbol.clone()).or_default();
-    let snapshot = match request.event {
-        SignalFeedEvent::Price { timestamp, price, volatility_1m } => {
-            for outcome in engine.on_price(timestamp, price, volatility_1m) {
-                runtime.store.append_outcome(&outcome.legacy).await.map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
-                runtime.store.append_evaluation(&outcome.evaluation).await.map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
-            }
-            None
-        }
-        SignalFeedEvent::Trade { timestamp, price, size, is_buy } => {
-            engine.on_trade(timestamp, price, size, is_buy);
-            None
-        }
-        SignalFeedEvent::Book { timestamp, best_bid, best_ask, bid_sizes, ask_sizes, bid_levels, ask_levels } => {
-            engine.on_book(timestamp, best_bid, best_ask, &bid_sizes, &ask_sizes, &bid_levels, &ask_levels);
-            None
-        }
-        SignalFeedEvent::Tick { timestamp } => {
-            let snapshot = engine.snapshot(&request.symbol, timestamp);
-            if let Some(snapshot) = &snapshot {
-                if let Some(book_snapshot) = engine.book_snapshot(&request.symbol, snapshot.timestamp) {
-                    runtime.store.append_book_snapshot(&book_snapshot).await.map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
+    let (snapshot, records) = {
+        let mut engines = runtime.engines.lock().await;
+        let (btc_context, eth_context) = match &request.event {
+            SignalFeedEvent::Tick { timestamp } => (
+                engines.get("BTC-USDT").map_or((None, None), |reference| reference.return_context(*timestamp)),
+                engines.get("ETH-USDT").map_or((None, None), |reference| reference.return_context(*timestamp)),
+            ),
+            _ => ((None, None), (None, None)),
+        };
+        let engine = engines.entry(request.symbol.clone()).or_default();
+        let mut records = Vec::new();
+        let snapshot = match request.event {
+            SignalFeedEvent::Price { timestamp, price, volatility_1m } => {
+                for outcome in engine.on_price(timestamp, price, volatility_1m) {
+                    records.push(StoredSignalRecord::Outcome(outcome.legacy));
+                    records.push(StoredSignalRecord::Evaluation(outcome.evaluation));
                 }
-                let features = engine.research_features(&request.symbol, snapshot.timestamp, btc_context, eth_context);
-                runtime.store.append_research_features(&features).await.map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
-                engine.track(snapshot);
-                runtime.store.append(snapshot).await.map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
+                None
             }
-            snapshot
-        }
+            SignalFeedEvent::Trade { timestamp, price, size, is_buy } => {
+                engine.on_trade(timestamp, price, size, is_buy);
+                None
+            }
+            SignalFeedEvent::Book { timestamp, best_bid, best_ask, bid_sizes, ask_sizes, bid_levels, ask_levels } => {
+                engine.on_book(timestamp, best_bid, best_ask, &bid_sizes, &ask_sizes, &bid_levels, &ask_levels);
+                None
+            }
+            SignalFeedEvent::Tick { timestamp } => {
+                let snapshot = engine.snapshot(&request.symbol, timestamp);
+                if let Some(snapshot) = &snapshot {
+                    if let Some(book_snapshot) = engine.book_snapshot(&request.symbol, snapshot.timestamp) {
+                        records.push(StoredSignalRecord::BookSnapshot(book_snapshot));
+                    }
+                    let features = engine.research_features(&request.symbol, snapshot.timestamp, btc_context, eth_context);
+                    records.push(StoredSignalRecord::ResearchFeatures(features));
+                    engine.track(snapshot);
+                    records.push(StoredSignalRecord::Snapshot(snapshot.clone()));
+                }
+                snapshot
+            }
+        };
+        (snapshot, records)
     };
+    runtime.store.append_records(records).await
+        .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
     Ok(Json(snapshot))
 }
 
@@ -295,9 +302,11 @@ fn normal_cdf(value: f64) -> f64 {
 async fn main() -> anyhow::Result<()> {
     let signal_store = SignalStore::from_environment()?;
     signal_store.migrate_to_binary().await?;
+    daily_summary::spawn_nightly();
     tokio::spawn(poll_external_market_features(signal_store.clone()));
     let signal_runtime = Arc::new(SignalRuntime { store: signal_store.clone(), engines: Mutex::new(HashMap::new()) });
     let app = Router::new()
+        .merge(daily_summary::router())
         .route("/health", get(|| async { "ok" }))
         .route("/positions/insights", get(get_position_insights))
         .route("/internal/signals/event", axum::routing::post(ingest_signal_event).with_state(signal_runtime))

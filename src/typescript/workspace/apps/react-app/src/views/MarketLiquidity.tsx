@@ -163,8 +163,8 @@ export function MarketLiquidityComponent({
               getRowId={({ data }) => String(data.percent)}
               theme={liquidityGridTheme}
               domLayout="autoHeight"
-              rowHeight={34}
-              headerHeight={38}
+              rowHeight={26}
+              headerHeight={28}
               suppressColumnMoveAnimation
               suppressHorizontalScroll={false}
               animateRows={false}

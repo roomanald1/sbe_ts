@@ -169,8 +169,8 @@ export function TradesViewComponent({
           getRowId={({ data }) => data.tradeId}
           theme={tradesGridTheme}
           domLayout="autoHeight"
-          rowHeight={32}
-          headerHeight={38}
+          rowHeight={26}
+          headerHeight={28}
           suppressColumnMoveAnimation
           animateRows={false}
           suppressHorizontalScroll

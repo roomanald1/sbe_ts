@@ -219,8 +219,8 @@ function PnlComponent({ connection, paused = false }: { connection: Connection; 
           getRowId={({ data }) => data.symbol}
           theme={pnlGridTheme}
           domLayout="autoHeight"
-          rowHeight={32}
-          headerHeight={38}
+          rowHeight={26}
+          headerHeight={28}
           suppressColumnMoveAnimation
         />
         {!loading && rows.length === 0 && (

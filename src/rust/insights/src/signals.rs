@@ -2,9 +2,10 @@ use anyhow::Result;
 use flate2::{read::MultiGzDecoder, write::GzEncoder, Compression};
 use std::io::{Read, Write};
 use serde::{Deserialize, Serialize};
-use std::{collections::{HashMap, VecDeque}, path::PathBuf, sync::Arc, time::{Duration, Instant}};
+use std::{collections::{BTreeMap, HashMap, HashSet, VecDeque}, path::PathBuf, sync::Arc, time::{Duration, Instant}};
 use axum::{Json, Router, http::StatusCode, routing::get};
-use tokio::{fs::OpenOptions, io::AsyncWriteExt, sync::Mutex};
+use tokio::sync::{mpsc, oneshot, Mutex};
+use rusqlite::{params, Connection};
 
 const SIGNALS_BINARY_MAGIC: &[u8; 8] = b"SIGBIN01";
 
@@ -183,6 +184,9 @@ pub struct SignalWalkForward {
     pub all_signal_short: SideWalkForwardMetrics,
     pub logistic_long: SideWalkForwardMetrics,
     pub logistic_short: SideWalkForwardMetrics,
+    /// Walk-forward results for models trained on synchronized microstructure and market-context features.
+    pub research_logistic_long: SideWalkForwardMetrics,
+    pub research_logistic_short: SideWalkForwardMetrics,
 }
 /// Side-by-side executable outcome label. A new enum variant preserves the
 /// existing bincode Snapshot and Outcome layouts for persisted records.
@@ -387,6 +391,46 @@ fn trend_logistic_up_probability(weights: &[f64; 6], features: &[f64; 4], trend:
     let z = weights[0]
         + features.iter().enumerate().map(|(index, value)| weights[index + 1] * value).sum::<f64>()
         + weights[5] * trend.clamp(-4.0, 4.0);
+    1.0 / (1.0 + (-z.clamp(-20.0, 20.0)).exp())
+}
+
+fn research_feature_vector(features: &SignalResearchFeatures) -> Option<[f64; 8]> {
+    let values = [
+        features.spread_bps.map(|value| (value / 10.0).clamp(0.0, 4.0)),
+        features.microprice_offset_bps.map(|value| (value / 10.0).clamp(-4.0, 4.0)),
+        features.depth_imbalance_10bps.map(|value| value.clamp(-1.0, 1.0)),
+        features.trade_flow_5s.map(|value| value.clamp(-1.0, 1.0)),
+        features.trade_flow_15s.map(|value| value.clamp(-1.0, 1.0)),
+        features.trade_flow_acceleration.map(|value| value.clamp(-1.0, 1.0)),
+        features.btc_return_1m_percent.map(|value| (value / 0.25).clamp(-4.0, 4.0)),
+        features.eth_return_1m_percent.map(|value| (value / 0.25).clamp(-4.0, 4.0)),
+    ];
+    values.iter().all(Option::is_some).then(|| values.map(Option::unwrap))
+}
+
+fn train_research_logistic(samples: &[SignalOutcome], features: &HashMap<(String, u64), [f64; 8]>) -> Option<[f64; 9]> {
+    let training = samples.iter().filter_map(|sample| {
+        Some((*features.get(&(sample.symbol.clone(), sample.signal_timestamp))?, (sample.return_percent > 0.0) as u8 as f64))
+    }).collect::<Vec<_>>();
+    if training.len() < WALK_FORWARD_MIN_TRAINING_SAMPLES { return None; }
+    let mut weights = [0.0; 9];
+    for _ in 0..250 {
+        let mut gradient = [0.0; 9];
+        for (features, target) in &training {
+            let z = weights[0] + features.iter().enumerate().map(|(index, value)| weights[index + 1] * value).sum::<f64>();
+            let probability = 1.0 / (1.0 + (-z.clamp(-20.0, 20.0)).exp());
+            let error = probability - target;
+            gradient[0] += error;
+            for index in 0..8 { gradient[index + 1] += error * features[index]; }
+        }
+        let scale = 0.04 / training.len() as f64;
+        for index in 0..9 { weights[index] -= scale * gradient[index]; }
+    }
+    Some(weights)
+}
+
+fn research_logistic_up_probability(weights: &[f64; 9], features: &[f64; 8]) -> f64 {
+    let z = weights[0] + features.iter().enumerate().map(|(index, value)| weights[index + 1] * value).sum::<f64>();
     1.0 / (1.0 + (-z.clamp(-20.0, 20.0)).exp())
 }
 
@@ -621,19 +665,33 @@ impl SignalEngine {
         if now.saturating_sub(self.last_snapshot_at) < MIN_SNAPSHOT_INTERVAL_MS { return None; }
         self.prune(now);
         let latest = self.prices.back().copied()?;
-        let range_samples = self.prices.iter().filter(|sample| sample.0 >= now.saturating_sub(300_000)).collect::<Vec<_>>();
-        let range_bounds = if range_samples.len() >= 12 {
-            let low = range_samples.iter().map(|sample| sample.1).fold(f64::INFINITY, f64::min);
-            let high = range_samples.iter().map(|sample| sample.1).fold(f64::NEG_INFINITY, f64::max);
-            (low.is_finite() && high.is_finite() && low > 0.0 && high > low).then_some((low, high))
+        let range_cutoff = now.saturating_sub(300_000);
+        let mut range_count = 0usize;
+        let mut range_first_price = None;
+        let mut range_low = f64::INFINITY;
+        let mut range_high = f64::NEG_INFINITY;
+        for &(timestamp, price) in &self.prices {
+            if timestamp < range_cutoff { continue; }
+            range_count += 1;
+            range_first_price.get_or_insert(price);
+            range_low = range_low.min(price);
+            range_high = range_high.max(price);
+        }
+        let range_bounds = if range_count >= 12 && range_low.is_finite() && range_high.is_finite() && range_low > 0.0 && range_high > range_low {
+            Some((range_low, range_high))
         } else { None };
         let ranging_probability = range_bounds.map(|(low, high)| {
             let width_percent = (high / low - 1.0) * 100.0;
-            let net_move_percent = (latest.1 / range_samples[0].1 - 1.0).abs() * 100.0;
+            let net_move_percent = (latest.1 / range_first_price.unwrap_or(latest.1) - 1.0).abs() * 100.0;
             // Heuristic only: range likelihood rises when price explores both
             // edges but makes little net progress over the five-minute window.
-            let low_touches = range_samples.iter().filter(|sample| (sample.1 / low - 1.0) * 100.0 <= width_percent * 0.15).count();
-            let high_touches = range_samples.iter().filter(|sample| (high / sample.1 - 1.0) * 100.0 <= width_percent * 0.15).count();
+            let mut low_touches = 0usize;
+            let mut high_touches = 0usize;
+            for &(timestamp, price) in &self.prices {
+                if timestamp < range_cutoff { continue; }
+                if (price / low - 1.0) * 100.0 <= width_percent * 0.15 { low_touches += 1; }
+                if (high / price - 1.0) * 100.0 <= width_percent * 0.15 { high_touches += 1; }
+            }
             let exploration = ((low_touches.min(3) + high_touches.min(3)) as f64 / 6.0).clamp(0.0, 1.0);
             let containment = (1.0 - net_move_percent / (width_percent * 0.6).max(0.01)).clamp(0.0, 1.0);
             (0.65 * containment + 0.35 * exploration).clamp(0.0, 1.0)
@@ -643,30 +701,38 @@ impl SignalEngine {
         let trend_5m = self.price_return(now.saturating_sub(300_000));
         let volatility_5m = self.realized_volatility(now.saturating_sub(300_000));
         let trend_5m_volatility_units = trend_5m.zip(volatility_5m).and_then(|(trend, volatility)| (volatility > 1e-9).then_some(trend / volatility));
-        let flow = {
-            let (buy, sell) = self.trades.iter().fold((0.0, 0.0), |(buy, sell), (_, price, size, is_buy, _)|
-                if *is_buy { (buy + price * size, sell) } else { (buy, sell + price * size) });
-            (buy + sell > 0.0).then_some((buy - sell) / (buy + sell))
-        };
-        let mispricing_vs_vwap_bps = {
-            let cutoff = now.saturating_sub(60_000);
-            let samples = self.trades.iter().filter(|sample| sample.0 >= cutoff).collect::<Vec<_>>();
-            let (notional, quantity) = samples.iter().fold((0.0, 0.0), |(notional, quantity), sample|
-                (notional + sample.1 * sample.2, quantity + sample.2));
-            if samples.len() >= 5 && samples.last().zip(samples.first()).is_some_and(|(last, first)| last.0.saturating_sub(first.0) >= 10_000) && quantity > 0.0 {
-                let vwap = notional / quantity;
-                (vwap.is_finite() && vwap > 0.0).then_some((latest.1 / vwap - 1.0) * 10_000.0)
-            } else { None }
-        };
+        let trade_cutoff = now.saturating_sub(60_000);
+        let (mut buy, mut sell) = (0.0, 0.0);
+        let (mut recent_notional, mut recent_quantity) = (0.0, 0.0);
+        let (mut recent_count, mut recent_first, mut recent_last) = (0usize, None, None);
+        let (mut weighted_cost, mut cost_notional) = (0.0, 0.0);
+        for &(timestamp, price, size, is_buy, aggressor_cost) in &self.trades {
+            let notional = price * size;
+            if is_buy { buy += notional; } else { sell += notional; }
+            if timestamp >= trade_cutoff {
+                recent_count += 1;
+                recent_first.get_or_insert(timestamp);
+                recent_last = Some(timestamp);
+                recent_notional += notional;
+                recent_quantity += size;
+                if let Some(cost) = aggressor_cost {
+                    weighted_cost += cost * notional;
+                    cost_notional += notional;
+                }
+            }
+        }
+        let flow = (buy + sell > 0.0).then_some((buy - sell) / (buy + sell));
+        let mispricing_vs_vwap_bps = if recent_count >= 5
+            && recent_last.zip(recent_first).is_some_and(|(last, first)| last.saturating_sub(first) >= 10_000)
+            && recent_quantity > 0.0
+        {
+            let vwap = recent_notional / recent_quantity;
+            (vwap.is_finite() && vwap > 0.0).then_some((latest.1 / vwap - 1.0) * 10_000.0)
+        } else { None };
         let pressure_without_price_move = flow.zip(momentum).and_then(|(imbalance, movement)| {
             (imbalance.abs() >= 0.55 && movement.abs() <= 0.025).then_some(-imbalance)
         });
-        let aggressor_cost_bps = {
-            let (weighted_cost, notional) = self.trades.iter().filter(|sample| sample.0 >= now.saturating_sub(60_000))
-                .filter_map(|sample| sample.4.map(|cost| (cost, sample.1 * sample.2)))
-                .fold((0.0, 0.0), |(sum, weight), (cost, value)| (sum + cost * value, weight + value));
-            (notional > 0.0).then_some(weighted_cost / notional)
-        };
+        let aggressor_cost_bps = (cost_notional > 0.0).then_some(weighted_cost / cost_notional);
         let components = SignalComponents {
             trend_1m_percent: trend,
             momentum_10s_percent: momentum,
@@ -723,18 +789,26 @@ impl SignalEngine {
     }
 
     fn realized_volatility(&self, cutoff: u64) -> Option<f64> {
-        let samples = self.prices.iter().filter(|sample| sample.0 >= cutoff).collect::<Vec<_>>();
-        if samples.len() < 2 { return None; }
-        let sum = samples.windows(2).map(|pair| {
-            let change = (pair[1].1 / pair[0].1).ln();
-            change * change
-        }).sum::<f64>();
-        Some(sum.sqrt() * 100.0)
+        let mut previous: Option<f64> = None;
+        let mut count = 0usize;
+        let mut sum = 0.0f64;
+        for &(timestamp, price) in &self.prices {
+            if timestamp < cutoff { continue; }
+            count += 1;
+            if let Some(previous_price) = previous {
+                let change = (price / previous_price).ln();
+                sum += change * change;
+            }
+            previous = Some(price);
+        }
+        (count >= 2).then_some(sum.sqrt() * 100.0)
     }
 
     fn price_return(&self, cutoff: u64) -> Option<f64> {
         let latest = self.prices.back()?.1;
-        let (sample_time, first) = self.prices.iter().rev().find(|sample| sample.0 <= cutoff).copied()?;
+        let index = self.prices.partition_point(|sample| sample.0 <= cutoff);
+        if index == 0 { return None; }
+        let (sample_time, first) = self.prices[index - 1];
         if cutoff.saturating_sub(sample_time) > MAX_PRICE_LOOKBACK_GAP_MS { return None; }
         Some((latest / first - 1.0) * 100.0)
     }
@@ -770,6 +844,60 @@ pub struct AutoTraderDashboard {
     pub walk_forward: Vec<SignalWalkForward>,
 }
 
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct AutoTraderExecutionQualitySummary {
+    pub order_samples: usize,
+    pub filled_order_samples: usize,
+    pub partial_fill_samples: usize,
+    pub unfilled_order_samples: usize,
+    pub measured_fill_samples: usize,
+    pub reference_price_coverage_percent: Option<f64>,
+    pub average_fill_rate: Option<f64>,
+    pub average_implementation_shortfall_bps: Option<f64>,
+    pub average_fee_bps: Option<f64>,
+    pub average_all_in_cost_bps: Option<f64>,
+    pub average_submit_response_ms: Option<f64>,
+    pub response_latency_samples: usize,
+    pub history_truncated: bool,
+    pub last_updated_at: Option<u64>,
+}
+
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct AutoTraderDecisionQualitySummary {
+    pub decision_samples: usize,
+    pub filled_entry_samples: usize,
+    pub unresolved_trade_samples: usize,
+    pub unpriced_closed_trade_samples: usize,
+    pub completed_trade_samples: usize,
+    pub history_truncated: bool,
+    pub cohorts: Vec<AutoTraderDecisionQualityCohort>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct AutoTraderDecisionQualityCohort {
+    pub dimension: String,
+    pub value: String,
+    pub completed_trade_samples: usize,
+    pub average_net_return_percent: f64,
+    pub win_rate: f64,
+    pub total_net_pnl: f64,
+    pub preliminary: bool,
+}
+
+#[derive(Default)]
+struct DecisionTradeAudit {
+    entry_quantity: f64,
+    entry_price: Option<f64>,
+    exploratory: Option<bool>,
+    direction: Option<String>,
+    strength: Option<f64>,
+    market_context: Option<String>,
+    entry_timestamp: Option<u64>,
+    signal_components: Option<serde_json::Value>,
+    exit_quantity: f64,
+    realized_pnl: f64,
+}
+
 #[derive(Deserialize)]
 struct EvaluationQuery {
     since: Option<u64>,
@@ -777,16 +905,28 @@ struct EvaluationQuery {
 }
 
 #[derive(Clone)]
-pub struct SignalStore { path: PathBuf, write_lock: Arc<Mutex<()>>, recent_cache: Arc<Mutex<Option<(Instant, Vec<SignalSnapshot>)>>>, best_cache: Arc<Mutex<Option<(Instant, Vec<SignalSnapshot>)>>>, performance_cache: Arc<Mutex<Option<(Instant, Vec<SignalPerformance>)>>>, walk_forward_cache: Arc<Mutex<Option<(Instant, Vec<SignalWalkForward>)>>> }
+pub struct SignalStore { path: PathBuf, writer: mpsc::Sender<WriteRequest>, recent_cache: Arc<Mutex<Option<(Instant, Vec<SignalSnapshot>)>>>, best_cache: Arc<Mutex<Option<(Instant, Vec<SignalSnapshot>)>>>, performance_cache: Arc<Mutex<Option<(Instant, Vec<SignalPerformance>)>>>, walk_forward_cache: Arc<Mutex<Option<(Instant, Vec<SignalWalkForward>)>>> }
+
+struct WriteRequest { records: Vec<StoredSignalRecord>, ack: oneshot::Sender<std::result::Result<(), String>> }
 
 #[derive(Serialize, Deserialize)]
-enum StoredSignalRecord {
+pub enum StoredSignalRecord {
     Snapshot(SignalSnapshot),
     Outcome(SignalOutcome),
     Evaluation(SignalEvaluation),
     BookSnapshot(SignalBookSnapshot),
     ResearchFeatures(SignalResearchFeatures),
     ExternalMarket(ExternalMarketFeatures),
+}
+
+fn compress_record(record: &StoredSignalRecord) -> Result<Vec<u8>> {
+    let mut encoder = GzEncoder::new(Vec::new(), Compression::fast());
+    encoder.write_all(&bincode::serialize(record)?)?;
+    Ok(encoder.finish()?)
+}
+
+fn record_kind(record: &StoredSignalRecord) -> i64 {
+    match record { StoredSignalRecord::Snapshot(_) => 0, StoredSignalRecord::Outcome(_) => 1, StoredSignalRecord::Evaluation(_) => 2, StoredSignalRecord::BookSnapshot(_) => 3, StoredSignalRecord::ResearchFeatures(_) => 4, StoredSignalRecord::ExternalMarket(_) => 5 }
 }
 
 fn record_timestamp(record: &StoredSignalRecord) -> u64 {
@@ -800,23 +940,6 @@ fn record_timestamp(record: &StoredSignalRecord) -> u64 {
     }
 }
 
-fn daily_partition_path(base: &PathBuf, timestamp_ms: u64) -> PathBuf {
-    let days = (timestamp_ms / 86_400_000) as i64;
-    let z = days + 719_468;
-    let era = z.div_euclid(146_097);
-    let day_of_era = z - era * 146_097;
-    let year_of_era = (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
-    let mut year = year_of_era + era * 400;
-    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
-    let month_prime = (5 * day_of_year + 2) / 153;
-    let day = day_of_year - (153 * month_prime + 2) / 5 + 1;
-    let month = month_prime + if month_prime < 10 { 3 } else { -9 };
-    year += i64::from(month <= 2);
-    let stem = base.file_stem().and_then(|value| value.to_str()).unwrap_or("signals");
-    let extension = base.extension().and_then(|value| value.to_str()).unwrap_or("jsonl");
-    base.with_file_name(format!("{stem}-{year:04}-{month:02}-{day:02}.{extension}"))
-}
-
 fn is_daily_partition(base: &PathBuf, candidate: &std::ffi::OsStr) -> bool {
     let Some(name) = candidate.to_str() else { return false; };
     let stem = base.file_stem().and_then(|value| value.to_str()).unwrap_or("signals");
@@ -828,15 +951,6 @@ fn is_daily_partition(base: &PathBuf, candidate: &std::ffi::OsStr) -> bool {
         4 | 7 => byte == b'-',
         _ => byte.is_ascii_digit(),
     })
-}
-
-fn encode_record(record: &StoredSignalRecord) -> Result<Vec<u8>> {
-    let payload = bincode::serialize(record)?;
-    anyhow::ensure!(payload.len() <= u32::MAX as usize, "signal record is too large");
-    let mut bytes = Vec::with_capacity(payload.len() + 4);
-    bytes.extend_from_slice(&(payload.len() as u32).to_le_bytes());
-    bytes.extend_from_slice(&payload);
-    Ok(bytes)
 }
 
 fn decode_binary_records(data: &[u8]) -> Result<Vec<StoredSignalRecord>> {
@@ -870,18 +984,6 @@ fn decode_legacy_records(data: &[u8]) -> Result<Vec<StoredSignalRecord>> {
         }
     }
     Ok(records)
-}
-
-fn encode_records(records: &[StoredSignalRecord]) -> Result<Vec<u8>> {
-    let mut output = SIGNALS_BINARY_MAGIC.to_vec();
-    for record in records { output.extend_from_slice(&encode_record(record)?); }
-    Ok(output)
-}
-
-fn gzip_member(data: &[u8]) -> Result<Vec<u8>> {
-    let mut encoder = GzEncoder::new(Vec::new(), Compression::best());
-    encoder.write_all(data)?;
-    Ok(encoder.finish()?)
 }
 
 async fn read_signal_records(path: &PathBuf) -> Result<Vec<StoredSignalRecord>> {
@@ -962,53 +1064,287 @@ fn calibrate_display_strength(snapshots: &mut [SignalSnapshot], records: &[Store
 
 impl SignalStore {
     pub fn from_environment() -> Result<Self> {
-        let path = std::env::var_os("SIGNALS_FILE").map(PathBuf::from).unwrap_or(std::env::current_dir()?.join("signals.jsonl"));
-        Ok(Self { path, write_lock: Arc::new(Mutex::new(())), recent_cache: Arc::new(Mutex::new(None)), best_cache: Arc::new(Mutex::new(None)), performance_cache: Arc::new(Mutex::new(None)), walk_forward_cache: Arc::new(Mutex::new(None)) })
+        let path = std::env::var_os("SIGNALS_DB_FILE").map(PathBuf::from)
+            .or_else(|| std::env::var_os("SIGNALS_FILE").map(|path| PathBuf::from(path).with_extension("sqlite")))
+            .unwrap_or(std::env::current_dir()?.join("signals.sqlite"));
+        let connection = Self::open_database_at(&path)?;
+        let (writer, receiver) = mpsc::channel(4096);
+        tokio::spawn(run_database_writer(connection, receiver));
+        Ok(Self { path, writer, recent_cache: Arc::new(Mutex::new(None)), best_cache: Arc::new(Mutex::new(None)), performance_cache: Arc::new(Mutex::new(None)), walk_forward_cache: Arc::new(Mutex::new(None)) })
     }
 
-    async fn record_paths(&self) -> Result<Vec<PathBuf>> {
-        let parent = self.path.parent().filter(|path| !path.as_os_str().is_empty()).unwrap_or_else(|| std::path::Path::new("."));
-        let mut paths = vec![self.path.clone()];
-        let mut directory = match tokio::fs::read_dir(parent).await {
-            Ok(directory) => directory,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(paths),
-            Err(error) => return Err(error.into()),
-        };
-        while let Some(entry) = directory.next_entry().await? {
-            let name = entry.file_name();
-            if is_daily_partition(&self.path, &name) { paths.push(entry.path()); }
+    fn open_database_at(path: &PathBuf) -> Result<Connection> {
+        if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) { std::fs::create_dir_all(parent)?; }
+        let connection = Connection::open(path)?;
+        connection.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; CREATE TABLE IF NOT EXISTS signal_records (id INTEGER PRIMARY KEY, timestamp INTEGER NOT NULL, kind INTEGER NOT NULL, payload BLOB NOT NULL); CREATE INDEX IF NOT EXISTS signal_records_timestamp ON signal_records(timestamp); CREATE INDEX IF NOT EXISTS signal_records_kind_timestamp ON signal_records(kind, timestamp); CREATE TABLE IF NOT EXISTS imported_files (path TEXT PRIMARY KEY); CREATE TABLE IF NOT EXISTS auto_trader_audit (decision_id TEXT NOT NULL, stage TEXT NOT NULL, timestamp INTEGER NOT NULL, symbol TEXT, payload BLOB NOT NULL, PRIMARY KEY(decision_id, stage)); CREATE INDEX IF NOT EXISTS auto_trader_audit_timestamp ON auto_trader_audit(timestamp);")?;
+        Ok(connection)
+    }
+
+    fn open_database(&self) -> Result<Connection> { Self::open_database_at(&self.path) }
+
+    async fn read_records(&self, kind: i64, since: Option<u64>, limit: Option<usize>) -> Result<Vec<StoredSignalRecord>> {
+        let connection = self.open_database()?;
+        let mut sql = String::from("SELECT payload FROM signal_records WHERE kind = ?");
+        let mut values = vec![rusqlite::types::Value::Integer(kind)];
+        if let Some(timestamp) = since {
+            sql.push_str(" AND timestamp >= ?");
+            values.push(rusqlite::types::Value::Integer(timestamp.min(i64::MAX as u64) as i64));
         }
-        paths.sort();
-        Ok(paths)
-    }
-
-    async fn read_all_records(&self) -> Result<Vec<StoredSignalRecord>> {
+        sql.push_str(" ORDER BY timestamp DESC, id DESC");
+        if let Some(limit) = limit {
+            sql.push_str(" LIMIT ?");
+            values.push(rusqlite::types::Value::Integer(limit.min(i64::MAX as usize) as i64));
+        }
+        let mut statement = connection.prepare(&sql)?;
+        let rows = statement.query_map(rusqlite::params_from_iter(values.iter()), |row| row.get::<_, Vec<u8>>(0))?;
         let mut records = Vec::new();
-        for path in self.record_paths().await? {
-            records.extend(read_signal_records(&path).await?);
+        for row in rows {
+            let compressed = row?;
+            let mut decoder = MultiGzDecoder::new(compressed.as_slice());
+            let mut payload = Vec::new();
+            decoder.read_to_end(&mut payload)?;
+            records.push(bincode::deserialize(&payload)?);
         }
+        records.reverse();
+        Ok(records)
+    }
+
+    async fn read_calibration_records(&self) -> Result<Vec<StoredSignalRecord>> {
+        let mut records = self.read_records(0, None, None).await?;
+        records.extend(self.read_records(1, None, None).await?);
+        records.sort_by_key(record_timestamp);
         Ok(records)
     }
 
     pub async fn migrate_to_binary(&self) -> Result<()> {
-        let _guard = self.write_lock.lock().await;
-        let existing = match tokio::fs::read(&self.path).await {
-            Ok(data) => data,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-            Err(error) => return Err(error.into()),
-        };
-        if existing.starts_with(&[0x1f, 0x8b]) {
-            let mut decoded = Vec::new();
-            MultiGzDecoder::new(existing.as_slice()).read_to_end(&mut decoded)?;
-            if decoded.starts_with(SIGNALS_BINARY_MAGIC) { return Ok(()); }
+        let connection = self.open_database()?;
+        let legacy_base = std::env::var_os("SIGNALS_FILE")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| self.path.with_extension("jsonl"));
+        let parent = legacy_base.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or_else(|| std::path::Path::new("."));
+        let mut sources = vec![legacy_base.clone()];
+        if let Ok(entries) = std::fs::read_dir(parent) {
+            for entry in entries.flatten() {
+                let candidate = entry.path();
+                let name = entry.file_name();
+                if is_daily_partition(&legacy_base, &name) { sources.push(candidate); }
+            }
         }
-        if existing.starts_with(SIGNALS_BINARY_MAGIC) {
-            tokio::fs::write(&self.path, gzip_member(&existing)?).await?;
-        } else {
-            let records = decode_legacy_records(&existing)?;
-            tokio::fs::write(&self.path, gzip_member(&encode_records(&records)?)?).await?;
+        sources.sort(); sources.dedup();
+        for source in sources {
+            let source_text = source.to_string_lossy().to_string();
+            let imported: bool = connection.query_row("SELECT EXISTS(SELECT 1 FROM imported_files WHERE path=?1)", [&source_text], |row| row.get(0))?;
+            if imported { continue; }
+            let records = match tokio::fs::metadata(&source).await {
+                Ok(_) => read_signal_records(&source).await?,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(error.into()),
+            };
+            let transaction = connection.unchecked_transaction()?;
+            {
+                let mut insert = transaction.prepare("INSERT INTO signal_records(timestamp, kind, payload) VALUES (?1, ?2, ?3)")?;
+                for record in &records { insert.execute(params![record_timestamp(record) as i64, record_kind(record), compress_record(record)?])?; }
+            }
+            transaction.execute("INSERT INTO imported_files(path) VALUES (?1)", [&source_text])?;
+            transaction.commit()?;
         }
         Ok(())
+    }
+
+    async fn save_auto_trader_audit(&self, payload: serde_json::Value) -> Result<()> {
+        let decision_id = payload.get("decision_id").and_then(|value| value.as_str()).ok_or_else(|| anyhow::anyhow!("audit record is missing decision_id"))?;
+        let stage = payload.get("stage").and_then(|value| value.as_str()).ok_or_else(|| anyhow::anyhow!("audit record is missing stage"))?;
+        let timestamp = payload.get("timestamp").and_then(|value| value.as_u64()).ok_or_else(|| anyhow::anyhow!("audit record is missing timestamp"))?;
+        let symbol = payload.get("symbol").and_then(|value| value.as_str()).unwrap_or("");
+        let json = serde_json::to_vec(&payload)?;
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::fast());
+        encoder.write_all(&json)?;
+        let compressed = encoder.finish()?;
+        let connection = self.open_database()?;
+        connection.execute("INSERT INTO auto_trader_audit(decision_id, stage, timestamp, symbol, payload) VALUES (?1, ?2, ?3, ?4, ?5) ON CONFLICT(decision_id, stage) DO UPDATE SET timestamp=excluded.timestamp, symbol=excluded.symbol, payload=excluded.payload", params![decision_id, stage, timestamp as i64, symbol, compressed])?;
+        Ok(())
+    }
+
+    async fn load_auto_trader_audit(&self, since: Option<u64>, limit: usize) -> Result<Vec<serde_json::Value>> {
+        let connection = self.open_database()?;
+        let mut statement = connection.prepare("SELECT payload FROM auto_trader_audit WHERE (?1 IS NULL OR timestamp >= ?1) ORDER BY timestamp DESC LIMIT ?2")?;
+        let rows = statement.query_map(params![since.map(|value| value as i64), limit.clamp(1, 50_000) as i64], |row| row.get::<_, Vec<u8>>(0))?;
+        let mut result = Vec::new();
+        for row in rows {
+            let compressed = row?;
+            let mut decoder = MultiGzDecoder::new(compressed.as_slice());
+            let mut json = Vec::new();
+            decoder.read_to_end(&mut json)?;
+            result.push(serde_json::from_slice(&json)?);
+        }
+        result.reverse();
+        Ok(result)
+    }
+
+    async fn auto_trader_execution_quality(&self) -> Result<AutoTraderExecutionQualitySummary> {
+        let records = self.load_auto_trader_audit(None, 50_000).await?;
+        let mut summary = AutoTraderExecutionQualitySummary::default();
+        summary.history_truncated = records.len() == 50_000;
+        let (mut requested_quantity, mut filled_quantity, mut measured_notional) = (0.0, 0.0, 0.0);
+        let (mut shortfall_total, mut fee_total, mut all_in_total, mut fee_notional) = (0.0, 0.0, 0.0, 0.0);
+        let (mut response_latency_total, mut response_latency_samples) = (0u64, 0usize);
+
+        for record in records {
+            let stage = record.get("stage").and_then(serde_json::Value::as_str).unwrap_or_default();
+            if stage != "entry" && !stage.starts_with("exit") { continue; }
+            summary.order_samples += 1;
+            summary.last_updated_at = summary.last_updated_at.max(record.get("response_received_at").or_else(|| record.get("observed_at")).or_else(|| record.get("timestamp")).and_then(serde_json::Value::as_u64));
+            if let Some(latency_ms) = record.get("submit_response_ms").and_then(serde_json::Value::as_f64)
+                .filter(|value| value.is_finite() && *value >= 0.0)
+            {
+                response_latency_total += (latency_ms * 1_000.0) as u64;
+                response_latency_samples += 1;
+            }
+            let quantity = (if stage == "entry" { record.get("order_quantity") } else { record.get("exit_order_quantity") })
+                .and_then(serde_json::Value::as_f64).unwrap_or(0.0).max(0.0);
+            let filled = (if stage == "entry" { record.get("filled_quantity") } else { record.get("exit_filled_quantity") })
+                .and_then(serde_json::Value::as_f64).unwrap_or(0.0).clamp(0.0, quantity);
+            requested_quantity += quantity;
+            filled_quantity += filled;
+            if filled <= 0.0 { summary.unfilled_order_samples += 1; continue; }
+            summary.filled_order_samples += 1;
+            if quantity > 0.0 && filled + 1e-12 < quantity { summary.partial_fill_samples += 1; }
+
+            let average_price = (if stage == "entry" { record.get("average_price") } else { record.get("exit_average_price") })
+                .and_then(serde_json::Value::as_f64).filter(|price| price.is_finite() && *price > 0.0);
+            let fee = (if stage == "entry" { record.get("fees") } else { record.get("exit_fees") })
+                .and_then(serde_json::Value::as_f64).unwrap_or(0.0).abs();
+            let Some(execution_price) = average_price else { continue; };
+            let notional = filled * execution_price;
+            if notional <= 0.0 || !notional.is_finite() { continue; }
+            let fee_bps = fee / notional * 10_000.0;
+            fee_total += fee_bps * notional;
+            fee_notional += notional;
+
+            let Some(mid) = record.get("decision_mid_price").and_then(serde_json::Value::as_f64).filter(|price| price.is_finite() && *price > 0.0) else { continue; };
+            let Some(side) = record.get("side").and_then(serde_json::Value::as_str) else { continue; };
+            let shortfall_bps = if side == "buy" { (execution_price / mid - 1.0) * 10_000.0 } else { (1.0 - execution_price / mid) * 10_000.0 };
+            measured_notional += notional;
+            shortfall_total += shortfall_bps * notional;
+            all_in_total += (shortfall_bps + fee_bps) * notional;
+            summary.measured_fill_samples += 1;
+        }
+
+        summary.average_fill_rate = (requested_quantity > 0.0).then_some(filled_quantity / requested_quantity);
+        summary.reference_price_coverage_percent = (summary.filled_order_samples > 0)
+            .then_some(summary.measured_fill_samples as f64 / summary.filled_order_samples as f64 * 100.0);
+        summary.average_implementation_shortfall_bps = (measured_notional > 0.0).then_some(shortfall_total / measured_notional);
+        summary.average_all_in_cost_bps = (measured_notional > 0.0).then_some(all_in_total / measured_notional);
+        summary.average_fee_bps = (fee_notional > 0.0).then_some(fee_total / fee_notional);
+        summary.response_latency_samples = response_latency_samples;
+        summary.average_submit_response_ms = (response_latency_samples > 0)
+            .then_some(response_latency_total as f64 / response_latency_samples as f64 / 1_000.0);
+        Ok(summary)
+    }
+
+    async fn auto_trader_decision_quality(&self) -> Result<AutoTraderDecisionQualitySummary> {
+        const MIN_COHORT_SAMPLES: usize = 10;
+        let records = self.load_auto_trader_audit(None, 50_000).await?;
+        let mut summary = AutoTraderDecisionQualitySummary { history_truncated: records.len() == 50_000, ..Default::default() };
+        let mut trades: HashMap<String, DecisionTradeAudit> = HashMap::new();
+        let mut seen_decisions = HashSet::new();
+        for record in records {
+            let Some(decision_id) = record.get("decision_id").and_then(serde_json::Value::as_str) else { continue; };
+            let stage = record.get("stage").and_then(serde_json::Value::as_str).unwrap_or_default();
+            if stage == "decision" { seen_decisions.insert(decision_id.to_owned()); }
+            let trade = trades.entry(decision_id.to_owned()).or_default();
+            if stage == "entry" {
+                trade.entry_quantity = record.get("filled_quantity").and_then(serde_json::Value::as_f64).unwrap_or(0.0).max(0.0);
+                trade.entry_price = record.get("average_price").and_then(serde_json::Value::as_f64).filter(|v| v.is_finite() && *v > 0.0);
+                trade.exploratory = record.get("exploratory").and_then(serde_json::Value::as_bool);
+                trade.direction = record.get("direction").and_then(serde_json::Value::as_str).map(str::to_owned);
+                trade.strength = record.get("strength").and_then(serde_json::Value::as_f64).filter(|v| v.is_finite());
+                trade.market_context = record.get("market_context").and_then(serde_json::Value::as_str).map(str::to_owned);
+                trade.entry_timestamp = record.get("timestamp").and_then(serde_json::Value::as_u64);
+                trade.signal_components = record.get("signal_components").cloned();
+            } else if stage.starts_with("exit") {
+                trade.exit_quantity += record.get("exit_filled_quantity").and_then(serde_json::Value::as_f64).unwrap_or(0.0).max(0.0);
+                trade.realized_pnl += record.get("realized_pnl").and_then(serde_json::Value::as_f64).filter(|v| v.is_finite()).unwrap_or(0.0);
+            }
+        }
+        summary.decision_samples = seen_decisions.len();
+        let mut groups: BTreeMap<(String, String), (usize, usize, f64, f64)> = BTreeMap::new();
+        for trade in trades.values() {
+            if trade.entry_quantity <= 0.0 { continue; }
+            summary.filled_entry_samples += 1;
+            if trade.exit_quantity + 1e-12 < trade.entry_quantity { summary.unresolved_trade_samples += 1; continue; }
+            let Some(entry_price) = trade.entry_price else { summary.unpriced_closed_trade_samples += 1; continue; };
+            let entry_notional = trade.entry_quantity * entry_price;
+            if entry_notional <= 0.0 || !entry_notional.is_finite() { continue; }
+            summary.completed_trade_samples += 1;
+            let net_return = trade.realized_pnl / entry_notional * 100.0;
+            let strength_band = match trade.strength.unwrap_or(0.0) {
+                v if v < 0.50 => "<0.50",
+                v if v < 0.60 => "0.50–0.59",
+                v if v < 0.70 => "0.60–0.69",
+                _ => "0.70+",
+            };
+            let components = trade.signal_components.as_ref();
+            let component_value = |name: &str| components.and_then(|values| values.get(name)).and_then(serde_json::Value::as_f64).filter(|v| v.is_finite());
+            let momentum_band = component_value("momentum_10s_percent").map(|v| if v < -0.12 { "<-0.12%" } else if v < -0.04 { "-0.12 to -0.04%" } else if v < 0.04 { "-0.04 to 0.04%" } else if v < 0.12 { "0.04 to 0.12%" } else { "≥0.12%" }).unwrap_or("unavailable");
+            let trend_band = component_value("trend_5m_volatility_units").map(|v| if v < -1.5 { "<-1.5σ" } else if v < -0.5 { "-1.5 to -0.5σ" } else if v < 0.5 { "-0.5 to 0.5σ" } else if v < 1.5 { "0.5 to 1.5σ" } else { "≥1.5σ" }).unwrap_or("unavailable");
+            let volatility_band = component_value("volatility_1m_percent").map(|v| if v < 0.10 { "<0.10%" } else if v < 0.30 { "0.10 to 0.30%" } else if v < 1.0 { "0.30 to 1.00%" } else { "≥1.00%" }).unwrap_or("unavailable");
+            let vwap_band = component_value("mispricing_vs_vwap_bps").map(|v| if v < -8.0 { "<-8 bps" } else if v < -3.0 { "-8 to -3 bps" } else if v < 3.0 { "-3 to 3 bps" } else if v < 8.0 { "3 to 8 bps" } else { "≥8 bps" }).unwrap_or("unavailable");
+            let pressure_band = component_value("pressure_without_price_move").map(|v| if v < -0.75 { "<-0.75" } else if v < 0.0 { "-0.75 to 0" } else if v < 0.75 { "0 to 0.75" } else { "≥0.75" }).unwrap_or("unavailable");
+            let aggressor_cost_band = component_value("aggressor_cost_bps").map(|v| if v < 0.0 { "<0 bps" } else if v < 2.0 { "0 to 2 bps" } else if v < 5.0 { "2 to 5 bps" } else { "≥5 bps" }).unwrap_or("unavailable");
+            let momentum_flow_confirmation = match (
+                component_value("momentum_10s_percent"), component_value("trade_flow_imbalance"), trade.direction.as_deref(),
+            ) {
+                (Some(momentum), Some(flow), Some(direction)) => {
+                    let direction_sign = if direction == "bullish" { 1.0 } else { -1.0 };
+                    let momentum_confirms = momentum * direction_sign > 0.0;
+                    let flow_confirms = flow * direction_sign > 0.0;
+                    match (momentum_confirms, flow_confirms) {
+                        (true, true) => "both confirm",
+                        (true, false) => "momentum only",
+                        (false, true) => "flow only",
+                        (false, false) => "neither confirms",
+                    }
+                }
+                _ => "unavailable",
+            };
+            let market_regime = trade.market_context.as_deref().and_then(|context| context.split_once(':').map(|(_, regime)| regime)).unwrap_or("unavailable");
+            let entry_time_utc = trade.entry_timestamp.map(|timestamp| {
+                let hour = (timestamp / 3_600_000) % 24;
+                let start = (hour / 6) * 6;
+                format!("{start:02}:00–{:02}:59 UTC", start + 5)
+            }).unwrap_or_else(|| "unavailable".to_owned());
+            let dimensions = [
+                ("direction", trade.direction.as_deref().unwrap_or("unknown").to_owned()),
+                ("selection", match trade.exploratory { Some(true) => "exploratory", Some(false) => "strict", None => "unknown" }.to_owned()),
+                ("market_context", trade.market_context.as_deref().unwrap_or("unknown").to_owned()),
+                ("market_regime", market_regime.to_owned()),
+                ("entry_time_utc", entry_time_utc),
+                ("strength", strength_band.to_owned()),
+                ("10s_momentum", momentum_band.to_owned()),
+                ("5m_trend", trend_band.to_owned()),
+                ("1m_volatility", volatility_band.to_owned()),
+                ("VWAP_mispricing", vwap_band.to_owned()),
+                ("pressure_without_move", pressure_band.to_owned()),
+                ("aggressor_cost", aggressor_cost_band.to_owned()),
+                ("momentum_flow_confirmation", momentum_flow_confirmation.to_owned()),
+            ];
+            for (dimension, value) in dimensions {
+                let group = groups.entry((dimension.to_owned(), value)).or_default();
+                group.0 += 1;
+                if net_return > 0.0 { group.1 += 1; }
+                group.2 += net_return;
+                group.3 += trade.realized_pnl;
+            }
+        }
+        summary.cohorts = groups.into_iter().map(|((dimension, value), (samples, wins, return_total, pnl_total))| AutoTraderDecisionQualityCohort {
+            dimension, value, completed_trade_samples: samples,
+            average_net_return_percent: return_total / samples as f64,
+            win_rate: wins as f64 / samples as f64,
+            total_net_pnl: pnl_total,
+            preliminary: samples < MIN_COHORT_SAMPLES,
+        }).collect();
+        Ok(summary)
     }
 
     pub fn router(self) -> Router {
@@ -1021,6 +1357,7 @@ impl SignalStore {
         let research_feature_store = self.clone();
         let external_market_store = self.clone();
         let auto_trader_store = self.clone();
+        let audit_store = self.clone();
         let best_store = self;
         Router::new()
             .route("/signals/dashboard", get(move || {
@@ -1038,6 +1375,33 @@ impl SignalStore {
             .route("/signals/auto-trader-dashboard", get(move || {
                 let store = auto_trader_store.clone();
                 async move { match store.auto_trader_dashboard().await { Ok(items) => Ok(Json(items)), Err(error) => Err((StatusCode::INTERNAL_SERVER_ERROR, error.to_string())) } }
+            }))
+            .route("/signals/auto-trader-decision-quality", get({
+                let store = audit_store.clone();
+                move || {
+                    let store = store.clone();
+                    async move { match store.auto_trader_decision_quality().await { Ok(summary) => Ok(Json(summary)), Err(error) => Err((StatusCode::INTERNAL_SERVER_ERROR, error.to_string())) } }
+                }
+            }))
+            .route("/signals/auto-trader-execution-quality", get({
+                let store = audit_store.clone();
+                move || {
+                    let store = store.clone();
+                    async move { match store.auto_trader_execution_quality().await { Ok(summary) => Ok(Json(summary)), Err(error) => Err((StatusCode::INTERNAL_SERVER_ERROR, error.to_string())) } }
+                }
+            }))
+            .route("/signals/auto-trader-audit", get({
+                let store = audit_store.clone();
+                move |axum::extract::Query(query): axum::extract::Query<EvaluationQuery>| {
+                    let store = store.clone();
+                    async move { match store.load_auto_trader_audit(query.since, query.limit.unwrap_or(10_000)).await { Ok(items) => Ok(Json(items)), Err(error) => Err((StatusCode::INTERNAL_SERVER_ERROR, error.to_string())) } }
+                }
+            }).post({
+                let store = audit_store.clone();
+                move |Json(payload): Json<serde_json::Value>| {
+                    let store = store.clone();
+                    async move { match store.save_auto_trader_audit(payload).await { Ok(()) => Ok(StatusCode::NO_CONTENT), Err(error) => Err((StatusCode::BAD_REQUEST, error.to_string())) } }
+                }
             }))
             .route("/signals/best", get(move || {
                 let store = best_store.clone();
@@ -1066,9 +1430,8 @@ impl SignalStore {
     }
 
     pub async fn book_snapshots(&self, since: Option<u64>, limit: usize) -> Result<Vec<SignalBookSnapshot>> {
-        let mut snapshots = self.read_all_records().await?.into_iter().filter_map(|record| match record {
-            StoredSignalRecord::BookSnapshot(snapshot) if since.is_none_or(|timestamp| snapshot.timestamp >= timestamp) => Some(snapshot),
-            _ => None,
+        let mut snapshots = self.read_records(3, since, Some(limit)).await?.into_iter().filter_map(|record| match record {
+            StoredSignalRecord::BookSnapshot(snapshot) => Some(snapshot), _ => None,
         }).collect::<Vec<_>>();
         snapshots.sort_by(|a, b| a.timestamp.cmp(&b.timestamp).then(a.symbol.cmp(&b.symbol)));
         let start = snapshots.len().saturating_sub(limit);
@@ -1084,9 +1447,8 @@ impl SignalStore {
     }
 
     pub async fn external_market_features(&self, since: Option<u64>, limit: usize) -> Result<Vec<ExternalMarketFeatures>> {
-        let mut features = self.read_all_records().await?.into_iter().filter_map(|record| match record {
-            StoredSignalRecord::ExternalMarket(features) if since.is_none_or(|timestamp| features.timestamp >= timestamp) => Some(features),
-            _ => None,
+        let mut features = self.read_records(5, since, Some(limit)).await?.into_iter().filter_map(|record| match record {
+            StoredSignalRecord::ExternalMarket(features) => Some(features), _ => None,
         }).collect::<Vec<_>>();
         features.sort_by(|a, b| a.timestamp.cmp(&b.timestamp).then(a.underlying.cmp(&b.underlying)));
         let start = features.len().saturating_sub(limit);
@@ -1098,9 +1460,8 @@ impl SignalStore {
     }
 
     pub async fn research_features(&self, since: Option<u64>, limit: usize) -> Result<Vec<SignalResearchFeatures>> {
-        let mut features = self.read_all_records().await?.into_iter().filter_map(|record| match record {
-            StoredSignalRecord::ResearchFeatures(features) if since.is_none_or(|timestamp| features.timestamp >= timestamp) => Some(features),
-            _ => None,
+        let mut features = self.read_records(4, since, Some(limit)).await?.into_iter().filter_map(|record| match record {
+            StoredSignalRecord::ResearchFeatures(features) => Some(features), _ => None,
         }).collect::<Vec<_>>();
         features.sort_by(|a, b| a.timestamp.cmp(&b.timestamp).then(a.symbol.cmp(&b.symbol)));
         let start = features.len().saturating_sub(limit);
@@ -1108,7 +1469,8 @@ impl SignalStore {
     }
 
     pub async fn evaluations(&self, since: Option<u64>, limit: usize) -> Result<Vec<SignalEvaluation>> {
-        let mut evaluations = self.read_all_records().await?.into_iter().filter_map(|record| match record {
+        let lower_bound = since.map(|timestamp| timestamp.saturating_sub(3_600_000));
+        let mut evaluations = self.read_records(2, lower_bound, None).await?.into_iter().filter_map(|record| match record {
             StoredSignalRecord::Evaluation(evaluation) if since.is_none_or(|timestamp| evaluation.evaluated_timestamp >= timestamp) => Some(evaluation),
             _ => None,
         }).collect::<Vec<_>>();
@@ -1148,7 +1510,7 @@ impl SignalStore {
     }
 
     async fn load_recent(&self, limit: usize) -> Result<Vec<SignalSnapshot>> {
-        let records = self.read_all_records().await?;
+        let records = self.read_calibration_records().await?;
         let mut items = records.iter().filter_map(|record| match record { StoredSignalRecord::Snapshot(snapshot) => Some(snapshot.clone()), _ => None }).collect::<Vec<_>>();
         calibrate_display_strength(&mut items, &records);
         let start = items.len().saturating_sub(limit);
@@ -1169,7 +1531,7 @@ impl SignalStore {
     }
 
     async fn load_best(&self, limit: usize) -> Result<Vec<SignalSnapshot>> {
-        let records = self.read_all_records().await?;
+        let records = self.read_calibration_records().await?;
         let mut latest: HashMap<String, SignalSnapshot> = HashMap::new();
         for record in &records {
             let StoredSignalRecord::Snapshot(snapshot) = record else { continue; };
@@ -1261,6 +1623,10 @@ impl SignalStore {
         let outcomes = self.read_outcomes().await?;
         let snapshots = self.read_snapshots().await?;
         let snapshots_by_key = snapshots.into_iter().map(|snapshot| ((snapshot.symbol.clone(), snapshot.timestamp), snapshot)).collect::<HashMap<_, _>>();
+        let research_features = self.research_features(None, 50_000).await?;
+        let research_features_by_key = research_features.into_iter()
+            .filter_map(|features| Some(((features.symbol.clone(), features.timestamp), research_feature_vector(&features)?)))
+            .collect::<HashMap<_, _>>();
         let mut grouped: HashMap<(String, u64), Vec<SignalOutcome>> = HashMap::new();
         for outcome in outcomes {
             grouped.entry((outcome.symbol.clone(), outcome.horizon_seconds)).or_default().push(outcome);
@@ -1291,6 +1657,8 @@ impl SignalStore {
             let mut all_signal_short = SideWalkForwardAccumulator::default();
             let mut logistic_long = SideWalkForwardAccumulator::default();
             let mut logistic_short = SideWalkForwardAccumulator::default();
+            let mut research_logistic_long = SideWalkForwardAccumulator::default();
+            let mut research_logistic_short = SideWalkForwardAccumulator::default();
             let mut baseline_correct = 0;
             let mut baseline_net_total = 0.0;
             let mut five_minute_trend_samples = 0;
@@ -1323,6 +1691,7 @@ impl SignalStore {
             let mut exploration_positive = [0usize; 5];
             let mut exploration_net = [0.0f64; 5];
             let mut trend_logistic_weights = None;
+            let mut research_logistic_weights = None;
             for index in WALK_FORWARD_MIN_TRAINING_SAMPLES..non_overlapping.len() {
                 let start = index.saturating_sub(WALK_FORWARD_TRAINING_WINDOW);
                 let sample = &non_overlapping[index];
@@ -1359,6 +1728,7 @@ impl SignalStore {
                     let logistic_training = training.iter().filter(|prior| prior.features.is_some()).cloned().collect::<Vec<_>>();
                     logistic_weights = train_logistic(&logistic_training);
                     trend_logistic_weights = train_trend_logistic(&logistic_training);
+                    research_logistic_weights = train_research_logistic(&training, &research_features_by_key);
                 }
                 if let (Some(weights), Some(features), Some(trend), Some(cost)) = (trend_logistic_weights.as_ref(), sample.features.as_ref(), sample.trend_5m_volatility_units, sample.execution_cost_percent) {
                     let probability = trend_logistic_up_probability(weights, features, trend);
@@ -1389,6 +1759,17 @@ impl SignalStore {
                             contrarian_confident_net[band] += contrarian_net;
                         }
                     }
+                }
+                if let (Some(weights), Some(features), Some(cost)) = (
+                    research_logistic_weights.as_ref(),
+                    research_features_by_key.get(&(sample.symbol.clone(), sample.signal_timestamp)),
+                    sample.execution_cost_percent,
+                ) {
+                    let up = research_logistic_up_probability(weights, features) >= 0.5;
+                    let matches = (up && sample.return_percent > 0.0) || (!up && sample.return_percent < 0.0);
+                    let net = if up { sample.return_percent } else { -sample.return_percent } - cost;
+                    if up { research_logistic_long.record(matches, net); }
+                    else { research_logistic_short.record(matches, net); }
                 }
                 if let (Some(weights), Some(features), Some(cost)) = (logistic_weights.as_ref(), sample.features.as_ref(), sample.execution_cost_percent) {
                     let up = logistic_up_probability(&weights, features) >= 0.5;
@@ -1474,6 +1855,8 @@ impl SignalStore {
                 all_signal_short: all_signal_short.metrics(),
                 logistic_long: logistic_long.metrics(),
                 logistic_short: logistic_short.metrics(),
+                research_logistic_long: research_logistic_long.metrics(),
+                research_logistic_short: research_logistic_short.metrics(),
             });
         }
         result.sort_by(|a, b| a.symbol.cmp(&b.symbol).then(a.horizon_seconds.cmp(&b.horizon_seconds)));
@@ -1481,11 +1864,11 @@ impl SignalStore {
     }
 
     async fn read_outcomes(&self) -> Result<Vec<SignalOutcome>> {
-        Ok(self.read_all_records().await?.into_iter().filter_map(|record| match record { StoredSignalRecord::Outcome(outcome) => Some(outcome), _ => None }).collect())
+        Ok(self.read_records(1, None, None).await?.into_iter().filter_map(|record| match record { StoredSignalRecord::Outcome(outcome) => Some(outcome), _ => None }).collect())
     }
 
     async fn read_snapshots(&self) -> Result<Vec<SignalSnapshot>> {
-        Ok(self.read_all_records().await?.into_iter().filter_map(|record| match record { StoredSignalRecord::Snapshot(snapshot) => Some(snapshot), _ => None }).collect())
+        Ok(self.read_records(0, None, None).await?.into_iter().filter_map(|record| match record { StoredSignalRecord::Snapshot(snapshot) => Some(snapshot), _ => None }).collect())
     }
 
     pub async fn append(&self, snapshot: &SignalSnapshot) -> Result<()> {
@@ -1501,31 +1884,49 @@ impl SignalStore {
     }
 
     async fn append_record(&self, record: StoredSignalRecord) -> Result<()> {
-        let _guard = self.write_lock.lock().await;
-        if let Some(parent) = self.path.parent().filter(|p| !p.as_os_str().is_empty()) {
-            tokio::fs::create_dir_all(parent).await?;
-        }
-
-        // main() migrates the legacy file before serving requests. The binary log
-        // is a concatenation of gzip members, so append only the new record rather
-        // than decompressing the complete history on every signal update.
-        let path = daily_partition_path(&self.path, record_timestamp(&record));
-        let mut file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)
-            .await?;
-        let record_bytes = encode_record(&record)?;
-        let member = if file.metadata().await?.len() == 0 {
-            let mut initial = SIGNALS_BINARY_MAGIC.to_vec();
-            initial.extend_from_slice(&record_bytes);
-            gzip_member(&initial)?
-        } else {
-            gzip_member(&record_bytes)?
-        };
-        file.write_all(&member).await?;
-        file.flush().await?;
-        Ok(())
+        self.append_records(vec![record]).await
     }
 
+    pub async fn append_records(&self, records: Vec<StoredSignalRecord>) -> Result<()> {
+        if records.is_empty() { return Ok(()); }
+        let (ack, result) = oneshot::channel();
+        self.writer.send(WriteRequest { records, ack }).await.map_err(|_| anyhow::anyhow!("signal database writer stopped"))?;
+        result.await.map_err(|_| anyhow::anyhow!("signal database writer dropped acknowledgement"))?
+            .map_err(|error| anyhow::anyhow!(error))
+    }
+
+}
+
+async fn run_database_writer(mut connection: Connection, mut receiver: mpsc::Receiver<WriteRequest>) {
+    const MAX_BATCH_RECORDS: usize = 128;
+    const MAX_DELAY: Duration = Duration::from_millis(5);
+    while let Some(first) = receiver.recv().await {
+        let mut batch = vec![first];
+        let mut record_count = batch[0].records.len();
+        let deadline = tokio::time::sleep(MAX_DELAY);
+        tokio::pin!(deadline);
+        while record_count < MAX_BATCH_RECORDS {
+            tokio::select! {
+                _ = &mut deadline => break,
+                request = receiver.recv() => match request {
+                    Some(request) => { record_count += request.records.len(); batch.push(request); },
+                    None => break,
+                }
+            }
+        }
+        let result = (|| -> Result<()> {
+            let transaction = connection.transaction()?;
+            {
+                let mut insert = transaction.prepare("INSERT INTO signal_records(timestamp, kind, payload) VALUES (?1, ?2, ?3)")?;
+                for request in &batch {
+                    for record in &request.records {
+                        insert.execute(params![record_timestamp(record) as i64, record_kind(record), compress_record(record)?])?;
+                    }
+                }
+            }
+            transaction.commit()?;
+            Ok(())
+        })().map_err(|error| error.to_string());
+        for request in batch { let _ = request.ack.send(result.clone()); }
+    }
 }

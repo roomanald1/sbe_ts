@@ -66,45 +66,53 @@ export class CloseInsightsModel {
     if (this.refreshInFlight) return;
     this.refreshInFlight = true;
     try {
-      const [positionsResponse, insightsResponse, ratesResponse, barriersResponse] = await Promise.all([
+      const ratesRequest = fetch('/positions/usd-rates');
+      const barriersRequest = fetch('/positions/barriers');
+      const [positionsResponse, insightsResponse] = await Promise.all([
         fetch('/positions'),
         fetch('/positions/insights'),
-        fetch('/positions/usd-rates'),
-        fetch('/positions/barriers'),
       ]);
       if (!positionsResponse.ok || !insightsResponse.ok) throw new Error('Could not load close-out insights');
       const positions = (await positionsResponse.json() as PositionsResponse).positions;
       const insights = (await insightsResponse.json() as InsightsResponse).insights;
-      const rates = ratesResponse.ok ? (await ratesResponse.json() as UsdRatesResponse).rates : {};
-      const barriers = barriersResponse.ok ? await barriersResponse.json() as BarrierOrder[] : this.state$.value.barriers;
       const positionsBySymbol = new Map(positions.map((position) => [position.symbol, position]));
+      const rows = insights.flatMap((insight) => {
+        const position = positionsBySymbol.get(insight.symbol);
+        return position && Math.abs(position.quantity) > 1e-12
+          ? [{
+              position,
+              closeSide: insight.close_side,
+              closeQuantity: insight.close_quantity,
+              closePrice: insight.close_price,
+              currentPrice: insight.current_price,
+              breakevenPrice: insight.breakeven_price,
+              closePnl: insight.close_pnl,
+              closeFee: insight.close_fee,
+              depthCoversPosition: insight.depth_covers_position,
+              closeDepthQuantity: insight.close_depth_quantity,
+              profitableCloseProbability5m: insight.profitable_close_probability_5m,
+              probabilitySamples: insight.probability_samples,
+            }]
+          : [];
+      });
+      this.state$.next({ ...this.state$.value, loading: false, error: undefined, insights: rows });
+
+      const [ratesResult, barriersResult] = await Promise.allSettled([ratesRequest, barriersRequest]);
+      const ratesResponse = ratesResult.status === 'fulfilled' ? ratesResult.value : undefined;
+      const barriersResponse = barriersResult.status === 'fulfilled' ? barriersResult.value : undefined;
+      const rates = ratesResponse?.ok ? (await ratesResponse.json() as UsdRatesResponse).rates : {};
+      const barriers = barriersResponse?.ok ? await barriersResponse.json() as BarrierOrder[] : this.state$.value.barriers;
       this.state$.next({
         ...this.state$.value,
-        loading: false,
-        error: undefined,
         barriers,
-        insights: insights.flatMap((insight) => {
-          const position = positionsBySymbol.get(insight.symbol);
-          const quote = insight.symbol.split('-')[1] ?? '';
+        insights: rows.map((row) => {
+          const quote = row.position.symbol.split('-')[1] ?? '';
           const rate = rates[quote];
-          return position && Math.abs(position.quantity) > 1e-12
-            ? [{
-                position,
-                closeSide: insight.close_side,
-                closeQuantity: insight.close_quantity,
-                closePrice: insight.close_price,
-                currentPrice: insight.current_price,
-                breakevenPrice: insight.breakeven_price,
-                closePnl: insight.close_pnl,
-                closeFee: insight.close_fee,
-                closeFeeUsd: insight.close_fee !== undefined && rate !== undefined ? insight.close_fee * rate : undefined,
-                closePnlUsd: insight.close_pnl !== undefined && rate !== undefined ? insight.close_pnl * rate : undefined,
-                depthCoversPosition: insight.depth_covers_position,
-                closeDepthQuantity: insight.close_depth_quantity,
-                profitableCloseProbability5m: insight.profitable_close_probability_5m,
-                probabilitySamples: insight.probability_samples,
-              }]
-            : [];
+          return {
+            ...row,
+            closeFeeUsd: row.closeFee !== undefined && rate !== undefined ? row.closeFee * rate : undefined,
+            closePnlUsd: row.closePnl !== undefined && rate !== undefined ? row.closePnl * rate : undefined,
+          };
         }),
       });
     } catch (reason) {

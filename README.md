@@ -27,3 +27,10 @@ Run the current backend plus the four service processes together from the reposi
 The UI remains a separate process (`./nx serve react-app`). FeedHandlers owns RSocket on port 10001 and instrument lookup on port 3001. Position Management owns the position ledger, account, and portfolio APIs on port 3002. Insights serves signal reads and position close insights on port 3004. Execution listens on port 3003 and currently forwards order and VWAP routes to Position Management while execution is extracted.
 
 The launcher points `POSITIONS_FILE` and `SIGNALS_FILE` at the existing persisted files under their owning services. FeedHandlers owns OKX connectivity, SBE encoding, and synthetic feed streams. Position Management owns the ledger and portfolio APIs. Execution owns order and VWAP APIs. Insights owns signal persistence and close insights.
+## Run the full local stack
+
+Set a unique Grafana password in monitoring/.env (copy monitoring/.env.example first), then run all services from the repository root:
+
+    ./start-all.sh
+
+This runs the backend services, React UI, and Grafana monitoring together. Open the UI at http://localhost:5173 and use its Grafana link for the dashboard. Run ./stop-all.sh from another terminal to stop everything, or press Ctrl+C in the start terminal. Monitoring and app logs are written under logs/.

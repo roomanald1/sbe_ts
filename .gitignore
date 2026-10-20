@@ -6,3 +6,9 @@ src/rust/insights/target/*
 src/rust/position_management/target/*
 src/rust/service_gateway/target/*
 logs/*
+src/rust/insights/signals.jsonl.sqlite
+src/rust/insights/signals.sqlite
+src/rust/insights/signals.sqlite-shm
+src/rust/insights/signals.sqlite-wal
+src/rust/insights/logs/insights.log
+monitoring/.env

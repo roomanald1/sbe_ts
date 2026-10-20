@@ -98,7 +98,7 @@ export function Users() {
             String(params.data.pageIndex) + ':' + String(params.data.rowIndex)
           }
           theme={userGridTheme}
-          rowHeight={46}
+          rowHeight={26}
           headerHeight={0}
           cellFlashDuration={700}
           cellFadeDuration={500}

@@ -25,9 +25,9 @@ const MAX_TICKER_BATCH_MESSAGES: usize = 256;
 const TICKER_BATCH_CAPACITY: usize = SYMBOL_PRICE_MESSAGE_LENGTH * MAX_TICKER_BATCH_MESSAGES;
 const BOOK_UPDATE_CAPACITY: usize = 32;
 const TRADE_UPDATE_CAPACITY: usize = 32;
-// Signal generation needs broader coverage than the ticker UI's most liquid ten:
-// a narrow universe often leaves Auto Trader with only stale/ranging candidates.
-const SIGNAL_INSTRUMENT_LIMIT: usize = 30;
+// Generate signals across the full top-volume spot universe so Auto Trader can
+// find fresh candidates beyond the first 30 instruments.
+const SIGNAL_INSTRUMENT_LIMIT: usize = 100;
 static TRADE_FEEDS: OnceLock<StdMutex<HashMap<String, broadcast::Sender<Bytes>>>> = OnceLock::new();
 static BOOK_FEEDS: OnceLock<StdMutex<HashMap<String, broadcast::Sender<Bytes>>>> = OnceLock::new();
 
