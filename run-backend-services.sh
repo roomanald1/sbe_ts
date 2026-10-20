@@ -24,17 +24,6 @@ for _ in {1..60}; do
 done
 if [[ "$ready" != "1" ]]; then echo "Insights did not become ready on port 3004" >&2; exit 1; fi
 
-cargo run --manifest-path src/rust/feed_handlers/Cargo.toml &
-feed_pid=$!
-children+=("$feed_pid")
-ready=0
-for _ in {1..60}; do
-  if curl --fail --silent http://127.0.0.1:3001/health >/dev/null; then ready=1; break; fi
-  if ! kill -0 "$feed_pid" 2>/dev/null; then wait "$feed_pid"; exit $?; fi
-  sleep 1
-done
-if [[ "$ready" != "1" ]]; then echo "FeedHandlers did not become ready on port 3001" >&2; exit 1; fi
-
 cargo run --manifest-path src/rust/position_management/Cargo.toml &
 position_pid=$!
 children+=("$position_pid")
@@ -45,6 +34,17 @@ for _ in {1..60}; do
   sleep 1
 done
 if [[ "$ready" != "1" ]]; then echo "Position Management did not become ready on port 3002" >&2; exit 1; fi
+
+cargo run --manifest-path src/rust/feed_handlers/Cargo.toml &
+feed_pid=$!
+children+=("$feed_pid")
+ready=0
+for _ in {1..60}; do
+  if curl --fail --silent http://127.0.0.1:3001/health >/dev/null; then ready=1; break; fi
+  if ! kill -0 "$feed_pid" 2>/dev/null; then wait "$feed_pid"; exit $?; fi
+  sleep 1
+done
+if [[ "$ready" != "1" ]]; then echo "FeedHandlers did not become ready on port 3001" >&2; exit 1; fi
 
 cargo run --manifest-path src/rust/execution/Cargo.toml &
 children+=("$!")

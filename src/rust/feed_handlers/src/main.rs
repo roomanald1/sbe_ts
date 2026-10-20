@@ -1,4 +1,4 @@
-use axum::{Router, body::Body, http::{Response, header::CONTENT_TYPE}, routing::get};
+use axum::{Json, Router, body::Body, http::{Response, StatusCode, header::CONTENT_TYPE}, routing::{get, post}};
 use bytes::Bytes;
 use serde::Serialize;
 use std::{sync::OnceLock, time::Duration};
@@ -12,6 +12,18 @@ struct InstrumentsResponse {
 }
 
 static INSTRUMENTS_CACHE: OnceLock<Mutex<Option<(Instant, Bytes)>>> = OnceLock::new();
+
+async fn publish_signal_snapshot(Json(snapshot): Json<serde_json::Value>) -> StatusCode {
+    let Some(symbol) = snapshot.get("symbol").and_then(serde_json::Value::as_str) else {
+        return StatusCode::BAD_REQUEST;
+    };
+    let Ok(bytes) = serde_json::to_vec(&snapshot) else { return StatusCode::BAD_REQUEST; };
+    if feed_handlers::websocket::publish_signal_snapshot(symbol, Bytes::from(bytes)) {
+        StatusCode::ACCEPTED
+    } else {
+        StatusCode::NOT_FOUND
+    }
+}
 const INSTRUMENTS_CACHE_TTL: Duration = Duration::from_secs(300);
 
 async fn get_instruments() -> Response<Body> {
@@ -48,7 +60,9 @@ fn json_response(body: Bytes) -> Response<Body> {
 async fn serve_http() -> anyhow::Result<()> {
     let app = Router::new()
         .route("/health", get(|| async { "ok" }))
-        .route("/instruments", get(get_instruments));
+        .route("/process-cpu-seconds", get(process_cpu_seconds))
+        .route("/instruments", get(get_instruments))
+        .route("/internal/signals/snapshot", post(publish_signal_snapshot));
     let listener = tokio::net::TcpListener::bind(("0.0.0.0", 3001)).await?;
     feed_handlers::service_log!("INFO", "FeedHandlers HTTP API listening on http://0.0.0.0:3001");
     axum::serve(listener, app).await?;
@@ -65,4 +79,10 @@ async fn main() -> anyhow::Result<()> {
         serve_http(),
     )?;
     Ok(())
+}
+async fn process_cpu_seconds() -> String {
+    let stat = std::fs::read_to_string("/proc/self/stat").unwrap_or_default();
+    let fields = stat.rsplit_once(')').map(|(_, fields)| fields).unwrap_or("");
+    let values: Vec<u64> = fields.split_whitespace().filter_map(|value| value.parse().ok()).collect();
+    values.get(11).zip(values.get(12)).map(|(user, system)| (*user + *system) as f64 / 100.0).unwrap_or(0.0).to_string()
 }

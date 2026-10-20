@@ -80,6 +80,7 @@ pub async fn router() -> anyhow::Result<Router> {
         .route("/positions/fee-rates", get(get_fee_rates))
         .route("/positions/hedge-candidates", get(get_hedge_candidates))
         .route("/internal/insights-inputs", get(get_insights_inputs))
+        .route("/internal/market-book", get(get_market_book))
         .route("/positions/trades", get(get_position_trades))
         .route("/positions/vwap", get(get_vwap_runs).post(start_vwap))
         .route("/positions/twap", post(start_twap))
@@ -1324,6 +1325,20 @@ struct PositionMarketInput {
 }
 #[derive(Deserialize, Default)]
 struct InsightsInputQuery { symbol: Option<String> }
+async fn get_market_book(
+    State(store): State<Arc<PositionStore>>,
+    Query(query): Query<InsightsInputQuery>,
+) -> Result<Json<BookSnapshot>, (StatusCode, String)> {
+    let symbol = query.symbol.map(|symbol| symbol.to_ascii_uppercase())
+        .filter(|symbol| valid_position_symbol(symbol) && store.spot_symbols.iter().any(|spot| spot == symbol))
+        .ok_or((StatusCode::BAD_REQUEST, "A valid subscribed spot symbol is required".to_owned()))?;
+    store.ensure_subscription(&symbol);
+    let now = now_ms().map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
+    let books = store.books.lock().await;
+    let book = books.get(&symbol).filter(|book| now.saturating_sub(book.updated_at_ms) <= 5_000)
+        .cloned().ok_or((StatusCode::SERVICE_UNAVAILABLE, format!("No fresh local order book for {symbol}")))?;
+    Ok(Json(book))
+}
 async fn get_insights_inputs(State(store): State<Arc<PositionStore>>, Query(query): Query<InsightsInputQuery>) -> Result<Json<PositionInsightsInput>, (StatusCode, String)> {
     let positions = summarize_positions(&store.ledger.lock().await.trades).positions
         .into_iter().filter(|position| position.quantity.abs() > EPSILON).collect::<Vec<_>>();
@@ -1333,26 +1348,10 @@ async fn get_insights_inputs(State(store): State<Arc<PositionStore>>, Query(quer
         symbols.insert(symbol.clone());
     }
     for symbol in &symbols { store.ensure_subscription(symbol); }
-    // A newly requested instrument has no cached book until its RSocket and OKX
-    // subscriptions deliver the first snapshot. Wait for that event, with a bounded
-    // timeout so a failed feed cannot leave the HTTP request hanging indefinitely.
-    if let Some(symbol) = requested_symbol {
-        let wait_for_snapshot = async {
-            loop {
-                let notified = store.book_changed.notified();
-                tokio::pin!(notified);
-                notified.as_mut().enable();
-                let ready = store.books.lock().await.get(&symbol)
-                    .is_some_and(|book| !book.bids.is_empty() && !book.asks.is_empty());
-                if ready { break; }
-                notified.await;
-            }
-        };
-        timeout(Duration::from_secs(8), wait_for_snapshot).await.map_err(|_| (
-            StatusCode::SERVICE_UNAVAILABLE,
-            format!("Timed out waiting for the first live OKX book snapshot for {symbol}"),
-        ))?;
-    }
+    // Return the latest snapshot, including an empty book while a new
+    // subscription is warming up. Consumers handle missing bid/ask data as a
+    // temporarily unavailable market; blocking here made transient feed delays
+    // fail the entire auto-trader cycle with HTTP 503.
     let books = store.books.lock().await;
     let histories = store.price_samples.lock().await;
     let markets = symbols.into_iter().map(|symbol| {

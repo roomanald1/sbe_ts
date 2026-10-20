@@ -112,7 +112,7 @@
     -0.462892012977021,
     -0.4506323761557612
   ],
-  "daily_realized_pnl": -14.718954235790553,
+  "daily_realized_pnl": -14.718954235790552,
   "pnl_utc_day": "20746",
   "utc_day": "20746",
   "orders": [
@@ -132,6 +132,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "armed",
       "realized_pnl": 0.0
     },
@@ -151,6 +152,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "accepted",
       "realized_pnl": 0.0
     },
@@ -170,6 +172,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "armed",
       "realized_pnl": 0.0
     },
@@ -189,6 +192,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "armed",
       "realized_pnl": 0.0
     },
@@ -208,6 +212,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "armed",
       "realized_pnl": -0.07791679736638743
     },
@@ -227,6 +232,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "armed",
       "realized_pnl": -0.06710432674952616
     },
@@ -246,6 +252,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": 0.0
     },
@@ -265,6 +272,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": 0.0
     },
@@ -284,6 +292,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": 0.0
     },
@@ -303,6 +312,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": 0.0
     },
@@ -322,6 +332,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": -0.08865252651278817
     },
@@ -341,6 +352,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": 0.0
     },
@@ -360,6 +372,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": -0.08207324643078921
     },
@@ -379,6 +392,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": 0.0001025422294417398
     },
@@ -398,6 +412,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": -0.07966434368383894
     },
@@ -417,6 +432,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": 0.0
     },
@@ -436,6 +452,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": 0.0
     },
@@ -455,6 +472,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": 0.0
     },
@@ -474,6 +492,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": 0.0
     },
@@ -493,6 +512,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": 0.0
     },
@@ -512,6 +532,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": 0.060437174152198146
     },
@@ -531,6 +552,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": 0.0
     },
@@ -550,6 +572,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": 0.0
     },
@@ -569,6 +592,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": 0.0
     },
@@ -588,6 +612,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": -0.14775946533161222
     },
@@ -607,6 +632,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": 0.0
     },
@@ -626,6 +652,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": 0.0
     },
@@ -645,6 +672,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": -0.07529345938816949
     },
@@ -664,6 +692,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": -0.14326918811051534
     },
@@ -683,6 +712,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "cancelled",
       "realized_pnl": 0.0
     },
@@ -702,6 +732,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "armed",
       "realized_pnl": 0.0
     },
@@ -721,6 +752,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": -0.07275332509270693
     },
@@ -740,6 +772,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "armed",
       "realized_pnl": 0.0
     },
@@ -759,6 +792,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": -0.07159518405969864
     },
@@ -778,6 +812,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": 0.0
     },
@@ -797,6 +832,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "cancelled",
       "realized_pnl": 0.0
     },
@@ -816,6 +852,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": 0.0
     },
@@ -835,6 +872,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "cancelled",
       "realized_pnl": 0.0
     },
@@ -854,6 +892,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": 0.0
     },
@@ -873,6 +912,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "cancelled",
       "realized_pnl": 0.0
     },
@@ -892,6 +932,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": 2.0187506587121025
     },
@@ -911,6 +952,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": 0.0
     },
@@ -930,6 +972,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "cancelled",
       "realized_pnl": 0.0
     },
@@ -949,6 +992,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": 0.0
     },
@@ -968,6 +1012,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "cancelled",
       "realized_pnl": 0.0
     },
@@ -987,6 +1032,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": 0.0
     },
@@ -1006,6 +1052,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": -1.99697539153975
     },
@@ -1025,6 +1072,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": 0.0
     },
@@ -1044,6 +1092,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": -0.07374738727978494
     },
@@ -1063,6 +1112,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": 0.0
     },
@@ -1082,6 +1132,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": -1.3869940029984993
     },
@@ -1101,6 +1152,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": 0.0
     },
@@ -1120,6 +1172,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": -0.8715991740408339
     },
@@ -1139,6 +1192,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": 0.0
     },
@@ -1158,6 +1212,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": -0.8568226066695899
     },
@@ -1177,6 +1232,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": 0.0
     },
@@ -1196,6 +1252,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": -1.1576196154900615
     },
@@ -1215,6 +1272,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": 0.0
     },
@@ -1234,6 +1292,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": -0.8781280561288018
     },
@@ -1253,6 +1312,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": 0.0
     },
@@ -1272,6 +1332,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "rejected",
       "realized_pnl": 0.0
     },
@@ -1291,6 +1352,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": 0.0
     },
@@ -1310,6 +1372,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": -0.5966102674277733
     },
@@ -1329,6 +1392,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": 0.0
     },
@@ -1348,6 +1412,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": -0.9441327898624406
     },
@@ -1367,6 +1432,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": 0.0
     },
@@ -1386,6 +1452,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": -0.9215590031021952
     },
@@ -1405,6 +1472,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": 0.0
     },
@@ -1424,6 +1492,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": -0.8787895737778217
     },
@@ -1443,6 +1512,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": 0.0
     },
@@ -1462,6 +1532,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": -0.869705971968342
     },
@@ -1481,6 +1552,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": 0.0
     },
@@ -1500,6 +1572,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": -0.5929799770398847
     },
@@ -1519,6 +1592,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": 0.0
     },
@@ -1538,6 +1612,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": -0.00011772887615957174
     },
@@ -1557,6 +1632,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": 0.0
     },
@@ -1576,6 +1652,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": -0.6104915476184245
     },
@@ -1595,6 +1672,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": 0.0
     },
@@ -1614,6 +1692,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": -0.652374088105416
     },
@@ -1633,6 +1712,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": 0.0
     },
@@ -1652,6 +1732,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": -0.7282820185425606
     },
@@ -1671,6 +1752,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": 0.0
     },
@@ -1690,6 +1772,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": -0.0007056659492014634
     },
@@ -1709,6 +1792,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": 0.0
     },
@@ -1728,6 +1812,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": -0.0001814984887211068
     },
@@ -1747,6 +1832,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": 0.0
     },
@@ -1766,6 +1852,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": -0.0007487802610294952
     },
@@ -1785,6 +1872,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": 0.0
     },
@@ -1804,6 +1892,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": -0.0014308698359516278
     },
@@ -1823,6 +1912,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": 0.0
     },
@@ -1842,6 +1932,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": -0.657435773406416
     },
@@ -1861,6 +1952,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": -0.8720307663149958
     },
@@ -1880,6 +1972,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": 0.0
     },
@@ -1899,6 +1992,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": -0.6858526886139191
     },
@@ -1918,6 +2012,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": 0.0
     },
@@ -1937,6 +2032,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": -0.7236997415798412
     },
@@ -1956,6 +2052,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": 0.0
     },
@@ -1975,6 +2072,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": -0.829631893275517
     },
@@ -1994,6 +2092,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": 0.0
     },
@@ -2013,6 +2112,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": -0.8484265624014439
     },
@@ -2032,6 +2132,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": 0.0
     },
@@ -2051,6 +2152,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": -0.8711198586021628
     },
@@ -2070,6 +2172,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": 0.0
     },
@@ -2089,6 +2192,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": -0.9215802831318158
     },
@@ -2108,6 +2212,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": 0.0
     },
@@ -2127,6 +2232,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": -0.8825593283079005
     },
@@ -2146,6 +2252,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": 0.0
     },
@@ -2165,6 +2272,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": -0.852684252626986
     },
@@ -2184,6 +2292,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": 0.0
     },
@@ -2203,6 +2312,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": -0.851153734432301
     },
@@ -2222,6 +2332,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": 0.0
     },
@@ -2241,6 +2352,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": -0.9215084587396002
     },
@@ -2260,6 +2372,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": 0.0
     },
@@ -2279,6 +2392,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": -0.7823665582354494
     },
@@ -2298,6 +2412,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": 0.0
     },
@@ -2317,6 +2432,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": -0.8491609760818786
     },
@@ -2336,6 +2452,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": 0.0
     },
@@ -2355,6 +2472,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": -0.9266079719171098
     },
@@ -2374,6 +2492,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": 0.0
     },
@@ -2393,6 +2512,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": -1.2090754764506086
     },
@@ -2412,6 +2532,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": 0.0
     },
@@ -2431,6 +2552,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": -0.8456607896417421
     },
@@ -2450,6 +2572,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": 0.0
     },
@@ -2469,6 +2592,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": -0.5711121587222772
     },
@@ -2488,6 +2612,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "rejected",
       "realized_pnl": 0.0
     },
@@ -2507,6 +2632,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": -2.2402649868598054e-16
     },
@@ -2526,6 +2652,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": 0.0
     },
@@ -2545,6 +2672,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": -0.875942020177444
     },
@@ -2564,6 +2692,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": 0.0
     },
@@ -2583,6 +2712,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": -0.8542745324967879
     },
@@ -2602,6 +2732,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": 0.0
     },
@@ -2621,6 +2752,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": -0.8910251865688338
     },
@@ -2640,6 +2772,7 @@
       "book_ask_depth_10bps": 3129.46484053,
       "book_depth_imbalance_10bps": 0.5339441994338111,
       "estimated_sweep_bps": 2.5319091659503634,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": 0.0
     },
@@ -2659,6 +2792,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "cancelled",
       "realized_pnl": 0.0
     },
@@ -2678,6 +2812,7 @@
       "book_ask_depth_10bps": 147221.90524739004,
       "book_depth_imbalance_10bps": 0.19260942889701815,
       "estimated_sweep_bps": 0.02081863017422414,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": 0.0
     },
@@ -2697,6 +2832,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": -0.8483962127467479
     },
@@ -2716,6 +2852,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": 2.650462543465236
     },
@@ -2735,6 +2872,7 @@
       "book_ask_depth_10bps": 164903.15368459,
       "book_depth_imbalance_10bps": -0.19041703923565495,
       "estimated_sweep_bps": 0.020794992566797177,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": 0.0
     },
@@ -2754,6 +2892,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "cancelled",
       "realized_pnl": 0.0
     },
@@ -2773,6 +2912,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": 0.0
     },
@@ -2792,6 +2932,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "cancelled",
       "realized_pnl": 0.0
     },
@@ -2811,6 +2952,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": 0.23374375070342251
     },
@@ -2830,6 +2972,7 @@
       "book_ask_depth_10bps": 28553.136600600006,
       "book_depth_imbalance_10bps": -0.3654601718215369,
       "estimated_sweep_bps": 0.6144393241158674,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": 0.0
     },
@@ -2849,6 +2992,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": -0.8593317972350085
     },
@@ -2868,6 +3012,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": 1.1951552967209769
     },
@@ -2887,6 +3032,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": 1.866262003579632
     },
@@ -2906,6 +3052,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": 0.0
     },
@@ -2925,6 +3072,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "cancelled",
       "realized_pnl": 0.0
     },
@@ -2944,6 +3092,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": 1.0834812667641
     },
@@ -2963,6 +3112,7 @@
       "book_ask_depth_10bps": 69608.6895629,
       "book_depth_imbalance_10bps": -0.0065256122200280375,
       "estimated_sweep_bps": 0.6866717022591118,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": 0.0
     },
@@ -2982,6 +3132,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "armed",
       "realized_pnl": 0.0
     },
@@ -3001,6 +3152,7 @@
       "book_ask_depth_10bps": 571.798992,
       "book_depth_imbalance_10bps": -0.1898789071336269,
       "estimated_sweep_bps": 8.03187121978688,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": 0.0
     },
@@ -3020,6 +3172,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": -0.14391897655000155
     },
@@ -3039,6 +3192,7 @@
       "book_ask_depth_10bps": 3281.7912043,
       "book_depth_imbalance_10bps": -0.007131879235770934,
       "estimated_sweep_bps": 0.7477194556615441,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": 0.0
     },
@@ -3058,6 +3212,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": -0.7351662331416821
     },
@@ -3077,6 +3232,7 @@
       "book_ask_depth_10bps": 17084.654923,
       "book_depth_imbalance_10bps": 0.2794242440835133,
       "estimated_sweep_bps": 5.790008910007138,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": 0.0
     },
@@ -3096,6 +3252,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": -0.8730943066528097
     },
@@ -3115,6 +3272,7 @@
       "book_ask_depth_10bps": 1498.8036251000003,
       "book_depth_imbalance_10bps": -0.3139353424842734,
       "estimated_sweep_bps": 3.632193852129983,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": 0.0
     },
@@ -3134,6 +3292,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "cancelled",
       "realized_pnl": 0.0
     },
@@ -3153,6 +3312,7 @@
       "book_ask_depth_10bps": 1681.5529273774,
       "book_depth_imbalance_10bps": -0.24176758732045928,
       "estimated_sweep_bps": 2.833663927457319,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": 0.0
     },
@@ -3172,6 +3332,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": -0.38235735992823233
     },
@@ -3191,6 +3352,7 @@
       "book_ask_depth_10bps": 8218.927502400002,
       "book_depth_imbalance_10bps": 0.30053072425357674,
       "estimated_sweep_bps": 1.4439440316760257,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": 0.0
     },
@@ -3210,6 +3372,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": -0.8564102526014525
     },
@@ -3229,6 +3392,7 @@
       "book_ask_depth_10bps": 242.693334,
       "book_depth_imbalance_10bps": 0.49064399925012847,
       "estimated_sweep_bps": 3.1675641431760937,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": 0.0
     },
@@ -3248,6 +3412,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "cancelled",
       "realized_pnl": 0.0
     },
@@ -3267,6 +3432,7 @@
       "book_ask_depth_10bps": 26946.1196306,
       "book_depth_imbalance_10bps": -0.5232302084486594,
       "estimated_sweep_bps": 1.8598492796095825,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": 0.0
     },
@@ -3286,6 +3452,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": -0.8636568325740147
     },
@@ -3305,6 +3472,7 @@
       "book_ask_depth_10bps": 310.33031600000004,
       "book_depth_imbalance_10bps": 0.5536644830989765,
       "estimated_sweep_bps": 3.752345215759512,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": 0.0
     },
@@ -3324,6 +3492,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": -0.07178718364677053
     },
@@ -3343,6 +3512,7 @@
       "book_ask_depth_10bps": 11507.9382024823,
       "book_depth_imbalance_10bps": -0.09972106466828484,
       "estimated_sweep_bps": 3.6688790510175378,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": 0.0
     },
@@ -3362,6 +3532,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": -0.8721450852841889
     },
@@ -3381,6 +3552,7 @@
       "book_ask_depth_10bps": 489.082447,
       "book_depth_imbalance_10bps": -0.47579252876649103,
       "estimated_sweep_bps": 4.695203067530684,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": 0.0
     },
@@ -3400,6 +3572,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": -0.11201963885371752
     },
@@ -3419,6 +3592,7 @@
       "book_ask_depth_10bps": 1193.3121011120002,
       "book_depth_imbalance_10bps": 0.6205081908542259,
       "estimated_sweep_bps": 0.9490310345094954,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": 0.0
     },
@@ -3438,6 +3612,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": -0.2931305172559122
     },
@@ -3457,6 +3632,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": 0.4793966327094365
     },
@@ -3476,6 +3652,7 @@
       "book_ask_depth_10bps": 9656.070016,
       "book_depth_imbalance_10bps": -0.1638663397835632,
       "estimated_sweep_bps": 1.895734597157084,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": 0.0
     },
@@ -3495,6 +3672,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": -0.943222748815174
     },
@@ -3514,6 +3692,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": 0.0
     },
@@ -3533,6 +3712,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "armed",
       "realized_pnl": 0.0
     },
@@ -3552,6 +3732,7 @@
       "book_ask_depth_10bps": 1557.8620119999998,
       "book_depth_imbalance_10bps": -0.3876642030572695,
       "estimated_sweep_bps": 4.1485169052069,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": 0.0
     },
@@ -3571,6 +3752,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": -0.16863005988090163
     },
@@ -3590,6 +3772,7 @@
       "book_ask_depth_10bps": 19551.31121807394,
       "book_depth_imbalance_10bps": 0.5136341198337523,
       "estimated_sweep_bps": 1.5033491012284017,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": 0.0
     },
@@ -3609,6 +3792,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": -0.9284204438531164
     },
@@ -3628,6 +3812,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": 0.07172022361586958
     },
@@ -3647,6 +3832,7 @@
       "book_ask_depth_10bps": 796.9130454553099,
       "book_depth_imbalance_10bps": 0.4747425923186575,
       "estimated_sweep_bps": 2.2080427423198934,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": 0.0
     },
@@ -3666,6 +3852,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": -0.18498186377252987
     },
@@ -3685,6 +3872,7 @@
       "book_ask_depth_10bps": 3369.8189835000003,
       "book_depth_imbalance_10bps": -0.5409339502143666,
       "estimated_sweep_bps": 1.5821282789618696,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": 0.0
     },
@@ -3704,6 +3892,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": -0.22730666518288087
     },
@@ -3723,6 +3912,7 @@
       "book_ask_depth_10bps": 15261.96854092,
       "book_depth_imbalance_10bps": 0.3504557851208314,
       "estimated_sweep_bps": 2.312138728322033,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": 0.0
     },
@@ -3742,6 +3932,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": -0.8947976878612384
     },
@@ -3761,6 +3952,7 @@
       "book_ask_depth_10bps": 2532.0200675,
       "book_depth_imbalance_10bps": -0.48208275568903575,
       "estimated_sweep_bps": 3.4312561036753397,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": 0.0
     },
@@ -3780,6 +3972,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": -0.21701098537799168
     },
@@ -3799,6 +3992,7 @@
       "book_ask_depth_10bps": 17665.77478446,
       "book_depth_imbalance_10bps": 0.19039827790543315,
       "estimated_sweep_bps": 1.3323341599924543,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": 0.0
     },
@@ -3818,6 +4012,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "cancelled",
       "realized_pnl": 0.0
     },
@@ -3837,6 +4032,7 @@
       "book_ask_depth_10bps": 1650.190242,
       "book_depth_imbalance_10bps": -0.7422940257512718,
       "estimated_sweep_bps": 4.116759130384784,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": 0.0
     },
@@ -3856,6 +4052,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": -0.05649910782649131
     },
@@ -3875,6 +4072,7 @@
       "book_ask_depth_10bps": 23022.025445124,
       "book_depth_imbalance_10bps": 0.00934715669505766,
       "estimated_sweep_bps": 1.2500580882579548,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": 0.0
     },
@@ -3894,6 +4092,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": -0.8672680516608933
     },
@@ -3913,6 +4112,7 @@
       "book_ask_depth_10bps": 2123.2706210211,
       "book_depth_imbalance_10bps": -0.34620446362369184,
       "estimated_sweep_bps": 2.7382256297914243,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": 0.0
     },
@@ -3932,6 +4132,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": -0.2522380231898627
     },
@@ -3951,6 +4152,7 @@
       "book_ask_depth_10bps": 2910.1969637,
       "book_depth_imbalance_10bps": 0.7307890401336906,
       "estimated_sweep_bps": 1.153269519087452,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": 0.0
     },
@@ -3970,6 +4172,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": -0.65979453993664
     },
@@ -3989,6 +4192,7 @@
       "book_ask_depth_10bps": 3387.3252295999996,
       "book_depth_imbalance_10bps": 0.1929411854118388,
       "estimated_sweep_bps": 2.374893977946657,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": 0.0
     },
@@ -4008,6 +4212,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": -0.9097964376590172
     },
@@ -4027,6 +4232,7 @@
       "book_ask_depth_10bps": 18711.829393,
       "book_depth_imbalance_10bps": 0.042084299930830515,
       "estimated_sweep_bps": 1.9000570017080332,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": 0.0
     },
@@ -4046,6 +4252,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": -0.4048775079237302
     },
@@ -4065,6 +4272,7 @@
       "book_ask_depth_10bps": 16384.682465100002,
       "book_depth_imbalance_10bps": 0.2806745379837847,
       "estimated_sweep_bps": 1.1118111403463082,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": 0.0
     },
@@ -4084,6 +4292,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": -0.8609726494459394
     },
@@ -4103,6 +4312,7 @@
       "book_ask_depth_10bps": 897.2067784094401,
       "book_depth_imbalance_10bps": -0.17902390670143478,
       "estimated_sweep_bps": 9.090157838196331,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": 0.0
     },
@@ -4122,6 +4332,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": -0.2083127150334097
     },
@@ -4141,6 +4352,7 @@
       "book_ask_depth_10bps": 3507.638217100001,
       "book_depth_imbalance_10bps": 0.2197086175026957,
       "estimated_sweep_bps": 2.0505055284769647,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": 0.0
     },
@@ -4160,6 +4372,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": -0.1959371455828472
     },
@@ -4179,6 +4392,7 @@
       "book_ask_depth_10bps": 22242.0953768045,
       "book_depth_imbalance_10bps": 0.281253628833489,
       "estimated_sweep_bps": 0.6047046018031743,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": 0.0
     },
@@ -4198,6 +4412,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": -0.3941440257673746
     },
@@ -4217,6 +4432,7 @@
       "book_ask_depth_10bps": 1719.3181206999998,
       "book_depth_imbalance_10bps": 0.5947215525995007,
       "estimated_sweep_bps": 2.330170066495718,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": 0.0
     },
@@ -4236,6 +4452,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": -0.4640455262672537
     },
@@ -4255,6 +4472,7 @@
       "book_ask_depth_10bps": 55677.21364350001,
       "book_depth_imbalance_10bps": -0.012679564516606984,
       "estimated_sweep_bps": 1.1585248117407243,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": 0.0
     },
@@ -4274,6 +4492,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": -0.7085646682562128
     },
@@ -4293,6 +4512,7 @@
       "book_ask_depth_10bps": 3376.2327772000003,
       "book_depth_imbalance_10bps": 0.2000429742257687,
       "estimated_sweep_bps": 1.5269338692069925,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": 0.0
     },
@@ -4312,6 +4532,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": -0.9418048402607184
     },
@@ -4331,6 +4552,7 @@
       "book_ask_depth_10bps": 190.33566121944003,
       "book_depth_imbalance_10bps": 0.6094022048569385,
       "estimated_sweep_bps": 9.066183136899886,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": 0.0
     },
@@ -4350,6 +4572,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": -0.18834817460370273
     },
@@ -4369,6 +4592,7 @@
       "book_ask_depth_10bps": 690.9663869999999,
       "book_depth_imbalance_10bps": 0.3850780541174956,
       "estimated_sweep_bps": 4.130524576619887,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": 0.0
     },
@@ -4388,6 +4612,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "cancelled",
       "realized_pnl": 0.0
     },
@@ -4407,6 +4632,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": 0.7884556801441278
     },
@@ -4426,6 +4652,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": 0.0
     },
@@ -4445,6 +4672,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": -1.6725778546712682
     },
@@ -4464,6 +4692,7 @@
       "book_ask_depth_10bps": 1518.7331995620002,
       "book_depth_imbalance_10bps": 0.5521863102227823,
       "estimated_sweep_bps": 1.958252089402368,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": 0.0
     },
@@ -4483,6 +4712,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": -0.3697325102963377
     },
@@ -4502,6 +4732,7 @@
       "book_ask_depth_10bps": 3374.4618207000003,
       "book_depth_imbalance_10bps": 0.21429201543800863,
       "estimated_sweep_bps": 0.3397777853275663,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": 0.0
     },
@@ -4521,6 +4752,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": -0.8071075162109842
     },
@@ -4540,6 +4772,7 @@
       "book_ask_depth_10bps": 9189.795599188,
       "book_depth_imbalance_10bps": 0.10131140882948156,
       "estimated_sweep_bps": 1.5870496746539509,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": 0.0
     },
@@ -4559,6 +4792,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": -0.8561107998741031
     },
@@ -4578,6 +4812,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": 0.1447147899745434
     },
@@ -4597,6 +4832,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": 0.0
     },
@@ -4616,6 +4852,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": -0.04208556149732564
     },
@@ -4635,6 +4872,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": 0.0
     },
@@ -4654,6 +4892,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": -0.04815883615549703
     },
@@ -4673,6 +4912,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": 0.0
     },
@@ -4692,6 +4932,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": -0.023587077678620335
     },
@@ -4711,6 +4952,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": 0.0
     },
@@ -4730,6 +4972,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "rejected",
       "realized_pnl": 0.0
     },
@@ -4749,6 +4992,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "unknown",
       "realized_pnl": 0.0
     },
@@ -4768,6 +5012,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "unknown",
       "realized_pnl": 0.0
     },
@@ -4787,6 +5032,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "unknown",
       "realized_pnl": 0.0
     },
@@ -4806,6 +5052,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "unknown",
       "realized_pnl": 0.0
     },
@@ -4825,6 +5072,7 @@
       "book_ask_depth_10bps": null,
       "book_depth_imbalance_10bps": null,
       "estimated_sweep_bps": null,
+      "stage_timings_ms": {},
       "status": "filled",
       "realized_pnl": -0.022531671736807212
     }
@@ -5587,9 +5835,9 @@
   "last_hedge_at": {
     "SOL-USDT": 1792422007841
   },
-  "last_decision": "No tradeable bias: fresh directional 11/100 (3 inferred from neutral score); contextual learned strength floors passed 6; exploration strength floor 0.05; contextual raw-score floors passed 0; 0 candidate(s) blocked by negative walk-forward history · risk covers 13 open positions; 3 use entry-price marks",
-  "last_decision_at": 1792497916001,
-  "last_risk_note": "risk covers 13 open positions; 3 use entry-price marks",
+  "last_decision": "No tradeable bias: fresh directional 0/1 (0 inferred from neutral score); contextual learned strength floors passed 0; exploration strength floor 0.05; contextual raw-score floors passed 0; 0 candidate(s) blocked by negative walk-forward history",
+  "last_decision_at": 1792503414424,
+  "last_risk_note": "",
   "risk_limited_sizing": false,
   "last_signal_at": {
     "AAVE-USDT": 1792484962339,

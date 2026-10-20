@@ -13,6 +13,26 @@ services:
       - prometheus-data:/prometheus
     restart: unless-stopped
 
+  loki:
+    image: grafana/loki:3.5.0
+    command: -config.file=/etc/loki/local-config.yaml
+    ports:
+      - "127.0.0.1:3100:3100"
+    volumes:
+      - loki-data:/loki
+    restart: unless-stopped
+
+  alloy:
+    image: grafana/alloy:v1.10.2
+    command: run --server.http.listen-addr=0.0.0.0:12345 /etc/alloy/config.alloy
+    depends_on:
+      - loki
+    volumes:
+      - ./alloy/config.alloy:/etc/alloy/config.alloy:ro
+      - ../logs:/var/log/app:ro
+      - alloy-data:/var/lib/alloy/data
+    restart: unless-stopped
+
   node-exporter:
     image: prom/node-exporter:v1.9.1
     command:
@@ -30,14 +50,18 @@ services:
       FEED_HANDLERS_URL: http://host.docker.internal:3001
       EXECUTION_URL: http://host.docker.internal:3003
       INSIGHTS_URL: http://host.docker.internal:3004
+      SQLITE_DB_PATH: /workspace/src/rust/insights/signals.sqlite
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    volumes:
+      - ../:/workspace:ro
     restart: unless-stopped
 
   grafana:
     image: grafana/grafana:12.1.1
     depends_on:
       - prometheus
+      - loki
     ports:
       - "127.0.0.1:3000:3000"
     env_file:
@@ -54,3 +78,5 @@ services:
 volumes:
   grafana-data:
   prometheus-data:
+  loki-data:
+  alloy-data:

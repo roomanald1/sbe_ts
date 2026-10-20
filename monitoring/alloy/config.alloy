@@ -1,0 +1,32 @@
+local.file_match "application_logs" {
+  path_targets = [
+    {"__path__" = "/var/log/app/feed_handlers.log", "job" = "application", "service" = "feed_handlers"},
+    {"__path__" = "/var/log/app/position_management.log", "job" = "application", "service" = "position_management"},
+    {"__path__" = "/var/log/app/execution.log", "job" = "application", "service" = "execution"},
+    {"__path__" = "/var/log/app/insights.log", "job" = "application", "service" = "insights"},
+    {"__path__" = "/var/log/app/backend.log", "job" = "application", "service" = "backend"},
+    {"__path__" = "/var/log/app/ui.log", "job" = "application", "service" = "ui"},
+  ]
+}
+
+loki.source.file "application_logs" {
+  targets    = local.file_match.application_logs.targets
+  forward_to = [loki.process.application_logs.receiver]
+  tail_from_end = true
+}
+
+loki.process "application_logs" {
+  stage.regex {
+    expression = "^[0-9]+[.][0-9]+ (?P<level>INFO|WARN|ERROR) (?P<message>.*)$"
+  }
+  stage.labels {
+    values = {level = "level"}
+  }
+  forward_to = [loki.write.default.receiver]
+}
+
+loki.write "default" {
+  endpoint {
+    url = "http://loki:3100/loki/api/v1/push"
+  }
+}

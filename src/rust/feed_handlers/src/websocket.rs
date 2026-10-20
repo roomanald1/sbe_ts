@@ -30,6 +30,8 @@ const TRADE_UPDATE_CAPACITY: usize = 32;
 const SIGNAL_INSTRUMENT_LIMIT: usize = 100;
 static TRADE_FEEDS: OnceLock<StdMutex<HashMap<String, broadcast::Sender<Bytes>>>> = OnceLock::new();
 static BOOK_FEEDS: OnceLock<StdMutex<HashMap<String, broadcast::Sender<Bytes>>>> = OnceLock::new();
+static SIGNAL_FEEDS: OnceLock<Arc<StdMutex<HashMap<String, broadcast::Sender<Bytes>>>>> = OnceLock::new();
+static SIGNAL_PRICE_FEEDS: OnceLock<Arc<StdMutex<HashMap<String, broadcast::Sender<Bytes>>>>> = OnceLock::new();
 
 pub async fn serve() -> Result<()> {
     let instrument_data = get_instrument_data()
@@ -56,12 +58,9 @@ pub async fn serve() -> Result<()> {
     let sub_sender = price_updates.clone();
     let sub = subscribe(&instrument_data, sub_sender);
     let (ticker_batches, _) = broadcast::channel::<Bytes>(256);
-    let signal_feeds = Arc::new(StdMutex::new(
-        HashMap::<String, broadcast::Sender<Bytes>>::new(),
-    ));
-    let signal_price_feeds = Arc::new(StdMutex::new(
-        HashMap::<String, broadcast::Sender<Bytes>>::new(),
-    ));
+    let signal_feeds = SIGNAL_FEEDS.get_or_init(|| Arc::new(StdMutex::new(HashMap::new()))).clone();
+    let signal_price_feeds = SIGNAL_PRICE_FEEDS.get_or_init(|| Arc::new(StdMutex::new(HashMap::new()))).clone();
+    let (signal_events, _) = broadcast::channel::<Bytes>(65_536);
     let mut ticker_router = price_updates.subscribe();
     let routed_prices = Arc::clone(&signal_price_feeds);
     tokio::spawn(async move {
@@ -112,7 +111,7 @@ pub async fn serve() -> Result<()> {
         }
     });
     for instrument in instrument_data.iter().take(SIGNAL_INSTRUMENT_LIMIT) {
-        start_signal_feed(instrument, &signal_feeds, &signal_price_feeds);
+        start_signal_feed(instrument, &signal_feeds, &signal_price_feeds, &signal_events);
     }
     let port = env::var("PORT").unwrap_or_else(|_| "10000".to_string());
     let addr = format!("0.0.0.0:{port}");
@@ -128,6 +127,7 @@ pub async fn serve() -> Result<()> {
                 instrument_lookup: Arc::clone(&instrument_lookup),
                 signal_feeds: Arc::clone(&signal_feeds),
                 signal_price_feeds: Arc::clone(&signal_price_feeds),
+                signal_events: signal_events.clone(),
             }))
         }))
         .serve();
@@ -141,6 +141,7 @@ struct ServerResponder {
     instrument_lookup: Arc<HashSet<Arc<str>>>,
     signal_feeds: Arc<StdMutex<HashMap<String, broadcast::Sender<Bytes>>>>,
     signal_price_feeds: Arc<StdMutex<HashMap<String, broadcast::Sender<Bytes>>>>,
+    signal_events: broadcast::Sender<Bytes>,
 }
 
 impl RSocket for ServerResponder {
@@ -178,6 +179,22 @@ impl RSocket for ServerResponder {
             );
         }
 
+        if payload.data().and_then(|data| std::str::from_utf8(data.as_ref()).ok()) == Some("signal-events:*") {
+            let stream = futures_util::stream::unfold(
+                self.signal_events.subscribe(),
+                |mut events| async move {
+                    loop {
+                        match events.recv().await {
+                            Ok(data) => break Some((Ok(Payload::new(Some(data), None)), events)),
+                            Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                            Err(broadcast::error::RecvError::Closed) => break None,
+                        }
+                    }
+                },
+            ).boxed();
+            return log_stream_end(stream, "Insights signal-event stream disconnected".to_owned());
+        }
+
         if let Some(instrument) = requested_signal_instrument(&payload) {
             if !instrument.is_ascii() || instrument.is_empty() || instrument.len() > SYMBOL_LENGTH {
                 return Box::pin(futures_util::stream::once(async {
@@ -191,7 +208,7 @@ impl RSocket for ServerResponder {
                 }));
             };
             let instrument = instrument.to_string();
-            let sender = start_signal_feed(&instrument, &self.signal_feeds, &self.signal_price_feeds);
+            let sender = start_signal_feed(&instrument, &self.signal_feeds, &self.signal_price_feeds, &self.signal_events);
             let stream =
                 futures_util::stream::unfold(sender.subscribe(), |mut receiver| async move {
                     loop {
@@ -414,10 +431,22 @@ fn requested_signal_instrument(payload: &Payload) -> Option<&str> {
         .strip_prefix("signals:")
 }
 
+pub fn publish_signal_snapshot(symbol: &str, snapshot: Bytes) -> bool {
+    let Some(feeds) = SIGNAL_FEEDS.get() else { return false; };
+    let sender = feeds.lock().expect("signal feed map poisoned").get(symbol).cloned();
+    if let Some(sender) = sender {
+        let _ = sender.send(snapshot);
+        true
+    } else {
+        false
+    }
+}
+
 fn start_signal_feed(
     instrument: &str,
     feeds: &Arc<StdMutex<HashMap<String, broadcast::Sender<Bytes>>>>,
     price_feeds: &Arc<StdMutex<HashMap<String, broadcast::Sender<Bytes>>>>,
+    events: &broadcast::Sender<Bytes>,
 ) -> broadcast::Sender<Bytes> {
     let price_receiver = {
         let mut price_feeds = price_feeds.lock().expect("signal price map poisoned");
@@ -433,55 +462,33 @@ fn start_signal_feed(
             let (sender, _) = broadcast::channel(64);
             tokio::spawn(run_signal_feed(
                 instrument.to_owned(),
-                sender.clone(),
                 price_receiver,
+                events.clone(),
             ));
             sender
         })
         .clone()
 }
 
-async fn send_signal_event(
-    client: &reqwest::Client,
-    event: serde_json::Value,
-    output: &broadcast::Sender<Bytes>,
-) {
-    let base = std::env::var("INSIGHTS_URL").unwrap_or_else(|_| "http://127.0.0.1:3004".to_owned());
-    match client
-        .post(format!("{base}/internal/signals/event"))
-        .json(&event)
-        .send()
-        .await
-    {
-        Ok(response) => match response.error_for_status() {
-            Ok(response) => match response.bytes().await {
-                Ok(bytes) if bytes.as_ref() == b"null" => {}
-                Ok(bytes) => {
-                    let _ = output.send(bytes);
-                }
-                Err(error) => crate::service_log!("ERROR", "Insights signal API response failed: {error}"),
-            },
-            Err(error) => crate::service_log!("ERROR", "Insights signal API returned an error: {error}"),
-        },
-        Err(error) => crate::service_log!("ERROR", "Insights signal API request failed: {error}"),
+fn publish_signal_event(events: &broadcast::Sender<Bytes>, event: serde_json::Value) {
+    if let Ok(bytes) = serde_json::to_vec(&event) {
+        let _ = events.send(Bytes::from(bytes));
     }
 }
 
 async fn run_signal_feed(
     instrument: String,
-    output: broadcast::Sender<Bytes>,
     mut prices: broadcast::Receiver<Bytes>,
+    events: broadcast::Sender<Bytes>,
 ) {
     let mut trades = trade_request_stream(instrument.clone());
     let mut books = book_request_stream(instrument.clone());
-    let client = reqwest::Client::new();
-    let mut timer = tokio::time::interval(Duration::from_secs(1));
     loop {
         tokio::select! {
             incoming = prices.recv() => match incoming {
                 Ok(bytes) if has_symbol(&bytes, &instrument) => {
                     if let (Some(price), Some(volatility)) = (read_f64(&bytes, 40), read_f64(&bytes, 48)) {
-                        send_signal_event(&client, serde_json::json!({"symbol": instrument, "type": "price", "timestamp": now_ms(), "price": price, "volatility_1m": volatility}), &output).await;
+                        publish_signal_event(&events, serde_json::json!({"symbol": instrument, "type": "price", "timestamp": now_ms(), "price": price, "volatility_1m": volatility}));
                     }
                 }
                 Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {},
@@ -492,7 +499,7 @@ async fn run_signal_feed(
                     let bytes = bytes.as_ref();
                     if has_symbol(bytes, &instrument) {
                         if let (Some(timestamp), Some(price), Some(size)) = (read_u64(bytes, 72), read_f64(bytes, 80), read_f64(bytes, 88)) {
-                            send_signal_event(&client, serde_json::json!({"symbol": instrument, "type": "trade", "timestamp": timestamp, "price": price, "size": size, "is_buy": bytes.get(96) == Some(&1)}), &output).await;
+                            publish_signal_event(&events, serde_json::json!({"symbol": instrument, "type": "trade", "timestamp": timestamp, "price": price, "size": size, "is_buy": bytes.get(96) == Some(&1)}));
                         }
                     }
                 }
@@ -505,13 +512,10 @@ async fn run_signal_feed(
                         let ask_levels = (0..7).filter_map(|index| Some((read_f64(bytes, 160 + index * 16)?, read_f64(bytes, 168 + index * 16)?))).collect::<Vec<_>>();
                         let bid_sizes = bid_levels.iter().map(|(_, size)| *size).collect::<Vec<_>>();
                         let ask_sizes = ask_levels.iter().map(|(_, size)| *size).collect::<Vec<_>>();
-                        send_signal_event(&client, serde_json::json!({"symbol": instrument, "type": "book", "timestamp": read_u64(bytes, 40).unwrap_or_else(now_ms), "best_bid": read_f64(bytes, 48).unwrap_or_default(), "best_ask": read_f64(bytes, 160).unwrap_or_default(), "bid_sizes": bid_sizes, "ask_sizes": ask_sizes, "bid_levels": bid_levels, "ask_levels": ask_levels}), &output).await;
+                        publish_signal_event(&events, serde_json::json!({"symbol": instrument, "type": "book", "timestamp": read_u64(bytes, 40).unwrap_or_else(now_ms), "best_bid": read_f64(bytes, 48).unwrap_or_default(), "best_ask": read_f64(bytes, 160).unwrap_or_default(), "bid_sizes": bid_sizes, "ask_sizes": ask_sizes, "bid_levels": bid_levels, "ask_levels": ask_levels}));
                     }
                 }
             },
-            _ = timer.tick() => {
-                send_signal_event(&client, serde_json::json!({"symbol": instrument, "type": "tick", "timestamp": now_ms()}), &output).await;
-            }
         }
     }
 }

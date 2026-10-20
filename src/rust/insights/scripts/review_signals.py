@@ -235,6 +235,8 @@ def summarize_database(path):
         if "imported_files" in tables:
             result["imported_files"] = [row[0] for row in db.execute("SELECT path FROM imported_files ORDER BY path")]
         if "signal_daily_summary" in tables:
+            summary_columns = {row[1] for row in db.execute("PRAGMA table_info(signal_daily_summary)")}
+            archive_bytes_sql = "COALESCE(length(training_payload), 0)" if "training_payload" in summary_columns else "0"
             result["daily_summary_rows"] = [
                 {
                     "day_utc": datetime.fromtimestamp(day_ms / 1000, timezone.utc).date().isoformat(),
@@ -243,10 +245,12 @@ def summarize_database(path):
                     "compressed_payload_bytes": payload_bytes,
                     "first_timestamp_utc": timestamp_text(first),
                     "last_timestamp_utc": timestamp_text(last),
+                    "training_archive_bytes": archive_bytes,
                 }
-                for day_ms, kind, count, payload_bytes, first, last in db.execute(
+                for day_ms, kind, count, payload_bytes, first, last, archive_bytes in db.execute(
                     "SELECT day_start_ms, kind, record_count, compressed_payload_bytes, "
-                    "first_timestamp, last_timestamp FROM signal_daily_summary "
+                    f"first_timestamp, last_timestamp, {archive_bytes_sql} "
+                    "FROM signal_daily_summary "
                     "ORDER BY day_start_ms, kind"
                 )
             ]

@@ -2,7 +2,7 @@ use anyhow::Result;
 use flate2::{read::MultiGzDecoder, write::GzEncoder, Compression};
 use std::io::{Read, Write};
 use serde::{Deserialize, Serialize};
-use std::{collections::{BTreeMap, HashMap, HashSet, VecDeque}, path::PathBuf, sync::Arc, time::{Duration, Instant}};
+use std::{collections::{BTreeMap, HashMap, HashSet, VecDeque}, path::PathBuf, sync::{Arc, atomic::{AtomicBool, Ordering}}, time::{Duration, Instant}};
 use axum::{Json, Router, http::StatusCode, routing::get};
 use tokio::sync::{mpsc, oneshot, Mutex};
 use rusqlite::{params, Connection};
@@ -11,10 +11,11 @@ const SIGNALS_BINARY_MAGIC: &[u8; 8] = b"SIGBIN01";
 
 const PRICE_WINDOW_MS: u64 = 3_610_000;
 const TRADE_WINDOW_MS: u64 = 60_000;
-const MIN_SNAPSHOT_INTERVAL_MS: u64 = 15_000;
 const MAX_BOOK_AGE_MS: u64 = 5_000;
 const MAX_PRICE_LOOKBACK_GAP_MS: u64 = 5_000;
 const WALK_FORWARD_MIN_TRAINING_SAMPLES: usize = 30;
+/// Heavy research capture is sampled independently from live signal generation.
+pub const RESEARCH_SAMPLE_INTERVAL_MS: u64 = 1_000;
 const WALK_FORWARD_MIN_THRESHOLD_SAMPLES: usize = 10;
 const WALK_FORWARD_TRAINING_WINDOW: usize = 200;
 const WALK_FORWARD_LOGISTIC_REFRESH_INTERVAL: usize = 100;
@@ -328,7 +329,7 @@ pub struct SignalEngine {
     book_ask_levels: Vec<(f64, f64)>,
     book_history: VecDeque<BookHistorySample>,
     volatility_1m: Option<f64>,
-    last_snapshot_at: u64,
+    last_research_sample_at: Option<u64>,
 }
 
 fn feature_vector(components: &SignalComponents) -> Option<[f64; 4]> {
@@ -484,6 +485,17 @@ fn breakout_watch(components: &SignalComponents, range_bounds: Option<(f64, f64)
 }
 
 impl SignalEngine {
+    /// Gate research feature extraction and persistence, never live snapshots.
+    pub fn research_sample_due(&mut self, timestamp: u64) -> bool {
+        let due = self.last_research_sample_at.map_or(true, |last| {
+            timestamp < last || timestamp.saturating_sub(last) >= RESEARCH_SAMPLE_INTERVAL_MS
+        });
+        if due {
+            self.last_research_sample_at = Some(timestamp);
+        }
+        due
+    }
+
     pub fn on_price(&mut self, timestamp: u64, price: f64, volatility_1m: f64) -> Vec<CompletedSignalOutcome> {
         if !price.is_finite() || price <= 0.0 { return Vec::new(); }
         if self.prices.back().is_some_and(|sample| timestamp < sample.0) { return Vec::new(); }
@@ -662,7 +674,6 @@ impl SignalEngine {
     }
 
     pub fn snapshot(&mut self, symbol: &str, now: u64) -> Option<SignalSnapshot> {
-        if now.saturating_sub(self.last_snapshot_at) < MIN_SNAPSHOT_INTERVAL_MS { return None; }
         self.prune(now);
         let latest = self.prices.back().copied()?;
         let range_cutoff = now.saturating_sub(300_000);
@@ -783,7 +794,6 @@ impl SignalEngine {
                 }
             }
         }
-        self.last_snapshot_at = now;
         Some(SignalSnapshot { symbol: symbol.to_owned(), timestamp: now, direction: direction.to_owned(), score, strength: (score.abs() * count as f64 / 6.0).clamp(0.0, 1.0), components, reasons, stale: now.saturating_sub(latest.0) > 5_000,
             ranging_probability, range_lower_bound: range_bounds.map(|(low, _)| low), range_upper_bound: range_bounds.map(|(_, high)| high) })
     }
@@ -819,11 +829,13 @@ impl SignalEngine {
     }
 }
 
-fn select_strength_threshold(training: &[SignalOutcome]) -> Option<f64> {
+fn select_strength_threshold(training: &[SignalOutcome], evaluated_by: u64) -> Option<f64> {
     STRENGTH_THRESHOLDS.iter().copied().filter_map(|threshold| {
-        let selected = training.iter().filter(|sample| sample.strength >= threshold).collect::<Vec<_>>();
-        if selected.len() < WALK_FORWARD_MIN_THRESHOLD_SAMPLES { return None; }
-        let mean = selected.iter().filter_map(|sample| sample.net_return_percent).sum::<f64>() / selected.len() as f64;
+        let (net_total, selected_count) = training.iter()
+            .filter(|sample| sample.evaluated_timestamp <= evaluated_by && sample.strength >= threshold)
+            .fold((0.0, 0usize), |(total, count), sample| (total + sample.net_return_percent.unwrap_or_default(), count + 1));
+        if selected_count < WALK_FORWARD_MIN_THRESHOLD_SAMPLES { return None; }
+        let mean = net_total / selected_count as f64;
         (mean > 0.0).then_some((threshold, mean))
     }).max_by(|left, right| left.1.total_cmp(&right.1).then(left.0.total_cmp(&right.0))).map(|(threshold, _)| threshold)
 }
@@ -905,7 +917,7 @@ struct EvaluationQuery {
 }
 
 #[derive(Clone)]
-pub struct SignalStore { path: PathBuf, writer: mpsc::Sender<WriteRequest>, recent_cache: Arc<Mutex<Option<(Instant, Vec<SignalSnapshot>)>>>, best_cache: Arc<Mutex<Option<(Instant, Vec<SignalSnapshot>)>>>, performance_cache: Arc<Mutex<Option<(Instant, Vec<SignalPerformance>)>>>, walk_forward_cache: Arc<Mutex<Option<(Instant, Vec<SignalWalkForward>)>>> }
+pub struct SignalStore { path: PathBuf, writer: mpsc::Sender<WriteRequest>, recent_cache: Arc<Mutex<Option<(Instant, Vec<SignalSnapshot>)>>>, best_cache: Arc<Mutex<Option<(Instant, Vec<SignalSnapshot>)>>>, performance_cache: Arc<Mutex<Option<(Instant, Vec<SignalPerformance>)>>>, walk_forward_cache: Arc<Mutex<Option<(Instant, Vec<SignalWalkForward>)>>>, walk_forward_refreshing: Arc<AtomicBool> }
 
 struct WriteRequest { records: Vec<StoredSignalRecord>, ack: oneshot::Sender<std::result::Result<(), String>> }
 
@@ -1070,7 +1082,7 @@ impl SignalStore {
         let connection = Self::open_database_at(&path)?;
         let (writer, receiver) = mpsc::channel(4096);
         tokio::spawn(run_database_writer(connection, receiver));
-        Ok(Self { path, writer, recent_cache: Arc::new(Mutex::new(None)), best_cache: Arc::new(Mutex::new(None)), performance_cache: Arc::new(Mutex::new(None)), walk_forward_cache: Arc::new(Mutex::new(None)) })
+        Ok(Self { path, writer, recent_cache: Arc::new(Mutex::new(None)), best_cache: Arc::new(Mutex::new(None)), performance_cache: Arc::new(Mutex::new(None)), walk_forward_cache: Arc::new(Mutex::new(None)), walk_forward_refreshing: Arc::new(AtomicBool::new(false)) })
     }
 
     fn open_database_at(path: &PathBuf) -> Result<Connection> {
@@ -1095,17 +1107,41 @@ impl SignalStore {
             sql.push_str(" LIMIT ?");
             values.push(rusqlite::types::Value::Integer(limit.min(i64::MAX as usize) as i64));
         }
-        let mut statement = connection.prepare(&sql)?;
-        let rows = statement.query_map(rusqlite::params_from_iter(values.iter()), |row| row.get::<_, Vec<u8>>(0))?;
         let mut records = Vec::new();
-        for row in rows {
-            let compressed = row?;
-            let mut decoder = MultiGzDecoder::new(compressed.as_slice());
-            let mut payload = Vec::new();
-            decoder.read_to_end(&mut payload)?;
-            records.push(bincode::deserialize(&payload)?);
+        {
+            let mut statement = connection.prepare(&sql)?;
+            let rows = statement.query_map(rusqlite::params_from_iter(values.iter()), |row| row.get::<_, Vec<u8>>(0))?;
+            for row in rows {
+                let compressed = row?;
+                let mut decoder = MultiGzDecoder::new(compressed.as_slice());
+                let mut payload = Vec::new();
+                decoder.read_to_end(&mut payload)?;
+                records.push(bincode::deserialize(&payload)?);
+            }
         }
-        records.reverse();
+        if matches!(kind, 0 | 1 | 4 | 5) {
+            let since_day = since.map(|timestamp| (timestamp / 86_400_000) as i64 * 86_400_000);
+            let mut statement = connection.prepare(
+                "SELECT training_payload FROM signal_daily_summary WHERE kind = ?1 AND training_payload IS NOT NULL AND (?2 IS NULL OR day_start_ms >= ?2)",
+            )?;
+            let rows = statement.query_map(params![kind, since_day], |row| row.get::<_, Vec<u8>>(0))?;
+            for row in rows {
+                let compressed = row?;
+                let mut decoder = MultiGzDecoder::new(compressed.as_slice());
+                let mut payload = Vec::new();
+                decoder.read_to_end(&mut payload)?;
+                let mut archived: Vec<StoredSignalRecord> = bincode::deserialize(&payload)?;
+                if let Some(timestamp) = since {
+                    archived.retain(|record| record_timestamp(record) >= timestamp);
+                }
+                records.extend(archived);
+            }
+        }
+        records.sort_by_key(record_timestamp);
+        if let Some(limit) = limit {
+            let start = records.len().saturating_sub(limit);
+            records.drain(..start);
+        }
         Ok(records)
     }
 
@@ -1518,14 +1554,17 @@ impl SignalStore {
     }
 
     pub async fn best(&self, limit: usize) -> Result<Vec<SignalSnapshot>> {
-        if limit > 10 { return self.load_best(limit).await; }
+        // The AutoTrader asks for more than the UI's ten rows. Keep a wider
+        // cache so its five-second cycle does not repeatedly decompress and
+        // recalibrate the entire signal history.
+        if limit > 100 { return self.load_best(limit).await; }
         let mut cache = self.best_cache.lock().await;
         if let Some((created, items)) = cache.as_ref() {
-            if created.elapsed() < Duration::from_secs(30) {
+            if created.elapsed() < Duration::from_secs(8) {
                 return Ok(items.iter().take(limit).cloned().collect());
             }
         }
-        let items = self.load_best(10).await?;
+        let items = self.load_best(100).await?;
         *cache = Some((Instant::now(), items.clone()));
         Ok(items.into_iter().take(limit).collect())
     }
@@ -1609,10 +1648,31 @@ impl SignalStore {
         Ok(result)
     }
 
+    pub fn cached_walk_forward(&self) -> Vec<SignalWalkForward> {
+        self.walk_forward_cache.try_lock().ok()
+            .and_then(|cache| cache.as_ref().map(|(_, value)| value.clone()))
+            .unwrap_or_default()
+    }
+
     pub async fn walk_forward(&self) -> Result<Vec<SignalWalkForward>> {
         let mut cache = self.walk_forward_cache.lock().await;
         if let Some((created, value)) = cache.as_ref() {
-            if created.elapsed() < Duration::from_secs(60) { return Ok(value.clone()); }
+            if created.elapsed() < Duration::from_secs(10) { return Ok(value.clone()); }
+            // Walk-forward training is deliberately expensive. Keep serving
+            // the last complete result while a background refresh runs, so
+            // a cache expiry cannot stall the AutoTrader's signal path.
+            let stale = value.clone();
+            if self.walk_forward_refreshing.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire).is_ok() {
+                let store = self.clone();
+                tokio::spawn(async move {
+                    let refreshed = store.compute_walk_forward().await;
+                    if let Ok(value) = refreshed {
+                        *store.walk_forward_cache.lock().await = Some((Instant::now(), value));
+                    }
+                    store.walk_forward_refreshing.store(false, Ordering::Release);
+                });
+            }
+            return Ok(stale);
         }
         let value = self.compute_walk_forward().await?;
         *cache = Some((Instant::now(), value.clone()));
@@ -1623,7 +1683,7 @@ impl SignalStore {
         let outcomes = self.read_outcomes().await?;
         let snapshots = self.read_snapshots().await?;
         let snapshots_by_key = snapshots.into_iter().map(|snapshot| ((snapshot.symbol.clone(), snapshot.timestamp), snapshot)).collect::<HashMap<_, _>>();
-        let research_features = self.research_features(None, 50_000).await?;
+        let research_features = self.research_features(None, usize::MAX).await?;
         let research_features_by_key = research_features.into_iter()
             .filter_map(|features| Some(((features.symbol.clone(), features.timestamp), research_feature_vector(&features)?)))
             .collect::<HashMap<_, _>>();
@@ -1718,13 +1778,15 @@ impl SignalStore {
                         }
                     }
                 }
-                let training = non_overlapping[start..index].iter().filter(|prior| prior.evaluated_timestamp <= sample.signal_timestamp).cloned().collect::<Vec<_>>();
-                if training.len() < WALK_FORWARD_MIN_TRAINING_SAMPLES { continue; }
-                max_training_samples = max_training_samples.max(training.len());
+                let training_window = &non_overlapping[start..index];
+                let training_count = training_window.iter().filter(|prior| prior.evaluated_timestamp <= sample.signal_timestamp).count();
+                if training_count < WALK_FORWARD_MIN_TRAINING_SAMPLES { continue; }
+                max_training_samples = max_training_samples.max(training_count);
                 evaluated_signals += 1;
                 if sample.direction_match { baseline_correct += 1; }
                 baseline_net_total += sample.net_return_percent.unwrap_or_default();
                 if (index - WALK_FORWARD_MIN_TRAINING_SAMPLES) % WALK_FORWARD_LOGISTIC_REFRESH_INTERVAL == 0 {
+                    let training = training_window.iter().filter(|prior| prior.evaluated_timestamp <= sample.signal_timestamp).cloned().collect::<Vec<_>>();
                     let logistic_training = training.iter().filter(|prior| prior.features.is_some()).cloned().collect::<Vec<_>>();
                     logistic_weights = train_logistic(&logistic_training);
                     trend_logistic_weights = train_trend_logistic(&logistic_training);
@@ -1786,7 +1848,7 @@ impl SignalStore {
                     if matches { five_minute_trend_correct += 1; }
                     five_minute_trend_net_total += net_return;
                 }
-                let Some(threshold) = select_strength_threshold(&training) else { continue; };
+                let Some(threshold) = select_strength_threshold(training_window, sample.signal_timestamp) else { continue; };
                 last_threshold = Some(threshold);
                 if sample.strength < threshold { continue; }
                 selected_signals += 1;

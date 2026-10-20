@@ -2,7 +2,7 @@
 use axum::{extract::State, http::StatusCode, routing::get, Json, Router};
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, path::PathBuf, sync::{Arc, atomic::{AtomicBool, Ordering}}, time::{Instant, SystemTime, UNIX_EPOCH}};
-use tokio::{sync::Mutex, time::{Duration, interval}};
+use tokio::{sync::{Mutex, Notify}, time::{Duration, interval}};
 
 const DEFAULT_MAX_ORDER_NOTIONAL: f64 = 100.0;
 const DEFAULT_DAILY_NOTIONAL: f64 = 1_000.0;
@@ -39,16 +39,20 @@ const EXIT_POLICY_ADJUSTMENT_STEP: f64 = 0.05;
 const MIN_EXIT_POLICY_SAMPLES: usize = 10;
 const MIN_EXIT_REWARD_RISK_RATIO: f64 = 1.5;
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct Dashboard { best: Vec<Signal>, walk_forward: Vec<WalkForward> }
-#[derive(Deserialize)]
+struct Dashboard {
+    best: Vec<Signal>,
+    walk_forward: Vec<WalkForward>,
+    #[serde(default)] markets: BTreeMap<String, serde_json::Value>,
+}
+#[derive(Clone, Deserialize)]
 struct Signal { symbol: String, direction: String, strength: f64, timestamp: u64, stale: bool,
     #[serde(default)] score: f64,
     #[serde(default)] ranging_probability: Option<f64>,
     #[serde(default)] components: SignalComponents,
 }
-#[derive(Default, Deserialize, Serialize)]
+#[derive(Clone, Default, Deserialize, Serialize)]
 struct SignalComponents {
     momentum_10s_percent: Option<f64>, trend_5m_volatility_units: Option<f64>,
     #[serde(default)] trade_flow_imbalance: Option<f64>,
@@ -56,7 +60,7 @@ struct SignalComponents {
     volatility_1m_percent: Option<f64>, mispricing_vs_vwap_bps: Option<f64>,
     pressure_without_price_move: Option<f64>, aggressor_cost_bps: Option<f64>,
 }
-#[derive(Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 struct WalkForward {
     symbol: String, horizon_seconds: u64,
     #[serde(default)] all_signal_long: SideWalkForwardMetrics,
@@ -64,7 +68,7 @@ struct WalkForward {
     #[serde(default)] research_logistic_long: SideWalkForwardMetrics,
     #[serde(default)] research_logistic_short: SideWalkForwardMetrics,
 }
-#[derive(Default, Deserialize, Serialize)]
+#[derive(Clone, Default, Deserialize, Serialize)]
 struct SideWalkForwardMetrics {
     sample_count: usize,
     direction_match_rate: Option<f64>,
@@ -73,10 +77,6 @@ struct SideWalkForwardMetrics {
     positive_net_rate_lower_95: Option<f64>,
 }
 
-#[derive(Deserialize)]
-struct OkxBooksResponse { code: String, msg: String, data: Vec<OkxBook> }
-#[derive(Deserialize)]
-struct OkxBook { bids: Vec<Vec<String>>, asks: Vec<Vec<String>> }
 #[derive(Clone, Copy)]
 struct DeepBookAssessment {
     available_within_band: f64,
@@ -87,43 +87,45 @@ struct DeepBookAssessment {
     depth_imbalance_10bps: f64,
 }
 
-fn quote_depth_within_band(levels: &[Vec<String>], mid: f64, is_bid: bool) -> f64 {
-    let band_price = if is_bid { mid * (1.0 - DEEP_BOOK_BAND_BPS / 10_000.0) } else { mid * (1.0 + DEEP_BOOK_BAND_BPS / 10_000.0) };
-    levels.iter().filter_map(|row| {
-        let price = row.first()?.parse::<f64>().ok()?;
-        let size = row.get(1)?.parse::<f64>().ok()?;
-        (price.is_finite() && size.is_finite() && price > 0.0 && size > 0.0 && if is_bid { price >= band_price } else { price <= band_price }).then_some(price * size)
-    }).sum()
+fn market_levels(market: &serde_json::Value, side: &str) -> Vec<(f64, f64)> {
+    market.get(side).and_then(serde_json::Value::as_array).into_iter().flatten().filter_map(|level| {
+        let price = level.get("price")?.as_f64()?;
+        let size = level.get("size")?.as_f64()?;
+        (price.is_finite() && size.is_finite() && price > 0.0 && size > 0.0).then_some((price, size))
+    }).collect()
 }
 
-async fn assess_deep_book(client: &reqwest::Client, symbol: &str, is_buy: bool, target_notional: f64) -> Result<Option<DeepBookAssessment>, String> {
+fn quote_depth_within_band(levels: &[(f64, f64)], mid: f64, is_bid: bool) -> f64 {
+    let band_price = if is_bid { mid * (1.0 - DEEP_BOOK_BAND_BPS / 10_000.0) } else { mid * (1.0 + DEEP_BOOK_BAND_BPS / 10_000.0) };
+    levels.iter().filter(|(price, _)| if is_bid { *price >= band_price } else { *price <= band_price })
+        .map(|(price, size)| price * size).sum()
+}
+
+fn assess_deep_book(market: &serde_json::Value, symbol: &str, is_buy: bool, target_notional: f64) -> Option<DeepBookAssessment> {
     let quote = symbol.rsplit('-').next().unwrap_or_default();
-    if !matches!(quote, "USDT" | "USDC") { return Ok(None); }
-    let response = client.get(format!("https://www.okx.com/api/v5/market/books?instId={symbol}&sz=50")).send().await
-        .map_err(|error| format!("deep-book request failed: {error}"))?
-        .error_for_status().map_err(|error| format!("deep-book HTTP error: {error}"))?;
-    let response: OkxBooksResponse = response.json().await.map_err(|error| format!("deep-book response could not be decoded: {error}"))?;
-    if response.code != "0" { return Err(format!("OKX deep-book error: {}", response.msg)); }
-    let book = response.data.first().ok_or_else(|| "OKX returned no deep-book snapshot".to_owned())?;
-    let best_bid = book.bids.first().and_then(|row| row.first()).and_then(|value| value.parse::<f64>().ok()).filter(|value| value.is_finite() && *value > 0.0).ok_or_else(|| "deep book has no valid bid".to_owned())?;
-    let best_ask = book.asks.first().and_then(|row| row.first()).and_then(|value| value.parse::<f64>().ok()).filter(|value| value.is_finite() && *value >= best_bid).ok_or_else(|| "deep book has no valid ask".to_owned())?;
+    if !matches!(quote, "USDT" | "USDC") { return None; }
+    let bids = market_levels(market, "bids");
+    let asks = market_levels(market, "asks");
+    let best_bid = bids.first()?.0;
+    let best_ask = asks.first()?.0;
+    if best_ask < best_bid { return None; }
     let mid = (best_bid + best_ask) / 2.0;
-    let bid_depth_10bps = quote_depth_within_band(&book.bids, mid, true);
-    let ask_depth_10bps = quote_depth_within_band(&book.asks, mid, false);
+    let bid_depth_10bps = quote_depth_within_band(&bids, mid, true);
+    let ask_depth_10bps = quote_depth_within_band(&asks, mid, false);
     let total_depth = bid_depth_10bps + ask_depth_10bps;
     let depth_imbalance_10bps = if total_depth > 0.0 { (bid_depth_10bps - ask_depth_10bps) / total_depth } else { 0.0 };
-    let levels = if is_buy { &book.asks } else { &book.bids };
+    let levels = if is_buy { &asks } else { &bids };
     let available_within_band = if is_buy { ask_depth_10bps } else { bid_depth_10bps };
     let notional_cap = available_within_band * DEEP_BOOK_MAX_PARTICIPATION;
     let planned_notional = target_notional.min(notional_cap);
-    if planned_notional < MIN_DEEP_BOOK_ORDER_NOTIONAL { return Ok(Some(DeepBookAssessment { available_within_band, notional_cap, impact_bps: f64::INFINITY, bid_depth_10bps, ask_depth_10bps, depth_imbalance_10bps })); }
+    if planned_notional < MIN_DEEP_BOOK_ORDER_NOTIONAL {
+        return Some(DeepBookAssessment { available_within_band, notional_cap, impact_bps: f64::INFINITY, bid_depth_10bps, ask_depth_10bps, depth_imbalance_10bps });
+    }
     let mut remaining = planned_notional / mid;
     let mut filled = 0.0;
     let mut quote_value = 0.0;
-    for row in levels {
-        let (Some(price), Some(size)) = (row.first().and_then(|value| value.parse::<f64>().ok()), row.get(1).and_then(|value| value.parse::<f64>().ok())) else { continue; };
-        if !price.is_finite() || !size.is_finite() || price <= 0.0 || size <= 0.0 { continue; }
-        let quantity = remaining.min(size);
+    for (price, size) in levels {
+        let quantity = remaining.min(*size);
         filled += quantity;
         quote_value += quantity * price;
         remaining -= quantity;
@@ -133,7 +135,7 @@ async fn assess_deep_book(client: &reqwest::Client, symbol: &str, is_buy: bool, 
         let average = quote_value / filled;
         if is_buy { (average / mid - 1.0) * 10_000.0 } else { (1.0 - average / mid) * 10_000.0 }
     };
-    Ok(Some(DeepBookAssessment { available_within_band, notional_cap, impact_bps, bid_depth_10bps, ask_depth_10bps, depth_imbalance_10bps }))
+    Some(DeepBookAssessment { available_within_band, notional_cap, impact_bps, bid_depth_10bps, ask_depth_10bps, depth_imbalance_10bps })
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
@@ -205,7 +207,7 @@ struct SettingsRequest {
 #[derive(Deserialize)]
 struct EnabledRequest { enabled: bool }
 #[derive(Clone)]
-struct AutoTraderState { enabled: Arc<AtomicBool>, settings: Arc<Mutex<Settings>>, cycle_lock: Arc<Mutex<()>>, settings_path: PathBuf }
+struct AutoTraderState { enabled: Arc<AtomicBool>, settings: Arc<Mutex<Settings>>, cycle_lock: Arc<Mutex<()>>, pending_signals: Arc<Mutex<BTreeMap<String, Dashboard>>>, signal_notify: Arc<Notify>, settings_path: PathBuf }
 
 #[derive(Clone, Serialize, Deserialize)]
 struct TraderOrder {
@@ -224,6 +226,7 @@ struct TraderOrder {
     #[serde(default)] book_ask_depth_10bps: Option<f64>,
     #[serde(default)] book_depth_imbalance_10bps: Option<f64>,
     #[serde(default)] estimated_sweep_bps: Option<f64>,
+    #[serde(default)] stage_timings_ms: BTreeMap<String, f64>,
     status: String,
     realized_pnl: f64,
 }
@@ -256,20 +259,54 @@ pub fn router() -> Router {
     if settings.utc_day != utc_day() { settings.utc_day = utc_day(); }
     let state = AutoTraderState {
         enabled: Arc::new(AtomicBool::new(std::env::var("AUTO_TRADER_ENABLED").as_deref() == Ok("true"))),
-        settings: Arc::new(Mutex::new(settings)), cycle_lock: Arc::new(Mutex::new(())), settings_path,
+        settings: Arc::new(Mutex::new(settings)),
+        cycle_lock: Arc::new(Mutex::new(())),
+        pending_signals: Arc::new(Mutex::new(BTreeMap::new())),
+        signal_notify: Arc::new(Notify::new()),
+        settings_path,
     };
     let worker_state = state.clone();
     tokio::spawn(async move {
         let mut ticker = interval(Duration::from_secs(5));
-        loop { ticker.tick().await; if worker_state.enabled.load(Ordering::Relaxed) {
-            if let Err(error) = run_cycle(&worker_state).await { crate::service_log!("ERROR", "Auto trader cycle failed: {}", error.1); }
-        } }
+        loop {
+            let signal_ready = worker_state.signal_notify.notified();
+            tokio::pin!(signal_ready);
+            let pending = worker_state.pending_signals.lock().await.pop_first().map(|(_, dashboard)| dashboard);
+            let pushed_dashboard = match pending {
+                Some(dashboard) => Some(dashboard),
+                None => tokio::select! {
+                    _ = ticker.tick() => None,
+                    _ = &mut signal_ready => worker_state.pending_signals.lock().await.pop_first().map(|(_, dashboard)| dashboard),
+                },
+            };
+            if worker_state.enabled.load(Ordering::Relaxed) {
+                if let Err(error) = run_cycle(&worker_state, pushed_dashboard).await { crate::service_log!("ERROR", "Auto trader cycle failed: {}", error.1); }
+            }
+        }
     });
     Router::new()
         .route("/positions/auto-trader", get(get_status).put(set_enabled))
+        .route("/internal/auto-trader/signal", axum::routing::post(signal_ready))
         .route("/positions/auto-trader/settings", axum::routing::put(update_settings))
         .route("/positions/auto-trader/activity", get(get_activity))
         .with_state(state)
+}
+
+async fn signal_ready(State(state): State<AutoTraderState>, Json(dashboard): Json<Dashboard>) -> StatusCode {
+    if state.enabled.load(Ordering::Relaxed) {
+        let mut pending = state.pending_signals.lock().await;
+        for signal in dashboard.best {
+            let symbol = signal.symbol.clone();
+            pending.insert(symbol, Dashboard {
+                best: vec![signal],
+                walk_forward: dashboard.walk_forward.clone(),
+                markets: dashboard.markets.clone(),
+            });
+        }
+        drop(pending);
+        state.signal_notify.notify_one();
+    }
+    StatusCode::ACCEPTED
 }
 
 async fn get_status(State(state): State<AutoTraderState>) -> Json<StatusResponse> {
@@ -385,8 +422,8 @@ async fn get_activity(State(state): State<AutoTraderState>) -> Json<ActivityResp
         learning_win_rate: (learning_samples > 0).then_some(learning_positive as f64 / learning_samples as f64), preferred_order_type, parameter_profile_samples })
 }
 
-async fn run_cycle(state: &AutoTraderState) -> Result<CycleResult, (StatusCode, String)> {
-    let result = run_cycle_inner(state).await;
+async fn run_cycle(state: &AutoTraderState, pushed_dashboard: Option<Dashboard>) -> Result<CycleResult, (StatusCode, String)> {
+    let result = run_cycle_inner(state, pushed_dashboard).await;
     let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64;
     let mut message = match &result {
         Ok(cycle) if cycle.status == "order_submitted" || cycle.status == "hedge_submitted" => format!("{}: {} {} {}", cycle.status, cycle.side.as_deref().unwrap_or(""), cycle.symbol.as_deref().unwrap_or(""), cycle.order_type.as_deref().unwrap_or("")),
@@ -401,7 +438,9 @@ async fn run_cycle(state: &AutoTraderState) -> Result<CycleResult, (StatusCode, 
     result
 }
 
-async fn run_cycle_inner(state: &AutoTraderState) -> Result<CycleResult, (StatusCode, String)> {
+async fn run_cycle_inner(state: &AutoTraderState, mut pushed_dashboard: Option<Dashboard>) -> Result<CycleResult, (StatusCode, String)> {
+    let cycle_started = Instant::now();
+    let signal_was_pushed = pushed_dashboard.is_some();
     let _cycle = state.cycle_lock.lock().await;
     { let mut settings = state.settings.lock().await; settings.last_risk_note.clear(); settings.risk_limited_sizing = false; }
     let now = SystemTime::now().duration_since(UNIX_EPOCH).map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "System clock is before Unix epoch".into()))?.as_secs();
@@ -409,7 +448,9 @@ async fn run_cycle_inner(state: &AutoTraderState) -> Result<CycleResult, (Status
     let position_url = std::env::var("POSITION_MANAGEMENT_URL").unwrap_or_else(|_| "http://127.0.0.1:3002".into());
     let client = reqwest::Client::new();
     { let mut settings = state.settings.lock().await; reset_daily_budget(&mut settings); }
-    if let Some(result) = maybe_exit_auto_position(&client, &position_url, state).await? { return Ok(result); }
+    if pushed_dashboard.is_none() {
+        if let Some(result) = maybe_exit_auto_position(&client, &position_url, state).await? { return Ok(result); }
+    }
     {
         let mut settings = state.settings.lock().await;
         reset_daily_budget(&mut settings);
@@ -422,10 +463,20 @@ async fn run_cycle_inner(state: &AutoTraderState) -> Result<CycleResult, (Status
             return Ok(skipped(&format!("Daily realized-loss limit reached at USD {:.2}; learned daily cap is now USD {:.2}", settings.daily_realized_pnl, settings.daily_realized_loss_limit)));
         }
     }
-    if let Some(result) = maybe_place_portfolio_hedge(&client, &position_url, state).await? { return Ok(result); }
-    let dashboard_response = client.get(format!("{insights_url}/signals/auto-trader-dashboard")).send().await.map_err(upstream_error)?.error_for_status().map_err(upstream_error)?;
-    let dashboard_payload: serde_json::Value = dashboard_response.json().await.map_err(upstream_error)?;
-    let dashboard: Dashboard = serde_json::from_value(dashboard_payload).map_err(|error| (StatusCode::BAD_GATEWAY, format!("Auto Trader signal payload could not be decoded: {error}")))?;
+    if pushed_dashboard.is_none() {
+        if let Some(result) = maybe_place_portfolio_hedge(&client, &position_url, state).await? { return Ok(result); }
+    }
+    let dashboard_ms = if pushed_dashboard.is_some() {
+        0.0
+    } else {
+        let dashboard_started = Instant::now();
+        let dashboard_response = client.get(format!("{insights_url}/signals/auto-trader-dashboard")).send().await.map_err(upstream_error)?.error_for_status().map_err(upstream_error)?;
+        let dashboard_payload: serde_json::Value = dashboard_response.json().await.map_err(upstream_error)?;
+        pushed_dashboard = Some(serde_json::from_value(dashboard_payload).map_err(|error| (StatusCode::BAD_GATEWAY, format!("Auto Trader signal payload could not be decoded: {error}")))?);
+        dashboard_started.elapsed().as_secs_f64() * 1000.0
+    };
+    let dashboard = pushed_dashboard.expect("dashboard was supplied or fetched");
+    let selection_started = Instant::now();
     let learning = state.settings.lock().await.learning.clone();
     let mut signals = dashboard.best;
     let mut inferred_direction_count = 0;
@@ -511,6 +562,7 @@ async fn run_cycle_inner(state: &AutoTraderState) -> Result<CycleResult, (Status
         };
         (signal, true)
     };
+    let signal_selection_ms = selection_started.elapsed().as_secs_f64() * 1000.0;
     let evidence = dashboard.walk_forward.iter().find(|item| item.symbol == signal.symbol && (60..=300).contains(&item.horizon_seconds));
     let selected_payload = signal_audit_payload(
         signal,
@@ -521,12 +573,27 @@ async fn run_cycle_inner(state: &AutoTraderState) -> Result<CycleResult, (Status
         Some(exploratory),
         evidence,
     );
-    store_auto_trader_audit(&client, &selected_payload).await;
+    let audit_client = client.clone();
+    tokio::spawn(async move { store_auto_trader_audit(&audit_client, &selected_payload).await; });
     let decision_id = signal_decision_id(signal);
     let position_url = std::env::var("POSITION_MANAGEMENT_URL").unwrap_or_else(|_| "http://127.0.0.1:3002".into());
     if !signal.symbol.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'-') { return Ok(skipped("Selected insight has an invalid instrument symbol")); }
-    let inputs: serde_json::Value = client.get(format!("{position_url}/internal/insights-inputs?symbol={}", signal.symbol)).send().await.map_err(upstream_error)?.error_for_status().map_err(upstream_error)?.json().await.map_err(upstream_error)?;
-    let market = &inputs["markets"][&signal.symbol];
+    let pushed_signal = signal_was_pushed;
+    let market_inputs_started = Instant::now();
+    let market = if let Some(market) = dashboard.markets.get(&signal.symbol) {
+        market.clone()
+    } else if pushed_signal {
+        return Ok(skipped(&format!("Pushed signal for {} had no cached local order book", signal.symbol)));
+    } else {
+        client.get(format!("{position_url}/internal/market-book?symbol={}", signal.symbol)).send().await.map_err(upstream_error)?.error_for_status().map_err(upstream_error)?.json().await.map_err(upstream_error)?
+    };
+    let market_inputs_ms = market_inputs_started.elapsed().as_secs_f64() * 1000.0;
+    if pushed_signal {
+        let updated_at = market.get("updated_at_ms").and_then(serde_json::Value::as_u64).unwrap_or_default();
+        if updated_at == 0 || now.saturating_mul(1000).saturating_sub(updated_at) > 5_000 {
+            return Ok(skipped(&format!("Pushed signal for {} had a stale local order book", signal.symbol)));
+        }
+    }
     let bid = market["bids"][0]["price"].as_f64();
     let ask = market["asks"][0]["price"].as_f64();
     let Some((bid, ask)) = bid.zip(ask).filter(|(bid, ask)| bid.is_finite() && ask.is_finite() && *bid > 0.0 && *ask >= *bid) else { return Ok(skipped(&format!("No current order book for {}; subscribed and waiting for a fresh book", signal.symbol))); };
@@ -583,8 +650,9 @@ async fn run_cycle_inner(state: &AutoTraderState) -> Result<CycleResult, (Status
     let learning_context = format!("{context}:P{profile}");
     drop(settings);
     let side = if signal.direction == "bullish" { "buy" } else { "sell" };
-    let deep_book = assess_deep_book(&client, &signal.symbol, side == "buy", notional).await
-        .map_err(|error| (StatusCode::BAD_GATEWAY, error))?;
+    let deep_book_started = Instant::now();
+    let deep_book = assess_deep_book(&market, &signal.symbol, side == "buy", notional);
+    let deep_book_ms = deep_book_started.elapsed().as_secs_f64() * 1000.0;
     // Walk-forward net returns include configured taker fees, but not the live
     // spread/sweep cost of this particular order. Avoid trading when that
     // incremental round-trip cost would consume the measured edge.
@@ -619,6 +687,13 @@ async fn run_cycle_inner(state: &AutoTraderState) -> Result<CycleResult, (Status
     }
     let quantity = notional / mid;
     let timestamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64;
+    let mut stage_timings_ms = BTreeMap::new();
+    stage_timings_ms.insert("dashboard_fetch".to_owned(), dashboard_ms);
+    stage_timings_ms.insert("signal_selection".to_owned(), signal_selection_ms);
+    stage_timings_ms.insert("local_market_book".to_owned(), market_inputs_ms);
+    stage_timings_ms.insert("deep_book_local".to_owned(), deep_book_ms);
+    stage_timings_ms.insert("cycle_to_order_record".to_owned(), cycle_started.elapsed().as_secs_f64() * 1000.0);
+    stage_timings_ms.insert("signal_age_at_order_record".to_owned(), timestamp.saturating_sub(signal.timestamp) as f64);
     {
         let mut settings = state.settings.lock().await;
         reset_daily_budget(&mut settings);
@@ -630,7 +705,7 @@ async fn run_cycle_inner(state: &AutoTraderState) -> Result<CycleResult, (Status
             book_bid_depth_10bps: deep_book.map(|assessment| assessment.bid_depth_10bps),
             book_ask_depth_10bps: deep_book.map(|assessment| assessment.ask_depth_10bps),
             book_depth_imbalance_10bps: deep_book.map(|assessment| assessment.depth_imbalance_10bps),
-            estimated_sweep_bps: deep_book.map(|assessment| assessment.impact_bps),
+            estimated_sweep_bps: deep_book.map(|assessment| assessment.impact_bps), stage_timings_ms: stage_timings_ms.clone(),
             status: "submitting".to_owned(), realized_pnl: 0.0 });
         if settings.orders.len() > 500 { let excess = settings.orders.len() - 500; settings.orders.drain(..excess); }
         persist_settings(&state.settings_path, &settings)?;
@@ -653,6 +728,7 @@ async fn run_cycle_inner(state: &AutoTraderState) -> Result<CycleResult, (Status
         }
     };
     let submit_response_ms = submit_started.elapsed().as_secs_f64() * 1000.0;
+    stage_timings_ms.insert("order_submit_response".to_owned(), submit_response_ms);
     let mut settings = state.settings.lock().await;
     reset_daily_budget(&mut settings);
     let filled = response.get("filled_quantity").and_then(serde_json::Value::as_f64).unwrap_or(0.0);
@@ -678,7 +754,7 @@ async fn run_cycle_inner(state: &AutoTraderState) -> Result<CycleResult, (Status
         else if filled > 0.0 { "filled" }
         else { "accepted" };
     if let Some(order) = settings.orders.iter_mut().find(|order| order.timestamp == timestamp) {
-        order.filled_quantity = filled; order.average_price = average_price; order.status = status.to_owned(); order.realized_pnl = realized_delta;
+        order.filled_quantity = filled; order.average_price = average_price; order.status = status.to_owned(); order.realized_pnl = realized_delta; order.stage_timings_ms = stage_timings_ms;
     }
     settings.used_notional_today = allocated_notional(&settings);
     persist_settings(&state.settings_path, &settings)?;
@@ -773,7 +849,7 @@ async fn maybe_exit_auto_position(client: &reqwest::Client, base: &str, state: &
             let mut settings = state.settings.lock().await;
             reset_daily_budget(&mut settings);
             settings.used_notional_today = allocated_notional(&settings);
-            settings.orders.push(TraderOrder { timestamp, triggered_at: None, symbol: symbol.clone(), side: side.into(), order_type: "Ioc".into(), purpose: reason.into(), decision_id: None, quantity, filled_quantity: 0.0, average_price: None, reserved_notional: notional, book_bid_depth_10bps: None, book_ask_depth_10bps: None, book_depth_imbalance_10bps: None, estimated_sweep_bps: None, status: "submitting".into(), realized_pnl: 0.0 });
+            settings.orders.push(TraderOrder { timestamp, triggered_at: None, symbol: symbol.clone(), side: side.into(), order_type: "Ioc".into(), purpose: reason.into(), decision_id: None, quantity, filled_quantity: 0.0, average_price: None, reserved_notional: notional, book_bid_depth_10bps: None, book_ask_depth_10bps: None, book_depth_imbalance_10bps: None, estimated_sweep_bps: None, stage_timings_ms: BTreeMap::new(), status: "submitting".into(), realized_pnl: 0.0 });
         }
         let submit_started = Instant::now();
         let response = match submit_configured_order(client, base, &symbol, side, quantity, notional, bid, ask, AutoOrderType::Ioc, ExecutionParameters::default()).await {
@@ -871,7 +947,7 @@ async fn arm_protective_stop(client: &reqwest::Client, base: &str, state: &AutoT
     let mut settings = state.settings.lock().await;
     if let Some(position) = settings.positions.get_mut(symbol).filter(|position| position.quantity.abs() > 1e-12 && position.quantity.signum() == if is_long { 1.0 } else { -1.0 }) {
         position.protective_stops.push(ProtectiveStop { barrier_id: id, order_timestamp: timestamp, quantity, processed_quantity: 0.0, processed_notional: 0.0, processed_fee: 0.0 });
-        settings.orders.push(TraderOrder { timestamp, triggered_at: None, symbol: symbol.to_owned(), side: side.to_owned(), order_type: "StopMarket".into(), purpose: "stop-loss".into(), decision_id: None, quantity, filled_quantity: 0.0, average_price: None, reserved_notional: 0.0, book_bid_depth_10bps: None, book_ask_depth_10bps: None, book_depth_imbalance_10bps: None, estimated_sweep_bps: None, status: "armed".into(), realized_pnl: 0.0 });
+        settings.orders.push(TraderOrder { timestamp, triggered_at: None, symbol: symbol.to_owned(), side: side.to_owned(), order_type: "StopMarket".into(), purpose: "stop-loss".into(), decision_id: None, quantity, filled_quantity: 0.0, average_price: None, reserved_notional: 0.0, book_bid_depth_10bps: None, book_ask_depth_10bps: None, book_depth_imbalance_10bps: None, estimated_sweep_bps: None, stage_timings_ms: BTreeMap::new(), status: "armed".into(), realized_pnl: 0.0 });
         if settings.orders.len() > 500 { let excess = settings.orders.len() - 500; settings.orders.drain(..excess); }
         persist_settings(&state.settings_path, &settings)?;
     } else {
@@ -1122,7 +1198,7 @@ async fn maybe_place_portfolio_hedge(client: &reqwest::Client, base: &str, state
     let quantity = notional / (price * quote_rate);
     settings.used_notional_today = allocated_notional(&settings);
     settings.last_hedge_at.insert(symbol.clone(), timestamp);
-    settings.orders.push(TraderOrder { timestamp, triggered_at: None, symbol: symbol.clone(), side: side.clone(), order_type: "Ioc".into(), purpose: "portfolio-hedge".into(), decision_id: None, quantity, filled_quantity: 0.0, average_price: None, reserved_notional: notional, book_bid_depth_10bps: None, book_ask_depth_10bps: None, book_depth_imbalance_10bps: None, estimated_sweep_bps: None, status: "submitting".into(), realized_pnl: 0.0 });
+    settings.orders.push(TraderOrder { timestamp, triggered_at: None, symbol: symbol.clone(), side: side.clone(), order_type: "Ioc".into(), purpose: "portfolio-hedge".into(), decision_id: None, quantity, filled_quantity: 0.0, average_price: None, reserved_notional: notional, book_bid_depth_10bps: None, book_ask_depth_10bps: None, book_depth_imbalance_10bps: None, estimated_sweep_bps: None, stage_timings_ms: BTreeMap::new(), status: "submitting".into(), realized_pnl: 0.0 });
     if settings.orders.len() > 500 { let excess = settings.orders.len() - 500; settings.orders.drain(..excess); }
     persist_settings(&state.settings_path, &settings)?;
     drop(settings);

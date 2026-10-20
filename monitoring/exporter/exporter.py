@@ -1,5 +1,6 @@
 import json
 import os
+from pathlib import Path
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.error import URLError
 from urllib.request import urlopen
@@ -35,13 +36,24 @@ def sample(name, help_text, value, labels=None, kind="gauge"):
 def metrics():
     METRIC_HEADERS.clear()
     output = []
+    db_path = Path(os.getenv("SQLITE_DB_PATH", ""))
+    if db_path.is_file():
+        output.append(sample("app_sqlite_database_size_bytes", "SQLite database file size in bytes.", db_path.stat().st_size, {"database": db_path.name}))
+    service_up = {}
     for name, (base, health_path) in SERVICES.items():
         try:
             with urlopen(base + health_path, timeout=2) as response:
                 up = 1 if response.status == 200 else 0
         except (OSError, URLError):
             up = 0
+        service_up[name] = up
         output.append(sample("app_service_up", "Whether an application service health endpoint is reachable.", up, {"service": name}))
+        try:
+            with urlopen(base + "/process-cpu-seconds", timeout=2) as response:
+                cpu_seconds = float(response.read().decode().strip())
+            output.append(sample("app_service_process_cpu_seconds_total", "Cumulative CPU time consumed by an application service process in seconds.", cpu_seconds, {"service": name}, kind="counter"))
+        except (OSError, URLError, ValueError):
+            pass
 
     base = SERVICES["position_management"][0]
     try:
@@ -67,15 +79,16 @@ def metrics():
         pass
     try:
         status = get_json(base, "/positions/auto-trader")
-        output.append(sample("app_autotrader_enabled", "Whether the autotrader is enabled.", int(bool(status.get("enabled")))))
+        enabled = bool(status.get("enabled")) and service_up.get("position_management", 0) == 1
+        output.append(sample("app_autotrader_enabled", "Whether the autotrader is enabled while position management is healthy.", int(enabled)))
         for key, metric, help_text in [
             ("used_notional_today", "app_autotrader_used_notional_today_usd", "Autotrader notional used today in USD."),
             ("daily_notional_limit", "app_autotrader_daily_notional_limit_usd", "Autotrader daily notional limit in USD."),
         ]:
             if isinstance(status.get(key), (int, float)):
                 output.append(sample(metric, help_text, status[key]))
-    except (OSError, URLError, ValueError):
-        pass
+    except (OSError, URLError, ValueError, TypeError):
+        output.append(sample("app_autotrader_enabled", "Whether the autotrader is enabled while position management is healthy.", 0))
     try:
         activity = get_json(base, "/positions/auto-trader/activity")
         for key, metric, help_text in [
@@ -112,6 +125,17 @@ def metrics():
             output.append(sample("app_autotrader_tick_to_order_latency_ms", "Milliseconds from signal tick timestamp to autotrader order creation.", sum(latencies) / len(latencies), {"stat": "average"}))
             output.append(sample("app_autotrader_tick_to_order_latency_ms", "Milliseconds from signal tick timestamp to autotrader order creation.", latencies[p95_index], {"stat": "p95"}))
             output.append(sample("app_autotrader_tick_to_order_samples", "Number of signal orders used in the tick-to-order latency summary.", len(latencies)))
+        stage_values = {}
+        for order in orders:
+            for stage, latency in order.get("stage_timings_ms", {}).items():
+                if isinstance(latency, (int, float)) and latency >= 0:
+                    stage_values.setdefault(stage, []).append((int(order.get("timestamp", 0)), latency))
+        for stage, samples in stage_values.items():
+            values = sorted(value for _, value in samples)
+            p95_index = max(0, (95 * len(values) + 99) // 100 - 1)
+            output.append(sample("app_autotrader_stage_latency_ms", "Milliseconds spent in a measured AutoTrader pipeline stage.", values[-1], {"stage": stage, "stat": "latest"}))
+            output.append(sample("app_autotrader_stage_latency_ms", "Milliseconds spent in a measured AutoTrader pipeline stage.", sum(values) / len(values), {"stage": stage, "stat": "average"}))
+            output.append(sample("app_autotrader_stage_latency_ms", "Milliseconds spent in a measured AutoTrader pipeline stage.", values[p95_index], {"stage": stage, "stat": "p95"}))
     except (OSError, URLError, ValueError, TypeError):
         pass
     return "".join(output).encode()

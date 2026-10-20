@@ -23,8 +23,14 @@ async fn proxy(State(state): State<GatewayState>, request: Request<Body>) -> Res
 async fn main() -> anyhow::Result<()> {
  let gateway_state = GatewayState { client: reqwest::Client::new(), upstream: std::env::var("POSITION_MANAGEMENT_URL").unwrap_or_else(|_| "http://127.0.0.1:3002".to_owned()), allowed_prefixes: Arc::new(vec!["/positions/orders".to_owned(), "/positions/vwap".to_owned(), "/positions/twap".to_owned(), "/positions/close-profitable".to_owned(), "/positions/barriers".to_owned(), "/positions/auto-trader".to_owned()]) };
  let gateway = Router::new().fallback(any(proxy)).with_state(gateway_state);
- let app = Router::new().route("/health", get(|| async { "ok" })).merge(gateway).merge(execution::vwap_api::router()).merge(execution::orders_api::router());
+ let app = Router::new().route("/health", get(|| async { "ok" })).route("/process-cpu-seconds", get(process_cpu_seconds)).merge(gateway).merge(execution::vwap_api::router()).merge(execution::orders_api::router());
  let listener = tokio::net::TcpListener::bind(("0.0.0.0", 3003)).await?;
  crate::service_log!("INFO", "Execution service listening on http://0.0.0.0:3003");
  axum::serve(listener, app).await?; Ok(())
+}
+async fn process_cpu_seconds() -> String {
+    let stat = std::fs::read_to_string("/proc/self/stat").unwrap_or_default();
+    let fields = stat.rsplit_once(')').map(|(_, fields)| fields).unwrap_or("");
+    let values: Vec<u64> = fields.split_whitespace().filter_map(|value| value.parse().ok()).collect();
+    values.get(11).zip(values.get(12)).map(|(user, system)| (*user + *system) as f64 / 100.0).unwrap_or(0.0).to_string()
 }

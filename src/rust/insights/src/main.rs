@@ -1,9 +1,11 @@
 mod logging;
 mod daily_summary;
+mod feed_client;
 use axum::{Json, Router, http::StatusCode, routing::get};
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, sync::{Arc, OnceLock}, time::{SystemTime, UNIX_EPOCH}};
-use tokio::sync::Mutex;
+use std::{collections::{BTreeMap, HashMap}, sync::{Arc, OnceLock}, time::{SystemTime, UNIX_EPOCH}};
+use tokio::sync::{Mutex, Notify};
+use futures_util::StreamExt;
 use insights::signals::{ExternalMarketFeatures, SignalEngine, SignalSnapshot, SignalStore, StoredSignalRecord};
 
 
@@ -13,11 +15,10 @@ enum SignalFeedEvent {
     Price { timestamp: u64, price: f64, volatility_1m: f64 },
     Trade { timestamp: u64, price: f64, size: f64, is_buy: bool },
     Book { timestamp: u64, best_bid: f64, best_ask: f64, bid_sizes: Vec<f64>, ask_sizes: Vec<f64>, #[serde(default)] bid_levels: Vec<(f64, f64)>, #[serde(default)] ask_levels: Vec<(f64, f64)> },
-    Tick { timestamp: u64 },
 }
 #[derive(Deserialize)]
 struct SignalEventRequest { symbol: String, #[serde(flatten)] event: SignalFeedEvent }
-struct SignalRuntime { store: SignalStore, engines: Mutex<HashMap<String, SignalEngine>> }
+struct SignalRuntime { store: SignalStore, engines: Mutex<HashMap<String, SignalEngine>>, signal_push_cache: Arc<Mutex<BTreeMap<String, serde_json::Value>>>, signal_push_notify: Arc<Notify>, ui_snapshot_cache: Arc<Mutex<BTreeMap<String, serde_json::Value>>>, ui_snapshot_notify: Arc<Notify> }
 
 static POSITION_MANAGEMENT_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
 
@@ -116,6 +117,109 @@ async fn poll_external_market_features(store: SignalStore) {
     }
 }
 
+
+async fn run_feed_signal_consumer(runtime: Arc<SignalRuntime>) {
+    loop {
+        match feed_client::signal_events().await {
+            Ok(mut events) => {
+                crate::service_log!("INFO", "Connected to FeedHandlers RSocket signal-event stream");
+                while let Some(event) = events.next().await {
+                    match event.and_then(|bytes| serde_json::from_slice::<SignalEventRequest>(&bytes).map_err(anyhow::Error::from)) {
+                        Ok(request) => {
+                            if let Err((status, error)) = ingest_signal_event(axum::extract::State(Arc::clone(&runtime)), Json(request)).await {
+                                crate::service_log!("WARN", "Signal event rejected with {status}: {error}");
+                            }
+                        }
+                        Err(error) => crate::service_log!("WARN", "Invalid FeedHandlers signal event: {error}"),
+                    }
+                }
+                crate::service_log!("WARN", "FeedHandlers RSocket signal-event stream disconnected");
+            }
+            Err(error) => crate::service_log!("WARN", "Could not connect to FeedHandlers signal-event stream: {error:#}"),
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    }
+}
+
+async fn run_ui_snapshot_push_worker(
+    pending_snapshots: Arc<Mutex<BTreeMap<String, serde_json::Value>>>,
+    notify: Arc<Notify>,
+) {
+    let client = POSITION_MANAGEMENT_CLIENT.get_or_init(reqwest::Client::new);
+    let base = std::env::var("FEED_HANDLERS_URL")
+        .unwrap_or_else(|_| "http://127.0.0.1:3001".to_owned());
+    loop {
+        let notified = notify.notified();
+        tokio::pin!(notified);
+        let snapshots = {
+            let mut pending = pending_snapshots.lock().await;
+            if pending.is_empty() { None } else { Some(std::mem::take(&mut *pending)) }
+        };
+        let Some(snapshots) = snapshots else {
+            notified.await;
+            continue;
+        };
+        for (_, snapshot) in snapshots {
+            if let Err(error) = client.post(format!("{base}/internal/signals/snapshot"))
+                .timeout(std::time::Duration::from_millis(250))
+                .json(&snapshot).send().await.and_then(reqwest::Response::error_for_status) {
+                crate::service_log!("WARN", "Signal snapshot fanout to FeedHandlers failed: {error}");
+            }
+        }
+    }
+}
+
+async fn run_signal_push_worker(
+    pending_signals: Arc<Mutex<BTreeMap<String, serde_json::Value>>>,
+    notify: Arc<Notify>,
+) {
+    let client = POSITION_MANAGEMENT_CLIENT.get_or_init(reqwest::Client::new);
+    let base = std::env::var("POSITION_MANAGEMENT_URL")
+        .unwrap_or_else(|_| "http://127.0.0.1:3002".to_owned());
+    let mut retry_delay = std::time::Duration::from_millis(250);
+    let mut endpoint_available = true;
+    loop {
+        let notified = notify.notified();
+        tokio::pin!(notified);
+        let dashboards = {
+            let mut pending = pending_signals.lock().await;
+            if pending.is_empty() { None } else { Some(std::mem::take(&mut *pending)) }
+        };
+        let Some(dashboards) = dashboards else {
+            notified.await;
+            continue;
+        };
+        let mut failed = BTreeMap::new();
+        for (symbol, dashboard) in dashboards {
+            let result = client.post(format!("{base}/internal/auto-trader/signal"))
+                .timeout(std::time::Duration::from_secs(2))
+                .json(&dashboard).send().await.and_then(reqwest::Response::error_for_status);
+            if let Err(error) = result {
+                if endpoint_available {
+                    crate::service_log!("WARN", "Auto-trader signal delivery unavailable; retaining latest signal per symbol and retrying: {error}");
+                    endpoint_available = false;
+                }
+                failed.insert(symbol, dashboard);
+            }
+        }
+        if !failed.is_empty() {
+            let mut pending = pending_signals.lock().await;
+            for (symbol, dashboard) in failed {
+                pending.entry(symbol).or_insert(dashboard);
+            }
+            drop(pending);
+            tokio::time::sleep(retry_delay).await;
+            retry_delay = (retry_delay * 2).min(std::time::Duration::from_secs(5));
+        } else {
+            if !endpoint_available {
+                crate::service_log!("INFO", "Auto-trader signal delivery recovered");
+            }
+            endpoint_available = true;
+            retry_delay = std::time::Duration::from_millis(250);
+        }
+    }
+}
+
 async fn ingest_signal_event(
     axum::extract::State(runtime): axum::extract::State<Arc<SignalRuntime>>,
     Json(request): Json<SignalEventRequest>,
@@ -123,24 +227,58 @@ async fn ingest_signal_event(
     if request.symbol.is_empty() || !request.symbol.is_ascii() || request.symbol.len() > 32 {
         return Err((StatusCode::BAD_REQUEST, "Invalid signal symbol".to_owned()));
     }
-    let (snapshot, records) = {
+    let (snapshot, records, market) = {
         let mut engines = runtime.engines.lock().await;
-        let (btc_context, eth_context) = match &request.event {
-            SignalFeedEvent::Tick { timestamp } => (
-                engines.get("BTC-USDT").map_or((None, None), |reference| reference.return_context(*timestamp)),
-                engines.get("ETH-USDT").map_or((None, None), |reference| reference.return_context(*timestamp)),
-            ),
-            _ => ((None, None), (None, None)),
+        let event_timestamp = match &request.event {
+            SignalFeedEvent::Price { timestamp, .. }
+            | SignalFeedEvent::Trade { timestamp, .. }
+            | SignalFeedEvent::Book { timestamp, .. } => *timestamp,
         };
+        let (btc_context, eth_context) = (
+            engines.get("BTC-USDT").map_or((None, None), |reference| reference.return_context(event_timestamp)),
+            engines.get("ETH-USDT").map_or((None, None), |reference| reference.return_context(event_timestamp)),
+        );
         let engine = engines.entry(request.symbol.clone()).or_default();
         let mut records = Vec::new();
+        let mut market = None;
         let snapshot = match request.event {
             SignalFeedEvent::Price { timestamp, price, volatility_1m } => {
                 for outcome in engine.on_price(timestamp, price, volatility_1m) {
                     records.push(StoredSignalRecord::Outcome(outcome.legacy));
                     records.push(StoredSignalRecord::Evaluation(outcome.evaluation));
                 }
-                None
+                let snapshot = engine.snapshot(&request.symbol, timestamp);
+                if let Some(snapshot) = &snapshot {
+                    // The pushed decision needs the latest available market cache on
+                    // every price event, regardless of the research sampling cadence.
+                    if let Some(book_snapshot) = engine.book_snapshot(&request.symbol, snapshot.timestamp) {
+                        let levels = |levels: Vec<(f64, f64)>| levels.into_iter()
+                            .map(|(price, size)| serde_json::json!({"price": price, "size": size}))
+                            .collect::<Vec<_>>();
+                        market = Some(serde_json::json!({
+                            request.symbol.clone(): {
+                                "bids": levels(book_snapshot.bid_levels.clone()),
+                                "asks": levels(book_snapshot.ask_levels.clone()),
+                                "updated_at_ms": book_snapshot.timestamp
+                            }
+                        }));
+                        if engine.research_sample_due(snapshot.timestamp) {
+                            let features = engine.research_features(&request.symbol, snapshot.timestamp, btc_context, eth_context);
+                            records.push(StoredSignalRecord::BookSnapshot(book_snapshot));
+                            records.push(StoredSignalRecord::ResearchFeatures(features));
+                            engine.track(snapshot);
+                            records.push(StoredSignalRecord::Snapshot(snapshot.clone()));
+                        }
+                    } else if engine.research_sample_due(snapshot.timestamp) {
+                        // Preserve feature and snapshot samples when a fresh book is
+                        // unavailable; depth data is optional in the research schema.
+                        let features = engine.research_features(&request.symbol, snapshot.timestamp, btc_context, eth_context);
+                        records.push(StoredSignalRecord::ResearchFeatures(features));
+                        engine.track(snapshot);
+                        records.push(StoredSignalRecord::Snapshot(snapshot.clone()));
+                    }
+                }
+                snapshot
             }
             SignalFeedEvent::Trade { timestamp, price, size, is_buy } => {
                 engine.on_trade(timestamp, price, size, is_buy);
@@ -150,24 +288,30 @@ async fn ingest_signal_event(
                 engine.on_book(timestamp, best_bid, best_ask, &bid_sizes, &ask_sizes, &bid_levels, &ask_levels);
                 None
             }
-            SignalFeedEvent::Tick { timestamp } => {
-                let snapshot = engine.snapshot(&request.symbol, timestamp);
-                if let Some(snapshot) = &snapshot {
-                    if let Some(book_snapshot) = engine.book_snapshot(&request.symbol, snapshot.timestamp) {
-                        records.push(StoredSignalRecord::BookSnapshot(book_snapshot));
-                    }
-                    let features = engine.research_features(&request.symbol, snapshot.timestamp, btc_context, eth_context);
-                    records.push(StoredSignalRecord::ResearchFeatures(features));
-                    engine.track(snapshot);
-                    records.push(StoredSignalRecord::Snapshot(snapshot.clone()));
-                }
-                snapshot
-            }
         };
-        (snapshot, records)
+        (snapshot, records, market)
     };
-    runtime.store.append_records(records).await
-        .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
+    if !records.is_empty() {
+        let store = runtime.store.clone();
+        tokio::spawn(async move {
+            if let Err(error) = store.append_records(records).await {
+                crate::service_log!("ERROR", "Could not persist signal event off hot path: {error}");
+            }
+        });
+    }
+    if let Some(snapshot) = snapshot.as_ref() {
+        let markets = market.unwrap_or_else(|| serde_json::json!({}));
+        let dashboard = serde_json::json!({
+            "best": [snapshot],
+            "walkForward": runtime.store.cached_walk_forward(),
+            "markets": markets
+        });
+        runtime.signal_push_cache.lock().await.insert(snapshot.symbol.clone(), dashboard);
+        runtime.signal_push_notify.notify_one();
+        let snapshot_json = serde_json::to_value(snapshot).unwrap_or(serde_json::Value::Null);
+        runtime.ui_snapshot_cache.lock().await.insert(snapshot.symbol.clone(), snapshot_json);
+        runtime.ui_snapshot_notify.notify_one();
+    }
     Ok(Json(snapshot))
 }
 
@@ -304,10 +448,24 @@ async fn main() -> anyhow::Result<()> {
     signal_store.migrate_to_binary().await?;
     daily_summary::spawn_nightly();
     tokio::spawn(poll_external_market_features(signal_store.clone()));
-    let signal_runtime = Arc::new(SignalRuntime { store: signal_store.clone(), engines: Mutex::new(HashMap::new()) });
+    let warm_store = signal_store.clone();
+    tokio::spawn(async move {
+        if let Err(error) = warm_store.walk_forward().await {
+            crate::service_log!("WARN", "Initial walk-forward cache warm failed: {error}");
+        }
+    });
+    let signal_push_cache = Arc::new(Mutex::new(BTreeMap::new()));
+    let signal_push_notify = Arc::new(Notify::new());
+    tokio::spawn(run_signal_push_worker(Arc::clone(&signal_push_cache), Arc::clone(&signal_push_notify)));
+    let ui_snapshot_cache = Arc::new(Mutex::new(BTreeMap::new()));
+    let ui_snapshot_notify = Arc::new(Notify::new());
+    tokio::spawn(run_ui_snapshot_push_worker(Arc::clone(&ui_snapshot_cache), Arc::clone(&ui_snapshot_notify)));
+    let signal_runtime = Arc::new(SignalRuntime { store: signal_store.clone(), engines: Mutex::new(HashMap::new()), signal_push_cache, signal_push_notify, ui_snapshot_cache, ui_snapshot_notify });
+    tokio::spawn(run_feed_signal_consumer(Arc::clone(&signal_runtime)));
     let app = Router::new()
         .merge(daily_summary::router())
         .route("/health", get(|| async { "ok" }))
+        .route("/process-cpu-seconds", get(process_cpu_seconds))
         .route("/positions/insights", get(get_position_insights))
         .route("/internal/signals/event", axum::routing::post(ingest_signal_event).with_state(signal_runtime))
         .merge(signal_store.router());
@@ -315,4 +473,10 @@ async fn main() -> anyhow::Result<()> {
     crate::service_log!("INFO", "Insights service listening on http://0.0.0.0:3004");
     axum::serve(listener, app).await?;
     Ok(())
+}
+async fn process_cpu_seconds() -> String {
+    let stat = std::fs::read_to_string("/proc/self/stat").unwrap_or_default();
+    let fields = stat.rsplit_once(')').map(|(_, fields)| fields).unwrap_or("");
+    let values: Vec<u64> = fields.split_whitespace().filter_map(|value| value.parse().ok()).collect();
+    values.get(11).zip(values.get(12)).map(|(user, system)| (*user + *system) as f64 / 100.0).unwrap_or(0.0).to_string()
 }
