@@ -18,7 +18,6 @@ import { FeedToolbar } from './FeedToolbar';
 import { getOrderTypeDescription } from '../order_type_descriptions';
 
 const money = new Intl.NumberFormat(undefined, { maximumFractionDigits: 2 });
-const pnlDetailMoney = new Intl.NumberFormat(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 4 });
 const timestamp = new Intl.DateTimeFormat(undefined, { hour: '2-digit', minute: '2-digit', second: '2-digit' });
 
 function explainAutoTraderReason(reason: string): string {
@@ -70,7 +69,7 @@ const autoTraderGridTheme = themeQuartz.withParams({
   rowHoverColor: '#141b24',
 });
 
-type AutoTraderOrderRow = AutoTraderOrder & { current_price?: number };
+type AutoTraderOrderRow = AutoTraderOrder & { current_price?: number; position_status?: string };
 
 const orderColumnDefs: ColDef<AutoTraderOrderRow>[] = [
   { field: 'timestamp', headerName: 'Time / Trigger', minWidth: 102, valueGetter: ({ data }) => data?.triggered_at ?? data?.timestamp, valueFormatter: ({ value }) => value ? timestamp.format(value) : '' },
@@ -78,12 +77,13 @@ const orderColumnDefs: ColDef<AutoTraderOrderRow>[] = [
   { field: 'side', headerName: 'Side', minWidth: 56, valueFormatter: ({ value }) => String(value ?? '').toUpperCase() },
   { field: 'order_type', headerName: 'Type', minWidth: 70, tooltipValueGetter: (params: ITooltipParams<AutoTraderOrderRow>) => getOrderTypeDescription(params.value), cellRenderer: (params: ICellRendererParams<AutoTraderOrderRow>) => <span title={getOrderTypeDescription(params.value)}>{String(params.value ?? '')}</span> },
   { field: 'purpose', headerName: 'Purpose', minWidth: 76, valueFormatter: ({ value }) => value === 'portfolio-hedge' ? 'HEDGE' : String(value ?? '').toUpperCase() },
-  { field: 'status', headerName: 'Status', minWidth: 70 },
+  { field: 'status', headerName: 'Order Status', minWidth: 82 },
+  { field: 'position_status', headerName: 'Position', minWidth: 75 },
   { field: 'filled_quantity', headerName: 'Filled / Qty', minWidth: 96, valueFormatter: ({ data }) => data ? formatForSymbol(data.filled_quantity, data.symbol, 'quantity') + '/' + formatForSymbol(data.quantity, data.symbol, 'quantity') : '' },
   { field: 'submitted_limit_price', headerName: 'Limit / Stop Price', minWidth: 112, valueGetter: ({ data }) => data?.submitted_limit_price ?? data?.target_price, valueFormatter: ({ value, data }) => value == null || !data ? '' : formatForSymbol(value, data.symbol, 'price') },
   { field: 'current_price', headerName: 'Current Price', minWidth: 92, valueFormatter: ({ value, data }) => value == null || !data ? '' : formatForSymbol(value, data.symbol, 'price') },
   { field: 'average_price', headerName: 'Avg Price', minWidth: 78, valueFormatter: ({ value }) => value == null ? '' : money.format(value) },
-  { field: 'realized_pnl', headerName: 'Realized USD', minWidth: 92, cellClass: ({ value }) => value >= 0 ? 'pnl-positive' : 'pnl-negative', valueFormatter: ({ value }) => value == null ? '' : money.format(value) },
+  { field: 'realized_pnl_usd', headerName: 'Realized USD', minWidth: 92, cellClass: ({ value }) => value >= 0 ? 'pnl-positive' : 'pnl-negative', valueFormatter: ({ value }) => value == null ? '—' : money.format(value) },
 ];
 
 const defaultOrderColDef: ColDef<AutoTraderOrderRow> = {
@@ -97,24 +97,11 @@ export function AutoTrader({ ticks }: { ticks: SymbolPriceTick[] }) {
   const model = useMemo(() => new AutoTraderModel(), []);
   useEffect(() => { model.start(); return () => model.stop(); }, [model]);
   const state = useBehaviorSnapshot(model.state$);
-  const openPositionSymbols = useMemo(() => new Set(state.openPositionSymbols), [state.openPositionSymbols]);
-  const orderRows = useMemo(() => state.orders.map((order) => ({ ...order, current_price: openPositionSymbols.has(order.symbol) ? currentPrices.get(order.symbol) : undefined })), [state.orders, openPositionSymbols, currentPrices]);
+  const ledgerOpenPositionSymbols = useMemo(() => new Set(state.ledgerOpenPositionSymbols), [state.ledgerOpenPositionSymbols]);
+  const orderRows = useMemo(() => state.orders.map((order) => ({ ...order, current_price: ledgerOpenPositionSymbols.has(order.symbol) ? currentPrices.get(order.symbol) : undefined, position_status: order.filled_quantity > 0 ? ledgerOpenPositionSymbols.has(order.symbol) ? 'Open' : 'Closed' : '' })), [state.orders, ledgerOpenPositionSymbols, currentPrices]);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [parametersOpen, setParametersOpen] = useState(false);
-  const [breakdownOpen, setBreakdownOpen] = useState(false);
   const [decisionDetailsOpen, setDecisionDetailsOpen] = useState(false);
-  const currencyBreakdown = useMemo(() => {
-    const grouped = new Map<string, { pnl: number; outcomes: number; symbols: Set<string> }>();
-    state.pnlBreakdown.forEach((item) => {
-      const currency = item.symbol.split('-')[1] || 'Other';
-      const current = grouped.get(currency) ?? { pnl: 0, outcomes: 0, symbols: new Set<string>() };
-      current.pnl += item.realized_pnl;
-      current.outcomes += item.outcomes;
-      current.symbols.add(item.symbol);
-      grouped.set(currency, current);
-    });
-    return Array.from(grouped, ([currency, value]) => ({ currency, ...value })).sort((a, b) => Math.abs(b.pnl) - Math.abs(a.pnl));
-  }, [state.pnlBreakdown]);
   useEffect(() => {
     if (!parametersOpen) return;
     void model.refreshDecisionParameters();
@@ -138,7 +125,7 @@ export function AutoTrader({ ticks }: { ticks: SymbolPriceTick[] }) {
   }, [state.orders]);
   const scoutOutcomeCohort = state.decisionQuality.cohorts.find((cohort) => cohort.dimension === 'selection' && cohort.value === 'scout');
   return (
-    <section className={"feed-section auto-trader-section" + (breakdownOpen || settingsOpen || parametersOpen ? " has-open-popup" : "")} aria-label="Auto Trader">
+    <section className={"feed-section auto-trader-section" + (settingsOpen || parametersOpen ? " has-open-popup" : "")} aria-label="Auto Trader">
       <FeedToolbar title="Auto Trader" />
       <div className="auto-trader-content">
         <div className={"auto-trader-live-banner " + (state.enabled ? "is-live" : "") + (state.loading ? " is-loading" : "")}>
@@ -150,7 +137,7 @@ export function AutoTrader({ ticks }: { ticks: SymbolPriceTick[] }) {
           </div>
         </div>
         <div className="auto-trader-settings-anchor">
-          <p>Paper · {state.explorationPercent}% explore · SL {state.stopLossPercent.toFixed(2)}% / TP {state.takeProfitPercent.toFixed(2)}%</p>
+          <p>Paper · {state.serverExplorationPercent}% explore · SL {state.stopLossPercent.toFixed(2)}% / TP {state.takeProfitPercent.toFixed(2)}%</p>
           <div className="auto-trader-settings-actions">
             <button className="auto-trader-parameters-button" type="button" aria-expanded={parametersOpen} aria-haspopup="dialog" disabled={state.loading} onClick={() => { setParametersOpen((open) => !open); setSettingsOpen(false); }}>View parameters</button>
             <button className="auto-trader-settings-button" type="button" aria-expanded={settingsOpen} aria-haspopup="dialog" disabled={state.loading} onClick={() => { setSettingsOpen((open) => !open); setParametersOpen(false); }}>…</button>
@@ -172,7 +159,7 @@ export function AutoTrader({ ticks }: { ticks: SymbolPriceTick[] }) {
               </dl></section>
               <section><strong>Active exit policy</strong><dl>
                 <div><dt>Stop-loss</dt><dd>{state.decisionParameters.active_exit_policy.stop_loss_percent.toFixed(2)}%</dd></div>
-                <div><dt>Take-profit</dt><dd>{state.decisionParameters.active_exit_policy.take_profit_percent.toFixed(2)}%</dd></div>
+                <div><dt>Take-profit (net after fees)</dt><dd>{state.decisionParameters.active_exit_policy.take_profit_percent.toFixed(2)}%</dd></div>
               </dl></section>
               <section><strong>Latest selected execution profile</strong><dl>
                 {state.decisionParameters.latest_execution ? <>
@@ -180,6 +167,7 @@ export function AutoTrader({ ticks }: { ticks: SymbolPriceTick[] }) {
                   <div><dt>Order type</dt><dd>{state.decisionParameters.latest_execution.baseline_order_type} → {state.decisionParameters.latest_execution.selected_order_type}</dd></div>
                   <div><dt>Profile</dt><dd>P{state.decisionParameters.latest_execution.profile}</dd></div>
                   <div><dt>VWAP / TWAP</dt><dd>{state.decisionParameters.latest_execution.vwap_duration_minutes} min · {state.decisionParameters.latest_execution.vwap_participation_percent.toFixed(1)}% participation</dd></div>
+                  <div><dt>Scheduling size threshold</dt><dd>{(state.decisionParameters.latest_execution.schedule_depth_threshold * 100).toFixed(0)}% of visible depth · current {(state.decisionParameters.latest_execution.proposed_depth_ratio * 100).toFixed(1)}% ({state.decisionParameters.latest_execution.schedule_threshold_samples} threshold outcome samples)</dd></div>
                   <div><dt>Order offsets</dt><dd>Limit {state.decisionParameters.latest_execution.limit_offset_bps.toFixed(2)} bps · trigger {state.decisionParameters.latest_execution.trigger_offset_bps.toFixed(2)} bps</dd></div>
                   <div><dt>Trailing distance</dt><dd>{state.decisionParameters.latest_execution.trailing_distance_percent.toFixed(2)}%</dd></div>
                 </> : <div><dt>Latest execution profile</dt><dd>No signal has selected an execution profile since this service started.</dd></div>}
@@ -190,9 +178,10 @@ export function AutoTrader({ ticks }: { ticks: SymbolPriceTick[] }) {
             <div className="auto-trader-settings-heading"><strong>Auto Trader settings</strong><button type="button" aria-label="Close settings" onClick={() => setSettingsOpen(false)}>×</button></div>
             <div className="auto-trader-limits">
               <label>MAX PER ORDER (USD)<input type="number" min="0.01" step="any" value={state.maxOrderNotional} onChange={(event) => model.setLimits(event.target.value, state.dailyNotionalLimit, state.dailyRealizedLossLimit, state.explorationPercent, state.maxOpenPositions)} /></label>
-              <label title="Maximum USD notional allocated to Auto Trader positions and pending orders that add exposure. Opening positions uses available capacity; closing fills release it. Manual positions are not included.">TOTAL BUDGET (USD)<input type="number" min="0.01" step="any" value={state.dailyNotionalLimit} onChange={(event) => model.setLimits(state.maxOrderNotional, event.target.value, state.dailyRealizedLossLimit, state.explorationPercent, state.maxOpenPositions)} /></label>
+              <label title="Maximum USD notional allocated to Auto Trader positions and pending orders that add exposure. Opening positions uses available capacity; closing fills release it. Manual positions are not included.">MAX ALLOCATED EXPOSURE (USD)<input type="number" min="0.01" step="any" value={state.dailyNotionalLimit} onChange={(event) => model.setLimits(state.maxOrderNotional, event.target.value, state.dailyRealizedLossLimit, state.explorationPercent, state.maxOpenPositions)} /></label>
               <label>DAILY LOSS CAP (USD)<input type="number" min="0.01" step="any" value={state.dailyRealizedLossLimit} onChange={(event) => model.setLimits(state.maxOrderNotional, state.dailyNotionalLimit, event.target.value, state.explorationPercent, state.maxOpenPositions)} /></label>
               <label>EXPLORATION SIZE (%)<input type="number" min="0" max="100" step="1" value={state.explorationPercent} onChange={(event) => model.setLimits(state.maxOrderNotional, state.dailyNotionalLimit, state.dailyRealizedLossLimit, event.target.value, state.maxOpenPositions)} /></label>
+              <label className="auto-trader-risk-slider" title="Shifts strength and score floors and adjusts take-profit. Riskier settings lower entry floors and move take-profit toward a 0.05% net win after fees; safer settings raise floors and preserve larger targets.">RISK APPETITE <span className="auto-trader-risk-value">{Number(state.riskAppetite)} · {Number(state.riskAppetite) < 34 ? 'Safe' : Number(state.riskAppetite) > 66 ? 'Risky' : 'Balanced'}</span><input aria-label="Auto Trader risk appetite" type="range" min="0" max="100" step="1" value={state.riskAppetite} onChange={(event) => model.setRiskAppetite(event.target.value)} /><span className="auto-trader-risk-scale"><span>Safe · higher floors</span><span>Risky · lower floors</span></span></label>
               <label title="Maximum number of distinct Auto Trader positions held at once.">MAX OPEN POSITIONS<input type="number" min="1" max="20" step="1" value={state.maxOpenPositions} onChange={(event) => model.setLimits(state.maxOrderNotional, state.dailyNotionalLimit, state.dailyRealizedLossLimit, state.explorationPercent, event.target.value)} /></label>
               <label title="Maximum number of entries Auto Trader can make while a position remains open, including the initial entry.">ENTRIES PER POSITION<input type="number" min="1" max="10" step="1" value={state.maxEntriesPerPosition} onChange={(event) => model.setMaxEntriesPerPosition(event.target.value)} /></label>
               <label>VWAP / TWAP DURATION (MIN)<input type="number" min="5" max="390" step="1" value={state.vwapDurationMinutes} onChange={(event) => model.setExecutionParameters({ vwapDurationMinutes: event.target.value })} /></label>
@@ -200,11 +189,12 @@ export function AutoTrader({ ticks }: { ticks: SymbolPriceTick[] }) {
               <label>LIMIT OFFSET (BPS)<input type="number" min="-10" max="10" step="0.5" value={state.limitOffsetBps} onChange={(event) => model.setExecutionParameters({ limitOffsetBps: event.target.value })} /></label>
               <label>TRIGGER OFFSET (BPS)<input type="number" min="5" max="100" step="1" value={state.triggerOffsetBps} onChange={(event) => model.setExecutionParameters({ triggerOffsetBps: event.target.value })} /></label>
               <label>TRAILING DISTANCE (%)<input type="number" min="0.05" max="1" step="0.05" value={state.trailingDistancePercent} onChange={(event) => model.setExecutionParameters({ trailingDistancePercent: event.target.value })} /></label>
+              <label title="Number of most recent fully closed exits used for rolling exit statistics. Range: 1–5000.">ROLLING CLOSED EXITS<input type="number" min="1" max="5000" step="1" value={state.closedTradeWindow} onChange={(event) => model.setClosedTradeWindow(event.target.value)} /></label>
               <button type="button" disabled={state.busy || state.loading} onClick={() => void model.saveLimits()}>Save settings</button>
             </div>
           </div>}
         </div>
-        <p className="auto-trader-allocation">Budget used <strong>USD {money.format(state.usedNotionalToday)}</strong> / {money.format(Number(state.dailyNotionalLimit) || 0)} · Available <strong>USD {money.format(Math.max(0, (Number(state.dailyNotionalLimit) || 0) - state.usedNotionalToday))}</strong></p>
+        <p className="auto-trader-allocation">Reserved exposure (incl. scheduled stop headroom) <strong>USD {money.format(state.usedNotionalToday)}</strong> / {money.format(state.serverDailyNotionalLimit)} cap · New exposure available <strong>USD {money.format(state.availableNotional)}</strong>{state.usedNotionalToday > state.serverDailyNotionalLimit && <span> · Existing positions or pending orders exceed the cap; new exposure is blocked.</span>}</p>
         <div className="auto-trader-insights">
           <div className="auto-trader-insight auto-trader-decision" role="status">
             <span className="auto-trader-insight-label">Why no trades? · {state.decisionsSinceTrade.toLocaleString()} scans since last order</span>
@@ -217,16 +207,17 @@ export function AutoTrader({ ticks }: { ticks: SymbolPriceTick[] }) {
             {state.lastDecisionAt > 0 && <time dateTime={new Date(state.lastDecisionAt).toISOString()}>{timestamp.format(state.lastDecisionAt)}</time>}
           </div>
           <div className="auto-trader-insight">
-            <span className="auto-trader-insight-label">Learning</span>
-            <strong>{state.learningSamples} closed outcomes</strong>
+            <span className="auto-trader-insight-label">Learning observations · today UTC</span>
+            <strong>{state.learningSamples} learning samples</strong>
             <span className="auto-trader-learning-detail">
-              {state.learningWinRate == null ? 'Win rate unavailable' : (state.learningWinRate * 100).toFixed(0) + '% profitable'}
+              {state.learningWinRate == null ? 'Positive rate unavailable' : (state.learningWinRate * 100).toFixed(0) + '% positive'}
               {state.preferredOrderType ? ' · Strongest: ' + state.preferredOrderType : ''}
-              {' · Parameter profiles P0/P1/P2: ' + state.parameterProfileSamples.join('/')}
+              {' · Profile observations P0/P1/P2: ' + state.parameterProfileSamples.join('/')}
             </span>
+            <span className="auto-trader-learning-detail">Includes realized fills and some unfilled post-only orders removed from the book. Cancelled protective stops with no fill do not count; partial stop fills do.</span>
           </div>
           <div className="auto-trader-insight">
-            <span className="auto-trader-insight-label">Execution · {state.executionQuality.measured_fill_samples}/{state.executionQuality.filled_order_samples} fills measured</span>
+            <span className="auto-trader-insight-label">Execution · today UTC · {state.executionQuality.measured_fill_samples}/{state.executionQuality.filled_order_samples} fills measured</span>
             <strong>{state.executionQuality.average_all_in_cost_bps == null ? 'Cost unavailable' : (state.executionQuality.average_all_in_cost_bps >= 0 ? '+' : '') + state.executionQuality.average_all_in_cost_bps.toFixed(2) + ' bps all-in'}</strong>
             <span className="auto-trader-learning-detail">
               {state.executionQuality.average_implementation_shortfall_bps == null ? 'No reference price' : (state.executionQuality.average_implementation_shortfall_bps >= 0 ? '+' : '') + state.executionQuality.average_implementation_shortfall_bps.toFixed(2) + ' bps vs mid'}
@@ -238,15 +229,15 @@ export function AutoTrader({ ticks }: { ticks: SymbolPriceTick[] }) {
               {state.executionQuality.history_truncated ? ' · last 50k audit updates' : ''}
             </span>
           </div>
-          <div className="auto-trader-insight auto-trader-scout-summary" aria-label="Scout summary">
-            <span className="auto-trader-insight-label">Scout summary</span>
-            <strong>{state.scoutOpenPositions}/{state.scoutMaxActivePositions} positions open · {state.decisionQuality.scout_completed_trade_samples} closed trades</strong>
+          <div className="auto-trader-insight auto-trader-scout-summary" aria-label="Today scout summary">
+            <span className="auto-trader-insight-label">Scout summary · today UTC</span>
+            <strong>{state.scoutOpenPositions} positions open now · {state.decisionQuality.scout_completed_trade_samples} trades closed today</strong>
             <span className="auto-trader-learning-detail">{state.decisionQuality.scout_filled_entry_samples} filled entries · {state.decisionQuality.scout_unresolved_trade_samples} unresolved entries · {state.decisionQuality.scout_unpriced_closed_trade_samples} closed without an entry price</span>
-            <span className="auto-trader-learning-detail">Recent scout orders in the latest 50: {scoutOrderCounts.filled} filled · {scoutOrderCounts.pending} pending · {scoutOrderCounts.failed} failed</span>
-            {scoutOutcomeCohort ? <span className="auto-trader-learning-detail">Closed cohort: {scoutOutcomeCohort.completed_trade_samples} trades · {scoutOutcomeCohort.average_net_return_percent >= 0 ? '+' : ''}{scoutOutcomeCohort.average_net_return_percent.toFixed(3)}% average · {(scoutOutcomeCohort.win_rate * 100).toFixed(0)}% wins · USD {money.format(scoutOutcomeCohort.total_net_pnl)}</span> : <span className="auto-trader-learning-detail">{state.scoutLearningSamples > 0 ? state.scoutLearningSamples + ' realized scout outcomes recorded · thresholds adjust after 5 per context · ' + (state.scoutLearningWinRate == null ? 'win rate unavailable' : (state.scoutLearningWinRate * 100).toFixed(0) + '% positive') + ' · USD ' + money.format(state.scoutLearningRealizedPnl) : 'Outcome-based scout learning starts after a scout position closes.'}</span>}
+            <span className="auto-trader-learning-detail">Today's scout orders: {scoutOrderCounts.filled} filled · {scoutOrderCounts.pending} pending · {scoutOrderCounts.failed} failed</span>
+            {scoutOutcomeCohort ? <span className="auto-trader-learning-detail">Closed cohort: {scoutOutcomeCohort.completed_trade_samples} trades · {scoutOutcomeCohort.average_net_return_percent >= 0 ? '+' : ''}{scoutOutcomeCohort.average_net_return_percent.toFixed(3)}% average · {(scoutOutcomeCohort.win_rate * 100).toFixed(0)}% wins · USD {money.format(scoutOutcomeCohort.total_net_pnl)}</span> : <span className="auto-trader-learning-detail">{state.scoutLearningSamples > 0 ? state.scoutLearningSamples + ' realized scout outcomes today · thresholds use full history · ' + (state.scoutLearningWinRate == null ? 'win rate unavailable' : (state.scoutLearningWinRate * 100).toFixed(0) + '% positive') : 'No scout outcomes closed today.'}</span>}
           </div>
           <div className="auto-trader-insight auto-trader-decision-quality">
-            <span className="auto-trader-insight-label">Decision quality · {state.decisionQuality.completed_trade_samples}/{state.decisionQuality.filled_entry_samples} outcomes closed</span>
+            <span className="auto-trader-insight-label">Decision quality · today UTC · {state.decisionQuality.completed_trade_samples}/{state.decisionQuality.filled_entry_samples} outcomes closed</span>
             <strong>{state.decisionQuality.decision_samples} decisions · {state.decisionQuality.unresolved_trade_samples} open</strong>
             <span className="auto-trader-learning-detail">Tracks filled Auto Trader entries after the full position closes; skipped signals and open trades are not completed outcomes.</span>
             <button className="auto-trader-cohort-toggle" type="button" aria-expanded={decisionDetailsOpen} onClick={() => setDecisionDetailsOpen((open) => !open)}>
@@ -262,34 +253,20 @@ export function AutoTrader({ ticks }: { ticks: SymbolPriceTick[] }) {
             </div>}
           </div>
           <div className="auto-trader-insight">
-            <span className="auto-trader-insight-label">Fully closed exits · rolling {state.exitLearningSamples}/200</span>
+            <span className="auto-trader-insight-label">Fully closed exits · today UTC ({state.exitLearningSamples})</span>
             <strong>{state.closedTradeAverageReturnPercent == null ? 'Average return unavailable' : (state.closedTradeAverageReturnPercent >= 0 ? '+' : '') + state.closedTradeAverageReturnPercent.toFixed(3) + '%'}</strong>
             <span className="auto-trader-learning-detail">{state.closedTradeWins} wins · {state.closedTradeLosses} losses · {state.closedTradeFlat} near flat</span>
+            <span className="auto-trader-learning-detail">Wins and losses count positions closed to flat; partial stop fills can realize P&amp;L while the position remains open.</span>
           </div>
         </div>
         <div className="auto-trader-pnl-summary" aria-label="Auto Trader profit and loss">
-          <span>Realized: <strong className={state.realizedPnl >= 0 ? 'auto-trader-pnl-positive' : 'auto-trader-pnl-negative'}>USD {money.format(state.realizedPnl)}</strong></span>
-          <span>Open: <strong className={state.unrealizedPnl == null ? undefined : state.unrealizedPnl >= 0 ? 'auto-trader-pnl-positive' : 'auto-trader-pnl-negative'}>{state.unrealizedPnl == null ? 'Unavailable (missing mark)' : 'USD ' + money.format(state.unrealizedPnl)}</strong></span>
-          <span>Total: <strong className={state.unrealizedPnl == null ? undefined : state.realizedPnl + state.unrealizedPnl >= 0 ? 'auto-trader-pnl-positive' : 'auto-trader-pnl-negative'}>{state.unrealizedPnl == null ? 'Unavailable' : 'USD ' + money.format(state.realizedPnl + state.unrealizedPnl)}</strong></span>
-        </div>
-        <div className="auto-trader-breakdown-anchor">
-          <button className="auto-trader-breakdown-button" type="button" aria-expanded={breakdownOpen} aria-haspopup="dialog" onClick={() => setBreakdownOpen((open) => !open)}>Signal P&amp;L by currency <span>{currencyBreakdown.length}</span></button>
-          {breakdownOpen && <div className="auto-trader-settings-popup auto-trader-breakdown-popup" role="dialog" aria-label="Signal P&L by currency">
-            <div className="auto-trader-settings-heading"><strong>Signal P&amp;L by currency</strong><button type="button" aria-label="Close breakdown" onClick={() => setBreakdownOpen(false)}>×</button></div>
-            <small>Net realized by quote currency · fees included.</small>
-          {currencyBreakdown.length === 0 ? <small>No closed outcomes yet.</small> : (
-            <div className="auto-trader-pnl-breakdown-list">
-              {currencyBreakdown.map((item) => <div key={item.currency}>
-                <span>{item.currency} · {item.symbols.size} symbols · {item.outcomes} outcomes</span>
-                <strong className={item.pnl >= 0 ? 'auto-trader-pnl-positive' : 'auto-trader-pnl-negative'}>USD {pnlDetailMoney.format(item.pnl)}</strong>
-              </div>)}
-            </div>
-          )}
-          </div>}
+          <span>Realized today: <strong className={state.realizedPnl == null ? undefined : state.realizedPnl >= 0 ? 'auto-trader-pnl-positive' : 'auto-trader-pnl-negative'}>{state.realizedPnl == null ? 'Unavailable (position ledger or FX rate)' : 'USD ' + money.format(state.realizedPnl)}</strong></span>
+          <span>Open now: <strong className={state.unrealizedPnl == null ? undefined : state.unrealizedPnl >= 0 ? 'auto-trader-pnl-positive' : 'auto-trader-pnl-negative'}>{state.unrealizedPnl == null ? 'Unavailable (missing mark or FX rate)' : 'USD ' + money.format(state.unrealizedPnl)}</strong></span>
+          <span>Today realized + current open: <strong className={state.realizedPnl == null || state.unrealizedPnl == null ? undefined : state.realizedPnl + state.unrealizedPnl >= 0 ? 'auto-trader-pnl-positive' : 'auto-trader-pnl-negative'}>{state.realizedPnl == null || state.unrealizedPnl == null ? 'Unavailable' : 'USD ' + money.format(state.realizedPnl + state.unrealizedPnl)}</strong></span>
         </div>
         {state.error && <p className="auto-trader-error" role="alert">{state.error}</p>}
         <div className="auto-trader-orders" aria-label="Recent auto trader orders">
-          <strong>Recent orders</strong>
+          <strong>Today’s orders ({state.orders.length}) · UTC</strong>
           <div className="data-grid-wrap auto-trader-grid-wrap">
             <AgGridReact<AutoTraderOrderRow>
               rowData={orderRows}

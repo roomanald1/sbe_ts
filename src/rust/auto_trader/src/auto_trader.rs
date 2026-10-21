@@ -18,6 +18,7 @@ use tokio::{
 
 const DEFAULT_MAX_ORDER_NOTIONAL: f64 = 100.0;
 const DEFAULT_DAILY_NOTIONAL: f64 = 1_000.0;
+const MAX_RETAINED_AUTO_TRADER_ORDERS: usize = 10_000;
 const MIN_STRENGTH: f64 = 0.35;
 const MIN_EXPLORATION_STRENGTH: f64 = 0.05;
 const MIN_EXPLORATION_SCORE: f64 = 0.30;
@@ -25,6 +26,7 @@ const NEUTRAL_SCORE_DIRECTION_FLOOR: f64 = 0.15;
 const PORTFOLIO_SHOCK_PERCENT: f64 = 0.01;
 const MIN_HEDGE_CORRELATION_SAMPLES: usize = 30;
 const MIN_HEDGE_CORRELATION: f64 = 0.70;
+const MIN_HEDGE_EXECUTION_LEARNING_SAMPLES: usize = 5;
 const MIN_SIDE_WALK_FORWARD_SAMPLES: usize = 30;
 const DEEP_BOOK_BAND_BPS: f64 = 10.0;
 const DEEP_BOOK_MAX_PARTICIPATION: f64 = 0.05;
@@ -54,16 +56,21 @@ const DEFAULT_DAILY_REALIZED_LOSS_LIMIT: f64 = 10.0;
 const MIN_DAILY_REALIZED_LOSS_LIMIT: f64 = 5.0;
 const MIN_STOP_LOSS_PERCENT: f64 = 0.25;
 const MAX_STOP_LOSS_PERCENT: f64 = 1.50;
-const MIN_TAKE_PROFIT_PERCENT: f64 = 0.40;
+const MIN_TAKE_PROFIT_PERCENT: f64 = 0.05;
+const SMALL_NET_TAKE_PROFIT_PERCENT: f64 = 0.05;
 const MAX_TAKE_PROFIT_PERCENT: f64 = 2.00;
-const EXIT_POLICY_ADJUSTMENT_STEP: f64 = 0.05;
-const MIN_EXIT_POLICY_SAMPLES: usize = 10;
 const MIN_EXIT_REWARD_RISK_RATIO: f64 = 1.5;
+const TAKE_PROFIT_HOLD_PROBABILITY_FLOOR: f64 = 0.80;
+const MAX_TAKE_PROFIT_HOLD_MS: u64 = 5 * 60 * 1_000;
 const MAX_SIGNAL_AGE_SECONDS: u64 = 60;
 const NEUTRAL_INFERENCE_MAX_RANGE_PROBABILITY: f64 = 0.75;
 const LEARNED_STRENGTH_ADJUSTMENT_SAMPLES: usize = 5;
 const LEARNED_STRENGTH_ADJUSTMENT_WIN_RATE: f64 = 0.45;
 const LEARNED_STRENGTH_FLOOR: f64 = 0.50;
+const STRONG_NEGATIVE_LEARNING_SAMPLES: usize = 20;
+const STRONG_NEGATIVE_LEARNING_WIN_RATE: f64 = 0.20;
+const STRONG_NEGATIVE_STRENGTH_FLOOR: f64 = 0.65;
+const STRONG_NEGATIVE_SCORE_FLOOR: f64 = 0.60;
 const EXPLORATION_SCORE_MID_FLOOR: f64 = 0.40;
 const EXPLORATION_SCORE_HIGH_FLOOR: f64 = 0.50;
 const EXPLORATION_SCORE_MID_SAMPLES: usize = 10;
@@ -78,6 +85,7 @@ const CONTEXT_RANGE_MIN_PROBABILITY: f64 = 0.65;
 const CONTEXT_TREND_MIN_VOLATILITY_UNITS: f64 = 1.5;
 const CONTEXT_VOLATILE_MIN_PERCENT: f64 = 1.0;
 const ORDER_POST_ONLY_RANGE: f64 = 0.75;
+const AGGRESSIVE_ORDER_PRIORITY_APPETITE: f64 = 70.0;
 const ORDER_POST_ONLY_AGGRESSOR_COST_BPS: f64 = 4.0;
 const ORDER_GTD_RANGE: f64 = 0.60;
 const ORDER_GTD_MIN_MISPRICING_BPS: f64 = 5.0;
@@ -95,6 +103,9 @@ const ORDER_VWAP_STRENGTH: f64 = 0.60;
 const ORDER_TWAP_RANGE: f64 = 0.50;
 const ORDER_TRAILING_VOLATILITY_PERCENT: f64 = 0.70;
 const ORDER_FOK_STRENGTH: f64 = 0.50;
+const DEFAULT_SCHEDULE_DEPTH_RATIO: f64 = 0.25;
+const MIN_SCHEDULE_DEPTH_RATIO: f64 = 0.05;
+const MAX_SCHEDULE_DEPTH_RATIO: f64 = 0.40;
 
 fn configured_taker_fee_rate() -> f64 {
     std::env::var("PAPER_OKX_SPOT_TAKER_FEE_RATE")
@@ -310,7 +321,7 @@ fn assess_deep_book(
     })
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 enum AutoOrderType {
     Market,
@@ -341,6 +352,8 @@ struct Settings {
     daily_notional_limit: f64,
     #[serde(default)]
     used_notional_today: f64,
+    #[serde(default = "default_usd_rates")]
+    usd_rates: BTreeMap<String, f64>,
     #[serde(default)]
     realized_pnl: f64,
     #[serde(default = "default_daily_loss_limit")]
@@ -369,8 +382,16 @@ struct Settings {
     trigger_offset_bps: f64,
     #[serde(default = "default_trailing_distance")]
     trailing_distance_percent: f64,
+    #[serde(default = "default_closed_trade_window")]
+    closed_trade_window: usize,
     #[serde(default)]
     closed_trade_returns_percent: Vec<f64>,
+    #[serde(default)]
+    closed_trade_timestamps_ms: Vec<u64>,
+    #[serde(default)]
+    closed_trade_realized_usd: Vec<f64>,
+    #[serde(default)]
+    closed_trade_fees_usd: Vec<f64>,
     #[serde(default)]
     daily_realized_pnl: f64,
     #[serde(default)]
@@ -409,7 +430,9 @@ fn default_daily_loss_limit() -> f64 {
 fn default_exploration_percent() -> f64 {
     EXPLORATION_NOTIONAL_FRACTION * 100.0
 }
-fn default_risk_appetite() -> f64 { 50.0 }
+fn default_risk_appetite() -> f64 {
+    50.0
+}
 fn default_max_open_positions() -> usize {
     20
 }
@@ -437,8 +460,18 @@ fn default_trigger_offset() -> f64 {
 fn default_trailing_distance() -> f64 {
     0.10
 }
+fn default_closed_trade_window() -> usize {
+    200
+}
 fn default_daily_limit() -> f64 {
     DEFAULT_DAILY_NOTIONAL
+}
+fn default_usd_rates() -> BTreeMap<String, f64> {
+    BTreeMap::from([
+        ("USD".to_owned(), 1.0),
+        ("USDT".to_owned(), 1.0),
+        ("USDC".to_owned(), 1.0),
+    ])
 }
 impl Default for Settings {
     fn default() -> Self {
@@ -447,6 +480,7 @@ impl Default for Settings {
             max_order_notional: default_order_limit(),
             daily_notional_limit: default_daily_limit(),
             used_notional_today: 0.0,
+            usd_rates: default_usd_rates(),
             realized_pnl: 0.0,
             daily_realized_loss_limit: default_daily_loss_limit(),
             exploration_percent: default_exploration_percent(),
@@ -461,7 +495,11 @@ impl Default for Settings {
             limit_offset_bps: default_limit_offset(),
             trigger_offset_bps: default_trigger_offset(),
             trailing_distance_percent: default_trailing_distance(),
+            closed_trade_window: default_closed_trade_window(),
             closed_trade_returns_percent: Vec::new(),
+            closed_trade_timestamps_ms: Vec::new(),
+            closed_trade_realized_usd: Vec::new(),
+            closed_trade_fees_usd: Vec::new(),
             daily_realized_pnl: 0.0,
             pnl_utc_day: utc_day(),
             utc_day: utc_day(),
@@ -496,7 +534,9 @@ struct StatusResponse {
     limit_offset_bps: f64,
     trigger_offset_bps: f64,
     trailing_distance_percent: f64,
+    closed_trade_window: usize,
     used_notional_today: f64,
+    available_notional: f64,
     last_decision: String,
     last_decision_at: u64,
     decisions_since_trade: u64,
@@ -555,6 +595,8 @@ struct SettingsRequest {
     trigger_offset_bps: Option<f64>,
     #[serde(default)]
     trailing_distance_percent: Option<f64>,
+    #[serde(default)]
+    closed_trade_window: Option<usize>,
 }
 #[derive(Clone, Deserialize)]
 struct EnabledRequest {
@@ -586,6 +628,9 @@ struct LatestExecutionParameters {
     profile: usize,
     vwap_duration_minutes: u64,
     vwap_participation_percent: f64,
+    schedule_depth_threshold: f64,
+    proposed_depth_ratio: f64,
+    schedule_threshold_samples: usize,
     limit_offset_bps: f64,
     trigger_offset_bps: f64,
     trailing_distance_percent: f64,
@@ -606,6 +651,7 @@ struct DecisionParametersResponse {
 
 #[derive(Default)]
 struct GapSummary {
+    utc_day: String,
     decisions: u64,
     reasons: BTreeMap<String, u64>,
     gate_hits: BTreeMap<String, u64>,
@@ -680,6 +726,8 @@ struct TraderOrder {
     #[serde(default)]
     target_price: Option<f64>,
     #[serde(default)]
+    horizon_take_profit_percent: Option<f64>,
+    #[serde(default)]
     limit_to_mid_bps: Option<f64>,
     #[serde(default)]
     limit_to_crossing_quote_bps: Option<f64>,
@@ -709,6 +757,10 @@ struct TraderPosition {
     #[serde(default)]
     scout_entry: bool,
     #[serde(default)]
+    horizon_take_profit_percent: Option<f64>,
+    #[serde(default)]
+    take_profit_deferred_at_ms: Option<u64>,
+    #[serde(default)]
     protective_stops: Vec<ProtectiveStop>,
 }
 #[derive(Clone, Default, Serialize, Deserialize)]
@@ -725,6 +777,118 @@ struct LearningStats {
     samples: usize,
     positive: usize,
     realized_pnl: f64,
+    #[serde(default)]
+    updated_at_ms: u64,
+    #[serde(default)]
+    daily_utc_day: String,
+    #[serde(default)]
+    daily_samples: usize,
+    #[serde(default)]
+    daily_positive: usize,
+    #[serde(default)]
+    daily_realized_pnl: f64,
+}
+
+const LEARNING_HALF_LIFE_MS: u64 = 7 * 24 * 60 * 60 * 1_000;
+
+fn current_time_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .min(u64::MAX as u128) as u64
+}
+
+fn utc_day_start_ms() -> u64 {
+    current_time_ms() / 86_400_000 * 86_400_000
+}
+
+fn decay_learning_stats(stats: &mut LearningStats, now_ms: u64) {
+    if stats.updated_at_ms == 0 {
+        // Legacy persisted profiles have no timestamp; begin their decay clock
+        // when first read after this version is deployed.
+        stats.updated_at_ms = now_ms;
+        return;
+    }
+    let elapsed_ms = now_ms.saturating_sub(stats.updated_at_ms);
+    if elapsed_ms == 0 {
+        return;
+    }
+    let weight = 0.5_f64.powf(elapsed_ms as f64 / LEARNING_HALF_LIFE_MS as f64);
+    stats.samples = (stats.samples as f64 * weight).round() as usize;
+    stats.positive = ((stats.positive as f64 * weight).round() as usize).min(stats.samples);
+    stats.realized_pnl *= weight;
+    stats.updated_at_ms = now_ms;
+}
+
+fn decay_learning_map(learning: &mut BTreeMap<String, LearningStats>, now_ms: u64) {
+    for stats in learning.values_mut() {
+        decay_learning_stats(stats, now_ms);
+    }
+}
+
+fn record_closed_trade_outcome(
+    settings: &mut Settings,
+    return_percent: f64,
+    realized_usd: f64,
+    fees_usd: f64,
+) {
+    // These parallel arrays are a persisted legacy format. Discard an already
+    // misaligned window rather than attaching new money values to old returns.
+    let count = settings.closed_trade_returns_percent.len();
+    if settings.closed_trade_timestamps_ms.len() != count
+        || settings.closed_trade_realized_usd.len() != count
+        || settings.closed_trade_fees_usd.len() != count
+    {
+        settings.closed_trade_returns_percent.clear();
+        settings.closed_trade_timestamps_ms.clear();
+        settings.closed_trade_realized_usd.clear();
+        settings.closed_trade_fees_usd.clear();
+    }
+    settings.closed_trade_returns_percent.push(return_percent);
+    settings.closed_trade_timestamps_ms.push(current_time_ms());
+    settings.closed_trade_realized_usd.push(realized_usd);
+    settings.closed_trade_fees_usd.push(fees_usd);
+    let excess = settings.closed_trade_returns_percent.len().saturating_sub(settings.closed_trade_window);
+    if excess > 0 {
+        settings.closed_trade_returns_percent.drain(0..excess);
+        settings.closed_trade_timestamps_ms.drain(0..excess);
+        settings.closed_trade_realized_usd.drain(0..excess);
+        settings.closed_trade_fees_usd.drain(0..excess);
+    }
+}
+
+fn realized_usd(settings: &Settings, symbol: &str, quote_amount: f64) -> f64 {
+    quote_amount * quote_usd_rate(settings, symbol)
+}
+
+fn learning_stats_for_day(stats: &LearningStats, day: &str) -> LearningStats {
+    if stats.daily_utc_day == day {
+        stats.clone()
+    } else {
+        LearningStats::default()
+    }
+}
+
+fn record_learning_outcome(stats: &mut LearningStats, realized_pnl: f64) {
+    let now_ms = current_time_ms();
+    decay_learning_stats(stats, now_ms);
+    let day = utc_day();
+    if stats.daily_utc_day != day {
+        stats.daily_utc_day = day;
+        stats.daily_samples = 0;
+        stats.daily_positive = 0;
+        stats.daily_realized_pnl = 0.0;
+    }
+    stats.daily_samples += 1;
+    stats.daily_realized_pnl += realized_pnl;
+    stats.samples += 1;
+    if realized_pnl > 0.0 {
+        stats.positive += 1;
+        stats.daily_positive += 1;
+    }
+    stats.realized_pnl += realized_pnl;
+    stats.updated_at_ms = now_ms;
 }
 #[derive(Serialize)]
 struct PnlBreakdown {
@@ -739,13 +903,17 @@ struct ActivityResponse {
     orders: Vec<TraderOrder>,
     open_position_symbols: Vec<String>,
     pnl_breakdown: Vec<PnlBreakdown>,
-    realized_pnl: f64,
+    realized_pnl: Option<f64>,
+    realized_pnl_by_quote: Option<BTreeMap<String, f64>>,
     unrealized_pnl: Option<f64>,
+    unrealized_pnl_by_quote: Option<BTreeMap<String, f64>>,
     exit_learning_samples: usize,
     closed_trade_average_return_percent: Option<f64>,
     closed_trade_wins: usize,
     closed_trade_losses: usize,
     closed_trade_flat: usize,
+    closed_trade_realized_usd: Option<f64>,
+    closed_trade_fees_usd: Option<f64>,
     learning_samples: usize,
     learning_win_rate: Option<f64>,
     preferred_order_type: Option<String>,
@@ -808,6 +976,15 @@ pub fn router() -> Router {
         .as_ref()
         .and_then(|value| serde_json::from_value::<Settings>(value.clone()).ok())
         .unwrap_or_default();
+    settings.take_profit_percent =
+        risk_adjusted_take_profit_percent(settings.stop_loss_percent, settings.risk_appetite);
+    if let Err(error) = persist_settings(&settings_path, &settings) {
+        crate::service_log!(
+            "ERROR",
+            "Could not persist risk-adjusted take-profit: {}",
+            error.1
+        );
+    }
     // The previous release defaulted this new cap to three, which can strand existing books above the cap.
     if settings.max_open_positions == 3 {
         settings.max_open_positions = default_max_open_positions();
@@ -873,6 +1050,22 @@ pub fn router() -> Router {
         cycle_lock_hold_ms: Arc::new(std::sync::Mutex::new(BTreeMap::new())),
         settings_path,
     };
+    let rates_worker_state = state.clone();
+    tokio::spawn(async move {
+        let mut ticker = interval(Duration::from_secs(30));
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            ticker.tick().await;
+            if let Err(error) = refresh_usd_rates(&rates_worker_state).await {
+                crate::service_log!(
+            "WARN",
+            "USD allocation rates refresh failed; using cached rates: {}",
+            error.1
+        );
+            }
+        }
+    });
+
     let signal_worker_state = state.clone();
     tokio::spawn(async move {
         loop {
@@ -1012,15 +1205,20 @@ async fn get_status(State(state): State<AutoTraderState>) -> Json<StatusResponse
 async fn get_decision_parameters(
     State(state): State<AutoTraderState>,
 ) -> Json<DecisionParametersResponse> {
-    let (learning, active_exit_policy, max_entries_per_auto_position) = {
+    let (learning, active_exit_policy, max_entries_per_auto_position, risk_appetite) = {
         let settings = state.settings.lock().await;
         (
-            settings.learning.clone(),
+            {
+                let mut learning = settings.learning.clone();
+                decay_learning_map(&mut learning, current_time_ms());
+                learning
+            },
             ActiveExitPolicy {
                 stop_loss_percent: settings.stop_loss_percent,
                 take_profit_percent: settings.take_profit_percent,
             },
             settings.max_entries_per_auto_position,
+            settings.risk_appetite,
         )
     };
     let bands = state.latest_missed_opportunity_bands.lock().await.clone();
@@ -1033,13 +1231,16 @@ async fn get_decision_parameters(
             let stats = context_learning_stats(&learning, &context);
             let positive_rate =
                 (stats.samples > 0).then_some(stats.positive as f64 / stats.samples as f64);
-            let strength_floor = adaptive_missed_opportunity_floor(
+            let floor_scale = risk_floor_scale(risk_appetite);
+            let strength_floor = (adaptive_missed_opportunity_floor(
                 adaptive_strength_floor(&learning, &context),
                 "strength",
                 &bands,
-            );
+            ) * floor_scale)
+                .clamp(0.0, 1.0);
             let exploration_score_floor =
-                adaptive_exploration_score_floor(&learning, &context, &bands);
+                (adaptive_exploration_score_floor(&learning, &context, &bands) * floor_scale)
+                    .max(0.0);
             ContextDecisionParameters {
                 exploration_allowed: !context.ends_with(":mixed"),
                 context,
@@ -1060,7 +1261,7 @@ async fn get_decision_parameters(
         parameter(
             "Signal qualification",
             "Neutral score direction floor",
-            NEUTRAL_SCORE_DIRECTION_FLOOR,
+            NEUTRAL_SCORE_DIRECTION_FLOOR * risk_floor_scale(risk_appetite),
             "score",
         ),
         parameter(
@@ -1070,15 +1271,39 @@ async fn get_decision_parameters(
             "probability",
         ),
         parameter(
+            "Scout qualification",
+            "Neutral scout score floor",
+            SCOUT_NEUTRAL_SCORE_FLOOR * risk_floor_scale(risk_appetite),
+            "score",
+        ),
+        parameter(
             "Signal qualification",
             "Base strict strength floor",
-            MIN_STRENGTH,
+            MIN_STRENGTH * risk_floor_scale(risk_appetite),
             "strength",
         ),
         parameter(
             "Signal qualification",
             "Strict strength floor after poor learning",
-            LEARNED_STRENGTH_FLOOR,
+            LEARNED_STRENGTH_FLOOR * risk_floor_scale(risk_appetite),
+            "strength",
+        ),
+        parameter(
+            "Signal qualification",
+            "Samples before strong negative-evidence adjustment",
+            STRONG_NEGATIVE_LEARNING_SAMPLES as f64,
+            "samples",
+        ),
+        parameter(
+            "Signal qualification",
+            "Positive rate boundary for strong negative evidence",
+            STRONG_NEGATIVE_LEARNING_WIN_RATE,
+            "rate",
+        ),
+        parameter(
+            "Signal qualification",
+            "Strict strength floor after strong negative evidence",
+            STRONG_NEGATIVE_STRENGTH_FLOOR * risk_floor_scale(risk_appetite),
             "strength",
         ),
         parameter(
@@ -1096,25 +1321,31 @@ async fn get_decision_parameters(
         parameter(
             "Signal qualification",
             "Minimum exploration strength",
-            MIN_EXPLORATION_STRENGTH,
+            MIN_EXPLORATION_STRENGTH * risk_floor_scale(risk_appetite),
             "strength",
         ),
         parameter(
             "Signal qualification",
             "Base exploration score floor",
-            MIN_EXPLORATION_SCORE,
+            MIN_EXPLORATION_SCORE * risk_floor_scale(risk_appetite),
             "score",
         ),
         parameter(
             "Signal qualification",
             "Exploration score floor after 10 weak samples",
-            EXPLORATION_SCORE_MID_FLOOR,
+            EXPLORATION_SCORE_MID_FLOOR * risk_floor_scale(risk_appetite),
             "score",
         ),
         parameter(
             "Signal qualification",
             "Exploration score floor after 20 weak samples",
-            EXPLORATION_SCORE_HIGH_FLOOR,
+            EXPLORATION_SCORE_HIGH_FLOOR * risk_floor_scale(risk_appetite),
+            "score",
+        ),
+        parameter(
+            "Signal qualification",
+            "Exploration score floor after strong negative evidence",
+            STRONG_NEGATIVE_SCORE_FLOOR * risk_floor_scale(risk_appetite),
             "score",
         ),
         parameter(
@@ -1191,8 +1422,14 @@ async fn get_decision_parameters(
         ),
         parameter(
             "Order selection",
+            "Risk appetite for aggressive order priority",
+            AGGRESSIVE_ORDER_PRIORITY_APPETITE,
+            "%",
+        ),
+        parameter(
+            "Order selection",
             "Range probability for post-only limit",
-            ORDER_POST_ONLY_RANGE,
+            (ORDER_POST_ONLY_RANGE + 0.20 * risk_appetite / 100.0).clamp(0.0, 1.0),
             "probability",
         ),
         parameter(
@@ -1204,7 +1441,7 @@ async fn get_decision_parameters(
         parameter(
             "Order selection",
             "Range probability for GTD",
-            ORDER_GTD_RANGE,
+            (ORDER_GTD_RANGE + 0.30 * risk_appetite / 100.0).clamp(0.0, 1.0),
             "probability",
         ),
         parameter(
@@ -1216,7 +1453,7 @@ async fn get_decision_parameters(
         parameter(
             "Order selection",
             "Range probability for limit",
-            ORDER_LIMIT_RANGE,
+            (ORDER_LIMIT_RANGE + 0.30 * risk_appetite / 100.0).clamp(0.0, 1.0),
             "probability",
         ),
         parameter(
@@ -1246,7 +1483,7 @@ async fn get_decision_parameters(
         parameter(
             "Order selection",
             "Strength for stop-market",
-            ORDER_STOP_MARKET_STRENGTH,
+            ORDER_STOP_MARKET_STRENGTH * risk_floor_scale(risk_appetite),
             "strength",
         ),
         parameter(
@@ -1258,7 +1495,7 @@ async fn get_decision_parameters(
         parameter(
             "Order selection",
             "Strength for market order",
-            ORDER_MARKET_STRENGTH,
+            ORDER_MARKET_STRENGTH * risk_floor_scale(risk_appetite),
             "strength",
         ),
         parameter(
@@ -1270,13 +1507,13 @@ async fn get_decision_parameters(
         parameter(
             "Order selection",
             "Strength for IOC",
-            ORDER_IOC_STRENGTH,
+            ORDER_IOC_STRENGTH * risk_floor_scale(risk_appetite),
             "strength",
         ),
         parameter(
             "Order selection",
             "Strength for VWAP",
-            ORDER_VWAP_STRENGTH,
+            ORDER_VWAP_STRENGTH * risk_floor_scale(risk_appetite),
             "strength",
         ),
         parameter(
@@ -1294,7 +1531,7 @@ async fn get_decision_parameters(
         parameter(
             "Order selection",
             "Strength for FOK",
-            ORDER_FOK_STRENGTH,
+            ORDER_FOK_STRENGTH * risk_floor_scale(risk_appetite),
             "strength",
         ),
         parameter(
@@ -1406,43 +1643,37 @@ async fn get_decision_parameters(
             "USD",
         ),
         parameter(
-            "Exit learning",
-            "Minimum exit samples",
-            MIN_EXIT_POLICY_SAMPLES as f64,
-            "samples",
-        ),
-        parameter(
-            "Exit learning",
-            "Reward/risk floor",
+            "Exit policy",
+            "Safe target minimum reward/risk ratio",
             MIN_EXIT_REWARD_RISK_RATIO,
             "ratio",
         ),
         parameter(
-            "Exit learning",
-            "Exit adjustment step",
-            EXIT_POLICY_ADJUSTMENT_STEP,
-            "%",
+            "Exit policy",
+            "Minimum net take-profit at maximum risk appetite",
+            SMALL_NET_TAKE_PROFIT_PERCENT,
+            "% after fees",
         ),
         parameter(
-            "Exit learning",
+            "Exit policy",
             "Stop-loss minimum",
             MIN_STOP_LOSS_PERCENT,
             "%",
         ),
         parameter(
-            "Exit learning",
+            "Exit policy",
             "Stop-loss maximum",
             MAX_STOP_LOSS_PERCENT,
             "%",
         ),
         parameter(
-            "Exit learning",
+            "Exit policy",
             "Take-profit minimum",
             MIN_TAKE_PROFIT_PERCENT,
             "%",
         ),
         parameter(
-            "Exit learning",
+            "Exit policy",
             "Take-profit maximum",
             MAX_TAKE_PROFIT_PERCENT,
             "%",
@@ -1473,7 +1704,12 @@ fn parameter(section: &str, name: &str, value: f64, unit: &str) -> DecisionParam
 async fn set_enabled(
     State(state): State<AutoTraderState>,
     Json(request): Json<EnabledRequest>,
-) -> Json<StatusResponse> {
+) -> Result<Json<StatusResponse>, (StatusCode, String)> {
+    if request.enabled {
+        let position_url = std::env::var("POSITION_MANAGEMENT_URL")
+            .unwrap_or_else(|_| "http://127.0.0.1:3002".into());
+        sync_auto_positions(&state.client, &position_url, &state).await?;
+    }
     state.enabled.store(request.enabled, Ordering::Relaxed);
     let mut settings = state.settings.lock().await;
     settings.enabled = request.enabled;
@@ -1484,7 +1720,7 @@ async fn set_enabled(
             error.1
         );
     }
-    Json(status(&state, &settings))
+    Ok(Json(status(&state, &settings)))
 }
 async fn update_settings(
     State(state): State<AutoTraderState>,
@@ -1498,7 +1734,9 @@ async fn update_settings(
         || request.daily_realized_loss_limit <= 0.0
         || !request.exploration_percent.is_finite()
         || !(0.0..=100.0).contains(&request.exploration_percent)
-        || request.risk_appetite.is_some_and(|value| !value.is_finite() || !(0.0..=100.0).contains(&value))
+        || request
+            .risk_appetite
+            .is_some_and(|value| !value.is_finite() || !(0.0..=100.0).contains(&value))
         || request.stop_loss_percent.is_some_and(|value| {
             !value.is_finite() || !(MIN_STOP_LOSS_PERCENT..=MAX_STOP_LOSS_PERCENT).contains(&value)
         })
@@ -1524,6 +1762,7 @@ async fn update_settings(
         || request
             .max_entries_per_auto_position
             .is_some_and(|value| !(1..=10).contains(&value))
+        || request.closed_trade_window.is_some_and(|value| !(1..=5000).contains(&value))
         || !(1..=20).contains(&request.max_open_positions)
     {
         return Err((StatusCode::BAD_REQUEST, "Order and total notional limits must be positive with total notional at least the per-order limit; daily loss cap must be positive, exploration must be between 0% and 100%, and max open positions must be between 1 and 20, and entries per position must be between 1 and 10".into()));
@@ -1540,7 +1779,11 @@ async fn update_settings(
     settings.daily_notional_limit = request.daily_notional_limit;
     settings.daily_realized_loss_limit = request.daily_realized_loss_limit;
     settings.exploration_percent = request.exploration_percent;
-    if let Some(value) = request.risk_appetite { settings.risk_appetite = value; }
+    let recalculate_take_profit =
+        request.risk_appetite.is_some() || request.stop_loss_percent.is_some();
+    if let Some(value) = request.risk_appetite {
+        settings.risk_appetite = value;
+    }
     settings.max_open_positions = request.max_open_positions;
     if let Some(value) = request.max_entries_per_auto_position {
         settings.max_entries_per_auto_position = value;
@@ -1550,6 +1793,10 @@ async fn update_settings(
     }
     if let Some(value) = request.take_profit_percent {
         settings.take_profit_percent = value;
+    }
+    if recalculate_take_profit {
+        settings.take_profit_percent =
+            risk_adjusted_take_profit_percent(settings.stop_loss_percent, settings.risk_appetite);
     }
     if let Some(value) = request.vwap_duration_minutes {
         settings.vwap_duration_minutes = value;
@@ -1566,10 +1813,23 @@ async fn update_settings(
     if let Some(value) = request.trailing_distance_percent {
         settings.trailing_distance_percent = value;
     }
+    if let Some(value) = request.closed_trade_window {
+        settings.closed_trade_window = value;
+        let excess = settings.closed_trade_returns_percent.len().saturating_sub(value);
+        if excess > 0 { settings.closed_trade_returns_percent.drain(0..excess); }
+        let timestamp_excess = settings.closed_trade_timestamps_ms.len().saturating_sub(value);
+        if timestamp_excess > 0 { settings.closed_trade_timestamps_ms.drain(0..timestamp_excess); }
+    }
     persist_settings(&state.settings_path, &settings)?;
     Ok(Json(status(&state, &settings)))
 }
 fn status(state: &AutoTraderState, settings: &Settings) -> StatusResponse {
+    if let Ok(mut summary) = state.gap_summary.lock() {
+        let day = utc_day();
+        if summary.utc_day != day {
+            *summary = GapSummary { utc_day: day, ..GapSummary::default() };
+        }
+    }
     StatusResponse {
         enabled: state.enabled.load(Ordering::Relaxed),
         max_order_notional: settings.max_order_notional,
@@ -1586,7 +1846,9 @@ fn status(state: &AutoTraderState, settings: &Settings) -> StatusResponse {
         limit_offset_bps: settings.limit_offset_bps,
         trigger_offset_bps: settings.trigger_offset_bps,
         trailing_distance_percent: settings.trailing_distance_percent,
+        closed_trade_window: settings.closed_trade_window,
         used_notional_today: settings.used_notional_today,
+        available_notional: (settings.daily_notional_limit - settings.used_notional_today).max(0.0),
         last_decision: settings.last_decision.clone(),
         last_decision_at: settings.last_decision_at,
         decisions_since_trade: state
@@ -1649,60 +1911,31 @@ fn status(state: &AutoTraderState, settings: &Settings) -> StatusResponse {
 }
 async fn get_activity(State(state): State<AutoTraderState>) -> Json<ActivityResponse> {
     let settings = state.settings.lock().await;
-    let realized_pnl = settings.realized_pnl;
-    let mut grouped_pnl = BTreeMap::<(String, String, String), (f64, usize)>::new();
-    for order in &settings.orders {
-        if order.realized_pnl.abs() > 1e-12 {
-            let direction = if order.side.eq_ignore_ascii_case("sell") {
-                "LONG"
-            } else {
-                "SHORT"
-            };
-            let key = (
-                order.symbol.clone(),
-                direction.to_owned(),
-                if order.purpose.is_empty() {
-                    "other".to_owned()
-                } else {
-                    order.purpose.clone()
-                },
-            );
-            let total = grouped_pnl.entry(key).or_default();
-            total.0 += order.realized_pnl;
-            total.1 += 1;
-        }
-    }
-    let mut pnl_breakdown = grouped_pnl
-        .into_iter()
-        .map(
-            |((symbol, side, purpose), (realized_pnl, outcomes))| PnlBreakdown {
-                symbol,
-                direction: side,
-                purpose,
-                realized_pnl,
-                outcomes,
-            },
-        )
-        .collect::<Vec<_>>();
-    pnl_breakdown
-        .sort_by(|left, right| right.realized_pnl.abs().total_cmp(&left.realized_pnl.abs()));
-    let orders = settings
+    let today_start = utc_day_start_ms();
+    let mut orders = settings
         .orders
         .iter()
+        .filter(|order| order.timestamp >= today_start)
         .rev()
-        .take(50)
+        .take(MAX_RETAINED_AUTO_TRADER_ORDERS)
         .cloned()
         .map(|mut order| {
             if order.target_price.is_none() && order.purpose == "stop-loss" {
-                if let Some(position) = settings.positions.get(&order.symbol).filter(|position| position.quantity.abs() > 1e-12) {
+                if let Some(position) = settings
+                    .positions
+                    .get(&order.symbol)
+                    .filter(|position| position.quantity.abs() > 1e-12)
+                {
                     let quantity = position.quantity.abs();
                     let loss_fraction = settings.stop_loss_percent / 100.0;
                     let fee_rate = configured_taker_fee_rate();
                     order.target_price = Some(if position.quantity > 0.0 {
-                        (quantity * position.average_entry_price * (1.0 - loss_fraction) + position.entry_fees)
+                        (quantity * position.average_entry_price * (1.0 - loss_fraction)
+                            + position.entry_fees)
                             / (quantity * (1.0 - fee_rate))
                     } else {
-                        (quantity * position.average_entry_price * (1.0 + loss_fraction) - position.entry_fees)
+                        (quantity * position.average_entry_price * (1.0 + loss_fraction)
+                            - position.entry_fees)
                             / (quantity * (1.0 + fee_rate))
                     });
                 }
@@ -1715,17 +1948,57 @@ async fn get_activity(State(state): State<AutoTraderState>) -> Json<ActivityResp
             }
             order
         })
-        .collect();
+        .collect::<Vec<_>>();
     let auto_positions = settings
         .positions
         .iter()
         .filter(|(_, position)| position.quantity.abs() > 1e-12)
         .map(|(symbol, position)| (symbol.clone(), position.clone()))
         .collect::<Vec<_>>();
-    let open_position_symbols = auto_positions.iter().map(|(symbol, _)| symbol.clone()).collect::<Vec<_>>();
+    let open_position_symbols = auto_positions
+        .iter()
+        .map(|(symbol, _)| symbol.clone())
+        .collect::<Vec<_>>();
     drop(settings);
+    let position_url = std::env::var("POSITION_MANAGEMENT_URL")
+        .unwrap_or_else(|_| "http://127.0.0.1:3002".into());
+    let ledger_pnl = fetch_ledger_realized_pnl(&state.client, &position_url).await.ok();
+    let (realized_pnl, realized_pnl_by_quote, pnl_breakdown) = if let Some(pnl) = ledger_pnl {
+        for order in &mut orders {
+            let realized = if order.purpose == "stop-loss" {
+                pnl.realized_pnl_by_barrier_created_at
+                    .get(&order.timestamp.to_string())
+                    .copied()
+            } else if order.order_type.starts_with("Twap") || order.order_type.starts_with("Vwap") {
+                order.execution_order_id.as_ref()
+                    .and_then(|id| pnl.realized_pnl_by_parent_order.get(id))
+                    .copied()
+            } else {
+                pnl.realized_pnl_by_parent_order
+                    .get(&order.timestamp.to_string())
+                    .copied()
+            };
+            order.realized_pnl = realized.unwrap_or(0.0);
+        }
+        let mut grouped = BTreeMap::<(String, String, String), (f64, usize)>::new();
+        for order in &orders {
+            if order.realized_pnl.abs() <= 1e-12 { continue; }
+            let direction = if order.side.eq_ignore_ascii_case("sell") { "LONG" } else { "SHORT" };
+            let total = grouped.entry((order.symbol.clone(), direction.to_owned(), order.purpose.clone())).or_default();
+            total.0 += order.realized_pnl;
+            total.1 += 1;
+        }
+        let mut breakdown = grouped.into_iter().map(|((symbol, direction, purpose), (realized_pnl, outcomes))| PnlBreakdown {
+            symbol, direction, purpose, realized_pnl, outcomes,
+        }).collect::<Vec<_>>();
+        breakdown.sort_by(|left, right| right.realized_pnl.abs().total_cmp(&left.realized_pnl.abs()));
+        (pnl.realized_pnl_all_time_usd, Some(pnl.realized_pnl_by_quote), breakdown)
+    } else {
+        for order in &mut orders { order.realized_pnl = 0.0; }
+        (None, None, Vec::new())
+    };
     let unrealized_pnl = if auto_positions.is_empty() {
-        Some(0.0)
+        Some((0.0, BTreeMap::new()))
     } else {
         let base = std::env::var("POSITION_MANAGEMENT_URL")
             .unwrap_or_else(|_| "http://127.0.0.1:3002".into());
@@ -1734,6 +2007,7 @@ async fn get_activity(State(state): State<AutoTraderState>) -> Json<ActivityResp
             .build()
             .unwrap_or_default();
         let mut total = 0.0;
+        let mut by_quote = BTreeMap::<String, f64>::new();
         let mut complete = true;
         for (symbol, position) in auto_positions {
             let response = client
@@ -1762,27 +2036,45 @@ async fn get_activity(State(state): State<AutoTraderState>) -> Json<ActivityResp
                 complete = false;
                 break;
             };
-            total += (mark - position.average_entry_price) * position.quantity
+            let pnl = (mark - position.average_entry_price) * position.quantity
                 - position.entry_fees
                 - position.quantity.abs() * mark * configured_taker_fee_rate();
+            total += pnl;
+            let quote = symbol.split_once('-').map(|(_, quote)| quote).unwrap_or("USD");
+            *by_quote.entry(quote.to_owned()).or_default() += pnl;
         }
-        complete.then_some(total)
+        complete.then_some((total, by_quote))
     };
     let settings = state.settings.lock().await;
-    let closed_returns = &settings.closed_trade_returns_percent;
-    let exit_learning_samples = closed_returns.len();
+    let today_closed_returns = settings
+        .closed_trade_returns_percent
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| settings.closed_trade_timestamps_ms.get(*index).is_some_and(|timestamp| *timestamp >= today_start))
+        .map(|(_, value)| *value)
+        .collect::<Vec<_>>();
+    let exit_learning_samples = today_closed_returns.len();
     let closed_trade_average_return_percent = (exit_learning_samples > 0)
-        .then(|| closed_returns.iter().sum::<f64>() / exit_learning_samples as f64);
-    let closed_trade_wins = closed_returns
-        .iter()
-        .filter(|value| **value > 1e-12)
-        .count();
-    let closed_trade_losses = closed_returns
-        .iter()
-        .filter(|value| **value < -1e-12)
-        .count();
+        .then(|| today_closed_returns.iter().sum::<f64>() / exit_learning_samples as f64);
+    let closed_trade_wins = today_closed_returns.iter().filter(|value| **value > 1e-12).count();
+    let closed_trade_losses = today_closed_returns.iter().filter(|value| **value < -1e-12).count();
     let closed_trade_flat = exit_learning_samples - closed_trade_wins - closed_trade_losses;
-    let learning_samples = settings.learning.values().map(|stats| stats.samples).sum();
+    let today_closed_indices = settings.closed_trade_timestamps_ms.iter().enumerate()
+        .filter(|(_, timestamp)| **timestamp >= today_start)
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    let closed_trade_realized_usd = (settings.closed_trade_timestamps_ms.len() == settings.closed_trade_returns_percent.len()
+        && settings.closed_trade_realized_usd.len() == settings.closed_trade_returns_percent.len()
+        && !today_closed_indices.is_empty())
+        .then(|| today_closed_indices.iter().map(|index| settings.closed_trade_realized_usd[*index]).sum());
+    let closed_trade_fees_usd = (settings.closed_trade_timestamps_ms.len() == settings.closed_trade_returns_percent.len()
+        && settings.closed_trade_fees_usd.len() == settings.closed_trade_returns_percent.len()
+        && !today_closed_indices.is_empty())
+        .then(|| today_closed_indices.iter().map(|index| settings.closed_trade_fees_usd[*index]).sum());
+    let today = utc_day();
+    let learning_samples = settings.learning.values()
+        .map(|stats| learning_stats_for_day(stats, &today).samples)
+        .sum();
     let scout_open_positions = settings
         .positions
         .values()
@@ -1792,7 +2084,7 @@ async fn get_activity(State(state): State<AutoTraderState>) -> Json<ActivityResp
         .learning
         .iter()
         .filter(|(key, _)| key.starts_with("scout:"))
-        .map(|(_, stats)| stats)
+        .map(|(_, stats)| learning_stats_for_day(stats, &today))
         .fold(LearningStats::default(), |mut total, stats| {
             total.samples += stats.samples;
             total.positive += stats.positive;
@@ -1804,7 +2096,7 @@ async fn get_activity(State(state): State<AutoTraderState>) -> Json<ActivityResp
     let learning_positive = settings
         .learning
         .values()
-        .map(|stats| stats.positive)
+        .map(|stats| learning_stats_for_day(stats, &today).positive)
         .sum::<usize>();
     let preferred_order_type = ALL_ORDER_TYPES
         .iter()
@@ -1814,7 +2106,7 @@ async fn get_activity(State(state): State<AutoTraderState>) -> Json<ActivityResp
                 .learning
                 .iter()
                 .filter(|(key, _)| key.ends_with(&suffix))
-                .map(|(_, stats)| stats)
+                .map(|(_, stats)| learning_stats_for_day(stats, &today))
                 .fold(LearningStats::default(), |mut total, stats| {
                     total.samples += stats.samples;
                     total.positive += stats.positive;
@@ -1836,7 +2128,7 @@ async fn get_activity(State(state): State<AutoTraderState>) -> Json<ActivityResp
             .learning
             .iter()
             .filter(|(key, _)| key.contains(&format!(":P{profile}:")))
-            .map(|(_, stats)| stats.samples)
+            .map(|(_, stats)| learning_stats_for_day(stats, &today).samples)
             .sum()
     });
     let processing_times = state.insight_processing_ms.lock().await.clone();
@@ -1870,17 +2162,24 @@ async fn get_activity(State(state): State<AutoTraderState>) -> Json<ActivityResp
             summarize_lock_wait(&values).map(|summary| (worker, summary))
         })
         .collect();
+    let (unrealized_pnl, unrealized_pnl_by_quote) = unrealized_pnl
+        .map(|(total, by_quote)| (Some(total), Some(by_quote)))
+        .unwrap_or((None, None));
     Json(ActivityResponse {
         orders,
         open_position_symbols,
         pnl_breakdown,
         realized_pnl,
+        realized_pnl_by_quote,
         unrealized_pnl,
+        unrealized_pnl_by_quote,
         exit_learning_samples,
         closed_trade_average_return_percent,
         closed_trade_wins,
         closed_trade_losses,
         closed_trade_flat,
+        closed_trade_realized_usd,
+        closed_trade_fees_usd,
         learning_samples,
         learning_win_rate: (learning_samples > 0)
             .then_some(learning_positive as f64 / learning_samples as f64),
@@ -1940,6 +2239,13 @@ async fn run_cycle(
     dashboard: Dashboard,
 ) -> Result<CycleResult, (StatusCode, String)> {
     let processing_started = Instant::now();
+    if let Err(error) = refresh_usd_rates(state).await {
+        crate::service_log!(
+            "WARN",
+            "USD allocation rates refresh failed; using cached rates: {}",
+            error.1
+        );
+    }
     let result = run_cycle_inner(state, dashboard).await;
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1963,8 +2269,12 @@ async fn run_cycle(
     };
     let traded = matches!(&result, Ok(cycle) if cycle.status == "order_submitted" || cycle.status == "hedge_submitted");
     if let Ok(mut summary) = state.gap_summary.lock() {
+        let day = utc_day();
+        if summary.utc_day != day {
+            *summary = GapSummary { utc_day: day.clone(), ..GapSummary::default() };
+        }
         if traded {
-            *summary = GapSummary::default();
+            *summary = GapSummary { utc_day: day, ..GapSummary::default() };
             if let Ok(cycle) = &result {
                 if cycle.status == "order_submitted"
                     && cycle.order_type.as_deref() != Some("Ioc exit")
@@ -2054,7 +2364,154 @@ async fn run_position_maintenance(state: &AutoTraderState) -> Result<(), (Status
         std::env::var("POSITION_MANAGEMENT_URL").unwrap_or_else(|_| "http://127.0.0.1:3002".into());
     let client = state.client.clone();
     reconcile_maker_fills(&client, &position_url, state).await?;
+    reconcile_scheduled_fills(&client, &position_url, state).await?;
+    sync_auto_positions(&client, &position_url, state).await?;
     let _ = maybe_exit_auto_position(&client, &position_url, state).await?;
+    Ok(())
+}
+
+#[derive(Deserialize)]
+struct LedgerRealizedPnl {
+    realized_pnl_by_quote: BTreeMap<String, f64>,
+    realized_pnl_usd: Option<f64>,
+    realized_pnl_by_parent_order: BTreeMap<String, f64>,
+    realized_pnl_by_barrier_created_at: BTreeMap<String, f64>,
+    realized_pnl_all_time_by_quote: BTreeMap<String, f64>,
+    realized_pnl_all_time_usd: Option<f64>,
+}
+
+async fn fetch_ledger_realized_pnl(
+    client: &reqwest::Client,
+    base: &str,
+) -> Result<LedgerRealizedPnl, (StatusCode, String)> {
+    client
+        .get(format!(
+            "{base}/positions/realized-pnl?source=auto&since_ms={}",
+            utc_day_start_ms()
+        ))
+        .send()
+        .await
+        .map_err(upstream_error)?
+        .error_for_status()
+        .map_err(upstream_error)?
+        .json::<LedgerRealizedPnl>()
+        .await
+        .map_err(upstream_error)
+}
+
+#[derive(Deserialize)]
+struct SourcePositionRecord {
+    symbol: String,
+    quantity: f64,
+    average_entry_price: f64,
+    realized_pnl: f64,
+    entry_fees: f64,
+    #[serde(default)]
+    fees_paid: f64,
+}
+
+async fn sync_auto_positions(
+    client: &reqwest::Client,
+    base: &str,
+    state: &AutoTraderState,
+) -> Result<(), (StatusCode, String)> {
+    let ledger_pnl = fetch_ledger_realized_pnl(client, base).await?;
+    let realized_all_time_usd = ledger_pnl.realized_pnl_all_time_usd.ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        "All-time realized P&L is unavailable from the position ledger because an FX rate is missing".into(),
+    ))?;
+    let realized_today_usd = ledger_pnl.realized_pnl_usd.ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        "Daily realized P&L is unavailable from the position ledger because an FX rate is missing".into(),
+    ))?;
+    let positions = client
+        .get(format!("{base}/positions?source=auto"))
+        .send()
+        .await
+        .map_err(|error| (StatusCode::BAD_GATEWAY, format!("Unable to fetch Auto Trader positions: {error}")))?
+        .error_for_status()
+        .map_err(|error| (StatusCode::BAD_GATEWAY, format!("Auto Trader positions lookup failed: {error}")))?
+        .json::<serde_json::Value>()
+        .await
+        .map_err(|error| (StatusCode::BAD_GATEWAY, format!("Invalid Auto Trader positions response: {error}")))?;
+    let positions = serde_json::from_value::<Vec<SourcePositionRecord>>(positions["positions"].clone())
+        .map_err(|error| (StatusCode::BAD_GATEWAY, format!("Invalid Auto Trader position records: {error}")))?;
+    let mut settings = state.settings.lock().await;
+    let mut changed = false;
+    let mut source_symbols = std::collections::BTreeSet::new();
+    for source_position in positions {
+        if !source_position.quantity.is_finite()
+            || !source_position.average_entry_price.is_finite()
+            || !source_position.realized_pnl.is_finite()
+        {
+            continue;
+        }
+        source_symbols.insert(source_position.symbol.clone());
+        let (prior_quantity, prior_average_entry_price, realized_delta, learning_key) = {
+            let position = settings.positions.entry(source_position.symbol.clone()).or_default();
+            let prior_quantity = position.quantity;
+            let prior_average_entry_price = position.average_entry_price;
+            let realized_delta = source_position.realized_pnl - position.realized_pnl;
+            let learning_key = format!(
+                "{}:{}",
+                if position.entry_context.is_empty() { &source_position.symbol } else { &position.entry_context },
+                if position.entry_order_type.is_empty() { "ManualClose" } else { &position.entry_order_type },
+            );
+            if (position.quantity - source_position.quantity).abs() > 1e-12
+                || (position.average_entry_price - source_position.average_entry_price).abs() > 1e-12
+                || (position.entry_fees - source_position.entry_fees.abs()).abs() > 1e-12
+                || (position.realized_pnl - source_position.realized_pnl).abs() > 1e-12
+            {
+                position.quantity = source_position.quantity;
+                position.average_entry_price = source_position.average_entry_price;
+                position.entry_fees = source_position.entry_fees.abs();
+                changed = true;
+            }
+            position.realized_pnl = source_position.realized_pnl;
+            (prior_quantity, prior_average_entry_price, realized_delta, learning_key)
+        };
+        if realized_delta.is_finite() && realized_delta.abs() > 1e-12 {
+            // Manual position-manager fills bypass apply_auto_fill. Use the
+            // ledger delta for close-out learning; account totals are mirrored below.
+            let realized_delta_usd = realized_usd(&settings, &source_position.symbol, realized_delta);
+            changed = true;
+            if prior_quantity.abs() > 1e-12 && source_position.quantity.abs() <= 1e-12 {
+                let entry_notional = prior_quantity.abs() * prior_average_entry_price;
+                if entry_notional > 0.0 {
+                    let fees_usd = realized_usd(&settings, &source_position.symbol, source_position.fees_paid.max(0.0));
+                    record_closed_trade_outcome(
+                        &mut settings,
+                        realized_delta / entry_notional * 100.0,
+                        realized_delta_usd,
+                        fees_usd,
+                    );
+                    adapt_exit_policy(&mut settings);
+                }
+                let stats = settings.learning.entry(learning_key).or_default();
+                record_learning_outcome(stats, realized_delta_usd);
+            }
+        }
+    }
+    // The position manager owns the ledger. Drop cached symbols that no longer
+    // exist there (for example after a ledger reset) and mirror its P&L totals.
+    let cached_symbols = settings.positions.keys().cloned().collect::<Vec<_>>();
+    for symbol in cached_symbols {
+        if !source_symbols.contains(&symbol) {
+            settings.positions.remove(&symbol);
+            changed = true;
+        }
+    }
+    if (settings.realized_pnl - realized_all_time_usd).abs() > 1e-9
+        || (settings.daily_realized_pnl - realized_today_usd).abs() > 1e-9
+    {
+        settings.realized_pnl = realized_all_time_usd;
+        settings.daily_realized_pnl = realized_today_usd;
+        changed = true;
+    }
+    if changed {
+        settings.used_notional_today = allocated_notional(&settings);
+        persist_settings(&state.settings_path, &settings)?;
+    }
     Ok(())
 }
 
@@ -2195,6 +2652,7 @@ async fn reconcile_maker_fills(
                 fill.fee.abs(),
                 "PostOnlyLimit",
                 order.learning_context.as_deref().unwrap_or(&order.symbol),
+                order.horizon_take_profit_percent,
             );
             order.filled_quantity += fill.quantity;
             order.fill_rate = (order.filled_quantity / order.quantity).clamp(0.0, 1.0);
@@ -2206,7 +2664,7 @@ async fn reconcile_maker_fills(
             order.realized_pnl += realized;
             order.processed_fill_trade_ids.push(fill.id.clone());
             if let Some(kind) = learned {
-                learning_updates.push((kind, realized));
+                learning_updates.push((kind, order.symbol.clone(), realized));
             }
             changed = true;
         }
@@ -2241,27 +2699,196 @@ async fn reconcile_maker_fills(
                     "removed_before_expiry".to_owned()
                 },
             );
-            unfilled_post_only_removal = order.filled_quantity <= 1e-12
-                && prior_status != "expired_or_cancelled";
+            unfilled_post_only_removal =
+                order.filled_quantity <= 1e-12 && prior_status != "expired_or_cancelled";
         }
         if unfilled_post_only_removal {
             if let Some(context) = order.learning_context.as_deref() {
-                learning_updates.push((format!("{context}:PostOnlyLimit"), 0.0));
+                learning_updates.push((format!("{context}:PostOnlyLimit"), order.symbol.clone(), 0.0));
             }
         }
         changed |= order.status != prior_status;
     }
-    for (kind, realized) in learning_updates {
+    for (kind, symbol, realized) in learning_updates {
+        let realized_usd = realized_usd(&settings, &symbol, realized);
         let stats = settings.learning.entry(kind).or_default();
-        stats.samples += 1;
-        if realized > 0.0 {
-            stats.positive += 1;
-        }
-        stats.realized_pnl += realized;
-        settings.realized_pnl += realized;
-        settings.daily_realized_pnl += realized;
+        record_learning_outcome(stats, realized_usd);
+        settings.realized_pnl += realized_usd;
+        settings.daily_realized_pnl += realized_usd;
     }
     if changed {
+        persist_settings(&state.settings_path, &settings)?;
+    }
+    Ok(())
+}
+
+async fn reconcile_scheduled_fills(
+    client: &reqwest::Client,
+    base: &str,
+    state: &AutoTraderState,
+) -> Result<(), (StatusCode, String)> {
+    let is_reconcilable = |order: &&TraderOrder| {
+        (order.order_type.starts_with("Twap") || order.order_type.starts_with("Vwap"))
+            && (matches!(order.status.as_str(), "accepted" | "partially_filled" | "resting")
+                || (order.status == "failed" && order.failure_reason.as_deref().is_some_and(|reason| reason.contains("Scheduled run is missing from the position manager"))))
+    };
+    let has_pending = state.settings.lock().await.orders.iter().filter(is_reconcilable).next().is_some();
+    if !has_pending {
+        return Ok(());
+    }
+    let (trades_response, runs_response) = tokio::try_join!(
+        client.get(format!("{base}/positions/trades")).send(),
+        client.get(format!("{base}/positions/vwap")).send(),
+    )
+    .map_err(|error| (StatusCode::BAD_GATEWAY, format!("Unable to fetch Auto Trader executions: {error}")))?;
+    let trades_response = trades_response.error_for_status().map_err(|error| {
+        (StatusCode::BAD_GATEWAY, format!("Auto Trader trade ledger lookup failed: {error}"))
+    })?;
+    let runs_response = runs_response.error_for_status().map_err(|error| {
+        (StatusCode::BAD_GATEWAY, format!("Scheduled execution status lookup failed: {error}"))
+    })?;
+    let trades = trades_response.json::<serde_json::Value>().await
+        .map_err(|error| (StatusCode::BAD_GATEWAY, format!("Invalid Auto Trader trade ledger: {error}")))?;
+    let runs = runs_response.json::<serde_json::Value>().await
+        .map_err(|error| (StatusCode::BAD_GATEWAY, format!("Invalid scheduled execution status: {error}")))?;
+    let trade_rows = trades["trades"].as_array().cloned().unwrap_or_default();
+    let run_rows = runs["runs"].as_array().cloned().unwrap_or_default();
+    let mut settings = state.settings.lock().await;
+    let mut changed = false;
+    let mut learning_updates = Vec::new();
+    {
+        let usd_rates = settings.usd_rates.clone();
+        let Settings { orders, positions, learning, realized_pnl, daily_realized_pnl, .. } = &mut *settings;
+        for order in orders.iter_mut().filter(|order| {
+            (order.order_type.starts_with("Twap") || order.order_type.starts_with("Vwap"))
+                && (matches!(order.status.as_str(), "accepted" | "partially_filled" | "resting")
+                    || (order.status == "failed" && order.failure_reason.as_deref().is_some_and(|reason| reason.contains("Scheduled run is missing from the position manager"))))
+        }) {
+            if order.execution_order_id.is_none() {
+                let candidate = run_rows.iter().filter(|run| {
+                    run["symbol"].as_str() == Some(order.symbol.as_str())
+                        && run["side"].as_str() == Some(order.side.as_str())
+                        && run["quantity"].as_f64().is_some_and(|qty| (qty - order.quantity).abs() <= order.quantity.abs() * 1e-9)
+                        && run["started_at"].as_u64().is_some_and(|at| at.abs_diff(order.timestamp) <= 120_000)
+                }).min_by_key(|run| run["started_at"].as_u64().unwrap_or_default().abs_diff(order.timestamp));
+                if let Some(id) = candidate.and_then(|run| run["id"].as_str()) {
+                    order.execution_order_id = Some(id.to_owned());
+                    changed = true;
+                } else {
+                    order.status = "failed".into();
+                    order.failure_reason = Some("Scheduled run could not be found in the position manager".into());
+                    changed = true;
+                    continue;
+                }
+            }
+            let Some(run_id) = order.execution_order_id.as_deref() else { continue; };
+            let run = run_rows.iter().find(|run| run["id"].as_str() == Some(run_id)).cloned().unwrap_or_else(|| {
+                let matching = trade_rows.iter().filter(|fill| {
+                    fill["source"].as_str() == Some("auto")
+                        && fill["parent_order_id"].as_str() == Some(run_id)
+                        && fill["symbol"].as_str() == Some(order.symbol.as_str())
+                        && fill["side"].as_str() == Some(order.side.as_str())
+                }).collect::<Vec<_>>();
+                let executed_quantity = matching.iter().map(|fill| fill["quantity"].as_f64().unwrap_or(0.0).max(0.0)).sum::<f64>();
+                let notional = matching.iter().map(|fill| fill["quantity"].as_f64().unwrap_or(0.0).max(0.0) * fill["execution_price"].as_f64().unwrap_or(0.0).max(0.0)).sum::<f64>();
+                serde_json::json!({
+                    "id": run_id,
+                    "status": "interrupted",
+                    "executed_quantity": executed_quantity,
+                    "execution_vwap": if executed_quantity > 0.0 { notional / executed_quantity } else { 0.0 },
+                    "error": "Scheduled run record is missing; tagged fills were reconciled and no further execution is assumed."
+                })
+            });
+            let fills = trade_rows.iter().filter(|fill| {
+                fill["source"].as_str() == Some("auto")
+                    && fill["parent_order_id"].as_str() == Some(run_id)
+                    && fill["symbol"].as_str() == Some(order.symbol.as_str())
+                    && fill["side"].as_str() == Some(order.side.as_str())
+                    && fill["id"].as_str().is_some_and(|id| !order.processed_fill_trade_ids.iter().any(|seen| seen == id))
+            }).cloned().collect::<Vec<_>>();
+            let has_tagged_fills = !fills.is_empty();
+            for fill in fills {
+                let Some(id) = fill["id"].as_str().map(str::to_owned) else { continue; };
+                let qty = fill["quantity"].as_f64().unwrap_or(0.0);
+                let price = fill["execution_price"].as_f64().unwrap_or(0.0);
+                let fee = fill["fee"].as_f64().unwrap_or(0.0).abs();
+                if !qty.is_finite() || qty <= 0.0 || !price.is_finite() || price <= 0.0 { continue; }
+                let (realized, learned) = apply_auto_fill(
+                    positions,
+                    &order.symbol,
+                    &order.side,
+                    qty,
+                    price,
+                    fee,
+                    "ScheduledExecution",
+                    order.learning_context.as_deref().unwrap_or(&order.symbol),
+                    order.horizon_take_profit_percent,
+                );
+                let prior_quantity = order.filled_quantity;
+                order.filled_quantity = (prior_quantity + qty).min(order.quantity);
+                order.fill_rate = (order.filled_quantity / order.quantity).clamp(0.0, 1.0);
+                order.average_price = Some((order.average_price.unwrap_or(0.0) * prior_quantity + price * qty) / order.filled_quantity);
+                order.fees_paid += fee;
+                order.realized_pnl += realized;
+                order.processed_fill_trade_ids.push(id);
+                let realized_usd = realized * quote_usd_rate_for_map(&usd_rates, &order.symbol);
+                *realized_pnl += realized_usd;
+                *daily_realized_pnl += realized_usd;
+                if let Some(kind) = learned { learning_updates.push((kind, realized_usd)); }
+                changed = true;
+            }
+            // Compatibility for schedules created before ledger source/parent tags were added.
+            if !has_tagged_fills {
+                let target_filled = run["executed_quantity"].as_f64().unwrap_or(0.0).clamp(0.0, order.quantity);
+                let delta_quantity = (target_filled - order.filled_quantity).max(0.0);
+                let price = run["execution_vwap"].as_f64().unwrap_or(0.0);
+                if delta_quantity > 1e-12 && price.is_finite() && price > 0.0 {
+                    let fee = delta_quantity * price * configured_taker_fee_rate();
+                    let (realized, learned) = apply_auto_fill(
+                        positions, &order.symbol, &order.side, delta_quantity, price, fee,
+                        "ScheduledExecution", order.learning_context.as_deref().unwrap_or(&order.symbol),
+                        order.horizon_take_profit_percent,
+                    );
+                    let previous_notional = order.filled_quantity * order.average_price.unwrap_or(price);
+                    let next_quantity = order.filled_quantity + delta_quantity;
+                    order.average_price = Some((previous_notional + delta_quantity * price) / next_quantity);
+                    order.filled_quantity = next_quantity;
+                    order.fill_rate = (next_quantity / order.quantity).clamp(0.0, 1.0);
+                    order.fees_paid += fee;
+                    order.realized_pnl += realized;
+                    let realized_usd = realized * quote_usd_rate_for_map(&usd_rates, &order.symbol);
+                    *realized_pnl += realized_usd;
+                    *daily_realized_pnl += realized_usd;
+                    if let Some(kind) = learned { learning_updates.push((kind, realized_usd)); }
+                    changed = true;
+                }
+            }
+            let next_status = match run["status"].as_str().unwrap_or("running") {
+                "running" => if order.filled_quantity > 0.0 { "partially_filled" } else { "accepted" },
+                "completed" if order.filled_quantity + 1e-12 >= order.quantity => "filled",
+                "completed" if order.filled_quantity > 1e-12 => "partially_filled_closed",
+                "completed" => "expired_or_cancelled",
+                "cancelled" if order.filled_quantity > 1e-12 => "partially_filled_closed",
+                "cancelled" => "cancelled",
+                "failed" => "failed",
+                "interrupted" => "interrupted",
+                _ => "accepted",
+            };
+            if order.status != next_status { order.status = next_status.to_owned(); changed = true; }
+            if let Some(error) = run["error"].as_str() {
+                if order.failure_reason.as_deref() != Some(error) {
+                    order.failure_reason = Some(error.to_owned());
+                    changed = true;
+                }
+            }
+        }
+        for (kind, realized) in learning_updates {
+            let stats = learning.entry(kind).or_default();
+            record_learning_outcome(stats, realized);
+        }
+    }
+    if changed {
+        settings.used_notional_today = allocated_notional(&settings);
         persist_settings(&state.settings_path, &settings)?;
     }
     Ok(())
@@ -2280,12 +2907,8 @@ async fn fresh_subscribed_market_book(
     position_url: &str,
     symbol: &str,
 ) -> Option<serde_json::Value> {
-    let subscribe_url = format!("{position_url}/internal/market-book/{symbol}/subscribe");
-    let _ = client
-        .post(subscribe_url)
-        .timeout(Duration::from_secs(1))
-        .send()
-        .await;
+    // The GET handler ensures the subscription itself, so a separate POST here
+    // only adds a network round trip before the first book poll.
     let market_url = format!("{position_url}/internal/market-book?symbol={symbol}");
     for _ in 0..4 {
         if let Ok(response) = client
@@ -2308,7 +2931,7 @@ async fn fresh_subscribed_market_book(
                 return Some(market);
             }
         }
-        tokio::time::sleep(Duration::from_millis(150)).await;
+        tokio::time::sleep(Duration::from_millis(25)).await;
     }
     None
 }
@@ -2342,9 +2965,15 @@ async fn run_cycle_inner(
         let mut settings = state.settings.lock().await;
         reset_daily_budget(&mut settings);
     }
+    let ledger_realized = fetch_ledger_realized_pnl(&client, &position_url).await?;
+    let realized_today_usd = ledger_realized.realized_pnl_usd.ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        "Daily realized P&L is unavailable from the position ledger because an FX rate is missing".into(),
+    ))?;
     {
         let mut settings = state.settings.lock().await;
         reset_daily_budget(&mut settings);
+        settings.daily_realized_pnl = realized_today_usd;
         if settings.daily_realized_pnl <= -settings.daily_realized_loss_limit {
             if !settings.daily_loss_limit_reduced {
                 settings.daily_realized_loss_limit = (settings.daily_realized_loss_limit * 0.9)
@@ -2362,13 +2991,19 @@ async fn run_cycle_inner(
     let selection_started = Instant::now();
     let (
         learning,
+        risk_appetite,
         active_scout_count,
         counterfactual_stop_loss_percent,
         counterfactual_take_profit_percent,
     ) = {
         let settings = state.settings.lock().await;
         (
-            settings.learning.clone(),
+            {
+                let mut learning = settings.learning.clone();
+                decay_learning_map(&mut learning, current_time_ms());
+                learning
+            },
+            settings.risk_appetite,
             settings
                 .positions
                 .values()
@@ -2380,20 +3015,19 @@ async fn run_cycle_inner(
     };
     let mut signals = dashboard.best;
     for signal in &mut signals {
-        let multiplier = longer_horizon_score_multiplier(
-            signal.score,
-            &dashboard.missed_opportunity_bands,
-        );
+        let multiplier =
+            longer_horizon_score_multiplier(signal.score, &dashboard.missed_opportunity_bands);
         if multiplier > 1.0 {
             signal.score *= multiplier;
         }
     }
+    let neutral_direction_floor = NEUTRAL_SCORE_DIRECTION_FLOOR * risk_floor_scale(risk_appetite);
     let mut inferred_direction_count = 0;
     for signal in &mut signals {
         if signal.direction == "neutral"
             && signal.ranging_probability.unwrap_or(0.0) < NEUTRAL_INFERENCE_MAX_RANGE_PROBABILITY
             && signal.score.is_finite()
-            && signal.score.abs() >= NEUTRAL_SCORE_DIRECTION_FLOOR
+            && signal.score.abs() >= neutral_direction_floor
         {
             signal.direction = if signal.score > 0.0 {
                 "bullish".into()
@@ -2411,7 +3045,7 @@ async fn run_cycle_inner(
             && now.saturating_sub(candidate.timestamp / 1000) <= MAX_SIGNAL_AGE_SECONDS
             && candidate.score.is_finite()
             && candidate.score.abs() >= SHADOW_MIN_ABS_SCORE
-            && candidate.score.abs() < NEUTRAL_SCORE_DIRECTION_FLOOR
+            && candidate.score.abs() < neutral_direction_floor
             && candidate.ranging_probability.unwrap_or(0.0)
                 < NEUTRAL_INFERENCE_MAX_RANGE_PROBABILITY
     }) {
@@ -2496,7 +3130,7 @@ async fn run_cycle_inner(
                 || signal.stale
                 || now.saturating_sub(signal.timestamp / 1000) > MAX_SIGNAL_AGE_SECONDS
                 || !signal.score.is_finite()
-                || signal.score.abs() < SCOUT_NEUTRAL_SCORE_FLOOR
+                || signal.score.abs() < SCOUT_NEUTRAL_SCORE_FLOOR * risk_floor_scale(risk_appetite)
                 || signal.ranging_probability.unwrap_or(0.0)
                     >= NEUTRAL_INFERENCE_MAX_RANGE_PROBABILITY
             {
@@ -2528,11 +3162,12 @@ async fn run_cycle_inner(
         .filter(|signal| {
             let context = market_context(signal);
             let learned_floor = adaptive_strength_floor(&learning, &context);
-            let floor = adaptive_missed_opportunity_floor(
+            let floor = (adaptive_missed_opportunity_floor(
                 learned_floor,
                 "strength",
                 &dashboard.missed_opportunity_bands,
-            );
+            ) * risk_floor_scale(risk_appetite))
+            .clamp(0.0, 1.0);
             signal.strength.is_finite() && signal.strength >= floor
         })
         .copied()
@@ -2543,14 +3178,15 @@ async fn run_cycle_inner(
             let context = market_context(signal);
             !context.ends_with(":mixed")
                 && signal.strength.is_finite()
-                && signal.strength >= MIN_EXPLORATION_STRENGTH
+                && signal.strength >= MIN_EXPLORATION_STRENGTH * risk_floor_scale(risk_appetite)
                 && signal.score.is_finite()
                 && signal.score.abs()
-                    >= adaptive_exploration_score_floor(
+                    >= (adaptive_exploration_score_floor(
                         &learning,
                         &context,
                         &dashboard.missed_opportunity_bands,
-                    )
+                    ) * risk_floor_scale(risk_appetite))
+                    .max(0.0)
         })
         .copied()
         .collect::<Vec<_>>();
@@ -2650,6 +3286,9 @@ async fn run_cycle_inner(
                     let context = market_context(signal);
                     let (strength_floor, score_floor) =
                         adaptive_scout_thresholds(&learning, &context, active_scout_count);
+                    let strength_floor =
+                        (strength_floor * risk_floor_scale(risk_appetite)).clamp(0.0, 1.0);
+                    let score_floor = (score_floor * risk_floor_scale(risk_appetite)).max(0.0);
                     if active_scout_count >= SCOUT_MAX_ACTIVE_POSITIONS
                         || !signal.strength.is_finite()
                         || signal.strength < strength_floor
@@ -2729,7 +3368,7 @@ async fn run_cycle_inner(
                 non_directional_count,
                 position_blocked_count,
                 strength_qualified.len(),
-                MIN_EXPLORATION_STRENGTH,
+                MIN_EXPLORATION_STRENGTH * risk_floor_scale(risk_appetite),
                 exploration_qualified.len(),
                 blocked_by_negative
             );
@@ -2748,7 +3387,7 @@ async fn run_cycle_inner(
                     Some(format!("{} {} · Signal freshness (age {}s > max {}s)", candidate.symbol, candidate.direction, age, MAX_SIGNAL_AGE_SECONDS))
                 } else if !matches!(candidate.direction.as_str(), "bullish" | "bearish") {
                     let ranging = candidate.ranging_probability.map(|value| format!("{:.1}%", value * 100.0)).unwrap_or_else(|| "n/a (defaults to 0%)".into());
-                    Some(format!("{} {} · Directional signal (|score| {:.3} vs floor {:.2}; range probability {} must be below {:.0}% to infer direction)", candidate.symbol, candidate.direction, candidate.score.abs(), NEUTRAL_SCORE_DIRECTION_FLOOR, ranging, NEUTRAL_INFERENCE_MAX_RANGE_PROBABILITY * 100.0))
+                    Some(format!("{} {} · Directional signal (|score| {:.3} vs floor {:.2}; range probability {} must be below {:.0}% to infer direction)", candidate.symbol, candidate.direction, candidate.score.abs(), neutral_direction_floor, ranging, NEUTRAL_INFERENCE_MAX_RANGE_PROBABILITY * 100.0))
                 } else {
                     open_positions.get(&candidate.symbol).and_then(|position| {
                         let signal_quantity = if candidate.direction == "bullish" { 1.0 } else { -1.0 };
@@ -2772,12 +3411,13 @@ async fn run_cycle_inner(
                 .map(|candidate| {
                 let context = market_context(candidate);
                 let learned_floor = adaptive_strength_floor(&learning, &context);
-                let strength_floor = adaptive_missed_opportunity_floor(
+                let floor_scale = risk_floor_scale(risk_appetite);
+                let strength_floor = (adaptive_missed_opportunity_floor(
                     learned_floor, "strength", &dashboard.missed_opportunity_bands,
-                );
-                let score_floor = adaptive_exploration_score_floor(
+                ) * floor_scale).clamp(0.0, 1.0);
+                let score_floor = (adaptive_exploration_score_floor(
                     &learning, &context, &dashboard.missed_opportunity_bands,
-                );
+                ) * floor_scale).max(0.0);
                 let evidence = dashboard.walk_forward.iter().find(|item| {
                     item.symbol == candidate.symbol && (60..=300).contains(&item.horizon_seconds)
                 });
@@ -2805,7 +3445,7 @@ async fn run_cycle_inner(
                 let evidence_missing = !weak && side.is_none_or(|m| m.sample_count < MIN_SIDE_WALK_FORWARD_SAMPLES);
                 let exploration_path_qualified = !mixed_context
                     && candidate.strength.is_finite()
-                    && candidate.strength >= MIN_EXPLORATION_STRENGTH
+                    && candidate.strength >= MIN_EXPLORATION_STRENGTH * risk_floor_scale(risk_appetite)
                     && candidate.score.is_finite()
                     && candidate.score.abs() >= score_floor;
                 let evidence_bad = exploration_path_qualified && side.is_some_and(|m| m.sample_count >= MIN_EXPLORATION_EVIDENCE_SAMPLES
@@ -2826,6 +3466,10 @@ async fn run_cycle_inner(
                 ));
                 let (scout_strength_floor, scout_score_floor) =
                     adaptive_scout_thresholds(&learning, &context, active_scout_count);
+                let scout_strength_floor =
+                    (scout_strength_floor * risk_floor_scale(risk_appetite)).clamp(0.0, 1.0);
+                let scout_score_floor =
+                    (scout_score_floor * risk_floor_scale(risk_appetite)).max(0.0);
                 let scout_strength_pass = candidate.strength.is_finite() && candidate.strength >= scout_strength_floor;
                 let scout_score_pass = candidate.score.is_finite() && candidate.score.abs() >= scout_score_floor;
                 let scout_negative = side.is_some_and(|m| m.sample_count >= MIN_EXPLORATION_EVIDENCE_SAMPLES
@@ -2967,6 +3611,7 @@ async fn run_cycle_inner(
     let now_ms = now.saturating_mul(1000);
     let mut settings = state.settings.lock().await;
     reset_daily_budget(&mut settings);
+    let quote_rate = quote_usd_rate(&settings, &signal.symbol);
     if let Some(stopped_at) = settings
         .orders
         .iter()
@@ -3062,21 +3707,34 @@ async fn run_cycle_inner(
             ),
         ));
     }
+    let baseline_type = choose_order_type(&signal, settings.risk_appetite);
     let risk_fraction = if settings.risk_limited_sizing {
         0.25
     } else {
         1.0
     };
+    let risk_size_scale = risk_size_scale(settings.risk_appetite);
     let exploration_cap = if scout {
-        settings.max_order_notional * SCOUT_MAX_ORDER_FRACTION
+        settings.max_order_notional * SCOUT_MAX_ORDER_FRACTION * risk_size_scale
     } else if exploratory {
-        settings.max_order_notional * (settings.exploration_percent / 100.0)
+        settings.max_order_notional
+            * (settings.exploration_percent / 100.0)
+            * risk_size_scale
     } else {
         settings.max_order_notional
     };
-    let risk_order_cap = exploration_cap.min(settings.max_order_notional * risk_fraction);
-    let mut notional =
-        risk_order_cap.min(settings.daily_notional_limit - settings.used_notional_today);
+    let risk_order_cap = exploration_cap
+        .min(settings.max_order_notional)
+        .min(settings.max_order_notional * risk_fraction);
+    let stop_headroom_multiplier = if matches!(baseline_type, AutoOrderType::Vwap | AutoOrderType::Twap) {
+        2.0
+    } else {
+        1.0
+    };
+    let mut notional = risk_order_cap.min(
+        (settings.daily_notional_limit - settings.used_notional_today)
+            / stop_headroom_multiplier,
+    );
     if notional <= 0.0 {
         return Ok(skipped_for_signal(
             signal,
@@ -3102,11 +3760,35 @@ async fn run_cycle_inner(
         trigger_offset_bps: settings.trigger_offset_bps,
         trailing_distance_percent: settings.trailing_distance_percent,
     };
-    let baseline_type = choose_order_type(&signal);
+    let minimum_book_order = if scout {
+        MIN_SCOUT_DEEP_BOOK_ORDER_NOTIONAL
+    } else {
+        MIN_DEEP_BOOK_ORDER_NOTIONAL
+    };
+    let deep_book_started = Instant::now();
+    let deep_book = assess_deep_book(
+        &market,
+        &signal.symbol,
+        signal.direction == "bullish",
+        notional * quote_rate,
+        minimum_book_order * quote_rate,
+    );
+    let deep_book_ms = deep_book_started.elapsed().as_secs_f64() * 1000.0;
+    let horizon_take_profit_percent = horizon_adjusted_take_profit_percent(
+        &signal,
+        &dashboard.walk_forward,
+        settings.take_profit_percent,
+    );
     let context = market_context(&signal);
-    let order_type = if scout {
+    decay_learning_map(&mut settings.learning, now_ms);
+    let learned_type = if scout {
         baseline_type
-    } else if let Some(order_type) = adapt_order_type(baseline_type, &context, &settings.learning) {
+    } else if let Some(order_type) = adapt_order_type(
+        baseline_type,
+        &context,
+        &settings.learning,
+        settings.risk_appetite,
+    ) {
         order_type
     } else {
         return Ok(skipped_for_signal(
@@ -3114,6 +3796,22 @@ async fn run_cycle_inner(
             "Recent closed auto-trades show no profitable order type with enough samples",
         ));
     };
+    let side_depth = deep_book.map(|assessment| {
+        if signal.direction == "bullish" { assessment.ask_depth_10bps } else { assessment.bid_depth_10bps }
+    }).unwrap_or(0.0);
+    let depth_ratio = if side_depth > 0.0 { notional * quote_rate / side_depth } else { 0.0 };
+    let (schedule_depth_threshold, schedule_threshold_samples) =
+        learned_schedule_depth_threshold(&settings.learning, &context);
+    let depth_ratio_bucket = schedule_depth_ratio_bucket(depth_ratio);
+    let order_type = score_execution_order_type(
+        signal,
+        settings.risk_appetite,
+        notional * quote_rate,
+        baseline_type,
+        learned_type,
+        deep_book,
+        schedule_depth_threshold,
+    );
     let profile = choose_parameter_profile(order_type, &context, &settings.learning, exploratory);
     let execution_params = parameter_profile(baseline_params, profile);
     *state.latest_execution_parameters.lock().await = Some(LatestExecutionParameters {
@@ -3125,14 +3823,17 @@ async fn run_cycle_inner(
         profile,
         vwap_duration_minutes: execution_params.vwap_duration_minutes,
         vwap_participation_percent: execution_params.vwap_participation_rate * 100.0,
+        schedule_depth_threshold,
+        proposed_depth_ratio: depth_ratio,
+        schedule_threshold_samples,
         limit_offset_bps: execution_params.limit_offset_bps,
         trigger_offset_bps: execution_params.trigger_offset_bps,
         trailing_distance_percent: execution_params.trailing_distance_percent,
     });
     let learning_context = if scout {
-        format!("scout:{context}:P{profile}")
+        format!("scout:{context}:P{profile}:depth:{depth_ratio_bucket}")
     } else {
-        format!("{context}:P{profile}")
+        format!("{context}:P{profile}:depth:{depth_ratio_bucket}")
     };
     drop(settings);
     let side = if signal.direction == "bullish" {
@@ -3140,20 +3841,6 @@ async fn run_cycle_inner(
     } else {
         "sell"
     };
-    let deep_book_started = Instant::now();
-    let minimum_book_order = if scout {
-        MIN_SCOUT_DEEP_BOOK_ORDER_NOTIONAL
-    } else {
-        MIN_DEEP_BOOK_ORDER_NOTIONAL
-    };
-    let deep_book = assess_deep_book(
-        &market,
-        &signal.symbol,
-        side == "buy",
-        notional,
-        minimum_book_order,
-    );
-    let deep_book_ms = deep_book_started.elapsed().as_secs_f64() * 1000.0;
     // Walk-forward net returns include configured taker fees, but not the live
     // spread/sweep cost of this particular order. Avoid trading when that
     // incremental round-trip cost would consume the measured edge.
@@ -3186,11 +3873,13 @@ async fn run_cycle_inner(
                 signal.symbol, assessment.impact_bps, DEEP_BOOK_BAND_BPS
             )));
         }
-        notional = notional.min(assessment.notional_cap);
+        if !matches!(order_type, AutoOrderType::Vwap | AutoOrderType::Twap) {
+            notional = notional.min(assessment.notional_cap / quote_rate);
+        }
         if notional < minimum_book_order {
             return Ok(skipped(&format!(
-                "Deep-book capacity for {} ({:.2}) is below the minimum paper order ({:.2})",
-                signal.symbol, assessment.notional_cap, minimum_book_order
+                "Deep-book capacity for {} ({:.2} USD) is below the minimum paper order ({:.2} USD)",
+                signal.symbol, assessment.notional_cap / quote_rate, minimum_book_order
             )));
         }
         Some(format!(
@@ -3211,7 +3900,7 @@ async fn run_cycle_inner(
         }
         settings.last_risk_note.push_str(&note);
     }
-    let quantity = notional / mid;
+    let mut quantity = notional / (mid * quote_rate);
     let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -3251,7 +3940,21 @@ async fn run_cycle_inner(
     {
         let mut settings = state.settings.lock().await;
         reset_daily_budget(&mut settings);
-        settings.used_notional_today = allocated_notional(&settings);
+        let allocated = allocated_notional(&settings);
+        let remaining_budget = (settings.daily_notional_limit - allocated).max(0.0);
+        notional = notional.min(remaining_budget / stop_headroom_multiplier);
+        if notional < minimum_book_order {
+            return Ok(skipped_for_signal(
+                signal,
+                if stop_headroom_multiplier > 1.0 {
+                    "Insufficient notional headroom for both the scheduled entry and its protective stop"
+                } else {
+                    "Remaining daily notional budget is below the minimum order size"
+                },
+            ));
+        }
+        quantity = notional / (mid * quote_rate);
+        settings.used_notional_today = allocated;
         settings
             .last_signal_at
             .insert(signal_key.clone(), timestamp);
@@ -3289,6 +3992,7 @@ async fn run_cycle_inner(
             decision_mid: Some(mid),
             submitted_limit_price,
             target_price: None,
+            horizon_take_profit_percent,
             limit_to_mid_bps,
             limit_to_crossing_quote_bps,
             expires_at,
@@ -3297,8 +4001,8 @@ async fn run_cycle_inner(
             status: "submitting".to_owned(),
             realized_pnl: 0.0,
         });
-        if settings.orders.len() > 500 {
-            let excess = settings.orders.len() - 500;
+        if settings.orders.len() > MAX_RETAINED_AUTO_TRADER_ORDERS {
+            let excess = settings.orders.len() - MAX_RETAINED_AUTO_TRADER_ORDERS;
             settings.orders.drain(..excess);
         }
         persist_settings(&state.settings_path, &settings)?;
@@ -3331,6 +4035,7 @@ async fn run_cycle_inner(
         ask,
         order_type,
         execution_params,
+        timestamp.to_string(),
     )
     .await
     {
@@ -3401,6 +4106,7 @@ async fn run_cycle_inner(
                     fee,
                     &format!("{order_type:?}"),
                     &learning_context,
+                    horizon_take_profit_percent,
                 )
             })
             .unwrap_or_default();
@@ -3411,15 +4117,12 @@ async fn run_cycle_inner(
     } else {
         (0.0, None)
     };
-    settings.realized_pnl += realized_delta;
-    settings.daily_realized_pnl += realized_delta;
+    let realized_delta_usd = realized_usd(&settings, &signal.symbol, realized_delta);
+    settings.realized_pnl += realized_delta_usd;
+    settings.daily_realized_pnl += realized_delta_usd;
     if let Some(kind) = learned_type {
         let stats = settings.learning.entry(kind).or_default();
-        stats.samples += 1;
-        if realized_delta > 0.0 {
-            stats.positive += 1;
-        }
-        stats.realized_pnl += realized_delta;
+        record_learning_outcome(stats, realized_delta_usd);
     }
     let status = if response
         .get("barrier_order")
@@ -3446,6 +4149,11 @@ async fn run_cycle_inner(
             .get("order")
             .and_then(|order| order.get("id"))
             .and_then(serde_json::Value::as_str)
+            .or_else(|| {
+                (matches!(&order_type, AutoOrderType::Twap | AutoOrderType::Vwap))
+                    .then(|| response.get("id").and_then(serde_json::Value::as_str))
+                    .flatten()
+            })
             .map(str::to_owned);
         order.status = status.to_owned();
         order.realized_pnl = realized_delta;
@@ -3517,31 +4225,41 @@ async fn run_cycle_inner(
     audit_payload["execution_response"] = response.clone();
     queue_auto_trader_audit(state, audit_payload);
     let stop_armed = if filled > 0.0 {
-        if let Some(entry_price) = average_price {
-            match arm_protective_stop(
-                &client,
-                &position_url,
-                state,
-                &signal.symbol,
-                side,
-                filled,
-                entry_price,
-                fee,
-            )
-            .await
-            {
-                Ok(()) => true,
-                Err((_, error)) => {
-                    let mut settings = state.settings.lock().await;
-                    settings.last_risk_note = format!(
-                        "Protective stop could not be armed: {error}; five-second exit monitor remains as fallback"
-                    );
-                    let _ = persist_settings(&state.settings_path, &settings);
-                    false
-                }
+        // VWAP/TWAP can add to the position through several child fills. Rebuild
+        // protection from the resulting aggregate position so all stop quantity
+        // uses the same weighted entry price and fee basis as take-profit logic.
+        let old_stops_cancelled = cancel_protective_stops(
+            &client,
+            &position_url,
+            state,
+            &signal.symbol,
+        )
+        .await
+        .unwrap_or(false);
+        if !old_stops_cancelled {
+            let mut settings = state.settings.lock().await;
+            settings.last_risk_note = format!(
+                "Existing protective stop could not be replaced for {}; newly filled quantity is covered at the aggregate position basis where possible",
+                signal.symbol
+            );
+            let _ = persist_settings(&state.settings_path, &settings);
+        }
+        match ensure_protective_stops(&client, &position_url, state).await {
+            Ok(()) => {
+                let settings = state.settings.lock().await;
+                settings
+                    .positions
+                    .get(&signal.symbol)
+                    .is_some_and(|position| !position.protective_stops.is_empty())
             }
-        } else {
-            false
+            Err((_, error)) => {
+                let mut settings = state.settings.lock().await;
+                settings.last_risk_note = format!(
+                    "Protective stop could not be refreshed: {error}; five-second exit monitor remains as fallback"
+                );
+                let _ = persist_settings(&state.settings_path, &settings);
+                false
+            }
         }
     } else {
         false
@@ -3555,6 +4273,87 @@ async fn run_cycle_inner(
         order_type: Some(format!("{order_type:?}")),
         order_response: Some(response),
     })
+}
+
+fn profitable_close_probability_5m(
+    market: &serde_json::Value,
+    position: &TraderPosition,
+) -> Option<f64> {
+    let closing_long = position.quantity > 0.0;
+    let levels = if closing_long {
+        market.get("bids")?.as_array()?
+    } else {
+        market.get("asks")?.as_array()?
+    };
+    let mut remaining = position.quantity.abs();
+    let mut notional = 0.0;
+    for level in levels {
+        let price = level.get("price")?.as_f64()?;
+        let size = level.get("size")?.as_f64()?;
+        if !price.is_finite() || price <= 0.0 || !size.is_finite() || size < 0.0 {
+            return None;
+        }
+        let quantity = remaining.min(size);
+        notional += quantity * price;
+        remaining -= quantity;
+        if remaining <= 1e-12 {
+            break;
+        }
+    }
+    if remaining > 1e-12 || position.quantity.abs() <= 1e-12 {
+        return None;
+    }
+    let close_price = notional / position.quantity.abs();
+    if !close_price.is_finite() || close_price <= 0.0 {
+        return None;
+    }
+    let samples = market.get("price_samples")?.as_array()?;
+    if samples.len() < 31 {
+        return None;
+    }
+    let parsed = samples
+        .iter()
+        .map(|sample| {
+            let pair = sample.as_array()?;
+            Some((pair.first()?.as_u64()?, pair.get(1)?.as_f64()?))
+        })
+        .collect::<Option<Vec<_>>>()?;
+    let returns = parsed
+        .windows(2)
+        .filter_map(|pair| {
+            let dt = pair[1].0.saturating_sub(pair[0].0) as f64;
+            (dt > 0.0 && pair[0].1 > 0.0 && pair[1].1 > 0.0)
+                .then_some((pair[1].1 / pair[0].1).ln() / (dt / 10_000.0))
+        })
+        .collect::<Vec<_>>();
+    if returns.len() < 30 {
+        return None;
+    }
+    let mean = returns.iter().sum::<f64>() / returns.len() as f64;
+    let variance = returns
+        .iter()
+        .map(|value| (value - mean).powi(2))
+        .sum::<f64>()
+        / (returns.len() - 1) as f64;
+    let projected_mean = close_price.ln() + mean * 30.0;
+    let projected_sd = (variance * 30.0).sqrt();
+    if !projected_sd.is_finite() || projected_sd <= 0.0 {
+        return None;
+    }
+    let below = normal_cdf((position.average_entry_price.ln() - projected_mean) / projected_sd);
+    Some(if closing_long { 1.0 - below } else { below })
+}
+
+fn normal_cdf(value: f64) -> f64 {
+    let sign = if value < 0.0 { -1.0 } else { 1.0 };
+    let x = value.abs() / std::f64::consts::SQRT_2;
+    let t = 1.0 / (1.0 + 0.3275911 * x);
+    let erf = 1.0
+        - (((((1.061405429 * t - 1.453152027) * t + 1.421413741) * t - 0.284496736) * t
+            + 0.254829592)
+            * t)
+            * (-x * x).exp();
+    0.5 * (1.0 + sign * erf)
 }
 
 async fn maybe_exit_auto_position(
@@ -3651,6 +4450,10 @@ async fn maybe_exit_auto_position(
             let settings = state.settings.lock().await;
             (settings.stop_loss_percent, settings.take_profit_percent)
         };
+        let take_profit_percent = position
+            .horizon_take_profit_percent
+            .map(|target| target.max(take_profit_percent))
+            .unwrap_or(take_profit_percent);
         let reason = if return_fraction <= -stop_loss_percent / 100.0 {
             Some("stop-loss")
         } else if return_fraction >= take_profit_percent / 100.0 {
@@ -3661,6 +4464,36 @@ async fn maybe_exit_auto_position(
         let Some(reason) = reason else {
             continue;
         };
+        if reason == "take-profit" {
+            let probability = profitable_close_probability_5m(market, &position);
+            if probability.is_some_and(|value| value >= TAKE_PROFIT_HOLD_PROBABILITY_FLOOR) {
+                let now_ms = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map_err(|_| {
+                        (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            "System clock is before Unix epoch".into(),
+                        )
+                    })?
+                    .as_millis() as u64;
+                let mut settings = state.settings.lock().await;
+                if let Some(current) = settings.positions.get_mut(&symbol) {
+                    let was_deferred = current.take_profit_deferred_at_ms.is_some();
+                    let deferred_at = *current.take_profit_deferred_at_ms.get_or_insert(now_ms);
+                    if now_ms.saturating_sub(deferred_at) < MAX_TAKE_PROFIT_HOLD_MS {
+                        if !was_deferred {
+                            persist_settings(&state.settings_path, &settings)?;
+                            crate::service_log!(
+                                "INFO",
+                                "Deferring take-profit for {symbol}: five-minute profitable-close probability is {:.1}%",
+                                probability.unwrap_or_default() * 100.0
+                            );
+                        }
+                        continue;
+                    }
+                }
+            }
+        }
         let entry_decision_id = position.entry_decision_id.clone();
         let protected_quantity = position
             .protective_stops
@@ -3713,6 +4546,7 @@ async fn maybe_exit_auto_position(
                 decision_mid: None,
                 submitted_limit_price: None,
                 target_price: None,
+                horizon_take_profit_percent: None,
                 limit_to_mid_bps: None,
                 limit_to_crossing_quote_bps: None,
                 expires_at: None,
@@ -3734,6 +4568,7 @@ async fn maybe_exit_auto_position(
             ask,
             AutoOrderType::Ioc,
             ExecutionParameters::default(),
+            timestamp.to_string(),
         )
         .await
         {
@@ -3768,34 +4603,33 @@ async fn maybe_exit_auto_position(
                         fee,
                         "Ioc",
                         reason,
+                        None,
                     )
                 })
                 .unwrap_or_default()
         } else {
             (0.0, None)
         };
-        settings.realized_pnl += realized_pnl;
-        settings.daily_realized_pnl += realized_pnl;
+        let realized_pnl_usd = realized_usd(&settings, &symbol, realized_pnl);
+        settings.realized_pnl += realized_pnl_usd;
+        settings.daily_realized_pnl += realized_pnl_usd;
         if filled + 1e-12 >= quantity {
             let closed_quantity = filled.min(quantity);
             let entry_notional = closed_quantity * position.average_entry_price;
             if entry_notional > 0.0 {
-                settings
-                    .closed_trade_returns_percent
-                    .push(realized_pnl / entry_notional * 100.0);
-                if settings.closed_trade_returns_percent.len() > 200 {
-                    settings.closed_trade_returns_percent.remove(0);
-                }
+                let fees_usd = realized_usd(&settings, &symbol, fee);
+                record_closed_trade_outcome(
+                    &mut settings,
+                    realized_pnl / entry_notional * 100.0,
+                    realized_pnl_usd,
+                    fees_usd,
+                );
                 adapt_exit_policy(&mut settings);
             }
         }
         if let Some(key) = learned_key {
             let stats = settings.learning.entry(key).or_default();
-            stats.samples += 1;
-            if realized_pnl > 0.0 {
-                stats.positive += 1;
-            }
-            stats.realized_pnl += realized_pnl;
+            record_learning_outcome(stats, realized_pnl_usd);
         }
         if let Some(order) = settings
             .orders
@@ -3887,7 +4721,8 @@ async fn arm_protective_stop(
         .post(format!("{base}/positions/orders"))
         .json(&serde_json::json!({
             "symbol": symbol, "side": side, "order_type": "stop-market", "quantity": quantity,
-            "trigger_price": trigger_price, "trigger_direction": trigger_direction
+            "trigger_price": trigger_price, "trigger_direction": trigger_direction,
+            "source": "auto", "client_order_id": format!("auto-stop-{symbol}-{}", SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis())
         }))
         .send()
         .await
@@ -3957,6 +4792,7 @@ async fn arm_protective_stop(
             decision_mid: None,
             submitted_limit_price: None,
             target_price: Some(trigger_price),
+            horizon_take_profit_percent: None,
             limit_to_mid_bps: None,
             limit_to_crossing_quote_bps: None,
             expires_at: None,
@@ -3965,8 +4801,8 @@ async fn arm_protective_stop(
             status: "armed".into(),
             realized_pnl: 0.0,
         });
-        if settings.orders.len() > 500 {
-            let excess = settings.orders.len() - 500;
+        if settings.orders.len() > MAX_RETAINED_AUTO_TRADER_ORDERS {
+            let excess = settings.orders.len() - MAX_RETAINED_AUTO_TRADER_ORDERS;
             settings.orders.drain(..excess);
         }
         persist_settings(&state.settings_path, &settings)?;
@@ -4068,9 +4904,11 @@ async fn sync_protective_stops(
                 delta_fee,
                 "StopMarket",
                 "stop-loss",
+                None,
             );
-            settings.realized_pnl += realized_delta;
-            settings.daily_realized_pnl += realized_delta;
+            let realized_delta_usd = realized_usd(&settings, &symbol, realized_delta);
+            settings.realized_pnl += realized_delta_usd;
+            settings.daily_realized_pnl += realized_delta_usd;
             settings.used_notional_today = allocated_notional(&settings);
             let entry_notional = delta_quantity * entry_price_before;
             let fully_closed = settings
@@ -4078,21 +4916,18 @@ async fn sync_protective_stops(
                 .get(&symbol)
                 .is_none_or(|position| position.quantity.abs() <= 1e-12);
             if fully_closed && entry_notional > 0.0 {
-                settings
-                    .closed_trade_returns_percent
-                    .push(realized_delta / entry_notional * 100.0);
-                if settings.closed_trade_returns_percent.len() > 200 {
-                    settings.closed_trade_returns_percent.remove(0);
-                }
+                let fees_usd = realized_usd(&settings, &symbol, delta_fee);
+                record_closed_trade_outcome(
+                    &mut settings,
+                    realized_delta / entry_notional * 100.0,
+                    realized_delta_usd,
+                    fees_usd,
+                );
                 adapt_exit_policy(&mut settings);
             }
             if let Some(key) = learned_key {
                 let stats = settings.learning.entry(key).or_default();
-                stats.samples += 1;
-                if realized_delta > 0.0 {
-                    stats.positive += 1;
-                }
-                stats.realized_pnl += realized_delta;
+                record_learning_outcome(stats, realized_delta_usd);
             }
             if let Some(order) = settings
                 .orders
@@ -4357,7 +5192,21 @@ async fn maybe_place_portfolio_hedge(
     }
     let portfolio_shock_risk = portfolio_variance.max(0.0).sqrt() * PORTFOLIO_SHOCK_PERCENT;
     let settings_snapshot = state.settings.lock().await.clone();
-    let risk_trigger = settings_snapshot.daily_realized_loss_limit;
+    let hedge_execution = settings_snapshot
+        .learning
+        .get("portfolio-hedge:execution")
+        .cloned()
+        .unwrap_or_default();
+    let hedge_win_rate = hedge_execution.positive as f64 / hedge_execution.samples.max(1) as f64;
+    // A hedge that reliably gets filled can be attempted at lower risk. Poor
+    // fill outcomes raise the trigger so the trader does not repeatedly cross
+    // into illiquid markets. Keep the adjustment bounded and require evidence.
+    let hedge_risk_scale = if hedge_execution.samples >= MIN_HEDGE_EXECUTION_LEARNING_SAMPLES {
+        (1.25 - 0.5 * hedge_win_rate).clamp(0.75, 1.25)
+    } else {
+        1.0
+    };
+    let risk_trigger = settings_snapshot.daily_realized_loss_limit * hedge_risk_scale;
     if portfolio_shock_risk <= risk_trigger {
         return Ok(None);
     }
@@ -4553,6 +5402,7 @@ async fn maybe_place_portfolio_hedge(
         decision_mid: None,
         submitted_limit_price: None,
         target_price: None,
+        horizon_take_profit_percent: None,
         limit_to_mid_bps: None,
         limit_to_crossing_quote_bps: None,
         expires_at: None,
@@ -4561,8 +5411,8 @@ async fn maybe_place_portfolio_hedge(
         status: "submitting".into(),
         realized_pnl: 0.0,
     });
-    if settings.orders.len() > 500 {
-        let excess = settings.orders.len() - 500;
+    if settings.orders.len() > MAX_RETAINED_AUTO_TRADER_ORDERS {
+        let excess = settings.orders.len() - MAX_RETAINED_AUTO_TRADER_ORDERS;
         settings.orders.drain(..excess);
     }
     persist_settings(&state.settings_path, &settings)?;
@@ -4611,6 +5461,7 @@ async fn maybe_place_portfolio_hedge(
         price,
         AutoOrderType::Ioc,
         ExecutionParameters::default(),
+        timestamp.to_string(),
     )
     .await
     {
@@ -4643,6 +5494,14 @@ async fn maybe_place_portfolio_hedge(
         .and_then(serde_json::Value::as_f64)
         .unwrap_or(0.0)
         .abs();
+    let execution_learning = settings
+        .learning
+        .entry("portfolio-hedge:execution".into())
+        .or_default();
+    record_learning_outcome(
+        execution_learning,
+        if filled >= quantity * 0.8 { 1.0 } else { 0.0 },
+    );
     let (realized_pnl, _) = if filled > 0.0 {
         average_price
             .map(|execution| {
@@ -4655,14 +5514,16 @@ async fn maybe_place_portfolio_hedge(
                     fee,
                     "Ioc",
                     "portfolio-hedge",
+                    None,
                 )
             })
             .unwrap_or_default()
     } else {
         (0.0, None)
     };
-    settings.realized_pnl += realized_pnl;
-    settings.daily_realized_pnl += realized_pnl;
+    let realized_pnl_usd = realized_usd(&settings, &symbol, realized_pnl);
+    settings.realized_pnl += realized_pnl_usd;
+    settings.daily_realized_pnl += realized_pnl_usd;
     let status = if response
         .get("barrier_order")
         .is_some_and(|value| !value.is_null())
@@ -4712,17 +5573,28 @@ fn apply_auto_fill(
     fee: f64,
     order_type: &str,
     context: &str,
+    horizon_take_profit_percent: Option<f64>,
 ) -> (f64, Option<String>) {
     let position = positions.entry(symbol.to_owned()).or_default();
     let old = position.quantity;
     let incoming = if side == "buy" { quantity } else { -quantity };
     if old == 0.0 || old.signum() == incoming.signum() {
+        if old == 0.0 {
+            position.take_profit_deferred_at_ms = None;
+        }
         position.entries = position.entries.saturating_add(1);
         let total = old.abs() + incoming.abs();
         position.average_entry_price =
             (old.abs() * position.average_entry_price + incoming.abs() * price) / total;
         position.quantity = old + incoming;
         position.entry_fees += fee;
+        if let Some(target) = horizon_take_profit_percent {
+            position.horizon_take_profit_percent = Some(
+                position
+                    .horizon_take_profit_percent
+                    .map_or(target, |current| current.max(target)),
+            );
+        }
         if position.entry_order_type.is_empty() {
             position.entry_order_type = order_type.to_owned();
             position.entry_context = context.to_owned();
@@ -4762,6 +5634,8 @@ fn apply_auto_fill(
         position.entry_order_type = order_type.to_owned();
         position.entry_context = context.to_owned();
         position.scout_entry = context.starts_with("scout:");
+        position.horizon_take_profit_percent = horizon_take_profit_percent;
+        position.take_profit_deferred_at_ms = None;
     } else {
         position.quantity = net;
         position.entry_fees -= entry_fee_closed;
@@ -4961,10 +5835,23 @@ fn adaptive_scout_thresholds(
     (strength, score)
 }
 
+fn risk_floor_scale(risk_appetite: f64) -> f64 {
+    1.5 - risk_appetite.clamp(0.0, 100.0) / 100.0
+}
+
+fn risk_size_scale(risk_appetite: f64) -> f64 {
+    0.5 + 2.5 * risk_appetite.clamp(0.0, 100.0) / 100.0
+}
+
 fn adaptive_strength_floor(learning: &BTreeMap<String, LearningStats>, context: &str) -> f64 {
     let stats = context_learning_stats(learning, context);
-    if stats.samples >= LEARNED_STRENGTH_ADJUSTMENT_SAMPLES
-        && stats.positive as f64 / (stats.samples as f64) < LEARNED_STRENGTH_ADJUSTMENT_WIN_RATE
+    let win_rate = stats.positive as f64 / stats.samples.max(1) as f64;
+    if stats.samples >= STRONG_NEGATIVE_LEARNING_SAMPLES
+        && win_rate < STRONG_NEGATIVE_LEARNING_WIN_RATE
+    {
+        STRONG_NEGATIVE_STRENGTH_FLOOR
+    } else if stats.samples >= LEARNED_STRENGTH_ADJUSTMENT_SAMPLES
+        && win_rate < LEARNED_STRENGTH_ADJUSTMENT_WIN_RATE
     {
         LEARNED_STRENGTH_FLOOR
     } else {
@@ -4979,7 +5866,11 @@ fn adaptive_exploration_score_floor(
 ) -> f64 {
     let stats = context_learning_stats(learning, context);
     let win_rate = stats.positive as f64 / stats.samples.max(1) as f64;
-    let learned_floor = if stats.samples >= EXPLORATION_SCORE_HIGH_SAMPLES
+    let learned_floor = if stats.samples >= STRONG_NEGATIVE_LEARNING_SAMPLES
+        && win_rate < STRONG_NEGATIVE_LEARNING_WIN_RATE
+    {
+        STRONG_NEGATIVE_SCORE_FLOOR
+    } else if stats.samples >= EXPLORATION_SCORE_HIGH_SAMPLES
         && win_rate < EXPLORATION_SCORE_HIGH_WIN_RATE
     {
         EXPLORATION_SCORE_HIGH_FLOOR
@@ -5002,8 +5893,12 @@ fn adaptive_exploration_score_floor(
                 && band.threshold >= COUNTERFACTUAL_SCORE_MIN_THRESHOLD
                 && band.threshold < learned_floor
                 && band.stop_target_sample_count >= COUNTERFACTUAL_RELAXATION_SAMPLES
-                && band.stop_target_average_net_return_percent.is_some_and(|value| value > 0.0)
-                && band.stop_target_positive_net_rate.is_some_and(|value| value >= 0.55)
+                && band
+                    .stop_target_average_net_return_percent
+                    .is_some_and(|value| value > 0.0)
+                && band
+                    .stop_target_positive_net_rate
+                    .is_some_and(|value| value >= 0.55)
         })
         .map(|band| band.threshold)
         .min_by(f64::total_cmp)
@@ -5043,9 +5938,7 @@ fn longer_horizon_score_multiplier(score: f64, bands: &[MissedOpportunityGateBan
     let short_horizon = bands
         .iter()
         .filter(|band| {
-            band.gate == "score"
-                && band.horizon_seconds == 300
-                && band.threshold <= absolute_score
+            band.gate == "score" && band.horizon_seconds == 300 && band.threshold <= absolute_score
         })
         .max_by(|left, right| left.threshold.total_cmp(&right.threshold));
     let Some(short) = short_horizon else {
@@ -5135,11 +6028,13 @@ fn adapt_order_type(
     baseline: AutoOrderType,
     context: &str,
     learning: &BTreeMap<String, LearningStats>,
+    risk_appetite: f64,
 ) -> Option<AutoOrderType> {
+    let favor_non_post_only = risk_appetite >= AGGRESSIVE_ORDER_PRIORITY_APPETITE;
     // A post-only entry is intentionally allowed as a cold-start experiment in
     // calm, costly-to-aggress conditions. Do not let the default IOC fallback
     // erase that signal before the maker cohort has enough outcomes to learn.
-    if matches!(baseline, AutoOrderType::PostOnlyLimit) {
+    if matches!(baseline, AutoOrderType::PostOnlyLimit) && !favor_non_post_only {
         let maker_stats =
             order_type_learning_stats(context, AutoOrderType::PostOnlyLimit, learning);
         if maker_stats.samples < MIN_EXECUTION_LEARNING_SAMPLES {
@@ -5154,36 +6049,34 @@ fn adapt_order_type(
             let average_pnl = stats.realized_pnl / stats.samples.max(1) as f64;
             let positive_rate = stats.positive as f64 / stats.samples.max(1) as f64;
             (stats.samples >= MIN_EXECUTION_LEARNING_SAMPLES
+                && !(favor_non_post_only && matches!(kind, AutoOrderType::PostOnlyLimit))
                 && average_pnl > 0.0
                 && positive_rate >= 0.55)
                 .then_some((kind, average_pnl))
         })
         .collect::<Vec<_>>();
     if candidates.is_empty() {
-        if matches!(baseline, AutoOrderType::PostOnlyLimit) {
-            let maker_stats =
-                order_type_learning_stats(context, AutoOrderType::PostOnlyLimit, learning);
-            if maker_stats.samples >= MIN_EXECUTION_LEARNING_SAMPLES
-                && (maker_stats.realized_pnl / maker_stats.samples as f64 <= 0.0
-                    || maker_stats.positive as f64 / (maker_stats.samples as f64) < 0.55)
-            {
-                return Some(AutoOrderType::Ioc);
-            }
-        }
-        // Falling back to IOC must not bypass a mature losing record for the
-        // fallback order type when the signal's preferred type is still unknown.
-        let has_mature_unprofitable_fallback =
-            [baseline, AutoOrderType::Ioc].into_iter().any(|kind| {
-                let stats = order_type_learning_stats(context, kind, learning);
-                stats.samples >= MIN_EXECUTION_LEARNING_SAMPLES
-                    && (stats.realized_pnl / stats.samples.max(1) as f64 <= 0.0
-                        || stats.positive as f64 / (stats.samples.max(1) as f64) < 0.55)
-            });
-        return if has_mature_unprofitable_fallback {
-            None
-        } else {
-            Some(AutoOrderType::Ioc)
+        // A losing record rules out that order type, not the signal. Keep
+        // trying the alternate execution type while its own evidence is
+        // immature; only stop when both choices have mature losing records.
+        let is_mature_unprofitable = |kind| {
+            let stats = order_type_learning_stats(context, kind, learning);
+            stats.samples >= MIN_EXECUTION_LEARNING_SAMPLES
+                && (stats.realized_pnl / stats.samples as f64 <= 0.0
+                    || (stats.positive as f64 / stats.samples as f64) < 0.55)
         };
+        let baseline_unprofitable = is_mature_unprofitable(baseline);
+        let ioc_unprofitable = is_mature_unprofitable(AutoOrderType::Ioc);
+        if baseline_unprofitable && ioc_unprofitable {
+            return None;
+        }
+        return Some(if baseline_unprofitable {
+            AutoOrderType::Ioc
+        } else if ioc_unprofitable {
+            baseline
+        } else {
+            AutoOrderType::Ioc
+        });
     }
     candidates
         .into_iter()
@@ -5199,10 +6092,16 @@ fn choose_parameter_profile(
 ) -> usize {
     let profiles = (0..PARAMETER_PROFILE_COUNT)
         .map(|profile| {
-            let stats = learning
-                .get(&format!("{context}:P{profile}:{kind:?}"))
-                .cloned()
-                .unwrap_or_default();
+            let prefix = format!("{context}:P{profile}:");
+            let suffix = format!(":{kind:?}");
+            let stats = learning.iter()
+                .filter(|(key, _)| key.starts_with(&prefix) && key.ends_with(&suffix))
+                .fold(LearningStats::default(), |mut total, (_, item)| {
+                    total.samples += item.samples;
+                    total.positive += item.positive;
+                    total.realized_pnl += item.realized_pnl;
+                    total
+                });
             (profile, stats)
         })
         .collect::<Vec<_>>();
@@ -5230,7 +6129,7 @@ fn choose_parameter_profile(
     0
 }
 
-fn choose_order_type(signal: &Signal) -> AutoOrderType {
+fn choose_order_type(signal: &Signal, risk_appetite: f64) -> AutoOrderType {
     let ranging = signal.ranging_probability.unwrap_or(0.0);
     let volatility = signal.components.volatility_1m_percent.unwrap_or(0.0).abs();
     let trend_units = signal
@@ -5250,39 +6149,200 @@ fn choose_order_type(signal: &Signal) -> AutoOrderType {
         .unwrap_or(0.0)
         .abs();
     let aggressor_cost = signal.components.aggressor_cost_bps.unwrap_or(0.0).abs();
-    if ranging >= ORDER_POST_ONLY_RANGE && aggressor_cost >= ORDER_POST_ONLY_AGGRESSOR_COST_BPS {
+    let strength_scale = risk_floor_scale(risk_appetite);
+    if risk_appetite >= AGGRESSIVE_ORDER_PRIORITY_APPETITE {
+        if trend_units >= ORDER_STOP_MARKET_TREND_UNITS
+            && signal.strength >= ORDER_STOP_MARKET_STRENGTH * strength_scale
+        {
+            return AutoOrderType::StopMarket;
+        }
+        if pressure >= ORDER_MARKET_PRESSURE
+            && signal.strength >= ORDER_MARKET_STRENGTH * strength_scale
+        {
+            return AutoOrderType::Market;
+        }
+        if momentum >= ORDER_IOC_MOMENTUM_PERCENT
+            && signal.strength >= ORDER_IOC_STRENGTH * strength_scale
+        {
+            return AutoOrderType::Ioc;
+        }
+    }
+    let post_only_range = (ORDER_POST_ONLY_RANGE + 0.20 * risk_appetite / 100.0).clamp(0.0, 1.0);
+    let gtd_range = (ORDER_GTD_RANGE + 0.30 * risk_appetite / 100.0).clamp(0.0, 1.0);
+    let limit_range = (ORDER_LIMIT_RANGE + 0.30 * risk_appetite / 100.0).clamp(0.0, 1.0);
+    if ranging >= post_only_range && aggressor_cost >= ORDER_POST_ONLY_AGGRESSOR_COST_BPS {
         AutoOrderType::PostOnlyLimit
-    } else if ranging >= ORDER_GTD_RANGE
+    } else if ranging >= gtd_range
         && mispricing >= ORDER_GTD_MIN_MISPRICING_BPS
         && mispricing < ORDER_GTD_MAX_MISPRICING_BPS
         && aggressor_cost < ORDER_POST_ONLY_AGGRESSOR_COST_BPS
     {
         AutoOrderType::Gtd
-    } else if ranging >= ORDER_LIMIT_RANGE && mispricing >= ORDER_GTD_MAX_MISPRICING_BPS {
+    } else if ranging >= limit_range && mispricing >= ORDER_GTD_MAX_MISPRICING_BPS {
         AutoOrderType::Limit
     } else if volatility >= ORDER_STOP_LIMIT_VOLATILITY_PERCENT
         && trend_units >= ORDER_STOP_LIMIT_TREND_UNITS
     {
         AutoOrderType::StopLimit
     } else if trend_units >= ORDER_STOP_MARKET_TREND_UNITS
-        && signal.strength >= ORDER_STOP_MARKET_STRENGTH
+        && signal.strength >= ORDER_STOP_MARKET_STRENGTH * strength_scale
     {
         AutoOrderType::StopMarket
-    } else if pressure >= ORDER_MARKET_PRESSURE && signal.strength >= ORDER_MARKET_STRENGTH {
+    } else if pressure >= ORDER_MARKET_PRESSURE
+        && signal.strength >= ORDER_MARKET_STRENGTH * strength_scale
+    {
         AutoOrderType::Market
-    } else if momentum >= ORDER_IOC_MOMENTUM_PERCENT && signal.strength >= ORDER_IOC_STRENGTH {
+    } else if momentum >= ORDER_IOC_MOMENTUM_PERCENT
+        && signal.strength >= ORDER_IOC_STRENGTH * strength_scale
+    {
         AutoOrderType::Ioc
-    } else if signal.strength >= ORDER_VWAP_STRENGTH {
+    } else if signal.strength >= ORDER_VWAP_STRENGTH * strength_scale {
         AutoOrderType::Vwap
     } else if ranging >= ORDER_TWAP_RANGE {
         AutoOrderType::Twap
     } else if volatility >= ORDER_TRAILING_VOLATILITY_PERCENT {
         AutoOrderType::TrailingStop
-    } else if signal.strength >= ORDER_FOK_STRENGTH {
+    } else if signal.strength >= ORDER_FOK_STRENGTH * strength_scale {
         AutoOrderType::Fok
     } else {
         AutoOrderType::Ioc
     }
+}
+
+fn schedule_depth_ratio_bucket(ratio: f64) -> &'static str {
+    match ratio {
+        value if value < 0.05 => "lt05",
+        value if value < 0.10 => "05_10",
+        value if value < 0.15 => "10_15",
+        value if value < 0.25 => "15_25",
+        value if value < 0.40 => "25_40",
+        _ => "ge40",
+    }
+}
+
+fn learned_schedule_depth_threshold(
+    learning: &BTreeMap<String, LearningStats>,
+    context: &str,
+) -> (f64, usize) {
+    let mut threshold = DEFAULT_SCHEDULE_DEPTH_RATIO;
+    let mut paired_samples = 0;
+    let cohorts: [(&str, f64, f64); 5] = [
+        ("05_10", 0.05, 0.10),
+        ("10_15", 0.10, 0.15),
+        ("15_25", 0.15, 0.25),
+        ("25_40", 0.25, 0.40),
+        ("ge40", 0.40, MAX_SCHEDULE_DEPTH_RATIO),
+    ];
+    for (bucket, lower, upper) in cohorts {
+        let marker = format!(":depth:{bucket}:");
+        let mut scheduled = LearningStats::default();
+        let mut alternatives = LearningStats::default();
+        for (key, stats) in learning.iter().filter(|(key, _)| {
+            key.starts_with(&format!("{context}:P")) && key.contains(&marker)
+        }) {
+            if key.ends_with(":Vwap") || key.ends_with(":Twap") {
+                scheduled.samples += stats.samples;
+                scheduled.positive += stats.positive;
+                scheduled.realized_pnl += stats.realized_pnl;
+            } else {
+                alternatives.samples += stats.samples;
+                alternatives.positive += stats.positive;
+                alternatives.realized_pnl += stats.realized_pnl;
+            }
+        }
+        if scheduled.samples < MIN_EXECUTION_LEARNING_SAMPLES {
+            continue;
+        }
+        paired_samples += scheduled.samples + alternatives.samples;
+        let scheduled_average = scheduled.realized_pnl / scheduled.samples as f64;
+        let scheduled_win_rate = scheduled.positive as f64 / scheduled.samples as f64;
+        if alternatives.samples >= MIN_EXECUTION_LEARNING_SAMPLES {
+            let alternatives_average = alternatives.realized_pnl / alternatives.samples as f64;
+            let alternatives_win_rate = alternatives.positive as f64 / alternatives.samples as f64;
+            if scheduled_average > alternatives_average && scheduled_win_rate + 0.03 >= alternatives_win_rate {
+                threshold = threshold.min(lower.max(MIN_SCHEDULE_DEPTH_RATIO));
+            } else if scheduled_average < alternatives_average && scheduled_win_rate + 0.05 < alternatives_win_rate {
+                threshold = threshold.max(upper.min(MAX_SCHEDULE_DEPTH_RATIO));
+            }
+        } else if lower >= threshold && scheduled_average <= 0.0 && scheduled_win_rate < 0.45 {
+            // Large orders are scheduled by policy, so use their own mature,
+            // consistently losing outcomes to back the threshold off safely.
+            threshold = threshold.max(upper.min(MAX_SCHEDULE_DEPTH_RATIO));
+        }
+    }
+    (threshold.clamp(MIN_SCHEDULE_DEPTH_RATIO, MAX_SCHEDULE_DEPTH_RATIO), paired_samples)
+}
+
+fn score_execution_order_type(
+    signal: &Signal,
+    risk_appetite: f64,
+    notional: f64,
+    baseline: AutoOrderType,
+    learned: AutoOrderType,
+    book: Option<DeepBookAssessment>,
+    schedule_depth_threshold: f64,
+) -> AutoOrderType {
+    let side_depth = book.map(|assessment| {
+        if signal.direction == "bullish" { assessment.ask_depth_10bps } else { assessment.bid_depth_10bps }
+    }).unwrap_or(0.0);
+    let depth_ratio = if side_depth > 0.0 { notional / side_depth } else { 0.0 };
+    // Once the parent order is a material share of visible near-touch liquidity,
+    // keep it whole and let the scheduler work it in slices instead of shrinking it.
+    let large_order = depth_ratio >= schedule_depth_threshold;
+    let urgency = (signal.components.momentum_10s_percent.unwrap_or(0.0).abs() / 0.30)
+        .max(signal.components.pressure_without_price_move.unwrap_or(0.0).abs())
+        .clamp(0.0, 1.0);
+    let ranging = signal.ranging_probability.unwrap_or(0.0).clamp(0.0, 1.0);
+    let trend = (signal.components.trend_5m_volatility_units.unwrap_or(0.0).abs() / 3.0).clamp(0.0, 1.0);
+    let fee_bps = configured_taker_fee_rate() * 10_000.0;
+    let impact_bps = book.map(|assessment| assessment.impact_bps).filter(|value| value.is_finite()).unwrap_or(0.0);
+    let scaled_impact_bps = if side_depth > 0.0 {
+        impact_bps * (notional / (side_depth * DEEP_BOOK_MAX_PARTICIPATION).max(1.0)).clamp(0.25, 4.0)
+    } else { impact_bps };
+    let candidates = [baseline, learned, AutoOrderType::Vwap, AutoOrderType::Twap,
+        AutoOrderType::PostOnlyLimit, AutoOrderType::Gtd, AutoOrderType::Ioc, AutoOrderType::Market];
+    let mut best = learned;
+    let mut best_score = f64::NEG_INFINITY;
+    for (index, candidate) in candidates.into_iter().enumerate() {
+        if candidates[..index].contains(&candidate) { continue; }
+        if large_order && !matches!(candidate, AutoOrderType::Vwap | AutoOrderType::Twap) { continue; }
+        let maker = matches!(candidate, AutoOrderType::PostOnlyLimit | AutoOrderType::Gtd);
+        let impact_multiplier = match candidate {
+            AutoOrderType::Vwap | AutoOrderType::Twap => 0.45,
+            AutoOrderType::PostOnlyLimit | AutoOrderType::Gtd => 0.10,
+            _ => 1.0,
+        };
+        let expected_cost_bps = (if maker { configured_fee_rates_maker_bps() } else { fee_bps })
+            + scaled_impact_bps * impact_multiplier
+            + if maker { 0.0 } else { signal.components.aggressor_cost_bps.unwrap_or(0.0).abs() * 0.25 };
+        let mut score = if candidate == baseline { 1.0 } else { 0.0 };
+        if candidate == learned { score += 0.35; }
+        score += match candidate {
+            AutoOrderType::Vwap => signal.strength.clamp(0.0, 1.0) * 0.6,
+            AutoOrderType::Twap => ranging * 0.7,
+            AutoOrderType::PostOnlyLimit | AutoOrderType::Gtd => ranging * 0.8 - urgency * 0.7,
+            AutoOrderType::Market | AutoOrderType::Ioc => urgency * 0.7 + trend * 0.2,
+            _ => 0.0,
+        };
+        if matches!(candidate, AutoOrderType::Vwap | AutoOrderType::Twap) {
+            score += ((depth_ratio - MIN_SCHEDULE_DEPTH_RATIO)
+                / (schedule_depth_threshold - MIN_SCHEDULE_DEPTH_RATIO).max(0.01))
+                .clamp(0.0, 1.0) * 2.0;
+            score -= urgency * (risk_appetite / 100.0) * 0.7;
+        }
+        // Cost is a meaningful score component, but its bounded weight cannot
+        // override a strong signal/regime fit by itself.
+        score -= (expected_cost_bps / 10.0).clamp(0.0, 2.0) * 0.35;
+        if score > best_score { best = candidate; best_score = score; }
+    }
+    best
+}
+
+fn configured_fee_rates_maker_bps() -> f64 {
+    std::env::var("PAPER_OKX_SPOT_MAKER_FEE_RATE")
+        .ok().and_then(|value| value.parse::<f64>().ok())
+        .filter(|value| value.is_finite() && *value >= 0.0 && *value <= 0.1)
+        .unwrap_or(0.0008) * 10_000.0
 }
 
 #[derive(Clone, Copy)]
@@ -5347,8 +6407,9 @@ async fn submit_configured_order(
     ask: f64,
     kind: AutoOrderType,
     params: ExecutionParameters,
+    client_order_id: String,
 ) -> Result<serde_json::Value, (StatusCode, String)> {
-    let mut body = serde_json::json!({ "symbol": symbol, "side": side, "quantity": quantity, "measure_execution_quality": true });
+    let mut body = serde_json::json!({ "symbol": symbol, "side": side, "quantity": quantity, "measure_execution_quality": true, "source": "auto", "client_order_id": client_order_id });
     let endpoint = match kind {
         AutoOrderType::Vwap | AutoOrderType::Twap => {
             body["duration_minutes"] = serde_json::json!(params.vwap_duration_minutes);
@@ -5449,9 +6510,9 @@ async fn submit_configured_order(
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.parse::<f64>().ok());
     let response_body = response.bytes().await.map_err(upstream_error)?;
-    let mut payload = serde_json::from_slice::<serde_json::Value>(&response_body).unwrap_or_else(|_| {
-        serde_json::json!({"error": String::from_utf8_lossy(&response_body).trim()})
-    });
+    let mut payload = serde_json::from_slice::<serde_json::Value>(&response_body).unwrap_or_else(
+        |_| serde_json::json!({"error": String::from_utf8_lossy(&response_body).trim()}),
+    );
     if let Some(handler_ms) = position_manager_ms {
         payload["position_manager_handler_ms"] = serde_json::json!(handler_ms);
     }
@@ -5471,32 +6532,63 @@ async fn submit_configured_order(
     Ok(payload)
 }
 
+fn horizon_adjusted_take_profit_percent(
+    signal: &Signal,
+    walk_forward: &[WalkForward],
+    base_target_percent: f64,
+) -> Option<f64> {
+    walk_forward
+        .iter()
+        .filter(|item| item.symbol == signal.symbol && matches!(item.horizon_seconds, 900 | 3_600))
+        .filter(|item| {
+            let metrics = if signal.direction == "bullish" {
+                &item.all_signal_long
+            } else {
+                &item.all_signal_short
+            };
+            metrics.sample_count >= MIN_SIDE_WALK_FORWARD_SAMPLES
+                && metrics
+                    .direction_match_rate
+                    .is_some_and(|rate| rate >= MIN_SIDE_DIRECTION_MATCH_RATE)
+                && metrics.positive_net_rate.is_some_and(|rate| rate >= 0.60)
+                && metrics
+                    .positive_net_rate_lower_95
+                    .is_some_and(|rate| rate >= MIN_SIDE_POSITIVE_NET_LOWER_95)
+                && metrics
+                    .average_net_return_percent
+                    .is_some_and(|average| average > base_target_percent)
+        })
+        .filter_map(|item| {
+            if signal.direction == "bullish" {
+                item.all_signal_long.average_net_return_percent
+            } else {
+                item.all_signal_short.average_net_return_percent
+            }
+        })
+        .max_by(f64::total_cmp)
+        .map(|average_return| {
+            (average_return * 0.75)
+                .max(base_target_percent)
+                .min(MAX_TAKE_PROFIT_PERCENT)
+        })
+}
+
+fn risk_adjusted_take_profit_percent(stop_loss_percent: f64, risk_appetite: f64) -> f64 {
+    let safe_target = default_take_profit_percent()
+        .max(stop_loss_percent * MIN_EXIT_REWARD_RISK_RATIO)
+        .clamp(MIN_TAKE_PROFIT_PERCENT, MAX_TAKE_PROFIT_PERCENT);
+    let risk = risk_appetite.clamp(0.0, 100.0) / 100.0;
+    (safe_target * (1.0 - risk) + SMALL_NET_TAKE_PROFIT_PERCENT * risk)
+        .max(safe_target)
+        .clamp(MIN_TAKE_PROFIT_PERCENT, MAX_TAKE_PROFIT_PERCENT)
+}
+
 fn adapt_exit_policy(settings: &mut Settings) {
-    let samples = settings.closed_trade_returns_percent.len();
-    if samples < MIN_EXIT_POLICY_SAMPLES || samples % 5 != 0 {
-        return;
-    }
-    let recent = &settings.closed_trade_returns_percent[samples.saturating_sub(20)..];
-    let average = recent.iter().sum::<f64>() / recent.len() as f64;
-    let positive_rate =
-        recent.iter().filter(|value| **value > 0.0).count() as f64 / recent.len() as f64;
-    // Poor win rate or negative expectancy is an entry-quality problem. Cutting
-    // the target in response shrinks winners while leaving the stop fixed, making
-    // the required break-even win rate even higher. Learn exits upward only after
-    // recent outcomes are profitable, and preserve at least a 1.5:1 reward/risk.
-    if average > 0.0 && positive_rate >= 0.60 {
-        settings.take_profit_percent = (settings.take_profit_percent + EXIT_POLICY_ADJUSTMENT_STEP)
-            .min(MAX_TAKE_PROFIT_PERCENT);
-    }
     settings.stop_loss_percent = settings
         .stop_loss_percent
         .clamp(MIN_STOP_LOSS_PERCENT, MAX_STOP_LOSS_PERCENT);
-    let reward_risk_floor =
-        (settings.stop_loss_percent * MIN_EXIT_REWARD_RISK_RATIO).min(MAX_TAKE_PROFIT_PERCENT);
-    settings.take_profit_percent = settings
-        .take_profit_percent
-        .max(reward_risk_floor)
-        .clamp(MIN_TAKE_PROFIT_PERCENT, MAX_TAKE_PROFIT_PERCENT);
+    settings.take_profit_percent =
+        risk_adjusted_take_profit_percent(settings.stop_loss_percent, settings.risk_appetite);
 }
 
 fn symbol_gate_hits_for_reason(reason: &str) -> Vec<(String, String, String, String, Option<f64>)> {
@@ -6098,13 +7190,25 @@ fn utc_day() -> String {
 fn allocated_notional(settings: &Settings) -> f64 {
     let open_positions = settings
         .positions
-        .values()
-        .map(|position| position.quantity.abs() * position.average_entry_price.max(0.0))
+        .iter()
+        .map(|(symbol, position)| {
+            let position_notional = position.quantity.abs()
+                * position.average_entry_price.max(0.0)
+                * quote_usd_rate(settings, symbol);
+            let scheduled_position = matches!(position.entry_order_type.as_str(), "Vwap" | "Twap");
+            position_notional * if scheduled_position { 2.0 } else { 1.0 }
+        })
         .sum::<f64>();
     let mut pending = BTreeMap::<String, f64>::new();
     let mut pending_quantity = BTreeMap::<String, f64>::new();
     for order in &settings.orders {
-        if !matches!(order.status.as_str(), "submitting" | "accepted" | "resting")
+        // Protective stop orders only close an existing position. A triggered
+        // stop-market barrier that partially fills is terminal in Position
+        // Management, but its residual quantity remains in the persisted order
+        // record. Counting that residual as pending entry exposure double-counts
+        // the already-netted position and can push allocation far above its cap.
+        if order.purpose == "stop-loss"
+            || !matches!(order.status.as_str(), "submitting" | "accepted" | "resting" | "partially_filled")
             || order.quantity <= 0.0
         {
             continue;
@@ -6129,14 +7233,70 @@ fn allocated_notional(settings: &Settings) -> f64 {
         let reference_notional = if order.reserved_notional > 0.0 {
             order.reserved_notional
         } else {
-            order.average_price.unwrap_or(0.0) * order.quantity
+            order.average_price.unwrap_or(0.0)
+                * order.quantity
+                * quote_usd_rate(settings, &order.symbol)
         };
+        let scheduled_order = order.order_type.starts_with("Vwap") || order.order_type.starts_with("Twap");
+        let stop_headroom_multiplier = if scheduled_order { 2.0 } else { 1.0 };
         *pending.entry(order.symbol.clone()).or_default() +=
-            reference_notional * increase_quantity / order.quantity;
+            reference_notional * increase_quantity / order.quantity * stop_headroom_multiplier;
         *pending_quantity.entry(order.symbol.clone()).or_default() += direction * remaining;
     }
     open_positions + pending.values().sum::<f64>()
 }
+
+fn quote_usd_rate(settings: &Settings, symbol: &str) -> f64 {
+    quote_usd_rate_for_map(&settings.usd_rates, symbol)
+}
+
+fn quote_usd_rate_for_map(rates: &BTreeMap<String, f64>, symbol: &str) -> f64 {
+    symbol
+        .split_once('-')
+        .and_then(|(_, quote)| rates.get(quote))
+        .copied()
+        .filter(|rate| rate.is_finite() && *rate > 0.0)
+        // Unknown quote currencies reserve conservatively until the USD-rate feed is available.
+        .unwrap_or(10.0)
+}
+
+async fn refresh_usd_rates(state: &AutoTraderState) -> Result<(), (StatusCode, String)> {
+    let base = std::env::var("POSITION_MANAGEMENT_URL")
+        .unwrap_or_else(|_| "http://127.0.0.1:3002".into());
+    let response = state
+        .client
+        .get(format!("{base}/positions/usd-rates"))
+        .send()
+        .await
+        .map_err(upstream_error)?
+        .error_for_status()
+        .map_err(upstream_error)?
+        .json::<serde_json::Value>()
+        .await
+        .map_err(upstream_error)?;
+    let Some(rates) = response.get("rates").and_then(serde_json::Value::as_object) else {
+        return Err((
+            StatusCode::BAD_GATEWAY,
+            "USD rate response has no rates map".into(),
+        ));
+    };
+    let mut parsed = default_usd_rates();
+    for (currency, value) in rates {
+        if let Some(rate) = value
+            .as_f64()
+            .filter(|rate| rate.is_finite() && *rate > 0.0)
+        {
+            parsed.insert(currency.clone(), rate);
+        }
+    }
+    parsed.insert("USD".into(), 1.0);
+    let mut settings = state.settings.lock().await;
+    settings.usd_rates = parsed;
+    settings.used_notional_today = allocated_notional(&settings);
+    persist_settings(&state.settings_path, &settings)?;
+    Ok(())
+}
+
 fn reset_daily_budget(settings: &mut Settings) {
     let day = utc_day();
     if settings.utc_day != day {

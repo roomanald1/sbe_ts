@@ -118,6 +118,7 @@ function CloseInsightsComponent({ histories = new Map<string, PriceHistorySample
           domLayout="autoHeight"
           rowHeight={26}
           headerHeight={28}
+          animateRows={false}
           suppressColumnMoveAnimation
         />
         {!state.loading && rowData.length === 0 && <p className="positions-empty">No open positions.</p>}

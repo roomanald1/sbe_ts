@@ -525,7 +525,7 @@
       },
       "fieldConfig": {
         "defaults": {
-          "unit": "ms",
+          "unit": "\u00b5s",
           "decimals": 1
         },
         "overrides": []
@@ -548,7 +548,7 @@
       },
       "targets": [
         {
-          "expr": "app_autotrader_tick_to_order_latency_ms",
+          "expr": "app_autotrader_tick_to_order_latency_ms * 1000",
           "legendFormat": "{{stat}}",
           "refId": "A"
         }
@@ -851,7 +851,7 @@
       "description": "Full AutoTrader cycle duration for each pushed insight, including skipped and failed decisions. Statistics summarize the most recent 500 cycles.",
       "fieldConfig": {
         "defaults": {
-          "unit": "ms"
+          "unit": "\u00b5s"
         },
         "overrides": []
       },
@@ -873,7 +873,7 @@
       },
       "targets": [
         {
-          "expr": "app_autotrader_insight_processing_duration_ms",
+          "expr": "app_autotrader_insight_processing_duration_ms * 1000",
           "legendFormat": "{{stat}}",
           "refId": "A"
         }
@@ -889,7 +889,7 @@
       "description": "Latest, average, and p95 time each AutoTrader worker spent waiting for and holding the shared cycle lock. Statistics summarize the most recent 500 observations per worker and phase.",
       "fieldConfig": {
         "defaults": {
-          "unit": "ms"
+          "unit": "\u00b5s"
         },
         "overrides": []
       },
@@ -911,7 +911,7 @@
       },
       "targets": [
         {
-          "expr": "app_autotrader_cycle_lock_duration_ms",
+          "expr": "app_autotrader_cycle_lock_duration_ms * 1000",
           "legendFormat": "{{worker}} \u00b7 {{phase}} \u00b7 {{stat}}",
           "refId": "A"
         }
@@ -924,7 +924,7 @@
         "type": "prometheus",
         "uid": "prometheus"
       },
-      "description": "Cycle total duration is available for every pushed insight, including skipped and failed decisions. Detailed order stages appear when a signal order is recorded. A separate lock panel shows contention by worker.",
+      "description": "Breaks the signal-to-order path into AutoTrader decision work, order submission, and position-manager processing. signal_age_at_order_record includes time before this cycle began; compare it with cycle_to_order_record to distinguish signal freshness from time spent in the current cycle. Samples are collected when a signal order is recorded.",
       "fieldConfig": {
         "defaults": {
           "unit": "ms"
@@ -933,9 +933,9 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 64,
+        "y": 39,
         "w": 24,
-        "h": 8
+        "h": 7
       },
       "id": 27,
       "options": {
@@ -949,12 +949,12 @@
       },
       "targets": [
         {
-          "expr": "app_autotrader_stage_latency_ms{stage=~\"cycle_total|dashboard_fetch|signal_selection|local_market_book|deep_book_local|cycle_to_order_record|order_submit_response|position_manager_handler|client_transport_and_decode|position_manager_.*\",stat=~\"latest|average|p95\"}",
+          "expr": "app_autotrader_stage_latency_ms{stage=~\"cycle_total|dashboard_fetch|signal_selection|local_market_book|deep_book_local|cycle_to_order_record|signal_age_at_order_record|order_submit_response|position_manager_handler|client_transport_and_decode|position_manager_.*\",stat=~\"latest|average|p95\"}",
           "legendFormat": "{{stage}} \u00b7 {{stat}}",
           "refId": "A"
         }
       ],
-      "title": "AutoTrader cycle duration and order stages",
+      "title": "AutoTrader latency breakdown by stage (ms)",
       "type": "timeseries"
     },
     {
@@ -987,7 +987,7 @@
       },
       "targets": [
         {
-          "expr": "app_autotrader_stage_latency_samples{stage=~\"cycle_total|dashboard_fetch|signal_selection|local_market_book|deep_book_local|cycle_to_order_record|order_submit_response|position_manager_handler|client_transport_and_decode|position_manager_.*\"}",
+          "expr": "app_autotrader_stage_latency_samples{stage=~\"cycle_total|dashboard_fetch|signal_selection|local_market_book|deep_book_local|cycle_to_order_record|signal_age_at_order_record|order_submit_response|position_manager_handler|client_transport_and_decode|position_manager_.*\"}",
           "legendFormat": "{{stage}} \u00b7 samples",
           "refId": "A"
         }

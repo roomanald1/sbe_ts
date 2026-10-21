@@ -14,6 +14,7 @@ import { CloseInsights } from './CloseInsights';
 import { Hedging } from './Hedging';
 import { AutoTrader } from './AutoTrader';
 import { AutoTraderDiagnostics } from './AutoTraderDiagnostics';
+import { AutoTraderOutcomes } from './AutoTraderOutcomes';
 import { TradeTicketPopup } from './TradeTicketPopup';
 import { RangeOrderPopup } from './RangeOrderPopup';
 import { OrderBookPopup } from './OrderBookPopup';
@@ -52,7 +53,8 @@ type DashboardWidgetType =
   | 'close-insights'
   | 'hedging'
   | 'auto-trader'
-  | 'auto-trader-diagnostics';
+  | 'auto-trader-diagnostics'
+  | 'auto-trader-outcomes';
 type DashboardWidget = {
   id: string;
   type: DashboardWidgetType;
@@ -91,6 +93,7 @@ const DASHBOARD_WIDGET_TYPES: DashboardWidgetType[] = [
   'hedging',
   'auto-trader',
   'auto-trader-diagnostics',
+  'auto-trader-outcomes',
 ];
 const DEFAULT_WIDGET_TYPES: DashboardWidgetType[] = [
   'grid',
@@ -127,6 +130,7 @@ const WIDGET_LABELS: Record<DashboardWidgetType, string> = {
   hedging: 'Hedging',
   'auto-trader': 'Auto Trader',
   'auto-trader-diagnostics': 'Auto Trader diagnostics',
+  'auto-trader-outcomes': 'AutoTrader outcomes',
 };
 
 function makeWidget(
@@ -758,6 +762,9 @@ export function FeedControls({
         break;
       case 'auto-trader-diagnostics':
         content = <AutoTraderDiagnostics />;
+        break;
+      case 'auto-trader-outcomes':
+        content = <AutoTraderOutcomes />;
         break;
       case 'trades':
         content =

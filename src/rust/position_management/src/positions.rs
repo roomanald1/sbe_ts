@@ -30,6 +30,7 @@ const NUM_VWAP_BINS: usize = 78;
 const EPSILON: f64 = 1e-12;
 static HTTP_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
 static USD_RATE_CACHE: OnceLock<Mutex<Option<(Instant, UsdRatesResponse)>>> = OnceLock::new();
+static USD_RATE_REFRESHING: AtomicBool = AtomicBool::new(false);
 static USD_RATE_STREAM_CACHE: OnceLock<StdRwLock<Option<UsdRatesResponse>>> = OnceLock::new();
 const USD_RATE_CACHE_TTL: Duration = Duration::from_secs(15);
 const USD_RATE_STREAM_MAX_AGE: Duration = Duration::from_secs(120);
@@ -75,6 +76,16 @@ pub async fn router() -> anyhow::Result<Router> {
         }
     });
     let sample_store = Arc::clone(&store);
+    // Keep the REST fallback cache warm so order capacity checks do not need
+    // to wait on an OKX request when the USD-rate feed is temporarily stale.
+    tokio::spawn(async move {
+        loop {
+            if let Err((status, error)) = get_usd_rates().await {
+                crate::service_log!("WARN", "Could not refresh USD conversion rates ({status}): {error}");
+            }
+            tokio::time::sleep(Duration::from_secs(10)).await;
+        }
+    });
     tokio::spawn(async move {
         loop {
             match crate::feed_client::stream("tickers:*".to_owned()).await {
@@ -94,6 +105,7 @@ pub async fn router() -> anyhow::Result<Router> {
     });
     Ok(Router::new()
         .route("/positions", get(get_positions))
+        .route("/positions/realized-pnl", get(get_realized_pnl))
         .route("/positions/account", get(get_account))
         .route("/account", get(get_account))
         .route("/positions/account/topups", post(top_up_account))
@@ -210,6 +222,7 @@ async fn barrier_order_loop(store: Arc<PositionStore>) {
                 symbol: claimed.symbol.clone(), side: claimed.side.clone(), order_type: if claimed.execution_type == "limit" { OrderType::Limit } else { OrderType::Market },
                 quantity: claimed.remaining_quantity, limit_price: claimed.limit_price, trigger_price: None,
                 trigger_direction: None, trailing_amount: None, trailing_percent: None, expires_at: None, time_in_force: None, measure_execution_quality: false,
+                source: claimed.source.clone(), client_order_id: Some(claimed.id.clone()),
             })).await;
             let mut ledger = store.ledger.lock().await;
             if let Some(order) = ledger.barrier_orders.iter_mut().find(|order| order.id == claimed.id) {
@@ -264,12 +277,33 @@ fn latest_stream_usd_rates() -> Option<UsdRatesResponse> {
 async fn get_usd_rates() -> Result<Json<UsdRatesResponse>, (StatusCode, String)> {
     if let Some(snapshot) = latest_stream_usd_rates() { return Ok(Json(snapshot)); }
     let cache = USD_RATE_CACHE.get_or_init(|| Mutex::new(None));
-    let mut cached = cache.lock().await;
-    if let Some((created, rates)) = cached.as_ref() {
-        if created.elapsed() < USD_RATE_CACHE_TTL {
-            return Ok(Json(rates.clone()));
+    let cached_rates = {
+        let cached = cache.lock().await;
+        cached.as_ref().map(|(created, rates)| (created.elapsed(), rates.clone()))
+    };
+    if let Some((age, rates)) = cached_rates {
+        if age < USD_RATE_CACHE_TTL {
+            return Ok(Json(rates));
         }
+        // Keep the order path independent of remote OKX latency. A background
+        // refresh updates the last usable snapshot for the next request.
+        if !USD_RATE_REFRESHING.swap(true, Ordering::AcqRel) {
+            tokio::spawn(async move {
+                if let Ok(rates) = fetch_usd_rates().await {
+                    let cache = USD_RATE_CACHE.get_or_init(|| Mutex::new(None));
+                    *cache.lock().await = Some((Instant::now(), rates));
+                }
+                USD_RATE_REFRESHING.store(false, Ordering::Release);
+            });
+        }
+        return Ok(Json(rates));
     }
+    let rates = fetch_usd_rates().await?;
+    *cache.lock().await = Some((Instant::now(), rates.clone()));
+    Ok(Json(rates))
+}
+
+async fn fetch_usd_rates() -> Result<UsdRatesResponse, (StatusCode, String)> {
     let response = HTTP_CLIENT.get_or_init(reqwest::Client::new)
         .get("https://www.okx.com/api/v5/market/index-tickers?quoteCcy=USD")
         .send()
@@ -302,9 +336,7 @@ async fn get_usd_rates() -> Result<Json<UsdRatesResponse>, (StatusCode, String)>
     if rates.len() == 1 {
         return Err((StatusCode::BAD_GATEWAY, "OKX returned no usable USD index rates".to_owned()));
     }
-    let rates = UsdRatesResponse { rates, updated_at, updated_at_by_currency };
-    *cached = Some((Instant::now(), rates.clone()));
-    Ok(Json(rates))
+    Ok(UsdRatesResponse { rates, updated_at, updated_at_by_currency })
 }
 
 #[derive(Deserialize)]
@@ -317,12 +349,17 @@ struct NewVwapRun {
     max_participation_rate: f64,
     #[serde(default)]
     strategy: ExecutionStrategy,
+    #[serde(default = "default_trade_source")]
+    source: String,
+    #[serde(default)]
+    client_order_id: Option<String>,
 }
 fn default_max_participation() -> f64 { 1.0 }
+fn default_trade_source() -> String { "manual".to_owned() }
 #[derive(Clone, Copy, Default, Deserialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
 enum ExecutionStrategy { #[default] Vwap, Twap }
-#[derive(Clone, Serialize)]
+#[derive(Clone, Serialize, Deserialize)]
 struct VwapRunStatus {
     id: String,
     symbol: String,
@@ -364,6 +401,10 @@ struct PositionTrade {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     reference_price: Option<f64>,
     timestamp: u64,
+    #[serde(default = "default_trade_source")]
+    source: String,
+    #[serde(default)]
+    parent_order_id: Option<String>,
     #[serde(default)]
     fee: f64,
     #[serde(default)]
@@ -405,6 +446,10 @@ struct RestingOrder {
     time_in_force: String,
     #[serde(default)]
     post_only: bool,
+    #[serde(default = "default_trade_source")]
+    source: String,
+    #[serde(default)]
+    parent_order_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -443,6 +488,10 @@ struct BarrierOrder {
     trailing_percent: Option<f64>,
     #[serde(default)]
     extreme_price: Option<f64>,
+    #[serde(default = "default_trade_source")]
+    source: String,
+    #[serde(default)]
+    parent_order_id: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -472,6 +521,10 @@ struct NewOrder {
     expires_at: Option<u64>,
     #[serde(default)]
     time_in_force: Option<String>,
+    #[serde(default = "default_trade_source")]
+    source: String,
+    #[serde(default)]
+    client_order_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -489,6 +542,20 @@ struct Position {
 struct PositionsResponse {
     positions: Vec<Position>,
     trade_count: usize,
+}
+#[derive(Serialize)]
+struct RealizedPnlResponse {
+    realized_pnl_by_quote: BTreeMap<String, f64>,
+    realized_pnl_usd: Option<f64>,
+    realized_pnl_by_parent_order: BTreeMap<String, f64>,
+    realized_pnl_by_barrier_created_at: BTreeMap<String, f64>,
+    realized_pnl_all_time_by_quote: BTreeMap<String, f64>,
+    realized_pnl_all_time_usd: Option<f64>,
+}
+#[derive(Deserialize)]
+struct RealizedPnlQuery {
+    source: Option<String>,
+    since_ms: Option<u64>,
 }
 #[derive(Serialize)]
 struct TradesResponse {
@@ -615,6 +682,8 @@ struct Ledger {
     orders: Vec<RestingOrder>,
     #[serde(default)]
     barrier_orders: Vec<BarrierOrder>,
+    #[serde(default)]
+    scheduled_runs: Vec<VwapRunStatus>,
 }
 struct PositionStore {
     path: PathBuf,
@@ -660,6 +729,7 @@ impl PositionStore {
                         max_leverage: None,
                         orders: Vec::new(),
                         barrier_orders: Vec::new(),
+                        scheduled_runs: Vec::new(),
                     }
                 } else {
                     serde_json::from_value(value)?
@@ -678,13 +748,24 @@ impl PositionStore {
                 order.error = Some("Backend restarted during barrier execution; review fills before replacing this order".to_owned());
             }
         }
+        let mut interrupted = false;
+        let mut vwap_runs = HashMap::new();
+        for run in &mut ledger.scheduled_runs {
+            if run.status == "running" {
+                run.status = "interrupted".to_owned();
+                run.error = Some("Position manager restarted; scheduled execution stopped. Persisted fills are retained.".to_owned());
+                interrupted = true;
+            }
+            vwap_runs.insert(run.id.clone(), VwapRunEntry {
+                status: Arc::new(Mutex::new(run.clone())),
+                cancelled: Arc::new(AtomicBool::new(true)),
+            });
+        }
         crate::service_log!("INFO", 
             "Loaded {} paper fills and {} resting orders from {}",
-            ledger.trades.len(),
-            ledger.orders.len(),
-            path.display()
+            ledger.trades.len(), ledger.orders.len(), path.display()
         );
-        Ok(Self {
+        let store = Self {
             path,
             ledger: Mutex::new(ledger),
             books: StdRwLock::new(HashMap::new()),
@@ -693,8 +774,13 @@ impl PositionStore {
             book_changed: Notify::new(),
             subscriptions: StdMutex::new(HashMap::new()),
             spot_symbols,
-            vwap_runs: Mutex::new(HashMap::new()),
-        })
+            vwap_runs: Mutex::new(vwap_runs),
+        };
+        if interrupted {
+            let ledger = store.ledger.lock().await;
+            store.persist(&ledger).await?;
+        }
+        Ok(store)
     }
     async fn persist(&self, ledger: &Ledger) -> anyhow::Result<()> {
         let bytes = serde_json::to_vec(ledger)?;
@@ -812,17 +898,17 @@ impl PositionStore {
                 order.remaining_quantity = result.remaining_quantity.max(0.0);
                 order.estimated_fee = order.remaining_quantity * order.limit_price * -order.maker_fee_rate;
                 let fee_rate = if order.maker_fee_rate == 0.0 { configured_fee_rates().maker } else { order.maker_fee_rate };
-                fills.extend(result.fills.into_iter().map(|fill| (order.id.clone(), order.side.clone(), fill.quantity, fill.price, fee_rate)));
+                fills.extend(result.fills.into_iter().map(|fill| (order.id.clone(), order.side.clone(), fill.quantity, fill.price, fee_rate, order.source.clone(), order.parent_order_id.clone())));
             }
         }
         ledger.orders.retain(|order| order.remaining_quantity > EPSILON);
         if !fills.is_empty() {
             let timestamp = now_ms()?;
             let offset = ledger.trades.len();
-            for (index, (order_id, side, quantity, execution_price, fee_rate)) in fills.into_iter().enumerate() {
+            for (index, (order_id, side, quantity, execution_price, fee_rate, source, parent_order_id)) in fills.into_iter().enumerate() {
                 ledger.trades.push(PositionTrade {
                     id: format!("{timestamp}-{index}-{offset}"), symbol: symbol.to_owned(), side, quantity, execution_price,
-                    reference_price: None, timestamp, fee: quantity * execution_price * -fee_rate,
+                    reference_price: None, timestamp, source, parent_order_id, fee: quantity * execution_price * -fee_rate,
                     fee_currency: symbol.split_once('-').map(|(_, quote)| quote.to_owned()).unwrap_or_default(),
                     fee_rate, fee_liquidity: "maker".to_owned(), resting_order_id: Some(order_id),
                     decision_timestamp: None, decision_price: None, decision_mid_price: None,
@@ -832,6 +918,18 @@ impl PositionStore {
             self.persist(&ledger).await?;
         }
         Ok(())
+    }
+}
+
+async fn persist_vwap_run_status(store: &PositionStore, status: &Arc<Mutex<VwapRunStatus>>) {
+    let snapshot = status.lock().await.clone();
+    let mut ledger = store.ledger.lock().await;
+    if let Some(index) = ledger.scheduled_runs.iter().position(|run| run.id == snapshot.id) {
+        ledger.scheduled_runs[index] = snapshot;
+        let id = ledger.scheduled_runs[index].id.clone();
+        if let Err(error) = store.persist(&ledger).await {
+            crate::service_log!("ERROR", "Unable to persist scheduled execution {id}: {error:#}");
+        }
     }
 }
 
@@ -855,6 +953,9 @@ async fn start_scheduled_run(store: Arc<PositionStore>, request: NewVwapRun) -> 
     let symbol = request.symbol.to_ascii_uppercase();
     if !valid_position_symbol(&symbol) {
         return Err((StatusCode::BAD_REQUEST, "Invalid instrument symbol".into()));
+    }
+    if !matches!(request.source.as_str(), "manual" | "auto") {
+        return Err((StatusCode::BAD_REQUEST, "Trade source must be manual or auto".into()));
     }
     if !request.quantity.is_finite() || request.quantity <= 0.0 {
         return Err((
@@ -890,10 +991,10 @@ async fn start_scheduled_run(store: Arc<PositionStore>, request: NewVwapRun) -> 
     let side_book = store.book(&symbol).ok_or((StatusCode::SERVICE_UNAVAILABLE, "Live book is required to reserve VWAP buying power".to_owned()))?;
     let price = match request.side { TradeSide::Buy => side_book.asks.iter().map(|level| level.price).fold(0.0_f64, f64::max), TradeSide::Sell => side_book.bids.first().map(|level| level.price).unwrap_or(0.0) };
     if price <= 0.0 { return Err((StatusCode::SERVICE_UNAVAILABLE, "Live reference price unavailable for VWAP".into())); }
-    let account_ledger = store.ledger.lock().await;
+    let mut account_ledger = store.ledger.lock().await;
     ensure_paper_capacity(&store, &account_ledger, &symbol, &request.side, request.quantity, price, configured_fee_rates().taker).await?;
     let timestamp = now_ms().map_err(internal_error)?;
-    let id = format!("vwap-{timestamp}-{}", symbol.to_ascii_lowercase());
+    let id = request.client_order_id.clone().unwrap_or_else(|| format!("vwap-{timestamp}-{}", symbol.to_ascii_lowercase()));
     let status = Arc::new(Mutex::new(VwapRunStatus {
         id: id.clone(),
         symbol: symbol.clone(),
@@ -910,6 +1011,9 @@ async fn start_scheduled_run(store: Arc<PositionStore>, request: NewVwapRun) -> 
         error: None,
     }));
     let cancelled = Arc::new(AtomicBool::new(false));
+    account_ledger.scheduled_runs.push(status.lock().await.clone());
+    if account_ledger.scheduled_runs.len() > 500 { account_ledger.scheduled_runs.remove(0); }
+    store.persist(&account_ledger).await.map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, format!("Unable to persist scheduled execution: {error}")))?;
     store.vwap_runs.lock().await.insert(
         id,
         VwapRunEntry {
@@ -936,11 +1040,15 @@ async fn cancel_vwap(
     let Some(entry) = runs.get(&id) else {
         return Err((StatusCode::NOT_FOUND, "VWAP execution not found".into()));
     };
+    let status_arc = Arc::clone(&entry.status);
     entry.cancelled.store(true, Ordering::Relaxed);
-    let mut status = entry.status.lock().await;
+    let mut status = status_arc.lock().await;
     if status.status == "running" {
         status.status = "cancelled".into();
     }
+    drop(status);
+    drop(runs);
+    persist_vwap_run_status(&store, &status_arc).await;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -950,6 +1058,7 @@ async fn run_twap(
 ) {
     const SLICES: usize = 78;
     let interval = Duration::from_secs_f64(request.duration_minutes as f64 * 60.0 / SLICES as f64);
+    let run_id = status.lock().await.id.clone();
     let mut executed = 0.0;
     let mut execution_notional = 0.0;
     let mut market_notional = 0.0;
@@ -966,7 +1075,7 @@ async fn run_twap(
         if let Some(book) = book {
             if let (Some(bid), Some(ask)) = (book.bids.first(), book.asks.first()) { market_notional += (bid.price + ask.price) * 0.5; market_samples += 1; }
         }
-        match execute_vwap_child(&store, &symbol, &request.side, qty).await {
+        match execute_vwap_child(&store, &symbol, &request.side, qty, &request.source, &run_id).await {
             Ok((filled, average)) => {
                 executed += filled;
                 if let Some(price) = average { execution_notional += filled * price; }
@@ -975,13 +1084,22 @@ async fn run_twap(
                 state.execution_vwap = if executed > 0.0 { execution_notional / executed } else { 0.0 };
                 state.market_vwap = if market_samples > 0 { market_notional / market_samples as f64 } else { 0.0 };
                 state.slippage = match request.side { TradeSide::Buy => state.execution_vwap - state.market_vwap, TradeSide::Sell => state.market_vwap - state.execution_vwap };
-                if executed + EPSILON >= request.quantity { state.status = "completed".to_owned(); break; }
+                if executed + EPSILON >= request.quantity { state.status = "completed".to_owned(); }
+                drop(state);
+                persist_vwap_run_status(&store, &status).await;
+                if executed + EPSILON >= request.quantity { break; }
             }
-            Err(error) => { status.lock().await.error = Some(error); }
+            Err(error) => {
+                status.lock().await.error = Some(error);
+                persist_vwap_run_status(&store, &status).await;
+            }
         }
     }
-    let mut state = status.lock().await;
-    if state.status == "running" { state.status = if cancelled.load(Ordering::Relaxed) { "cancelled" } else { "completed" }.to_owned(); }
+    {
+        let mut state = status.lock().await;
+        if state.status == "running" { state.status = if cancelled.load(Ordering::Relaxed) { "cancelled" } else { "completed" }.to_owned(); }
+    }
+    persist_vwap_run_status(&store, &status).await;
 }
 
 async fn run_vwap(
@@ -1008,8 +1126,13 @@ async fn run_vwap(
         expected, (request.quantity * 0.0001).max(1e-8), bin_duration_secs,
     ) {
         Ok(manager) => manager,
-        Err(error) => { let mut state=status.lock().await; state.status="failed".into(); state.error=Some(error.to_owned()); return; }
+        Err(error) => {
+            { let mut state=status.lock().await; state.status="failed".into(); state.error=Some(error.to_owned()); }
+            persist_vwap_run_status(&store, &status).await;
+            return;
+        }
     };
+    let run_id = status.lock().await.id.clone();
     let book_slot = store.book_slot(&symbol);
     let (sender, mut receiver) = mpsc::channel(64);
     let trade_symbol = symbol.clone();
@@ -1064,7 +1187,7 @@ async fn run_vwap(
             Some(execution::vwap::OrderAction::CancelOrder) | None => 0.0,
         };
         if child_qty > EPSILON {
-            match execute_vwap_child_from_slot(&store, &symbol, &request.side, child_qty, &book_slot).await {
+            match execute_vwap_child_from_slot(&store, &symbol, &request.side, child_qty, &book_slot, &request.source, &run_id).await {
                 Ok((filled, average_price)) => manager.on_execution_fill(average_price.unwrap_or(trade_price), filled),
                 Err(error) => { let mut state = status.lock().await; state.error = Some(error); }
             }
@@ -1079,10 +1202,12 @@ async fn run_vwap(
             if scheduler_state.remaining_qty <= EPSILON { state.status = "completed".into(); }
             let finished = state.status == "completed";
             drop(state);
+            persist_vwap_run_status(&store, &status).await;
             if finished { break; }
         }
     }
     feed_handle.abort();
+    persist_vwap_run_status(&store, &status).await;
 }
 
 async fn execute_vwap_child(
@@ -1090,10 +1215,12 @@ async fn execute_vwap_child(
     symbol: &str,
     side: &TradeSide,
     quantity: f64,
+    source: &str,
+    parent_order_id: &str,
 ) -> Result<(f64, Option<f64>), String> {
     let slot = store.books.read().expect("book map poisoned").get(symbol).cloned()
         .ok_or_else(|| "Live order book unavailable for VWAP child order".to_string())?;
-    execute_vwap_child_from_slot(store, symbol, side, quantity, &slot).await
+    execute_vwap_child_from_slot(store, symbol, side, quantity, &slot, source, parent_order_id).await
 }
 
 async fn execute_vwap_child_from_slot(
@@ -1102,6 +1229,8 @@ async fn execute_vwap_child_from_slot(
     side: &TradeSide,
     quantity: f64,
     book_slot: &Arc<ArcSwapOption<BookSnapshot>>,
+    source: &str,
+    parent_order_id: &str,
 ) -> Result<(f64, Option<f64>), String> {
     let book = book_slot.load_full()
         .ok_or_else(|| "Live order book unavailable for VWAP child order".to_string())?;
@@ -1111,7 +1240,7 @@ async fn execute_vwap_child_from_slot(
     let average = matched.average_execution_price.unwrap_or_default();
     let reference_price = matched.reference_price;
     let fills = matched.fills.into_iter().map(|fill| (fill.quantity, fill.price)).collect::<Vec<_>>();
-    let fee_rate = configured_fee_rates().taker;
+    let fee_rate = configured_fee_rates().taker.abs();
     let timestamp = now_ms().map_err(|error| error.to_string())?;
     let mut ledger = store.ledger.lock().await;
     let offset = ledger.trades.len();
@@ -1124,6 +1253,8 @@ async fn execute_vwap_child_from_slot(
             execution_price,
             reference_price,
             timestamp,
+            source: source.to_owned(),
+            parent_order_id: Some(parent_order_id.to_owned()),
             fee: qty * execution_price * -fee_rate,
             fee_currency: symbol.split_once('-').map(|(_, quote)| quote.to_owned()).unwrap_or_default(),
             fee_rate,
@@ -1146,6 +1277,9 @@ async fn get_fee_rates() -> Json<FeeRatesResponse> {
 }
 async fn account_snapshot(store: &PositionStore, ledger: &Ledger) -> Result<AccountResponse, (StatusCode, String)> {
     let rates = get_usd_rates().await?.0.rates;
+    account_snapshot_with_rates(store, ledger, &rates)
+}
+fn account_snapshot_with_rates(store: &PositionStore, ledger: &Ledger, rates: &BTreeMap<String, f64>) -> Result<AccountResponse, (StatusCode, String)> {
     let mut cash = ledger.initial_cash + ledger.topups.iter().map(|topup| topup.amount).sum::<f64>();
     let mut fees_paid = 0.0;
     let mut equity_available = true;
@@ -1191,10 +1325,16 @@ async fn account_snapshot(store: &PositionStore, ledger: &Ledger) -> Result<Acco
 }
 async fn ensure_paper_capacity(store: &PositionStore, ledger: &Ledger, symbol: &str, side: &TradeSide, quantity: f64, price: f64, fee_rate: f64) -> Result<(), (StatusCode, String)> {
     let rates = get_usd_rates().await?.0.rates;
+    ensure_paper_capacity_with_rates(store, ledger, &rates, symbol, side, quantity, price, fee_rate, None).await
+}
+async fn ensure_paper_capacity_with_rates(store: &PositionStore, ledger: &Ledger, rates: &BTreeMap<String, f64>, symbol: &str, side: &TradeSide, quantity: f64, price: f64, fee_rate: f64, mut timings: Option<&mut BTreeMap<String, f64>>) -> Result<(), (StatusCode, String)> {
     let quote = symbol.split_once('-').map(|(_, quote)| quote).unwrap_or_default();
     let quote_rate = *rates.get(quote).ok_or((StatusCode::SERVICE_UNAVAILABLE, format!("No OKX USD conversion rate for {quote}")))?;
-    let account = account_snapshot(store, ledger).await?;
+    let account_started = Instant::now();
+    let account = account_snapshot_with_rates(store, ledger, rates)?;
+    if let Some(timings) = timings.as_deref_mut() { timings.insert("capacity_account_snapshot".to_owned(), account_started.elapsed().as_secs_f64() * 1_000.0); }
     if !account.equity_available { return Err((StatusCode::SERVICE_UNAVAILABLE, "Account equity cannot be valued until every open position has a live mark and USD conversion rate".into())); }
+    let reservation_scan_started = Instant::now();
     let mut reserved_buying_power = 0.0;
     for barrier in ledger.barrier_orders.iter().filter(|order| order.status == "armed" && matches!(order.side, TradeSide::Buy)) {
         let barrier_quote = barrier.symbol.split_once('-').map(|(_, quote)| quote).unwrap_or_default();
@@ -1226,6 +1366,7 @@ async fn ensure_paper_capacity(store: &PositionStore, ledger: &Ledger, symbol: &
             reserved_sell += remaining;
         }
     }
+    if let Some(timings) = timings.as_deref_mut() { timings.insert("capacity_reservation_scan".to_owned(), reservation_scan_started.elapsed().as_secs_f64() * 1_000.0); }
     if matches!(side, TradeSide::Buy) {
         let required = quantity * price * quote_rate * (1.0 - fee_rate);
         let available = account.cash - reserved_buying_power;
@@ -1269,9 +1410,88 @@ async fn top_up_account(State(store): State<Arc<PositionStore>>, Json(request): 
     ledger.topups.push(AccountTopup { amount: request.amount, timestamp: now_ms().map_err(internal_error)? });
     store.persist(&ledger).await.map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, format!("Unable to persist account top-up: {error}")))?;
     Ok(Json(account_snapshot(&store, &ledger).await?))
-}async fn get_positions(State(store): State<Arc<PositionStore>>) -> Json<PositionsResponse> {
+}
+#[derive(Deserialize)]
+struct PositionSourceQuery { source: Option<String> }
+async fn get_realized_pnl(
+    State(store): State<Arc<PositionStore>>,
+    Query(query): Query<RealizedPnlQuery>,
+) -> Result<Json<RealizedPnlResponse>, (StatusCode, String)> {
+    if query.source.as_deref().is_some_and(|source| !matches!(source, "manual" | "auto")) {
+        return Err((StatusCode::BAD_REQUEST, "Position source must be manual or auto".into()));
+    }
+    let since_ms = query.since_ms.unwrap_or(0);
     let ledger = store.ledger.lock().await;
-    Json(summarize_positions(&ledger.trades))
+    let mut trades = ledger.trades.iter()
+        .filter(|trade| query.source.as_deref().is_none_or(|source| trade.source == source))
+        .cloned()
+        .collect::<Vec<_>>();
+    trades.sort_by_key(|trade| trade.timestamp);
+    let mut positions = BTreeMap::<String, Position>::new();
+    let mut today_by_quote = BTreeMap::<String, f64>::new();
+    let mut today_by_parent_order = BTreeMap::<String, f64>::new();
+    let barrier_created_at = ledger.barrier_orders.iter()
+        .map(|barrier| (barrier.id.clone(), barrier.created_at.to_string()))
+        .collect::<HashMap<_, _>>();
+    let mut today_by_barrier_created_at = BTreeMap::<String, f64>::new();
+    let mut all_time_by_quote = BTreeMap::<String, f64>::new();
+    for trade in &trades {
+        let position = positions.entry(trade.symbol.clone()).or_insert(Position {
+            symbol: trade.symbol.clone(),
+            quantity: 0.0,
+            average_entry_price: 0.0,
+            realized_pnl: 0.0,
+            entry_fees: 0.0,
+            fees_paid: 0.0,
+            estimated_exit_fee_rate: 0.0,
+            last_trade_timestamp: trade.timestamp,
+        });
+        let prior_realized = position.realized_pnl;
+        apply_trade(position, trade);
+        let realized_delta = position.realized_pnl - prior_realized;
+        if realized_delta.abs() <= EPSILON { continue; }
+        let quote = trade.symbol.split_once('-').map(|(_, quote)| quote).unwrap_or("USD");
+        *all_time_by_quote.entry(quote.to_owned()).or_default() += realized_delta;
+        if trade.timestamp >= since_ms {
+            *today_by_quote.entry(quote.to_owned()).or_default() += realized_delta;
+            if let Some(parent_order_id) = trade.parent_order_id.as_deref() {
+                *today_by_parent_order.entry(parent_order_id.to_owned()).or_default() += realized_delta;
+                if let Some(created_at) = barrier_created_at.get(parent_order_id) {
+                    *today_by_barrier_created_at.entry(created_at.clone()).or_default() += realized_delta;
+                }
+            }
+        }
+    }
+    drop(ledger);
+    let rates = get_usd_rates().await?.0.rates;
+    let convert_usd = |totals: &BTreeMap<String, f64>| -> Option<f64> {
+        totals.iter().try_fold(0.0, |sum, (quote, amount)| {
+            rates.get(quote).map(|rate| sum + amount * rate)
+        })
+    };
+    Ok(Json(RealizedPnlResponse {
+        realized_pnl_usd: convert_usd(&today_by_quote),
+        realized_pnl_by_quote: today_by_quote,
+        realized_pnl_by_parent_order: today_by_parent_order,
+        realized_pnl_by_barrier_created_at: today_by_barrier_created_at,
+        realized_pnl_all_time_usd: convert_usd(&all_time_by_quote),
+        realized_pnl_all_time_by_quote: all_time_by_quote,
+    }))
+}
+
+async fn get_positions(
+    State(store): State<Arc<PositionStore>>,
+    Query(query): Query<PositionSourceQuery>,
+) -> Result<Json<PositionsResponse>, (StatusCode, String)> {
+    if query.source.as_deref().is_some_and(|source| !matches!(source, "manual" | "auto")) {
+        return Err((StatusCode::BAD_REQUEST, "Position source must be manual or auto".into()));
+    }
+    let ledger = store.ledger.lock().await;
+    let trades = ledger.trades.iter()
+        .filter(|trade| query.source.as_deref().is_none_or(|source| trade.source == source))
+        .cloned()
+        .collect::<Vec<_>>();
+    Ok(Json(summarize_positions(&trades)))
 }
 
 async fn get_hedge_candidates(
@@ -1508,6 +1728,7 @@ async fn create_profit_barrier(
         created_at: timestamp, triggered_at: None, status: "armed".to_owned(),
         average_execution_price: None, fee_paid: 0.0, error: None, order_kind: "profit-target".to_owned(), execution_type: "market".to_owned(), limit_price: None,
         trailing_amount: None, trailing_percent: None, extreme_price: None,
+        source: default_trade_source(), parent_order_id: None,
     };
     ledger.barrier_orders.push(barrier_order.clone());
     if let Err(error) = store.persist(&ledger).await {
@@ -1549,6 +1770,8 @@ async fn close_profitable(
             trailing_percent: None,
             expires_at: None,
             time_in_force: None,
+            source: default_trade_source(),
+            client_order_id: None,
         }),
     ).await.map_err(|(status, error)| (
         status,
@@ -1563,6 +1786,9 @@ async fn submit_order(
     let symbol = request.symbol.to_ascii_uppercase();
     if !valid_position_symbol(&symbol) {
         return Err((StatusCode::BAD_REQUEST, "Invalid instrument symbol".into()));
+    }
+    if !matches!(request.source.as_str(), "manual" | "auto") {
+        return Err((StatusCode::BAD_REQUEST, "Trade source must be manual or auto".into()));
     }
     if !request.quantity.is_finite() || request.quantity <= 0.0 {
         return Err((
@@ -1613,6 +1839,7 @@ async fn submit_order(
             order_kind: if trailing { "trailing-stop" } else if execution_type == "limit" { "stop-limit" } else if matches!(&request.order_type, OrderType::StopMarket) { "stop-market" } else { "barrier" }.to_owned(),
             execution_type: execution_type.to_owned(), limit_price: stop_limit_price,
             trailing_amount, trailing_percent, extreme_price,
+            source: request.source.clone(), parent_order_id: request.client_order_id.clone(),
         };
         ledger.barrier_orders.push(barrier_order.clone());
         if let Err(error) = store.persist(&ledger).await {
@@ -1657,7 +1884,8 @@ async fn submit_order(
     let mut processing_timings_ms = BTreeMap::new();
     let book_wait_started = Instant::now();
     store.ensure_subscription(&symbol);
-    if store.book(&symbol).is_none() {
+    let book_was_missing = store.book(&symbol).is_none();
+    if book_was_missing {
         let wait = async {
             loop {
                 let notified = store.book_changed.notified();
@@ -1678,7 +1906,7 @@ async fn submit_order(
         StatusCode::SERVICE_UNAVAILABLE,
         "Live OKX book unavailable".into(),
     ))?;
-    processing_timings_ms.insert("book_wait".to_owned(), book_wait_started.elapsed().as_secs_f64() * 1_000.0);
+    processing_timings_ms.insert(if book_was_missing { "book_wait_cold" } else { "book_wait_active" }.to_owned(), book_wait_started.elapsed().as_secs_f64() * 1_000.0);
     let matching_started = Instant::now();
     let levels = match request.side { TradeSide::Buy => &book.asks, TradeSide::Sell => &book.bids };
     if is_post_only {
@@ -1708,12 +1936,15 @@ async fn submit_order(
     let average_execution_price = matched.average_execution_price;
     let fills = matched.fills.into_iter().map(|fill| (fill.quantity, fill.price)).collect::<Vec<_>>();
     let timestamp = now_ms().map_err(internal_error)?;
+    let rates_started = Instant::now();
+    let capacity_rates = get_usd_rates().await?.0.rates;
+    processing_timings_ms.insert("capacity_rate_lookup".to_owned(), rates_started.elapsed().as_secs_f64() * 1_000.0);
     let ledger_lock_started = Instant::now();
     let mut ledger = store.ledger.lock().await;
     processing_timings_ms.insert("ledger_lock_wait".to_owned(), ledger_lock_started.elapsed().as_secs_f64() * 1_000.0);
     let capacity_started = Instant::now();
     let reserve_price = if matches!(request.side, TradeSide::Buy) { levels.iter().map(|level| level.price).fold(0.0_f64, f64::max) } else { reference_price.unwrap_or(0.0) };
-    ensure_paper_capacity(&store, &ledger, &symbol, &request.side, request.quantity, reserve_price, taker_fee_rate).await?;
+    ensure_paper_capacity_with_rates(&store, &ledger, &capacity_rates, &symbol, &request.side, request.quantity, reserve_price, taker_fee_rate, Some(&mut processing_timings_ms)).await?;
     processing_timings_ms.insert("capacity_check".to_owned(), capacity_started.elapsed().as_secs_f64() * 1_000.0);
     let start = ledger.trades.len();
     for (index, (quantity, execution_price)) in fills.into_iter().enumerate() {
@@ -1725,6 +1956,8 @@ async fn submit_order(
             execution_price,
             reference_price,
             timestamp,
+            source: request.source.clone(),
+            parent_order_id: request.client_order_id.clone(),
             fee: quantity * execution_price * -taker_fee_rate,
             fee_currency: symbol.split_once('-').map(|(_, quote)| quote.to_owned()).unwrap_or_default(),
             fee_rate: taker_fee_rate,
@@ -1754,6 +1987,8 @@ async fn submit_order(
             expires_at: request.expires_at,
             time_in_force: if request.expires_at.is_some() { "gtd".to_owned() } else { "gtc".to_owned() },
             post_only: is_post_only,
+            source: request.source.clone(),
+            parent_order_id: request.client_order_id.clone(),
         };
         ledger.orders.push(order.clone());
         Some(order)

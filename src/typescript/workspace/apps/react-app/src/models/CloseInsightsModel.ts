@@ -95,8 +95,6 @@ export class CloseInsightsModel {
             }]
           : [];
       });
-      this.state$.next({ ...this.state$.value, loading: false, error: undefined, insights: rows });
-
       const [ratesResult, barriersResult] = await Promise.allSettled([ratesRequest, barriersRequest]);
       const ratesResponse = ratesResult.status === 'fulfilled' ? ratesResult.value : undefined;
       const barriersResponse = barriersResult.status === 'fulfilled' ? barriersResult.value : undefined;
@@ -104,6 +102,8 @@ export class CloseInsightsModel {
       const barriers = barriersResponse?.ok ? await barriersResponse.json() as BarrierOrder[] : this.state$.value.barriers;
       this.state$.next({
         ...this.state$.value,
+        loading: false,
+        error: undefined,
         barriers,
         insights: rows.map((row) => {
           const quote = row.position.symbol.split('-')[1] ?? '';
