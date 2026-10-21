@@ -4,7 +4,6 @@ local.file_match "application_logs" {
     {"__path__" = "/var/log/app/position_management.log", "job" = "application", "service" = "position_management"},
     {"__path__" = "/var/log/app/execution.log", "job" = "application", "service" = "execution"},
     {"__path__" = "/var/log/app/insights.log", "job" = "application", "service" = "insights"},
-    {"__path__" = "/var/log/app/backend.log", "job" = "application", "service" = "backend"},
     {"__path__" = "/var/log/app/ui.log", "job" = "application", "service" = "ui"},
   ]
 }

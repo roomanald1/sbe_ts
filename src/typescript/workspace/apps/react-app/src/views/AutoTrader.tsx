@@ -10,8 +10,9 @@ import {
   type ITooltipParams,
 } from 'ag-grid-community';
 import { formatForSymbol } from '../instrument_precision';
+import type { SymbolPriceTick } from '../types/symbol_price';
 import { AutoTraderModel } from '../models/AutoTraderModel';
-import type { AutoTraderOrder } from '../models/AutoTraderModel';
+import type { AutoTraderContextParameters, AutoTraderDecisionParameter, AutoTraderOrder } from '../models/AutoTraderModel';
 import { useBehaviorSnapshot } from '../use_behavior_snapshot';
 import { FeedToolbar } from './FeedToolbar';
 import { getOrderTypeDescription } from '../order_type_descriptions';
@@ -19,6 +20,44 @@ import { getOrderTypeDescription } from '../order_type_descriptions';
 const money = new Intl.NumberFormat(undefined, { maximumFractionDigits: 2 });
 const pnlDetailMoney = new Intl.NumberFormat(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 4 });
 const timestamp = new Intl.DateTimeFormat(undefined, { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+
+function explainAutoTraderReason(reason: string): string {
+  const lower = reason.toLowerCase();
+  if (lower.startsWith('no tradeable bias')) {
+    const fresh = reason.match(/fresh directional (\d+)\/(\d+)/i);
+    const strength = reason.match(/strength floors passed (\d+)/i);
+    const exploration = reason.match(/raw-score floors passed (\d+)/i);
+    const usable = fresh ? Number(fresh[1]) : 0;
+    const total = fresh ? Number(fresh[2]) : 0;
+    if (total === 0) return 'No insights available';
+    if (usable === 0) {
+      const filters = reason.match(/filtered: (\d+) stale, (\d+) non-directional, (\d+) blocked by existing positions/i);
+      const causes = filters
+        ? Number(filters[1]) + ' stale · ' + Number(filters[2]) + ' no direction · ' + Number(filters[3]) + ' position blocked'
+        : 'filtered before strength or history checks';
+      return 'No usable buy or sell signal\n' + total + ' insight checked · ' + causes;
+    }
+    if (strength?.[1] === '0' && exploration?.[1] === '0') return 'Signal too weak\n' + usable + ' usable · 0 passed normal strength · 0 passed trial score';
+    const history = reason.match(/(\d+) candidate\(s\) blocked by negative walk-forward history/i);
+    const blocked = history ? Number(history[1]) : 0;
+    if (blocked > 0) return 'Past-performance check blocked ' + blocked + ' candidate' + (blocked === 1 ? '' : 's');
+    return 'No signal passed all entry checks\n' + usable + ' usable signals checked';
+  }
+  if (lower.includes('no insights available')) return 'No insights available';
+  if (lower.includes('no usable buy or sell signal') || lower.includes('no usable directional signal') || lower.includes('no fresh directional signal')) return 'No usable buy or sell signal';
+  if (lower.includes('signals were stale')) return 'Insights were stale';
+  if (lower.includes('no directional signal')) return 'Insights had no clear direction';
+  if (lower.includes('position blocked')) return 'Existing position blocked another entry';
+  if (lower.includes('signal too weak') || lower.includes('strength and score floors')) return 'Signal too weak for entry';
+  if (lower.includes('daily realized-loss limit')) return 'Daily loss limit reached';
+  if (lower.includes('budget') || lower.includes('capacity')) return 'Not enough budget or position capacity';
+  if (lower.includes('walk-forward') || lower.includes('historical')) return 'Past-performance check blocked the trade';
+  if (lower.includes('stale local order book')) return 'Market data was out of date';
+  if (lower.includes('no cached local order book')) return 'Market data was unavailable';
+  if (lower.includes('position') || lower.includes('cooldown')) return 'Existing position or wait period';
+  if (lower.includes('cycle error')) return 'Decision cycle error';
+  return reason;
+}
 ModuleRegistry.registerModules([CellStyleModule, ClientSideRowModelModule]);
 
 const autoTraderGridTheme = themeQuartz.withParams({
@@ -31,29 +70,37 @@ const autoTraderGridTheme = themeQuartz.withParams({
   rowHoverColor: '#141b24',
 });
 
-const orderColumnDefs: ColDef<AutoTraderOrder>[] = [
+type AutoTraderOrderRow = AutoTraderOrder & { current_price?: number };
+
+const orderColumnDefs: ColDef<AutoTraderOrderRow>[] = [
   { field: 'timestamp', headerName: 'Time / Trigger', minWidth: 102, valueGetter: ({ data }) => data?.triggered_at ?? data?.timestamp, valueFormatter: ({ value }) => value ? timestamp.format(value) : '' },
   { field: 'symbol', headerName: 'Symbol', minWidth: 78 },
   { field: 'side', headerName: 'Side', minWidth: 56, valueFormatter: ({ value }) => String(value ?? '').toUpperCase() },
-  { field: 'order_type', headerName: 'Type', minWidth: 70, tooltipValueGetter: (params: ITooltipParams<AutoTraderOrder>) => getOrderTypeDescription(params.value), cellRenderer: (params: ICellRendererParams<AutoTraderOrder>) => <span title={getOrderTypeDescription(params.value)}>{String(params.value ?? '')}</span> },
+  { field: 'order_type', headerName: 'Type', minWidth: 70, tooltipValueGetter: (params: ITooltipParams<AutoTraderOrderRow>) => getOrderTypeDescription(params.value), cellRenderer: (params: ICellRendererParams<AutoTraderOrderRow>) => <span title={getOrderTypeDescription(params.value)}>{String(params.value ?? '')}</span> },
   { field: 'purpose', headerName: 'Purpose', minWidth: 76, valueFormatter: ({ value }) => value === 'portfolio-hedge' ? 'HEDGE' : String(value ?? '').toUpperCase() },
   { field: 'status', headerName: 'Status', minWidth: 70 },
   { field: 'filled_quantity', headerName: 'Filled / Qty', minWidth: 96, valueFormatter: ({ data }) => data ? formatForSymbol(data.filled_quantity, data.symbol, 'quantity') + '/' + formatForSymbol(data.quantity, data.symbol, 'quantity') : '' },
+  { field: 'submitted_limit_price', headerName: 'Limit / Stop Price', minWidth: 112, valueGetter: ({ data }) => data?.submitted_limit_price ?? data?.target_price, valueFormatter: ({ value, data }) => value == null || !data ? '' : formatForSymbol(value, data.symbol, 'price') },
+  { field: 'current_price', headerName: 'Current Price', minWidth: 92, valueFormatter: ({ value, data }) => value == null || !data ? '' : formatForSymbol(value, data.symbol, 'price') },
   { field: 'average_price', headerName: 'Avg Price', minWidth: 78, valueFormatter: ({ value }) => value == null ? '' : money.format(value) },
   { field: 'realized_pnl', headerName: 'Realized USD', minWidth: 92, cellClass: ({ value }) => value >= 0 ? 'pnl-positive' : 'pnl-negative', valueFormatter: ({ value }) => value == null ? '' : money.format(value) },
 ];
 
-const defaultOrderColDef: ColDef<AutoTraderOrder> = {
+const defaultOrderColDef: ColDef<AutoTraderOrderRow> = {
   sortable: true,
   resizable: true,
   flex: 1,
   minWidth: 68,
 };
-export function AutoTrader() {
+export function AutoTrader({ ticks }: { ticks: SymbolPriceTick[] }) {
+  const currentPrices = useMemo(() => new Map(ticks.map((tick) => [tick.symbol, tick.price])), [ticks]);
   const model = useMemo(() => new AutoTraderModel(), []);
   useEffect(() => { model.start(); return () => model.stop(); }, [model]);
   const state = useBehaviorSnapshot(model.state$);
+  const openPositionSymbols = useMemo(() => new Set(state.openPositionSymbols), [state.openPositionSymbols]);
+  const orderRows = useMemo(() => state.orders.map((order) => ({ ...order, current_price: openPositionSymbols.has(order.symbol) ? currentPrices.get(order.symbol) : undefined })), [state.orders, openPositionSymbols, currentPrices]);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [parametersOpen, setParametersOpen] = useState(false);
   const [breakdownOpen, setBreakdownOpen] = useState(false);
   const [decisionDetailsOpen, setDecisionDetailsOpen] = useState(false);
   const currencyBreakdown = useMemo(() => {
@@ -68,21 +115,77 @@ export function AutoTrader() {
     });
     return Array.from(grouped, ([currency, value]) => ({ currency, ...value })).sort((a, b) => Math.abs(b.pnl) - Math.abs(a.pnl));
   }, [state.pnlBreakdown]);
+  useEffect(() => {
+    if (!parametersOpen) return;
+    void model.refreshDecisionParameters();
+    const timer = setInterval(() => void model.refreshDecisionParameters(), 5000);
+    return () => clearInterval(timer);
+  }, [model, parametersOpen]);
+  const decisionParameterSections = useMemo(() => {
+    const grouped = new Map<string, AutoTraderDecisionParameter[]>();
+    state.decisionParameters?.thresholds.forEach((item) => grouped.set(item.section, [...(grouped.get(item.section) ?? []), item]));
+    return Array.from(grouped, ([section, parameters]) => ({ section, parameters }));
+  }, [state.decisionParameters]);
+  const contextLabel = (context: AutoTraderContextParameters) => context.context.replace(':', ' · ').replace(/^([a-z])/, (letter) => letter.toUpperCase());
+  const scoutOrderCounts = useMemo(() => {
+    const scouts = state.orders.filter((order) => order.purpose === 'scout');
+    return {
+      total: scouts.length,
+      filled: scouts.filter((order) => order.filled_quantity > 0).length,
+      pending: scouts.filter((order) => ['accepted', 'resting', 'armed', 'submitting'].includes(order.status)).length,
+      failed: scouts.filter((order) => order.status === 'failed').length,
+    };
+  }, [state.orders]);
+  const scoutOutcomeCohort = state.decisionQuality.cohorts.find((cohort) => cohort.dimension === 'selection' && cohort.value === 'scout');
   return (
-    <section className={"feed-section auto-trader-section" + (breakdownOpen || settingsOpen ? " has-open-popup" : "")} aria-label="Auto Trader">
+    <section className={"feed-section auto-trader-section" + (breakdownOpen || settingsOpen || parametersOpen ? " has-open-popup" : "")} aria-label="Auto Trader">
       <FeedToolbar title="Auto Trader" />
       <div className="auto-trader-content">
         <div className={"auto-trader-live-banner " + (state.enabled ? "is-live" : "") + (state.loading ? " is-loading" : "")}>
           <span className="auto-trader-live-dot" aria-hidden="true" />
           <strong>{state.loading ? 'Connecting' : state.enabled ? 'LIVE' : 'PAUSED'}</strong>
-          <span>{state.loading ? 'Checking status' : state.enabled ? 'Scanning markets · 5s cycle' : 'Auto Trader is off'}</span>
+          <span>{state.loading ? 'Checking status' : state.enabled ? 'Auto Trader is active' : 'Auto Trader is off'}</span>
           <div className="auto-trader-live-actions">
             <button type="button" disabled={state.loading || state.busy} onClick={() => void model.setEnabled(!state.enabled)}>{state.busy ? 'Working…' : state.enabled ? 'Pause' : 'Go live'}</button>
           </div>
         </div>
         <div className="auto-trader-settings-anchor">
           <p>Paper · {state.explorationPercent}% explore · SL {state.stopLossPercent.toFixed(2)}% / TP {state.takeProfitPercent.toFixed(2)}%</p>
-          <button className="auto-trader-settings-button" type="button" aria-expanded={settingsOpen} aria-haspopup="dialog" disabled={state.loading} onClick={() => setSettingsOpen((open) => !open)}>…</button>
+          <div className="auto-trader-settings-actions">
+            <button className="auto-trader-parameters-button" type="button" aria-expanded={parametersOpen} aria-haspopup="dialog" disabled={state.loading} onClick={() => { setParametersOpen((open) => !open); setSettingsOpen(false); }}>View parameters</button>
+            <button className="auto-trader-settings-button" type="button" aria-expanded={settingsOpen} aria-haspopup="dialog" disabled={state.loading} onClick={() => { setSettingsOpen((open) => !open); setParametersOpen(false); }}>…</button>
+          </div>
+          {parametersOpen && <div className="auto-trader-settings-popup auto-trader-parameters-popup" role="dialog" aria-label="Current Auto Trader parameters">
+            <div className="auto-trader-settings-heading"><strong>Current Auto Trader parameters</strong><button type="button" aria-label="Close parameters" onClick={() => setParametersOpen(false)}>×</button></div>
+            <small aria-live="polite">Live parameters from the AutoTrader service · refreshed {state.decisionParameters ? timestamp.format(state.decisionParameters.refreshed_at) : 'on open and every 5s'}</small>
+            {state.decisionParametersError && <p className="auto-trader-error" role="alert">{state.decisionParametersError}</p>}
+            {!state.decisionParameters && !state.decisionParametersError && <p>Loading live decision parameters…</p>}
+            {state.decisionParameters && <div className="auto-trader-parameter-sections">
+              {decisionParameterSections.map(({ section, parameters }) => <section key={section}><strong>{section}</strong><dl>
+                {parameters.map((item) => <div key={item.name}><dt>{item.name}</dt><dd>{item.value.toLocaleString(undefined, { maximumFractionDigits: 3 })} {item.unit}</dd></div>)}
+              </dl></section>)}
+              <section><strong>Effective thresholds by market context</strong><dl>
+                {state.decisionParameters.contexts.map((context) => <div key={context.context}>
+                  <dt>{contextLabel(context)} · {context.learning_samples} samples{context.positive_rate == null ? '' : ' · ' + (context.positive_rate * 100).toFixed(0) + '% positive'}</dt>
+                  <dd>Strength ≥ {context.strength_floor.toFixed(2)} · score ≥ {context.exploration_score_floor.toFixed(2)} · exploration {context.exploration_allowed ? 'enabled' : 'disabled'}</dd>
+                </div>)}
+              </dl></section>
+              <section><strong>Active exit policy</strong><dl>
+                <div><dt>Stop-loss</dt><dd>{state.decisionParameters.active_exit_policy.stop_loss_percent.toFixed(2)}%</dd></div>
+                <div><dt>Take-profit</dt><dd>{state.decisionParameters.active_exit_policy.take_profit_percent.toFixed(2)}%</dd></div>
+              </dl></section>
+              <section><strong>Latest selected execution profile</strong><dl>
+                {state.decisionParameters.latest_execution ? <>
+                  <div><dt>Signal</dt><dd>{state.decisionParameters.latest_execution.symbol} · {state.decisionParameters.latest_execution.context}</dd></div>
+                  <div><dt>Order type</dt><dd>{state.decisionParameters.latest_execution.baseline_order_type} → {state.decisionParameters.latest_execution.selected_order_type}</dd></div>
+                  <div><dt>Profile</dt><dd>P{state.decisionParameters.latest_execution.profile}</dd></div>
+                  <div><dt>VWAP / TWAP</dt><dd>{state.decisionParameters.latest_execution.vwap_duration_minutes} min · {state.decisionParameters.latest_execution.vwap_participation_percent.toFixed(1)}% participation</dd></div>
+                  <div><dt>Order offsets</dt><dd>Limit {state.decisionParameters.latest_execution.limit_offset_bps.toFixed(2)} bps · trigger {state.decisionParameters.latest_execution.trigger_offset_bps.toFixed(2)} bps</dd></div>
+                  <div><dt>Trailing distance</dt><dd>{state.decisionParameters.latest_execution.trailing_distance_percent.toFixed(2)}%</dd></div>
+                </> : <div><dt>Latest execution profile</dt><dd>No signal has selected an execution profile since this service started.</dd></div>}
+              </dl></section>
+            </div>}
+          </div>}
           {settingsOpen && <div className="auto-trader-settings-popup" role="dialog" aria-label="Auto Trader settings">
             <div className="auto-trader-settings-heading"><strong>Auto Trader settings</strong><button type="button" aria-label="Close settings" onClick={() => setSettingsOpen(false)}>×</button></div>
             <div className="auto-trader-limits">
@@ -91,6 +194,7 @@ export function AutoTrader() {
               <label>DAILY LOSS CAP (USD)<input type="number" min="0.01" step="any" value={state.dailyRealizedLossLimit} onChange={(event) => model.setLimits(state.maxOrderNotional, state.dailyNotionalLimit, event.target.value, state.explorationPercent, state.maxOpenPositions)} /></label>
               <label>EXPLORATION SIZE (%)<input type="number" min="0" max="100" step="1" value={state.explorationPercent} onChange={(event) => model.setLimits(state.maxOrderNotional, state.dailyNotionalLimit, state.dailyRealizedLossLimit, event.target.value, state.maxOpenPositions)} /></label>
               <label title="Maximum number of distinct Auto Trader positions held at once.">MAX OPEN POSITIONS<input type="number" min="1" max="20" step="1" value={state.maxOpenPositions} onChange={(event) => model.setLimits(state.maxOrderNotional, state.dailyNotionalLimit, state.dailyRealizedLossLimit, state.explorationPercent, event.target.value)} /></label>
+              <label title="Maximum number of entries Auto Trader can make while a position remains open, including the initial entry.">ENTRIES PER POSITION<input type="number" min="1" max="10" step="1" value={state.maxEntriesPerPosition} onChange={(event) => model.setMaxEntriesPerPosition(event.target.value)} /></label>
               <label>VWAP / TWAP DURATION (MIN)<input type="number" min="5" max="390" step="1" value={state.vwapDurationMinutes} onChange={(event) => model.setExecutionParameters({ vwapDurationMinutes: event.target.value })} /></label>
               <label>VWAP PARTICIPATION (%)<input type="number" min="1" max="50" step="1" value={state.vwapParticipationPercent} onChange={(event) => model.setExecutionParameters({ vwapParticipationPercent: event.target.value })} /></label>
               <label>LIMIT OFFSET (BPS)<input type="number" min="-10" max="10" step="0.5" value={state.limitOffsetBps} onChange={(event) => model.setExecutionParameters({ limitOffsetBps: event.target.value })} /></label>
@@ -103,8 +207,13 @@ export function AutoTrader() {
         <p className="auto-trader-allocation">Budget used <strong>USD {money.format(state.usedNotionalToday)}</strong> / {money.format(Number(state.dailyNotionalLimit) || 0)} · Available <strong>USD {money.format(Math.max(0, (Number(state.dailyNotionalLimit) || 0) - state.usedNotionalToday))}</strong></p>
         <div className="auto-trader-insights">
           <div className="auto-trader-insight auto-trader-decision" role="status">
-            <span className="auto-trader-insight-label">Last decision</span>
-            <span className="auto-trader-decision-text">{state.lastDecision || 'Waiting for first cycle.'}</span>
+            <span className="auto-trader-insight-label">Why no trades? · {state.decisionsSinceTrade.toLocaleString()} scans since last order</span>
+            {state.gapReasons.length > 0 ? <ol className="auto-trader-gap-reasons">
+              {state.gapReasons.slice().sort((a, b) => b.count - a.count).slice(0, 3).map((item) => <li key={item.reason}>
+                <span>{explainAutoTraderReason(item.reason)}</span><strong>{item.count.toLocaleString()} scans</strong>
+              </li>)}
+            </ol> : <span className="auto-trader-decision-text">{state.lastDecision ? explainAutoTraderReason(state.lastDecision) : 'Waiting for the first decision.'}</span>}
+
             {state.lastDecisionAt > 0 && <time dateTime={new Date(state.lastDecisionAt).toISOString()}>{timestamp.format(state.lastDecisionAt)}</time>}
           </div>
           <div className="auto-trader-insight">
@@ -129,9 +238,17 @@ export function AutoTrader() {
               {state.executionQuality.history_truncated ? ' · last 50k audit updates' : ''}
             </span>
           </div>
+          <div className="auto-trader-insight auto-trader-scout-summary" aria-label="Scout summary">
+            <span className="auto-trader-insight-label">Scout summary</span>
+            <strong>{state.scoutOpenPositions}/{state.scoutMaxActivePositions} positions open · {state.decisionQuality.scout_completed_trade_samples} closed trades</strong>
+            <span className="auto-trader-learning-detail">{state.decisionQuality.scout_filled_entry_samples} filled entries · {state.decisionQuality.scout_unresolved_trade_samples} unresolved entries · {state.decisionQuality.scout_unpriced_closed_trade_samples} closed without an entry price</span>
+            <span className="auto-trader-learning-detail">Recent scout orders in the latest 50: {scoutOrderCounts.filled} filled · {scoutOrderCounts.pending} pending · {scoutOrderCounts.failed} failed</span>
+            {scoutOutcomeCohort ? <span className="auto-trader-learning-detail">Closed cohort: {scoutOutcomeCohort.completed_trade_samples} trades · {scoutOutcomeCohort.average_net_return_percent >= 0 ? '+' : ''}{scoutOutcomeCohort.average_net_return_percent.toFixed(3)}% average · {(scoutOutcomeCohort.win_rate * 100).toFixed(0)}% wins · USD {money.format(scoutOutcomeCohort.total_net_pnl)}</span> : <span className="auto-trader-learning-detail">{state.scoutLearningSamples > 0 ? state.scoutLearningSamples + ' realized scout outcomes recorded · thresholds adjust after 5 per context · ' + (state.scoutLearningWinRate == null ? 'win rate unavailable' : (state.scoutLearningWinRate * 100).toFixed(0) + '% positive') + ' · USD ' + money.format(state.scoutLearningRealizedPnl) : 'Outcome-based scout learning starts after a scout position closes.'}</span>}
+          </div>
           <div className="auto-trader-insight auto-trader-decision-quality">
             <span className="auto-trader-insight-label">Decision quality · {state.decisionQuality.completed_trade_samples}/{state.decisionQuality.filled_entry_samples} outcomes closed</span>
             <strong>{state.decisionQuality.decision_samples} decisions · {state.decisionQuality.unresolved_trade_samples} open</strong>
+            <span className="auto-trader-learning-detail">Tracks filled Auto Trader entries after the full position closes; skipped signals and open trades are not completed outcomes.</span>
             <button className="auto-trader-cohort-toggle" type="button" aria-expanded={decisionDetailsOpen} onClick={() => setDecisionDetailsOpen((open) => !open)}>
               {decisionDetailsOpen ? 'Hide breakdown' : 'View breakdown · ' + state.decisionQuality.cohorts.length + ' signals'}
             </button>
@@ -174,8 +291,8 @@ export function AutoTrader() {
         <div className="auto-trader-orders" aria-label="Recent auto trader orders">
           <strong>Recent orders</strong>
           <div className="data-grid-wrap auto-trader-grid-wrap">
-            <AgGridReact<AutoTraderOrder>
-              rowData={state.orders}
+            <AgGridReact<AutoTraderOrderRow>
+              rowData={orderRows}
               columnDefs={orderColumnDefs}
               defaultColDef={defaultOrderColDef}
               getRowId={({ data }) => String(data.timestamp) + '-' + data.symbol + '-' + data.side}

@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+dashmap = "6.1.0"
 anyhow = "1.0.104"
 axum = "0.8.9"
 async-stream = "0.3.6"

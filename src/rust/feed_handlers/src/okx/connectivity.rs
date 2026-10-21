@@ -2,14 +2,15 @@ use anyhow::Result;
 use bytes::Bytes;
 use futures_util::{SinkExt, StreamExt, TryStreamExt};
 use reqwest::header::USER_AGENT;
-use serde::Deserialize;
+use dashmap::DashMap;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
-    collections::{HashMap, HashSet, VecDeque},
-    sync::{Arc, Mutex},
+    collections::{BTreeMap, HashSet, VecDeque},
+    sync::{atomic::{AtomicU64, Ordering}, Arc},
     time::{SystemTime, UNIX_EPOCH},
 };
-use tokio::sync::{broadcast::Sender, mpsc};
+use tokio::sync::{broadcast::Sender, mpsc, watch};
 use tokio::time::{Duration, Instant, sleep};
 use tokio_tungstenite::{connect_async, tungstenite::Utf8Bytes};
 
@@ -20,6 +21,7 @@ const MAX_RECONNECT_DELAY: Duration = Duration::from_secs(30);
 const STABLE_CONNECTION_DURATION: Duration = Duration::from_secs(60);
 const VOLATILITY_HISTORY_MS: u64 = 300_000;
 const OKX_IDLE_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(20);
+const OKX_PONG_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Default)]
 pub(crate) struct RollingVolatility {
@@ -354,6 +356,134 @@ pub struct TickerSample {
     pub timestamp: u64,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct UsdRateSnapshot {
+    pub rates: BTreeMap<String, f64>,
+    pub updated_at: u64,
+    pub updated_at_by_currency: BTreeMap<String, u64>,
+}
+
+#[derive(Deserialize)]
+struct IndexTickerRestResponse { data: Vec<IndexTickerRestItem> }
+
+#[derive(Deserialize)]
+struct IndexTickerRestItem {
+    #[serde(rename = "instId")] instrument: String,
+    #[serde(rename = "idxPx")] index_price: String,
+    ts: String,
+}
+
+#[derive(Deserialize)]
+struct IndexTickerWsMessage {
+    event: Option<String>,
+    msg: Option<String>,
+    data: Option<Vec<IndexTickerWsItem>>,
+}
+
+#[derive(Deserialize)]
+struct IndexTickerWsItem {
+    #[serde(rename = "instId")] instrument: String,
+    #[serde(rename = "idxPx")] index_price: String,
+    ts: String,
+}
+
+#[derive(Clone, Debug)]
+struct UsdIndexUpdate { currency: String, rate: f64, timestamp: u64 }
+
+pub async fn run_usd_rate_stream(output: watch::Sender<Bytes>) {
+    loop {
+        match bootstrap_usd_rates().await {
+            Ok((instruments, mut snapshot)) => {
+                if let Ok(bytes) = serde_json::to_vec(&snapshot) {
+                    output.send_replace(Bytes::from(bytes));
+                }
+                let (update_tx, mut update_rx) = mpsc::channel(1024);
+                let subscription = subscribe_usd_index_tickers(&instruments, update_tx);
+                tokio::pin!(subscription);
+                loop {
+                    tokio::select! {
+                        result = &mut subscription => {
+                            if let Err(error) = result {
+                                crate::service_log!("ERROR", "OKX USD index ticker stream disconnected: {error:#}");
+                            } else {
+                                crate::service_log!("WARN", "OKX USD index ticker stream ended");
+                            }
+                            break;
+                        }
+                        update = update_rx.recv() => {
+                            let Some(update) = update else { break; };
+                            snapshot.rates.insert(update.currency.clone(), update.rate);
+                            snapshot.updated_at_by_currency.insert(update.currency, update.timestamp);
+                            snapshot.updated_at = snapshot.updated_at.max(update.timestamp);
+                            if let Ok(bytes) = serde_json::to_vec(&snapshot) {
+                                output.send_replace(Bytes::from(bytes));
+                            }
+                        }
+                    }
+                }
+            }
+            Err(error) => crate::service_log!("ERROR", "Could not bootstrap OKX USD index rates: {error:#}"),
+        }
+        sleep(Duration::from_secs(1)).await;
+    }
+}
+
+async fn bootstrap_usd_rates() -> Result<(Vec<String>, UsdRateSnapshot)> {
+    let response = reqwest::Client::new()
+        .get("https://www.okx.com/api/v5/market/index-tickers?quoteCcy=USD")
+        .send().await?.error_for_status()?.json::<IndexTickerRestResponse>().await?;
+    let mut instruments = Vec::new();
+    let mut rates = BTreeMap::from([("USD".to_owned(), 1.0)]);
+    let mut updated_at_by_currency = BTreeMap::from([("USD".to_owned(), 0)]);
+    let mut updated_at = 0;
+    for item in response.data {
+        let Some((currency, quote)) = item.instrument.split_once('-') else { continue; };
+        let Ok(rate) = item.index_price.parse::<f64>() else { continue; };
+        let Ok(timestamp) = item.ts.parse::<u64>() else { continue; };
+        if quote != "USD" || !rate.is_finite() || rate <= 0.0 { continue; }
+        let currency = currency.to_owned();
+        instruments.push(item.instrument);
+        rates.insert(currency.clone(), rate);
+        updated_at_by_currency.insert(currency, timestamp);
+        updated_at = updated_at.max(timestamp);
+    }
+    if instruments.is_empty() { anyhow::bail!("OKX returned no usable USD index rates"); }
+    instruments.sort();
+    instruments.dedup();
+    Ok((instruments, UsdRateSnapshot { rates, updated_at, updated_at_by_currency }))
+}
+
+async fn subscribe_usd_index_tickers(instruments: &[String], updates: mpsc::Sender<UsdIndexUpdate>) -> Result<()> {
+    let (incoming_ws, _) = connect_async("wss://ws.okx.com:8443/ws/v5/public").await?;
+    let (mut write, mut read) = incoming_ws.split();
+    for (batch_index, batch) in instruments.chunks(240).enumerate() {
+        let args = batch.iter().map(|instrument| json!({ "channel": "index-tickers", "instId": instrument })).collect::<Vec<_>>();
+        let request = json!({ "op": "subscribe", "id": (batch_index + 1).to_string(), "args": args });
+        write.send(tokio_tungstenite::tungstenite::Message::Text(Utf8Bytes::from(request.to_string()))).await?;
+        if batch_index + 1 < instruments.chunks(240).len() { sleep(Duration::from_millis(500)).await; }
+    }
+    loop {
+        let Some(message) = read.next().await else { anyhow::bail!("OKX USD index ticker stream ended") };
+        let message = message?;
+        if !message.is_text() { continue; }
+        let update = match serde_json::from_str::<IndexTickerWsMessage>(message.to_text()?) {
+            Ok(update) => update,
+            Err(error) => { crate::service_log!("ERROR", "Ignoring invalid OKX USD index ticker JSON: {error}"); continue; }
+        };
+        if update.event.as_deref() == Some("error") {
+            anyhow::bail!("OKX USD index subscription error: {}", update.msg.unwrap_or_else(|| "unknown error".to_owned()));
+        }
+        for item in update.data.unwrap_or_default() {
+            let (Some((currency, quote)), Ok(rate), Ok(timestamp)) = (
+                item.instrument.split_once('-'), item.index_price.parse::<f64>(), item.ts.parse::<u64>()
+            ) else { continue; };
+            if quote != "USD" || !rate.is_finite() || rate <= 0.0 { continue; }
+            updates.send(UsdIndexUpdate { currency: currency.to_owned(), rate, timestamp }).await
+                .map_err(|_| anyhow::anyhow!("USD rate update receiver was dropped"))?;
+        }
+    }
+}
+
 pub async fn subscribe_ticker_samples(
     instruments: &[String],
     updates: mpsc::Sender<TickerSample>,
@@ -429,12 +559,19 @@ pub async fn subscribe_trades_once(
             Utf8Bytes::from(request.to_string()),
         ))
         .await?;
+    crate::service_log!("INFO", "OKX trades WebSocket connected; subscribe request sent for {instrument}");
     let heartbeat = tokio::time::sleep(OKX_IDLE_HEARTBEAT_INTERVAL);
+    let pong_timeout = tokio::time::sleep(Duration::from_secs(60 * 60 * 24 * 365));
     tokio::pin!(heartbeat);
+    tokio::pin!(pong_timeout);
+    let mut awaiting_pong = false;
     loop {
         tokio::select! {
+            _ = &mut pong_timeout, if awaiting_pong => anyhow::bail!("OKX trades WebSocket did not answer ping within {}s", OKX_PONG_TIMEOUT.as_secs()),
             _ = &mut heartbeat => {
                 write.send(tokio_tungstenite::tungstenite::Message::Text(Utf8Bytes::from("ping"))).await?;
+                awaiting_pong = true;
+                pong_timeout.as_mut().reset(tokio::time::Instant::now() + OKX_PONG_TIMEOUT);
                 heartbeat.as_mut().reset(tokio::time::Instant::now() + OKX_IDLE_HEARTBEAT_INTERVAL);
             }
             _ = updates.closed() => {
@@ -448,9 +585,14 @@ pub async fn subscribe_trades_once(
                 heartbeat.as_mut().reset(tokio::time::Instant::now() + OKX_IDLE_HEARTBEAT_INTERVAL);
                 if !message.is_text() { continue; }
                 let text = message.to_text()?;
-                if text == "pong" { continue; }
+                if text == "pong" {
+                    awaiting_pong = false;
+                    pong_timeout.as_mut().reset(tokio::time::Instant::now() + Duration::from_secs(60 * 60 * 24 * 365));
+                    continue;
+                }
                 let update: TradeMessage<'_> = match serde_json::from_str(text) { Ok(update) => update, Err(error) => { crate::service_log!("ERROR", "Ignoring invalid OKX trades JSON message: {error}"); continue; } };
                 if update.event == Some("error") { anyhow::bail!("OKX trades subscription error: {}", update.msg.unwrap_or("unknown error")); }
+                if update.event == Some("subscribe") { crate::service_log!("INFO", "OKX trades subscription acknowledged for {instrument}"); continue; }
                 let Some(trades) = update.data else { continue; };
                 for trade in trades {
                     if trade.instrument != instrument {
@@ -529,15 +671,22 @@ pub async fn subscribe_book_once(
             Utf8Bytes::from(request.to_string()),
         ))
         .await?;
+    crate::service_log!("INFO", "OKX books WebSocket connected; subscribe request sent for {instrument}");
     let heartbeat = tokio::time::sleep(OKX_IDLE_HEARTBEAT_INTERVAL);
+    let pong_timeout = tokio::time::sleep(Duration::from_secs(60 * 60 * 24 * 365));
     tokio::pin!(heartbeat);
+    tokio::pin!(pong_timeout);
+    let mut awaiting_pong = false;
 
     let mut bid_book = Vec::new();
     let mut ask_book = Vec::new();
     loop {
         tokio::select! {
+            _ = &mut pong_timeout, if awaiting_pong => anyhow::bail!("OKX books WebSocket did not answer ping within {}s", OKX_PONG_TIMEOUT.as_secs()),
             _ = &mut heartbeat => {
                 write.send(tokio_tungstenite::tungstenite::Message::Text(Utf8Bytes::from("ping"))).await?;
+                awaiting_pong = true;
+                pong_timeout.as_mut().reset(tokio::time::Instant::now() + OKX_PONG_TIMEOUT);
                 heartbeat.as_mut().reset(tokio::time::Instant::now() + OKX_IDLE_HEARTBEAT_INTERVAL);
             }
             _ = updates.closed() => {
@@ -568,7 +717,11 @@ pub async fn subscribe_book_once(
                         continue;
                     }
                 };
-                if text == "pong" { continue; }
+                if text == "pong" {
+                    awaiting_pong = false;
+                    pong_timeout.as_mut().reset(tokio::time::Instant::now() + Duration::from_secs(60 * 60 * 24 * 365));
+                    continue;
+                }
                 let update = match serde_json::from_str::<BookMessage<'_>>(text) {
                     Ok(update) => update,
                     Err(error) => {
@@ -582,6 +735,10 @@ pub async fn subscribe_book_once(
                         "OKX book subscription error: {}",
                         update.msg.unwrap_or("unknown subscription error")
                     );
+                }
+                if update.event == Some("subscribe") {
+                    crate::service_log!("INFO", "OKX books subscription acknowledged for {instrument}");
+                    continue;
                 }
 
                 let Some(instrument_arg) = update.arg else {
@@ -647,17 +804,17 @@ fn apply_book_side(book: &mut Vec<(f64, f64)>, rows: &[Vec<&str>]) -> Result<()>
 }
 
 fn top_book_side(book: &[(f64, f64)], bids: bool) -> [(f64, f64); BOOK_DEPTH] {
-    let mut levels = book.to_vec();
-    levels.sort_by(|left, right| {
-        if bids {
-            right.0.total_cmp(&left.0)
-        } else {
-            left.0.total_cmp(&right.0)
-        }
-    });
     let mut top = [(0.0, 0.0); BOOK_DEPTH];
-    for (index, level) in levels.into_iter().take(BOOK_DEPTH).enumerate() {
-        top[index] = level;
+    let mut len = 0;
+    for &level in book {
+        let position = top[..len].iter().position(|existing| {
+            if bids { level.0 > existing.0 } else { level.0 < existing.0 }
+        }).unwrap_or(len);
+        if position == BOOK_DEPTH { continue; }
+        let new_len = (len + 1).min(BOOK_DEPTH);
+        for index in (position + 1..new_len).rev() { top[index] = top[index - 1]; }
+        top[position] = level;
+        len = new_len;
     }
     top
 }
@@ -673,15 +830,29 @@ async fn subscribe_once(
 
     crate::service_log!("INFO", "OKX WebSocket handshake has been successfully completed");
     let (mut write, read) = incoming_ws.split();
-    let volatility_by_instrument =
-        Arc::new(Mutex::new(HashMap::<String, RollingVolatility>::new()));
+    let volatility_by_instrument = Arc::new({
+        let states = DashMap::<Arc<str>, RollingVolatility>::with_capacity(instrument_lookup.len());
+        for instrument in instrument_lookup.iter() { states.insert(Arc::clone(instrument), RollingVolatility::default()); }
+        states
+    });
+    let last_message_at = Arc::new(AtomicU64::new(now_ms()));
+    let ping_sent_at = Arc::new(AtomicU64::new(0));
+    let monitor_last_message_at = Arc::clone(&last_message_at);
+    let monitor_ping_sent_at = Arc::clone(&ping_sent_at);
     let ws = {
         let read = read.map(|message| message.map_err(anyhow::Error::from));
         read.try_for_each(move |message| {
             let instrument_lookup = instrument_lookup.clone();
             let price_updates = price_updates.clone();
             let volatility_by_instrument = Arc::clone(&volatility_by_instrument);
+            let last_message_at = Arc::clone(&last_message_at);
+            let ping_sent_at = Arc::clone(&ping_sent_at);
             async move {
+                last_message_at.store(now_ms(), Ordering::Relaxed);
+                if message.is_pong() || message.to_text().ok() == Some("pong") {
+                    ping_sent_at.store(0, Ordering::Relaxed);
+                    return Ok(());
+                }
                 let text = match message.to_text() {
                     Ok(text) => text,
                     Err(error) => {
@@ -703,6 +874,10 @@ async fn subscribe_once(
                         update.msg.unwrap_or("unknown subscription error")
                     );
                 }
+                if update.event == Some("subscribe") {
+                    crate::service_log!("INFO", "OKX tickers subscription batch acknowledged");
+                    return Ok(());
+                }
 
                 if let Some(items) = update.data {
                     for item in items {
@@ -722,12 +897,8 @@ async fn subscribe_once(
                                         .unwrap_or_default()
                                         .as_millis() as u64
                                 });
-                            let (volatility_1m, volatility_5m) = volatility_by_instrument
-                                .lock()
-                                .expect("volatility state lock poisoned")
-                                .entry(instrument.to_string())
-                                .or_default()
-                                .update(timestamp_ms, price);
+                            let Some(mut volatility) = volatility_by_instrument.get_mut(instrument) else { continue; };
+                            let (volatility_1m, volatility_5m) = volatility.update(timestamp_ms, price);
                             let encoded = encode_symbol_price(
                                 instrument,
                                 price,
@@ -761,8 +932,36 @@ async fn subscribe_once(
             .await?;
     }
 
-    ws.await?;
-    anyhow::bail!("OKX WebSocket stream ended")
+    let mut ws = Box::pin(ws);
+    let mut liveness_check = tokio::time::interval(Duration::from_secs(1));
+    liveness_check.tick().await;
+    loop {
+        tokio::select! {
+            result = &mut ws => {
+                result?;
+                anyhow::bail!("OKX WebSocket stream ended");
+            }
+            _ = liveness_check.tick() => {
+                let now = now_ms();
+                let ping_started = monitor_ping_sent_at.load(Ordering::Relaxed);
+                if ping_started != 0 && now.saturating_sub(ping_started) >= OKX_PONG_TIMEOUT.as_millis() as u64 {
+                    anyhow::bail!("OKX ticker WebSocket did not answer ping within {}s", OKX_PONG_TIMEOUT.as_secs());
+                }
+                let last_message = monitor_last_message_at.load(Ordering::Relaxed);
+                if ping_started == 0 && now.saturating_sub(last_message) >= OKX_IDLE_HEARTBEAT_INTERVAL.as_millis() as u64 {
+                    monitor_ping_sent_at.store(now, Ordering::Relaxed);
+                    write.send(tokio_tungstenite::tungstenite::Message::Text(Utf8Bytes::from("ping"))).await?;
+                }
+            }
+        }
+    }
+}
+
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
 }
 
 fn retry_delay_after_failure(current_delay: Duration, connection_duration: Duration) -> Duration {

@@ -8,6 +8,7 @@ const apiProxy = {
   '/positions/orders': { target: 'http://localhost:3003', changeOrigin: true },
   '/positions/vwap': { target: 'http://localhost:3003', changeOrigin: true },
   '/positions/close-profitable': { target: 'http://localhost:3003', changeOrigin: true },
+  '/positions/auto-trader': { target: 'http://localhost:3005', changeOrigin: true },
   '/positions/insights': { target: 'http://localhost:3004', changeOrigin: true },
   '/signals': { target: 'http://localhost:3004', changeOrigin: true },
   '/positions': { target: 'http://localhost:3002', changeOrigin: true },

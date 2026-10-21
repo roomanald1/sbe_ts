@@ -13,6 +13,15 @@ struct InstrumentsResponse {
 
 static INSTRUMENTS_CACHE: OnceLock<Mutex<Option<(Instant, Bytes)>>> = OnceLock::new();
 
+async fn publish_news_snapshot(Json(snapshot): Json<serde_json::Value>) -> StatusCode {
+    let Ok(bytes) = serde_json::to_vec(&snapshot) else { return StatusCode::BAD_REQUEST; };
+    if feed_handlers::websocket::publish_news_snapshot(Bytes::from(bytes)) {
+        StatusCode::ACCEPTED
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE
+    }
+}
+
 async fn publish_signal_snapshot(Json(snapshot): Json<serde_json::Value>) -> StatusCode {
     let Some(symbol) = snapshot.get("symbol").and_then(serde_json::Value::as_str) else {
         return StatusCode::BAD_REQUEST;
@@ -62,7 +71,8 @@ async fn serve_http() -> anyhow::Result<()> {
         .route("/health", get(|| async { "ok" }))
         .route("/process-cpu-seconds", get(process_cpu_seconds))
         .route("/instruments", get(get_instruments))
-        .route("/internal/signals/snapshot", post(publish_signal_snapshot));
+        .route("/internal/signals/snapshot", post(publish_signal_snapshot))
+        .route("/internal/news/snapshot", post(publish_news_snapshot));
     let listener = tokio::net::TcpListener::bind(("0.0.0.0", 3001)).await?;
     feed_handlers::service_log!("INFO", "FeedHandlers HTTP API listening on http://0.0.0.0:3001");
     axum::serve(listener, app).await?;

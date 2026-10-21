@@ -3,7 +3,7 @@ import { usePausedValue } from '../use_paused_value';
 import { AgGridReact } from 'ag-grid-react';
 import { ClientSideRowModelModule, ModuleRegistry, themeQuartz, type ColDef } from 'ag-grid-community';
 import { FeedToolbar } from './FeedToolbar';
-import { SignalInfoModel, type SignalPerformanceRow, type SignalWalkForwardRow } from '../models/SignalInfoModel';
+import { SignalInfoModel, type MissedOpportunityBand, type SignalPerformanceRow, type SignalWalkForwardRow } from '../models/SignalInfoModel';
 import type { SignalSnapshot } from '../models/SignalsModel';
 import { useBehaviorSnapshot } from '../use_behavior_snapshot';
 
@@ -68,7 +68,7 @@ export function BestSignalsView({ onTradeSymbol, onRangeOrders }: { onTradeSymbo
   ], [onTradeSymbol, onRangeOrders]);
   return <section className="feed-section signal-info-panel" aria-label="Best signals across markets">
     <FeedToolbar title="Best signals across top spot markets" />
-    <p className="signal-info-note">Ranked by backend signal strength across the ten highest-turnover spot pairs. The five-minute trend is context only and does not affect the live score. “5m Trend / Vol” shows the move in recent volatility units. Snapshot refreshes every 15 seconds.</p>
+    <p className="signal-info-note">Listed alphabetically across the ten highest-turnover spot pairs. The five-minute trend is context only and does not affect the live score. “5m Trend / Vol” shows the move in recent volatility units. Snapshot refreshes every 15 seconds.</p>
     {state.bestError && <div className="positions-error">{state.bestError}</div>}
     <div className="data-grid-wrap signal-info-grid"><AgGridReact<BestSignalRow> rowData={rows} columnDefs={columns} defaultColDef={{ sortable: true, resizable: true, flex: 1, minWidth: 80 }} theme={gridTheme} domLayout="autoHeight" rowHeight={26} headerHeight={28} /></div>
     {rows.length === 0 && <p className="positions-empty">Waiting for fresh signals from the backend.</p>}
@@ -174,3 +174,30 @@ function WalkForwardViewComponent({ paused = false, onTradeSymbol }: { paused?: 
 export const WalkForwardView = memo(WalkForwardViewComponent);
 
 export const SignalPerformanceView = memo(SignalPerformanceViewComponent);
+
+
+export function MissedOpportunityBandsView({ paused = false }: { paused?: boolean }) {
+  const state = useSignalInfo();
+  const rows = usePausedValue(state.missedOpportunityBands, paused);
+  const columns = useMemo<ColDef<MissedOpportunityBand>[]>(() => [
+    { field: 'gate', headerName: 'Gate', minWidth: 120 },
+    { field: 'threshold', headerName: 'Threshold', valueFormatter: ({ value, data }) => data?.gate === 'score' ? Number(value).toFixed(2) : (Number(value) * 100).toFixed(0) + '%', minWidth: 105 },
+    { field: 'horizonSeconds', headerName: 'Horizon', valueFormatter: ({ value }) => (Number(value) / 60).toFixed(0) + 'm', minWidth: 90 },
+    { field: 'sampleCount', headerName: 'Missed signals', minWidth: 110 },
+    { field: 'averageNetReturnPercent', headerName: 'Avg net at horizon', cellClassRules: signedValueClasses, valueFormatter: ({ value }) => percent(value), minWidth: 140 },
+    { field: 'positiveNetRate', headerName: 'Net positive at end', valueFormatter: ({ value }) => ratio(value), minWidth: 140 },
+    { field: 'stopTargetSampleCount', headerName: 'SL/TP samples', minWidth: 105 },
+    { field: 'stopTargetAverageNetReturnPercent', headerName: 'SL/TP simulated net', cellClassRules: signedValueClasses, valueFormatter: ({ value }) => percent(value), minWidth: 145 },
+    { field: 'stopTargetPositiveNetRate', headerName: 'SL/TP win rate', valueFormatter: ({ value }) => ratio(value), minWidth: 120 },
+    { field: 'timeToProfitRate', headerName: 'Became net positive', valueFormatter: ({ value }) => ratio(value), minWidth: 145 },
+    { field: 'averageTimeToProfitSeconds', headerName: 'Avg time to profit', valueFormatter: ({ value }) => value == null ? '—' : Number(value).toFixed(0) + 's', minWidth: 135 },
+    { field: 'medianTimeToProfitSeconds', headerName: 'Median time to profit', valueFormatter: ({ value }) => value == null ? '—' : Number(value).toFixed(0) + 's', minWidth: 145 },
+  ], []);
+  return <section className="feed-section signal-info-panel" aria-label="Missed opportunity bands">
+    <FeedToolbar title="Missed opportunity bands" />
+    <p className="signal-info-note">Skipped-signal outcomes at 1m, 5m, 15m, and 60m, after entry/exit spread and taker fees. “Became net positive” is the share that crossed above zero during the horizon; average and median times use those samples only. SL/TP simulation uses the thresholds recorded at the skipped decision, applies the entry spread as an exit-spread proxy at barrier touches, assumes the stop first if both barriers were touched, and marks any unhit position at the horizon. Five-minute SL/TP outcomes inform gate adjustments; longer windows help assess a sensible holding period.</p>
+    {state.missedOpportunityBandsError && <div className="positions-error">{state.missedOpportunityBandsError}</div>}
+    <div className="data-grid-wrap signal-info-grid"><AgGridReact<MissedOpportunityBand> rowData={rows} columnDefs={columns} defaultColDef={{ sortable: true, resizable: true, flex: 1, minWidth: 80 }} theme={gridTheme} domLayout="autoHeight" rowHeight={26} headerHeight={28} /></div>
+    {rows.length === 0 && !state.missedOpportunityBandsError && <p className="positions-empty">No missed opportunity samples are available yet.</p>}
+  </section>;
+}

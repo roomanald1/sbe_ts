@@ -13,12 +13,14 @@ import { PortfolioRisk } from './PortfolioRisk';
 import { CloseInsights } from './CloseInsights';
 import { Hedging } from './Hedging';
 import { AutoTrader } from './AutoTrader';
+import { AutoTraderDiagnostics } from './AutoTraderDiagnostics';
 import { TradeTicketPopup } from './TradeTicketPopup';
 import { RangeOrderPopup } from './RangeOrderPopup';
 import { OrderBookPopup } from './OrderBookPopup';
 import { TradesView } from './TradesView';
+import { NewsTicker } from './NewsTicker';
 import { MarketLiquidity } from './MarketLiquidity';
-import { BestSignalsView, SignalHistoryView, SignalPerformanceView, WalkForwardView } from './SignalInfoViews';
+import { BestSignalsView, MissedOpportunityBandsView, SignalHistoryView, SignalPerformanceView, WalkForwardView } from './SignalInfoViews';
 import { PriceChangesModel } from '../price_change_data';
 import { useBehaviorSnapshot } from '../use_behavior_snapshot';
 
@@ -37,9 +39,11 @@ type DashboardWidgetType =
   | 'trades'
   | 'liquidity'
   | 'signals'
+  | 'news'
   | 'signal-history'
   | 'signal-performance'
   | 'walk-forward'
+  | 'missed-opportunity-bands'
   | 'positions'
   | 'fills'
   | 'pnl'
@@ -47,7 +51,8 @@ type DashboardWidgetType =
   | 'risk'
   | 'close-insights'
   | 'hedging'
-  | 'auto-trader';
+  | 'auto-trader'
+  | 'auto-trader-diagnostics';
 type DashboardWidget = {
   id: string;
   type: DashboardWidgetType;
@@ -56,6 +61,7 @@ type DashboardWidget = {
   y: number;
   w: number;
   h: number;
+  collapsed: boolean;
 };
 type SavedDashboardLayout = {
   id: string;
@@ -71,9 +77,11 @@ const DASHBOARD_WIDGET_TYPES: DashboardWidgetType[] = [
   'trades',
   'liquidity',
   'signals',
+  'news',
   'signal-history',
   'signal-performance',
   'walk-forward',
+  'missed-opportunity-bands',
   'positions',
   'fills',
   'pnl',
@@ -82,6 +90,7 @@ const DASHBOARD_WIDGET_TYPES: DashboardWidgetType[] = [
   'close-insights',
   'hedging',
   'auto-trader',
+  'auto-trader-diagnostics',
 ];
 const DEFAULT_WIDGET_TYPES: DashboardWidgetType[] = [
   'grid',
@@ -104,9 +113,11 @@ const WIDGET_LABELS: Record<DashboardWidgetType, string> = {
   trades: 'Recent trades',
   liquidity: 'Market liquidity',
   signals: 'Best signals',
+  news: 'Crypto news & signals',
   'signal-history': 'Signal history',
   'signal-performance': 'Signal performance',
   'walk-forward': 'Walk-forward evaluation',
+  'missed-opportunity-bands': 'Missed opportunity bands',
   positions: 'Orders',
   fills: 'Fills',
   pnl: 'P&L',
@@ -115,6 +126,7 @@ const WIDGET_LABELS: Record<DashboardWidgetType, string> = {
   'close-insights': 'Close-out insights',
   hedging: 'Hedging',
   'auto-trader': 'Auto Trader',
+  'auto-trader-diagnostics': 'Auto Trader diagnostics',
 };
 
 function makeWidget(
@@ -131,6 +143,7 @@ function makeWidget(
     y,
     w: DEFAULT_WIDGET_WIDTH,
     h: DEFAULT_WIDGET_HEIGHT,
+    collapsed: false,
   };
 }
 
@@ -143,6 +156,7 @@ function defaultDashboardLayout(): DashboardWidget[] {
     y: Math.floor(index / 2) * DEFAULT_WIDGET_HEIGHT,
     w: DEFAULT_WIDGET_WIDTH,
     h: DEFAULT_WIDGET_HEIGHT,
+    collapsed: false,
   }));
 }
 
@@ -166,6 +180,7 @@ function firstOpenPosition(widgets: DashboardWidget[]): {
         y,
         w: DEFAULT_WIDGET_WIDTH,
         h: DEFAULT_WIDGET_HEIGHT,
+        collapsed: false,
       };
       if (!widgets.some((widget) => overlaps(candidate, widget)))
         return { x, y };
@@ -264,6 +279,7 @@ function normalizeWidgets(items: unknown[], scale = 1): DashboardWidget[] {
         y: Math.floor(index / 2) * DEFAULT_WIDGET_HEIGHT,
         w: DEFAULT_WIDGET_WIDTH,
         h: DEFAULT_WIDGET_HEIGHT,
+        collapsed: false,
       });
       return;
     }
@@ -276,6 +292,7 @@ function normalizeWidgets(items: unknown[], scale = 1): DashboardWidget[] {
       y?: unknown;
       w?: unknown;
       h?: unknown;
+      collapsed?: unknown;
     };
     if (
       typeof stored.id !== 'string' ||
@@ -308,6 +325,7 @@ function normalizeWidgets(items: unknown[], scale = 1): DashboardWidget[] {
         typeof stored.h === 'number'
           ? Math.max(3, Math.floor(stored.h * scale))
           : DEFAULT_WIDGET_HEIGHT,
+      collapsed: stored.collapsed === true,
     });
   });
   const placed: DashboardWidget[] = [];
@@ -664,9 +682,19 @@ export function FeedControls({
     });
   };
 
+  const displayWidgetLayout = dashboardWidgets.some((widget) => widget.collapsed)
+    ? packDashboardWidgets(
+        dashboardWidgets.map((widget) => ({
+          ...widget,
+          h: widget.collapsed ? 2 : widget.h,
+        })),
+      )
+    : dashboardWidgets;
+
   const renderWidget = (
     widget: DashboardWidget,
     compact: boolean,
+    layoutWidget: DashboardWidget = widget,
   ): ReactNode => {
     const symbol = widget.symbol || selectedNewWidgetSymbol;
     let content: ReactNode;
@@ -726,7 +754,10 @@ export function FeedControls({
         content = <Hedging paused={draggingWidgetId !== null} />;
         break;
       case 'auto-trader':
-        content = <AutoTrader />;
+        content = <AutoTrader ticks={widgetPriceChanges.ticks} />;
+        break;
+      case 'auto-trader-diagnostics':
+        content = <AutoTraderDiagnostics />;
         break;
       case 'trades':
         content =
@@ -757,6 +788,9 @@ export function FeedControls({
       case 'signals':
         content = <BestSignalsView onTradeSymbol={openTrade} onRangeOrders={setRangeOrderRequest} />;
         break;
+      case 'news':
+        content = <NewsTicker connection={connection} streamKey={widget.id} />;
+        break;
       case 'signal-history':
         content = <SignalHistoryView paused={draggingWidgetId !== null} onTradeSymbol={openTrade} />;
         break;
@@ -765,6 +799,9 @@ export function FeedControls({
         break;
       case 'walk-forward':
         content = <WalkForwardView paused={draggingWidgetId !== null} onTradeSymbol={openTrade} />;
+        break;
+      case 'missed-opportunity-bands':
+        content = <MissedOpportunityBandsView paused={draggingWidgetId !== null} />;
         break;
       case 'book':
         content =
@@ -805,14 +842,16 @@ export function FeedControls({
         key={widget.id}
         style={{
           gridColumn:
-            widget.x +
+            layoutWidget.x +
             1 +
             ' / span ' +
-            Math.min(widget.w, DASHBOARD_COLUMNS - widget.x),
-          gridRow: widget.y + 1 + ' / span ' + widget.h,
+            Math.min(layoutWidget.w, DASHBOARD_COLUMNS - layoutWidget.x),
+          gridRow: layoutWidget.y + 1 + ' / span ' + layoutWidget.h,
         }}
         data-dragging={draggingWidgetId === widget.id || undefined}
+        data-collapsed={widget.collapsed || undefined}
       >
+        <div className="dashboard-widget-header">
         <button
           className="dashboard-widget-drag"
           type="button"
@@ -825,6 +864,7 @@ export function FeedControls({
             event.dataTransfer.effectAllowed = 'move';
             const ghost = document.createElement('div');
             ghost.className = 'dashboard-drag-ghost';
+            ghost.dataset.collapsed = String(widget.collapsed);
             ghost.textContent = description;
             document.body.appendChild(ghost);
             event.dataTransfer.setDragImage(ghost, 18, 18);
@@ -840,6 +880,15 @@ export function FeedControls({
         >
           <span className="dashboard-widget-drag-icon" aria-hidden="true" />
         </button>
+        <span className="dashboard-widget-title">{description}</span>
+        <button
+          className="dashboard-widget-collapse"
+          type="button"
+          aria-label={(widget.collapsed ? 'Expand ' : 'Collapse ') + description + ' widget'}
+          aria-expanded={!widget.collapsed}
+          title={widget.collapsed ? 'Expand widget' : 'Collapse widget'}
+          onClick={() => setDashboardWidgets((current) => current.map((item) => item.id === widget.id ? { ...item, collapsed: !item.collapsed } : item))}
+        ><span className="dashboard-widget-chevron" aria-hidden="true" /></button>
         <button
           className="dashboard-widget-remove"
           type="button"
@@ -849,6 +898,7 @@ export function FeedControls({
         >
           <span className="dashboard-widget-remove-icon" aria-hidden="true" />
         </button>
+        </div>
         {connectionState === 'connected' ? (
           content
         ) : (
@@ -858,7 +908,7 @@ export function FeedControls({
             </div>
           </section>
         )}
-        <div
+        {!widget.collapsed && <div
           className="dashboard-widget-resize"
           role="separator"
           aria-label={'Resize ' + description + ' widget'}
@@ -901,7 +951,7 @@ export function FeedControls({
             handle.addEventListener('pointerup', up);
             handle.addEventListener('pointercancel', up);
           }}
-        />
+        />}
       </div>
     );
   };
@@ -1058,8 +1108,10 @@ export function FeedControls({
                 preview.style.display = 'none';
               } else {
                 preview.style.display = 'block';
-                preview.style.gridColumn = landing.x + 1 + ' / span ' + (dashboardWidgets.find((widget) => widget.id === widgetId)?.w ?? DEFAULT_WIDGET_WIDTH);
-                preview.style.gridRow = landing.y + 1 + ' / span ' + (dashboardWidgets.find((widget) => widget.id === widgetId)?.h ?? DEFAULT_WIDGET_HEIGHT);
+                const draggedWidget = dashboardWidgets.find((widget) => widget.id === widgetId);
+                preview.dataset.collapsed = String(draggedWidget?.collapsed === true);
+                preview.style.gridColumn = landing.x + 1 + ' / span ' + (draggedWidget?.w ?? DEFAULT_WIDGET_WIDTH);
+                preview.style.gridRow = landing.y + 1 + ' / span ' + (draggedWidget?.collapsed ? 2 : draggedWidget?.h ?? DEFAULT_WIDGET_HEIGHT);
               }
             }
           }}
@@ -1088,7 +1140,13 @@ export function FeedControls({
             if (dropPreviewRef.current) dropPreviewRef.current.style.display = 'none';
           }}
         >
-          {dashboardWidgets.map((widget) => renderWidget(widget, true))}
+          {dashboardWidgets.map((widget) =>
+            renderWidget(
+              widget,
+              true,
+              displayWidgetLayout.find((item) => item.id === widget.id) ?? widget,
+            ),
+          )}
           {resizePreview && (
             <div
               className="dashboard-resize-preview"

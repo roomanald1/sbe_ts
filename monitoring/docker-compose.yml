@@ -47,9 +47,11 @@ services:
     build: ./exporter
     environment:
       POSITION_MANAGEMENT_URL: http://host.docker.internal:3002
+      AUTO_TRADER_URL: http://host.docker.internal:3005
       FEED_HANDLERS_URL: http://host.docker.internal:3001
       EXECUTION_URL: http://host.docker.internal:3003
       INSIGHTS_URL: http://host.docker.internal:3004
+      NEWS_SENTIMENT_URL: http://host.docker.internal:3006
       SQLITE_DB_PATH: /workspace/src/rust/insights/signals.sqlite
     extra_hosts:
       - "host.docker.internal:host-gateway"

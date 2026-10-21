@@ -1,7 +1,9 @@
 use axum::{
-    Json, Router,
+    Json, Router, body::Body,
     extract::{Path, Query, State},
-    http::StatusCode,
+    http::{Request, StatusCode, header::HeaderName},
+    middleware::{self, Next},
+    response::Response,
     routing::{get, post},
 };
 use bytes::Bytes;
@@ -11,11 +13,12 @@ use std::{
     collections::{BTreeMap, HashMap},
     path::PathBuf,
     sync::{
-        Arc, Mutex as StdMutex, OnceLock,
+        Arc, Mutex as StdMutex, OnceLock, RwLock as StdRwLock,
         atomic::{AtomicBool, Ordering},
     },
     time::{SystemTime, UNIX_EPOCH},
 };
+use arc_swap::ArcSwapOption;
 use tokio::{
     sync::{Mutex, Notify, mpsc},
     time::{Duration, Instant, timeout},
@@ -27,7 +30,9 @@ const NUM_VWAP_BINS: usize = 78;
 const EPSILON: f64 = 1e-12;
 static HTTP_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
 static USD_RATE_CACHE: OnceLock<Mutex<Option<(Instant, UsdRatesResponse)>>> = OnceLock::new();
+static USD_RATE_STREAM_CACHE: OnceLock<StdRwLock<Option<UsdRatesResponse>>> = OnceLock::new();
 const USD_RATE_CACHE_TTL: Duration = Duration::from_secs(15);
+const USD_RATE_STREAM_MAX_AGE: Duration = Duration::from_secs(120);
 
 pub async fn router() -> anyhow::Result<Router> {
     let spot_symbols = Arc::new(crate::feed_client::spot_symbols().await?);
@@ -51,6 +56,24 @@ pub async fn router() -> anyhow::Result<Router> {
     tokio::spawn(async move { barrier_order_loop(barrier_store).await; });
     let expiry_store = Arc::clone(&store);
     tokio::spawn(async move { expire_orders_loop(expiry_store).await; });
+    tokio::spawn(async move {
+        loop {
+            match crate::feed_client::stream("usd-rates:*".to_owned()).await {
+                Ok(mut stream) => while let Some(item) = stream.next().await {
+                    match item.and_then(|bytes| serde_json::from_slice::<UsdRatesResponse>(&bytes).map_err(anyhow::Error::from)) {
+                        Ok(snapshot) if snapshot.rates.values().any(|rate| rate.is_finite() && *rate > 0.0) => {
+                            let cache = USD_RATE_STREAM_CACHE.get_or_init(|| StdRwLock::new(None));
+                            if let Ok(mut current) = cache.write() { *current = Some(snapshot); }
+                        }
+                        Ok(_) => crate::service_log!("WARN", "Ignoring empty or invalid FeedHandlers USD rate snapshot"),
+                        Err(error) => crate::service_log!("WARN", "Ignoring invalid FeedHandlers USD rate update: {error}"),
+                    }
+                },
+                Err(error) => crate::service_log!("ERROR", "FeedHandlers USD rate stream disconnected: {error:#}"),
+            }
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+    });
     let sample_store = Arc::clone(&store);
     tokio::spawn(async move {
         loop {
@@ -81,11 +104,12 @@ pub async fn router() -> anyhow::Result<Router> {
         .route("/positions/hedge-candidates", get(get_hedge_candidates))
         .route("/internal/insights-inputs", get(get_insights_inputs))
         .route("/internal/market-book", get(get_market_book))
+        .route("/internal/market-book/{symbol}/subscribe", post(subscribe_market_book))
         .route("/positions/trades", get(get_position_trades))
         .route("/positions/vwap", get(get_vwap_runs).post(start_vwap))
         .route("/positions/twap", post(start_twap))
         .route("/positions/vwap/{id}", axum::routing::delete(cancel_vwap))
-        .route("/positions/orders", get(get_orders).post(submit_order))
+        .route("/positions/orders", get(get_orders).post(submit_order).layer(middleware::from_fn(order_handler_timing)))
         .route("/positions/barriers", get(get_barrier_orders))
         .route("/positions/barriers/profit-target", post(create_profit_barrier))
         .route("/positions/close-profitable", post(close_profitable))
@@ -96,6 +120,28 @@ pub async fn router() -> anyhow::Result<Router> {
         .with_state(store))
 }
 
+async fn order_handler_timing(request: Request<Body>, next: Next) -> Response {
+    let started = Instant::now();
+    let mut response = next.run(request).await;
+    let elapsed_ms = started.elapsed().as_secs_f64() * 1_000.0;
+    if let Ok(value) = elapsed_ms.to_string().parse() {
+        response.headers_mut().insert(HeaderName::from_static("x-position-manager-handler-ms"), value);
+    }
+    response
+}
+
+
+async fn subscribe_market_book(
+    State(store): State<Arc<PositionStore>>,
+    Path(symbol): Path<String>,
+) -> StatusCode {
+    let symbol = symbol.to_ascii_uppercase();
+    if !valid_position_symbol(&symbol) {
+        return StatusCode::BAD_REQUEST;
+    }
+    store.ensure_subscription(&symbol);
+    StatusCode::NO_CONTENT
+}
 
 async fn expire_orders_loop(store: Arc<PositionStore>) {
     loop {
@@ -116,7 +162,7 @@ async fn barrier_order_loop(store: Arc<PositionStore>) {
         let barriers = store.ledger.lock().await.barrier_orders.iter()
             .filter(|order| order.status == "armed").cloned().collect::<Vec<_>>();
         if barriers.is_empty() { continue; }
-        let books = store.books.lock().await.clone();
+        let books = store.books_snapshot();
         let Ok(now) = now_ms() else { continue; };
         for barrier in barriers {
             let Some(book) = books.get(&barrier.symbol) else { continue; };
@@ -190,13 +236,33 @@ async fn barrier_order_loop(store: Arc<PositionStore>) {
     }
 }
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, Serialize, Deserialize)]
 struct UsdRatesResponse {
     rates: BTreeMap<String, f64>,
     updated_at: u64,
+    #[serde(default)] updated_at_by_currency: BTreeMap<String, u64>,
+}
+
+fn latest_stream_usd_rates() -> Option<UsdRatesResponse> {
+    let snapshot = USD_RATE_STREAM_CACHE.get_or_init(|| StdRwLock::new(None)).read().ok()?.clone()?;
+    let now_ms = SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_millis() as u64;
+    let max_age_ms = USD_RATE_STREAM_MAX_AGE.as_millis() as u64;
+    let mut rates = BTreeMap::from([("USD".to_owned(), 1.0)]);
+    let mut updated_at_by_currency = BTreeMap::from([("USD".to_owned(), 0)]);
+    let mut updated_at = 0;
+    for (currency, rate) in snapshot.rates {
+        if currency == "USD" { continue; }
+        let timestamp = snapshot.updated_at_by_currency.get(&currency).copied().unwrap_or(snapshot.updated_at);
+        if !rate.is_finite() || rate <= 0.0 || timestamp == 0 || now_ms.saturating_sub(timestamp) > max_age_ms { continue; }
+        rates.insert(currency.clone(), rate);
+        updated_at_by_currency.insert(currency, timestamp);
+        updated_at = updated_at.max(timestamp);
+    }
+    (rates.len() > 1).then_some(UsdRatesResponse { rates, updated_at, updated_at_by_currency })
 }
 
 async fn get_usd_rates() -> Result<Json<UsdRatesResponse>, (StatusCode, String)> {
+    if let Some(snapshot) = latest_stream_usd_rates() { return Ok(Json(snapshot)); }
     let cache = USD_RATE_CACHE.get_or_init(|| Mutex::new(None));
     let mut cached = cache.lock().await;
     if let Some((created, rates)) = cached.as_ref() {
@@ -219,6 +285,7 @@ async fn get_usd_rates() -> Result<Json<UsdRatesResponse>, (StatusCode, String)>
     let data = response.get("data").and_then(serde_json::Value::as_array)
         .ok_or_else(|| (StatusCode::BAD_GATEWAY, "OKX USD index response has no data".to_owned()))?;
     let mut rates = BTreeMap::from([("USD".to_owned(), 1.0)]);
+    let mut updated_at_by_currency = BTreeMap::from([("USD".to_owned(), 0)]);
     let mut updated_at = 0;
     for item in data {
         let Some(instrument) = item.get("instId").and_then(serde_json::Value::as_str) else { continue; };
@@ -228,13 +295,14 @@ async fn get_usd_rates() -> Result<Json<UsdRatesResponse>, (StatusCode, String)>
         if !rate.is_finite() || rate <= 0.0 { continue; }
         rates.insert(currency.to_owned(), rate);
         if let Some(timestamp) = item.get("ts").and_then(serde_json::Value::as_str).and_then(|value| value.parse::<u64>().ok()) {
+            updated_at_by_currency.insert(currency.to_owned(), timestamp);
             updated_at = updated_at.max(timestamp);
         }
     }
     if rates.len() == 1 {
         return Err((StatusCode::BAD_GATEWAY, "OKX returned no usable USD index rates".to_owned()));
     }
-    let rates = UsdRatesResponse { rates, updated_at };
+    let rates = UsdRatesResponse { rates, updated_at, updated_at_by_currency };
     *cached = Some((Instant::now(), rates.clone()));
     Ok(Json(rates))
 }
@@ -304,6 +372,8 @@ struct PositionTrade {
     fee_rate: f64,
     #[serde(default)]
     fee_liquidity: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    resting_order_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     decision_timestamp: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -463,6 +533,8 @@ struct OrderResponse {
     average_execution_price: Option<f64>,
     order: Option<RestingOrder>,
     barrier_order: Option<BarrierOrder>,
+    #[serde(default)]
+    processing_timings_ms: BTreeMap<String, f64>,
 }
 #[derive(Clone, Serialize, Deserialize)]
 struct BookLevel {
@@ -481,6 +553,36 @@ struct MatcherFill { quantity: f64, price: f64 }
 #[derive(Deserialize)]
 struct MatcherResponse { reference_price: Option<f64>, fills: Vec<MatcherFill>, remaining_quantity: f64, filled_quantity: f64, average_execution_price: Option<f64> }
 
+fn match_book(side: &TradeSide, quantity: f64, limit_price: Option<f64>, book: &BookSnapshot) -> MatcherResponse {
+    let buy = matches!(side, TradeSide::Buy);
+    let levels = if buy { &book.asks } else { &book.bids };
+    let mut remaining = quantity;
+    let mut fills = Vec::with_capacity(levels.len());
+    let mut notional = 0.0;
+    for level in levels {
+        let crosses = match limit_price {
+            Some(limit) if buy => level.price <= limit,
+            Some(limit) => level.price >= limit,
+            None => true,
+        };
+        if !crosses || remaining <= EPSILON { continue; }
+        let filled = remaining.min(level.size);
+        if filled > EPSILON {
+            fills.push(MatcherFill { quantity: filled, price: level.price });
+            remaining -= filled;
+            notional += filled * level.price;
+        }
+    }
+    let filled_quantity = quantity - remaining;
+    MatcherResponse {
+        reference_price: levels.first().map(|level| level.price),
+        fills,
+        remaining_quantity: remaining,
+        filled_quantity,
+        average_execution_price: (filled_quantity > EPSILON).then_some(notional / filled_quantity),
+    }
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 struct AccountTopup { amount: f64, timestamp: u64 }
 #[derive(Deserialize)]
@@ -496,7 +598,6 @@ fn configured_fee_rates() -> FeeRates {
     let parse = |name: &str, default: f64| std::env::var(name).ok().and_then(|value| value.parse::<f64>().ok()).filter(|value| value.is_finite() && *value >= 0.0 && *value <= 0.1).unwrap_or(default);
     FeeRates { maker: -parse("PAPER_OKX_SPOT_MAKER_FEE_RATE", 0.0008), taker: -parse("PAPER_OKX_SPOT_TAKER_FEE_RATE", 0.001) }
 }
-pub(crate) fn configured_taker_fee_rate() -> f64 { configured_fee_rates().taker.abs() }
 fn default_account_cash() -> f64 { std::env::var("PAPER_ACCOUNT_INITIAL_CASH").ok().and_then(|value| value.parse().ok()).filter(|value: &f64| value.is_finite() && *value > 0.0).unwrap_or(10_000.0) }
 fn paper_max_leverage() -> f64 { std::env::var("PAPER_ACCOUNT_MAX_LEVERAGE").ok().and_then(|value| value.parse::<f64>().ok()).filter(|value| value.is_finite() && *value >= 1.0 && *value <= 10.0).unwrap_or(2.0) }
 fn configured_account_leverage(ledger: &Ledger) -> f64 { ledger.max_leverage.unwrap_or_else(paper_max_leverage) }
@@ -518,7 +619,7 @@ struct Ledger {
 struct PositionStore {
     path: PathBuf,
     ledger: Mutex<Ledger>,
-    books: Mutex<HashMap<String, BookSnapshot>>,
+    books: StdRwLock<HashMap<String, Arc<ArcSwapOption<BookSnapshot>>>>,
     price_samples: Mutex<HashMap<String, Vec<(u64, f64)>>>,
     hedge_samples: Mutex<HashMap<String, Vec<(u64, f64)>>>,
     book_changed: Notify,
@@ -528,6 +629,22 @@ struct PositionStore {
 }
 
 impl PositionStore {
+    fn book_slot(&self, symbol: &str) -> Arc<ArcSwapOption<BookSnapshot>> {
+        let mut books = self.books.write().expect("book map poisoned");
+        Arc::clone(books.entry(symbol.to_owned()).or_insert_with(|| Arc::new(ArcSwapOption::empty())))
+    }
+
+    fn book(&self, symbol: &str) -> Option<Arc<BookSnapshot>> {
+        let slot = self.books.read().expect("book map poisoned").get(symbol).cloned()?;
+        slot.load_full()
+    }
+
+    fn books_snapshot(&self) -> HashMap<String, Arc<BookSnapshot>> {
+        self.books.read().expect("book map poisoned").iter()
+            .filter_map(|(symbol, slot)| slot.load_full().map(|book| (symbol.clone(), book)))
+            .collect()
+    }
+
     async fn load(spot_symbols: Arc<Vec<String>>) -> anyhow::Result<Self> {
         let path = std::env::var_os("POSITIONS_FILE")
             .map(PathBuf::from)
@@ -570,7 +687,7 @@ impl PositionStore {
         Ok(Self {
             path,
             ledger: Mutex::new(ledger),
-            books: Mutex::new(HashMap::new()),
+            books: StdRwLock::new(HashMap::new()),
             price_samples: Mutex::new(HashMap::new()),
             hedge_samples: Mutex::new(HashMap::new()),
             book_changed: Notify::new(),
@@ -612,6 +729,7 @@ impl PositionStore {
         let symbol = symbol.to_owned();
         let subscription_symbol = symbol.clone();
         let log_symbol = symbol.clone();
+        let book_slot = self.book_slot(&symbol);
         tokio::spawn(async move {
             crate::service_log!("INFO", "Paper order manager subscribing to OKX books for {symbol}");
             while let Some(result) = receiver.recv().await {
@@ -622,7 +740,7 @@ impl PositionStore {
                                 (Some(bid), Some(ask)) => Some((bid.price + ask.price) / 2.0),
                                 _ => None,
                             };
-                            store.books.lock().await.insert(symbol.clone(), book);
+                            book_slot.store(Some(Arc::new(book)));
                             if let (Some(mid), Ok(now)) = (mid, now_ms()) {
                                 let mut histories = store.price_samples.lock().await;
                                 let samples = histories.entry(symbol.clone()).or_default();
@@ -668,7 +786,7 @@ impl PositionStore {
             ledger.orders.retain(|order| order.expires_at.is_none_or(|expires| expires > now));
             if ledger.orders.len() != old_len { self.persist(&ledger).await?; }
         }
-        let Some(book) = self.books.lock().await.get(symbol).cloned() else { return Ok(()); };
+        let Some(book) = self.book(symbol) else { return Ok(()); };
         {
             let mut ledger = self.ledger.lock().await;
             let old_len = ledger.orders.len();
@@ -683,15 +801,10 @@ impl PositionStore {
         }
         let orders = self.ledger.lock().await.orders.iter().filter(|order| order.symbol == symbol).cloned().collect::<Vec<_>>();
         if orders.is_empty() { return Ok(()); }
-        let base = std::env::var("EXECUTION_URL").unwrap_or_else(|_| "http://127.0.0.1:3003".to_owned());
-        let client = HTTP_CLIENT.get_or_init(reqwest::Client::new);
-        let mut matches = Vec::new();
-        for order in orders {
-            let response: MatcherResponse = client.post(format!("{base}/internal/orders/match"))
-                .json(&serde_json::json!({"side":order.side,"quantity":order.remaining_quantity,"limit_price":order.limit_price,"book":book}))
-                .send().await?.error_for_status()?.json().await?;
-            matches.push((order.id, response));
-        }
+        let matches = orders.into_iter().map(|order| {
+            let response = match_book(&order.side, order.remaining_quantity, Some(order.limit_price), &book);
+            (order.id, response)
+        }).collect::<Vec<_>>();
         let mut ledger = self.ledger.lock().await;
         let mut fills = Vec::new();
         for (id, result) in matches {
@@ -699,19 +812,19 @@ impl PositionStore {
                 order.remaining_quantity = result.remaining_quantity.max(0.0);
                 order.estimated_fee = order.remaining_quantity * order.limit_price * -order.maker_fee_rate;
                 let fee_rate = if order.maker_fee_rate == 0.0 { configured_fee_rates().maker } else { order.maker_fee_rate };
-                fills.extend(result.fills.into_iter().map(|fill| (order.side.clone(), fill.quantity, fill.price, fee_rate)));
+                fills.extend(result.fills.into_iter().map(|fill| (order.id.clone(), order.side.clone(), fill.quantity, fill.price, fee_rate)));
             }
         }
         ledger.orders.retain(|order| order.remaining_quantity > EPSILON);
         if !fills.is_empty() {
             let timestamp = now_ms()?;
             let offset = ledger.trades.len();
-            for (index, (side, quantity, execution_price, fee_rate)) in fills.into_iter().enumerate() {
+            for (index, (order_id, side, quantity, execution_price, fee_rate)) in fills.into_iter().enumerate() {
                 ledger.trades.push(PositionTrade {
                     id: format!("{timestamp}-{index}-{offset}"), symbol: symbol.to_owned(), side, quantity, execution_price,
                     reference_price: None, timestamp, fee: quantity * execution_price * -fee_rate,
                     fee_currency: symbol.split_once('-').map(|(_, quote)| quote.to_owned()).unwrap_or_default(),
-                    fee_rate, fee_liquidity: "maker".to_owned(),
+                    fee_rate, fee_liquidity: "maker".to_owned(), resting_order_id: Some(order_id),
                     decision_timestamp: None, decision_price: None, decision_mid_price: None,
                     slippage: None, slippage_bps: None,
                 });
@@ -764,17 +877,17 @@ async fn start_scheduled_run(store: Arc<PositionStore>, request: NewVwapRun) -> 
         ));
     }
     store.ensure_subscription(&symbol);
-    if store.books.lock().await.get(&symbol).is_none() {
+    if store.book(&symbol).is_none() {
         let wait = async {
             loop {
                 let notified = store.book_changed.notified();
-                if store.books.lock().await.contains_key(&symbol) { break; }
+                if store.book(&symbol).is_some() { break; }
                 notified.await;
             }
         };
         timeout(Duration::from_secs(8), wait).await.map_err(|_| (StatusCode::SERVICE_UNAVAILABLE, "Waiting for live OKX book timed out".to_owned()))?;
     }
-    let side_book = store.books.lock().await.get(&symbol).cloned().ok_or((StatusCode::SERVICE_UNAVAILABLE, "Live book is required to reserve VWAP buying power".to_owned()))?;
+    let side_book = store.book(&symbol).ok_or((StatusCode::SERVICE_UNAVAILABLE, "Live book is required to reserve VWAP buying power".to_owned()))?;
     let price = match request.side { TradeSide::Buy => side_book.asks.iter().map(|level| level.price).fold(0.0_f64, f64::max), TradeSide::Sell => side_book.bids.first().map(|level| level.price).unwrap_or(0.0) };
     if price <= 0.0 { return Err((StatusCode::SERVICE_UNAVAILABLE, "Live reference price unavailable for VWAP".into())); }
     let account_ledger = store.ledger.lock().await;
@@ -849,7 +962,7 @@ async fn run_twap(
         if remaining <= EPSILON { break; }
         let target_cumulative = if slice + 1 == SLICES { request.quantity } else { request.quantity * (slice + 1) as f64 / SLICES as f64 };
         let qty = (target_cumulative - executed).max(0.0).min(remaining);
-        let book = store.books.lock().await.get(&symbol).cloned();
+        let book = store.book(&symbol);
         if let Some(book) = book {
             if let (Some(bid), Some(ask)) = (book.bids.first(), book.asks.first()) { market_notional += (bid.price + ask.price) * 0.5; market_samples += 1; }
         }
@@ -888,21 +1001,16 @@ async fn run_vwap(
     for weight in &mut curve {
         *weight /= total_weight;
     }
-    let expected = (0..NUM_VWAP_BINS).map(|index| request.quantity * curve[index] / request.max_participation_rate).collect::<Vec<_>>();
-    let execution_base = std::env::var("EXECUTION_URL").unwrap_or_else(|_| "http://127.0.0.1:3003".to_owned());
-    let client = HTTP_CLIENT.get_or_init(reqwest::Client::new);
-    let manager_id: String = match client.post(format!("{execution_base}/internal/vwap/managers"))
-        .json(&serde_json::json!({"parent_qty": request.quantity, "curve": curve.to_vec(), "expected": expected,
-            "max_participation_rate": request.max_participation_rate,
-            "min_trade_threshold": (request.quantity * 0.0001).max(1e-8),
-            "bin_duration_secs": request.duration_minutes as f64 * 60.0 / NUM_VWAP_BINS as f64}))
-        .send().await.and_then(|response| response.error_for_status().map_err(Into::into)) {
-            Ok(response) => match response.json().await {
-                Ok(id) => id,
-                Err(error) => { let mut state=status.lock().await; state.status="failed".into(); state.error=Some(error.to_string()); return; }
-            },
-            Err(error) => { let mut state=status.lock().await; state.status="failed".into(); state.error=Some(error.to_string()); return; }
-        };
+    let expected = std::array::from_fn(|index| request.quantity * curve[index] / request.max_participation_rate);
+    let bin_duration_secs = request.duration_minutes as f64 * 60.0 / NUM_VWAP_BINS as f64;
+    let mut manager = match execution::vwap::OrderManager::new(
+        execution::vwap::VwapConfig { parent_qty: request.quantity, historical_vwap_curve: curve, max_participation_rate: request.max_participation_rate },
+        expected, (request.quantity * 0.0001).max(1e-8), bin_duration_secs,
+    ) {
+        Ok(manager) => manager,
+        Err(error) => { let mut state=status.lock().await; state.status="failed".into(); state.error=Some(error.to_owned()); return; }
+    };
+    let book_slot = store.book_slot(&symbol);
     let (sender, mut receiver) = mpsc::channel(64);
     let trade_symbol = symbol.clone();
     let feed_handle = tokio::spawn(async move {
@@ -948,55 +1056,33 @@ async fn run_vwap(
             continue;
         }
         let elapsed_in_bin = elapsed - target_bin as f64 * bin_duration;
-        let market_result = match client.post(format!("{execution_base}/internal/vwap/managers/{manager_id}/market"))
-            .json(&serde_json::json!({"trade_qty":trade_qty,"trade_price":trade_price,"elapsed_bin_secs":elapsed_in_bin,"target_bin":target_bin}))
-            .send().await.and_then(|response| response.error_for_status().map_err(Into::into)) {
-                Ok(response) => match response.json::<serde_json::Value>().await { Ok(value) => value, Err(error) => { crate::service_log!("ERROR", "Execution scheduler response failed: {error}"); continue; } },
-                Err(error) => { crate::service_log!("ERROR", "Execution scheduler request failed: {error}"); continue; }
-            };
-        let scheduler_state = market_result.clone();
-        if let Some(action) = market_result.get("action").filter(|action| !action.is_null()) {
-            let child_qty = match action.get("action").and_then(|value| value.as_str()) {
-                Some("new_order") => action.get("qty").and_then(|v|v.as_f64()).unwrap_or_default(),
-                Some("modify_order") => action.get("new_qty").and_then(|v|v.as_f64()).unwrap_or_default(),
-                _ => 0.0,
-            };
-            if child_qty > EPSILON {
-                match execute_vwap_child(&store, &symbol, &request.side, child_qty).await {
-                    Ok((filled, average_price)) => {
-                        if let Err(error) = client.post(format!("{execution_base}/internal/vwap/managers/{manager_id}/fill"))
-                            .json(&serde_json::json!({"fill_price":average_price.unwrap_or(trade_price),"filled_qty":filled})).send().await {
-                            crate::service_log!("ERROR", "Execution fill report failed: {error}");
-                        }
-                    }
-                    Err(error) => {
-                        let mut state = status.lock().await;
-                        state.error = Some(error);
-                    }
-                }
-                let _ = client.post(format!("{execution_base}/internal/vwap/managers/{manager_id}/complete")).send().await;
-                let scheduler_state: serde_json::Value = match client.get(format!("{execution_base}/internal/vwap/managers/{manager_id}")).send().await {
-                    Ok(response) => response.json().await.unwrap_or(scheduler_state),
-                    Err(_) => scheduler_state,
-                };
-                let mut state = status.lock().await;
-                state.executed_quantity = scheduler_state.get("executed_qty").and_then(|v|v.as_f64()).unwrap_or_default();
-                state.market_vwap = scheduler_state.get("market_vwap").and_then(|v|v.as_f64()).unwrap_or_default();
-                state.execution_vwap = scheduler_state.get("execution_vwap").and_then(|v|v.as_f64()).unwrap_or_default();
-                state.slippage = scheduler_state.get("slippage").and_then(|v|v.as_f64()).unwrap_or_default();
-                if scheduler_state.get("remaining_qty").and_then(|v|v.as_f64()).unwrap_or_default() <= EPSILON {
-                    state.status = "completed".into();
-                }
-                let finished = state.status == "completed";
-                drop(state);
-                if finished {
-                    break;
-                }
+        while manager.state().current_bin < target_bin.min(NUM_VWAP_BINS) { manager.on_bin_transition(); }
+        let action = manager.on_market_trade(trade_qty, trade_price, elapsed_in_bin);
+        let child_qty = match action {
+            Some(execution::vwap::OrderAction::NewOrder { qty }) => qty,
+            Some(execution::vwap::OrderAction::ModifyOrder { new_qty }) => new_qty,
+            Some(execution::vwap::OrderAction::CancelOrder) | None => 0.0,
+        };
+        if child_qty > EPSILON {
+            match execute_vwap_child_from_slot(&store, &symbol, &request.side, child_qty, &book_slot).await {
+                Ok((filled, average_price)) => manager.on_execution_fill(average_price.unwrap_or(trade_price), filled),
+                Err(error) => { let mut state = status.lock().await; state.error = Some(error); }
             }
+            manager.on_order_complete();
+            let scheduler_state = manager.state();
+            let benchmark = manager.benchmark();
+            let mut state = status.lock().await;
+            state.executed_quantity = scheduler_state.executed_qty;
+            state.market_vwap = benchmark.market_vwap();
+            state.execution_vwap = benchmark.execution_vwap();
+            state.slippage = benchmark.slippage();
+            if scheduler_state.remaining_qty <= EPSILON { state.status = "completed".into(); }
+            let finished = state.status == "completed";
+            drop(state);
+            if finished { break; }
         }
     }
     feed_handle.abort();
-    let _ = client.delete(format!("{execution_base}/internal/vwap/managers/{manager_id}")).send().await;
 }
 
 async fn execute_vwap_child(
@@ -1005,20 +1091,21 @@ async fn execute_vwap_child(
     side: &TradeSide,
     quantity: f64,
 ) -> Result<(f64, Option<f64>), String> {
-    let book = store
-        .books
-        .lock()
-        .await
-        .get(symbol)
-        .cloned()
+    let slot = store.books.read().expect("book map poisoned").get(symbol).cloned()
         .ok_or_else(|| "Live order book unavailable for VWAP child order".to_string())?;
-    let execution_base = std::env::var("EXECUTION_URL").unwrap_or_else(|_| "http://127.0.0.1:3003".to_owned());
-    let matched: MatcherResponse = HTTP_CLIENT.get_or_init(reqwest::Client::new)
-        .post(format!("{execution_base}/internal/orders/match"))
-        .json(&serde_json::json!({"side": if matches!(side, TradeSide::Buy) { "buy" } else { "sell" }, "quantity": quantity, "limit_price": null, "book": book}))
-        .send().await.map_err(|error| format!("Execution match request failed: {error}"))?
-        .error_for_status().map_err(|error| format!("Execution match rejected VWAP child: {error}"))?
-        .json().await.map_err(|error| format!("Invalid Execution match response: {error}"))?;
+    execute_vwap_child_from_slot(store, symbol, side, quantity, &slot).await
+}
+
+async fn execute_vwap_child_from_slot(
+    store: &PositionStore,
+    symbol: &str,
+    side: &TradeSide,
+    quantity: f64,
+    book_slot: &Arc<ArcSwapOption<BookSnapshot>>,
+) -> Result<(f64, Option<f64>), String> {
+    let book = book_slot.load_full()
+        .ok_or_else(|| "Live order book unavailable for VWAP child order".to_string())?;
+    let matched = match_book(side, quantity, None, &book);
     let filled = matched.filled_quantity;
     if filled <= EPSILON { return Ok((0.0, None)); }
     let average = matched.average_execution_price.unwrap_or_default();
@@ -1041,6 +1128,7 @@ async fn execute_vwap_child(
             fee_currency: symbol.split_once('-').map(|(_, quote)| quote.to_owned()).unwrap_or_default(),
             fee_rate,
             fee_liquidity: "taker".to_owned(),
+            resting_order_id: None,
             decision_timestamp: None, decision_price: None, decision_mid_price: None,
             slippage: None, slippage_bps: None,
         });
@@ -1074,7 +1162,7 @@ async fn account_snapshot(store: &PositionStore, ledger: &Ledger) -> Result<Acco
         }
     }
     let positions = summarize_positions(&ledger.trades).positions;
-    let books = store.books.lock().await;
+    let books = store.books_snapshot();
     let mut equity = cash;
     let mut realized_pnl = 0.0;
     let mut unrealized_pnl = 0.0;
@@ -1121,7 +1209,7 @@ async fn ensure_paper_capacity(store: &PositionStore, ledger: &Ledger, symbol: &
         }
     }
     let runs = store.vwap_runs.lock().await;
-    let books = store.books.lock().await;
+    let books = store.books_snapshot();
     let mut reserved_sell = ledger.barrier_orders.iter()
         .filter(|order| order.status == "armed" && order.symbol == symbol && matches!(order.side, TradeSide::Sell))
         .map(|order| order.remaining_quantity).sum::<f64>();
@@ -1334,10 +1422,10 @@ async fn get_market_book(
         .ok_or((StatusCode::BAD_REQUEST, "A valid subscribed spot symbol is required".to_owned()))?;
     store.ensure_subscription(&symbol);
     let now = now_ms().map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
-    let books = store.books.lock().await;
+    let books = store.books_snapshot();
     let book = books.get(&symbol).filter(|book| now.saturating_sub(book.updated_at_ms) <= 5_000)
         .cloned().ok_or((StatusCode::SERVICE_UNAVAILABLE, format!("No fresh local order book for {symbol}")))?;
-    Ok(Json(book))
+    Ok(Json((*book).clone()))
 }
 async fn get_insights_inputs(State(store): State<Arc<PositionStore>>, Query(query): Query<InsightsInputQuery>) -> Result<Json<PositionInsightsInput>, (StatusCode, String)> {
     let positions = summarize_positions(&store.ledger.lock().await.trades).positions
@@ -1352,7 +1440,7 @@ async fn get_insights_inputs(State(store): State<Arc<PositionStore>>, Query(quer
     // subscription is warming up. Consumers handle missing bid/ask data as a
     // temporarily unavailable market; blocking here made transient feed delays
     // fail the entire auto-trader cycle with HTTP 503.
-    let books = store.books.lock().await;
+    let books = store.books_snapshot();
     let histories = store.price_samples.lock().await;
     let markets = symbols.into_iter().map(|symbol| {
         let book = books.get(&symbol);
@@ -1426,7 +1514,7 @@ async fn create_profit_barrier(
         ledger.barrier_orders.pop();
         return Err((StatusCode::INTERNAL_SERVER_ERROR, format!("Unable to persist profit barrier: {error}")));
     }
-    Ok(Json(OrderResponse { estimated_fee: 0.0, filled_quantity: 0.0, remaining_quantity: quantity, average_execution_price: None, order: None, barrier_order: Some(barrier_order) }))
+    Ok(Json(OrderResponse { estimated_fee: 0.0, filled_quantity: 0.0, remaining_quantity: quantity, average_execution_price: None, order: None, barrier_order: Some(barrier_order), processing_timings_ms: BTreeMap::new() }))
 }
 
 #[derive(Deserialize)]
@@ -1485,15 +1573,15 @@ async fn submit_order(
     if matches!(&request.order_type, OrderType::Barrier | OrderType::StopMarket | OrderType::StopLimit | OrderType::TrailingStop) {
         store.ensure_subscription(&symbol);
         let trailing = matches!(&request.order_type, OrderType::TrailingStop);
-        if trailing && store.books.lock().await.get(&symbol).is_none() {
-            let wait = async { loop { let notified = store.book_changed.notified(); if store.books.lock().await.contains_key(&symbol) { break; } notified.await; } };
+        if trailing && store.book(&symbol).is_none() {
+            let wait = async { loop { let notified = store.book_changed.notified(); if store.book(&symbol).is_some() { break; } notified.await; } };
             timeout(Duration::from_secs(8), wait).await.map_err(|_| (StatusCode::SERVICE_UNAVAILABLE, "Waiting for live book to arm trailing stop timed out".into()))?;
         }
         let (trigger_price, trigger_direction, trailing_amount, trailing_percent, extreme_price) = if trailing {
             let amount = request.trailing_amount.filter(|value| value.is_finite() && *value > 0.0);
             let percent = request.trailing_percent.filter(|value| value.is_finite() && *value > 0.0 && *value < 1.0);
             if amount.is_some() == percent.is_some() { return Err((StatusCode::BAD_REQUEST, "Trailing stop needs exactly one positive amount or percentage below 100%".into())); }
-            let book = store.books.lock().await.get(&symbol).cloned().ok_or((StatusCode::SERVICE_UNAVAILABLE, "Live book required to arm trailing stop".into()))?;
+            let book = store.book(&symbol).ok_or((StatusCode::SERVICE_UNAVAILABLE, "Live book required to arm trailing stop".into()))?;
             let current = match request.side { TradeSide::Sell => book.bids.first().map(|l| l.price), TradeSide::Buy => book.asks.first().map(|l| l.price) }.ok_or((StatusCode::SERVICE_UNAVAILABLE, "Live trigger reference price unavailable".into()))?;
             let distance = amount.unwrap_or(current * percent.unwrap());
             let initial = if matches!(request.side, TradeSide::Sell) { current - distance } else { current + distance };
@@ -1538,6 +1626,7 @@ async fn submit_order(
             average_execution_price: None,
             order: None,
             barrier_order: Some(barrier_order),
+            processing_timings_ms: BTreeMap::new(),
         }));
     }
     let fee_rates = configured_fee_rates();
@@ -1565,12 +1654,14 @@ async fn submit_order(
     if request.time_in_force.as_deref().is_some_and(|tif| tif != "gtd" && tif != "gtc") { return Err((StatusCode::BAD_REQUEST, "Supported time-in-force values are gtc and gtd".into())); }
     if request.time_in_force.as_deref() == Some("gtd") && request.expires_at.is_none() { return Err((StatusCode::BAD_REQUEST, "GTD limit order requires expires_at".into())); }
     if request.time_in_force.as_deref() == Some("gtc") && request.expires_at.is_some() { return Err((StatusCode::BAD_REQUEST, "GTC order cannot include expires_at".into())); }
+    let mut processing_timings_ms = BTreeMap::new();
+    let book_wait_started = Instant::now();
     store.ensure_subscription(&symbol);
-    if store.books.lock().await.get(&symbol).is_none() {
+    if store.book(&symbol).is_none() {
         let wait = async {
             loop {
                 let notified = store.book_changed.notified();
-                if store.books.lock().await.contains_key(&symbol) {
+                if store.book(&symbol).is_some() {
                     break;
                 }
                 notified.await;
@@ -1583,10 +1674,12 @@ async fn submit_order(
             )
         })?;
     }
-    let book = store.books.lock().await.get(&symbol).cloned().ok_or((
+    let book = store.book(&symbol).ok_or((
         StatusCode::SERVICE_UNAVAILABLE,
         "Live OKX book unavailable".into(),
     ))?;
+    processing_timings_ms.insert("book_wait".to_owned(), book_wait_started.elapsed().as_secs_f64() * 1_000.0);
+    let matching_started = Instant::now();
     let levels = match request.side { TradeSide::Buy => &book.asks, TradeSide::Sell => &book.bids };
     if is_post_only {
         let crosses = match (request.side.clone(), limit_price, book.bids.first(), book.asks.first()) {
@@ -1604,31 +1697,24 @@ async fn submit_order(
         book.bids.first().zip(book.asks.first()).map(|(bid, ask)| (bid.price + ask.price) / 2.0)
             .filter(|price| price.is_finite() && *price > 0.0)
     } else { None };
-    let execution_base = std::env::var("EXECUTION_URL").unwrap_or_else(|_| "http://127.0.0.1:3003".to_owned());
-    let matcher_response = HTTP_CLIENT.get_or_init(reqwest::Client::new)
-        .post(format!("{execution_base}/internal/orders/match"))
-        .json(&serde_json::json!({"side": if matches!(request.side, TradeSide::Buy) { "buy" } else { "sell" },
-            "quantity": request.quantity, "limit_price": limit_price, "book": book}))
-        .send().await.map_err(|error| (StatusCode::BAD_GATEWAY, format!("Execution service request failed: {error}")))?;
-    if !matcher_response.status().is_success() {
-        let status = matcher_response.status();
-        let detail = matcher_response.text().await.unwrap_or_else(|error| format!("could not read response body: {error}"));
-        return Err((StatusCode::BAD_GATEWAY, format!("Execution service rejected order match (HTTP {status}): {}", detail.trim())));
-    }
-    let matched: MatcherResponse = matcher_response.json().await
-        .map_err(|error| (StatusCode::BAD_GATEWAY, format!("Invalid Execution match response: {error}")))?;
+    let matched = match_book(&request.side, request.quantity, limit_price, &book);
     if is_fok && matched.remaining_quantity > EPSILON {
         return Err((StatusCode::CONFLICT, format!("FOK order cancelled: only {} of {} was available", matched.filled_quantity, request.quantity)));
     }
+    processing_timings_ms.insert("matching".to_owned(), matching_started.elapsed().as_secs_f64() * 1_000.0);
     let reference_price = matched.reference_price;
     let remaining = matched.remaining_quantity;
     let filled_quantity = matched.filled_quantity;
     let average_execution_price = matched.average_execution_price;
     let fills = matched.fills.into_iter().map(|fill| (fill.quantity, fill.price)).collect::<Vec<_>>();
     let timestamp = now_ms().map_err(internal_error)?;
+    let ledger_lock_started = Instant::now();
     let mut ledger = store.ledger.lock().await;
+    processing_timings_ms.insert("ledger_lock_wait".to_owned(), ledger_lock_started.elapsed().as_secs_f64() * 1_000.0);
+    let capacity_started = Instant::now();
     let reserve_price = if matches!(request.side, TradeSide::Buy) { levels.iter().map(|level| level.price).fold(0.0_f64, f64::max) } else { reference_price.unwrap_or(0.0) };
     ensure_paper_capacity(&store, &ledger, &symbol, &request.side, request.quantity, reserve_price, taker_fee_rate).await?;
+    processing_timings_ms.insert("capacity_check".to_owned(), capacity_started.elapsed().as_secs_f64() * 1_000.0);
     let start = ledger.trades.len();
     for (index, (quantity, execution_price)) in fills.into_iter().enumerate() {
         ledger.trades.push(PositionTrade {
@@ -1643,6 +1729,7 @@ async fn submit_order(
             fee_currency: symbol.split_once('-').map(|(_, quote)| quote.to_owned()).unwrap_or_default(),
             fee_rate: taker_fee_rate,
             fee_liquidity: "taker".to_owned(),
+            resting_order_id: None,
             decision_timestamp,
             decision_price,
             decision_mid_price,
@@ -1673,12 +1760,14 @@ async fn submit_order(
     } else {
         None
     };
+    let persistence_started = Instant::now();
     if let Err(error) = store.persist(&ledger).await {
         return Err((
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("Unable to persist paper order: {error}"),
         ));
     }
+    processing_timings_ms.insert("persistence".to_owned(), persistence_started.elapsed().as_secs_f64() * 1_000.0);
     Ok(Json(OrderResponse {
         filled_quantity,
         estimated_fee: ledger.trades[start..].iter().map(|trade| trade.fee).sum::<f64>(),
@@ -1686,6 +1775,7 @@ async fn submit_order(
         average_execution_price,
         order,
         barrier_order: None,
+        processing_timings_ms,
     }))
 }
 

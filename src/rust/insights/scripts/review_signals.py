@@ -232,8 +232,6 @@ def summarize_database(path):
                 "FROM signal_records GROUP BY 1, 2 ORDER BY 1, 2"
             )
         ]
-        if "imported_files" in tables:
-            result["imported_files"] = [row[0] for row in db.execute("SELECT path FROM imported_files ORDER BY path")]
         if "signal_daily_summary" in tables:
             summary_columns = {row[1] for row in db.execute("PRAGMA table_info(signal_daily_summary)")}
             archive_bytes_sql = "COALESCE(length(training_payload), 0)" if "training_payload" in summary_columns else "0"

@@ -12,3 +12,7 @@ src/rust/insights/signals.sqlite-shm
 src/rust/insights/signals.sqlite-wal
 src/rust/insights/logs/insights.log
 monitoring/.env
+*.sql
+signals.sqlite*
+src/rust/insights/.news-python-packages/
+src/rust/insights/.news-model-cache/

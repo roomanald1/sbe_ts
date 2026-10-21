@@ -4,6 +4,8 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+arc-swap = "1.7.1"
+execution = { path = "../execution" }
 anyhow = "1.0.104"
 axum = "0.8.9"
 bytes = "1.12.1"

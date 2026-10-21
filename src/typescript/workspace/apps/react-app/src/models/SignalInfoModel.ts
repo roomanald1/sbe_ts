@@ -45,11 +45,28 @@ export type SignalWalkForwardSideMetrics = {
   positive_net_rate?: number | null;
   positive_net_rate_lower_95?: number | null;
 };
+export type MissedOpportunityBand = {
+  gate: string;
+  threshold: number;
+  horizonSeconds: number;
+  sampleCount: number;
+  averageNetReturnPercent?: number | null;
+  positiveNetRate?: number | null;
+  timeToProfitSampleCount: number;
+  timeToProfitRate?: number | null;
+  averageTimeToProfitSeconds?: number | null;
+  medianTimeToProfitSeconds?: number | null;
+  stopTargetSampleCount: number;
+  stopTargetAverageNetReturnPercent?: number | null;
+  stopTargetPositiveNetRate?: number | null;
+};
 export type SignalInfoState = {
   best: SignalSnapshot[];
   history: SignalSnapshot[];
   performance: SignalPerformanceRow[];
   walkForward: SignalWalkForwardRow[];
+  missedOpportunityBands: MissedOpportunityBand[];
+  missedOpportunityBandsError?: string;
   bestError?: string;
   historyError?: string;
   performanceError?: string;
@@ -57,7 +74,7 @@ export type SignalInfoState = {
 };
 
 export class SignalInfoModel {
-  readonly state$ = new BehaviorSubject<SignalInfoState>({ best: [], history: [], performance: [], walkForward: [] });
+  readonly state$ = new BehaviorSubject<SignalInfoState>({ best: [], history: [], performance: [], walkForward: [], missedOpportunityBands: [] });
   private timer?: ReturnType<typeof setInterval>;
   async start() {
     if (this.timer) return;
@@ -70,6 +87,15 @@ export class SignalInfoModel {
   }
   private async refresh() {
     try {
+      const bandsResponse = await fetch('/signals/auto-trader-dashboard');
+      if (!bandsResponse.ok) throw new Error('Could not load missed opportunity bands');
+      const bandsDashboard = await bandsResponse.json() as { missedOpportunityBands?: MissedOpportunityBand[] };
+      const previousBands = this.state$.value;
+      this.state$.next({ ...previousBands, missedOpportunityBands: bandsDashboard.missedOpportunityBands ?? [], missedOpportunityBandsError: undefined });
+    } catch {
+      this.state$.next({ ...this.state$.value, missedOpportunityBandsError: 'Missed opportunity bands are unavailable.' });
+    }
+    try {
       const response = await fetch('/signals/dashboard');
       if (!response.ok) throw new Error('Could not load signal dashboard');
       const dashboard = await response.json() as {
@@ -78,7 +104,7 @@ export class SignalInfoModel {
         performance: SignalPerformanceRow[];
         walkForward: SignalWalkForwardRow[];
       };
-      this.state$.next(dashboard);
+      this.state$.next({ ...this.state$.value, ...dashboard });
     } catch {
       const previous = this.state$.value;
       this.state$.next({

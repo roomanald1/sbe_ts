@@ -26,6 +26,7 @@ export type BookFeed = {
 };
 
 export type SignalFeed = BookFeed;
+export type NewsFeed = { key: string; data: BehaviorSubject<unknown | undefined>; error: BehaviorSubject<string | undefined> };
 
 type ActiveTradeFeed = TradeFeed & {
   subscription?: { cancel: () => void; request: (count: number) => void };
@@ -37,6 +38,7 @@ type ActiveBookFeed = BookFeed & {
   active: boolean;
 };
 type ActiveSignalFeed = SignalFeed & { subscription?: { cancel: () => void; request: (count: number) => void }; active: boolean };
+type ActiveNewsFeed = NewsFeed & { subscription?: { cancel: () => void; request: (count: number) => void }; active: boolean };
 
 const REQUEST_BATCH_SIZE = 500;
 
@@ -70,6 +72,7 @@ export class Connection {
   private readonly bookFeeds = new Map<string, ActiveBookFeed>();
   private readonly tradeFeeds = new Map<string, ActiveTradeFeed>();
   private readonly signalFeeds = new Map<string, ActiveSignalFeed>();
+  private readonly newsFeeds = new Map<string, ActiveNewsFeed>();
   private retryTimer: ReturnType<typeof setTimeout> | undefined;
   private retryAttempt = 0;
 
@@ -104,6 +107,7 @@ export class Connection {
       this.cancelBookSubscriptions('connection reconnecting');
       this.cancelTradeSubscriptions('connection reconnecting');
       this.cancelSignalSubscriptions();
+      this.cancelNewsSubscriptions();
       this.socket?.close();
       this.socket = undefined;
 
@@ -147,6 +151,7 @@ export class Connection {
             this.startBookSubscriptions();
             this.startTradeSubscriptions();
             this.startSignalSubscriptions();
+            this.startNewsSubscriptions();
             if (this.source === 'synthetic') {
               requestNext = () => sub.request(REQUEST_BATCH_SIZE);
               sub.request(1000);
@@ -236,6 +241,49 @@ export class Connection {
       },
       onError: (error) => { if (this.signalFeeds.get(feed.key) !== feed || this.socket !== socket) return; feed.subscription = undefined; feed.active = false; feed.error.next(error.message ?? 'Signal stream disconnected'); },
       onComplete: () => { if (this.signalFeeds.get(feed.key) !== feed || this.socket !== socket) return; feed.subscription = undefined; feed.active = false; feed.error.next('Signal stream completed'); },
+    });
+  }
+
+  public openNews(key: string): NewsFeed {
+    const existing = this.newsFeeds.get(key);
+    if (existing) return existing;
+    const feed: ActiveNewsFeed = { key, data: new BehaviorSubject<unknown | undefined>(undefined), error: new BehaviorSubject<string | undefined>(undefined), active: false };
+    this.newsFeeds.set(key, feed);
+    this.startNewsSubscription(feed);
+    return feed;
+  }
+
+  public closeNews(key: string, feed: NewsFeed) {
+    const active = this.newsFeeds.get(key);
+    if (!active || active !== feed) return;
+    active.subscription?.cancel(); active.subscription = undefined; active.active = false;
+    this.newsFeeds.delete(key); active.data.complete(); active.error.complete();
+  }
+
+  private cancelNewsSubscriptions() {
+    for (const feed of this.newsFeeds.values()) {
+      feed.subscription?.cancel(); feed.subscription = undefined; feed.active = false; feed.data.next(undefined);
+    }
+  }
+
+  private startNewsSubscriptions() { for (const feed of this.newsFeeds.values()) this.startNewsSubscription(feed); }
+
+  private startNewsSubscription(feed: ActiveNewsFeed) {
+    const socket = this.socket; const generation = this.lifecycleGeneration;
+    if (!socket || feed.active || this.newsFeeds.get(feed.key) !== feed) return;
+    feed.active = true; let received = 0; let requestNext: (() => void) | undefined;
+    socket.requestStream({ data: Buffer.from('news:*') }).subscribe({
+      onSubscribe: (subscription) => {
+        if (this.newsFeeds.get(feed.key) !== feed || this.socket !== socket || this.lifecycleGeneration !== generation) { subscription.cancel(); return; }
+        feed.subscription = subscription; requestNext = () => subscription.request(1); requestNext();
+      },
+      onNext: (payload) => {
+        if (this.newsFeeds.get(feed.key) !== feed || this.socket !== socket || this.lifecycleGeneration !== generation) return;
+        feed.data.next(payload.data); feed.error.next(undefined); received += 1;
+        if (received >= 1) { received = 0; requestNext?.(); }
+      },
+      onError: (error) => { if (this.newsFeeds.get(feed.key) !== feed || this.socket !== socket) return; feed.subscription = undefined; feed.active = false; feed.error.next(error.message ?? 'News stream disconnected'); },
+      onComplete: () => { if (this.newsFeeds.get(feed.key) !== feed || this.socket !== socket) return; feed.subscription = undefined; feed.active = false; feed.error.next('News stream completed'); },
     });
   }
 
@@ -487,6 +535,7 @@ export class Connection {
     for (const feed of this.tradeFeeds.values())
       this.closeTrades(feed.key, feed);
     for (const feed of this.signalFeeds.values()) this.closeSignals(feed.key, feed);
+    for (const feed of this.newsFeeds.values()) this.closeNews(feed.key, feed);
     this.socket?.close();
   }
 }

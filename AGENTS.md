@@ -19,6 +19,13 @@
 - Use rg to find relevant symbols and read only the files needed for the task. Avoid lockfiles, build output, dependencies, and generated code unless relevant.
 - Root README has run commands; the Rust crate README describes service behavior and profiling.
 
+## Running the full stack
+
+- Start the complete local stack from the repository root with `./start-all.sh`. It builds and starts the monitoring Compose services, backend services, and React app. Keep the terminal running to supervise the stack; use Ctrl+C or `./stop-all.sh` to stop it.
+- Stop the stack from the repository root with `./stop-all.sh`. This stops this repository backend and UI processes and tears down its monitoring Compose services.
+- Before starting, ensure `monitoring/.env` exists. Create it from `monitoring/.env.example` and set a unique Grafana password when needed.
+- Use these scripts for normal full-stack startup and shutdown instead of starting or stopping the backend, UI, and monitoring services separately. For focused frontend targets, the Nx guidance below still applies.
+
 ## Execution-strategy map
 
 - Position management is in src/rust/position_management; execution and VWAP scheduling are in src/rust/execution.

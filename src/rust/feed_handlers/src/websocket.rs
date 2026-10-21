@@ -1,5 +1,6 @@
 use anyhow::Result;
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
+use dashmap::DashMap;
 use futures_util::{Stream, StreamExt};
 use rsocket_rust::prelude::*;
 use rsocket_rust_transport_websocket::WebsocketServerTransport;
@@ -9,13 +10,13 @@ use std::{
     pin::Pin,
     sync::{Arc, Mutex as StdMutex, OnceLock},
 };
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::{broadcast, mpsc, watch};
 use tokio::time::{Duration, sleep};
 
 use crate::encoders::{SYMBOL_LENGTH, encode_symbol_price_bytes};
 use crate::okx::connectivity::{
     RollingVolatility, get_all_spot_instruments, get_instrument_data, subscribe,
-    subscribe_book_once, subscribe_trades_once,
+    subscribe_book_once, subscribe_trades_once, run_usd_rate_stream,
 };
 
 const PRICE_UPDATE_CAPACITY: usize = 4096;
@@ -30,8 +31,9 @@ const TRADE_UPDATE_CAPACITY: usize = 32;
 const SIGNAL_INSTRUMENT_LIMIT: usize = 100;
 static TRADE_FEEDS: OnceLock<StdMutex<HashMap<String, broadcast::Sender<Bytes>>>> = OnceLock::new();
 static BOOK_FEEDS: OnceLock<StdMutex<HashMap<String, broadcast::Sender<Bytes>>>> = OnceLock::new();
-static SIGNAL_FEEDS: OnceLock<Arc<StdMutex<HashMap<String, broadcast::Sender<Bytes>>>>> = OnceLock::new();
-static SIGNAL_PRICE_FEEDS: OnceLock<Arc<StdMutex<HashMap<String, broadcast::Sender<Bytes>>>>> = OnceLock::new();
+static SIGNAL_FEEDS: OnceLock<Arc<DashMap<String, broadcast::Sender<Bytes>>>> = OnceLock::new();
+static SIGNAL_PRICE_FEEDS: OnceLock<Arc<DashMap<String, broadcast::Sender<Bytes>>>> = OnceLock::new();
+static NEWS_SNAPSHOT: OnceLock<watch::Sender<Bytes>> = OnceLock::new();
 
 pub async fn serve() -> Result<()> {
     let instrument_data = get_instrument_data()
@@ -58,8 +60,13 @@ pub async fn serve() -> Result<()> {
     let sub_sender = price_updates.clone();
     let sub = subscribe(&instrument_data, sub_sender);
     let (ticker_batches, _) = broadcast::channel::<Bytes>(256);
-    let signal_feeds = SIGNAL_FEEDS.get_or_init(|| Arc::new(StdMutex::new(HashMap::new()))).clone();
-    let signal_price_feeds = SIGNAL_PRICE_FEEDS.get_or_init(|| Arc::new(StdMutex::new(HashMap::new()))).clone();
+    let initial_usd_rates = Bytes::from_static(br#"{"rates":{"USD":1.0},"updated_at":0,"updated_at_by_currency":{"USD":0}}"#);
+    let (usd_rate_snapshot, _) = watch::channel(initial_usd_rates);
+    tokio::spawn(run_usd_rate_stream(usd_rate_snapshot.clone()));
+    let (news_snapshot, _) = watch::channel(Bytes::from_static(br#"{"updated_at_ms":0,"source":"CoinDesk RSS","stale":true,"error":null,"articles":[]}"#));
+    let _ = NEWS_SNAPSHOT.set(news_snapshot.clone());
+    let signal_feeds = SIGNAL_FEEDS.get_or_init(|| Arc::new(DashMap::new())).clone();
+    let signal_price_feeds = SIGNAL_PRICE_FEEDS.get_or_init(|| Arc::new(DashMap::new())).clone();
     let (signal_events, _) = broadcast::channel::<Bytes>(65_536);
     let mut ticker_router = price_updates.subscribe();
     let routed_prices = Arc::clone(&signal_price_feeds);
@@ -68,12 +75,13 @@ pub async fn serve() -> Result<()> {
             match ticker_router.recv().await {
                 Ok(bytes) => {
                     if let Some(symbol) = symbol_from_sbe(&bytes) {
-                        if let Some(sender) = routed_prices.lock().expect("signal price map poisoned").get(symbol) {
-                            let _ = sender.send(bytes);
-                        }
+                        let output = routed_prices.get(symbol).map(|entry| entry.value().clone());
+                        if let Some(output) = output { let _ = output.send(bytes); }
                     }
                 }
-                Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                    crate::service_log!("WARN", "Signal price router lagged; skipped {skipped} ticker updates");
+                }
                 Err(broadcast::error::RecvError::Closed) => break,
             }
         }
@@ -128,6 +136,8 @@ pub async fn serve() -> Result<()> {
                 signal_feeds: Arc::clone(&signal_feeds),
                 signal_price_feeds: Arc::clone(&signal_price_feeds),
                 signal_events: signal_events.clone(),
+                usd_rate_snapshot: usd_rate_snapshot.clone(),
+                news_snapshot: news_snapshot.clone(),
             }))
         }))
         .serve();
@@ -139,9 +149,11 @@ pub async fn serve() -> Result<()> {
 struct ServerResponder {
     price_updates: tokio::sync::broadcast::Sender<Bytes>,
     instrument_lookup: Arc<HashSet<Arc<str>>>,
-    signal_feeds: Arc<StdMutex<HashMap<String, broadcast::Sender<Bytes>>>>,
-    signal_price_feeds: Arc<StdMutex<HashMap<String, broadcast::Sender<Bytes>>>>,
+    signal_feeds: Arc<DashMap<String, broadcast::Sender<Bytes>>>,
+    signal_price_feeds: Arc<DashMap<String, broadcast::Sender<Bytes>>>,
     signal_events: broadcast::Sender<Bytes>,
+    usd_rate_snapshot: watch::Sender<Bytes>,
+    news_snapshot: watch::Sender<Bytes>,
 }
 
 impl RSocket for ServerResponder {
@@ -166,7 +178,10 @@ impl RSocket for ServerResponder {
                     loop {
                         match updates.recv().await {
                             Ok(data) => break Some((Ok(Payload::new(Some(data), None)), updates)),
-                            Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                            Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                                crate::service_log!("WARN", "RSocket ticker subscriber lagged; skipped {skipped} updates");
+                                continue;
+                            }
                             Err(broadcast::error::RecvError::Closed) => break None,
                         }
                     }
@@ -179,6 +194,30 @@ impl RSocket for ServerResponder {
             );
         }
 
+        if payload.data().and_then(|data| std::str::from_utf8(data.as_ref()).ok()) == Some("news:*") {
+            let stream = futures_util::stream::unfold(
+                (self.news_snapshot.subscribe(), true),
+                |(mut snapshot, initial)| async move {
+                    if !initial && snapshot.changed().await.is_err() { return None; }
+                    let data = snapshot.borrow_and_update().clone();
+                    Some((Ok(Payload::new(Some(data), None)), (snapshot, false)))
+                },
+            ).boxed();
+            return log_stream_end(stream, "Backend news snapshot stream disconnected".to_owned());
+        }
+
+        if payload.data().and_then(|data| std::str::from_utf8(data.as_ref()).ok()) == Some("usd-rates:*") {
+            let stream = futures_util::stream::unfold(
+                (self.usd_rate_snapshot.subscribe(), true),
+                |(mut snapshot, initial)| async move {
+                    if !initial && snapshot.changed().await.is_err() { return None; }
+                    let data = snapshot.borrow_and_update().clone();
+                    Some((Ok(Payload::new(Some(data), None)), (snapshot, false)))
+                },
+            ).boxed();
+            return log_stream_end(stream, "FeedHandlers USD rate stream disconnected".to_owned());
+        }
+
         if payload.data().and_then(|data| std::str::from_utf8(data.as_ref()).ok()) == Some("signal-events:*") {
             let stream = futures_util::stream::unfold(
                 self.signal_events.subscribe(),
@@ -186,7 +225,10 @@ impl RSocket for ServerResponder {
                     loop {
                         match events.recv().await {
                             Ok(data) => break Some((Ok(Payload::new(Some(data), None)), events)),
-                            Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                            Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                                crate::service_log!("WARN", "Insights signal-event subscriber lagged; skipped {skipped} events");
+                                continue;
+                            }
                             Err(broadcast::error::RecvError::Closed) => break None,
                         }
                     }
@@ -431,9 +473,15 @@ fn requested_signal_instrument(payload: &Payload) -> Option<&str> {
         .strip_prefix("signals:")
 }
 
+pub fn publish_news_snapshot(snapshot: Bytes) -> bool {
+    let Some(sender) = NEWS_SNAPSHOT.get() else { return false; };
+    sender.send_replace(snapshot);
+    true
+}
+
 pub fn publish_signal_snapshot(symbol: &str, snapshot: Bytes) -> bool {
     let Some(feeds) = SIGNAL_FEEDS.get() else { return false; };
-    let sender = feeds.lock().expect("signal feed map poisoned").get(symbol).cloned();
+    let sender = feeds.get(symbol).map(|entry| entry.value().clone());
     if let Some(sender) = sender {
         let _ = sender.send(snapshot);
         true
@@ -444,37 +492,33 @@ pub fn publish_signal_snapshot(symbol: &str, snapshot: Bytes) -> bool {
 
 fn start_signal_feed(
     instrument: &str,
-    feeds: &Arc<StdMutex<HashMap<String, broadcast::Sender<Bytes>>>>,
-    price_feeds: &Arc<StdMutex<HashMap<String, broadcast::Sender<Bytes>>>>,
+    feeds: &Arc<DashMap<String, broadcast::Sender<Bytes>>>,
+    price_feeds: &Arc<DashMap<String, broadcast::Sender<Bytes>>>,
     events: &broadcast::Sender<Bytes>,
 ) -> broadcast::Sender<Bytes> {
-    let price_receiver = {
-        let mut price_feeds = price_feeds.lock().expect("signal price map poisoned");
-        price_feeds
-            .entry(instrument.to_owned())
-            .or_insert_with(|| broadcast::channel(64).0)
-            .subscribe()
-    };
-    let mut feeds = feeds.lock().expect("signal feed map poisoned");
-    feeds
+    let price_sender = price_feeds
         .entry(instrument.to_owned())
-        .or_insert_with(|| {
+        .or_insert_with(|| broadcast::channel(64).0)
+        .value()
+        .clone();
+    let price_receiver = price_sender.subscribe();
+
+    // Reserve the symbol entry first, then start its task after releasing the
+    // DashMap shard guard. The task may itself access shared feed maps.
+    let (sender, should_start) = match feeds.entry(instrument.to_owned()) {
+        dashmap::mapref::entry::Entry::Occupied(entry) => (entry.get().clone(), false),
+        dashmap::mapref::entry::Entry::Vacant(entry) => {
             let (sender, _) = broadcast::channel(64);
-            tokio::spawn(run_signal_feed(
-                instrument.to_owned(),
-                price_receiver,
-                events.clone(),
-            ));
-            sender
-        })
-        .clone()
+            entry.insert(sender.clone());
+            (sender, true)
+        }
+    };
+    if should_start {
+        tokio::spawn(run_signal_feed(instrument.to_owned(), price_receiver, events.clone()));
+    }
+    sender
 }
 
-fn publish_signal_event(events: &broadcast::Sender<Bytes>, event: serde_json::Value) {
-    if let Ok(bytes) = serde_json::to_vec(&event) {
-        let _ = events.send(Bytes::from(bytes));
-    }
-}
 
 async fn run_signal_feed(
     instrument: String,
@@ -487,19 +531,25 @@ async fn run_signal_feed(
         tokio::select! {
             incoming = prices.recv() => match incoming {
                 Ok(bytes) if has_symbol(&bytes, &instrument) => {
-                    if let (Some(price), Some(volatility)) = (read_f64(&bytes, 40), read_f64(&bytes, 48)) {
-                        publish_signal_event(&events, serde_json::json!({"symbol": instrument, "type": "price", "timestamp": now_ms(), "price": price, "volatility_1m": volatility}));
+                    if bytes.len() >= 64 && read_f64(&bytes, 40).is_some() && read_f64(&bytes, 48).is_some() {
+                        let mut message = BytesMut::with_capacity(bytes.len() + 8);
+                        message.extend_from_slice(&bytes);
+                        message.extend_from_slice(&now_ms().to_le_bytes());
+                        let _ = events.send(message.freeze());
                     }
                 }
-                Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {},
+                Ok(_) => {},
+                Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                    crate::service_log!("WARN", "Signal price feed for {instrument} lagged; skipped {skipped} ticker updates");
+                }
                 Err(broadcast::error::RecvError::Closed) => break,
             },
             incoming = trades.next() => if let Some(Ok(payload)) = incoming {
                 if let Some(bytes) = payload.data() {
                     let bytes = bytes.as_ref();
                     if has_symbol(bytes, &instrument) {
-                        if let (Some(timestamp), Some(price), Some(size)) = (read_u64(bytes, 72), read_f64(bytes, 80), read_f64(bytes, 88)) {
-                            publish_signal_event(&events, serde_json::json!({"symbol": instrument, "type": "trade", "timestamp": timestamp, "price": price, "size": size, "is_buy": bytes.get(96) == Some(&1)}));
+                        if bytes.len() >= 97 {
+                            let _ = events.send(Bytes::clone(payload.data().expect("checked payload data")));
                         }
                     }
                 }
@@ -507,12 +557,8 @@ async fn run_signal_feed(
             incoming = books.next() => if let Some(Ok(payload)) = incoming {
                 if let Some(bytes) = payload.data() {
                     let bytes = bytes.as_ref();
-                    if has_symbol(bytes, &instrument) {
-                        let bid_levels = (0..7).filter_map(|index| Some((read_f64(bytes, 48 + index * 16)?, read_f64(bytes, 56 + index * 16)?))).collect::<Vec<_>>();
-                        let ask_levels = (0..7).filter_map(|index| Some((read_f64(bytes, 160 + index * 16)?, read_f64(bytes, 168 + index * 16)?))).collect::<Vec<_>>();
-                        let bid_sizes = bid_levels.iter().map(|(_, size)| *size).collect::<Vec<_>>();
-                        let ask_sizes = ask_levels.iter().map(|(_, size)| *size).collect::<Vec<_>>();
-                        publish_signal_event(&events, serde_json::json!({"symbol": instrument, "type": "book", "timestamp": read_u64(bytes, 40).unwrap_or_else(now_ms), "best_bid": read_f64(bytes, 48).unwrap_or_default(), "best_ask": read_f64(bytes, 160).unwrap_or_default(), "bid_sizes": bid_sizes, "ask_sizes": ask_sizes, "bid_levels": bid_levels, "ask_levels": ask_levels}));
+                    if has_symbol(bytes, &instrument) && bytes.len() >= 272 {
+                        let _ = events.send(Bytes::clone(payload.data().expect("checked payload data")));
                     }
                 }
             },
@@ -540,11 +586,6 @@ fn has_symbol(bytes: &[u8], symbol: &str) -> bool {
 fn read_f64(bytes: &[u8], offset: usize) -> Option<f64> {
     let value = f64::from_le_bytes(bytes.get(offset..offset + 8)?.try_into().ok()?);
     value.is_finite().then_some(value)
-}
-fn read_u64(bytes: &[u8], offset: usize) -> Option<u64> {
-    Some(u64::from_le_bytes(
-        bytes.get(offset..offset + 8)?.try_into().ok()?,
-    ))
 }
 fn now_ms() -> u64 {
     std::time::SystemTime::now()
@@ -580,11 +621,16 @@ fn trade_request_stream(
                                 let _ = sender.send(bytes);
                             }
                         });
+                        let attempt_started = std::time::Instant::now();
                         match subscribe_trades_once(&instrument, tx).await {
                             Ok(()) => break,
                             Err(error) => {
+                                if attempt_started.elapsed() >= Duration::from_secs(60) {
+                                    delay = Duration::from_secs(1);
+                                }
                                 crate::service_log!("ERROR", 
-                                    "Shared trades subscription for {instrument} failed: {error:#}"
+                                    "Shared trades subscription for {instrument} failed: {error:#}; retrying in {}s",
+                                    delay.as_secs()
                                 );
                                 forward.abort();
                                 sleep(delay).await;
@@ -638,11 +684,16 @@ fn book_request_stream(
                                 let _ = sender.send(bytes);
                             }
                         });
+                        let attempt_started = std::time::Instant::now();
                         match subscribe_book_once(&instrument, tx).await {
                             Ok(()) => break,
                             Err(error) => {
+                                if attempt_started.elapsed() >= Duration::from_secs(60) {
+                                    delay = Duration::from_secs(1);
+                                }
                                 crate::service_log!("ERROR", 
-                                    "Shared book subscription for {instrument} failed: {error:#}"
+                                    "Shared book subscription for {instrument} failed: {error:#}; retrying in {}s",
+                                    delay.as_secs()
                                 );
                                 forward.abort();
                                 sleep(delay).await;

@@ -1,5 +1,5 @@
 use axum::{Json, Router, extract::Query, http::StatusCode, routing::get};
-use flate2::{read::MultiGzDecoder, write::GzEncoder, Compression};
+use flate2::{Compression, read::MultiGzDecoder, write::GzEncoder};
 use insights::signals::StoredSignalRecord;
 use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
@@ -70,23 +70,20 @@ async fn summarize_missing_days() -> anyhow::Result<()> {
 fn summarize_missing_days_sync(path: &PathBuf) -> anyhow::Result<()> {
     let connection = open_database(path)?;
     let today_start = now_ms().div_euclid(DAY_MS) * DAY_MS;
-    let retention_start = today_start - 5 * DAY_MS;
+    // Keep one day of raw records. Older records of every type are retained in
+    // the compressed daily archive and remain available to historical readers.
+    let retention_start = today_start - DAY_MS;
     let day_starts = {
         let mut statement = connection.prepare(
             "SELECT DISTINCT (timestamp / ?1) * ?1 FROM signal_records WHERE timestamp < ?2 ORDER BY 1",
         )?;
-        statement.query_map(params![DAY_MS, today_start], |row| row.get::<_, i64>(0))?
+        statement
+            .query_map(params![DAY_MS, today_start], |row| row.get::<_, i64>(0))?
             .collect::<rusqlite::Result<Vec<_>>>()?
     };
-    let mut deleted_records = 0usize;
     for day_start in day_starts {
-        let transaction = connection.unchecked_transaction()?;
-        transaction.execute(
-            "DELETE FROM signal_daily_summary WHERE day_start_ms = ?1",
-            [day_start],
-        )?;
         let aggregates = {
-            let mut statement = transaction.prepare(
+            let mut statement = connection.prepare(
                 r#"SELECT kind, COUNT(*), COALESCE(SUM(length(payload)), 0), MIN(timestamp), MAX(timestamp)
                    FROM signal_records
                    WHERE timestamp >= ?1 AND timestamp < ?2
@@ -94,21 +91,19 @@ fn summarize_missing_days_sync(path: &PathBuf) -> anyhow::Result<()> {
             )?;
             statement
                 .query_map(params![day_start, day_start + DAY_MS], |row| {
-                    Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?, row.get::<_, i64>(2)?, row.get::<_, i64>(3)?, row.get::<_, i64>(4)?))
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, i64>(3)?,
+                        row.get::<_, i64>(4)?,
+                    ))
                 })?
                 .collect::<rusqlite::Result<Vec<_>>>()?
         };
-        for (kind, count, bytes, first, last) in aggregates {
-            transaction.execute(
-                r#"INSERT INTO signal_daily_summary
-                   (day_start_ms, kind, record_count, compressed_payload_bytes, first_timestamp, last_timestamp, training_payload)
-                   VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL)"#,
-                params![day_start, kind, count, bytes, first, last],
-            )?;
-        }
         let training_payloads = if day_start < retention_start {
-            let mut statement = transaction.prepare(
-                "SELECT kind, payload FROM signal_records WHERE timestamp >= ?1 AND timestamp < ?2 AND kind IN (0, 1, 4, 5) ORDER BY kind, timestamp, id",
+            let mut statement = connection.prepare(
+                "SELECT kind, payload FROM signal_records WHERE timestamp >= ?1 AND timestamp < ?2 ORDER BY kind, timestamp, id",
             )?;
             let rows = statement.query_map(params![day_start, day_start + DAY_MS], |row| {
                 Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?))
@@ -119,17 +114,39 @@ fn summarize_missing_days_sync(path: &PathBuf) -> anyhow::Result<()> {
                 let mut decoder = MultiGzDecoder::new(compressed.as_slice());
                 let mut payload = Vec::new();
                 decoder.read_to_end(&mut payload)?;
-                grouped.entry(kind).or_default().push(bincode::deserialize(&payload)?);
+                grouped
+                    .entry(kind)
+                    .or_default()
+                    .push(bincode::deserialize(&payload)?);
             }
-            grouped.into_iter().map(|(kind, records)| {
-                let serialized = bincode::serialize(&records)?;
-                let mut encoder = GzEncoder::new(Vec::new(), Compression::fast());
-                encoder.write_all(&serialized)?;
-                Ok::<_, anyhow::Error>((kind, encoder.finish()?))
-            }).collect::<anyhow::Result<Vec<_>>>()?
+            grouped
+                .into_iter()
+                .map(|(kind, records)| {
+                    let serialized = bincode::serialize(&records)?;
+                    let mut encoder = GzEncoder::new(Vec::new(), Compression::fast());
+                    encoder.write_all(&serialized)?;
+                    Ok::<_, anyhow::Error>((kind, encoder.finish()?))
+                })
+                .collect::<anyhow::Result<Vec<_>>>()?
         } else {
             Vec::new()
         };
+        // Decode and recompress historical rows before taking SQLite's write
+        // lock. A backfill can be substantial and must not block live signal
+        // writes for the duration of the compression pass.
+        let transaction = connection.unchecked_transaction()?;
+        transaction.execute(
+            "DELETE FROM signal_daily_summary WHERE day_start_ms = ?1",
+            [day_start],
+        )?;
+        for (kind, count, bytes, first, last) in aggregates {
+            transaction.execute(
+                r#"INSERT INTO signal_daily_summary
+                   (day_start_ms, kind, record_count, compressed_payload_bytes, first_timestamp, last_timestamp, training_payload)
+                   VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL)"#,
+                params![day_start, kind, count, bytes, first, last],
+            )?;
+        }
         for (kind, payload) in training_payloads {
             transaction.execute(
                 "UPDATE signal_daily_summary SET training_payload = ?3 WHERE day_start_ms = ?1 AND kind = ?2",
@@ -137,7 +154,7 @@ fn summarize_missing_days_sync(path: &PathBuf) -> anyhow::Result<()> {
             )?;
         }
         if day_start < retention_start {
-            deleted_records += transaction.execute(
+            transaction.execute(
                 "DELETE FROM signal_records WHERE timestamp >= ?1 AND timestamp < ?2",
                 params![day_start, day_start + DAY_MS],
             )?;
@@ -148,9 +165,9 @@ fn summarize_missing_days_sync(path: &PathBuf) -> anyhow::Result<()> {
         )?;
         transaction.commit()?;
     }
-    if deleted_records > 0 {
-        connection.execute_batch("PRAGMA wal_checkpoint(TRUNCATE); VACUUM;")?;
-    }
+    // Do not VACUUM after retention cleanup: rebuilding a multi-gigabyte
+    // database takes an exclusive lock and blocks the live signal writer.
+    // SQLite can reuse the freed pages for future inserts.
     Ok(())
 }
 
@@ -188,9 +205,24 @@ fn open_database(path: &PathBuf) -> anyhow::Result<Connection> {
     }
     let connection = Connection::open(path)?;
     connection.busy_timeout(Duration::from_secs(5))?;
+    connection.execute_batch("PRAGMA synchronous=NORMAL;")?;
+    Ok(connection)
+}
+
+pub async fn initialize() -> anyhow::Result<()> {
+    let path = database_path();
+    tokio::task::spawn_blocking(move || {
+        let connection = Connection::open(&path)?;
+        connection.busy_timeout(Duration::from_secs(5))?;
+        initialize_schema(&connection)
+    })
+    .await
+    .map_err(|error| anyhow::anyhow!("daily summary initialization failed: {error}"))?
+}
+
+fn initialize_schema(connection: &Connection) -> anyhow::Result<()> {
     connection.execute_batch(
-        r#"PRAGMA journal_mode=WAL;
-         CREATE TABLE IF NOT EXISTS signal_daily_summary (
+        r#"CREATE TABLE IF NOT EXISTS signal_daily_summary (
            day_start_ms INTEGER NOT NULL,
            kind INTEGER NOT NULL,
            record_count INTEGER NOT NULL,
@@ -207,14 +239,19 @@ fn open_database(path: &PathBuf) -> anyhow::Result<Connection> {
     )?;
     let columns = {
         let mut statement = connection.prepare("PRAGMA table_info(signal_daily_summary)")?;
-        statement.query_map([], |row| row.get::<_, String>(1))?
+        statement
+            .query_map([], |row| row.get::<_, String>(1))?
             .collect::<rusqlite::Result<Vec<_>>>()?
     };
     if !columns.iter().any(|column| column == "training_payload") {
-        connection.execute("ALTER TABLE signal_daily_summary ADD COLUMN training_payload BLOB", [])?;
+        connection.execute(
+            "ALTER TABLE signal_daily_summary ADD COLUMN training_payload BLOB",
+            [],
+        )?;
     }
-    Ok(connection)
+    Ok(())
 }
+
 
 fn database_path() -> PathBuf {
     std::env::var_os("SIGNALS_DB_FILE")

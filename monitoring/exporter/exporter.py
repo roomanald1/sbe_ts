@@ -8,8 +8,10 @@ from urllib.request import urlopen
 SERVICES = {
     "feed_handlers": (os.getenv("FEED_HANDLERS_URL", "http://127.0.0.1:3001"), "/health"),
     "position_management": (os.getenv("POSITION_MANAGEMENT_URL", "http://127.0.0.1:3002"), "/health"),
+    "auto_trader": (os.getenv("AUTO_TRADER_URL", "http://127.0.0.1:3005"), "/health"),
     "execution": (os.getenv("EXECUTION_URL", "http://127.0.0.1:3003"), "/health"),
     "insights": (os.getenv("INSIGHTS_URL", "http://127.0.0.1:3004"), "/health"),
+    "news_sentiment": (os.getenv("NEWS_SENTIMENT_URL", "http://127.0.0.1:3006"), "/health"),
 }
 
 
@@ -21,7 +23,7 @@ def get_json(base, path):
 METRIC_HEADERS = set()
 
 
-def sample(name, help_text, value, labels=None, kind="gauge"):
+def sample(name, help_text, value, labels=None, kind="gauge", timestamp_ms=None):
     labels_text = ""
     if labels:
         labels_text = "{" + ",".join(f'{key}="{str(val).replace(chr(92), chr(92) * 2).replace(chr(34), chr(92) + chr(34))}"' for key, val in labels.items()) + "}"
@@ -30,7 +32,8 @@ def sample(name, help_text, value, labels=None, kind="gauge"):
         METRIC_HEADERS.add(name)
     else:
         header = ""
-    return header + name + labels_text + " " + str(value) + chr(10)
+    timestamp_text = "" if timestamp_ms is None else " " + str(timestamp_ms)
+    return header + name + labels_text + " " + str(value) + timestamp_text + chr(10)
 
 
 def metrics():
@@ -77,10 +80,11 @@ def metrics():
         output.append(sample("app_open_positions", "Number of currently open account positions.", open_positions))
     except (OSError, URLError, ValueError, TypeError):
         pass
+    auto_trader_base = SERVICES["auto_trader"][0]
     try:
-        status = get_json(base, "/positions/auto-trader")
-        enabled = bool(status.get("enabled")) and service_up.get("position_management", 0) == 1
-        output.append(sample("app_autotrader_enabled", "Whether the autotrader is enabled while position management is healthy.", int(enabled)))
+        status = get_json(auto_trader_base, "/positions/auto-trader")
+        enabled = bool(status.get("enabled"))
+        output.append(sample("app_autotrader_enabled", "Whether AutoTrader is enabled according to its status endpoint.", int(enabled)))
         for key, metric, help_text in [
             ("used_notional_today", "app_autotrader_used_notional_today_usd", "Autotrader notional used today in USD."),
             ("daily_notional_limit", "app_autotrader_daily_notional_limit_usd", "Autotrader daily notional limit in USD."),
@@ -88,9 +92,33 @@ def metrics():
             if isinstance(status.get(key), (int, float)):
                 output.append(sample(metric, help_text, status[key]))
     except (OSError, URLError, ValueError, TypeError):
-        output.append(sample("app_autotrader_enabled", "Whether the autotrader is enabled while position management is healthy.", 0))
+        # A failed status request is unknown, not disabled. Emitting zero here
+        # makes Grafana report DISABLED while the UI can still show its last
+        # successfully fetched enabled state.
+        pass
     try:
-        activity = get_json(base, "/positions/auto-trader/activity")
+        activity = get_json(auto_trader_base, "/positions/auto-trader/activity")
+        for key, stat in [("insight_processing_latest_ms", "latest"), ("insight_processing_average_ms", "average"), ("insight_processing_p95_ms", "p95")]:
+            value = activity.get(key)
+            if isinstance(value, (int, float)):
+                output.append(sample("app_autotrader_insight_processing_duration_ms", "Milliseconds spent processing one pushed insight through an AutoTrader cycle.", value, {"stat": stat}))
+                output.append(sample("app_autotrader_stage_latency_ms", "Milliseconds spent in an AutoTrader cycle or recorded order pipeline stage.", value, {"stage": "cycle_total", "stat": stat}))
+        if isinstance(activity.get("insight_processing_samples"), (int, float)):
+            output.append(sample("app_autotrader_insight_processing_samples", "Number of recent pushed insight processing cycles included in the duration summary.", activity["insight_processing_samples"]))
+            output.append(sample("app_autotrader_stage_latency_samples", "Number of recent insight cycles included in the cycle total duration summary.", activity["insight_processing_samples"], {"stage": "cycle_total"}))
+        for phase, field in (("wait", "cycle_lock_wait_ms"), ("hold", "cycle_lock_hold_ms")):
+            worker_summaries = activity.get(field, {})
+            if not isinstance(worker_summaries, dict):
+                continue
+            for worker, summary in worker_summaries.items():
+                if not isinstance(summary, dict):
+                    continue
+                for stat in ("latest", "average", "p95"):
+                    value = summary.get(f"{stat}_ms")
+                    if isinstance(value, (int, float)):
+                        output.append(sample("app_autotrader_cycle_lock_duration_ms", "Milliseconds waiting for or holding the shared AutoTrader cycle lock.", value, {"phase": phase, "worker": worker, "stat": stat}))
+                if isinstance(summary.get("samples"), (int, float)):
+                    output.append(sample("app_autotrader_cycle_lock_duration_samples", "Recent lock duration observations for an AutoTrader worker.", summary["samples"], {"phase": phase, "worker": worker}))
         for key, metric, help_text in [
             ("realized_pnl", "app_autotrader_realized_pnl_usd", "Autotrader cumulative realized P and L in USD."),
             ("unrealized_pnl", "app_autotrader_unrealized_pnl_usd", "Autotrader unrealized P and L in USD."),
@@ -121,9 +149,10 @@ def metrics():
         if tick_to_order:
             latencies = sorted(latency for _, latency in tick_to_order)
             p95_index = max(0, (95 * len(latencies) + 99) // 100 - 1)
-            output.append(sample("app_autotrader_tick_to_order_latency_ms", "Milliseconds from signal tick timestamp to autotrader order creation.", latencies[-1], {"stat": "latest"}))
-            output.append(sample("app_autotrader_tick_to_order_latency_ms", "Milliseconds from signal tick timestamp to autotrader order creation.", sum(latencies) / len(latencies), {"stat": "average"}))
-            output.append(sample("app_autotrader_tick_to_order_latency_ms", "Milliseconds from signal tick timestamp to autotrader order creation.", latencies[p95_index], {"stat": "p95"}))
+            event_timestamp = max(timestamp for timestamp, _ in tick_to_order)
+            output.append(sample("app_autotrader_tick_to_order_latency_ms", "Milliseconds from signal tick timestamp to autotrader order creation.", latencies[-1], {"stat": "latest"}, timestamp_ms=event_timestamp))
+            output.append(sample("app_autotrader_tick_to_order_latency_ms", "Milliseconds from signal tick timestamp to autotrader order creation.", sum(latencies) / len(latencies), {"stat": "average"}, timestamp_ms=event_timestamp))
+            output.append(sample("app_autotrader_tick_to_order_latency_ms", "Milliseconds from signal tick timestamp to autotrader order creation.", latencies[p95_index], {"stat": "p95"}, timestamp_ms=event_timestamp))
             output.append(sample("app_autotrader_tick_to_order_samples", "Number of signal orders used in the tick-to-order latency summary.", len(latencies)))
         stage_values = {}
         for order in orders:
@@ -133,9 +162,11 @@ def metrics():
         for stage, samples in stage_values.items():
             values = sorted(value for _, value in samples)
             p95_index = max(0, (95 * len(values) + 99) // 100 - 1)
-            output.append(sample("app_autotrader_stage_latency_ms", "Milliseconds spent in a measured AutoTrader pipeline stage.", values[-1], {"stage": stage, "stat": "latest"}))
-            output.append(sample("app_autotrader_stage_latency_ms", "Milliseconds spent in a measured AutoTrader pipeline stage.", sum(values) / len(values), {"stage": stage, "stat": "average"}))
-            output.append(sample("app_autotrader_stage_latency_ms", "Milliseconds spent in a measured AutoTrader pipeline stage.", values[p95_index], {"stage": stage, "stat": "p95"}))
+            event_timestamp = max(timestamp for timestamp, _ in samples)
+            output.append(sample("app_autotrader_stage_latency_ms", "Milliseconds spent in a measured AutoTrader pipeline stage.", values[-1], {"stage": stage, "stat": "latest"}, timestamp_ms=event_timestamp))
+            output.append(sample("app_autotrader_stage_latency_ms", "Milliseconds spent in a measured AutoTrader pipeline stage.", sum(values) / len(values), {"stage": stage, "stat": "average"}, timestamp_ms=event_timestamp))
+            output.append(sample("app_autotrader_stage_latency_ms", "Milliseconds spent in a measured AutoTrader pipeline stage.", values[p95_index], {"stage": stage, "stat": "p95"}, timestamp_ms=event_timestamp))
+            output.append(sample("app_autotrader_stage_latency_samples", "Number of recent AutoTrader orders with a measurement for this pipeline stage.", len(values), {"stage": stage}, timestamp_ms=event_timestamp))
     except (OSError, URLError, ValueError, TypeError):
         pass
     return "".join(output).encode()

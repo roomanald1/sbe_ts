@@ -13,12 +13,8 @@ if [[ ! -f "$ROOT/monitoring/.env" ]]; then
   echo "Missing monitoring/.env. Copy monitoring/.env.example to monitoring/.env and set a unique Grafana password." >&2
   exit 1
 fi
-if [[ -f "$RUNNER_PID_FILE" ]] && kill -0 "$(cat "$RUNNER_PID_FILE")" 2>/dev/null; then
-  echo "The full app stack is already running (PID $(cat "$RUNNER_PID_FILE"))." >&2
-  exit 1
-fi
-
 mkdir -p "$LOG_DIR"
+./stop-all.sh
 echo "$$" > "$RUNNER_PID_FILE"
 children=()
 cleanup() {

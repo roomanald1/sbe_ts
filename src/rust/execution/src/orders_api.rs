@@ -15,7 +15,7 @@ pub struct MatchResponse { pub reference_price: Option<f64>, pub fills: Vec<Fill
 async fn match_order(Json(r):Json<MatchRequest>)->Result<Json<MatchResponse>,(StatusCode,String)> {
  if !matches!(r.side.as_str(),"buy"|"sell") || !r.quantity.is_finite() || r.quantity<=0.0 {return Err((StatusCode::BAD_REQUEST,"Invalid order match request".into()));}
  let buy=r.side=="buy"; let levels=if buy {&r.book.asks}else{&r.book.bids};
- let mut remaining=r.quantity;let reference=levels.first().map(|l|l.price);let mut fills=Vec::new();
+ let mut remaining=r.quantity;let reference=levels.first().map(|l|l.price);let mut fills=Vec::with_capacity(levels.len());
  for level in levels {
   let crosses=match r.limit_price {Some(limit) if buy=>level.price<=limit,Some(limit)=>level.price>=limit,None=>true};
   if !crosses||remaining<=1e-12{continue;}

@@ -20,7 +20,10 @@ pub async fn signal_events() -> Result<ByteStream> {
     Ok(Box::pin(source.map(move |item| {
         let _client = &client;
         item.map_err(anyhow::Error::from).and_then(|payload| {
-            payload.data().cloned().ok_or_else(|| anyhow::anyhow!("FeedHandlers returned an empty signal event"))
+            payload
+                .data()
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("FeedHandlers returned an empty signal event"))
         })
     })))
 }

@@ -26,6 +26,7 @@ pub struct VwapState {
 #[derive(Clone, Debug)]
 pub struct VwapScheduler {
     config: VwapConfig,
+    curve_total: f64,
     state: VwapState,
 }
 
@@ -53,6 +54,7 @@ impl VwapScheduler {
         }
         Ok(Self {
             config,
+            curve_total: total,
             state: VwapState {
                 current_bin: 0,
                 executed_qty: 0.0,
@@ -81,7 +83,7 @@ impl VwapScheduler {
             expected_bin_volume * self.config.max_participation_rate
         } else {
             self.config.parent_qty * self.config.historical_vwap_curve[bin]
-                / self.config.historical_vwap_curve.iter().sum::<f64>()
+                / self.curve_total
         };
         let target = planned_bin_qty * elapsed_bin_fraction.clamp(0.0, 1.0);
         let cap = live_bin_volume * self.config.max_participation_rate;
