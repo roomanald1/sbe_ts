@@ -1,6 +1,9 @@
 #[derive(Serialize)]
 struct StatusResponse {
     enabled: bool,
+    research_strategy: String,
+    research_strategies: Vec<String>,
+    generic_signals_enabled: bool,
     max_order_notional: f64,
     daily_notional_limit: f64,
     daily_realized_loss_limit: f64,
@@ -25,6 +28,7 @@ struct StatusResponse {
     gate_hits: Vec<GateHit>,
     symbol_gate_hits: Vec<SymbolGateHit>,
     latest_signal_diagnostic: String,
+    research_strategy_diagnostic: Option<ResearchStrategyDiagnostic>,
 }
 #[derive(Serialize)]
 struct GapReason {
@@ -54,6 +58,12 @@ struct SymbolGateCount {
 #[derive(Clone, Deserialize)]
 struct SettingsRequest {
     max_order_notional: f64,
+    #[serde(default)]
+    research_strategy: Option<ResearchStrategy>,
+    #[serde(default)]
+    research_strategies: Option<Vec<ResearchStrategy>>,
+    #[serde(default)]
+    generic_signals_enabled: Option<bool>,
     daily_notional_limit: f64,
     daily_realized_loss_limit: f64,
     exploration_percent: f64,

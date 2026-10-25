@@ -1,0 +1,4333 @@
+{
+  "universe": [
+    "BTCUSDT",
+    "ETHUSDT",
+    "BNBUSDT",
+    "SOLUSDT"
+  ],
+  "timing": "close-based trigger, next-open execution; open-to-open returns",
+  "cost": "15 bps each entry and exit",
+  "selection": "rank by validation 2023-24; show 2025 and 2026 separately",
+  "results": [
+    {
+      "strategy": "SOLUSDT_dip200_tp100_time14",
+      "entry_dip_bps": 200,
+      "take_profit_bps": 100,
+      "max_hold_days": 14,
+      "cost_bps_per_side": 15,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": -53.49002438448306,
+          "sharpe": 0.3188205042687129,
+          "max_dd_pct": -95.54558284631098
+        },
+        "validation_2023_2024": {
+          "return_pct": 308.4741871597621,
+          "sharpe": 1.4044579511681246,
+          "max_dd_pct": -35.58964506964318
+        },
+        "selection_2025": {
+          "return_pct": -63.5899778832852,
+          "sharpe": -1.1971642139325989,
+          "max_dd_pct": -65.78690447486169
+        },
+        "holdout_2026": {
+          "return_pct": -18.42758810140438,
+          "sharpe": -0.24460196288900699,
+          "max_dd_pct": -46.94362936230482
+        }
+      },
+      "turnovers": 534
+    },
+    {
+      "strategy": "SOLUSDT_dip100_tp100_time14",
+      "entry_dip_bps": 100,
+      "take_profit_bps": 100,
+      "max_hold_days": 14,
+      "cost_bps_per_side": 15,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": -45.79482860855902,
+          "sharpe": 0.39514823660072956,
+          "max_dd_pct": -95.5451214046862
+        },
+        "validation_2023_2024": {
+          "return_pct": 269.8238773209841,
+          "sharpe": 1.3119258155689553,
+          "max_dd_pct": -39.426732054770255
+        },
+        "selection_2025": {
+          "return_pct": -42.9803085910138,
+          "sharpe": -0.42996580427335107,
+          "max_dd_pct": -49.76569649301413
+        },
+        "holdout_2026": {
+          "return_pct": -31.959427691805654,
+          "sharpe": -0.6332445730201949,
+          "max_dd_pct": -55.52336055557525
+        }
+      },
+      "turnovers": 596
+    },
+    {
+      "strategy": "SOLUSDT_dip100_tp200_time14",
+      "entry_dip_bps": 100,
+      "take_profit_bps": 200,
+      "max_hold_days": 14,
+      "cost_bps_per_side": 15,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": -54.74990510636102,
+          "sharpe": 0.338458605383757,
+          "max_dd_pct": -95.1303488092004
+        },
+        "validation_2023_2024": {
+          "return_pct": 159.05677482945322,
+          "sharpe": 1.0335991046169972,
+          "max_dd_pct": -44.35528683086941
+        },
+        "selection_2025": {
+          "return_pct": -44.67682647284094,
+          "sharpe": -0.4481826930910061,
+          "max_dd_pct": -52.52209463164381
+        },
+        "holdout_2026": {
+          "return_pct": -30.22873469616698,
+          "sharpe": -0.5511612232144144,
+          "max_dd_pct": -50.67672245938132
+        }
+      },
+      "turnovers": 534
+    },
+    {
+      "strategy": "BTCUSDT_dip200_tp200_time14",
+      "entry_dip_bps": 200,
+      "take_profit_bps": 200,
+      "max_hold_days": 14,
+      "cost_bps_per_side": 15,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": -53.3220828252599,
+          "sharpe": -0.2692338680044021,
+          "max_dd_pct": -67.59113517361293
+        },
+        "validation_2023_2024": {
+          "return_pct": 151.93667091690938,
+          "sharpe": 1.5518713074890582,
+          "max_dd_pct": -21.056807916307562
+        },
+        "selection_2025": {
+          "return_pct": -12.966153751993515,
+          "sharpe": -0.2541522968556014,
+          "max_dd_pct": -30.422514559016477
+        },
+        "holdout_2026": {
+          "return_pct": -0.7922956086127031,
+          "sharpe": 0.15249281451159508,
+          "max_dd_pct": -30.94254747647154
+        }
+      },
+      "turnovers": 322
+    },
+    {
+      "strategy": "SOLUSDT_dip300_tp300_time14",
+      "entry_dip_bps": 300,
+      "take_profit_bps": 300,
+      "max_hold_days": 14,
+      "cost_bps_per_side": 15,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": -36.66408291817634,
+          "sharpe": 0.44093812681516154,
+          "max_dd_pct": -96.72478740096838
+        },
+        "validation_2023_2024": {
+          "return_pct": 141.72224002718835,
+          "sharpe": 1.0185845956827242,
+          "max_dd_pct": -38.46893912871594
+        },
+        "selection_2025": {
+          "return_pct": -53.113164975379476,
+          "sharpe": -0.7531832181988869,
+          "max_dd_pct": -56.64637084862266
+        },
+        "holdout_2026": {
+          "return_pct": -18.162106901802822,
+          "sharpe": -0.28429132701475773,
+          "max_dd_pct": -41.76783327018535
+        }
+      },
+      "turnovers": 394
+    },
+    {
+      "strategy": "SOLUSDT_dip300_tp100_time3",
+      "entry_dip_bps": 300,
+      "take_profit_bps": 100,
+      "max_hold_days": 3,
+      "cost_bps_per_side": 15,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": -22.344019635302757,
+          "sharpe": 0.3648791151222921,
+          "max_dd_pct": -90.47480389826433
+        },
+        "validation_2023_2024": {
+          "return_pct": 137.5363418059238,
+          "sharpe": 1.168414195885337,
+          "max_dd_pct": -24.544272482266283
+        },
+        "selection_2025": {
+          "return_pct": -8.532390473428785,
+          "sharpe": 0.07609455158707079,
+          "max_dd_pct": -35.35751679102332
+        },
+        "holdout_2026": {
+          "return_pct": -31.972388036144206,
+          "sharpe": -1.1737594928714135,
+          "max_dd_pct": -36.693620292830545
+        }
+      },
+      "turnovers": 708
+    },
+    {
+      "strategy": "SOLUSDT_dip300_tp100_time14",
+      "entry_dip_bps": 300,
+      "take_profit_bps": 100,
+      "max_hold_days": 14,
+      "cost_bps_per_side": 15,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": -43.76926210403296,
+          "sharpe": 0.36489021005570926,
+          "max_dd_pct": -96.07288814599303
+        },
+        "validation_2023_2024": {
+          "return_pct": 133.35085176862748,
+          "sharpe": 1.024256738976808,
+          "max_dd_pct": -36.708925168305875
+        },
+        "selection_2025": {
+          "return_pct": -36.632373823993944,
+          "sharpe": -0.37248458546638086,
+          "max_dd_pct": -40.34644286425846
+        },
+        "holdout_2026": {
+          "return_pct": -33.615700819935725,
+          "sharpe": -0.943011934212256,
+          "max_dd_pct": -47.539225698078646
+        }
+      },
+      "turnovers": 468
+    },
+    {
+      "strategy": "BTCUSDT_dip100_tp300_time14",
+      "entry_dip_bps": 100,
+      "take_profit_bps": 300,
+      "max_hold_days": 14,
+      "cost_bps_per_side": 15,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": -53.95004757684687,
+          "sharpe": -0.23424289152128033,
+          "max_dd_pct": -77.01625247868918
+        },
+        "validation_2023_2024": {
+          "return_pct": 131.7026691690994,
+          "sharpe": 1.2500323267164177,
+          "max_dd_pct": -29.974411493215413
+        },
+        "selection_2025": {
+          "return_pct": -11.855725657025495,
+          "sharpe": -0.1849253639472774,
+          "max_dd_pct": -33.57155856186399
+        },
+        "holdout_2026": {
+          "return_pct": -19.959279755235805,
+          "sharpe": -0.5118588967960321,
+          "max_dd_pct": -40.37520065083936
+        }
+      },
+      "turnovers": 381
+    },
+    {
+      "strategy": "SOLUSDT_dip200_tp200_time14",
+      "entry_dip_bps": 200,
+      "take_profit_bps": 200,
+      "max_hold_days": 14,
+      "cost_bps_per_side": 15,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": -63.706942116572975,
+          "sharpe": 0.23485188248903843,
+          "max_dd_pct": -95.86899573543575
+        },
+        "validation_2023_2024": {
+          "return_pct": 117.38524185841376,
+          "sharpe": 0.9095069288497195,
+          "max_dd_pct": -42.36261430364401
+        },
+        "selection_2025": {
+          "return_pct": -54.61205016981214,
+          "sharpe": -0.7571895881144863,
+          "max_dd_pct": -59.298210200560206
+        },
+        "holdout_2026": {
+          "return_pct": -11.410165322607124,
+          "sharpe": -0.028750586623634704,
+          "max_dd_pct": -39.853960191401896
+        }
+      },
+      "turnovers": 486
+    },
+    {
+      "strategy": "BNBUSDT_dip200_tp100_time14",
+      "entry_dip_bps": 200,
+      "take_profit_bps": 100,
+      "max_hold_days": 14,
+      "cost_bps_per_side": 15,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": 177.1584483506645,
+          "sharpe": 0.9389927530804958,
+          "max_dd_pct": -56.312111663028496
+        },
+        "validation_2023_2024": {
+          "return_pct": 116.84674667183019,
+          "sharpe": 1.3818985935317978,
+          "max_dd_pct": -43.59423751491669
+        },
+        "selection_2025": {
+          "return_pct": 23.03468459130975,
+          "sharpe": 0.7424354804801732,
+          "max_dd_pct": -22.94534178962434
+        },
+        "holdout_2026": {
+          "return_pct": -29.787484232914863,
+          "sharpe": -1.211234311987953,
+          "max_dd_pct": -38.444714909131946
+        }
+      },
+      "turnovers": 444
+    },
+    {
+      "strategy": "BTCUSDT_dip300_tp100_time14",
+      "entry_dip_bps": 300,
+      "take_profit_bps": 100,
+      "max_hold_days": 14,
+      "cost_bps_per_side": 15,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": -31.950110736597935,
+          "sharpe": -0.06508983930362264,
+          "max_dd_pct": -59.114795113907036
+        },
+        "validation_2023_2024": {
+          "return_pct": 115.19536575528306,
+          "sharpe": 1.5420031151992974,
+          "max_dd_pct": -13.572501189125518
+        },
+        "selection_2025": {
+          "return_pct": 2.642344586751788,
+          "sharpe": 0.23039632466594312,
+          "max_dd_pct": -15.804584479351181
+        },
+        "holdout_2026": {
+          "return_pct": -21.19002891815921,
+          "sharpe": -0.8418133073426997,
+          "max_dd_pct": -28.68125712966929
+        }
+      },
+      "turnovers": 252
+    },
+    {
+      "strategy": "BTCUSDT_dip200_tp300_time14",
+      "entry_dip_bps": 200,
+      "take_profit_bps": 300,
+      "max_hold_days": 14,
+      "cost_bps_per_side": 15,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": -45.63156778099305,
+          "sharpe": -0.1475106341597727,
+          "max_dd_pct": -66.51961983680332
+        },
+        "validation_2023_2024": {
+          "return_pct": 115.0587503516026,
+          "sharpe": 1.294049504900693,
+          "max_dd_pct": -21.056807916307562
+        },
+        "selection_2025": {
+          "return_pct": -10.373211341192768,
+          "sharpe": -0.1642263625502957,
+          "max_dd_pct": -28.349638079184558
+        },
+        "holdout_2026": {
+          "return_pct": -7.987715594022504,
+          "sharpe": -0.10311487211838184,
+          "max_dd_pct": -28.517818154972442
+        }
+      },
+      "turnovers": 303
+    },
+    {
+      "strategy": "BTCUSDT_dip200_tp100_time14",
+      "entry_dip_bps": 200,
+      "take_profit_bps": 100,
+      "max_hold_days": 14,
+      "cost_bps_per_side": 15,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": -53.48574944681801,
+          "sharpe": -0.31018167431984695,
+          "max_dd_pct": -73.42192085850382
+        },
+        "validation_2023_2024": {
+          "return_pct": 109.38627620650743,
+          "sharpe": 1.3126307670306014,
+          "max_dd_pct": -23.207675805597617
+        },
+        "selection_2025": {
+          "return_pct": -1.7797016212702133,
+          "sharpe": 0.09882896143612657,
+          "max_dd_pct": -17.635296616596463
+        },
+        "holdout_2026": {
+          "return_pct": -8.489300344529294,
+          "sharpe": -0.14282741488008066,
+          "max_dd_pct": -34.39098268374674
+        }
+      },
+      "turnovers": 360
+    },
+    {
+      "strategy": "SOLUSDT_dip500_tp100_time14",
+      "entry_dip_bps": 500,
+      "take_profit_bps": 100,
+      "max_hold_days": 14,
+      "cost_bps_per_side": 15,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": 17.233348357484534,
+          "sharpe": 0.6031832445424092,
+          "max_dd_pct": -86.18853436886346
+        },
+        "validation_2023_2024": {
+          "return_pct": 108.93946139736386,
+          "sharpe": 1.0564601512114902,
+          "max_dd_pct": -28.28309831096677
+        },
+        "selection_2025": {
+          "return_pct": -37.80760041293656,
+          "sharpe": -0.4791920116030272,
+          "max_dd_pct": -46.526945260548615
+        },
+        "holdout_2026": {
+          "return_pct": -29.535642935306072,
+          "sharpe": -1.0668645115837767,
+          "max_dd_pct": -46.119707639557184
+        }
+      },
+      "turnovers": 308
+    },
+    {
+      "strategy": "BTCUSDT_dip100_tp200_time14",
+      "entry_dip_bps": 100,
+      "take_profit_bps": 200,
+      "max_hold_days": 14,
+      "cost_bps_per_side": 15,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": -55.19621326435213,
+          "sharpe": -0.2544357181462349,
+          "max_dd_pct": -76.009498033871
+        },
+        "validation_2023_2024": {
+          "return_pct": 104.33563325317495,
+          "sharpe": 1.113334997747551,
+          "max_dd_pct": -30.322479209848318
+        },
+        "selection_2025": {
+          "return_pct": -24.424416374255564,
+          "sharpe": -0.6543490245069215,
+          "max_dd_pct": -35.22111041251388
+        },
+        "holdout_2026": {
+          "return_pct": -21.436511928399295,
+          "sharpe": -0.5812324149555345,
+          "max_dd_pct": -40.93127940379687
+        }
+      },
+      "turnovers": 404
+    },
+    {
+      "strategy": "SOLUSDT_dip100_tp300_time14",
+      "entry_dip_bps": 100,
+      "take_profit_bps": 300,
+      "max_hold_days": 14,
+      "cost_bps_per_side": 15,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": -0.5178200424605706,
+          "sharpe": 0.6246923008514489,
+          "max_dd_pct": -95.78351706764043
+        },
+        "validation_2023_2024": {
+          "return_pct": 103.20350314689803,
+          "sharpe": 0.8545347051443611,
+          "max_dd_pct": -38.39480867110399
+        },
+        "selection_2025": {
+          "return_pct": -28.500079516347142,
+          "sharpe": -0.06375590546493147,
+          "max_dd_pct": -49.32128947562611
+        },
+        "holdout_2026": {
+          "return_pct": -32.31300824811684,
+          "sharpe": -0.618838107679912,
+          "max_dd_pct": -57.18771139080475
+        }
+      },
+      "turnovers": 489
+    },
+    {
+      "strategy": "SOLUSDT_dip300_tp200_time3",
+      "entry_dip_bps": 300,
+      "take_profit_bps": 200,
+      "max_hold_days": 3,
+      "cost_bps_per_side": 15,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": -40.398383421646756,
+          "sharpe": 0.2344345602296619,
+          "max_dd_pct": -90.96927588575076
+        },
+        "validation_2023_2024": {
+          "return_pct": 102.68845137364605,
+          "sharpe": 0.9828612993180877,
+          "max_dd_pct": -28.649720099742115
+        },
+        "selection_2025": {
+          "return_pct": 8.057025766979976,
+          "sharpe": 0.41436077386360337,
+          "max_dd_pct": -35.185475001490374
+        },
+        "holdout_2026": {
+          "return_pct": -18.460105404801862,
+          "sharpe": -0.4553226537165955,
+          "max_dd_pct": -34.77995211567063
+        }
+      },
+      "turnovers": 688
+    },
+    {
+      "strategy": "BTCUSDT_dip300_tp300_time7",
+      "entry_dip_bps": 300,
+      "take_profit_bps": 300,
+      "max_hold_days": 7,
+      "cost_bps_per_side": 15,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": 60.36749369446481,
+          "sharpe": 0.654088599499604,
+          "max_dd_pct": -46.26809367497001
+        },
+        "validation_2023_2024": {
+          "return_pct": 100.0670561458306,
+          "sharpe": 1.4870734717522498,
+          "max_dd_pct": -26.91275850138455
+        },
+        "selection_2025": {
+          "return_pct": -2.8519317601351624,
+          "sharpe": 0.02100548896877595,
+          "max_dd_pct": -18.02148992879078
+        },
+        "holdout_2026": {
+          "return_pct": -23.47725051927856,
+          "sharpe": -1.1163132490064818,
+          "max_dd_pct": -31.430079084980566
+        }
+      },
+      "turnovers": 292
+    },
+    {
+      "strategy": "BNBUSDT_dip300_tp300_time14",
+      "entry_dip_bps": 300,
+      "take_profit_bps": 300,
+      "max_hold_days": 14,
+      "cost_bps_per_side": 15,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": 188.31063683087726,
+          "sharpe": 0.9601991920691865,
+          "max_dd_pct": -56.73486998224391
+        },
+        "validation_2023_2024": {
+          "return_pct": 100.05352508028,
+          "sharpe": 1.2217218432678565,
+          "max_dd_pct": -24.79839888770641
+        },
+        "selection_2025": {
+          "return_pct": 21.763574177629753,
+          "sharpe": 0.7244732067070134,
+          "max_dd_pct": -23.80730161298684
+        },
+        "holdout_2026": {
+          "return_pct": -23.094212303843907,
+          "sharpe": -1.0227471878515704,
+          "max_dd_pct": -30.65814933415487
+        }
+      },
+      "turnovers": 285
+    },
+    {
+      "strategy": "SOLUSDT_dip500_tp300_time7",
+      "entry_dip_bps": 500,
+      "take_profit_bps": 300,
+      "max_hold_days": 7,
+      "cost_bps_per_side": 15,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": -74.33405176813581,
+          "sharpe": -0.04705752326837676,
+          "max_dd_pct": -93.35746251673915
+        },
+        "validation_2023_2024": {
+          "return_pct": 100.04363533045763,
+          "sharpe": 0.9810953679229977,
+          "max_dd_pct": -36.15399098610986
+        },
+        "selection_2025": {
+          "return_pct": -29.829840687157205,
+          "sharpe": -0.5773147626127608,
+          "max_dd_pct": -44.13349438729922
+        },
+        "holdout_2026": {
+          "return_pct": -40.06144032684239,
+          "sharpe": -1.7542232729243528,
+          "max_dd_pct": -44.25587765240524
+        }
+      },
+      "turnovers": 322
+    },
+    {
+      "strategy": "BTCUSDT_dip300_tp200_time14",
+      "entry_dip_bps": 300,
+      "take_profit_bps": 200,
+      "max_hold_days": 14,
+      "cost_bps_per_side": 15,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": -33.36831362312302,
+          "sharpe": -0.04841888367031978,
+          "max_dd_pct": -62.80255895749146
+        },
+        "validation_2023_2024": {
+          "return_pct": 99.39833549058577,
+          "sharpe": 1.368215134370569,
+          "max_dd_pct": -16.25154563585065
+        },
+        "selection_2025": {
+          "return_pct": 2.1674948389269533,
+          "sharpe": 0.2152240228273921,
+          "max_dd_pct": -21.222249663889492
+        },
+        "holdout_2026": {
+          "return_pct": -18.021078910524835,
+          "sharpe": -0.6215512348173396,
+          "max_dd_pct": -30.133618086004375
+        }
+      },
+      "turnovers": 238
+    },
+    {
+      "strategy": "ETHUSDT_dip100_tp300_time14",
+      "entry_dip_bps": 100,
+      "take_profit_bps": 300,
+      "max_hold_days": 14,
+      "cost_bps_per_side": 15,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": -2.793659240290469,
+          "sharpe": 0.3944139059750446,
+          "max_dd_pct": -76.6977871585682
+        },
+        "validation_2023_2024": {
+          "return_pct": 98.38659127268849,
+          "sharpe": 0.9399702413030347,
+          "max_dd_pct": -33.44057768218145
+        },
+        "selection_2025": {
+          "return_pct": -27.68521877153369,
+          "sharpe": -0.15674479062248425,
+          "max_dd_pct": -45.22287438244912
+        },
+        "holdout_2026": {
+          "return_pct": -28.803733382206076,
+          "sharpe": -0.5521124153099074,
+          "max_dd_pct": -44.51065575443249
+        }
+      },
+      "turnovers": 449
+    },
+    {
+      "strategy": "SOLUSDT_dip100_tp100_time3",
+      "entry_dip_bps": 100,
+      "take_profit_bps": 100,
+      "max_hold_days": 3,
+      "cost_bps_per_side": 15,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": 49.58768468987533,
+          "sharpe": 0.6699761612334589,
+          "max_dd_pct": -87.30446658278991
+        },
+        "validation_2023_2024": {
+          "return_pct": 97.49486942057908,
+          "sharpe": 0.8808420486729023,
+          "max_dd_pct": -45.51825206476195
+        },
+        "selection_2025": {
+          "return_pct": -46.59464392242613,
+          "sharpe": -0.7114467786763845,
+          "max_dd_pct": -50.68310499280451
+        },
+        "holdout_2026": {
+          "return_pct": -27.71037172373201,
+          "sharpe": -0.6536388584492803,
+          "max_dd_pct": -46.81409691594357
+        }
+      },
+      "turnovers": 1010
+    },
+    {
+      "strategy": "SOLUSDT_dip200_tp100_time3",
+      "entry_dip_bps": 200,
+      "take_profit_bps": 100,
+      "max_hold_days": 3,
+      "cost_bps_per_side": 15,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": -15.771865922088068,
+          "sharpe": 0.4182375310305636,
+          "max_dd_pct": -88.32891520441221
+        },
+        "validation_2023_2024": {
+          "return_pct": 95.68541802821464,
+          "sharpe": 0.898754059357706,
+          "max_dd_pct": -29.318863936207194
+        },
+        "selection_2025": {
+          "return_pct": -55.67344062821115,
+          "sharpe": -1.0928129043318255,
+          "max_dd_pct": -59.15604750058956
+        },
+        "holdout_2026": {
+          "return_pct": -26.424165677028277,
+          "sharpe": -0.6718623772764772,
+          "max_dd_pct": -45.61998454409271
+        }
+      },
+      "turnovers": 868
+    },
+    {
+      "strategy": "BNBUSDT_dip300_tp200_time14",
+      "entry_dip_bps": 300,
+      "take_profit_bps": 200,
+      "max_hold_days": 14,
+      "cost_bps_per_side": 15,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": 331.7390110527497,
+          "sharpe": 1.1842698089175054,
+          "max_dd_pct": -56.73486998224391
+        },
+        "validation_2023_2024": {
+          "return_pct": 95.61722196760456,
+          "sharpe": 1.2437364525321242,
+          "max_dd_pct": -24.79839888770641
+        },
+        "selection_2025": {
+          "return_pct": 10.83410099565425,
+          "sharpe": 0.46872520373494553,
+          "max_dd_pct": -23.807301612986866
+        },
+        "holdout_2026": {
+          "return_pct": -24.701790880530062,
+          "sharpe": -1.1633690215164334,
+          "max_dd_pct": -33.81505686973711
+        }
+      },
+      "turnovers": 312
+    },
+    {
+      "strategy": "ETHUSDT_dip200_tp300_time14",
+      "entry_dip_bps": 200,
+      "take_profit_bps": 300,
+      "max_hold_days": 14,
+      "cost_bps_per_side": 15,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": 16.074219263394873,
+          "sharpe": 0.466823508256798,
+          "max_dd_pct": -71.08388142563221
+        },
+        "validation_2023_2024": {
+          "return_pct": 95.3338881579537,
+          "sharpe": 0.9610955343056962,
+          "max_dd_pct": -30.923459110752905
+        },
+        "selection_2025": {
+          "return_pct": -30.26649988907254,
+          "sharpe": -0.30452649419391026,
+          "max_dd_pct": -45.044703177210174
+        },
+        "holdout_2026": {
+          "return_pct": -18.262562329300657,
+          "sharpe": -0.252738847116153,
+          "max_dd_pct": -40.08726633885722
+        }
+      },
+      "turnovers": 411
+    },
+    {
+      "strategy": "BNBUSDT_dip300_tp100_time14",
+      "entry_dip_bps": 300,
+      "take_profit_bps": 100,
+      "max_hold_days": 14,
+      "cost_bps_per_side": 15,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": 129.25394753057287,
+          "sharpe": 0.8390567935410338,
+          "max_dd_pct": -55.12109671134853
+        },
+        "validation_2023_2024": {
+          "return_pct": 93.4164622042656,
+          "sharpe": 1.3107294913360725,
+          "max_dd_pct": -24.79839888770643
+        },
+        "selection_2025": {
+          "return_pct": 29.389791860379955,
+          "sharpe": 0.9365084016249311,
+          "max_dd_pct": -23.807301612986887
+        },
+        "holdout_2026": {
+          "return_pct": -27.59655076992328,
+          "sharpe": -1.3533008395619397,
+          "max_dd_pct": -35.45836097838081
+        }
+      },
+      "turnovers": 326
+    },
+    {
+      "strategy": "SOLUSDT_dip500_tp200_time14",
+      "entry_dip_bps": 500,
+      "take_profit_bps": 200,
+      "max_hold_days": 14,
+      "cost_bps_per_side": 15,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": -15.051335976567493,
+          "sharpe": 0.4851225424615542,
+          "max_dd_pct": -89.73489237817353
+        },
+        "validation_2023_2024": {
+          "return_pct": 91.6232784301888,
+          "sharpe": 0.9378968703356393,
+          "max_dd_pct": -28.90088321884201
+        },
+        "selection_2025": {
+          "return_pct": -32.56216429868143,
+          "sharpe": -0.3364464083205067,
+          "max_dd_pct": -43.4641658612288
+        },
+        "holdout_2026": {
+          "return_pct": -22.70101486076872,
+          "sharpe": -0.6512431511981923,
+          "max_dd_pct": -39.93169238300639
+        }
+      },
+      "turnovers": 291
+    },
+    {
+      "strategy": "BNBUSDT_dip200_tp100_time7",
+      "entry_dip_bps": 200,
+      "take_profit_bps": 100,
+      "max_hold_days": 7,
+      "cost_bps_per_side": 15,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": 169.13813425925568,
+          "sharpe": 0.9229375002671995,
+          "max_dd_pct": -62.714504124588274
+        },
+        "validation_2023_2024": {
+          "return_pct": 91.35592974744979,
+          "sharpe": 1.2529789234929618,
+          "max_dd_pct": -30.91676832016178
+        },
+        "selection_2025": {
+          "return_pct": -0.5773875775798576,
+          "sharpe": 0.15291786531985638,
+          "max_dd_pct": -33.82560200474779
+        },
+        "holdout_2026": {
+          "return_pct": -33.304452866100235,
+          "sharpe": -1.503291041309133,
+          "max_dd_pct": -40.77392079227506
+        }
+      },
+      "turnovers": 498
+    },
+    {
+      "strategy": "ETHUSDT_dip200_tp300_time3",
+      "entry_dip_bps": 200,
+      "take_profit_bps": 300,
+      "max_hold_days": 3,
+      "cost_bps_per_side": 15,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": 44.582292760706956,
+          "sharpe": 0.55664759139038,
+          "max_dd_pct": -54.36161808053874
+        },
+        "validation_2023_2024": {
+          "return_pct": 90.57262639107945,
+          "sharpe": 1.0769192192559867,
+          "max_dd_pct": -31.33736750332673
+        },
+        "selection_2025": {
+          "return_pct": -23.044959485851425,
+          "sharpe": -0.34467681426910146,
+          "max_dd_pct": -36.35588772424598
+        },
+        "holdout_2026": {
+          "return_pct": -21.027982163559322,
+          "sharpe": -0.49255295435859253,
+          "max_dd_pct": -39.12692287807599
+        }
+      },
+      "turnovers": 672
+    },
+    {
+      "strategy": "BNBUSDT_dip200_tp200_time14",
+      "entry_dip_bps": 200,
+      "take_profit_bps": 200,
+      "max_hold_days": 14,
+      "cost_bps_per_side": 15,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": 383.7478051311476,
+          "sharpe": 1.230361818437987,
+          "max_dd_pct": -56.73486998224391
+        },
+        "validation_2023_2024": {
+          "return_pct": 89.01666798539982,
+          "sharpe": 1.089661459420335,
+          "max_dd_pct": -43.5942375149167
+        },
+        "selection_2025": {
+          "return_pct": 8.954447409129962,
+          "sharpe": 0.4143381104722452,
+          "max_dd_pct": -26.525372303339743
+        },
+        "holdout_2026": {
+          "return_pct": -27.84474320627348,
+          "sharpe": -0.9612524281365954,
+          "max_dd_pct": -38.68379520723993
+        }
+      },
+      "turnovers": 399
+    },
+    {
+      "strategy": "BTCUSDT_dip300_tp200_time7",
+      "entry_dip_bps": 300,
+      "take_profit_bps": 200,
+      "max_hold_days": 7,
+      "cost_bps_per_side": 15,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": -0.5020794841400611,
+          "sharpe": 0.23048280635159912,
+          "max_dd_pct": -49.44774936570473
+        },
+        "validation_2023_2024": {
+          "return_pct": 88.58033936358585,
+          "sharpe": 1.3877657132982284,
+          "max_dd_pct": -26.751660329681727
+        },
+        "selection_2025": {
+          "return_pct": 14.419405622890057,
+          "sharpe": 0.6693354004140588,
+          "max_dd_pct": -12.483477769426077
+        },
+        "holdout_2026": {
+          "return_pct": -23.740320872737954,
+          "sharpe": -1.1333485660547002,
+          "max_dd_pct": -31.665809158118396
+        }
+      },
+      "turnovers": 298
+    },
+    {
+      "strategy": "SOLUSDT_dip500_tp300_time14",
+      "entry_dip_bps": 500,
+      "take_profit_bps": 300,
+      "max_hold_days": 14,
+      "cost_bps_per_side": 15,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": 4.81704355431658,
+          "sharpe": 0.5726757055143084,
+          "max_dd_pct": -91.22368053949884
+        },
+        "validation_2023_2024": {
+          "return_pct": 88.3850476413504,
+          "sharpe": 0.8851297011046885,
+          "max_dd_pct": -31.223947756961156
+        },
+        "selection_2025": {
+          "return_pct": -32.56216429868143,
+          "sharpe": -0.3364464083205067,
+          "max_dd_pct": -43.4641658612288
+        },
+        "holdout_2026": {
+          "return_pct": -25.37801770135587,
+          "sharpe": -0.6941612239713303,
+          "max_dd_pct": -39.64796894664213
+        }
+      },
+      "turnovers": 271
+    },
+    {
+      "strategy": "BTCUSDT_dip200_tp300_time7",
+      "entry_dip_bps": 200,
+      "take_profit_bps": 300,
+      "max_hold_days": 7,
+      "cost_bps_per_side": 15,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": 19.39535932883125,
+          "sharpe": 0.40742414723814524,
+          "max_dd_pct": -52.4369804577018
+        },
+        "validation_2023_2024": {
+          "return_pct": 86.73234526047263,
+          "sharpe": 1.1641813321411691,
+          "max_dd_pct": -31.257915196243825
+        },
+        "selection_2025": {
+          "return_pct": -10.949292078265849,
+          "sharpe": -0.26676996449132284,
+          "max_dd_pct": -28.05015818100738
+        },
+        "holdout_2026": {
+          "return_pct": -27.22940837248832,
+          "sharpe": -1.1280666017401042,
+          "max_dd_pct": -36.58673277265403
+        }
+      },
+      "turnovers": 402
+    },
+    {
+      "strategy": "SOLUSDT_dip300_tp200_time14",
+      "entry_dip_bps": 300,
+      "take_profit_bps": 200,
+      "max_hold_days": 14,
+      "cost_bps_per_side": 15,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": -62.468356445000325,
+          "sharpe": 0.22160059408288943,
+          "max_dd_pct": -96.60707604260995
+        },
+        "validation_2023_2024": {
+          "return_pct": 86.26314306624255,
+          "sharpe": 0.8139746606545355,
+          "max_dd_pct": -41.85861478763179
+        },
+        "selection_2025": {
+          "return_pct": -40.84858665144884,
+          "sharpe": -0.4348090256095419,
+          "max_dd_pct": -48.41365194700895
+        },
+        "holdout_2026": {
+          "return_pct": -17.48252581536487,
+          "sharpe": -0.2780431686708451,
+          "max_dd_pct": -41.76783327018535
+        }
+      },
+      "turnovers": 428
+    },
+    {
+      "strategy": "SOLUSDT_dip100_tp100_time7",
+      "entry_dip_bps": 100,
+      "take_profit_bps": 100,
+      "max_hold_days": 7,
+      "cost_bps_per_side": 15,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": -58.32557858039258,
+          "sharpe": 0.2527291812044149,
+          "max_dd_pct": -92.99560772583905
+        },
+        "validation_2023_2024": {
+          "return_pct": 83.37650554060707,
+          "sharpe": 0.7978488814595139,
+          "max_dd_pct": -58.23575354846964
+        },
+        "selection_2025": {
+          "return_pct": -46.95564169767666,
+          "sharpe": -0.6038392632429591,
+          "max_dd_pct": -52.53911610917292
+        },
+        "holdout_2026": {
+          "return_pct": -41.932295947164036,
+          "sharpe": -1.3008736657932263,
+          "max_dd_pct": -54.937002339739706
+        }
+      },
+      "turnovers": 778
+    },
+    {
+      "strategy": "BTCUSDT_dip300_tp300_time14",
+      "entry_dip_bps": 300,
+      "take_profit_bps": 300,
+      "max_hold_days": 14,
+      "cost_bps_per_side": 15,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": -32.34888258965947,
+          "sharpe": -0.02792767231378061,
+          "max_dd_pct": -62.56266918964237
+        },
+        "validation_2023_2024": {
+          "return_pct": 82.72999854321574,
+          "sharpe": 1.188773981771279,
+          "max_dd_pct": -22.01732447148963
+        },
+        "selection_2025": {
+          "return_pct": -11.235707068784585,
+          "sharpe": -0.26715487972196356,
+          "max_dd_pct": -28.38612883112367
+        },
+        "holdout_2026": {
+          "return_pct": -17.73827908768213,
+          "sharpe": -0.607614051594573,
+          "max_dd_pct": -29.89260246680181
+        }
+      },
+      "turnovers": 228
+    },
+    {
+      "strategy": "SOLUSDT_dip300_tp300_time3",
+      "entry_dip_bps": 300,
+      "take_profit_bps": 300,
+      "max_hold_days": 3,
+      "cost_bps_per_side": 15,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": -58.07968961168518,
+          "sharpe": 0.09112229175947165,
+          "max_dd_pct": -89.69142047313532
+        },
+        "validation_2023_2024": {
+          "return_pct": 82.31819729870173,
+          "sharpe": 0.8804174785644663,
+          "max_dd_pct": -31.234604465029804
+        },
+        "selection_2025": {
+          "return_pct": 0.3839160141233089,
+          "sharpe": 0.2841059772174517,
+          "max_dd_pct": -35.239224112498555
+        },
+        "holdout_2026": {
+          "return_pct": -17.640007833880645,
+          "sharpe": -0.4228095176227451,
+          "max_dd_pct": -34.77995211567063
+        }
+      },
+      "turnovers": 670
+    },
+    {
+      "strategy": "BTCUSDT_dip200_tp200_time7",
+      "entry_dip_bps": 200,
+      "take_profit_bps": 200,
+      "max_hold_days": 7,
+      "cost_bps_per_side": 15,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": -21.831258670464127,
+          "sharpe": 0.060473564200148676,
+          "max_dd_pct": -56.83894462135854
+        },
+        "validation_2023_2024": {
+          "return_pct": 82.14361901066705,
+          "sharpe": 1.1335939110572915,
+          "max_dd_pct": -28.99997624788916
+        },
+        "selection_2025": {
+          "return_pct": -8.712894417321204,
+          "sharpe": -0.18409405939591011,
+          "max_dd_pct": -26.24322748158211
+        },
+        "holdout_2026": {
+          "return_pct": -25.56958270234069,
+          "sharpe": -1.029814215795176,
+          "max_dd_pct": -37.868278606207404
+        }
+      },
+      "turnovers": 416
+    },
+    {
+      "strategy": "SOLUSDT_dip200_tp300_time14",
+      "entry_dip_bps": 200,
+      "take_profit_bps": 300,
+      "max_hold_days": 14,
+      "cost_bps_per_side": 15,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": -31.552585684246925,
+          "sharpe": 0.4847767867975396,
+          "max_dd_pct": -95.84584216449052
+        },
+        "validation_2023_2024": {
+          "return_pct": 80.3491682865377,
+          "sharpe": 0.7717266831132283,
+          "max_dd_pct": -41.09107762687878
+        },
+        "selection_2025": {
+          "return_pct": -53.11705164534229,
+          "sharpe": -0.7127669708785159,
+          "max_dd_pct": -57.95756547170371
+        },
+        "holdout_2026": {
+          "return_pct": -24.643749392362622,
+          "sharpe": -0.44015389612157413,
+          "max_dd_pct": -46.28128982882127
+        }
+      },
+      "turnovers": 447
+    },
+    {
+      "strategy": "SOLUSDT_dip500_tp100_time7",
+      "entry_dip_bps": 500,
+      "take_profit_bps": 100,
+      "max_hold_days": 7,
+      "cost_bps_per_side": 15,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": -62.68275420325469,
+          "sharpe": 0.08004861460189412,
+          "max_dd_pct": -85.7962863314126
+        },
+        "validation_2023_2024": {
+          "return_pct": 79.07488728928085,
+          "sharpe": 0.9273897603868102,
+          "max_dd_pct": -23.95748580185102
+        },
+        "selection_2025": {
+          "return_pct": -27.71543454826326,
+          "sharpe": -0.5784162338884229,
+          "max_dd_pct": -39.43450236088718
+        },
+        "holdout_2026": {
+          "return_pct": -41.06878730304378,
+          "sharpe": -2.153281350323628,
+          "max_dd_pct": -48.9997830399348
+        }
+      },
+      "turnovers": 360
+    },
+    {
+      "strategy": "BTCUSDT_dip300_tp300_time3",
+      "entry_dip_bps": 300,
+      "take_profit_bps": 300,
+      "max_hold_days": 3,
+      "cost_bps_per_side": 15,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": 62.252974566355036,
+          "sharpe": 0.6990379756711123,
+          "max_dd_pct": -31.278627553247908
+        },
+        "validation_2023_2024": {
+          "return_pct": 75.8202151908238,
+          "sharpe": 1.5155429639249964,
+          "max_dd_pct": -17.253118185556595
+        },
+        "selection_2025": {
+          "return_pct": 5.51714037058828,
+          "sharpe": 0.37313819846549623,
+          "max_dd_pct": -14.257831493907847
+        },
+        "holdout_2026": {
+          "return_pct": -15.006523916692005,
+          "sharpe": -0.5896635176575608,
+          "max_dd_pct": -24.927956546679898
+        }
+      },
+      "turnovers": 348
+    },
+    {
+      "strategy": "BTCUSDT_dip100_tp100_time14",
+      "entry_dip_bps": 100,
+      "take_profit_bps": 100,
+      "max_hold_days": 14,
+      "cost_bps_per_side": 15,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": -53.26493638168286,
+          "sharpe": -0.24714123872075555,
+          "max_dd_pct": -71.56473890893496
+        },
+        "validation_2023_2024": {
+          "return_pct": 74.65301916142988,
+          "sharpe": 0.949969245774731,
+          "max_dd_pct": -30.322479209848307
+        },
+        "selection_2025": {
+          "return_pct": -12.84922859387584,
+          "sharpe": -0.2213008235341099,
+          "max_dd_pct": -31.665422948367617
+        },
+        "holdout_2026": {
+          "return_pct": -28.07078435746442,
+          "sharpe": -0.9018690592082583,
+          "max_dd_pct": -42.29420385635506
+        }
+      },
+      "turnovers": 484
+    },
+    {
+      "strategy": "SOLUSDT_dip100_tp200_time3",
+      "entry_dip_bps": 100,
+      "take_profit_bps": 200,
+      "max_hold_days": 3,
+      "cost_bps_per_side": 15,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": 13.973405537259564,
+          "sharpe": 0.5655186823490065,
+          "max_dd_pct": -86.08420284101034
+        },
+        "validation_2023_2024": {
+          "return_pct": 73.78055746745152,
+          "sharpe": 0.7642473971611594,
+          "max_dd_pct": -44.09829204539019
+        },
+        "selection_2025": {
+          "return_pct": -42.40197067633995,
+          "sharpe": -0.5699916892500837,
+          "max_dd_pct": -47.544791757199654
+        },
+        "holdout_2026": {
+          "return_pct": -18.771348167724668,
+          "sharpe": -0.3076998371080053,
+          "max_dd_pct": -46.34928505666932
+        }
+      },
+      "turnovers": 968
+    },
+    {
+      "strategy": "BTCUSDT_dip300_tp200_time3",
+      "entry_dip_bps": 300,
+      "take_profit_bps": 200,
+      "max_hold_days": 3,
+      "cost_bps_per_side": 15,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": 26.800428745047157,
+          "sharpe": 0.4494283650633534,
+          "max_dd_pct": -30.813699486961752
+        },
+        "validation_2023_2024": {
+          "return_pct": 73.33540472190249,
+          "sharpe": 1.4817401286005085,
+          "max_dd_pct": -17.118274604048977
+        },
+        "selection_2025": {
+          "return_pct": 4.256138893101302,
+          "sharpe": 0.31140796549690036,
+          "max_dd_pct": -14.257831493907847
+        },
+        "holdout_2026": {
+          "return_pct": -15.006523916692005,
+          "sharpe": -0.5896635176575608,
+          "max_dd_pct": -24.927956546679898
+        }
+      },
+      "turnovers": 350
+    },
+    {
+      "strategy": "ETHUSDT_dip100_tp200_time14",
+      "entry_dip_bps": 100,
+      "take_profit_bps": 200,
+      "max_hold_days": 14,
+      "cost_bps_per_side": 15,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": -19.20965237720592,
+          "sharpe": 0.2962716824042341,
+          "max_dd_pct": -76.52573645655858
+        },
+        "validation_2023_2024": {
+          "return_pct": 71.83268770316526,
+          "sharpe": 0.7999022414805578,
+          "max_dd_pct": -31.970897845751878
+        },
+        "selection_2025": {
+          "return_pct": -27.36094681833888,
+          "sharpe": -0.1700118312174229,
+          "max_dd_pct": -46.29444816098906
+        },
+        "holdout_2026": {
+          "return_pct": -26.7954550261435,
+          "sharpe": -0.504068352296948,
+          "max_dd_pct": -48.64313670317226
+        }
+      },
+      "turnovers": 492
+    },
+    {
+      "strategy": "BTCUSDT_dip200_tp300_time3",
+      "entry_dip_bps": 200,
+      "take_profit_bps": 300,
+      "max_hold_days": 3,
+      "cost_bps_per_side": 15,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": 10.30995247150306,
+          "sharpe": 0.3217475542384322,
+          "max_dd_pct": -40.503738141738786
+        },
+        "validation_2023_2024": {
+          "return_pct": 71.68289645985546,
+          "sharpe": 1.226634728739729,
+          "max_dd_pct": -23.44390357086531
+        },
+        "selection_2025": {
+          "return_pct": -19.13403721600375,
+          "sharpe": -0.7308578052329743,
+          "max_dd_pct": -28.98353910910515
+        },
+        "holdout_2026": {
+          "return_pct": -3.1974291866473825,
+          "sharpe": 0.023781840117755693,
+          "max_dd_pct": -24.919898096530336
+        }
+      },
+      "turnovers": 528
+    },
+    {
+      "strategy": "BTCUSDT_dip200_tp200_time3",
+      "entry_dip_bps": 200,
+      "take_profit_bps": 200,
+      "max_hold_days": 3,
+      "cost_bps_per_side": 15,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": -20.503964406703634,
+          "sharpe": 0.013917413893062973,
+          "max_dd_pct": -43.21683868987887
+        },
+        "validation_2023_2024": {
+          "return_pct": 70.22246819462995,
+          "sharpe": 1.2153677630046829,
+          "max_dd_pct": -23.44390357086531
+        },
+        "selection_2025": {
+          "return_pct": -20.10044038226557,
+          "sharpe": -0.7809724489382749,
+          "max_dd_pct": -28.983539109105138
+        },
+        "holdout_2026": {
+          "return_pct": -6.439622195788175,
+          "sharpe": -0.11747117517612285,
+          "max_dd_pct": -24.849281686779733
+        }
+      },
+      "turnovers": 532
+    },
+    {
+      "strategy": "BNBUSDT_dip200_tp300_time14",
+      "entry_dip_bps": 200,
+      "take_profit_bps": 300,
+      "max_hold_days": 14,
+      "cost_bps_per_side": 15,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": 164.66087157080963,
+          "sharpe": 0.9102475657007941,
+          "max_dd_pct": -61.875777682120955
+        },
+        "validation_2023_2024": {
+          "return_pct": 66.68939544072887,
+          "sharpe": 0.8940899319063625,
+          "max_dd_pct": -43.04464904686716
+        },
+        "selection_2025": {
+          "return_pct": 0.886471758195162,
+          "sharpe": 0.2211970221085435,
+          "max_dd_pct": -34.97667286581084
+        },
+        "holdout_2026": {
+          "return_pct": -19.699493882640017,
+          "sharpe": -0.599398383516531,
+          "max_dd_pct": -33.4601397547
+        }
+      },
+      "turnovers": 353
+    },
+    {
+      "strategy": "ETHUSDT_dip300_tp300_time14",
+      "entry_dip_bps": 300,
+      "take_profit_bps": 300,
+      "max_hold_days": 14,
+      "cost_bps_per_side": 15,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": 91.97752793155476,
+          "sharpe": 0.7439501049728378,
+          "max_dd_pct": -63.05768708351236
+        },
+        "validation_2023_2024": {
+          "return_pct": 65.22745855558927,
+          "sharpe": 0.8528805780574592,
+          "max_dd_pct": -42.975577896051
+        },
+        "selection_2025": {
+          "return_pct": -37.53560855227336,
+          "sharpe": -0.5674847803656954,
+          "max_dd_pct": -48.3169749620755
+        },
+        "holdout_2026": {
+          "return_pct": -8.810132720703944,
+          "sharpe": -0.023917155283317382,
+          "max_dd_pct": -37.435831922332554
+        }
+      },
+      "turnovers": 330
+    },
+    {
+      "strategy": "BNBUSDT_dip200_tp200_time7",
+      "entry_dip_bps": 200,
+      "take_profit_bps": 200,
+      "max_hold_days": 7,
+      "cost_bps_per_side": 15,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": 136.29973374764046,
+          "sharpe": 0.8537171802448641,
+          "max_dd_pct": -59.81016394334291
+        },
+        "validation_2023_2024": {
+          "return_pct": 62.87302064910902,
+          "sharpe": 0.9343520310566631,
+          "max_dd_pct": -32.15090236795831
+        },
+        "selection_2025": {
+          "return_pct": -7.749689904996848,
+          "sharpe": -0.035791580309486176,
+          "max_dd_pct": -33.82560200474779
+        },
+        "holdout_2026": {
+          "return_pct": -37.886184875556275,
+          "sharpe": -1.7569263460056859,
+          "max_dd_pct": -43.887497340890945
+        }
+      },
+      "turnovers": 460
+    },
+    {
+      "strategy": "ETHUSDT_dip300_tp200_time14",
+      "entry_dip_bps": 300,
+      "take_profit_bps": 200,
+      "max_hold_days": 14,
+      "cost_bps_per_side": 15,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": 56.55647738932119,
+          "sharpe": 0.6261868789168007,
+          "max_dd_pct": -65.52332888337682
+        },
+        "validation_2023_2024": {
+          "return_pct": 62.581624179727434,
+          "sharpe": 0.8485872132176469,
+          "max_dd_pct": -36.3766093915952
+        },
+        "selection_2025": {
+          "return_pct": -39.29714417033527,
+          "sharpe": -0.6367690300810146,
+          "max_dd_pct": -50.02288234634956
+        },
+        "holdout_2026": {
+          "return_pct": -11.43018584108406,
+          "sharpe": -0.13128717531463074,
+          "max_dd_pct": -35.37554896194997
+        }
+      },
+      "turnovers": 346
+    },
+    {
+      "strategy": "ETHUSDT_dip200_tp100_time3",
+      "entry_dip_bps": 200,
+      "take_profit_bps": 100,
+      "max_hold_days": 3,
+      "cost_bps_per_side": 15,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": 136.85915779298736,
+          "sharpe": 0.9073824064742371,
+          "max_dd_pct": -42.63993920604416
+        },
+        "validation_2023_2024": {
+          "return_pct": 61.50757590690805,
+          "sharpe": 0.9037053233980968,
+          "max_dd_pct": -25.0089198331249
+        },
+        "selection_2025": {
+          "return_pct": -29.536717415866974,
+          "sharpe": -0.6023029758315696,
+          "max_dd_pct": -39.184619046541336
+        },
+        "holdout_2026": {
+          "return_pct": -29.610165767822714,
+          "sharpe": -0.896070033295943,
+          "max_dd_pct": -39.12692287807599
+        }
+      },
+      "turnovers": 720
+    },
+    {
+      "strategy": "SOLUSDT_dip100_tp300_time3",
+      "entry_dip_bps": 100,
+      "take_profit_bps": 300,
+      "max_hold_days": 3,
+      "cost_bps_per_side": 15,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": -4.560646390387957,
+          "sharpe": 0.4977099357495375,
+          "max_dd_pct": -88.4040689223903
+        },
+        "validation_2023_2024": {
+          "return_pct": 58.237143172039694,
+          "sharpe": 0.6848758192351957,
+          "max_dd_pct": -43.18188547066275
+        },
+        "selection_2025": {
+          "return_pct": -51.89889189762638,
+          "sharpe": -0.8523606870641999,
+          "max_dd_pct": -58.210823147086025
+        },
+        "holdout_2026": {
+          "return_pct": -18.668020303746356,
+          "sharpe": -0.3042565409068016,
+          "max_dd_pct": -46.281038032362495
+        }
+      },
+      "turnovers": 936
+    },
+    {
+      "strategy": "SOLUSDT_dip500_tp200_time7",
+      "entry_dip_bps": 500,
+      "take_profit_bps": 200,
+      "max_hold_days": 7,
+      "cost_bps_per_side": 15,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": -62.75777669856251,
+          "sharpe": 0.08357326018807722,
+          "max_dd_pct": -88.25393587039375
+        },
+        "validation_2023_2024": {
+          "return_pct": 57.35545864415623,
+          "sharpe": 0.751362229358942,
+          "max_dd_pct": -36.07163613921854
+        },
+        "selection_2025": {
+          "return_pct": -6.98716443599976,
+          "sharpe": 0.06115298187064829,
+          "max_dd_pct": -36.77026270856937
+        },
+        "holdout_2026": {
+          "return_pct": -36.3720104525194,
+          "sharpe": -1.5857881710366635,
+          "max_dd_pct": -43.142537156317815
+        }
+      },
+      "turnovers": 346
+    },
+    {
+      "strategy": "BTCUSDT_dip300_tp100_time3",
+      "entry_dip_bps": 300,
+      "take_profit_bps": 100,
+      "max_hold_days": 3,
+      "cost_bps_per_side": 15,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": 0.9995237189523998,
+          "sharpe": 0.20544081339326867,
+          "max_dd_pct": -33.788554951850045
+        },
+        "validation_2023_2024": {
+          "return_pct": 55.45274848203856,
+          "sharpe": 1.2345811066895955,
+          "max_dd_pct": -19.666038237271778
+        },
+        "selection_2025": {
+          "return_pct": 3.9634413744052077,
+          "sharpe": 0.3004685007199371,
+          "max_dd_pct": -17.4064582406126
+        },
+        "holdout_2026": {
+          "return_pct": -19.835743152205932,
+          "sharpe": -0.883793373414191,
+          "max_dd_pct": -24.84928168677971
+        }
+      },
+      "turnovers": 352
+    },
+    {
+      "strategy": "SOLUSDT_dip500_tp100_time3",
+      "entry_dip_bps": 500,
+      "take_profit_bps": 100,
+      "max_hold_days": 3,
+      "cost_bps_per_side": 15,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": -2.220658828558175,
+          "sharpe": 0.43272754503137867,
+          "max_dd_pct": -81.93027921569741
+        },
+        "validation_2023_2024": {
+          "return_pct": 54.52819978463515,
+          "sharpe": 0.8092671867916214,
+          "max_dd_pct": -21.490804117022165
+        },
+        "selection_2025": {
+          "return_pct": 0.8979129288340548,
+          "sharpe": 0.1847209535835922,
+          "max_dd_pct": -21.352818559307217
+        },
+        "holdout_2026": {
+          "return_pct": -31.744136182903915,
+          "sharpe": -1.5118679486601119,
+          "max_dd_pct": -38.4969237604731
+        }
+      },
+      "turnovers": 418
+    },
+    {
+      "strategy": "ETHUSDT_dip200_tp200_time3",
+      "entry_dip_bps": 200,
+      "take_profit_bps": 200,
+      "max_hold_days": 3,
+      "cost_bps_per_side": 15,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": 74.28185118294188,
+          "sharpe": 0.6890316622388054,
+          "max_dd_pct": -45.8398765722548
+        },
+        "validation_2023_2024": {
+          "return_pct": 52.985588898101746,
+          "sharpe": 0.7855540633867542,
+          "max_dd_pct": -31.33736750332673
+        },
+        "selection_2025": {
+          "return_pct": -25.876662355798295,
+          "sharpe": -0.46674145459532235,
+          "max_dd_pct": -36.355887724245974
+        },
+        "holdout_2026": {
+          "return_pct": -28.09072754579277,
+          "sharpe": -0.813346837668515,
+          "max_dd_pct": -39.12692287807599
+        }
+      },
+      "turnovers": 692
+    },
+    {
+      "strategy": "SOLUSDT_dip300_tp300_time7",
+      "entry_dip_bps": 300,
+      "take_profit_bps": 300,
+      "max_hold_days": 7,
+      "cost_bps_per_side": 15,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": -57.06811498184569,
+          "sharpe": 0.2490678893543231,
+          "max_dd_pct": -94.24700317438108
+        },
+        "validation_2023_2024": {
+          "return_pct": 52.2375609034744,
+          "sharpe": 0.6475976543691598,
+          "max_dd_pct": -53.431899284390916
+        },
+        "selection_2025": {
+          "return_pct": -38.803204876286735,
+          "sharpe": -0.518603672115438,
+          "max_dd_pct": -49.29045759087016
+        },
+        "holdout_2026": {
+          "return_pct": -35.635400169479325,
+          "sharpe": -1.071284582682093,
+          "max_dd_pct": -46.28339413469459
+        }
+      },
+      "turnovers": 510
+    },
+    {
+      "strategy": "ETHUSDT_dip500_tp300_time14",
+      "entry_dip_bps": 500,
+      "take_profit_bps": 300,
+      "max_hold_days": 14,
+      "cost_bps_per_side": 15,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": 26.853694354635827,
+          "sharpe": 0.4755224471995298,
+          "max_dd_pct": -58.137420484554994
+        },
+        "validation_2023_2024": {
+          "return_pct": 50.94017455061173,
+          "sharpe": 0.8646131270867918,
+          "max_dd_pct": -24.2950038535001
+        },
+        "selection_2025": {
+          "return_pct": -44.5390897263381,
+          "sharpe": -0.9730033318315656,
+          "max_dd_pct": -52.73861087264772
+        },
+        "holdout_2026": {
+          "return_pct": -11.40104566388449,
+          "sharpe": -0.2932630651247868,
+          "max_dd_pct": -26.42803431471503
+        }
+      },
+      "turnovers": 192
+    },
+    {
+      "strategy": "ETHUSDT_dip100_tp300_time3",
+      "entry_dip_bps": 100,
+      "take_profit_bps": 300,
+      "max_hold_days": 3,
+      "cost_bps_per_side": 15,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": 64.31218350988995,
+          "sharpe": 0.6418401026935235,
+          "max_dd_pct": -61.542262040512206
+        },
+        "validation_2023_2024": {
+          "return_pct": 50.25221438240386,
+          "sharpe": 0.6918312296625326,
+          "max_dd_pct": -40.946551761614614
+        },
+        "selection_2025": {
+          "return_pct": -14.776798834419036,
+          "sharpe": -0.07889110015814513,
+          "max_dd_pct": -43.151935031520175
+        },
+        "holdout_2026": {
+          "return_pct": -26.962990907647487,
+          "sharpe": -0.6699630590769241,
+          "max_dd_pct": -42.17724655165574
+        }
+      },
+      "turnovers": 830
+    },
+    {
+      "strategy": "SOLUSDT_dip300_tp100_time7",
+      "entry_dip_bps": 300,
+      "take_profit_bps": 100,
+      "max_hold_days": 7,
+      "cost_bps_per_side": 15,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": -79.09815508790925,
+          "sharpe": -0.0848648861258231,
+          "max_dd_pct": -95.76258110751624
+        },
+        "validation_2023_2024": {
+          "return_pct": 50.213781764160316,
+          "sharpe": 0.6440895168683559,
+          "max_dd_pct": -52.851988306705145
+        },
+        "selection_2025": {
+          "return_pct": -40.20880598724822,
+          "sharpe": -0.6413588477702983,
+          "max_dd_pct": -45.78605321307383
+        },
+        "holdout_2026": {
+          "return_pct": -50.383867609510055,
+          "sharpe": -2.1195170895794595,
+          "max_dd_pct": -52.540221522474575
+        }
+      },
+      "turnovers": 570
+    },
+    {
+      "strategy": "BTCUSDT_dip500_tp300_time14",
+      "entry_dip_bps": 500,
+      "take_profit_bps": 300,
+      "max_hold_days": 14,
+      "cost_bps_per_side": 15,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": -41.811275623920764,
+          "sharpe": -0.24219045276088588,
+          "max_dd_pct": -53.49310949984708
+        },
+        "validation_2023_2024": {
+          "return_pct": 49.5806478661089,
+          "sharpe": 1.0126566479981265,
+          "max_dd_pct": -14.772767210107297
+        },
+        "selection_2025": {
+          "return_pct": 12.470692012250995,
+          "sharpe": 0.7765091323508732,
+          "max_dd_pct": -13.911916435052463
+        },
+        "holdout_2026": {
+          "return_pct": -23.447454853909754,
+          "sharpe": -1.1760700342906791,
+          "max_dd_pct": -28.923596312524445
+        }
+      },
+      "turnovers": 114
+    },
+    {
+      "strategy": "BTCUSDT_dip500_tp200_time7",
+      "entry_dip_bps": 500,
+      "take_profit_bps": 200,
+      "max_hold_days": 7,
+      "cost_bps_per_side": 15,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": -59.13242750708796,
+          "sharpe": -0.7442949101051141,
+          "max_dd_pct": -65.37943187067158
+        },
+        "validation_2023_2024": {
+          "return_pct": 49.39133422273536,
+          "sharpe": 1.1348379614479023,
+          "max_dd_pct": -12.293906193240323
+        },
+        "selection_2025": {
+          "return_pct": 2.2443329005639834,
+          "sharpe": 0.22374903517536598,
+          "max_dd_pct": -11.08492022122627
+        },
+        "holdout_2026": {
+          "return_pct": -31.713153198260613,
+          "sharpe": -2.2124511398741165,
+          "max_dd_pct": -32.54492264641162
+        }
+      },
+      "turnovers": 128
+    },
+    {
+      "strategy": "BTCUSDT_dip500_tp200_time14",
+      "entry_dip_bps": 500,
+      "take_profit_bps": 200,
+      "max_hold_days": 14,
+      "cost_bps_per_side": 15,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": -45.266335209275745,
+          "sharpe": -0.3005875250495295,
+          "max_dd_pct": -55.59144715470945
+        },
+        "validation_2023_2024": {
+          "return_pct": 49.390254501048325,
+          "sharpe": 1.0324839528088163,
+          "max_dd_pct": -14.772767210107308
+        },
+        "selection_2025": {
+          "return_pct": 15.651308187309642,
+          "sharpe": 0.99124166724327,
+          "max_dd_pct": -11.3565984767391
+        },
+        "holdout_2026": {
+          "return_pct": -23.447454853909754,
+          "sharpe": -1.1760700342906791,
+          "max_dd_pct": -28.923596312524445
+        }
+      },
+      "turnovers": 114
+    },
+    {
+      "strategy": "SOLUSDT_dip200_tp300_time3",
+      "entry_dip_bps": 200,
+      "take_profit_bps": 300,
+      "max_hold_days": 3,
+      "cost_bps_per_side": 15,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": -46.31893368384691,
+          "sharpe": 0.23622600386155806,
+          "max_dd_pct": -85.0717015899324
+        },
+        "validation_2023_2024": {
+          "return_pct": 49.26738682741612,
+          "sharpe": 0.640226226772885,
+          "max_dd_pct": -45.5306651996923
+        },
+        "selection_2025": {
+          "return_pct": -55.02844736904022,
+          "sharpe": -1.0380450978450537,
+          "max_dd_pct": -61.40320890447519
+        },
+        "holdout_2026": {
+          "return_pct": -25.44762048168857,
+          "sharpe": -0.6040383049568108,
+          "max_dd_pct": -45.07495759809479
+        }
+      },
+      "turnovers": 818
+    },
+    {
+      "strategy": "SOLUSDT_dip100_tp200_time7",
+      "entry_dip_bps": 100,
+      "take_profit_bps": 200,
+      "max_hold_days": 7,
+      "cost_bps_per_side": 15,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": -64.12190433858393,
+          "sharpe": 0.2016840640998471,
+          "max_dd_pct": -93.30775713050785
+        },
+        "validation_2023_2024": {
+          "return_pct": 49.190659311795535,
+          "sharpe": 0.6277853944628519,
+          "max_dd_pct": -58.54732886990308
+        },
+        "selection_2025": {
+          "return_pct": -52.30588001676304,
+          "sharpe": -0.74837663446805,
+          "max_dd_pct": -56.97688677703185
+        },
+        "holdout_2026": {
+          "return_pct": -19.655938480954237,
+          "sharpe": -0.3263207362444278,
+          "max_dd_pct": -38.61529767548464
+        }
+      },
+      "turnovers": 706
+    },
+    {
+      "strategy": "BTCUSDT_dip200_tp100_time3",
+      "entry_dip_bps": 200,
+      "take_profit_bps": 100,
+      "max_hold_days": 3,
+      "cost_bps_per_side": 15,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": -28.230476297027828,
+          "sharpe": -0.09747296154682628,
+          "max_dd_pct": -45.6244070627485
+        },
+        "validation_2023_2024": {
+          "return_pct": 48.882755740638586,
+          "sharpe": 0.971596134838982,
+          "max_dd_pct": -25.012489945423543
+        },
+        "selection_2025": {
+          "return_pct": -20.479180143585417,
+          "sharpe": -0.8993088641375948,
+          "max_dd_pct": -24.391842795681118
+        },
+        "holdout_2026": {
+          "return_pct": -14.330667862216783,
+          "sharpe": -0.5108409285282448,
+          "max_dd_pct": -26.133770157849977
+        }
+      },
+      "turnovers": 546
+    },
+    {
+      "strategy": "BNBUSDT_dip200_tp300_time7",
+      "entry_dip_bps": 200,
+      "take_profit_bps": 300,
+      "max_hold_days": 7,
+      "cost_bps_per_side": 15,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": 119.54522590178223,
+          "sharpe": 0.8134491309426904,
+          "max_dd_pct": -62.352600548448855
+        },
+        "validation_2023_2024": {
+          "return_pct": 48.406210565365846,
+          "sharpe": 0.7803145329129743,
+          "max_dd_pct": -35.97887948623485
+        },
+        "selection_2025": {
+          "return_pct": -11.10991954508319,
+          "sharpe": -0.12244414128697834,
+          "max_dd_pct": -33.825602004747815
+        },
+        "holdout_2026": {
+          "return_pct": -36.81514332771055,
+          "sharpe": -1.6734024577552296,
+          "max_dd_pct": -41.70129049387151
+        }
+      },
+      "turnovers": 428
+    },
+    {
+      "strategy": "BTCUSDT_dip500_tp300_time7",
+      "entry_dip_bps": 500,
+      "take_profit_bps": 300,
+      "max_hold_days": 7,
+      "cost_bps_per_side": 15,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": -51.10439638427916,
+          "sharpe": -0.5358108042095835,
+          "max_dd_pct": -61.17777030206961
+        },
+        "validation_2023_2024": {
+          "return_pct": 47.09982936115394,
+          "sharpe": 1.0790719838215637,
+          "max_dd_pct": -13.765203546917748
+        },
+        "selection_2025": {
+          "return_pct": -4.667588371198406,
+          "sharpe": -0.2395893994686862,
+          "max_dd_pct": -17.208725981237748
+        },
+        "holdout_2026": {
+          "return_pct": -31.713153198260613,
+          "sharpe": -2.2124511398741165,
+          "max_dd_pct": -32.54492264641162
+        }
+      },
+      "turnovers": 128
+    },
+    {
+      "strategy": "BTCUSDT_dip100_tp300_time3",
+      "entry_dip_bps": 100,
+      "take_profit_bps": 300,
+      "max_hold_days": 3,
+      "cost_bps_per_side": 15,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": -17.602766092228027,
+          "sharpe": 0.08411912542666203,
+          "max_dd_pct": -47.53971053036784
+        },
+        "validation_2023_2024": {
+          "return_pct": 46.03016781843161,
+          "sharpe": 0.7498001300823132,
+          "max_dd_pct": -26.2631376913517
+        },
+        "selection_2025": {
+          "return_pct": -21.2724115812433,
+          "sharpe": -0.750993642346748,
+          "max_dd_pct": -33.99420439715478
+        },
+        "holdout_2026": {
+          "return_pct": -5.624278810926386,
+          "sharpe": -0.04149290370880337,
+          "max_dd_pct": -28.20813203697402
+        }
+      },
+      "turnovers": 742
+    },
+    {
+      "strategy": "ETHUSDT_dip100_tp100_time14",
+      "entry_dip_bps": 100,
+      "take_profit_bps": 100,
+      "max_hold_days": 14,
+      "cost_bps_per_side": 15,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": -14.46938796167132,
+          "sharpe": 0.30707158031637166,
+          "max_dd_pct": -73.00450166081293
+        },
+        "validation_2023_2024": {
+          "return_pct": 45.50908189713279,
+          "sharpe": 0.6382421576081955,
+          "max_dd_pct": -46.0300045014844
+        },
+        "selection_2025": {
+          "return_pct": -34.404113982094266,
+          "sharpe": -0.33542645438683616,
+          "max_dd_pct": -48.662408703108404
+        },
+        "holdout_2026": {
+          "return_pct": -25.255881015901092,
+          "sharpe": -0.4811133453481538,
+          "max_dd_pct": -49.15649288451004
+        }
+      },
+      "turnovers": 562
+    },
+    {
+      "strategy": "BTCUSDT_dip100_tp300_time7",
+      "entry_dip_bps": 100,
+      "take_profit_bps": 300,
+      "max_hold_days": 7,
+      "cost_bps_per_side": 15,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": 2.2780503166594634,
+          "sharpe": 0.3079442341306462,
+          "max_dd_pct": -54.42926291123229
+        },
+        "validation_2023_2024": {
+          "return_pct": 44.60881817849256,
+          "sharpe": 0.6804749691395547,
+          "max_dd_pct": -34.16309402282278
+        },
+        "selection_2025": {
+          "return_pct": -24.352289693764128,
+          "sharpe": -0.7325430469933673,
+          "max_dd_pct": -43.51579468709013
+        },
+        "holdout_2026": {
+          "return_pct": -27.623849970175552,
+          "sharpe": -0.9993379904645416,
+          "max_dd_pct": -43.57999158606922
+        }
+      },
+      "turnovers": 522
+    },
+    {
+      "strategy": "BNBUSDT_dip200_tp100_time3",
+      "entry_dip_bps": 200,
+      "take_profit_bps": 100,
+      "max_hold_days": 3,
+      "cost_bps_per_side": 15,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": 317.26093986376134,
+          "sharpe": 1.249107753407172,
+          "max_dd_pct": -38.21787545757485
+        },
+        "validation_2023_2024": {
+          "return_pct": 44.31171260087936,
+          "sharpe": 0.850876813552875,
+          "max_dd_pct": -27.216195076930926
+        },
+        "selection_2025": {
+          "return_pct": 2.835594155940502,
+          "sharpe": 0.24445834802801436,
+          "max_dd_pct": -24.434026749858628
+        },
+        "holdout_2026": {
+          "return_pct": -24.917467665087422,
+          "sharpe": -1.101143404966779,
+          "max_dd_pct": -32.26033968038065
+        }
+      },
+      "turnovers": 610
+    },
+    {
+      "strategy": "SOLUSDT_dip500_tp200_time3",
+      "entry_dip_bps": 500,
+      "take_profit_bps": 200,
+      "max_hold_days": 3,
+      "cost_bps_per_side": 15,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": 18.330585240990203,
+          "sharpe": 0.5209574371825958,
+          "max_dd_pct": -83.4708574865365
+        },
+        "validation_2023_2024": {
+          "return_pct": 43.33619415024697,
+          "sharpe": 0.688571129681431,
+          "max_dd_pct": -31.630378815152937
+        },
+        "selection_2025": {
+          "return_pct": 7.752302512280829,
+          "sharpe": 0.3843517384099808,
+          "max_dd_pct": -21.363829161388303
+        },
+        "holdout_2026": {
+          "return_pct": -22.632928828150856,
+          "sharpe": -0.8471956183208655,
+          "max_dd_pct": -31.858183440506306
+        }
+      },
+      "turnovers": 410
+    },
+    {
+      "strategy": "BNBUSDT_dip200_tp300_time3",
+      "entry_dip_bps": 200,
+      "take_profit_bps": 300,
+      "max_hold_days": 3,
+      "cost_bps_per_side": 15,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": 41.79373145557812,
+          "sharpe": 0.5529103252615385,
+          "max_dd_pct": -43.254653681735356
+        },
+        "validation_2023_2024": {
+          "return_pct": 42.79420103556142,
+          "sharpe": 0.788804838775597,
+          "max_dd_pct": -35.790614352926255
+        },
+        "selection_2025": {
+          "return_pct": 15.70553189124928,
+          "sharpe": 0.6003913705981764,
+          "max_dd_pct": -20.231814632381163
+        },
+        "holdout_2026": {
+          "return_pct": -25.93024391707678,
+          "sharpe": -1.1415752340928267,
+          "max_dd_pct": -35.828574372453545
+        }
+      },
+      "turnovers": 558
+    },
+    {
+      "strategy": "BNBUSDT_dip200_tp200_time3",
+      "entry_dip_bps": 200,
+      "take_profit_bps": 200,
+      "max_hold_days": 3,
+      "cost_bps_per_side": 15,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": 164.81448659564873,
+          "sharpe": 0.9586370415687585,
+          "max_dd_pct": -43.225379038182425
+        },
+        "validation_2023_2024": {
+          "return_pct": 42.32498326995382,
+          "sharpe": 0.7913359572102576,
+          "max_dd_pct": -27.83146237153741
+        },
+        "selection_2025": {
+          "return_pct": 21.56435358092592,
+          "sharpe": 0.7575542714721822,
+          "max_dd_pct": -20.560707417385547
+        },
+        "holdout_2026": {
+          "return_pct": -28.423170281567067,
+          "sharpe": -1.298440999990636,
+          "max_dd_pct": -35.828574372453545
+        }
+      },
+      "turnovers": 588
+    },
+    {
+      "strategy": "BNBUSDT_dip100_tp300_time3",
+      "entry_dip_bps": 100,
+      "take_profit_bps": 300,
+      "max_hold_days": 3,
+      "cost_bps_per_side": 15,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": 146.3564293526642,
+          "sharpe": 0.892259968545073,
+          "max_dd_pct": -43.225379038182425
+        },
+        "validation_2023_2024": {
+          "return_pct": 41.506100140875816,
+          "sharpe": 0.6572874515094029,
+          "max_dd_pct": -34.00061345157591
+        },
+        "selection_2025": {
+          "return_pct": 2.1600179957725674,
+          "sharpe": 0.24463770737006074,
+          "max_dd_pct": -25.647957552338497
+        },
+        "holdout_2026": {
+          "return_pct": -43.91829670080334,
+          "sharpe": -1.9972069372132413,
+          "max_dd_pct": -47.22878431047588
+        }
+      },
+      "turnovers": 780
+    },
+    {
+      "strategy": "ETHUSDT_dip100_tp100_time3",
+      "entry_dip_bps": 100,
+      "take_profit_bps": 100,
+      "max_hold_days": 3,
+      "cost_bps_per_side": 15,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": 173.06827367002197,
+          "sharpe": 0.9775135883075369,
+          "max_dd_pct": -59.348587433845836
+        },
+        "validation_2023_2024": {
+          "return_pct": 41.30535364415273,
+          "sharpe": 0.6304704741935129,
+          "max_dd_pct": -35.81618353733745
+        },
+        "selection_2025": {
+          "return_pct": -24.4236106312415,
+          "sharpe": -0.3514533581096609,
+          "max_dd_pct": -42.362086558741105
+        },
+        "holdout_2026": {
+          "return_pct": -21.050593092086157,
+          "sharpe": -0.47445416495441634,
+          "max_dd_pct": -43.61560977800538
+        }
+      },
+      "turnovers": 910
+    },
+    {
+      "strategy": "ETHUSDT_dip300_tp100_time14",
+      "entry_dip_bps": 300,
+      "take_profit_bps": 100,
+      "max_hold_days": 14,
+      "cost_bps_per_side": 15,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": 55.31846153791371,
+          "sharpe": 0.6197323716009595,
+          "max_dd_pct": -63.89801956622756
+        },
+        "validation_2023_2024": {
+          "return_pct": 40.340861224520985,
+          "sharpe": 0.6632994700491132,
+          "max_dd_pct": -32.97663549558006
+        },
+        "selection_2025": {
+          "return_pct": -44.60157274846909,
+          "sharpe": -0.8143205399165864,
+          "max_dd_pct": -53.4306680358264
+        },
+        "holdout_2026": {
+          "return_pct": -4.1281700280479505,
+          "sharpe": 0.08268375065462656,
+          "max_dd_pct": -35.37554896194999
+        }
+      },
+      "turnovers": 376
+    },
+    {
+      "strategy": "ETHUSDT_dip100_tp200_time3",
+      "entry_dip_bps": 100,
+      "take_profit_bps": 200,
+      "max_hold_days": 3,
+      "cost_bps_per_side": 15,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": 77.16787720143563,
+          "sharpe": 0.6908181989607539,
+          "max_dd_pct": -64.1094366889928
+        },
+        "validation_2023_2024": {
+          "return_pct": 40.299093309198895,
+          "sharpe": 0.6116309797280518,
+          "max_dd_pct": -40.94655176161459
+        },
+        "selection_2025": {
+          "return_pct": -23.356956594269974,
+          "sharpe": -0.31192604103265276,
+          "max_dd_pct": -43.15193503152016
+        },
+        "holdout_2026": {
+          "return_pct": -26.90485208835456,
+          "sharpe": -0.6841257988791707,
+          "max_dd_pct": -42.816379976013806
+        }
+      },
+      "turnovers": 858
+    },
+    {
+      "strategy": "BNBUSDT_dip500_tp100_time14",
+      "entry_dip_bps": 500,
+      "take_profit_bps": 100,
+      "max_hold_days": 14,
+      "cost_bps_per_side": 15,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": 125.35024355465096,
+          "sharpe": 0.8478233651097642,
+          "max_dd_pct": -55.12109671134855
+        },
+        "validation_2023_2024": {
+          "return_pct": 38.70232162351708,
+          "sharpe": 0.8939227318971682,
+          "max_dd_pct": -18.02808403845717
+        },
+        "selection_2025": {
+          "return_pct": 5.486301025992502,
+          "sharpe": 0.3598840769082245,
+          "max_dd_pct": -17.246212487427293
+        },
+        "holdout_2026": {
+          "return_pct": -25.165453969050034,
+          "sharpe": -1.4363824829911152,
+          "max_dd_pct": -29.11068407615064
+        }
+      },
+      "turnovers": 180
+    },
+    {
+      "strategy": "BNBUSDT_dip300_tp100_time7",
+      "entry_dip_bps": 300,
+      "take_profit_bps": 100,
+      "max_hold_days": 7,
+      "cost_bps_per_side": 15,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": 146.95356283534738,
+          "sharpe": 0.8808613355686152,
+          "max_dd_pct": -61.59757055059042
+        },
+        "validation_2023_2024": {
+          "return_pct": 38.03216194794046,
+          "sharpe": 0.7617501553376189,
+          "max_dd_pct": -29.43331144328164
+        },
+        "selection_2025": {
+          "return_pct": -1.5632583212736195,
+          "sharpe": 0.10491161429770592,
+          "max_dd_pct": -33.82560200474779
+        },
+        "holdout_2026": {
+          "return_pct": -30.8658084828509,
+          "sharpe": -1.7453300749236953,
+          "max_dd_pct": -36.10272110029854
+        }
+      },
+      "turnovers": 358
+    },
+    {
+      "strategy": "SOLUSDT_dip200_tp200_time3",
+      "entry_dip_bps": 200,
+      "take_profit_bps": 200,
+      "max_hold_days": 3,
+      "cost_bps_per_side": 15,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": -27.812697687589306,
+          "sharpe": 0.350032272333483,
+          "max_dd_pct": -86.11074974456136
+        },
+        "validation_2023_2024": {
+          "return_pct": 37.08506160954037,
+          "sharpe": 0.5594382527930681,
+          "max_dd_pct": -38.738526250086615
+        },
+        "selection_2025": {
+          "return_pct": -51.54338608943334,
+          "sharpe": -0.9257192793512966,
+          "max_dd_pct": -56.234700765794
+        },
+        "holdout_2026": {
+          "return_pct": -25.542335231764778,
+          "sharpe": -0.607788472643498,
+          "max_dd_pct": -45.14473688210467
+        }
+      },
+      "turnovers": 836
+    },
+    {
+      "strategy": "ETHUSDT_dip200_tp200_time14",
+      "entry_dip_bps": 200,
+      "take_profit_bps": 200,
+      "max_hold_days": 14,
+      "cost_bps_per_side": 15,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": -16.168839556409132,
+          "sharpe": 0.2841830108794048,
+          "max_dd_pct": -74.31328685406125
+        },
+        "validation_2023_2024": {
+          "return_pct": 36.80699786934232,
+          "sharpe": 0.5738204365252936,
+          "max_dd_pct": -43.30723301764022
+        },
+        "selection_2025": {
+          "return_pct": -32.23683708065915,
+          "sharpe": -0.38175487127916263,
+          "max_dd_pct": -46.29444816098906
+        },
+        "holdout_2026": {
+          "return_pct": -25.22324389013245,
+          "sharpe": -0.5093961340459364,
+          "max_dd_pct": -40.08726633885722
+        }
+      },
+      "turnovers": 436
+    },
+    {
+      "strategy": "SOLUSDT_dip500_tp300_time3",
+      "entry_dip_bps": 500,
+      "take_profit_bps": 300,
+      "max_hold_days": 3,
+      "cost_bps_per_side": 15,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": -15.74207588972374,
+          "sharpe": 0.36372125063914335,
+          "max_dd_pct": -84.82178951672002
+        },
+        "validation_2023_2024": {
+          "return_pct": 36.57847355182962,
+          "sharpe": 0.6099753993361448,
+          "max_dd_pct": -31.630378815152906
+        },
+        "selection_2025": {
+          "return_pct": 7.164823169460188,
+          "sharpe": 0.3691081533666798,
+          "max_dd_pct": -22.964091670202748
+        },
+        "holdout_2026": {
+          "return_pct": -23.89145617365276,
+          "sharpe": -0.9099090006445136,
+          "max_dd_pct": -31.858183440506306
+        }
+      },
+      "turnovers": 400
+    },
+    {
+      "strategy": "BTCUSDT_dip500_tp100_time7",
+      "entry_dip_bps": 500,
+      "take_profit_bps": 100,
+      "max_hold_days": 7,
+      "cost_bps_per_side": 15,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": -62.484559422677044,
+          "sharpe": -0.8507255117898955,
+          "max_dd_pct": -68.2191579489033
+        },
+        "validation_2023_2024": {
+          "return_pct": 36.33770679630581,
+          "sharpe": 0.9446989117092872,
+          "max_dd_pct": -12.293906193240334
+        },
+        "selection_2025": {
+          "return_pct": 12.195358547033974,
+          "sharpe": 0.9536029275060577,
+          "max_dd_pct": -4.6835722441225025
+        },
+        "holdout_2026": {
+          "return_pct": -31.713153198260613,
+          "sharpe": -2.2124511398741165,
+          "max_dd_pct": -32.54492264641162
+        }
+      },
+      "turnovers": 130
+    },
+    {
+      "strategy": "BTCUSDT_dip500_tp100_time14",
+      "entry_dip_bps": 500,
+      "take_profit_bps": 100,
+      "max_hold_days": 14,
+      "cost_bps_per_side": 15,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": -50.352640940129724,
+          "sharpe": -0.4057790590892811,
+          "max_dd_pct": -58.41398041745119
+        },
+        "validation_2023_2024": {
+          "return_pct": 36.33672141934547,
+          "sharpe": 0.8528073995434058,
+          "max_dd_pct": -14.77276721010734
+        },
+        "selection_2025": {
+          "return_pct": 18.860622135391438,
+          "sharpe": 1.3396695027718113,
+          "max_dd_pct": -4.6835722441225025
+        },
+        "holdout_2026": {
+          "return_pct": -23.447454853909754,
+          "sharpe": -1.1760700342906791,
+          "max_dd_pct": -28.923596312524445
+        }
+      },
+      "turnovers": 116
+    },
+    {
+      "strategy": "ETHUSDT_dip500_tp300_time7",
+      "entry_dip_bps": 500,
+      "take_profit_bps": 300,
+      "max_hold_days": 7,
+      "cost_bps_per_side": 15,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": 57.008358947572276,
+          "sharpe": 0.6195491205316908,
+          "max_dd_pct": -50.664597163504176
+        },
+        "validation_2023_2024": {
+          "return_pct": 35.72023522074392,
+          "sharpe": 0.7129354402757346,
+          "max_dd_pct": -29.22182532759805
+        },
+        "selection_2025": {
+          "return_pct": -24.03801007351212,
+          "sharpe": -0.4323378062433054,
+          "max_dd_pct": -43.52917196409224
+        },
+        "holdout_2026": {
+          "return_pct": -33.877960552895836,
+          "sharpe": -1.4176062646092544,
+          "max_dd_pct": -38.23447774364479
+        }
+      },
+      "turnovers": 220
+    },
+    {
+      "strategy": "ETHUSDT_dip500_tp200_time14",
+      "entry_dip_bps": 500,
+      "take_profit_bps": 200,
+      "max_hold_days": 14,
+      "cost_bps_per_side": 15,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": 30.264229255557183,
+          "sharpe": 0.4944937257731213,
+          "max_dd_pct": -56.53302367881889
+        },
+        "validation_2023_2024": {
+          "return_pct": 35.031443768308975,
+          "sharpe": 0.6868203258291955,
+          "max_dd_pct": -25.644304006012163
+        },
+        "selection_2025": {
+          "return_pct": -43.57413462832868,
+          "sharpe": -0.9638228592248964,
+          "max_dd_pct": -51.19087598982907
+        },
+        "holdout_2026": {
+          "return_pct": -27.84646250632313,
+          "sharpe": -0.9068400740262477,
+          "max_dd_pct": -38.37246478811998
+        }
+      },
+      "turnovers": 192
+    },
+    {
+      "strategy": "BNBUSDT_dip100_tp300_time14",
+      "entry_dip_bps": 100,
+      "take_profit_bps": 300,
+      "max_hold_days": 14,
+      "cost_bps_per_side": 15,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": 319.7338662874371,
+          "sharpe": 1.1365594670212635,
+          "max_dd_pct": -59.41525694881491
+        },
+        "validation_2023_2024": {
+          "return_pct": 34.46778291717325,
+          "sharpe": 0.5606931769304786,
+          "max_dd_pct": -41.73501107027122
+        },
+        "selection_2025": {
+          "return_pct": 25.885170701042725,
+          "sharpe": 0.7515552529175994,
+          "max_dd_pct": -29.356337130473563
+        },
+        "holdout_2026": {
+          "return_pct": -27.537728541191342,
+          "sharpe": -0.7980223339478605,
+          "max_dd_pct": -45.67359972527465
+        }
+      },
+      "turnovers": 429
+    },
+    {
+      "strategy": "ETHUSDT_dip500_tp100_time14",
+      "entry_dip_bps": 500,
+      "take_profit_bps": 100,
+      "max_hold_days": 14,
+      "cost_bps_per_side": 15,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": -13.540585173246633,
+          "sharpe": 0.20522953073932637,
+          "max_dd_pct": -63.96955245727673
+        },
+        "validation_2023_2024": {
+          "return_pct": 31.80802272830956,
+          "sharpe": 0.6569604436760249,
+          "max_dd_pct": -21.75314455731684
+        },
+        "selection_2025": {
+          "return_pct": -31.315891430848964,
+          "sharpe": -0.6065212716261216,
+          "max_dd_pct": -50.59054199717028
+        },
+        "holdout_2026": {
+          "return_pct": -23.696784992650223,
+          "sharpe": -0.7615793256170994,
+          "max_dd_pct": -35.375548961949974
+        }
+      },
+      "turnovers": 206
+    },
+    {
+      "strategy": "BNBUSDT_dip500_tp200_time14",
+      "entry_dip_bps": 500,
+      "take_profit_bps": 200,
+      "max_hold_days": 14,
+      "cost_bps_per_side": 15,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": 248.63806375959777,
+          "sharpe": 1.1186222716179253,
+          "max_dd_pct": -56.73486998224391
+        },
+        "validation_2023_2024": {
+          "return_pct": 31.513813214824673,
+          "sharpe": 0.7074672365877526,
+          "max_dd_pct": -18.028084038457216
+        },
+        "selection_2025": {
+          "return_pct": -12.470599036718255,
+          "sharpe": -0.4459822708723657,
+          "max_dd_pct": -21.370380113661014
+        },
+        "holdout_2026": {
+          "return_pct": -25.165453969050034,
+          "sharpe": -1.4363824829911152,
+          "max_dd_pct": -29.11068407615064
+        }
+      },
+      "turnovers": 172
+    },
+    {
+      "strategy": "BNBUSDT_dip500_tp100_time7",
+      "entry_dip_bps": 500,
+      "take_profit_bps": 100,
+      "max_hold_days": 7,
+      "cost_bps_per_side": 15,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": 198.9840978989116,
+          "sharpe": 1.0365697360435226,
+          "max_dd_pct": -47.08111712933445
+        },
+        "validation_2023_2024": {
+          "return_pct": 27.389215071443896,
+          "sharpe": 0.7194988707739903,
+          "max_dd_pct": -14.606087677288626
+        },
+        "selection_2025": {
+          "return_pct": 5.956418524603513,
+          "sharpe": 0.40289544513589,
+          "max_dd_pct": -17.898586529898473
+        },
+        "holdout_2026": {
+          "return_pct": -24.939424856630012,
+          "sharpe": -1.495061848040137,
+          "max_dd_pct": -27.51947294621043
+        }
+      },
+      "turnovers": 196
+    },
+    {
+      "strategy": "BTCUSDT_dip300_tp100_time7",
+      "entry_dip_bps": 300,
+      "take_profit_bps": 100,
+      "max_hold_days": 7,
+      "cost_bps_per_side": 15,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": -27.52827437163854,
+          "sharpe": -0.07745436792715257,
+          "max_dd_pct": -49.34830434403948
+        },
+        "validation_2023_2024": {
+          "return_pct": 27.143996966283268,
+          "sharpe": 0.6394587058743838,
+          "max_dd_pct": -25.05282934109787
+        },
+        "selection_2025": {
+          "return_pct": 31.620460625212267,
+          "sharpe": 1.2893681315208607,
+          "max_dd_pct": -10.25239095051379
+        },
+        "holdout_2026": {
+          "return_pct": -27.79206221944699,
+          "sharpe": -1.462010106696351,
+          "max_dd_pct": -31.295611186909433
+        }
+      },
+      "turnovers": 310
+    },
+    {
+      "strategy": "ETHUSDT_dip100_tp300_time7",
+      "entry_dip_bps": 100,
+      "take_profit_bps": 300,
+      "max_hold_days": 7,
+      "cost_bps_per_side": 15,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": -4.986008207139481,
+          "sharpe": 0.3624821789257427,
+          "max_dd_pct": -70.51074708226852
+        },
+        "validation_2023_2024": {
+          "return_pct": 25.44592178474312,
+          "sharpe": 0.47381658087105705,
+          "max_dd_pct": -41.59832034318435
+        },
+        "selection_2025": {
+          "return_pct": -35.45466713491812,
+          "sharpe": -0.43819523526426535,
+          "max_dd_pct": -42.073637031596824
+        },
+        "holdout_2026": {
+          "return_pct": -15.396557256385002,
+          "sharpe": -0.20070103497461533,
+          "max_dd_pct": -43.12366464959118
+        }
+      },
+      "turnovers": 604
+    },
+    {
+      "strategy": "ETHUSDT_dip300_tp300_time7",
+      "entry_dip_bps": 300,
+      "take_profit_bps": 300,
+      "max_hold_days": 7,
+      "cost_bps_per_side": 15,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": 61.05080325511361,
+          "sharpe": 0.6403624913111718,
+          "max_dd_pct": -62.93489940133335
+        },
+        "validation_2023_2024": {
+          "return_pct": 24.37295262500998,
+          "sharpe": 0.48621409429740337,
+          "max_dd_pct": -40.989759503457215
+        },
+        "selection_2025": {
+          "return_pct": -26.880646052281453,
+          "sharpe": -0.4045277751030775,
+          "max_dd_pct": -41.2815600565106
+        },
+        "holdout_2026": {
+          "return_pct": -12.830247986832877,
+          "sharpe": -0.2145111859632169,
+          "max_dd_pct": -38.181108549474764
+        }
+      },
+      "turnovers": 398
+    },
+    {
+      "strategy": "BNBUSDT_dip100_tp200_time3",
+      "entry_dip_bps": 100,
+      "take_profit_bps": 200,
+      "max_hold_days": 3,
+      "cost_bps_per_side": 15,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": 164.07428222887904,
+          "sharpe": 0.9404218203834769,
+          "max_dd_pct": -43.34182039985127
+        },
+        "validation_2023_2024": {
+          "return_pct": 23.623459499849165,
+          "sharpe": 0.4849900176936613,
+          "max_dd_pct": -33.61988531951942
+        },
+        "selection_2025": {
+          "return_pct": 9.349088841277986,
+          "sharpe": 0.42693961776833145,
+          "max_dd_pct": -28.662238487977408
+        },
+        "holdout_2026": {
+          "return_pct": -39.38638037033091,
+          "sharpe": -1.6949935253290036,
+          "max_dd_pct": -45.832323143864265
+        }
+      },
+      "turnovers": 816
+    },
+    {
+      "strategy": "BNBUSDT_dip500_tp300_time14",
+      "entry_dip_bps": 500,
+      "take_profit_bps": 300,
+      "max_hold_days": 14,
+      "cost_bps_per_side": 15,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": 200.87341252286186,
+          "sharpe": 1.0194484439013884,
+          "max_dd_pct": -56.73486998224391
+        },
+        "validation_2023_2024": {
+          "return_pct": 23.100245298224763,
+          "sharpe": 0.5460850640192068,
+          "max_dd_pct": -19.792652582187277
+        },
+        "selection_2025": {
+          "return_pct": -0.23951889243236657,
+          "sharpe": 0.13476429547298518,
+          "max_dd_pct": -17.246212487427282
+        },
+        "holdout_2026": {
+          "return_pct": -25.165453969050034,
+          "sharpe": -1.4363824829911152,
+          "max_dd_pct": -29.11068407615064
+        }
+      },
+      "turnovers": 158
+    },
+    {
+      "strategy": "ETHUSDT_dip500_tp100_time7",
+      "entry_dip_bps": 500,
+      "take_profit_bps": 100,
+      "max_hold_days": 7,
+      "cost_bps_per_side": 15,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": 4.736622048560291,
+          "sharpe": 0.32598367660809396,
+          "max_dd_pct": -57.14811443786386
+        },
+        "validation_2023_2024": {
+          "return_pct": 22.843241819155025,
+          "sharpe": 0.5407373449300363,
+          "max_dd_pct": -23.614121044257573
+        },
+        "selection_2025": {
+          "return_pct": -18.859510088828813,
+          "sharpe": -0.32548244670702475,
+          "max_dd_pct": -43.52917196409224
+        },
+        "holdout_2026": {
+          "return_pct": -34.5837386737737,
+          "sharpe": -1.523946977375057,
+          "max_dd_pct": -37.98052161353812
+        }
+      },
+      "turnovers": 234
+    },
+    {
+      "strategy": "BNBUSDT_dip300_tp300_time7",
+      "entry_dip_bps": 300,
+      "take_profit_bps": 300,
+      "max_hold_days": 7,
+      "cost_bps_per_side": 15,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": 96.07918886444496,
+          "sharpe": 0.7525592029104262,
+          "max_dd_pct": -60.168319862995865
+        },
+        "validation_2023_2024": {
+          "return_pct": 20.22112123040909,
+          "sharpe": 0.4649116461734646,
+          "max_dd_pct": -29.433311443281607
+        },
+        "selection_2025": {
+          "return_pct": -7.703279124024409,
+          "sharpe": -0.047971525990272594,
+          "max_dd_pct": -33.82560200474782
+        },
+        "holdout_2026": {
+          "return_pct": -32.43736814513159,
+          "sharpe": -1.7934316824483494,
+          "max_dd_pct": -34.01622392307869
+        }
+      },
+      "turnovers": 316
+    },
+    {
+      "strategy": "BTCUSDT_dip500_tp100_time3",
+      "entry_dip_bps": 500,
+      "take_profit_bps": 100,
+      "max_hold_days": 3,
+      "cost_bps_per_side": 15,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": -41.14105776950851,
+          "sharpe": -0.5217043226720711,
+          "max_dd_pct": -57.861051817882704
+        },
+        "validation_2023_2024": {
+          "return_pct": 19.44910974256173,
+          "sharpe": 0.6856337788587873,
+          "max_dd_pct": -15.904315269192292
+        },
+        "selection_2025": {
+          "return_pct": 8.232739349848517,
+          "sharpe": 0.688128595279338,
+          "max_dd_pct": -4.6835722441225025
+        },
+        "holdout_2026": {
+          "return_pct": -7.5361285927604165,
+          "sharpe": -0.49172260757100733,
+          "max_dd_pct": -9.486608250127604
+        }
+      },
+      "turnovers": 148
+    },
+    {
+      "strategy": "BTCUSDT_dip500_tp200_time3",
+      "entry_dip_bps": 500,
+      "take_profit_bps": 200,
+      "max_hold_days": 3,
+      "cost_bps_per_side": 15,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": -33.661748133004835,
+          "sharpe": -0.36101326991187704,
+          "max_dd_pct": -53.33792673937654
+        },
+        "validation_2023_2024": {
+          "return_pct": 19.44910974256173,
+          "sharpe": 0.6856337788587873,
+          "max_dd_pct": -15.904315269192292
+        },
+        "selection_2025": {
+          "return_pct": 8.569011310108321,
+          "sharpe": 0.6753085414239828,
+          "max_dd_pct": -5.935490509671926
+        },
+        "holdout_2026": {
+          "return_pct": -7.5361285927604165,
+          "sharpe": -0.49172260757100733,
+          "max_dd_pct": -9.486608250127604
+        }
+      },
+      "turnovers": 148
+    },
+    {
+      "strategy": "BNBUSDT_dip300_tp200_time7",
+      "entry_dip_bps": 300,
+      "take_profit_bps": 200,
+      "max_hold_days": 7,
+      "cost_bps_per_side": 15,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": 167.30860720847772,
+          "sharpe": 0.9257352971699511,
+          "max_dd_pct": -60.008871864682575
+        },
+        "validation_2023_2024": {
+          "return_pct": 18.97950415492884,
+          "sharpe": 0.4565458540748688,
+          "max_dd_pct": -29.433311443281617
+        },
+        "selection_2025": {
+          "return_pct": -12.602951676912589,
+          "sharpe": -0.22236890601348452,
+          "max_dd_pct": -33.82560200474776
+        },
+        "holdout_2026": {
+          "return_pct": -28.463937590910692,
+          "sharpe": -1.5598745640161746,
+          "max_dd_pct": -34.47582313893971
+        }
+      },
+      "turnovers": 338
+    },
+    {
+      "strategy": "ETHUSDT_dip500_tp200_time7",
+      "entry_dip_bps": 500,
+      "take_profit_bps": 200,
+      "max_hold_days": 7,
+      "cost_bps_per_side": 15,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": 57.8480966397037,
+          "sharpe": 0.6234515529685135,
+          "max_dd_pct": -48.288442977541756
+        },
+        "validation_2023_2024": {
+          "return_pct": 17.079845450629506,
+          "sharpe": 0.43848869384272543,
+          "max_dd_pct": -29.550531000268332
+        },
+        "selection_2025": {
+          "return_pct": -29.00427894729195,
+          "sharpe": -0.5992079914270039,
+          "max_dd_pct": -43.52917196409224
+        },
+        "holdout_2026": {
+          "return_pct": -34.954677699083625,
+          "sharpe": -1.4845976434616341,
+          "max_dd_pct": -39.24025429580125
+        }
+      },
+      "turnovers": 222
+    },
+    {
+      "strategy": "ETHUSDT_dip300_tp200_time7",
+      "entry_dip_bps": 300,
+      "take_profit_bps": 200,
+      "max_hold_days": 7,
+      "cost_bps_per_side": 15,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": 66.4204071273859,
+          "sharpe": 0.6597198484743931,
+          "max_dd_pct": -62.77494919398991
+        },
+        "validation_2023_2024": {
+          "return_pct": 16.556582428861887,
+          "sharpe": 0.39459649327890395,
+          "max_dd_pct": -40.693167258463724
+        },
+        "selection_2025": {
+          "return_pct": -30.696107406565254,
+          "sharpe": -0.526395147724703,
+          "max_dd_pct": -42.87534085240296
+        },
+        "holdout_2026": {
+          "return_pct": -23.805643111877085,
+          "sharpe": -0.6719407870128858,
+          "max_dd_pct": -38.181108549474764
+        }
+      },
+      "turnovers": 414
+    },
+    {
+      "strategy": "BNBUSDT_dip300_tp200_time3",
+      "entry_dip_bps": 300,
+      "take_profit_bps": 200,
+      "max_hold_days": 3,
+      "cost_bps_per_side": 15,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": 180.90104478559246,
+          "sharpe": 0.9884517407218454,
+          "max_dd_pct": -43.22537903818241
+        },
+        "validation_2023_2024": {
+          "return_pct": 16.471794966159358,
+          "sharpe": 0.4543314583629608,
+          "max_dd_pct": -27.026966261866512
+        },
+        "selection_2025": {
+          "return_pct": 6.9805968230530535,
+          "sharpe": 0.3748393901346939,
+          "max_dd_pct": -22.497235864069008
+        },
+        "holdout_2026": {
+          "return_pct": -23.50168671875945,
+          "sharpe": -1.3463100707505713,
+          "max_dd_pct": -27.343617679246346
+        }
+      },
+      "turnovers": 408
+    },
+    {
+      "strategy": "ETHUSDT_dip100_tp200_time7",
+      "entry_dip_bps": 100,
+      "take_profit_bps": 200,
+      "max_hold_days": 7,
+      "cost_bps_per_side": 15,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": -17.835154785795915,
+          "sharpe": 0.28101939190599406,
+          "max_dd_pct": -74.71670782376655
+        },
+        "validation_2023_2024": {
+          "return_pct": 15.867636025233267,
+          "sharpe": 0.38543142954601023,
+          "max_dd_pct": -47.24850010550734
+        },
+        "selection_2025": {
+          "return_pct": -36.118055731868914,
+          "sharpe": -0.46536870241564854,
+          "max_dd_pct": -42.584271815623495
+        },
+        "holdout_2026": {
+          "return_pct": -24.49528266941714,
+          "sharpe": -0.5165937166167619,
+          "max_dd_pct": -45.628027065593436
+        }
+      },
+      "turnovers": 644
+    },
+    {
+      "strategy": "ETHUSDT_dip200_tp300_time7",
+      "entry_dip_bps": 200,
+      "take_profit_bps": 300,
+      "max_hold_days": 7,
+      "cost_bps_per_side": 15,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": 45.80128946518012,
+          "sharpe": 0.5869366276540151,
+          "max_dd_pct": -60.8760067017944
+        },
+        "validation_2023_2024": {
+          "return_pct": 15.413447278232994,
+          "sharpe": 0.37803396050856125,
+          "max_dd_pct": -42.38642858730389
+        },
+        "selection_2025": {
+          "return_pct": -39.351999725340825,
+          "sharpe": -0.6939837527838902,
+          "max_dd_pct": -44.555430995765974
+        },
+        "holdout_2026": {
+          "return_pct": -13.283140976594154,
+          "sharpe": -0.16689106482736776,
+          "max_dd_pct": -43.371986281527064
+        }
+      },
+      "turnovers": 516
+    },
+    {
+      "strategy": "ETHUSDT_dip100_tp100_time7",
+      "entry_dip_bps": 100,
+      "take_profit_bps": 100,
+      "max_hold_days": 7,
+      "cost_bps_per_side": 15,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": 18.34043990438974,
+          "sharpe": 0.47277089950255013,
+          "max_dd_pct": -63.64151755330651
+        },
+        "validation_2023_2024": {
+          "return_pct": 14.75025231705731,
+          "sharpe": 0.37188828174075805,
+          "max_dd_pct": -34.7203448574279
+        },
+        "selection_2025": {
+          "return_pct": -31.82200868709949,
+          "sharpe": -0.35133718424348304,
+          "max_dd_pct": -41.549652636005604
+        },
+        "holdout_2026": {
+          "return_pct": -24.111296430066343,
+          "sharpe": -0.5252840248273075,
+          "max_dd_pct": -48.63344103942243
+        }
+      },
+      "turnovers": 722
+    },
+    {
+      "strategy": "BTCUSDT_dip500_tp300_time3",
+      "entry_dip_bps": 500,
+      "take_profit_bps": 300,
+      "max_hold_days": 3,
+      "cost_bps_per_side": 15,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": -18.78644918403436,
+          "sharpe": -0.08659321615397118,
+          "max_dd_pct": -48.41239567777546
+        },
+        "validation_2023_2024": {
+          "return_pct": 14.570658996791819,
+          "sharpe": 0.5327592137172061,
+          "max_dd_pct": -19.456552380496394
+        },
+        "selection_2025": {
+          "return_pct": 9.539955645452514,
+          "sharpe": 0.7377480186825937,
+          "max_dd_pct": -5.935490509671936
+        },
+        "holdout_2026": {
+          "return_pct": -7.5361285927604165,
+          "sharpe": -0.49172260757100733,
+          "max_dd_pct": -9.486608250127604
+        }
+      },
+      "turnovers": 148
+    },
+    {
+      "strategy": "BNBUSDT_dip100_tp200_time7",
+      "entry_dip_bps": 100,
+      "take_profit_bps": 200,
+      "max_hold_days": 7,
+      "cost_bps_per_side": 15,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": 93.32470605777996,
+          "sharpe": 0.7468350790028889,
+          "max_dd_pct": -77.06462573405348
+        },
+        "validation_2023_2024": {
+          "return_pct": 14.166048207980598,
+          "sharpe": 0.3630333842129064,
+          "max_dd_pct": -42.82569691634942
+        },
+        "selection_2025": {
+          "return_pct": 5.806668263438097,
+          "sharpe": 0.33925987266588625,
+          "max_dd_pct": -32.285484951243745
+        },
+        "holdout_2026": {
+          "return_pct": -37.238905019675315,
+          "sharpe": -1.3713489513188681,
+          "max_dd_pct": -43.642014947344286
+        }
+      },
+      "turnovers": 610
+    },
+    {
+      "strategy": "SOLUSDT_dip300_tp200_time7",
+      "entry_dip_bps": 300,
+      "take_profit_bps": 200,
+      "max_hold_days": 7,
+      "cost_bps_per_side": 15,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": -70.67791238687893,
+          "sharpe": 0.0661715685681559,
+          "max_dd_pct": -94.2542771524092
+        },
+        "validation_2023_2024": {
+          "return_pct": 13.584137492661629,
+          "sharpe": 0.38802994685836395,
+          "max_dd_pct": -57.3325345080956
+        },
+        "selection_2025": {
+          "return_pct": -22.24242592243225,
+          "sharpe": -0.12393117036174948,
+          "max_dd_pct": -47.48494167318184
+        },
+        "holdout_2026": {
+          "return_pct": -37.61734820705206,
+          "sharpe": -1.1853990101140341,
+          "max_dd_pct": -46.2833941346946
+        }
+      },
+      "turnovers": 538
+    },
+    {
+      "strategy": "BTCUSDT_dip200_tp100_time7",
+      "entry_dip_bps": 200,
+      "take_profit_bps": 100,
+      "max_hold_days": 7,
+      "cost_bps_per_side": 15,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": -38.91374369834423,
+          "sharpe": -0.16247691463017225,
+          "max_dd_pct": -56.71308753967654
+        },
+        "validation_2023_2024": {
+          "return_pct": 13.325994250496297,
+          "sharpe": 0.3668396800505777,
+          "max_dd_pct": -33.91583320541477
+        },
+        "selection_2025": {
+          "return_pct": -11.135642774234134,
+          "sharpe": -0.3271395792127651,
+          "max_dd_pct": -25.05425767141769
+        },
+        "holdout_2026": {
+          "return_pct": -28.36852010659928,
+          "sharpe": -1.2639984007756304,
+          "max_dd_pct": -39.219413645550574
+        }
+      },
+      "turnovers": 448
+    },
+    {
+      "strategy": "BNBUSDT_dip300_tp300_time3",
+      "entry_dip_bps": 300,
+      "take_profit_bps": 300,
+      "max_hold_days": 3,
+      "cost_bps_per_side": 15,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": 115.53607664260599,
+          "sharpe": 0.8164890957677882,
+          "max_dd_pct": -43.22537903818241
+        },
+        "validation_2023_2024": {
+          "return_pct": 12.37396413593772,
+          "sharpe": 0.3684298869707274,
+          "max_dd_pct": -33.35103328393798
+        },
+        "selection_2025": {
+          "return_pct": -1.1611936649775556,
+          "sharpe": 0.11438054772665526,
+          "max_dd_pct": -22.497235864069097
+        },
+        "holdout_2026": {
+          "return_pct": -23.50168671875945,
+          "sharpe": -1.3463100707505713,
+          "max_dd_pct": -27.343617679246346
+        }
+      },
+      "turnovers": 396
+    },
+    {
+      "strategy": "BNBUSDT_dip300_tp100_time3",
+      "entry_dip_bps": 300,
+      "take_profit_bps": 100,
+      "max_hold_days": 3,
+      "cost_bps_per_side": 15,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": 312.03126997735626,
+          "sharpe": 1.2569068415476545,
+          "max_dd_pct": -29.08119639725132
+        },
+        "validation_2023_2024": {
+          "return_pct": 12.063275920084893,
+          "sharpe": 0.3795832968538843,
+          "max_dd_pct": -30.681384633334265
+        },
+        "selection_2025": {
+          "return_pct": -4.914843364677834,
+          "sharpe": -0.03441744576618174,
+          "max_dd_pct": -26.27613349631589
+        },
+        "holdout_2026": {
+          "return_pct": -24.455952652908387,
+          "sharpe": -1.4215808848599558,
+          "max_dd_pct": -27.85930292117136
+        }
+      },
+      "turnovers": 426
+    },
+    {
+      "strategy": "BTCUSDT_dip100_tp200_time7",
+      "entry_dip_bps": 100,
+      "take_profit_bps": 200,
+      "max_hold_days": 7,
+      "cost_bps_per_side": 15,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": -21.775108012016453,
+          "sharpe": 0.10594597279213046,
+          "max_dd_pct": -56.877265660807495
+        },
+        "validation_2023_2024": {
+          "return_pct": 10.910241191464443,
+          "sharpe": 0.32203550770824485,
+          "max_dd_pct": -37.19056103229131
+        },
+        "selection_2025": {
+          "return_pct": -21.5861871425721,
+          "sharpe": -0.6195606167869491,
+          "max_dd_pct": -43.51579468709016
+        },
+        "holdout_2026": {
+          "return_pct": -26.295753289984614,
+          "sharpe": -0.9478976798166923,
+          "max_dd_pct": -40.22864222630078
+        }
+      },
+      "turnovers": 544
+    },
+    {
+      "strategy": "ETHUSDT_dip300_tp300_time3",
+      "entry_dip_bps": 300,
+      "take_profit_bps": 300,
+      "max_hold_days": 3,
+      "cost_bps_per_side": 15,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": 37.98350589380048,
+          "sharpe": 0.521048701721369,
+          "max_dd_pct": -52.945574928591846
+        },
+        "validation_2023_2024": {
+          "return_pct": 10.767213518128727,
+          "sharpe": 0.3194380222792668,
+          "max_dd_pct": -34.95691053079767
+        },
+        "selection_2025": {
+          "return_pct": -17.1511696756112,
+          "sharpe": -0.2585680836486429,
+          "max_dd_pct": -44.928967051118704
+        },
+        "holdout_2026": {
+          "return_pct": -19.967542405057525,
+          "sharpe": -0.540128884472067,
+          "max_dd_pct": -34.52605802127565
+        }
+      },
+      "turnovers": 484
+    },
+    {
+      "strategy": "BTCUSDT_dip100_tp100_time7",
+      "entry_dip_bps": 100,
+      "take_profit_bps": 100,
+      "max_hold_days": 7,
+      "cost_bps_per_side": 15,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": -23.083159397536768,
+          "sharpe": 0.08389814604694291,
+          "max_dd_pct": -53.16197648273793
+        },
+        "validation_2023_2024": {
+          "return_pct": 10.440134956453928,
+          "sharpe": 0.3144578645162017,
+          "max_dd_pct": -30.113172900654426
+        },
+        "selection_2025": {
+          "return_pct": -28.21926379909542,
+          "sharpe": -0.962840383839119,
+          "max_dd_pct": -42.568840030514984
+        },
+        "holdout_2026": {
+          "return_pct": -29.04332446009802,
+          "sharpe": -1.1330426194599794,
+          "max_dd_pct": -39.232308790503936
+        }
+      },
+      "turnovers": 622
+    },
+    {
+      "strategy": "BTCUSDT_dip100_tp200_time3",
+      "entry_dip_bps": 100,
+      "take_profit_bps": 200,
+      "max_hold_days": 3,
+      "cost_bps_per_side": 15,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": -41.6456460389565,
+          "sharpe": -0.22261230360214856,
+          "max_dd_pct": -57.723854955185125
+        },
+        "validation_2023_2024": {
+          "return_pct": 10.073099189321644,
+          "sharpe": 0.30894993106201735,
+          "max_dd_pct": -26.73422326621807
+        },
+        "selection_2025": {
+          "return_pct": -22.93168071244588,
+          "sharpe": -0.8323688434672719,
+          "max_dd_pct": -33.99420439715476
+        },
+        "holdout_2026": {
+          "return_pct": -8.720317911107223,
+          "sharpe": -0.16700598525593274,
+          "max_dd_pct": -28.247306991846067
+        }
+      },
+      "turnovers": 748
+    },
+    {
+      "strategy": "BNBUSDT_dip100_tp100_time3",
+      "entry_dip_bps": 100,
+      "take_profit_bps": 100,
+      "max_hold_days": 3,
+      "cost_bps_per_side": 15,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": 415.7124739305423,
+          "sharpe": 1.3554534915187992,
+          "max_dd_pct": -47.31153759640393
+        },
+        "validation_2023_2024": {
+          "return_pct": 8.600336363233652,
+          "sharpe": 0.2870732665804729,
+          "max_dd_pct": -31.850445250925596
+        },
+        "selection_2025": {
+          "return_pct": -17.373925990778282,
+          "sharpe": -0.36799874019817275,
+          "max_dd_pct": -32.140541501722375
+        },
+        "holdout_2026": {
+          "return_pct": -46.7393531514456,
+          "sharpe": -2.1971956779938506,
+          "max_dd_pct": -48.46904420484345
+        }
+      },
+      "turnovers": 842
+    },
+    {
+      "strategy": "SOLUSDT_dip200_tp100_time7",
+      "entry_dip_bps": 200,
+      "take_profit_bps": 100,
+      "max_hold_days": 7,
+      "cost_bps_per_side": 15,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": -78.37779505590586,
+          "sharpe": -0.035661621125147876,
+          "max_dd_pct": -95.00564720497152
+        },
+        "validation_2023_2024": {
+          "return_pct": 8.117532914191216,
+          "sharpe": 0.3522304595949324,
+          "max_dd_pct": -58.17724079693101
+        },
+        "selection_2025": {
+          "return_pct": -58.848831192009854,
+          "sharpe": -1.0246276261682046,
+          "max_dd_pct": -62.359992072437855
+        },
+        "holdout_2026": {
+          "return_pct": -44.75757626278089,
+          "sharpe": -1.5244581971810056,
+          "max_dd_pct": -55.89206777841535
+        }
+      },
+      "turnovers": 670
+    },
+    {
+      "strategy": "BNBUSDT_dip100_tp100_time14",
+      "entry_dip_bps": 100,
+      "take_profit_bps": 100,
+      "max_hold_days": 14,
+      "cost_bps_per_side": 15,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": 143.40173408725025,
+          "sharpe": 0.8650962113658893,
+          "max_dd_pct": -72.8964766343098
+        },
+        "validation_2023_2024": {
+          "return_pct": 5.676652563721629,
+          "sharpe": 0.2668490135253382,
+          "max_dd_pct": -41.527303647189726
+        },
+        "selection_2025": {
+          "return_pct": -12.792613837413791,
+          "sharpe": -0.13033587512994768,
+          "max_dd_pct": -26.023881527053582
+        },
+        "holdout_2026": {
+          "return_pct": -23.303331975019535,
+          "sharpe": -0.654989791188295,
+          "max_dd_pct": -37.87110523618497
+        }
+      },
+      "turnovers": 532
+    },
+    {
+      "strategy": "BNBUSDT_dip500_tp100_time3",
+      "entry_dip_bps": 500,
+      "take_profit_bps": 100,
+      "max_hold_days": 3,
+      "cost_bps_per_side": 15,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": 426.0960872670495,
+          "sharpe": 1.590792688730731,
+          "max_dd_pct": -21.285783872479314
+        },
+        "validation_2023_2024": {
+          "return_pct": 5.632702751281071,
+          "sharpe": 0.2486825829705051,
+          "max_dd_pct": -23.96657922676233
+        },
+        "selection_2025": {
+          "return_pct": -4.875478796670141,
+          "sharpe": -0.21899402071198829,
+          "max_dd_pct": -16.81560027660116
+        },
+        "holdout_2026": {
+          "return_pct": -21.90350804930651,
+          "sharpe": -1.4657378188176455,
+          "max_dd_pct": -21.90350804930651
+        }
+      },
+      "turnovers": 220
+    },
+    {
+      "strategy": "BNBUSDT_dip100_tp200_time14",
+      "entry_dip_bps": 100,
+      "take_profit_bps": 200,
+      "max_hold_days": 14,
+      "cost_bps_per_side": 15,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": 331.73376412873637,
+          "sharpe": 1.1520674682095275,
+          "max_dd_pct": -58.067961406736465
+        },
+        "validation_2023_2024": {
+          "return_pct": 4.894670346446439,
+          "sharpe": 0.255855441217045,
+          "max_dd_pct": -42.33220870128572
+        },
+        "selection_2025": {
+          "return_pct": 12.808285815984677,
+          "sharpe": 0.49917625985892694,
+          "max_dd_pct": -29.356337130473563
+        },
+        "holdout_2026": {
+          "return_pct": -25.057147502022413,
+          "sharpe": -0.7091959251983287,
+          "max_dd_pct": -42.688436409791976
+        }
+      },
+      "turnovers": 475
+    },
+    {
+      "strategy": "BNBUSDT_dip100_tp300_time7",
+      "entry_dip_bps": 100,
+      "take_profit_bps": 300,
+      "max_hold_days": 7,
+      "cost_bps_per_side": 15,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": 210.4284993567555,
+          "sharpe": 0.9905031139816227,
+          "max_dd_pct": -64.42086350612699
+        },
+        "validation_2023_2024": {
+          "return_pct": 4.784317002295668,
+          "sharpe": 0.25251179283239966,
+          "max_dd_pct": -46.41135815381225
+        },
+        "selection_2025": {
+          "return_pct": 27.74303029822416,
+          "sharpe": 0.8062830409629651,
+          "max_dd_pct": -29.78864413816703
+        },
+        "holdout_2026": {
+          "return_pct": -40.14720681405374,
+          "sharpe": -1.541059523588305,
+          "max_dd_pct": -45.666096000033576
+        }
+      },
+      "turnovers": 574
+    },
+    {
+      "strategy": "ETHUSDT_dip300_tp100_time3",
+      "entry_dip_bps": 300,
+      "take_profit_bps": 100,
+      "max_hold_days": 3,
+      "cost_bps_per_side": 15,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": 50.51888975226362,
+          "sharpe": 0.5849704757829055,
+          "max_dd_pct": -52.48485041513724
+        },
+        "validation_2023_2024": {
+          "return_pct": 4.385841800114054,
+          "sharpe": 0.21510930115460503,
+          "max_dd_pct": -32.70195990131506
+        },
+        "selection_2025": {
+          "return_pct": -25.64726036309255,
+          "sharpe": -0.5269066521095328,
+          "max_dd_pct": -38.2974947127511
+        },
+        "holdout_2026": {
+          "return_pct": -24.879298498891966,
+          "sharpe": -0.7952612001478067,
+          "max_dd_pct": -34.52605802127565
+        }
+      },
+      "turnovers": 510
+    },
+    {
+      "strategy": "ETHUSDT_dip200_tp200_time7",
+      "entry_dip_bps": 200,
+      "take_profit_bps": 200,
+      "max_hold_days": 7,
+      "cost_bps_per_side": 15,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": 34.8699499653476,
+          "sharpe": 0.5410388450446244,
+          "max_dd_pct": -63.926282113149455
+        },
+        "validation_2023_2024": {
+          "return_pct": 4.291232787105836,
+          "sharpe": 0.2461655077936667,
+          "max_dd_pct": -45.300431224139814
+        },
+        "selection_2025": {
+          "return_pct": -41.81264762645371,
+          "sharpe": -0.8097259550345556,
+          "max_dd_pct": -45.211064449674296
+        },
+        "holdout_2026": {
+          "return_pct": -26.597074466585603,
+          "sharpe": -0.6588453639354499,
+          "max_dd_pct": -43.371986281527064
+        }
+      },
+      "turnovers": 544
+    },
+    {
+      "strategy": "SOLUSDT_dip100_tp300_time7",
+      "entry_dip_bps": 100,
+      "take_profit_bps": 300,
+      "max_hold_days": 7,
+      "cost_bps_per_side": 15,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": -35.74137002210661,
+          "sharpe": 0.4339547088812293,
+          "max_dd_pct": -94.75217689897907
+        },
+        "validation_2023_2024": {
+          "return_pct": 4.057108494343331,
+          "sharpe": 0.3438136369888754,
+          "max_dd_pct": -54.75774945001979
+        },
+        "selection_2025": {
+          "return_pct": -35.568307781360396,
+          "sharpe": -0.26892367529245503,
+          "max_dd_pct": -50.547624884782834
+        },
+        "holdout_2026": {
+          "return_pct": -11.153031314693385,
+          "sharpe": -0.04634587008274769,
+          "max_dd_pct": -40.82016913469283
+        }
+      },
+      "turnovers": 674
+    },
+    {
+      "strategy": "BNBUSDT_dip500_tp200_time7",
+      "entry_dip_bps": 500,
+      "take_profit_bps": 200,
+      "max_hold_days": 7,
+      "cost_bps_per_side": 15,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": 142.26389449915266,
+          "sharpe": 0.8980371490995904,
+          "max_dd_pct": -60.35005280362724
+        },
+        "validation_2023_2024": {
+          "return_pct": 3.1232159519422265,
+          "sharpe": 0.17718188340171792,
+          "max_dd_pct": -20.889348723000833
+        },
+        "selection_2025": {
+          "return_pct": -2.382325090337978,
+          "sharpe": -0.008215507965166274,
+          "max_dd_pct": -17.89858652989843
+        },
+        "holdout_2026": {
+          "return_pct": -24.939424856630012,
+          "sharpe": -1.495061848040137,
+          "max_dd_pct": -27.51947294621043
+        }
+      },
+      "turnovers": 186
+    },
+    {
+      "strategy": "ETHUSDT_dip300_tp100_time7",
+      "entry_dip_bps": 300,
+      "take_profit_bps": 100,
+      "max_hold_days": 7,
+      "cost_bps_per_side": 15,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": 21.8650213737029,
+          "sharpe": 0.46578913005705935,
+          "max_dd_pct": -65.29414610291593
+        },
+        "validation_2023_2024": {
+          "return_pct": 3.071553707866803,
+          "sharpe": 0.2052236561904884,
+          "max_dd_pct": -35.19678339829031
+        },
+        "selection_2025": {
+          "return_pct": -38.97069823699677,
+          "sharpe": -0.8149202874843591,
+          "max_dd_pct": -46.43358626806188
+        },
+        "holdout_2026": {
+          "return_pct": -22.4611851585894,
+          "sharpe": -0.6522208067029625,
+          "max_dd_pct": -38.181108549474786
+        }
+      },
+      "turnovers": 432
+    },
+    {
+      "strategy": "BNBUSDT_dip100_tp100_time7",
+      "entry_dip_bps": 100,
+      "take_profit_bps": 100,
+      "max_hold_days": 7,
+      "cost_bps_per_side": 15,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": 111.7625820655281,
+          "sharpe": 0.7941901127888633,
+          "max_dd_pct": -79.09273985129623
+        },
+        "validation_2023_2024": {
+          "return_pct": 2.7530169236019253,
+          "sharpe": 0.22095644810266812,
+          "max_dd_pct": -39.41907189932839
+        },
+        "selection_2025": {
+          "return_pct": -6.8880913950682405,
+          "sharpe": -0.0021262687578400097,
+          "max_dd_pct": -32.285484951243774
+        },
+        "holdout_2026": {
+          "return_pct": -43.73111011834179,
+          "sharpe": -1.7604473558934906,
+          "max_dd_pct": -48.52539311162653
+        }
+      },
+      "turnovers": 658
+    },
+    {
+      "strategy": "BTCUSDT_dip100_tp100_time3",
+      "entry_dip_bps": 100,
+      "take_profit_bps": 100,
+      "max_hold_days": 3,
+      "cost_bps_per_side": 15,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": -44.97016263279169,
+          "sharpe": -0.29943875664186764,
+          "max_dd_pct": -58.72607957271532
+        },
+        "validation_2023_2024": {
+          "return_pct": 2.331681435818145,
+          "sharpe": 0.1846492919068113,
+          "max_dd_pct": -25.39526774388172
+        },
+        "selection_2025": {
+          "return_pct": -26.983881198934423,
+          "sharpe": -1.061514904903757,
+          "max_dd_pct": -34.612630425294675
+        },
+        "holdout_2026": {
+          "return_pct": -15.887259359451145,
+          "sharpe": -0.4916660524803562,
+          "max_dd_pct": -31.003135454523346
+        }
+      },
+      "turnovers": 786
+    },
+    {
+      "strategy": "ETHUSDT_dip300_tp200_time3",
+      "entry_dip_bps": 300,
+      "take_profit_bps": 200,
+      "max_hold_days": 3,
+      "cost_bps_per_side": 15,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": 44.40561400662914,
+          "sharpe": 0.5541261079370832,
+          "max_dd_pct": -54.3529347515203
+        },
+        "validation_2023_2024": {
+          "return_pct": 2.105457086191609,
+          "sharpe": 0.1778823201258669,
+          "max_dd_pct": -35.07581160057348
+        },
+        "selection_2025": {
+          "return_pct": -27.503607225385586,
+          "sharpe": -0.6099241675686539,
+          "max_dd_pct": -44.92896705111872
+        },
+        "holdout_2026": {
+          "return_pct": -24.363120732910414,
+          "sharpe": -0.7567183680763893,
+          "max_dd_pct": -34.52605802127565
+        }
+      },
+      "turnovers": 494
+    },
+    {
+      "strategy": "BNBUSDT_dip500_tp200_time3",
+      "entry_dip_bps": 500,
+      "take_profit_bps": 200,
+      "max_hold_days": 3,
+      "cost_bps_per_side": 15,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": 267.80246017342847,
+          "sharpe": 1.2446171289409071,
+          "max_dd_pct": -46.46997417159553
+        },
+        "validation_2023_2024": {
+          "return_pct": -1.6437876017346587,
+          "sharpe": 0.03884584891952502,
+          "max_dd_pct": -23.96657922676232
+        },
+        "selection_2025": {
+          "return_pct": -4.631594892837498,
+          "sharpe": -0.19565943189017287,
+          "max_dd_pct": -16.81560027660115
+        },
+        "holdout_2026": {
+          "return_pct": -21.90350804930651,
+          "sharpe": -1.4657378188176455,
+          "max_dd_pct": -21.90350804930651
+        }
+      },
+      "turnovers": 214
+    },
+    {
+      "strategy": "ETHUSDT_dip200_tp100_time7",
+      "entry_dip_bps": 200,
+      "take_profit_bps": 100,
+      "max_hold_days": 7,
+      "cost_bps_per_side": 15,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": 14.192237394513052,
+          "sharpe": 0.4382728988782194,
+          "max_dd_pct": -64.3265035183058
+        },
+        "validation_2023_2024": {
+          "return_pct": -6.186663416176453,
+          "sharpe": 0.09168179462673604,
+          "max_dd_pct": -39.16747602809838
+        },
+        "selection_2025": {
+          "return_pct": -44.766462697900586,
+          "sharpe": -0.9332941537514988,
+          "max_dd_pct": -46.89839905463311
+        },
+        "holdout_2026": {
+          "return_pct": -27.10291404391051,
+          "sharpe": -0.7087001858296615,
+          "max_dd_pct": -43.371986281527064
+        }
+      },
+      "turnovers": 572
+    },
+    {
+      "strategy": "BNBUSDT_dip500_tp300_time7",
+      "entry_dip_bps": 500,
+      "take_profit_bps": 300,
+      "max_hold_days": 7,
+      "cost_bps_per_side": 15,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": 58.64404794030265,
+          "sharpe": 0.6260141819278142,
+          "max_dd_pct": -61.618246998444825
+        },
+        "validation_2023_2024": {
+          "return_pct": -8.027291021022743,
+          "sharpe": -0.07763430333134408,
+          "max_dd_pct": -21.939393336563707
+        },
+        "selection_2025": {
+          "return_pct": 13.194603667206772,
+          "sharpe": 0.5909839623829839,
+          "max_dd_pct": -17.898586529898463
+        },
+        "holdout_2026": {
+          "return_pct": -24.939424856630012,
+          "sharpe": -1.495061848040137,
+          "max_dd_pct": -27.51947294621043
+        }
+      },
+      "turnovers": 174
+    },
+    {
+      "strategy": "ETHUSDT_dip500_tp300_time3",
+      "entry_dip_bps": 500,
+      "take_profit_bps": 300,
+      "max_hold_days": 3,
+      "cost_bps_per_side": 15,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": 92.2145654591408,
+          "sharpe": 0.7905867332776382,
+          "max_dd_pct": -46.01821190683211
+        },
+        "validation_2023_2024": {
+          "return_pct": -9.752959791468063,
+          "sharpe": -0.17865775059905367,
+          "max_dd_pct": -28.090393901023948
+        },
+        "selection_2025": {
+          "return_pct": -25.41903792030622,
+          "sharpe": -0.7600577474615418,
+          "max_dd_pct": -32.63141371624457
+        },
+        "holdout_2026": {
+          "return_pct": -19.13667410303025,
+          "sharpe": -0.8332582040601397,
+          "max_dd_pct": -20.75639554365668
+        }
+      },
+      "turnovers": 248
+    },
+    {
+      "strategy": "ETHUSDT_dip200_tp100_time14",
+      "entry_dip_bps": 200,
+      "take_profit_bps": 100,
+      "max_hold_days": 14,
+      "cost_bps_per_side": 15,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": 25.088589317594924,
+          "sharpe": 0.49984268292761047,
+          "max_dd_pct": -69.9749089832061
+        },
+        "validation_2023_2024": {
+          "return_pct": -14.394815787196148,
+          "sharpe": -0.011882354663298502,
+          "max_dd_pct": -53.2099372948357
+        },
+        "selection_2025": {
+          "return_pct": -41.15053830730633,
+          "sharpe": -0.6561005601511228,
+          "max_dd_pct": -48.662408703108404
+        },
+        "holdout_2026": {
+          "return_pct": -30.993712348266723,
+          "sharpe": -0.7470495372666649,
+          "max_dd_pct": -42.120543866242436
+        }
+      },
+      "turnovers": 468
+    },
+    {
+      "strategy": "ETHUSDT_dip500_tp200_time3",
+      "entry_dip_bps": 500,
+      "take_profit_bps": 200,
+      "max_hold_days": 3,
+      "cost_bps_per_side": 15,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": 81.38104677508863,
+          "sharpe": 0.7432930017284244,
+          "max_dd_pct": -46.899034213098076
+        },
+        "validation_2023_2024": {
+          "return_pct": -15.75031817503384,
+          "sharpe": -0.3851264116878513,
+          "max_dd_pct": -28.76270176073773
+        },
+        "selection_2025": {
+          "return_pct": -30.295017484709174,
+          "sharpe": -0.9908416588195599,
+          "max_dd_pct": -35.439285710391935
+        },
+        "holdout_2026": {
+          "return_pct": -19.13667410303025,
+          "sharpe": -0.8332582040601397,
+          "max_dd_pct": -20.75639554365668
+        }
+      },
+      "turnovers": 248
+    },
+    {
+      "strategy": "BNBUSDT_dip500_tp300_time3",
+      "entry_dip_bps": 500,
+      "take_profit_bps": 300,
+      "max_hold_days": 3,
+      "cost_bps_per_side": 15,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": 216.00676840048578,
+          "sharpe": 1.1261824746546645,
+          "max_dd_pct": -46.46997417159552
+        },
+        "validation_2023_2024": {
+          "return_pct": -16.07904727481204,
+          "sharpe": -0.39622078723567056,
+          "max_dd_pct": -35.125632080991586
+        },
+        "selection_2025": {
+          "return_pct": -0.176617510712751,
+          "sharpe": 0.10688749052062071,
+          "max_dd_pct": -16.81560027660116
+        },
+        "holdout_2026": {
+          "return_pct": -21.90350804930651,
+          "sharpe": -1.4657378188176455,
+          "max_dd_pct": -21.90350804930651
+        }
+      },
+      "turnovers": 206
+    },
+    {
+      "strategy": "ETHUSDT_dip500_tp100_time3",
+      "entry_dip_bps": 500,
+      "take_profit_bps": 100,
+      "max_hold_days": 3,
+      "cost_bps_per_side": 15,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": 102.8367939154431,
+          "sharpe": 0.8489551598495545,
+          "max_dd_pct": -41.340847011971626
+        },
+        "validation_2023_2024": {
+          "return_pct": -17.505138761508665,
+          "sharpe": -0.4496429595435232,
+          "max_dd_pct": -28.644128822159264
+        },
+        "selection_2025": {
+          "return_pct": -13.172532907352974,
+          "sharpe": -0.31351788480520015,
+          "max_dd_pct": -34.26925285866142
+        },
+        "holdout_2026": {
+          "return_pct": -16.653216858130392,
+          "sharpe": -0.6998786650248977,
+          "max_dd_pct": -19.943041401380455
+        }
+      },
+      "turnovers": 258
+    },
+    {
+      "strategy": "SOLUSDT_dip200_tp300_time7",
+      "entry_dip_bps": 200,
+      "take_profit_bps": 300,
+      "max_hold_days": 7,
+      "cost_bps_per_side": 15,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": -55.23357903393682,
+          "sharpe": 0.2881778584614626,
+          "max_dd_pct": -93.61601016917157
+        },
+        "validation_2023_2024": {
+          "return_pct": -28.771958177088496,
+          "sharpe": 0.01975877995446138,
+          "max_dd_pct": -61.363230798811365
+        },
+        "selection_2025": {
+          "return_pct": -55.24915763124207,
+          "sharpe": -0.8694246884763956,
+          "max_dd_pct": -63.69311081303095
+        },
+        "holdout_2026": {
+          "return_pct": -26.75440799288048,
+          "sharpe": -0.591190429094638,
+          "max_dd_pct": -44.13205663889455
+        }
+      },
+      "turnovers": 594
+    },
+    {
+      "strategy": "SOLUSDT_dip200_tp200_time7",
+      "entry_dip_bps": 200,
+      "take_profit_bps": 200,
+      "max_hold_days": 7,
+      "cost_bps_per_side": 15,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": -70.22809159572871,
+          "sharpe": 0.101859219459874,
+          "max_dd_pct": -92.83550318357149
+        },
+        "validation_2023_2024": {
+          "return_pct": -46.3319575382305,
+          "sharpe": -0.23378902845930932,
+          "max_dd_pct": -68.12820042929282
+        },
+        "selection_2025": {
+          "return_pct": -60.97235407568796,
+          "sharpe": -1.1016512559004417,
+          "max_dd_pct": -66.04931221382317
+        },
+        "holdout_2026": {
+          "return_pct": -26.585469326329868,
+          "sharpe": -0.5965566530769347,
+          "max_dd_pct": -42.32445765112487
+        }
+      },
+      "turnovers": 620
+    }
+  ]
+}

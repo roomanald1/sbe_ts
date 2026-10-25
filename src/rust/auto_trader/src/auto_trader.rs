@@ -5,7 +5,7 @@
 use axum::{Json, Router, extract::State, http::StatusCode, routing::get};
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     path::PathBuf,
     sync::{
         Arc,
@@ -21,6 +21,7 @@ use tokio::{
 
 include!("auto_trader/constants.rs");
 include!("auto_trader/market_data.rs");
+include!("auto_trader/research_market_data.rs");
 include!("auto_trader/settings.rs");
 include!("auto_trader/api_types.rs");
 include!("auto_trader/state.rs");

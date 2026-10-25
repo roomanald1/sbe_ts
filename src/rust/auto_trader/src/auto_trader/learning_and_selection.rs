@@ -1,5 +1,7 @@
 fn market_context(signal: &Signal) -> String {
-    let regime = if signal.ranging_probability.unwrap_or(0.0) >= CONTEXT_RANGE_MIN_PROBABILITY {
+    let regime = if signal.research_strategy_candidate {
+        "trend"
+    } else if signal.ranging_probability.unwrap_or(0.0) >= CONTEXT_RANGE_MIN_PROBABILITY {
         "range"
     } else if signal
         .components
@@ -16,14 +18,16 @@ fn market_context(signal: &Signal) -> String {
     } else {
         "mixed"
     };
-    format!(
-        "{}:{regime}",
-        if signal.direction == "bullish" {
-            "long"
-        } else {
-            "short"
-        }
-    )
+    let direction = if signal.direction == "bullish" {
+        "long"
+    } else {
+        "short"
+    };
+    if let Some(strategy) = signal.research_strategy.as_deref() {
+        format!("{direction}:{regime}:{strategy}")
+    } else {
+        format!("{direction}:{regime}")
+    }
 }
 
 const ALL_ORDER_TYPES: [AutoOrderType; 12] = [

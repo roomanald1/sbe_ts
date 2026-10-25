@@ -1,3 +1,30 @@
+fn tag_position_strategy(
+    positions: &mut BTreeMap<String, TraderPosition>,
+    symbol: &str,
+    strategy: Option<&str>,
+) {
+    let Some(strategy) = strategy.filter(|strategy| *strategy != "generic-insight-signals") else {
+        return;
+    };
+    if let Some(position) = positions.get_mut(symbol).filter(|position| position.quantity.abs() > 1e-12) {
+        position.research_strategy = Some(strategy.to_owned());
+    }
+}
+
+fn strategy_from_entry_context(context: &str) -> Option<String> {
+    [
+        "donchian-55-btc200",
+        "donchian-20-sma200",
+        "trend-sleeves-btc200",
+        "trend-50-200",
+        "relative-strength-90-sma200",
+        "rsi2-oversold-rebound",
+    ]
+    .into_iter()
+    .find(|strategy| context.contains(strategy))
+    .map(str::to_owned)
+}
+
 fn apply_auto_fill(
     positions: &mut BTreeMap<String, TraderPosition>,
     symbol: &str,
@@ -7,6 +34,7 @@ fn apply_auto_fill(
     fee: f64,
     order_type: &str,
     context: &str,
+    count_entry: bool,
     horizon_take_profit_percent: Option<f64>,
 ) -> (f64, Option<String>) {
     let position = positions.entry(symbol.to_owned()).or_default();
@@ -15,8 +43,10 @@ fn apply_auto_fill(
     if old == 0.0 || old.signum() == incoming.signum() {
         if old == 0.0 {
             position.take_profit_deferred_at_ms = None;
+            position.entries = 1;
+        } else if count_entry {
+            position.entries = position.entries.saturating_add(1);
         }
-        position.entries = position.entries.saturating_add(1);
         let total = old.abs() + incoming.abs();
         position.average_entry_price =
             (old.abs() * position.average_entry_price + incoming.abs() * price) / total;
@@ -68,6 +98,7 @@ fn apply_auto_fill(
         position.entry_order_type = order_type.to_owned();
         position.entry_context = context.to_owned();
         position.scout_entry = context.starts_with("scout:");
+        position.entries = 1;
         position.horizon_take_profit_percent = horizon_take_profit_percent;
         position.take_profit_deferred_at_ms = None;
     } else {
@@ -110,6 +141,8 @@ fn signal_audit_payload(
         "strength": signal.strength,
         "ranging_probability": signal.ranging_probability,
         "market_context": market_context(signal),
+        "research_strategy": signal.research_strategy,
+        "market_regime": signal.market_regime,
         "signal_components": signal.components,
         "exploratory": exploratory,
         "stop_loss_percent": stop_loss_percent,

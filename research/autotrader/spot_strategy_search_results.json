@@ -1,0 +1,1054 @@
+{
+  "data_source": "https://data-api.binance.vision/api/v3/klines",
+  "symbols": [
+    "BTCUSDT",
+    "ETHUSDT",
+    "BNBUSDT",
+    "XRPUSDT",
+    "SOLUSDT",
+    "ADAUSDT",
+    "DOGEUSDT"
+  ],
+  "bar": "1d",
+  "execution": "prior-close signal, next open; open-to-next-open returns",
+  "cost_model": {
+    "fee_bps_per_side": 10.0,
+    "slippage_bps_per_side": 5.0,
+    "charged_on_exposure_change": true
+  },
+  "splits": "train through 2022; validation 2023-24; holdout 2025 onward",
+  "results": [
+    {
+      "strategy": "BTCUSDT_sma50",
+      "cost_bps_per_side": 15.0,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": 193.9426213922334,
+          "sharpe": 1.1846583327400464,
+          "max_dd_pct": -58.371042689757616
+        },
+        "validation_2023_2024": {
+          "return_pct": 318.54379992901835,
+          "sharpe": 1.9787791255146798,
+          "max_dd_pct": -26.79155451119708
+        },
+        "holdout_2025_2026": {
+          "return_pct": 17.257789475515395,
+          "sharpe": 0.4678919363295293,
+          "max_dd_pct": -26.208153426481186
+        }
+      },
+      "turnover_units": 119.0,
+      "active_days": 1218,
+      "observations": 2263
+    },
+    {
+      "strategy": "BTCUSDT_sma100",
+      "cost_bps_per_side": 15.0,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": 125.81204881065919,
+          "sharpe": 0.9670924430487738,
+          "max_dd_pct": -38.79881264705342
+        },
+        "validation_2023_2024": {
+          "return_pct": 196.7127821588533,
+          "sharpe": 1.475787597124186,
+          "max_dd_pct": -36.67616672862341
+        },
+        "holdout_2025_2026": {
+          "return_pct": 11.896438803609065,
+          "sharpe": 0.377571150834982,
+          "max_dd_pct": -24.891296518863413
+        }
+      },
+      "turnover_units": 77.0,
+      "active_days": 1179,
+      "observations": 2263
+    },
+    {
+      "strategy": "BTCUSDT_sma200",
+      "cost_bps_per_side": 15.0,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": -50.94772362156872,
+          "sharpe": -0.6966251684861908,
+          "max_dd_pct": -64.37341674859502
+        },
+        "validation_2023_2024": {
+          "return_pct": 250.30413546941222,
+          "sharpe": 1.6303253197012575,
+          "max_dd_pct": -26.008807168370108
+        },
+        "holdout_2025_2026": {
+          "return_pct": -3.531081024617244,
+          "sharpe": 0.0679663598206634,
+          "max_dd_pct": -31.979115563388692
+        }
+      },
+      "turnover_units": 53.0,
+      "active_days": 1119,
+      "observations": 2263
+    },
+    {
+      "strategy": "BTCUSDT_momentum30",
+      "cost_bps_per_side": 15.0,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": 208.61237006493144,
+          "sharpe": 1.2716781982287135,
+          "max_dd_pct": -46.96043558971461
+        },
+        "validation_2023_2024": {
+          "return_pct": 253.77173151271987,
+          "sharpe": 1.762022776927497,
+          "max_dd_pct": -36.92359903935915
+        },
+        "holdout_2025_2026": {
+          "return_pct": -4.2908024255652215,
+          "sharpe": 0.03935566409054979,
+          "max_dd_pct": -33.98207181363595
+        }
+      },
+      "turnover_units": 188.0,
+      "active_days": 1238,
+      "observations": 2263
+    },
+    {
+      "strategy": "BTCUSDT_momentum90",
+      "cost_bps_per_side": 15.0,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": 80.39927597439447,
+          "sharpe": 0.7507327900303274,
+          "max_dd_pct": -57.9510817181259
+        },
+        "validation_2023_2024": {
+          "return_pct": 218.20064437043754,
+          "sharpe": 1.5414159607657947,
+          "max_dd_pct": -27.230148397398324
+        },
+        "holdout_2025_2026": {
+          "return_pct": -2.2432421300759176,
+          "sharpe": 0.06586803227607915,
+          "max_dd_pct": -27.737598728329893
+        }
+      },
+      "turnover_units": 75.0,
+      "active_days": 1213,
+      "observations": 2263
+    },
+    {
+      "strategy": "BTCUSDT_momentum180",
+      "cost_bps_per_side": 15.0,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": -30.320262669536103,
+          "sharpe": -0.11508379244603531,
+          "max_dd_pct": -61.09608019967493
+        },
+        "validation_2023_2024": {
+          "return_pct": 178.0510319674463,
+          "sharpe": 1.3486735336955549,
+          "max_dd_pct": -26.07493390117206
+        },
+        "holdout_2025_2026": {
+          "return_pct": 19.93982332004314,
+          "sharpe": 0.4758746271073708,
+          "max_dd_pct": -28.09527676693747
+        }
+      },
+      "turnover_units": 45.0,
+      "active_days": 1265,
+      "observations": 2263
+    },
+    {
+      "strategy": "ETHUSDT_sma50",
+      "cost_bps_per_side": 15.0,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": 299.5997675086907,
+          "sharpe": 1.200614395340786,
+          "max_dd_pct": -54.914090445908535
+        },
+        "validation_2023_2024": {
+          "return_pct": 88.35592342699805,
+          "sharpe": 0.9442486890754622,
+          "max_dd_pct": -37.877305391371465
+        },
+        "holdout_2025_2026": {
+          "return_pct": 132.5666709957966,
+          "sharpe": 1.2688767004178823,
+          "max_dd_pct": -29.783240141328736
+        }
+      },
+      "turnover_units": 110.0,
+      "active_days": 1169,
+      "observations": 2263
+    },
+    {
+      "strategy": "ETHUSDT_sma100",
+      "cost_bps_per_side": 15.0,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": 121.43308437912546,
+          "sharpe": 0.8260674279485488,
+          "max_dd_pct": -74.96145625894034
+        },
+        "validation_2023_2024": {
+          "return_pct": 73.1285976549636,
+          "sharpe": 0.8299931114727158,
+          "max_dd_pct": -46.64586624686081
+        },
+        "holdout_2025_2026": {
+          "return_pct": 42.70028388995228,
+          "sharpe": 0.6748474881483977,
+          "max_dd_pct": -38.592722561738604
+        }
+      },
+      "turnover_units": 99.0,
+      "active_days": 1206,
+      "observations": 2263
+    },
+    {
+      "strategy": "ETHUSDT_sma200",
+      "cost_bps_per_side": 15.0,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": 74.78535684235474,
+          "sharpe": 0.6915295474842569,
+          "max_dd_pct": -57.75758891615892
+        },
+        "validation_2023_2024": {
+          "return_pct": 121.74639651727652,
+          "sharpe": 1.0542577175284524,
+          "max_dd_pct": -29.100324739224547
+        },
+        "holdout_2025_2026": {
+          "return_pct": 2.571993964162589,
+          "sharpe": 0.22654019890968982,
+          "max_dd_pct": -38.47345931902105
+        }
+      },
+      "turnover_units": 33.0,
+      "active_days": 1073,
+      "observations": 2263
+    },
+    {
+      "strategy": "ETHUSDT_momentum30",
+      "cost_bps_per_side": 15.0,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": 525.9797257616932,
+          "sharpe": 1.4275022231852432,
+          "max_dd_pct": -50.115773982740805
+        },
+        "validation_2023_2024": {
+          "return_pct": 52.01388595640668,
+          "sharpe": 0.690937076172022,
+          "max_dd_pct": -32.95649783848609
+        },
+        "holdout_2025_2026": {
+          "return_pct": 109.93651150772767,
+          "sharpe": 1.13009170214553,
+          "max_dd_pct": -43.20541579274656
+        }
+      },
+      "turnover_units": 166.0,
+      "active_days": 1178,
+      "observations": 2263
+    },
+    {
+      "strategy": "ETHUSDT_momentum90",
+      "cost_bps_per_side": 15.0,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": 197.06783483152006,
+          "sharpe": 0.9876357640081761,
+          "max_dd_pct": -69.51381372563212
+        },
+        "validation_2023_2024": {
+          "return_pct": 124.09006817015667,
+          "sharpe": 1.0641397031712267,
+          "max_dd_pct": -33.166998912911616
+        },
+        "holdout_2025_2026": {
+          "return_pct": -7.029574867089461,
+          "sharpe": 0.1065801258051015,
+          "max_dd_pct": -41.11649326769724
+        }
+      },
+      "turnover_units": 67.0,
+      "active_days": 1215,
+      "observations": 2263
+    },
+    {
+      "strategy": "ETHUSDT_momentum180",
+      "cost_bps_per_side": 15.0,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": 65.23869839285071,
+          "sharpe": 0.6512430537728527,
+          "max_dd_pct": -57.205052881781526
+        },
+        "validation_2023_2024": {
+          "return_pct": 13.18128640093228,
+          "sharpe": 0.36461688490014055,
+          "max_dd_pct": -53.322808528046515
+        },
+        "holdout_2025_2026": {
+          "return_pct": -41.07036128537654,
+          "sharpe": -0.4792165885208967,
+          "max_dd_pct": -56.115121454948415
+        }
+      },
+      "turnover_units": 75.0,
+      "active_days": 1184,
+      "observations": 2263
+    },
+    {
+      "strategy": "BNBUSDT_sma50",
+      "cost_bps_per_side": 15.0,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": 1215.3030059686887,
+          "sharpe": 1.6134718002578152,
+          "max_dd_pct": -41.058535676421684
+        },
+        "validation_2023_2024": {
+          "return_pct": 115.17683500090787,
+          "sharpe": 1.0957164874361591,
+          "max_dd_pct": -30.302755028504514
+        },
+        "holdout_2025_2026": {
+          "return_pct": 35.96869526242399,
+          "sharpe": 0.6562689807388442,
+          "max_dd_pct": -32.9711313059498
+        }
+      },
+      "turnover_units": 156.0,
+      "active_days": 1218,
+      "observations": 2263
+    },
+    {
+      "strategy": "BNBUSDT_sma100",
+      "cost_bps_per_side": 15.0,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": 392.658817067987,
+          "sharpe": 1.1469851571317806,
+          "max_dd_pct": -77.88911493739687
+        },
+        "validation_2023_2024": {
+          "return_pct": 204.53458332388465,
+          "sharpe": 1.4790291530469823,
+          "max_dd_pct": -26.687773325671504
+        },
+        "holdout_2025_2026": {
+          "return_pct": 29.695665450712518,
+          "sharpe": 0.58437093237256,
+          "max_dd_pct": -37.488126961266445
+        }
+      },
+      "turnover_units": 97.0,
+      "active_days": 1214,
+      "observations": 2263
+    },
+    {
+      "strategy": "BNBUSDT_sma200",
+      "cost_bps_per_side": 15.0,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": -5.296036354929989,
+          "sharpe": 0.3225104693809734,
+          "max_dd_pct": -68.37082888012242
+        },
+        "validation_2023_2024": {
+          "return_pct": 69.84580500773019,
+          "sharpe": 0.8000976943372099,
+          "max_dd_pct": -37.24435552548062
+        },
+        "holdout_2025_2026": {
+          "return_pct": -18.689294910062326,
+          "sharpe": -0.123227872161043,
+          "max_dd_pct": -44.67646121937969
+        }
+      },
+      "turnover_units": 79.0,
+      "active_days": 1170,
+      "observations": 2263
+    },
+    {
+      "strategy": "BNBUSDT_momentum30",
+      "cost_bps_per_side": 15.0,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": 1200.9343646667455,
+          "sharpe": 1.5727747107686871,
+          "max_dd_pct": -59.51273199647529
+        },
+        "validation_2023_2024": {
+          "return_pct": 88.02343852740539,
+          "sharpe": 0.9424971034917711,
+          "max_dd_pct": -36.60165502873751
+        },
+        "holdout_2025_2026": {
+          "return_pct": 34.058756256173254,
+          "sharpe": 0.6309890550139893,
+          "max_dd_pct": -34.08328422623913
+        }
+      },
+      "turnover_units": 208.0,
+      "active_days": 1264,
+      "observations": 2263
+    },
+    {
+      "strategy": "BNBUSDT_momentum90",
+      "cost_bps_per_side": 15.0,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": 530.9174174172514,
+          "sharpe": 1.246615102117592,
+          "max_dd_pct": -74.77476713726011
+        },
+        "validation_2023_2024": {
+          "return_pct": 107.50125359898814,
+          "sharpe": 1.0413978781561617,
+          "max_dd_pct": -34.326983236670806
+        },
+        "holdout_2025_2026": {
+          "return_pct": 9.71190398065296,
+          "sharpe": 0.3226956957202999,
+          "max_dd_pct": -36.78186692141542
+        }
+      },
+      "turnover_units": 97.0,
+      "active_days": 1262,
+      "observations": 2263
+    },
+    {
+      "strategy": "BNBUSDT_momentum180",
+      "cost_bps_per_side": 15.0,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": 124.14390337739292,
+          "sharpe": 0.7950925183609088,
+          "max_dd_pct": -78.70216586303309
+        },
+        "validation_2023_2024": {
+          "return_pct": 67.10660218042415,
+          "sharpe": 0.7894514119464332,
+          "max_dd_pct": -38.08795709503758
+        },
+        "holdout_2025_2026": {
+          "return_pct": 0.3942920133586991,
+          "sharpe": 0.2098282854735037,
+          "max_dd_pct": -43.456304986819525
+        }
+      },
+      "turnover_units": 83.0,
+      "active_days": 1287,
+      "observations": 2263
+    },
+    {
+      "strategy": "XRPUSDT_sma50",
+      "cost_bps_per_side": 15.0,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": 131.6033549928788,
+          "sharpe": 0.8190538580929021,
+          "max_dd_pct": -65.51907541719365
+        },
+        "validation_2023_2024": {
+          "return_pct": 69.97755528733576,
+          "sharpe": 0.7291298630043855,
+          "max_dd_pct": -60.159219486781424
+        },
+        "holdout_2025_2026": {
+          "return_pct": -19.406720372273213,
+          "sharpe": -0.02214690542158513,
+          "max_dd_pct": -60.20452042685696
+        }
+      },
+      "turnover_units": 156.0,
+      "active_days": 1012,
+      "observations": 2263
+    },
+    {
+      "strategy": "XRPUSDT_sma100",
+      "cost_bps_per_side": 15.0,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": -15.997455868609157,
+          "sharpe": 0.41056372364953986,
+          "max_dd_pct": -77.08419555358445
+        },
+        "validation_2023_2024": {
+          "return_pct": 13.421538308789493,
+          "sharpe": 0.4031971926952556,
+          "max_dd_pct": -70.21951909405867
+        },
+        "holdout_2025_2026": {
+          "return_pct": -33.02453604098494,
+          "sharpe": -0.21646877787598792,
+          "max_dd_pct": -58.89322376019045
+        }
+      },
+      "turnover_units": 111.0,
+      "active_days": 992,
+      "observations": 2263
+    },
+    {
+      "strategy": "XRPUSDT_sma200",
+      "cost_bps_per_side": 15.0,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": -32.23272714440847,
+          "sharpe": 0.19107984142921883,
+          "max_dd_pct": -83.86902061480646
+        },
+        "validation_2023_2024": {
+          "return_pct": 98.66063790805035,
+          "sharpe": 0.7688568421668094,
+          "max_dd_pct": -65.17087670789783
+        },
+        "holdout_2025_2026": {
+          "return_pct": -21.02904153162829,
+          "sharpe": 0.06240326681364457,
+          "max_dd_pct": -51.014067219238
+        }
+      },
+      "turnover_units": 83.0,
+      "active_days": 1025,
+      "observations": 2263
+    },
+    {
+      "strategy": "XRPUSDT_momentum30",
+      "cost_bps_per_side": 15.0,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": 133.8008179267708,
+          "sharpe": 0.8367926847909326,
+          "max_dd_pct": -62.69672588578919
+        },
+        "validation_2023_2024": {
+          "return_pct": 101.34424280493688,
+          "sharpe": 0.862104612596304,
+          "max_dd_pct": -52.154945742605705
+        },
+        "holdout_2025_2026": {
+          "return_pct": -66.62389680462259,
+          "sharpe": -1.1396083015139828,
+          "max_dd_pct": -71.83787406400732
+        }
+      },
+      "turnover_units": 218.0,
+      "active_days": 1024,
+      "observations": 2263
+    },
+    {
+      "strategy": "XRPUSDT_momentum90",
+      "cost_bps_per_side": 15.0,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": -47.04549890654482,
+          "sharpe": 0.30668772788323495,
+          "max_dd_pct": -86.82346219401965
+        },
+        "validation_2023_2024": {
+          "return_pct": 17.42889374504566,
+          "sharpe": 0.43148823474128045,
+          "max_dd_pct": -78.06356835640184
+        },
+        "holdout_2025_2026": {
+          "return_pct": -45.174001775233044,
+          "sharpe": -0.4405973178014582,
+          "max_dd_pct": -65.991261651557
+        }
+      },
+      "turnover_units": 113.0,
+      "active_days": 1112,
+      "observations": 2263
+    },
+    {
+      "strategy": "XRPUSDT_momentum180",
+      "cost_bps_per_side": 15.0,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": -31.361829870797088,
+          "sharpe": 0.24923049954767038,
+          "max_dd_pct": -84.31604956375378
+        },
+        "validation_2023_2024": {
+          "return_pct": 149.0622656604017,
+          "sharpe": 0.9074022747918572,
+          "max_dd_pct": -61.97460827901945
+        },
+        "holdout_2025_2026": {
+          "return_pct": -45.67920534432843,
+          "sharpe": -0.2967424223661344,
+          "max_dd_pct": -65.62196405413926
+        }
+      },
+      "turnover_units": 100.0,
+      "active_days": 1157,
+      "observations": 2263
+    },
+    {
+      "strategy": "SOLUSDT_sma50",
+      "cost_bps_per_side": 15.0,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": 1893.4109339914532,
+          "sharpe": 1.748410086304771,
+          "max_dd_pct": -69.35143577129959
+        },
+        "validation_2023_2024": {
+          "return_pct": 616.5030576940723,
+          "sharpe": 1.6544997857892634,
+          "max_dd_pct": -52.71710119367812
+        },
+        "holdout_2025_2026": {
+          "return_pct": -14.62009418009883,
+          "sharpe": 0.04371579421475461,
+          "max_dd_pct": -60.43372544658684
+        }
+      },
+      "turnover_units": 126.0,
+      "active_days": 1110,
+      "observations": 2263
+    },
+    {
+      "strategy": "SOLUSDT_sma100",
+      "cost_bps_per_side": 15.0,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": 1422.571202993591,
+          "sharpe": 1.6272282245704104,
+          "max_dd_pct": -69.87853892777598
+        },
+        "validation_2023_2024": {
+          "return_pct": 70.33046800658632,
+          "sharpe": 0.7207936848194523,
+          "max_dd_pct": -60.531254223194495
+        },
+        "holdout_2025_2026": {
+          "return_pct": -1.504176786467426,
+          "sharpe": 0.20858013986349552,
+          "max_dd_pct": -44.570959390710385
+        }
+      },
+      "turnover_units": 111.0,
+      "active_days": 1064,
+      "observations": 2263
+    },
+    {
+      "strategy": "SOLUSDT_sma200",
+      "cost_bps_per_side": 15.0,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": 922.5249612954918,
+          "sharpe": 1.5309821779761152,
+          "max_dd_pct": -58.0410584430667
+        },
+        "validation_2023_2024": {
+          "return_pct": 208.34359425955364,
+          "sharpe": 1.125313627855489,
+          "max_dd_pct": -58.791428038174246
+        },
+        "holdout_2025_2026": {
+          "return_pct": 2.344715653560958,
+          "sharpe": 0.25565371666666403,
+          "max_dd_pct": -39.614975431629254
+        }
+      },
+      "turnover_units": 43.0,
+      "active_days": 1042,
+      "observations": 2263
+    },
+    {
+      "strategy": "SOLUSDT_momentum30",
+      "cost_bps_per_side": 15.0,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": 3090.7554282224037,
+          "sharpe": 1.9425374046867399,
+          "max_dd_pct": -48.09272856078856
+        },
+        "validation_2023_2024": {
+          "return_pct": 901.8337295671017,
+          "sharpe": 1.890479674836608,
+          "max_dd_pct": -50.46759087948143
+        },
+        "holdout_2025_2026": {
+          "return_pct": -31.788818685322497,
+          "sharpe": -0.22331583612661832,
+          "max_dd_pct": -58.13732102158819
+        }
+      },
+      "turnover_units": 158.0,
+      "active_days": 1125,
+      "observations": 2263
+    },
+    {
+      "strategy": "SOLUSDT_momentum90",
+      "cost_bps_per_side": 15.0,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": 1336.4697163362446,
+          "sharpe": 1.6157884910381772,
+          "max_dd_pct": -57.94185271190706
+        },
+        "validation_2023_2024": {
+          "return_pct": 173.80086470261352,
+          "sharpe": 1.044113627600272,
+          "max_dd_pct": -60.19148802750398
+        },
+        "holdout_2025_2026": {
+          "return_pct": -24.166262449308697,
+          "sharpe": -0.07879338259496735,
+          "max_dd_pct": -54.12906486591416
+        }
+      },
+      "turnover_units": 95.0,
+      "active_days": 1139,
+      "observations": 2263
+    },
+    {
+      "strategy": "SOLUSDT_momentum180",
+      "cost_bps_per_side": 15.0,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": 1160.1832811674913,
+          "sharpe": 1.554892640129383,
+          "max_dd_pct": -67.8998490770481
+        },
+        "validation_2023_2024": {
+          "return_pct": 600.1417723328271,
+          "sharpe": 1.656054262924448,
+          "max_dd_pct": -37.38700913805877
+        },
+        "holdout_2025_2026": {
+          "return_pct": -43.23651073171229,
+          "sharpe": -0.3378623506599245,
+          "max_dd_pct": -66.15738641466072
+        }
+      },
+      "turnover_units": 33.0,
+      "active_days": 1099,
+      "observations": 2263
+    },
+    {
+      "strategy": "ADAUSDT_sma50",
+      "cost_bps_per_side": 15.0,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": 484.5957155897948,
+          "sharpe": 1.2749158012955948,
+          "max_dd_pct": -64.59437065925785
+        },
+        "validation_2023_2024": {
+          "return_pct": 137.2868814940994,
+          "sharpe": 1.0145985871421133,
+          "max_dd_pct": -55.29315923474798
+        },
+        "holdout_2025_2026": {
+          "return_pct": -55.92286987455435,
+          "sharpe": -0.681894760632973,
+          "max_dd_pct": -65.84574701654662
+        }
+      },
+      "turnover_units": 140.0,
+      "active_days": 904,
+      "observations": 2263
+    },
+    {
+      "strategy": "ADAUSDT_sma100",
+      "cost_bps_per_side": 15.0,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": 728.3785178884242,
+          "sharpe": 1.4373811977625999,
+          "max_dd_pct": -66.53635838542446
+        },
+        "validation_2023_2024": {
+          "return_pct": 134.4941764046577,
+          "sharpe": 0.9962092373129331,
+          "max_dd_pct": -47.33473416349134
+        },
+        "holdout_2025_2026": {
+          "return_pct": -52.003905784996476,
+          "sharpe": -0.5321993274533267,
+          "max_dd_pct": -67.51332454621138
+        }
+      },
+      "turnover_units": 77.0,
+      "active_days": 889,
+      "observations": 2263
+    },
+    {
+      "strategy": "ADAUSDT_sma200",
+      "cost_bps_per_side": 15.0,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": 23.336357881943414,
+          "sharpe": 0.45537153895193544,
+          "max_dd_pct": -51.26875489087905
+        },
+        "validation_2023_2024": {
+          "return_pct": 53.970993077628314,
+          "sharpe": 0.6521706166768153,
+          "max_dd_pct": -45.77801258926605
+        },
+        "holdout_2025_2026": {
+          "return_pct": -77.6289125326764,
+          "sharpe": -1.3579582123348861,
+          "max_dd_pct": -83.31694562713932
+        }
+      },
+      "turnover_units": 53.0,
+      "active_days": 779,
+      "observations": 2263
+    },
+    {
+      "strategy": "ADAUSDT_momentum30",
+      "cost_bps_per_side": 15.0,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": 737.4424466434899,
+          "sharpe": 1.4365903612636324,
+          "max_dd_pct": -62.99678399203502
+        },
+        "validation_2023_2024": {
+          "return_pct": 170.8523668175089,
+          "sharpe": 1.1065064186856721,
+          "max_dd_pct": -58.23480863952473
+        },
+        "holdout_2025_2026": {
+          "return_pct": -78.83905140456274,
+          "sharpe": -1.4816556393251195,
+          "max_dd_pct": -84.5190804226485
+        }
+      },
+      "turnover_units": 174.0,
+      "active_days": 976,
+      "observations": 2263
+    },
+    {
+      "strategy": "ADAUSDT_momentum90",
+      "cost_bps_per_side": 15.0,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": 603.231396056992,
+          "sharpe": 1.3622868409580375,
+          "max_dd_pct": -59.175453907011466
+        },
+        "validation_2023_2024": {
+          "return_pct": 127.46562566799452,
+          "sharpe": 0.9655822398854306,
+          "max_dd_pct": -51.157910526294025
+        },
+        "holdout_2025_2026": {
+          "return_pct": -28.519605647320155,
+          "sharpe": -0.16582337398320793,
+          "max_dd_pct": -50.91434517737235
+        }
+      },
+      "turnover_units": 81.0,
+      "active_days": 884,
+      "observations": 2263
+    },
+    {
+      "strategy": "ADAUSDT_momentum180",
+      "cost_bps_per_side": 15.0,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": 80.5781676283635,
+          "sharpe": 0.6939621921660266,
+          "max_dd_pct": -59.67837972165411
+        },
+        "validation_2023_2024": {
+          "return_pct": 51.23582191292262,
+          "sharpe": 0.6371303785491552,
+          "max_dd_pct": -44.738199638896084
+        },
+        "holdout_2025_2026": {
+          "return_pct": -49.48139297101872,
+          "sharpe": -0.17032035975422136,
+          "max_dd_pct": -62.38591687418351
+        }
+      },
+      "turnover_units": 56.0,
+      "active_days": 855,
+      "observations": 2263
+    },
+    {
+      "strategy": "DOGEUSDT_sma50",
+      "cost_bps_per_side": 15.0,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": 4014.8855916868697,
+          "sharpe": 1.1769478180772386,
+          "max_dd_pct": -82.81721635132784
+        },
+        "validation_2023_2024": {
+          "return_pct": 321.29250980443214,
+          "sharpe": 1.350294990070876,
+          "max_dd_pct": -50.155345260017036
+        },
+        "holdout_2025_2026": {
+          "return_pct": -56.18647811400918,
+          "sharpe": -0.6161143183022537,
+          "max_dd_pct": -69.49456697883787
+        }
+      },
+      "turnover_units": 120.0,
+      "active_days": 946,
+      "observations": 2263
+    },
+    {
+      "strategy": "DOGEUSDT_sma100",
+      "cost_bps_per_side": 15.0,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": 1783.5021741920907,
+          "sharpe": 1.0746587061075634,
+          "max_dd_pct": -92.34114486200738
+        },
+        "validation_2023_2024": {
+          "return_pct": 131.5265721275213,
+          "sharpe": 0.9336152188713018,
+          "max_dd_pct": -46.85504111703972
+        },
+        "holdout_2025_2026": {
+          "return_pct": -42.04821989467498,
+          "sharpe": -0.293695872003701,
+          "max_dd_pct": -55.899428023401065
+        }
+      },
+      "turnover_units": 81.0,
+      "active_days": 938,
+      "observations": 2263
+    },
+    {
+      "strategy": "DOGEUSDT_sma200",
+      "cost_bps_per_side": 15.0,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": 114.00455288469229,
+          "sharpe": 0.7810811336504021,
+          "max_dd_pct": -84.44223568740938
+        },
+        "validation_2023_2024": {
+          "return_pct": 143.87319513786233,
+          "sharpe": 0.9657496308504635,
+          "max_dd_pct": -49.890410632330365
+        },
+        "holdout_2025_2026": {
+          "return_pct": -65.91423851115688,
+          "sharpe": -1.0622649643217732,
+          "max_dd_pct": -74.0611664528009
+        }
+      },
+      "turnover_units": 58.0,
+      "active_days": 807,
+      "observations": 2263
+    },
+    {
+      "strategy": "DOGEUSDT_momentum30",
+      "cost_bps_per_side": 15.0,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": 8154.847428166961,
+          "sharpe": 1.2797109273459757,
+          "max_dd_pct": -75.16433708887989
+        },
+        "validation_2023_2024": {
+          "return_pct": 254.06443674488264,
+          "sharpe": 1.2224931900853004,
+          "max_dd_pct": -64.5239905071224
+        },
+        "holdout_2025_2026": {
+          "return_pct": -62.02384947053141,
+          "sharpe": -0.793516509729794,
+          "max_dd_pct": -62.02384947053141
+        }
+      },
+      "turnover_units": 174.0,
+      "active_days": 1017,
+      "observations": 2263
+    },
+    {
+      "strategy": "DOGEUSDT_momentum90",
+      "cost_bps_per_side": 15.0,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": 1807.8432772887893,
+          "sharpe": 1.0783187534902943,
+          "max_dd_pct": -89.42668560452917
+        },
+        "validation_2023_2024": {
+          "return_pct": 236.81693926843863,
+          "sharpe": 1.1835416070158442,
+          "max_dd_pct": -45.40688253393911
+        },
+        "holdout_2025_2026": {
+          "return_pct": -69.66060843995028,
+          "sharpe": -1.0651172143728616,
+          "max_dd_pct": -76.91210660330954
+        }
+      },
+      "turnover_units": 109.0,
+      "active_days": 948,
+      "observations": 2263
+    },
+    {
+      "strategy": "DOGEUSDT_momentum180",
+      "cost_bps_per_side": 15.0,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": -13.104957166575826,
+          "sharpe": 0.47498538705288085,
+          "max_dd_pct": -90.41950075152556
+        },
+        "validation_2023_2024": {
+          "return_pct": 197.92468764093266,
+          "sharpe": 1.0764417862238627,
+          "max_dd_pct": -57.10844468684666
+        },
+        "holdout_2025_2026": {
+          "return_pct": -67.8598895248538,
+          "sharpe": -0.907638143660251,
+          "max_dd_pct": -75.54178227538544
+        }
+      },
+      "turnover_units": 48.0,
+      "active_days": 985,
+      "observations": 2263
+    },
+    {
+      "strategy": "equal_weight_mom90",
+      "cost_bps_per_side": 15.0,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": 24.319966111145153,
+          "sharpe": 0.42928504073174184,
+          "max_dd_pct": -62.27290555258068
+        },
+        "validation_2023_2024": {
+          "return_pct": 161.34450834527004,
+          "sharpe": 1.506582208048423,
+          "max_dd_pct": -22.273274622306825
+        },
+        "holdout_2025_2026": {
+          "return_pct": -15.343437675435146,
+          "sharpe": -0.33168663138601345,
+          "max_dd_pct": -30.149549788404084
+        }
+      },
+      "turnover_units": 89.85714285714292,
+      "active_days": 1656,
+      "observations": 2263
+    }
+  ]
+}

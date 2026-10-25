@@ -7,15 +7,13 @@ pub fn router() -> Router {
         .as_ref()
         .and_then(|value| serde_json::from_value::<Settings>(value.clone()).ok())
         .unwrap_or_default();
+    if stored_state.as_ref().is_some_and(|value| value.get("research_strategies").is_none()) {
+        if let Some(strategy) = stored_state.as_ref().and_then(|value| value.get("research_strategy")).and_then(|value| serde_json::from_value::<ResearchStrategy>(value.clone()).ok()) {
+            settings.research_strategies = vec![strategy];
+        }
+    }
     settings.take_profit_percent =
         risk_adjusted_take_profit_percent(settings.stop_loss_percent, settings.risk_appetite);
-    if let Err(error) = persist_settings(&settings_path, &settings) {
-        crate::service_log!(
-            "ERROR",
-            "Could not persist risk-adjusted take-profit: {}",
-            error.1
-        );
-    }
     // The previous release defaulted this new cap to three, which can strand existing books above the cap.
     if settings.max_open_positions == 3 {
         settings.max_open_positions = default_max_open_positions();
@@ -30,10 +28,38 @@ pub fn router() -> Router {
             .map(|position| position.realized_pnl)
             .sum();
     }
-    for position in settings.positions.values_mut() {
-        if position.quantity.abs() > 1e-12 && position.entries == 0 {
+    for (symbol, position) in settings.positions.iter_mut() {
+        if position.quantity.abs() > 1e-12 && position.research_strategy.is_none() {
+            position.research_strategy = strategy_from_entry_context(&position.entry_context);
+        }
+        if position.quantity.abs() > 1e-12 && position.entries > settings.max_entries_per_auto_position {
+            let expected_strategy = position.research_strategy.as_deref();
+            let actual_entry_count = settings.orders.iter()
+                .filter(|order| order.symbol == *symbol && matches!(order.purpose.as_str(), "signal" | "scout") && order.filled_quantity > 1e-12)
+                .filter(|order| match expected_strategy {
+                    Some(strategy) => order.strategy.as_deref() == Some(strategy),
+                    None => order.strategy.as_deref().is_none_or(|strategy| strategy == "generic-insight-signals"),
+                })
+                .filter_map(|order| order.decision_id.as_ref())
+                .collect::<BTreeSet<_>>()
+                .len();
+            position.entries = actual_entry_count.max(1).min(settings.max_entries_per_auto_position as usize) as u32;
+        } else if position.quantity.abs() > 1e-12 && position.entries == 0 {
             position.entries = 1;
         }
+    }
+    let strategy_by_symbol = settings.positions.iter()
+        .filter_map(|(symbol, position)| position.research_strategy.as_ref().map(|strategy| (symbol.clone(), strategy.clone())))
+        .collect::<BTreeMap<_, _>>();
+    for order in &mut settings.orders {
+        if order.purpose == "stop-loss" && order.strategy.as_deref() == Some("generic-insight-signals") {
+            if let Some(strategy) = strategy_by_symbol.get(&order.symbol) {
+                order.strategy = Some(strategy.clone());
+            }
+        }
+    }
+    if let Err(error) = persist_settings(&settings_path, &settings) {
+        crate::service_log!("ERROR", "Could not persist AutoTrader state migrations: {}", error.1);
     }
     settings.used_notional_today = allocated_notional(&settings);
     if settings.utc_day != utc_day() {
@@ -66,6 +92,8 @@ pub fn router() -> Router {
             .timeout(Duration::from_secs(5))
             .build()
             .unwrap_or_else(|_| reqwest::Client::new()),
+        research_daily_data: Arc::new(Mutex::new(ResearchDailyDataCache::default())),
+        research_strategy_diagnostic: Arc::new(std::sync::Mutex::new(None)),
         enabled: Arc::new(AtomicBool::new(enabled)),
         settings: Arc::new(Mutex::new(settings)),
         latest_missed_opportunity_bands: Arc::new(Mutex::new(Vec::new())),
@@ -97,27 +125,42 @@ pub fn router() -> Router {
         }
     });
 
-    let signal_worker_state = state.clone();
+    let research_worker_state = state.clone();
+    tokio::spawn(async move {
+        let mut ticker = interval(Duration::from_secs(60));
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            ticker.tick().await;
+            if !research_worker_state.enabled.load(Ordering::Relaxed) {
+                continue;
+            }
+            let daily_strategies_enabled = !research_worker_state.settings.lock().await.research_strategies.is_empty();
+            if !daily_strategies_enabled { continue; }
+            let dashboard = Dashboard { best: Vec::new(), walk_forward: Arc::new(Vec::new()), missed_opportunity_bands: Vec::new(), markets: Arc::new(BTreeMap::new()) };
+            if let Err(error) = run_cycle(&research_worker_state, dashboard).await {
+                crate::service_log!("ERROR", "Research strategy cycle failed: {}", error.1);
+            }
+        }
+    });
+
+    let generic_worker_state = state.clone();
     tokio::spawn(async move {
         loop {
-            let signal_ready = signal_worker_state.signal_notify.notified();
-            tokio::pin!(signal_ready);
+            let notification = generic_worker_state.signal_notify.notified();
+            tokio::pin!(notification);
             let pending = {
-                let mut pending_signals = signal_worker_state.pending_signals.lock().await;
-                let symbol = pending_signals.keys().next().cloned();
-                symbol.and_then(|symbol| pending_signals.remove(&symbol))
+                let mut queue = generic_worker_state.pending_signals.lock().await;
+                queue.keys().next().cloned().and_then(|symbol| queue.remove(&symbol))
             };
-            let dashboard = match pending {
-                Some(dashboard) => dashboard,
-                None => {
-                    signal_ready.await;
-                    continue;
+            if let Some(dashboard) = pending {
+                let enabled = generic_worker_state.enabled.load(Ordering::Relaxed) && generic_worker_state.settings.lock().await.generic_signals_enabled;
+                if enabled {
+                    if let Err(error) = run_cycle(&generic_worker_state, dashboard).await {
+                        crate::service_log!("ERROR", "Generic insight cycle failed: {}", error.1);
+                    }
                 }
-            };
-            if signal_worker_state.enabled.load(Ordering::Relaxed) {
-                if let Err(error) = run_cycle(&signal_worker_state, dashboard).await {
-                    crate::service_log!("ERROR", "Auto trader signal cycle failed: {}", error.1);
-                }
+            } else {
+                notification.await;
             }
         }
     });
@@ -175,39 +218,24 @@ pub fn router() -> Router {
         .with_state(state)
 }
 
-async fn signal_ready(
-    State(state): State<AutoTraderState>,
-    Json(dashboard): Json<Dashboard>,
-) -> StatusCode {
+async fn signal_ready(State(state): State<AutoTraderState>, Json(dashboard): Json<Dashboard>) -> StatusCode {
     static INGRESS_REQUESTS: AtomicU64 = AtomicU64::new(0);
     static INGRESS_SYMBOLS: AtomicU64 = AtomicU64::new(0);
     static LAST_INGRESS_LOG_MS: AtomicU64 = AtomicU64::new(0);
 
-    let enabled = state.enabled.load(Ordering::Relaxed);
     let incoming_symbols = dashboard.best.len() as u64;
+    let generic_enabled = state.enabled.load(Ordering::Relaxed) && state.settings.lock().await.generic_signals_enabled;
+    if generic_enabled {
+        let mut queue = state.pending_signals.lock().await;
+        for signal in dashboard.best.iter().cloned() {
+            let symbol = signal.symbol.clone();
+            queue.insert(symbol, Dashboard { best: vec![signal], walk_forward: dashboard.walk_forward.clone(), missed_opportunity_bands: dashboard.missed_opportunity_bands.clone(), markets: dashboard.markets.clone() });
+        }
+        drop(queue);
+        state.signal_notify.notify_one();
+    }
     let requests = INGRESS_REQUESTS.fetch_add(1, Ordering::Relaxed) + 1;
     let symbols = INGRESS_SYMBOLS.fetch_add(incoming_symbols, Ordering::Relaxed) + incoming_symbols;
-    let pending_symbols = if enabled {
-        let mut pending_signals = state.pending_signals.lock().await;
-        for signal in dashboard.best {
-            let symbol = signal.symbol.clone();
-            pending_signals.insert(
-                symbol,
-                Dashboard {
-                    best: vec![signal],
-                    walk_forward: dashboard.walk_forward.clone(),
-                    missed_opportunity_bands: dashboard.missed_opportunity_bands.clone(),
-                    markets: dashboard.markets.clone(),
-                },
-            );
-        }
-        let pending_symbols = pending_signals.len();
-        drop(pending_signals);
-        state.signal_notify.notify_one();
-        pending_symbols
-    } else {
-        0
-    };
 
     let now_ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -220,8 +248,8 @@ async fn signal_ready(
             .is_ok()
     {
         crate::service_log!(
-            if enabled { "INFO" } else { "WARN" },
-            "AutoTrader signal ingress: enabled={enabled} cumulative_requests={requests} cumulative_symbols={symbols} pending_symbols={pending_symbols}"
+            "INFO",
+            "AutoTrader signal ingress acknowledged: generic_enabled={generic_enabled} cumulative_requests={requests} cumulative_symbols={symbols}"
         );
     }
     StatusCode::ACCEPTED
@@ -873,6 +901,11 @@ async fn update_settings(
     {
         return Err((StatusCode::BAD_REQUEST, "Order and total notional limits must be positive with total notional at least the per-order limit; daily loss cap must be positive, exploration must be between 0% and 100%, and max open positions must be between 1 and 20, and entries per position must be between 1 and 10".into()));
     }
+    if request.research_strategies.as_ref().is_some_and(Vec::is_empty)
+        && request.generic_signals_enabled == Some(false)
+    {
+        return Err((StatusCode::BAD_REQUEST, "Enable the generic insight strategy or select at least one daily strategy".into()));
+    }
     let mut settings = state.settings.lock().await;
     reset_daily_budget(&mut settings);
     if request.daily_notional_limit < settings.used_notional_today {
@@ -882,6 +915,14 @@ async fn update_settings(
         ));
     }
     settings.max_order_notional = request.max_order_notional;
+    if let Some(strategies) = request.research_strategies {
+        let mut unique = Vec::new();
+        for strategy in strategies { if !unique.contains(&strategy) { unique.push(strategy); } }
+        settings.research_strategies = unique;
+    } else if let Some(strategy) = request.research_strategy {
+        settings.research_strategies = vec![strategy];
+    }
+    if let Some(enabled) = request.generic_signals_enabled { settings.generic_signals_enabled = enabled; }
     settings.daily_notional_limit = request.daily_notional_limit;
     settings.daily_realized_loss_limit = request.daily_realized_loss_limit;
     settings.exploration_percent = request.exploration_percent;
@@ -953,6 +994,9 @@ fn status(state: &AutoTraderState, settings: &Settings) -> StatusResponse {
     }
     StatusResponse {
         enabled: state.enabled.load(Ordering::Relaxed),
+        research_strategy: settings.research_strategies.first().copied().unwrap_or_default().as_str().to_owned(),
+        research_strategies: settings.research_strategies.iter().map(|strategy| strategy.as_str().to_owned()).collect(),
+        generic_signals_enabled: settings.generic_signals_enabled,
         max_order_notional: settings.max_order_notional,
         daily_notional_limit: settings.daily_notional_limit,
         daily_realized_loss_limit: settings.daily_realized_loss_limit,
@@ -1028,6 +1072,11 @@ fn status(state: &AutoTraderState, settings: &Settings) -> StatusResponse {
             .lock()
             .map(|summary| summary.latest_detail.clone())
             .unwrap_or_default(),
+        research_strategy_diagnostic: state
+            .research_strategy_diagnostic
+            .lock()
+            .ok()
+            .and_then(|diagnostic| diagnostic.clone()),
     }
 }
 struct ActivityPositionSnapshot {
@@ -1120,7 +1169,7 @@ async fn await_activity_realized_pnl(
             };
             order.realized_pnl = realized.unwrap_or(0.0);
         }
-        let mut grouped = BTreeMap::<(String, String, String), (f64, usize)>::new();
+        let mut grouped = BTreeMap::<(String, String, String, String), (f64, usize)>::new();
         for order in orders.iter() {
             if order.realized_pnl.abs() <= 1e-12 {
                 continue;
@@ -1135,6 +1184,7 @@ async fn await_activity_realized_pnl(
                     order.symbol.clone(),
                     direction.to_owned(),
                     order.purpose.clone(),
+                    order.strategy.clone().unwrap_or_else(|| "legacy-unknown".into()),
                 ))
                 .or_default();
             total.0 += order.realized_pnl;
@@ -1143,10 +1193,11 @@ async fn await_activity_realized_pnl(
         let mut breakdown = grouped
             .into_iter()
             .map(
-                |((symbol, direction, purpose), (realized_pnl, outcomes))| PnlBreakdown {
+                |((symbol, direction, purpose, strategy), (realized_pnl, outcomes))| PnlBreakdown {
                     symbol,
                     direction,
                     purpose,
+                    strategy,
                     realized_pnl,
                     outcomes,
                 },

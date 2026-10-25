@@ -1,6 +1,8 @@
 #[derive(Clone)]
 struct AutoTraderState {
     client: reqwest::Client,
+    research_daily_data: Arc<Mutex<ResearchDailyDataCache>>,
+    research_strategy_diagnostic: Arc<std::sync::Mutex<Option<ResearchStrategyDiagnostic>>>,
     enabled: Arc<AtomicBool>,
     settings: Arc<Mutex<Settings>>,
     latest_missed_opportunity_bands: Arc<Mutex<Vec<MissedOpportunityGateBand>>>,
@@ -27,6 +29,8 @@ struct TraderOrder {
     order_type: String,
     #[serde(default)]
     purpose: String,
+    #[serde(default)]
+    strategy: Option<String>,
     #[serde(default)]
     decision_id: Option<String>,
     quantity: f64,
@@ -94,9 +98,15 @@ struct TraderPosition {
     #[serde(default)]
     entry_decision_id: Option<String>,
     #[serde(default)]
+    research_strategy: Option<String>,
+    #[serde(default)]
     scout_entry: bool,
     #[serde(default)]
     horizon_take_profit_percent: Option<f64>,
+    #[serde(default)]
+    stop_loss_percent: Option<f64>,
+    #[serde(default)]
+    take_profit_percent: Option<f64>,
     #[serde(default)]
     take_profit_deferred_at_ms: Option<u64>,
     #[serde(default)]

@@ -14,6 +14,37 @@ enum AutoOrderType {
     Vwap,
     Twap,
 }
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+enum ResearchStrategy {
+    #[default]
+    #[serde(rename = "donchian-55-btc200")]
+    Donchian55Btc200,
+    #[serde(rename = "donchian-20-sma200")]
+    Donchian20Sma200,
+    #[serde(rename = "trend-sleeves-btc200")]
+    TrendSleevesBtc200,
+    #[serde(rename = "trend-50-200")]
+    Trend50200,
+    #[serde(rename = "relative-strength-90-sma200")]
+    RelativeStrength90Sma200,
+    #[serde(rename = "rsi2-oversold-rebound")]
+    Rsi2OversoldRebound,
+}
+
+impl ResearchStrategy {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Donchian55Btc200 => "donchian-55-btc200",
+            Self::Donchian20Sma200 => "donchian-20-sma200",
+            Self::TrendSleevesBtc200 => "trend-sleeves-btc200",
+            Self::Trend50200 => "trend-50-200",
+            Self::RelativeStrength90Sma200 => "relative-strength-90-sma200",
+            Self::Rsi2OversoldRebound => "rsi2-oversold-rebound",
+        }
+    }
+}
+
 impl Default for AutoOrderType {
     fn default() -> Self {
         Self::Ioc
@@ -23,6 +54,10 @@ impl Default for AutoOrderType {
 struct Settings {
     #[serde(default)]
     enabled: bool,
+    #[serde(default = "default_research_strategies")]
+    research_strategies: Vec<ResearchStrategy>,
+    #[serde(default = "default_generic_signals_enabled")]
+    generic_signals_enabled: bool,
     #[serde(default = "default_order_limit")]
     max_order_notional: f64,
     #[serde(default = "default_daily_limit")]
@@ -150,10 +185,15 @@ fn default_usd_rates() -> BTreeMap<String, f64> {
         ("USDC".to_owned(), 1.0),
     ])
 }
+fn default_research_strategies() -> Vec<ResearchStrategy> { vec![ResearchStrategy::default()] }
+fn default_generic_signals_enabled() -> bool { true }
+
 impl Default for Settings {
     fn default() -> Self {
         Self {
             enabled: false,
+            research_strategies: default_research_strategies(),
+            generic_signals_enabled: default_generic_signals_enabled(),
             max_order_notional: default_order_limit(),
             daily_notional_limit: default_daily_limit(),
             used_notional_today: 0.0,

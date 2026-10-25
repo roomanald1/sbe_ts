@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { AgGridReact } from 'ag-grid-react';
 import { ClientSideRowModelModule, ModuleRegistry, themeQuartz, type ColDef, type ICellRendererParams } from 'ag-grid-community';
-import { AutoTraderModel } from '../models/AutoTraderModel';
+import { AutoTraderModel, type ResearchStrategyDiagnostic } from '../models/AutoTraderModel';
 import { useBehaviorSnapshot } from '../use_behavior_snapshot';
 import { FeedToolbar } from './FeedToolbar';
 
@@ -20,6 +20,7 @@ type GateDetailRow = {
   gate: string; count: number; detail: string;
 };
 type DiagnosticsRow = SymbolGroup | GateDetailRow;
+type StrategyDiagnosticRow = ResearchStrategyDiagnostic['symbols'][number];
 type GateColumnParams = ICellRendererParams<DiagnosticsRow> & { onToggle: (key: string) => void };
 function GateColumnCell({ data, onToggle }: GateColumnParams) {
   if (!data) return null;
@@ -64,6 +65,17 @@ export function AutoTraderDiagnostics() {
       gate: gate.gate, count: gate.count, detail: gate.detail,
     })) : []),
   ]), [symbolGroups]);
+  const strategyColumns = useMemo<ColDef<StrategyDiagnosticRow>[]>(() => [
+    { field: 'symbol', headerName: 'Symbol', minWidth: 110, flex: 0.7 },
+    { field: 'close', headerName: 'Daily close', minWidth: 110, valueFormatter: ({ value }) => typeof value === 'number' ? value.toPrecision(8) : '—' },
+    { field: 'primary_rule', headerName: 'Primary rule', minWidth: 150, flex: 1 },
+    { field: 'primary_level', headerName: 'Primary level', minWidth: 110, valueFormatter: ({ value }) => typeof value === 'number' && value > 0 ? value.toPrecision(8) : '—' },
+    { field: 'primary_distance_percent', headerName: 'Distance to primary', minWidth: 150, valueFormatter: ({ value }) => typeof value === 'number' ? Math.abs(value).toFixed(2) + '% ' + (value >= 0 ? 'above' : 'below') : '—' },
+    { field: 'secondary_rule', headerName: 'Secondary rule', minWidth: 140, valueFormatter: ({ value }) => value ?? '—' },
+    { field: 'secondary_level', headerName: 'Secondary level', minWidth: 115, valueFormatter: ({ value }) => typeof value === 'number' ? value.toPrecision(8) : '—' },
+    { field: 'secondary_distance_percent', headerName: 'Distance to secondary', minWidth: 165, valueFormatter: ({ value }) => typeof value === 'number' ? Math.abs(value).toFixed(2) + '% ' + (value >= 0 ? 'above' : 'below') : '—' },
+    { field: 'signal_active', headerName: 'Signal', minWidth: 95, valueFormatter: ({ value }) => value ? 'Active' : 'No signal' },
+  ], []);
   const symbolColumns = useMemo<ColDef<DiagnosticsRow>[]>(() => [
     { field: 'symbol', headerName: 'Symbol', minWidth: 120, flex: 1, sort: 'asc', sortIndex: 0, comparator: (a, b, left, right) => { const bySymbol = String(a ?? '').localeCompare(String(b ?? '')); if (bySymbol) return bySymbol; const leftRow = left.data; const rightRow = right.data; if (!leftRow || !rightRow) return 0; const byDirection = leftRow.direction.localeCompare(rightRow.direction); if (byDirection) return byDirection; if (leftRow.kind !== rightRow.kind) return leftRow.kind === 'symbol' ? -1 : 1; return leftRow.kind === 'gate' && rightRow.kind === 'gate' ? leftRow.gate.localeCompare(rightRow.gate) : 0; }, cellRenderer: (params: ICellRendererParams<DiagnosticsRow>) => params.data?.kind === 'symbol' ? params.value : '' },
     { field: 'direction', headerName: 'Direction', minWidth: 100, valueFormatter: ({ value, data }) => data?.kind === 'symbol' ? String(value ?? '').toUpperCase() : '' },
@@ -94,6 +106,26 @@ export function AutoTraderDiagnostics() {
             </ul>
           ) : <p className="auto-trader-diagnostics-empty">{state.loading ? 'Loading current gate counts…' : 'No blocked gates recorded for this running session.'}</p>}
         </details>
+
+        <section className="auto-trader-diagnostics-block" aria-label="Selected daily strategy distance">
+          <div className="auto-trader-diagnostics-heading">
+            <strong>Daily strategy diagnostics</strong>
+            <span>{state.researchStrategyDiagnostic != null && state.researchStrategies.includes(state.researchStrategyDiagnostic.strategy) ? state.researchStrategyDiagnostic.strategy : 'Waiting for current strategy data'}</span>
+          </div>
+          {state.researchStrategyDiagnostic != null && state.researchStrategies.includes(state.researchStrategyDiagnostic.strategy) ? (
+            <>
+              <p className="auto-trader-diagnostics-note">
+                {state.researchStrategyDiagnostic.btc_gate_required
+                  ? 'BTC 200-day SMA gate: ' + (state.researchStrategyDiagnostic.btc_gate_passed ? 'pass' : 'blocked') + ' · BTC close ' + state.researchStrategyDiagnostic.btc_close.toPrecision(8) + ' vs SMA ' + state.researchStrategyDiagnostic.btc_sma200.toPrecision(8) + ' · ' + Math.abs(state.researchStrategyDiagnostic.btc_distance_percent).toFixed(2) + '% ' + (state.researchStrategyDiagnostic.btc_distance_percent >= 0 ? 'above' : 'below') + '.'
+                  : 'This strategy uses each asset’s own trend filter; BTC 200-day regime gate is not required.'}
+                {' '}Distances are from the latest completed daily close to the exact strategy threshold; negative values are below the level.
+              </p>
+              <div className="data-grid-wrap auto-trader-symbol-grid">
+                <AgGridReact<StrategyDiagnosticRow> animateRows={false} rowData={state.researchStrategyDiagnostic.symbols} columnDefs={strategyColumns} defaultColDef={{ sortable: true, resizable: true, filter: true, minWidth: 85 }} theme={diagnosticsGridTheme} domLayout="autoHeight" rowHeight={34} headerHeight={29} getRowId={({ data }) => data.symbol} />
+              </div>
+            </>
+          ) : <p className="auto-trader-diagnostics-empty">Daily candle diagnostics for an enabled strategy will appear after its next successful evaluation.</p>}
+        </section>
 
         <section className="auto-trader-diagnostics-block" aria-label="Gate counts by symbol">
           <div className="auto-trader-diagnostics-heading">

@@ -1,4 +1,4 @@
-use axum::{Json, Router, body::Body, http::{Response, StatusCode, header::CONTENT_TYPE}, routing::{get, post}};
+use axum::{Json, Router, body::Body, http::{Response, StatusCode, header::CONTENT_TYPE}, response::IntoResponse, routing::{get, post}, extract::Query};
 use bytes::Bytes;
 use serde::Serialize;
 use std::{sync::OnceLock, time::Duration};
@@ -9,6 +9,31 @@ use tokio::time::Instant;
 struct InstrumentsResponse {
     symbols: Vec<String>,
     instruments: Vec<feed_handlers::okx::connectivity::SpotInstrumentPrecision>,
+}
+
+
+#[derive(Serialize)]
+struct DailyCandle { close_time_ms: u64, high: f64, close: f64 }
+
+async fn get_daily_candles(Query(query): Query<std::collections::BTreeMap<String, String>>) -> Response<Body> {
+    let Some(symbols) = query.get("symbols") else { return (StatusCode::BAD_REQUEST, "symbols query parameter is required").into_response(); };
+    let pairs = [("BTC-USDT", "BTCUSDT"), ("ETH-USDT", "ETHUSDT"), ("BNB-USDT", "BNBUSDT"), ("XRP-USDT", "XRPUSDT"), ("SOL-USDT", "SOLUSDT"), ("ADA-USDT", "ADAUSDT"), ("DOGE-USDT", "DOGEUSDT")];
+    let now_ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as u64;
+    let client = reqwest::Client::new();
+    let mut result = serde_json::Map::new();
+    for symbol in symbols.split(',') {
+        let Some((_, pair)) = pairs.iter().find(|(name, pair)| *name == symbol || *pair == symbol) else { return (StatusCode::BAD_REQUEST, format!("unsupported symbol: {symbol}")).into_response(); };
+        let url = format!("https://data-api.binance.vision/api/v3/klines?symbol={pair}&interval=1d&limit=260");
+        let response = match client.get(url).send().await { Ok(response) => match response.error_for_status() { Ok(response) => response, Err(error) => return (StatusCode::BAD_GATEWAY, error.to_string()).into_response() }, Err(error) => return (StatusCode::BAD_GATEWAY, error.to_string()).into_response() };
+        let rows = match response.json::<Vec<Vec<serde_json::Value>>>().await { Ok(rows) => rows, Err(error) => return (StatusCode::BAD_GATEWAY, error.to_string()).into_response() };
+        let candles = rows.into_iter().filter_map(|row| {
+            let close_time_ms = row.get(6)?.as_u64()?; if close_time_ms >= now_ms { return None; }
+            let high = row.get(2)?.as_str()?.parse::<f64>().ok()?; let close = row.get(4)?.as_str()?.parse::<f64>().ok()?;
+            (high.is_finite() && high > 0.0 && close.is_finite() && close > 0.0).then_some(DailyCandle { close_time_ms, high, close })
+        }).collect::<Vec<_>>();
+        result.insert(symbol.to_owned(), serde_json::to_value(candles).expect("candle serialization"));
+    }
+    json_response(Bytes::from(serde_json::to_vec(&result).expect("candle map serialization")))
 }
 
 static INSTRUMENTS_CACHE: OnceLock<Mutex<Option<(Instant, Bytes)>>> = OnceLock::new();
@@ -71,6 +96,7 @@ async fn serve_http() -> anyhow::Result<()> {
         .route("/health", get(|| async { "ok" }))
         .route("/process-cpu-seconds", get(process_cpu_seconds))
         .route("/instruments", get(get_instruments))
+        .route("/market-data/daily-candles", get(get_daily_candles))
         .route("/internal/signals/snapshot", post(publish_signal_snapshot))
         .route("/internal/news/snapshot", post(publish_news_snapshot));
     let listener = tokio::net::TcpListener::bind(("0.0.0.0", 3001)).await?;

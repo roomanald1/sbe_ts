@@ -21,6 +21,12 @@ struct Signal {
     ranging_probability: Option<f64>,
     #[serde(default)]
     components: SignalComponents,
+    #[serde(default)]
+    research_strategy_candidate: bool,
+    #[serde(default)]
+    research_strategy: Option<String>,
+    #[serde(default)]
+    market_regime: Option<String>,
 }
 #[derive(Clone, Default, Deserialize, Serialize)]
 struct SignalComponents {
@@ -36,9 +42,21 @@ struct SignalComponents {
     aggressor_cost_bps: Option<f64>,
 }
 #[derive(Clone, Deserialize, Serialize)]
+struct LearnedExitPolicy {
+    stop_loss_percent: f64,
+    take_profit_percent: f64,
+    validation_samples: usize,
+    validation_average_net_return_percent: f64,
+    validation_positive_net_rate: f64,
+}
+#[derive(Clone, Deserialize, Serialize)]
 struct WalkForward {
     symbol: String,
     horizon_seconds: u64,
+    #[serde(default)]
+    learned_long_exit_policy: Option<LearnedExitPolicy>,
+    #[serde(default)]
+    learned_short_exit_policy: Option<LearnedExitPolicy>,
     #[serde(default)]
     all_signal_long: SideWalkForwardMetrics,
     #[serde(default)]

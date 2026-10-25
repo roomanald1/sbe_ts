@@ -18,57 +18,58 @@ cleanup() {
 }
 trap cleanup INT TERM EXIT
 
+process_alive() {
+  local pid="$1" state
+  [[ -r "/proc/$pid/stat" ]] || return 1
+  state="$(awk '{print $3}' "/proc/$pid/stat")"
+  [[ "$state" != "Z" && "$state" != "X" ]]
+}
+
+wait_for_service() {
+  local pid="$1" port="$2" name="$3" status
+  for _ in {1..60}; do
+    if curl --fail --silent "http://127.0.0.1:$port/health" >/dev/null; then return 0; fi
+    if ! process_alive "$pid"; then
+      if wait "$pid"; then status=0; else status=$?; fi
+      echo "$name exited before becoming healthy on port $port (status $status)" >&2
+      (( status != 0 )) || status=1
+      return "$status"
+    fi
+    sleep 1
+  done
+  echo "$name did not become ready on port $port within 60 seconds" >&2
+  return 1
+}
+
 "$NEWS_SENTIMENT_PYTHON" "$ROOT/src/rust/insights/scripts/classify_news.py" &
 sentiment_pid=$!
 children+=("$sentiment_pid")
-cargo run --manifest-path src/rust/insights/Cargo.toml &
+cargo run --manifest-path src/rust/insights/Cargo.toml --bin insights &
 insights_pid=$!
 children+=("$insights_pid")
-ready=0
-for _ in {1..60}; do
-  if curl --fail --silent http://127.0.0.1:3004/health >/dev/null; then ready=1; break; fi
-  if ! kill -0 "$insights_pid" 2>/dev/null; then wait "$insights_pid"; exit $?; fi
-  sleep 1
-done
-if [[ "$ready" != "1" ]]; then echo "Insights did not become ready on port 3004" >&2; exit 1; fi
+wait_for_service "$insights_pid" 3004 "Insights"
+wait_for_service "$sentiment_pid" 3006 "News sentiment"
+
 
 cargo run --manifest-path src/rust/feed_handlers/Cargo.toml &
 feed_pid=$!
 children+=("$feed_pid")
-ready=0
-for _ in {1..60}; do
-  if curl --fail --silent http://127.0.0.1:3001/health >/dev/null; then ready=1; break; fi
-  if ! kill -0 "$feed_pid" 2>/dev/null; then wait "$feed_pid"; exit $?; fi
-  sleep 1
-done
-if [[ "$ready" != "1" ]]; then echo "FeedHandlers did not become ready on port 3001" >&2; exit 1; fi
-
+wait_for_service "$feed_pid" 3001 "FeedHandlers"
 
 cargo run --manifest-path src/rust/position_management/Cargo.toml &
 position_pid=$!
 children+=("$position_pid")
-ready=0
-for _ in {1..60}; do
-  if curl --fail --silent http://127.0.0.1:3002/health >/dev/null; then ready=1; break; fi
-  if ! kill -0 "$position_pid" 2>/dev/null; then wait "$position_pid"; exit $?; fi
-  sleep 1
-done
-if [[ "$ready" != "1" ]]; then echo "Position Management did not become ready on port 3002" >&2; exit 1; fi
+wait_for_service "$position_pid" 3002 "Position Management"
 
 cargo run --manifest-path src/rust/auto_trader/Cargo.toml &
 auto_trader_pid=$!
 children+=("$auto_trader_pid")
-ready=0
-for _ in {1..60}; do
-  if curl --fail --silent http://127.0.0.1:3005/health >/dev/null; then ready=1; break; fi
-  if ! kill -0 "$auto_trader_pid" 2>/dev/null; then wait "$auto_trader_pid"; exit $?; fi
-  sleep 1
-done
-if [[ "$ready" != "1" ]]; then echo "AutoTrader did not become ready on port 3005" >&2; exit 1; fi
-
+wait_for_service "$auto_trader_pid" 3005 "AutoTrader"
 
 cargo run --manifest-path src/rust/execution/Cargo.toml &
-children+=("$!")
+execution_pid=$!
+children+=("$execution_pid")
+wait_for_service "$execution_pid" 3003 "Execution"
 
 status=0
 wait -n "${children[@]}" || status=$?

@@ -1,0 +1,157 @@
+{
+  "construction": "three independent sleeves, each starts with one third of capital: BTC above SMA50, ETH above SMA50, BNB above SMA100; uninvested sleeve value stays cash",
+  "gated_construction": "same sleeves, each disabled when BTC prior close is below its trailing SMA200",
+  "accounting": "sleeve equity compounds independently; fee is debited on sleeve equity at each position change; aggregate daily return is change in total account equity",
+  "timing": "prior-close signal, rebalance at next open, open-to-next-open returns",
+  "cost": "15 bps per side on sleeve notional changes",
+  "range": [
+    "2019-07-21",
+    "2026-10-22"
+  ],
+  "portfolio": {
+    "return_pct": 1967.3864133703844,
+    "sharpe": 1.1435291714778533,
+    "max_dd_pct": -64.48931633435704,
+    "days": 2651
+  },
+  "equal_weight_buy_and_hold": {
+    "return_pct": 1282.7450234631228,
+    "sharpe": 0.8797982500143697,
+    "max_dd_pct": -74.23935023246037,
+    "days": 2651
+  },
+  "btc_regime_gated": {
+    "return_pct": 1703.2508139615634,
+    "sharpe": 1.118764189759287,
+    "max_dd_pct": -60.52888354560895,
+    "days": 2651
+  },
+  "by_btc_regime": {
+    "BTC_above_SMA200": {
+      "return_pct": 1588.6073566054556,
+      "sharpe": 1.4786384611004584,
+      "max_dd_pct": -58.63567969379058,
+      "days": 1541
+    },
+    "BTC_below_SMA200": {
+      "return_pct": 22.431446557615708,
+      "sharpe": 0.391973824754744,
+      "max_dd_pct": -47.28415376946026,
+      "days": 1110
+    }
+  },
+  "by_year": {
+    "2019": {
+      "mix": {
+        "return_pct": -23.56152101677822,
+        "sharpe": -3.5524944097193294,
+        "max_dd_pct": -23.56152101677822,
+        "days": 164
+      },
+      "btc_gated": {
+        "return_pct": -17.41173345159266,
+        "sharpe": -2.7753632260372276,
+        "max_dd_pct": -17.41173345159266,
+        "days": 164
+      }
+    },
+    "2020": {
+      "mix": {
+        "return_pct": 210.07575720372077,
+        "sharpe": 2.3547688762026158,
+        "max_dd_pct": -29.083961926594814,
+        "days": 366
+      },
+      "btc_gated": {
+        "return_pct": 116.26276149418429,
+        "sharpe": 1.7322453246786427,
+        "max_dd_pct": -36.520058029145986,
+        "days": 366
+      }
+    },
+    "2021": {
+      "mix": {
+        "return_pct": 270.8040114483224,
+        "sharpe": 1.9847264857137252,
+        "max_dd_pct": -49.08568085146035,
+        "days": 365
+      },
+      "btc_gated": {
+        "return_pct": 186.67561311280903,
+        "sharpe": 1.6441286252250504,
+        "max_dd_pct": -60.52888354560898,
+        "days": 365
+      }
+    },
+    "2022": {
+      "mix": {
+        "return_pct": -45.982755617304036,
+        "sharpe": -1.9537212429169677,
+        "max_dd_pct": -46.10560419258014,
+        "days": 365
+      },
+      "btc_gated": {
+        "return_pct": 0.0,
+        "sharpe": 0,
+        "max_dd_pct": 0.0,
+        "days": 365
+      }
+    },
+    "2023": {
+      "mix": {
+        "return_pct": 72.75462759925595,
+        "sharpe": 1.848328872431473,
+        "max_dd_pct": -17.771262086887873,
+        "days": 365
+      },
+      "btc_gated": {
+        "return_pct": 52.01473472888121,
+        "sharpe": 1.5113404631412315,
+        "max_dd_pct": -13.514768675550236,
+        "days": 365
+      }
+    },
+    "2024": {
+      "mix": {
+        "return_pct": 67.77817036379747,
+        "sharpe": 1.515692944971627,
+        "max_dd_pct": -25.906205314380028,
+        "days": 366
+      },
+      "btc_gated": {
+        "return_pct": 65.26992570940202,
+        "sharpe": 1.4357192927292328,
+        "max_dd_pct": -30.462076153771868,
+        "days": 366
+      }
+    },
+    "2025": {
+      "mix": {
+        "return_pct": 29.65477343200682,
+        "sharpe": 1.0162109106130714,
+        "max_dd_pct": -17.298168201708176,
+        "days": 365
+      },
+      "btc_gated": {
+        "return_pct": 21.84607616542895,
+        "sharpe": 0.784174819445527,
+        "max_dd_pct": -22.775030037615483,
+        "days": 365
+      }
+    },
+    "2026": {
+      "mix": {
+        "return_pct": 15.880751940069192,
+        "sharpe": 0.8144895254290905,
+        "max_dd_pct": -13.396014078079954,
+        "days": 295
+      },
+      "btc_gated": {
+        "return_pct": 15.04671590879001,
+        "sharpe": 1.0892638160371204,
+        "max_dd_pct": -9.436441746188118,
+        "days": 295
+      }
+    }
+  }
+}

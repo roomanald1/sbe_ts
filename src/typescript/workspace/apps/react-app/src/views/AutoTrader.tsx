@@ -3,7 +3,9 @@ import { AgGridReact } from 'ag-grid-react';
 import {
   CellStyleModule,
   ClientSideRowModelModule,
+  TextFilterModule,
   ModuleRegistry,
+  NumberFilterModule,
   themeQuartz,
   type ColDef,
   type ICellRendererParams,
@@ -12,7 +14,7 @@ import {
 import { formatForSymbol } from '../instrument_precision';
 import type { SymbolPriceTick } from '../types/symbol_price';
 import { AutoTraderModel } from '../models/AutoTraderModel';
-import type { AutoTraderContextParameters, AutoTraderDecisionParameter, AutoTraderOrder } from '../models/AutoTraderModel';
+import type { AutoTraderContextParameters, AutoTraderDecisionParameter, AutoTraderOrder, ResearchStrategy } from '../models/AutoTraderModel';
 import { useBehaviorSnapshot } from '../use_behavior_snapshot';
 import { FeedToolbar } from './FeedToolbar';
 import { getOrderTypeDescription } from '../order_type_descriptions';
@@ -57,7 +59,7 @@ function explainAutoTraderReason(reason: string): string {
   if (lower.includes('cycle error')) return 'Decision cycle error';
   return reason;
 }
-ModuleRegistry.registerModules([CellStyleModule, ClientSideRowModelModule]);
+ModuleRegistry.registerModules([CellStyleModule, ClientSideRowModelModule, NumberFilterModule, TextFilterModule]);
 
 const autoTraderGridTheme = themeQuartz.withParams({
   accentColor: '#8296ad',
@@ -69,15 +71,16 @@ const autoTraderGridTheme = themeQuartz.withParams({
   rowHoverColor: '#141b24',
 });
 
-type AutoTraderOrderRow = AutoTraderOrder & { current_price?: number; position_status?: string };
+type AutoTraderOrderRow = AutoTraderOrder & { current_price?: number; position_status?: string; protection_order?: boolean };
 
 const orderColumnDefs: ColDef<AutoTraderOrderRow>[] = [
   { field: 'timestamp', headerName: 'Time / Trigger', minWidth: 102, valueGetter: ({ data }) => data?.triggered_at ?? data?.timestamp, valueFormatter: ({ value }) => value ? timestamp.format(value) : '' },
   { field: 'symbol', headerName: 'Symbol', minWidth: 78 },
   { field: 'side', headerName: 'Side', minWidth: 56, valueFormatter: ({ value }) => String(value ?? '').toUpperCase() },
   { field: 'order_type', headerName: 'Type', minWidth: 70, tooltipValueGetter: (params: ITooltipParams<AutoTraderOrderRow>) => getOrderTypeDescription(params.value), cellRenderer: (params: ICellRendererParams<AutoTraderOrderRow>) => <span title={getOrderTypeDescription(params.value)}>{String(params.value ?? '')}</span> },
+  { field: 'strategy', headerName: 'Strategy', minWidth: 154, cellRenderer: (params: ICellRendererParams<AutoTraderOrderRow>) => <span>{params.data?.protection_order ? '↳ ' : ''}{strategyLabel(params.value)}</span> },
   { field: 'purpose', headerName: 'Purpose', minWidth: 76, valueFormatter: ({ value }) => value === 'portfolio-hedge' ? 'HEDGE' : String(value ?? '').toUpperCase() },
-  { field: 'status', headerName: 'Order Status', minWidth: 82 },
+  { field: 'status', headerName: 'Order Status', minWidth: 82, filter: 'agTextColumnFilter' },
   { field: 'position_status', headerName: 'Position', minWidth: 75 },
   { field: 'filled_quantity', headerName: 'Filled / Qty', minWidth: 96, valueFormatter: ({ data }) => data ? formatForSymbol(data.filled_quantity, data.symbol, 'quantity') + '/' + formatForSymbol(data.quantity, data.symbol, 'quantity') : '' },
   { field: 'submitted_limit_price', headerName: 'Limit / Stop Price', minWidth: 112, valueGetter: ({ data }) => data?.submitted_limit_price ?? data?.target_price, valueFormatter: ({ value, data }) => value == null || !data ? '' : formatForSymbol(value, data.symbol, 'price') },
@@ -86,9 +89,24 @@ const orderColumnDefs: ColDef<AutoTraderOrderRow>[] = [
   { field: 'realized_pnl_usd', headerName: 'Realized USD', minWidth: 92, cellClass: ({ value }) => value >= 0 ? 'pnl-positive' : 'pnl-negative', valueFormatter: ({ value }) => value == null ? '—' : money.format(value) },
 ];
 
+function strategyLabel(strategy?: string): string {
+  const labels: Record<string, string> = {
+    'donchian-55-btc200': 'Donchian 55 + BTC SMA200',
+    'donchian-20-sma200': 'Donchian 20 + asset SMA200',
+    'trend-sleeves-btc200': 'BTC/ETH/BNB trend sleeves',
+    'trend-50-200': 'SMA 50/200 trend',
+    'relative-strength-90-sma200': '90-day momentum rotation',
+    'rsi2-oversold-rebound': 'RSI(2) rebound',
+    'generic-insight-signals': 'Live insight signals',
+    'portfolio-hedge': 'Portfolio hedge',
+  };
+  return strategy ? labels[strategy] ?? strategy : 'Legacy / unknown';
+}
+
 const defaultOrderColDef: ColDef<AutoTraderOrderRow> = {
   sortable: true,
   resizable: true,
+  filter: true,
   flex: 1,
   minWidth: 68,
 };
@@ -98,7 +116,19 @@ export function AutoTrader({ ticks }: { ticks: SymbolPriceTick[] }) {
   useEffect(() => { model.start(); return () => model.stop(); }, [model]);
   const state = useBehaviorSnapshot(model.state$);
   const ledgerOpenPositionSymbols = useMemo(() => new Set(state.ledgerOpenPositionSymbols), [state.ledgerOpenPositionSymbols]);
-  const orderRows = useMemo(() => state.orders.map((order) => ({ ...order, current_price: ledgerOpenPositionSymbols.has(order.symbol) ? currentPrices.get(order.symbol) : undefined, position_status: order.filled_quantity > 0 ? ledgerOpenPositionSymbols.has(order.symbol) ? 'Open' : 'Closed' : '' })), [state.orders, ledgerOpenPositionSymbols, currentPrices]);
+  const orderRows = useMemo(() => state.orders.map((order) => ({
+    ...order,
+    current_price: ledgerOpenPositionSymbols.has(order.symbol) ? currentPrices.get(order.symbol) : undefined,
+    position_status: order.filled_quantity > 0 ? ledgerOpenPositionSymbols.has(order.symbol) ? 'Open' : 'Closed' : '',
+    protection_order: order.purpose?.toLowerCase().includes('stop') ?? false,
+  })).sort((a, b) => {
+    // Keep each strategy's orders together so protective stops read directly beneath its trades.
+    const groupA = (a.strategy ?? 'legacy') + '|' + a.symbol;
+    const groupB = (b.strategy ?? 'legacy') + '|' + b.symbol;
+    if (groupA !== groupB) return groupA.localeCompare(groupB);
+    if (a.protection_order !== b.protection_order) return a.protection_order ? 1 : -1;
+    return (b.triggered_at ?? b.timestamp) - (a.triggered_at ?? a.timestamp);
+  }), [state.orders, ledgerOpenPositionSymbols, currentPrices]);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [parametersOpen, setParametersOpen] = useState(false);
   const [decisionDetailsOpen, setDecisionDetailsOpen] = useState(false);
@@ -177,6 +207,12 @@ export function AutoTrader({ ticks }: { ticks: SymbolPriceTick[] }) {
           {settingsOpen && <div className="auto-trader-settings-popup" role="dialog" aria-label="Auto Trader settings">
             <div className="auto-trader-settings-heading"><strong>Auto Trader settings</strong><button type="button" aria-label="Close settings" onClick={() => setSettingsOpen(false)}>×</button></div>
             <div className="auto-trader-limits">
+              <fieldset className="auto-trader-strategy-options" title="Enabled daily signal families share the same AutoTrader portfolio exposure, daily loss, and open-position limits."><legend>STRATEGIES · SHARED PORTFOLIO LIMITS</legend>
+                <label className="auto-trader-generic-strategy"><input type="checkbox" checked={state.genericSignalsEnabled} onChange={(event) => model.setGenericSignalsEnabled(event.target.checked)} /><span><strong>Live insight signals</strong><small>Use the existing directional signal feed, with walk-forward evidence and AutoTrader risk checks.</small></span></label>
+                {([{ value: 'donchian-55-btc200', label: '55-day Donchian breakout · trade highs only while BTC is above its SMA200' }, { value: 'donchian-20-sma200', label: '20-day Donchian breakout · buy assets above their own SMA200' }, { value: 'trend-sleeves-btc200', label: 'Trend sleeves · BTC/ETH SMA50 + BNB SMA100 · BTC SMA200 risk gate' }, { value: 'trend-50-200', label: 'Generic trend following · hold each asset above its SMA50 and SMA200' }, { value: 'relative-strength-90-sma200', label: 'Generic momentum rotation · hold the strongest 90-day asset above its SMA200' }, { value: 'rsi2-oversold-rebound', label: 'Generic mean reversion · RSI(2) ≤ 10 above SMA200 · five-day max hold' }] as Array<{ value: ResearchStrategy; label: string }>).map(({ value, label }) => <label key={value}><input type="checkbox" checked={state.researchStrategies.includes(value)} onChange={(event) => model.setResearchStrategies(event.target.checked ? [...state.researchStrategies, value] : state.researchStrategies.filter((strategy) => strategy !== value))} />{label}</label>)}
+                <small>20-day volatility breakout uses the same entry rule as the 20-day Donchian option. Buy-and-hold remains research-only because it needs a no-exit policy. RSI rebound positions retain their simulated five-day maximum hold, alongside the shared protective stop and target.</small>
+                {state.researchStrategies.length === 0 && !state.genericSignalsEnabled && <small className="auto-trader-strategy-validation">Select at least one strategy before saving.</small>}
+              </fieldset>
               <label>MAX PER ORDER (USD)<input type="number" min="0.01" step="any" value={state.maxOrderNotional} onChange={(event) => model.setLimits(event.target.value, state.dailyNotionalLimit, state.dailyRealizedLossLimit, state.explorationPercent, state.maxOpenPositions)} /></label>
               <label title="Maximum USD notional allocated to Auto Trader positions and pending orders that add exposure. Opening positions uses available capacity; closing fills release it. Manual positions are not included.">MAX ALLOCATED EXPOSURE (USD)<input type="number" min="0.01" step="any" value={state.dailyNotionalLimit} onChange={(event) => model.setLimits(state.maxOrderNotional, event.target.value, state.dailyRealizedLossLimit, state.explorationPercent, state.maxOpenPositions)} /></label>
               <label>DAILY LOSS CAP (USD)<input type="number" min="0.01" step="any" value={state.dailyRealizedLossLimit} onChange={(event) => model.setLimits(state.maxOrderNotional, state.dailyNotionalLimit, event.target.value, state.explorationPercent, state.maxOpenPositions)} /></label>
@@ -190,7 +226,7 @@ export function AutoTrader({ ticks }: { ticks: SymbolPriceTick[] }) {
               <label>TRIGGER OFFSET (BPS)<input type="number" min="5" max="100" step="1" value={state.triggerOffsetBps} onChange={(event) => model.setExecutionParameters({ triggerOffsetBps: event.target.value })} /></label>
               <label>TRAILING DISTANCE (%)<input type="number" min="0.05" max="1" step="0.05" value={state.trailingDistancePercent} onChange={(event) => model.setExecutionParameters({ trailingDistancePercent: event.target.value })} /></label>
               <label title="Number of most recent fully closed exits used for rolling exit statistics. Range: 1–5000.">ROLLING CLOSED EXITS<input type="number" min="1" max="5000" step="1" value={state.closedTradeWindow} onChange={(event) => model.setClosedTradeWindow(event.target.value)} /></label>
-              <button type="button" disabled={state.busy || state.loading} onClick={() => void model.saveLimits()}>Save settings</button>
+              <button type="button" disabled={state.busy || state.loading || (state.researchStrategies.length === 0 && !state.genericSignalsEnabled)} onClick={() => void model.saveLimits()}>Save settings</button>
             </div>
           </div>}
         </div>
@@ -266,7 +302,7 @@ export function AutoTrader({ ticks }: { ticks: SymbolPriceTick[] }) {
         </div>
         {state.error && <p className="auto-trader-error" role="alert">{state.error}</p>}
         <div className="auto-trader-orders" aria-label="Recent auto trader orders">
-          <strong>Today’s orders ({state.orders.length}) · UTC</strong>
+          <strong>Today’s trades &amp; protection ({state.orders.length}) · grouped by strategy and symbol · UTC</strong>
           <div className="data-grid-wrap auto-trader-grid-wrap">
             <AgGridReact<AutoTraderOrderRow>
               rowData={orderRows}
@@ -275,10 +311,10 @@ export function AutoTrader({ ticks }: { ticks: SymbolPriceTick[] }) {
               getRowId={({ data }) => String(data.timestamp) + '-' + data.symbol + '-' + data.side}
               theme={autoTraderGridTheme}
               rowHeight={26}
+              getRowClass={({ data }) => data?.protection_order ? 'auto-trader-protection-order' : ''}
               headerHeight={28}
               suppressColumnMoveAnimation
               animateRows={false}
-              overlayNoRowsTemplate="No auto-trader orders yet."
             />
           </div>
         </div>

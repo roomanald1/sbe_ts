@@ -994,6 +994,45 @@
       ],
       "title": "AutoTrader cycle and stage timing sample counts",
       "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 77,
+        "w": 24,
+        "h": 7
+      },
+      "id": 42,
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "single"
+        }
+      },
+      "targets": [
+        {
+          "expr": "app_autotrader_strategy_realized_pnl",
+          "legendFormat": "{{strategy}} \u00b7 {{quote}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Autotrader daily realized P&L by strategy",
+      "type": "timeseries",
+      "description": "Realized daily P&L attributed to the entry strategy. Values are in the symbol quote currency; check the quote label when comparing strategies."
     }
   ],
   "refresh": "15s",

@@ -51,13 +51,34 @@ async fn maybe_exit_auto_position(
         })??;
         inputs_by_symbol.insert(symbol, inputs);
     }
+    let regime_now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+    let research_regime = match load_research_regime_snapshot(state, regime_now_ms).await {
+        Ok(snapshot) => Some(snapshot),
+        Err(error) => {
+            crate::service_log!(
+                "WARN",
+                "Daily regime data unavailable for trend exits: {error}"
+            );
+            None
+        }
+    };
     // Market input requests do not mutate trader state. Keep them outside the
     // shared cycle lock, then serialize exit decisions and order mutations.
     let _cycle = acquire_cycle_lock(state, "position_maintenance").await;
     for (symbol, position) in positions {
-        if let Some(result) =
-            evaluate_position_exit(client, base, state, symbol, position, &mut inputs_by_symbol)
-                .await?
+        if let Some(result) = evaluate_position_exit(
+            client,
+            base,
+            state,
+            symbol,
+            position,
+            &mut inputs_by_symbol,
+            research_regime.as_ref(),
+        )
+        .await?
         {
             return Ok(Some(result));
         }
@@ -72,6 +93,7 @@ async fn evaluate_position_exit(
     symbol: String,
     position: TraderPosition,
     inputs_by_symbol: &mut BTreeMap<String, serde_json::Value>,
+    research_regime: Option<&ResearchRegimeSnapshot>,
 ) -> Result<Option<CycleResult>, (StatusCode, String)> {
     let position_is_current = {
         let settings = state.settings.lock().await;
@@ -110,14 +132,35 @@ async fn evaluate_position_exit(
         let settings = state.settings.lock().await;
         (settings.stop_loss_percent, settings.take_profit_percent)
     };
+    let stop_loss_percent = position.stop_loss_percent.unwrap_or(stop_loss_percent);
     let take_profit_percent = position
-        .horizon_take_profit_percent
-        .map(|target| target.max(take_profit_percent))
+        .take_profit_percent
+        .or_else(|| {
+            position
+                .horizon_take_profit_percent
+                .map(|target| target.max(take_profit_percent))
+        })
         .unwrap_or(take_profit_percent);
-    let reason = if return_fraction <= -stop_loss_percent / 100.0 {
+    let (strategy_disabled, strategy_no_longer_eligible) = {
+        let settings = state.settings.lock().await;
+        let strategy_disabled = position.research_strategy.as_ref().is_some_and(|strategy| {
+            !settings
+                .research_strategies
+                .iter()
+                .any(|enabled| enabled.as_str() == strategy)
+        });
+        (strategy_disabled, position.research_strategy.is_some())
+    };
+    let research_exit = strategy_no_longer_eligible
+        && research_regime.is_some_and(|regime| !regime.entry_enabled(&symbol));
+    let reason = if strategy_disabled {
+        Some("strategy-disabled")
+    } else if return_fraction <= -stop_loss_percent / 100.0 {
         Some("stop-loss")
     } else if return_fraction >= take_profit_percent / 100.0 {
         Some("take-profit")
+    } else if research_exit {
+        Some("research-regime-exit")
     } else {
         None
     };
@@ -213,6 +256,12 @@ async fn submit_position_exit_order(
             side: side.into(),
             order_type: "Ioc".into(),
             purpose: reason.into(),
+            strategy: Some(
+                position
+                    .research_strategy
+                    .clone()
+                    .unwrap_or_else(|| "generic-insight-signals".into()),
+            ),
             decision_id: None,
             quantity,
             filled_quantity: 0.0,
@@ -290,6 +339,7 @@ async fn submit_position_exit_order(
                     fee,
                     "Ioc",
                     reason,
+                    false,
                     None,
                 )
             })
@@ -376,6 +426,7 @@ async fn arm_protective_stop(
     quantity: f64,
     entry_price: f64,
     entry_fees: f64,
+    stop_loss_override: Option<f64>,
 ) -> Result<(), (StatusCode, String)> {
     if quantity <= 0.0 || entry_price <= 0.0 {
         return Ok(());
@@ -383,7 +434,7 @@ async fn arm_protective_stop(
     let (stop_loss_percent, is_enabled) = {
         let settings = state.settings.lock().await;
         (
-            settings.stop_loss_percent,
+            stop_loss_override.unwrap_or(settings.stop_loss_percent),
             state.enabled.load(Ordering::Relaxed),
         )
     };
@@ -450,6 +501,10 @@ async fn arm_protective_stop(
             processed_notional: 0.0,
             processed_fee: 0.0,
         });
+        let strategy = position
+            .research_strategy
+            .clone()
+            .unwrap_or_else(|| "generic-insight-signals".into());
         settings.orders.push(TraderOrder {
             timestamp,
             triggered_at: None,
@@ -457,6 +512,7 @@ async fn arm_protective_stop(
             side: side.to_owned(),
             order_type: "StopMarket".into(),
             purpose: "stop-loss".into(),
+            strategy: Some(strategy),
             decision_id: None,
             quantity,
             filled_quantity: 0.0,
@@ -589,6 +645,7 @@ async fn sync_protective_stops(
                 delta_fee,
                 "StopMarket",
                 "stop-loss",
+                false,
                 None,
             );
             let realized_delta_usd = realized_usd(&settings, &symbol, realized_delta);
@@ -682,49 +739,170 @@ async fn sync_protective_stops(
     Ok(())
 }
 
+async fn cancel_protective_barrier(
+    client: &reqwest::Client,
+    base: &str,
+    state: &AutoTraderState,
+    symbol: &str,
+    barrier_id: &str,
+    created_at: u64,
+) -> Result<bool, (StatusCode, String)> {
+    let response = client
+        .delete(format!("{base}/positions/orders/{barrier_id}"))
+        .send()
+        .await
+        .map_err(upstream_error)?;
+    if !response.status().is_success() && response.status() != StatusCode::NOT_FOUND {
+        return Ok(false);
+    }
+    let mut settings = state.settings.lock().await;
+    if let Some(position) = settings.positions.get_mut(symbol) {
+        position
+            .protective_stops
+            .retain(|stop| stop.barrier_id != barrier_id);
+    }
+    if let Some(order) = settings.orders.iter_mut().find(|order| {
+        order.timestamp == created_at && order.symbol == symbol && order.purpose == "stop-loss"
+    }) {
+        order.status = "cancelled".into();
+    }
+    persist_settings(&state.settings_path, &settings)?;
+    Ok(true)
+}
+
 async fn ensure_protective_stops(
     client: &reqwest::Client,
     base: &str,
     state: &AutoTraderState,
 ) -> Result<(), (StatusCode, String)> {
+    // Reconcile against the position manager's authoritative barriers. The
+    // cached stop list can lag manual fills, partial exits, or a flat position.
+    let barriers: Vec<serde_json::Value> = client
+        .get(format!("{base}/positions/barriers"))
+        .send()
+        .await
+        .map_err(upstream_error)?
+        .error_for_status()
+        .map_err(upstream_error)?
+        .json()
+        .await
+        .map_err(upstream_error)?;
     let positions = {
         let settings = state.settings.lock().await;
-        settings
-            .positions
-            .iter()
-            .filter(|(_, position)| position.quantity.abs() > 1e-12)
-            .map(|(symbol, position)| (symbol.clone(), position.clone()))
-            .collect::<Vec<_>>()
+        settings.positions.clone()
     };
-    for (symbol, position) in positions {
-        let covered = position
-            .protective_stops
+    let mut symbols = BTreeSet::new();
+    symbols.extend(positions.keys().cloned());
+    for barrier in &barriers {
+        if barrier["source"].as_str() == Some("auto")
+            && barrier["parent_order_id"]
+                .as_str()
+                .is_some_and(|id| id.starts_with("auto-stop-"))
+            && matches!(barrier["status"].as_str(), Some("armed" | "triggering"))
+        {
+            if let Some(symbol) = barrier["symbol"].as_str() {
+                symbols.insert(symbol.to_owned());
+            }
+        }
+    }
+
+    for symbol in symbols {
+        let position = positions.get(&symbol).cloned().unwrap_or_default();
+        let desired_quantity = position.quantity.abs();
+        let active = barriers
             .iter()
-            .map(|stop| (stop.quantity - stop.processed_quantity).max(0.0))
+            .filter(|barrier| {
+                barrier["symbol"].as_str() == Some(symbol.as_str())
+                    && barrier["source"].as_str() == Some("auto")
+                    && barrier["parent_order_id"]
+                        .as_str()
+                        .is_some_and(|id| id.starts_with("auto-stop-"))
+                    && matches!(barrier["status"].as_str(), Some("armed" | "triggering"))
+            })
+            .collect::<Vec<_>>();
+        if active.is_empty() && desired_quantity <= 1e-12 {
+            continue;
+        }
+
+        // A triggering barrier is already executing at the position manager.
+        // Let it settle before changing protection around its in-flight fill.
+        if active
+            .iter()
+            .any(|barrier| barrier["status"].as_str() == Some("triggering"))
+        {
+            continue;
+        }
+
+        let expected_side = if position.quantity > 0.0 {
+            "sell"
+        } else {
+            "buy"
+        };
+        let covered_quantity = active
+            .iter()
+            .filter(|barrier| barrier["side"].as_str() == Some(expected_side))
+            .map(|barrier| {
+                barrier["remaining_quantity"]
+                    .as_f64()
+                    .unwrap_or(0.0)
+                    .max(0.0)
+            })
             .sum::<f64>();
-        let uncovered = (position.quantity.abs() - covered).max(0.0);
-        if uncovered > 1e-12 {
-            if let Err((_, error)) = arm_protective_stop(
-                client,
-                base,
-                state,
-                &symbol,
-                if position.quantity > 0.0 {
-                    "buy"
-                } else {
-                    "sell"
-                },
-                uncovered,
-                position.average_entry_price,
-                position.entry_fees * uncovered / position.quantity.abs(),
-            )
-            .await
-            {
+        let wrong_side = active
+            .iter()
+            .any(|barrier| barrier["side"].as_str() != Some(expected_side));
+        let tolerance = (desired_quantity * 1e-6).max(1e-12);
+        let coverage_mismatch =
+            wrong_side || (covered_quantity - desired_quantity).abs() > tolerance;
+
+        if coverage_mismatch && !active.is_empty() {
+            // Existing barriers are not quantity-editable. Cancel the stale set,
+            // then replace it with one barrier sized to the current net position.
+            let mut cancelled_all = true;
+            for barrier in &active {
+                let Some(id) = barrier["id"].as_str() else {
+                    cancelled_all = false;
+                    break;
+                };
+                let created_at = barrier["created_at"].as_u64().unwrap_or_default();
+                if !cancel_protective_barrier(client, base, state, &symbol, id, created_at).await? {
+                    cancelled_all = false;
+                    break;
+                }
+            }
+            if !cancelled_all {
                 let mut settings = state.settings.lock().await;
                 settings.last_risk_note = format!(
-                    "Protective stop could not be armed for {symbol}: {error}; five-second exit monitor remains as fallback"
+                    "Protective stop quantities for {symbol} do not match the position; a barrier could not be cancelled, so replacement protection was not added"
                 );
+                continue;
             }
+        }
+
+        if desired_quantity <= 1e-12 || (!active.is_empty() && !coverage_mismatch) {
+            continue;
+        }
+        if let Err((_, error)) = arm_protective_stop(
+            client,
+            base,
+            state,
+            &symbol,
+            if position.quantity > 0.0 {
+                "buy"
+            } else {
+                "sell"
+            },
+            desired_quantity,
+            position.average_entry_price,
+            position.entry_fees,
+            position.stop_loss_percent,
+        )
+        .await
+        {
+            let mut settings = state.settings.lock().await;
+            settings.last_risk_note = format!(
+                "Protective stop could not be armed for {symbol}: {error}; five-second exit monitor remains as fallback"
+            );
         }
     }
     Ok(())

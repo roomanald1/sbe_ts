@@ -1,8 +1,10 @@
 fn configured_fee_rates_maker_bps() -> f64 {
     std::env::var("PAPER_OKX_SPOT_MAKER_FEE_RATE")
-        .ok().and_then(|value| value.parse::<f64>().ok())
+        .ok()
+        .and_then(|value| value.parse::<f64>().ok())
         .filter(|value| value.is_finite() && *value >= 0.0 && *value <= 0.1)
-        .unwrap_or(0.0008) * 10_000.0
+        .unwrap_or(0.0008)
+        * 10_000.0
 }
 
 #[derive(Clone, Copy)]
@@ -190,6 +192,31 @@ async fn submit_configured_order(
     }
     let _ = notional;
     Ok(payload)
+}
+
+fn learned_exit_policy(signal: &Signal, walk_forward: &[WalkForward]) -> Option<(f64, f64)> {
+    walk_forward
+        .iter()
+        .filter(|item| item.symbol == signal.symbol && matches!(item.horizon_seconds, 900 | 3_600))
+        .filter_map(|item| {
+            let policy = if signal.direction == "bullish" {
+                item.learned_long_exit_policy.as_ref()
+            } else {
+                item.learned_short_exit_policy.as_ref()
+            }?;
+            (policy.validation_samples >= 8
+                && policy.validation_average_net_return_percent > 0.0
+                && policy.validation_positive_net_rate >= 0.40
+                && policy.stop_loss_percent.is_finite()
+                && policy.take_profit_percent.is_finite())
+            .then_some((
+                policy.validation_average_net_return_percent,
+                policy.stop_loss_percent,
+                policy.take_profit_percent,
+            ))
+        })
+        .max_by(|left, right| left.0.total_cmp(&right.0))
+        .map(|(_, stop, target)| (stop, target))
 }
 
 fn horizon_adjusted_take_profit_percent(

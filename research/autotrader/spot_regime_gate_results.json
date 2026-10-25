@@ -1,0 +1,170 @@
+{
+  "source": "Existing local Binance daily spot candles",
+  "date_range": [
+    "2021-03-01",
+    "2026-10-22"
+  ],
+  "rules": "Each of 7 assets gets 1/7 account weight on a close above prior 55-day high; gated version takes all breakout positions only when BTC prior close is above its trailing SMA200; otherwise cash. Signals at prior close, entry current open, open-to-next-open returns.",
+  "cost": "15 bps per side on absolute portfolio-weight turnover; cash earns 0.",
+  "out_of_sample": "Common seven-symbol data begins 2021-03-01; fixed split: train through 2022, validation 2023-24, holdout 2025 through 2026-10-22. No parameter search in this test.",
+  "ungated": {
+    "splits": {
+      "train_2021_2022": {
+        "return_pct": 14.91333565476969,
+        "sharpe": 0.5692095994800187,
+        "max_dd_pct": -15.383449371493175,
+        "days": 671
+      },
+      "validation_2023_2024": {
+        "return_pct": 44.28485686094488,
+        "sharpe": 1.6017284038912543,
+        "max_dd_pct": -8.242247068458896,
+        "days": 731
+      },
+      "holdout_2025_2026": {
+        "return_pct": 9.895507231637257,
+        "sharpe": 0.7637878564171038,
+        "max_dd_pct": -4.4119156022352835,
+        "days": 660
+      }
+    },
+    "by_year": {
+      "2021": {
+        "return_pct": 18.4908977646292,
+        "sharpe": 1.0177178563076015,
+        "max_dd_pct": -11.41822604866951,
+        "days": 306
+      },
+      "2022": {
+        "return_pct": -3.0192716717920676,
+        "sharpe": -0.815378730828346,
+        "max_dd_pct": -5.664524725725773,
+        "days": 365
+      },
+      "2023": {
+        "return_pct": 12.087142287583386,
+        "sharpe": 1.1961587325349403,
+        "max_dd_pct": -8.242247068458896,
+        "days": 365
+      },
+      "2024": {
+        "return_pct": 28.7256093038321,
+        "sharpe": 1.9308157548679217,
+        "max_dd_pct": -6.088711093398247,
+        "days": 366
+      },
+      "2025": {
+        "return_pct": 5.606488111056973,
+        "sharpe": 0.8893750327259333,
+        "max_dd_pct": -4.4119156022352835,
+        "days": 365
+      },
+      "2026": {
+        "return_pct": 4.061321607503809,
+        "sharpe": 0.6503723549987322,
+        "max_dd_pct": -2.8258875435866138,
+        "days": 295
+      }
+    },
+    "by_btc_regime_daily_samples": {
+      "BTC_above_SMA200": {
+        "return_pct": 86.25352073894692,
+        "sharpe": 1.3509527532916665,
+        "max_dd_pct": -14.164192980260692,
+        "days": 1118
+      },
+      "BTC_below_SMA200": {
+        "return_pct": -2.171221429226189,
+        "sharpe": -0.2853021358004646,
+        "max_dd_pct": -6.099454125214643,
+        "days": 944
+      }
+    },
+    "full": {
+      "return_pct": 82.20954438397476,
+      "sharpe": 0.9496881914553377,
+      "max_dd_pct": -15.383449371493175,
+      "days": 2062
+    }
+  },
+  "btc_sma200_gated": {
+    "splits": {
+      "train_2021_2022": {
+        "return_pct": 16.791102653536406,
+        "sharpe": 0.6377414313412849,
+        "max_dd_pct": -12.68896387862074,
+        "days": 671
+      },
+      "validation_2023_2024": {
+        "return_pct": 42.362230693667534,
+        "sharpe": 1.549843760377451,
+        "max_dd_pct": -8.24224706845892,
+        "days": 731
+      },
+      "holdout_2025_2026": {
+        "return_pct": 11.880011593339667,
+        "sharpe": 0.9067640755363272,
+        "max_dd_pct": -4.4119156022352835,
+        "days": 660
+      }
+    },
+    "by_year": {
+      "2021": {
+        "return_pct": 16.791102653536406,
+        "sharpe": 0.9441641031538928,
+        "max_dd_pct": -12.68896387862074,
+        "days": 306
+      },
+      "2022": {
+        "return_pct": 0.0,
+        "sharpe": 0,
+        "max_dd_pct": 0.0,
+        "days": 365
+      },
+      "2023": {
+        "return_pct": 10.580134535972018,
+        "sharpe": 1.0692324785863836,
+        "max_dd_pct": -8.24224706845892,
+        "days": 365
+      },
+      "2024": {
+        "return_pct": 28.741234843910135,
+        "sharpe": 1.9317236443100234,
+        "max_dd_pct": -6.077311538822205,
+        "days": 366
+      },
+      "2025": {
+        "return_pct": 5.606488111056973,
+        "sharpe": 0.8893750327259333,
+        "max_dd_pct": -4.4119156022352835,
+        "days": 365
+      },
+      "2026": {
+        "return_pct": 5.940471645724488,
+        "sharpe": 0.9340261330556209,
+        "max_dd_pct": -2.8258875435865805,
+        "days": 295
+      }
+    },
+    "by_btc_regime_daily_samples": {
+      "BTC_above_SMA200": {
+        "return_pct": 86.21834864993278,
+        "sharpe": 1.3509812515564155,
+        "max_dd_pct": -14.198792115962611,
+        "days": 1118
+      },
+      "BTC_below_SMA200": {
+        "return_pct": -0.1071107172376129,
+        "sharpe": -0.9380529838787498,
+        "max_dd_pct": -0.1071107172376129,
+        "days": 944
+      }
+    },
+    "full": {
+      "return_pct": 86.01888884106597,
+      "sharpe": 0.9922211459740016,
+      "max_dd_pct": -14.290694405125748,
+      "days": 2062
+    }
+  }
+}

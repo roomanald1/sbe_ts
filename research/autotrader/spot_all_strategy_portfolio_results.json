@@ -1,0 +1,281 @@
+{
+  "range": [
+    "2021-03-07",
+    "2026-10-18"
+  ],
+  "weekly_periods": 288,
+  "construction": "Equal initial capital in independent strategy sleeves; sleeve equity compounds separately; no leverage; cash stays inside each strategy; portfolio is not rebalanced back to equal weights. Daily strategies are aggregated into Sunday-to-Sunday returns. The point-in-time rotation sleeves use CoinMarketCap snapshot prices. Costs are as estimated in each component test.",
+  "components": {
+    "btc_eth_bnb_trend_mix": {
+      "full": {
+        "return_pct": 265.7184398359877,
+        "sharpe": 0.7735685883964382,
+        "max_dd_pct": -59.48431847553748,
+        "weeks": 288
+      },
+      "holdout": {
+        "return_pct": 56.6921908533182,
+        "sharpe": 0.9475720533527304,
+        "max_dd_pct": -20.14426498622849,
+        "weeks": 92
+      }
+    },
+    "buy_hold_7": {
+      "full": {
+        "return_pct": 279.34990696902173,
+        "sharpe": 0.6879753643434074,
+        "max_dd_pct": -78.48206781053644,
+        "weeks": 288
+      },
+      "holdout": {
+        "return_pct": -43.503602692631574,
+        "sharpe": -0.2632009959205021,
+        "max_dd_pct": -66.24056352994607,
+        "weeks": 92
+      }
+    },
+    "trend_50_200": {
+      "full": {
+        "return_pct": 499.4963190834543,
+        "sharpe": 0.9506837031804007,
+        "max_dd_pct": -35.792283086048926,
+        "weeks": 288
+      },
+      "holdout": {
+        "return_pct": -16.533821622351162,
+        "sharpe": -0.31197837065538636,
+        "max_dd_pct": -24.92098311354417,
+        "weeks": 92
+      }
+    },
+    "donchian_55": {
+      "full": {
+        "return_pct": 82.20954438397492,
+        "sharpe": 0.7530494767379656,
+        "max_dd_pct": -12.503885197792197,
+        "weeks": 288
+      },
+      "holdout": {
+        "return_pct": 9.895507231637325,
+        "sharpe": 0.6598363732164282,
+        "max_dd_pct": -4.411915602235306,
+        "weeks": 92
+      }
+    },
+    "breakout_20_sma200": {
+      "full": {
+        "return_pct": 80.46648962709872,
+        "sharpe": 0.7159876666549084,
+        "max_dd_pct": -15.271556434698264,
+        "weeks": 288
+      },
+      "holdout": {
+        "return_pct": 3.6236927893590787,
+        "sharpe": 0.28879667768941136,
+        "max_dd_pct": -9.389260716159352,
+        "weeks": 92
+      }
+    },
+    "oversold_rsi2": {
+      "full": {
+        "return_pct": -11.794002131691117,
+        "sharpe": 0.020825205706936772,
+        "max_dd_pct": -35.98270714588543,
+        "weeks": 288
+      },
+      "holdout": {
+        "return_pct": -16.782465749080888,
+        "sharpe": -0.5063719078143383,
+        "max_dd_pct": -26.048797568723725,
+        "weeks": 92
+      }
+    },
+    "rotation_90_sma200_monthly": {
+      "full": {
+        "return_pct": 564.9193943870899,
+        "sharpe": 0.7922292604207427,
+        "max_dd_pct": -81.33569299163658,
+        "weeks": 288
+      },
+      "holdout": {
+        "return_pct": -3.18816601421551,
+        "sharpe": 0.19280394998125877,
+        "max_dd_pct": -38.52225499289915,
+        "weeks": 92
+      }
+    },
+    "btc_gated_donchian55": {
+      "full": {
+        "return_pct": 86.01888884106603,
+        "sharpe": 0.7876582004498374,
+        "max_dd_pct": -11.40033238673005,
+        "weeks": 288
+      },
+      "holdout": {
+        "return_pct": 11.880011593339713,
+        "sharpe": 0.7806099412675869,
+        "max_dd_pct": -4.411915602235306,
+        "weeks": 92
+      }
+    },
+    "pit_top_1_equal_weight": {
+      "full": {
+        "return_pct": -99.99338786782516,
+        "sharpe": -0.311863180911066,
+        "max_dd_pct": -99.99792468353004,
+        "weeks": 288
+      },
+      "holdout": {
+        "return_pct": -99.93216935812383,
+        "sharpe": -1.03226758418243,
+        "max_dd_pct": -99.94350586413766,
+        "weeks": 92
+      }
+    },
+    "pit_top_5_equal_weight": {
+      "full": {
+        "return_pct": 35.570261494202235,
+        "sharpe": 0.4908141441722368,
+        "max_dd_pct": -86.10325918009433,
+        "weeks": 288
+      },
+      "holdout": {
+        "return_pct": -35.720560425937386,
+        "sharpe": -0.004145501876380768,
+        "max_dd_pct": -68.10745724488827,
+        "weeks": 92
+      }
+    },
+    "pit_top_10_equal_weight": {
+      "full": {
+        "return_pct": -61.515252245257265,
+        "sharpe": 0.14973742906214998,
+        "max_dd_pct": -91.01572995305663,
+        "weeks": 288
+      },
+      "holdout": {
+        "return_pct": -56.339490049158535,
+        "sharpe": -0.4932526561847686,
+        "max_dd_pct": -70.2403004588126,
+        "weeks": 92
+      }
+    }
+  },
+  "combined": {
+    "all_11_sleeves": {
+      "full": {
+        "return_pct": 156.40423657973818,
+        "sharpe": 0.608547875037689,
+        "max_dd_pct": -59.322704056435946,
+        "weeks": 288
+      },
+      "splits": {
+        "train_2021_2022": {
+          "return_pct": 4.105354179249776,
+          "sharpe": 0.3180281297789175,
+          "max_dd_pct": -56.11322034991303,
+          "weeks": 92
+        },
+        "validation_2023_2024": {
+          "return_pct": 182.13943632699136,
+          "sharpe": 1.4279017155902358,
+          "max_dd_pct": -31.381338888540334,
+          "weeks": 104
+        },
+        "holdout_2025_2026": {
+          "return_pct": -12.705207618742687,
+          "sharpe": -0.10764037152644441,
+          "max_dd_pct": -31.069653960390298,
+          "weeks": 92
+        }
+      },
+      "sleeves": [
+        "btc_eth_bnb_trend_mix",
+        "buy_hold_7",
+        "trend_50_200",
+        "donchian_55",
+        "breakout_20_sma200",
+        "oversold_rsi2",
+        "rotation_90_sma200_monthly",
+        "btc_gated_donchian55",
+        "pit_top_1_equal_weight",
+        "pit_top_5_equal_weight",
+        "pit_top_10_equal_weight"
+      ]
+    },
+    "all_except_point_in_time_rotations": {
+      "full": {
+        "return_pct": 230.79812262450042,
+        "sharpe": 0.7501416219443312,
+        "max_dd_pct": -47.89558876817295,
+        "weeks": 288
+      },
+      "splits": {
+        "train_2021_2022": {
+          "return_pct": 25.08766296896676,
+          "sharpe": 0.5126959514001393,
+          "max_dd_pct": -45.98880577071562,
+          "weeks": 92
+        },
+        "validation_2023_2024": {
+          "return_pct": 192.00958806915165,
+          "sharpe": 1.4882481151113982,
+          "max_dd_pct": -29.498284770334916,
+          "weeks": 104
+        },
+        "holdout_2025_2026": {
+          "return_pct": -9.436865432468334,
+          "sharpe": -0.04777602029133557,
+          "max_dd_pct": -30.177993746117725,
+          "weeks": 92
+        }
+      },
+      "sleeves": [
+        "btc_eth_bnb_trend_mix",
+        "buy_hold_7",
+        "trend_50_200",
+        "donchian_55",
+        "breakout_20_sma200",
+        "oversold_rsi2",
+        "rotation_90_sma200_monthly",
+        "btc_gated_donchian55"
+      ]
+    },
+    "trend_breakout_and_mix_only": {
+      "full": {
+        "return_pct": 202.78193635431535,
+        "sharpe": 0.8832151023463997,
+        "max_dd_pct": -25.34593816238242,
+        "weeks": 288
+      },
+      "splits": {
+        "train_2021_2022": {
+          "return_pct": 42.38564227548793,
+          "sharpe": 0.7808009218242816,
+          "max_dd_pct": -24.286200771656496,
+          "weeks": 92
+        },
+        "validation_2023_2024": {
+          "return_pct": 104.77829497669337,
+          "sharpe": 1.4196487632110937,
+          "max_dd_pct": -16.019841091540975,
+          "weeks": 104
+        },
+        "holdout_2025_2026": {
+          "return_pct": 3.8436251455236325,
+          "sharpe": 0.20688110599986723,
+          "max_dd_pct": -13.61301893658009,
+          "weeks": 92
+        }
+      },
+      "sleeves": [
+        "btc_eth_bnb_trend_mix",
+        "trend_50_200",
+        "donchian_55",
+        "breakout_20_sma200",
+        "btc_gated_donchian55"
+      ]
+    }
+  },
+  "limits": "This combines heterogeneous strategy backtests and price sources, with imperfect daily fee/execution estimates. The component rules were selected after prior research, which creates selection bias. The combined results are not a fresh untouched test and do not imply future profitability."
+}

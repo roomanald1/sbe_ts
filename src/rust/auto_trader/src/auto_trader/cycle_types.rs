@@ -3,6 +3,7 @@ struct PnlBreakdown {
     symbol: String,
     direction: String,
     purpose: String,
+    strategy: String,
     realized_pnl: f64,
     outcomes: usize,
 }

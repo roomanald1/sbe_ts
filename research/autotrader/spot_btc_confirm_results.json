@@ -1,0 +1,630 @@
+{
+  "cost_bps_per_side": 15,
+  "execution": "prior-close signal; next open; open-to-next-open",
+  "results": [
+    {
+      "strategy": "BNBUSDT_sma100_no_btc_gate",
+      "confirm": false,
+      "splits": {
+        "train_2019_2022": {
+          "return_pct": 704.9219026047059,
+          "sharpe": 1.0211572660449857,
+          "max_dd_pct": -77.88911493739688
+        },
+        "validation_2023_2024": {
+          "return_pct": 204.53458332388465,
+          "sharpe": 1.4790291530469823,
+          "max_dd_pct": -26.687773325671504
+        },
+        "selection_2025": {
+          "return_pct": 18.14759834902513,
+          "sharpe": 0.6101430125445706,
+          "max_dd_pct": -31.04835078505953
+        },
+        "holdout_2026": {
+          "return_pct": 9.774271557829529,
+          "sharpe": 0.5756607965508075,
+          "max_dd_pct": -16.333367676891662
+        }
+      }
+    },
+    {
+      "strategy": "BNBUSDT_sma100_btc_sma100",
+      "confirm": true,
+      "splits": {
+        "train_2019_2022": {
+          "return_pct": 2426.0960197096933,
+          "sharpe": 1.4061565186177318,
+          "max_dd_pct": -54.47925807337823
+        },
+        "validation_2023_2024": {
+          "return_pct": 185.9198417698538,
+          "sharpe": 1.4131144190777782,
+          "max_dd_pct": -24.883015829046297
+        },
+        "selection_2025": {
+          "return_pct": 27.502229860237293,
+          "sharpe": 0.909294193033398,
+          "max_dd_pct": -18.131739883487818
+        },
+        "holdout_2026": {
+          "return_pct": 21.4160281493043,
+          "sharpe": 1.1310978004814791,
+          "max_dd_pct": -10.180007755719878
+        }
+      }
+    },
+    {
+      "strategy": "BNBUSDT_sma100_btc_sma50",
+      "confirm": true,
+      "splits": {
+        "train_2019_2022": {
+          "return_pct": 1807.2309691140294,
+          "sharpe": 1.3455722382004556,
+          "max_dd_pct": -50.143711361074295
+        },
+        "validation_2023_2024": {
+          "return_pct": 165.98739808849848,
+          "sharpe": 1.3658669955956637,
+          "max_dd_pct": -26.713315294176464
+        },
+        "selection_2025": {
+          "return_pct": 18.893601252888015,
+          "sharpe": 0.7181572174956972,
+          "max_dd_pct": -22.297601539226942
+        },
+        "holdout_2026": {
+          "return_pct": 15.681177392437462,
+          "sharpe": 1.0058754435114716,
+          "max_dd_pct": -10.180007755719867
+        }
+      }
+    },
+    {
+      "strategy": "BNBUSDT_sma100_btc_sma200",
+      "confirm": true,
+      "splits": {
+        "train_2019_2022": {
+          "return_pct": 773.2638795911192,
+          "sharpe": 1.0696109639020264,
+          "max_dd_pct": -69.18207812964037
+        },
+        "validation_2023_2024": {
+          "return_pct": 158.1269536695225,
+          "sharpe": 1.2988390768051747,
+          "max_dd_pct": -35.94299397399428
+        },
+        "selection_2025": {
+          "return_pct": 17.226669096526017,
+          "sharpe": 0.5954435367929841,
+          "max_dd_pct": -31.585810637459655
+        },
+        "holdout_2026": {
+          "return_pct": 16.369268404963975,
+          "sharpe": 1.1130621544619144,
+          "max_dd_pct": -10.180007755719856
+        }
+      }
+    },
+    {
+      "strategy": "ETHUSDT_sma200_btc_sma50",
+      "confirm": true,
+      "splits": {
+        "train_2019_2022": {
+          "return_pct": 1628.551679284929,
+          "sharpe": 1.6653103994816438,
+          "max_dd_pct": -29.884606787804913
+        },
+        "validation_2023_2024": {
+          "return_pct": 127.2931462108592,
+          "sharpe": 1.1403588022786364,
+          "max_dd_pct": -28.38476014252411
+        },
+        "selection_2025": {
+          "return_pct": 2.4707377042642698,
+          "sharpe": 0.2493146281175137,
+          "max_dd_pct": -29.696550809416856
+        },
+        "holdout_2026": {
+          "return_pct": 5.897093309537049,
+          "sharpe": 0.4386690462887233,
+          "max_dd_pct": -13.942439305525555
+        }
+      }
+    },
+    {
+      "strategy": "ETHUSDT_sma50_btc_sma50",
+      "confirm": true,
+      "splits": {
+        "train_2019_2022": {
+          "return_pct": 2123.4164296947993,
+          "sharpe": 1.5964675271220972,
+          "max_dd_pct": -45.879269745749895
+        },
+        "validation_2023_2024": {
+          "return_pct": 123.19314243628044,
+          "sharpe": 1.149391320638514,
+          "max_dd_pct": -36.74214263058987
+        },
+        "selection_2025": {
+          "return_pct": 68.85987650710348,
+          "sharpe": 1.4396392730535992,
+          "max_dd_pct": -22.96237449270916
+        },
+        "holdout_2026": {
+          "return_pct": 13.389908854917643,
+          "sharpe": 0.5866043855271013,
+          "max_dd_pct": -21.07559964286285
+        }
+      }
+    },
+    {
+      "strategy": "ETHUSDT_sma200_no_btc_gate",
+      "confirm": false,
+      "splits": {
+        "train_2019_2022": {
+          "return_pct": 440.81050391526514,
+          "sharpe": 0.9720824388093995,
+          "max_dd_pct": -67.09347035807542
+        },
+        "validation_2023_2024": {
+          "return_pct": 121.74639651727652,
+          "sharpe": 1.0542577175284524,
+          "max_dd_pct": -29.100324739224547
+        },
+        "selection_2025": {
+          "return_pct": -3.1399344792733763,
+          "sharpe": 0.17001165867558238,
+          "max_dd_pct": -38.47345931902105
+        },
+        "holdout_2026": {
+          "return_pct": 5.897093309537049,
+          "sharpe": 0.4386690462887233,
+          "max_dd_pct": -13.942439305525555
+        }
+      }
+    },
+    {
+      "strategy": "BNBUSDT_sma50_no_btc_gate",
+      "confirm": false,
+      "splits": {
+        "train_2019_2022": {
+          "return_pct": 5048.153156569622,
+          "sharpe": 1.6034947112040188,
+          "max_dd_pct": -41.05853567642178
+        },
+        "validation_2023_2024": {
+          "return_pct": 115.17683500090787,
+          "sharpe": 1.0957164874361591,
+          "max_dd_pct": -30.302755028504514
+        },
+        "selection_2025": {
+          "return_pct": 35.0606686046121,
+          "sharpe": 0.9511242316675276,
+          "max_dd_pct": -21.60843814027096
+        },
+        "holdout_2026": {
+          "return_pct": 0.6723102048828755,
+          "sharpe": 0.1691252026485637,
+          "max_dd_pct": -23.693536163441763
+        }
+      }
+    },
+    {
+      "strategy": "ETHUSDT_sma200_btc_sma200",
+      "confirm": true,
+      "splits": {
+        "train_2019_2022": {
+          "return_pct": 517.4370696449984,
+          "sharpe": 1.076272080931684,
+          "max_dd_pct": -62.93148325349208
+        },
+        "validation_2023_2024": {
+          "return_pct": 113.50386919807742,
+          "sharpe": 1.0160029003879951,
+          "max_dd_pct": -29.100324739224547
+        },
+        "selection_2025": {
+          "return_pct": 9.064415894789924,
+          "sharpe": 0.41726572524090527,
+          "max_dd_pct": -30.721126551766766
+        },
+        "holdout_2026": {
+          "return_pct": 5.897093309537049,
+          "sharpe": 0.4386690462887233,
+          "max_dd_pct": -13.942439305525555
+        }
+      }
+    },
+    {
+      "strategy": "BNBUSDT_sma50_btc_sma50",
+      "confirm": true,
+      "splits": {
+        "train_2019_2022": {
+          "return_pct": 4724.319252685473,
+          "sharpe": 1.6396917557673556,
+          "max_dd_pct": -37.82282863056643
+        },
+        "validation_2023_2024": {
+          "return_pct": 100.71964196987015,
+          "sharpe": 1.036811770654583,
+          "max_dd_pct": -32.54294562186227
+        },
+        "selection_2025": {
+          "return_pct": 26.35547907239115,
+          "sharpe": 0.9180401915438924,
+          "max_dd_pct": -22.297601539226918
+        },
+        "holdout_2026": {
+          "return_pct": 14.63278724405168,
+          "sharpe": 0.8526774427725179,
+          "max_dd_pct": -15.431515355427772
+        }
+      }
+    },
+    {
+      "strategy": "ETHUSDT_sma100_btc_sma50",
+      "confirm": true,
+      "splits": {
+        "train_2019_2022": {
+          "return_pct": 1476.6276587021316,
+          "sharpe": 1.4955140974461032,
+          "max_dd_pct": -45.37031035216058
+        },
+        "validation_2023_2024": {
+          "return_pct": 96.28994153086366,
+          "sharpe": 1.0045687621475758,
+          "max_dd_pct": -38.39007119314848
+        },
+        "selection_2025": {
+          "return_pct": 15.060625860847022,
+          "sharpe": 0.5466539385746279,
+          "max_dd_pct": -28.828682419159655
+        },
+        "holdout_2026": {
+          "return_pct": 1.2605257970620176,
+          "sharpe": 0.19785298448665453,
+          "max_dd_pct": -18.773120199492986
+        }
+      }
+    },
+    {
+      "strategy": "BNBUSDT_sma50_btc_sma100",
+      "confirm": true,
+      "splits": {
+        "train_2019_2022": {
+          "return_pct": 3347.036598468142,
+          "sharpe": 1.5258601757034889,
+          "max_dd_pct": -40.23637927417292
+        },
+        "validation_2023_2024": {
+          "return_pct": 92.23537188984554,
+          "sharpe": 0.969904017019472,
+          "max_dd_pct": -34.6993333633313
+        },
+        "selection_2025": {
+          "return_pct": 29.867574034103896,
+          "sharpe": 0.9757328005264633,
+          "max_dd_pct": -16.252603090244378
+        },
+        "holdout_2026": {
+          "return_pct": 22.605810168748985,
+          "sharpe": 1.1683942941739016,
+          "max_dd_pct": -9.495151814974157
+        }
+      }
+    },
+    {
+      "strategy": "ETHUSDT_sma50_no_btc_gate",
+      "confirm": false,
+      "splits": {
+        "train_2019_2022": {
+          "return_pct": 865.8558665301266,
+          "sharpe": 1.1840406625821849,
+          "max_dd_pct": -54.914090445908535
+        },
+        "validation_2023_2024": {
+          "return_pct": 88.35592342699805,
+          "sharpe": 0.9442486890754622,
+          "max_dd_pct": -37.877305391371465
+        },
+        "selection_2025": {
+          "return_pct": 87.92677139286033,
+          "sharpe": 1.5725330906002741,
+          "max_dd_pct": -18.031856072461583
+        },
+        "holdout_2026": {
+          "return_pct": 23.753879914009968,
+          "sharpe": 0.8434497391163482,
+          "max_dd_pct": -22.256914396553828
+        }
+      }
+    },
+    {
+      "strategy": "BNBUSDT_sma200_btc_sma50",
+      "confirm": true,
+      "splits": {
+        "train_2019_2022": {
+          "return_pct": 1582.8080020734426,
+          "sharpe": 1.3496734836528799,
+          "max_dd_pct": -47.04684283419795
+        },
+        "validation_2023_2024": {
+          "return_pct": 82.72396917567464,
+          "sharpe": 0.925904195670512,
+          "max_dd_pct": -33.64655044633862
+        },
+        "selection_2025": {
+          "return_pct": -5.246264487812658,
+          "sharpe": -0.012880462774796568,
+          "max_dd_pct": -30.705604275325836
+        },
+        "holdout_2026": {
+          "return_pct": 13.639665019716096,
+          "sharpe": 0.8879513663379538,
+          "max_dd_pct": -10.180007755719899
+        }
+      }
+    },
+    {
+      "strategy": "ETHUSDT_sma50_btc_sma100",
+      "confirm": true,
+      "splits": {
+        "train_2019_2022": {
+          "return_pct": 1623.8791358564622,
+          "sharpe": 1.5166887527712483,
+          "max_dd_pct": -40.344287311018554
+        },
+        "validation_2023_2024": {
+          "return_pct": 81.77224207485627,
+          "sharpe": 0.9094569652616649,
+          "max_dd_pct": -36.771561342355405
+        },
+        "selection_2025": {
+          "return_pct": 77.03333944468054,
+          "sharpe": 1.455889160193115,
+          "max_dd_pct": -20.61676674460571
+        },
+        "holdout_2026": {
+          "return_pct": 0.9021816555566442,
+          "sharpe": 0.16010484200404007,
+          "max_dd_pct": -10.987404365679732
+        }
+      }
+    },
+    {
+      "strategy": "ETHUSDT_sma200_btc_sma100",
+      "confirm": true,
+      "splits": {
+        "train_2019_2022": {
+          "return_pct": 1298.8032215858414,
+          "sharpe": 1.4620640150208735,
+          "max_dd_pct": -45.21007664266223
+        },
+        "validation_2023_2024": {
+          "return_pct": 75.54031441401764,
+          "sharpe": 0.8274046675325452,
+          "max_dd_pct": -35.546751906471165
+        },
+        "selection_2025": {
+          "return_pct": 16.56443686058935,
+          "sharpe": 0.5746068667048585,
+          "max_dd_pct": -25.95703370731468
+        },
+        "holdout_2026": {
+          "return_pct": 5.897093309537049,
+          "sharpe": 0.4386690462887233,
+          "max_dd_pct": -13.942439305525555
+        }
+      }
+    },
+    {
+      "strategy": "ETHUSDT_sma100_no_btc_gate",
+      "confirm": false,
+      "splits": {
+        "train_2019_2022": {
+          "return_pct": 277.9432919070346,
+          "sharpe": 0.8404105833846699,
+          "max_dd_pct": -74.9614562589404
+        },
+        "validation_2023_2024": {
+          "return_pct": 73.1285976549636,
+          "sharpe": 0.8299931114727158,
+          "max_dd_pct": -46.64586624686081
+        },
+        "selection_2025": {
+          "return_pct": 38.19716147277068,
+          "sharpe": 0.9032341743159552,
+          "max_dd_pct": -24.43988724637549
+        },
+        "holdout_2026": {
+          "return_pct": 3.2584767799799463,
+          "sharpe": 0.27572124840107487,
+          "max_dd_pct": -18.918629365496987
+        }
+      }
+    },
+    {
+      "strategy": "ETHUSDT_sma100_btc_sma100",
+      "confirm": true,
+      "splits": {
+        "train_2019_2022": {
+          "return_pct": 1856.9267001794917,
+          "sharpe": 1.535136674664791,
+          "max_dd_pct": -45.29226152769829
+        },
+        "validation_2023_2024": {
+          "return_pct": 70.62758099887525,
+          "sharpe": 0.8196052785501284,
+          "max_dd_pct": -42.21298069496079
+        },
+        "selection_2025": {
+          "return_pct": 35.1089660950652,
+          "sharpe": 0.8690742299925274,
+          "max_dd_pct": -25.957033707314668
+        },
+        "holdout_2026": {
+          "return_pct": -6.554180159462364,
+          "sharpe": -0.23285379247505816,
+          "max_dd_pct": -14.2171478926855
+        }
+      }
+    },
+    {
+      "strategy": "BNBUSDT_sma200_no_btc_gate",
+      "confirm": false,
+      "splits": {
+        "train_2019_2022": {
+          "return_pct": 481.1714582018616,
+          "sharpe": 0.9202758291743571,
+          "max_dd_pct": -68.37082888012243
+        },
+        "validation_2023_2024": {
+          "return_pct": 69.84580500773019,
+          "sharpe": 0.8000976943372099,
+          "max_dd_pct": -37.24435552548062
+        },
+        "selection_2025": {
+          "return_pct": -28.448658242849845,
+          "sharpe": -0.4870319603771497,
+          "max_dd_pct": -43.34760022077262
+        },
+        "holdout_2026": {
+          "return_pct": 13.639665019716096,
+          "sharpe": 0.8879513663379538,
+          "max_dd_pct": -10.180007755719899
+        }
+      }
+    },
+    {
+      "strategy": "BNBUSDT_sma50_btc_sma200",
+      "confirm": true,
+      "splits": {
+        "train_2019_2022": {
+          "return_pct": 1681.9297362814918,
+          "sharpe": 1.3365551075020297,
+          "max_dd_pct": -40.23637927417292
+        },
+        "validation_2023_2024": {
+          "return_pct": 67.35951526638407,
+          "sharpe": 0.8122185952474519,
+          "max_dd_pct": -39.861798259144635
+        },
+        "selection_2025": {
+          "return_pct": 26.622610935504042,
+          "sharpe": 0.7963197880980822,
+          "max_dd_pct": -25.408468076804358
+        },
+        "holdout_2026": {
+          "return_pct": 15.131994671842453,
+          "sharpe": 1.0643882520549957,
+          "max_dd_pct": -9.495151814974212
+        }
+      }
+    },
+    {
+      "strategy": "ETHUSDT_sma50_btc_sma200",
+      "confirm": true,
+      "splits": {
+        "train_2019_2022": {
+          "return_pct": 241.87743284711965,
+          "sharpe": 0.8351139142771337,
+          "max_dd_pct": -59.97556548613825
+        },
+        "validation_2023_2024": {
+          "return_pct": 61.4945721715239,
+          "sharpe": 0.774689831994991,
+          "max_dd_pct": -41.3299495247159
+        },
+        "selection_2025": {
+          "return_pct": 87.92677139286033,
+          "sharpe": 1.5725330906002741,
+          "max_dd_pct": -18.031856072461583
+        },
+        "holdout_2026": {
+          "return_pct": 9.533375911931197,
+          "sharpe": 0.6659675716040173,
+          "max_dd_pct": -10.987404365679732
+        }
+      }
+    },
+    {
+      "strategy": "BNBUSDT_sma200_btc_sma100",
+      "confirm": true,
+      "splits": {
+        "train_2019_2022": {
+          "return_pct": 1426.5250678791222,
+          "sharpe": 1.2733613254614538,
+          "max_dd_pct": -54.2802875531696
+        },
+        "validation_2023_2024": {
+          "return_pct": 58.531123957252795,
+          "sharpe": 0.7394153202556085,
+          "max_dd_pct": -37.44766454707502
+        },
+        "selection_2025": {
+          "return_pct": 10.966217641393161,
+          "sharpe": 0.4788751813722455,
+          "max_dd_pct": -28.20708214323837
+        },
+        "holdout_2026": {
+          "return_pct": 16.369268404963975,
+          "sharpe": 1.1130621544619144,
+          "max_dd_pct": -10.180007755719856
+        }
+      }
+    },
+    {
+      "strategy": "ETHUSDT_sma100_btc_sma200",
+      "confirm": true,
+      "splits": {
+        "train_2019_2022": {
+          "return_pct": 535.9842527085718,
+          "sharpe": 1.0979404441354965,
+          "max_dd_pct": -63.66253085583826
+        },
+        "validation_2023_2024": {
+          "return_pct": 57.53540363013994,
+          "sharpe": 0.7267107360355064,
+          "max_dd_pct": -46.64586624686078
+        },
+        "selection_2025": {
+          "return_pct": 38.19716147277068,
+          "sharpe": 0.9032341743159552,
+          "max_dd_pct": -24.43988724637549
+        },
+        "holdout_2026": {
+          "return_pct": 5.897093309537049,
+          "sharpe": 0.4386690462887233,
+          "max_dd_pct": -13.942439305525555
+        }
+      }
+    },
+    {
+      "strategy": "BNBUSDT_sma200_btc_sma200",
+      "confirm": true,
+      "splits": {
+        "train_2019_2022": {
+          "return_pct": 608.8253248279822,
+          "sharpe": 0.9990491280067163,
+          "max_dd_pct": -67.69724384141924
+        },
+        "validation_2023_2024": {
+          "return_pct": 48.990297845227325,
+          "sharpe": 0.6637120272325893,
+          "max_dd_pct": -41.674331105242956
+        },
+        "selection_2025": {
+          "return_pct": -10.761444054636392,
+          "sharpe": -0.04627127662504566,
+          "max_dd_pct": -37.91165451827923
+        },
+        "holdout_2026": {
+          "return_pct": 16.369268404963975,
+          "sharpe": 1.1130621544619144,
+          "max_dd_pct": -10.180007755719856
+        }
+      }
+    }
+  ]
+}

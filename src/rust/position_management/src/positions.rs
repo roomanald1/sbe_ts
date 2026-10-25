@@ -1,10 +1,12 @@
+use arc_swap::ArcSwapOption;
 use axum::{
-    Json, Router, body::Body,
+    body::Body,
     extract::{Path, Query, State},
-    http::{Request, StatusCode, header::HeaderName},
+    http::{header::HeaderName, Request, StatusCode},
     middleware::{self, Next},
     response::Response,
     routing::{get, post},
+    Json, Router,
 };
 use bytes::Bytes;
 use futures_util::StreamExt;
@@ -13,15 +15,14 @@ use std::{
     collections::{BTreeMap, HashMap},
     path::PathBuf,
     sync::{
-        Arc, Mutex as StdMutex, OnceLock, RwLock as StdRwLock,
         atomic::{AtomicBool, Ordering},
+        Arc, Mutex as StdMutex, OnceLock, RwLock as StdRwLock,
     },
     time::{SystemTime, UNIX_EPOCH},
 };
-use arc_swap::ArcSwapOption;
 use tokio::{
-    sync::{Mutex, Notify, mpsc},
-    time::{Duration, Instant, timeout},
+    sync::{mpsc, Mutex, Notify},
+    time::{timeout, Duration, Instant},
 };
 
 const SYMBOL_PRICE_MESSAGE_LENGTH: usize = 64;
@@ -46,31 +47,70 @@ pub async fn router() -> anyhow::Result<Router> {
         .iter()
         .map(|order| order.symbol.clone())
         .collect::<std::collections::HashSet<_>>();
-    symbols.extend(store.ledger.lock().await.barrier_orders.iter().filter(|order| order.status == "armed").map(|order| order.symbol.clone()));
-    symbols.extend(summarize_positions(&store.ledger.lock().await.trades).positions.into_iter()
-        .filter(|position| position.quantity.abs() > EPSILON)
-        .map(|position| position.symbol));
+    symbols.extend(
+        store
+            .ledger
+            .lock()
+            .await
+            .barrier_orders
+            .iter()
+            .filter(|order| order.status == "armed")
+            .map(|order| order.symbol.clone()),
+    );
+    symbols.extend(
+        summarize_positions(&store.ledger.lock().await.trades)
+            .positions
+            .into_iter()
+            .filter(|position| position.quantity.abs() > EPSILON)
+            .map(|position| position.symbol),
+    );
     for symbol in symbols {
         store.ensure_subscription(&symbol);
     }
     let barrier_store = Arc::clone(&store);
-    tokio::spawn(async move { barrier_order_loop(barrier_store).await; });
+    tokio::spawn(async move {
+        barrier_order_loop(barrier_store).await;
+    });
     let expiry_store = Arc::clone(&store);
-    tokio::spawn(async move { expire_orders_loop(expiry_store).await; });
+    tokio::spawn(async move {
+        expire_orders_loop(expiry_store).await;
+    });
     tokio::spawn(async move {
         loop {
             match crate::feed_client::stream("usd-rates:*".to_owned()).await {
-                Ok(mut stream) => while let Some(item) = stream.next().await {
-                    match item.and_then(|bytes| serde_json::from_slice::<UsdRatesResponse>(&bytes).map_err(anyhow::Error::from)) {
-                        Ok(snapshot) if snapshot.rates.values().any(|rate| rate.is_finite() && *rate > 0.0) => {
-                            let cache = USD_RATE_STREAM_CACHE.get_or_init(|| StdRwLock::new(None));
-                            if let Ok(mut current) = cache.write() { *current = Some(snapshot); }
+                Ok(mut stream) => {
+                    while let Some(item) = stream.next().await {
+                        match item.and_then(|bytes| {
+                            serde_json::from_slice::<UsdRatesResponse>(&bytes)
+                                .map_err(anyhow::Error::from)
+                        }) {
+                            Ok(snapshot)
+                                if snapshot
+                                    .rates
+                                    .values()
+                                    .any(|rate| rate.is_finite() && *rate > 0.0) =>
+                            {
+                                let cache =
+                                    USD_RATE_STREAM_CACHE.get_or_init(|| StdRwLock::new(None));
+                                if let Ok(mut current) = cache.write() {
+                                    *current = Some(snapshot);
+                                }
+                            }
+                            Ok(_) => crate::service_log!(
+                                "WARN",
+                                "Ignoring empty or invalid FeedHandlers USD rate snapshot"
+                            ),
+                            Err(error) => crate::service_log!(
+                                "WARN",
+                                "Ignoring invalid FeedHandlers USD rate update: {error}"
+                            ),
                         }
-                        Ok(_) => crate::service_log!("WARN", "Ignoring empty or invalid FeedHandlers USD rate snapshot"),
-                        Err(error) => crate::service_log!("WARN", "Ignoring invalid FeedHandlers USD rate update: {error}"),
                     }
-                },
-                Err(error) => crate::service_log!("ERROR", "FeedHandlers USD rate stream disconnected: {error:#}"),
+                }
+                Err(error) => crate::service_log!(
+                    "ERROR",
+                    "FeedHandlers USD rate stream disconnected: {error:#}"
+                ),
             }
             tokio::time::sleep(Duration::from_secs(1)).await;
         }
@@ -81,7 +121,10 @@ pub async fn router() -> anyhow::Result<Router> {
     tokio::spawn(async move {
         loop {
             if let Err((status, error)) = get_usd_rates().await {
-                crate::service_log!("WARN", "Could not refresh USD conversion rates ({status}): {error}");
+                crate::service_log!(
+                    "WARN",
+                    "Could not refresh USD conversion rates ({status}): {error}"
+                );
             }
             tokio::time::sleep(Duration::from_secs(10)).await;
         }
@@ -89,16 +132,27 @@ pub async fn router() -> anyhow::Result<Router> {
     tokio::spawn(async move {
         loop {
             match crate::feed_client::stream("tickers:*".to_owned()).await {
-                Ok(mut stream) => while let Some(Ok(bytes)) = stream.next().await {
-                    for message in bytes.chunks_exact(SYMBOL_PRICE_MESSAGE_LENGTH) {
-                        let instrument = String::from_utf8_lossy(&message[8..40]).trim_end_matches([' ', '\0']).to_owned();
-                        let price = f64::from_le_bytes(message[40..48].try_into().unwrap_or_default());
-                        if price.is_finite() && price > 0.0 {
-                            if let Ok(timestamp) = now_ms() { sample_store.record_ticker_sample(instrument, price, timestamp).await; }
+                Ok(mut stream) => {
+                    while let Some(Ok(bytes)) = stream.next().await {
+                        for message in bytes.chunks_exact(SYMBOL_PRICE_MESSAGE_LENGTH) {
+                            let instrument = String::from_utf8_lossy(&message[8..40])
+                                .trim_end_matches([' ', '\0'])
+                                .to_owned();
+                            let price =
+                                f64::from_le_bytes(message[40..48].try_into().unwrap_or_default());
+                            if price.is_finite() && price > 0.0 {
+                                if let Ok(timestamp) = now_ms() {
+                                    sample_store
+                                        .record_ticker_sample(instrument, price, timestamp)
+                                        .await;
+                                }
+                            }
                         }
                     }
-                },
-                Err(error) => crate::service_log!("ERROR", "FeedHandlers ticker API disconnected: {error:#}"),
+                }
+                Err(error) => {
+                    crate::service_log!("ERROR", "FeedHandlers ticker API disconnected: {error:#}")
+                }
             }
             tokio::time::sleep(Duration::from_secs(1)).await;
         }
@@ -116,14 +170,25 @@ pub async fn router() -> anyhow::Result<Router> {
         .route("/positions/hedge-candidates", get(get_hedge_candidates))
         .route("/internal/insights-inputs", get(get_insights_inputs))
         .route("/internal/market-book", get(get_market_book))
-        .route("/internal/market-book/{symbol}/subscribe", post(subscribe_market_book))
+        .route(
+            "/internal/market-book/{symbol}/subscribe",
+            post(subscribe_market_book),
+        )
         .route("/positions/trades", get(get_position_trades))
         .route("/positions/vwap", get(get_vwap_runs).post(start_vwap))
         .route("/positions/twap", post(start_twap))
         .route("/positions/vwap/{id}", axum::routing::delete(cancel_vwap))
-        .route("/positions/orders", get(get_orders).post(submit_order).layer(middleware::from_fn(order_handler_timing)))
+        .route(
+            "/positions/orders",
+            get(get_orders)
+                .post(submit_order)
+                .layer(middleware::from_fn(order_handler_timing)),
+        )
         .route("/positions/barriers", get(get_barrier_orders))
-        .route("/positions/barriers/profit-target", post(create_profit_barrier))
+        .route(
+            "/positions/barriers/profit-target",
+            post(create_profit_barrier),
+        )
         .route("/positions/close-profitable", post(close_profitable))
         .route(
             "/positions/orders/{id}",
@@ -137,11 +202,13 @@ async fn order_handler_timing(request: Request<Body>, next: Next) -> Response {
     let mut response = next.run(request).await;
     let elapsed_ms = started.elapsed().as_secs_f64() * 1_000.0;
     if let Ok(value) = elapsed_ms.to_string().parse() {
-        response.headers_mut().insert(HeaderName::from_static("x-position-manager-handler-ms"), value);
+        response.headers_mut().insert(
+            HeaderName::from_static("x-position-manager-handler-ms"),
+            value,
+        );
     }
     response
 }
-
 
 async fn subscribe_market_book(
     State(store): State<Arc<PositionStore>>,
@@ -158,12 +225,18 @@ async fn subscribe_market_book(
 async fn expire_orders_loop(store: Arc<PositionStore>) {
     loop {
         tokio::time::sleep(Duration::from_secs(1)).await;
-        let Ok(now) = now_ms() else { continue; };
+        let Ok(now) = now_ms() else {
+            continue;
+        };
         let mut ledger = store.ledger.lock().await;
         let old_len = ledger.orders.len();
-        ledger.orders.retain(|order| order.expires_at.is_none_or(|expires| expires > now));
+        ledger
+            .orders
+            .retain(|order| order.expires_at.is_none_or(|expires| expires > now));
         if ledger.orders.len() != old_len {
-            if let Err(error) = store.persist(&ledger).await { crate::service_log!("ERROR", "Could not persist GTD expiry: {error}"); }
+            if let Err(error) = store.persist(&ledger).await {
+                crate::service_log!("ERROR", "Could not persist GTD expiry: {error}");
+            }
         }
     }
 }
@@ -171,32 +244,69 @@ async fn expire_orders_loop(store: Arc<PositionStore>) {
 async fn barrier_order_loop(store: Arc<PositionStore>) {
     loop {
         tokio::time::sleep(Duration::from_millis(500)).await;
-        let barriers = store.ledger.lock().await.barrier_orders.iter()
-            .filter(|order| order.status == "armed").cloned().collect::<Vec<_>>();
-        if barriers.is_empty() { continue; }
+        let barriers = store
+            .ledger
+            .lock()
+            .await
+            .barrier_orders
+            .iter()
+            .filter(|order| order.status == "armed")
+            .cloned()
+            .collect::<Vec<_>>();
+        if barriers.is_empty() {
+            continue;
+        }
         let books = store.books_snapshot();
-        let Ok(now) = now_ms() else { continue; };
+        let Ok(now) = now_ms() else {
+            continue;
+        };
         for barrier in barriers {
-            let Some(book) = books.get(&barrier.symbol) else { continue; };
-            if now.saturating_sub(book.updated_at_ms) > 5_000 { continue; }
+            let Some(book) = books.get(&barrier.symbol) else {
+                continue;
+            };
+            if now.saturating_sub(book.updated_at_ms) > 5_000 {
+                continue;
+            }
             let current = match barrier.side {
                 TradeSide::Buy => book.asks.first().map(|level| level.price),
                 TradeSide::Sell => book.bids.first().map(|level| level.price),
             };
-            let Some(current) = current.filter(|price| price.is_finite() && *price > 0.0) else { continue; };
+            let Some(current) = current.filter(|price| price.is_finite() && *price > 0.0) else {
+                continue;
+            };
             let mut effective_barrier = barrier.clone();
             if barrier.trailing_amount.is_some() || barrier.trailing_percent.is_some() {
                 let prior = barrier.extreme_price.unwrap_or(current);
-                let favorable = if matches!(barrier.side, TradeSide::Sell) { current > prior } else { current < prior };
+                let favorable = if matches!(barrier.side, TradeSide::Sell) {
+                    current > prior
+                } else {
+                    current < prior
+                };
                 if favorable {
-                    let distance = barrier.trailing_amount.unwrap_or(current * barrier.trailing_percent.unwrap_or_default());
+                    let distance = barrier
+                        .trailing_amount
+                        .unwrap_or(current * barrier.trailing_percent.unwrap_or_default());
                     effective_barrier.extreme_price = Some(current);
-                    effective_barrier.trigger_price = if matches!(barrier.side, TradeSide::Sell) { current - distance } else { current + distance };
+                    effective_barrier.trigger_price = if matches!(barrier.side, TradeSide::Sell) {
+                        current - distance
+                    } else {
+                        current + distance
+                    };
                     let mut ledger = store.ledger.lock().await;
-                    if let Some(order) = ledger.barrier_orders.iter_mut().find(|order| order.id == barrier.id && order.status == "armed") {
+                    if let Some(order) = ledger
+                        .barrier_orders
+                        .iter_mut()
+                        .find(|order| order.id == barrier.id && order.status == "armed")
+                    {
                         order.extreme_price = effective_barrier.extreme_price;
                         order.trigger_price = effective_barrier.trigger_price;
-                        if let Err(error) = store.persist(&ledger).await { crate::service_log!("ERROR", "Could not persist trailing stop {}: {error}", barrier.id); }
+                        if let Err(error) = store.persist(&ledger).await {
+                            crate::service_log!(
+                                "ERROR",
+                                "Could not persist trailing stop {}: {error}",
+                                barrier.id
+                            );
+                        }
                     }
                 }
             }
@@ -204,46 +314,99 @@ async fn barrier_order_loop(store: Arc<PositionStore>) {
                 BarrierDirection::Above => current >= effective_barrier.trigger_price,
                 BarrierDirection::Below => current <= effective_barrier.trigger_price,
             };
-            if !triggered { continue; }
+            if !triggered {
+                continue;
+            }
             let claimed = {
                 let mut ledger = store.ledger.lock().await;
-                let Some(index) = ledger.barrier_orders.iter().position(|order| order.id == barrier.id && order.status == "armed") else { continue; };
+                let Some(index) = ledger
+                    .barrier_orders
+                    .iter()
+                    .position(|order| order.id == barrier.id && order.status == "armed")
+                else {
+                    continue;
+                };
                 ledger.barrier_orders[index].status = "triggering".to_owned();
                 ledger.barrier_orders[index].triggered_at = Some(now);
                 if let Err(error) = store.persist(&ledger).await {
-                    crate::service_log!("ERROR", "Could not persist triggered barrier {}: {error}", barrier.id);
+                    crate::service_log!(
+                        "ERROR",
+                        "Could not persist triggered barrier {}: {error}",
+                        barrier.id
+                    );
                     ledger.barrier_orders[index].status = "armed".to_owned();
                     ledger.barrier_orders[index].triggered_at = None;
                     continue;
                 }
                 ledger.barrier_orders[index].clone()
             };
-            let result = submit_order(State(Arc::clone(&store)), Json(NewOrder {
-                symbol: claimed.symbol.clone(), side: claimed.side.clone(), order_type: if claimed.execution_type == "limit" { OrderType::Limit } else { OrderType::Market },
-                quantity: claimed.remaining_quantity, limit_price: claimed.limit_price, trigger_price: None,
-                trigger_direction: None, trailing_amount: None, trailing_percent: None, expires_at: None, time_in_force: None, measure_execution_quality: false,
-                source: claimed.source.clone(), client_order_id: Some(claimed.id.clone()),
-            })).await;
+            let result = submit_order(
+                State(Arc::clone(&store)),
+                Json(NewOrder {
+                    symbol: claimed.symbol.clone(),
+                    side: claimed.side.clone(),
+                    order_type: if claimed.execution_type == "limit" {
+                        OrderType::Limit
+                    } else {
+                        OrderType::Market
+                    },
+                    quantity: claimed.remaining_quantity,
+                    limit_price: claimed.limit_price,
+                    trigger_price: None,
+                    trigger_direction: None,
+                    trailing_amount: None,
+                    trailing_percent: None,
+                    expires_at: None,
+                    time_in_force: None,
+                    measure_execution_quality: false,
+                    source: claimed.source.clone(),
+                    client_order_id: Some(claimed.id.clone()),
+                    reduce_only: claimed.source == "auto"
+                        && claimed
+                            .parent_order_id
+                            .as_deref()
+                            .is_some_and(|id| id.starts_with("auto-stop-")),
+                }),
+            )
+            .await;
             let mut ledger = store.ledger.lock().await;
-            if let Some(order) = ledger.barrier_orders.iter_mut().find(|order| order.id == claimed.id) {
+            if let Some(order) = ledger
+                .barrier_orders
+                .iter_mut()
+                .find(|order| order.id == claimed.id)
+            {
                 match result {
                     Ok(response) => {
                         let response = response.0;
                         order.filled_quantity += response.filled_quantity;
-                        order.remaining_quantity = (order.quantity - order.filled_quantity).max(0.0);
+                        order.remaining_quantity =
+                            (order.quantity - order.filled_quantity).max(0.0);
                         order.average_execution_price = response.average_execution_price;
                         order.fee_paid += response.estimated_fee;
-                        order.status = if claimed.execution_type == "limit" && response.order.is_some() { "activated".to_owned() }
-                            else if order.remaining_quantity <= EPSILON { "filled".to_owned() }
-                            else if order.filled_quantity > EPSILON { "partially_filled".to_owned() }
-                            else { "unfilled".to_owned() };
+                        order.status =
+                            if claimed.execution_type == "limit" && response.order.is_some() {
+                                "activated".to_owned()
+                            } else if order.remaining_quantity <= EPSILON {
+                                "filled".to_owned()
+                            } else if order.filled_quantity > EPSILON {
+                                "partially_filled".to_owned()
+                            } else {
+                                "unfilled".to_owned()
+                            };
                         order.error = None;
                     }
-                    Err((_, error)) => { order.status = "rejected".to_owned(); order.error = Some(error); }
+                    Err((_, error)) => {
+                        order.status = "rejected".to_owned();
+                        order.error = Some(error);
+                    }
                 }
             }
             if let Err(error) = store.persist(&ledger).await {
-                crate::service_log!("ERROR", "Could not persist barrier execution {}: {error}", claimed.id);
+                crate::service_log!(
+                    "ERROR",
+                    "Could not persist barrier execution {}: {error}",
+                    claimed.id
+                );
             }
         }
     }
@@ -253,33 +416,61 @@ async fn barrier_order_loop(store: Arc<PositionStore>) {
 struct UsdRatesResponse {
     rates: BTreeMap<String, f64>,
     updated_at: u64,
-    #[serde(default)] updated_at_by_currency: BTreeMap<String, u64>,
+    #[serde(default)]
+    updated_at_by_currency: BTreeMap<String, u64>,
 }
 
 fn latest_stream_usd_rates() -> Option<UsdRatesResponse> {
-    let snapshot = USD_RATE_STREAM_CACHE.get_or_init(|| StdRwLock::new(None)).read().ok()?.clone()?;
-    let now_ms = SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_millis() as u64;
+    let snapshot = USD_RATE_STREAM_CACHE
+        .get_or_init(|| StdRwLock::new(None))
+        .read()
+        .ok()?
+        .clone()?;
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()?
+        .as_millis() as u64;
     let max_age_ms = USD_RATE_STREAM_MAX_AGE.as_millis() as u64;
     let mut rates = BTreeMap::from([("USD".to_owned(), 1.0)]);
     let mut updated_at_by_currency = BTreeMap::from([("USD".to_owned(), 0)]);
     let mut updated_at = 0;
     for (currency, rate) in snapshot.rates {
-        if currency == "USD" { continue; }
-        let timestamp = snapshot.updated_at_by_currency.get(&currency).copied().unwrap_or(snapshot.updated_at);
-        if !rate.is_finite() || rate <= 0.0 || timestamp == 0 || now_ms.saturating_sub(timestamp) > max_age_ms { continue; }
+        if currency == "USD" {
+            continue;
+        }
+        let timestamp = snapshot
+            .updated_at_by_currency
+            .get(&currency)
+            .copied()
+            .unwrap_or(snapshot.updated_at);
+        if !rate.is_finite()
+            || rate <= 0.0
+            || timestamp == 0
+            || now_ms.saturating_sub(timestamp) > max_age_ms
+        {
+            continue;
+        }
         rates.insert(currency.clone(), rate);
         updated_at_by_currency.insert(currency, timestamp);
         updated_at = updated_at.max(timestamp);
     }
-    (rates.len() > 1).then_some(UsdRatesResponse { rates, updated_at, updated_at_by_currency })
+    (rates.len() > 1).then_some(UsdRatesResponse {
+        rates,
+        updated_at,
+        updated_at_by_currency,
+    })
 }
 
 async fn get_usd_rates() -> Result<Json<UsdRatesResponse>, (StatusCode, String)> {
-    if let Some(snapshot) = latest_stream_usd_rates() { return Ok(Json(snapshot)); }
+    if let Some(snapshot) = latest_stream_usd_rates() {
+        return Ok(Json(snapshot));
+    }
     let cache = USD_RATE_CACHE.get_or_init(|| Mutex::new(None));
     let cached_rates = {
         let cached = cache.lock().await;
-        cached.as_ref().map(|(created, rates)| (created.elapsed(), rates.clone()))
+        cached
+            .as_ref()
+            .map(|(created, rates)| (created.elapsed(), rates.clone()))
     };
     if let Some((age, rates)) = cached_rates {
         if age < USD_RATE_CACHE_TTL {
@@ -304,39 +495,91 @@ async fn get_usd_rates() -> Result<Json<UsdRatesResponse>, (StatusCode, String)>
 }
 
 async fn fetch_usd_rates() -> Result<UsdRatesResponse, (StatusCode, String)> {
-    let response = HTTP_CLIENT.get_or_init(reqwest::Client::new)
+    let response = HTTP_CLIENT
+        .get_or_init(reqwest::Client::new)
         .get("https://www.okx.com/api/v5/market/index-tickers?quoteCcy=USD")
         .send()
         .await
-        .map_err(|error| (StatusCode::BAD_GATEWAY, format!("OKX USD index request failed: {error}")))?
+        .map_err(|error| {
+            (
+                StatusCode::BAD_GATEWAY,
+                format!("OKX USD index request failed: {error}"),
+            )
+        })?
         .error_for_status()
-        .map_err(|error| (StatusCode::BAD_GATEWAY, format!("OKX USD index request failed: {error}")))?
+        .map_err(|error| {
+            (
+                StatusCode::BAD_GATEWAY,
+                format!("OKX USD index request failed: {error}"),
+            )
+        })?
         .text()
         .await
-        .map_err(|error| (StatusCode::BAD_GATEWAY, format!("Could not read OKX USD index response: {error}")))?;
-    let response: serde_json::Value = serde_json::from_str(&response)
-        .map_err(|error| (StatusCode::BAD_GATEWAY, format!("Invalid OKX USD index response: {error}")))?;
-    let data = response.get("data").and_then(serde_json::Value::as_array)
-        .ok_or_else(|| (StatusCode::BAD_GATEWAY, "OKX USD index response has no data".to_owned()))?;
+        .map_err(|error| {
+            (
+                StatusCode::BAD_GATEWAY,
+                format!("Could not read OKX USD index response: {error}"),
+            )
+        })?;
+    let response: serde_json::Value = serde_json::from_str(&response).map_err(|error| {
+        (
+            StatusCode::BAD_GATEWAY,
+            format!("Invalid OKX USD index response: {error}"),
+        )
+    })?;
+    let data = response
+        .get("data")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| {
+            (
+                StatusCode::BAD_GATEWAY,
+                "OKX USD index response has no data".to_owned(),
+            )
+        })?;
     let mut rates = BTreeMap::from([("USD".to_owned(), 1.0)]);
     let mut updated_at_by_currency = BTreeMap::from([("USD".to_owned(), 0)]);
     let mut updated_at = 0;
     for item in data {
-        let Some(instrument) = item.get("instId").and_then(serde_json::Value::as_str) else { continue; };
-        let Some((currency, quote)) = instrument.split_once('-') else { continue; };
-        if quote != "USD" { continue; }
-        let Some(rate) = item.get("idxPx").and_then(serde_json::Value::as_str).and_then(|value| value.parse::<f64>().ok()) else { continue; };
-        if !rate.is_finite() || rate <= 0.0 { continue; }
+        let Some(instrument) = item.get("instId").and_then(serde_json::Value::as_str) else {
+            continue;
+        };
+        let Some((currency, quote)) = instrument.split_once('-') else {
+            continue;
+        };
+        if quote != "USD" {
+            continue;
+        }
+        let Some(rate) = item
+            .get("idxPx")
+            .and_then(serde_json::Value::as_str)
+            .and_then(|value| value.parse::<f64>().ok())
+        else {
+            continue;
+        };
+        if !rate.is_finite() || rate <= 0.0 {
+            continue;
+        }
         rates.insert(currency.to_owned(), rate);
-        if let Some(timestamp) = item.get("ts").and_then(serde_json::Value::as_str).and_then(|value| value.parse::<u64>().ok()) {
+        if let Some(timestamp) = item
+            .get("ts")
+            .and_then(serde_json::Value::as_str)
+            .and_then(|value| value.parse::<u64>().ok())
+        {
             updated_at_by_currency.insert(currency.to_owned(), timestamp);
             updated_at = updated_at.max(timestamp);
         }
     }
     if rates.len() == 1 {
-        return Err((StatusCode::BAD_GATEWAY, "OKX returned no usable USD index rates".to_owned()));
+        return Err((
+            StatusCode::BAD_GATEWAY,
+            "OKX returned no usable USD index rates".to_owned(),
+        ));
     }
-    Ok(UsdRatesResponse { rates, updated_at, updated_at_by_currency })
+    Ok(UsdRatesResponse {
+        rates,
+        updated_at,
+        updated_at_by_currency,
+    })
 }
 
 #[derive(Deserialize)]
@@ -354,11 +597,19 @@ struct NewVwapRun {
     #[serde(default)]
     client_order_id: Option<String>,
 }
-fn default_max_participation() -> f64 { 1.0 }
-fn default_trade_source() -> String { "manual".to_owned() }
+fn default_max_participation() -> f64 {
+    1.0
+}
+fn default_trade_source() -> String {
+    "manual".to_owned()
+}
 #[derive(Clone, Copy, Default, Deserialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
-enum ExecutionStrategy { #[default] Vwap, Twap }
+enum ExecutionStrategy {
+    #[default]
+    Vwap,
+    Twap,
+}
 #[derive(Clone, Serialize, Deserialize)]
 struct VwapRunStatus {
     id: String,
@@ -454,7 +705,10 @@ struct RestingOrder {
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
-enum BarrierDirection { Above, Below }
+enum BarrierDirection {
+    Above,
+    Below,
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct BarrierOrder {
@@ -497,7 +751,15 @@ struct BarrierOrder {
 #[derive(Deserialize)]
 #[serde(rename_all = "kebab-case")]
 enum OrderType {
-    Ioc, Market, Limit, Barrier, StopMarket, StopLimit, TrailingStop, PostOnlyLimit, Fok,
+    Ioc,
+    Market,
+    Limit,
+    Barrier,
+    StopMarket,
+    StopLimit,
+    TrailingStop,
+    PostOnlyLimit,
+    Fok,
 }
 
 #[derive(Deserialize)]
@@ -525,6 +787,8 @@ struct NewOrder {
     source: String,
     #[serde(default)]
     client_order_id: Option<String>,
+    #[serde(default)]
+    reduce_only: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -616,11 +880,25 @@ struct BookSnapshot {
 }
 
 #[derive(Deserialize)]
-struct MatcherFill { quantity: f64, price: f64 }
+struct MatcherFill {
+    quantity: f64,
+    price: f64,
+}
 #[derive(Deserialize)]
-struct MatcherResponse { reference_price: Option<f64>, fills: Vec<MatcherFill>, remaining_quantity: f64, filled_quantity: f64, average_execution_price: Option<f64> }
+struct MatcherResponse {
+    reference_price: Option<f64>,
+    fills: Vec<MatcherFill>,
+    remaining_quantity: f64,
+    filled_quantity: f64,
+    average_execution_price: Option<f64>,
+}
 
-fn match_book(side: &TradeSide, quantity: f64, limit_price: Option<f64>, book: &BookSnapshot) -> MatcherResponse {
+fn match_book(
+    side: &TradeSide,
+    quantity: f64,
+    limit_price: Option<f64>,
+    book: &BookSnapshot,
+) -> MatcherResponse {
     let buy = matches!(side, TradeSide::Buy);
     let levels = if buy { &book.asks } else { &book.bids };
     let mut remaining = quantity;
@@ -632,10 +910,15 @@ fn match_book(side: &TradeSide, quantity: f64, limit_price: Option<f64>, book: &
             Some(limit) => level.price >= limit,
             None => true,
         };
-        if !crosses || remaining <= EPSILON { continue; }
+        if !crosses || remaining <= EPSILON {
+            continue;
+        }
         let filled = remaining.min(level.size);
         if filled > EPSILON {
-            fills.push(MatcherFill { quantity: filled, price: level.price });
+            fills.push(MatcherFill {
+                quantity: filled,
+                price: level.price,
+            });
             remaining -= filled;
             notional += filled * level.price;
         }
@@ -651,23 +934,70 @@ fn match_book(side: &TradeSide, quantity: f64, limit_price: Option<f64>, book: &
 }
 
 #[derive(Clone, Serialize, Deserialize)]
-struct AccountTopup { amount: f64, timestamp: u64 }
-#[derive(Deserialize)]
-struct TopupRequest { amount: f64 }
-#[derive(Deserialize)]
-struct LeverageRequest { max_leverage: f64 }
-#[derive(Serialize)]
-struct AccountResponse { currency: &'static str, cash: f64, equity: f64, realized_pnl: f64, unrealized_pnl: f64, fees_paid: f64, equity_available: bool, initial_cash: f64, topups: Vec<AccountTopup>, max_leverage: f64 }
-#[derive(Serialize)]
-struct FeeRatesResponse { maker: f64, taker: f64 }
-struct FeeRates { maker: f64, taker: f64 }
-fn configured_fee_rates() -> FeeRates {
-    let parse = |name: &str, default: f64| std::env::var(name).ok().and_then(|value| value.parse::<f64>().ok()).filter(|value| value.is_finite() && *value >= 0.0 && *value <= 0.1).unwrap_or(default);
-    FeeRates { maker: -parse("PAPER_OKX_SPOT_MAKER_FEE_RATE", 0.0008), taker: -parse("PAPER_OKX_SPOT_TAKER_FEE_RATE", 0.001) }
+struct AccountTopup {
+    amount: f64,
+    timestamp: u64,
 }
-fn default_account_cash() -> f64 { std::env::var("PAPER_ACCOUNT_INITIAL_CASH").ok().and_then(|value| value.parse().ok()).filter(|value: &f64| value.is_finite() && *value > 0.0).unwrap_or(10_000.0) }
-fn paper_max_leverage() -> f64 { std::env::var("PAPER_ACCOUNT_MAX_LEVERAGE").ok().and_then(|value| value.parse::<f64>().ok()).filter(|value| value.is_finite() && *value >= 1.0 && *value <= 10.0).unwrap_or(2.0) }
-fn configured_account_leverage(ledger: &Ledger) -> f64 { ledger.max_leverage.unwrap_or_else(paper_max_leverage) }
+#[derive(Deserialize)]
+struct TopupRequest {
+    amount: f64,
+}
+#[derive(Deserialize)]
+struct LeverageRequest {
+    max_leverage: f64,
+}
+#[derive(Serialize)]
+struct AccountResponse {
+    currency: &'static str,
+    cash: f64,
+    equity: f64,
+    realized_pnl: f64,
+    unrealized_pnl: f64,
+    fees_paid: f64,
+    equity_available: bool,
+    initial_cash: f64,
+    topups: Vec<AccountTopup>,
+    max_leverage: f64,
+}
+#[derive(Serialize)]
+struct FeeRatesResponse {
+    maker: f64,
+    taker: f64,
+}
+struct FeeRates {
+    maker: f64,
+    taker: f64,
+}
+fn configured_fee_rates() -> FeeRates {
+    let parse = |name: &str, default: f64| {
+        std::env::var(name)
+            .ok()
+            .and_then(|value| value.parse::<f64>().ok())
+            .filter(|value| value.is_finite() && *value >= 0.0 && *value <= 0.1)
+            .unwrap_or(default)
+    };
+    FeeRates {
+        maker: -parse("PAPER_OKX_SPOT_MAKER_FEE_RATE", 0.0008),
+        taker: -parse("PAPER_OKX_SPOT_TAKER_FEE_RATE", 0.001),
+    }
+}
+fn default_account_cash() -> f64 {
+    std::env::var("PAPER_ACCOUNT_INITIAL_CASH")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .filter(|value: &f64| value.is_finite() && *value > 0.0)
+        .unwrap_or(10_000.0)
+}
+fn paper_max_leverage() -> f64 {
+    std::env::var("PAPER_ACCOUNT_MAX_LEVERAGE")
+        .ok()
+        .and_then(|value| value.parse::<f64>().ok())
+        .filter(|value| value.is_finite() && *value >= 1.0 && *value <= 10.0)
+        .unwrap_or(2.0)
+}
+fn configured_account_leverage(ledger: &Ledger) -> f64 {
+    ledger.max_leverage.unwrap_or_else(paper_max_leverage)
+}
 
 #[derive(Clone, Default, Serialize, Deserialize)]
 struct Ledger {
@@ -700,16 +1030,28 @@ struct PositionStore {
 impl PositionStore {
     fn book_slot(&self, symbol: &str) -> Arc<ArcSwapOption<BookSnapshot>> {
         let mut books = self.books.write().expect("book map poisoned");
-        Arc::clone(books.entry(symbol.to_owned()).or_insert_with(|| Arc::new(ArcSwapOption::empty())))
+        Arc::clone(
+            books
+                .entry(symbol.to_owned())
+                .or_insert_with(|| Arc::new(ArcSwapOption::empty())),
+        )
     }
 
     fn book(&self, symbol: &str) -> Option<Arc<BookSnapshot>> {
-        let slot = self.books.read().expect("book map poisoned").get(symbol).cloned()?;
+        let slot = self
+            .books
+            .read()
+            .expect("book map poisoned")
+            .get(symbol)
+            .cloned()?;
         slot.load_full()
     }
 
     fn books_snapshot(&self) -> HashMap<String, Arc<BookSnapshot>> {
-        self.books.read().expect("book map poisoned").iter()
+        self.books
+            .read()
+            .expect("book map poisoned")
+            .iter()
             .filter_map(|(symbol, slot)| slot.load_full().map(|book| (symbol.clone(), book)))
             .collect()
     }
@@ -735,12 +1077,18 @@ impl PositionStore {
                     serde_json::from_value(value)?
                 }
             }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ledger { initial_cash: default_account_cash(), ..Ledger::default() },
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ledger {
+                initial_cash: default_account_cash(),
+                ..Ledger::default()
+            },
             Err(error) => return Err(error.into()),
         };
         for order in &mut ledger.orders {
-            if order.maker_fee_rate == 0.0 { order.maker_fee_rate = configured_fee_rates().maker; }
-            order.estimated_fee = order.remaining_quantity * order.limit_price * -order.maker_fee_rate;
+            if order.maker_fee_rate == 0.0 {
+                order.maker_fee_rate = configured_fee_rates().maker;
+            }
+            order.estimated_fee =
+                order.remaining_quantity * order.limit_price * -order.maker_fee_rate;
         }
         for order in &mut ledger.barrier_orders {
             if order.status == "triggering" {
@@ -756,14 +1104,20 @@ impl PositionStore {
                 run.error = Some("Position manager restarted; scheduled execution stopped. Persisted fills are retained.".to_owned());
                 interrupted = true;
             }
-            vwap_runs.insert(run.id.clone(), VwapRunEntry {
-                status: Arc::new(Mutex::new(run.clone())),
-                cancelled: Arc::new(AtomicBool::new(true)),
-            });
+            vwap_runs.insert(
+                run.id.clone(),
+                VwapRunEntry {
+                    status: Arc::new(Mutex::new(run.clone())),
+                    cancelled: Arc::new(AtomicBool::new(true)),
+                },
+            );
         }
-        crate::service_log!("INFO", 
+        crate::service_log!(
+            "INFO",
             "Loaded {} paper fills and {} resting orders from {}",
-            ledger.trades.len(), ledger.orders.len(), path.display()
+            ledger.trades.len(),
+            ledger.orders.len(),
+            path.display()
         );
         let store = Self {
             path,
@@ -795,7 +1149,10 @@ impl PositionStore {
     async fn record_ticker_sample(&self, instrument: String, price: f64, timestamp: u64) {
         let mut histories = self.hedge_samples.lock().await;
         let samples = histories.entry(instrument).or_default();
-        if samples.last().map_or(true, |(last, _)| timestamp.saturating_sub(*last) >= 10_000) {
+        if samples
+            .last()
+            .map_or(true, |(last, _)| timestamp.saturating_sub(*last) >= 10_000)
+        {
             samples.push((timestamp, price));
             samples.retain(|(time, _)| timestamp.saturating_sub(*time) <= 30 * 60_000);
         }
@@ -817,7 +1174,10 @@ impl PositionStore {
         let log_symbol = symbol.clone();
         let book_slot = self.book_slot(&symbol);
         tokio::spawn(async move {
-            crate::service_log!("INFO", "Paper order manager subscribing to OKX books for {symbol}");
+            crate::service_log!(
+                "INFO",
+                "Paper order manager subscribing to OKX books for {symbol}"
+            );
             while let Some(result) = receiver.recv().await {
                 match result {
                     Ok(bytes) => {
@@ -830,19 +1190,30 @@ impl PositionStore {
                             if let (Some(mid), Ok(now)) = (mid, now_ms()) {
                                 let mut histories = store.price_samples.lock().await;
                                 let samples = histories.entry(symbol.clone()).or_default();
-                                if samples.last().map_or(true, |(time, _)| now.saturating_sub(*time) >= 10_000) {
+                                if samples
+                                    .last()
+                                    .map_or(true, |(time, _)| now.saturating_sub(*time) >= 10_000)
+                                {
                                     samples.push((now, mid));
-                                    samples.retain(|(time, _)| now.saturating_sub(*time) <= 30 * 60_000);
+                                    samples.retain(|(time, _)| {
+                                        now.saturating_sub(*time) <= 30 * 60_000
+                                    });
                                 }
                             }
                             store.book_changed.notify_waiters();
                             if let Err(error) = store.match_resting(&symbol).await {
-                                crate::service_log!("ERROR", "Unable to match resting orders for {symbol}: {error:#}");
+                                crate::service_log!(
+                                    "ERROR",
+                                    "Unable to match resting orders for {symbol}: {error:#}"
+                                );
                             }
                         }
                     }
                     Err(error) => {
-                        crate::service_log!("ERROR", "Paper order book stream for {symbol} failed: {error:#}")
+                        crate::service_log!(
+                            "ERROR",
+                            "Paper order book stream for {symbol} failed: {error:#}"
+                        )
                     }
                 }
             }
@@ -850,8 +1221,14 @@ impl PositionStore {
         tokio::spawn(async move {
             loop {
                 if let Err(error) = async {
-                    let mut stream = crate::feed_client::stream(format!("book:{subscription_symbol}")).await?;
-                    while let Some(item) = stream.next().await { sender.send(item).await.map_err(|_| anyhow::anyhow!("book consumer stopped"))?; }
+                    let mut stream =
+                        crate::feed_client::stream(format!("book:{subscription_symbol}")).await?;
+                    while let Some(item) = stream.next().await {
+                        sender
+                            .send(item)
+                            .await
+                            .map_err(|_| anyhow::anyhow!("book consumer stopped"))?;
+                    }
                     Ok::<(), anyhow::Error>(())
                 }
                 .await
@@ -869,50 +1246,121 @@ impl PositionStore {
         {
             let mut ledger = self.ledger.lock().await;
             let old_len = ledger.orders.len();
-            ledger.orders.retain(|order| order.expires_at.is_none_or(|expires| expires > now));
-            if ledger.orders.len() != old_len { self.persist(&ledger).await?; }
+            ledger
+                .orders
+                .retain(|order| order.expires_at.is_none_or(|expires| expires > now));
+            if ledger.orders.len() != old_len {
+                self.persist(&ledger).await?;
+            }
         }
-        let Some(book) = self.book(symbol) else { return Ok(()); };
+        let Some(book) = self.book(symbol) else {
+            return Ok(());
+        };
         {
             let mut ledger = self.ledger.lock().await;
             let old_len = ledger.orders.len();
             ledger.orders.retain(|order| {
-                if !order.post_only || order.symbol != symbol { return true; }
+                if !order.post_only || order.symbol != symbol {
+                    return true;
+                }
                 match order.side {
-                    TradeSide::Buy => !book.asks.first().is_some_and(|ask| order.limit_price >= ask.price),
-                    TradeSide::Sell => !book.bids.first().is_some_and(|bid| order.limit_price <= bid.price),
+                    TradeSide::Buy => !book
+                        .asks
+                        .first()
+                        .is_some_and(|ask| order.limit_price >= ask.price),
+                    TradeSide::Sell => !book
+                        .bids
+                        .first()
+                        .is_some_and(|bid| order.limit_price <= bid.price),
                 }
             });
-            if ledger.orders.len() != old_len { self.persist(&ledger).await?; }
+            if ledger.orders.len() != old_len {
+                self.persist(&ledger).await?;
+            }
         }
-        let orders = self.ledger.lock().await.orders.iter().filter(|order| order.symbol == symbol).cloned().collect::<Vec<_>>();
-        if orders.is_empty() { return Ok(()); }
-        let matches = orders.into_iter().map(|order| {
-            let response = match_book(&order.side, order.remaining_quantity, Some(order.limit_price), &book);
-            (order.id, response)
-        }).collect::<Vec<_>>();
+        let orders = self
+            .ledger
+            .lock()
+            .await
+            .orders
+            .iter()
+            .filter(|order| order.symbol == symbol)
+            .cloned()
+            .collect::<Vec<_>>();
+        if orders.is_empty() {
+            return Ok(());
+        }
+        let matches = orders
+            .into_iter()
+            .map(|order| {
+                let response = match_book(
+                    &order.side,
+                    order.remaining_quantity,
+                    Some(order.limit_price),
+                    &book,
+                );
+                (order.id, response)
+            })
+            .collect::<Vec<_>>();
         let mut ledger = self.ledger.lock().await;
         let mut fills = Vec::new();
         for (id, result) in matches {
             if let Some(order) = ledger.orders.iter_mut().find(|order| order.id == id) {
                 order.remaining_quantity = result.remaining_quantity.max(0.0);
-                order.estimated_fee = order.remaining_quantity * order.limit_price * -order.maker_fee_rate;
-                let fee_rate = if order.maker_fee_rate == 0.0 { configured_fee_rates().maker } else { order.maker_fee_rate };
-                fills.extend(result.fills.into_iter().map(|fill| (order.id.clone(), order.side.clone(), fill.quantity, fill.price, fee_rate, order.source.clone(), order.parent_order_id.clone())));
+                order.estimated_fee =
+                    order.remaining_quantity * order.limit_price * -order.maker_fee_rate;
+                let fee_rate = if order.maker_fee_rate == 0.0 {
+                    configured_fee_rates().maker
+                } else {
+                    order.maker_fee_rate
+                };
+                fills.extend(result.fills.into_iter().map(|fill| {
+                    (
+                        order.id.clone(),
+                        order.side.clone(),
+                        fill.quantity,
+                        fill.price,
+                        fee_rate,
+                        order.source.clone(),
+                        order.parent_order_id.clone(),
+                    )
+                }));
             }
         }
-        ledger.orders.retain(|order| order.remaining_quantity > EPSILON);
+        ledger
+            .orders
+            .retain(|order| order.remaining_quantity > EPSILON);
         if !fills.is_empty() {
             let timestamp = now_ms()?;
             let offset = ledger.trades.len();
-            for (index, (order_id, side, quantity, execution_price, fee_rate, source, parent_order_id)) in fills.into_iter().enumerate() {
+            for (
+                index,
+                (order_id, side, quantity, execution_price, fee_rate, source, parent_order_id),
+            ) in fills.into_iter().enumerate()
+            {
                 ledger.trades.push(PositionTrade {
-                    id: format!("{timestamp}-{index}-{offset}"), symbol: symbol.to_owned(), side, quantity, execution_price,
-                    reference_price: None, timestamp, source, parent_order_id, fee: quantity * execution_price * -fee_rate,
-                    fee_currency: symbol.split_once('-').map(|(_, quote)| quote.to_owned()).unwrap_or_default(),
-                    fee_rate, fee_liquidity: "maker".to_owned(), resting_order_id: Some(order_id),
-                    decision_timestamp: None, decision_price: None, decision_mid_price: None,
-                    slippage: None, slippage_bps: None,
+                    id: format!("{timestamp}-{index}-{offset}"),
+                    symbol: symbol.to_owned(),
+                    side,
+                    quantity,
+                    execution_price,
+                    reference_price: None,
+                    timestamp,
+                    source,
+                    parent_order_id,
+                    fee: quantity * execution_price * -fee_rate,
+                    fee_currency: symbol
+                        .split_once('-')
+                        .map(|(_, quote)| quote.to_owned())
+                        .unwrap_or_default(),
+                    fee_rate,
+                    fee_liquidity: "maker".to_owned(),
+                    resting_order_id: Some(order_id),
+                    decision_timestamp: None,
+                    decision_price: None,
+                    decision_mid_price: None,
+                    slippage: None,
+                    slippage_bps: None,
                 });
             }
             self.persist(&ledger).await?;
@@ -924,11 +1372,18 @@ impl PositionStore {
 async fn persist_vwap_run_status(store: &PositionStore, status: &Arc<Mutex<VwapRunStatus>>) {
     let snapshot = status.lock().await.clone();
     let mut ledger = store.ledger.lock().await;
-    if let Some(index) = ledger.scheduled_runs.iter().position(|run| run.id == snapshot.id) {
+    if let Some(index) = ledger
+        .scheduled_runs
+        .iter()
+        .position(|run| run.id == snapshot.id)
+    {
         ledger.scheduled_runs[index] = snapshot;
         let id = ledger.scheduled_runs[index].id.clone();
         if let Err(error) = store.persist(&ledger).await {
-            crate::service_log!("ERROR", "Unable to persist scheduled execution {id}: {error:#}");
+            crate::service_log!(
+                "ERROR",
+                "Unable to persist scheduled execution {id}: {error:#}"
+            );
         }
     }
 }
@@ -942,20 +1397,32 @@ async fn get_vwap_runs(State(store): State<Arc<PositionStore>>) -> Json<VwapRuns
     Json(VwapRunsResponse { runs })
 }
 
-async fn start_vwap(State(store): State<Arc<PositionStore>>, Json(request): Json<NewVwapRun>) -> Result<Json<VwapRunStatus>, (StatusCode, String)> {
+async fn start_vwap(
+    State(store): State<Arc<PositionStore>>,
+    Json(request): Json<NewVwapRun>,
+) -> Result<Json<VwapRunStatus>, (StatusCode, String)> {
     start_scheduled_run(store, request).await
 }
-async fn start_twap(State(store): State<Arc<PositionStore>>, Json(mut request): Json<NewVwapRun>) -> Result<Json<VwapRunStatus>, (StatusCode, String)> {
+async fn start_twap(
+    State(store): State<Arc<PositionStore>>,
+    Json(mut request): Json<NewVwapRun>,
+) -> Result<Json<VwapRunStatus>, (StatusCode, String)> {
     request.strategy = ExecutionStrategy::Twap;
     start_scheduled_run(store, request).await
 }
-async fn start_scheduled_run(store: Arc<PositionStore>, request: NewVwapRun) -> Result<Json<VwapRunStatus>, (StatusCode, String)> {
+async fn start_scheduled_run(
+    store: Arc<PositionStore>,
+    request: NewVwapRun,
+) -> Result<Json<VwapRunStatus>, (StatusCode, String)> {
     let symbol = request.symbol.to_ascii_uppercase();
     if !valid_position_symbol(&symbol) {
         return Err((StatusCode::BAD_REQUEST, "Invalid instrument symbol".into()));
     }
     if !matches!(request.source.as_str(), "manual" | "auto") {
-        return Err((StatusCode::BAD_REQUEST, "Trade source must be manual or auto".into()));
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Trade source must be manual or auto".into(),
+        ));
     }
     if !request.quantity.is_finite() || request.quantity <= 0.0 {
         return Err((
@@ -969,8 +1436,9 @@ async fn start_scheduled_run(store: Arc<PositionStore>, request: NewVwapRun) -> 
             "Duration must be between 5 and 390 minutes".into(),
         ));
     }
-    if request.strategy == ExecutionStrategy::Vwap && (!request.max_participation_rate.is_finite()
-        || !(0.01..=1.0).contains(&request.max_participation_rate))
+    if request.strategy == ExecutionStrategy::Vwap
+        && (!request.max_participation_rate.is_finite()
+            || !(0.01..=1.0).contains(&request.max_participation_rate))
     {
         return Err((
             StatusCode::BAD_REQUEST,
@@ -982,26 +1450,68 @@ async fn start_scheduled_run(store: Arc<PositionStore>, request: NewVwapRun) -> 
         let wait = async {
             loop {
                 let notified = store.book_changed.notified();
-                if store.book(&symbol).is_some() { break; }
+                if store.book(&symbol).is_some() {
+                    break;
+                }
                 notified.await;
             }
         };
-        timeout(Duration::from_secs(8), wait).await.map_err(|_| (StatusCode::SERVICE_UNAVAILABLE, "Waiting for live OKX book timed out".to_owned()))?;
+        timeout(Duration::from_secs(8), wait).await.map_err(|_| {
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Waiting for live OKX book timed out".to_owned(),
+            )
+        })?;
     }
-    let side_book = store.book(&symbol).ok_or((StatusCode::SERVICE_UNAVAILABLE, "Live book is required to reserve VWAP buying power".to_owned()))?;
-    let price = match request.side { TradeSide::Buy => side_book.asks.iter().map(|level| level.price).fold(0.0_f64, f64::max), TradeSide::Sell => side_book.bids.first().map(|level| level.price).unwrap_or(0.0) };
-    if price <= 0.0 { return Err((StatusCode::SERVICE_UNAVAILABLE, "Live reference price unavailable for VWAP".into())); }
+    let side_book = store.book(&symbol).ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        "Live book is required to reserve VWAP buying power".to_owned(),
+    ))?;
+    let price = match request.side {
+        TradeSide::Buy => side_book
+            .asks
+            .iter()
+            .map(|level| level.price)
+            .fold(0.0_f64, f64::max),
+        TradeSide::Sell => side_book
+            .bids
+            .first()
+            .map(|level| level.price)
+            .unwrap_or(0.0),
+    };
+    if price <= 0.0 {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Live reference price unavailable for VWAP".into(),
+        ));
+    }
     let mut account_ledger = store.ledger.lock().await;
-    ensure_paper_capacity(&store, &account_ledger, &symbol, &request.side, request.quantity, price, configured_fee_rates().taker).await?;
+    ensure_paper_capacity(
+        &store,
+        &account_ledger,
+        &symbol,
+        &request.side,
+        request.quantity,
+        price,
+        configured_fee_rates().taker,
+    )
+    .await?;
     let timestamp = now_ms().map_err(internal_error)?;
-    let id = request.client_order_id.clone().unwrap_or_else(|| format!("vwap-{timestamp}-{}", symbol.to_ascii_lowercase()));
+    let id = request
+        .client_order_id
+        .clone()
+        .unwrap_or_else(|| format!("vwap-{timestamp}-{}", symbol.to_ascii_lowercase()));
     let status = Arc::new(Mutex::new(VwapRunStatus {
         id: id.clone(),
         symbol: symbol.clone(),
         side: request.side.clone(),
         quantity: request.quantity,
         executed_quantity: 0.0,
-        strategy: if request.strategy == ExecutionStrategy::Twap { "twap".to_owned() } else { "vwap".to_owned() },
+        strategy: if request.strategy == ExecutionStrategy::Twap {
+            "twap".to_owned()
+        } else {
+            "vwap".to_owned()
+        },
         duration_minutes: request.duration_minutes,
         started_at: timestamp,
         status: "running".into(),
@@ -1011,9 +1521,18 @@ async fn start_scheduled_run(store: Arc<PositionStore>, request: NewVwapRun) -> 
         error: None,
     }));
     let cancelled = Arc::new(AtomicBool::new(false));
-    account_ledger.scheduled_runs.push(status.lock().await.clone());
-    if account_ledger.scheduled_runs.len() > 500 { account_ledger.scheduled_runs.remove(0); }
-    store.persist(&account_ledger).await.map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, format!("Unable to persist scheduled execution: {error}")))?;
+    account_ledger
+        .scheduled_runs
+        .push(status.lock().await.clone());
+    if account_ledger.scheduled_runs.len() > 500 {
+        account_ledger.scheduled_runs.remove(0);
+    }
+    store.persist(&account_ledger).await.map_err(|error| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Unable to persist scheduled execution: {error}"),
+        )
+    })?;
     store.vwap_runs.lock().await.insert(
         id,
         VwapRunEntry {
@@ -1025,9 +1544,21 @@ async fn start_scheduled_run(store: Arc<PositionStore>, request: NewVwapRun) -> 
     drop(account_ledger);
     let initial_status = status.lock().await.clone();
     if request.strategy == ExecutionStrategy::Twap {
-        tokio::spawn(run_twap(Arc::clone(&store), request, symbol, Arc::clone(&status), cancelled));
+        tokio::spawn(run_twap(
+            Arc::clone(&store),
+            request,
+            symbol,
+            Arc::clone(&status),
+            cancelled,
+        ));
     } else {
-        tokio::spawn(run_vwap(Arc::clone(&store), request, symbol, Arc::clone(&status), cancelled));
+        tokio::spawn(run_vwap(
+            Arc::clone(&store),
+            request,
+            symbol,
+            Arc::clone(&status),
+            cancelled,
+        ));
     }
     Ok(Json(initial_status))
 }
@@ -1053,8 +1584,11 @@ async fn cancel_vwap(
 }
 
 async fn run_twap(
-    store: Arc<PositionStore>, request: NewVwapRun, symbol: String,
-    status: Arc<Mutex<VwapRunStatus>>, cancelled: Arc<AtomicBool>,
+    store: Arc<PositionStore>,
+    request: NewVwapRun,
+    symbol: String,
+    status: Arc<Mutex<VwapRunStatus>>,
+    cancelled: Arc<AtomicBool>,
 ) {
     const SLICES: usize = 78;
     let interval = Duration::from_secs_f64(request.duration_minutes as f64 * 60.0 / SLICES as f64);
@@ -1064,30 +1598,71 @@ async fn run_twap(
     let mut market_notional = 0.0;
     let mut market_samples = 0usize;
     for slice in 0..SLICES {
-        if cancelled.load(Ordering::Relaxed) { break; }
-        if slice > 0 { tokio::time::sleep(interval).await; }
-        if cancelled.load(Ordering::Relaxed) { break; }
+        if cancelled.load(Ordering::Relaxed) {
+            break;
+        }
+        if slice > 0 {
+            tokio::time::sleep(interval).await;
+        }
+        if cancelled.load(Ordering::Relaxed) {
+            break;
+        }
         let remaining = (request.quantity - executed).max(0.0);
-        if remaining <= EPSILON { break; }
-        let target_cumulative = if slice + 1 == SLICES { request.quantity } else { request.quantity * (slice + 1) as f64 / SLICES as f64 };
+        if remaining <= EPSILON {
+            break;
+        }
+        let target_cumulative = if slice + 1 == SLICES {
+            request.quantity
+        } else {
+            request.quantity * (slice + 1) as f64 / SLICES as f64
+        };
         let qty = (target_cumulative - executed).max(0.0).min(remaining);
         let book = store.book(&symbol);
         if let Some(book) = book {
-            if let (Some(bid), Some(ask)) = (book.bids.first(), book.asks.first()) { market_notional += (bid.price + ask.price) * 0.5; market_samples += 1; }
+            if let (Some(bid), Some(ask)) = (book.bids.first(), book.asks.first()) {
+                market_notional += (bid.price + ask.price) * 0.5;
+                market_samples += 1;
+            }
         }
-        match execute_vwap_child(&store, &symbol, &request.side, qty, &request.source, &run_id).await {
+        match execute_vwap_child(
+            &store,
+            &symbol,
+            &request.side,
+            qty,
+            &request.source,
+            &run_id,
+        )
+        .await
+        {
             Ok((filled, average)) => {
                 executed += filled;
-                if let Some(price) = average { execution_notional += filled * price; }
+                if let Some(price) = average {
+                    execution_notional += filled * price;
+                }
                 let mut state = status.lock().await;
                 state.executed_quantity = executed;
-                state.execution_vwap = if executed > 0.0 { execution_notional / executed } else { 0.0 };
-                state.market_vwap = if market_samples > 0 { market_notional / market_samples as f64 } else { 0.0 };
-                state.slippage = match request.side { TradeSide::Buy => state.execution_vwap - state.market_vwap, TradeSide::Sell => state.market_vwap - state.execution_vwap };
-                if executed + EPSILON >= request.quantity { state.status = "completed".to_owned(); }
+                state.execution_vwap = if executed > 0.0 {
+                    execution_notional / executed
+                } else {
+                    0.0
+                };
+                state.market_vwap = if market_samples > 0 {
+                    market_notional / market_samples as f64
+                } else {
+                    0.0
+                };
+                state.slippage = match request.side {
+                    TradeSide::Buy => state.execution_vwap - state.market_vwap,
+                    TradeSide::Sell => state.market_vwap - state.execution_vwap,
+                };
+                if executed + EPSILON >= request.quantity {
+                    state.status = "completed".to_owned();
+                }
                 drop(state);
                 persist_vwap_run_status(&store, &status).await;
-                if executed + EPSILON >= request.quantity { break; }
+                if executed + EPSILON >= request.quantity {
+                    break;
+                }
             }
             Err(error) => {
                 status.lock().await.error = Some(error);
@@ -1097,7 +1672,14 @@ async fn run_twap(
     }
     {
         let mut state = status.lock().await;
-        if state.status == "running" { state.status = if cancelled.load(Ordering::Relaxed) { "cancelled" } else { "completed" }.to_owned(); }
+        if state.status == "running" {
+            state.status = if cancelled.load(Ordering::Relaxed) {
+                "cancelled"
+            } else {
+                "completed"
+            }
+            .to_owned();
+        }
     }
     persist_vwap_run_status(&store, &status).await;
 }
@@ -1119,15 +1701,27 @@ async fn run_vwap(
     for weight in &mut curve {
         *weight /= total_weight;
     }
-    let expected = std::array::from_fn(|index| request.quantity * curve[index] / request.max_participation_rate);
+    let expected = std::array::from_fn(|index| {
+        request.quantity * curve[index] / request.max_participation_rate
+    });
     let bin_duration_secs = request.duration_minutes as f64 * 60.0 / NUM_VWAP_BINS as f64;
     let mut manager = match execution::vwap::OrderManager::new(
-        execution::vwap::VwapConfig { parent_qty: request.quantity, historical_vwap_curve: curve, max_participation_rate: request.max_participation_rate },
-        expected, (request.quantity * 0.0001).max(1e-8), bin_duration_secs,
+        execution::vwap::VwapConfig {
+            parent_qty: request.quantity,
+            historical_vwap_curve: curve,
+            max_participation_rate: request.max_participation_rate,
+        },
+        expected,
+        (request.quantity * 0.0001).max(1e-8),
+        bin_duration_secs,
     ) {
         Ok(manager) => manager,
         Err(error) => {
-            { let mut state=status.lock().await; state.status="failed".into(); state.error=Some(error.to_owned()); }
+            {
+                let mut state = status.lock().await;
+                state.status = "failed".into();
+                state.error = Some(error.to_owned());
+            }
             persist_vwap_run_status(&store, &status).await;
             return;
         }
@@ -1139,11 +1733,22 @@ async fn run_vwap(
     let feed_handle = tokio::spawn(async move {
         loop {
             if let Err(error) = async {
-                    let mut stream = crate::feed_client::stream(format!("trades:{trade_symbol}")).await?;
-                    while let Some(item) = stream.next().await { sender.send(item).await.map_err(|_| anyhow::anyhow!("trade consumer stopped"))?; }
-                    Ok::<(), anyhow::Error>(())
-                }.await {
-                crate::service_log!("ERROR", "VWAP trade feed for {trade_symbol} disconnected: {error:#}; retrying");
+                let mut stream =
+                    crate::feed_client::stream(format!("trades:{trade_symbol}")).await?;
+                while let Some(item) = stream.next().await {
+                    sender
+                        .send(item)
+                        .await
+                        .map_err(|_| anyhow::anyhow!("trade consumer stopped"))?;
+                }
+                Ok::<(), anyhow::Error>(())
+            }
+            .await
+            {
+                crate::service_log!(
+                    "ERROR",
+                    "VWAP trade feed for {trade_symbol} disconnected: {error:#}; retrying"
+                );
                 tokio::time::sleep(Duration::from_secs(1)).await;
             }
         }
@@ -1179,7 +1784,9 @@ async fn run_vwap(
             continue;
         }
         let elapsed_in_bin = elapsed - target_bin as f64 * bin_duration;
-        while manager.state().current_bin < target_bin.min(NUM_VWAP_BINS) { manager.on_bin_transition(); }
+        while manager.state().current_bin < target_bin.min(NUM_VWAP_BINS) {
+            manager.on_bin_transition();
+        }
         let action = manager.on_market_trade(trade_qty, trade_price, elapsed_in_bin);
         let child_qty = match action {
             Some(execution::vwap::OrderAction::NewOrder { qty }) => qty,
@@ -1187,9 +1794,24 @@ async fn run_vwap(
             Some(execution::vwap::OrderAction::CancelOrder) | None => 0.0,
         };
         if child_qty > EPSILON {
-            match execute_vwap_child_from_slot(&store, &symbol, &request.side, child_qty, &book_slot, &request.source, &run_id).await {
-                Ok((filled, average_price)) => manager.on_execution_fill(average_price.unwrap_or(trade_price), filled),
-                Err(error) => { let mut state = status.lock().await; state.error = Some(error); }
+            match execute_vwap_child_from_slot(
+                &store,
+                &symbol,
+                &request.side,
+                child_qty,
+                &book_slot,
+                &request.source,
+                &run_id,
+            )
+            .await
+            {
+                Ok((filled, average_price)) => {
+                    manager.on_execution_fill(average_price.unwrap_or(trade_price), filled)
+                }
+                Err(error) => {
+                    let mut state = status.lock().await;
+                    state.error = Some(error);
+                }
             }
             manager.on_order_complete();
             let scheduler_state = manager.state();
@@ -1199,11 +1821,15 @@ async fn run_vwap(
             state.market_vwap = benchmark.market_vwap();
             state.execution_vwap = benchmark.execution_vwap();
             state.slippage = benchmark.slippage();
-            if scheduler_state.remaining_qty <= EPSILON { state.status = "completed".into(); }
+            if scheduler_state.remaining_qty <= EPSILON {
+                state.status = "completed".into();
+            }
             let finished = state.status == "completed";
             drop(state);
             persist_vwap_run_status(&store, &status).await;
-            if finished { break; }
+            if finished {
+                break;
+            }
         }
     }
     feed_handle.abort();
@@ -1218,9 +1844,23 @@ async fn execute_vwap_child(
     source: &str,
     parent_order_id: &str,
 ) -> Result<(f64, Option<f64>), String> {
-    let slot = store.books.read().expect("book map poisoned").get(symbol).cloned()
+    let slot = store
+        .books
+        .read()
+        .expect("book map poisoned")
+        .get(symbol)
+        .cloned()
         .ok_or_else(|| "Live order book unavailable for VWAP child order".to_string())?;
-    execute_vwap_child_from_slot(store, symbol, side, quantity, &slot, source, parent_order_id).await
+    execute_vwap_child_from_slot(
+        store,
+        symbol,
+        side,
+        quantity,
+        &slot,
+        source,
+        parent_order_id,
+    )
+    .await
 }
 
 async fn execute_vwap_child_from_slot(
@@ -1232,14 +1872,21 @@ async fn execute_vwap_child_from_slot(
     source: &str,
     parent_order_id: &str,
 ) -> Result<(f64, Option<f64>), String> {
-    let book = book_slot.load_full()
+    let book = book_slot
+        .load_full()
         .ok_or_else(|| "Live order book unavailable for VWAP child order".to_string())?;
     let matched = match_book(side, quantity, None, &book);
     let filled = matched.filled_quantity;
-    if filled <= EPSILON { return Ok((0.0, None)); }
+    if filled <= EPSILON {
+        return Ok((0.0, None));
+    }
     let average = matched.average_execution_price.unwrap_or_default();
     let reference_price = matched.reference_price;
-    let fills = matched.fills.into_iter().map(|fill| (fill.quantity, fill.price)).collect::<Vec<_>>();
+    let fills = matched
+        .fills
+        .into_iter()
+        .map(|fill| (fill.quantity, fill.price))
+        .collect::<Vec<_>>();
     let fee_rate = configured_fee_rates().taker.abs();
     let timestamp = now_ms().map_err(|error| error.to_string())?;
     let mut ledger = store.ledger.lock().await;
@@ -1256,12 +1903,18 @@ async fn execute_vwap_child_from_slot(
             source: source.to_owned(),
             parent_order_id: Some(parent_order_id.to_owned()),
             fee: qty * execution_price * -fee_rate,
-            fee_currency: symbol.split_once('-').map(|(_, quote)| quote.to_owned()).unwrap_or_default(),
+            fee_currency: symbol
+                .split_once('-')
+                .map(|(_, quote)| quote.to_owned())
+                .unwrap_or_default(),
             fee_rate,
             fee_liquidity: "taker".to_owned(),
             resting_order_id: None,
-            decision_timestamp: None, decision_price: None, decision_mid_price: None,
-            slippage: None, slippage_bps: None,
+            decision_timestamp: None,
+            decision_price: None,
+            decision_mid_price: None,
+            slippage: None,
+            slippage_bps: None,
         });
     }
     store
@@ -1273,21 +1926,39 @@ async fn execute_vwap_child_from_slot(
 
 async fn get_fee_rates() -> Json<FeeRatesResponse> {
     let rates = configured_fee_rates();
-    Json(FeeRatesResponse { maker: rates.maker.abs(), taker: rates.taker.abs() })
+    Json(FeeRatesResponse {
+        maker: rates.maker.abs(),
+        taker: rates.taker.abs(),
+    })
 }
-async fn account_snapshot(store: &PositionStore, ledger: &Ledger) -> Result<AccountResponse, (StatusCode, String)> {
+async fn account_snapshot(
+    store: &PositionStore,
+    ledger: &Ledger,
+) -> Result<AccountResponse, (StatusCode, String)> {
     let rates = get_usd_rates().await?.0.rates;
     account_snapshot_with_rates(store, ledger, &rates)
 }
-fn account_snapshot_with_rates(store: &PositionStore, ledger: &Ledger, rates: &BTreeMap<String, f64>) -> Result<AccountResponse, (StatusCode, String)> {
-    let mut cash = ledger.initial_cash + ledger.topups.iter().map(|topup| topup.amount).sum::<f64>();
+fn account_snapshot_with_rates(
+    store: &PositionStore,
+    ledger: &Ledger,
+    rates: &BTreeMap<String, f64>,
+) -> Result<AccountResponse, (StatusCode, String)> {
+    let mut cash =
+        ledger.initial_cash + ledger.topups.iter().map(|topup| topup.amount).sum::<f64>();
     let mut fees_paid = 0.0;
     let mut equity_available = true;
     for trade in &ledger.trades {
-        let quote = trade.symbol.split_once('-').map(|(_, quote)| quote).unwrap_or_default();
+        let quote = trade
+            .symbol
+            .split_once('-')
+            .map(|(_, quote)| quote)
+            .unwrap_or_default();
         if let Some(rate) = rates.get(quote) {
             let notional = trade.quantity * trade.execution_price * rate;
-            cash += match trade.side { TradeSide::Buy => -notional, TradeSide::Sell => notional };
+            cash += match trade.side {
+                TradeSide::Buy => -notional,
+                TradeSide::Sell => notional,
+            };
             let fee = trade.fee * rate;
             cash -= fee;
             fees_paid += fee;
@@ -1301,7 +1972,11 @@ fn account_snapshot_with_rates(store: &PositionStore, ledger: &Ledger, rates: &B
     let mut realized_pnl = 0.0;
     let mut unrealized_pnl = 0.0;
     for position in &positions {
-        let quote = position.symbol.split_once('-').map(|(_, quote)| quote).unwrap_or_default();
+        let quote = position
+            .symbol
+            .split_once('-')
+            .map(|(_, quote)| quote)
+            .unwrap_or_default();
         let Some(rate) = rates.get(quote) else {
             if position.quantity.abs() > EPSILON || position.realized_pnl.abs() > EPSILON {
                 equity_available = false;
@@ -1311,126 +1986,344 @@ fn account_snapshot_with_rates(store: &PositionStore, ledger: &Ledger, rates: &B
         // Keep realized P&L from fully closed symbols; they remain in the
         // ledger summary with zero quantity, but still contribute to account P&L.
         realized_pnl += position.realized_pnl * rate;
-        if position.quantity.abs() <= EPSILON { continue; }
-        let Some(book) = books.get(&position.symbol) else { equity_available = false; continue; };
-        let mark = if position.quantity > 0.0 { book.bids.first() } else { book.asks.first() };
-        let Some(mark) = mark else { equity_available = false; continue; };
+        if position.quantity.abs() <= EPSILON {
+            continue;
+        }
+        let Some(book) = books.get(&position.symbol) else {
+            equity_available = false;
+            continue;
+        };
+        let mark = if position.quantity > 0.0 {
+            book.bids.first()
+        } else {
+            book.asks.first()
+        };
+        let Some(mark) = mark else {
+            equity_available = false;
+            continue;
+        };
         let marked_value = position.quantity * mark.price * rate;
         equity += marked_value;
         let gross_unrealized = (mark.price - position.average_entry_price) * position.quantity;
         let close_fee = position.quantity.abs() * mark.price * position.estimated_exit_fee_rate;
         unrealized_pnl += (gross_unrealized - position.entry_fees - close_fee) * rate;
     }
-    Ok(AccountResponse { currency: "USD", cash, equity, realized_pnl, unrealized_pnl, fees_paid, equity_available, initial_cash: ledger.initial_cash, topups: ledger.topups.clone(), max_leverage: configured_account_leverage(ledger) })
+    Ok(AccountResponse {
+        currency: "USD",
+        cash,
+        equity,
+        realized_pnl,
+        unrealized_pnl,
+        fees_paid,
+        equity_available,
+        initial_cash: ledger.initial_cash,
+        topups: ledger.topups.clone(),
+        max_leverage: configured_account_leverage(ledger),
+    })
 }
-async fn ensure_paper_capacity(store: &PositionStore, ledger: &Ledger, symbol: &str, side: &TradeSide, quantity: f64, price: f64, fee_rate: f64) -> Result<(), (StatusCode, String)> {
+async fn ensure_paper_capacity(
+    store: &PositionStore,
+    ledger: &Ledger,
+    symbol: &str,
+    side: &TradeSide,
+    quantity: f64,
+    price: f64,
+    fee_rate: f64,
+) -> Result<(), (StatusCode, String)> {
     let rates = get_usd_rates().await?.0.rates;
-    ensure_paper_capacity_with_rates(store, ledger, &rates, symbol, side, quantity, price, fee_rate, None).await
+    ensure_paper_capacity_with_rates(
+        store, ledger, &rates, symbol, side, quantity, price, fee_rate, None,
+    )
+    .await
 }
-async fn ensure_paper_capacity_with_rates(store: &PositionStore, ledger: &Ledger, rates: &BTreeMap<String, f64>, symbol: &str, side: &TradeSide, quantity: f64, price: f64, fee_rate: f64, mut timings: Option<&mut BTreeMap<String, f64>>) -> Result<(), (StatusCode, String)> {
-    let quote = symbol.split_once('-').map(|(_, quote)| quote).unwrap_or_default();
-    let quote_rate = *rates.get(quote).ok_or((StatusCode::SERVICE_UNAVAILABLE, format!("No OKX USD conversion rate for {quote}")))?;
+async fn ensure_paper_capacity_with_rates(
+    store: &PositionStore,
+    ledger: &Ledger,
+    rates: &BTreeMap<String, f64>,
+    symbol: &str,
+    side: &TradeSide,
+    quantity: f64,
+    price: f64,
+    fee_rate: f64,
+    mut timings: Option<&mut BTreeMap<String, f64>>,
+) -> Result<(), (StatusCode, String)> {
+    let quote = symbol
+        .split_once('-')
+        .map(|(_, quote)| quote)
+        .unwrap_or_default();
+    let quote_rate = *rates.get(quote).ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        format!("No OKX USD conversion rate for {quote}"),
+    ))?;
     let account_started = Instant::now();
     let account = account_snapshot_with_rates(store, ledger, rates)?;
-    if let Some(timings) = timings.as_deref_mut() { timings.insert("capacity_account_snapshot".to_owned(), account_started.elapsed().as_secs_f64() * 1_000.0); }
-    if !account.equity_available { return Err((StatusCode::SERVICE_UNAVAILABLE, "Account equity cannot be valued until every open position has a live mark and USD conversion rate".into())); }
+    if let Some(timings) = timings.as_deref_mut() {
+        timings.insert(
+            "capacity_account_snapshot".to_owned(),
+            account_started.elapsed().as_secs_f64() * 1_000.0,
+        );
+    }
+    if !account.equity_available {
+        return Err((StatusCode::SERVICE_UNAVAILABLE, "Account equity cannot be valued until every open position has a live mark and USD conversion rate".into()));
+    }
     let reservation_scan_started = Instant::now();
     let mut reserved_buying_power = 0.0;
-    for barrier in ledger.barrier_orders.iter().filter(|order| order.status == "armed" && matches!(order.side, TradeSide::Buy)) {
-        let barrier_quote = barrier.symbol.split_once('-').map(|(_, quote)| quote).unwrap_or_default();
-        let rate = *rates.get(barrier_quote).ok_or((StatusCode::SERVICE_UNAVAILABLE, format!("No OKX USD conversion rate for {barrier_quote}")))?;
-        reserved_buying_power += barrier.remaining_quantity * barrier.trigger_price * rate * (1.0 - configured_fee_rates().taker);
+    for barrier in ledger
+        .barrier_orders
+        .iter()
+        .filter(|order| order.status == "armed" && matches!(order.side, TradeSide::Buy))
+    {
+        let barrier_quote = barrier
+            .symbol
+            .split_once('-')
+            .map(|(_, quote)| quote)
+            .unwrap_or_default();
+        let rate = *rates.get(barrier_quote).ok_or((
+            StatusCode::SERVICE_UNAVAILABLE,
+            format!("No OKX USD conversion rate for {barrier_quote}"),
+        ))?;
+        reserved_buying_power += barrier.remaining_quantity
+            * barrier.trigger_price
+            * rate
+            * (1.0 - configured_fee_rates().taker);
     }
     for order in &ledger.orders {
         if matches!(order.side, TradeSide::Buy) {
-            let order_quote = order.symbol.split_once('-').map(|(_, quote)| quote).unwrap_or_default();
-            let rate = *rates.get(order_quote).ok_or((StatusCode::SERVICE_UNAVAILABLE, format!("No OKX USD conversion rate for {order_quote}")))?;
-            reserved_buying_power += (order.remaining_quantity * order.limit_price + order.estimated_fee) * rate;
+            let order_quote = order
+                .symbol
+                .split_once('-')
+                .map(|(_, quote)| quote)
+                .unwrap_or_default();
+            let rate = *rates.get(order_quote).ok_or((
+                StatusCode::SERVICE_UNAVAILABLE,
+                format!("No OKX USD conversion rate for {order_quote}"),
+            ))?;
+            reserved_buying_power +=
+                (order.remaining_quantity * order.limit_price + order.estimated_fee) * rate;
         }
     }
     let runs = store.vwap_runs.lock().await;
     let books = store.books_snapshot();
-    let mut reserved_sell = ledger.barrier_orders.iter()
-        .filter(|order| order.status == "armed" && order.symbol == symbol && matches!(order.side, TradeSide::Sell))
-        .map(|order| order.remaining_quantity).sum::<f64>();
+    let mut reserved_sell = ledger
+        .barrier_orders
+        .iter()
+        .filter(|order| {
+            order.status == "armed"
+                && order.symbol == symbol
+                && matches!(order.side, TradeSide::Sell)
+        })
+        .map(|order| order.remaining_quantity)
+        .sum::<f64>();
     for entry in runs.values() {
         let status = entry.status.lock().await;
-        if status.status != "running" { continue; }
+        if status.status != "running" {
+            continue;
+        }
         let remaining = (status.quantity - status.executed_quantity).max(0.0);
         if matches!(status.side, TradeSide::Buy) {
-            let run_quote = status.symbol.split_once('-').map(|(_, quote)| quote).unwrap_or_default();
-            let rate = *rates.get(run_quote).ok_or((StatusCode::SERVICE_UNAVAILABLE, format!("No OKX USD conversion rate for {run_quote}")))?;
-            let run_price = books.get(&status.symbol).and_then(|book| book.asks.first()).map(|level| level.price).ok_or((StatusCode::SERVICE_UNAVAILABLE, "Cannot reserve VWAP without a live ask price".into()))?;
-            reserved_buying_power += remaining * run_price * rate * (1.0 - configured_fee_rates().taker);
+            let run_quote = status
+                .symbol
+                .split_once('-')
+                .map(|(_, quote)| quote)
+                .unwrap_or_default();
+            let rate = *rates.get(run_quote).ok_or((
+                StatusCode::SERVICE_UNAVAILABLE,
+                format!("No OKX USD conversion rate for {run_quote}"),
+            ))?;
+            let run_price = books
+                .get(&status.symbol)
+                .and_then(|book| book.asks.first())
+                .map(|level| level.price)
+                .ok_or((
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "Cannot reserve VWAP without a live ask price".into(),
+                ))?;
+            reserved_buying_power +=
+                remaining * run_price * rate * (1.0 - configured_fee_rates().taker);
         } else if status.symbol == symbol {
             reserved_sell += remaining;
         }
     }
-    if let Some(timings) = timings.as_deref_mut() { timings.insert("capacity_reservation_scan".to_owned(), reservation_scan_started.elapsed().as_secs_f64() * 1_000.0); }
+    if let Some(timings) = timings.as_deref_mut() {
+        timings.insert(
+            "capacity_reservation_scan".to_owned(),
+            reservation_scan_started.elapsed().as_secs_f64() * 1_000.0,
+        );
+    }
     if matches!(side, TradeSide::Buy) {
         let required = quantity * price * quote_rate * (1.0 - fee_rate);
         let available = account.cash - reserved_buying_power;
-        if required > available + EPSILON { return Err((StatusCode::CONFLICT, format!("Insufficient paper account buying power: need {:.2} USD, have {:.2} USD", required, available.max(0.0)))); }
+        if required > available + EPSILON {
+            return Err((
+                StatusCode::CONFLICT,
+                format!(
+                    "Insufficient paper account buying power: need {:.2} USD, have {:.2} USD",
+                    required,
+                    available.max(0.0)
+                ),
+            ));
+        }
     } else {
         let positions = summarize_positions(&ledger.trades).positions;
-        let held = positions.iter().find(|position| position.symbol == symbol).map(|position| position.quantity.max(0.0)).unwrap_or(0.0);
-        let reserved = ledger.orders.iter().filter(|order| order.symbol == symbol && matches!(order.side, TradeSide::Sell)).map(|order| order.remaining_quantity).sum::<f64>() + reserved_sell;
+        let held = positions
+            .iter()
+            .find(|position| position.symbol == symbol)
+            .map(|position| position.quantity.max(0.0))
+            .unwrap_or(0.0);
+        let reserved = ledger
+            .orders
+            .iter()
+            .filter(|order| order.symbol == symbol && matches!(order.side, TradeSide::Sell))
+            .map(|order| order.remaining_quantity)
+            .sum::<f64>()
+            + reserved_sell;
         let new_borrow = (quantity - (held - reserved).max(0.0)).max(0.0);
-        let short_exposure = positions.iter().filter(|position| position.quantity < -EPSILON).map(|position| {
-            let mark = books.get(&position.symbol).and_then(|book| book.asks.first()).map(|level| level.price).unwrap_or(position.average_entry_price);
-            let quote = position.symbol.split_once('-').map(|(_, quote)| quote).unwrap_or_default();
-            position.quantity.abs() * mark * rates.get(quote).copied().unwrap_or(0.0)
-        }).sum::<f64>();
-        let pending_short = ledger.orders.iter().enumerate().filter(|(index, order)| matches!(order.side, TradeSide::Sell) && !ledger.orders[..*index].iter().any(|prior| prior.symbol == order.symbol && matches!(prior.side, TradeSide::Sell))).map(|(_, order)| {
-            let long = positions.iter().find(|position| position.symbol == order.symbol).map(|position| position.quantity.max(0.0)).unwrap_or(0.0);
-            let pending = ledger.orders.iter().filter(|other| other.symbol == order.symbol && matches!(other.side, TradeSide::Sell)).map(|other| other.remaining_quantity).sum::<f64>();
-            let quote = order.symbol.split_once('-').map(|(_, quote)| quote).unwrap_or_default();
-            (pending - long).max(0.0) * order.limit_price * rates.get(quote).copied().unwrap_or(0.0)
-        }).sum::<f64>();
+        let short_exposure = positions
+            .iter()
+            .filter(|position| position.quantity < -EPSILON)
+            .map(|position| {
+                let mark = books
+                    .get(&position.symbol)
+                    .and_then(|book| book.asks.first())
+                    .map(|level| level.price)
+                    .unwrap_or(position.average_entry_price);
+                let quote = position
+                    .symbol
+                    .split_once('-')
+                    .map(|(_, quote)| quote)
+                    .unwrap_or_default();
+                position.quantity.abs() * mark * rates.get(quote).copied().unwrap_or(0.0)
+            })
+            .sum::<f64>();
+        let pending_short = ledger
+            .orders
+            .iter()
+            .enumerate()
+            .filter(|(index, order)| {
+                matches!(order.side, TradeSide::Sell)
+                    && !ledger.orders[..*index].iter().any(|prior| {
+                        prior.symbol == order.symbol && matches!(prior.side, TradeSide::Sell)
+                    })
+            })
+            .map(|(_, order)| {
+                let long = positions
+                    .iter()
+                    .find(|position| position.symbol == order.symbol)
+                    .map(|position| position.quantity.max(0.0))
+                    .unwrap_or(0.0);
+                let pending = ledger
+                    .orders
+                    .iter()
+                    .filter(|other| {
+                        other.symbol == order.symbol && matches!(other.side, TradeSide::Sell)
+                    })
+                    .map(|other| other.remaining_quantity)
+                    .sum::<f64>();
+                let quote = order
+                    .symbol
+                    .split_once('-')
+                    .map(|(_, quote)| quote)
+                    .unwrap_or_default();
+                (pending - long).max(0.0)
+                    * order.limit_price
+                    * rates.get(quote).copied().unwrap_or(0.0)
+            })
+            .sum::<f64>();
         let exposure = short_exposure + pending_short + new_borrow * price * quote_rate;
         let limit = account.equity.max(0.0) * account.max_leverage;
-        if exposure > limit + EPSILON { return Err((StatusCode::CONFLICT, format!("Paper spot margin limit exceeded: short exposure {:.2} USD exceeds {:.2} USD ({:.1}x equity)", exposure, limit, account.max_leverage))); }
+        if exposure > limit + EPSILON {
+            return Err((StatusCode::CONFLICT, format!("Paper spot margin limit exceeded: short exposure {:.2} USD exceeds {:.2} USD ({:.1}x equity)", exposure, limit, account.max_leverage)));
+        }
     }
     Ok(())
 }
-async fn get_account(State(store): State<Arc<PositionStore>>) -> Result<Json<AccountResponse>, (StatusCode, String)> {
+async fn get_account(
+    State(store): State<Arc<PositionStore>>,
+) -> Result<Json<AccountResponse>, (StatusCode, String)> {
     let ledger = store.ledger.lock().await.clone();
     Ok(Json(account_snapshot(&store, &ledger).await?))
 }
-async fn set_account_leverage(State(store): State<Arc<PositionStore>>, Json(request): Json<LeverageRequest>) -> Result<Json<AccountResponse>, (StatusCode, String)> {
-    if !request.max_leverage.is_finite() || !(1.0..=10.0).contains(&request.max_leverage) { return Err((StatusCode::BAD_REQUEST, "Maximum leverage must be between 1x and 10x".into())); }
+async fn set_account_leverage(
+    State(store): State<Arc<PositionStore>>,
+    Json(request): Json<LeverageRequest>,
+) -> Result<Json<AccountResponse>, (StatusCode, String)> {
+    if !request.max_leverage.is_finite() || !(1.0..=10.0).contains(&request.max_leverage) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Maximum leverage must be between 1x and 10x".into(),
+        ));
+    }
     let mut ledger = store.ledger.lock().await;
     ledger.max_leverage = Some(request.max_leverage);
-    store.persist(&ledger).await.map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, format!("Unable to persist leverage setting: {error}")))?;
+    store.persist(&ledger).await.map_err(|error| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Unable to persist leverage setting: {error}"),
+        )
+    })?;
     Ok(Json(account_snapshot(&store, &ledger).await?))
 }
-async fn top_up_account(State(store): State<Arc<PositionStore>>, Json(request): Json<TopupRequest>) -> Result<Json<AccountResponse>, (StatusCode, String)> {
-    if !request.amount.is_finite() || request.amount <= 0.0 { return Err((StatusCode::BAD_REQUEST, "Top-up amount must be positive".into())); }
+async fn top_up_account(
+    State(store): State<Arc<PositionStore>>,
+    Json(request): Json<TopupRequest>,
+) -> Result<Json<AccountResponse>, (StatusCode, String)> {
+    if !request.amount.is_finite() || request.amount <= 0.0 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Top-up amount must be positive".into(),
+        ));
+    }
     let mut ledger = store.ledger.lock().await;
-    ledger.topups.push(AccountTopup { amount: request.amount, timestamp: now_ms().map_err(internal_error)? });
-    store.persist(&ledger).await.map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, format!("Unable to persist account top-up: {error}")))?;
+    ledger.topups.push(AccountTopup {
+        amount: request.amount,
+        timestamp: now_ms().map_err(internal_error)?,
+    });
+    store.persist(&ledger).await.map_err(|error| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Unable to persist account top-up: {error}"),
+        )
+    })?;
     Ok(Json(account_snapshot(&store, &ledger).await?))
 }
 #[derive(Deserialize)]
-struct PositionSourceQuery { source: Option<String> }
+struct PositionSourceQuery {
+    source: Option<String>,
+}
 async fn get_realized_pnl(
     State(store): State<Arc<PositionStore>>,
     Query(query): Query<RealizedPnlQuery>,
 ) -> Result<Json<RealizedPnlResponse>, (StatusCode, String)> {
-    if query.source.as_deref().is_some_and(|source| !matches!(source, "manual" | "auto")) {
-        return Err((StatusCode::BAD_REQUEST, "Position source must be manual or auto".into()));
+    if query
+        .source
+        .as_deref()
+        .is_some_and(|source| !matches!(source, "manual" | "auto"))
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Position source must be manual or auto".into(),
+        ));
     }
     let since_ms = query.since_ms.unwrap_or(0);
     let ledger = store.ledger.lock().await;
-    let mut trades = ledger.trades.iter()
-        .filter(|trade| query.source.as_deref().is_none_or(|source| trade.source == source))
+    let mut trades = ledger
+        .trades
+        .iter()
+        .filter(|trade| {
+            query
+                .source
+                .as_deref()
+                .is_none_or(|source| trade.source == source)
+        })
         .cloned()
         .collect::<Vec<_>>();
     trades.sort_by_key(|trade| trade.timestamp);
     let mut positions = BTreeMap::<String, Position>::new();
     let mut today_by_quote = BTreeMap::<String, f64>::new();
     let mut today_by_parent_order = BTreeMap::<String, f64>::new();
-    let barrier_created_at = ledger.barrier_orders.iter()
+    let barrier_created_at = ledger
+        .barrier_orders
+        .iter()
         .map(|barrier| (barrier.id.clone(), barrier.created_at.to_string()))
         .collect::<HashMap<_, _>>();
     let mut today_by_barrier_created_at = BTreeMap::<String, f64>::new();
@@ -1449,15 +2342,25 @@ async fn get_realized_pnl(
         let prior_realized = position.realized_pnl;
         apply_trade(position, trade);
         let realized_delta = position.realized_pnl - prior_realized;
-        if realized_delta.abs() <= EPSILON { continue; }
-        let quote = trade.symbol.split_once('-').map(|(_, quote)| quote).unwrap_or("USD");
+        if realized_delta.abs() <= EPSILON {
+            continue;
+        }
+        let quote = trade
+            .symbol
+            .split_once('-')
+            .map(|(_, quote)| quote)
+            .unwrap_or("USD");
         *all_time_by_quote.entry(quote.to_owned()).or_default() += realized_delta;
         if trade.timestamp >= since_ms {
             *today_by_quote.entry(quote.to_owned()).or_default() += realized_delta;
             if let Some(parent_order_id) = trade.parent_order_id.as_deref() {
-                *today_by_parent_order.entry(parent_order_id.to_owned()).or_default() += realized_delta;
+                *today_by_parent_order
+                    .entry(parent_order_id.to_owned())
+                    .or_default() += realized_delta;
                 if let Some(created_at) = barrier_created_at.get(parent_order_id) {
-                    *today_by_barrier_created_at.entry(created_at.clone()).or_default() += realized_delta;
+                    *today_by_barrier_created_at
+                        .entry(created_at.clone())
+                        .or_default() += realized_delta;
                 }
             }
         }
@@ -1483,12 +2386,26 @@ async fn get_positions(
     State(store): State<Arc<PositionStore>>,
     Query(query): Query<PositionSourceQuery>,
 ) -> Result<Json<PositionsResponse>, (StatusCode, String)> {
-    if query.source.as_deref().is_some_and(|source| !matches!(source, "manual" | "auto")) {
-        return Err((StatusCode::BAD_REQUEST, "Position source must be manual or auto".into()));
+    if query
+        .source
+        .as_deref()
+        .is_some_and(|source| !matches!(source, "manual" | "auto"))
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Position source must be manual or auto".into(),
+        ));
     }
     let ledger = store.ledger.lock().await;
-    let trades = ledger.trades.iter()
-        .filter(|trade| query.source.as_deref().is_none_or(|source| trade.source == source))
+    let trades = ledger
+        .trades
+        .iter()
+        .filter(|trade| {
+            query
+                .source
+                .as_deref()
+                .is_none_or(|source| trade.source == source)
+        })
         .cloned()
         .collect::<Vec<_>>();
     Ok(Json(summarize_positions(&trades)))
@@ -1528,16 +2445,25 @@ async fn get_hedge_candidates(
         .map(|position| {
             let position_key = hedge_history_key(&position.symbol);
             let quote = position_key.split_once('-').map(|(_, quote)| quote);
-            let position_samples = histories.get(&position_key).map(Vec::as_slice).unwrap_or(&[]);
-            let mut candidates: Vec<HedgeCandidate> = store.spot_symbols
+            let position_samples = histories
+                .get(&position_key)
+                .map(Vec::as_slice)
+                .unwrap_or(&[]);
+            let mut candidates: Vec<HedgeCandidate> = store
+                .spot_symbols
                 .iter()
                 .filter(|symbol| {
                     symbol.as_str() != position.symbol
-                        && quote.is_some_and(|quote| symbol.split_once('-').is_some_and(|(_, candidate_quote)| candidate_quote == quote))
+                        && quote.is_some_and(|quote| {
+                            symbol
+                                .split_once('-')
+                                .is_some_and(|(_, candidate_quote)| candidate_quote == quote)
+                        })
                 })
                 .map(|symbol| {
                     let samples = histories.get(symbol).map(Vec::as_slice).unwrap_or(&[]);
-                    let (correlation, paired_samples) = return_correlation(position_samples, samples);
+                    let (correlation, paired_samples) =
+                        return_correlation(position_samples, samples);
                     HedgeCandidate {
                         symbol: symbol.clone(),
                         correlation,
@@ -1565,7 +2491,10 @@ async fn get_hedge_candidates(
             }
         })
         .collect();
-    Json(HedgeCandidatesResponse { positions: response, pair_correlations })
+    Json(HedgeCandidatesResponse {
+        positions: response,
+        pair_correlations,
+    })
 }
 
 fn hedge_history_key(symbol: &str) -> String {
@@ -1610,9 +2539,18 @@ fn return_correlation(a: &[(u64, f64)], b: &[(u64, f64)]) -> (Option<f64>, usize
     }
     let mean_a = returns.iter().map(|(x, _)| x).sum::<f64>() / count as f64;
     let mean_b = returns.iter().map(|(_, y)| y).sum::<f64>() / count as f64;
-    let covariance = returns.iter().map(|(x, y)| (x - mean_a) * (y - mean_b)).sum::<f64>();
-    let variance_a = returns.iter().map(|(x, _)| (x - mean_a).powi(2)).sum::<f64>();
-    let variance_b = returns.iter().map(|(_, y)| (y - mean_b).powi(2)).sum::<f64>();
+    let covariance = returns
+        .iter()
+        .map(|(x, y)| (x - mean_a) * (y - mean_b))
+        .sum::<f64>();
+    let variance_a = returns
+        .iter()
+        .map(|(x, _)| (x - mean_a).powi(2))
+        .sum::<f64>();
+    let variance_b = returns
+        .iter()
+        .map(|(_, y)| (y - mean_b).powi(2))
+        .sum::<f64>();
     let correlation = if variance_a > 0.0 && variance_b > 0.0 {
         Some((covariance / (variance_a * variance_b).sqrt()).clamp(-1.0, 1.0))
     } else {
@@ -1632,44 +2570,85 @@ struct PositionMarketInput {
     price_samples: Vec<(u64, f64)>,
 }
 #[derive(Deserialize, Default)]
-struct InsightsInputQuery { symbol: Option<String> }
+struct InsightsInputQuery {
+    symbol: Option<String>,
+}
 async fn get_market_book(
     State(store): State<Arc<PositionStore>>,
     Query(query): Query<InsightsInputQuery>,
 ) -> Result<Json<BookSnapshot>, (StatusCode, String)> {
-    let symbol = query.symbol.map(|symbol| symbol.to_ascii_uppercase())
-        .filter(|symbol| valid_position_symbol(symbol) && store.spot_symbols.iter().any(|spot| spot == symbol))
-        .ok_or((StatusCode::BAD_REQUEST, "A valid subscribed spot symbol is required".to_owned()))?;
+    let symbol = query
+        .symbol
+        .map(|symbol| symbol.to_ascii_uppercase())
+        .filter(|symbol| {
+            valid_position_symbol(symbol) && store.spot_symbols.iter().any(|spot| spot == symbol)
+        })
+        .ok_or((
+            StatusCode::BAD_REQUEST,
+            "A valid subscribed spot symbol is required".to_owned(),
+        ))?;
     store.ensure_subscription(&symbol);
     let now = now_ms().map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
     let books = store.books_snapshot();
-    let book = books.get(&symbol).filter(|book| now.saturating_sub(book.updated_at_ms) <= 5_000)
-        .cloned().ok_or((StatusCode::SERVICE_UNAVAILABLE, format!("No fresh local order book for {symbol}")))?;
+    let book = books
+        .get(&symbol)
+        .filter(|book| now.saturating_sub(book.updated_at_ms) <= 5_000)
+        .cloned()
+        .ok_or((
+            StatusCode::SERVICE_UNAVAILABLE,
+            format!("No fresh local order book for {symbol}"),
+        ))?;
     Ok(Json((*book).clone()))
 }
-async fn get_insights_inputs(State(store): State<Arc<PositionStore>>, Query(query): Query<InsightsInputQuery>) -> Result<Json<PositionInsightsInput>, (StatusCode, String)> {
-    let positions = summarize_positions(&store.ledger.lock().await.trades).positions
-        .into_iter().filter(|position| position.quantity.abs() > EPSILON).collect::<Vec<_>>();
-    let mut symbols = positions.iter().map(|position| position.symbol.clone()).collect::<std::collections::BTreeSet<_>>();
-    let requested_symbol = query.symbol.map(|symbol| symbol.to_ascii_uppercase()).filter(|symbol| valid_position_symbol(symbol) && store.spot_symbols.iter().any(|spot| spot == symbol));
+async fn get_insights_inputs(
+    State(store): State<Arc<PositionStore>>,
+    Query(query): Query<InsightsInputQuery>,
+) -> Result<Json<PositionInsightsInput>, (StatusCode, String)> {
+    let positions = summarize_positions(&store.ledger.lock().await.trades)
+        .positions
+        .into_iter()
+        .filter(|position| position.quantity.abs() > EPSILON)
+        .collect::<Vec<_>>();
+    let mut symbols = positions
+        .iter()
+        .map(|position| position.symbol.clone())
+        .collect::<std::collections::BTreeSet<_>>();
+    let requested_symbol = query
+        .symbol
+        .map(|symbol| symbol.to_ascii_uppercase())
+        .filter(|symbol| {
+            valid_position_symbol(symbol) && store.spot_symbols.iter().any(|spot| spot == symbol)
+        });
     if let Some(symbol) = requested_symbol.as_ref() {
         symbols.insert(symbol.clone());
     }
-    for symbol in &symbols { store.ensure_subscription(symbol); }
+    for symbol in &symbols {
+        store.ensure_subscription(symbol);
+    }
     // Return the latest snapshot, including an empty book while a new
     // subscription is warming up. Consumers handle missing bid/ask data as a
     // temporarily unavailable market; blocking here made transient feed delays
     // fail the entire auto-trader cycle with HTTP 503.
     let books = store.books_snapshot();
     let histories = store.price_samples.lock().await;
-    let markets = symbols.into_iter().map(|symbol| {
-        let book = books.get(&symbol);
-        (symbol.clone(), PositionMarketInput {
-            bids: book.map(|snapshot| snapshot.bids.clone()).unwrap_or_default(),
-            asks: book.map(|snapshot| snapshot.asks.clone()).unwrap_or_default(),
-            price_samples: histories.get(&symbol).cloned().unwrap_or_default(),
+    let markets = symbols
+        .into_iter()
+        .map(|symbol| {
+            let book = books.get(&symbol);
+            (
+                symbol.clone(),
+                PositionMarketInput {
+                    bids: book
+                        .map(|snapshot| snapshot.bids.clone())
+                        .unwrap_or_default(),
+                    asks: book
+                        .map(|snapshot| snapshot.asks.clone())
+                        .unwrap_or_default(),
+                    price_samples: histories.get(&symbol).cloned().unwrap_or_default(),
+                },
+            )
         })
-    }).collect();
+        .collect();
     Ok(Json(PositionInsightsInput { positions, markets }))
 }
 
@@ -1680,14 +2659,20 @@ async fn get_position_trades(State(store): State<Arc<PositionStore>>) -> Json<Tr
 }
 async fn get_orders(State(store): State<Arc<PositionStore>>) -> Json<OrdersResponse> {
     let ledger = store.ledger.lock().await;
-    Json(OrdersResponse { orders: ledger.orders.clone(), barrier_orders: ledger.barrier_orders.clone() })
+    Json(OrdersResponse {
+        orders: ledger.orders.clone(),
+        barrier_orders: ledger.barrier_orders.clone(),
+    })
 }
 async fn get_barrier_orders(State(store): State<Arc<PositionStore>>) -> Json<Vec<BarrierOrder>> {
     Json(store.ledger.lock().await.barrier_orders.clone())
 }
 
 #[derive(Deserialize)]
-struct ProfitBarrierRequest { symbol: String, target_profit_usd: f64 }
+struct ProfitBarrierRequest {
+    symbol: String,
+    target_profit_usd: f64,
+}
 
 async fn create_profit_barrier(
     State(store): State<Arc<PositionStore>>,
@@ -1698,48 +2683,114 @@ async fn create_profit_barrier(
         return Err((StatusCode::BAD_REQUEST, "Invalid instrument symbol".into()));
     }
     if !request.target_profit_usd.is_finite() || request.target_profit_usd <= 0.0 {
-        return Err((StatusCode::BAD_REQUEST, "Target profit must be a finite USD amount greater than zero".into()));
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Target profit must be a finite USD amount greater than zero".into(),
+        ));
     }
     let rates = get_usd_rates().await?.0.rates;
-    let quote = symbol.split_once('-').map(|(_, quote)| quote).unwrap_or_default();
-    let rate = *rates.get(quote).ok_or((StatusCode::SERVICE_UNAVAILABLE, format!("No OKX USD conversion rate for {quote}")))?;
+    let quote = symbol
+        .split_once('-')
+        .map(|(_, quote)| quote)
+        .unwrap_or_default();
+    let rate = *rates.get(quote).ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        format!("No OKX USD conversion rate for {quote}"),
+    ))?;
     let positions = summarize_positions(&store.ledger.lock().await.trades).positions;
-    let position = positions.into_iter().find(|position| position.symbol == symbol && position.quantity.abs() > EPSILON)
+    let position = positions
+        .into_iter()
+        .find(|position| position.symbol == symbol && position.quantity.abs() > EPSILON)
         .ok_or((StatusCode::NOT_FOUND, "Open position not found".into()))?;
     let quantity = position.quantity.abs();
     let fee_rate = position.estimated_exit_fee_rate.abs();
     let denominator = position.quantity - quantity * fee_rate;
     if !denominator.is_finite() || denominator.abs() <= EPSILON {
-        return Err((StatusCode::BAD_REQUEST, "Cannot calculate a profit trigger for this position and fee rate".into()));
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Cannot calculate a profit trigger for this position and fee rate".into(),
+        ));
     }
-    let trigger_price = (request.target_profit_usd / rate + position.average_entry_price * position.quantity + position.entry_fees) / denominator;
+    let trigger_price = (request.target_profit_usd / rate
+        + position.average_entry_price * position.quantity
+        + position.entry_fees)
+        / denominator;
     if !trigger_price.is_finite() || trigger_price <= 0.0 {
-        return Err((StatusCode::BAD_REQUEST, "Target profit produces an invalid trigger price".into()));
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Target profit produces an invalid trigger price".into(),
+        ));
     }
-    let side = if position.quantity > 0.0 { TradeSide::Sell } else { TradeSide::Buy };
-    let trigger_direction = if position.quantity > 0.0 { BarrierDirection::Above } else { BarrierDirection::Below };
+    let side = if position.quantity > 0.0 {
+        TradeSide::Sell
+    } else {
+        TradeSide::Buy
+    };
+    let trigger_direction = if position.quantity > 0.0 {
+        BarrierDirection::Above
+    } else {
+        BarrierDirection::Below
+    };
     store.ensure_subscription(&symbol);
     let timestamp = now_ms().map_err(internal_error)?;
     let mut ledger = store.ledger.lock().await;
-    ensure_paper_capacity(&store, &ledger, &symbol, &side, quantity, trigger_price, configured_fee_rates().taker).await?;
+    ensure_paper_capacity(
+        &store,
+        &ledger,
+        &symbol,
+        &side,
+        quantity,
+        trigger_price,
+        configured_fee_rates().taker,
+    )
+    .await?;
     let barrier_order = BarrierOrder {
-        id: format!("barrier-{timestamp}-{}", ledger.barrier_orders.len()), symbol, side,
-        quantity, remaining_quantity: quantity, filled_quantity: 0.0, trigger_price, trigger_direction,
-        created_at: timestamp, triggered_at: None, status: "armed".to_owned(),
-        average_execution_price: None, fee_paid: 0.0, error: None, order_kind: "profit-target".to_owned(), execution_type: "market".to_owned(), limit_price: None,
-        trailing_amount: None, trailing_percent: None, extreme_price: None,
-        source: default_trade_source(), parent_order_id: None,
+        id: format!("barrier-{timestamp}-{}", ledger.barrier_orders.len()),
+        symbol,
+        side,
+        quantity,
+        remaining_quantity: quantity,
+        filled_quantity: 0.0,
+        trigger_price,
+        trigger_direction,
+        created_at: timestamp,
+        triggered_at: None,
+        status: "armed".to_owned(),
+        average_execution_price: None,
+        fee_paid: 0.0,
+        error: None,
+        order_kind: "profit-target".to_owned(),
+        execution_type: "market".to_owned(),
+        limit_price: None,
+        trailing_amount: None,
+        trailing_percent: None,
+        extreme_price: None,
+        source: default_trade_source(),
+        parent_order_id: None,
     };
     ledger.barrier_orders.push(barrier_order.clone());
     if let Err(error) = store.persist(&ledger).await {
         ledger.barrier_orders.pop();
-        return Err((StatusCode::INTERNAL_SERVER_ERROR, format!("Unable to persist profit barrier: {error}")));
+        return Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Unable to persist profit barrier: {error}"),
+        ));
     }
-    Ok(Json(OrderResponse { estimated_fee: 0.0, filled_quantity: 0.0, remaining_quantity: quantity, average_execution_price: None, order: None, barrier_order: Some(barrier_order), processing_timings_ms: BTreeMap::new() }))
+    Ok(Json(OrderResponse {
+        estimated_fee: 0.0,
+        filled_quantity: 0.0,
+        remaining_quantity: quantity,
+        average_execution_price: None,
+        order: None,
+        barrier_order: Some(barrier_order),
+        processing_timings_ms: BTreeMap::new(),
+    }))
 }
 
 #[derive(Deserialize)]
-struct CloseProfitableRequest { symbol: String }
+struct CloseProfitableRequest {
+    symbol: String,
+}
 
 async fn close_profitable(
     State(store): State<Arc<PositionStore>>,
@@ -1749,11 +2800,40 @@ async fn close_profitable(
     if !valid_position_symbol(&symbol) {
         return Err((StatusCode::BAD_REQUEST, "Invalid instrument symbol".into()));
     }
-    let positions = summarize_positions(&store.ledger.lock().await.trades).positions;
-    let position = positions.into_iter().find(|position| position.symbol == symbol && position.quantity.abs() > EPSILON)
-        .ok_or((StatusCode::NOT_FOUND, "Open position not found".into()))?;
+    let (position, source) = {
+        let ledger = store.ledger.lock().await;
+        let auto_positions = summarize_positions(
+            &ledger
+                .trades
+                .iter()
+                .filter(|trade| trade.source == "auto")
+                .cloned()
+                .collect::<Vec<_>>(),
+        )
+        .positions;
+        if let Some(position) = auto_positions
+            .into_iter()
+            .find(|position| position.symbol == symbol && position.quantity.abs() > EPSILON)
+        {
+            // Attribute a manual close to the AutoTrader inventory it closes.
+            // AutoTrader reconciles its state from source=auto; tagging this fill
+            // manual would leave a stale open position and block future entries.
+            (position, "auto".to_owned())
+        } else {
+            let positions = summarize_positions(&ledger.trades).positions;
+            let position = positions
+                .into_iter()
+                .find(|position| position.symbol == symbol && position.quantity.abs() > EPSILON)
+                .ok_or((StatusCode::NOT_FOUND, "Open position not found".into()))?;
+            (position, default_trade_source())
+        }
+    };
     store.ensure_subscription(&symbol);
-    let side = if position.quantity > 0.0 { TradeSide::Sell } else { TradeSide::Buy };
+    let side = if position.quantity > 0.0 {
+        TradeSide::Sell
+    } else {
+        TradeSide::Buy
+    };
     let quantity = position.quantity.abs();
     submit_order(
         State(store),
@@ -1770,25 +2850,40 @@ async fn close_profitable(
             trailing_percent: None,
             expires_at: None,
             time_in_force: None,
-            source: default_trade_source(),
+            source,
             client_order_id: None,
+            reduce_only: false,
         }),
-    ).await.map_err(|(status, error)| (
-        status,
-        format!("Close IOC {symbol} {} {quantity} failed: {error}", match side { TradeSide::Buy => "buy", TradeSide::Sell => "sell" }),
-    ))
+    )
+    .await
+    .map_err(|(status, error)| {
+        (
+            status,
+            format!(
+                "Close IOC {symbol} {} {quantity} failed: {error}",
+                match side {
+                    TradeSide::Buy => "buy",
+                    TradeSide::Sell => "sell",
+                }
+            ),
+        )
+    })
 }
 
 async fn submit_order(
     State(store): State<Arc<PositionStore>>,
     Json(request): Json<NewOrder>,
 ) -> Result<Json<OrderResponse>, (StatusCode, String)> {
+    let mut request = request;
     let symbol = request.symbol.to_ascii_uppercase();
     if !valid_position_symbol(&symbol) {
         return Err((StatusCode::BAD_REQUEST, "Invalid instrument symbol".into()));
     }
     if !matches!(request.source.as_str(), "manual" | "auto") {
-        return Err((StatusCode::BAD_REQUEST, "Trade source must be manual or auto".into()));
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Trade source must be manual or auto".into(),
+        ));
     }
     if !request.quantity.is_finite() || request.quantity <= 0.0 {
         return Err((
@@ -1796,31 +2891,127 @@ async fn submit_order(
             "Quantity must be finite and greater than zero".into(),
         ));
     }
-    if matches!(&request.order_type, OrderType::Barrier | OrderType::StopMarket | OrderType::StopLimit | OrderType::TrailingStop) {
+    if matches!(
+        &request.order_type,
+        OrderType::Barrier | OrderType::StopMarket | OrderType::StopLimit | OrderType::TrailingStop
+    ) {
         store.ensure_subscription(&symbol);
         let trailing = matches!(&request.order_type, OrderType::TrailingStop);
         if trailing && store.book(&symbol).is_none() {
-            let wait = async { loop { let notified = store.book_changed.notified(); if store.book(&symbol).is_some() { break; } notified.await; } };
-            timeout(Duration::from_secs(8), wait).await.map_err(|_| (StatusCode::SERVICE_UNAVAILABLE, "Waiting for live book to arm trailing stop timed out".into()))?;
+            let wait = async {
+                loop {
+                    let notified = store.book_changed.notified();
+                    if store.book(&symbol).is_some() {
+                        break;
+                    }
+                    notified.await;
+                }
+            };
+            timeout(Duration::from_secs(8), wait).await.map_err(|_| {
+                (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "Waiting for live book to arm trailing stop timed out".into(),
+                )
+            })?;
         }
-        let (trigger_price, trigger_direction, trailing_amount, trailing_percent, extreme_price) = if trailing {
-            let amount = request.trailing_amount.filter(|value| value.is_finite() && *value > 0.0);
-            let percent = request.trailing_percent.filter(|value| value.is_finite() && *value > 0.0 && *value < 1.0);
-            if amount.is_some() == percent.is_some() { return Err((StatusCode::BAD_REQUEST, "Trailing stop needs exactly one positive amount or percentage below 100%".into())); }
-            let book = store.book(&symbol).ok_or((StatusCode::SERVICE_UNAVAILABLE, "Live book required to arm trailing stop".into()))?;
-            let current = match request.side { TradeSide::Sell => book.bids.first().map(|l| l.price), TradeSide::Buy => book.asks.first().map(|l| l.price) }.ok_or((StatusCode::SERVICE_UNAVAILABLE, "Live trigger reference price unavailable".into()))?;
-            let distance = amount.unwrap_or(current * percent.unwrap());
-            let initial = if matches!(request.side, TradeSide::Sell) { current - distance } else { current + distance };
-            if !initial.is_finite() || initial <= 0.0 { return Err((StatusCode::BAD_REQUEST, "Trailing distance produces an invalid trigger price".into())); }
-            (initial, if matches!(request.side, TradeSide::Sell) { BarrierDirection::Below } else { BarrierDirection::Above }, amount, percent, Some(current))
+        let (trigger_price, trigger_direction, trailing_amount, trailing_percent, extreme_price) =
+            if trailing {
+                let amount = request
+                    .trailing_amount
+                    .filter(|value| value.is_finite() && *value > 0.0);
+                let percent = request
+                    .trailing_percent
+                    .filter(|value| value.is_finite() && *value > 0.0 && *value < 1.0);
+                if amount.is_some() == percent.is_some() {
+                    return Err((
+                        StatusCode::BAD_REQUEST,
+                        "Trailing stop needs exactly one positive amount or percentage below 100%"
+                            .into(),
+                    ));
+                }
+                let book = store.book(&symbol).ok_or((
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "Live book required to arm trailing stop".into(),
+                ))?;
+                let current = match request.side {
+                    TradeSide::Sell => book.bids.first().map(|l| l.price),
+                    TradeSide::Buy => book.asks.first().map(|l| l.price),
+                }
+                .ok_or((
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "Live trigger reference price unavailable".into(),
+                ))?;
+                let distance = amount.unwrap_or(current * percent.unwrap());
+                let initial = if matches!(request.side, TradeSide::Sell) {
+                    current - distance
+                } else {
+                    current + distance
+                };
+                if !initial.is_finite() || initial <= 0.0 {
+                    return Err((
+                        StatusCode::BAD_REQUEST,
+                        "Trailing distance produces an invalid trigger price".into(),
+                    ));
+                }
+                (
+                    initial,
+                    if matches!(request.side, TradeSide::Sell) {
+                        BarrierDirection::Below
+                    } else {
+                        BarrierDirection::Above
+                    },
+                    amount,
+                    percent,
+                    Some(current),
+                )
+            } else {
+                (
+                    request
+                        .trigger_price
+                        .filter(|price| price.is_finite() && *price > 0.0)
+                        .ok_or((
+                            StatusCode::BAD_REQUEST,
+                            "Trigger price must be finite and greater than zero".to_owned(),
+                        ))?,
+                    request.trigger_direction.clone().ok_or((
+                        StatusCode::BAD_REQUEST,
+                        "Trigger direction must be above or below".to_owned(),
+                    ))?,
+                    None,
+                    None,
+                    None,
+                )
+            };
+        let execution_type = if matches!(&request.order_type, OrderType::StopLimit) {
+            "limit"
         } else {
-            (request.trigger_price.filter(|price| price.is_finite() && *price > 0.0).ok_or((StatusCode::BAD_REQUEST, "Trigger price must be finite and greater than zero".to_owned()))?, request.trigger_direction.clone().ok_or((StatusCode::BAD_REQUEST, "Trigger direction must be above or below".to_owned()))?, None, None, None)
+            "market"
         };
-        let execution_type = if matches!(&request.order_type, OrderType::StopLimit) { "limit" } else { "market" };
-        let stop_limit_price = if execution_type == "limit" { Some(request.limit_price.filter(|p| p.is_finite() && *p > 0.0).ok_or((StatusCode::BAD_REQUEST, "Stop-limit requires a positive limit price".into()))?) } else { None };
+        let stop_limit_price = if execution_type == "limit" {
+            Some(
+                request
+                    .limit_price
+                    .filter(|p| p.is_finite() && *p > 0.0)
+                    .ok_or((
+                        StatusCode::BAD_REQUEST,
+                        "Stop-limit requires a positive limit price".into(),
+                    ))?,
+            )
+        } else {
+            None
+        };
         let timestamp = now_ms().map_err(internal_error)?;
         let mut ledger = store.ledger.lock().await;
-        ensure_paper_capacity(&store, &ledger, &symbol, &request.side, request.quantity, stop_limit_price.unwrap_or(trigger_price), configured_fee_rates().taker).await?;
+        ensure_paper_capacity(
+            &store,
+            &ledger,
+            &symbol,
+            &request.side,
+            request.quantity,
+            stop_limit_price.unwrap_or(trigger_price),
+            configured_fee_rates().taker,
+        )
+        .await?;
         let barrier_order = BarrierOrder {
             id: format!("barrier-{timestamp}-{}", ledger.barrier_orders.len()),
             symbol,
@@ -1836,15 +3027,31 @@ async fn submit_order(
             average_execution_price: None,
             fee_paid: 0.0,
             error: None,
-            order_kind: if trailing { "trailing-stop" } else if execution_type == "limit" { "stop-limit" } else if matches!(&request.order_type, OrderType::StopMarket) { "stop-market" } else { "barrier" }.to_owned(),
-            execution_type: execution_type.to_owned(), limit_price: stop_limit_price,
-            trailing_amount, trailing_percent, extreme_price,
-            source: request.source.clone(), parent_order_id: request.client_order_id.clone(),
+            order_kind: if trailing {
+                "trailing-stop"
+            } else if execution_type == "limit" {
+                "stop-limit"
+            } else if matches!(&request.order_type, OrderType::StopMarket) {
+                "stop-market"
+            } else {
+                "barrier"
+            }
+            .to_owned(),
+            execution_type: execution_type.to_owned(),
+            limit_price: stop_limit_price,
+            trailing_amount,
+            trailing_percent,
+            extreme_price,
+            source: request.source.clone(),
+            parent_order_id: request.client_order_id.clone(),
         };
         ledger.barrier_orders.push(barrier_order.clone());
         if let Err(error) = store.persist(&ledger).await {
             ledger.barrier_orders.pop();
-            return Err((StatusCode::INTERNAL_SERVER_ERROR, format!("Unable to persist barrier order: {error}")));
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Unable to persist barrier order: {error}"),
+            ));
         }
         return Ok(Json(OrderResponse {
             estimated_fee: 0.0,
@@ -1860,7 +3067,10 @@ async fn submit_order(
     let maker_fee_rate = fee_rates.maker;
     let taker_fee_rate = fee_rates.taker;
     let is_post_only = matches!(request.order_type, OrderType::PostOnlyLimit);
-    let is_limit = matches!(request.order_type, OrderType::Limit | OrderType::PostOnlyLimit);
+    let is_limit = matches!(
+        request.order_type,
+        OrderType::Limit | OrderType::PostOnlyLimit
+    );
     let is_fok = matches!(request.order_type, OrderType::Fok);
     let limit_price = if is_limit {
         let p = request.limit_price.unwrap_or(f64::NAN);
@@ -1874,13 +3084,43 @@ async fn submit_order(
     } else {
         None
     };
-    if request.expires_at.is_some_and(|expires| expires <= now_ms().unwrap_or_default()) {
-        return Err((StatusCode::BAD_REQUEST, "Good-till-date must be in the future".into()));
+    if request
+        .expires_at
+        .is_some_and(|expires| expires <= now_ms().unwrap_or_default())
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Good-till-date must be in the future".into(),
+        ));
     }
-    if request.expires_at.is_some() && !is_limit { return Err((StatusCode::BAD_REQUEST, "Good-till-date is supported only for limit orders".into())); }
-    if request.time_in_force.as_deref().is_some_and(|tif| tif != "gtd" && tif != "gtc") { return Err((StatusCode::BAD_REQUEST, "Supported time-in-force values are gtc and gtd".into())); }
-    if request.time_in_force.as_deref() == Some("gtd") && request.expires_at.is_none() { return Err((StatusCode::BAD_REQUEST, "GTD limit order requires expires_at".into())); }
-    if request.time_in_force.as_deref() == Some("gtc") && request.expires_at.is_some() { return Err((StatusCode::BAD_REQUEST, "GTC order cannot include expires_at".into())); }
+    if request.expires_at.is_some() && !is_limit {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Good-till-date is supported only for limit orders".into(),
+        ));
+    }
+    if request
+        .time_in_force
+        .as_deref()
+        .is_some_and(|tif| tif != "gtd" && tif != "gtc")
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Supported time-in-force values are gtc and gtd".into(),
+        ));
+    }
+    if request.time_in_force.as_deref() == Some("gtd") && request.expires_at.is_none() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "GTD limit order requires expires_at".into(),
+        ));
+    }
+    if request.time_in_force.as_deref() == Some("gtc") && request.expires_at.is_some() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "GTC order cannot include expires_at".into(),
+        ));
+    }
     let mut processing_timings_ms = BTreeMap::new();
     let book_wait_started = Instant::now();
     store.ensure_subscription(&symbol);
@@ -1906,46 +3146,172 @@ async fn submit_order(
         StatusCode::SERVICE_UNAVAILABLE,
         "Live OKX book unavailable".into(),
     ))?;
-    processing_timings_ms.insert(if book_was_missing { "book_wait_cold" } else { "book_wait_active" }.to_owned(), book_wait_started.elapsed().as_secs_f64() * 1_000.0);
+    processing_timings_ms.insert(
+        if book_was_missing {
+            "book_wait_cold"
+        } else {
+            "book_wait_active"
+        }
+        .to_owned(),
+        book_wait_started.elapsed().as_secs_f64() * 1_000.0,
+    );
     let matching_started = Instant::now();
-    let levels = match request.side { TradeSide::Buy => &book.asks, TradeSide::Sell => &book.bids };
+    let levels = match request.side {
+        TradeSide::Buy => &book.asks,
+        TradeSide::Sell => &book.bids,
+    };
     if is_post_only {
-        let crosses = match (request.side.clone(), limit_price, book.bids.first(), book.asks.first()) {
+        let crosses = match (
+            request.side.clone(),
+            limit_price,
+            book.bids.first(),
+            book.asks.first(),
+        ) {
             (TradeSide::Buy, Some(price), _, Some(ask)) => price >= ask.price,
             (TradeSide::Sell, Some(price), Some(bid), _) => price <= bid.price,
             _ => false,
         };
-        if crosses { return Err((StatusCode::CONFLICT, "Post-only limit would take liquidity; order was not placed".into())); }
+        if crosses {
+            return Err((
+                StatusCode::CONFLICT,
+                "Post-only limit would take liquidity; order was not placed".into(),
+            ));
+        }
     }
-    let decision_timestamp = if request.measure_execution_quality { Some(now_ms().map_err(internal_error)?) } else { None };
+    let decision_timestamp = if request.measure_execution_quality {
+        Some(now_ms().map_err(internal_error)?)
+    } else {
+        None
+    };
     let decision_price = if request.measure_execution_quality {
-        levels.first().map(|level| level.price).filter(|price| price.is_finite() && *price > 0.0)
-    } else { None };
-    let decision_mid_price = if request.measure_execution_quality {
-        book.bids.first().zip(book.asks.first()).map(|(bid, ask)| (bid.price + ask.price) / 2.0)
+        levels
+            .first()
+            .map(|level| level.price)
             .filter(|price| price.is_finite() && *price > 0.0)
-    } else { None };
-    let matched = match_book(&request.side, request.quantity, limit_price, &book);
-    if is_fok && matched.remaining_quantity > EPSILON {
-        return Err((StatusCode::CONFLICT, format!("FOK order cancelled: only {} of {} was available", matched.filled_quantity, request.quantity)));
+    } else {
+        None
+    };
+    let decision_mid_price = if request.measure_execution_quality {
+        book.bids
+            .first()
+            .zip(book.asks.first())
+            .map(|(bid, ask)| (bid.price + ask.price) / 2.0)
+            .filter(|price| price.is_finite() && *price > 0.0)
+    } else {
+        None
+    };
+    let mut matched = match_book(&request.side, request.quantity, limit_price, &book);
+    if is_fok && !request.reduce_only && matched.remaining_quantity > EPSILON {
+        return Err((
+            StatusCode::CONFLICT,
+            format!(
+                "FOK order cancelled: only {} of {} was available",
+                matched.filled_quantity, request.quantity
+            ),
+        ));
     }
-    processing_timings_ms.insert("matching".to_owned(), matching_started.elapsed().as_secs_f64() * 1_000.0);
+    processing_timings_ms.insert(
+        "matching".to_owned(),
+        matching_started.elapsed().as_secs_f64() * 1_000.0,
+    );
+    let timestamp = now_ms().map_err(internal_error)?;
+    let rates_started = Instant::now();
+    let capacity_rates = get_usd_rates().await?.0.rates;
+    processing_timings_ms.insert(
+        "capacity_rate_lookup".to_owned(),
+        rates_started.elapsed().as_secs_f64() * 1_000.0,
+    );
+    let ledger_lock_started = Instant::now();
+    let mut ledger = store.ledger.lock().await;
+    processing_timings_ms.insert(
+        "ledger_lock_wait".to_owned(),
+        ledger_lock_started.elapsed().as_secs_f64() * 1_000.0,
+    );
+    if request.reduce_only {
+        let current_quantity = summarize_positions(&ledger.trades)
+            .positions
+            .into_iter()
+            .find(|position| position.symbol == symbol)
+            .map(|position| position.quantity)
+            .unwrap_or(0.0);
+        let closes_position = match (&request.side, current_quantity) {
+            (TradeSide::Buy, quantity) if quantity < -EPSILON => true,
+            (TradeSide::Sell, quantity) if quantity > EPSILON => true,
+            _ => false,
+        };
+        if !closes_position {
+            // A stale protective barrier must never open or reverse a position.
+            return Ok(Json(OrderResponse {
+                estimated_fee: 0.0,
+                filled_quantity: 0.0,
+                remaining_quantity: 0.0,
+                average_execution_price: None,
+                order: None,
+                barrier_order: None,
+                processing_timings_ms,
+            }));
+        }
+        request.quantity = request.quantity.min(current_quantity.abs());
+        if request.quantity <= EPSILON {
+            return Ok(Json(OrderResponse {
+                estimated_fee: 0.0,
+                filled_quantity: 0.0,
+                remaining_quantity: 0.0,
+                average_execution_price: None,
+                order: None,
+                barrier_order: None,
+                processing_timings_ms,
+            }));
+        }
+        // Recompute while holding the ledger lock so simultaneous stop barriers
+        // see the quantity left after the preceding barrier fill.
+        matched = match_book(&request.side, request.quantity, limit_price, &book);
+    }
+    if is_fok && matched.remaining_quantity > EPSILON {
+        return Err((
+            StatusCode::CONFLICT,
+            format!(
+                "FOK order cancelled: only {} of {} was available",
+                matched.filled_quantity, request.quantity
+            ),
+        ));
+    }
     let reference_price = matched.reference_price;
     let remaining = matched.remaining_quantity;
     let filled_quantity = matched.filled_quantity;
     let average_execution_price = matched.average_execution_price;
-    let fills = matched.fills.into_iter().map(|fill| (fill.quantity, fill.price)).collect::<Vec<_>>();
-    let timestamp = now_ms().map_err(internal_error)?;
-    let rates_started = Instant::now();
-    let capacity_rates = get_usd_rates().await?.0.rates;
-    processing_timings_ms.insert("capacity_rate_lookup".to_owned(), rates_started.elapsed().as_secs_f64() * 1_000.0);
-    let ledger_lock_started = Instant::now();
-    let mut ledger = store.ledger.lock().await;
-    processing_timings_ms.insert("ledger_lock_wait".to_owned(), ledger_lock_started.elapsed().as_secs_f64() * 1_000.0);
+    let fills = matched
+        .fills
+        .into_iter()
+        .map(|fill| (fill.quantity, fill.price))
+        .collect::<Vec<_>>();
     let capacity_started = Instant::now();
-    let reserve_price = if matches!(request.side, TradeSide::Buy) { levels.iter().map(|level| level.price).fold(0.0_f64, f64::max) } else { reference_price.unwrap_or(0.0) };
-    ensure_paper_capacity_with_rates(&store, &ledger, &capacity_rates, &symbol, &request.side, request.quantity, reserve_price, taker_fee_rate, Some(&mut processing_timings_ms)).await?;
-    processing_timings_ms.insert("capacity_check".to_owned(), capacity_started.elapsed().as_secs_f64() * 1_000.0);
+    let reserve_price = if matches!(request.side, TradeSide::Buy) {
+        levels
+            .iter()
+            .map(|level| level.price)
+            .fold(0.0_f64, f64::max)
+    } else {
+        reference_price.unwrap_or(0.0)
+    };
+    if !request.reduce_only {
+        ensure_paper_capacity_with_rates(
+            &store,
+            &ledger,
+            &capacity_rates,
+            &symbol,
+            &request.side,
+            request.quantity,
+            reserve_price,
+            taker_fee_rate,
+            Some(&mut processing_timings_ms),
+        )
+        .await?;
+    }
+    processing_timings_ms.insert(
+        "capacity_check".to_owned(),
+        capacity_started.elapsed().as_secs_f64() * 1_000.0,
+    );
     let start = ledger.trades.len();
     for (index, (quantity, execution_price)) in fills.into_iter().enumerate() {
         ledger.trades.push(PositionTrade {
@@ -1959,16 +3325,29 @@ async fn submit_order(
             source: request.source.clone(),
             parent_order_id: request.client_order_id.clone(),
             fee: quantity * execution_price * -taker_fee_rate,
-            fee_currency: symbol.split_once('-').map(|(_, quote)| quote.to_owned()).unwrap_or_default(),
+            fee_currency: symbol
+                .split_once('-')
+                .map(|(_, quote)| quote.to_owned())
+                .unwrap_or_default(),
             fee_rate: taker_fee_rate,
             fee_liquidity: "taker".to_owned(),
             resting_order_id: None,
             decision_timestamp,
             decision_price,
             decision_mid_price,
-            slippage: decision_price.map(|price| if matches!(request.side, TradeSide::Sell) { execution_price - price } else { price - execution_price }),
+            slippage: decision_price.map(|price| {
+                if matches!(request.side, TradeSide::Sell) {
+                    execution_price - price
+                } else {
+                    price - execution_price
+                }
+            }),
             slippage_bps: decision_price.filter(|price| *price > 0.0).map(|price| {
-                let favorable_difference = if matches!(request.side, TradeSide::Sell) { execution_price - price } else { price - execution_price };
+                let favorable_difference = if matches!(request.side, TradeSide::Sell) {
+                    execution_price - price
+                } else {
+                    price - execution_price
+                };
                 favorable_difference / price * 10_000.0
             }),
         });
@@ -1985,7 +3364,11 @@ async fn submit_order(
             maker_fee_rate,
             estimated_fee: remaining * limit_price.unwrap() * -maker_fee_rate,
             expires_at: request.expires_at,
-            time_in_force: if request.expires_at.is_some() { "gtd".to_owned() } else { "gtc".to_owned() },
+            time_in_force: if request.expires_at.is_some() {
+                "gtd".to_owned()
+            } else {
+                "gtc".to_owned()
+            },
             post_only: is_post_only,
             source: request.source.clone(),
             parent_order_id: request.client_order_id.clone(),
@@ -2002,10 +3385,16 @@ async fn submit_order(
             format!("Unable to persist paper order: {error}"),
         ));
     }
-    processing_timings_ms.insert("persistence".to_owned(), persistence_started.elapsed().as_secs_f64() * 1_000.0);
+    processing_timings_ms.insert(
+        "persistence".to_owned(),
+        persistence_started.elapsed().as_secs_f64() * 1_000.0,
+    );
     Ok(Json(OrderResponse {
         filled_quantity,
-        estimated_fee: ledger.trades[start..].iter().map(|trade| trade.fee).sum::<f64>(),
+        estimated_fee: ledger.trades[start..]
+            .iter()
+            .map(|trade| trade.fee)
+            .sum::<f64>(),
         remaining_quantity: remaining,
         average_execution_price,
         order,
@@ -2024,7 +3413,12 @@ async fn cancel_order(
     ledger.orders.retain(|order| order.id != id);
     if ledger.orders.len() == original_orders {
         if let Some(order) = ledger.barrier_orders.iter().find(|order| order.id == id) {
-            if order.status != "armed" { return Err((StatusCode::CONFLICT, "Barrier order has already triggered and cannot be cancelled".into())); }
+            if order.status != "armed" {
+                return Err((
+                    StatusCode::CONFLICT,
+                    "Barrier order has already triggered and cannot be cancelled".into(),
+                ));
+            }
         }
         ledger.barrier_orders.retain(|order| order.id != id);
         if ledger.barrier_orders.len() == original_barriers {
@@ -2062,7 +3456,11 @@ fn decode_book(bytes: &Bytes) -> Option<BookSnapshot> {
             asks.push(ask);
         }
     }
-    Some(BookSnapshot { bids, asks, updated_at_ms: now_ms().ok()? })
+    Some(BookSnapshot {
+        bids,
+        asks,
+        updated_at_ms: now_ms().ok()?,
+    })
 }
 fn read_level(bytes: &[u8], offset: usize) -> Option<BookLevel> {
     let price = f64::from_le_bytes(bytes.get(offset..offset + 8)?.try_into().ok()?);
@@ -2111,11 +3509,20 @@ fn summarize_positions(trades: &[PositionTrade]) -> PositionsResponse {
 fn apply_trade(position: &mut Position, trade: &PositionTrade) {
     let old = position.quantity;
     position.fees_paid += trade.fee;
-    let incoming = match trade.side { TradeSide::Buy => trade.quantity, TradeSide::Sell => -trade.quantity };
-    position.estimated_exit_fee_rate = if trade.fee_rate == 0.0 { configured_fee_rates().taker.abs() } else { trade.fee_rate.abs() };
+    let incoming = match trade.side {
+        TradeSide::Buy => trade.quantity,
+        TradeSide::Sell => -trade.quantity,
+    };
+    position.estimated_exit_fee_rate = if trade.fee_rate == 0.0 {
+        configured_fee_rates().taker.abs()
+    } else {
+        trade.fee_rate.abs()
+    };
     if old == 0.0 || old.signum() == incoming.signum() {
         let total = old.abs() + incoming.abs();
-        position.average_entry_price = (old.abs() * position.average_entry_price + incoming.abs() * trade.execution_price) / total;
+        position.average_entry_price = (old.abs() * position.average_entry_price
+            + incoming.abs() * trade.execution_price)
+            / total;
         position.quantity = old + incoming;
         position.entry_fees += trade.fee;
         return;
@@ -2123,7 +3530,12 @@ fn apply_trade(position: &mut Position, trade: &PositionTrade) {
     let closed = old.abs().min(incoming.abs());
     let entry_fee_closed = position.entry_fees * (closed / old.abs());
     let closing_fee = trade.fee * (closed / incoming.abs());
-    let gross = closed * if old > 0.0 { trade.execution_price - position.average_entry_price } else { position.average_entry_price - trade.execution_price };
+    let gross = closed
+        * if old > 0.0 {
+            trade.execution_price - position.average_entry_price
+        } else {
+            position.average_entry_price - trade.execution_price
+        };
     position.realized_pnl += gross - entry_fee_closed - closing_fee;
     let net = old + incoming;
     if net.abs() < EPSILON {
@@ -2139,10 +3551,3 @@ fn apply_trade(position: &mut Position, trade: &PositionTrade) {
         position.quantity = net;
     }
 }
-
-
-
-
-
-
-

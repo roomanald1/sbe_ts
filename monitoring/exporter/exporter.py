@@ -129,6 +129,13 @@ def metrics():
         ]:
             if isinstance(activity.get(key), (int, float)):
                 output.append(sample(metric, help_text, activity[key]))
+        for item in activity.get("pnl_breakdown", []):
+            strategy = item.get("strategy", "legacy-unknown")
+            symbol = item.get("symbol", "")
+            quote = symbol.rsplit("-", 1)[-1] if "-" in symbol else "unknown"
+            value = item.get("realized_pnl")
+            if isinstance(value, (int, float)):
+                output.append(sample("app_autotrader_strategy_realized_pnl", "Recent daily realized P and L grouped by AutoTrader strategy and quote currency.", value, {"strategy": strategy, "quote": quote}))
         orders = activity.get("orders", [])
         output.append(sample("app_autotrader_orders", "Number of recorded autotrader orders.", len(orders)))
         for status_name in sorted({order.get("status", "unknown") for order in orders}):

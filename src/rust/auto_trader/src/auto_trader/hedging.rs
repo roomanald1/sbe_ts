@@ -344,6 +344,7 @@ async fn execute_portfolio_hedge(
         side: side.clone(),
         order_type: "Ioc".into(),
         purpose: "portfolio-hedge".into(),
+        strategy: Some("portfolio-hedge".into()),
         decision_id: None,
         quantity,
         filled_quantity: 0.0,
@@ -476,6 +477,7 @@ async fn execute_portfolio_hedge(
                     fee,
                     "Ioc",
                     "portfolio-hedge",
+                    true,
                     None,
                 )
             })

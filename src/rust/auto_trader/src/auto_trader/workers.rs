@@ -503,6 +503,7 @@ async fn reconcile_maker_fills(
             {
                 continue;
             }
+            let count_entry = order.filled_quantity <= 1e-12;
             let (realized, learned) = apply_auto_fill(
                 positions,
                 &order.symbol,
@@ -512,8 +513,10 @@ async fn reconcile_maker_fills(
                 fill.fee.abs(),
                 "PostOnlyLimit",
                 order.learning_context.as_deref().unwrap_or(&order.symbol),
+                count_entry,
                 order.horizon_take_profit_percent,
             );
+            tag_position_strategy(positions, &order.symbol, order.strategy.as_deref());
             order.filled_quantity += fill.quantity;
             order.fill_rate = (order.filled_quantity / order.quantity).clamp(0.0, 1.0);
             order.fees_paid += fill.fee.abs();
@@ -752,6 +755,7 @@ async fn reconcile_scheduled_fills(
                 if !qty.is_finite() || qty <= 0.0 || !price.is_finite() || price <= 0.0 {
                     continue;
                 }
+                let count_entry = order.filled_quantity <= 1e-12;
                 let (realized, learned) = apply_auto_fill(
                     positions,
                     &order.symbol,
@@ -761,8 +765,10 @@ async fn reconcile_scheduled_fills(
                     fee,
                     "ScheduledExecution",
                     order.learning_context.as_deref().unwrap_or(&order.symbol),
+                    count_entry,
                     order.horizon_take_profit_percent,
                 );
+                tag_position_strategy(positions, &order.symbol, order.strategy.as_deref());
                 let prior_quantity = order.filled_quantity;
                 order.filled_quantity = (prior_quantity + qty).min(order.quantity);
                 order.fill_rate = (order.filled_quantity / order.quantity).clamp(0.0, 1.0);
@@ -791,6 +797,7 @@ async fn reconcile_scheduled_fills(
                 let price = run["execution_vwap"].as_f64().unwrap_or(0.0);
                 if delta_quantity > 1e-12 && price.is_finite() && price > 0.0 {
                     let fee = delta_quantity * price * configured_taker_fee_rate();
+                    let count_entry = order.filled_quantity <= 1e-12;
                     let (realized, learned) = apply_auto_fill(
                         positions,
                         &order.symbol,
@@ -800,8 +807,10 @@ async fn reconcile_scheduled_fills(
                         fee,
                         "ScheduledExecution",
                         order.learning_context.as_deref().unwrap_or(&order.symbol),
+                        count_entry,
                         order.horizon_take_profit_percent,
                     );
+                    tag_position_strategy(positions, &order.symbol, order.strategy.as_deref());
                     let previous_notional =
                         order.filled_quantity * order.average_price.unwrap_or(price);
                     let next_quantity = order.filled_quantity + delta_quantity;

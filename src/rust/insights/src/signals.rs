@@ -182,6 +182,15 @@ pub struct ProbabilityConfidenceMetrics {
 }
 
 #[derive(Clone, Debug, Serialize)]
+pub struct LearnedExitPolicy {
+    pub stop_loss_percent: f64,
+    pub take_profit_percent: f64,
+    pub validation_samples: usize,
+    pub validation_average_net_return_percent: f64,
+    pub validation_positive_net_rate: f64,
+}
+
+#[derive(Clone, Debug, Serialize)]
 pub struct SignalWalkForward {
     pub symbol: String,
     pub horizon_seconds: u64,
@@ -223,6 +232,10 @@ pub struct SignalWalkForward {
     /// Walk-forward results for models trained on synchronized microstructure and market-context features.
     pub research_logistic_long: SideWalkForwardMetrics,
     pub research_logistic_short: SideWalkForwardMetrics,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub learned_long_exit_policy: Option<LearnedExitPolicy>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub learned_short_exit_policy: Option<LearnedExitPolicy>,
 }
 /// Side-by-side executable outcome label. A new enum variant preserves the
 /// existing bincode Snapshot and Outcome layouts for persisted records.
@@ -686,6 +699,81 @@ fn stop_target_counterfactual_return(
     }
 }
 
+fn fit_learned_exit_policy(
+    samples: &[SignalOutcome],
+    evaluations: &HashMap<(String, u64, u64), SignalEvaluation>,
+    direction: &str,
+) -> Option<LearnedExitPolicy> {
+    let rows = samples
+        .iter()
+        .filter(|sample| sample.direction == direction)
+        .filter_map(|sample| {
+            evaluations
+                .get(&(
+                    sample.symbol.clone(),
+                    sample.signal_timestamp,
+                    sample.horizon_seconds,
+                ))
+                .map(|evaluation| (sample, evaluation))
+        })
+        .collect::<Vec<_>>();
+    if rows.len() < 28 {
+        return None;
+    }
+    let split = rows.len() * 7 / 10;
+    let (training, validation) = rows.split_at(split);
+    if training.len() < 20 || validation.len() < 8 {
+        return None;
+    }
+    let evaluate = |set: &[(&SignalOutcome, &SignalEvaluation)], stop: f64, target: f64| {
+        let returns = set
+            .iter()
+            .filter_map(|(_, evaluation)| {
+                stop_target_counterfactual_return(evaluation, direction, stop, target)
+            })
+            .collect::<Vec<_>>();
+        if returns.len() < 8 {
+            return None;
+        }
+        Some((
+            returns.len(),
+            returns.iter().sum::<f64>() / returns.len() as f64,
+            returns.iter().filter(|value| **value > 0.0).count() as f64 / returns.len() as f64,
+        ))
+    };
+    let baseline_train = evaluate(training, 0.50, 0.80)?;
+    let mut best: Option<(f64, f64, f64)> = None;
+    for stop in [0.30, 0.40, 0.50, 0.65, 0.80] {
+        for target in [0.50, 0.65, 0.80, 1.00, 1.25, 1.50] {
+            if target < stop * 1.25 || (stop == 0.50 && target == 0.80) {
+                continue;
+            }
+            let Some((_, average, _)) = evaluate(training, stop, target) else {
+                continue;
+            };
+            if average <= baseline_train.1 + 0.02 {
+                continue;
+            }
+            if best.is_none_or(|(_, _, best_average)| average > best_average) {
+                best = Some((stop, target, average));
+            }
+        }
+    }
+    let (stop, target, _) = best?;
+    let candidate = evaluate(validation, stop, target)?;
+    let baseline = evaluate(validation, 0.50, 0.80)?;
+    if candidate.1 <= baseline.1 + 0.02 || candidate.1 <= 0.0 || candidate.2 < 0.40 {
+        return None;
+    }
+    Some(LearnedExitPolicy {
+        stop_loss_percent: stop,
+        take_profit_percent: target,
+        validation_samples: candidate.0,
+        validation_average_net_return_percent: candidate.1,
+        validation_positive_net_rate: candidate.2,
+    })
+}
+
 fn configured_signal_taker_fee_rate() -> f64 {
     let configured = std::env::var("SIGNALS_TAKER_FEE_RATE")
         .or_else(|_| std::env::var("PAPER_OKX_SPOT_TAKER_FEE_RATE"))
@@ -760,8 +848,7 @@ impl SignalEngine {
     /// Gate expensive live snapshot generation independently of feed ingestion.
     pub fn live_snapshot_due(&mut self, timestamp: u64) -> bool {
         let due = self.last_live_snapshot_at.map_or(true, |last| {
-            timestamp < last
-                || timestamp.saturating_sub(last) >= LIVE_SIGNAL_SNAPSHOT_INTERVAL_MS
+            timestamp < last || timestamp.saturating_sub(last) >= LIVE_SIGNAL_SNAPSHOT_INTERVAL_MS
         });
         if due {
             self.last_live_snapshot_at = Some(timestamp);
@@ -1304,7 +1391,9 @@ impl SignalEngine {
         let recent_trades = self
             .trades
             .iter()
-            .filter(|(trade_time, ..)| *trade_time >= timestamp.saturating_sub(TRADE_WINDOW_MS) && *trade_time <= timestamp)
+            .filter(|(trade_time, ..)| {
+                *trade_time >= timestamp.saturating_sub(TRADE_WINDOW_MS) && *trade_time <= timestamp
+            })
             .count();
         let quote_age = self
             .best_quote
@@ -2102,7 +2191,10 @@ fn calibrate_signal_scores(snapshots: &mut [SignalSnapshot], records: &[StoredSi
                 outcome.horizon_seconds,
             ))
             .or_default()
-            .push((outcome.evaluated_timestamp, outcome.net_return_percent.unwrap_or_default()));
+            .push((
+                outcome.evaluated_timestamp,
+                outcome.net_return_percent.unwrap_or_default(),
+            ));
     }
     for samples in net_edge_history.values_mut() {
         samples.sort_by_key(|(timestamp, _)| *timestamp);
@@ -2145,9 +2237,13 @@ fn calibrate_signal_scores(snapshots: &mut [SignalSnapshot], records: &[StoredSi
                 snapshot.direction.clone(),
                 adjacent,
             )) {
-                let completed = samples.partition_point(|(timestamp, _)| *timestamp <= snapshot.timestamp);
+                let completed =
+                    samples.partition_point(|(timestamp, _)| *timestamp <= snapshot.timestamp);
                 total.0 += completed;
-                total.1 += samples[..completed].iter().filter(|(_, matched)| *matched).count();
+                total.1 += samples[..completed]
+                    .iter()
+                    .filter(|(_, matched)| *matched)
+                    .count();
             }
         }
         (total.1 as f64 + PRIOR_SAMPLES * 0.5) / (total.0 as f64 + PRIOR_SAMPLES)
@@ -2186,19 +2282,23 @@ fn calibrate_signal_scores(snapshots: &mut [SignalSnapshot], records: &[StoredSi
                 edge_direction.to_owned(),
                 horizon,
             ))?;
-            let completed = samples
-                .partition_point(|(timestamp, _)| *timestamp <= snapshot.timestamp);
+            let completed =
+                samples.partition_point(|(timestamp, _)| *timestamp <= snapshot.timestamp);
             if completed < 8 {
                 return None;
             }
             Some((completed, samples[completed - 1].1 / completed as f64))
         });
         if let Some((sample_count, mean_net_return)) = edge {
-            let direction_sign = if edge_direction == "bullish" { 1.0 } else { -1.0 };
+            let direction_sign = if edge_direction == "bullish" {
+                1.0
+            } else {
+                -1.0
+            };
             let reliability = sample_count as f64 / (sample_count as f64 + EDGE_PRIOR_SAMPLES);
             let edge_signal = (mean_net_return / EDGE_SCALE_PERCENT).tanh();
-            let adjusted_score = snapshot.score
-                + direction_sign * EDGE_SCORE_WEIGHT * reliability * edge_signal;
+            let adjusted_score =
+                snapshot.score + direction_sign * EDGE_SCORE_WEIGHT * reliability * edge_signal;
             snapshot.score = if direction_sign > 0.0 {
                 adjusted_score.clamp(0.0, 1.0)
             } else {
@@ -2533,9 +2633,13 @@ impl SignalStore {
     ) -> Result<Vec<serde_json::Value>> {
         let connection = Self::open_database_path(path)?;
         let mut statement = connection.prepare("SELECT payload FROM auto_trader_audit WHERE (stage = 'entry' OR stage LIKE 'exit%') AND (?1 IS NULL OR timestamp >= ?1) ORDER BY timestamp DESC LIMIT ?2")?;
-        let rows = statement.query_map(params![since.map(|value| value as i64), limit.clamp(1, 50_000) as i64], |row| {
-            row.get::<_, Vec<u8>>(0)
-        })?;
+        let rows = statement.query_map(
+            params![
+                since.map(|value| value as i64),
+                limit.clamp(1, 50_000) as i64
+            ],
+            |row| row.get::<_, Vec<u8>>(0),
+        )?;
         let compressed_rows = rows.collect::<rusqlite::Result<Vec<_>>>()?;
         drop(statement);
         drop(connection);
@@ -2550,7 +2654,10 @@ impl SignalStore {
         Ok(result)
     }
 
-    async fn auto_trader_execution_quality(&self, since: Option<u64>) -> Result<AutoTraderExecutionQualitySummary> {
+    async fn auto_trader_execution_quality(
+        &self,
+        since: Option<u64>,
+    ) -> Result<AutoTraderExecutionQualitySummary> {
         // Filter before applying the cap so decision events cannot crowd fills out.
         let records = self.load_auto_trader_execution_audit(since, 50_000).await?;
         let mut summary = AutoTraderExecutionQualitySummary::default();
@@ -2674,7 +2781,10 @@ impl SignalStore {
         Ok(summary)
     }
 
-    async fn auto_trader_decision_quality(&self, since: Option<u64>) -> Result<AutoTraderDecisionQualitySummary> {
+    async fn auto_trader_decision_quality(
+        &self,
+        since: Option<u64>,
+    ) -> Result<AutoTraderDecisionQualitySummary> {
         const MIN_COHORT_SAMPLES: usize = 10;
         let records = self.load_auto_trader_audit(since, 50_000).await?;
         let mut summary = AutoTraderDecisionQualitySummary {
@@ -3836,6 +3946,25 @@ impl SignalStore {
 
     async fn compute_walk_forward(&self) -> Result<Vec<SignalWalkForward>> {
         let outcomes = self.read_outcomes().await?;
+        let evaluations = self
+            .read_recent_records_with_corrupt_rows(2, 100_000, true)
+            .await?
+            .into_iter()
+            .filter_map(|record| match record {
+                StoredSignalRecord::Evaluation(evaluation) => Some(evaluation),
+                _ => None,
+            })
+            .map(|evaluation| {
+                (
+                    (
+                        evaluation.symbol.clone(),
+                        evaluation.signal_timestamp,
+                        evaluation.horizon_seconds,
+                    ),
+                    evaluation,
+                )
+            })
+            .collect::<HashMap<_, _>>();
         let snapshots = self.read_snapshots().await?;
         let snapshots_by_key = snapshots
             .into_iter()
@@ -4258,6 +4387,16 @@ impl SignalStore {
                 logistic_short: logistic_short.metrics(),
                 research_logistic_long: research_logistic_long.metrics(),
                 research_logistic_short: research_logistic_short.metrics(),
+                learned_long_exit_policy: fit_learned_exit_policy(
+                    &non_overlapping,
+                    &evaluations,
+                    "bullish",
+                ),
+                learned_short_exit_policy: fit_learned_exit_policy(
+                    &non_overlapping,
+                    &evaluations,
+                    "bearish",
+                ),
             });
         }
         result.sort_by(|a, b| {

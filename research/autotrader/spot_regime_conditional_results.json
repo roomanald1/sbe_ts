@@ -1,0 +1,250 @@
+{
+  "regime_definition": "BTC prior daily close above/below trailing 200-day close SMA; same common 7-asset calendar; signal state uses only information available before the return interval",
+  "evaluation": "Net open-to-next-open daily strategy return, 15 bps per side on exposure/weight changes; regime-conditioned returns compound only days assigned to that BTC state, so returns are not full-path account returns. Daily observations are serially dependent.",
+  "date_range": [
+    "2021-03-01",
+    "2026-10-22"
+  ],
+  "strategies": {
+    "buy_and_hold": {
+      "BTC_above_SMA200": {
+        "days": 1118,
+        "compound_return_pct": 480.37861948422585,
+        "mean_daily_bp": 22.147074261149115,
+        "positive_day_pct": 53.7567084078712,
+        "sharpe": 1.187764179029179
+      },
+      "BTC_below_SMA200": {
+        "days": 944,
+        "compound_return_pct": -35.71825596641971,
+        "mean_daily_bp": 2.6686047189554816,
+        "positive_day_pct": 51.271186440677965,
+        "sharpe": 0.13333588081256353
+      }
+    },
+    "trend_50_200": {
+      "BTC_above_SMA200": {
+        "days": 1118,
+        "compound_return_pct": 424.47710116815466,
+        "mean_daily_bp": 17.806813885426134,
+        "positive_day_pct": 48.83720930232558,
+        "sharpe": 1.40239895213841
+      },
+      "BTC_below_SMA200": {
+        "days": 944,
+        "compound_return_pct": 13.141832306607437,
+        "mean_daily_bp": 1.5407981193451485,
+        "positive_day_pct": 11.016949152542374,
+        "sharpe": 0.4275229538949562
+      }
+    },
+    "donchian_55": {
+      "BTC_above_SMA200": {
+        "days": 1118,
+        "compound_return_pct": 86.25352073894692,
+        "mean_daily_bp": 5.901076512064102,
+        "positive_day_pct": 11.449016100178891,
+        "sharpe": 1.3509527532916665
+      },
+      "BTC_below_SMA200": {
+        "days": 944,
+        "compound_return_pct": -2.171221429226189,
+        "mean_daily_bp": -0.22150945628360483,
+        "positive_day_pct": 1.8008474576271187,
+        "sharpe": -0.2853021358004646
+      }
+    },
+    "donchian_20_filter": {
+      "BTC_above_SMA200": {
+        "days": 1118,
+        "compound_return_pct": 76.66152817454747,
+        "mean_daily_bp": 5.453669889812362,
+        "positive_day_pct": 13.953488372093023,
+        "sharpe": 1.2067565555355362
+      },
+      "BTC_below_SMA200": {
+        "days": 944,
+        "compound_return_pct": 2.153814411019739,
+        "mean_daily_bp": 0.2392934021429072,
+        "positive_day_pct": 1.8008474576271187,
+        "sharpe": 0.27879843421952344
+      }
+    },
+    "oversold_rebound": {
+      "BTC_above_SMA200": {
+        "days": 1118,
+        "compound_return_pct": 0.6747217842432818,
+        "mean_daily_bp": 1.336919312162533,
+        "positive_day_pct": 33.18425760286225,
+        "sharpe": 0.16080388877666116
+      },
+      "BTC_below_SMA200": {
+        "days": 944,
+        "compound_return_pct": -8.546180151960325,
+        "mean_daily_bp": -0.09582972887125123,
+        "positive_day_pct": 10.38135593220339,
+        "sharpe": -0.014005743550261589
+      }
+    },
+    "relative_strength_rotation": {
+      "BTC_above_SMA200": {
+        "days": 1118,
+        "compound_return_pct": 8326.325022347219,
+        "mean_daily_bp": 56.50245695197542,
+        "positive_day_pct": 51.07334525939177,
+        "sharpe": 1.7620584859177923
+      },
+      "BTC_below_SMA200": {
+        "days": 944,
+        "compound_return_pct": -74.3314672027696,
+        "mean_daily_bp": -8.912358113639382,
+        "positive_day_pct": 19.491525423728813,
+        "sharpe": -0.5209077235657481
+      }
+    },
+    "BTCUSDT_SMA50": {
+      "BTC_above_SMA200": {
+        "days": 1118,
+        "compound_return_pct": 266.33473862238657,
+        "mean_daily_bp": 13.999926846302527,
+        "positive_day_pct": 37.0304114490161,
+        "sharpe": 1.2207412160652178
+      },
+      "BTC_below_SMA200": {
+        "days": 944,
+        "compound_return_pct": -4.664988244827672,
+        "mean_daily_bp": 0.44662098905804626,
+        "positive_day_pct": 13.559322033898304,
+        "sharpe": 0.06204151718167623
+      }
+    },
+    "ETHUSDT_SMA50": {
+      "BTC_above_SMA200": {
+        "days": 1118,
+        "compound_return_pct": 192.07739347234437,
+        "mean_daily_bp": 14.243836155607628,
+        "positive_day_pct": 35.3309481216458,
+        "sharpe": 0.8931686775096276
+      },
+      "BTC_below_SMA200": {
+        "days": 944,
+        "compound_return_pct": 57.46298894879638,
+        "mean_daily_bp": 6.619098135121252,
+        "positive_day_pct": 15.042372881355933,
+        "sharpe": 0.6635600582198735
+      }
+    },
+    "BNBUSDT_SMA50": {
+      "BTC_above_SMA200": {
+        "days": 1118,
+        "compound_return_pct": 543.5649895228141,
+        "mean_daily_bp": 21.479919985740533,
+        "positive_day_pct": 38.819320214669055,
+        "sharpe": 1.3082979354900235
+      },
+      "BTC_below_SMA200": {
+        "days": 944,
+        "compound_return_pct": 7.629653530689429,
+        "mean_daily_bp": 1.8861901372899752,
+        "positive_day_pct": 14.40677966101695,
+        "sharpe": 0.24394821957225182
+      }
+    },
+    "BNBUSDT_SMA100": {
+      "BTC_above_SMA200": {
+        "days": 1118,
+        "compound_return_pct": 371.21907119382314,
+        "mean_daily_bp": 19.80469416341342,
+        "positive_day_pct": 42.93381037567084,
+        "sharpe": 1.1055498962605375
+      },
+      "BTC_below_SMA200": {
+        "days": 944,
+        "compound_return_pct": -40.43535738949856,
+        "mean_daily_bp": -4.381705451141914,
+        "positive_day_pct": 10.38135593220339,
+        "sharpe": -0.5686501837456429
+      }
+    },
+    "trend_mix_ungated": {
+      "BTC_above_SMA200": {
+        "days": 1118,
+        "compound_return_pct": 257.9039733574008,
+        "mean_daily_bp": 14.598937443497787,
+        "positive_day_pct": 46.601073345259394,
+        "sharpe": 1.1133399095915668
+      },
+      "BTC_below_SMA200": {
+        "days": 944,
+        "compound_return_pct": 1.5009570041422116,
+        "mean_daily_bp": 1.0364099576594399,
+        "positive_day_pct": 24.576271186440678,
+        "sharpe": 0.1496015648444681
+      }
+    },
+    "trend_mix_BTC200_gate": {
+      "BTC_above_SMA200": {
+        "days": 1118,
+        "compound_return_pct": 269.3775758254924,
+        "mean_daily_bp": 14.87639662059093,
+        "positive_day_pct": 47.40608228980322,
+        "sharpe": 1.1360276244616394
+      },
+      "BTC_below_SMA200": {
+        "days": 944,
+        "compound_return_pct": -1.6966284512177965,
+        "mean_daily_bp": -0.18116191331200285,
+        "positive_day_pct": 0.0,
+        "sharpe": -2.375127299302173
+      }
+    },
+    "monthly_mom30_SMA50_rotation_validation_winner": {
+      "BTC_above_SMA200": {
+        "days": 1118,
+        "compound_return_pct": 2776.1003456061494,
+        "mean_daily_bp": 43.07841448886082,
+        "positive_day_pct": 45.61717352415027,
+        "sharpe": 1.5939285712810536
+      },
+      "BTC_below_SMA200": {
+        "days": 944,
+        "compound_return_pct": -42.54023414570987,
+        "mean_daily_bp": -1.0623182444215717,
+        "positive_day_pct": 23.622881355932204,
+        "sharpe": -0.06508374191983374
+      }
+    },
+    "SOL_dip200_TP100_14d_validation_winner": {
+      "BTC_above_SMA200": {
+        "days": 1118,
+        "compound_return_pct": 1161.1162394878245,
+        "mean_daily_bp": 29.09357408990221,
+        "positive_day_pct": 29.785330948121647,
+        "sharpe": 1.5312733727147356
+      },
+      "BTC_below_SMA200": {
+        "days": 944,
+        "compound_return_pct": -98.11982491739072,
+        "mean_daily_bp": -30.066128066217832,
+        "positive_day_pct": 32.097457627118644,
+        "sharpe": -1.1985622239339835
+      }
+    },
+    "BNB_SMA100_BTC_SMA100_confirm": {
+      "BTC_above_SMA200": {
+        "days": 1118,
+        "compound_return_pct": 977.783788688731,
+        "mean_daily_bp": 25.903350733960973,
+        "positive_day_pct": 39.26654740608229,
+        "sharpe": 1.6111548706453978
+      },
+      "BTC_below_SMA200": {
+        "days": 944,
+        "compound_return_pct": 21.875564431019413,
+        "mean_daily_bp": 2.4849113307301076,
+        "positive_day_pct": 4.02542372881356,
+        "sharpe": 0.5324654484263839
+      }
+    }
+  }
+}

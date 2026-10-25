@@ -1,0 +1,575 @@
+{
+  "universe": [
+    "BTCUSDT",
+    "ETHUSDT",
+    "BNBUSDT",
+    "XRPUSDT",
+    "SOLUSDT",
+    "ADAUSDT",
+    "DOGEUSDT"
+  ],
+  "data": "Binance Spot daily klines; common calendar across all seven pairs",
+  "execution": "signal from prior daily close; rebalance at next open; open-to-next-open returns",
+  "cost": "15 bps per side on absolute weight changes; includes assumed 10bp fee + 5bp slippage",
+  "selection_rule": "rank by validation 2023-24 only; report 2025 and 2026 separately",
+  "results": [
+    {
+      "strategy": "momentum30_above_sma50_monthly",
+      "lookback_days": 30,
+      "trend_filter_days": 50,
+      "rebalance": "monthly",
+      "cost_bps_per_side": 15,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": 36.84141841438504,
+          "sharpe": 0.6708034993888631,
+          "max_dd_pct": -73.9340640520324
+        },
+        "validation_2023_2024": {
+          "return_pct": 1052.1326386401597,
+          "sharpe": 1.8308331665960496,
+          "max_dd_pct": -56.79099750663907
+        },
+        "selection_2025": {
+          "return_pct": -26.99604365252143,
+          "sharpe": -0.25729798241047264,
+          "max_dd_pct": -39.23118128629187
+        },
+        "holdout_2026": {
+          "return_pct": -0.027429666187861468,
+          "sharpe": 0.21908785207266132,
+          "max_dd_pct": -34.13404672036909
+        }
+      },
+      "turnover_units": 89.0,
+      "observations": 2263
+    },
+    {
+      "strategy": "momentum30_above_sma200_monthly",
+      "lookback_days": 30,
+      "trend_filter_days": 200,
+      "rebalance": "monthly",
+      "cost_bps_per_side": 15,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": 168.3559560487503,
+          "sharpe": 0.9006064568530794,
+          "max_dd_pct": -75.26917340211902
+        },
+        "validation_2023_2024": {
+          "return_pct": 798.6377350432296,
+          "sharpe": 1.6907857001511313,
+          "max_dd_pct": -57.51957105037111
+        },
+        "selection_2025": {
+          "return_pct": -21.689755097003914,
+          "sharpe": -0.08291603868285694,
+          "max_dd_pct": -45.28398452201624
+        },
+        "holdout_2026": {
+          "return_pct": -1.9309215201437802,
+          "sharpe": 0.05657414156133808,
+          "max_dd_pct": -21.523668639053252
+        }
+      },
+      "turnover_units": 77.0,
+      "observations": 2263
+    },
+    {
+      "strategy": "momentum90_above_sma200_weekly",
+      "lookback_days": 90,
+      "trend_filter_days": 200,
+      "rebalance": "weekly",
+      "cost_bps_per_side": 15,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": -17.44702393234353,
+          "sharpe": 0.3704068539511621,
+          "max_dd_pct": -83.09415951841011
+        },
+        "validation_2023_2024": {
+          "return_pct": 694.3897992608221,
+          "sharpe": 1.6677129430931918,
+          "max_dd_pct": -61.685772220069246
+        },
+        "selection_2025": {
+          "return_pct": 16.889013445102762,
+          "sharpe": 0.5799023157791686,
+          "max_dd_pct": -47.766824409560925
+        },
+        "holdout_2026": {
+          "return_pct": -12.505782396503006,
+          "sharpe": -0.5439747974133029,
+          "max_dd_pct": -19.511325162711067
+        }
+      },
+      "turnover_units": 103.0,
+      "observations": 2263
+    },
+    {
+      "strategy": "momentum30_above_sma100_monthly",
+      "lookback_days": 30,
+      "trend_filter_days": 100,
+      "rebalance": "monthly",
+      "cost_bps_per_side": 15,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": 4.930310557247619,
+          "sharpe": 0.5709542902931426,
+          "max_dd_pct": -75.26917340211902
+        },
+        "validation_2023_2024": {
+          "return_pct": 633.1993241806732,
+          "sharpe": 1.5757005406554532,
+          "max_dd_pct": -58.42181460734882
+        },
+        "selection_2025": {
+          "return_pct": -4.353575077308203,
+          "sharpe": 0.22076581813451412,
+          "max_dd_pct": -36.47927183723419
+        },
+        "holdout_2026": {
+          "return_pct": -29.19844782658263,
+          "sharpe": -1.0593563538380557,
+          "max_dd_pct": -37.49333676280341
+        }
+      },
+      "turnover_units": 85.0,
+      "observations": 2263
+    },
+    {
+      "strategy": "momentum180_above_sma200_weekly",
+      "lookback_days": 180,
+      "trend_filter_days": 200,
+      "rebalance": "weekly",
+      "cost_bps_per_side": 15,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": 255.40984754143054,
+          "sharpe": 0.9770692607383642,
+          "max_dd_pct": -84.18180682890201
+        },
+        "validation_2023_2024": {
+          "return_pct": 618.9682339796456,
+          "sharpe": 1.6258764297896908,
+          "max_dd_pct": -55.642727634627356
+        },
+        "selection_2025": {
+          "return_pct": -21.44948976039023,
+          "sharpe": 0.07444152882607492,
+          "max_dd_pct": -52.07024262698402
+        },
+        "holdout_2026": {
+          "return_pct": -15.71691203319161,
+          "sharpe": -0.9656171464623408,
+          "max_dd_pct": -20.459496460247408
+        }
+      },
+      "turnover_units": 81.0,
+      "observations": 2263
+    },
+    {
+      "strategy": "momentum90_above_sma50_weekly",
+      "lookback_days": 90,
+      "trend_filter_days": 50,
+      "rebalance": "weekly",
+      "cost_bps_per_side": 15,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": 115.26526089809796,
+          "sharpe": 0.8319943177982394,
+          "max_dd_pct": -66.36892125602164
+        },
+        "validation_2023_2024": {
+          "return_pct": 553.420316004233,
+          "sharpe": 1.5563662244601981,
+          "max_dd_pct": -55.22567550906699
+        },
+        "selection_2025": {
+          "return_pct": -1.9315867044074397,
+          "sharpe": 0.28122910780784544,
+          "max_dd_pct": -57.993745372451635
+        },
+        "holdout_2026": {
+          "return_pct": -32.25078235692293,
+          "sharpe": -1.1059238417791166,
+          "max_dd_pct": -40.33762605662184
+        }
+      },
+      "turnover_units": 177.0,
+      "observations": 2263
+    },
+    {
+      "strategy": "momentum90_above_sma200_monthly",
+      "lookback_days": 90,
+      "trend_filter_days": 200,
+      "rebalance": "monthly",
+      "cost_bps_per_side": 15,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": 12.424734332127985,
+          "sharpe": 0.5138519949811587,
+          "max_dd_pct": -75.10867275266212
+        },
+        "validation_2023_2024": {
+          "return_pct": 487.4087718961129,
+          "sharpe": 1.4976479010299861,
+          "max_dd_pct": -60.46840533789097
+        },
+        "selection_2025": {
+          "return_pct": 5.48824968779551,
+          "sharpe": 0.4437271128737839,
+          "max_dd_pct": -45.433283722625575
+        },
+        "holdout_2026": {
+          "return_pct": 1.332023651713743,
+          "sharpe": 0.18365033664701486,
+          "max_dd_pct": -14.243481486245823
+        }
+      },
+      "turnover_units": 49.0,
+      "observations": 2263
+    },
+    {
+      "strategy": "momentum30_above_sma50_weekly",
+      "lookback_days": 30,
+      "trend_filter_days": 50,
+      "rebalance": "weekly",
+      "cost_bps_per_side": 15,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": 137.572862283282,
+          "sharpe": 0.9015941195810839,
+          "max_dd_pct": -66.88217021859832
+        },
+        "validation_2023_2024": {
+          "return_pct": 439.83017530330875,
+          "sharpe": 1.3724424716514838,
+          "max_dd_pct": -53.99830982027132
+        },
+        "selection_2025": {
+          "return_pct": 45.554716175207346,
+          "sharpe": 0.8866736367209015,
+          "max_dd_pct": -53.96576409080127
+        },
+        "holdout_2026": {
+          "return_pct": -51.58694153788556,
+          "sharpe": -1.780181423625414,
+          "max_dd_pct": -53.50350811522
+        }
+      },
+      "turnover_units": 211.0,
+      "observations": 2263
+    },
+    {
+      "strategy": "momentum90_above_sma50_monthly",
+      "lookback_days": 90,
+      "trend_filter_days": 50,
+      "rebalance": "monthly",
+      "cost_bps_per_side": 15,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": -20.571288694668375,
+          "sharpe": 0.44980337713101803,
+          "max_dd_pct": -71.26609014903187
+        },
+        "validation_2023_2024": {
+          "return_pct": 431.29035740761464,
+          "sharpe": 1.4526441931538192,
+          "max_dd_pct": -63.973567119512545
+        },
+        "selection_2025": {
+          "return_pct": 21.500851115542098,
+          "sharpe": 0.6198433773811505,
+          "max_dd_pct": -36.479271837234165
+        },
+        "holdout_2026": {
+          "return_pct": -8.15932788929864,
+          "sharpe": -0.10876055463026357,
+          "max_dd_pct": -34.84963858375543
+        }
+      },
+      "turnover_units": 65.0,
+      "observations": 2263
+    },
+    {
+      "strategy": "momentum180_above_sma200_monthly",
+      "lookback_days": 180,
+      "trend_filter_days": 200,
+      "rebalance": "monthly",
+      "cost_bps_per_side": 15,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": 518.850730368672,
+          "sharpe": 1.1599244379195823,
+          "max_dd_pct": -80.0394772008281
+        },
+        "validation_2023_2024": {
+          "return_pct": 403.6033469365825,
+          "sharpe": 1.424498626011363,
+          "max_dd_pct": -44.6596489942922
+        },
+        "selection_2025": {
+          "return_pct": -15.986249683663246,
+          "sharpe": 0.1463417375053385,
+          "max_dd_pct": -50.05269829531285
+        },
+        "holdout_2026": {
+          "return_pct": -5.059185153877888,
+          "sharpe": -0.2696644760936818,
+          "max_dd_pct": -15.510202363466108
+        }
+      },
+      "turnover_units": 35.0,
+      "observations": 2263
+    },
+    {
+      "strategy": "momentum180_above_sma50_monthly",
+      "lookback_days": 180,
+      "trend_filter_days": 50,
+      "rebalance": "monthly",
+      "cost_bps_per_side": 15,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": 114.70383282934687,
+          "sharpe": 0.7982874924438402,
+          "max_dd_pct": -69.1232880538611
+        },
+        "validation_2023_2024": {
+          "return_pct": 391.3608921565996,
+          "sharpe": 1.420344674031646,
+          "max_dd_pct": -60.502914223281955
+        },
+        "selection_2025": {
+          "return_pct": 1.182264858078086,
+          "sharpe": 0.311424134635651,
+          "max_dd_pct": -39.15312281432155
+        },
+        "holdout_2026": {
+          "return_pct": -0.6419312394722043,
+          "sharpe": 0.16376787639013687,
+          "max_dd_pct": -32.138065963014725
+        }
+      },
+      "turnover_units": 61.0,
+      "observations": 2263
+    },
+    {
+      "strategy": "momentum180_above_sma50_weekly",
+      "lookback_days": 180,
+      "trend_filter_days": 50,
+      "rebalance": "weekly",
+      "cost_bps_per_side": 15,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": 856.4266573338058,
+          "sharpe": 1.2975461618090756,
+          "max_dd_pct": -63.61324470242964
+        },
+        "validation_2023_2024": {
+          "return_pct": 285.7608102766557,
+          "sharpe": 1.2432470584888093,
+          "max_dd_pct": -69.30177562868045
+        },
+        "selection_2025": {
+          "return_pct": -32.277377767005355,
+          "sharpe": -0.33321034105030567,
+          "max_dd_pct": -58.10977742986066
+        },
+        "holdout_2026": {
+          "return_pct": -24.661575736825192,
+          "sharpe": -0.90603277033642,
+          "max_dd_pct": -32.19488327553305
+        }
+      },
+      "turnover_units": 173.0,
+      "observations": 2263
+    },
+    {
+      "strategy": "momentum90_above_sma100_weekly",
+      "lookback_days": 90,
+      "trend_filter_days": 100,
+      "rebalance": "weekly",
+      "cost_bps_per_side": 15,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": -4.616197503313336,
+          "sharpe": 0.5513126248226885,
+          "max_dd_pct": -76.68566120167067
+        },
+        "validation_2023_2024": {
+          "return_pct": 273.9338849289802,
+          "sharpe": 1.1934719473812925,
+          "max_dd_pct": -67.45468041295719
+        },
+        "selection_2025": {
+          "return_pct": 8.171429794808382,
+          "sharpe": 0.46167303930705766,
+          "max_dd_pct": -45.440167152443756
+        },
+        "holdout_2026": {
+          "return_pct": -14.090081533139564,
+          "sharpe": -0.33078485163217874,
+          "max_dd_pct": -31.836580510240665
+        }
+      },
+      "turnover_units": 141.0,
+      "observations": 2263
+    },
+    {
+      "strategy": "momentum30_above_sma200_weekly",
+      "lookback_days": 30,
+      "trend_filter_days": 200,
+      "rebalance": "weekly",
+      "cost_bps_per_side": 15,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": -22.998097396489968,
+          "sharpe": 0.37850644603943534,
+          "max_dd_pct": -82.52492922863226
+        },
+        "validation_2023_2024": {
+          "return_pct": 235.59028655241994,
+          "sharpe": 1.133802760510553,
+          "max_dd_pct": -55.56345994930578
+        },
+        "selection_2025": {
+          "return_pct": -40.35766334019949,
+          "sharpe": -0.27943163959687345,
+          "max_dd_pct": -71.20087526642749
+        },
+        "holdout_2026": {
+          "return_pct": -17.98367174595078,
+          "sharpe": -0.6462915723253617,
+          "max_dd_pct": -24.547240711170048
+        }
+      },
+      "turnover_units": 213.0,
+      "observations": 2263
+    },
+    {
+      "strategy": "momentum180_above_sma100_weekly",
+      "lookback_days": 180,
+      "trend_filter_days": 100,
+      "rebalance": "weekly",
+      "cost_bps_per_side": 15,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": 522.7132001499388,
+          "sharpe": 1.1610220725731217,
+          "max_dd_pct": -74.09034240816443
+        },
+        "validation_2023_2024": {
+          "return_pct": 192.29085287557703,
+          "sharpe": 1.0583203745093666,
+          "max_dd_pct": -71.82088780687653
+        },
+        "selection_2025": {
+          "return_pct": -12.156438717585106,
+          "sharpe": 0.1530973597746868,
+          "max_dd_pct": -45.0036729964723
+        },
+        "holdout_2026": {
+          "return_pct": -16.118480231327492,
+          "sharpe": -0.5008804371825437,
+          "max_dd_pct": -30.17731338980726
+        }
+      },
+      "turnover_units": 127.0,
+      "observations": 2263
+    },
+    {
+      "strategy": "momentum90_above_sma100_monthly",
+      "lookback_days": 90,
+      "trend_filter_days": 100,
+      "rebalance": "monthly",
+      "cost_bps_per_side": 15,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": 12.706217195368907,
+          "sharpe": 0.6167225875699519,
+          "max_dd_pct": -73.80989780427241
+        },
+        "validation_2023_2024": {
+          "return_pct": 151.02661239663794,
+          "sharpe": 0.9677197169217263,
+          "max_dd_pct": -62.568847620229164
+        },
+        "selection_2025": {
+          "return_pct": 43.87774581033668,
+          "sharpe": 0.9049284818959936,
+          "max_dd_pct": -39.44643884898493
+        },
+        "holdout_2026": {
+          "return_pct": -26.84274522995098,
+          "sharpe": -1.1231258547230023,
+          "max_dd_pct": -37.49333676280341
+        }
+      },
+      "turnover_units": 63.0,
+      "observations": 2263
+    },
+    {
+      "strategy": "momentum30_above_sma100_weekly",
+      "lookback_days": 30,
+      "trend_filter_days": 100,
+      "rebalance": "weekly",
+      "cost_bps_per_side": 15,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": -8.027958985675577,
+          "sharpe": 0.5825836937448563,
+          "max_dd_pct": -76.98012447168155
+        },
+        "validation_2023_2024": {
+          "return_pct": 144.7858617534035,
+          "sharpe": 0.9358531643918678,
+          "max_dd_pct": -63.00401055943259
+        },
+        "selection_2025": {
+          "return_pct": 47.93905969372065,
+          "sharpe": 0.8801410346277403,
+          "max_dd_pct": -41.88949103035075
+        },
+        "holdout_2026": {
+          "return_pct": -21.257331441585936,
+          "sharpe": -0.5086589329799052,
+          "max_dd_pct": -32.23096454016747
+        }
+      },
+      "turnover_units": 209.0,
+      "observations": 2263
+    },
+    {
+      "strategy": "momentum180_above_sma100_monthly",
+      "lookback_days": 180,
+      "trend_filter_days": 100,
+      "rebalance": "monthly",
+      "cost_bps_per_side": 15,
+      "splits": {
+        "train_2020_2022": {
+          "return_pct": 1314.986160216659,
+          "sharpe": 1.4316192100059082,
+          "max_dd_pct": -75.73638626822776
+        },
+        "validation_2023_2024": {
+          "return_pct": 126.58353826673694,
+          "sharpe": 0.9150171356208143,
+          "max_dd_pct": -65.10935421098426
+        },
+        "selection_2025": {
+          "return_pct": -3.6904427096188797,
+          "sharpe": 0.19145026170476068,
+          "max_dd_pct": -42.08336992184826
+        },
+        "holdout_2026": {
+          "return_pct": -29.85067369909864,
+          "sharpe": -1.6302757692133882,
+          "max_dd_pct": -34.87804107366955
+        }
+      },
+      "turnover_units": 47.0,
+      "observations": 2263
+    }
+  ]
+}

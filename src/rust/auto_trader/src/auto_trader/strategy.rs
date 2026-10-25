@@ -1,6 +1,6 @@
 async fn run_cycle_inner(
     state: &AutoTraderState,
-    dashboard: Dashboard,
+    mut dashboard: Dashboard,
 ) -> Result<CycleResult, (StatusCode, String)> {
     let cycle_started = Instant::now();
     let _cycle = acquire_cycle_lock(state, "signal").await;
@@ -27,6 +27,68 @@ async fn run_cycle_inner(
         return Ok(result);
     }
     let dashboard_ms = 0.0;
+    let regime_now_ms = now.saturating_mul(1000);
+    let has_generic_signals = !dashboard.best.is_empty();
+    let (generic_signals_enabled, research_strategies_enabled) = {
+        let settings = state.settings.lock().await;
+        (
+            settings.generic_signals_enabled,
+            !settings.research_strategies.is_empty(),
+        )
+    };
+    if has_generic_signals {
+        if !generic_signals_enabled {
+            return Ok(CycleResult {
+                status: "skipped",
+                reason: Some("Generic insight strategy is disabled".into()),
+                symbol: None,
+                side: None,
+                quantity: None,
+                order_type: None,
+                order_response: None,
+            });
+        }
+    } else if research_strategies_enabled {
+        let research_regime = match load_research_regime_snapshot(state, regime_now_ms).await {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                return Ok(CycleResult {
+                    status: "skipped",
+                    reason: Some(format!(
+                        "Research daily market data unavailable; no entry submitted: {error}"
+                    )),
+                    symbol: None,
+                    side: None,
+                    quantity: None,
+                    order_type: None,
+                    order_response: None,
+                })
+            }
+        };
+        dashboard.best = research_regime.generated_signals.clone();
+        if dashboard.best.is_empty() {
+            return Ok(CycleResult {
+                status: "skipped",
+                reason: Some(research_regime.empty_signal_reason().into()),
+                symbol: None,
+                side: None,
+                quantity: None,
+                order_type: None,
+                order_response: None,
+            });
+        }
+    }
+    if dashboard.best.is_empty() {
+        return Ok(CycleResult {
+            status: "skipped",
+            reason: Some("No generic or daily strategy signals are enabled".into()),
+            symbol: None,
+            side: None,
+            quantity: None,
+            order_type: None,
+            order_response: None,
+        });
+    }
     let selection_started = Instant::now();
     let (
         learning,
@@ -232,10 +294,11 @@ async fn run_cycle_inner(
                 ),
             ));
         }
-    } else if settings
-        .last_signal_direction
-        .get(&signal_key)
-        .is_some_and(|direction| direction == &signal.direction)
+    } else if !signal.research_strategy_candidate
+        && settings
+            .last_signal_direction
+            .get(&signal_key)
+            .is_some_and(|direction| direction == &signal.direction)
         && settings
             .last_signal_strength
             .get(&signal_key)
@@ -249,10 +312,11 @@ async fn run_cycle_inner(
             ),
         ));
     }
-    if settings
-        .last_signal_at
-        .get(&signal_key)
-        .is_some_and(|last| now_ms.saturating_sub(*last) < SIGNAL_COOLDOWN_MS)
+    if !signal.research_strategy_candidate
+        && settings
+            .last_signal_at
+            .get(&signal_key)
+            .is_some_and(|last| now_ms.saturating_sub(*last) < SIGNAL_COOLDOWN_MS)
     {
         return Ok(skipped_for_signal(
             signal,
@@ -327,11 +391,19 @@ async fn run_cycle_inner(
         minimum_book_order * quote_rate,
     );
     let deep_book_ms = deep_book_started.elapsed().as_secs_f64() * 1000.0;
-    let horizon_take_profit_percent = horizon_adjusted_take_profit_percent(
-        &signal,
-        &dashboard.walk_forward,
-        settings.take_profit_percent,
-    );
+    let learned_exit_policy = learned_exit_policy(&signal, &dashboard.walk_forward);
+    let effective_stop_loss_percent = learned_exit_policy
+        .map(|(stop, _)| stop)
+        .unwrap_or(counterfactual_stop_loss_percent);
+    let horizon_take_profit_percent = learned_exit_policy.map(|(_, target)| target).or_else(|| {
+        horizon_adjusted_take_profit_percent(
+            &signal,
+            &dashboard.walk_forward,
+            settings.take_profit_percent,
+        )
+    });
+    let effective_take_profit_percent =
+        horizon_take_profit_percent.unwrap_or(counterfactual_take_profit_percent);
     let context = market_context(&signal);
     decay_learning_map(&mut settings.learning, now_ms);
     let learned_type = if scout {
@@ -535,6 +607,12 @@ async fn run_cycle_inner(
             side: side.to_owned(),
             order_type: format!("{order_type:?} · P{profile}"),
             purpose: if scout { "scout" } else { "signal" }.into(),
+            strategy: Some(
+                signal
+                    .research_strategy
+                    .clone()
+                    .unwrap_or_else(|| "generic-insight-signals".into()),
+            ),
             decision_id: Some(decision_id.clone()),
             quantity,
             filled_quantity: 0.0,
@@ -581,6 +659,8 @@ async fn run_cycle_inner(
         scout,
         counterfactual_stop_loss_percent,
         counterfactual_take_profit_percent,
+        effective_stop_loss_percent,
+        effective_take_profit_percent,
         evidence,
         side,
         quantity,
@@ -614,6 +694,8 @@ struct SelectedOrderExecution<'a> {
     scout: bool,
     counterfactual_stop_loss_percent: f64,
     counterfactual_take_profit_percent: f64,
+    effective_stop_loss_percent: f64,
+    effective_take_profit_percent: f64,
     evidence: Option<&'a WalkForward>,
     side: &'a str,
     quantity: f64,
@@ -648,6 +730,8 @@ async fn submit_and_record_selected_order(
         scout,
         counterfactual_stop_loss_percent,
         counterfactual_take_profit_percent,
+        effective_stop_loss_percent,
+        effective_take_profit_percent,
         evidence,
         side,
         quantity,
@@ -757,6 +841,13 @@ async fn submit_and_record_selected_order(
         .unwrap_or(0.0)
         .abs();
     let (realized_delta, learned_type) = if filled > 0.0 {
+        let prior_quantity = settings
+            .positions
+            .get(&signal.symbol)
+            .map_or(0.0, |position| position.quantity);
+        let incoming_sign = if side == "buy" { 1.0_f64 } else { -1.0_f64 };
+        let is_new_position_direction =
+            prior_quantity == 0.0 || incoming_sign != prior_quantity.signum();
         let result = average_price
             .map(|price| {
                 apply_auto_fill(
@@ -768,12 +859,20 @@ async fn submit_and_record_selected_order(
                     fee,
                     &format!("{order_type:?}"),
                     &learning_context,
+                    true,
                     horizon_take_profit_percent,
                 )
             })
             .unwrap_or_default();
         if let Some(position) = settings.positions.get_mut(&signal.symbol) {
             position.entry_decision_id = Some(decision_id.to_owned());
+            if signal.research_strategy.is_some() {
+                position.research_strategy = signal.research_strategy.clone();
+            }
+            if position.quantity.abs() > 1e-12 && is_new_position_direction {
+                position.stop_loss_percent = Some(effective_stop_loss_percent);
+                position.take_profit_percent = Some(effective_take_profit_percent);
+            }
         }
         result
     } else {
@@ -837,6 +936,9 @@ async fn submit_and_record_selected_order(
         evidence,
     );
     audit_payload["scout"] = serde_json::json!(scout);
+    audit_payload["effective_stop_loss_percent"] = serde_json::json!(effective_stop_loss_percent);
+    audit_payload["effective_take_profit_percent"] =
+        serde_json::json!(effective_take_profit_percent);
     audit_payload["order_type"] = serde_json::json!(format!("{order_type:?}"));
     audit_payload["order_quantity"] = serde_json::json!(quantity);
     audit_payload["filled_quantity"] = serde_json::json!(filled);
@@ -863,11 +965,9 @@ async fn submit_and_record_selected_order(
     audit_payload["fill_rate"] = serde_json::json!((filled / quantity).clamp(0.0, 1.0));
     audit_payload["implementation_shortfall_bps"] = serde_json::json!(implementation_shortfall_bps);
     audit_payload["fee_bps"] = serde_json::json!(fee_bps);
-    audit_payload["all_in_cost_bps"] = serde_json::json!(
-        implementation_shortfall_bps
-            .zip(fee_bps)
-            .map(|(shortfall, fees)| shortfall + fees)
-    );
+    audit_payload["all_in_cost_bps"] = serde_json::json!(implementation_shortfall_bps
+        .zip(fee_bps)
+        .map(|(shortfall, fees)| shortfall + fees));
     audit_payload["bid"] = serde_json::json!(bid);
     audit_payload["ask"] = serde_json::json!(ask);
     audit_payload["spread_bps"] = serde_json::json!((ask - bid) / mid * 10_000.0);
@@ -997,7 +1097,13 @@ async fn load_signal_market_snapshot(
     tokio::spawn(async move {
         let _ = warm_client.post(warm_url).send().await;
     });
-    Ok(SignalMarketSnapshot { market, bid, ask, mid, market_inputs_ms })
+    Ok(SignalMarketSnapshot {
+        market,
+        bid,
+        ask,
+        mid,
+        market_inputs_ms,
+    })
 }
 
 struct FreshSignalCandidates<'a> {
@@ -1333,6 +1439,14 @@ fn select_cycle_signal<'a>(
         counterfactual_take_profit_percent,
         ..
     } = input;
+    if let Some(signal) = fresh_directional
+        .iter()
+        .copied()
+        .filter(|signal| signal.research_strategy_candidate)
+        .max_by(|a, b| a.strength.total_cmp(&b.strength))
+    {
+        return Ok((signal, false, false));
+    }
     let strength_qualified = fresh_directional
         .iter()
         .filter(|signal| {
