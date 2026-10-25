@@ -75,7 +75,7 @@ def metrics():
     try:
         positions = get_json(base, "/positions")
         if isinstance(positions.get("trade_count"), (int, float)):
-            output.append(sample("app_trade_count", "Number of persisted position ledger trades.", positions["trade_count"], kind="counter"))
+            output.append(sample("app_trade_count", "Cumulative number of persisted position ledger fill records.", positions["trade_count"], kind="counter"))
         open_positions = sum(1 for position in positions.get("positions", []) if abs(position.get("quantity", 0)) > 1e-12)
         output.append(sample("app_open_positions", "Number of currently open account positions.", open_positions))
     except (OSError, URLError, ValueError, TypeError):
@@ -126,6 +126,7 @@ def metrics():
             ("learning_win_rate", "app_autotrader_learning_win_rate", "Autotrader closed trade win rate from zero to one."),
             ("closed_trade_wins", "app_autotrader_closed_trade_wins", "Number of closed winning autotrader trades."),
             ("closed_trade_losses", "app_autotrader_closed_trade_losses", "Number of closed losing autotrader trades."),
+            ("closed_trade_flat", "app_autotrader_closed_trade_flat", "Number of closed near-flat autotrader trades."),
         ]:
             if isinstance(activity.get(key), (int, float)):
                 output.append(sample(metric, help_text, activity[key]))
@@ -135,7 +136,10 @@ def metrics():
             quote = symbol.rsplit("-", 1)[-1] if "-" in symbol else "unknown"
             value = item.get("realized_pnl")
             if isinstance(value, (int, float)):
-                output.append(sample("app_autotrader_strategy_realized_pnl", "Recent daily realized P and L grouped by AutoTrader strategy and quote currency.", value, {"strategy": strategy, "quote": quote}))
+                output.append(sample("app_autotrader_strategy_realized_pnl", "Recent realized P and L grouped by AutoTrader strategy and quote currency.", value, {"strategy": strategy, "quote": quote}))
+            outcomes = item.get("outcomes")
+            if isinstance(outcomes, (int, float)):
+                output.append(sample("app_autotrader_strategy_outcomes", "Number of realized trade outcomes grouped by AutoTrader strategy and quote currency.", outcomes, {"strategy": strategy, "quote": quote}))
         orders = activity.get("orders", [])
         output.append(sample("app_autotrader_orders", "Number of recorded autotrader orders.", len(orders)))
         for status_name in sorted({order.get("status", "unknown") for order in orders}):

@@ -206,7 +206,32 @@
         "defaults": {
           "unit": "short"
         },
-        "overrides": []
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Win rate"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "percent"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Closed trades"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "short"
+              }
+            ]
+          }
+        ]
       },
       "gridPos": {
         "x": 8,
@@ -219,7 +244,7 @@
         "colorMode": "value",
         "graphMode": "none",
         "justifyMode": "auto",
-        "orientation": "auto",
+        "orientation": "horizontal",
         "reduceOptions": {
           "calcs": [
             "lastNotNull"
@@ -227,15 +252,21 @@
           "fields": "",
           "values": false
         },
-        "textMode": "auto"
+        "textMode": "value_and_name"
       },
       "targets": [
         {
-          "expr": "app_trade_count",
+          "expr": "100 * sum(app_autotrader_closed_trade_wins) / clamp_min(sum(app_autotrader_closed_trade_wins) + sum(app_autotrader_closed_trade_losses) + sum(app_autotrader_closed_trade_flat), 1)",
+          "legendFormat": "Win rate",
           "refId": "A"
+        },
+        {
+          "expr": "sum(app_autotrader_closed_trade_wins) + sum(app_autotrader_closed_trade_losses) + sum(app_autotrader_closed_trade_flat)",
+          "legendFormat": "Closed trades",
+          "refId": "B"
         }
       ],
-      "title": "Position ledger trades",
+      "title": "Closed trades \u00b7 today UTC",
       "type": "stat"
     },
     {
@@ -1030,9 +1061,48 @@
           "refId": "A"
         }
       ],
-      "title": "Autotrader daily realized P&L by strategy",
+      "title": "AutoTrader realized P&L by strategy",
       "type": "timeseries",
-      "description": "Realized daily P&L attributed to the entry strategy. Values are in the symbol quote currency; check the quote label when comparing strategies."
+      "description": "Recent realized P&L attributed to the entry strategy. Values are in the symbol quote currency; check the quote label when comparing strategies."
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "description": "Number of realized outcomes in the same recent activity window as strategy P&L. Use this to judge the sample size behind each strategy result.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 84,
+        "w": 24,
+        "h": 7
+      },
+      "id": 43,
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "single"
+        }
+      },
+      "targets": [
+        {
+          "expr": "app_autotrader_strategy_outcomes",
+          "legendFormat": "{{strategy}} \u00b7 {{quote}}",
+          "refId": "A"
+        }
+      ],
+      "title": "AutoTrader trade outcomes by strategy",
+      "type": "timeseries"
     }
   ],
   "refresh": "15s",
@@ -1095,5 +1165,5 @@
   "timezone": "browser",
   "title": "SBE TS System and Trading",
   "uid": "sbe-ts-overview",
-  "version": 4
+  "version": 5
 }

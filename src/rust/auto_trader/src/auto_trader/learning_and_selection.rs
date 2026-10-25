@@ -254,24 +254,34 @@ fn order_type_learning_stats(
     kind: AutoOrderType,
     learning: &BTreeMap<String, LearningStats>,
 ) -> LearningStats {
-    let prefix = format!("{context}:P");
-    let suffix = format!(":{kind:?}");
-    learning
-        .iter()
-        .filter(|(key, _)| key.starts_with(&prefix) && key.ends_with(&suffix))
-        .map(|(_, stats)| stats)
-        .fold(
-            learning
-                .get(&format!("{context}:{kind:?}"))
-                .cloned()
-                .unwrap_or_default(),
-            |mut total, item| {
-                total.samples += item.samples;
-                total.positive += item.positive;
-                total.realized_pnl += item.realized_pnl;
-                total
-            },
-        )
+    // Paper Market and IOC both execute immediately against the same book
+    // levels with the same taker fee and no resting remainder. Treat their
+    // historical cohorts as one execution behavior so evidence is not split
+    // across two labels for identical fills.
+    let equivalent_kinds: &[AutoOrderType] = match kind {
+        AutoOrderType::Market | AutoOrderType::Ioc => &[AutoOrderType::Market, AutoOrderType::Ioc],
+        _ => std::slice::from_ref(&kind),
+    };
+    let mut total = LearningStats::default();
+    for equivalent_kind in equivalent_kinds {
+        let prefix = format!("{context}:P");
+        let suffix = format!(":{equivalent_kind:?}");
+        for stats in learning
+            .iter()
+            .filter(|(key, _)| key.starts_with(&prefix) && key.ends_with(&suffix))
+            .map(|(_, stats)| stats)
+        {
+            total.samples += stats.samples;
+            total.positive += stats.positive;
+            total.realized_pnl += stats.realized_pnl;
+        }
+        if let Some(stats) = learning.get(&format!("{context}:{equivalent_kind:?}")) {
+            total.samples += stats.samples;
+            total.positive += stats.positive;
+            total.realized_pnl += stats.realized_pnl;
+        }
+    }
+    total
 }
 
 fn adapt_order_type(
@@ -536,8 +546,7 @@ fn score_execution_order_type(
         if signal.direction == "bullish" { assessment.ask_depth_10bps } else { assessment.bid_depth_10bps }
     }).unwrap_or(0.0);
     let depth_ratio = if side_depth > 0.0 { notional / side_depth } else { 0.0 };
-    // Once the parent order is a material share of visible near-touch liquidity,
-    // keep it whole and let the scheduler work it in slices instead of shrinking it.
+    // Large parent orders use the scheduler to work child slices against volume.
     let large_order = depth_ratio >= schedule_depth_threshold;
     let urgency = (signal.components.momentum_10s_percent.unwrap_or(0.0).abs() / 0.30)
         .max(signal.components.pressure_without_price_move.unwrap_or(0.0).abs())
@@ -586,4 +595,37 @@ fn score_execution_order_type(
         if score > best_score { best = candidate; best_score = score; }
     }
     best
+}
+
+
+fn strategy_post_stop_cooldown_ms(strategy: &str, orders: &[TraderOrder]) -> u64 {
+    let outcomes = orders
+        .iter()
+        .rev()
+        .filter(|order| {
+            order.strategy.as_deref() == Some(strategy)
+                && matches!(
+                    order.purpose.as_str(),
+                    "stop-loss" | "take-profit" | "strategy-disabled" | "research-regime-exit"
+                )
+                && order.status == "filled"
+                && order.filled_quantity > 0.0
+                && order.realized_pnl.is_finite()
+        })
+        .take(POST_STOP_OUTCOME_WINDOW)
+        .collect::<Vec<_>>();
+
+    if outcomes.len() < MIN_POST_STOP_OUTCOMES_FOR_ADAPTATION {
+        return DEFAULT_POST_STOP_REENTRY_COOLDOWN_MS;
+    }
+
+    let win_rate = outcomes
+        .iter()
+        .filter(|order| order.realized_pnl > 0.0)
+        .count() as f64
+        / outcomes.len() as f64;
+    let loss_pressure = ((0.55 - win_rate) / 0.35).clamp(0.0, 1.0);
+    MIN_POST_STOP_REENTRY_COOLDOWN_MS
+        + ((MAX_POST_STOP_REENTRY_COOLDOWN_MS - MIN_POST_STOP_REENTRY_COOLDOWN_MS) as f64
+            * loss_pressure) as u64
 }

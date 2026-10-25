@@ -1,3 +1,118 @@
+async fn reconcile_auto_positions_with_ledger(
+    client: &reqwest::Client,
+    base: &str,
+    state: &AutoTraderState,
+) -> Result<(), (StatusCode, String)> {
+    let response: serde_json::Value = client
+        .get(format!("{base}/positions?source=auto"))
+        .send()
+        .await
+        .map_err(upstream_error)?
+        .error_for_status()
+        .map_err(upstream_error)?
+        .json()
+        .await
+        .map_err(upstream_error)?;
+    let ledger_positions = response["positions"]
+        .as_array()
+        .ok_or((
+            StatusCode::BAD_GATEWAY,
+            "Position manager response did not contain positions".into(),
+        ))?
+        .iter()
+        .filter_map(|position| {
+            Some((
+                position["symbol"].as_str()?.to_owned(),
+                position["quantity"].as_f64()?,
+                position["average_entry_price"].as_f64()?,
+                position["entry_fees"].as_f64().unwrap_or_default(),
+            ))
+        })
+        .filter(|(_, quantity, average_entry_price, entry_fees)| {
+            quantity.is_finite() && average_entry_price.is_finite() && entry_fees.is_finite()
+        })
+        .map(|(symbol, quantity, average_entry_price, entry_fees)| {
+            (symbol, (quantity, average_entry_price, entry_fees))
+        })
+        .collect::<BTreeMap<_, _>>();
+
+    let mut settings = state.settings.lock().await;
+    let flat_symbols = settings
+        .positions
+        .keys()
+        .chain(
+            settings
+                .orders
+                .iter()
+                .filter(|order| order.purpose == "stop-loss" && order.status == "unfilled")
+                .map(|order| &order.symbol),
+        )
+        .filter(|symbol| {
+            ledger_positions
+                .get(*symbol)
+                .is_none_or(|(quantity, _, _)| quantity.abs() <= 1e-12)
+        })
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let mut changed = false;
+
+    for (symbol, position) in &mut settings.positions {
+        if flat_symbols.contains(symbol) {
+            if position.quantity.abs() > 1e-12 || !position.protective_stops.is_empty() {
+                crate::service_log!(
+                    "INFO",
+                    "Reconciling stale AutoTrader position for {symbol}: {} -> 0; the position manager ledger is flat",
+                    position.quantity
+                );
+                *position = TraderPosition::default();
+                changed = true;
+            }
+            continue;
+        }
+        let Some((quantity, average_entry_price, entry_fees)) = ledger_positions.get(symbol) else {
+            continue;
+        };
+        let quantity_changed = (position.quantity - quantity).abs() > 1e-12;
+        let normalized_entry_fees = entry_fees.abs();
+        if quantity_changed
+            || (position.average_entry_price - average_entry_price).abs() > 1e-12
+            || (position.entry_fees - normalized_entry_fees).abs() > 1e-12
+        {
+            if quantity_changed {
+                crate::service_log!(
+                    "INFO",
+                    "Reconciling AutoTrader quantity for {symbol}: {} -> {} from the position manager ledger",
+                    position.quantity,
+                    quantity
+                );
+            }
+            position.quantity = *quantity;
+            position.average_entry_price = *average_entry_price;
+            // Position manager stores signed cash flows; AutoTrader stores costs as positive values.
+            position.entry_fees = normalized_entry_fees;
+            if quantity_changed {
+                position.protective_stops.clear();
+            }
+            changed = true;
+        }
+    }
+
+    for order in &mut settings.orders {
+        if order.purpose == "stop-loss"
+            && order.status == "unfilled"
+            && flat_symbols.contains(&order.symbol)
+        {
+            order.status = "cancelled".into();
+            order.failure_reason = None;
+            changed = true;
+        }
+    }
+    if changed {
+        persist_settings(&state.settings_path, &settings)?;
+    }
+    Ok(())
+}
+
 async fn maybe_exit_auto_position(
     client: &reqwest::Client,
     base: &str,
@@ -9,6 +124,7 @@ async fn maybe_exit_auto_position(
     // update is serialized by the settings mutex, and the exit path below
     // still takes the cycle lock before mutating orders or positions.
     sync_protective_stops(client, base, state).await?;
+    reconcile_auto_positions_with_ledger(client, base, state).await?;
     ensure_protective_stops(client, base, state).await?;
     let positions = {
         let settings = state.settings.lock().await;
@@ -91,7 +207,7 @@ async fn evaluate_position_exit(
     base: &str,
     state: &AutoTraderState,
     symbol: String,
-    position: TraderPosition,
+    mut position: TraderPosition,
     inputs_by_symbol: &mut BTreeMap<String, serde_json::Value>,
     research_regime: Option<&ResearchRegimeSnapshot>,
 ) -> Result<Option<CycleResult>, (StatusCode, String)> {
@@ -117,6 +233,29 @@ async fn evaluate_position_exit(
     else {
         return Ok(None);
     };
+    let observed_at = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+    {
+        let mut settings = state.settings.lock().await;
+        if let Some(current) = settings.positions.get_mut(&symbol) {
+            let should_sample = current
+                .price_path
+                .last()
+                .is_none_or(|sample| observed_at.saturating_sub(sample.timestamp) >= 5_000);
+            if should_sample {
+                current.price_path.push(TradePriceSample { timestamp: observed_at, bid, ask });
+                if current.price_path.len() > 4096 {
+                    current.price_path.drain(..current.price_path.len() - 4096);
+                }
+                position.price_path = current.price_path.clone();
+                persist_settings(&state.settings_path, &settings)?;
+            } else {
+                position.price_path = current.price_path.clone();
+            }
+        }
+    }
     let is_long = position.quantity > 0.0;
     let exit_price = if is_long { bid } else { ask };
     let entry_notional = position.quantity.abs() * position.average_entry_price;
@@ -128,9 +267,13 @@ async fn evaluate_position_exit(
     } else {
         0.0
     };
-    let (stop_loss_percent, take_profit_percent) = {
+    let (stop_loss_percent, configured_take_profit_percent, closed_trade_returns) = {
         let settings = state.settings.lock().await;
-        (settings.stop_loss_percent, settings.take_profit_percent)
+        (
+            settings.stop_loss_percent,
+            settings.take_profit_percent,
+            settings.closed_trade_returns_percent.clone(),
+        )
     };
     let stop_loss_percent = position.stop_loss_percent.unwrap_or(stop_loss_percent);
     let take_profit_percent = position
@@ -138,9 +281,13 @@ async fn evaluate_position_exit(
         .or_else(|| {
             position
                 .horizon_take_profit_percent
-                .map(|target| target.max(take_profit_percent))
+                .map(|target| target.max(configured_take_profit_percent))
         })
-        .unwrap_or(take_profit_percent);
+        .unwrap_or(configured_take_profit_percent);
+    let take_profit_percent = confidence_adjusted_take_profit_percent(
+        &closed_trade_returns,
+        take_profit_percent,
+    );
     let (strategy_disabled, strategy_no_longer_eligible) = {
         let settings = state.settings.lock().await;
         let strategy_disabled = position.research_strategy.as_ref().is_some_and(|strategy| {
@@ -169,7 +316,9 @@ async fn evaluate_position_exit(
     };
     if reason == "take-profit" {
         let probability = profitable_close_probability_5m(market, &position);
-        if probability.is_some_and(|value| value >= TAKE_PROFIT_HOLD_PROBABILITY_FLOOR) {
+        if win_rate_supports_extended_hold(&closed_trade_returns)
+            && probability.is_some_and(|value| value >= TAKE_PROFIT_HOLD_PROBABILITY_FLOOR)
+        {
             let now_ms = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .map_err(|_| {
@@ -207,6 +356,8 @@ async fn evaluate_position_exit(
         ask,
         reason,
         return_fraction,
+        stop_loss_percent,
+        take_profit_percent,
     )
     .await
 }
@@ -221,6 +372,8 @@ async fn submit_position_exit_order(
     ask: f64,
     reason: &str,
     return_fraction: f64,
+    stop_loss_percent: f64,
+    take_profit_percent: f64,
 ) -> Result<Option<CycleResult>, (StatusCode, String)> {
     let is_long = position.quantity > 0.0;
     let entry_notional = position.quantity.abs() * position.average_entry_price;
@@ -262,7 +415,8 @@ async fn submit_position_exit_order(
                     .clone()
                     .unwrap_or_else(|| "generic-insight-signals".into()),
             ),
-            decision_id: None,
+            // Link the protective exit to the decision that opened this position.
+            decision_id: position.entry_decision_id.clone(),
             quantity,
             filled_quantity: 0.0,
             fill_rate: 0.0,
@@ -374,9 +528,22 @@ async fn submit_position_exit_order(
         .find(|order| order.timestamp == timestamp)
     {
         order.filled_quantity = filled;
+        order.fill_rate = if quantity > 0.0 {
+            (filled / quantity).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
         order.average_price = average_price;
+        order.fees_paid = fee;
         order.realized_pnl = realized_pnl;
-        order.status = if filled > 0.0 { "filled" } else { "accepted" }.into();
+        order.status = if filled + 1e-12 >= quantity {
+            "filled"
+        } else if filled > 0.0 {
+            "partially_filled_closed"
+        } else {
+            "expired_or_cancelled"
+        }
+        .into();
     }
     persist_settings(&state.settings_path, &settings)?;
     drop(settings);
@@ -386,10 +553,12 @@ async fn submit_position_exit_order(
             .unwrap_or_default()
             .as_millis() as u64;
         let payload = serde_json::json!({
+            "record_schema_version": 1,
             "decision_id": decision_id, "stage": format!("exit:{timestamp}"), "timestamp": now, "symbol": symbol,
-            "status": if filled > 0.0 { "filled" } else { "accepted" }, "reason": reason,
+            "status": if filled + 1e-12 >= quantity { "filled" } else if filled > 0.0 { "partially_filled_closed" } else { "expired_or_cancelled" }, "reason": reason,
             "exit_order_type": "Ioc", "exit_order_quantity": quantity, "exit_filled_quantity": filled,
             "exit_average_price": average_price, "exit_fees": fee, "realized_pnl": realized_pnl,
+            "execution_response": response,
             "net_return_percent": if entry_notional > 0.0 { Some(realized_pnl / entry_notional * 100.0) } else { None },
             "side": side,
             "decision_mid_price": (bid + ask) / 2.0,
@@ -399,7 +568,16 @@ async fn submit_position_exit_order(
             "fill_rate": if quantity > 0.0 { (filled / quantity).clamp(0.0, 1.0) } else { 0.0 },
             "implementation_shortfall_bps": average_price.map(|price| if side == "buy" { (price / ((bid + ask) / 2.0) - 1.0) * 10_000.0 } else { (1.0 - price / ((bid + ask) / 2.0)) * 10_000.0 }),
             "fee_bps": if filled > 0.0 { Some(fee / (filled * ((bid + ask) / 2.0)) * 10_000.0) } else { None },
-            "exit_bid": bid, "exit_ask": ask
+            "exit_bid": bid, "exit_ask": ask,
+            "price_path": position.price_path.iter().map(|sample| serde_json::json!({
+                "timestamp": sample.timestamp, "bid": sample.bid, "ask": sample.ask
+            })).collect::<Vec<_>>(),
+            "entry_average_price": position.average_entry_price,
+            "entry_fees_paid": position.entry_fees,
+            "entry_timestamp_ms": position.entry_timestamp_ms,
+            "duration_ms": (position.entry_timestamp_ms > 0).then_some(now.saturating_sub(position.entry_timestamp_ms)),
+            "effective_stop_loss_percent": stop_loss_percent,
+            "effective_take_profit_percent": take_profit_percent
         });
         store_auto_trader_audit(client, &payload).await;
     }
@@ -636,6 +814,17 @@ async fn sync_protective_stops(
                 .map(|position| position.average_entry_price)
                 .filter(|price| *price > 0.0)
                 .unwrap_or(fill_price);
+            let (price_path, effective_stop_loss_percent, effective_take_profit_percent, entry_fees, position_entry_timestamp_ms) = settings
+                .positions
+                .get(&symbol)
+                .map(|position| (
+                    position.price_path.clone(),
+                    position.stop_loss_percent.unwrap_or(settings.stop_loss_percent),
+                    position.take_profit_percent.or(position.horizon_take_profit_percent).unwrap_or(settings.take_profit_percent),
+                    position.entry_fees,
+                    position.entry_timestamp_ms,
+                ))
+                .unwrap_or_default();
             let (realized_delta, learned_key) = apply_auto_fill(
                 &mut settings.positions,
                 &symbol,
@@ -678,7 +867,13 @@ async fn sync_protective_stops(
             {
                 order.triggered_at = barrier["triggered_at"].as_u64();
                 order.filled_quantity = total_filled;
+                order.fill_rate = if order.quantity > 0.0 {
+                    (total_filled / order.quantity).clamp(0.0, 1.0)
+                } else {
+                    0.0
+                };
                 order.average_price = barrier["average_execution_price"].as_f64();
+                order.fees_paid = total_fee;
                 order.realized_pnl += realized_delta;
                 order.status = status.to_owned();
             }
@@ -707,13 +902,26 @@ async fn sync_protective_stops(
                     .unwrap_or_default()
                     .as_millis() as u64;
                 let payload = serde_json::json!({
+                    "record_schema_version": 1,
                     "decision_id": decision_id, "stage": format!("exit:stop:{}", stop.order_timestamp), "timestamp": update_timestamp,
                     "observed_at": update_timestamp, "symbol": symbol, "side": barrier["side"],
                     "status": status, "reason": "stop-loss", "exit_order_type": "StopMarket",
                     "submitted_at": barrier["triggered_at"],
+                    "barrier_order_id": stop.barrier_id,
                     "exit_order_quantity": stop.quantity, "exit_filled_quantity": total_filled,
                     "exit_average_price": barrier["average_execution_price"],
                     "exit_fees": total_fee, "realized_pnl": cumulative_pnl,
+                    "entry_average_price": entry_price_before,
+                    "entry_fees_paid": entry_fees,
+                    "entry_timestamp_ms": position_entry_timestamp_ms,
+                    "duration_ms": (position_entry_timestamp_ms > 0).then_some(update_timestamp.saturating_sub(position_entry_timestamp_ms)),
+                    "barrier_trigger_price": barrier["trigger_price"],
+                    "barrier_trigger_direction": barrier["trigger_direction"],
+                    "effective_stop_loss_percent": effective_stop_loss_percent,
+                    "effective_take_profit_percent": effective_take_profit_percent,
+                    "price_path": price_path.iter().map(|sample| serde_json::json!({
+                        "timestamp": sample.timestamp, "bid": sample.bid, "ask": sample.ask
+                    })).collect::<Vec<_>>(),
                     "net_return_percent": if entry_price_before > 0.0 { Some(cumulative_pnl / (total_filled * entry_price_before).max(1e-12) * 100.0) } else { None }
                 });
                 store_auto_trader_audit(client, &payload).await;
@@ -854,6 +1062,42 @@ async fn ensure_protective_stops(
         let tolerance = (desired_quantity * 1e-6).max(1e-12);
         let coverage_mismatch =
             wrong_side || (covered_quantity - desired_quantity).abs() > tolerance;
+
+        // VWAP and TWAP children can increase exposure between five-second
+        // maintenance passes. Keep existing correctly sided stops armed and
+        // protect only the uncovered increment; cancelling and replacing the
+        // whole set would leave the position unprotected during that handoff.
+        if !wrong_side
+            && desired_quantity > covered_quantity + tolerance
+            && !active.is_empty()
+        {
+            let uncovered_quantity = desired_quantity - covered_quantity;
+            let uncovered_entry_fees =
+                position.entry_fees * (uncovered_quantity / desired_quantity);
+            if let Err((_, error)) = arm_protective_stop(
+                client,
+                base,
+                state,
+                &symbol,
+                if position.quantity > 0.0 {
+                    "buy"
+                } else {
+                    "sell"
+                },
+                uncovered_quantity,
+                position.average_entry_price,
+                uncovered_entry_fees,
+                position.stop_loss_percent,
+            )
+            .await
+            {
+                let mut settings = state.settings.lock().await;
+                settings.last_risk_note = format!(
+                    "Additional protective stop could not be armed for {symbol}: {error}; existing stops remain active"
+                );
+            }
+            continue;
+        }
 
         if coverage_mismatch && !active.is_empty() {
             // Existing barriers are not quantity-editable. Cancel the stale set,

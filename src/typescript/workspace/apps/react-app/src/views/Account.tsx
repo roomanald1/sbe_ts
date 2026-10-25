@@ -13,10 +13,14 @@ export function Account() {
   return <section className="feed-section" aria-label="Paper account"><FeedToolbar title="Account" />
     {state.error && <div className="positions-error" role="alert">{state.error}</div>}
     <div className="positions-totals">
-      <div className="position-total-card"><span>Realized balance</span><strong>{money.format(state.initial_cash + state.topups.reduce((sum, topup) => sum + topup.amount, 0) + state.realized_pnl) + ' USD'}</strong></div>
-      <div className="position-total-card"><span>Realized P&amp;L</span><strong>{money.format(state.realized_pnl) + ' USD'}</strong></div>
-      <div className="position-total-card"><span>Fees paid</span><strong>{state.equity_available ? money.format(state.fees_paid) + ' USD' : 'Unavailable'}</strong></div>
-
+      <div className="position-total-card"><span>Net liquidation equity</span><strong>{state.equity_available ? money.format(state.equity - state.estimated_exit_fees) + ' USD' : 'Unavailable'}</strong><small>Marked equity less estimated close fees</small></div>
+      <div className="position-total-card"><span>Deposited capital</span><strong>{money.format(state.initial_cash + state.topups.reduce((sum, topup) => sum + topup.amount, 0)) + ' USD'}</strong><small>Starting cash plus top-ups</small></div>
+      <div className="position-total-card"><span>AutoTrader P&amp;L today + open</span><strong>{state.auto_trader_total == null ? 'Unavailable' : money.format(state.auto_trader_total) + ' USD'}</strong><small>Same scope as the AutoTrader summary</small></div>
+      <div className="position-total-card"><span>Net liquidation P&amp;L</span><strong>{state.equity_available ? money.format(state.realized_pnl + state.unrealized_pnl) + ' USD' : 'Unavailable'}</strong><small>Realized plus open P&amp;L after estimated close fees</small></div>
+      <div className="position-total-card"><span>All account realized P&amp;L</span><strong>{money.format(state.realized_pnl) + ' USD'}</strong><small>Closed positions, after allocated fees</small></div>
+      <div className="position-total-card"><span>All account unrealized P&amp;L</span><strong>{state.equity_available ? money.format(state.unrealized_pnl) + ' USD' : 'Unavailable'}</strong><small>Open positions, estimated close fee included</small></div>
+      <div className="position-total-card"><span>Estimated close fees</span><strong>{state.equity_available ? money.format(state.estimated_exit_fees) + ' USD' : 'Unavailable'}</strong><small>Deducted from open P&amp;L, not yet paid</small></div>
+      <div className="position-total-card"><span>Fees paid</span><strong>{money.format(Math.abs(state.fees_paid)) + ' USD'}</strong><small>Already reflected in realized and open P&amp;L</small></div>
     </div>
     <form className="paper-trade-form account-topup-form" onSubmit={(event) => { event.preventDefault(); const value = Number(amount); if (Number.isFinite(value) && value > 0) void model.topUp(value); }}>
       <label>

@@ -8,12 +8,14 @@ export type AutoTraderOrder = {
   order_type: string;
   purpose?: string;
   strategy?: string;
+  decision_id?: string;
   quantity: number;
   filled_quantity: number;
   submitted_limit_price?: number;
   target_price?: number;
   average_price?: number;
   status: string;
+  failure_reason?: string;
   realized_pnl: number;
   realized_pnl_usd?: number | null;
 };
@@ -155,7 +157,7 @@ export class AutoTraderModel {
     this.refreshInFlight = true;
     void this.refreshAnalyticsIfDue();
     try {
-      const [statusResponse, activityResponse, positionsResponse, ratesResponse] = await Promise.all([fetch('/positions/auto-trader'), fetch('/positions/auto-trader/activity'), fetch('/positions'), fetch('/positions/usd-rates')]);
+      const [statusResponse, activityResponse, positionsResponse, ratesResponse] = await Promise.all([fetch('/positions/auto-trader'), fetch('/positions/auto-trader/activity'), fetch('/positions?source=auto'), fetch('/positions/usd-rates')]);
       if (!statusResponse.ok) throw await this.responseError('status', statusResponse);
       if (!activityResponse.ok) throw await this.responseError('activity', activityResponse);
       if (!positionsResponse.ok) throw await this.responseError('positions', positionsResponse);

@@ -14,7 +14,7 @@ import {
 import { formatForSymbol } from '../instrument_precision';
 import type { SymbolPriceTick } from '../types/symbol_price';
 import { AutoTraderModel } from '../models/AutoTraderModel';
-import type { AutoTraderContextParameters, AutoTraderDecisionParameter, AutoTraderOrder, ResearchStrategy } from '../models/AutoTraderModel';
+import type { AutoTraderOrder, ResearchStrategy } from '../models/AutoTraderModel';
 import { useBehaviorSnapshot } from '../use_behavior_snapshot';
 import { FeedToolbar } from './FeedToolbar';
 import { getOrderTypeDescription } from '../order_type_descriptions';
@@ -71,22 +71,23 @@ const autoTraderGridTheme = themeQuartz.withParams({
   rowHoverColor: '#141b24',
 });
 
-type AutoTraderOrderRow = AutoTraderOrder & { current_price?: number; position_status?: string; protection_order?: boolean };
+type AutoTraderOrderRow = AutoTraderOrder & { current_price?: number; position_status?: string; protection_order?: boolean; strategy_group?: string; group_header?: boolean; group_label?: string };
 
 const orderColumnDefs: ColDef<AutoTraderOrderRow>[] = [
-  { field: 'timestamp', headerName: 'Time / Trigger', minWidth: 102, valueGetter: ({ data }) => data?.triggered_at ?? data?.timestamp, valueFormatter: ({ value }) => value ? timestamp.format(value) : '' },
+  { field: 'timestamp', headerName: 'Time / Trigger', minWidth: 102, colSpan: ({ data }) => data?.group_header ? orderColumnDefs.length : 1, cellRenderer: ({ data, value }: ICellRendererParams<AutoTraderOrderRow>) => data?.group_header ? <strong>{data.group_label}</strong> : value ? timestamp.format(value) : '', valueGetter: ({ data }) => data?.group_header ? undefined : data?.triggered_at ?? data?.timestamp },
   { field: 'symbol', headerName: 'Symbol', minWidth: 78 },
   { field: 'side', headerName: 'Side', minWidth: 56, valueFormatter: ({ value }) => String(value ?? '').toUpperCase() },
   { field: 'order_type', headerName: 'Type', minWidth: 70, tooltipValueGetter: (params: ITooltipParams<AutoTraderOrderRow>) => getOrderTypeDescription(params.value), cellRenderer: (params: ICellRendererParams<AutoTraderOrderRow>) => <span title={getOrderTypeDescription(params.value)}>{String(params.value ?? '')}</span> },
   { field: 'strategy', headerName: 'Strategy', minWidth: 154, cellRenderer: (params: ICellRendererParams<AutoTraderOrderRow>) => <span>{params.data?.protection_order ? '↳ ' : ''}{strategyLabel(params.value)}</span> },
   { field: 'purpose', headerName: 'Purpose', minWidth: 76, valueFormatter: ({ value }) => value === 'portfolio-hedge' ? 'HEDGE' : String(value ?? '').toUpperCase() },
   { field: 'status', headerName: 'Order Status', minWidth: 82, filter: 'agTextColumnFilter' },
+  { field: 'failure_reason', headerName: 'Failure reason', minWidth: 210, cellRenderer: (params: ICellRendererParams<AutoTraderOrderRow>) => { const reason = String(params.value ?? ''); return reason ? <span title={reason}>{reason}</span> : ''; } },
   { field: 'position_status', headerName: 'Position', minWidth: 75 },
   { field: 'filled_quantity', headerName: 'Filled / Qty', minWidth: 96, valueFormatter: ({ data }) => data ? formatForSymbol(data.filled_quantity, data.symbol, 'quantity') + '/' + formatForSymbol(data.quantity, data.symbol, 'quantity') : '' },
   { field: 'submitted_limit_price', headerName: 'Limit / Stop Price', minWidth: 112, valueGetter: ({ data }) => data?.submitted_limit_price ?? data?.target_price, valueFormatter: ({ value, data }) => value == null || !data ? '' : formatForSymbol(value, data.symbol, 'price') },
   { field: 'current_price', headerName: 'Current Price', minWidth: 92, valueFormatter: ({ value, data }) => value == null || !data ? '' : formatForSymbol(value, data.symbol, 'price') },
   { field: 'average_price', headerName: 'Avg Price', minWidth: 78, valueFormatter: ({ value }) => value == null ? '' : money.format(value) },
-  { field: 'realized_pnl_usd', headerName: 'Realized USD', minWidth: 92, cellClass: ({ value }) => value >= 0 ? 'pnl-positive' : 'pnl-negative', valueFormatter: ({ value }) => value == null ? '—' : money.format(value) },
+  { field: 'realized_pnl_usd', headerName: 'Realized USD', minWidth: 92, cellClass: ({ value }) => value >= 0 ? 'pnl-positive' : 'pnl-negative', valueFormatter: ({ value }) => value == null || Math.abs(value) < 1e-9 ? '—' : money.format(value) },
 ];
 
 function strategyLabel(strategy?: string): string {
@@ -116,34 +117,47 @@ export function AutoTrader({ ticks }: { ticks: SymbolPriceTick[] }) {
   useEffect(() => { model.start(); return () => model.stop(); }, [model]);
   const state = useBehaviorSnapshot(model.state$);
   const ledgerOpenPositionSymbols = useMemo(() => new Set(state.ledgerOpenPositionSymbols), [state.ledgerOpenPositionSymbols]);
-  const orderRows = useMemo(() => state.orders.map((order) => ({
-    ...order,
-    current_price: ledgerOpenPositionSymbols.has(order.symbol) ? currentPrices.get(order.symbol) : undefined,
-    position_status: order.filled_quantity > 0 ? ledgerOpenPositionSymbols.has(order.symbol) ? 'Open' : 'Closed' : '',
-    protection_order: order.purpose?.toLowerCase().includes('stop') ?? false,
-  })).sort((a, b) => {
-    // Keep each strategy's orders together so protective stops read directly beneath its trades.
-    const groupA = (a.strategy ?? 'legacy') + '|' + a.symbol;
-    const groupB = (b.strategy ?? 'legacy') + '|' + b.symbol;
-    if (groupA !== groupB) return groupA.localeCompare(groupB);
-    if (a.protection_order !== b.protection_order) return a.protection_order ? 1 : -1;
-    return (b.triggered_at ?? b.timestamp) - (a.triggered_at ?? a.timestamp);
+  const orderRows = useMemo(() => state.orders.map((order) => {
+    const protectionOrder = order.purpose?.toLowerCase().includes('stop') ?? false;
+    const positionIsOpen = ledgerOpenPositionSymbols.has(order.symbol);
+    const failureReason = order.failure_reason ?? (protectionOrder && order.status === 'unfilled'
+      ? positionIsOpen
+        ? 'Stop triggered, but the position manager reported no fill.'
+        : 'Stop triggered after the position was closed; no open quantity remained to reduce.'
+      : undefined);
+    return {
+      ...order,
+      failure_reason: failureReason,
+      current_price: positionIsOpen ? currentPrices.get(order.symbol) : undefined,
+      position_status: protectionOrder ? positionIsOpen ? 'Open' : 'Closed' : order.filled_quantity > 0 ? positionIsOpen ? 'Open' : 'Closed' : '',
+      protection_order: protectionOrder,
+      strategy_group: order.decision_id ?? ('legacy:' + (order.strategy ?? 'unknown') + ':' + order.symbol),
+    };
   }), [state.orders, ledgerOpenPositionSymbols, currentPrices]);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [parametersOpen, setParametersOpen] = useState(false);
   const [decisionDetailsOpen, setDecisionDetailsOpen] = useState(false);
+  const [showOnlyLiveOrders, setShowOnlyLiveOrders] = useState(false);
+  const visibleOrderRows = useMemo(() => {
+    const filtered = showOnlyLiveOrders
+      ? orderRows.filter((order) => ['submitting', 'accepted', 'resting', 'partially_filled', 'armed', 'triggering'].includes(order.status.toLowerCase()))
+      : orderRows;
+    const groups = new Map<string, AutoTraderOrderRow[]>();
+    for (const order of filtered) groups.set(order.strategy_group!, [...(groups.get(order.strategy_group!) ?? []), order]);
+    const orderedGroups = [...groups.entries()].sort(([, a], [, b]) => Math.max(...b.map((row) => row.triggered_at ?? row.timestamp)) - Math.max(...a.map((row) => row.triggered_at ?? row.timestamp)));
+    return orderedGroups.flatMap(([key, rows]) => {
+      rows.sort((a, b) => (b.triggered_at ?? b.timestamp) - (a.triggered_at ?? a.timestamp));
+      const first = rows[0];
+      const label = strategyLabel(first.strategy) + ' · ' + first.symbol + ' · ' + rows.length + (rows.length === 1 ? ' order' : ' orders');
+      return [{ timestamp: 0, symbol: '', side: '', order_type: '', quantity: 0, filled_quantity: 0, status: '', realized_pnl: 0, strategy_group: key, group_header: true, group_label: label }, ...rows];
+    });
+  }, [orderRows, showOnlyLiveOrders]);
   useEffect(() => {
     if (!parametersOpen) return;
     void model.refreshDecisionParameters();
     const timer = setInterval(() => void model.refreshDecisionParameters(), 5000);
     return () => clearInterval(timer);
   }, [model, parametersOpen]);
-  const decisionParameterSections = useMemo(() => {
-    const grouped = new Map<string, AutoTraderDecisionParameter[]>();
-    state.decisionParameters?.thresholds.forEach((item) => grouped.set(item.section, [...(grouped.get(item.section) ?? []), item]));
-    return Array.from(grouped, ([section, parameters]) => ({ section, parameters }));
-  }, [state.decisionParameters]);
-  const contextLabel = (context: AutoTraderContextParameters) => context.context.replace(':', ' · ').replace(/^([a-z])/, (letter) => letter.toUpperCase());
   const scoutOrderCounts = useMemo(() => {
     const scouts = state.orders.filter((order) => order.purpose === 'scout');
     return {
@@ -178,29 +192,15 @@ export function AutoTrader({ ticks }: { ticks: SymbolPriceTick[] }) {
             {state.decisionParametersError && <p className="auto-trader-error" role="alert">{state.decisionParametersError}</p>}
             {!state.decisionParameters && !state.decisionParametersError && <p>Loading live decision parameters…</p>}
             {state.decisionParameters && <div className="auto-trader-parameter-sections">
-              {decisionParameterSections.map(({ section, parameters }) => <section key={section}><strong>{section}</strong><dl>
-                {parameters.map((item) => <div key={item.name}><dt>{item.name}</dt><dd>{item.value.toLocaleString(undefined, { maximumFractionDigits: 3 })} {item.unit}</dd></div>)}
-              </dl></section>)}
-              <section><strong>Effective thresholds by market context</strong><dl>
-                {state.decisionParameters.contexts.map((context) => <div key={context.context}>
-                  <dt>{contextLabel(context)} · {context.learning_samples} samples{context.positive_rate == null ? '' : ' · ' + (context.positive_rate * 100).toFixed(0) + '% positive'}</dt>
-                  <dd>Strength ≥ {context.strength_floor.toFixed(2)} · score ≥ {context.exploration_score_floor.toFixed(2)} · exploration {context.exploration_allowed ? 'enabled' : 'disabled'}</dd>
-                </div>)}
-              </dl></section>
-              <section><strong>Active exit policy</strong><dl>
-                <div><dt>Stop-loss</dt><dd>{state.decisionParameters.active_exit_policy.stop_loss_percent.toFixed(2)}%</dd></div>
-                <div><dt>Take-profit (net after fees)</dt><dd>{state.decisionParameters.active_exit_policy.take_profit_percent.toFixed(2)}%</dd></div>
-              </dl></section>
-              <section><strong>Latest selected execution profile</strong><dl>
-                {state.decisionParameters.latest_execution ? <>
-                  <div><dt>Signal</dt><dd>{state.decisionParameters.latest_execution.symbol} · {state.decisionParameters.latest_execution.context}</dd></div>
-                  <div><dt>Order type</dt><dd>{state.decisionParameters.latest_execution.baseline_order_type} → {state.decisionParameters.latest_execution.selected_order_type}</dd></div>
-                  <div><dt>Profile</dt><dd>P{state.decisionParameters.latest_execution.profile}</dd></div>
-                  <div><dt>VWAP / TWAP</dt><dd>{state.decisionParameters.latest_execution.vwap_duration_minutes} min · {state.decisionParameters.latest_execution.vwap_participation_percent.toFixed(1)}% participation</dd></div>
-                  <div><dt>Scheduling size threshold</dt><dd>{(state.decisionParameters.latest_execution.schedule_depth_threshold * 100).toFixed(0)}% of visible depth · current {(state.decisionParameters.latest_execution.proposed_depth_ratio * 100).toFixed(1)}% ({state.decisionParameters.latest_execution.schedule_threshold_samples} threshold outcome samples)</dd></div>
-                  <div><dt>Order offsets</dt><dd>Limit {state.decisionParameters.latest_execution.limit_offset_bps.toFixed(2)} bps · trigger {state.decisionParameters.latest_execution.trigger_offset_bps.toFixed(2)} bps</dd></div>
-                  <div><dt>Trailing distance</dt><dd>{state.decisionParameters.latest_execution.trailing_distance_percent.toFixed(2)}%</dd></div>
-                </> : <div><dt>Latest execution profile</dt><dd>No signal has selected an execution profile since this service started.</dd></div>}
+              <section><strong>Shared risk controls</strong><dl>
+                <div><dt>Risk appetite</dt><dd>{Number(state.riskAppetite)} · {Number(state.riskAppetite) < 34 ? 'Safe' : Number(state.riskAppetite) > 66 ? 'Risky' : 'Balanced'}</dd></div>
+                <div><dt>Maximum per order</dt><dd>{Number(state.maxOrderNotional).toLocaleString()}</dd></div>
+                <div><dt>Maximum allocated exposure</dt><dd>{Number(state.dailyNotionalLimit).toLocaleString()}</dd></div>
+                <div><dt>Daily loss cap</dt><dd>{Number(state.dailyRealizedLossLimit).toLocaleString()}</dd></div>
+                <div><dt>Maximum open positions</dt><dd>{state.maxOpenPositions}</dd></div>
+                <div><dt>Maximum entries per position</dt><dd>{state.maxEntriesPerPosition}</dd></div>
+                <div><dt>Exploration allocation</dt><dd>{state.explorationPercent}%</dd></div>
+                <div><dt>Protective stop / target</dt><dd>{state.stopLossPercent.toFixed(2)}% / {state.takeProfitPercent.toFixed(2)}%</dd></div>
               </dl></section>
             </div>}
           </div>}
@@ -302,16 +302,22 @@ export function AutoTrader({ ticks }: { ticks: SymbolPriceTick[] }) {
         </div>
         {state.error && <p className="auto-trader-error" role="alert">{state.error}</p>}
         <div className="auto-trader-orders" aria-label="Recent auto trader orders">
-          <strong>Today’s trades &amp; protection ({state.orders.length}) · grouped by strategy and symbol · UTC</strong>
+          <div className="auto-trader-orders-heading">
+            <strong>Today’s trades &amp; protection ({visibleOrderRows.filter((row) => !row.group_header).length}{showOnlyLiveOrders ? ' of ' + orderRows.length : ''}) · newest first within each strategy and symbol · UTC</strong>
+            <label className="auto-trader-live-filter">
+              <span>Live orders only</span>
+              <input type="checkbox" role="switch" checked={showOnlyLiveOrders} onChange={(event) => setShowOnlyLiveOrders(event.target.checked)} />
+            </label>
+          </div>
           <div className="data-grid-wrap auto-trader-grid-wrap">
             <AgGridReact<AutoTraderOrderRow>
-              rowData={orderRows}
+              rowData={visibleOrderRows}
               columnDefs={orderColumnDefs}
               defaultColDef={defaultOrderColDef}
-              getRowId={({ data }) => String(data.timestamp) + '-' + data.symbol + '-' + data.side}
+              getRowId={({ data }) => data.group_header ? 'group-' + data.strategy_group : String(data.timestamp) + '-' + data.symbol + '-' + data.side}
               theme={autoTraderGridTheme}
               rowHeight={26}
-              getRowClass={({ data }) => data?.protection_order ? 'auto-trader-protection-order' : ''}
+              getRowClass={({ data }) => data?.group_header ? 'auto-trader-strategy-group' : data?.protection_order ? 'auto-trader-protection-order' : ''}
               headerHeight={28}
               suppressColumnMoveAnimation
               animateRows={false}

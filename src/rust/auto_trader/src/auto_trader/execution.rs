@@ -266,14 +266,45 @@ fn risk_adjusted_take_profit_percent(stop_loss_percent: f64, risk_appetite: f64)
         .clamp(MIN_TAKE_PROFIT_PERCENT, MAX_TAKE_PROFIT_PERCENT);
     let risk = risk_appetite.clamp(0.0, 100.0) / 100.0;
     (safe_target * (1.0 - risk) + SMALL_NET_TAKE_PROFIT_PERCENT * risk)
-        .max(safe_target)
         .clamp(MIN_TAKE_PROFIT_PERCENT, MAX_TAKE_PROFIT_PERCENT)
+}
+
+fn volatility_adjusted_stop_loss_percent(base_stop_percent: f64, volatility_1m_percent: Option<f64>) -> f64 {
+    let base = base_stop_percent.clamp(MIN_STOP_LOSS_PERCENT, MAX_STOP_LOSS_PERCENT);
+    let Some(volatility) = volatility_1m_percent.filter(|value| value.is_finite() && *value > 0.0) else {
+        return base;
+    };
+    // volatility_1m_percent is realized one-minute movement; allow 1.5x the
+    // square-root-of-time five-minute move, with bounded exposure.
+    let volatility_stop = volatility * 5.0_f64.sqrt() * 1.5;
+    base.max(volatility_stop).clamp(MIN_STOP_LOSS_PERCENT, MAX_STOP_LOSS_PERCENT)
+}
+
+fn volatility_size_scale(base_stop_percent: f64, effective_stop_percent: f64) -> f64 {
+    (base_stop_percent / effective_stop_percent).clamp(0.0, 1.0)
+}
+
+fn win_rate_supports_extended_hold(returns: &[f64]) -> bool {
+    returns.len() >= EXTENDED_HOLD_MIN_SAMPLES
+        && returns.iter().filter(|value| **value > 0.0).count() as f64 / returns.len() as f64
+            >= EXTENDED_HOLD_MIN_WIN_RATE
+}
+
+fn confidence_adjusted_take_profit_percent(returns: &[f64], candidate: f64) -> f64 {
+    if win_rate_supports_extended_hold(returns) {
+        candidate.clamp(MIN_TAKE_PROFIT_PERCENT, MAX_TAKE_PROFIT_PERCENT)
+    } else {
+        EARLY_NET_TAKE_PROFIT_PERCENT
+    }
 }
 
 fn adapt_exit_policy(settings: &mut Settings) {
     settings.stop_loss_percent = settings
         .stop_loss_percent
         .clamp(MIN_STOP_LOSS_PERCENT, MAX_STOP_LOSS_PERCENT);
-    settings.take_profit_percent =
-        risk_adjusted_take_profit_percent(settings.stop_loss_percent, settings.risk_appetite);
+    let candidate = risk_adjusted_take_profit_percent(settings.stop_loss_percent, settings.risk_appetite);
+    settings.take_profit_percent = confidence_adjusted_take_profit_percent(
+        &settings.closed_trade_returns_percent,
+        candidate,
+    );
 }

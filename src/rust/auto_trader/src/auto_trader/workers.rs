@@ -277,6 +277,7 @@ async fn sync_auto_positions(
     let mut settings = state.settings.lock().await;
     let mut changed = false;
     let mut source_symbols = std::collections::BTreeSet::new();
+    let mut external_closes = Vec::new();
     for source_position in positions {
         if !source_position.quantity.is_finite()
             || !source_position.average_entry_price.is_finite()
@@ -285,7 +286,7 @@ async fn sync_auto_positions(
             continue;
         }
         source_symbols.insert(source_position.symbol.clone());
-        let (prior_quantity, prior_average_entry_price, realized_delta, learning_key) = {
+        let (prior_quantity, prior_average_entry_price, realized_delta, learning_key, close_audit) = {
             let position = settings
                 .positions
                 .entry(source_position.symbol.clone())
@@ -306,6 +307,23 @@ async fn sync_auto_positions(
                     &position.entry_order_type
                 },
             );
+            let close_audit = (prior_quantity.abs() > 1e-12
+                && source_position.quantity.abs() <= 1e-12)
+                .then(|| serde_json::json!({
+                    "record_schema_version": 1,
+                    "decision_id": position.entry_decision_id,
+                    "symbol": source_position.symbol,
+                    "entry_average_price": prior_average_entry_price,
+                    "entry_fees_paid": position.entry_fees,
+                    "entry_timestamp_ms": position.entry_timestamp_ms,
+                    "effective_stop_loss_percent": position.stop_loss_percent,
+                    "effective_take_profit_percent": position.take_profit_percent.or(position.horizon_take_profit_percent),
+                    "price_path": position.price_path.iter().map(|sample| serde_json::json!({
+                        "timestamp": sample.timestamp, "bid": sample.bid, "ask": sample.ask
+                    })).collect::<Vec<_>>(),
+                    "entry_quantity": prior_quantity.abs(),
+                    "entry_position_side": if prior_quantity > 0.0 { "long" } else { "short" },
+                }));
             if (position.quantity - source_position.quantity).abs() > 1e-12
                 || (position.average_entry_price - source_position.average_entry_price).abs()
                     > 1e-12
@@ -323,8 +341,14 @@ async fn sync_auto_positions(
                 prior_average_entry_price,
                 realized_delta,
                 learning_key,
+                close_audit,
             )
         };
+        if let Some(audit) = close_audit {
+            if audit["decision_id"].as_str().is_some() {
+                external_closes.push((audit, realized_delta));
+            }
+        }
         if realized_delta.is_finite() && realized_delta.abs() > 1e-12 {
             // Manual position-manager fills bypass apply_auto_fill. Use the
             // ledger delta for close-out learning; account totals are mirrored below.
@@ -371,6 +395,61 @@ async fn sync_auto_positions(
     if changed {
         settings.used_notional_today = allocated_notional(&settings);
         persist_settings(&state.settings_path, &settings)?;
+    }
+    drop(settings);
+    for (mut payload, realized_pnl) in external_closes {
+        let symbol = payload["symbol"].as_str().unwrap_or_default().to_owned();
+        let entry_timestamp = payload["entry_timestamp_ms"].as_u64().unwrap_or_default();
+        let entry_notional = payload["entry_average_price"].as_f64().unwrap_or_default()
+            * payload["entry_quantity"].as_f64().unwrap_or_default();
+        let now = current_time_ms();
+        let stage = format!("exit:external:{symbol}:{entry_timestamp}");
+        payload["stage"] = serde_json::json!(stage);
+        payload["timestamp"] = serde_json::json!(now);
+        payload["reason"] = serde_json::json!("external-or-manual-close");
+        payload["exit_order_type"] = serde_json::json!("external-ledger-fill");
+        payload["status"] = serde_json::json!("filled");
+        payload["realized_pnl"] = serde_json::json!(realized_pnl);
+        payload["net_return_percent"] = serde_json::json!((entry_notional > 0.0).then_some(realized_pnl / entry_notional * 100.0));
+        payload["duration_ms"] = serde_json::json!((entry_timestamp > 0).then_some(now.saturating_sub(entry_timestamp)));
+        store_execution_audit_until_saved(&client, &payload).await;
+        let trades_url = format!(
+            "{base}/positions/trades?symbol={symbol}&source=auto&since_ms={entry_timestamp}"
+        );
+        let trades = client
+            .get(trades_url)
+            .send()
+            .await
+            .map_err(upstream_error)?
+            .error_for_status()
+            .map_err(upstream_error)?
+            .json::<serde_json::Value>()
+            .await
+            .map_err(upstream_error)?;
+        let close_side = if payload["entry_position_side"].as_str() == Some("long") { "sell" } else { "buy" };
+        let close_fills = trades["trades"].as_array().into_iter().flatten()
+            .filter(|trade| trade["side"].as_str() == Some(close_side))
+            .filter_map(|trade| {
+                let quantity = trade["quantity"].as_f64()?;
+                let price = trade["execution_price"].as_f64()?;
+                Some(serde_json::json!({
+                    "timestamp": trade["timestamp"], "quantity": quantity,
+                    "price": price, "fee": trade["fee"], "parent_order_id": trade["parent_order_id"]
+                }))
+            })
+            .collect::<Vec<_>>();
+        let exit_quantity = close_fills.iter().filter_map(|fill| fill["quantity"].as_f64()).sum::<f64>();
+        let exit_notional = close_fills.iter().filter_map(|fill| {
+            Some(fill["quantity"].as_f64()? * fill["price"].as_f64()?)
+        }).sum::<f64>();
+        let exit_fees = close_fills.iter().filter_map(|fill| fill["fee"].as_f64()).map(f64::abs).sum::<f64>();
+        payload["exit_filled_quantity"] = serde_json::json!(exit_quantity);
+        payload["exit_average_price"] = serde_json::json!((exit_quantity > 0.0).then_some(exit_notional / exit_quantity));
+        payload["exit_fees"] = serde_json::json!(exit_fees);
+        payload["exit_fills"] = serde_json::json!(close_fills);
+        payload["realized_pnl"] = serde_json::json!(realized_pnl);
+        payload["net_return_percent"] = serde_json::json!((entry_notional > 0.0).then_some(realized_pnl / entry_notional * 100.0));
+        store_execution_audit_until_saved(&client, &payload).await;
     }
     Ok(())
 }

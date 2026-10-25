@@ -3156,9 +3156,18 @@ tbody tr:first-child td {
 .auto-trader-limits button:disabled { opacity: 0.45; cursor: default; }
 .auto-trader-limits button:not(:disabled):hover { border-color: var(--blue); background: #20364d; }
 .auto-trader-orders { display: flex; min-height: 0; flex: 1 1 0%; flex-direction: column; gap: 6px; overflow: hidden; }
+.auto-trader-orders-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.auto-trader-live-filter { display: inline-flex; align-items: center; gap: 8px; color: var(--muted); font: 10px/1.2 var(--mono); white-space: nowrap; cursor: pointer; }
+.auto-trader-live-filter input { appearance: none; width: 28px; height: 16px; margin: 0; border: 1px solid #526273; border-radius: 999px; background: #1a2027; cursor: pointer; position: relative; transition: background-color 120ms ease, border-color 120ms ease; }
+.auto-trader-live-filter input::before { content: ''; position: absolute; top: 2px; left: 2px; width: 10px; height: 10px; border-radius: 50%; background: #a0a6ad; transition: transform 120ms ease, background-color 120ms ease; }
+.auto-trader-live-filter input:checked { border-color: #6f9e86; background: #234333; }
+.auto-trader-live-filter input:checked::before { transform: translateX(12px); background: #9be0b5; }
+.auto-trader-live-filter input:focus-visible { outline: 2px solid #8296ad; outline-offset: 2px; }
 .auto-trader-grid-wrap { min-height: 0; flex: 1 1 0%; overflow: auto; }
 .auto-trader-grid-wrap > div, .auto-trader-grid-wrap .ag-root-wrapper { height: 100%; }
 .auto-trader-grid-wrap .ag-row.auto-trader-protection-order { background-color: #11171d; }
+.auto-trader-grid-wrap .ag-row.auto-trader-strategy-group { background: #17212b; color: #d6e5f3; font-size: 11px; font-weight: 600; border-top: 1px solid #364656; }
+.auto-trader-grid-wrap .ag-row.auto-trader-strategy-group .ag-cell { display: flex; align-items: center; }
 .auto-trader-grid-wrap .ag-row.auto-trader-protection-order .ag-cell[col-id="strategy"] { padding-left: 18px; color: #aab6c3; }
 .auto-trader-order { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; border-top: 1px solid #242a31; padding: 6px 0; font-size: 11px; }
 .auto-trader-pnl-summary { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px 18px; }

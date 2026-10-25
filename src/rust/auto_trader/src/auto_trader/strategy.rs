@@ -229,25 +229,31 @@ async fn run_cycle_inner(
     let mut settings = state.settings.lock().await;
     reset_daily_budget(&mut settings);
     let quote_rate = quote_usd_rate(&settings, &signal.symbol);
+    let strategy_key = signal
+        .research_strategy
+        .as_deref()
+        .unwrap_or("generic-insight-signals");
+    let strategy_cooldown_ms = strategy_post_stop_cooldown_ms(strategy_key, &settings.orders);
     if let Some(stopped_at) = settings
         .orders
         .iter()
         .filter(|order| {
             order.symbol == signal_key
+                && order.strategy.as_deref() == Some(strategy_key)
                 && order.purpose == "stop-loss"
                 && order.status == "filled"
                 && order.realized_pnl < 0.0
         })
         .filter_map(|order| order.triggered_at)
         .max()
-        .filter(|stopped_at| now_ms.saturating_sub(*stopped_at) < POST_STOP_REENTRY_COOLDOWN_MS)
+        .filter(|stopped_at| now_ms.saturating_sub(*stopped_at) < strategy_cooldown_ms)
     {
         let seconds_remaining =
-            POST_STOP_REENTRY_COOLDOWN_MS.saturating_sub(now_ms.saturating_sub(stopped_at)) / 1000;
+            strategy_cooldown_ms.saturating_sub(now_ms.saturating_sub(stopped_at)) / 1000;
         return Ok(skipped_for_signal(
             signal,
             &format!(
-                "Post-stop cooldown: {signal_key} paused for {seconds_remaining}s after a losing protective stop"
+                "Post-stop cooldown: {signal_key} / {strategy_key} paused for {seconds_remaining}s after a losing protective stop"
             ),
         ));
     }
@@ -294,38 +300,15 @@ async fn run_cycle_inner(
                 ),
             ));
         }
-    } else if !signal.research_strategy_candidate
-        && settings
-            .last_signal_direction
-            .get(&signal_key)
-            .is_some_and(|direction| direction == &signal.direction)
-        && settings
-            .last_signal_strength
-            .get(&signal_key)
-            .is_some_and(|strength| signal.strength < strength + MATERIAL_STRENGTH_CHANGE)
-    {
-        return Ok(skipped_for_signal(
-            signal,
-            &format!(
-                "Re-entry blocked: {signal_key} signal strength has not improved by {:.2}",
-                MATERIAL_STRENGTH_CHANGE
-            ),
-        ));
     }
-    if !signal.research_strategy_candidate
-        && settings
-            .last_signal_at
-            .get(&signal_key)
-            .is_some_and(|last| now_ms.saturating_sub(*last) < SIGNAL_COOLDOWN_MS)
-    {
-        return Ok(skipped_for_signal(
-            signal,
-            &format!(
-                "Re-entry cooldown: {signal_key} needs a materially new signal after {} seconds",
-                SIGNAL_COOLDOWN_MS / 1000
-            ),
-        ));
-    }
+    let learned_exit_policy = learned_exit_policy(&signal, &dashboard.walk_forward);
+    let learned_or_configured_stop = learned_exit_policy
+        .map(|(stop, _)| stop)
+        .unwrap_or(counterfactual_stop_loss_percent);
+    let effective_stop_loss_percent = volatility_adjusted_stop_loss_percent(
+        learned_or_configured_stop,
+        signal.components.volatility_1m_percent,
+    );
     let baseline_type = choose_order_type(&signal, settings.risk_appetite);
     let risk_fraction = if settings.risk_limited_sizing {
         0.25
@@ -352,6 +335,7 @@ async fn run_cycle_inner(
     let mut notional = risk_order_cap.min(
         (settings.daily_notional_limit - settings.used_notional_today) / stop_headroom_multiplier,
     );
+    notional *= volatility_size_scale(counterfactual_stop_loss_percent, effective_stop_loss_percent);
     if notional <= 0.0 {
         return Ok(skipped_for_signal(
             signal,
@@ -391,10 +375,6 @@ async fn run_cycle_inner(
         minimum_book_order * quote_rate,
     );
     let deep_book_ms = deep_book_started.elapsed().as_secs_f64() * 1000.0;
-    let learned_exit_policy = learned_exit_policy(&signal, &dashboard.walk_forward);
-    let effective_stop_loss_percent = learned_exit_policy
-        .map(|(stop, _)| stop)
-        .unwrap_or(counterfactual_stop_loss_percent);
     let horizon_take_profit_percent = learned_exit_policy.map(|(_, target)| target).or_else(|| {
         horizon_adjusted_take_profit_percent(
             &signal,
@@ -402,8 +382,10 @@ async fn run_cycle_inner(
             settings.take_profit_percent,
         )
     });
-    let effective_take_profit_percent =
-        horizon_take_profit_percent.unwrap_or(counterfactual_take_profit_percent);
+    let effective_take_profit_percent = confidence_adjusted_take_profit_percent(
+        &settings.closed_trade_returns_percent,
+        horizon_take_profit_percent.unwrap_or(counterfactual_take_profit_percent),
+    );
     let context = market_context(&signal);
     decay_learning_map(&mut settings.learning, now_ms);
     let learned_type = if scout {
@@ -957,6 +939,7 @@ async fn submit_and_record_selected_order(
         }
     });
     let fee_bps = (filled > 0.0 && mid > 0.0).then(|| fee / (filled * mid) * 10_000.0);
+    audit_payload["entry_fill_timestamp_ms"] = serde_json::json!(response_received_at);
     audit_payload["side"] = serde_json::json!(side);
     audit_payload["decision_mid_price"] = serde_json::json!(mid);
     audit_payload["submitted_at"] = serde_json::json!(timestamp);
@@ -968,6 +951,12 @@ async fn submit_and_record_selected_order(
     audit_payload["all_in_cost_bps"] = serde_json::json!(implementation_shortfall_bps
         .zip(fee_bps)
         .map(|(shortfall, fees)| shortfall + fees));
+    audit_payload["volatility_size_scale"] = serde_json::json!(volatility_size_scale(
+        counterfactual_stop_loss_percent,
+        effective_stop_loss_percent,
+    ));
+    audit_payload["submitted_notional"] = serde_json::json!(notional);
+    audit_payload["volatility_1m_percent"] = serde_json::json!(signal.components.volatility_1m_percent);
     audit_payload["bid"] = serde_json::json!(bid);
     audit_payload["ask"] = serde_json::json!(ask);
     audit_payload["spread_bps"] = serde_json::json!((ask - bid) / mid * 10_000.0);
@@ -987,21 +976,8 @@ async fn submit_and_record_selected_order(
     audit_payload["execution_response"] = response.clone();
     queue_auto_trader_audit(state, audit_payload);
     let stop_armed = if filled > 0.0 {
-        // VWAP/TWAP can add to the position through several child fills. Rebuild
-        // protection from the resulting aggregate position so all stop quantity
-        // uses the same weighted entry price and fee basis as take-profit logic.
-        let old_stops_cancelled =
-            cancel_protective_stops(&client, &position_url, state, &signal.symbol)
-                .await
-                .unwrap_or(false);
-        if !old_stops_cancelled {
-            let mut settings = state.settings.lock().await;
-            settings.last_risk_note = format!(
-                "Existing protective stop could not be replaced for {}; newly filled quantity is covered at the aggregate position basis where possible",
-                signal.symbol
-            );
-            let _ = persist_settings(&state.settings_path, &settings);
-        }
+        // Reconcile aggregate exposure without cancelling correctly sided stops;
+        // newly filled quantity gets its own barrier while existing protection stays armed.
         match ensure_protective_stops(&client, &position_url, state).await {
             Ok(()) => {
                 let settings = state.settings.lock().await;
@@ -1830,7 +1806,18 @@ fn profitable_close_probability_5m(
     if !projected_sd.is_finite() || projected_sd <= 0.0 {
         return None;
     }
-    let below = normal_cdf((position.average_entry_price.ln() - projected_mean) / projected_sd);
+    let fee_rate = configured_taker_fee_rate();
+    let breakeven_price = if closing_long {
+        (position.average_entry_price + position.entry_fees / position.quantity.abs())
+            / (1.0 - fee_rate)
+    } else {
+        (position.average_entry_price - position.entry_fees / position.quantity.abs())
+            / (1.0 + fee_rate)
+    };
+    if !breakeven_price.is_finite() || breakeven_price <= 0.0 {
+        return None;
+    }
+    let below = normal_cdf((breakeven_price.ln() - projected_mean) / projected_sd);
     Some(if closing_long { 1.0 - below } else { below })
 }
 

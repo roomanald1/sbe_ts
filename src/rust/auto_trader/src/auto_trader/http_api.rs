@@ -12,8 +12,11 @@ pub fn router() -> Router {
             settings.research_strategies = vec![strategy];
         }
     }
-    settings.take_profit_percent =
-        risk_adjusted_take_profit_percent(settings.stop_loss_percent, settings.risk_appetite);
+    let candidate = risk_adjusted_take_profit_percent(settings.stop_loss_percent, settings.risk_appetite);
+    settings.take_profit_percent = confidence_adjusted_take_profit_percent(
+        &settings.closed_trade_returns_percent,
+        candidate,
+    );
     // The previous release defaulted this new cap to three, which can strand existing books above the cap.
     if settings.max_open_positions == 3 {
         settings.max_open_positions = default_max_open_positions();
@@ -741,24 +744,6 @@ fn risk_and_re_entry_thresholds(max_entries_per_auto_position: u32) -> Vec<Decis
     vec![
         parameter(
             "Risk and re-entry",
-            "Signal cooldown",
-            SIGNAL_COOLDOWN_MS as f64 / 1000.0,
-            "seconds",
-        ),
-        parameter(
-            "Risk and re-entry",
-            "Cooldown after losing stop",
-            POST_STOP_REENTRY_COOLDOWN_MS as f64 / 1000.0,
-            "seconds",
-        ),
-        parameter(
-            "Risk and re-entry",
-            "Required re-entry strength improvement",
-            MATERIAL_STRENGTH_CHANGE,
-            "strength",
-        ),
-        parameter(
-            "Risk and re-entry",
             "Entries per position",
             max_entries_per_auto_position as f64,
             "entries",
@@ -942,8 +927,11 @@ async fn update_settings(
         settings.take_profit_percent = value;
     }
     if recalculate_take_profit {
-        settings.take_profit_percent =
-            risk_adjusted_take_profit_percent(settings.stop_loss_percent, settings.risk_appetite);
+        let candidate = risk_adjusted_take_profit_percent(settings.stop_loss_percent, settings.risk_appetite);
+        settings.take_profit_percent = confidence_adjusted_take_profit_percent(
+            &settings.closed_trade_returns_percent,
+            candidate,
+        );
     }
     if let Some(value) = request.vwap_duration_minutes {
         settings.vwap_duration_minutes = value;

@@ -111,6 +111,16 @@ struct TraderPosition {
     take_profit_deferred_at_ms: Option<u64>,
     #[serde(default)]
     protective_stops: Vec<ProtectiveStop>,
+    #[serde(default)]
+    price_path: Vec<TradePriceSample>,
+    #[serde(default)]
+    entry_timestamp_ms: u64,
+}
+#[derive(Clone, Default, Serialize, Deserialize)]
+struct TradePriceSample {
+    timestamp: u64,
+    bid: f64,
+    ask: f64,
 }
 #[derive(Clone, Default, Serialize, Deserialize)]
 struct ProtectiveStop {

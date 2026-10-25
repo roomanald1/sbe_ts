@@ -264,7 +264,9 @@ async fn barrier_order_loop(store: Arc<PositionStore>) {
             let Some(book) = books.get(&barrier.symbol) else {
                 continue;
             };
-            if now.saturating_sub(book.updated_at_ms) > 5_000 {
+            if barrier.retry_after.is_some_and(|retry_after| now < retry_after)
+                || now.saturating_sub(book.updated_at_ms) > 5_000
+            {
                 continue;
             }
             let current = match barrier.side {
@@ -328,6 +330,7 @@ async fn barrier_order_loop(store: Arc<PositionStore>) {
                 };
                 ledger.barrier_orders[index].status = "triggering".to_owned();
                 ledger.barrier_orders[index].triggered_at = Some(now);
+                ledger.barrier_orders[index].retry_after = None;
                 if let Err(error) = store.persist(&ledger).await {
                     crate::service_log!(
                         "ERROR",
@@ -336,6 +339,7 @@ async fn barrier_order_loop(store: Arc<PositionStore>) {
                     );
                     ledger.barrier_orders[index].status = "armed".to_owned();
                     ledger.barrier_orders[index].triggered_at = None;
+                    ledger.barrier_orders[index].retry_after = None;
                     continue;
                 }
                 ledger.barrier_orders[index].clone()
@@ -378,21 +382,36 @@ async fn barrier_order_loop(store: Arc<PositionStore>) {
                 match result {
                     Ok(response) => {
                         let response = response.0;
+                        let is_auto_stop = claimed.source == "auto"
+                            && claimed
+                                .parent_order_id
+                                .as_deref()
+                                .is_some_and(|id| id.starts_with("auto-stop-"));
                         order.filled_quantity += response.filled_quantity;
                         order.remaining_quantity =
                             (order.quantity - order.filled_quantity).max(0.0);
-                        order.average_execution_price = response.average_execution_price;
+                        if response.filled_quantity > EPSILON {
+                            order.average_execution_price = response.average_execution_price;
+                        }
                         order.fee_paid += response.estimated_fee;
-                        order.status =
-                            if claimed.execution_type == "limit" && response.order.is_some() {
-                                "activated".to_owned()
-                            } else if order.remaining_quantity <= EPSILON {
-                                "filled".to_owned()
-                            } else if order.filled_quantity > EPSILON {
-                                "partially_filled".to_owned()
-                            } else {
-                                "unfilled".to_owned()
-                            };
+                        order.status = if is_auto_stop
+                            && response.remaining_quantity > EPSILON
+                            && order.remaining_quantity > EPSILON
+                        {
+                            order.triggered_at = None;
+                            order.retry_after = Some(now.saturating_add(5_000));
+                            "armed".to_owned()
+                        } else if is_auto_stop && response.filled_quantity <= EPSILON {
+                            "cancelled".to_owned()
+                        } else if claimed.execution_type == "limit" && response.order.is_some() {
+                            "activated".to_owned()
+                        } else if order.remaining_quantity <= EPSILON {
+                            "filled".to_owned()
+                        } else if order.filled_quantity > EPSILON {
+                            "partially_filled".to_owned()
+                        } else {
+                            "unfilled".to_owned()
+                        };
                         order.error = None;
                     }
                     Err((_, error)) => {
@@ -723,6 +742,8 @@ struct BarrierOrder {
     created_at: u64,
     #[serde(default)]
     triggered_at: Option<u64>,
+    #[serde(default)]
+    retry_after: Option<u64>,
     status: String,
     #[serde(default)]
     average_execution_price: Option<f64>,
@@ -954,6 +975,7 @@ struct AccountResponse {
     realized_pnl: f64,
     unrealized_pnl: f64,
     fees_paid: f64,
+    estimated_exit_fees: f64,
     equity_available: bool,
     initial_cash: f64,
     topups: Vec<AccountTopup>,
@@ -1090,19 +1112,29 @@ impl PositionStore {
             order.estimated_fee =
                 order.remaining_quantity * order.limit_price * -order.maker_fee_rate;
         }
+        let mut ledger_migrated = false;
         for order in &mut ledger.barrier_orders {
             if order.status == "triggering" {
                 order.status = "interrupted".to_owned();
                 order.error = Some("Backend restarted during barrier execution; review fills before replacing this order".to_owned());
+                ledger_migrated = true;
+            } else if order.status == "unfilled"
+                && order.triggered_at.is_some()
+                && order.source == "auto"
+                && order.parent_order_id.as_deref().is_some_and(|id| id.starts_with("auto-stop-"))
+            {
+                // Older versions left triggered AutoTrader stops as "unfilled" when
+                // the reduce-only fill returned no quantity. They are terminal, not armed.
+                order.status = "cancelled".to_owned();
+                ledger_migrated = true;
             }
         }
-        let mut interrupted = false;
         let mut vwap_runs = HashMap::new();
         for run in &mut ledger.scheduled_runs {
             if run.status == "running" {
                 run.status = "interrupted".to_owned();
                 run.error = Some("Position manager restarted; scheduled execution stopped. Persisted fills are retained.".to_owned());
-                interrupted = true;
+                ledger_migrated = true;
             }
             vwap_runs.insert(
                 run.id.clone(),
@@ -1130,7 +1162,7 @@ impl PositionStore {
             spot_symbols,
             vwap_runs: Mutex::new(vwap_runs),
         };
-        if interrupted {
+        if ledger_migrated {
             let ledger = store.ledger.lock().await;
             store.persist(&ledger).await?;
         }
@@ -1348,7 +1380,7 @@ impl PositionStore {
                     timestamp,
                     source,
                     parent_order_id,
-                    fee: quantity * execution_price * -fee_rate,
+                    fee: -quantity * execution_price * fee_rate.abs(),
                     fee_currency: symbol
                         .split_once('-')
                         .map(|(_, quote)| quote.to_owned())
@@ -1902,7 +1934,7 @@ async fn execute_vwap_child_from_slot(
             timestamp,
             source: source.to_owned(),
             parent_order_id: Some(parent_order_id.to_owned()),
-            fee: qty * execution_price * -fee_rate,
+            fee: -qty * execution_price * fee_rate.abs(),
             fee_currency: symbol
                 .split_once('-')
                 .map(|(_, quote)| quote.to_owned())
@@ -1959,9 +1991,11 @@ fn account_snapshot_with_rates(
                 TradeSide::Buy => -notional,
                 TradeSide::Sell => notional,
             };
-            let fee = trade.fee * rate;
-            cash -= fee;
-            fees_paid += fee;
+            // Ledger fees use cash-flow signs: expenses are negative.
+            // Apply that cash flow directly and expose fees paid as positive.
+            let fee = signed_fee_cashflow(trade.fee) * rate;
+            cash += fee;
+            fees_paid -= fee;
         } else if trade.quantity * trade.execution_price > 0.0 {
             equity_available = false;
         }
@@ -1971,6 +2005,7 @@ fn account_snapshot_with_rates(
     let mut equity = cash;
     let mut realized_pnl = 0.0;
     let mut unrealized_pnl = 0.0;
+    let mut estimated_exit_fees = 0.0;
     for position in &positions {
         let quote = position
             .symbol
@@ -2006,7 +2041,10 @@ fn account_snapshot_with_rates(
         equity += marked_value;
         let gross_unrealized = (mark.price - position.average_entry_price) * position.quantity;
         let close_fee = position.quantity.abs() * mark.price * position.estimated_exit_fee_rate;
-        unrealized_pnl += (gross_unrealized - position.entry_fees - close_fee) * rate;
+        estimated_exit_fees += close_fee * rate;
+        // entry_fees is a signed cash flow (negative for a fee); close_fee is
+        // an estimated positive cost, so subtract only the latter.
+        unrealized_pnl += (gross_unrealized + position.entry_fees - close_fee) * rate;
     }
     Ok(AccountResponse {
         currency: "USD",
@@ -2015,6 +2053,7 @@ fn account_snapshot_with_rates(
         realized_pnl,
         unrealized_pnl,
         fees_paid,
+        estimated_exit_fees,
         equity_available,
         initial_cash: ledger.initial_cash,
         topups: ledger.topups.clone(),
@@ -2652,9 +2691,31 @@ async fn get_insights_inputs(
     Ok(Json(PositionInsightsInput { positions, markets }))
 }
 
-async fn get_position_trades(State(store): State<Arc<PositionStore>>) -> Json<TradesResponse> {
+#[derive(Deserialize, Default)]
+struct PositionTradesQuery {
+    symbol: Option<String>,
+    source: Option<String>,
+    since_ms: Option<u64>,
+}
+async fn get_position_trades(
+    State(store): State<Arc<PositionStore>>,
+    Query(query): Query<PositionTradesQuery>,
+) -> Json<TradesResponse> {
+    let symbol = query.symbol.map(|value| value.to_ascii_uppercase());
+    let ledger = store.ledger.lock().await;
     Json(TradesResponse {
-        trades: store.ledger.lock().await.trades.clone(),
+        trades: ledger
+            .trades
+            .iter()
+            .filter(|trade| symbol.as_ref().is_none_or(|value| trade.symbol == *value))
+            .filter(|trade| query.source.as_ref().is_none_or(|value| trade.source == *value))
+            .filter(|trade| query.since_ms.is_none_or(|value| trade.timestamp >= value))
+            .cloned()
+            .map(|mut trade| {
+                trade.fee = signed_fee_cashflow(trade.fee);
+                trade
+            })
+            .collect(),
     })
 }
 async fn get_orders(State(store): State<Arc<PositionStore>>) -> Json<OrdersResponse> {
@@ -2713,7 +2774,7 @@ async fn create_profit_barrier(
     }
     let trigger_price = (request.target_profit_usd / rate
         + position.average_entry_price * position.quantity
-        + position.entry_fees)
+        - position.entry_fees)
         / denominator;
     if !trigger_price.is_finite() || trigger_price <= 0.0 {
         return Err((
@@ -2755,6 +2816,7 @@ async fn create_profit_barrier(
         trigger_direction,
         created_at: timestamp,
         triggered_at: None,
+        retry_after: None,
         status: "armed".to_owned(),
         average_execution_price: None,
         fee_paid: 0.0,
@@ -3023,6 +3085,7 @@ async fn submit_order(
             trigger_direction,
             created_at: timestamp,
             triggered_at: None,
+            retry_after: None,
             status: "armed".to_owned(),
             average_execution_price: None,
             fee_paid: 0.0,
@@ -3228,7 +3291,13 @@ async fn submit_order(
         ledger_lock_started.elapsed().as_secs_f64() * 1_000.0,
     );
     if request.reduce_only {
-        let current_quantity = summarize_positions(&ledger.trades)
+        let source_trades = ledger
+            .trades
+            .iter()
+            .filter(|trade| trade.source == request.source)
+            .cloned()
+            .collect::<Vec<_>>();
+        let current_quantity = summarize_positions(&source_trades)
             .positions
             .into_iter()
             .find(|position| position.symbol == symbol)
@@ -3324,7 +3393,7 @@ async fn submit_order(
             timestamp,
             source: request.source.clone(),
             parent_order_id: request.client_order_id.clone(),
-            fee: quantity * execution_price * -taker_fee_rate,
+            fee: -quantity * execution_price * taker_fee_rate.abs(),
             fee_currency: symbol
                 .split_once('-')
                 .map(|(_, quote)| quote.to_owned())
@@ -3393,7 +3462,7 @@ async fn submit_order(
         filled_quantity,
         estimated_fee: ledger.trades[start..]
             .iter()
-            .map(|trade| trade.fee)
+            .map(|trade| trade.fee.abs())
             .sum::<f64>(),
         remaining_quantity: remaining,
         average_execution_price,
@@ -3506,9 +3575,15 @@ fn summarize_positions(trades: &[PositionTrade]) -> PositionsResponse {
         trade_count: trades.len(),
     }
 }
+fn signed_fee_cashflow(fee: f64) -> f64 {
+    // Paper trading has fees but no rebates. Normalize historical rows too:
+    // earlier versions persisted positive fees for some fills.
+    -fee.abs()
+}
 fn apply_trade(position: &mut Position, trade: &PositionTrade) {
     let old = position.quantity;
-    position.fees_paid += trade.fee;
+    let fee = signed_fee_cashflow(trade.fee);
+    position.fees_paid -= fee;
     let incoming = match trade.side {
         TradeSide::Buy => trade.quantity,
         TradeSide::Sell => -trade.quantity,
@@ -3524,19 +3599,20 @@ fn apply_trade(position: &mut Position, trade: &PositionTrade) {
             + incoming.abs() * trade.execution_price)
             / total;
         position.quantity = old + incoming;
-        position.entry_fees += trade.fee;
+        position.entry_fees += fee;
         return;
     }
     let closed = old.abs().min(incoming.abs());
     let entry_fee_closed = position.entry_fees * (closed / old.abs());
-    let closing_fee = trade.fee * (closed / incoming.abs());
+    let closing_fee = fee * (closed / incoming.abs());
     let gross = closed
         * if old > 0.0 {
             trade.execution_price - position.average_entry_price
         } else {
             position.average_entry_price - trade.execution_price
         };
-    position.realized_pnl += gross - entry_fee_closed - closing_fee;
+    // Both fee allocations are signed cash flows, so adding them deducts fees.
+    position.realized_pnl += gross + entry_fee_closed + closing_fee;
     let net = old + incoming;
     if net.abs() < EPSILON {
         position.quantity = 0.0;
@@ -3544,7 +3620,7 @@ fn apply_trade(position: &mut Position, trade: &PositionTrade) {
         position.entry_fees = 0.0;
     } else if net.signum() != old.signum() {
         position.average_entry_price = trade.execution_price;
-        position.entry_fees = (trade.fee - closing_fee).max(0.0);
+        position.entry_fees = fee - closing_fee;
         position.quantity = net;
     } else {
         position.entry_fees -= entry_fee_closed;

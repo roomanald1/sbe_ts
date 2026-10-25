@@ -44,6 +44,8 @@ fn apply_auto_fill(
         if old == 0.0 {
             position.take_profit_deferred_at_ms = None;
             position.entries = 1;
+            position.entry_timestamp_ms = current_time_ms();
+            position.price_path.clear();
         } else if count_entry {
             position.entries = position.entries.saturating_add(1);
         }
@@ -131,6 +133,7 @@ fn signal_audit_payload(
         "metrics": if signal.direction == "bullish" { &item.all_signal_long } else { &item.all_signal_short },
     }));
     serde_json::json!({
+        "record_schema_version": 1,
         "decision_id": signal_decision_id(signal),
         "stage": stage,
         "timestamp": timestamp,
