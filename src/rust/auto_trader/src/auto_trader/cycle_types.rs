@@ -8,8 +8,15 @@ struct PnlBreakdown {
     outcomes: usize,
 }
 #[derive(Serialize)]
+struct PositionExitPolicy {
+    symbol: String,
+    stop_loss_percent: f64,
+    take_profit_percent: f64,
+}
+#[derive(Serialize)]
 struct ActivityResponse {
     orders: Vec<TraderOrder>,
+    position_exit_policies: Vec<PositionExitPolicy>,
     open_position_symbols: Vec<String>,
     pnl_breakdown: Vec<PnlBreakdown>,
     realized_pnl: Option<f64>,

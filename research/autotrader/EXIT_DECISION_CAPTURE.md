@@ -9,7 +9,7 @@ Question for next review: Are fixed stop and target exits cutting daily research
 - Root auto_trader_state.json is a different state snapshot: disabled, generic signals enabled, only donchian-55-btc200. Do not treat it as active without checking AUTO_TRADER_STATE_FILE or the running service API.
 - The position-management state had global stop loss and take profit both at 0.5%. Per-position overrides and policy adaptation exist; use each entry/exit audit's effective values.
 - In src/rust/auto_trader/src/auto_trader/position_exits.rs, exit evaluation checks strategy disablement, then stop loss, then take profit, then research-regime exit. Fixed thresholds can therefore close a position before its daily eligibility rule is checked.
-- The 55-day breakout backtest evaluates yesterday's close, enters at today's open, and earns open-to-next-open returns while its daily signal remains active. That differs from the Auto Trader's fixed P&L thresholds. This is a plausible backtest/live mismatch, not a proven loss cause.
+- The 55-day breakout backtest evaluates yesterday's close, enters at today's open, and earns open-to-next-open returns while its daily signal remains active. That differs from the Auto Trader's fixed P&L thresholds. A matched daily-bar replay below supports the mismatch as a likely source of the gap, subject to the listed assumptions.
 
 ## Evidence recorded
 
@@ -68,11 +68,29 @@ An independent cost stress calculation remained positive in the holdout: +9.1% a
 - Active-looking state snapshot: src/rust/position_management/auto_trader_state.json
 - Alternate root state snapshot: auto_trader_state.json
 - Strategy rules: src/rust/auto_trader/src/auto_trader/research_market_data.rs
-- Exit evaluation and protective stops: src/rust/auto_trader/src/auto_trader/position_exits.rs
+- Exit evaluation: src/rust/auto_trader/src/auto_trader/position_exit_rules.rs; protective-stop maintenance: src/rust/auto_trader/src/auto_trader/protective_stop_maintenance.rs
 - Exit adaptation and thresholds: src/rust/auto_trader/src/auto_trader/execution.rs and src/rust/auto_trader/src/auto_trader/constants.rs
 - Daily breakout backtest/results: research/autotrader/spot_regime_gate_test.py and research/autotrader/spot_regime_gate_results.json
 - Audit database: src/rust/insights/signals.sqlite (read-only during review)
 
+
+
+## Counterfactual completed on 25 October 2026
+
+A reproducible replay was added at research/autotrader/exit_policy_counterfactual.py, with output in research/autotrader/exit_policy_counterfactual_results.json. It uses the same seven Binance daily series, prior 55-day breakout, BTC SMA200 gate, fixed 1/7 weights, next-open entry, and 15 bps per-side baseline cost. It compares strategy-signal exits with net fixed brackets. For daily bars that touch both bracket levels, it assumes the stop hit first; gaps exit at the worse open price.
+
+| Exit policy | 2021-2022 | 2023-2024 | 2025-22 Oct 2026 | Holdout max drawdown |
+|---|---:|---:|---:|---:|
+| Daily strategy invalidation | +16.79% | +42.36% | +11.88% | -4.41% |
+| Net stop 0.5%, target 0.5% | -6.90% | -12.46% | -5.70% | -5.70% |
+| Net stop 0.5%, target 1.0% | -6.90% | -11.58% | -5.29% | -5.29% |
+| Net stop 0.5%, target 1.5% | -6.90% | -10.69% | -5.07% | -5.07% |
+| Net stop 1.0%, target 1.5% | -12.72% | -15.30% | -6.56% | -6.56% |
+
+Signal-exit holdout returns remained +9.09% at 30 bps per side and +5.49% at 50 bps per side. Fixed-bracket results are only a daily OHLC approximation; intraday stop/target order is unknown, and stop-first treatment is conservative. The strategy-signal result reproduces the prior daily backtest convention and is not an execution-matched test of live positions.
+
+The source change is limited to positions tagged donchian-55-btc200: their exit is now based on that strategy's own active/inactive status, instead of another configured strategy keeping the symbol eligible. While Donchian 55 BTC200 remains enabled, fixed stop/target checks are bypassed and its protective stop barriers are cancelled. Disabling the strategy still triggers an exit. This means those positions can carry larger losses and is not validated by live fills; the runtime has not been rebuilt or restarted.
+
 ## Provisional conclusion
 
-There is an implementation mismatch: the historical daily breakout test exits according to daily signal state, while the Auto Trader can first exit at fixed P&L thresholds. The negative realized window and low win rate make exit timing worth testing, but incomplete price paths and mixed strategy cohorts prevent concluding that exits caused the losses or that wider/strategy-aware exits would have been profitable. No settings or live behavior were changed.
+The matched daily-bar replay favors strategy invalidation over the tested fixed brackets in all chronological splits. That supports using the strategy's own active state as the Donchian 55 BTC200 exit. It does not establish that the live implementation will make money: actual fill paths remain sparse, the counterfactual uses daily OHLC, and the broader realized sample mixes strategies. The source logic was changed, but settings were not edited and the running service was not rebuilt or restarted.

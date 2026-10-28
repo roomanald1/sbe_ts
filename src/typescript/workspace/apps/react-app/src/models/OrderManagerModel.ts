@@ -1,108 +1,17 @@
-import { alignsToStep, getInstrumentPrecision } from '../instrument_precision';
 import { BehaviorSubject } from 'rxjs';
-import type { BookFeed, Connection } from '../connection';
-import { decodeBookDepth, type BookDepth } from '../types/symbol_price';
-import { getLimitPriceMarkWarning } from './limit_price_guard';
+import type { Connection } from '../connection';
+import { deriveOrderManagerState } from './OrderManagerDerived';
+import { OrderManagerBookFeeds } from './OrderManagerBookFeeds';
+import type {
+  BarrierDirection, BarrierOrder, OrderManagerProps, OrderManagerState,
+  OrderType, OrdersResponse, TradeSide, VwapRun, VwapRunsResponse,
+} from './OrderManagerTypes';
+import { orderSubmissionBody, validateOrderSubmission } from './OrderManagerSubmission';
 
-type TradeSide = 'buy' | 'sell';
-type OrderType = 'ioc' | 'limit' | 'vwap' | 'barrier';
-type BarrierDirection = 'above' | 'below';
-type RestingOrder = {
-  id: string;
-  symbol: string;
-  side: TradeSide;
-  quantity: number;
-  remaining_quantity: number;
-  limit_price: number;
-  timestamp: number;
-  expires_at?: number;
-  time_in_force?: 'gtc' | 'gtd';
-  post_only?: boolean;
-  maker_fee_rate: number;
-  estimated_fee: number;
-};
-type BarrierOrder = {
-  id: string;
-  symbol: string;
-  side: TradeSide;
-  quantity: number;
-  remaining_quantity: number;
-  filled_quantity: number;
-  trigger_price: number;
-  trigger_direction: BarrierDirection;
-  order_kind?: 'barrier' | 'profit-target' | 'stop-market' | 'stop-limit' | 'trailing-stop';
-  execution_type?: 'market' | 'limit';
-  limit_price?: number;
-  trailing_amount?: number;
-  trailing_percent?: number;
-  created_at: number;
-  triggered_at?: number;
-  status: string;
-  average_execution_price?: number;
-  error?: string;
-};
-type OrdersResponse = { orders: RestingOrder[]; barrier_orders?: BarrierOrder[] };
-export type VwapRun = {
-  id: string;
-  symbol: string;
-  side: TradeSide;
-  quantity: number;
-  executed_quantity: number;
-  duration_minutes: number;
-  strategy?: 'vwap' | 'twap';
-  started_at: number;
-  status: string;
-  market_vwap: number;
-  execution_vwap: number;
-  slippage: number;
-  error?: string;
-};
-type VwapRunsResponse = { runs: VwapRun[] };
-type FeedEntry = {
-  feed: BookFeed;
-  data: { unsubscribe(): void };
-  errors: { unsubscribe(): void };
-};
-export type OrderRow = {
-  order: RestingOrder;
-  current?: number;
-  bookError?: string;
-};
-export type OrderManagerState = {
-  symbols: string[];
-  books: Record<string, BookDepth>;
-  bookErrors: Record<string, string>;
-  selectedSymbol: string;
-  side: TradeSide;
-  quantity: string;
-  orderType: OrderType;
-  limitPrice: string;
-  barrierPrice: string;
-  barrierDirection: BarrierDirection;
-  orders: RestingOrder[];
-  barrierOrders: BarrierOrder[];
-  vwapRuns: VwapRun[];
-  rows: OrderRow[];
-  selectedCurrentPrice?: number;
-  estimatedFee?: number;
-  makerFeeRate: number;
-  takerFeeRate: number;
-  limitPriceWarning?: string;
-  confirmedLimitPrice?: string;
-  durationMinutes: string;
-  participationRate: string;
-  vwapRunId?: string;
-  vwapStatus?: string;
-  vwapExecutedQuantity?: number;
-  loading: boolean;
-  submitting: boolean;
-  error?: string;
-};
-type OrderManagerProps = { connection: Connection; symbols: string[] };
 export class OrderManagerModel {
   readonly props$: BehaviorSubject<OrderManagerProps>;
   readonly state$: BehaviorSubject<OrderManagerState>;
-  private activeFeeds = new Map<string, FeedEntry>();
+  private bookFeeds!: OrderManagerBookFeeds;
   private timer?: ReturnType<typeof setInterval>;
   private vwapTimer?: ReturnType<typeof setInterval>;
   constructor(props: OrderManagerProps) {
@@ -129,6 +38,23 @@ export class OrderManagerModel {
       loading: true,
       submitting: false,
     });
+    this.bookFeeds = new OrderManagerBookFeeds(
+      props.connection,
+      (symbol, depth) => {
+        const books = { ...this.state$.value.books };
+        if (depth) books[symbol] = depth;
+        else delete books[symbol];
+        const bookErrors = { ...this.state$.value.bookErrors };
+        if (depth) delete bookErrors[symbol];
+        this.patch({ books, bookErrors });
+      },
+      (symbol, error) => {
+        const bookErrors = { ...this.state$.value.bookErrors };
+        if (error) bookErrors[symbol] = error;
+        else delete bookErrors[symbol];
+        this.patch({ bookErrors });
+      },
+    );
   }
   private get connection(): Connection {
     return this.props$.value.connection;
@@ -148,7 +74,7 @@ export class OrderManagerModel {
       : (props.symbols[0] ?? '');
     this.patch({ symbols: props.symbols, selectedSymbol });
     if (oldConnection !== props.connection) {
-      this.closeFeeds();
+      this.bookFeeds.updateConnection(props.connection);
       this.syncFeeds();
     }
   }
@@ -227,27 +153,12 @@ export class OrderManagerModel {
   }
   async submit(): Promise<void> {
     const state = this.state$.value;
-    const quantity = Number(state.quantity);
-    const limitPrice = Number(state.limitPrice);
-    const barrierPrice = Number(state.barrierPrice);
-    const durationMinutes = Number(state.durationMinutes);
-    const participationRate = Number(state.participationRate) / 100;
-    const instrument = await getInstrumentPrecision(state.selectedSymbol);
-    if (instrument && (!alignsToStep(quantity, instrument.lotSz) || (state.orderType === 'limit' && !alignsToStep(limitPrice, instrument.tickSz)) || (state.orderType === 'barrier' && !alignsToStep(barrierPrice, instrument.tickSz)))) {
-      this.patch({ error: 'Quantity or price does not match this instrument tick or lot size.' }); return;
-    }
-    if (
-      !state.selectedSymbol ||
-      !Number.isFinite(quantity) ||
-      quantity <= 0 ||
-      (state.orderType === 'limit' &&
-        (!Number.isFinite(limitPrice) || limitPrice <= 0)) ||
-      (state.orderType === 'barrier' && (!Number.isFinite(barrierPrice) || barrierPrice <= 0)) ||
-      (state.orderType === 'vwap' &&
-        (!Number.isInteger(durationMinutes) || durationMinutes < 5 || durationMinutes > 390 ||
-          !Number.isFinite(participationRate) || participationRate < 0.01 || participationRate > 1))
-    )
+    const validation = await validateOrderSubmission(state);
+    if (validation && 'error' in validation) {
+      this.patch({ error: validation.error });
       return;
+    }
+    if (!validation) return;
     if (
       state.orderType === 'limit' &&
       state.limitPriceWarning &&
@@ -265,14 +176,7 @@ export class OrderManagerModel {
       const response = await fetch(isVwap ? '/positions/vwap' : '/positions/orders', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          symbol: state.selectedSymbol,
-          side: state.side,
-          ...(isVwap ? { duration_minutes: durationMinutes, max_participation_rate: participationRate } : { order_type: state.orderType }),
-          quantity,
-          ...(state.orderType === 'limit' ? { limit_price: limitPrice } : {}),
-          ...(state.orderType === 'barrier' ? { trigger_price: barrierPrice, trigger_direction: state.barrierDirection } : {}),
-        }),
+        body: JSON.stringify(orderSubmissionBody(state, validation.values)),
       });
       if (!response.ok) {
         const detail = await response.text();
@@ -367,94 +271,22 @@ export class OrderManagerModel {
     this.state$.next(this.derive({ ...this.state$.value, ...patch }));
   }
   private derive(state: OrderManagerState): OrderManagerState {
-    const rows = state.orders.map((order) => {
-      const book = state.books[order.symbol];
-      const current =
-        book?.bids[0] && book.asks[0]
-          ? (book.bids[0].price + book.asks[0].price) / 2
-          : (book?.bids[0]?.price ?? book?.asks[0]?.price);
-      return { order, current, bookError: state.bookErrors[order.symbol] };
-    });
-    const book = state.books[state.selectedSymbol];
-    const selectedCurrentPrice =
-      book?.bids[0] && book.asks[0]
-        ? (book.bids[0].price + book.asks[0].price) / 2
-        : (book?.bids[0]?.price ?? book?.asks[0]?.price);
-    const requestedQuantity = Number(state.quantity);
-    const feePrice = state.orderType === "limit" && Number(state.limitPrice) > 0 ? Number(state.limitPrice) : selectedCurrentPrice;
-    const feeRate = state.orderType === "limit" ? state.makerFeeRate : state.takerFeeRate;
-    const estimatedFee = Number.isFinite(requestedQuantity) && requestedQuantity > 0 && feePrice !== undefined ? requestedQuantity * feePrice * feeRate : undefined;
-    const limitPriceWarning =
-      state.orderType === 'limit'
-        ? getLimitPriceMarkWarning(state.limitPrice, selectedCurrentPrice)
-        : undefined;
-    return {
-      ...state,
-      rows,
-      selectedCurrentPrice,
-      estimatedFee,
-      limitPriceWarning,
-      confirmedLimitPrice: limitPriceWarning ? state.confirmedLimitPrice : undefined,
-    };
+    return deriveOrderManagerState(state);
   }
   private syncFeeds(): void {
     const state = this.state$.value;
-    const symbols = new Set(
-      [
-        state.selectedSymbol,
-        ...state.orders.map((order) => order.symbol),
-        ...state.barrierOrders.filter((order) => order.status === 'armed').map((order) => order.symbol),
-      ].filter(Boolean),
-    );
-    for (const symbol of symbols) {
-      if (this.activeFeeds.has(symbol)) continue;
-      const feed = this.connection.openBook('order-manager:' + symbol, symbol);
-      const data = feed.data.subscribe((raw) => {
-        if (raw === undefined) {
-          const books = { ...this.state$.value.books };
-          delete books[symbol];
-          this.patch({ books });
-          return;
-        }
-        const depth = decodeBookDepth(raw);
-        if (!depth || depth.symbol !== symbol) return;
-        this.patch({
-          books: { ...this.state$.value.books, [symbol]: depth },
-          bookErrors: {
-            ...this.state$.value.bookErrors,
-            [symbol]: undefined,
-          } as Record<string, string>,
-        });
-      });
-      const errors = feed.error.subscribe((error) => {
-        if (error)
-          this.patch({
-            bookErrors: { ...this.state$.value.bookErrors, [symbol]: error },
-          });
-      });
-      this.activeFeeds.set(symbol, { feed, data, errors });
-    }
-    for (const [symbol, active] of this.activeFeeds) {
-      if (symbols.has(symbol)) continue;
-      active.data.unsubscribe();
-      active.errors.unsubscribe();
-      this.connection.closeBook(active.feed.key, active.feed);
-      this.activeFeeds.delete(symbol);
-      const books = { ...this.state$.value.books };
-      delete books[symbol];
-      const bookErrors = { ...this.state$.value.bookErrors };
-      delete bookErrors[symbol];
-      this.patch({ books, bookErrors });
-    }
+    const symbols = new Set([
+      state.selectedSymbol,
+      ...state.orders.map((order) => order.symbol),
+      ...state.barrierOrders.filter((order) => order.status === 'armed').map((order) => order.symbol),
+    ].filter(Boolean));
+    this.bookFeeds.sync(symbols);
   }
+
   private closeFeeds(): void {
-    for (const active of this.activeFeeds.values()) {
-      active.data.unsubscribe();
-      active.errors.unsubscribe();
-      this.connection.closeBook(active.feed.key, active.feed);
-    }
-    this.activeFeeds.clear();
+    this.bookFeeds.close();
   }
+
 }
 
 

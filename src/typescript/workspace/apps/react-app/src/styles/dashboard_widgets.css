@@ -1,0 +1,276 @@
+.dashboard-widget-resize {
+  position: absolute;
+  z-index: 5;
+  right: 2px;
+  bottom: 2px;
+  width: 16px;
+  height: 16px;
+  border-right: 2px solid #63758a;
+  border-bottom: 2px solid #63758a;
+  cursor: nwse-resize;
+  touch-action: none;
+}
+
+.dashboard-widget-remove:hover {
+  border-color: var(--coral);
+  background: #2b1c1b;
+  color: #ffaaa2;
+}
+
+.dashboard-widget-remove:focus-visible {
+  outline: 2px solid var(--blue);
+  outline-offset: 2px;
+}
+
+.dashboard-widget .feed-toolbar {
+  padding-right: 40px;
+  padding-left: 40px;
+}
+
+.dashboard-widget .feed-toolbar > div:first-child {
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+}
+
+.dashboard-widget .toolbar-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dashboard-widget .feed-toolbar > .toolbar-meta,
+.dashboard-widget .feed-toolbar > .chart-symbol-control {
+  min-width: 0;
+  flex: 0 1 auto;
+}
+
+.market-dashboard .feed-toolbar {
+  min-height: 36px;
+  flex: 0 0 36px;
+  padding-inline: 10px;
+}
+
+.market-dashboard .dashboard-widget .feed-toolbar {
+  padding-right: 46px;
+  padding-left: 46px;
+}
+
+.market-dashboard .toolbar-title {
+  font-size: 11px;
+}
+
+.market-dashboard .toolbar-meta {
+  padding: 4px 6px;
+  font-size: 8px;
+}
+
+.market-dashboard .symbol-grid {
+  min-height: 0;
+  flex: 1;
+}
+
+.market-dashboard .symbol-grid-cell {
+  gap: 2px;
+}
+
+.market-dashboard .grid-symbol {
+  font-size: 8px;
+}
+
+.market-dashboard .grid-volatility {
+  color: var(--muted);
+  font: 500 7px/1 var(--mono);
+}
+
+.market-dashboard .grid-price {
+  font-size: 8px;
+  letter-spacing: -0.04em;
+}
+
+.market-dashboard .table-scroll {
+  height: auto;
+  min-height: 0;
+  flex: 1;
+  overflow: auto;
+}
+
+.market-dashboard .tick-table th {
+  height: 24px;
+  padding-inline: 8px;
+  font-size: 8px;
+}
+
+.market-dashboard .tick-table td {
+  height: 27px;
+  padding-inline: 8px;
+  font-size: 10px;
+}
+
+.market-dashboard .symbol-tag {
+  height: 20px;
+  padding-inline: 4px;
+  font-size: 9px;
+}
+
+.market-dashboard .price-cell,
+.market-dashboard .time-cell {
+  font-size: 9px;
+}
+
+.market-dashboard .price-chart-section {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  flex: 1;
+  overflow: hidden;
+}
+
+.market-dashboard .chart-symbol-control {
+  gap: 5px;
+  font-size: 8px;
+}
+
+.market-dashboard .chart-symbol-control select {
+  max-width: 130px;
+  padding: 4px 6px;
+  font-size: 9px;
+}
+
+.market-dashboard .price-chart-summary {
+  min-height: 44px;
+  gap: 14px;
+  padding: 7px 12px 3px;
+}
+
+.market-dashboard .price-chart-summary strong {
+  font-size: 11px;
+}
+
+.market-dashboard .price-chart-label {
+  font-size: 8px;
+}
+
+.market-dashboard .price-chart-summary small {
+  font-size: 9px;
+}
+
+.market-dashboard .price-chart-wrap {
+  width: 100%;
+  height: 0;
+  min-height: 0;
+  flex: 1 1 0;
+  overflow: hidden;
+  padding: 0 4px;
+}
+
+.market-dashboard .price-chart-times {
+  min-width: 0;
+  padding: 4px 10px 6px;
+  font-size: 8px;
+}
+
+.market-dashboard .price-chart-times > * {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.market-dashboard .book-view-wrap {
+  min-height: 0;
+  flex: 1;
+}
+
+.market-dashboard .book-popup.book-view {
+  min-height: 0;
+  flex: 1;
+}
+
+.market-dashboard .book-popup-header {
+  min-height: 38px;
+  padding: 4px 10px;
+}
+
+.market-dashboard .book-popup-eyebrow {
+  display: none;
+}
+
+.market-dashboard .book-popup-header h2 {
+  margin: 0;
+  font-size: 12px;
+}
+
+.market-dashboard .book-stream-status {
+  font-size: 8px;
+}
+
+.market-dashboard .book-freeze-button {
+  height: 24px;
+}
+
+.market-dashboard .book-popup-columns {
+  padding: 4px 10px 2px;
+  font-size: 8px;
+}
+
+.market-dashboard .book-levels {
+  padding-inline: 8px;
+}
+
+.market-dashboard .book-level {
+  min-height: 16px;
+  padding-inline: 4px;
+  font-size: 9px;
+}
+
+.market-dashboard .book-level-quantity {
+  flex-direction: row;
+  gap: 5px;
+}
+
+.market-dashboard .book-level-quantity small,
+.market-dashboard .book-balance,
+.market-dashboard .book-popup-footer {
+  display: none;
+}
+
+.market-dashboard .book-spread {
+  min-height: 30px;
+  padding-inline: 10px;
+}
+
+.market-dashboard .book-spread strong {
+  font-size: 10px;
+}
+
+.market-dashboard .book-spread time {
+  font-size: 8px;
+}
+
+@media (max-width: 760px), (max-height: 650px) {
+  .market-dashboard {
+    grid-template-columns: repeat(24, minmax(0, 1fr));
+    grid-auto-rows: 20px;
+    gap: 6px;
+    height: auto;
+  }
+
+  .market-dashboard .feed-toolbar {
+    min-height: 30px;
+    flex-basis: 30px;
+    padding-inline: 6px;
+  }
+
+  .market-dashboard .book-popup-header {
+    min-height: 30px;
+    padding: 2px 6px;
+  }
+
+  .market-dashboard .book-level {
+    min-height: 14px;
+    font-size: 8px;
+  }
+}
+

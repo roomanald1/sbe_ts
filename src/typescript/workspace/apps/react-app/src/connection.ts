@@ -7,6 +7,7 @@ import {
 } from 'rsocket-core';
 
 import * as WebSocketClient from 'rsocket-websocket-client';
+import { ConnectionFeedManager, createBookFeed, createNewsFeed, createTradeFeed } from './connection_feed_manager';
 
 export type ConnectionState = 'connecting' | 'connected' | 'reconnecting';
 export type FeedSource = 'okx' | 'synthetic';
@@ -27,18 +28,6 @@ export type BookFeed = {
 
 export type SignalFeed = BookFeed;
 export type NewsFeed = { key: string; data: BehaviorSubject<unknown | undefined>; error: BehaviorSubject<string | undefined> };
-
-type ActiveTradeFeed = TradeFeed & {
-  subscription?: { cancel: () => void; request: (count: number) => void };
-  active: boolean;
-};
-
-type ActiveBookFeed = BookFeed & {
-  subscription?: { cancel: () => void; request: (count: number) => void };
-  active: boolean;
-};
-type ActiveSignalFeed = SignalFeed & { subscription?: { cancel: () => void; request: (count: number) => void }; active: boolean };
-type ActiveNewsFeed = NewsFeed & { subscription?: { cancel: () => void; request: (count: number) => void }; active: boolean };
 
 const REQUEST_BATCH_SIZE = 500;
 
@@ -69,10 +58,10 @@ export class Connection {
   private lifecycleGeneration = 0;
   private socket: Awaited<ReturnType<typeof this.createClient>> | undefined;
   private subscription: { cancel: () => void } | undefined;
-  private readonly bookFeeds = new Map<string, ActiveBookFeed>();
-  private readonly tradeFeeds = new Map<string, ActiveTradeFeed>();
-  private readonly signalFeeds = new Map<string, ActiveSignalFeed>();
-  private readonly newsFeeds = new Map<string, ActiveNewsFeed>();
+  private readonly bookFeeds = this.createBookManager('book');
+  private readonly tradeFeeds = this.createTradeManager();
+  private readonly signalFeeds = this.createBookManager('signals');
+  private readonly newsFeeds = this.createNewsManager();
   private retryTimer: ReturnType<typeof setTimeout> | undefined;
   private retryAttempt = 0;
 
@@ -104,10 +93,10 @@ export class Connection {
       this.error_message.next(message);
       this.subscription?.cancel();
       this.subscription = undefined;
-      this.cancelBookSubscriptions('connection reconnecting');
-      this.cancelTradeSubscriptions('connection reconnecting');
-      this.cancelSignalSubscriptions();
-      this.cancelNewsSubscriptions();
+      this.bookFeeds.cancelAll();
+      this.tradeFeeds.cancelAll();
+      this.signalFeeds.cancelAll();
+      this.newsFeeds.cancelAll();
       this.socket?.close();
       this.socket = undefined;
 
@@ -148,10 +137,10 @@ export class Connection {
             this.subscription = sub;
             this.connection_state.next('connected');
             this.error_message.next(undefined);
-            this.startBookSubscriptions();
-            this.startTradeSubscriptions();
-            this.startSignalSubscriptions();
-            this.startNewsSubscriptions();
+            this.bookFeeds.resumeAll();
+            this.tradeFeeds.resumeAll();
+            this.signalFeeds.resumeAll();
+            this.newsFeeds.resumeAll();
             if (this.source === 'synthetic') {
               requestNext = () => sub.request(REQUEST_BATCH_SIZE);
               sub.request(1000);
@@ -183,310 +172,43 @@ export class Connection {
     }
   }
 
-  public openBook(key: string, symbol: string): BookFeed {
-    const existing = this.bookFeeds.get(key);
-    if (existing?.symbol === symbol) return existing;
-    if (existing) this.closeBook(key, existing);
+  public openBook(key: string, symbol: string): BookFeed { return this.bookFeeds.open(key, symbol); }
+  public closeBook(key: string, feed: BookFeed): void { this.bookFeeds.close(key, feed as BookFeed & { active: boolean }); }
+  public openSignals(key: string, symbol: string): SignalFeed { return this.signalFeeds.open(key, symbol); }
+  public closeSignals(key: string, feed: SignalFeed): void { this.signalFeeds.close(key, feed as SignalFeed & { active: boolean }); }
+  public openTrades(key: string, symbol: string): TradeFeed { return this.tradeFeeds.open(key, symbol); }
+  public closeTrades(key: string, feed: TradeFeed): void { this.tradeFeeds.close(key, feed as TradeFeed & { active: boolean }); }
+  public openNews(key: string): NewsFeed { return this.newsFeeds.open(key); }
+  public closeNews(key: string, feed: NewsFeed): void { this.newsFeeds.close(key, feed as NewsFeed & { active: boolean }); }
 
-    const feed: ActiveBookFeed = {
-      key,
-      symbol,
-      data: new BehaviorSubject<unknown | undefined>(undefined),
-      error: new BehaviorSubject<string | undefined>(undefined),
-      active: false,
-    };
-    this.bookFeeds.set(key, feed);
-    this.startBookSubscription(feed);
-    return feed;
-  }
-
-  public openSignals(key: string, symbol: string): SignalFeed {
-    const existing = this.signalFeeds.get(key);
-    if (existing?.symbol === symbol) return existing;
-    if (existing) this.closeSignals(key, existing);
-    const feed: ActiveSignalFeed = { key, symbol, data: new BehaviorSubject<unknown | undefined>(undefined), error: new BehaviorSubject<string | undefined>(undefined), active: false };
-    this.signalFeeds.set(key, feed);
-    this.startSignalSubscription(feed);
-    return feed;
-  }
-
-  public closeSignals(key: string, feed: SignalFeed) {
-    const active = this.signalFeeds.get(key);
-    if (!active || active !== feed) return;
-    active.subscription?.cancel(); active.subscription = undefined; active.active = false;
-    this.signalFeeds.delete(key); active.data.complete(); active.error.complete();
-  }
-
-  private cancelSignalSubscriptions() {
-    for (const feed of this.signalFeeds.values()) {
-      feed.subscription?.cancel(); feed.subscription = undefined; feed.active = false; feed.data.next(undefined);
-    }
-  }
-
-  private startSignalSubscriptions() { for (const feed of this.signalFeeds.values()) this.startSignalSubscription(feed); }
-
-  private startSignalSubscription(feed: ActiveSignalFeed) {
-    const socket = this.socket; const generation = this.lifecycleGeneration;
-    if (!socket || feed.active || this.signalFeeds.get(feed.key) !== feed) return;
-    feed.active = true; let received = 0; let requestNext: (() => void) | undefined;
-    socket.requestStream({ data: Buffer.from('signals:' + feed.symbol) }).subscribe({
-      onSubscribe: (subscription) => {
-        if (this.signalFeeds.get(feed.key) !== feed || this.socket !== socket || this.lifecycleGeneration !== generation) { subscription.cancel(); return; }
-        feed.subscription = subscription; requestNext = () => subscription.request(REQUEST_BATCH_SIZE); requestNext();
-      },
-      onNext: (payload) => {
-        if (this.signalFeeds.get(feed.key) !== feed || this.socket !== socket || this.lifecycleGeneration !== generation) return;
-        feed.data.next(payload.data); feed.error.next(undefined); received += 1;
-        if (received >= REQUEST_BATCH_SIZE) { received = 0; requestNext?.(); }
-      },
-      onError: (error) => { if (this.signalFeeds.get(feed.key) !== feed || this.socket !== socket) return; feed.subscription = undefined; feed.active = false; feed.error.next(error.message ?? 'Signal stream disconnected'); },
-      onComplete: () => { if (this.signalFeeds.get(feed.key) !== feed || this.socket !== socket) return; feed.subscription = undefined; feed.active = false; feed.error.next('Signal stream completed'); },
+  private createBookManager(requestType: 'book' | 'signals') {
+    return new ConnectionFeedManager({
+      create: createBookFeed,
+      request: (feed) => requestType + ':' + feed.symbol,
+      demand: REQUEST_BATCH_SIZE,
+      getSocket: () => this.socket as never,
+      getGeneration: () => this.lifecycleGeneration,
     });
   }
 
-  public openNews(key: string): NewsFeed {
-    const existing = this.newsFeeds.get(key);
-    if (existing) return existing;
-    const feed: ActiveNewsFeed = { key, data: new BehaviorSubject<unknown | undefined>(undefined), error: new BehaviorSubject<string | undefined>(undefined), active: false };
-    this.newsFeeds.set(key, feed);
-    this.startNewsSubscription(feed);
-    return feed;
-  }
-
-  public closeNews(key: string, feed: NewsFeed) {
-    const active = this.newsFeeds.get(key);
-    if (!active || active !== feed) return;
-    active.subscription?.cancel(); active.subscription = undefined; active.active = false;
-    this.newsFeeds.delete(key); active.data.complete(); active.error.complete();
-  }
-
-  private cancelNewsSubscriptions() {
-    for (const feed of this.newsFeeds.values()) {
-      feed.subscription?.cancel(); feed.subscription = undefined; feed.active = false; feed.data.next(undefined);
-    }
-  }
-
-  private startNewsSubscriptions() { for (const feed of this.newsFeeds.values()) this.startNewsSubscription(feed); }
-
-  private startNewsSubscription(feed: ActiveNewsFeed) {
-    const socket = this.socket; const generation = this.lifecycleGeneration;
-    if (!socket || feed.active || this.newsFeeds.get(feed.key) !== feed) return;
-    feed.active = true; let received = 0; let requestNext: (() => void) | undefined;
-    socket.requestStream({ data: Buffer.from('news:*') }).subscribe({
-      onSubscribe: (subscription) => {
-        if (this.newsFeeds.get(feed.key) !== feed || this.socket !== socket || this.lifecycleGeneration !== generation) { subscription.cancel(); return; }
-        feed.subscription = subscription; requestNext = () => subscription.request(1); requestNext();
-      },
-      onNext: (payload) => {
-        if (this.newsFeeds.get(feed.key) !== feed || this.socket !== socket || this.lifecycleGeneration !== generation) return;
-        feed.data.next(payload.data); feed.error.next(undefined); received += 1;
-        if (received >= 1) { received = 0; requestNext?.(); }
-      },
-      onError: (error) => { if (this.newsFeeds.get(feed.key) !== feed || this.socket !== socket) return; feed.subscription = undefined; feed.active = false; feed.error.next(error.message ?? 'News stream disconnected'); },
-      onComplete: () => { if (this.newsFeeds.get(feed.key) !== feed || this.socket !== socket) return; feed.subscription = undefined; feed.active = false; feed.error.next('News stream completed'); },
+  private createTradeManager() {
+    return new ConnectionFeedManager({
+      create: createTradeFeed,
+      request: (feed) => 'trades:' + feed.symbol,
+      demand: REQUEST_BATCH_SIZE,
+      getSocket: () => this.socket as never,
+      getGeneration: () => this.lifecycleGeneration,
     });
   }
 
-  public openTrades(key: string, symbol: string): TradeFeed {
-    const existing = this.tradeFeeds.get(key);
-    if (existing?.symbol === symbol) return existing;
-    if (existing) this.closeTrades(key, existing);
-    const feed: ActiveTradeFeed = {
-      key,
-      symbol,
-      data: new BehaviorSubject<unknown | undefined>(undefined),
-      error: new BehaviorSubject<string | undefined>(undefined),
-      active: false,
-    };
-    this.tradeFeeds.set(key, feed);
-    this.startTradeSubscription(feed);
-    return feed;
-  }
-
-  public closeTrades(key: string, feed: TradeFeed) {
-    const activeFeed = this.tradeFeeds.get(key);
-    if (!activeFeed || activeFeed !== feed) return;
-    activeFeed.subscription?.cancel();
-    activeFeed.subscription = undefined;
-    activeFeed.active = false;
-    this.tradeFeeds.delete(key);
-    activeFeed.data.complete();
-    activeFeed.error.complete();
-  }
-
-  private cancelTradeSubscriptions(reason: string) {
-    for (const feed of this.tradeFeeds.values()) {
-      if (feed.subscription) {
-        console.info(
-          '[trades] UI unsubscribing from ' + feed.symbol + ' (' + reason + ')',
-        );
-        feed.subscription.cancel();
-      }
-      feed.subscription = undefined;
-      feed.active = false;
-      feed.data.next(undefined);
-    }
-  }
-
-  private startTradeSubscriptions() {
-    for (const feed of this.tradeFeeds.values())
-      this.startTradeSubscription(feed);
-  }
-
-  private startTradeSubscription(feed: ActiveTradeFeed) {
-    const socket = this.socket;
-    const generation = this.lifecycleGeneration;
-    if (!socket || feed.active || this.tradeFeeds.get(feed.key) !== feed)
-      return;
-    feed.active = true;
-    let updatesSinceRequest = 0;
-    let requestNext: (() => void) | undefined;
-    socket
-      .requestStream({ data: Buffer.from('trades:' + feed.symbol) })
-      .subscribe({
-        onSubscribe: (subscription) => {
-          if (
-            this.tradeFeeds.get(feed.key) !== feed ||
-            this.socket !== socket ||
-            this.lifecycleGeneration !== generation
-          ) {
-            subscription.cancel();
-            return;
-          }
-          feed.subscription = subscription;
-          requestNext = () => subscription.request(REQUEST_BATCH_SIZE);
-          requestNext();
-        },
-        onNext: (payload) => {
-          if (
-            this.tradeFeeds.get(feed.key) !== feed ||
-            this.socket !== socket ||
-            this.lifecycleGeneration !== generation
-          )
-            return;
-          feed.data.next(payload.data);
-          feed.error.next(undefined);
-          updatesSinceRequest += 1;
-          if (updatesSinceRequest >= REQUEST_BATCH_SIZE) {
-            updatesSinceRequest = 0;
-            requestNext?.();
-          }
-        },
-        onError: (error) => {
-          if (this.tradeFeeds.get(feed.key) !== feed || this.socket !== socket)
-            return;
-          feed.subscription = undefined;
-          feed.active = false;
-          feed.error.next(error.message ?? 'Trades stream disconnected');
-        },
-        onComplete: () => {
-          if (this.tradeFeeds.get(feed.key) !== feed || this.socket !== socket)
-            return;
-          feed.subscription = undefined;
-          feed.active = false;
-          feed.error.next('Trades stream completed');
-        },
-      });
-  }
-
-  public closeBook(key: string, feed: BookFeed) {
-    const activeFeed = this.bookFeeds.get(key);
-    if (!activeFeed || activeFeed !== feed) return;
-    if (activeFeed.subscription) {
-      console.info(
-        '[book] UI unsubscribing from ' +
-          activeFeed.symbol +
-          ' (widget closed)',
-      );
-      activeFeed.subscription.cancel();
-    }
-    activeFeed.subscription = undefined;
-    activeFeed.active = false;
-    this.bookFeeds.delete(key);
-    activeFeed.data.complete();
-    activeFeed.error.complete();
-  }
-
-  private cancelBookSubscriptions(reason: string) {
-    for (const feed of this.bookFeeds.values()) {
-      if (feed.subscription) {
-        console.info(
-          '[book] UI unsubscribing from ' + feed.symbol + ' (' + reason + ')',
-        );
-        feed.subscription.cancel();
-      }
-      feed.subscription = undefined;
-      feed.active = false;
-      feed.data.next(undefined);
-    }
-  }
-
-  private startBookSubscriptions() {
-    for (const feed of this.bookFeeds.values())
-      this.startBookSubscription(feed);
-  }
-
-  private startBookSubscription(feed: ActiveBookFeed) {
-    const socket = this.socket;
-    const generation = this.lifecycleGeneration;
-    if (!socket || feed.active || this.bookFeeds.get(feed.key) !== feed) return;
-
-    feed.active = true;
-    let updatesSinceRequest = 0;
-    let requestNext: (() => void) | undefined;
-    socket
-      .requestStream({
-        data: Buffer.from('book:' + feed.symbol),
-      })
-      .subscribe({
-        onSubscribe: (subscription) => {
-          if (
-            this.bookFeeds.get(feed.key) !== feed ||
-            this.socket !== socket ||
-            this.lifecycleGeneration !== generation
-          ) {
-            console.info(
-              '[book] UI unsubscribing from ' +
-                feed.symbol +
-                ' (subscription became stale)',
-            );
-            subscription.cancel();
-            return;
-          }
-          feed.subscription = subscription;
-          requestNext = () => subscription.request(REQUEST_BATCH_SIZE);
-          requestNext();
-        },
-        onNext: (payload) => {
-          if (
-            this.bookFeeds.get(feed.key) !== feed ||
-            this.socket !== socket ||
-            this.lifecycleGeneration !== generation
-          )
-            return;
-          feed.data.next(payload.data);
-          feed.error.next(undefined);
-          updatesSinceRequest += 1;
-          if (updatesSinceRequest >= REQUEST_BATCH_SIZE) {
-            updatesSinceRequest = 0;
-            requestNext?.();
-          }
-        },
-        onError: (error) => {
-          if (this.bookFeeds.get(feed.key) !== feed || this.socket !== socket)
-            return;
-          feed.subscription = undefined;
-          feed.active = false;
-          feed.error.next(error.message ?? 'Order book stream disconnected');
-        },
-        onComplete: () => {
-          if (this.bookFeeds.get(feed.key) !== feed || this.socket !== socket)
-            return;
-          feed.subscription = undefined;
-          feed.active = false;
-          feed.error.next('Order book stream completed');
-        },
-      });
+  private createNewsManager() {
+    return new ConnectionFeedManager({
+      create: createNewsFeed,
+      request: () => 'news:*',
+      demand: 1,
+      getSocket: () => this.socket as never,
+      getGeneration: () => this.lifecycleGeneration,
+    });
   }
 
   private async createClient() {
@@ -531,11 +253,10 @@ export class Connection {
       this.retryTimer = undefined;
     }
     this.subscription?.cancel();
-    for (const feed of this.bookFeeds.values()) this.closeBook(feed.key, feed);
-    for (const feed of this.tradeFeeds.values())
-      this.closeTrades(feed.key, feed);
-    for (const feed of this.signalFeeds.values()) this.closeSignals(feed.key, feed);
-    for (const feed of this.newsFeeds.values()) this.closeNews(feed.key, feed);
+    this.bookFeeds.closeAll();
+    this.tradeFeeds.closeAll();
+    this.signalFeeds.closeAll();
+    this.newsFeeds.closeAll();
     this.socket?.close();
   }
 }

@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { AgGridReact } from 'ag-grid-react';
 import { ClientSideRowModelModule, ModuleRegistry, themeQuartz, type ColDef, type ICellRendererParams } from 'ag-grid-community';
-import { AutoTraderModel, type ResearchStrategyDiagnostic } from '../models/AutoTraderModel';
+import { AutoTraderModel, type StrategyDiagnostic } from '../models/AutoTraderModel';
 import { useBehaviorSnapshot } from '../use_behavior_snapshot';
 import { FeedToolbar } from './FeedToolbar';
 
@@ -20,7 +20,7 @@ type GateDetailRow = {
   gate: string; count: number; detail: string;
 };
 type DiagnosticsRow = SymbolGroup | GateDetailRow;
-type StrategyDiagnosticRow = ResearchStrategyDiagnostic['symbols'][number];
+type StrategyDiagnosticRow = StrategyDiagnostic['symbols'][number];
 type GateColumnParams = ICellRendererParams<DiagnosticsRow> & { onToggle: (key: string) => void };
 function GateColumnCell({ data, onToggle }: GateColumnParams) {
   if (!data) return null;
@@ -107,24 +107,27 @@ export function AutoTraderDiagnostics() {
           ) : <p className="auto-trader-diagnostics-empty">{state.loading ? 'Loading current gate counts…' : 'No blocked gates recorded for this running session.'}</p>}
         </details>
 
-        <section className="auto-trader-diagnostics-block" aria-label="Selected daily strategy distance">
+        <section className="auto-trader-diagnostics-block" aria-label="Daily strategy decisions">
           <div className="auto-trader-diagnostics-heading">
             <strong>Daily strategy diagnostics</strong>
-            <span>{state.researchStrategyDiagnostic != null && state.researchStrategies.includes(state.researchStrategyDiagnostic.strategy) ? state.researchStrategyDiagnostic.strategy : 'Waiting for current strategy data'}</span>
+            <span>{state.strategyDiagnostics.filter((item) => state.strategies.includes(item.strategy)).length} enabled strategies</span>
           </div>
-          {state.researchStrategyDiagnostic != null && state.researchStrategies.includes(state.researchStrategyDiagnostic.strategy) ? (
-            <>
-              <p className="auto-trader-diagnostics-note">
-                {state.researchStrategyDiagnostic.btc_gate_required
-                  ? 'BTC 200-day SMA gate: ' + (state.researchStrategyDiagnostic.btc_gate_passed ? 'pass' : 'blocked') + ' · BTC close ' + state.researchStrategyDiagnostic.btc_close.toPrecision(8) + ' vs SMA ' + state.researchStrategyDiagnostic.btc_sma200.toPrecision(8) + ' · ' + Math.abs(state.researchStrategyDiagnostic.btc_distance_percent).toFixed(2) + '% ' + (state.researchStrategyDiagnostic.btc_distance_percent >= 0 ? 'above' : 'below') + '.'
-                  : 'This strategy uses each asset’s own trend filter; BTC 200-day regime gate is not required.'}
-                {' '}Distances are from the latest completed daily close to the exact strategy threshold; negative values are below the level.
-              </p>
-              <div className="data-grid-wrap auto-trader-symbol-grid">
-                <AgGridReact<StrategyDiagnosticRow> animateRows={false} rowData={state.researchStrategyDiagnostic.symbols} columnDefs={strategyColumns} defaultColDef={{ sortable: true, resizable: true, filter: true, minWidth: 85 }} theme={diagnosticsGridTheme} domLayout="autoHeight" rowHeight={34} headerHeight={29} getRowId={({ data }) => data.symbol} />
-              </div>
-            </>
-          ) : <p className="auto-trader-diagnostics-empty">Daily candle diagnostics for an enabled strategy will appear after its next successful evaluation.</p>}
+          {state.strategyDiagnostics.filter((item) => state.strategies.includes(item.strategy)).length > 0 ? (
+            state.strategyDiagnostics.filter((item) => state.strategies.includes(item.strategy)).map((diagnostic) => (
+              <section key={diagnostic.strategy} className="auto-trader-strategy-diagnostic">
+                <div className="auto-trader-diagnostics-heading"><strong>{diagnostic.strategy}</strong><span>Evaluated {new Date(diagnostic.as_of_ms).toLocaleString()}</span></div>
+                <p className="auto-trader-diagnostics-note">
+                  {diagnostic.btc_gate_required
+                    ? 'BTC ' + diagnostic.btc_window_days + '-day SMA gate: ' + (diagnostic.btc_gate_passed ? 'pass' : 'blocked') + ' · BTC close ' + diagnostic.btc_close?.toPrecision(8) + ' vs SMA ' + diagnostic.btc_sma?.toPrecision(8) + ' · ' + Math.abs(diagnostic.btc_distance_percent ?? 0).toFixed(2) + '% ' + ((diagnostic.btc_distance_percent ?? 0) >= 0 ? 'above' : 'below') + '.'
+                    : 'This strategy does not use a BTC regime gate.'}
+                  {' '}Distances are from the latest completed daily close to each strategy threshold; negative values are below the level.
+                </p>
+                <div className="data-grid-wrap auto-trader-symbol-grid">
+                  <AgGridReact<StrategyDiagnosticRow> animateRows={false} rowData={diagnostic.symbols} columnDefs={strategyColumns} defaultColDef={{ sortable: true, resizable: true, filter: true, minWidth: 85 }} theme={diagnosticsGridTheme} domLayout="autoHeight" rowHeight={34} headerHeight={29} getRowId={({ data }) => data.symbol} />
+                </div>
+              </section>
+            ))
+          ) : <p className="auto-trader-diagnostics-empty">Daily candle diagnostics for enabled strategies will appear after the next successful evaluation.</p>}
         </section>
 
         <section className="auto-trader-diagnostics-block" aria-label="Gate counts by symbol">

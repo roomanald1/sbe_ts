@@ -21,10 +21,12 @@ struct Signal {
     ranging_probability: Option<f64>,
     #[serde(default)]
     components: SignalComponents,
+    #[serde(default, alias = "research_strategy_candidate")]
+    strategy_candidate: bool,
+    #[serde(default, alias = "research_strategy")]
+    strategy: Option<String>,
     #[serde(default)]
-    research_strategy_candidate: bool,
-    #[serde(default)]
-    research_strategy: Option<String>,
+    strategy_decision: Option<serde_json::Value>,
     #[serde(default)]
     market_regime: Option<String>,
 }

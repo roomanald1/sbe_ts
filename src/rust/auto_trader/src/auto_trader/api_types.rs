@@ -1,15 +1,21 @@
 #[derive(Serialize)]
 struct StatusResponse {
     enabled: bool,
-    research_strategy: String,
-    research_strategies: Vec<String>,
-    generic_signals_enabled: bool,
+    strategy: String,
+    strategies: Vec<String>,
+    signal_strategies_enabled: bool,
     max_order_notional: f64,
     daily_notional_limit: f64,
     daily_realized_loss_limit: f64,
     exploration_percent: f64,
     risk_appetite: f64,
     max_open_positions: usize,
+    max_intraday_open_positions: usize,
+    max_daily_open_positions: usize,
+    intraday_notional_limit: f64,
+    daily_strategy_notional_limit: f64,
+    intraday_used_notional: f64,
+    daily_strategy_used_notional: f64,
     max_entries_per_auto_position: u32,
     stop_loss_percent: f64,
     take_profit_percent: f64,
@@ -28,7 +34,7 @@ struct StatusResponse {
     gate_hits: Vec<GateHit>,
     symbol_gate_hits: Vec<SymbolGateHit>,
     latest_signal_diagnostic: String,
-    research_strategy_diagnostic: Option<ResearchStrategyDiagnostic>,
+    strategy_diagnostics: Vec<StrategyDiagnostic>,
 }
 #[derive(Serialize)]
 struct GapReason {
@@ -59,11 +65,11 @@ struct SymbolGateCount {
 struct SettingsRequest {
     max_order_notional: f64,
     #[serde(default)]
-    research_strategy: Option<ResearchStrategy>,
-    #[serde(default)]
-    research_strategies: Option<Vec<ResearchStrategy>>,
-    #[serde(default)]
-    generic_signals_enabled: Option<bool>,
+    strategy: Option<Strategy>,
+    #[serde(default, alias = "research_strategies")]
+    strategies: Option<Vec<Strategy>>,
+    #[serde(default, alias = "generic_signals_enabled")]
+    signal_strategies_enabled: Option<bool>,
     daily_notional_limit: f64,
     daily_realized_loss_limit: f64,
     exploration_percent: f64,
@@ -71,11 +77,15 @@ struct SettingsRequest {
     risk_appetite: Option<f64>,
     max_open_positions: usize,
     #[serde(default)]
+    max_intraday_open_positions: Option<usize>,
+    #[serde(default)]
+    max_daily_open_positions: Option<usize>,
+    #[serde(default)]
+    intraday_notional_limit: Option<f64>,
+    #[serde(default)]
+    daily_strategy_notional_limit: Option<f64>,
+    #[serde(default)]
     max_entries_per_auto_position: Option<u32>,
-    #[serde(default)]
-    stop_loss_percent: Option<f64>,
-    #[serde(default)]
-    take_profit_percent: Option<f64>,
     #[serde(default)]
     vwap_duration_minutes: Option<u64>,
     #[serde(default)]
@@ -88,6 +98,17 @@ struct SettingsRequest {
     trailing_distance_percent: Option<f64>,
     #[serde(default)]
     closed_trade_window: Option<usize>,
+    #[serde(default)]
+    reset_learning: bool,
+    #[serde(default)]
+    strategy_parameter_overrides: Option<BTreeMap<String, f64>>,
+    #[serde(default)]
+    reset_strategy_profile: Option<StrategyProfileReset>,
+}
+#[derive(Clone, Deserialize)]
+struct StrategyProfileReset {
+    symbol: String,
+    strategy: String,
 }
 #[derive(Clone, Deserialize)]
 struct EnabledRequest {
@@ -126,18 +147,13 @@ struct LatestExecutionParameters {
     trigger_offset_bps: f64,
     trailing_distance_percent: f64,
 }
-#[derive(Clone, Serialize)]
-struct ActiveExitPolicy {
-    stop_loss_percent: f64,
-    take_profit_percent: f64,
-}
 #[derive(Serialize)]
 struct DecisionParametersResponse {
     refreshed_at: u64,
     thresholds: Vec<DecisionParameter>,
     contexts: Vec<ContextDecisionParameters>,
-    active_exit_policy: ActiveExitPolicy,
     latest_execution: Option<LatestExecutionParameters>,
+    strategy_profiles: Vec<StrategyParameterProfile>,
 }
 
 #[derive(Default)]

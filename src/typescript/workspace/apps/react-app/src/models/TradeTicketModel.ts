@@ -2,12 +2,13 @@ import { alignsToStep, getInstrumentPrecision } from '../instrument_precision';
 import { BehaviorSubject } from 'rxjs';
 import type { BookFeed, Connection } from '../connection';
 import { decodeBookDepth, type BookDepth } from '../types/symbol_price';
-import { getLimitPriceMarkWarning } from './limit_price_guard';
+import { deriveTradeTicketState } from './TradeTicketDerived';
+import { fetchFeeRates } from './fee_rates';
 
-type Side = 'buy' | 'sell';
-type OrderType = 'market' | 'ioc' | 'limit' | 'vwap' | 'twap' | 'barrier' | 'stop-market' | 'stop-limit' | 'trailing-stop' | 'post-only-limit' | 'fok' | 'gtd';
-type BarrierDirection = 'above' | 'below';
-type TrailingMode = 'amount' | 'percent';
+export type Side = 'buy' | 'sell';
+export type OrderType = 'market' | 'ioc' | 'limit' | 'vwap' | 'twap' | 'barrier' | 'stop-market' | 'stop-limit' | 'trailing-stop' | 'post-only-limit' | 'fok' | 'gtd';
+export type BarrierDirection = 'above' | 'below';
+export type TrailingMode = 'amount' | 'percent';
 type Props = { symbol: string; initialSide: Side; connection: Connection };
 export type TradeTicketState = {
   symbol: string;
@@ -152,12 +153,8 @@ export class TradeTicketModel {
   setTrailingMode(trailingMode: TrailingMode): void { this.update({ trailingMode }); }
   setExpiresAtLocal(expiresAtLocal: string): void { this.update({ expiresAtLocal, message: '' }); }
   private async loadFeeRates(): Promise<void> {
-    try {
-      const response = await fetch("/positions/fee-rates");
-      if (!response.ok) return;
-      const rates = await response.json() as { maker: number; taker: number };
-      if (Number.isFinite(rates.maker) && Number.isFinite(rates.taker)) this.update({ makerFeeRate: rates.maker, takerFeeRate: rates.taker });
-    } catch { /* use displayed paper fee defaults until rates load */ }
+    const rates = await fetchFeeRates();
+    if (rates) this.update({ makerFeeRate: rates.maker, takerFeeRate: rates.taker });
   }
   async submit(): Promise<void> {
     const state = this.state$.value;
@@ -291,53 +288,7 @@ export class TradeTicketModel {
     finally { this.update({ vwapStatus: 'cancelled', message: (this.state$.value.orderType === 'twap' ? 'TWAP' : 'VWAP') + ' execution cancelled.' }); }
   }
   private update(update: Partial<TradeTicketState>): void {
-    const next = { ...this.state$.value, ...update };
-    const book = next.book;
-    next.currentPrice =
-      book?.bids[0] && book.asks[0]
-        ? (book.bids[0].price + book.asks[0].price) / 2
-        : (book?.bids[0]?.price ?? book?.asks[0]?.price);
-    next.bestBid = book?.bids[0]?.price;
-    next.bestAsk = book?.asks[0]?.price;
-    next.spread = next.bestBid !== undefined && next.bestAsk !== undefined
-      ? next.bestAsk - next.bestBid
-      : undefined;
-    const requestedQuantity = Number(next.quantity);
-    const validQuantity = Number.isFinite(requestedQuantity) && requestedQuantity > 0;
-    next.estimatedNotional = validQuantity && next.currentPrice !== undefined
-      ? requestedQuantity * next.currentPrice
-      : undefined;
-    const levels = next.side === 'buy' ? book?.asks : book?.bids;
-    let remaining = validQuantity ? requestedQuantity : 0;
-    let filled = 0;
-    let cost = 0;
-    for (const level of levels ?? []) {
-      if (next.orderType === 'limit') {
-        const crossesLimit = next.side === 'buy'
-          ? level.price <= Number(next.limitPrice)
-          : level.price >= Number(next.limitPrice);
-        if (!crossesLimit) continue;
-      }
-      const levelFill = Math.min(remaining, level.size);
-      filled += levelFill;
-      cost += levelFill * level.price;
-      remaining -= levelFill;
-      if (remaining <= 0) break;
-    }
-    next.estimatedFillQuantity = validQuantity && levels?.length ? filled : undefined;
-    next.estimatedFillAverage = filled > 0 ? cost / filled : undefined;
-    next.estimatedUnfilledQuantity = validQuantity && levels?.length ? remaining : undefined;
-    next.limitPriceWarning =
-      next.orderType === 'limit'
-        ? getLimitPriceMarkWarning(next.limitPrice, next.currentPrice)
-        : undefined;
-    if (!next.limitPriceWarning) next.confirmedLimitPrice = undefined;
-    const makerOrder = ['limit', 'stop-limit', 'post-only-limit', 'gtd'].includes(next.orderType);
-    const feeRate = makerOrder ? next.makerFeeRate : next.takerFeeRate;
-    const feePrice = makerOrder && Number(next.limitPrice) > 0 ? Number(next.limitPrice) : (next.estimatedFillAverage ?? next.currentPrice);
-    const feeQuantity = next.orderType === "ioc" && next.estimatedFillQuantity !== undefined ? next.estimatedFillQuantity : (next.orderType === "ioc" && next.book ? 0 : requestedQuantity);
-    next.estimatedFee = feePrice !== undefined && validQuantity ? feeQuantity * feePrice * feeRate : undefined;
-    this.state$.next(next);
+    this.state$.next(deriveTradeTicketState(this.state$.value, update));
   }
 }
 

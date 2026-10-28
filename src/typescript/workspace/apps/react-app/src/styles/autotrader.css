@@ -1,0 +1,91 @@
+.auto-trader-symbol-grid * { animation: none !important; transition: none !important; }
+
+
+/* Compact strategy selector inside AutoTrader settings. */
+.auto-trader-settings-popup { max-height: min(82vh, 760px); overflow-y: auto; }
+.auto-trader-strategy-options {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  flex: 1 1 100%;
+  min-width: 0;
+  gap: 0;
+  margin: 0;
+  padding: 8px 10px 10px;
+  border: 1px solid #303d4d;
+  border-radius: 6px;
+  background: #0c1116;
+}
+.auto-trader-strategy-options legend {
+  padding: 0 5px;
+  color: #a0a9b4;
+  font: 700 9px/1.2 var(--mono);
+  letter-spacing: 0.06em;
+}
+.auto-trader-limits .auto-trader-strategy-options label {
+  display: grid;
+  grid-template-columns: 16px minmax(0, 1fr);
+  align-items: start;
+  min-width: 0;
+  min-height: 42px;
+  flex: initial;
+  gap: 8px;
+  padding: 8px 7px;
+  border-radius: 4px;
+  color: #d7dde4;
+  font: 500 11px/1.4 system-ui, sans-serif;
+  letter-spacing: 0;
+  cursor: pointer;
+}
+.auto-trader-limits .auto-trader-strategy-options label:hover { background: #141d26; }
+.auto-trader-limits .auto-trader-strategy-options input[type="checkbox"] {
+  width: 15px;
+  height: 15px;
+  min-width: 15px;
+  margin: 1px 0 0;
+  padding: 0;
+  accent-color: #71c5a1;
+  cursor: pointer;
+}
+.auto-trader-strategy-options small {
+  grid-column: 1 / -1;
+  padding: 6px 7px 0;
+  color: #909ba7;
+  font: 400 10px/1.45 system-ui, sans-serif;
+}
+.auto-trader-strategy-options .auto-trader-strategy-validation { color: #f0b86e; }
+@media (max-width: 560px) {
+  .auto-trader-strategy-options { grid-template-columns: minmax(0, 1fr); }
+}
+.auto-trader-limits .auto-trader-strategy-options .auto-trader-generic-strategy {
+  grid-column: 1 / -1;
+  grid-template-columns: 16px minmax(0, 1fr);
+  min-height: 54px;
+  margin-bottom: 5px;
+  border: 1px solid #263b35;
+  background: #101a17;
+}
+.auto-trader-generic-strategy span { display: block; min-width: 0; }
+.auto-trader-generic-strategy strong { display: block; color: #dff3e9; font: 600 11px/1.3 system-ui, sans-serif; }
+.auto-trader-strategy-options .auto-trader-generic-strategy span small {
+  display: block;
+  padding: 3px 0 0;
+  color: #9fb6aa;
+  font: 400 10px/1.4 system-ui, sans-serif;
+}
+
+
+.auto-trader-strategy-parameters { grid-column: 1 / -1; min-width: 0; border: 1px solid #242a31; border-radius: 5px; padding: 10px; }
+.auto-trader-strategy-parameters > strong { color: #c7d5e4; font: 700 10px/1.3 var(--mono); }
+.auto-trader-strategy-parameters > p, .auto-trader-strategy-parameters > small { display: block; color: var(--muted); font-size: 10px; margin: 6px 0; }
+.auto-trader-parameter-selectors { display: flex; gap: 10px; margin: 8px 0; }
+.auto-trader-parameter-selectors label, .auto-trader-parameter-input { display: grid; gap: 5px; }
+.auto-trader-parameter-selectors label { min-width: 180px; color: var(--muted); font: 600 9px/1.2 var(--mono); }
+.auto-trader-parameter-selectors select, .auto-trader-parameter-input input { min-width: 0; border: 1px solid #303d4d; border-radius: 4px; padding: 6px; background: #111820; color: var(--ink); }
+.auto-trader-parameter-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin: 9px 0; }
+.auto-trader-parameter-input { grid-template-columns: minmax(0, 1fr) 90px auto; align-items: center; border-top: 1px solid #242a31; padding-top: 7px; color: var(--ink); font-size: 10px; }
+.auto-trader-parameter-input small { display: block; color: var(--muted); margin-top: 3px; }
+.auto-trader-parameter-input button, .auto-trader-strategy-parameters > button { border: 1px solid #303d4d; border-radius: 4px; padding: 6px; background: #111820; color: var(--ink); font-size: 9px; cursor: pointer; }
+.auto-trader-parameter-input button:disabled { opacity: .45; cursor: default; }
+@media (max-width: 700px) { .auto-trader-parameter-list { grid-template-columns: 1fr; } .auto-trader-parameter-selectors { flex-direction: column; } }
+
+.auto-trader-profile-actions { display: flex; flex-wrap: wrap; gap: 7px; }

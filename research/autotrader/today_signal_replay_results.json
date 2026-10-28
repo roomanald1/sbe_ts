@@ -1,0 +1,83 @@
+{
+  "day": "2026-10-27",
+  "as_of_utc": "2026-10-27T22:58:00+00:00",
+  "sample_modulus": 97,
+  "horizons": {
+    "60": {
+      "sampled": 7456,
+      "first_12h": {
+        "nonoverlapping_observations": 3682,
+        "directional_observations": 804,
+        "directional_mean_net_percent": -0.2498881607387389,
+        "directional_win_rate": 0.04477611940298507,
+        "median_roundtrip_cost_percent": 0.22835873932025558,
+        "median_absolute_reference_move_percent": 0.024129122889871013
+      },
+      "second_period": {
+        "nonoverlapping_observations": 3423,
+        "directional_observations": 714,
+        "directional_mean_net_percent": -0.2539177804016594,
+        "directional_win_rate": 0.04341736694677871,
+        "median_roundtrip_cost_percent": 0.22726281352236627,
+        "median_absolute_reference_move_percent": 0.02968533544429608
+      }
+    },
+    "300": {
+      "sampled": 7099,
+      "first_12h": {
+        "nonoverlapping_observations": 2863,
+        "directional_observations": 600,
+        "directional_mean_net_percent": -0.2234931354520989,
+        "directional_win_rate": 0.12,
+        "median_roundtrip_cost_percent": 0.2238379022646007,
+        "median_absolute_reference_move_percent": 0.08009611533840166
+      },
+      "second_period": {
+        "nonoverlapping_observations": 2702,
+        "directional_observations": 617,
+        "directional_mean_net_percent": -0.2315236194735009,
+        "directional_win_rate": 0.17179902755267423,
+        "median_roundtrip_cost_percent": 0.22412392674558948,
+        "median_absolute_reference_move_percent": 0.08838694881743159
+      }
+    },
+    "900": {
+      "sampled": 6780,
+      "first_12h": {
+        "nonoverlapping_observations": 1886,
+        "directional_observations": 394,
+        "directional_mean_net_percent": -0.25857979415961857,
+        "directional_win_rate": 0.17766497461928935,
+        "median_roundtrip_cost_percent": 0.22443781400134347,
+        "median_absolute_reference_move_percent": 0.15345171999914253
+      },
+      "second_period": {
+        "nonoverlapping_observations": 1835,
+        "directional_observations": 411,
+        "directional_mean_net_percent": -0.30867478914647867,
+        "directional_win_rate": 0.21654501216545013,
+        "median_roundtrip_cost_percent": 0.22347874039976273,
+        "median_absolute_reference_move_percent": 0.1786397856322619
+      }
+    },
+    "3600": {
+      "sampled": 5855,
+      "first_12h": {
+        "nonoverlapping_observations": 706,
+        "directional_observations": 152,
+        "directional_mean_net_percent": -0.3180787637330625,
+        "directional_win_rate": 0.24342105263157895,
+        "median_roundtrip_cost_percent": 0.2215112905262993,
+        "median_absolute_reference_move_percent": 0.264061427925949
+      },
+      "second_period": {
+        "nonoverlapping_observations": 705,
+        "directional_observations": 136,
+        "directional_mean_net_percent": -0.3454295143358609,
+        "directional_win_rate": 0.3088235294117647,
+        "median_roundtrip_cost_percent": 0.22636879171236113,
+        "median_absolute_reference_move_percent": 0.3023652767617513
+      }
+    }
+  }
+}

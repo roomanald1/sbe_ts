@@ -1,5 +1,9 @@
 const DEFAULT_MAX_ORDER_NOTIONAL: f64 = 100.0;
 const DEFAULT_DAILY_NOTIONAL: f64 = 1_000.0;
+const DEFAULT_MAX_INTRADAY_OPEN_POSITIONS: usize = 10;
+const DEFAULT_MAX_DAILY_OPEN_POSITIONS: usize = 10;
+const DEFAULT_INTRADAY_NOTIONAL_LIMIT: f64 = 500.0;
+const DEFAULT_DAILY_STRATEGY_NOTIONAL_LIMIT: f64 = 500.0;
 const MAX_RETAINED_AUTO_TRADER_ORDERS: usize = 10_000;
 const MIN_STRENGTH: f64 = 0.35;
 const MIN_EXPLORATION_STRENGTH: f64 = 0.05;
@@ -17,8 +21,37 @@ const MIN_SCOUT_DEEP_BOOK_ORDER_NOTIONAL: f64 = 1.0;
 const MIN_SIDE_DIRECTION_MATCH_RATE: f64 = 0.55;
 const MIN_SIDE_POSITIVE_NET_RATE: f64 = 0.55;
 const MIN_SIDE_POSITIVE_NET_LOWER_95: f64 = 0.45;
+const MIN_EDGE_TO_INCREMENTAL_COST_MULTIPLIER: f64 = 1.5;
 const EXPLORATION_NOTIONAL_FRACTION: f64 = 0.05;
 const MIN_EXPLORATION_EVIDENCE_SAMPLES: usize = 10;
+const ENTRY_EVIDENCE_MIN_HORIZON_SECONDS: u64 = 60;
+const ENTRY_EVIDENCE_MAX_HORIZON_SECONDS: u64 = 300;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StrategyCategory { Intraday, Daily }
+
+fn strategy_category(strategy_name: Option<&str>) -> StrategyCategory {
+    match strategy_name.and_then(Strategy::from_name) {
+        Some(strategy) if strategy.is_live_insight() => StrategyCategory::Intraday,
+        Some(_) => StrategyCategory::Daily,
+        None => StrategyCategory::Intraday,
+    }
+}
+
+fn strategy_category_key(category: StrategyCategory) -> &'static str {
+    match category { StrategyCategory::Intraday => "intraday", StrategyCategory::Daily => "daily" }
+}
+
+fn position_entries_for_category(position: &TraderPosition, category: StrategyCategory) -> u32 {
+    position.entries_by_category.get(strategy_category_key(category)).copied().unwrap_or_else(|| {
+        if strategy_category(position.strategy.as_deref()) == category { position.entries } else { 0 }
+    })
+}
+
+fn is_entry_evidence_horizon(horizon_seconds: u64) -> bool {
+    (ENTRY_EVIDENCE_MIN_HORIZON_SECONDS..=ENTRY_EVIDENCE_MAX_HORIZON_SECONDS)
+        .contains(&horizon_seconds)
+}
 const SCOUT_MIN_STRENGTH: f64 = 0.15;
 const SCOUT_MIN_ABS_SCORE: f64 = 0.20;
 const SCOUT_MAX_ORDER_FRACTION: f64 = 0.05;
@@ -38,6 +71,11 @@ const MIN_EXECUTION_LEARNING_SAMPLES: usize = 10;
 const PARAMETER_PROFILE_COUNT: usize = 3;
 const DEFAULT_DAILY_REALIZED_LOSS_LIMIT: f64 = 10.0;
 const MIN_DAILY_REALIZED_LOSS_LIMIT: f64 = 5.0;
+const DEFAULT_STOP_LOSS_PERCENT: f64 = 0.50;
+const DEFAULT_TAKE_PROFIT_PERCENT: f64 = 0.80;
+const DEFAULT_PROFIT_PROTECTION_ACTIVATION_PERCENT: f64 = 0.15;
+const DEFAULT_PROFIT_PROTECTION_GIVEBACK_PERCENT: f64 = 0.10;
+const DEFAULT_PROFIT_PROTECTION_MINIMUM_LOCK_PERCENT: f64 = 0.05;
 const MIN_STOP_LOSS_PERCENT: f64 = 0.25;
 const MAX_STOP_LOSS_PERCENT: f64 = 1.50;
 const MIN_TAKE_PROFIT_PERCENT: f64 = 0.05;
@@ -49,6 +87,8 @@ const MAX_TAKE_PROFIT_PERCENT: f64 = 2.00;
 const MIN_EXIT_REWARD_RISK_RATIO: f64 = 1.5;
 const TAKE_PROFIT_HOLD_PROBABILITY_FLOOR: f64 = 0.80;
 const MAX_TAKE_PROFIT_HOLD_MS: u64 = 5 * 60 * 1_000;
+const LIVE_SIGNAL_TP_DECAY_START_MS: u64 = 15 * 60 * 1_000;
+const LIVE_SIGNAL_TP_DECAY_END_MS: u64 = 60 * 60 * 1_000;
 const MAX_SIGNAL_AGE_SECONDS: u64 = 60;
 const NEUTRAL_INFERENCE_MAX_RANGE_PROBABILITY: f64 = 0.75;
 const LEARNED_STRENGTH_ADJUSTMENT_SAMPLES: usize = 5;
@@ -101,3 +141,4 @@ fn configured_taker_fee_rate() -> f64 {
         .filter(|value| value.is_finite() && *value >= 0.0 && *value <= 0.1)
         .unwrap_or(0.001)
 }
+

@@ -32,25 +32,38 @@ fn utc_day() -> String {
     days.to_string()
 }
 fn allocated_notional(settings: &Settings) -> f64 {
-    let open_positions = settings
-        .positions
-        .iter()
-        .map(|(symbol, position)| {
-            let position_notional = position.quantity.abs()
-                * position.average_entry_price.max(0.0)
-                * quote_usd_rate(settings, symbol);
-            let scheduled_position = matches!(position.entry_order_type.as_str(), "Vwap" | "Twap");
-            position_notional * if scheduled_position { 2.0 } else { 1.0 }
-        })
-        .sum::<f64>();
-    let mut pending = BTreeMap::<String, f64>::new();
+    allocated_notional_for_category(settings, None)
+}
+
+fn allocated_notional_for_category(
+    settings: &Settings,
+    category: Option<StrategyCategory>,
+) -> f64 {
+    let open_positions = if let Some(category) = category {
+        let mut lots_total = 0.0;
+        for (symbol, lots) in &settings.strategy_positions {
+            for (strategy, position) in lots {
+                if strategy_category(Some(strategy)) != category { continue; }
+                let value = position.quantity.abs() * position.average_entry_price.max(0.0)
+                    * quote_usd_rate(settings, symbol);
+                lots_total += value * if matches!(position.entry_order_type.as_str(), "Vwap" | "Twap") { 2.0 } else { 1.0 };
+            }
+        }
+        if settings.strategy_positions.is_empty() {
+            settings.positions.iter().filter(|(_, position)| strategy_category(position.strategy.as_deref()) == category)
+                .map(|(symbol, position)| position.quantity.abs() * position.average_entry_price.max(0.0) * quote_usd_rate(settings, symbol))
+                .sum()
+        } else { lots_total }
+    } else {
+        settings.positions.iter().map(|(symbol, position)| {
+            let value = position.quantity.abs() * position.average_entry_price.max(0.0) * quote_usd_rate(settings, symbol);
+            value * if matches!(position.entry_order_type.as_str(), "Vwap" | "Twap") { 2.0 } else { 1.0 }
+        }).sum()
+    };
+    let mut pending_exposure = 0.0;
     let mut pending_quantity = BTreeMap::<String, f64>::new();
+    let mut pending_category_quantity = BTreeMap::<(String, String), f64>::new();
     for order in &settings.orders {
-        // Protective stop orders only close an existing position. A triggered
-        // stop-market barrier that partially fills is terminal in Position
-        // Management, but its residual quantity remains in the persisted order
-        // record. Counting that residual as pending entry exposure double-counts
-        // the already-netted position and can push allocation far above its cap.
         if order.purpose == "stop-loss"
             || !matches!(order.status.as_str(), "submitting" | "accepted" | "resting" | "partially_filled")
             || order.quantity <= 0.0
@@ -61,33 +74,75 @@ fn allocated_notional(settings: &Settings) -> f64 {
         if remaining <= 1e-12 {
             continue;
         }
-        let current_quantity = settings
-            .positions
-            .get(&order.symbol)
-            .map(|position| position.quantity)
-            .unwrap_or(0.0)
-            + pending_quantity.get(&order.symbol).copied().unwrap_or(0.0);
+        let current_quantity = if let Some(category) = category {
+            let category_key = strategy_category_key(category);
+            settings.strategy_positions.get(&order.symbol).map(|lots| lots.iter()
+                .filter(|(strategy, _)| strategy_category(Some(strategy.as_str())) == category)
+                .map(|(_, position)| position.quantity).sum::<f64>()).unwrap_or_else(|| {
+                    settings.positions.get(&order.symbol)
+                        .filter(|position| strategy_category(position.strategy.as_deref()) == category)
+                        .map(|position| position.quantity).unwrap_or(0.0)
+                }) + pending_category_quantity.get(&(order.symbol.clone(), category_key.to_owned())).copied().unwrap_or(0.0)
+        } else {
+            settings.positions.get(&order.symbol).map(|position| position.quantity).unwrap_or(0.0)
+                + pending_quantity.get(&order.symbol).copied().unwrap_or(0.0)
+        };
         let direction = if order.side == "buy" { 1.0 } else { -1.0 };
-        let increase_quantity = if current_quantity == 0.0 || current_quantity.signum() == direction
-        {
+        let increase_quantity = if current_quantity == 0.0 || current_quantity.signum() == direction {
             remaining
         } else {
             (remaining - current_quantity.abs()).max(0.0)
         };
-        let reference_notional = if order.reserved_notional > 0.0 {
-            order.reserved_notional
-        } else {
-            order.average_price.unwrap_or(0.0)
-                * order.quantity
-                * quote_usd_rate(settings, &order.symbol)
-        };
-        let scheduled_order = order.order_type.starts_with("Vwap") || order.order_type.starts_with("Twap");
-        let stop_headroom_multiplier = if scheduled_order { 2.0 } else { 1.0 };
-        *pending.entry(order.symbol.clone()).or_default() +=
-            reference_notional * increase_quantity / order.quantity * stop_headroom_multiplier;
+        if category.is_none_or(|category| strategy_category(order.strategy.as_deref()) == category) {
+            let reference_notional = if order.reserved_notional > 0.0 {
+                order.reserved_notional
+            } else {
+                order.average_price.unwrap_or(0.0)
+                    * order.quantity
+                    * quote_usd_rate(settings, &order.symbol)
+            };
+            let scheduled_order = order.order_type.starts_with("Vwap") || order.order_type.starts_with("Twap");
+            let stop_headroom_multiplier = if scheduled_order { 2.0 } else { 1.0 };
+            pending_exposure += reference_notional * increase_quantity / order.quantity * stop_headroom_multiplier;
+            if let Some(category) = category {
+                *pending_category_quantity.entry((order.symbol.clone(), strategy_category_key(category).to_owned())).or_default() += direction * remaining;
+            }
+        }
         *pending_quantity.entry(order.symbol.clone()).or_default() += direction * remaining;
     }
-    open_positions + pending.values().sum::<f64>()
+    open_positions + pending_exposure
+}
+
+fn total_open_position_count(settings: &Settings) -> usize {
+    if settings.strategy_positions.is_empty() {
+        return settings.positions.values().filter(|position| position.quantity.abs() > 1e-12).count();
+    }
+    settings.strategy_positions.values().flat_map(|lots| lots.values())
+        .filter(|position| position.quantity.abs() > 1e-12).count()
+}
+
+fn category_open_position_count(settings: &Settings, category: StrategyCategory) -> usize {
+    if settings.strategy_positions.is_empty() {
+        return settings.positions.values().filter(|position| position.quantity.abs() > 1e-12
+            && strategy_category(position.strategy.as_deref()) == category).count();
+    }
+    settings.strategy_positions.values().flat_map(|lots| lots.iter())
+        .filter(|(strategy, position)| strategy_category(Some(strategy.as_str())) == category && position.quantity.abs() > 1e-12)
+        .count()
+}
+
+fn category_position_limit(settings: &Settings, category: StrategyCategory) -> usize {
+    match category {
+        StrategyCategory::Intraday => settings.max_intraday_open_positions,
+        StrategyCategory::Daily => settings.max_daily_open_positions,
+    }
+}
+
+fn category_notional_limit(settings: &Settings, category: StrategyCategory) -> f64 {
+    match category {
+        StrategyCategory::Intraday => settings.intraday_notional_limit,
+        StrategyCategory::Daily => settings.daily_strategy_notional_limit,
+    }
 }
 
 fn quote_usd_rate(settings: &Settings, symbol: &str) -> f64 {

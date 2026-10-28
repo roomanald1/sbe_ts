@@ -1,0 +1,200 @@
+{
+  "strategy": "Weekly long lowest trailing-7-day funding tercile, short highest; gross exposure 1",
+  "source": "https://data.binance.vision/data/futures/um/monthly",
+  "universe": [
+    "BTCUSDT",
+    "ETHUSDT",
+    "BNBUSDT",
+    "XRPUSDT",
+    "SOLUSDT",
+    "ADAUSDT",
+    "DOGEUSDT",
+    "LINKUSDT",
+    "LTCUSDT",
+    "AVAXUSDT",
+    "DOTUSDT",
+    "BCHUSDT",
+    "ATOMUSDT",
+    "ETCUSDT"
+  ],
+  "months": [
+    "2023-01",
+    "2023-02",
+    "2023-03",
+    "2023-04",
+    "2023-05",
+    "2023-06",
+    "2023-07",
+    "2023-08",
+    "2023-09",
+    "2023-10",
+    "2023-11",
+    "2023-12",
+    "2024-01",
+    "2024-02",
+    "2024-03",
+    "2024-04",
+    "2024-05",
+    "2024-06",
+    "2024-07",
+    "2024-08",
+    "2024-09",
+    "2024-10",
+    "2024-11",
+    "2024-12",
+    "2025-01",
+    "2025-02",
+    "2025-03",
+    "2025-04",
+    "2025-05",
+    "2025-06",
+    "2025-07",
+    "2025-08",
+    "2025-09",
+    "2025-10",
+    "2025-11",
+    "2025-12",
+    "2026-01",
+    "2026-02",
+    "2026-03",
+    "2026-04",
+    "2026-05",
+    "2026-06",
+    "2026-07",
+    "2026-08",
+    "2026-09"
+  ],
+  "errors": [],
+  "panel_counts": {
+    "BTCUSDT": {
+      "prices": 1369,
+      "funding": 1369
+    },
+    "ETHUSDT": {
+      "prices": 1369,
+      "funding": 1369
+    },
+    "BNBUSDT": {
+      "prices": 1369,
+      "funding": 1369
+    },
+    "XRPUSDT": {
+      "prices": 1369,
+      "funding": 1369
+    },
+    "SOLUSDT": {
+      "prices": 1369,
+      "funding": 1369
+    },
+    "ADAUSDT": {
+      "prices": 1369,
+      "funding": 1369
+    },
+    "DOGEUSDT": {
+      "prices": 1369,
+      "funding": 1369
+    },
+    "LINKUSDT": {
+      "prices": 1369,
+      "funding": 1369
+    },
+    "LTCUSDT": {
+      "prices": 1369,
+      "funding": 1369
+    },
+    "AVAXUSDT": {
+      "prices": 1369,
+      "funding": 1369
+    },
+    "DOTUSDT": {
+      "prices": 1369,
+      "funding": 1369
+    },
+    "BCHUSDT": {
+      "prices": 1369,
+      "funding": 1369
+    },
+    "ATOMUSDT": {
+      "prices": 1369,
+      "funding": 1369
+    },
+    "ETCUSDT": {
+      "prices": 1369,
+      "funding": 1369
+    }
+  },
+  "cost_6bps": {
+    "days": 1361,
+    "rebalances": 195,
+    "return_percent": 31.54576738273791,
+    "max_drawdown_percent": -23.528009665724326,
+    "sharpe": 0.5182418096438305,
+    "by_year": {
+      "2023": {
+        "days": 358,
+        "return_percent": -8.75191641791,
+        "price_percent": -9.37952188181271,
+        "funding_percent": 4.210071544576468,
+        "cost_percent": 2.3159386024193087
+      },
+      "2024": {
+        "days": 366,
+        "return_percent": 4.053425792966037,
+        "price_percent": 4.790174802460605,
+        "funding_percent": 3.6030979629708173,
+        "cost_percent": 2.648507690813377
+      },
+      "2025": {
+        "days": 365,
+        "return_percent": 13.270244757597727,
+        "price_percent": 13.570407885205412,
+        "funding_percent": 2.7502672213266823,
+        "cost_percent": 2.649136640935604
+      },
+      "2026": {
+        "days": 272,
+        "return_percent": 22.315333716940167,
+        "price_percent": 21.245433514013097,
+        "funding_percent": 1.788685182235693,
+        "cost_percent": 2.1255831880220084
+      }
+    }
+  },
+  "cost_10bps": {
+    "days": 1361,
+    "rebalances": 195,
+    "return_percent": 23.270191299119645,
+    "max_drawdown_percent": -24.310112882340874,
+    "sharpe": 0.41566788693754897,
+    "by_year": {
+      "2023": {
+        "days": 358,
+        "return_percent": -10.15083347796617,
+        "price_percent": -9.379955342492229,
+        "funding_percent": 4.209867381804942,
+        "cost_percent": 3.859897670698848
+      },
+      "2024": {
+        "days": 366,
+        "return_percent": 2.230918808923743,
+        "price_percent": 4.7864676844538865,
+        "funding_percent": 3.602895853157547,
+        "cost_percent": 4.414179484688963
+      },
+      "2025": {
+        "days": 365,
+        "return_percent": 11.285853576022697,
+        "price_percent": 13.569723379380788,
+        "funding_percent": 2.7501265529400944,
+        "cost_percent": 4.415227734892674
+      },
+      "2026": {
+        "days": 272,
+        "return_percent": 20.59291464351547,
+        "price_percent": 21.24641822970033,
+        "funding_percent": 1.7885619776251156,
+        "cost_percent": 3.542638646703347
+      }
+    }
+  }
+}

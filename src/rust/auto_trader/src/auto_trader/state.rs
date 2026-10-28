@@ -1,14 +1,14 @@
 #[derive(Clone)]
 struct AutoTraderState {
     client: reqwest::Client,
-    research_daily_data: Arc<Mutex<ResearchDailyDataCache>>,
-    research_strategy_diagnostic: Arc<std::sync::Mutex<Option<ResearchStrategyDiagnostic>>>,
+    latest_daily_strategy_snapshot: Arc<Mutex<Option<DailyStrategySnapshot>>>,
+    strategy_diagnostic: Arc<std::sync::Mutex<Vec<StrategyDiagnostic>>>,
     enabled: Arc<AtomicBool>,
     settings: Arc<Mutex<Settings>>,
     latest_missed_opportunity_bands: Arc<Mutex<Vec<MissedOpportunityGateBand>>>,
     latest_execution_parameters: Arc<Mutex<Option<LatestExecutionParameters>>>,
     cycle_lock: Arc<Mutex<()>>,
-    pending_signals: Arc<Mutex<BTreeMap<String, Dashboard>>>,
+    pending_signals: Arc<Mutex<PendingSignalQueue>>,
     signal_notify: Arc<Notify>,
     audit_tx: mpsc::Sender<serde_json::Value>,
     execution_audit_tx: mpsc::UnboundedSender<serde_json::Value>,
@@ -17,6 +17,9 @@ struct AutoTraderState {
     cycle_lock_wait_ms: Arc<Mutex<BTreeMap<String, Vec<f64>>>>,
     cycle_lock_hold_ms: Arc<std::sync::Mutex<BTreeMap<String, Vec<f64>>>>,
     settings_path: PathBuf,
+    dated_carry: Arc<Mutex<DatedCarryBook>>,
+    dated_carry_work_lock: Arc<Mutex<()>>,
+    dated_carry_path: PathBuf,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -30,6 +33,7 @@ struct TraderOrder {
     #[serde(default)]
     purpose: String,
     #[serde(default)]
+    #[serde(alias = "research_strategy")]
     strategy: Option<String>,
     #[serde(default)]
     decision_id: Option<String>,
@@ -92,13 +96,18 @@ struct TraderPosition {
     #[serde(default)]
     entries: u32,
     #[serde(default)]
+    entries_by_category: BTreeMap<String, u32>,
+    #[serde(default)]
     entry_order_type: String,
     #[serde(default)]
     entry_context: String,
     #[serde(default)]
     entry_decision_id: Option<String>,
     #[serde(default)]
-    research_strategy: Option<String>,
+    #[serde(alias = "research_strategy")]
+    strategy: Option<String>,
+    #[serde(default)]
+    strategy_decision: Option<serde_json::Value>,
     #[serde(default)]
     scout_entry: bool,
     #[serde(default)]
@@ -109,6 +118,8 @@ struct TraderPosition {
     take_profit_percent: Option<f64>,
     #[serde(default)]
     take_profit_deferred_at_ms: Option<u64>,
+    #[serde(default, alias = "shadow_profit_peak_return_percent")]
+    profit_protection_peak_return_percent: Option<f64>,
     #[serde(default)]
     protective_stops: Vec<ProtectiveStop>,
     #[serde(default)]
@@ -125,6 +136,8 @@ struct TradePriceSample {
 #[derive(Clone, Default, Serialize, Deserialize)]
 struct ProtectiveStop {
     barrier_id: String,
+    #[serde(default)]
+    strategy: String,
     order_timestamp: u64,
     quantity: f64,
     processed_quantity: f64,
@@ -146,4 +159,65 @@ struct LearningStats {
     daily_positive: usize,
     #[serde(default)]
     daily_realized_pnl: f64,
+}
+
+
+#[derive(Clone, Copy, Eq, PartialEq, Ord, PartialOrd)]
+enum PendingSignalKind {
+    Daily,
+    Live,
+}
+
+type PendingSignalQueue = BTreeMap<(PendingSignalKind, String), Dashboard>;
+
+fn queue_pending_signal(
+    queue: &mut PendingSignalQueue,
+    kind: PendingSignalKind,
+    symbol: String,
+    dashboard: Dashboard,
+) {
+    queue.insert((kind, symbol), dashboard);
+}
+
+fn take_next_pending_signal(queue: &mut PendingSignalQueue) -> Option<Dashboard> {
+    let key = queue.keys().next().cloned()?;
+    queue.remove(&key)
+}
+
+#[cfg(test)]
+mod pending_signal_queue_tests {
+    use super::*;
+
+    fn dashboard(daily: bool) -> Dashboard {
+        Dashboard {
+            best: vec![Signal {
+                symbol: "BNB-USDT".into(),
+                direction: "bullish".into(),
+                strength: 1.0,
+                timestamp: 1,
+                stale: false,
+                score: 1.0,
+                ranging_probability: None,
+                components: SignalComponents::default(),
+                strategy_candidate: daily,
+                strategy: None,
+                strategy_decision: None,
+                market_regime: None,
+            }],
+            walk_forward: Arc::new(Vec::new()),
+            missed_opportunity_bands: Vec::new(),
+            markets: Arc::new(BTreeMap::new()),
+        }
+    }
+
+    #[test]
+    fn daily_signal_survives_live_update_for_same_symbol() {
+        let mut queue = PendingSignalQueue::new();
+        queue_pending_signal(&mut queue, PendingSignalKind::Daily, "BNB-USDT".into(), dashboard(true));
+        queue_pending_signal(&mut queue, PendingSignalKind::Live, "BNB-USDT".into(), dashboard(false));
+        queue_pending_signal(&mut queue, PendingSignalKind::Live, "BNB-USDT".into(), dashboard(false));
+        assert_eq!(queue.len(), 2);
+        assert!(take_next_pending_signal(&mut queue).unwrap().best[0].strategy_candidate);
+        assert!(!take_next_pending_signal(&mut queue).unwrap().best[0].strategy_candidate);
+    }
 }

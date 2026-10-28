@@ -1,0 +1,92 @@
+{
+  "assets": [
+    "BTC",
+    "ETH",
+    "SOL"
+  ],
+  "start": "2024-01-01",
+  "end": "2026-09-12",
+  "source_funding": "https://github.com/molinamanlio/perp-funding-study/tree/main/data/full",
+  "counts": {
+    "BTC": {
+      "binance_prices": 1369,
+      "hl_prices": 988,
+      "binance_funding_days": 2561,
+      "hl_funding_days": 1222
+    },
+    "ETH": {
+      "binance_prices": 1369,
+      "hl_prices": 988,
+      "binance_funding_days": 2483,
+      "hl_funding_days": 1222
+    },
+    "SOL": {
+      "binance_prices": 1369,
+      "hl_prices": 988,
+      "binance_funding_days": 2192,
+      "hl_funding_days": 1222
+    }
+  },
+  "cost_10bps": {
+    "days": 986,
+    "monthly_rebalances": 33,
+    "missing_settlement_days": 1,
+    "missing_day_examples": [
+      "2024-08-15"
+    ],
+    "return_percent": 9.70452741683836,
+    "max_drawdown_percent": -0.7293367914992022,
+    "sharpe": 4.40706272972141,
+    "by_year": {
+      "2024": {
+        "return": 6.45999269117512,
+        "price": -0.017325320065681837,
+        "funding": 6.585275403434639,
+        "cost": 0.3055530062043307
+      },
+      "2025": {
+        "return": 2.434853826760719,
+        "price": -0.0007434761815348602,
+        "funding": 2.578712120857381,
+        "cost": 0.16641649518280888
+      },
+      "2026": {
+        "return": 0.5982363411056291,
+        "price": 0.0073942025884260795,
+        "funding": 0.7997615178585079,
+        "cost": 0.210452517001211
+      }
+    }
+  },
+  "cost_6bps": {
+    "days": 986,
+    "monthly_rebalances": 33,
+    "missing_settlement_days": 1,
+    "missing_day_examples": [
+      "2024-08-15"
+    ],
+    "return_percent": 10.004503266146658,
+    "max_drawdown_percent": -0.7293367914991689,
+    "sharpe": 4.561340880691833,
+    "by_year": {
+      "2024": {
+        "return": 6.5902418507097105,
+        "price": -0.01732618588315151,
+        "funding": 6.585311934896665,
+        "cost": 0.18333180372259836
+      },
+      "2025": {
+        "return": 2.5030737471806175,
+        "price": -0.0007431274062996456,
+        "funding": 2.578715823504932,
+        "cost": 0.09984989710968534
+      },
+      "2026": {
+        "return": 0.6829954619002709,
+        "price": 0.007394399800076093,
+        "funding": 0.7997621850490555,
+        "cost": 0.12627151020072663
+      }
+    }
+  }
+}

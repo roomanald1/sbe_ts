@@ -7,12 +7,13 @@ fn tag_position_strategy(
         return;
     };
     if let Some(position) = positions.get_mut(symbol).filter(|position| position.quantity.abs() > 1e-12) {
-        position.research_strategy = Some(strategy.to_owned());
+        position.strategy = Some(strategy.to_owned());
     }
 }
 
 fn strategy_from_entry_context(context: &str) -> Option<String> {
     [
+        "live-insights",
         "donchian-55-btc200",
         "donchian-20-sma200",
         "trend-sleeves-btc200",
@@ -41,6 +42,8 @@ fn apply_auto_fill(
     let old = position.quantity;
     let incoming = if side == "buy" { quantity } else { -quantity };
     if old == 0.0 || old.signum() == incoming.signum() {
+        // A changed entry basis starts a fresh profit-protection trail.
+        position.profit_protection_peak_return_percent = None;
         if old == 0.0 {
             position.take_profit_deferred_at_ms = None;
             position.entries = 1;
@@ -94,6 +97,7 @@ fn apply_auto_fill(
     if net.abs() < 1e-12 {
         *position = TraderPosition::default();
     } else if net.signum() != old.signum() {
+        position.profit_protection_peak_return_percent = None;
         position.quantity = net;
         position.average_entry_price = price;
         position.entry_fees = fee - closing_fee;
@@ -108,6 +112,59 @@ fn apply_auto_fill(
         position.entry_fees -= entry_fee_closed;
     }
     (pnl, Some(format!("{entry_context}:{entry_type}")))
+}
+
+fn apply_strategy_position_fill(
+    strategy_positions: &mut BTreeMap<String, BTreeMap<String, TraderPosition>>,
+    aggregate_positions: &mut BTreeMap<String, TraderPosition>,
+    symbol: &str,
+    strategy: &str,
+    side: &str,
+    quantity: f64,
+    price: f64,
+    fee: f64,
+    order_type: &str,
+    context: &str,
+    count_entry: bool,
+    horizon_take_profit_percent: Option<f64>,
+    decision_id: Option<&str>,
+    strategy_decision: Option<&serde_json::Value>,
+    stop_loss_percent: Option<f64>,
+    take_profit_percent: Option<f64>,
+) -> (f64, Option<String>) {
+    let mut one_position = BTreeMap::new();
+    if let Some(position) = strategy_positions.get(symbol).and_then(|lots| lots.get(strategy)) {
+        one_position.insert(strategy.to_owned(), position.clone());
+    }
+    let result = apply_auto_fill(
+        &mut one_position, strategy, side, quantity, price, fee, order_type,
+        context, count_entry, horizon_take_profit_percent,
+    );
+    let updated = one_position.remove(strategy).unwrap_or_default();
+    let active = updated.quantity.abs() > 1e-12;
+    let lots = strategy_positions.entry(symbol.to_owned()).or_default();
+    if active {
+        let mut updated = updated;
+        updated.strategy = Some(strategy.to_owned());
+        if let Some(decision_id) = decision_id { updated.entry_decision_id = Some(decision_id.to_owned()); }
+        if let Some(decision) = strategy_decision { updated.strategy_decision = Some(decision.clone()); }
+        if updated.stop_loss_percent.is_none() { updated.stop_loss_percent = stop_loss_percent; }
+        if updated.take_profit_percent.is_none() { updated.take_profit_percent = take_profit_percent; }
+        lots.insert(strategy.to_owned(), updated);
+    } else {
+        lots.remove(strategy);
+    }
+    let category_key = strategy_category_key(strategy_category(Some(strategy))).to_owned();
+    let category_entries = lots.iter()
+        .filter(|(name, _)| strategy_category(Some(name.as_str())) == strategy_category(Some(strategy)))
+        .map(|(_, position)| position.entries)
+        .sum::<u32>();
+    if let Some(aggregate) = aggregate_positions.get_mut(symbol) {
+        if category_entries > 0 { aggregate.entries_by_category.insert(category_key, category_entries); }
+        else { aggregate.entries_by_category.remove(&category_key); }
+    }
+    if lots.is_empty() { strategy_positions.remove(symbol); }
+    result
 }
 
 fn signal_decision_id(signal: &Signal) -> String {
@@ -144,7 +201,9 @@ fn signal_audit_payload(
         "strength": signal.strength,
         "ranging_probability": signal.ranging_probability,
         "market_context": market_context(signal),
-        "research_strategy": signal.research_strategy,
+        // Keep execution audit strategy aligned with the entry order fallback.
+        "strategy": signal.strategy.as_deref().unwrap_or("live-insights"),
+        "strategy_decision": signal.strategy_decision,
         "market_regime": signal.market_regime,
         "signal_components": signal.components,
         "exploratory": exploratory,
@@ -219,5 +278,43 @@ async fn store_execution_audit_until_saved(client: &reqwest::Client, payload: &s
     while !store_auto_trader_audit(client, payload).await {
         tokio::time::sleep(retry_delay).await;
         retry_delay = (retry_delay * 2).min(Duration::from_secs(30));
+    }
+}
+
+
+#[cfg(test)]
+mod strategy_lot_pnl_tests {
+    use super::*;
+
+    #[test]
+    fn closing_return_uses_the_strategy_lot_basis() {
+        let symbol = "BTC-USDT";
+        let strategy = "live-trade-flow";
+        let mut aggregate = BTreeMap::from([(
+            symbol.to_owned(),
+            TraderPosition {
+                quantity: 0.01,
+                average_entry_price: 120.0,
+                ..TraderPosition::default()
+            },
+        )]);
+        let mut lots = BTreeMap::from([(
+            symbol.to_owned(),
+            BTreeMap::from([(
+                strategy.to_owned(),
+                TraderPosition {
+                    quantity: 1.0,
+                    average_entry_price: 100.0,
+                    entry_fees: 0.1,
+                    ..TraderPosition::default()
+                },
+            )]),
+        )]);
+        let (lot_pnl, _) = apply_strategy_position_fill(
+            &mut lots, &mut aggregate, symbol, strategy, "sell", 1.0, 101.0,
+            0.1, "Ioc", "take-profit", false, None, None, None, None, None,
+        );
+        assert!((lot_pnl - 0.8).abs() < 1e-12);
+        assert!(!lots.contains_key(symbol));
     }
 }

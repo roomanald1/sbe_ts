@@ -1,50 +1,3 @@
-#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
-#[serde(rename_all = "kebab-case")]
-enum AutoOrderType {
-    Market,
-    Ioc,
-    Fok,
-    Limit,
-    Gtd,
-    PostOnlyLimit,
-    Barrier,
-    StopMarket,
-    StopLimit,
-    TrailingStop,
-    Vwap,
-    Twap,
-}
-#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Serialize)]
-#[serde(rename_all = "kebab-case")]
-enum ResearchStrategy {
-    #[default]
-    #[serde(rename = "donchian-55-btc200")]
-    Donchian55Btc200,
-    #[serde(rename = "donchian-20-sma200")]
-    Donchian20Sma200,
-    #[serde(rename = "trend-sleeves-btc200")]
-    TrendSleevesBtc200,
-    #[serde(rename = "trend-50-200")]
-    Trend50200,
-    #[serde(rename = "relative-strength-90-sma200")]
-    RelativeStrength90Sma200,
-    #[serde(rename = "rsi2-oversold-rebound")]
-    Rsi2OversoldRebound,
-}
-
-impl ResearchStrategy {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Donchian55Btc200 => "donchian-55-btc200",
-            Self::Donchian20Sma200 => "donchian-20-sma200",
-            Self::TrendSleevesBtc200 => "trend-sleeves-btc200",
-            Self::Trend50200 => "trend-50-200",
-            Self::RelativeStrength90Sma200 => "relative-strength-90-sma200",
-            Self::Rsi2OversoldRebound => "rsi2-oversold-rebound",
-        }
-    }
-}
-
 impl Default for AutoOrderType {
     fn default() -> Self {
         Self::Ioc
@@ -54,10 +7,13 @@ impl Default for AutoOrderType {
 struct Settings {
     #[serde(default)]
     enabled: bool,
-    #[serde(default = "default_research_strategies")]
-    research_strategies: Vec<ResearchStrategy>,
-    #[serde(default = "default_generic_signals_enabled")]
-    generic_signals_enabled: bool,
+    #[serde(default = "default_strategies", alias = "research_strategies")]
+    strategies: Vec<Strategy>,
+    #[serde(
+        default = "default_signal_strategies_enabled",
+        alias = "generic_signals_enabled"
+    )]
+    signal_strategies_enabled: bool,
     #[serde(default = "default_order_limit")]
     max_order_notional: f64,
     #[serde(default = "default_daily_limit")]
@@ -76,14 +32,22 @@ struct Settings {
     risk_appetite: f64,
     #[serde(default = "default_max_open_positions")]
     max_open_positions: usize,
+    #[serde(default = "default_max_intraday_open_positions")]
+    max_intraday_open_positions: usize,
+    #[serde(default = "default_max_daily_open_positions")]
+    max_daily_open_positions: usize,
+    #[serde(default = "default_intraday_notional_limit")]
+    intraday_notional_limit: f64,
+    #[serde(default = "default_daily_strategy_notional_limit")]
+    daily_strategy_notional_limit: f64,
     #[serde(default = "default_max_entries_per_auto_position")]
     max_entries_per_auto_position: u32,
-    #[serde(default)]
-    daily_loss_limit_reduced: bool,
     #[serde(default = "default_stop_loss_percent")]
     stop_loss_percent: f64,
     #[serde(default = "default_take_profit_percent")]
     take_profit_percent: f64,
+    #[serde(default)]
+    daily_loss_limit_reduced: bool,
     #[serde(default = "default_vwap_duration")]
     vwap_duration_minutes: u64,
     #[serde(default = "default_vwap_participation")]
@@ -105,6 +69,8 @@ struct Settings {
     #[serde(default)]
     closed_trade_fees_usd: Vec<f64>,
     #[serde(default)]
+    closed_trade_metrics_version: u32,
+    #[serde(default)]
     daily_realized_pnl: f64,
     #[serde(default)]
     pnl_utc_day: String,
@@ -115,7 +81,11 @@ struct Settings {
     #[serde(default)]
     positions: BTreeMap<String, TraderPosition>,
     #[serde(default)]
+    strategy_positions: BTreeMap<String, BTreeMap<String, TraderPosition>>,
+    #[serde(default)]
     learning: BTreeMap<String, LearningStats>,
+    #[serde(default)]
+    strategy_parameter_overrides: BTreeMap<String, f64>,
     #[serde(default)]
     last_hedge_at: BTreeMap<String, u64>,
     #[serde(default)]
@@ -145,17 +115,19 @@ fn default_exploration_percent() -> f64 {
 fn default_risk_appetite() -> f64 {
     50.0
 }
-fn default_max_open_positions() -> usize {
-    20
-}
+fn default_max_open_positions() -> usize { 20 }
+fn default_max_intraday_open_positions() -> usize { DEFAULT_MAX_INTRADAY_OPEN_POSITIONS }
+fn default_max_daily_open_positions() -> usize { DEFAULT_MAX_DAILY_OPEN_POSITIONS }
+fn default_intraday_notional_limit() -> f64 { DEFAULT_INTRADAY_NOTIONAL_LIMIT }
+fn default_daily_strategy_notional_limit() -> f64 { DEFAULT_DAILY_STRATEGY_NOTIONAL_LIMIT }
 fn default_max_entries_per_auto_position() -> u32 {
     DEFAULT_MAX_ENTRIES_PER_AUTO_POSITION
 }
 fn default_stop_loss_percent() -> f64 {
-    0.50
+    DEFAULT_STOP_LOSS_PERCENT
 }
 fn default_take_profit_percent() -> f64 {
-    0.80
+    DEFAULT_TAKE_PROFIT_PERCENT
 }
 fn default_vwap_duration() -> u64 {
     5
@@ -185,15 +157,21 @@ fn default_usd_rates() -> BTreeMap<String, f64> {
         ("USDC".to_owned(), 1.0),
     ])
 }
-fn default_research_strategies() -> Vec<ResearchStrategy> { vec![ResearchStrategy::default()] }
-fn default_generic_signals_enabled() -> bool { true }
+fn default_strategies() -> Vec<Strategy> {
+    std::iter::once(Strategy::default())
+        .chain(Strategy::live_strategies().filter(|strategy| !strategy.is_legacy_composite()))
+        .collect()
+}
+fn default_signal_strategies_enabled() -> bool {
+    true
+}
 
 impl Default for Settings {
     fn default() -> Self {
         Self {
             enabled: false,
-            research_strategies: default_research_strategies(),
-            generic_signals_enabled: default_generic_signals_enabled(),
+            strategies: default_strategies(),
+            signal_strategies_enabled: default_signal_strategies_enabled(),
             max_order_notional: default_order_limit(),
             daily_notional_limit: default_daily_limit(),
             used_notional_today: 0.0,
@@ -203,10 +181,14 @@ impl Default for Settings {
             exploration_percent: default_exploration_percent(),
             risk_appetite: default_risk_appetite(),
             max_open_positions: default_max_open_positions(),
+            max_intraday_open_positions: default_max_intraday_open_positions(),
+            max_daily_open_positions: default_max_daily_open_positions(),
+            intraday_notional_limit: default_intraday_notional_limit(),
+            daily_strategy_notional_limit: default_daily_strategy_notional_limit(),
             max_entries_per_auto_position: default_max_entries_per_auto_position(),
-            daily_loss_limit_reduced: false,
             stop_loss_percent: default_stop_loss_percent(),
             take_profit_percent: default_take_profit_percent(),
+            daily_loss_limit_reduced: false,
             vwap_duration_minutes: default_vwap_duration(),
             vwap_participation_percent: default_vwap_participation(),
             limit_offset_bps: default_limit_offset(),
@@ -217,12 +199,15 @@ impl Default for Settings {
             closed_trade_timestamps_ms: Vec::new(),
             closed_trade_realized_usd: Vec::new(),
             closed_trade_fees_usd: Vec::new(),
+            closed_trade_metrics_version: 2,
             daily_realized_pnl: 0.0,
             pnl_utc_day: utc_day(),
             utc_day: utc_day(),
             orders: Vec::new(),
             positions: BTreeMap::new(),
+            strategy_positions: BTreeMap::new(),
             learning: BTreeMap::new(),
+            strategy_parameter_overrides: BTreeMap::new(),
             last_hedge_at: BTreeMap::new(),
             last_decision: String::new(),
             last_decision_at: 0,

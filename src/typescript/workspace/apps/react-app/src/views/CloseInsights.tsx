@@ -1,5 +1,6 @@
 import { formatForSymbol } from '../instrument_precision';
 import { memo, useEffect, useMemo, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { usePausedValue } from '../use_paused_value';
 import { AgGridReact } from 'ag-grid-react';
 import {
@@ -85,7 +86,8 @@ function CloseInsightsComponent({ histories = new Map<string, PriceHistorySample
   const columnDefs = useMemo<ColDef<CloseInsightRow>[]>(
     () => [
       { field: 'position.symbol', headerName: 'Instrument', minWidth: 95, cellRenderer: CloseSymbolCell, cellRendererParams: { onTradeSymbol } },
-      { field: 'closeSide', headerName: 'Side', minWidth: 65, valueFormatter: ({ value }) => String(value ?? '').toUpperCase() },
+      { colId: 'position-direction', headerName: 'Position', minWidth: 75, valueGetter: ({ data }) => data ? data.position.quantity > 0 ? 'LONG' : 'SHORT' : '' },
+      { field: 'closeSide', headerName: 'Close side', minWidth: 90, valueFormatter: ({ value }) => String(value ?? '').toUpperCase() },
       { field: 'closeQuantity', headerName: 'Qty', minWidth: 85, valueFormatter: ({ value, data }) => value == null ? '' : formatForSymbol(value, data?.position.symbol ?? '', 'quantity') },
       { field: 'position.symbol', headerName: 'TREND', colId: 'trend', minWidth: 76, maxWidth: 88, sortable: false, filter: false, cellRenderer: CloseTrendCell, cellRendererParams: { histories, onShowTrend: setTrendSymbol } },
       { field: 'closePrice', headerName: 'Est. close', minWidth: 105, valueFormatter: ({ value, data }) => value == null ? 'Unavailable' : formatForSymbol(value, data?.position.symbol ?? '', 'price') + ' ' + (data?.currency ?? '') },
@@ -125,7 +127,7 @@ function CloseInsightsComponent({ histories = new Map<string, PriceHistorySample
         {state.loading && rowData.length === 0 && <p className="positions-empty">Loading...</p>}
       </div>
       {trendSymbol && <PriceHistoryPopup symbol={trendSymbol} history={histories.get(trendSymbol) ?? []} onClose={() => setTrendSymbol(undefined)} />}
-      {confirmation && (
+      {confirmation && createPortal(
         <div className="trade-popup-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) model.cancelClose(); }}>
           <section className="trade-popup close-confirm-modal" role="dialog" aria-modal="true" aria-labelledby="close-confirm-title">
             <header>
@@ -147,7 +149,8 @@ function CloseInsightsComponent({ histories = new Map<string, PriceHistorySample
               <button type="button" className="paper-trade-submit is-sell" onClick={() => void model.confirmClose()}>Confirm close</button>
             </div>
           </section>
-        </div>
+        </div>,
+        document.body,
       )}
     </section>
   );

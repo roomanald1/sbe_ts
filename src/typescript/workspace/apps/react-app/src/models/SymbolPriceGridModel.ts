@@ -14,15 +14,23 @@ export type SymbolPriceGridState = SymbolPriceGridProps & {
   rows: SymbolGridRow[];
 };
 
-function createRows(ticks: SymbolPriceTick[]): SymbolGridRow[] {
-  const rows = Array.from({ length: 10 }, (_, rowIndex) => ({
-    rowIndex,
-    cells: Array<SymbolGridCell>(10).fill(undefined),
-  }));
-  ticks.slice(0, 100).forEach((tick, index) => {
-    rows[Math.floor(index / 10)].cells[index % 10] = tick;
+function createRows(ticks: SymbolPriceTick[], previousRows: SymbolGridRow[] = []): SymbolGridRow[] {
+  const nextRows = Array.from({ length: 10 }, (_, rowIndex) => {
+    const prior = previousRows[rowIndex];
+    const cells = Array.from({ length: 10 }, (_, columnIndex) =>
+      ticks[rowIndex * 10 + columnIndex],
+    );
+    const unchanged = prior?.cells.every((cell, index) => {
+      const next = cells[index];
+      return cell?.symbol === next?.symbol
+        && cell?.price === next?.price
+        && cell?.volatility1m === next?.volatility1m
+        && cell?.volatility5m === next?.volatility5m
+        && cell?.direction === next?.direction;
+    });
+    return unchanged ? prior : { rowIndex, cells };
   });
-  return rows;
+  return nextRows;
 }
 
 export class SymbolPriceGridModel {
@@ -42,7 +50,7 @@ export class SymbolPriceGridModel {
   };
   setProps(props: SymbolPriceGridProps): void {
     this.props$.next(props);
-    this.state$.next({ ...props, rows: createRows(props.ticks) });
+    this.state$.next({ ...props, rows: createRows(props.ticks, this.state$.value.rows) });
   }
   selectSymbol(symbol: string, side: 'buy' | 'sell'): void {
     this.props$.value.onSelectSymbol?.(symbol, side);

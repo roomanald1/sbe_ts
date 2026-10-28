@@ -8,7 +8,6 @@ import {
   ModuleRegistry,
   NumberFilterModule,
   TextFilterModule,
-  themeQuartz,
   type ColDef,
   type ColGroupDef,
   type ICellRendererParams,
@@ -26,54 +25,8 @@ ModuleRegistry.registerModules([
   TextFilterModule,
 ]);
 
-type TradeSide = 'buy' | 'sell';
-const quoteCurrency = (symbol: string) => symbol.split('-')[1] ?? '';
-
-type PositionGridRow = {
-  id: string;
-  kind: 'order' | 'vwap' | 'barrier';
-  orderType: string;
-  expiresAt?: number;
-  orderTimeInForce?: 'gtc' | 'gtd';
-  status: string;
-  symbol: string;
-  side: TradeSide;
-  executed: number;
-  remaining: number;
-  limitPrice?: number;
-  triggerDirection?: 'above' | 'below';
-  executionType?: 'market' | 'limit';
-  activationLimit?: number;
-  estimatedFee?: number;
-  current?: number;
-  quote: string;
-  bookError?: string;
-  error?: string;
-  progress?: number;
-  etaMinutes?: number;
-  executionVwap?: number;
-  marketVwap?: number;
-  slippage?: number;
-};
-
-const positionsGridTheme = themeQuartz.withParams({
-  accentColor: '#8296ad',
-  backgroundColor: '#0d0f12',
-  borderColor: '#242a31',
-  foregroundColor: '#e7e7e7',
-  headerBackgroundColor: '#11151a',
-  headerTextColor: '#a0a6ad',
-  rowHoverColor: '#141b24',
-});
-
-const defaultPositionColDef: ColDef<PositionGridRow> = {
-  sortable: true,
-  filter: true,
-  resizable: true,
-  floatingFilter: false,
-  flex: 1,
-  minWidth: 68,
-};
+import { positionsGridTheme, defaultPositionColDef } from './PositionGridConfig';
+import { quoteCurrency, type PositionGridRow } from './PositionGridTypes';
 
 function CancelOrderCell({
   data,
@@ -123,6 +76,7 @@ function PositionsComponent({
       ...state.rows.map(({ order, current: mark, bookError }) => ({
         id: order.id,
         kind: 'order' as const,
+        createdAt: order.timestamp,
         orderType: order.post_only ? 'Post-only limit' : order.time_in_force === 'gtd' ? 'GTD limit' : 'Limit',
         expiresAt: order.expires_at,
         orderTimeInForce: order.time_in_force,
@@ -140,6 +94,7 @@ function PositionsComponent({
       ...state.barrierOrders.map((order) => ({
         id: order.id,
         kind: 'barrier' as const,
+        createdAt: order.created_at,
         orderType: order.order_kind || 'Barrier',
         status: order.status,
         error: order.error,
@@ -160,6 +115,7 @@ function PositionsComponent({
       ...state.vwapRuns.slice(-20).map((run) => ({
           id: run.id,
           kind: 'vwap' as const,
+          createdAt: run.started_at,
           orderType: run.strategy === 'twap' ? 'TWAP' : 'VWAP',
           status: run.status,
           symbol: run.symbol,
@@ -183,6 +139,14 @@ function PositionsComponent({
     () => [
       { field: 'symbol', headerName: 'Symbol', minWidth: 90 },
       { field: 'orderType', headerName: 'Type', minWidth: 92, tooltipValueGetter: ({ value }) => getOrderTypeDescription(value) },
+      {
+        field: 'createdAt',
+        headerName: 'Time',
+        minWidth: 120,
+        sort: 'desc',
+        sortIndex: 0,
+        valueFormatter: ({ value }) => value == null ? '' : new Date(value).toLocaleString(),
+      },
       { field: 'status', headerName: 'Status', minWidth: 105, tooltipField: 'error' },
       {
         field: 'side',

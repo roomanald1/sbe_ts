@@ -1,4 +1,5 @@
 import React from 'react';
+import './agGridRuntime';
 import './App.css';
 import { Connection, type FeedSource } from './connection';
 import { useObservable } from './use_observable';

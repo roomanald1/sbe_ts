@@ -1,0 +1,195 @@
+{
+  "data_source": "Local Binance daily spot candles",
+  "date_range": [
+    "2021-03-01",
+    "2026-10-22"
+  ],
+  "universe": [
+    "BTCUSDT",
+    "ETHUSDT",
+    "BNBUSDT",
+    "XRPUSDT",
+    "SOLUSDT",
+    "ADAUSDT",
+    "DOGEUSDT"
+  ],
+  "signal": "Prior 55-day high breakout, long only when BTC prior close is above its trailing 200-day close SMA",
+  "sizing_and_timing": "Each active symbol has fixed 1/7 portfolio weight; signal uses prior close; entry and strategy invalidation exit at current open; daily open-to-next-open returns",
+  "base_cost": "15 bps per side on weight turnover; fixed bracket thresholds are net of estimated entry and exit costs",
+  "fixed_bracket_assumption": "Use daily high/low to detect touches; if stop and target are both touched in one daily bar, count stop first; gap exits use the worse opening price",
+  "results": {
+    "daily_signal_exit": {
+      "splits": {
+        "train_2021_2022": {
+          "days": 671,
+          "return_pct": 16.791102653536406,
+          "max_drawdown_pct": -12.68896387862074,
+          "sharpe": 0.6377414313412849
+        },
+        "validation_2023_2024": {
+          "days": 731,
+          "return_pct": 42.362230693667534,
+          "max_drawdown_pct": -8.24224706845892,
+          "sharpe": 1.549843760377451
+        },
+        "holdout_2025_to_latest": {
+          "days": 660,
+          "return_pct": 11.88001159333969,
+          "max_drawdown_pct": -4.4119156022352835,
+          "sharpe": 0.9067640755363272
+        }
+      },
+      "counts": {
+        "entries": 260,
+        "exits": 260,
+        "stop_first_touches": 0,
+        "target_first_touches": 0
+      },
+      "full_period_return_pct": 86.01888884106599
+    },
+    "net_stop_0_5_target_0_5": {
+      "splits": {
+        "train_2021_2022": {
+          "days": 671,
+          "return_pct": -6.902479814188123,
+          "max_drawdown_pct": -6.902479814188123,
+          "sharpe": -5.417036670882006
+        },
+        "validation_2023_2024": {
+          "days": 731,
+          "return_pct": -12.45620223526317,
+          "max_drawdown_pct": -12.45620223526317,
+          "sharpe": -6.643862406985781
+        },
+        "holdout_2025_to_latest": {
+          "days": 660,
+          "return_pct": -5.6970533289193215,
+          "max_drawdown_pct": -5.6970533289193215,
+          "sharpe": -4.109351621038855
+        }
+      },
+      "counts": {
+        "entries": 408,
+        "exits": 408,
+        "stop_first_touches": 388,
+        "target_first_touches": 20
+      },
+      "full_period_return_pct": -23.142056608403173
+    },
+    "net_stop_0_5_target_1_0": {
+      "splits": {
+        "train_2021_2022": {
+          "days": 671,
+          "return_pct": -6.902479814188123,
+          "max_drawdown_pct": -6.902479814188123,
+          "sharpe": -5.417036670882006
+        },
+        "validation_2023_2024": {
+          "days": 731,
+          "return_pct": -11.575632121412948,
+          "max_drawdown_pct": -11.575802909975897,
+          "sharpe": -5.899486804041038
+        },
+        "holdout_2025_to_latest": {
+          "days": 660,
+          "return_pct": -5.2916150880437325,
+          "max_drawdown_pct": -5.2916150880437325,
+          "sharpe": -3.7287936356012965
+        }
+      },
+      "counts": {
+        "entries": 408,
+        "exits": 408,
+        "stop_first_touches": 388,
+        "target_first_touches": 20
+      },
+      "full_period_return_pct": -22.035211098546593
+    },
+    "net_stop_0_5_target_1_5": {
+      "splits": {
+        "train_2021_2022": {
+          "days": 671,
+          "return_pct": -6.902479814188123,
+          "max_drawdown_pct": -6.902479814188123,
+          "sharpe": -5.417036670882006
+        },
+        "validation_2023_2024": {
+          "days": 731,
+          "return_pct": -10.686934074436639,
+          "max_drawdown_pct": -10.75095154413167,
+          "sharpe": -5.048211078799457
+        },
+        "holdout_2025_to_latest": {
+          "days": 660,
+          "return_pct": -5.073435816609761,
+          "max_drawdown_pct": -5.073435816609761,
+          "sharpe": -3.4511282273781037
+        }
+      },
+      "counts": {
+        "entries": 408,
+        "exits": 408,
+        "stop_first_touches": 388,
+        "target_first_touches": 19
+      },
+      "full_period_return_pct": -21.070223496386873
+    },
+    "net_stop_1_0_target_1_5": {
+      "splits": {
+        "train_2021_2022": {
+          "days": 671,
+          "return_pct": -12.721313418819024,
+          "max_drawdown_pct": -12.721313418819024,
+          "sharpe": -5.05845156196723
+        },
+        "validation_2023_2024": {
+          "days": 731,
+          "return_pct": -15.301855448168954,
+          "max_drawdown_pct": -16.024107373260343,
+          "sharpe": -4.068115580045274
+        },
+        "holdout_2025_to_latest": {
+          "days": 660,
+          "return_pct": -6.556068223904587,
+          "max_drawdown_pct": -6.556068223904587,
+          "sharpe": -2.3931422442606434
+        }
+      },
+      "counts": {
+        "entries": 408,
+        "exits": 408,
+        "stop_first_touches": 346,
+        "target_first_touches": 59
+      },
+      "full_period_return_pct": -30.92304225775542
+    }
+  },
+  "signal_exit_holdout_cost_stress": {
+    "daily_signal_exit": {
+      "15_bps_per_side": {
+        "days": 660,
+        "return_pct": 11.88001159333969,
+        "max_drawdown_pct": -4.4119156022352835,
+        "sharpe": 0.9067640755363272
+      },
+      "30_bps_per_side": {
+        "days": 660,
+        "return_pct": 9.094665177995376,
+        "max_drawdown_pct": -4.782201978489109,
+        "sharpe": 0.7163024707362372
+      },
+      "50_bps_per_side": {
+        "days": 660,
+        "return_pct": 5.48631265078352,
+        "max_drawdown_pct": -5.27401637975985,
+        "sharpe": 0.45640782862053886
+      }
+    }
+  },
+  "limitations": [
+    "Daily OHLC cannot identify intraday order of stop and target touches; stop-first is conservative.",
+    "This is a research replay, not a live fill simulation; it does not include latency, partial fills, or market impact.",
+    "The fixed bracket replay reinvests using portfolio-level daily returns and re-enters on a later active day; exact production cooldown behavior may differ.",
+    "The signal-driven result reproduces the historical daily backtest convention; production strategy configuration and holdings can differ."
+  ]
+}

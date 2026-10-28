@@ -1,0 +1,83 @@
+{
+  "database": "/home/ronnie/dev/sbe_ts/src/rust/insights/signals.sqlite",
+  "record_counts": {
+    "0": 758276,
+    "1": 2654212,
+    "2": 2654212,
+    "3": 718428,
+    "4": 758276,
+    "5": 2706
+  },
+  "record_span_utc": [
+    "2026-10-26T12:09:03.906000+00:00",
+    "2026-10-27T10:45:38.045000+00:00"
+  ],
+  "entry_audits": 426,
+  "entry_median_one_way_cost_bps": 11.729352707734101,
+  "exit_audit_events": 378,
+  "exit_decision_ids": 200,
+  "exit_reason_by_decision": {
+    "stop-loss": 60,
+    "take-profit": 60,
+    "external-or-manual-close": 79,
+    "shadow-profit-protection": 1
+  },
+  "exit_strategy_by_decision": {
+    "unattributed": 86,
+    "live-trade-flow": 24,
+    "live-order-book": 19,
+    "live-absorption-pressure": 9,
+    "live-vwap-dislocation": 61,
+    "live-momentum": 1
+  },
+  "path_coverage": {
+    "any_path": 120,
+    "ends_near_exit": 118,
+    "begins_near_entry": 41
+  },
+  "strict_complete_single_fill_paths_by_reason": {
+    "take-profit": 39,
+    "shadow-profit-protection": 1
+  },
+  "sampled_evaluations": 27715,
+  "evaluation_decode_failures": 0,
+  "sample_modulus": 97,
+  "horizons": {
+    "60": {
+      "sampled": 7221,
+      "nonoverlap": 6877,
+      "directional_n": 1549,
+      "directional_mean_net_percent": -0.2618763095943757,
+      "median_absolute_move_percent": 0.028298549699334874,
+      "median_roundtrip_cost_percent": 0.22967945366993964,
+      "oracle_positive_net_rate": 0.050021811836556636
+    },
+    "300": {
+      "sampled": 6854,
+      "nonoverlap": 5412,
+      "directional_n": 1180,
+      "directional_mean_net_percent": -0.22927388348297292,
+      "median_absolute_move_percent": 0.09191269544266412,
+      "median_roundtrip_cost_percent": 0.22411784352694403,
+      "oracle_positive_net_rate": 0.2139689578713969
+    },
+    "900": {
+      "sampled": 6511,
+      "nonoverlap": 3614,
+      "directional_n": 789,
+      "directional_mean_net_percent": -0.22849392141605201,
+      "median_absolute_move_percent": 0.17594514156535346,
+      "median_roundtrip_cost_percent": 0.22426520522141874,
+      "oracle_positive_net_rate": 0.38627559490868846
+    },
+    "3600": {
+      "sampled": 5068,
+      "nonoverlap": 1294,
+      "directional_n": 281,
+      "directional_mean_net_percent": -0.13421017993570877,
+      "median_absolute_move_percent": 0.3166215118254212,
+      "median_roundtrip_cost_percent": 0.22305746203109528,
+      "oracle_positive_net_rate": 0.5494590417310664
+    }
+  }
+}

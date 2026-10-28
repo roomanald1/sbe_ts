@@ -1,0 +1,139 @@
+{
+  "strategy": "Weekly long lowest trailing-7-day funding tercile, short highest; gross exposure 1",
+  "source": "https://data.binance.vision/data/futures/um/monthly",
+  "universe": [
+    "BTCUSDT",
+    "ETHUSDT",
+    "BNBUSDT",
+    "XRPUSDT",
+    "SOLUSDT",
+    "ADAUSDT",
+    "DOGEUSDT"
+  ],
+  "months": [
+    "2024-01",
+    "2024-02",
+    "2024-03",
+    "2024-04",
+    "2024-05",
+    "2024-06",
+    "2024-07",
+    "2024-08",
+    "2024-09",
+    "2024-10",
+    "2024-11",
+    "2024-12",
+    "2025-01",
+    "2025-02",
+    "2025-03",
+    "2025-04",
+    "2025-05",
+    "2025-06",
+    "2025-07",
+    "2025-08",
+    "2025-09",
+    "2025-10",
+    "2025-11",
+    "2025-12",
+    "2026-01",
+    "2026-02",
+    "2026-03",
+    "2026-04",
+    "2026-05",
+    "2026-06",
+    "2026-07",
+    "2026-08",
+    "2026-09"
+  ],
+  "errors": [],
+  "panel_counts": {
+    "BTCUSDT": {
+      "prices": 1004,
+      "funding": 1004
+    },
+    "ETHUSDT": {
+      "prices": 1004,
+      "funding": 1004
+    },
+    "BNBUSDT": {
+      "prices": 1004,
+      "funding": 1004
+    },
+    "XRPUSDT": {
+      "prices": 1004,
+      "funding": 1004
+    },
+    "SOLUSDT": {
+      "prices": 1004,
+      "funding": 1004
+    },
+    "ADAUSDT": {
+      "prices": 1004,
+      "funding": 1004
+    },
+    "DOGEUSDT": {
+      "prices": 1004,
+      "funding": 1004
+    }
+  },
+  "cost_6bps": {
+    "days": 996,
+    "rebalances": 143,
+    "return_percent": 40.61179803802337,
+    "max_drawdown_percent": -26.262405453495564,
+    "sharpe": 0.6868777960742564,
+    "by_year": {
+      "2024": {
+        "days": 359,
+        "return_percent": 20.58675788984028,
+        "price_percent": 22.1715521439748,
+        "funding_percent": 2.95558999579558,
+        "cost_percent": 2.9883303725102706
+      },
+      "2025": {
+        "days": 365,
+        "return_percent": -3.4253771707411285,
+        "price_percent": 0.03919520153281657,
+        "funding_percent": 1.6777153787260917,
+        "cost_percent": 2.8534853227928303
+      },
+      "2026": {
+        "days": 272,
+        "return_percent": 20.742210420706186,
+        "price_percent": 20.868527735043298,
+        "funding_percent": 0.8489266571783468,
+        "cost_percent": 2.1992692397574327
+      }
+    }
+  },
+  "cost_10bps": {
+    "days": 996,
+    "rebalances": 143,
+    "return_percent": 33.266020852191616,
+    "max_drawdown_percent": -26.468350852147225,
+    "sharpe": 0.596057071736517,
+    "by_year": {
+      "2024": {
+        "days": 359,
+        "return_percent": 18.205981747016132,
+        "price_percent": 22.16177485835271,
+        "funding_percent": 2.955444962004338,
+        "cost_percent": 4.980550620850451
+      },
+      "2025": {
+        "days": 365,
+        "return_percent": -5.246718756776437,
+        "price_percent": 0.03934143193203393,
+        "funding_percent": 1.6776379276774191,
+        "cost_percent": 4.755808871321385
+      },
+      "2026": {
+        "days": 272,
+        "return_percent": 18.983219997500743,
+        "price_percent": 20.86718465182189,
+        "funding_percent": 0.8488845448596398,
+        "cost_percent": 3.6654487329290544
+      }
+    }
+  }
+}

@@ -1,0 +1,134 @@
+{
+  "trade_fills_today": 16359,
+  "all_fill_fees_today_usd": 9.804319104514455,
+  "realized": {
+    "closing_fills": 1467,
+    "net_usd": -11.153654458088111,
+    "gross_usd": -1.3609672240238124,
+    "allocated_fees_usd": -9.792687234064301,
+    "closed_entry_notional_usd": 4922.643029938235
+  },
+  "by_symbol": {
+    "AAVE-USDT": {
+      "closing_fills": 170,
+      "net_usd": -1.5404840146026526,
+      "gross_usd": -0.11509097160473229,
+      "allocated_fees_usd": -1.4253930429979211,
+      "closed_entry_notional_usd": 716.5149471915478
+    },
+    "ADA-USDT": {
+      "closing_fills": 124,
+      "net_usd": -1.2499066485480381,
+      "gross_usd": -0.3781369161477073,
+      "allocated_fees_usd": -0.8717697324003306,
+      "closed_entry_notional_usd": 435.73432979570856
+    },
+    "ARB-USDT": {
+      "closing_fills": 169,
+      "net_usd": -2.3017703488886156,
+      "gross_usd": -0.3653631395919777,
+      "allocated_fees_usd": -1.9364072092966385,
+      "closed_entry_notional_usd": 989.6283573753835
+    },
+    "AVAX-USDT": {
+      "closing_fills": 169,
+      "net_usd": -1.2292239230900246,
+      "gross_usd": -0.16283180642603776,
+      "allocated_fees_usd": -1.066392116663988,
+      "closed_entry_notional_usd": 533.1854345135473
+    },
+    "BABY-USDT": {
+      "closing_fills": 235,
+      "net_usd": -0.795173852575538,
+      "gross_usd": -0.21630159433599008,
+      "allocated_fees_usd": -0.5788722582395482,
+      "closed_entry_notional_usd": 289.2748554444648
+    },
+    "BCH-USDT": {
+      "closing_fills": 199,
+      "net_usd": -1.273803206845227,
+      "gross_usd": -0.1504829989119686,
+      "allocated_fees_usd": -1.123320207933258,
+      "closed_entry_notional_usd": 561.4129664719864
+    },
+    "BNB-USDT": {
+      "closing_fills": 43,
+      "net_usd": -0.4260006399411389,
+      "gross_usd": 0.45350533368942836,
+      "allocated_fees_usd": -0.8795059736305673,
+      "closed_entry_notional_usd": 439.5829583490843
+    },
+    "BTC-BRL": {
+      "closing_fills": 17,
+      "net_usd": -0.07596522220111679,
+      "gross_usd": -0.020100185683738857,
+      "allocated_fees_usd": -0.05586503651737793,
+      "closed_entry_notional_usd": 27.975667647923174
+    },
+    "BTC-EUR": {
+      "closing_fills": 10,
+      "net_usd": -0.1754421268535003,
+      "gross_usd": -0.034408411362633944,
+      "allocated_fees_usd": -0.14103371549086632,
+      "closed_entry_notional_usd": 70.5294438708978
+    },
+    "BTC-TRY": {
+      "closing_fills": 1,
+      "net_usd": 0.003689033766791284,
+      "gross_usd": 0.012858413882245857,
+      "allocated_fees_usd": -0.009169380115454573,
+      "closed_entry_notional_usd": 4.5782608507861635
+    },
+    "BTC-USDC": {
+      "closing_fills": 3,
+      "net_usd": -0.13299122760477017,
+      "gross_usd": -0.08051875887617319,
+      "allocated_fees_usd": -0.05247246872859696,
+      "closed_entry_notional_usd": 26.250103810237448
+    },
+    "BTC-USDT": {
+      "closing_fills": 47,
+      "net_usd": 0.0395197890142024,
+      "gross_usd": 0.39382791641643156,
+      "allocated_fees_usd": -0.35430812740222906,
+      "closed_entry_notional_usd": 176.91724673324643
+    },
+    "CT-USDT": {
+      "closing_fills": 106,
+      "net_usd": -0.11583795102724834,
+      "gross_usd": -0.07231254795192453,
+      "allocated_fees_usd": -0.043525403075323876,
+      "closed_entry_notional_usd": 21.727186314608343
+    },
+    "DASH-USDT": {
+      "closing_fills": 2,
+      "net_usd": -0.03658773740382136,
+      "gross_usd": -0.022327648671011887,
+      "allocated_fees_usd": -0.014260088732809477,
+      "closed_entry_notional_usd": 7.141208190740246
+    },
+    "DATA-USDT": {
+      "closing_fills": 3,
+      "net_usd": -0.14290890567485504,
+      "gross_usd": -0.07641381467807315,
+      "allocated_fees_usd": -0.06649509099678186,
+      "closed_entry_notional_usd": 35.004002412793426
+    },
+    "ETH-USDT": {
+      "closing_fills": 66,
+      "net_usd": -0.2182396022770834,
+      "gross_usd": 0.18970983810280626,
+      "allocated_fees_usd": -0.40794944037988967,
+      "closed_entry_notional_usd": 203.88617856221686
+    },
+    "SOL-USDT": {
+      "closing_fills": 103,
+      "net_usd": -1.4825278733354736,
+      "gross_usd": -0.7165799318727551,
+      "allocated_fees_usd": -0.7659479414627195,
+      "closed_entry_notional_usd": 383.2998824030624
+    }
+  },
+  "day": "2026-10-27",
+  "as_of_utc": "2026-10-27T22:58:00+00:00"
+}
