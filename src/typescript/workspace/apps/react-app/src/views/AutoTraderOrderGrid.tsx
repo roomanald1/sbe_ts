@@ -81,9 +81,11 @@ export function strategyLabel(strategy?: string): string {
   const labels: Record<string, string> = {
     'donchian-55-btc200': 'Donchian 55 + BTC SMA200',
     'donchian-20-sma200': 'Donchian 20 + asset SMA200',
+    'donchian-20-btc200': 'Donchian 20 + BTC SMA200',
     'trend-sleeves-btc200': 'BTC/ETH/BNB trend sleeves',
     'trend-50-200': 'SMA 50/200 trend',
     'relative-strength-90-sma200': '90-day momentum rotation',
+    'risk-adjusted-monthly-momentum': 'Risk-adjusted monthly momentum',
     'rsi2-oversold-rebound': 'RSI(2) rebound',
     'live-insights': 'Live Insights',
     'generic-insight-signals': 'Legacy Live Insights',

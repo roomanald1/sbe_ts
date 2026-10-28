@@ -1,0 +1,142 @@
+{
+  "default_bracket_15bp": {
+    "stop_percent": 0.5,
+    "target_percent": 0.8,
+    "counts": {
+      "stops": 29,
+      "targets": 6,
+      "entries": 35
+    },
+    "splits": {
+      "2021-2022": {
+        "return_percent": -0.891052555140015,
+        "max_drawdown_percent": -1.0931723711120944,
+        "annualized_sharpe": -1.22926644987937,
+        "days": 671
+      },
+      "2023-2024": {
+        "return_percent": -5.449508559686988,
+        "max_drawdown_percent": -5.449508559686988,
+        "annualized_sharpe": -1.8212752810743658,
+        "days": 731
+      },
+      "2025": {
+        "return_percent": -3.643977975656043,
+        "max_drawdown_percent": -3.778503892608409,
+        "annualized_sharpe": -2.4525956850689004,
+        "days": 365
+      },
+      "2026": {
+        "return_percent": -1.4135640318771125,
+        "max_drawdown_percent": -1.4135640318771125,
+        "annualized_sharpe": -1.5634115571612601,
+        "days": 295
+      }
+    }
+  },
+  "wide_bracket_15bp": {
+    "stop_percent": 1.5,
+    "target_percent": 3.0,
+    "counts": {
+      "stops": 25,
+      "targets": 10,
+      "entries": 35
+    },
+    "splits": {
+      "2021-2022": {
+        "return_percent": -1.3689223754263402,
+        "max_drawdown_percent": -2.4459271029876106,
+        "annualized_sharpe": -0.6414567318889506,
+        "days": 671
+      },
+      "2023-2024": {
+        "return_percent": -4.50522051339588,
+        "max_drawdown_percent": -6.532235049772172,
+        "annualized_sharpe": -0.5282450887491124,
+        "days": 731
+      },
+      "2025": {
+        "return_percent": -4.168206407203967,
+        "max_drawdown_percent": -6.255964519091306,
+        "annualized_sharpe": -1.1258201651625168,
+        "days": 365
+      },
+      "2026": {
+        "return_percent": 1.2586587091634849,
+        "max_drawdown_percent": -1.6747625884860007,
+        "annualized_sharpe": 0.4355812698937219,
+        "days": 295
+      }
+    }
+  },
+  "default_bracket_25bp": {
+    "stop_percent": 0.5,
+    "target_percent": 0.8,
+    "counts": {
+      "stops": 29,
+      "targets": 6,
+      "entries": 35
+    },
+    "splits": {
+      "2021-2022": {
+        "return_percent": -1.2440078926291842,
+        "max_drawdown_percent": -1.3646049621619194,
+        "annualized_sharpe": -1.4609643367251424,
+        "days": 671
+      },
+      "2023-2024": {
+        "return_percent": -7.597228639466335,
+        "max_drawdown_percent": -7.597228639466335,
+        "annualized_sharpe": -2.2264956756571808,
+        "days": 731
+      },
+      "2025": {
+        "return_percent": -4.620926273035597,
+        "max_drawdown_percent": -4.7007136951098705,
+        "annualized_sharpe": -2.5101253809939243,
+        "days": 365
+      },
+      "2026": {
+        "return_percent": -1.7638706122997672,
+        "max_drawdown_percent": -1.7638706122997672,
+        "annualized_sharpe": -1.5634322938682021,
+        "days": 295
+      }
+    }
+  },
+  "wide_bracket_25bp": {
+    "stop_percent": 1.5,
+    "target_percent": 3.0,
+    "counts": {
+      "stops": 25,
+      "targets": 10,
+      "entries": 35
+    },
+    "splits": {
+      "2021-2022": {
+        "return_percent": -1.720175881667707,
+        "max_drawdown_percent": -2.7136472938853795,
+        "annualized_sharpe": -0.7906664386771356,
+        "days": 671
+      },
+      "2023-2024": {
+        "return_percent": -6.674390152740973,
+        "max_drawdown_percent": -7.437401982317581,
+        "annualized_sharpe": -0.7842712086596166,
+        "days": 731
+      },
+      "2025": {
+        "return_percent": -5.1398395819489355,
+        "max_drawdown_percent": -6.748057113464833,
+        "annualized_sharpe": -1.3414900666193463,
+        "days": 365
+      },
+      "2026": {
+        "return_percent": 0.898856936006176,
+        "max_drawdown_percent": -1.9259196411962165,
+        "annualized_sharpe": 0.31908398384002223,
+        "days": 295
+      }
+    }
+  }
+}

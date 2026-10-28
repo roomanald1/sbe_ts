@@ -16,9 +16,11 @@ fn strategy_from_entry_context(context: &str) -> Option<String> {
         "live-insights",
         "donchian-55-btc200",
         "donchian-20-sma200",
+        "donchian-20-btc200",
         "trend-sleeves-btc200",
         "trend-50-200",
         "relative-strength-90-sma200",
+        "risk-adjusted-monthly-momentum",
         "rsi2-oversold-rebound",
     ]
     .into_iter()

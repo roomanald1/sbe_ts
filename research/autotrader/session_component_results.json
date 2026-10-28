@@ -1,0 +1,1244 @@
+{
+  "10": {
+    "BTCUSDT": {
+      "full_reversal": {
+        "2019-2020": {
+          "sessions": 1445,
+          "return_percent": 127.88289140028057,
+          "max_drawdown_percent": -54.72557471184379,
+          "annualized_sharpe": 0.8177925330653786,
+          "exposure_fraction": 0.4643598615916955,
+          "entries": 358
+        },
+        "2021-2022": {
+          "sessions": 1453,
+          "return_percent": 24.406634432409312,
+          "max_drawdown_percent": -47.21327655612655,
+          "annualized_sharpe": 0.3316664123847351,
+          "exposure_fraction": 0.5072264280798349,
+          "entries": 375
+        },
+        "2023-2024": {
+          "sessions": 1461,
+          "return_percent": 129.72630006623675,
+          "max_drawdown_percent": -25.73155861572013,
+          "annualized_sharpe": 1.0327970291592112,
+          "exposure_fraction": 0.4736481861738535,
+          "entries": 385
+        },
+        "2025-2026": {
+          "sessions": 1330,
+          "return_percent": -46.45485518207126,
+          "max_drawdown_percent": -60.87831842518987,
+          "annualized_sharpe": -0.6484771707871562,
+          "exposure_fraction": 0.48195488721804514,
+          "entries": 356
+        }
+      },
+      "day_reversal": {
+        "2019-2020": {
+          "sessions": 1445,
+          "return_percent": 44.534906192335825,
+          "max_drawdown_percent": -39.48377859087068,
+          "annualized_sharpe": 0.5035756865634464,
+          "exposure_fraction": 0.22145328719723184,
+          "entries": 320
+        },
+        "2021-2022": {
+          "sessions": 1453,
+          "return_percent": -42.28775032047649,
+          "max_drawdown_percent": -64.36128737346046,
+          "annualized_sharpe": -0.35583855465226144,
+          "exposure_fraction": 0.26359256710254647,
+          "entries": 381
+        },
+        "2023-2024": {
+          "sessions": 1461,
+          "return_percent": 4.574750984293718,
+          "max_drawdown_percent": -21.52434218461342,
+          "annualized_sharpe": 0.15088393568999292,
+          "exposure_fraction": 0.23408624229979466,
+          "entries": 342
+        },
+        "2025-2026": {
+          "sessions": 1330,
+          "return_percent": -48.09553066169998,
+          "max_drawdown_percent": -60.21152212604969,
+          "annualized_sharpe": -0.8583777529865129,
+          "exposure_fraction": 0.24210526315789474,
+          "entries": 322
+        }
+      },
+      "night_reversal": {
+        "2019-2020": {
+          "sessions": 1445,
+          "return_percent": -15.718044066603076,
+          "max_drawdown_percent": -45.022433585952506,
+          "annualized_sharpe": -0.1157201878007927,
+          "exposure_fraction": 0.24290657439446367,
+          "entries": 351
+        },
+        "2021-2022": {
+          "sessions": 1453,
+          "return_percent": 4.888303283101814,
+          "max_drawdown_percent": -39.043870499735554,
+          "annualized_sharpe": 0.1682565589224102,
+          "exposure_fraction": 0.24363386097728837,
+          "entries": 354
+        },
+        "2023-2024": {
+          "sessions": 1461,
+          "return_percent": 18.84848489225488,
+          "max_drawdown_percent": -25.440178600168817,
+          "annualized_sharpe": 0.3713656722084795,
+          "exposure_fraction": 0.23956194387405885,
+          "entries": 350
+        },
+        "2025-2026": {
+          "sessions": 1330,
+          "return_percent": -41.6764928963409,
+          "max_drawdown_percent": -44.709290697894176,
+          "annualized_sharpe": -1.1358157557755448,
+          "exposure_fraction": 0.23984962406015037,
+          "entries": 319
+        }
+      },
+      "night_long": {
+        "2019-2020": {
+          "sessions": 1445,
+          "return_percent": -55.7537330443169,
+          "max_drawdown_percent": -75.0219684496699,
+          "annualized_sharpe": -0.5630890097643533,
+          "exposure_fraction": 0.4982698961937716,
+          "entries": 717
+        },
+        "2021-2022": {
+          "sessions": 1453,
+          "return_percent": -75.64174300622047,
+          "max_drawdown_percent": -81.34178700301645,
+          "annualized_sharpe": -0.831302404925235,
+          "exposure_fraction": 0.49827942188575364,
+          "entries": 724
+        },
+        "2023-2024": {
+          "sessions": 1461,
+          "return_percent": -43.055932344160055,
+          "max_drawdown_percent": -55.51621726782208,
+          "annualized_sharpe": -0.5595161966259347,
+          "exposure_fraction": 0.5003422313483915,
+          "entries": 730
+        },
+        "2025-2026": {
+          "sessions": 1330,
+          "return_percent": -73.81667356680546,
+          "max_drawdown_percent": -74.14998374428609,
+          "annualized_sharpe": -1.9244522279027265,
+          "exposure_fraction": 0.5,
+          "entries": 665
+        }
+      },
+      "day_long": {
+        "2019-2020": {
+          "sessions": 1445,
+          "return_percent": -3.7192105283587518,
+          "max_drawdown_percent": -57.95341769399636,
+          "annualized_sharpe": 0.15486182514115548,
+          "exposure_fraction": 0.5017301038062284,
+          "entries": 717
+        },
+        "2021-2022": {
+          "sessions": 1453,
+          "return_percent": -86.62699339474364,
+          "max_drawdown_percent": -90.86858202695919,
+          "annualized_sharpe": -1.1792064001857279,
+          "exposure_fraction": 0.5017205781142464,
+          "entries": 724
+        },
+        "2023-2024": {
+          "sessions": 1461,
+          "return_percent": -45.51243246574319,
+          "max_drawdown_percent": -57.270535201352416,
+          "annualized_sharpe": -0.4683578304921421,
+          "exposure_fraction": 0.4996577686516085,
+          "entries": 730
+        },
+        "2025-2026": {
+          "sessions": 1330,
+          "return_percent": -76.90955098829006,
+          "max_drawdown_percent": -81.5108402311302,
+          "annualized_sharpe": -1.4609936429435815,
+          "exposure_fraction": 0.5,
+          "entries": 665
+        }
+      },
+      "combo": {
+        "2019-2020": {
+          "sessions": 1445,
+          "return_percent": 126.9558001134226,
+          "max_drawdown_percent": -68.28469934003503,
+          "annualized_sharpe": 0.7354351923163032,
+          "exposure_fraction": 0.7197231833910035,
+          "entries": 404
+        },
+        "2021-2022": {
+          "sessions": 1453,
+          "return_percent": -35.67613843649392,
+          "max_drawdown_percent": -69.71764858558583,
+          "annualized_sharpe": -0.022148452258170092,
+          "exposure_fraction": 0.7618719889883001,
+          "entries": 346
+        },
+        "2023-2024": {
+          "sessions": 1461,
+          "return_percent": 134.03856824645234,
+          "max_drawdown_percent": -33.09090882005038,
+          "annualized_sharpe": 0.9119716762920614,
+          "exposure_fraction": 0.7344284736481862,
+          "entries": 388
+        },
+        "2025-2026": {
+          "sessions": 1330,
+          "return_percent": -50.69616056355643,
+          "max_drawdown_percent": -59.585721825146656,
+          "annualized_sharpe": -0.6070930180747426,
+          "exposure_fraction": 0.7421052631578947,
+          "entries": 343
+        }
+      }
+    },
+    "ETHUSDT": {
+      "full_reversal": {
+        "2019-2020": {
+          "sessions": 1443,
+          "return_percent": 480.13784227856047,
+          "max_drawdown_percent": -51.86308196044451,
+          "annualized_sharpe": 1.2196295240314157,
+          "exposure_fraction": 0.47886347886347885,
+          "entries": 381
+        },
+        "2021-2022": {
+          "sessions": 1452,
+          "return_percent": 73.79726126977995,
+          "max_drawdown_percent": -64.99014621334787,
+          "annualized_sharpe": 0.5291382445594093,
+          "exposure_fraction": 0.4869146005509642,
+          "entries": 363
+        },
+        "2023-2024": {
+          "sessions": 1461,
+          "return_percent": -38.281819756928556,
+          "max_drawdown_percent": -56.518734516659805,
+          "annualized_sharpe": -0.3091958259621806,
+          "exposure_fraction": 0.4804928131416838,
+          "entries": 376
+        },
+        "2025-2026": {
+          "sessions": 1330,
+          "return_percent": -5.026327703971523,
+          "max_drawdown_percent": -54.44400394896475,
+          "annualized_sharpe": 0.13909242361997437,
+          "exposure_fraction": 0.4857142857142857,
+          "entries": 348
+        }
+      },
+      "day_reversal": {
+        "2019-2020": {
+          "sessions": 1443,
+          "return_percent": 220.63005863104715,
+          "max_drawdown_percent": -35.98003559760892,
+          "annualized_sharpe": 0.9882684792481184,
+          "exposure_fraction": 0.24601524601524602,
+          "entries": 353
+        },
+        "2021-2022": {
+          "sessions": 1452,
+          "return_percent": 122.58791021207594,
+          "max_drawdown_percent": -33.06410896664003,
+          "annualized_sharpe": 0.7627903541396056,
+          "exposure_fraction": 0.23760330578512398,
+          "entries": 344
+        },
+        "2023-2024": {
+          "sessions": 1461,
+          "return_percent": -31.06453874482753,
+          "max_drawdown_percent": -47.42213784410876,
+          "annualized_sharpe": -0.4179002840232671,
+          "exposure_fraction": 0.24845995893223818,
+          "entries": 363
+        },
+        "2025-2026": {
+          "sessions": 1330,
+          "return_percent": -32.20776416258785,
+          "max_drawdown_percent": -51.17998080506014,
+          "annualized_sharpe": -0.2573853051298301,
+          "exposure_fraction": 0.2571428571428571,
+          "entries": 342
+        }
+      },
+      "night_reversal": {
+        "2019-2020": {
+          "sessions": 1443,
+          "return_percent": -2.3060413223489395,
+          "max_drawdown_percent": -52.425749155699776,
+          "annualized_sharpe": 0.11156285053895167,
+          "exposure_fraction": 0.23284823284823286,
+          "entries": 336
+        },
+        "2021-2022": {
+          "sessions": 1452,
+          "return_percent": -60.69332757522825,
+          "max_drawdown_percent": -78.00070508508763,
+          "annualized_sharpe": -0.522578544873038,
+          "exposure_fraction": 0.2493112947658402,
+          "entries": 362
+        },
+        "2023-2024": {
+          "sessions": 1461,
+          "return_percent": -53.276241184389384,
+          "max_drawdown_percent": -61.88376728269828,
+          "annualized_sharpe": -0.8489040139639172,
+          "exposure_fraction": 0.23203285420944558,
+          "entries": 338
+        },
+        "2025-2026": {
+          "sessions": 1330,
+          "return_percent": -22.828977224321633,
+          "max_drawdown_percent": -39.30250702253283,
+          "annualized_sharpe": -0.19250434625127386,
+          "exposure_fraction": 0.22857142857142856,
+          "entries": 304
+        }
+      },
+      "night_long": {
+        "2019-2020": {
+          "sessions": 1443,
+          "return_percent": -42.15232592164191,
+          "max_drawdown_percent": -72.94023030756918,
+          "annualized_sharpe": -0.21148096990671025,
+          "exposure_fraction": 0.498960498960499,
+          "entries": 717
+        },
+        "2021-2022": {
+          "sessions": 1452,
+          "return_percent": -91.54346442572019,
+          "max_drawdown_percent": -93.53728329196929,
+          "annualized_sharpe": -1.0836729814058963,
+          "exposure_fraction": 0.49931129476584024,
+          "entries": 724
+        },
+        "2023-2024": {
+          "sessions": 1461,
+          "return_percent": -20.37549774460723,
+          "max_drawdown_percent": -47.42368866504714,
+          "annualized_sharpe": -0.051160484204962144,
+          "exposure_fraction": 0.5003422313483915,
+          "entries": 730
+        },
+        "2025-2026": {
+          "sessions": 1330,
+          "return_percent": -63.13104573914002,
+          "max_drawdown_percent": -64.26731507612634,
+          "annualized_sharpe": -0.7076594798745641,
+          "exposure_fraction": 0.5,
+          "entries": 665
+        }
+      },
+      "day_long": {
+        "2019-2020": {
+          "sessions": 1443,
+          "return_percent": -47.98689177367509,
+          "max_drawdown_percent": -74.1367859279434,
+          "annualized_sharpe": -0.11717939538125864,
+          "exposure_fraction": 0.501039501039501,
+          "entries": 717
+        },
+        "2021-2022": {
+          "sessions": 1452,
+          "return_percent": -10.06341636827428,
+          "max_drawdown_percent": -76.16067261724733,
+          "annualized_sharpe": 0.18650152133226813,
+          "exposure_fraction": 0.5006887052341598,
+          "entries": 724
+        },
+        "2023-2024": {
+          "sessions": 1461,
+          "return_percent": -80.60785085756605,
+          "max_drawdown_percent": -81.44630491589815,
+          "annualized_sharpe": -1.522547665204298,
+          "exposure_fraction": 0.4996577686516085,
+          "entries": 730
+        },
+        "2025-2026": {
+          "sessions": 1330,
+          "return_percent": -86.64178525894275,
+          "max_drawdown_percent": -89.07911774582253,
+          "annualized_sharpe": -1.420337368385541,
+          "exposure_fraction": 0.5,
+          "entries": 665
+        }
+      },
+      "combo": {
+        "2019-2020": {
+          "sessions": 1443,
+          "return_percent": 657.2053789069913,
+          "max_drawdown_percent": -60.72335819725063,
+          "annualized_sharpe": 1.2641582923242236,
+          "exposure_fraction": 0.7449757449757449,
+          "entries": 367
+        },
+        "2021-2022": {
+          "sessions": 1452,
+          "return_percent": -25.57596199155665,
+          "max_drawdown_percent": -79.37259315036755,
+          "annualized_sharpe": 0.16328728139919535,
+          "exposure_fraction": 0.7369146005509641,
+          "entries": 382
+        },
+        "2023-2024": {
+          "sessions": 1461,
+          "return_percent": 134.63916919547373,
+          "max_drawdown_percent": -41.70436608707564,
+          "annualized_sharpe": 0.7925099119816912,
+          "exposure_fraction": 0.7488021902806297,
+          "entries": 367
+        },
+        "2025-2026": {
+          "sessions": 1330,
+          "return_percent": -1.768023164773802,
+          "max_drawdown_percent": -50.28253049362724,
+          "annualized_sharpe": 0.1976470898152821,
+          "exposure_fraction": 0.7571428571428571,
+          "entries": 323
+        }
+      }
+    }
+  },
+  "15": {
+    "BTCUSDT": {
+      "full_reversal": {
+        "2019-2020": {
+          "sessions": 1445,
+          "return_percent": 59.23542941521953,
+          "max_drawdown_percent": -59.34557181664131,
+          "annualized_sharpe": 0.5318685166124771,
+          "exposure_fraction": 0.4643598615916955,
+          "entries": 358
+        },
+        "2021-2022": {
+          "sessions": 1453,
+          "return_percent": -14.536775054375074,
+          "max_drawdown_percent": -60.60087006473549,
+          "annualized_sharpe": 0.0746180518763433,
+          "exposure_fraction": 0.5072264280798349,
+          "entries": 375
+        },
+        "2023-2024": {
+          "sessions": 1461,
+          "return_percent": 56.320340423308444,
+          "max_drawdown_percent": -28.67607378426117,
+          "annualized_sharpe": 0.606607956804586,
+          "exposure_fraction": 0.4736481861738535,
+          "entries": 385
+        },
+        "2025-2026": {
+          "sessions": 1330,
+          "return_percent": -62.50980012854485,
+          "max_drawdown_percent": -70.30935486671113,
+          "annualized_sharpe": -1.0826992359168914,
+          "exposure_fraction": 0.48195488721804514,
+          "entries": 356
+        }
+      },
+      "day_reversal": {
+        "2019-2020": {
+          "sessions": 1445,
+          "return_percent": 4.911856573478368,
+          "max_drawdown_percent": -46.84044608802138,
+          "annualized_sharpe": 0.1746176975485601,
+          "exposure_fraction": 0.22145328719723184,
+          "entries": 320
+        },
+        "2021-2022": {
+          "sessions": 1453,
+          "return_percent": -60.59106384985217,
+          "max_drawdown_percent": -74.27340995026705,
+          "annualized_sharpe": -0.6987272270489991,
+          "exposure_fraction": 0.26359256710254647,
+          "entries": 381
+        },
+        "2023-2024": {
+          "sessions": 1461,
+          "return_percent": -25.747303470910275,
+          "max_drawdown_percent": -35.91794595100425,
+          "annualized_sharpe": -0.34089826668517176,
+          "exposure_fraction": 0.23408624229979466,
+          "entries": 342
+        },
+        "2025-2026": {
+          "sessions": 1330,
+          "return_percent": -62.40008121597758,
+          "max_drawdown_percent": -69.16165629323633,
+          "annualized_sharpe": -1.324950342749103,
+          "exposure_fraction": 0.24210526315789474,
+          "entries": 322
+        }
+      },
+      "night_reversal": {
+        "2019-2020": {
+          "sessions": 1445,
+          "return_percent": -40.69293198172461,
+          "max_drawdown_percent": -51.70813411301044,
+          "annualized_sharpe": -0.559991707944867,
+          "exposure_fraction": 0.24290657439446367,
+          "entries": 351
+        },
+        "2021-2022": {
+          "sessions": 1453,
+          "return_percent": -26.414135823602813,
+          "max_drawdown_percent": -51.22456708051357,
+          "annualized_sharpe": -0.20748715192159695,
+          "exposure_fraction": 0.24363386097728837,
+          "entries": 354
+        },
+        "2023-2024": {
+          "sessions": 1461,
+          "return_percent": -16.243647667733608,
+          "max_drawdown_percent": -40.45928490898567,
+          "annualized_sharpe": -0.2366403185131502,
+          "exposure_fraction": 0.23956194387405885,
+          "entries": 350
+        },
+        "2025-2026": {
+          "sessions": 1330,
+          "return_percent": -57.622991378163604,
+          "max_drawdown_percent": -59.133946911707035,
+          "annualized_sharpe": -1.8399645622253769,
+          "exposure_fraction": 0.23984962406015037,
+          "entries": 319
+        }
+      },
+      "night_long": {
+        "2019-2020": {
+          "sessions": 1445,
+          "return_percent": -78.40689081896141,
+          "max_drawdown_percent": -85.24120771294386,
+          "annualized_sharpe": -1.1865464176447582,
+          "exposure_fraction": 0.4982698961937716,
+          "entries": 717
+        },
+        "2021-2022": {
+          "sessions": 1453,
+          "return_percent": -88.2015904263171,
+          "max_drawdown_percent": -90.5213470353975,
+          "annualized_sharpe": -1.3488386510661463,
+          "exposure_fraction": 0.49827942188575364,
+          "entries": 724
+        },
+        "2023-2024": {
+          "sessions": 1461,
+          "return_percent": -72.58320286852273,
+          "max_drawdown_percent": -76.31488197343417,
+          "annualized_sharpe": -1.4229566588750415,
+          "exposure_fraction": 0.5003422313483915,
+          "entries": 730
+        },
+        "2025-2026": {
+          "sessions": 1330,
+          "return_percent": -86.54581098841474,
+          "max_drawdown_percent": -86.69711667731934,
+          "annualized_sharpe": -2.926928458438194,
+          "exposure_fraction": 0.5,
+          "entries": 665
+        }
+      },
+      "day_long": {
+        "2019-2020": {
+          "sessions": 1445,
+          "return_percent": -53.03646610824515,
+          "max_drawdown_percent": -71.77715123970452,
+          "annualized_sharpe": -0.3464650943115842,
+          "exposure_fraction": 0.5017301038062284,
+          "entries": 717
+        },
+        "2021-2022": {
+          "sessions": 1453,
+          "return_percent": -93.52251644275391,
+          "max_drawdown_percent": -95.02617476850263,
+          "annualized_sharpe": -1.6710793121309262,
+          "exposure_fraction": 0.5017205781142464,
+          "entries": 724
+        },
+        "2023-2024": {
+          "sessions": 1461,
+          "return_percent": -73.76593125901864,
+          "max_drawdown_percent": -77.15559971060382,
+          "annualized_sharpe": -1.1851669215714662,
+          "exposure_fraction": 0.4996577686516085,
+          "entries": 730
+        },
+        "2025-2026": {
+          "sessions": 1330,
+          "return_percent": -88.13507267082508,
+          "max_drawdown_percent": -89.22326249991157,
+          "annualized_sharpe": -2.1826434156702037,
+          "exposure_fraction": 0.5,
+          "entries": 665
+        }
+      },
+      "combo": {
+        "2019-2020": {
+          "sessions": 1445,
+          "return_percent": 51.524945880223314,
+          "max_drawdown_percent": -71.53971699622583,
+          "annualized_sharpe": 0.4673644406223042,
+          "exposure_fraction": 0.7197231833910035,
+          "entries": 404
+        },
+        "2021-2022": {
+          "sessions": 1453,
+          "return_percent": -54.46419849301575,
+          "max_drawdown_percent": -75.96503814232062,
+          "annualized_sharpe": -0.21486834578684785,
+          "exposure_fraction": 0.7618719889883001,
+          "entries": 346
+        },
+        "2023-2024": {
+          "sessions": 1461,
+          "return_percent": 58.69756884370503,
+          "max_drawdown_percent": -35.58881554228863,
+          "annualized_sharpe": 0.5574179411793577,
+          "exposure_fraction": 0.7344284736481862,
+          "entries": 388
+        },
+        "2025-2026": {
+          "sessions": 1330,
+          "return_percent": -65.027128418633,
+          "max_drawdown_percent": -68.05904570317227,
+          "annualized_sharpe": -0.9646851021516474,
+          "exposure_fraction": 0.7421052631578947,
+          "entries": 343
+        }
+      }
+    },
+    "ETHUSDT": {
+      "full_reversal": {
+        "2019-2020": {
+          "sessions": 1443,
+          "return_percent": 296.1483967718585,
+          "max_drawdown_percent": -54.71816375403422,
+          "annualized_sharpe": 1.004881585508497,
+          "exposure_fraction": 0.47886347886347885,
+          "entries": 381
+        },
+        "2021-2022": {
+          "sessions": 1452,
+          "return_percent": 20.89661453903102,
+          "max_drawdown_percent": -69.87239621352455,
+          "annualized_sharpe": 0.33848331984533836,
+          "exposure_fraction": 0.4869146005509642,
+          "entries": 363
+        },
+        "2023-2024": {
+          "sessions": 1461,
+          "return_percent": -57.6440906704613,
+          "max_drawdown_percent": -67.38188640299579,
+          "annualized_sharpe": -0.6576819759349187,
+          "exposure_fraction": 0.4804928131416838,
+          "entries": 376
+        },
+        "2025-2026": {
+          "sessions": 1330,
+          "return_percent": -32.96839880924106,
+          "max_drawdown_percent": -60.939778036513495,
+          "annualized_sharpe": -0.12935644112351768,
+          "exposure_fraction": 0.4857142857142857,
+          "entries": 348
+        }
+      },
+      "day_reversal": {
+        "2019-2020": {
+          "sessions": 1443,
+          "return_percent": 125.16786339479124,
+          "max_drawdown_percent": -36.902772492027694,
+          "annualized_sharpe": 0.7453301061754595,
+          "exposure_fraction": 0.24601524601524602,
+          "entries": 353
+        },
+        "2021-2022": {
+          "sessions": 1452,
+          "return_percent": 57.73108357492547,
+          "max_drawdown_percent": -44.79826516905588,
+          "annualized_sharpe": 0.5065988195995614,
+          "exposure_fraction": 0.23760330578512398,
+          "entries": 344
+        },
+        "2023-2024": {
+          "sessions": 1461,
+          "return_percent": -52.071208582741725,
+          "max_drawdown_percent": -58.78437773979768,
+          "annualized_sharpe": -0.9145662267010974,
+          "exposure_fraction": 0.24845995893223818,
+          "entries": 363
+        },
+        "2025-2026": {
+          "sessions": 1330,
+          "return_percent": -51.86451540850572,
+          "max_drawdown_percent": -60.686580522669175,
+          "annualized_sharpe": -0.6027189406328309,
+          "exposure_fraction": 0.2571428571428571,
+          "entries": 342
+        }
+      },
+      "night_reversal": {
+        "2019-2020": {
+          "sessions": 1443,
+          "return_percent": -30.214992878139626,
+          "max_drawdown_percent": -62.97437148210495,
+          "annualized_sharpe": -0.21750971322162527,
+          "exposure_fraction": 0.23284823284823286,
+          "entries": 336
+        },
+        "2021-2022": {
+          "sessions": 1452,
+          "return_percent": -72.63015559521803,
+          "max_drawdown_percent": -82.58121005636538,
+          "annualized_sharpe": -0.7910002543152224,
+          "exposure_fraction": 0.2493112947658402,
+          "entries": 362
+        },
+        "2023-2024": {
+          "sessions": 1461,
+          "return_percent": -66.69092929189124,
+          "max_drawdown_percent": -72.3468647023825,
+          "annualized_sharpe": -1.2706295504074505,
+          "exposure_fraction": 0.23203285420944558,
+          "entries": 338
+        },
+        "2025-2026": {
+          "sessions": 1330,
+          "return_percent": -43.08018335334643,
+          "max_drawdown_percent": -53.14400975758704,
+          "annualized_sharpe": -0.5567174178897654,
+          "exposure_fraction": 0.22857142857142856,
+          "entries": 304
+        }
+      },
+      "night_long": {
+        "2019-2020": {
+          "sessions": 1443,
+          "return_percent": -71.76911798018526,
+          "max_drawdown_percent": -81.1118010067384,
+          "annualized_sharpe": -0.7253586807518432,
+          "exposure_fraction": 0.498960498960499,
+          "entries": 717
+        },
+        "2021-2022": {
+          "sessions": 1452,
+          "return_percent": -95.90390764391503,
+          "max_drawdown_percent": -96.71456777571619,
+          "annualized_sharpe": -1.471952546153343,
+          "exposure_fraction": 0.49931129476584024,
+          "entries": 724
+        },
+        "2023-2024": {
+          "sessions": 1461,
+          "return_percent": -61.66327916324953,
+          "max_drawdown_percent": -71.4237241967453,
+          "annualized_sharpe": -0.6803679570015077,
+          "exposure_fraction": 0.5003422313483915,
+          "entries": 730
+        },
+        "2025-2026": {
+          "sessions": 1330,
+          "return_percent": -81.05504735806852,
+          "max_drawdown_percent": -81.5375231591658,
+          "annualized_sharpe": -1.2871848160025403,
+          "exposure_fraction": 0.5,
+          "entries": 665
+        }
+      },
+      "day_long": {
+        "2019-2020": {
+          "sessions": 1443,
+          "return_percent": -74.6292133206698,
+          "max_drawdown_percent": -84.20045741797799,
+          "annualized_sharpe": -0.505709491426389,
+          "exposure_fraction": 0.501039501039501,
+          "entries": 717
+        },
+        "2021-2022": {
+          "sessions": 1452,
+          "return_percent": -56.43741464687429,
+          "max_drawdown_percent": -86.88062615278885,
+          "annualized_sharpe": -0.18925882254148768,
+          "exposure_fraction": 0.5006887052341598,
+          "entries": 724
+        },
+        "2023-2024": {
+          "sessions": 1461,
+          "return_percent": -90.66328344868532,
+          "max_drawdown_percent": -90.98082333750742,
+          "annualized_sharpe": -2.2569343517657985,
+          "exposure_fraction": 0.4996577686516085,
+          "entries": 730
+        },
+        "2025-2026": {
+          "sessions": 1330,
+          "return_percent": -93.13593914653721,
+          "max_drawdown_percent": -93.5445776461474,
+          "annualized_sharpe": -1.9476977950522423,
+          "exposure_fraction": 0.5,
+          "entries": 665
+        }
+      },
+      "combo": {
+        "2019-2020": {
+          "sessions": 1443,
+          "return_percent": 424.62085301304217,
+          "max_drawdown_percent": -65.39587234389526,
+          "annualized_sharpe": 1.081789722756254,
+          "exposure_fraction": 0.7449757449757449,
+          "entries": 367
+        },
+        "2021-2022": {
+          "sessions": 1452,
+          "return_percent": -49.17938257133048,
+          "max_drawdown_percent": -81.3378863144161,
+          "annualized_sharpe": -0.002048263411061619,
+          "exposure_fraction": 0.7369146005509641,
+          "entries": 382
+        },
+        "2023-2024": {
+          "sessions": 1461,
+          "return_percent": 62.485627559516146,
+          "max_drawdown_percent": -43.42938657226051,
+          "annualized_sharpe": 0.5246800226406338,
+          "exposure_fraction": 0.7488021902806297,
+          "entries": 367
+        },
+        "2025-2026": {
+          "sessions": 1330,
+          "return_percent": -28.911361358599684,
+          "max_drawdown_percent": -56.19614854484989,
+          "annualized_sharpe": -0.015055301987526118,
+          "exposure_fraction": 0.7571428571428571,
+          "entries": 323
+        }
+      }
+    }
+  },
+  "20": {
+    "BTCUSDT": {
+      "full_reversal": {
+        "2019-2020": {
+          "sessions": 1445,
+          "return_percent": 11.247359889430285,
+          "max_drawdown_percent": -63.496092581748,
+          "annualized_sharpe": 0.24541047441372127,
+          "exposure_fraction": 0.4643598615916955,
+          "entries": 358
+        },
+        "2021-2022": {
+          "sessions": 1453,
+          "return_percent": -41.30064389543311,
+          "max_drawdown_percent": -70.60775233466136,
+          "annualized_sharpe": -0.1821446546196865,
+          "exposure_fraction": 0.5072264280798349,
+          "entries": 375
+        },
+        "2023-2024": {
+          "sessions": 1461,
+          "return_percent": 6.349761960379596,
+          "max_drawdown_percent": -39.25619603914018,
+          "annualized_sharpe": 0.18050846295708245,
+          "exposure_fraction": 0.4736481861738535,
+          "entries": 385
+        },
+        "2025-2026": {
+          "sessions": 1330,
+          "return_percent": -73.75552574141253,
+          "max_drawdown_percent": -77.52398939916328,
+          "annualized_sharpe": -1.516371055741883,
+          "exposure_fraction": 0.48195488721804514,
+          "entries": 356
+        }
+      },
+      "day_reversal": {
+        "2019-2020": {
+          "sessions": 1445,
+          "return_percent": -23.861081406189854,
+          "max_drawdown_percent": -53.3080946167717,
+          "annualized_sharpe": -0.15486568326554853,
+          "exposure_fraction": 0.22145328719723184,
+          "entries": 320
+        },
+        "2021-2022": {
+          "sessions": 1453,
+          "return_percent": -73.09466296837341,
+          "max_drawdown_percent": -81.44333662762327,
+          "annualized_sharpe": -1.0412194295524566,
+          "exposure_fraction": 0.26359256710254647,
+          "entries": 381
+        },
+        "2023-2024": {
+          "sessions": 1461,
+          "return_percent": -47.286344610141384,
+          "max_drawdown_percent": -50.82522071973076,
+          "annualized_sharpe": -0.8324024796133652,
+          "exposure_fraction": 0.23408624229979466,
+          "entries": 342
+        },
+        "2025-2026": {
+          "sessions": 1330,
+          "return_percent": -72.76678424363861,
+          "max_drawdown_percent": -76.1236513745154,
+          "annualized_sharpe": -1.789460332626037,
+          "exposure_fraction": 0.24210526315789474,
+          "entries": 322
+        }
+      },
+      "night_reversal": {
+        "2019-2020": {
+          "sessions": 1445,
+          "return_percent": -58.27447067142367,
+          "max_drawdown_percent": -64.00291027625906,
+          "annualized_sharpe": -1.0037458495809115,
+          "exposure_fraction": 0.24290657439446367,
+          "entries": 351
+        },
+        "2021-2022": {
+          "sessions": 1453,
+          "return_percent": -48.38396649679307,
+          "max_drawdown_percent": -62.54033240358516,
+          "annualized_sharpe": -0.5833534630871169,
+          "exposure_fraction": 0.24363386097728837,
+          "entries": 354
+        },
+        "2023-2024": {
+          "sessions": 1461,
+          "return_percent": -40.98454775738326,
+          "max_drawdown_percent": -53.44055038012145,
+          "annualized_sharpe": -0.8444704336003079,
+          "exposure_fraction": 0.23956194387405885,
+          "entries": 350
+        },
+        "2025-2026": {
+          "sessions": 1330,
+          "return_percent": -69.21440978468212,
+          "max_drawdown_percent": -69.99815461300662,
+          "annualized_sharpe": -2.5366816754455783,
+          "exposure_fraction": 0.23984962406015037,
+          "entries": 319
+        }
+      },
+      "night_long": {
+        "2019-2020": {
+          "sessions": 1445,
+          "return_percent": -89.46589428865943,
+          "max_drawdown_percent": -91.2817568475132,
+          "annualized_sharpe": -1.8106688799042316,
+          "exposure_fraction": 0.4982698961937716,
+          "entries": 717
+        },
+        "2021-2022": {
+          "sessions": 1453,
+          "return_percent": -94.28727864789721,
+          "max_drawdown_percent": -95.19405535374474,
+          "annualized_sharpe": -1.8668831933460537,
+          "exposure_fraction": 0.49827942188575364,
+          "entries": 724
+        },
+        "2023-2024": {
+          "sessions": 1461,
+          "return_percent": -86.80449680207649,
+          "max_drawdown_percent": -87.98822412600829,
+          "annualized_sharpe": -2.2873141958152483,
+          "exposure_fraction": 0.5003422313483915,
+          "entries": 730
+        },
+        "2025-2026": {
+          "sessions": 1330,
+          "return_percent": -93.0889284081419,
+          "max_drawdown_percent": -93.15637454507437,
+          "annualized_sharpe": -3.9304091741748186,
+          "exposure_fraction": 0.5,
+          "entries": 665
+        }
+      },
+      "day_long": {
+        "2019-2020": {
+          "sessions": 1445,
+          "return_percent": -77.10051408361973,
+          "max_drawdown_percent": -84.76652512116894,
+          "annualized_sharpe": -0.8481209131842137,
+          "exposure_fraction": 0.5017301038062284,
+          "entries": 717
+        },
+        "2021-2022": {
+          "sessions": 1453,
+          "return_percent": -96.86364010383956,
+          "max_drawdown_percent": -97.4804941943556,
+          "annualized_sharpe": -2.16333790457332,
+          "exposure_fraction": 0.5017205781142464,
+          "entries": 724
+        },
+        "2023-2024": {
+          "sessions": 1461,
+          "return_percent": -87.37373529423968,
+          "max_drawdown_percent": -88.66404267572692,
+          "annualized_sharpe": -1.9026908218737595,
+          "exposure_fraction": 0.4996577686516085,
+          "entries": 730
+        },
+        "2025-2026": {
+          "sessions": 1330,
+          "return_percent": -93.90529134580223,
+          "max_drawdown_percent": -94.26386116879951,
+          "annualized_sharpe": -2.905016284361652,
+          "exposure_fraction": 0.5,
+          "entries": 665
+        }
+      },
+      "combo": {
+        "2019-2020": {
+          "sessions": 1445,
+          "return_percent": 1.1437628504441966,
+          "max_drawdown_percent": -74.97727868746378,
+          "annualized_sharpe": 0.19910099406002052,
+          "exposure_fraction": 0.7197231833910035,
+          "entries": 404
+        },
+        "2021-2022": {
+          "sessions": 1453,
+          "return_percent": -67.77011759430843,
+          "max_drawdown_percent": -82.59173628204117,
+          "annualized_sharpe": -0.407440732250749,
+          "exposure_fraction": 0.7618719889883001,
+          "entries": 346
+        },
+        "2023-2024": {
+          "sessions": 1461,
+          "return_percent": 7.589182658535232,
+          "max_drawdown_percent": -37.994649955667256,
+          "annualized_sharpe": 0.20320002531418876,
+          "exposure_fraction": 0.7344284736481862,
+          "entries": 388
+        },
+        "2025-2026": {
+          "sessions": 1330,
+          "return_percent": -75.1968328219756,
+          "max_drawdown_percent": -76.20042063097289,
+          "annualized_sharpe": -1.3213340915590135,
+          "exposure_fraction": 0.7421052631578947,
+          "entries": 343
+        }
+      }
+    },
+    "ETHUSDT": {
+      "full_reversal": {
+        "2019-2020": {
+          "sessions": 1443,
+          "return_percent": 170.459118436399,
+          "max_drawdown_percent": -60.326852300291,
+          "annualized_sharpe": 0.7899033898877521,
+          "exposure_fraction": 0.47886347886347885,
+          "entries": 381
+        },
+        "2021-2022": {
+          "sessions": 1452,
+          "return_percent": -15.917348595696101,
+          "max_drawdown_percent": -74.07574913393545,
+          "annualized_sharpe": 0.14773092993728074,
+          "exposure_fraction": 0.4869146005509642,
+          "entries": 363
+        },
+        "2023-2024": {
+          "sessions": 1461,
+          "return_percent": -70.9374970312856,
+          "max_drawdown_percent": -76.26557149443823,
+          "annualized_sharpe": -1.006230138666628,
+          "exposure_fraction": 0.4804928131416838,
+          "entries": 376
+        },
+        "2025-2026": {
+          "sessions": 1330,
+          "return_percent": -52.697928339805266,
+          "max_drawdown_percent": -67.00654486360445,
+          "annualized_sharpe": -0.3976440321554265,
+          "exposure_fraction": 0.4857142857142857,
+          "entries": 348
+        }
+      },
+      "day_reversal": {
+        "2019-2020": {
+          "sessions": 1443,
+          "return_percent": 58.09993660297235,
+          "max_drawdown_percent": -38.67814960842384,
+          "annualized_sharpe": 0.5017886800404081,
+          "exposure_fraction": 0.24601524601524602,
+          "entries": 353
+        },
+        "2021-2022": {
+          "sessions": 1452,
+          "return_percent": 11.752713796713344,
+          "max_drawdown_percent": -54.47976687001439,
+          "annualized_sharpe": 0.24987006197800052,
+          "exposure_fraction": 0.23760330578512398,
+          "entries": 344
+        },
+        "2023-2024": {
+          "sessions": 1461,
+          "return_percent": -66.68259190408827,
+          "max_drawdown_percent": -69.81567406762534,
+          "annualized_sharpe": -1.4098511954348891,
+          "exposure_fraction": 0.24845995893223818,
+          "entries": 363
+        },
+        "2025-2026": {
+          "sessions": 1330,
+          "return_percent": -65.82753939736298,
+          "max_drawdown_percent": -70.75970027407367,
+          "annualized_sharpe": -0.9478397044677364,
+          "exposure_fraction": 0.2571428571428571,
+          "entries": 342
+        }
+      },
+      "night_reversal": {
+        "2019-2020": {
+          "sessions": 1443,
+          "return_percent": -50.15938812577056,
+          "max_drawdown_percent": -71.36411452384688,
+          "annualized_sharpe": -0.5466894308837184,
+          "exposure_fraction": 0.23284823284823286,
+          "entries": 336
+        },
+        "2021-2022": {
+          "sessions": 1452,
+          "return_percent": -80.94540849245914,
+          "max_drawdown_percent": -87.526380118404,
+          "annualized_sharpe": -1.059217559868278,
+          "exposure_fraction": 0.2493112947658402,
+          "entries": 362
+        },
+        "2023-2024": {
+          "sessions": 1461,
+          "return_percent": -76.258199957105,
+          "max_drawdown_percent": -79.94101367918994,
+          "annualized_sharpe": -1.6906300930804794,
+          "exposure_fraction": 0.23203285420944558,
+          "entries": 338
+        },
+        "2025-2026": {
+          "sessions": 1330,
+          "return_percent": -58.023471662107994,
+          "max_drawdown_percent": -63.83377446376242,
+          "annualized_sharpe": -0.9205736393534814,
+          "exposure_fraction": 0.22857142857142856,
+          "entries": 304
+        }
+      },
+      "night_long": {
+        "2019-2020": {
+          "sessions": 1443,
+          "return_percent": -86.22768527552974,
+          "max_drawdown_percent": -89.01986163479204,
+          "annualized_sharpe": -1.2397914378866137,
+          "exposure_fraction": 0.498960498960499,
+          "entries": 717
+        },
+        "2021-2022": {
+          "sessions": 1452,
+          "return_percent": -98.01669588458886,
+          "max_drawdown_percent": -98.33502726545971,
+          "annualized_sharpe": -1.8605871071539115,
+          "exposure_fraction": 0.49931129476584024,
+          "entries": 724
+        },
+        "2023-2024": {
+          "sessions": 1461,
+          "return_percent": -81.54881768379694,
+          "max_drawdown_percent": -85.41041749691422,
+          "annualized_sharpe": -1.3102143250676463,
+          "exposure_fraction": 0.5003422313483915,
+          "entries": 730
+        },
+        "2025-2026": {
+          "sessions": 1330,
+          "return_percent": -90.26846405234781,
+          "max_drawdown_percent": -90.46597679980253,
+          "annualized_sharpe": -1.867290838840193,
+          "exposure_fraction": 0.5,
+          "entries": 665
+        }
+      },
+      "day_long": {
+        "2019-2020": {
+          "sessions": 1443,
+          "return_percent": -87.62916833324567,
+          "max_drawdown_percent": -91.84751267494879,
+          "annualized_sharpe": -0.8945356167236299,
+          "exposure_fraction": 0.501039501039501,
+          "entries": 717
+        },
+        "2021-2022": {
+          "sessions": 1452,
+          "return_percent": -78.90724932496835,
+          "max_drawdown_percent": -92.78224227806464,
+          "annualized_sharpe": -0.5653422634663606,
+          "exposure_fraction": 0.5006887052341598,
+          "entries": 724
+        },
+        "2023-2024": {
+          "sessions": 1461,
+          "return_percent": -95.50630686290016,
+          "max_drawdown_percent": -95.63061938649857,
+          "annualized_sharpe": -2.9920500285602967,
+          "exposure_fraction": 0.4996577686516085,
+          "entries": 730
+        },
+        "2025-2026": {
+          "sessions": 1330,
+          "return_percent": -96.47410810653071,
+          "max_drawdown_percent": -96.66903338217398,
+          "annualized_sharpe": -2.475586638980249,
+          "exposure_fraction": 0.5,
+          "entries": 665
+        }
+      },
+      "combo": {
+        "2019-2020": {
+          "sessions": 1443,
+          "return_percent": 263.41059469691686,
+          "max_drawdown_percent": -69.52976428039858,
+          "annualized_sharpe": 0.8993856897381087,
+          "exposure_fraction": 0.7449757449757449,
+          "entries": 367
+        },
+        "2021-2022": {
+          "sessions": 1452,
+          "return_percent": -65.30366019361387,
+          "max_drawdown_percent": -83.1936420350819,
+          "annualized_sharpe": -0.1673235163225302,
+          "exposure_fraction": 0.7369146005509641,
+          "entries": 382
+        },
+        "2023-2024": {
+          "sessions": 1461,
+          "return_percent": 12.49920652141714,
+          "max_drawdown_percent": -46.07608604104859,
+          "annualized_sharpe": 0.2569468414061299,
+          "exposure_fraction": 0.7488021902806297,
+          "entries": 367
+        },
+        "2025-2026": {
+          "sessions": 1330,
+          "return_percent": -48.56281871378313,
+          "max_drawdown_percent": -63.82432591593623,
+          "annualized_sharpe": -0.22758506171916823,
+          "exposure_fraction": 0.7571428571428571,
+          "entries": 323
+        }
+      }
+    }
+  }
+}

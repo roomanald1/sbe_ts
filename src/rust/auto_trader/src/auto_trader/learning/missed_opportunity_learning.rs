@@ -6,7 +6,9 @@ fn longer_horizon_score_multiplier(score: f64, bands: &[MissedOpportunityGateBan
     let short_horizon = bands
         .iter()
         .filter(|band| {
-            band.gate == "score" && band.horizon_seconds == 300 && band.threshold <= absolute_score
+            band.gate == MissedOpportunityGate::Score
+                && band.horizon_seconds == 300
+                && band.threshold <= absolute_score
         })
         .max_by(|left, right| left.threshold.total_cmp(&right.threshold));
     let Some(short) = short_horizon else {
@@ -19,7 +21,7 @@ fn longer_horizon_score_multiplier(score: f64, bands: &[MissedOpportunityGateBan
         return 1.0;
     };
     let supported_longer_horizon = bands.iter().any(|long| {
-        long.gate == "score"
+        long.gate == MissedOpportunityGate::Score
             && (long.threshold - short.threshold).abs() < 1e-9
             && matches!(long.horizon_seconds, 900 | 3_600)
             && long.sample_count >= COUNTERFACTUAL_RELAXATION_SAMPLES
@@ -45,7 +47,7 @@ fn longer_horizon_score_multiplier(score: f64, bands: &[MissedOpportunityGateBan
 
 fn adaptive_missed_opportunity_floor(
     learned_floor: f64,
-    gate: &str,
+    gate: MissedOpportunityGate,
     bands: &[MissedOpportunityGateBand],
 ) -> f64 {
     bands

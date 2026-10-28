@@ -28,8 +28,11 @@ async fn maybe_place_portfolio_hedge(
     if holdings.is_empty() || unknown_marks > 0 {
         return Ok(None);
     }
-    let portfolio_variance =
-        calculate_portfolio_variance(&holdings, &candidates["pair_correlations"]);
+    let pair_correlations: Vec<HedgePairCorrelationData> = serde_json::from_value(
+        candidates["pair_correlations"].clone(),
+    )
+    .unwrap_or_default();
+    let portfolio_variance = calculate_portfolio_variance(&holdings, &pair_correlations);
     let portfolio_shock_risk = portfolio_variance.max(0.0).sqrt() * PORTFOLIO_SHOCK_PERCENT;
     let settings_snapshot = state.settings.lock().await.clone();
     let hedge_execution = settings_snapshot

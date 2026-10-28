@@ -76,10 +76,18 @@ struct SideWalkForwardMetrics {
     positive_net_rate: Option<f64>,
     positive_net_rate_lower_95: Option<f64>,
 }
+#[derive(Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum MissedOpportunityGate {
+    Score,
+    Strength,
+    #[serde(other)]
+    Other,
+}
 #[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct MissedOpportunityGateBand {
-    gate: String,
+    gate: MissedOpportunityGate,
     threshold: f64,
     #[serde(default)]
     horizon_seconds: u64,

@@ -44,6 +44,31 @@ impl DailyStrategySnapshot {
             .contains(&(strategy.to_owned(), symbol.to_owned()));
         strategy_kind.should_exit_when_insight_inactive(active)
     }
+
+    fn strategy_rebalance_required(
+        &self,
+        strategy: &str,
+        symbol: &str,
+        previous_decision: Option<&serde_json::Value>,
+    ) -> bool {
+        if Strategy::from_name(strategy) != Some(Strategy::RiskAdjustedMonthlyMomentum) {
+            return false;
+        }
+        let Some(previous_anchor) = previous_decision
+            .and_then(|decision| decision.get("monthly_anchor_close_time_ms"))
+            .and_then(serde_json::Value::as_u64)
+        else {
+            return false;
+        };
+        self.generated_signals.iter().any(|signal| {
+            signal.strategy.as_deref() == Some(strategy)
+                && signal.symbol == symbol
+                && signal.strategy_decision.as_ref()
+                    .and_then(|decision| decision.get("monthly_anchor_close_time_ms"))
+                    .and_then(serde_json::Value::as_u64)
+                    .is_some_and(|current_anchor| current_anchor > previous_anchor)
+        })
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -80,4 +105,50 @@ enum StrategyInsight<'a> {
 #[derive(Clone)]
 enum StrategyEvaluation {
     LiveSignal,
+}
+
+
+#[cfg(test)]
+mod risk_adjusted_monthly_momentum_tests {
+    use super::*;
+
+    fn candidate(anchor: u64) -> Signal {
+        Signal {
+            symbol: "ETH-USDT".into(),
+            direction: "bullish".into(),
+            strength: 1.0,
+            timestamp: 10,
+            stale: false,
+            score: 1.0,
+            ranging_probability: None,
+            components: SignalComponents::default(),
+            strategy_candidate: true,
+            strategy: Some("risk-adjusted-monthly-momentum".into()),
+            strategy_decision: Some(serde_json::json!({"monthly_anchor_close_time_ms": anchor})),
+            market_regime: None,
+        }
+    }
+
+    #[test]
+    fn same_symbol_rebalances_only_when_month_anchor_advances() {
+        let snapshot = DailyStrategySnapshot {
+            as_of_ms: 10,
+            active_strategy_symbols: BTreeSet::from([(
+                "risk-adjusted-monthly-momentum".into(), "ETH-USDT".into(),
+            )]),
+            generated_signals: vec![candidate(2_000)],
+        };
+        assert!(snapshot.strategy_rebalance_required(
+            "risk-adjusted-monthly-momentum", "ETH-USDT",
+            Some(&serde_json::json!({"monthly_anchor_close_time_ms": 1_000})),
+        ));
+        assert!(!snapshot.strategy_rebalance_required(
+            "risk-adjusted-monthly-momentum", "ETH-USDT",
+            Some(&serde_json::json!({"monthly_anchor_close_time_ms": 2_000})),
+        ));
+        assert!(!snapshot.strategy_rebalance_required(
+            "relative-strength-90-sma200", "ETH-USDT",
+            Some(&serde_json::json!({"monthly_anchor_close_time_ms": 1_000})),
+        ));
+    }
 }

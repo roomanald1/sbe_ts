@@ -1,0 +1,99 @@
+{
+  "date_range": [
+    "2021-03-01",
+    "2026-10-27"
+  ],
+  "timing": "prior close signal; next open entry; open-to-next-open holding",
+  "portfolio": "fixed 1/7 weight per asset on each active day; rebalancing cost omitted as in legacy exit replay",
+  "cost": "15 bps per side",
+  "fixed_bracket_assumption": "daily low/high touches; stop first if both touched; gaps at worse open",
+  "policies": {
+    "signal_exit": {
+      "splits": {
+        "train_2021_2022": {
+          "days": 671,
+          "return_pct": 18.385934704130523,
+          "max_drawdown_pct": -12.258352332286071,
+          "sharpe": 0.6639194022717689
+        },
+        "validation_2023_2024": {
+          "days": 731,
+          "return_pct": 42.64547972754211,
+          "max_drawdown_pct": -13.485024203061723,
+          "sharpe": 1.395548077850431
+        },
+        "holdout_2025_to_latest": {
+          "days": 665,
+          "return_pct": 22.399947729800672,
+          "max_drawdown_pct": -7.51946236660258,
+          "sharpe": 1.0321559696015972
+        }
+      },
+      "counts": {
+        "entries": 369,
+        "exits": 369,
+        "stop_first_touches": 0,
+        "target_first_touches": 0
+      },
+      "full_period_return_pct": 106.69946554426973
+    },
+    "net_stop_0_5_target_0_5": {
+      "splits": {
+        "train_2021_2022": {
+          "days": 671,
+          "return_pct": -8.487018003772551,
+          "max_drawdown_pct": -8.487018003772551,
+          "sharpe": -5.96033014068151
+        },
+        "validation_2023_2024": {
+          "days": 731,
+          "return_pct": -17.504418514524666,
+          "max_drawdown_pct": -17.504418514524666,
+          "sharpe": -7.392675907834808
+        },
+        "holdout_2025_to_latest": {
+          "days": 665,
+          "return_pct": -8.948799913433092,
+          "max_drawdown_pct": -8.948799913433092,
+          "sharpe": -4.448431002586914
+        }
+      },
+      "counts": {
+        "entries": 580,
+        "exits": 580,
+        "stop_first_touches": 552,
+        "target_first_touches": 28
+      },
+      "full_period_return_pct": -31.261655285768718
+    },
+    "net_stop_0_5_target_1_5": {
+      "splits": {
+        "train_2021_2022": {
+          "days": 671,
+          "return_pct": -8.355901525534005,
+          "max_drawdown_pct": -8.355901525534005,
+          "sharpe": -5.905182580571329
+        },
+        "validation_2023_2024": {
+          "days": 731,
+          "return_pct": -14.989873166361068,
+          "max_drawdown_pct": -14.989873166361068,
+          "sharpe": -5.794032176900119
+        },
+        "holdout_2025_to_latest": {
+          "days": 665,
+          "return_pct": -8.346685929775388,
+          "max_drawdown_pct": -8.346685929775388,
+          "sharpe": -4.022410291297238
+        }
+      },
+      "counts": {
+        "entries": 580,
+        "exits": 580,
+        "stop_first_touches": 552,
+        "target_first_touches": 27
+      },
+      "full_period_return_pct": -28.59586858954679
+    }
+  }
+}

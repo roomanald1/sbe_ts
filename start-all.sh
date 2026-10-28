@@ -37,7 +37,25 @@ if [[ ! -f "$ROOT/monitoring/.env" ]]; then
   exit 1
 fi
 mkdir -p "$LOG_DIR"
-./stop-all.sh
+
+if [[ "${1:-}" != "--daemon-run" ]]; then
+  if [[ -f "$RUNNER_PID_FILE" ]]; then
+    runner_pid="$(cat "$RUNNER_PID_FILE")"
+    if process_alive "$runner_pid"; then
+      echo "Stack supervisor is already running (PID $runner_pid)."
+      exit 0
+    fi
+  fi
+  ./stop-all.sh
+  nohup "$0" --daemon-run >>"$LOG_DIR/start-all.log" 2>&1 </dev/null &
+  runner_pid=$!
+  echo "$runner_pid" > "$RUNNER_PID_FILE"
+  disown "$runner_pid" 2>/dev/null || true
+  echo "Stack startup launched in the background (PID $runner_pid)."
+  echo "Logs: $LOG_DIR/"
+  exit 0
+fi
+
 echo "$$" > "$RUNNER_PID_FILE"
 children=()
 cleanup() {
@@ -75,6 +93,6 @@ if [[ "$ui_ready" != "1" ]]; then echo "React app did not become ready on port 5
 echo "App:       http://localhost:5173"
 echo "Grafana:   http://localhost:3000/d/sbe-ts-overview/sbe-ts-system-and-trading"
 echo "Prometheus: http://localhost:9090"
-echo "Press Ctrl+C here, or run ./stop-all.sh, to stop the stack."
+echo "Run ./stop-all.sh to stop the stack."
 
 wait -n "$backend_pid" "$ui_pid"

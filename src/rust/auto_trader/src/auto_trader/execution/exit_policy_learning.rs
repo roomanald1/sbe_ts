@@ -1,4 +1,11 @@
-fn learned_exit_policy(signal: &Signal, walk_forward: &[WalkForward]) -> Option<(f64, f64)> {
+const MIN_VALIDATED_EXIT_POLICY_SAMPLES: usize = 20;
+const STOP_WIDENING_PER_VALIDATION_TIER_PERCENT: f64 = 0.15;
+const MAX_STOP_WIDENING_TIERS: usize = 3;
+
+fn learned_exit_policy(
+    signal: &Signal,
+    walk_forward: &[WalkForward],
+) -> Option<(f64, f64, usize)> {
     walk_forward
         .iter()
         .filter(|item| item.symbol == signal.symbol && matches!(item.horizon_seconds, 900 | 3_600))
@@ -8,7 +15,7 @@ fn learned_exit_policy(signal: &Signal, walk_forward: &[WalkForward]) -> Option<
             } else {
                 item.learned_short_exit_policy.as_ref()
             }?;
-            (policy.validation_samples >= 8
+            (policy.validation_samples >= MIN_VALIDATED_EXIT_POLICY_SAMPLES
                 && policy.validation_average_net_return_percent > 0.0
                 && policy.validation_positive_net_rate >= 0.40
                 && policy.stop_loss_percent.is_finite()
@@ -17,10 +24,11 @@ fn learned_exit_policy(signal: &Signal, walk_forward: &[WalkForward]) -> Option<
                 policy.validation_average_net_return_percent,
                 policy.stop_loss_percent,
                 policy.take_profit_percent,
+                policy.validation_samples,
             ))
         })
         .max_by(|left, right| left.0.total_cmp(&right.0))
-        .map(|(_, stop, target)| (stop, target))
+        .map(|(_, stop, target, samples)| (stop, target, samples))
 }
 
 fn horizon_adjusted_take_profit_percent(

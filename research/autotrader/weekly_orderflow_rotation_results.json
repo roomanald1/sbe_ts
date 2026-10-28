@@ -1,0 +1,278 @@
+{
+  "universe": [
+    "BTCUSDT",
+    "ETHUSDT",
+    "BNBUSDT",
+    "XRPUSDT",
+    "SOLUSDT",
+    "ADAUSDT",
+    "DOGEUSDT"
+  ],
+  "signal": "Each Monday rank prior 7 complete days by aggregate Binance spot taker-buy imbalance (2*taker-buy quote volume minus total quote volume, divided by total quote volume); equally weight top two, cash if best flow score is not positive. Signal known at prior close, execute at next open.",
+  "benchmark": "same weekly rule ranking by prior 7-day return instead of flow",
+  "cost": "15 bps per side per dollar absolute portfolio-weight change; zero cash return",
+  "source": "Binance spot daily klines: quote volume and taker-buy quote volume fields; no external order-flow data.",
+  "periods": {
+    "flow_10bp": {
+      "2020-2022": {
+        "days": 865,
+        "return_percent": 1037.4956202948526,
+        "max_drawdown_percent": -88.49962594411855,
+        "annualized_sharpe": 1.167360230695369
+      },
+      "2023-2024": {
+        "days": 731,
+        "return_percent": 721.7506349512055,
+        "max_drawdown_percent": -41.17712568072404,
+        "annualized_sharpe": 1.9011231423185597
+      },
+      "2025": {
+        "days": 365,
+        "return_percent": -9.733043857059753,
+        "max_drawdown_percent": -56.279146731388764,
+        "annualized_sharpe": 0.12460829184169367
+      },
+      "2026": {
+        "days": 295,
+        "return_percent": -14.318316012786102,
+        "max_drawdown_percent": -46.58419789587579,
+        "annualized_sharpe": -0.19414513570745728
+      }
+    },
+    "flow_15bp": {
+      "2020-2022": {
+        "days": 865,
+        "return_percent": 972.5898210153726,
+        "max_drawdown_percent": -88.8631861047285,
+        "annualized_sharpe": 1.1522793811367344
+      },
+      "2023-2024": {
+        "days": 731,
+        "return_percent": 684.8863026299672,
+        "max_drawdown_percent": -41.82261133037336,
+        "annualized_sharpe": 1.8663116429774207
+      },
+      "2025": {
+        "days": 365,
+        "return_percent": -11.68911092810082,
+        "max_drawdown_percent": -56.598808015052946,
+        "annualized_sharpe": 0.08791105285645057
+      },
+      "2026": {
+        "days": 295,
+        "return_percent": -16.253646184354153,
+        "max_drawdown_percent": -47.242012712381275,
+        "annualized_sharpe": -0.2570626131490252
+      }
+    },
+    "flow_25bp": {
+      "2020-2022": {
+        "days": 865,
+        "return_percent": 853.5744288731257,
+        "max_drawdown_percent": -89.55677420200611,
+        "annualized_sharpe": 1.1220985778865284
+      },
+      "2023-2024": {
+        "days": 731,
+        "return_percent": 615.9867920520787,
+        "max_drawdown_percent": -43.09344917804459,
+        "annualized_sharpe": 1.7965386176728135
+      },
+      "2025": {
+        "days": 365,
+        "return_percent": -15.478441926230902,
+        "max_drawdown_percent": -57.23180642976007,
+        "annualized_sharpe": 0.014727811055927529
+      },
+      "2026": {
+        "days": 295,
+        "return_percent": -19.997832213881527,
+        "max_drawdown_percent": -48.53469720512751,
+        "annualized_sharpe": -0.38320061818826284
+      }
+    },
+    "flow_reversal_10bp": {
+      "2020-2022": {
+        "days": 865,
+        "return_percent": 131.23580736912578,
+        "max_drawdown_percent": -84.90655064666288,
+        "annualized_sharpe": 0.8422901076968667
+      },
+      "2023-2024": {
+        "days": 731,
+        "return_percent": 245.83767660010466,
+        "max_drawdown_percent": -46.79267502090549,
+        "annualized_sharpe": 1.347871378177973
+      },
+      "2025": {
+        "days": 365,
+        "return_percent": -41.689405246973024,
+        "max_drawdown_percent": -55.03805699556486,
+        "annualized_sharpe": -0.42690849384199203
+      },
+      "2026": {
+        "days": 295,
+        "return_percent": -4.940455398748789,
+        "max_drawdown_percent": -54.356176453828844,
+        "annualized_sharpe": 0.17571812990607302
+      }
+    },
+    "flow_reversal_15bp": {
+      "2020-2022": {
+        "days": 865,
+        "return_percent": 116.19284024981229,
+        "max_drawdown_percent": -85.49784787418827,
+        "annualized_sharpe": 0.8111922141307241
+      },
+      "2023-2024": {
+        "days": 731,
+        "return_percent": 227.00273690765673,
+        "max_drawdown_percent": -47.449808252764626,
+        "annualized_sharpe": 1.3002891380776338
+      },
+      "2025": {
+        "days": 365,
+        "return_percent": -43.2565293690605,
+        "max_drawdown_percent": -56.180554612257616,
+        "annualized_sharpe": -0.46565273086943226
+      },
+      "2026": {
+        "days": 295,
+        "return_percent": -7.044012126899101,
+        "max_drawdown_percent": -55.11965054440366,
+        "annualized_sharpe": 0.12749243148135792
+      }
+    },
+    "flow_reversal_25bp": {
+      "2020-2022": {
+        "days": 865,
+        "return_percent": 88.95349479719283,
+        "max_drawdown_percent": -86.61290735465815,
+        "annualized_sharpe": 0.74897158850508
+      },
+      "2023-2024": {
+        "days": 731,
+        "return_percent": 192.32037120280765,
+        "max_drawdown_percent": -48.741164674937195,
+        "annualized_sharpe": 1.2049562252543065
+      },
+      "2025": {
+        "days": 365,
+        "return_percent": -46.26851799522554,
+        "max_drawdown_percent": -58.38139224007202,
+        "annualized_sharpe": -0.5430049704432459
+      },
+      "2026": {
+        "days": 295,
+        "return_percent": -11.116666856886859,
+        "max_drawdown_percent": -56.61010013430497,
+        "annualized_sharpe": 0.03089308326523833
+      }
+    },
+    "momentum_10bp": {
+      "2020-2022": {
+        "days": 865,
+        "return_percent": 501.6935547544465,
+        "max_drawdown_percent": -83.23468862715468,
+        "annualized_sharpe": 1.2301538506006424
+      },
+      "2023-2024": {
+        "days": 731,
+        "return_percent": 648.2974900293497,
+        "max_drawdown_percent": -50.19328150833711,
+        "annualized_sharpe": 1.8279929319249906
+      },
+      "2025": {
+        "days": 365,
+        "return_percent": -46.399940609016674,
+        "max_drawdown_percent": -53.92242289702427,
+        "annualized_sharpe": -0.5872003407303891
+      },
+      "2026": {
+        "days": 295,
+        "return_percent": -39.38469701018463,
+        "max_drawdown_percent": -53.149878701525644,
+        "annualized_sharpe": -0.843069044253892
+      }
+    },
+    "momentum_15bp": {
+      "2020-2022": {
+        "days": 865,
+        "return_percent": 450.3632493455167,
+        "max_drawdown_percent": -83.81056161420695,
+        "annualized_sharpe": 1.1963191552382533
+      },
+      "2023-2024": {
+        "days": 731,
+        "return_percent": 596.0717667959523,
+        "max_drawdown_percent": -51.32586709424765,
+        "annualized_sharpe": 1.7741315893078011
+      },
+      "2025": {
+        "days": 365,
+        "return_percent": -48.426636706180346,
+        "max_drawdown_percent": -54.30599270425647,
+        "annualized_sharpe": -0.6431785242341076
+      },
+      "2026": {
+        "days": 295,
+        "return_percent": -41.11204119996374,
+        "max_drawdown_percent": -54.07691344977279,
+        "annualized_sharpe": -0.9084322753916209
+      }
+    },
+    "momentum_25bp": {
+      "2020-2022": {
+        "days": 865,
+        "return_percent": 360.3592348930797,
+        "max_drawdown_percent": -84.90505070158558,
+        "annualized_sharpe": 1.1286190922971278
+      },
+      "2023-2024": {
+        "days": 731,
+        "return_percent": 502.19428118627417,
+        "max_drawdown_percent": -53.517220547217434,
+        "annualized_sharpe": 1.6661134776905244
+      },
+      "2025": {
+        "days": 365,
+        "return_percent": -52.25786704620277,
+        "max_drawdown_percent": -56.420037066937255,
+        "annualized_sharpe": -0.7546941644422398
+      },
+      "2026": {
+        "days": 295,
+        "return_percent": -44.42444248790361,
+        "max_drawdown_percent": -55.878442170477236,
+        "annualized_sharpe": -1.039133120265336
+      }
+    },
+    "equal_weight_buyhold": {
+      "2020-2022": {
+        "days": 872,
+        "return_percent": 814.4672941221725,
+        "max_drawdown_percent": -79.41550284895781,
+        "annualized_sharpe": 1.4195638236221815
+      },
+      "2023-2024": {
+        "days": 731,
+        "return_percent": 514.0383646541699,
+        "max_drawdown_percent": -35.582054121591234,
+        "annualized_sharpe": 1.893766731743824
+      },
+      "2025": {
+        "days": 365,
+        "return_percent": -23.705549704013517,
+        "max_drawdown_percent": -46.421725230755364,
+        "annualized_sharpe": -0.04853874784081521
+      },
+      "2026": {
+        "days": 295,
+        "return_percent": -21.030064518133063,
+        "max_drawdown_percent": -50.39439340515822,
+        "annualized_sharpe": -0.25849309127410197
+      }
+    }
+  },
+  "limits": "Fixed seven-coin universe (not point-in-time); no delisted coins; screening only, not untouched holdout."
+}

@@ -9,7 +9,9 @@ fn order_selection_thresholds(risk_appetite: f64) -> Vec<DecisionParameter> {
         parameter(
             "Order selection",
             "Range probability for post-only limit",
-            (ORDER_POST_ONLY_RANGE + 0.20 * risk_appetite / 100.0).clamp(0.0, 1.0),
+            (ORDER_POST_ONLY_RANGE
+                + ORDER_POST_ONLY_RANGE_RISK_ADJUSTMENT * risk_appetite / 100.0)
+                .clamp(0.0, 1.0),
             "probability",
         ),
         parameter(
@@ -21,7 +23,8 @@ fn order_selection_thresholds(risk_appetite: f64) -> Vec<DecisionParameter> {
         parameter(
             "Order selection",
             "Range probability for GTD",
-            (ORDER_GTD_RANGE + 0.30 * risk_appetite / 100.0).clamp(0.0, 1.0),
+            (ORDER_GTD_RANGE + ORDER_GTD_RANGE_RISK_ADJUSTMENT * risk_appetite / 100.0)
+                .clamp(0.0, 1.0),
             "probability",
         ),
         parameter(
@@ -33,7 +36,8 @@ fn order_selection_thresholds(risk_appetite: f64) -> Vec<DecisionParameter> {
         parameter(
             "Order selection",
             "Range probability for limit",
-            (ORDER_LIMIT_RANGE + 0.30 * risk_appetite / 100.0).clamp(0.0, 1.0),
+            (ORDER_LIMIT_RANGE + ORDER_LIMIT_RANGE_RISK_ADJUSTMENT * risk_appetite / 100.0)
+                .clamp(0.0, 1.0),
             "probability",
         ),
         parameter(

@@ -27,6 +27,21 @@ async fn ensure_protective_stops(
         (lots, stop_strategies)
     };
     for (symbol, strategy, position) in lots {
+        let strategy_kind = Strategy::from_name(&strategy).unwrap_or(Strategy::LiveInsights);
+        if !strategy_kind.uses_protective_stops() {
+            for stop in &position.protective_stops {
+                if !cancel_protective_barrier(
+                    client, base, state, &symbol, &stop.barrier_id,
+                    stop.order_timestamp, &strategy,
+                ).await? {
+                    let mut settings = state.settings.lock().await;
+                    settings.last_risk_note = format!(
+                        "Could not cancel obsolete stop for {symbol} ({strategy}); retrying"
+                    );
+                }
+            }
+            continue;
+        }
         let desired_quantity = position.quantity.abs();
         let active = barriers.iter().filter(|barrier| {
             if barrier["symbol"].as_str() != Some(symbol.as_str())

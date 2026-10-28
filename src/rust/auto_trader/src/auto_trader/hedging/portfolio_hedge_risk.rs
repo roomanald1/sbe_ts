@@ -4,6 +4,36 @@ struct RiskHolding {
     signed_usd: f64,
 }
 
+#[derive(serde::Deserialize)]
+struct HedgePositionData {
+    symbol: String,
+    quantity: f64,
+    average_entry_price: f64,
+    latest_price: Option<f64>,
+    candidates: Vec<HedgeCandidateData>,
+}
+
+#[derive(serde::Deserialize)]
+struct HedgeCandidateData {
+    symbol: String,
+    correlation: Option<f64>,
+    paired_samples: usize,
+    latest_price: Option<f64>,
+}
+
+#[derive(Default, serde::Deserialize)]
+struct HedgePairCorrelationData {
+    symbol_a: String,
+    symbol_b: String,
+    correlation: Option<f64>,
+}
+
+#[derive(serde::Deserialize)]
+struct HedgeCandidatesData {
+    positions: Vec<HedgePositionData>,
+    pair_correlations: Vec<HedgePairCorrelationData>,
+}
+
 fn calculate_risk_holdings(
     positions: &[serde_json::Value],
     rates: &serde_json::Value,
@@ -61,31 +91,28 @@ async fn update_risk_coverage_note(
 
 fn calculate_portfolio_variance(
     holdings: &[RiskHolding],
-    pair_correlations: &serde_json::Value,
+    pair_correlations: &[HedgePairCorrelationData],
 ) -> f64 {
     let mut portfolio_variance = holdings
         .iter()
         .map(|holding| holding.signed_usd.powi(2))
         .sum::<f64>();
-    if let Some(pairs) = pair_correlations.as_array() {
-        for i in 0..holdings.len() {
-            for j in (i + 1)..holdings.len() {
-                if let Some(pair) = pairs.iter().find(|pair| {
-                    (pair["symbol_a"].as_str() == Some(&holdings[i].symbol)
-                        && pair["symbol_b"].as_str() == Some(&holdings[j].symbol))
-                        || (pair["symbol_b"].as_str() == Some(&holdings[i].symbol)
-                            && pair["symbol_a"].as_str() == Some(&holdings[j].symbol))
-                }) {
-                    if let Some(correlation) = pair["correlation"]
-                        .as_f64()
-                        .filter(|value| value.is_finite())
-                    {
-                        portfolio_variance += 2.0
-                            * holdings[i].signed_usd
-                            * holdings[j].signed_usd
-                            * correlation.clamp(-1.0, 1.0);
-                    }
-                }
+    for i in 0..holdings.len() {
+        for j in (i + 1)..holdings.len() {
+            if let Some(correlation) = pair_correlations
+                .iter()
+                .find(|pair| {
+                    (pair.symbol_a == holdings[i].symbol && pair.symbol_b == holdings[j].symbol)
+                        || (pair.symbol_b == holdings[i].symbol
+                            && pair.symbol_a == holdings[j].symbol)
+                })
+                .and_then(|pair| pair.correlation)
+                .filter(|value| value.is_finite())
+            {
+                portfolio_variance += 2.0
+                    * holdings[i].signed_usd
+                    * holdings[j].signed_usd
+                    * correlation.clamp(-1.0, 1.0);
             }
         }
     }

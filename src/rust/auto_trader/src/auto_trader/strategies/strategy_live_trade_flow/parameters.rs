@@ -1,8 +1,9 @@
-use super::super::{StrategyParameterSpec, param};
+use super::super::{param, StrategyParameterSpec};
+use crate::auto_trader::StrategyParameterKey;
 
 pub(super) fn parameters() -> Vec<StrategyParameterSpec> {
     let mut specs = vec![param(
-        "minimum_flow_imbalance",
+        StrategyParameterKey::MinimumFlowImbalance,
         "Minimum aligned trade flow",
         0.15,
         0.02,
@@ -12,8 +13,26 @@ pub(super) fn parameters() -> Vec<StrategyParameterSpec> {
         -1.0,
     )];
     specs.extend([
-        param("stop_loss_percent", "Protective stop distance", 0.50, 0.10, 1.50, 0.05, "%", -1.0),
-        param("take_profit_percent", "Protective target distance", 0.80, 0.20, 3.00, 0.05, "%", 1.0),
+        param(
+            StrategyParameterKey::StopLossPercent,
+            "Protective stop distance",
+            0.50,
+            0.10,
+            1.50,
+            0.05,
+            "%",
+            -1.0,
+        ),
+        param(
+            StrategyParameterKey::TakeProfitPercent,
+            "Protective target distance",
+            0.80,
+            0.20,
+            3.00,
+            0.05,
+            "%",
+            1.0,
+        ),
     ]);
     specs
 }

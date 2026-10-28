@@ -60,7 +60,7 @@ fn build_context_decision_parameters(
                 (stats.samples > 0).then_some(stats.positive as f64 / stats.samples as f64);
             let strength_floor = (adaptive_missed_opportunity_floor(
                 adaptive_strength_floor(learning, &context),
-                "strength",
+                MissedOpportunityGate::Strength,
                 bands,
             ) * floor_scale)
                 .clamp(0.0, 1.0);

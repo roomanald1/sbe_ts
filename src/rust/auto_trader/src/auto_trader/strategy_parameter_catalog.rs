@@ -3,7 +3,7 @@ fn strategy_parameter_specs(strategy: Strategy) -> Vec<StrategyParameterSpec> {
 }
 
 const fn param(
-    key: &'static str,
+    key: StrategyParameterKey,
     label: &'static str,
     default: f64,
     min: f64,
@@ -27,7 +27,7 @@ const fn param(
 fn all_strategy_parameter_specs(strategy: Strategy) -> Vec<StrategyParameterSpec> {
     let mut specs = strategy_parameter_specs(strategy);
     specs.push(param(
-        "learning_rate",
+        StrategyParameterKey::LearningRate,
         "Outcome adaptation weight",
         0.05,
         0.0,
@@ -38,7 +38,7 @@ fn all_strategy_parameter_specs(strategy: Strategy) -> Vec<StrategyParameterSpec
     ));
     specs.extend([
         param(
-            "profit_protection_activation_percent",
+            StrategyParameterKey::ProfitProtectionActivationPercent,
             "Profit protection activation",
             DEFAULT_PROFIT_PROTECTION_ACTIVATION_PERCENT,
             0.10,
@@ -48,7 +48,7 @@ fn all_strategy_parameter_specs(strategy: Strategy) -> Vec<StrategyParameterSpec
             1.0,
         ),
         param(
-            "profit_protection_giveback_percent",
+            StrategyParameterKey::ProfitProtectionGivebackPercent,
             "Profit protection giveback",
             DEFAULT_PROFIT_PROTECTION_GIVEBACK_PERCENT,
             0.05,
@@ -58,7 +58,7 @@ fn all_strategy_parameter_specs(strategy: Strategy) -> Vec<StrategyParameterSpec
             1.0,
         ),
         param(
-            "profit_protection_minimum_lock_percent",
+            StrategyParameterKey::ProfitProtectionMinimumLockPercent,
             "Minimum profit lock",
             DEFAULT_PROFIT_PROTECTION_MINIMUM_LOCK_PERCENT,
             0.0,

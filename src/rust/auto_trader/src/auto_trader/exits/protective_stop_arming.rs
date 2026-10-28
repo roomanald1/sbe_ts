@@ -1,3 +1,23 @@
+fn build_protective_stop_request(
+    symbol: &str,
+    side: &str,
+    quantity: f64,
+    trigger_price: f64,
+    trigger_direction: &str,
+    client_order_id: String,
+) -> serde_json::Value {
+    serde_json::json!({
+        "symbol": symbol,
+        "side": side,
+        "order_type": "stop-market",
+        "quantity": quantity,
+        "trigger_price": trigger_price,
+        "trigger_direction": trigger_direction,
+        "source": "auto",
+        "client_order_id": client_order_id,
+    })
+}
+
 async fn arm_protective_stop(
     client: &reqwest::Client,
     base: &str,
@@ -35,13 +55,24 @@ async fn arm_protective_stop(
             / (quantity * (1.0 + fee_rate))
     };
     let trigger_direction = if is_long { "below" } else { "above" };
+    let client_order_id = format!(
+        "auto-stop-{symbol}-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis()
+    );
+    let request = build_protective_stop_request(
+        symbol,
+        side,
+        quantity,
+        trigger_price,
+        trigger_direction,
+        client_order_id,
+    );
     let response = client
         .post(format!("{base}/positions/orders"))
-        .json(&serde_json::json!({
-            "symbol": symbol, "side": side, "order_type": "stop-market", "quantity": quantity,
-            "trigger_price": trigger_price, "trigger_direction": trigger_direction,
-            "source": "auto", "client_order_id": format!("auto-stop-{symbol}-{}", SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis())
-        }))
+        .json(&request)
         .send()
         .await
         .map_err(upstream_error)?;

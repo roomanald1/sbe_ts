@@ -138,7 +138,7 @@ fn adaptive_exploration_score_floor(
     let short_horizon_floor = missed_opportunity_bands
         .iter()
         .filter(|band| {
-            band.gate == "score"
+            band.gate == MissedOpportunityGate::Score
                 && band.horizon_seconds == 300
                 && band.threshold >= COUNTERFACTUAL_SCORE_MIN_THRESHOLD
                 && band.threshold < learned_floor
@@ -156,7 +156,7 @@ fn adaptive_exploration_score_floor(
     let longer_horizon_floor = missed_opportunity_bands
         .iter()
         .filter(|band| {
-            band.gate == "score"
+            band.gate == MissedOpportunityGate::Score
                 && matches!(band.horizon_seconds, 900 | 3_600)
                 && band.threshold >= COUNTERFACTUAL_SCORE_MIN_THRESHOLD
                 && band.threshold < learned_floor

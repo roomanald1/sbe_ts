@@ -1,0 +1,140 @@
+{
+  "source": "Binance BTCUSDT daily spot candles; prior-close signal, next-open execution",
+  "rule": "long-only 60-day time-series momentum; risk-managed exposure targets 50% annualized volatility using the prior 30 daily close returns, capped at 100%; cash earns zero",
+  "cost": "15/30/50 bps per dollar absolute exposure change; no borrow or leverage",
+  "caveat": "research screen, not proof of future profits; 2025-26 was inspected in prior searches and is not a pristine holdout",
+  "periods": {
+    "15": {
+      "train_2021_2022": {
+        "unscaled": {
+          "return_percent": -18.78287450876921,
+          "max_drawdown_percent": -60.59218312619647,
+          "annualized_sharpe": -0.06489939275519596,
+          "days": 671
+        },
+        "vol_managed": {
+          "return_percent": -34.21530854224593,
+          "max_drawdown_percent": -58.38579004025988,
+          "annualized_sharpe": -0.5341536705704062,
+          "days": 671
+        }
+      },
+      "validation_2023_2024": {
+        "unscaled": {
+          "return_percent": 229.02913205527295,
+          "max_drawdown_percent": -37.97515126853028,
+          "annualized_sharpe": 1.6345685946280524,
+          "days": 731
+        },
+        "vol_managed": {
+          "return_percent": 212.15623985032502,
+          "max_drawdown_percent": -33.547653605385264,
+          "annualized_sharpe": 1.6686793677285694,
+          "days": 731
+        }
+      },
+      "later_2025_2026": {
+        "unscaled": {
+          "return_percent": 13.082600932127919,
+          "max_drawdown_percent": -28.516453652456963,
+          "annualized_sharpe": 0.38821841412224595,
+          "days": 665
+        },
+        "vol_managed": {
+          "return_percent": 12.831994926897906,
+          "max_drawdown_percent": -28.516453652456985,
+          "annualized_sharpe": 0.3836949039032986,
+          "days": 665
+        }
+      }
+    },
+    "30": {
+      "train_2021_2022": {
+        "unscaled": {
+          "return_percent": -22.48114010172799,
+          "max_drawdown_percent": -61.81689448944718,
+          "annualized_sharpe": -0.12577455183652758,
+          "days": 671
+        },
+        "vol_managed": {
+          "return_percent": -37.15038670065095,
+          "max_drawdown_percent": -59.59572555504625,
+          "annualized_sharpe": -0.6095614231766278,
+          "days": 671
+        }
+      },
+      "validation_2023_2024": {
+        "unscaled": {
+          "return_percent": 209.3606026868972,
+          "max_drawdown_percent": -40.62121623953687,
+          "annualized_sharpe": 1.5599503999847548,
+          "days": 731
+        },
+        "vol_managed": {
+          "return_percent": 192.88049377783233,
+          "max_drawdown_percent": -36.25717296434788,
+          "annualized_sharpe": 1.5855060677739865,
+          "days": 731
+        }
+      },
+      "later_2025_2026": {
+        "unscaled": {
+          "return_percent": 9.239282318209273,
+          "max_drawdown_percent": -30.1113588224039,
+          "annualized_sharpe": 0.31548419286363494,
+          "days": 665
+        },
+        "vol_managed": {
+          "return_percent": 8.989627967344571,
+          "max_drawdown_percent": -30.111358822403933,
+          "annualized_sharpe": 0.3107311450574834,
+          "days": 665
+        }
+      }
+    },
+    "50": {
+      "train_2021_2022": {
+        "unscaled": {
+          "return_percent": -27.159490954445886,
+          "max_drawdown_percent": -63.39354961906687,
+          "annualized_sharpe": -0.20678000183995351,
+          "days": 671
+        },
+        "vol_managed": {
+          "return_percent": -40.86590812658463,
+          "max_drawdown_percent": -61.15668850324276,
+          "annualized_sharpe": -0.7096498634279645,
+          "days": 671
+        }
+      },
+      "validation_2023_2024": {
+        "unscaled": {
+          "return_percent": 184.91139880167884,
+          "max_drawdown_percent": -43.98026521540239,
+          "annualized_sharpe": 1.4600127317991407,
+          "days": 731
+        },
+        "vol_managed": {
+          "return_percent": 168.9830732943879,
+          "max_drawdown_percent": -39.70409645079359,
+          "annualized_sharpe": 1.474068942124292,
+          "days": 731
+        }
+      },
+      "later_2025_2026": {
+        "unscaled": {
+          "return_percent": 4.308825230921665,
+          "max_drawdown_percent": -32.32108998782065,
+          "annualized_sharpe": 0.21834202627921648,
+          "days": 665
+        },
+        "vol_managed": {
+          "return_percent": 4.060886405993913,
+          "max_drawdown_percent": -32.321089987820606,
+          "annualized_sharpe": 0.2132850081680185,
+          "days": 665
+        }
+      }
+    }
+  }
+}

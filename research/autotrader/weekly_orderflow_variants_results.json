@@ -1,0 +1,106 @@
+{
+  "flow_btc200_10bp": {
+    "2020-2022": {
+      "days": 672,
+      "return_percent": -26.364659792909574,
+      "max_drawdown_percent": -71.71664542149368,
+      "annualized_sharpe": 0.024922543729550495
+    },
+    "2023-2024": {
+      "days": 731,
+      "return_percent": 405.1234344068181,
+      "max_drawdown_percent": -47.54705569682736,
+      "annualized_sharpe": 1.567185448146977
+    },
+    "2025": {
+      "days": 365,
+      "return_percent": -13.03568311924942,
+      "max_drawdown_percent": -54.11404439288111,
+      "annualized_sharpe": 0.030522889383322007
+    },
+    "2026": {
+      "days": 295,
+      "return_percent": 1.8844682732194862,
+      "max_drawdown_percent": -11.491077102694547,
+      "annualized_sharpe": 0.21602187569460418
+    }
+  },
+  "flow_btc200_15bp": {
+    "2020-2022": {
+      "days": 672,
+      "return_percent": -27.594443122860547,
+      "max_drawdown_percent": -72.00136206954339,
+      "annualized_sharpe": 0.00933356447774779
+    },
+    "2023-2024": {
+      "days": 731,
+      "return_percent": 385.61941755426943,
+      "max_drawdown_percent": -48.070760286469586,
+      "annualized_sharpe": 1.5362646868844607
+    },
+    "2025": {
+      "days": 365,
+      "return_percent": -14.705257286734707,
+      "max_drawdown_percent": -54.4047543491344,
+      "annualized_sharpe": -0.003781456507551252
+    },
+    "2026": {
+      "days": 295,
+      "return_percent": 1.4282110797489533,
+      "max_drawdown_percent": -11.626935552613915,
+      "annualized_sharpe": 0.186607311105435
+    }
+  },
+  "residual_flow_10bp": {
+    "2020-2022": {
+      "days": 672,
+      "return_percent": -38.01819574014227,
+      "max_drawdown_percent": -85.9902012403811,
+      "annualized_sharpe": 0.22376355164502906
+    },
+    "2023-2024": {
+      "days": 731,
+      "return_percent": 254.66928132213283,
+      "max_drawdown_percent": -53.48119926992973,
+      "annualized_sharpe": 1.2548219965659584
+    },
+    "2025": {
+      "days": 365,
+      "return_percent": 12.407001510927863,
+      "max_drawdown_percent": -46.33274725915205,
+      "annualized_sharpe": 0.5010487323886236
+    },
+    "2026": {
+      "days": 295,
+      "return_percent": -18.982786803476948,
+      "max_drawdown_percent": -51.42735585714251,
+      "annualized_sharpe": -0.19484643796243478
+    }
+  },
+  "residual_flow_15bp": {
+    "2020-2022": {
+      "days": 672,
+      "return_percent": -40.99630742594689,
+      "max_drawdown_percent": -86.3691648264703,
+      "annualized_sharpe": 0.19616631310478722
+    },
+    "2023-2024": {
+      "days": 731,
+      "return_percent": 236.08196106984627,
+      "max_drawdown_percent": -54.036219386762156,
+      "annualized_sharpe": 1.2149243141874444
+    },
+    "2025": {
+      "days": 365,
+      "return_percent": 9.55357667965513,
+      "max_drawdown_percent": -46.607299518274104,
+      "annualized_sharpe": 0.4605967848620002
+    },
+    "2026": {
+      "days": 295,
+      "return_percent": -21.28017155397519,
+      "max_drawdown_percent": -52.04952946687995,
+      "annualized_sharpe": -0.2600965462576492
+    }
+  }
+}

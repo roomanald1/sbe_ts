@@ -43,7 +43,7 @@ def metrics(series):
     }
 
 
-def run(days, data, policy, stop_pct=0.5, target_pct=0.5, cost=BASE_COST):
+def run(days, data, policy, stop_pct=0.5, target_pct=0.5, cost=BASE_COST, lookback_days=55):
     equity = 1.0
     positions = {symbol: None for symbol in SYMBOLS}
     daily = []
@@ -55,7 +55,7 @@ def run(days, data, policy, stop_pct=0.5, target_pct=0.5, cost=BASE_COST):
         btc_risk_on = data["BTCUSDT"][prior]["close"] > btc_sma200
         active = {}
         for symbol in SYMBOLS:
-            prior_high = max(data[symbol][days[k]]["high"] for k in range(index - 56, index - 1))
+            prior_high = max(data[symbol][days[k]]["high"] for k in range(index - lookback_days - 1, index - 1))
             active[symbol] = btc_risk_on and data[symbol][prior]["close"] > prior_high
 
         portfolio_return = 0.0

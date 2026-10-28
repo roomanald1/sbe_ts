@@ -144,13 +144,8 @@ async fn close_profitable(
     }
     let (position, source) = {
         let ledger = store.ledger.lock().await;
-        let auto_positions = summarize_positions(
-            &ledger
-                .trades
-                .iter()
-                .filter(|trade| trade.source == "auto")
-                .cloned()
-                .collect::<Vec<_>>(),
+        let auto_positions = summarize_positions_from(
+            ledger.trades.iter().filter(|trade| trade.source == "auto"),
         )
         .positions;
         if let Some(position) = auto_positions
@@ -194,7 +189,9 @@ async fn close_profitable(
             time_in_force: None,
             source,
             client_order_id: None,
-            reduce_only: false,
+            // A manual close must not reserve buying power or open/reverse a
+            // position if inventory changed after the close quantity was read.
+            reduce_only: true,
         }),
     )
     .await

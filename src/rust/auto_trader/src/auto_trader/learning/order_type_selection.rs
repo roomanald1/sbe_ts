@@ -81,9 +81,15 @@ fn choose_order_type(signal: &Signal, risk_appetite: f64) -> AutoOrderType {
             return AutoOrderType::Ioc;
         }
     }
-    let post_only_range = (ORDER_POST_ONLY_RANGE + 0.20 * risk_appetite / 100.0).clamp(0.0, 1.0);
-    let gtd_range = (ORDER_GTD_RANGE + 0.30 * risk_appetite / 100.0).clamp(0.0, 1.0);
-    let limit_range = (ORDER_LIMIT_RANGE + 0.30 * risk_appetite / 100.0).clamp(0.0, 1.0);
+    let post_only_range = (ORDER_POST_ONLY_RANGE
+        + ORDER_POST_ONLY_RANGE_RISK_ADJUSTMENT * risk_appetite / 100.0)
+        .clamp(0.0, 1.0);
+    let gtd_range = (ORDER_GTD_RANGE
+        + ORDER_GTD_RANGE_RISK_ADJUSTMENT * risk_appetite / 100.0)
+        .clamp(0.0, 1.0);
+    let limit_range = (ORDER_LIMIT_RANGE
+        + ORDER_LIMIT_RANGE_RISK_ADJUSTMENT * risk_appetite / 100.0)
+        .clamp(0.0, 1.0);
     if ranging >= post_only_range && aggressor_cost >= ORDER_POST_ONLY_AGGRESSOR_COST_BPS {
         AutoOrderType::PostOnlyLimit
     } else if ranging >= gtd_range

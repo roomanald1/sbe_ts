@@ -1,0 +1,311 @@
+{
+  "source": "CoinMarketCap via CryptWatch",
+  "snapshot_range": [
+    "2019-01-06",
+    "2026-10-25"
+  ],
+  "rebalance_range": [
+    "2019-01-06",
+    "2026-10-04"
+  ],
+  "universe": "Point-in-time active top-100 at each rebalance; stablecoins excluded; require complete prior eight-week price history; hold top 10 by eight-week realized volatility",
+  "timing": "First available Sunday snapshot each month; hold equal-weight top-10 for one month; missing next snapshot mark is treated as total loss",
+  "cost": "15, 30, 50 bps per traded dollar on absolute weight turnover; includes entry and exit",
+  "selection_warning": "The rule is predeclared from 2026 low-vol literature, but this market history and point-in-time universe have been inspected in other repo research; this is discovery, not a clean confirmatory holdout.",
+  "policies": {
+    "low_vol": {
+      "15": {
+        "train_2019_2022": {
+          "monthly_periods": 46,
+          "return_percent": 181.6200401829336,
+          "max_drawdown_percent": -80.61413640292504,
+          "annualized_monthly_sharpe": 0.6787525849908017,
+          "rebalance_events": 46,
+          "absolute_weight_turnover": 55.05821011476594,
+          "missing_next_mark_count": 16,
+          "average_eligible_count": 71.6304347826087
+        },
+        "validation_2023_2024": {
+          "monthly_periods": 24,
+          "return_percent": 107.91718530809926,
+          "max_drawdown_percent": -44.914405667713396,
+          "annualized_monthly_sharpe": 0.7290355341105885,
+          "rebalance_events": 24,
+          "absolute_weight_turnover": 21.58036228790853,
+          "missing_next_mark_count": 9,
+          "average_eligible_count": 80.16666666666667
+        },
+        "later_2025_2026": {
+          "monthly_periods": 21,
+          "return_percent": -2.201440787509046,
+          "max_drawdown_percent": -25.659344756842884,
+          "annualized_monthly_sharpe": 0.1345266143190834,
+          "rebalance_events": 21,
+          "absolute_weight_turnover": 12.028947983631472,
+          "missing_next_mark_count": 1,
+          "average_eligible_count": 81.76190476190476
+        }
+      },
+      "30": {
+        "train_2019_2022": {
+          "monthly_periods": 46,
+          "return_percent": 159.23370521204475,
+          "max_drawdown_percent": -81.08110895750056,
+          "annualized_monthly_sharpe": 0.6588232563169206,
+          "rebalance_events": 46,
+          "absolute_weight_turnover": 55.05821011476594,
+          "missing_next_mark_count": 16,
+          "average_eligible_count": 71.6304347826087
+        },
+        "validation_2023_2024": {
+          "monthly_periods": 24,
+          "return_percent": 101.28023285319281,
+          "max_drawdown_percent": -45.7739868806456,
+          "annualized_monthly_sharpe": 0.7108426972599239,
+          "rebalance_events": 24,
+          "absolute_weight_turnover": 21.58036228790853,
+          "missing_next_mark_count": 9,
+          "average_eligible_count": 80.16666666666667
+        },
+        "later_2025_2026": {
+          "monthly_periods": 21,
+          "return_percent": -3.952859845920631,
+          "max_drawdown_percent": -26.310242559833007,
+          "annualized_monthly_sharpe": 0.10786661268832812,
+          "rebalance_events": 21,
+          "absolute_weight_turnover": 12.028947983631472,
+          "missing_next_mark_count": 1,
+          "average_eligible_count": 81.76190476190476
+        }
+      },
+      "50": {
+        "train_2019_2022": {
+          "monthly_periods": 46,
+          "return_percent": 132.0701689276583,
+          "max_drawdown_percent": -81.68741110255534,
+          "annualized_monthly_sharpe": 0.6321211052589679,
+          "rebalance_events": 46,
+          "absolute_weight_turnover": 55.05821011476594,
+          "missing_next_mark_count": 16,
+          "average_eligible_count": 71.6304347826087
+        },
+        "validation_2023_2024": {
+          "monthly_periods": 24,
+          "return_percent": 92.74505856636563,
+          "max_drawdown_percent": -46.90724564600784,
+          "annualized_monthly_sharpe": 0.6864627652668422,
+          "rebalance_events": 24,
+          "absolute_weight_turnover": 21.58036228790853,
+          "missing_next_mark_count": 9,
+          "average_eligible_count": 80.16666666666667
+        },
+        "later_2025_2026": {
+          "monthly_periods": 21,
+          "return_percent": -6.242055399184087,
+          "max_drawdown_percent": -27.17018505550044,
+          "annualized_monthly_sharpe": 0.07225291404285765,
+          "rebalance_events": 21,
+          "absolute_weight_turnover": 12.028947983631472,
+          "missing_next_mark_count": 1,
+          "average_eligible_count": 81.76190476190476
+        }
+      }
+    },
+    "high_vol": {
+      "15": {
+        "train_2019_2022": {
+          "monthly_periods": 46,
+          "return_percent": -66.44287849741953,
+          "max_drawdown_percent": -94.2047859765471,
+          "annualized_monthly_sharpe": 0.35512138585498015,
+          "rebalance_events": 46,
+          "absolute_weight_turnover": 54.59642497565884,
+          "missing_next_mark_count": 16,
+          "average_eligible_count": 71.6304347826087
+        },
+        "validation_2023_2024": {
+          "monthly_periods": 24,
+          "return_percent": 38.130620386573575,
+          "max_drawdown_percent": -70.14437827633625,
+          "annualized_monthly_sharpe": 0.5875914716120498,
+          "rebalance_events": 24,
+          "absolute_weight_turnover": 26.27964077095314,
+          "missing_next_mark_count": 6,
+          "average_eligible_count": 80.16666666666667
+        },
+        "later_2025_2026": {
+          "monthly_periods": 21,
+          "return_percent": -91.15686882190207,
+          "max_drawdown_percent": -94.01702678692871,
+          "annualized_monthly_sharpe": -1.2460340401497427,
+          "rebalance_events": 21,
+          "absolute_weight_turnover": 24.550396117166724,
+          "missing_next_mark_count": 10,
+          "average_eligible_count": 81.76190476190476
+        }
+      },
+      "30": {
+        "train_2019_2022": {
+          "monthly_periods": 46,
+          "return_percent": -69.08874232362072,
+          "max_drawdown_percent": -94.33655228837739,
+          "annualized_monthly_sharpe": 0.34115210183971306,
+          "rebalance_events": 46,
+          "absolute_weight_turnover": 54.59642497565884,
+          "missing_next_mark_count": 16,
+          "average_eligible_count": 71.6304347826087
+        },
+        "validation_2023_2024": {
+          "monthly_periods": 24,
+          "return_percent": 32.777783019450425,
+          "max_drawdown_percent": -71.09481661061288,
+          "annualized_monthly_sharpe": 0.5708934201826272,
+          "rebalance_events": 24,
+          "absolute_weight_turnover": 26.27964077095314,
+          "missing_next_mark_count": 6,
+          "average_eligible_count": 80.16666666666667
+        },
+        "later_2025_2026": {
+          "monthly_periods": 21,
+          "return_percent": -91.47749041293626,
+          "max_drawdown_percent": -94.21118310932002,
+          "annualized_monthly_sharpe": -1.2742936064902104,
+          "rebalance_events": 21,
+          "absolute_weight_turnover": 24.550396117166724,
+          "missing_next_mark_count": 10,
+          "average_eligible_count": 81.76190476190476
+        }
+      },
+      "50": {
+        "train_2019_2022": {
+          "monthly_periods": 46,
+          "return_percent": -72.3016853033446,
+          "max_drawdown_percent": -94.50793838860973,
+          "annualized_monthly_sharpe": 0.3224354169775966,
+          "rebalance_events": 46,
+          "absolute_weight_turnover": 54.59642497565884,
+          "missing_next_mark_count": 16,
+          "average_eligible_count": 71.6304347826087
+        },
+        "validation_2023_2024": {
+          "monthly_periods": 24,
+          "return_percent": 25.948371980609974,
+          "max_drawdown_percent": -72.31767333735432,
+          "annualized_monthly_sharpe": 0.5485690110670082,
+          "rebalance_events": 24,
+          "absolute_weight_turnover": 26.27964077095314,
+          "missing_next_mark_count": 6,
+          "average_eligible_count": 80.16666666666667
+        },
+        "later_2025_2026": {
+          "monthly_periods": 21,
+          "return_percent": -91.88786093434376,
+          "max_drawdown_percent": -94.46082630222308,
+          "annualized_monthly_sharpe": -1.3121786792051684,
+          "rebalance_events": 21,
+          "absolute_weight_turnover": 24.550396117166724,
+          "missing_next_mark_count": 10,
+          "average_eligible_count": 81.76190476190476
+        }
+      }
+    },
+    "momentum": {
+      "15": {
+        "train_2019_2022": {
+          "monthly_periods": 46,
+          "return_percent": 32.2060497751115,
+          "max_drawdown_percent": -82.06368776048099,
+          "annualized_monthly_sharpe": 0.48130972660371885,
+          "rebalance_events": 46,
+          "absolute_weight_turnover": 59.001702091667035,
+          "missing_next_mark_count": 8,
+          "average_eligible_count": 71.6304347826087
+        },
+        "validation_2023_2024": {
+          "monthly_periods": 24,
+          "return_percent": 127.82043853065366,
+          "max_drawdown_percent": -42.31836729051841,
+          "annualized_monthly_sharpe": 0.833642718026683,
+          "rebalance_events": 24,
+          "absolute_weight_turnover": 30.103510395133924,
+          "missing_next_mark_count": 1,
+          "average_eligible_count": 80.16666666666667
+        },
+        "later_2025_2026": {
+          "monthly_periods": 21,
+          "return_percent": -46.30314746130205,
+          "max_drawdown_percent": -68.23155609408657,
+          "annualized_monthly_sharpe": -0.33103372477588405,
+          "rebalance_events": 21,
+          "absolute_weight_turnover": 25.175881215573174,
+          "missing_next_mark_count": 5,
+          "average_eligible_count": 81.76190476190476
+        }
+      },
+      "30": {
+        "train_2019_2022": {
+          "monthly_periods": 46,
+          "return_percent": 20.975330453279263,
+          "max_drawdown_percent": -82.55222899073217,
+          "annualized_monthly_sharpe": 0.46190439587695253,
+          "rebalance_events": 46,
+          "absolute_weight_turnover": 59.001702091667035,
+          "missing_next_mark_count": 8,
+          "average_eligible_count": 71.6304347826087
+        },
+        "validation_2023_2024": {
+          "monthly_periods": 24,
+          "return_percent": 117.73235890528144,
+          "max_drawdown_percent": -43.15981577708218,
+          "annualized_monthly_sharpe": 0.8043158597816862,
+          "rebalance_events": 24,
+          "absolute_weight_turnover": 30.103510395133924,
+          "missing_next_mark_count": 1,
+          "average_eligible_count": 80.16666666666667
+        },
+        "later_2025_2026": {
+          "monthly_periods": 21,
+          "return_percent": -48.29887919259176,
+          "max_drawdown_percent": -69.2823552413524,
+          "annualized_monthly_sharpe": -0.3692467683778595,
+          "rebalance_events": 21,
+          "absolute_weight_turnover": 25.175881215573174,
+          "missing_next_mark_count": 5,
+          "average_eligible_count": 81.76190476190476
+        }
+      },
+      "50": {
+        "train_2019_2022": {
+          "monthly_periods": 46,
+          "return_percent": 7.44033935856081,
+          "max_drawdown_percent": -83.18445918137203,
+          "annualized_monthly_sharpe": 0.4359212858492305,
+          "rebalance_events": 46,
+          "absolute_weight_turnover": 59.001702091667035,
+          "missing_next_mark_count": 8,
+          "average_eligible_count": 71.6304347826087
+        },
+        "validation_2023_2024": {
+          "monthly_periods": 24,
+          "return_percent": 104.9439714498778,
+          "max_drawdown_percent": -44.265410188981654,
+          "annualized_monthly_sharpe": 0.7651256724747741,
+          "rebalance_events": 24,
+          "absolute_weight_turnover": 30.103510395133924,
+          "missing_next_mark_count": 1,
+          "average_eligible_count": 80.16666666666667
+        },
+        "later_2025_2026": {
+          "monthly_periods": 21,
+          "return_percent": -50.85064655149903,
+          "max_drawdown_percent": -70.63253670117267,
+          "annualized_monthly_sharpe": -0.4205967971606535,
+          "rebalance_events": 21,
+          "absolute_weight_turnover": 25.175881215573174,
+          "missing_next_mark_count": 5,
+          "average_eligible_count": 81.76190476190476
+        }
+      }
+    }
+  }
+}

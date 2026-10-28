@@ -1,6 +1,65 @@
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum StrategyParameterKey {
+    BnbSmaDays,
+    BreakoutLookbackDays,
+    BtcEthSmaDays,
+    BtcRegimeSmaDays,
+    BtcTrendDays,
+    FastSmaDays,
+    LearningRate,
+    MaximumHoldDays,
+    MinimumAbsorptionPressure,
+    MinimumBookImbalance,
+    MinimumFlowImbalance,
+    MinimumMomentum,
+    MinimumVwapDislocationBps,
+    ProfitProtectionActivationPercent,
+    ProfitProtectionGivebackPercent,
+    ProfitProtectionMinimumLockPercent,
+    RelativeStrengthDays,
+    RsiEntryMax,
+    RsiExitLevel,
+    RsiPeriodDays,
+    SlowSmaDays,
+    StopLossPercent,
+    TakeProfitPercent,
+    TrendSmaDays,
+}
+
+impl StrategyParameterKey {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::BnbSmaDays => "bnb_sma_days",
+            Self::BreakoutLookbackDays => "breakout_lookback_days",
+            Self::BtcEthSmaDays => "btc_eth_sma_days",
+            Self::BtcRegimeSmaDays => "btc_regime_sma_days",
+            Self::BtcTrendDays => "btc_trend_days",
+            Self::FastSmaDays => "fast_sma_days",
+            Self::LearningRate => "learning_rate",
+            Self::MaximumHoldDays => "maximum_hold_days",
+            Self::MinimumAbsorptionPressure => "minimum_absorption_pressure",
+            Self::MinimumBookImbalance => "minimum_book_imbalance",
+            Self::MinimumFlowImbalance => "minimum_flow_imbalance",
+            Self::MinimumMomentum => "minimum_momentum",
+            Self::MinimumVwapDislocationBps => "minimum_vwap_dislocation_bps",
+            Self::ProfitProtectionActivationPercent => "profit_protection_activation_percent",
+            Self::ProfitProtectionGivebackPercent => "profit_protection_giveback_percent",
+            Self::ProfitProtectionMinimumLockPercent => "profit_protection_minimum_lock_percent",
+            Self::RelativeStrengthDays => "relative_strength_days",
+            Self::RsiEntryMax => "rsi_entry_max",
+            Self::RsiExitLevel => "rsi_exit_level",
+            Self::RsiPeriodDays => "rsi_period_days",
+            Self::SlowSmaDays => "slow_sma_days",
+            Self::StopLossPercent => "stop_loss_percent",
+            Self::TakeProfitPercent => "take_profit_percent",
+            Self::TrendSmaDays => "trend_sma_days",
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 struct StrategyParameterSpec {
-    key: &'static str,
+    key: StrategyParameterKey,
     label: &'static str,
     default: f64,
     min: f64,

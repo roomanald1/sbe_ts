@@ -35,12 +35,16 @@ enum Strategy {
     Donchian55Btc200,
     #[serde(rename = "donchian-20-sma200")]
     Donchian20Sma200,
+    #[serde(rename = "donchian-20-btc200")]
+    Donchian20Btc200,
     #[serde(rename = "trend-sleeves-btc200")]
     TrendSleevesBtc200,
     #[serde(rename = "trend-50-200")]
     Trend50200,
     #[serde(rename = "relative-strength-90-sma200")]
     RelativeStrength90Sma200,
+    #[serde(rename = "risk-adjusted-monthly-momentum")]
+    RiskAdjustedMonthlyMomentum,
     #[serde(rename = "rsi2-oversold-rebound")]
     Rsi2OversoldRebound,
     #[serde(rename = "dated-futures-carry")]
@@ -195,6 +199,17 @@ pub(super) mod strategy_donchian_20_sma200 {
         include!("strategy_donchian_20_sma200/parameters.rs");
     }
 }
+pub(super) mod strategy_donchian_20_btc200 {
+    pub(super) mod exit {
+        include!("strategy_donchian_20_btc200/exit.rs");
+    }
+    pub(super) mod definition {
+        include!("strategy_donchian_20_btc200/contract.rs");
+    }
+    pub(super) mod parameters {
+        include!("strategy_donchian_20_btc200/parameters.rs");
+    }
+}
 pub(super) mod strategy_trend_sleeves_btc200 {
     pub(super) mod exit {
         include!("strategy_trend_sleeves_btc200/exit.rs");
@@ -226,6 +241,17 @@ pub(super) mod strategy_relative_strength_90_sma200 {
     }
     pub(super) mod parameters {
         include!("strategy_relative_strength_90_sma200/parameters.rs");
+    }
+}
+pub(super) mod strategy_risk_adjusted_monthly_momentum {
+    pub(super) mod exit {
+        include!("strategy_risk_adjusted_monthly_momentum/exit.rs");
+    }
+    pub(super) mod definition {
+        include!("strategy_risk_adjusted_monthly_momentum/contract.rs");
+    }
+    pub(super) mod parameters {
+        include!("strategy_risk_adjusted_monthly_momentum/parameters.rs");
     }
 }
 pub(super) mod strategy_rsi2_oversold_rebound {
@@ -310,6 +336,14 @@ impl Strategy {
             .is_some_and(|evaluate_exit| evaluate_exit(active))
     }
 
+    fn uses_protective_stops(self) -> bool {
+        match self {
+            Self::Donchian20Btc200 => strategy_donchian_20_btc200::exit::uses_protective_stops(),
+            Self::RiskAdjustedMonthlyMomentum => strategy_risk_adjusted_monthly_momentum::exit::uses_protective_stops(),
+            _ => true,
+        }
+    }
+
 }
 
 fn insights_only_evaluate(_: &StrategyInsight<'_>) -> Result<Option<StrategyEvaluation>, String> {
@@ -341,7 +375,7 @@ static DATED_CARRY_DEFINITION: StrategyDefinition = StrategyDefinition {
     parameter_specs: dated_carry_no_parameters,
 };
 
-static STRATEGY_DEFINITIONS: [&StrategyDefinition; 13] = [
+static STRATEGY_DEFINITIONS: [&StrategyDefinition; 15] = [
     &strategy_live_insights::definition::DEFINITION,
     &strategy_live_momentum::definition::DEFINITION,
     &strategy_live_trade_flow::definition::DEFINITION,
@@ -350,9 +384,52 @@ static STRATEGY_DEFINITIONS: [&StrategyDefinition; 13] = [
     &strategy_live_absorption_pressure::definition::DEFINITION,
     &strategy_donchian_55_btc200::definition::DEFINITION,
     &strategy_donchian_20_sma200::definition::DEFINITION,
+    &strategy_donchian_20_btc200::definition::DEFINITION,
     &strategy_trend_sleeves_btc200::definition::DEFINITION,
     &strategy_trend_50_200::definition::DEFINITION,
     &strategy_relative_strength_90_sma200::definition::DEFINITION,
+    &strategy_risk_adjusted_monthly_momentum::definition::DEFINITION,
     &strategy_rsi2_oversold_rebound::definition::DEFINITION,
     &DATED_CARRY_DEFINITION,
 ];
+
+
+#[cfg(test)]
+mod donchian_20_btc200_registry_tests {
+    use super::*;
+
+    #[test]
+    fn selected_breakout_exits_only_on_daily_invalidation() {
+        let strategy = Strategy::from_name("donchian-20-btc200").unwrap();
+        assert_eq!(strategy, Strategy::Donchian20Btc200);
+        assert!(!strategy.should_exit_when_insight_inactive(true));
+        assert!(strategy.should_exit_when_insight_inactive(false));
+        assert!(strategy.should_exit_when_disabled(false));
+        let mut snapshot = DailyStrategySnapshot {
+            as_of_ms: 0,
+            active_strategy_symbols: BTreeSet::new(),
+            generated_signals: Vec::new(),
+        };
+        assert!(snapshot.strategy_exit_required("donchian-20-btc200", "ETH-USDT"));
+        snapshot.active_strategy_symbols.insert(
+            ("donchian-20-btc200".into(), "ETH-USDT".into())
+        );
+        assert!(!snapshot.strategy_exit_required("donchian-20-btc200", "ETH-USDT"));
+    }
+}
+
+
+#[cfg(test)]
+mod risk_adjusted_monthly_momentum_registry_tests {
+    use super::*;
+
+    #[test]
+    fn strategy_is_registered_and_uses_signal_exit_without_fixed_stops() {
+        let strategy = Strategy::from_name("risk-adjusted-monthly-momentum").unwrap();
+        assert_eq!(strategy, Strategy::RiskAdjustedMonthlyMomentum);
+        assert!(!strategy.uses_protective_stops());
+        assert!(strategy.should_exit_when_insight_inactive(false));
+        assert!(!strategy.should_exit_when_insight_inactive(true));
+        assert!(strategy.should_exit_when_disabled(false));
+    }
+}

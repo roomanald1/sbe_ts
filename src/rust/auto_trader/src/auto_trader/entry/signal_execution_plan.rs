@@ -1,3 +1,17 @@
+fn signal_strategy_order_size_multiplier(
+    strategy: Option<Strategy>,
+    decision: Option<&serde_json::Value>,
+) -> Result<f64, String> {
+    match strategy {
+        Some(Strategy::RiskAdjustedMonthlyMomentum) => decision
+            .and_then(|decision| decision.get("strategy_order_size_multiplier"))
+            .and_then(serde_json::Value::as_f64)
+            .filter(|value| value.is_finite() && *value > 0.0 && *value <= 1.0)
+            .ok_or_else(|| "Monthly momentum signal is missing a valid volatility size multiplier".to_owned()),
+        _ => Ok(1.0),
+    }
+}
+
 struct SignalExecutionPlan {
     effective_stop_loss_percent: f64,
     effective_take_profit_percent: f64,
@@ -30,6 +44,8 @@ async fn prepare_signal_execution_plan(
     let strategy = signal.strategy.as_deref().and_then(Strategy::from_name);
     let strategy_profile =
         strategy.map(|strategy| strategy_parameter_profile(&settings, &signal.symbol, strategy));
+    let strategy_order_size_multiplier =
+        signal_strategy_order_size_multiplier(strategy, signal.strategy_decision.as_ref())?;
     let stop_parameter = strategy_profile
         .as_ref()
         .and_then(|profile| strategy_profile_value(profile, "stop_loss_percent"));
@@ -58,19 +74,48 @@ async fn prepare_signal_execution_plan(
     let per_strategy_history_is_mature = strategy_profile
         .as_ref()
         .is_some_and(|profile| profile.learning_samples >= STRATEGY_PARAMETER_MIN_SAMPLES);
-    let configured_stop = if explicit_stop || per_strategy_history_is_mature {
-        stop_parameter.unwrap_or(counterfactual_stop_loss_percent)
+    let baseline_stop = stop_parameter.unwrap_or(counterfactual_stop_loss_percent);
+    let baseline_target = target_parameter.unwrap_or(counterfactual_take_profit_percent);
+    let bounded_learned_policy = learned_exit_policy.map(|(stop, target, samples)| {
+        let widening_tiers = (samples / MIN_VALIDATED_EXIT_POLICY_SAMPLES)
+            .clamp(1, MAX_STOP_WIDENING_TIERS) as f64;
+        let max_widening = STOP_WIDENING_PER_VALIDATION_TIER_PERCENT * widening_tiers;
+        let stop = if stop > baseline_stop {
+            stop.min(baseline_stop + max_widening)
+        } else {
+            stop
+        };
+        (stop, target)
+    });
+    // Respect either manual exit override. Otherwise a validated walk-forward
+    // policy can widen the stop, including after the strategy profile matures,
+    // only when held-out results beat the conservative baseline.
+    let explicit_exit_override = explicit_stop || explicit_target;
+    let validated_wider_policy = (!explicit_exit_override)
+        .then_some(bounded_learned_policy)
+        .flatten()
+        .filter(|(stop, _)| *stop > baseline_stop + 1e-9);
+    let configured_stop = if explicit_exit_override {
+        baseline_stop
+    } else if let Some((stop, _)) = validated_wider_policy {
+        stop
+    } else if per_strategy_history_is_mature {
+        baseline_stop
     } else {
-        learned_exit_policy
+        bounded_learned_policy
             .map(|(stop, _)| stop)
-            .unwrap_or(counterfactual_stop_loss_percent)
+            .unwrap_or(baseline_stop)
     };
-    let configured_target = if explicit_target || per_strategy_history_is_mature {
-        target_parameter.unwrap_or(counterfactual_take_profit_percent)
+    let configured_target = if explicit_exit_override {
+        baseline_target
+    } else if let Some((_, target)) = validated_wider_policy {
+        target
+    } else if per_strategy_history_is_mature {
+        baseline_target
     } else {
-        learned_exit_policy
+        bounded_learned_policy
             .map(|(_, target)| target)
-            .unwrap_or(counterfactual_take_profit_percent)
+            .unwrap_or(baseline_target)
     };
     let learned_or_configured_stop = configured_stop;
     let effective_stop_loss_percent = volatility_adjusted_stop_loss_percent(
@@ -94,12 +139,13 @@ async fn prepare_signal_execution_plan(
     let risk_order_cap = exploration_cap
         .min(settings.max_order_notional)
         .min(settings.max_order_notional * risk_fraction);
-    let stop_headroom_multiplier =
-        if matches!(baseline_type, AutoOrderType::Vwap | AutoOrderType::Twap) {
-            2.0
-        } else {
-            1.0
-        };
+    let stop_headroom_multiplier = if strategy.is_some_and(|kind| !kind.uses_protective_stops()) {
+        1.0
+    } else if matches!(baseline_type, AutoOrderType::Vwap | AutoOrderType::Twap) {
+        2.0
+    } else {
+        1.0
+    };
     let category = strategy_category(signal.strategy.as_deref());
     let total_allocated = allocated_notional(&settings);
     let category_allocated = allocated_notional_for_category(&settings, Some(category));
@@ -107,7 +153,12 @@ async fn prepare_signal_execution_plan(
         .min(category_notional_limit(&settings, category) - category_allocated)
         .max(0.0);
     let mut notional = risk_order_cap.min(remaining_budget / stop_headroom_multiplier);
-    notional *= volatility_size_scale(configured_stop, effective_stop_loss_percent);
+    // Size against the unlearned stop so a wider validated stop does not
+    // silently increase the dollar risk of the position.
+    if strategy.is_some_and(|kind| kind.uses_protective_stops()) {
+        notional *= volatility_size_scale(baseline_stop, effective_stop_loss_percent);
+    }
+    notional *= strategy_order_size_multiplier;
     if notional <= 0.0 {
         return Err("Strategy category or total notional capacity is fully allocated".into());
     }
@@ -144,12 +195,20 @@ async fn prepare_signal_execution_plan(
         minimum_book_order * quote_rate,
     );
     let deep_book_ms = deep_book_started.elapsed().as_secs_f64() * 1000.0;
-    let horizon_take_profit_percent =
-        horizon_adjusted_take_profit_percent(signal, &dashboard.walk_forward, configured_target);
-    let effective_take_profit_percent = confidence_adjusted_take_profit_percent(
-        &settings.closed_trade_returns_percent,
-        horizon_take_profit_percent.unwrap_or(configured_target),
-    );
+    let (effective_take_profit_percent, horizon_take_profit_percent) =
+        if validated_wider_policy.is_some() {
+            // Keep the target paired with the wider stop that passed walk-forward
+            // validation; unrelated target heuristics would invalidate that result.
+            (configured_target, None)
+        } else {
+            let horizon_take_profit_percent =
+                horizon_adjusted_take_profit_percent(signal, &dashboard.walk_forward, configured_target);
+            let effective_take_profit_percent = confidence_adjusted_take_profit_percent(
+                &settings.closed_trade_returns_percent,
+                horizon_take_profit_percent.unwrap_or(configured_target),
+            );
+            (effective_take_profit_percent, horizon_take_profit_percent)
+        };
     let context = market_context(&signal);
     decay_learning_map(&mut settings.learning, now_ms);
     let learned_type = if scout {
@@ -236,4 +295,23 @@ async fn prepare_signal_execution_plan(
         execution_params,
         learning_context,
     })
+}
+
+
+#[cfg(test)]
+mod risk_adjusted_monthly_momentum_sizing_tests {
+    use super::*;
+
+    #[test]
+    fn strategy_uses_volatility_multiplier_and_fails_closed_when_missing() {
+        let strategy = Some(Strategy::RiskAdjustedMonthlyMomentum);
+        assert_eq!(signal_strategy_order_size_multiplier(strategy, Some(&serde_json::json!({
+            "strategy_order_size_multiplier": 0.4
+        }))).unwrap(), 0.4);
+        assert!(signal_strategy_order_size_multiplier(strategy, None).is_err());
+        assert!(signal_strategy_order_size_multiplier(strategy, Some(&serde_json::json!({
+            "strategy_order_size_multiplier": 2.0
+        }))).is_err());
+        assert_eq!(signal_strategy_order_size_multiplier(Some(Strategy::Donchian55Btc200), None).unwrap(), 1.0);
+    }
 }

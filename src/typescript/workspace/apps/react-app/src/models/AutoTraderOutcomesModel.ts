@@ -9,10 +9,13 @@ export type AutoTraderOutcome = {
   scout: boolean; components: Record<string, number | null>;
 };
 
-type AuditRecord = { decision_id?: string; stage?: string; symbol?: string; timestamp?: number; side?: string; direction?: string; strategy?: string; exit_order_type?: string; barrier_order_id?: string; exit_fills?: Array<{ parent_order_id?: string }>; filled_quantity?: number; average_price?: number; exit_filled_quantity?: number; realized_pnl?: number; strength?: number; scout?: boolean; signal_components?: Record<string, number | null> };
+type AuditRecord = { decision_id?: string; stage?: string; symbol?: string; timestamp?: number; side?: string; direction?: string; strategy?: string; exit_order_type?: string; barrier_order_id?: string; exit_fills?: Array<{ parent_order_id?: string }>; filled_quantity?: number; average_price?: number; exit_filled_quantity?: number; realized_pnl?: number; entry_context?: { quantity?: number; average_price?: number }; strength?: number; scout?: boolean; signal_components?: Record<string, number | null> };
 type PositionsResponse = { positions?: Position[] };
 type TradesResponse = { trades?: PositionTrade[] };
-type ActivityResponse = { position_exit_policies?: Array<{ symbol: string; stop_loss_percent: number; take_profit_percent: number }> };
+type ActivityResponse = {
+  orders?: Array<{ timestamp: number; symbol: string; side: string; purpose?: string; strategy?: string; decision_id?: string; filled_quantity: number }>;
+  position_exit_policies?: Array<{ symbol: string; stop_loss_percent: number; take_profit_percent: number }>;
+};
 type TradeAudit = { entry?: AuditRecord; exits: AuditRecord[] };
 const quoteCurrency = (symbol: string) => symbol.includes('-') ? symbol.slice(symbol.lastIndexOf('-') + 1) : 'Unknown';
 
@@ -90,19 +93,22 @@ export class AutoTraderOutcomesModel {
       }
       const rows: AutoTraderOutcome[] = [...trades.entries()].flatMap(([decisionId, trade]) => {
         const entry = trade.entry;
-        if (!entry || !trade.exits.length || !(entry.filled_quantity && entry.average_price)) return [];
+        if (!entry || !trade.exits.length) return [];
         const canonicalExits = this.canonicalExits(trade.exits);
         const exited = canonicalExits.reduce((sum, row) => sum + (row.exit_filled_quantity ?? 0), 0);
-        if (exited + 1e-12 < entry.filled_quantity) return [];
-        const symbol = entry.symbol ?? '—';
+        const entryQuantity = Math.max(entry.filled_quantity ?? 0, ...canonicalExits.map((row) => row.entry_context?.quantity ?? 0));
+        const entryPrice = entry.average_price || canonicalExits.find((row) => row.entry_context?.average_price)?.entry_context?.average_price;
+        if (!(entryQuantity > 0 && typeof entryPrice === 'number' && entryPrice > 0) || exited + 1e-12 < entryQuantity) return [];
+        const symbol = entry.symbol ?? canonicalExits.find((row) => row.symbol)?.symbol ?? '—';
         return [{ rowId: 'closed:' + decisionId, status: 'Closed', decisionId, symbol, side: entry.side ?? '—', openedAt: entry.timestamp ?? 0,
-          closedAt: Math.max(...canonicalExits.map((row) => row.timestamp ?? 0)), quantity: entry.filled_quantity, signedQuantity: entry.side === 'sell' ? -entry.filled_quantity : entry.filled_quantity,
-          entryPrice: entry.average_price, pnl: canonicalExits.reduce((sum, row) => sum + (row.realized_pnl ?? 0), 0), entryFees: 0, estimatedExitFeeRate: 0, estimatedExitSlippageBps: 0,
+          closedAt: Math.max(...canonicalExits.map((row) => row.timestamp ?? 0)), quantity: entryQuantity, signedQuantity: entry.side === 'sell' ? -entryQuantity : entryQuantity,
+          entryPrice, pnl: canonicalExits.reduce((sum, row) => sum + (row.realized_pnl ?? 0), 0), entryFees: 0, estimatedExitFeeRate: 0, estimatedExitSlippageBps: 0,
           pnlQuoteCurrency: quoteCurrency(symbol), strategy: entry.strategy ?? 'live-insights', direction: entry.direction ?? '—', strength: entry.strength ?? null,
           scout: entry.scout ?? false, components: entry.signal_components ?? {} }];
       });
       const openPositions = (positionsData.positions ?? []).filter((position) => Math.abs(position.quantity) > 1e-12);
       for (const position of openPositions) {
+        const side = position.quantity > 0 ? 'buy' : 'sell';
         const activeEntries = [...trades.values()].flatMap((trade) => {
           const entry = trade.entry;
           if (!entry || entry.symbol !== position.symbol || !entry.filled_quantity || !entry.average_price) return [];
@@ -111,16 +117,22 @@ export class AutoTraderOutcomesModel {
           const sameSide = (position.quantity > 0 && entry.side === 'buy') || (position.quantity < 0 && entry.side === 'sell');
           return sameSide && remaining > 1e-12 ? [entry] : [];
         }).sort((a, b) => (b.timestamp ?? 0) - (a.timestamp ?? 0));
-        const entry = activeEntries[0];
+        const latestFilledOrder = (activityData.orders ?? [])
+          .filter((order) => order.symbol === position.symbol
+            && order.side === side
+            && (order.purpose === 'signal' || order.purpose === 'scout')
+            && order.filled_quantity > 1e-12)
+          .sort((a, b) => b.timestamp - a.timestamp)[0];
+        const entry = activeEntries[0]
+          ?? (latestFilledOrder?.decision_id ? trades.get(latestFilledOrder.decision_id)?.entry : undefined);
         const symbol = position.symbol;
-        const side = position.quantity > 0 ? 'buy' : 'sell';
         const adverseSlippage = adverseSlippageBySymbol.get(symbol) ?? [];
         const estimatedExitSlippageBps = adverseSlippage.length ? adverseSlippage.reduce((sum, value) => sum + value, 0) / adverseSlippage.length : 0;
-        const decisionId = entry?.decision_id ?? 'ledger:' + symbol;
-        rows.push({ rowId: 'open:' + symbol, status: 'Open', decisionId, symbol, side, openedAt: entry?.timestamp ?? position.last_trade_timestamp,
+        const decisionId = entry?.decision_id ?? latestFilledOrder?.decision_id ?? 'ledger:' + symbol;
+        rows.push({ rowId: 'open:' + symbol, status: 'Open', decisionId, symbol, side, openedAt: entry?.timestamp ?? latestFilledOrder?.timestamp ?? position.last_trade_timestamp,
           quantity: Math.abs(position.quantity), signedQuantity: position.quantity, entryPrice: position.average_entry_price, pnl: 0,
           entryFees: position.entry_fees ?? 0, estimatedExitFeeRate: position.estimated_exit_fee_rate ?? 0, estimatedExitSlippageBps,
-          pnlQuoteCurrency: quoteCurrency(symbol), strategy: entry?.strategy ?? 'Unknown', direction: entry?.direction ?? (side === 'buy' ? 'bullish' : 'bearish'),
+          pnlQuoteCurrency: quoteCurrency(symbol), strategy: entry?.strategy ?? latestFilledOrder?.strategy ?? 'Unknown', direction: entry?.direction ?? (side === 'buy' ? 'bullish' : 'bearish'),
           stopLossPercent: exitPolicies.get(symbol)?.stop_loss_percent, takeProfitPercent: exitPolicies.get(symbol)?.take_profit_percent,
           strength: entry?.strength ?? null, scout: entry?.scout ?? false, components: entry?.signal_components ?? {} });
       }

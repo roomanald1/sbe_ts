@@ -51,13 +51,13 @@ fn strategy_parameter_profile(
     let parameters = specs
         .iter()
         .map(|spec| {
-            let key = strategy_parameter_key(symbol, strategy, spec.key);
+            let key = strategy_parameter_key(symbol, strategy, spec.key.as_str());
             let configured = settings
                 .strategy_parameter_overrides
                 .get(&key)
                 .copied()
                 .or_else(|| {
-                    legacy_strategy_parameter_name(spec.key).and_then(|legacy| {
+                    legacy_strategy_parameter_name(spec.key.as_str()).and_then(|legacy| {
                         settings
                             .strategy_parameter_overrides
                             .get(&strategy_parameter_key(symbol, strategy, legacy))
@@ -66,12 +66,14 @@ fn strategy_parameter_profile(
                 });
             let default_value = spec.default;
             let base = configured.unwrap_or(default_value);
-            // Profitability alone cannot safely tune stop and target distances:
-            // widening stops or tightening targets can increase risk. Keep these
-            // fixed until outcomes are evaluated against alternative exit policies.
+            // Win rate or realized PnL alone cannot safely tune stop and target
+            // distances. The entry planner may use a wider walk-forward policy
+            // only after its held-out results beat the conservative baseline.
             let adaptive_step = if matches!(
                 spec.key,
-                "learning_rate" | "stop_loss_percent" | "take_profit_percent"
+                StrategyParameterKey::LearningRate
+                    | StrategyParameterKey::StopLossPercent
+                    | StrategyParameterKey::TakeProfitPercent
             ) {
                 0.0
             } else {
@@ -82,7 +84,7 @@ fn strategy_parameter_profile(
             let learned_value =
                 (spec.min + step_position.round() * spec.step).clamp(spec.min, spec.max);
             StrategyParameterValue {
-                key: spec.key.into(),
+                key: spec.key.as_str().into(),
                 label: spec.label.into(),
                 value: learned_value,
                 learned_value,
@@ -137,8 +139,8 @@ fn validate_strategy_parameter_overrides(values: &BTreeMap<String, f64>) -> Resu
         };
         let specs = all_strategy_parameter_specs(strategy);
         let Some(spec) = specs.iter().find(|spec| {
-            spec.key == parameter_name
-                || legacy_strategy_parameter_name(spec.key) == Some(parameter_name)
+            spec.key.as_str() == parameter_name
+                || legacy_strategy_parameter_name(spec.key.as_str()) == Some(parameter_name)
         }) else {
             return Err(format!("Unknown strategy parameter {key}"));
         };

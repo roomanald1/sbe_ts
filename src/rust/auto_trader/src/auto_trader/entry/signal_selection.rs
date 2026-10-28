@@ -56,7 +56,7 @@ fn select_cycle_signal<'a>(
             let learned_floor = adaptive_strength_floor(&learning, &context);
             let floor = (adaptive_missed_opportunity_floor(
                 learned_floor,
-                "strength",
+                MissedOpportunityGate::Strength,
                 &dashboard.missed_opportunity_bands,
             ) * risk_floor_scale(risk_appetite))
             .clamp(0.0, 1.0);

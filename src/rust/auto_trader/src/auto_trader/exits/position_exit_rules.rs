@@ -218,16 +218,30 @@ async fn evaluate_position_exit(
         });
         (strategy_disabled, position.strategy.clone())
     };
+    let risk_adjusted_momentum = strategy_no_longer_eligible.as_deref()
+        == Some("risk-adjusted-monthly-momentum");
+    let research_state_unavailable = risk_adjusted_momentum && research_regime.is_none();
     let research_exit = strategy_no_longer_eligible.as_deref().is_some_and(|strategy| {
         research_regime.is_some_and(|regime| regime.strategy_exit_required(strategy, &symbol))
     });
-    let donchian_signal_managed =
-        strategy_no_longer_eligible.as_deref() == Some("donchian-55-btc200");
+    let strategy_rebalance = strategy_no_longer_eligible.as_deref().is_some_and(|strategy| {
+        research_regime.is_some_and(|regime| {
+            regime.strategy_rebalance_required(strategy, &symbol, position.strategy_decision.as_ref())
+        })
+    });
+    let signal_managed_strategy = matches!(
+        strategy_no_longer_eligible.as_deref(),
+        Some("donchian-55-btc200" | "donchian-20-btc200" | "risk-adjusted-monthly-momentum")
+    );
     let reason = if strategy_disabled {
         Some("strategy-disabled")
+    } else if research_state_unavailable {
+        Some("daily-signal-state-unavailable")
     } else if research_exit {
         Some("research-regime-exit")
-    } else if donchian_signal_managed {
+    } else if strategy_rebalance {
+        Some("strategy-monthly-rebalance")
+    } else if signal_managed_strategy {
         None
     } else if return_fraction <= -stop_loss_percent / 100.0 {
         Some("stop-loss")

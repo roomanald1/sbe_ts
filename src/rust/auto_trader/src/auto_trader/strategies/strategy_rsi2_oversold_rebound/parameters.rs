@@ -1,9 +1,10 @@
-use super::super::{StrategyParameterSpec, param};
+use super::super::{param, StrategyParameterSpec};
+use crate::auto_trader::StrategyParameterKey;
 
 pub(super) fn parameters() -> Vec<StrategyParameterSpec> {
     let mut specs = vec![
         param(
-            "rsi_period_days",
+            StrategyParameterKey::RsiPeriodDays,
             "RSI period",
             2.0,
             2.0,
@@ -13,7 +14,7 @@ pub(super) fn parameters() -> Vec<StrategyParameterSpec> {
             1.0,
         ),
         param(
-            "rsi_entry_max",
+            StrategyParameterKey::RsiEntryMax,
             "RSI entry ceiling",
             10.0,
             2.0,
@@ -23,7 +24,7 @@ pub(super) fn parameters() -> Vec<StrategyParameterSpec> {
             -1.0,
         ),
         param(
-            "rsi_exit_level",
+            StrategyParameterKey::RsiExitLevel,
             "RSI exit level",
             70.0,
             40.0,
@@ -33,7 +34,7 @@ pub(super) fn parameters() -> Vec<StrategyParameterSpec> {
             1.0,
         ),
         param(
-            "trend_sma_days",
+            StrategyParameterKey::TrendSmaDays,
             "Asset trend SMA",
             200.0,
             50.0,
@@ -43,7 +44,7 @@ pub(super) fn parameters() -> Vec<StrategyParameterSpec> {
             1.0,
         ),
         param(
-            "maximum_hold_days",
+            StrategyParameterKey::MaximumHoldDays,
             "Maximum hold",
             5.0,
             1.0,
@@ -54,8 +55,26 @@ pub(super) fn parameters() -> Vec<StrategyParameterSpec> {
         ),
     ];
     specs.extend([
-        param("stop_loss_percent", "Protective stop distance", 0.50, 0.10, 1.50, 0.05, "%", -1.0),
-        param("take_profit_percent", "Protective target distance", 0.80, 0.20, 3.00, 0.05, "%", 1.0),
+        param(
+            StrategyParameterKey::StopLossPercent,
+            "Protective stop distance",
+            0.50,
+            0.10,
+            1.50,
+            0.05,
+            "%",
+            -1.0,
+        ),
+        param(
+            StrategyParameterKey::TakeProfitPercent,
+            "Protective target distance",
+            0.80,
+            0.20,
+            3.00,
+            0.05,
+            "%",
+            1.0,
+        ),
     ]);
     specs
 }

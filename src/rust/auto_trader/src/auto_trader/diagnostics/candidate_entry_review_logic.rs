@@ -30,7 +30,7 @@ fn review_candidate_entry<'a>(
     let risk_scale = risk_floor_scale(risk_appetite);
     let strength_floor = (adaptive_missed_opportunity_floor(
         adaptive_strength_floor(learning, &context),
-        "strength",
+        MissedOpportunityGate::Strength,
         &dashboard.missed_opportunity_bands,
     ) * risk_scale)
         .clamp(0.0, 1.0);

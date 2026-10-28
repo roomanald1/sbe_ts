@@ -1,0 +1,168 @@
+{
+  "sampled_at_utc": "2026-10-28T15:24:58.188237+00:00",
+  "notional_usdt_per_leg": 1000.0,
+  "fee_scenarios_bps_per_side": [
+    10,
+    20
+  ],
+  "venues": [
+    "Binance Spot",
+    "OKX Spot"
+  ],
+  "markets": {
+    "BTCUSDT": {
+      "binance_last_update_id": 101999533262,
+      "okx_timestamp_ms": "1793201098652",
+      "directions": {
+        "buy_binance_sell_okx": {
+          "buy_vwap": 80739.65,
+          "sell_vwap": 80735.0,
+          "gross_spread_bps": -0.5759252114656555,
+          "net_after_10bp_each_venue_bps": -20.575925211465655,
+          "net_after_20bp_each_venue_bps": -40.57592521146566,
+          "both_books_complete": true
+        },
+        "buy_okx_sell_binance": {
+          "buy_vwap": 80735.1,
+          "sell_vwap": 80739.64,
+          "gross_spread_bps": 0.5623328638959535,
+          "net_after_10bp_each_venue_bps": -19.437667136104047,
+          "net_after_20bp_each_venue_bps": -39.43766713610405,
+          "both_books_complete": true
+        }
+      }
+    },
+    "ETHUSDT": {
+      "binance_last_update_id": 82578592181,
+      "okx_timestamp_ms": "1793201099256",
+      "directions": {
+        "buy_binance_sell_okx": {
+          "buy_vwap": 2340.35,
+          "sell_vwap": 2340.39,
+          "gross_spread_bps": 0.17091460678964054,
+          "net_after_10bp_each_venue_bps": -19.82908539321036,
+          "net_after_20bp_each_venue_bps": -39.82908539321036,
+          "both_books_complete": true
+        },
+        "buy_okx_sell_binance": {
+          "buy_vwap": 2340.4,
+          "sell_vwap": 2340.34,
+          "gross_spread_bps": -0.25636643308790674,
+          "net_after_10bp_each_venue_bps": -20.256366433087905,
+          "net_after_20bp_each_venue_bps": -40.256366433087905,
+          "both_books_complete": true
+        }
+      }
+    },
+    "BNBUSDT": {
+      "binance_last_update_id": 21082402599,
+      "okx_timestamp_ms": "1793201099857",
+      "directions": {
+        "buy_binance_sell_okx": {
+          "buy_vwap": 749.82,
+          "sell_vwap": 749.7986696168468,
+          "gross_spread_bps": -0.2844733823215151,
+          "net_after_10bp_each_venue_bps": -20.284473382321515,
+          "net_after_20bp_each_venue_bps": -40.284473382321515,
+          "both_books_complete": true
+        },
+        "buy_okx_sell_binance": {
+          "buy_vwap": 749.8666469746441,
+          "sell_vwap": 749.81,
+          "gross_spread_bps": -0.7554273132792666,
+          "net_after_10bp_each_venue_bps": -20.755427313279267,
+          "net_after_20bp_each_venue_bps": -40.75542731327927,
+          "both_books_complete": true
+        }
+      }
+    },
+    "XRPUSDT": {
+      "binance_last_update_id": 26846924667,
+      "okx_timestamp_ms": "1793201100458",
+      "directions": {
+        "buy_binance_sell_okx": {
+          "buy_vwap": 1.3155,
+          "sell_vwap": 1.3154,
+          "gross_spread_bps": -0.7601672367918422,
+          "net_after_10bp_each_venue_bps": -20.760167236791844,
+          "net_after_20bp_each_venue_bps": -40.760167236791844,
+          "both_books_complete": true
+        },
+        "buy_okx_sell_binance": {
+          "buy_vwap": 1.3155,
+          "sell_vwap": 1.3154,
+          "gross_spread_bps": -0.7601672367918422,
+          "net_after_10bp_each_venue_bps": -20.760167236791844,
+          "net_after_20bp_each_venue_bps": -40.760167236791844,
+          "both_books_complete": true
+        }
+      }
+    },
+    "SOLUSDT": {
+      "binance_last_update_id": 30475312272,
+      "okx_timestamp_ms": "1793201101056",
+      "directions": {
+        "buy_binance_sell_okx": {
+          "buy_vwap": 101.28,
+          "sell_vwap": 101.26999999999998,
+          "gross_spread_bps": -0.9873617693545444,
+          "net_after_10bp_each_venue_bps": -20.987361769354543,
+          "net_after_20bp_each_venue_bps": -40.98736176935454,
+          "both_books_complete": true
+        },
+        "buy_okx_sell_binance": {
+          "buy_vwap": 101.28,
+          "sell_vwap": 101.26999999999998,
+          "gross_spread_bps": -0.9873617693545444,
+          "net_after_10bp_each_venue_bps": -20.987361769354543,
+          "net_after_20bp_each_venue_bps": -40.98736176935454,
+          "both_books_complete": true
+        }
+      }
+    },
+    "ADAUSDT": {
+      "binance_last_update_id": 15980881556,
+      "okx_timestamp_ms": "1793201101706",
+      "directions": {
+        "buy_binance_sell_okx": {
+          "buy_vwap": 0.2035,
+          "sell_vwap": 0.20339999999999997,
+          "gross_spread_bps": -4.914004914006176,
+          "net_after_10bp_each_venue_bps": -24.914004914006178,
+          "net_after_20bp_each_venue_bps": -44.91400491400618,
+          "both_books_complete": true
+        },
+        "buy_okx_sell_binance": {
+          "buy_vwap": 0.2035,
+          "sell_vwap": 0.20339999999999997,
+          "gross_spread_bps": -4.914004914006176,
+          "net_after_10bp_each_venue_bps": -24.914004914006178,
+          "net_after_20bp_each_venue_bps": -44.91400491400618,
+          "both_books_complete": true
+        }
+      }
+    },
+    "DOGEUSDT": {
+      "binance_last_update_id": 25766563995,
+      "okx_timestamp_ms": "1793201102308",
+      "directions": {
+        "buy_binance_sell_okx": {
+          "buy_vwap": 0.07945,
+          "sell_vwap": 0.07944,
+          "gross_spread_bps": -1.2586532410330253,
+          "net_after_10bp_each_venue_bps": -21.258653241033024,
+          "net_after_20bp_each_venue_bps": -41.258653241033024,
+          "both_books_complete": true
+        },
+        "buy_okx_sell_binance": {
+          "buy_vwap": 0.07945,
+          "sell_vwap": 0.07944,
+          "gross_spread_bps": -1.2586532410330253,
+          "net_after_10bp_each_venue_bps": -21.258653241033024,
+          "net_after_20bp_each_venue_bps": -41.258653241033024,
+          "both_books_complete": true
+        }
+      }
+    }
+  }
+}

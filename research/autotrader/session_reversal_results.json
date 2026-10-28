@@ -1,0 +1,148 @@
+{
+  "source": "Binance spot 1-minute klines, July-September 2026; segments aligned UTC 08:00/20:00",
+  "rule": "for each 12-hour session, go long spot for the following session only when the previous matching session (day or night) had a negative return; otherwise cash. Compare with buy-and-hold. This is a simple long-only adaptation; prior signal known at session close.",
+  "cost": "10 bps per side on each position change; no shorting, no leverage, no cash yield",
+  "caveats": "Only three months of retained minute data. Not a forward holdout. Session cutoffs are literature-informed; this is a narrow exploratory replication.",
+  "assets": {
+    "BTCUSDT": {
+      "periods": {
+        "all": {
+          "segments": 182,
+          "return_percent": 1.9845408613971882,
+          "max_drawdown_percent": -4.9989488726233215,
+          "annualized_sharpe": 0.500876877204768,
+          "position_fraction": 0.45054945054945056,
+          "entries": 52
+        },
+        "2026-07": {
+          "segments": 62,
+          "return_percent": 2.1327811248686768,
+          "max_drawdown_percent": -4.269448904369311,
+          "annualized_sharpe": 1.2503850343537413,
+          "position_fraction": 0.4032258064516129,
+          "entries": 18
+        },
+        "2026-08": {
+          "segments": 62,
+          "return_percent": -0.8026690036835982,
+          "max_drawdown_percent": -4.072379360944245,
+          "annualized_sharpe": -0.5862261214163886,
+          "position_fraction": 0.45161290322580644,
+          "entries": 21
+        },
+        "2026-09": {
+          "segments": 58,
+          "return_percent": 0.662844807636298,
+          "max_drawdown_percent": -4.998948872623266,
+          "annualized_sharpe": 0.48698580475251757,
+          "position_fraction": 0.5,
+          "entries": 14
+        }
+      },
+      "buy_hold": {
+        "2026-06": {
+          "segments": 1,
+          "return_percent": 0.24551080934984704,
+          "max_drawdown_percent": 0.0,
+          "annualized_sharpe": 0,
+          "position_fraction": 1.0,
+          "entries": 1
+        },
+        "2026-07": {
+          "segments": 62,
+          "return_percent": 7.285875596236302,
+          "max_drawdown_percent": -5.2265370512287195,
+          "annualized_sharpe": 2.8680707332022806,
+          "position_fraction": 1.0,
+          "entries": 1
+        },
+        "2026-08": {
+          "segments": 62,
+          "return_percent": 24.7134160025821,
+          "max_drawdown_percent": -3.49976197312013,
+          "annualized_sharpe": 6.90336502711303,
+          "position_fraction": 1.0,
+          "entries": 1
+        },
+        "2026-09": {
+          "segments": 58,
+          "return_percent": 5.942272883292232,
+          "max_drawdown_percent": -7.325252237130231,
+          "annualized_sharpe": 2.0295872922600546,
+          "position_fraction": 1.0,
+          "entries": 1
+        }
+      }
+    },
+    "ETHUSDT": {
+      "periods": {
+        "all": {
+          "segments": 182,
+          "return_percent": 9.300633649488699,
+          "max_drawdown_percent": -5.139563449227136,
+          "annualized_sharpe": 1.716076678748016,
+          "position_fraction": 0.4175824175824176,
+          "entries": 50
+        },
+        "2026-07": {
+          "segments": 62,
+          "return_percent": 2.914998980139716,
+          "max_drawdown_percent": -5.139563449227136,
+          "annualized_sharpe": 1.373530482179509,
+          "position_fraction": 0.4032258064516129,
+          "entries": 17
+        },
+        "2026-08": {
+          "segments": 62,
+          "return_percent": -2.7670059884985942,
+          "max_drawdown_percent": -4.716062050064962,
+          "annualized_sharpe": -3.500832722979776,
+          "position_fraction": 0.3709677419354839,
+          "entries": 19
+        },
+        "2026-09": {
+          "segments": 58,
+          "return_percent": 9.22708581484748,
+          "max_drawdown_percent": -2.498882389207868,
+          "annualized_sharpe": 4.448043362672086,
+          "position_fraction": 0.4827586206896552,
+          "entries": 15
+        }
+      },
+      "buy_hold": {
+        "2026-06": {
+          "segments": 1,
+          "return_percent": 0.40458015267175185,
+          "max_drawdown_percent": 0.0,
+          "annualized_sharpe": 0,
+          "position_fraction": 1.0,
+          "entries": 1
+        },
+        "2026-07": {
+          "segments": 62,
+          "return_percent": 18.465369117311646,
+          "max_drawdown_percent": -4.969986747394972,
+          "annualized_sharpe": 4.740615579701925,
+          "position_fraction": 1.0,
+          "entries": 1
+        },
+        "2026-08": {
+          "segments": 62,
+          "return_percent": 32.244452644921175,
+          "max_drawdown_percent": -2.6936621547219763,
+          "annualized_sharpe": 6.774611930262623,
+          "position_fraction": 1.0,
+          "entries": 1
+        },
+        "2026-09": {
+          "segments": 58,
+          "return_percent": 8.175207868258427,
+          "max_drawdown_percent": -5.631867591072492,
+          "annualized_sharpe": 2.4842896178243437,
+          "position_fraction": 1.0,
+          "entries": 1
+        }
+      }
+    }
+  }
+}

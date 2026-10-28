@@ -33,4 +33,4 @@ Set a unique Grafana password in monitoring/.env (copy monitoring/.env.example f
 
     ./start-all.sh
 
-This runs the backend services, React UI, and Grafana monitoring together. Open the UI at http://localhost:5173 and use its Grafana link for the dashboard. Run ./stop-all.sh from another terminal to stop everything, or press Ctrl+C in the start terminal. Monitoring and app logs are written under logs/.
+This launches the backend services, React UI, and Grafana monitoring in the background and returns to the shell. Open the UI at http://localhost:5173 and use its Grafana link for the dashboard. Run ./stop-all.sh to stop everything. Monitoring and app logs are written under logs/; startup and supervisor output is in logs/start-all.log.

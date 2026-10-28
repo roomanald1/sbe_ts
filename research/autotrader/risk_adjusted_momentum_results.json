@@ -1,0 +1,258 @@
+{
+  "signal": "At monthly rebalance, restrict candidates to positive 90-day return, price above own SMA100, BTC above SMA200. Select max 90-day return divided by prior 60-day daily realized volatility (risk-adjusted momentum). One asset at a time, cash if no candidate. Signal at prior close; next-open rebalance.",
+  "benchmark": "same gates and rebalance, ranked by raw 90-day return",
+  "cost": "15 bps per side on absolute weight turnover; cash return zero",
+  "universe": [
+    "BTCUSDT",
+    "ETHUSDT",
+    "BNBUSDT",
+    "XRPUSDT",
+    "SOLUSDT",
+    "ADAUSDT",
+    "DOGEUSDT"
+  ],
+  "data_range": [
+    "2020-08-11",
+    "2026-10-23"
+  ],
+  "usable_signal_range": [
+    "2021-03-01",
+    "2026-10-22"
+  ],
+  "periods": {
+    "raw_10bp": {
+      "2021-2022": {
+        "return_percent": 51.891705081716545,
+        "max_drawdown_percent": -62.27464592359567,
+        "annualized_sharpe": 0.67386723092309,
+        "days": 671
+      },
+      "2023-2024": {
+        "return_percent": 183.48210426370576,
+        "max_drawdown_percent": -58.065586941856004,
+        "annualized_sharpe": 1.0497376024720158,
+        "days": 731
+      },
+      "2025": {
+        "return_percent": 30.115858797114072,
+        "max_drawdown_percent": -39.386016979653604,
+        "annualized_sharpe": 0.738244524796014,
+        "days": 365
+      },
+      "2026": {
+        "return_percent": 1.637692037310945,
+        "max_drawdown_percent": -14.158117841479989,
+        "annualized_sharpe": 0.1998282002414711,
+        "days": 295
+      }
+    },
+    "riskadj_10bp": {
+      "2021-2022": {
+        "return_percent": 23.42018392991154,
+        "max_drawdown_percent": -62.27464592359566,
+        "annualized_sharpe": 0.5319472655130909,
+        "days": 671
+      },
+      "2023-2024": {
+        "return_percent": 518.2367855851455,
+        "max_drawdown_percent": -47.22431433495328,
+        "annualized_sharpe": 1.5854645791218853,
+        "days": 731
+      },
+      "2025": {
+        "return_percent": 9.880904982849415,
+        "max_drawdown_percent": -37.221317743409834,
+        "annualized_sharpe": 0.4501003728476646,
+        "days": 365
+      },
+      "2026": {
+        "return_percent": 8.622079129614658,
+        "max_drawdown_percent": -9.921438531865423,
+        "annualized_sharpe": 0.5701694264766902,
+        "days": 295
+      }
+    },
+    "riskadj_40vol_10bp": {
+      "2021-2022": {
+        "return_percent": 10.632095718206113,
+        "max_drawdown_percent": -23.511932431657534,
+        "annualized_sharpe": 0.3529457494378144,
+        "days": 671
+      },
+      "2023-2024": {
+        "return_percent": 237.3317567952062,
+        "max_drawdown_percent": -30.79300236611958,
+        "annualized_sharpe": 1.62867787990052,
+        "days": 731
+      },
+      "2025": {
+        "return_percent": 13.28870675467979,
+        "max_drawdown_percent": -24.804256901289467,
+        "annualized_sharpe": 0.5286768223974497,
+        "days": 365
+      },
+      "2026": {
+        "return_percent": 5.705052675801525,
+        "max_drawdown_percent": -9.729451107590947,
+        "annualized_sharpe": 0.4702150812130921,
+        "days": 295
+      }
+    },
+    "raw_15bp": {
+      "2021-2022": {
+        "return_percent": 51.13530125408259,
+        "max_drawdown_percent": -62.31260816243262,
+        "annualized_sharpe": 0.6703312499659857,
+        "days": 671
+      },
+      "2023-2024": {
+        "return_percent": 180.20362106971106,
+        "max_drawdown_percent": -58.280869821004885,
+        "annualized_sharpe": 1.0421534928047234,
+        "days": 731
+      },
+      "2025": {
+        "return_percent": 29.54130510525983,
+        "max_drawdown_percent": -39.44643884898489,
+        "annualized_sharpe": 0.7307467773821161,
+        "days": 365
+      },
+      "2026": {
+        "return_percent": 1.4842500267538083,
+        "max_drawdown_percent": -14.243481486245857,
+        "annualized_sharpe": 0.19171748138086828,
+        "days": 295
+      }
+    },
+    "riskadj_15bp": {
+      "2021-2022": {
+        "return_percent": 22.80184689806366,
+        "max_drawdown_percent": -62.31260816243264,
+        "annualized_sharpe": 0.5284622195578335,
+        "days": 671
+      },
+      "2023-2024": {
+        "return_percent": 511.74441025421675,
+        "max_drawdown_percent": -47.43788735626077,
+        "annualized_sharpe": 1.5782664551191612,
+        "days": 731
+      },
+      "2025": {
+        "return_percent": 9.394116068896551,
+        "max_drawdown_percent": -37.28383078020928,
+        "annualized_sharpe": 0.44257837553246643,
+        "days": 365
+      },
+      "2026": {
+        "return_percent": 8.457619273465378,
+        "max_drawdown_percent": -10.011408158603485,
+        "annualized_sharpe": 0.5615679530494148,
+        "days": 295
+      }
+    },
+    "riskadj_40vol_15bp": {
+      "2021-2022": {
+        "return_percent": 10.4691484926154,
+        "max_drawdown_percent": -23.511932431657524,
+        "annualized_sharpe": 0.34947454293271485,
+        "days": 671
+      },
+      "2023-2024": {
+        "return_percent": 234.71917701136658,
+        "max_drawdown_percent": -30.891701567274588,
+        "annualized_sharpe": 1.6194748536811816,
+        "days": 731
+      },
+      "2025": {
+        "return_percent": 12.942776906126019,
+        "max_drawdown_percent": -24.815649923687733,
+        "annualized_sharpe": 0.5199519425574334,
+        "days": 365
+      },
+      "2026": {
+        "return_percent": 5.569282560983435,
+        "max_drawdown_percent": -9.729451107590947,
+        "annualized_sharpe": 0.46127257184462955,
+        "days": 295
+      }
+    },
+    "raw_25bp": {
+      "2021-2022": {
+        "return_percent": 49.632192781872945,
+        "max_drawdown_percent": -62.38853264010653,
+        "annualized_sharpe": 0.6632528907477737,
+        "days": 671
+      },
+      "2023-2024": {
+        "return_percent": 173.7512751405729,
+        "max_drawdown_percent": -58.70872026199435,
+        "annualized_sharpe": 1.0269647325573195,
+        "days": 731
+      },
+      "2025": {
+        "return_percent": 28.398402617167662,
+        "max_drawdown_percent": -39.56728258764751,
+        "annualized_sharpe": 0.7157173688931295,
+        "days": 365
+      },
+      "2026": {
+        "return_percent": 1.1776787894375529,
+        "max_drawdown_percent": -14.414208775777404,
+        "annualized_sharpe": 0.17549274047869706,
+        "days": 295
+      }
+    },
+    "riskadj_25bp": {
+      "2021-2022": {
+        "return_percent": 21.573154342567747,
+        "max_drawdown_percent": -62.38853264010653,
+        "annualized_sharpe": 0.5214878303985736,
+        "days": 671
+      },
+      "2023-2024": {
+        "return_percent": 498.9465538467352,
+        "max_drawdown_percent": -47.86308838249378,
+        "annualized_sharpe": 1.56383460512941,
+        "days": 731
+      },
+      "2025": {
+        "return_percent": 8.425809846320597,
+        "max_drawdown_percent": -37.408763436857896,
+        "annualized_sharpe": 0.42751134080667985,
+        "days": 365
+      },
+      "2026": {
+        "return_percent": 8.129035305215627,
+        "max_drawdown_percent": -10.19134741207961,
+        "annualized_sharpe": 0.5443338453304082,
+        "days": 295
+      }
+    },
+    "riskadj_40vol_25bp": {
+      "2021-2022": {
+        "return_percent": 10.143882457235943,
+        "max_drawdown_percent": -23.511932431657513,
+        "annualized_sharpe": 0.3425290835607467,
+        "days": 671
+      },
+      "2023-2024": {
+        "return_percent": 229.54999671147758,
+        "max_drawdown_percent": -31.088890290710193,
+        "annualized_sharpe": 1.601015012077422,
+        "days": 731
+      },
+      "2025": {
+        "return_percent": 12.253540672711916,
+        "max_drawdown_percent": -24.838435968484163,
+        "annualized_sharpe": 0.5024896378119659,
+        "days": 365
+      },
+      "2026": {
+        "return_percent": 5.297966097193907,
+        "max_drawdown_percent": -9.729451107590958,
+        "annualized_sharpe": 0.44335798983776736,
+        "days": 295
+      }
+    }
+  }
+}

@@ -44,12 +44,19 @@ async fn submit_order(
         TradeSide::Sell => &book.bids,
     };
     let timestamp = now_ms().map_err(internal_error)?;
-    let rates_started = Instant::now();
-    let capacity_rates = get_usd_rates().await?.0.rates;
-    processing_timings_ms.insert(
-        "capacity_rate_lookup".to_owned(),
-        rates_started.elapsed().as_secs_f64() * 1_000.0,
-    );
+    // Reduce-only orders cannot consume additional buying power, so they do
+    // not need an FX lookup before matching or ledger persistence.
+    let capacity_rates = if request.reduce_only {
+        None
+    } else {
+        let rates_started = Instant::now();
+        let rates = get_usd_rates().await?.0.rates;
+        processing_timings_ms.insert(
+            "capacity_rate_lookup".to_owned(),
+            rates_started.elapsed().as_secs_f64() * 1_000.0,
+        );
+        Some(rates)
+    };
     let ledger_lock_started = Instant::now();
     let mut ledger = store.ledger.lock().await;
     processing_timings_ms.insert(
@@ -57,13 +64,9 @@ async fn submit_order(
         ledger_lock_started.elapsed().as_secs_f64() * 1_000.0,
     );
     if request.reduce_only {
-        let source_trades = ledger
-            .trades
-            .iter()
-            .filter(|trade| trade.source == request.source)
-            .cloned()
-            .collect::<Vec<_>>();
-        let current_quantity = summarize_positions(&source_trades)
+        let current_quantity = summarize_positions_from(
+            ledger.trades.iter().filter(|trade| trade.source == request.source),
+        )
             .positions
             .into_iter()
             .find(|position| position.symbol == symbol)
@@ -133,7 +136,7 @@ async fn submit_order(
         ensure_paper_capacity_with_rates(
             &store,
             &ledger,
-            &capacity_rates,
+            capacity_rates.as_ref().expect("capacity rates loaded for opening order"),
             &symbol,
             &request.side,
             request.quantity,
@@ -190,30 +193,28 @@ async fn submit_order(
     // Protective AutoTrader barriers are siblings of the position they guard.
     // Retire them as soon as the authoritative auto ledger becomes flat, rather
     // than waiting for the next AutoTrader maintenance pass to notice.
-    let auto_trades = ledger
-        .trades
-        .iter()
-        .filter(|trade| trade.source == "auto")
-        .cloned()
-        .collect::<Vec<_>>();
-    let auto_quantity = summarize_positions(&auto_trades)
+    if request.source == "auto" {
+        let auto_quantity = summarize_positions_from(
+            ledger.trades.iter().filter(|trade| trade.source == "auto"),
+        )
         .positions
         .into_iter()
         .find(|position| position.symbol == symbol)
         .map(|position| position.quantity)
         .unwrap_or(0.0);
-    if auto_quantity.abs() <= EPSILON {
-        for barrier in &mut ledger.barrier_orders {
-            if barrier.symbol == symbol
-                && barrier.source == "auto"
-                && barrier.status == "armed"
-                && barrier
-                    .parent_order_id
-                    .as_deref()
-                    .is_some_and(|id| id.starts_with("auto-stop-"))
-            {
-                barrier.status = "cancelled".to_owned();
-                barrier.retry_after = None;
+        if auto_quantity.abs() <= EPSILON {
+            for barrier in &mut ledger.barrier_orders {
+                if barrier.symbol == symbol
+                    && barrier.source == "auto"
+                    && barrier.status == "armed"
+                    && barrier
+                        .parent_order_id
+                        .as_deref()
+                        .is_some_and(|id| id.starts_with("auto-stop-"))
+                {
+                    barrier.status = "cancelled".to_owned();
+                    barrier.retry_after = None;
+                }
             }
         }
     }

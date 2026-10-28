@@ -1,0 +1,449 @@
+{
+  "source": "retained Binance daily spot candles plus frozen 2026-10-28 REST snapshot",
+  "date_range": [
+    "2021-03-01",
+    "2026-10-27"
+  ],
+  "rule": "short a coin after its prior close falls below its previous 20- or 55-day low, only while BTC prior close is below its trailing SMA200; exit when daily eligibility ends",
+  "portfolio": "seven separate equal-initial-capital short sleeves, cash earns zero",
+  "borrowing": "5% annual borrowing charge on each open short sleeve",
+  "risk_note": "spot shorting requires actual borrow and margin; no intraday liquidation replay",
+  "policies": {
+    "short20_btc200": {
+      "15": {
+        "train_2021_2022": {
+          "days": 671,
+          "return_percent": -38.937749164413106,
+          "max_drawdown_percent": -38.937749164413106,
+          "annualized_daily_sharpe": -0.9491920505426623,
+          "entry_events": 139
+        },
+        "validation_2023_2024": {
+          "days": 731,
+          "return_percent": -3.459445630707214,
+          "max_drawdown_percent": -7.6369181645182245,
+          "annualized_daily_sharpe": -0.2256135958429692,
+          "entry_events": 38
+        },
+        "later_2025_2026": {
+          "days": 665,
+          "return_percent": -5.700552567751382,
+          "max_drawdown_percent": -17.22527616336046,
+          "annualized_daily_sharpe": -0.1718314997449734,
+          "entry_events": 93
+        },
+        "year_2021": {
+          "days": 306,
+          "return_percent": -32.39564881286752,
+          "max_drawdown_percent": -32.39564881286752,
+          "annualized_daily_sharpe": -2.0293927975863992,
+          "entry_events": 32
+        },
+        "year_2022": {
+          "days": 365,
+          "return_percent": -9.677040363033228,
+          "max_drawdown_percent": -23.19097075003629,
+          "annualized_daily_sharpe": -0.23656156794357622,
+          "entry_events": 107
+        },
+        "year_2023": {
+          "days": 365,
+          "return_percent": -1.9680104934518217,
+          "max_drawdown_percent": -2.1178693051073116,
+          "annualized_daily_sharpe": -1.0930963932530597,
+          "entry_events": 17
+        },
+        "year_2024": {
+          "days": 366,
+          "return_percent": -1.5213759761100953,
+          "max_drawdown_percent": -7.6369181645182245,
+          "annualized_daily_sharpe": -0.11582863997608957,
+          "entry_events": 21
+        },
+        "year_2025": {
+          "days": 365,
+          "return_percent": -5.6669012519051325,
+          "max_drawdown_percent": -6.9508489747539866,
+          "annualized_daily_sharpe": -0.7213347170589266,
+          "entry_events": 39
+        },
+        "year_2026": {
+          "days": 300,
+          "return_percent": -0.03567286169208206,
+          "max_drawdown_percent": -14.992532217038645,
+          "annualized_daily_sharpe": 0.09206106586389462,
+          "entry_events": 54
+        },
+        "all": {
+          "days": 2067,
+          "return_percent": -44.41063089235809,
+          "max_drawdown_percent": -50.531126180734745,
+          "annualized_daily_sharpe": -0.5399710303152491,
+          "entry_events": 270
+        }
+      },
+      "30": {
+        "train_2021_2022": {
+          "days": 671,
+          "return_percent": -42.47357942146313,
+          "max_drawdown_percent": -42.47357942146313,
+          "annualized_daily_sharpe": -1.0792028479243618,
+          "entry_events": 139
+        },
+        "validation_2023_2024": {
+          "days": 731,
+          "return_percent": -5.001547447679034,
+          "max_drawdown_percent": -8.090173427324975,
+          "annualized_daily_sharpe": -0.3449160105680764,
+          "entry_events": 38
+        },
+        "later_2025_2026": {
+          "days": 665,
+          "return_percent": -9.372248348820323,
+          "max_drawdown_percent": -19.60450188202779,
+          "annualized_daily_sharpe": -0.3352052872964276,
+          "entry_events": 93
+        },
+        "year_2021": {
+          "days": 306,
+          "return_percent": -33.25155004956305,
+          "max_drawdown_percent": -33.25155004956305,
+          "annualized_daily_sharpe": -2.0909253041946285,
+          "entry_events": 32
+        },
+        "year_2022": {
+          "days": 365,
+          "return_percent": -13.816095173367637,
+          "max_drawdown_percent": -24.81174826159409,
+          "annualized_daily_sharpe": -0.4095148971457121,
+          "entry_events": 107
+        },
+        "year_2023": {
+          "days": 365,
+          "return_percent": -2.69716357498494,
+          "max_drawdown_percent": -2.69716357498494,
+          "annualized_daily_sharpe": -1.4243740129059403,
+          "entry_events": 17
+        },
+        "year_2024": {
+          "days": 366,
+          "return_percent": -2.3682597109796255,
+          "max_drawdown_percent": -8.090173427324931,
+          "annualized_daily_sharpe": -0.20845808168070545,
+          "entry_events": 21
+        },
+        "year_2025": {
+          "days": 365,
+          "return_percent": -7.18803373493434,
+          "max_drawdown_percent": -8.190506152153908,
+          "annualized_daily_sharpe": -0.9355407132032574,
+          "entry_events": 39
+        },
+        "year_2026": {
+          "days": 300,
+          "return_percent": -2.3533760804592796,
+          "max_drawdown_percent": -15.61362011465761,
+          "annualized_daily_sharpe": -0.06638053287925345,
+          "entry_events": 54
+        },
+        "all": {
+          "days": 2067,
+          "return_percent": -50.47265026338135,
+          "max_drawdown_percent": -55.584761970488714,
+          "annualized_daily_sharpe": -0.6628601978487747,
+          "entry_events": 270
+        }
+      },
+      "50": {
+        "train_2021_2022": {
+          "days": 671,
+          "return_percent": -46.87595322887801,
+          "max_drawdown_percent": -46.87595322887801,
+          "annualized_daily_sharpe": -1.2518153085277712,
+          "entry_events": 139
+        },
+        "validation_2023_2024": {
+          "days": 731,
+          "return_percent": -7.023508470152196,
+          "max_drawdown_percent": -8.691599275050555,
+          "annualized_daily_sharpe": -0.5036742305034275,
+          "entry_events": 38
+        },
+        "later_2025_2026": {
+          "days": 665,
+          "return_percent": -14.040014248595279,
+          "max_drawdown_percent": -22.982642865677416,
+          "annualized_daily_sharpe": -0.5518061886648551,
+          "entry_events": 93
+        },
+        "year_2021": {
+          "days": 306,
+          "return_percent": -34.375855250424294,
+          "max_drawdown_percent": -34.375855250424294,
+          "annualized_daily_sharpe": -2.171428602457203,
+          "entry_events": 32
+        },
+        "year_2022": {
+          "days": 365,
+          "return_percent": -19.048016589251702,
+          "max_drawdown_percent": -26.92103529155444,
+          "annualized_daily_sharpe": -0.6406644451872973,
+          "entry_events": 107
+        },
+        "year_2023": {
+          "days": 365,
+          "return_percent": -3.6625800604308756,
+          "max_drawdown_percent": -3.6625800604308756,
+          "annualized_daily_sharpe": -1.7748780233968224,
+          "entry_events": 17
+        },
+        "year_2024": {
+          "days": 366,
+          "return_percent": -3.4887050243089246,
+          "max_drawdown_percent": -8.691599275050566,
+          "annualized_daily_sharpe": -0.3329485066700522,
+          "entry_events": 21
+        },
+        "year_2025": {
+          "days": 365,
+          "return_percent": -9.176056937008747,
+          "max_drawdown_percent": -10.139065802121571,
+          "annualized_daily_sharpe": -1.2177335084353076,
+          "entry_events": 39
+        },
+        "year_2026": {
+          "days": 300,
+          "return_percent": -5.3553690222556405,
+          "max_drawdown_percent": -16.47249320281373,
+          "annualized_daily_sharpe": -0.27667043505039735,
+          "entry_events": 54
+        },
+        "all": {
+          "days": 2067,
+          "return_percent": -57.54189181976985,
+          "max_drawdown_percent": -61.55123987769504,
+          "annualized_daily_sharpe": -0.8258767382119554,
+          "entry_events": 270
+        }
+      }
+    },
+    "short55_btc200": {
+      "15": {
+        "train_2021_2022": {
+          "days": 671,
+          "return_percent": -7.234439839408546,
+          "max_drawdown_percent": -17.513937994211215,
+          "annualized_daily_sharpe": -0.14726624411750802,
+          "entry_events": 66
+        },
+        "validation_2023_2024": {
+          "days": 731,
+          "return_percent": -1.7687574019747188,
+          "max_drawdown_percent": -2.6274404444252886,
+          "annualized_daily_sharpe": -0.39662796471885137,
+          "entry_events": 15
+        },
+        "later_2025_2026": {
+          "days": 665,
+          "return_percent": -2.9012568631034963,
+          "max_drawdown_percent": -13.463896247165174,
+          "annualized_daily_sharpe": -0.06099242275884437,
+          "entry_events": 53
+        },
+        "year_2021": {
+          "days": 306,
+          "return_percent": -8.485524889095153,
+          "max_drawdown_percent": -8.485524889095153,
+          "annualized_daily_sharpe": -1.6602078198581607,
+          "entry_events": 4
+        },
+        "year_2022": {
+          "days": 365,
+          "return_percent": 1.3670897944509708,
+          "max_drawdown_percent": -17.513937994211247,
+          "annualized_daily_sharpe": 0.17449627444885416,
+          "entry_events": 62
+        },
+        "year_2023": {
+          "days": 365,
+          "return_percent": -0.3977100825965585,
+          "max_drawdown_percent": -0.7063353470278977,
+          "annualized_daily_sharpe": -0.4210572798423757,
+          "entry_events": 8
+        },
+        "year_2024": {
+          "days": 366,
+          "return_percent": -1.3765218857067718,
+          "max_drawdown_percent": -2.4152480887461247,
+          "annualized_daily_sharpe": -0.45430521405834806,
+          "entry_events": 7
+        },
+        "year_2025": {
+          "days": 365,
+          "return_percent": -7.452639743403311,
+          "max_drawdown_percent": -8.574344394985523,
+          "annualized_daily_sharpe": -1.197895665094578,
+          "entry_events": 23
+        },
+        "year_2026": {
+          "days": 300,
+          "return_percent": 4.9178959482805595,
+          "max_drawdown_percent": -13.165492774447562,
+          "annualized_daily_sharpe": 0.42527602206817117,
+          "entry_events": 30
+        },
+        "all": {
+          "days": 2067,
+          "return_percent": -11.519000975763982,
+          "max_drawdown_percent": -29.02204245164124,
+          "annualized_daily_sharpe": -0.11270536839087748,
+          "entry_events": 134
+        }
+      },
+      "30": {
+        "train_2021_2022": {
+          "days": 671,
+          "return_percent": -9.75043931955799,
+          "max_drawdown_percent": -18.453514712080654,
+          "annualized_daily_sharpe": -0.23403766833096962,
+          "entry_events": 66
+        },
+        "validation_2023_2024": {
+          "days": 731,
+          "return_percent": -2.36498802220646,
+          "max_drawdown_percent": -2.873791977852991,
+          "annualized_daily_sharpe": -0.5346160350323811,
+          "entry_events": 15
+        },
+        "later_2025_2026": {
+          "days": 665,
+          "return_percent": -5.281252834698469,
+          "max_drawdown_percent": -15.041899061483921,
+          "annualized_daily_sharpe": -0.16803069492699013,
+          "entry_events": 53
+        },
+        "year_2021": {
+          "days": 306,
+          "return_percent": -8.631606364606947,
+          "max_drawdown_percent": -8.631606364606947,
+          "annualized_daily_sharpe": -1.6830370230366434,
+          "entry_events": 4
+        },
+        "year_2022": {
+          "days": 365,
+          "return_percent": -1.2245295232132691,
+          "max_drawdown_percent": -18.453514712080665,
+          "annualized_daily_sharpe": 0.06099331824574368,
+          "entry_events": 62
+        },
+        "year_2023": {
+          "days": 365,
+          "return_percent": -0.7610429899885918,
+          "max_drawdown_percent": -0.7790502462568072,
+          "annualized_daily_sharpe": -0.8043014287606008,
+          "entry_events": 8
+        },
+        "year_2024": {
+          "days": 366,
+          "return_percent": -1.6162453541869293,
+          "max_drawdown_percent": -2.5135566130447318,
+          "annualized_daily_sharpe": -0.5359629820516928,
+          "entry_events": 7
+        },
+        "year_2025": {
+          "days": 365,
+          "return_percent": -8.466063418944092,
+          "max_drawdown_percent": -9.570484175551218,
+          "annualized_daily_sharpe": -1.3543603964956528,
+          "entry_events": 23
+        },
+        "year_2026": {
+          "days": 300,
+          "return_percent": 3.479376833558767,
+          "max_drawdown_percent": -13.402422285815296,
+          "annualized_daily_sharpe": 0.32986158415526917,
+          "entry_events": 30
+        },
+        "all": {
+          "days": 2067,
+          "return_percent": -16.538415500438454,
+          "max_drawdown_percent": -31.532012585182912,
+          "annualized_daily_sharpe": -0.19675015847964764,
+          "entry_events": 134
+        }
+      },
+      "50": {
+        "train_2021_2022": {
+          "days": 671,
+          "return_percent": -12.995444130659372,
+          "max_drawdown_percent": -19.684152711921687,
+          "annualized_daily_sharpe": -0.3499178080930514,
+          "entry_events": 66
+        },
+        "validation_2023_2024": {
+          "days": 731,
+          "return_percent": -3.1522282543846036,
+          "max_drawdown_percent": -3.559255643298831,
+          "annualized_daily_sharpe": -0.7136980003215985,
+          "entry_events": 15
+        },
+        "later_2025_2026": {
+          "days": 665,
+          "return_percent": -8.363696239991903,
+          "max_drawdown_percent": -17.109985332346213,
+          "annualized_daily_sharpe": -0.30989560424697177,
+          "entry_events": 53
+        },
+        "year_2021": {
+          "days": 306,
+          "return_percent": -8.82604003985592,
+          "max_drawdown_percent": -8.82604003985592,
+          "annualized_daily_sharpe": -1.7128792830265012,
+          "entry_events": 4
+        },
+        "year_2022": {
+          "days": 365,
+          "return_percent": -4.573020731605826,
+          "max_drawdown_percent": -19.684152711921655,
+          "annualized_daily_sharpe": -0.09084102269921661,
+          "entry_events": 62
+        },
+        "year_2023": {
+          "days": 365,
+          "return_percent": -1.2408535978903235,
+          "max_drawdown_percent": -1.2408535978903235,
+          "annualized_daily_sharpe": -1.2666708093862242,
+          "entry_events": 8
+        },
+        "year_2024": {
+          "days": 366,
+          "return_percent": -1.9353900131050983,
+          "max_drawdown_percent": -2.6445346881730947,
+          "annualized_daily_sharpe": -0.6430330485587368,
+          "entry_events": 7
+        },
+        "year_2025": {
+          "days": 365,
+          "return_percent": -9.792084117754085,
+          "max_drawdown_percent": -10.873163229875871,
+          "annualized_daily_sharpe": -1.5522912836938196,
+          "entry_events": 23
+        },
+        "year_2026": {
+          "days": 300,
+          "return_percent": 1.5834396170140597,
+          "max_drawdown_percent": -13.733312944175513,
+          "annualized_daily_sharpe": 0.20181759320737408,
+          "entry_events": 30
+        },
+        "all": {
+          "days": 2067,
+          "return_percent": -22.785441847509414,
+          "max_drawdown_percent": -34.74267748143235,
+          "annualized_daily_sharpe": -0.3086391555206399,
+          "entry_events": 134
+        }
+      }
+    }
+  }
+}

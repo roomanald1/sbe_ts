@@ -1,0 +1,127 @@
+{
+  "rule": "BTC/ETH log price ratio z-score vs previous 60 closes; enter opposite extreme at |z|>=2, exit on mean crossing or after 10 days",
+  "position": "50% long one coin and 50% short the other, unleveraged gross notional relative to capital",
+  "timing": "previous closed daily candle signal, next open execution",
+  "short_borrow": "5% annual rate on 50% short notional, charged daily while held",
+  "source": "retained Binance daily spot candles and frozen 2026-10-28 REST snapshot",
+  "date_range": [
+    "2021-03-01",
+    "2026-10-27"
+  ],
+  "scenarios": {
+    "15": {
+      "train_2021_2022": {
+        "days": 671,
+        "return_percent": -35.91846980937648,
+        "max_drawdown_percent": -37.72907816567819,
+        "annualized_daily_sharpe": -1.5709380569175466,
+        "entries": 17,
+        "exits": 17,
+        "mean_absolute_z_at_entry": 2.330767165425553
+      },
+      "validation_2023_2024": {
+        "days": 731,
+        "return_percent": 5.71490264996235,
+        "max_drawdown_percent": -11.120136034989702,
+        "annualized_daily_sharpe": 0.30266557678643863,
+        "entries": 24,
+        "exits": 24,
+        "mean_absolute_z_at_entry": 2.442002376133326
+      },
+      "later_2025_2026": {
+        "days": 665,
+        "return_percent": -18.320339937839204,
+        "max_drawdown_percent": -21.183584288166667,
+        "annualized_daily_sharpe": -0.9561450375987733,
+        "entries": 24,
+        "exits": 23,
+        "mean_absolute_z_at_entry": 2.4636381451586717
+      },
+      "all": {
+        "days": 2067,
+        "return_percent": -44.667153862535535,
+        "max_drawdown_percent": -46.075900520481184,
+        "annualized_daily_sharpe": -0.7802260781935384,
+        "entries": 65,
+        "exits": 64,
+        "mean_absolute_z_at_entry": 2.4208986818960363
+      }
+    },
+    "30": {
+      "train_2021_2022": {
+        "days": 671,
+        "return_percent": -39.1115881564421,
+        "max_drawdown_percent": -40.565125418810155,
+        "annualized_daily_sharpe": -1.7563424011152295,
+        "entries": 17,
+        "exits": 17,
+        "mean_absolute_z_at_entry": 2.330767165425553
+      },
+      "validation_2023_2024": {
+        "days": 731,
+        "return_percent": -1.645270451692915,
+        "max_drawdown_percent": -13.235296973168253,
+        "annualized_daily_sharpe": -0.01732149624695593,
+        "entries": 24,
+        "exits": 24,
+        "mean_absolute_z_at_entry": 2.442002376133326
+      },
+      "later_2025_2026": {
+        "days": 665,
+        "return_percent": -23.895077870275017,
+        "max_drawdown_percent": -24.89025068979509,
+        "annualized_daily_sharpe": -1.2988781114128307,
+        "entries": 24,
+        "exits": 23,
+        "mean_absolute_z_at_entry": 2.4636381451586717
+      },
+      "all": {
+        "days": 2067,
+        "return_percent": -54.42332474525797,
+        "max_drawdown_percent": -54.775249177949384,
+        "annualized_daily_sharpe": -1.0509936019040662,
+        "entries": 65,
+        "exits": 64,
+        "mean_absolute_z_at_entry": 2.4208986818960363
+      }
+    },
+    "50": {
+      "train_2021_2022": {
+        "days": 671,
+        "return_percent": -43.12976828304082,
+        "max_drawdown_percent": -44.15272581957777,
+        "annualized_daily_sharpe": -1.996876995027038,
+        "entries": 17,
+        "exits": 17,
+        "mean_absolute_z_at_entry": 2.330767165425553
+      },
+      "validation_2023_2024": {
+        "days": 731,
+        "return_percent": -10.683055386638241,
+        "max_drawdown_percent": -18.032265932458834,
+        "annualized_daily_sharpe": -0.43503758380897367,
+        "entries": 24,
+        "exits": 24,
+        "mean_absolute_z_at_entry": 2.442002376133326
+      },
+      "later_2025_2026": {
+        "days": 665,
+        "return_percent": -30.752216558856958,
+        "max_drawdown_percent": -30.969030993757272,
+        "annualized_daily_sharpe": -1.7365936408378768,
+        "entries": 24,
+        "exits": 23,
+        "mean_absolute_z_at_entry": 2.4636381451586717
+      },
+      "all": {
+        "days": 2067,
+        "return_percent": -64.8257591909466,
+        "max_drawdown_percent": -64.85193813410909,
+        "annualized_daily_sharpe": -1.4016351756197285,
+        "entries": 65,
+        "exits": 64,
+        "mean_absolute_z_at_entry": 2.4208986818960363
+      }
+    }
+  }
+}

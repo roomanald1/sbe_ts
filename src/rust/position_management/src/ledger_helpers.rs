@@ -50,8 +50,16 @@ fn valid_position_symbol(symbol: &str) -> bool {
 }
 
 fn summarize_positions(trades: &[PositionTrade]) -> PositionsResponse {
+    summarize_positions_from(trades.iter())
+}
+
+fn summarize_positions_from<'a>(
+    trades: impl Iterator<Item = &'a PositionTrade>,
+) -> PositionsResponse {
     let mut positions = BTreeMap::<String, Position>::new();
+    let mut trade_count = 0;
     for trade in trades {
+        trade_count += 1;
         let position = positions.entry(trade.symbol.clone()).or_insert(Position {
             symbol: trade.symbol.clone(),
             quantity: 0.0,
@@ -67,7 +75,7 @@ fn summarize_positions(trades: &[PositionTrade]) -> PositionsResponse {
     }
     PositionsResponse {
         positions: positions.into_values().collect(),
-        trade_count: trades.len(),
+        trade_count,
     }
 }
 fn signed_fee_cashflow(fee: f64) -> f64 {
