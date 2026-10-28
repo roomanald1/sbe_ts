@@ -45,11 +45,14 @@ async fn get_insights_inputs(
     State(store): State<Arc<PositionStore>>,
     Query(query): Query<InsightsInputQuery>,
 ) -> Result<Json<PositionInsightsInput>, (StatusCode, String)> {
-    let positions = summarize_positions(&store.ledger.lock().await.trades)
-        .positions
-        .into_iter()
-        .filter(|position| position.quantity.abs() > EPSILON)
-        .collect::<Vec<_>>();
+    let positions = {
+        let ledger = store.ledger.lock().await;
+        cached_position_summary(&store, &ledger, None)
+            .positions
+            .into_iter()
+            .filter(|position| position.quantity.abs() > EPSILON)
+            .collect::<Vec<_>>()
+    };
     let mut symbols = positions
         .iter()
         .map(|position| position.symbol.clone())

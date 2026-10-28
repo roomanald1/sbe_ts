@@ -103,6 +103,17 @@ async fn get_activity(State(state): State<AutoTraderState>) -> Json<ActivityResp
             summarize_lock_wait(&values).map(|summary| (worker, summary))
         })
         .collect();
+    let settings_persistence_ms = state
+        .settings_persist_timings_ms
+        .lock()
+        .ok()
+        .map(|samples| samples.clone())
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|(phase, values)| {
+            summarize_lock_wait(&values).map(|summary| (phase, summary))
+        })
+        .collect();
     let (unrealized_pnl, unrealized_pnl_by_quote) = unrealized_pnl
         .map(|(total, by_quote)| (Some(total), Some(by_quote)))
         .unwrap_or((None, None));
@@ -137,5 +148,6 @@ async fn get_activity(State(state): State<AutoTraderState>) -> Json<ActivityResp
         insight_processing_samples,
         cycle_lock_wait_ms,
         cycle_lock_hold_ms,
+        settings_persistence_ms,
     })
 }

@@ -310,7 +310,7 @@ async fn reconcile_scheduled_fills(
     }
     if changed {
         settings.used_notional_today = allocated_notional(&settings);
-        persist_settings(&state.settings_path, &settings)?;
+        request_settings_persist(state)?;
     }
     Ok(())
 }

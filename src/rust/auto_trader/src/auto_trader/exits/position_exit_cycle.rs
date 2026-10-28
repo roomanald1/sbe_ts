@@ -13,10 +13,17 @@ async fn maybe_exit_auto_position(
     ensure_protective_stops(client, base, state).await?;
     let positions = {
         let settings = state.settings.lock().await;
-        settings.strategy_positions.iter().flat_map(|(symbol, lots)| {
-            lots.iter().filter(|(_, position)| position.quantity.abs() > 1e-12)
-                .map(|(strategy, position)| (symbol.clone(), strategy.clone(), position.clone()))
-        }).collect::<Vec<_>>()
+        settings
+            .strategy_positions
+            .iter()
+            .flat_map(|(symbol, lots)| {
+                lots.iter()
+                    .filter(|(_, position)| position.quantity.abs() > 1e-12)
+                    .map(|(strategy, position)| {
+                        (symbol.clone(), strategy.clone(), position.clone())
+                    })
+            })
+            .collect::<Vec<_>>()
     };
     // These reads do not depend on each other. Fetch them concurrently, then
     // retain the existing deterministic position processing and serialized
@@ -54,14 +61,21 @@ async fn maybe_exit_auto_position(
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64;
-    let research_regime = state.latest_daily_strategy_snapshot.lock().await.clone()
+    let research_regime = state
+        .latest_daily_strategy_snapshot
+        .lock()
+        .await
+        .clone()
         .filter(|snapshot| regime_now_ms.saturating_sub(snapshot.as_of_ms) <= 10 * 60_000);
     if research_regime.is_none() {
-        crate::service_log!("WARN", "Insights daily strategy state unavailable or stale for trend exits");
+        crate::service_log!(
+            "WARN",
+            "Insights daily strategy state unavailable or stale for trend exits"
+        );
     }
-    // Market input requests do not mutate trader state. Keep them outside the
-    // shared cycle lock, then serialize exit decisions and order mutations.
-    let _cycle = acquire_cycle_lock(state, "position_maintenance").await;
+    // Evaluate positions without the shared cycle lock. Exit submission takes
+    // that lock only after an exit is actually required, so routine path sampling
+    // and settings persistence do not block incoming signal cycles.
     for (symbol, strategy, position) in positions {
         if let Some(result) = evaluate_position_exit(
             client,
@@ -80,4 +94,3 @@ async fn maybe_exit_auto_position(
     }
     Ok(None)
 }
-

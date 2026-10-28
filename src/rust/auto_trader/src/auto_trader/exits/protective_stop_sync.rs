@@ -42,7 +42,7 @@ async fn sync_protective_stops(
             {
                 order.status = "cancelled".into();
             }
-            persist_settings(&state.settings_path, &settings)?;
+            request_settings_persist(state)?;
             continue;
         };
         let total_filled = barrier["filled_quantity"].as_f64().unwrap_or(0.0).max(0.0);
@@ -141,7 +141,7 @@ async fn sync_protective_stops(
                     tracked.processed_fee = total_fee;
                 }
             }
-            persist_settings(&state.settings_path, &settings)?;
+            request_settings_persist(state)?;
             let cumulative_pnl = settings
                 .orders
                 .iter()
@@ -189,7 +189,7 @@ async fn sync_protective_stops(
             {
                 order.status = status.to_owned();
             }
-            persist_settings(&state.settings_path, &settings)?;
+            request_settings_persist(state)?;
         }
     }
     Ok(())

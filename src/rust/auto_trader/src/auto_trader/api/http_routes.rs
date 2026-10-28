@@ -66,14 +66,24 @@ pub fn router() -> Router {
             position.entries = 1;
         }
     }
-    let legacy_positions = settings.positions.iter()
+    let legacy_positions = settings
+        .positions
+        .iter()
         .filter(|(_, position)| position.quantity.abs() > 1e-12)
         .map(|(symbol, position)| (symbol.clone(), position.clone()))
         .collect::<Vec<_>>();
     for (symbol, position) in legacy_positions {
-        let strategy = position.strategy.clone().unwrap_or_else(|| "live-insights".into());
-        let lots = settings.strategy_positions.entry(symbol.clone()).or_default();
-        if lots.is_empty() { lots.insert(strategy, position.clone()); }
+        let strategy = position
+            .strategy
+            .clone()
+            .unwrap_or_else(|| "live-insights".into());
+        let lots = settings
+            .strategy_positions
+            .entry(symbol.clone())
+            .or_default();
+        if lots.is_empty() {
+            lots.insert(strategy, position.clone());
+        }
         let mut entries_by_category = BTreeMap::<String, u32>::new();
         for (strategy, lot) in lots.iter() {
             let category = strategy_category_key(strategy_category(Some(strategy)));
@@ -134,7 +144,8 @@ pub fn router() -> Router {
         }
     });
     let carry_path = dated_carry_path(&settings_path);
-    let carry_book = std::fs::read(&carry_path).ok()
+    let carry_book = std::fs::read(&carry_path)
+        .ok()
         .and_then(|bytes| serde_json::from_slice::<DatedCarryBook>(&bytes).ok())
         .unwrap_or_default();
     let state = AutoTraderState {
@@ -148,11 +159,14 @@ pub fn router() -> Router {
         strategy_diagnostic: Arc::new(std::sync::Mutex::new(Vec::new())),
         enabled: Arc::new(AtomicBool::new(enabled)),
         settings: Arc::new(Mutex::new(settings)),
+        settings_persist_notify: Arc::new(Notify::new()),
+        settings_persist_timings_ms: Arc::new(std::sync::Mutex::new(BTreeMap::new())),
         latest_missed_opportunity_bands: Arc::new(Mutex::new(Vec::new())),
         latest_execution_parameters: Arc::new(Mutex::new(None)),
         cycle_lock: Arc::new(Mutex::new(())),
         pending_signals: Arc::new(Mutex::new(BTreeMap::new())),
         signal_notify: Arc::new(Notify::new()),
+        signal_book_prewarms: Arc::new(Mutex::new(BTreeMap::new())),
         audit_tx,
         execution_audit_tx,
         gap_summary: Arc::new(std::sync::Mutex::new(GapSummary::default())),
@@ -164,6 +178,7 @@ pub fn router() -> Router {
         dated_carry_work_lock: Arc::new(Mutex::new(())),
         dated_carry_path: carry_path,
     };
+    start_settings_persistence_worker(&state);
     let rates_worker_state = state.clone();
     tokio::spawn(async move {
         let mut ticker = interval(Duration::from_secs(30));
@@ -247,9 +262,18 @@ pub fn router() -> Router {
     });
     Router::new()
         .route("/positions/auto-trader", get(get_status).put(set_enabled))
-        .route("/positions/auto-trader/dated-carry", get(get_dated_carry).put(update_dated_carry))
-        .route("/internal/auto-trader/dated-carry-signal", axum::routing::post(receive_dated_carry_signal))
-        .route("/internal/auto-trader/daily-strategy-signals", axum::routing::post(receive_daily_strategy_signals))
+        .route(
+            "/positions/auto-trader/dated-carry",
+            get(get_dated_carry).put(update_dated_carry),
+        )
+        .route(
+            "/internal/auto-trader/dated-carry-signal",
+            axum::routing::post(receive_dated_carry_signal),
+        )
+        .route(
+            "/internal/auto-trader/daily-strategy-signals",
+            axum::routing::post(receive_daily_strategy_signals),
+        )
         .route(
             "/positions/auto-trader/parameters",
             get(get_decision_parameters),
@@ -284,6 +308,7 @@ async fn signal_ready(
                 .any(|strategy| strategy.is_live_insight()));
     if generic_enabled {
         let mut queue = state.pending_signals.lock().await;
+        let mut prewarm_symbols = Vec::new();
         for signal in dashboard.best.iter().cloned() {
             let selected_live = settings
                 .strategies
@@ -302,6 +327,9 @@ async fn signal_ready(
                 continue;
             }
             let symbol = signal.symbol.clone();
+            if !signal.stale {
+                prewarm_symbols.push(symbol.clone());
+            }
             queue_pending_signal(
                 &mut queue,
                 PendingSignalKind::Live,
@@ -311,10 +339,41 @@ async fn signal_ready(
                     walk_forward: dashboard.walk_forward.clone(),
                     missed_opportunity_bands: dashboard.missed_opportunity_bands.clone(),
                     markets: dashboard.markets.clone(),
+                    queued_at: None,
+                    queue_wait_ms: None,
                 },
             );
         }
         drop(queue);
+        let now = Instant::now();
+        let mut prewarms = state.signal_book_prewarms.lock().await;
+        prewarms
+            .retain(|_, requested_at| now.duration_since(*requested_at) < Duration::from_secs(300));
+        let position_url = std::env::var("POSITION_MANAGEMENT_URL")
+            .unwrap_or_else(|_| "http://127.0.0.1:3002".to_owned());
+        for symbol in prewarm_symbols {
+            let should_request = prewarms.get(&symbol).is_none_or(|requested_at| {
+                now.duration_since(*requested_at) >= Duration::from_secs(60)
+            });
+            if !should_request {
+                continue;
+            }
+            prewarms.insert(symbol.clone(), now);
+            let client = state.client.clone();
+            let url = format!("{position_url}/internal/market-book/{symbol}/subscribe");
+            let requested_symbols = Arc::clone(&state.signal_book_prewarms);
+            tokio::spawn(async move {
+                let succeeded = client
+                    .post(url)
+                    .send()
+                    .await
+                    .is_ok_and(|response| response.status().is_success());
+                if !succeeded {
+                    requested_symbols.lock().await.remove(&symbol);
+                }
+            });
+        }
+        drop(prewarms);
         state.signal_notify.notify_one();
     }
     let requests = INGRESS_REQUESTS.fetch_add(1, Ordering::Relaxed) + 1;
@@ -337,7 +396,6 @@ async fn signal_ready(
     }
     StatusCode::ACCEPTED
 }
-
 
 fn migrate_closed_trade_metrics(settings: &mut Settings) {
     // Older windows contain cumulative symbol fees and residual-position returns.

@@ -119,6 +119,7 @@ pub struct SignalStore {
     recent_cache: Arc<Mutex<Option<(Instant, Vec<SignalSnapshot>)>>>,
     best_cache: Arc<Mutex<Option<(Instant, Vec<SignalSnapshot>)>>>,
     performance_cache: Arc<Mutex<Option<(Instant, Vec<SignalPerformance>)>>>,
+    calibration_records_cache: Arc<Mutex<Option<(Instant, Arc<Vec<StoredSignalRecord>>)>>>,
     walk_forward_cache: Arc<Mutex<Option<(Instant, Vec<SignalWalkForward>)>>>,
     missed_opportunity_cache: Arc<Mutex<Option<(Instant, Vec<MissedOpportunityGateBand>)>>>,
     walk_forward_refreshing: Arc<AtomicBool>,

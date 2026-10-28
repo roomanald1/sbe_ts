@@ -1,3 +1,17 @@
+fn record_position_persistence_sample(
+    samples: &StdMutex<BTreeMap<String, Vec<f64>>>,
+    phase: &str,
+    elapsed_ms: f64,
+) {
+    if let Ok(mut samples) = samples.lock() {
+        let values = samples.entry(phase.to_owned()).or_default();
+        values.push(elapsed_ms);
+        if values.len() > 500 {
+            values.remove(0);
+        }
+    }
+}
+
 impl PositionStore {
     fn book_slot(&self, symbol: &str) -> Arc<ArcSwapOption<BookSnapshot>> {
         let mut books = self.books.write().expect("book map poisoned");
@@ -102,7 +116,12 @@ impl PositionStore {
         );
         let store = Self {
             path,
-            ledger: Mutex::new(ledger),
+            ledger: Arc::new(Mutex::new(ledger)),
+            persistence_notify: Arc::new(Notify::new()),
+            persistence_timings_ms: Arc::new(StdMutex::new(BTreeMap::new())),
+            account_ledger_cache: StdMutex::new(None),
+            realized_pnl_cache: StdMutex::new(None),
+            positions_cache: StdMutex::new(None),
             books: StdRwLock::new(HashMap::new()),
             price_samples: Mutex::new(HashMap::new()),
             hedge_samples: Mutex::new(HashMap::new()),
@@ -111,20 +130,80 @@ impl PositionStore {
             spot_symbols,
             vwap_runs: Mutex::new(vwap_runs),
         };
+        let writer_ledger = Arc::clone(&store.ledger);
+        let writer_notify = Arc::clone(&store.persistence_notify);
+        let writer_timings = Arc::clone(&store.persistence_timings_ms);
+        let writer_path = store.path.clone();
+        tokio::spawn(async move {
+            loop {
+                writer_notify.notified().await;
+                // Let a burst of fills and book updates collapse into one current snapshot.
+                tokio::time::sleep(Duration::from_millis(10)).await;
+                let ledger_guard = Arc::clone(&writer_ledger).lock_owned().await;
+                let serialization_started = Instant::now();
+                let snapshot = match tokio::task::spawn_blocking(move || {
+                    serde_json::to_vec(&*ledger_guard)
+                })
+                .await
+                {
+                    Ok(Ok(snapshot)) => snapshot,
+                    Ok(Err(error)) => {
+                        crate::service_log!("ERROR", "Position ledger serialization failed: {error}");
+                        tokio::time::sleep(Duration::from_secs(1)).await;
+                        writer_notify.notify_one();
+                        continue;
+                    }
+                    Err(error) => {
+                        crate::service_log!("ERROR", "Position ledger serializer failed: {error}");
+                        tokio::time::sleep(Duration::from_secs(1)).await;
+                        writer_notify.notify_one();
+                        continue;
+                    }
+                };
+                record_position_persistence_sample(
+                    &writer_timings,
+                    "snapshot_serialize",
+                    serialization_started.elapsed().as_secs_f64() * 1_000.0,
+                );
+                let path = writer_path.clone();
+                let write_started = Instant::now();
+                match tokio::task::spawn_blocking(move || persist_ledger_bytes(&path, snapshot))
+                    .await
+                {
+                    Ok(Ok(())) => record_position_persistence_sample(
+                        &writer_timings,
+                        "snapshot_write",
+                        write_started.elapsed().as_secs_f64() * 1_000.0,
+                    ),
+                    Ok(Err(error)) => {
+                        crate::service_log!(
+                            "ERROR",
+                            "Position ledger snapshot write failed: {error:#}"
+                        );
+                        tokio::time::sleep(Duration::from_secs(1)).await;
+                        writer_notify.notify_one();
+                    }
+                    Err(error) => {
+                        crate::service_log!(
+                            "ERROR",
+                            "Position ledger snapshot writer failed: {error}"
+                        );
+                        tokio::time::sleep(Duration::from_secs(1)).await;
+                        writer_notify.notify_one();
+                    }
+                }
+            }
+        });
         if ledger_migrated {
             let ledger = store.ledger.lock().await;
             store.persist(&ledger).await?;
         }
         Ok(store)
     }
-    async fn persist(&self, ledger: &Ledger) -> anyhow::Result<()> {
-        let bytes = serde_json::to_vec(ledger)?;
-        if let Some(parent) = self.path.parent().filter(|p| !p.as_os_str().is_empty()) {
-            tokio::fs::create_dir_all(parent).await?;
-        }
-        let temp = self.path.with_extension("positions.tmp");
-        tokio::fs::write(&temp, bytes).await?;
-        tokio::fs::rename(temp, &self.path).await?;
+    async fn persist(&self, _ledger: &Ledger) -> anyhow::Result<()> {
+        // Snapshotting and disk I/O are handled by one coalescing background writer.
+        // It reads the latest ledger after the caller releases its ledger lock.
+        self.persistence_notify.notify_one();
         Ok(())
     }
     async fn record_ticker_sample(&self, instrument: String, price: f64, timestamp: u64) {
@@ -138,4 +217,17 @@ impl PositionStore {
             samples.retain(|(time, _)| timestamp.saturating_sub(*time) <= 30 * 60_000);
         }
     }
+}
+
+fn persist_ledger_bytes(path: &std::path::Path, bytes: Vec<u8>) -> anyhow::Result<()> {
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        std::fs::create_dir_all(parent)?;
+    }
+    let temp = path.with_extension("positions.tmp");
+    std::fs::write(&temp, bytes)?;
+    std::fs::rename(temp, path)?;
+    Ok(())
 }

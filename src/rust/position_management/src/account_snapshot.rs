@@ -5,44 +5,87 @@ async fn get_fee_rates() -> Json<FeeRatesResponse> {
         taker: rates.taker.abs(),
     })
 }
-async fn account_snapshot(
-    store: &PositionStore,
-    ledger: &Ledger,
-) -> Result<AccountResponse, (StatusCode, String)> {
-    let rates = get_usd_rates().await?.0.rates;
-    account_snapshot_with_rates(store, ledger, &rates)
+#[derive(Clone)]
+struct AccountLedgerSnapshot {
+    trade_count: usize,
+    rates: BTreeMap<String, f64>,
+    cash_delta: f64,
+    fees_paid: f64,
+    equity_available: bool,
+    positions: BTreeMap<String, Position>,
 }
+
 fn account_snapshot_with_rates(
     store: &PositionStore,
     ledger: &Ledger,
     rates: &BTreeMap<String, f64>,
 ) -> Result<AccountResponse, (StatusCode, String)> {
-    let mut cash =
-        ledger.initial_cash + ledger.topups.iter().map(|topup| topup.amount).sum::<f64>();
-    let mut fees_paid = 0.0;
-    let mut equity_available = true;
-    for trade in &ledger.trades {
-        let quote = trade
-            .symbol
-            .split_once('-')
-            .map(|(_, quote)| quote)
-            .unwrap_or_default();
-        if let Some(rate) = rates.get(quote) {
-            let notional = trade.quantity * trade.execution_price * rate;
-            cash += match trade.side {
-                TradeSide::Buy => -notional,
-                TradeSide::Sell => notional,
-            };
-            // Ledger fees use cash-flow signs: expenses are negative.
-            // Apply that cash flow directly and expose fees paid as positive.
-            let fee = signed_fee_cashflow(trade.fee) * rate;
-            cash += fee;
-            fees_paid -= fee;
-        } else if trade.quantity * trade.execution_price > 0.0 {
-            equity_available = false;
+    let snapshot = {
+        let mut cache = store
+            .account_ledger_cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let can_extend = cache.as_ref().is_some_and(|snapshot| {
+            snapshot.trade_count <= ledger.trades.len() && snapshot.rates == *rates
+        });
+        if !can_extend {
+            *cache = Some(AccountLedgerSnapshot {
+                trade_count: 0,
+                rates: rates.clone(),
+                cash_delta: 0.0,
+                fees_paid: 0.0,
+                equity_available: true,
+                positions: BTreeMap::new(),
+            });
         }
-    }
-    let positions = summarize_positions(&ledger.trades).positions;
+        let snapshot = cache.as_mut().expect("account ledger cache initialized");
+        for trade in &ledger.trades[snapshot.trade_count..] {
+            let quote = trade
+                .symbol
+                .split_once('-')
+                .map(|(_, quote)| quote)
+                .unwrap_or_default();
+            if let Some(rate) = rates.get(quote) {
+                let notional = trade.quantity * trade.execution_price * rate;
+                snapshot.cash_delta += match trade.side {
+                    TradeSide::Buy => -notional,
+                    TradeSide::Sell => notional,
+                };
+                // Ledger fees use cash-flow signs: expenses are negative.
+                let fee = signed_fee_cashflow(trade.fee) * rate;
+                snapshot.cash_delta += fee;
+                snapshot.fees_paid -= fee;
+            } else if trade.quantity * trade.execution_price > 0.0 {
+                snapshot.equity_available = false;
+            }
+            let position = snapshot
+                .positions
+                .entry(trade.symbol.clone())
+                .or_insert(Position {
+                    symbol: trade.symbol.clone(),
+                    quantity: 0.0,
+                    average_entry_price: 0.0,
+                    realized_pnl: 0.0,
+                    entry_fees: 0.0,
+                    fees_paid: 0.0,
+                    estimated_exit_fee_rate: 0.0,
+                    last_trade_timestamp: trade.timestamp,
+                });
+            apply_trade(position, trade);
+            position.last_trade_timestamp = trade.timestamp;
+        }
+        snapshot.trade_count = ledger.trades.len();
+        cache
+            .as_ref()
+            .expect("account ledger cache populated")
+            .clone()
+    };
+    let cash = ledger.initial_cash
+        + ledger.topups.iter().map(|topup| topup.amount).sum::<f64>()
+        + snapshot.cash_delta;
+    let fees_paid = snapshot.fees_paid;
+    let mut equity_available = snapshot.equity_available;
+    let positions = snapshot.positions.into_values().collect::<Vec<_>>();
     let books = store.books_snapshot();
     let mut equity = cash;
     let mut realized_pnl = 0.0;

@@ -16,6 +16,7 @@ impl SignalStore {
             recent_cache: Arc::new(Mutex::new(None)),
             best_cache: Arc::new(Mutex::new(None)),
             performance_cache: Arc::new(Mutex::new(None)),
+            calibration_records_cache: Arc::new(Mutex::new(None)),
             walk_forward_cache: Arc::new(Mutex::new(None)),
             missed_opportunity_cache: Arc::new(Mutex::new(None)),
             walk_forward_refreshing: Arc::new(AtomicBool::new(false)),
@@ -202,12 +203,20 @@ impl SignalStore {
         Ok(records)
     }
 
-    async fn read_calibration_records(&self) -> Result<Vec<StoredSignalRecord>> {
-        // The display needs recent signal history, not a decompression pass over
-        // every archived outcome each time its cache expires.
+    async fn read_calibration_records(&self) -> Result<Arc<Vec<StoredSignalRecord>>> {
+        // Best, recent, and performance views use overlapping records. Share
+        // one decompression pass across their independently refreshed caches.
+        let mut cache = self.calibration_records_cache.lock().await;
+        if let Some((created, records)) = cache.as_ref() {
+            if created.elapsed() < Duration::from_secs(60) {
+                return Ok(Arc::clone(records));
+            }
+        }
         let mut records = self.read_recent_records(0, 10_000).await?;
         records.extend(self.read_recent_records(1, 100_000).await?);
         records.sort_by_key(record_timestamp);
+        let records = Arc::new(records);
+        *cache = Some((Instant::now(), Arc::clone(&records)));
         Ok(records)
     }
 }

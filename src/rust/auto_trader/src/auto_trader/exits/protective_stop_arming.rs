@@ -134,7 +134,7 @@ async fn arm_protective_stop(
             let excess = settings.orders.len() - MAX_RETAINED_AUTO_TRADER_ORDERS;
             settings.orders.drain(..excess);
         }
-        persist_settings(&state.settings_path, &settings)?;
+        request_settings_persist(state)?;
     } else {
         drop(settings);
         let _ = client

@@ -5,11 +5,14 @@ struct AutoTraderState {
     strategy_diagnostic: Arc<std::sync::Mutex<Vec<StrategyDiagnostic>>>,
     enabled: Arc<AtomicBool>,
     settings: Arc<Mutex<Settings>>,
+    settings_persist_notify: Arc<Notify>,
+    settings_persist_timings_ms: Arc<std::sync::Mutex<BTreeMap<String, Vec<f64>>>>,
     latest_missed_opportunity_bands: Arc<Mutex<Vec<MissedOpportunityGateBand>>>,
     latest_execution_parameters: Arc<Mutex<Option<LatestExecutionParameters>>>,
     cycle_lock: Arc<Mutex<()>>,
     pending_signals: Arc<Mutex<PendingSignalQueue>>,
     signal_notify: Arc<Notify>,
+    signal_book_prewarms: Arc<Mutex<BTreeMap<String, Instant>>>,
     audit_tx: mpsc::Sender<serde_json::Value>,
     execution_audit_tx: mpsc::UnboundedSender<serde_json::Value>,
     gap_summary: Arc<std::sync::Mutex<GapSummary>>,
@@ -161,7 +164,6 @@ struct LearningStats {
     daily_realized_pnl: f64,
 }
 
-
 #[derive(Clone, Copy, Eq, PartialEq, Ord, PartialOrd)]
 enum PendingSignalKind {
     Daily,
@@ -174,14 +176,38 @@ fn queue_pending_signal(
     queue: &mut PendingSignalQueue,
     kind: PendingSignalKind,
     symbol: String,
-    dashboard: Dashboard,
+    mut dashboard: Dashboard,
 ) {
+    dashboard.queued_at = Some(Instant::now());
     queue.insert((kind, symbol), dashboard);
 }
 
 fn take_next_pending_signal(queue: &mut PendingSignalQueue) -> Option<Dashboard> {
-    let key = queue.keys().next().cloned()?;
-    queue.remove(&key)
+    // The worker submits one symbol at a time, and an order round trip can take
+    // close to a second. Process the freshest queued snapshot first so backlog
+    // does not make the most actionable signals stale before they reach sizing.
+    let key = queue
+        .iter()
+        .max_by_key(|((kind, symbol), dashboard)| {
+            let timestamp = dashboard
+                .best
+                .iter()
+                .map(|signal| signal.timestamp)
+                .max()
+                .unwrap_or_default();
+            (
+                timestamp,
+                std::cmp::Reverse(*kind),
+                std::cmp::Reverse(symbol.as_str()),
+            )
+        })
+        .map(|(key, _)| key.clone())?;
+    let mut dashboard = queue.remove(&key)?;
+    dashboard.queue_wait_ms = dashboard
+        .queued_at
+        .take()
+        .map(|queued_at| queued_at.elapsed().as_secs_f64() * 1_000.0);
+    Some(dashboard)
 }
 
 #[cfg(test)]
@@ -207,15 +233,32 @@ mod pending_signal_queue_tests {
             walk_forward: Arc::new(Vec::new()),
             missed_opportunity_bands: Vec::new(),
             markets: Arc::new(BTreeMap::new()),
+            queued_at: None,
+            queue_wait_ms: None,
         }
     }
 
     #[test]
     fn daily_signal_survives_live_update_for_same_symbol() {
         let mut queue = PendingSignalQueue::new();
-        queue_pending_signal(&mut queue, PendingSignalKind::Daily, "BNB-USDT".into(), dashboard(true));
-        queue_pending_signal(&mut queue, PendingSignalKind::Live, "BNB-USDT".into(), dashboard(false));
-        queue_pending_signal(&mut queue, PendingSignalKind::Live, "BNB-USDT".into(), dashboard(false));
+        queue_pending_signal(
+            &mut queue,
+            PendingSignalKind::Daily,
+            "BNB-USDT".into(),
+            dashboard(true),
+        );
+        queue_pending_signal(
+            &mut queue,
+            PendingSignalKind::Live,
+            "BNB-USDT".into(),
+            dashboard(false),
+        );
+        queue_pending_signal(
+            &mut queue,
+            PendingSignalKind::Live,
+            "BNB-USDT".into(),
+            dashboard(false),
+        );
         assert_eq!(queue.len(), 2);
         assert!(take_next_pending_signal(&mut queue).unwrap().best[0].strategy_candidate);
         assert!(!take_next_pending_signal(&mut queue).unwrap().best[0].strategy_candidate);

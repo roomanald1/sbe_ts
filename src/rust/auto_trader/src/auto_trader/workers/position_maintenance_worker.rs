@@ -2,6 +2,9 @@ async fn run_position_maintenance(state: &AutoTraderState) -> Result<(), (Status
     let position_url =
         std::env::var("POSITION_MANAGEMENT_URL").unwrap_or_else(|_| "http://127.0.0.1:3002".into());
     let client = state.client.clone();
+    if let Err(error) = reconcile_inactive_execution_orders(&client, &position_url, state).await {
+        crate::service_log!("WARN", "Pending-order reconciliation failed: {}", error.1);
+    }
     reconcile_maker_fills(&client, &position_url, state).await?;
     reconcile_scheduled_fills(&client, &position_url, state).await?;
     sync_auto_positions(&client, &position_url, state).await?;
@@ -109,7 +112,18 @@ async fn sync_auto_positions(
                     format!("Invalid Auto Trader position records: {error}"),
                 )
             })?;
+    // Serialize the ledger reconciliation with order reservation and fill
+    // application. A request remains "submitting" while Position Manager is
+    // working; do not mirror its fill here or the response path would apply it
+    // a second time.
+    let _cycle = acquire_cycle_lock(state, "position_maintenance").await;
     let mut settings = state.settings.lock().await;
+    let pending_signal_symbols = settings
+        .orders
+        .iter()
+        .filter(|order| order.status == "submitting")
+        .map(|order| order.symbol.clone())
+        .collect::<std::collections::BTreeSet<_>>();
     let mut changed = false;
     let mut source_symbols = std::collections::BTreeSet::new();
     let mut external_closes = Vec::new();
@@ -121,6 +135,9 @@ async fn sync_auto_positions(
             continue;
         }
         source_symbols.insert(source_position.symbol.clone());
+        if pending_signal_symbols.contains(&source_position.symbol) {
+            continue;
+        }
         let (prior_quantity, realized_delta, learning_key, close_audit) = {
             let position = settings
                 .positions
@@ -202,9 +219,10 @@ async fn sync_auto_positions(
     }
     if changed {
         settings.used_notional_today = allocated_notional(&settings);
-        persist_settings(&state.settings_path, &settings)?;
+        request_settings_persist(state)?;
     }
     drop(settings);
+    drop(_cycle);
     for (mut payload, realized_pnl) in external_closes {
         let symbol = payload["symbol"].as_str().unwrap_or_default().to_owned();
         let entry_timestamp = payload["entry_timestamp_ms"].as_u64().unwrap_or_default();
@@ -256,4 +274,77 @@ async fn sync_auto_positions(
         store_execution_audit_until_saved(&client, &payload).await;
     }
     Ok(())
+}
+
+
+async fn reconcile_inactive_execution_orders(
+    client: &reqwest::Client,
+    base: &str,
+    state: &AutoTraderState,
+) -> Result<(), (StatusCode, String)> {
+    let response = client
+        .get(format!("{base}/positions/orders"))
+        .send()
+        .await
+        .map_err(|error| (StatusCode::BAD_GATEWAY, format!("Unable to fetch active orders: {error}")))?
+        .error_for_status()
+        .map_err(|error| (StatusCode::BAD_GATEWAY, format!("Active order lookup failed: {error}")))?
+        .json::<serde_json::Value>()
+        .await
+        .map_err(|error| (StatusCode::BAD_GATEWAY, format!("Invalid active order response: {error}")))?;
+    let active_ids = response["orders"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|order| order["id"].as_str())
+        .collect::<std::collections::HashSet<_>>();
+    let mut settings = state.settings.lock().await;
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+    let mut changed = false;
+    for order in settings.orders.iter_mut().filter(|order| {
+        matches!(order.purpose.as_str(), "signal" | "scout")
+            && matches!(order.status.as_str(), "submitting" | "accepted" | "resting" | "partially_filled")
+    }) {
+        let Some(id) = order.execution_order_id.as_deref() else {
+            continue;
+        };
+        if active_ids.contains(id) {
+            continue;
+        }
+        let prior_status = order.status.clone();
+        order.status = inactive_execution_order_status(order.filled_quantity).into();
+        order.failure_reason = Some(if order.expires_at.is_some_and(|expires| expires <= now_ms) {
+            "expired_without_full_fill".into()
+        } else {
+            "removed_from_execution_ledger".into()
+        });
+        changed |= order.status != prior_status;
+    }
+    if changed {
+        request_settings_persist(state)?;
+    }
+    Ok(())
+}
+
+
+fn inactive_execution_order_status(filled_quantity: f64) -> &'static str {
+    if filled_quantity > 1e-12 {
+        "partially_filled_closed"
+    } else {
+        "expired_or_cancelled"
+    }
+}
+
+#[cfg(test)]
+mod inactive_execution_order_tests {
+    use super::inactive_execution_order_status;
+
+    #[test]
+    fn removes_unfilled_and_partially_filled_orders_from_pending_state() {
+        assert_eq!(inactive_execution_order_status(0.0), "expired_or_cancelled");
+        assert_eq!(inactive_execution_order_status(0.25), "partially_filled_closed");
+    }
 }

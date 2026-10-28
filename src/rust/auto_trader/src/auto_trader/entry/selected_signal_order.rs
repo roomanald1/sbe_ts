@@ -8,7 +8,6 @@ struct SelectedSignalOrderRequest<'a> {
     scout: bool,
     counterfactual_stop_loss_percent: f64,
     counterfactual_take_profit_percent: f64,
-    cycle_started: Instant,
     dashboard_ms: f64,
     signal_selection_ms: f64,
     now: u64,
@@ -32,7 +31,6 @@ async fn submit_selected_signal(
         scout,
         counterfactual_stop_loss_percent,
         counterfactual_take_profit_percent,
-        cycle_started,
         dashboard_ms,
         signal_selection_ms,
         now,
@@ -42,13 +40,17 @@ async fn submit_selected_signal(
         mid,
         market_inputs_ms,
     } = request;
+    let cycle_guard = acquire_cycle_lock(state, "signal").await;
+    let cycle_started = Instant::now();
     let evidence = dashboard.walk_forward.iter().find(|item| {
         item.symbol == signal.symbol && is_entry_evidence_horizon(item.horizon_seconds)
     });
     let decision_id = signal_decision_id(signal);
     let signal_key = signal.symbol.clone();
     let now_ms = now.saturating_mul(1000);
+    let settings_lock_started = Instant::now();
     let mut settings = state.settings.lock().await;
+    let settings_lock_wait_ms = settings_lock_started.elapsed().as_secs_f64() * 1_000.0;
     reset_daily_budget(&mut settings);
     let quote_rate = quote_usd_rate(&settings, &signal.symbol);
     let strategy_key = signal.strategy.as_deref().unwrap_or("live-insights");
@@ -57,6 +59,7 @@ async fn submit_selected_signal(
     {
         return Ok(skipped_for_signal(signal, &reason));
     }
+    let execution_plan_started = Instant::now();
     let plan = match prepare_signal_execution_plan(
         state,
         settings,
@@ -75,6 +78,7 @@ async fn submit_selected_signal(
         Ok(plan) => plan,
         Err(reason) => return Ok(skipped_for_signal(signal, &reason)),
     };
+    let execution_plan_ms = execution_plan_started.elapsed().as_secs_f64() * 1_000.0;
     let SignalExecutionPlan {
         effective_stop_loss_percent,
         effective_take_profit_percent,
@@ -176,9 +180,15 @@ async fn submit_selected_signal(
         .as_millis() as u64;
     let mut stage_timings_ms = BTreeMap::new();
     stage_timings_ms.insert("dashboard_fetch".to_owned(), dashboard_ms);
+    stage_timings_ms.insert("settings_lock_wait".to_owned(), settings_lock_wait_ms);
+    stage_timings_ms.insert("execution_plan_local".to_owned(), execution_plan_ms);
     stage_timings_ms.insert("signal_selection".to_owned(), signal_selection_ms);
     stage_timings_ms.insert("local_market_book".to_owned(), market_inputs_ms);
     stage_timings_ms.insert("deep_book_local".to_owned(), deep_book_ms);
+    stage_timings_ms.insert(
+        "signal_queue_wait".to_owned(),
+        dashboard.queue_wait_ms.unwrap_or_default(),
+    );
     stage_timings_ms.insert(
         "cycle_to_order_record".to_owned(),
         cycle_started.elapsed().as_secs_f64() * 1000.0,
@@ -206,14 +216,26 @@ async fn submit_selected_signal(
     let expires_at = is_post_only.then_some(timestamp.saturating_add(300_000));
     let estimated_ioc_all_in_bps =
         deep_book.map(|assessment| assessment.impact_bps + configured_taker_fee_rate() * 10_000.0);
+    let reservation_lock_started = Instant::now();
     let quantity = {
         let mut settings = state.settings.lock().await;
+        stage_timings_ms.insert(
+            "reservation_lock_wait".to_owned(),
+            reservation_lock_started.elapsed().as_secs_f64() * 1_000.0,
+        );
         reset_daily_budget(&mut settings);
         let allocated = allocated_notional(&settings);
         let category = strategy_category(signal.strategy.as_deref());
         let category_allocated = allocated_notional_for_category(&settings, Some(category));
+        let strategy_remaining_budget = if is_independent_daily_strategy(strategy_key) {
+            daily_strategy_notional_share(&settings)
+                - allocated_notional_for_strategy(&settings, strategy_key)
+        } else {
+            f64::INFINITY
+        };
         let remaining_budget = (settings.daily_notional_limit - allocated)
             .min(category_notional_limit(&settings, category) - category_allocated)
+            .min(strategy_remaining_budget)
             .max(0.0);
         notional = notional.min(remaining_budget / stop_headroom_multiplier);
         if notional < minimum_book_order {
@@ -284,9 +306,17 @@ async fn submit_selected_signal(
             let excess = settings.orders.len() - MAX_RETAINED_AUTO_TRADER_ORDERS;
             settings.orders.drain(..excess);
         }
-        persist_settings(&state.settings_path, &settings)?;
+        let settings_persist_started = Instant::now();
+        request_settings_persist(state)?;
+        stage_timings_ms.insert(
+            "order_record_persist_notify".to_owned(),
+            settings_persist_started.elapsed().as_secs_f64() * 1_000.0,
+        );
         quantity
     };
+    // The pending order and notional reservation are durable-in-memory now.
+    // Other cycles can proceed while Position Manager handles the request.
+    drop(cycle_guard);
     submit_and_record_selected_order(SelectedOrderExecution {
         state,
         client: &client,

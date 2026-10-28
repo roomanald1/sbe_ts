@@ -69,7 +69,7 @@ async fn submit_position_exit_order(
             {
                 order.status = "failed".into();
             }
-            persist_settings(&state.settings_path, &settings)?;
+            request_settings_persist(state)?;
             return Err(error);
         }
     };
@@ -167,7 +167,7 @@ async fn submit_position_exit_order(
         }
         .into();
     }
-    persist_settings(&state.settings_path, &settings)?;
+    request_settings_persist(state)?;
     drop(settings);
     if let Some(decision_id) = entry_decision_id {
         let now = SystemTime::now()

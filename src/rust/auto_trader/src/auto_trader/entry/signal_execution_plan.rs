@@ -149,8 +149,14 @@ async fn prepare_signal_execution_plan(
     let category = strategy_category(signal.strategy.as_deref());
     let total_allocated = allocated_notional(&settings);
     let category_allocated = allocated_notional_for_category(&settings, Some(category));
+    let strategy_remaining_budget = signal.strategy.as_deref()
+        .filter(|name| is_independent_daily_strategy(name))
+        .map(|name| daily_strategy_notional_share(&settings)
+            - allocated_notional_for_strategy(&settings, name))
+        .unwrap_or(f64::INFINITY);
     let remaining_budget = (settings.daily_notional_limit - total_allocated)
         .min(category_notional_limit(&settings, category) - category_allocated)
+        .min(strategy_remaining_budget)
         .max(0.0);
     let mut notional = risk_order_cap.min(remaining_budget / stop_headroom_multiplier);
     // Size against the unlearned stop so a wider validated stop does not

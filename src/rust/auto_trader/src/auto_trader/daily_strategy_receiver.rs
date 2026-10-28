@@ -68,6 +68,8 @@ async fn receive_daily_strategy_signals(
                     walk_forward: Arc::new(Vec::new()),
                     missed_opportunity_bands: Vec::new(),
                     markets: Arc::new(BTreeMap::new()),
+                    queued_at: None,
+                    queue_wait_ms: None,
                 },
             );
         }

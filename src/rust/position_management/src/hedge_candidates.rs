@@ -1,11 +1,14 @@
 async fn get_hedge_candidates(
     State(store): State<Arc<PositionStore>>,
 ) -> Json<HedgeCandidatesResponse> {
-    let positions = summarize_positions(&store.ledger.lock().await.trades)
-        .positions
-        .into_iter()
-        .filter(|position| position.quantity.abs() > EPSILON)
-        .collect::<Vec<_>>();
+    let positions = {
+        let ledger = store.ledger.lock().await;
+        cached_position_summary(&store, &ledger, None)
+            .positions
+            .into_iter()
+            .filter(|position| position.quantity.abs() > EPSILON)
+            .collect::<Vec<_>>()
+    };
     for position in &positions {
         store.ensure_subscription(&position.symbol);
     }

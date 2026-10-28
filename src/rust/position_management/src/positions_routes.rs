@@ -120,6 +120,7 @@ pub async fn router() -> anyhow::Result<Router> {
         }
     });
     Ok(Router::new()
+        .route("/internal/persistence-timing", get(get_persistence_timing))
         .route("/positions", get(get_positions))
         .route("/positions/realized-pnl", get(get_realized_pnl))
         .route("/positions/account", get(get_account))
@@ -172,3 +173,32 @@ async fn order_handler_timing(request: Request<Body>, next: Next) -> Response {
     response
 }
 
+
+#[derive(Serialize)]
+struct PersistenceTimingSummary {
+    latest_ms: f64,
+    average_ms: f64,
+    p95_ms: f64,
+    samples: usize,
+}
+
+async fn get_persistence_timing(
+    State(store): State<Arc<PositionStore>>,
+) -> Json<BTreeMap<String, PersistenceTimingSummary>> {
+    let samples = store
+        .persistence_timings_ms
+        .lock()
+        .map(|samples| samples.clone())
+        .unwrap_or_default();
+    Json(samples.into_iter().filter_map(|(phase, values)| {
+        if values.is_empty() { return None; }
+        let mut sorted = values.clone();
+        sorted.sort_by(f64::total_cmp);
+        Some((phase, PersistenceTimingSummary {
+            latest_ms: *values.last().unwrap_or(&0.0),
+            average_ms: sorted.iter().sum::<f64>() / sorted.len() as f64,
+            p95_ms: sorted[(95 * sorted.len()).div_ceil(100).saturating_sub(1)],
+            samples: sorted.len(),
+        }))
+    }).collect())
+}

@@ -43,7 +43,7 @@ async fn submit_and_record_selected_order(
             order.status = "cancelled_before_submit".into();
         }
         settings.used_notional_today = allocated_notional(&settings);
-        persist_settings(&state.settings_path, &settings)?;
+        request_settings_persist(state)?;
         return Ok(skipped_for_signal(
             signal,
             "Auto Trader was disabled before order submission",
@@ -76,12 +76,13 @@ async fn submit_and_record_selected_order(
                 order.status = "failed".into();
                 order.failure_reason = Some(error.1.clone());
             }
-            persist_settings(&state.settings_path, &settings)?;
+            request_settings_persist(state)?;
             return Err(error);
         }
     };
     let submit_response_ms = submit_started.elapsed().as_secs_f64() * 1000.0;
     record_execution_stage_timings(&response, submit_response_ms, &mut stage_timings_ms);
+    let cycle_guard = acquire_cycle_lock(state, "signal").await;
     let mut settings = state.settings.lock().await;
     reset_daily_budget(&mut settings);
     let filled = response
@@ -121,7 +122,11 @@ async fn submit_and_record_selected_order(
             })
             .unwrap_or_default();
         if let Some(price) = average_price {
-            let Settings { strategy_positions, positions, .. } = &mut *settings;
+            let Settings {
+                strategy_positions,
+                positions,
+                ..
+            } = &mut *settings;
             apply_strategy_position_fill(
                 strategy_positions,
                 positions,
@@ -200,8 +205,9 @@ async fn submit_and_record_selected_order(
         order.failure_reason = None;
     }
     settings.used_notional_today = allocated_notional(&settings);
-    persist_settings(&state.settings_path, &settings)?;
+    request_settings_persist(state)?;
     drop(settings);
+    drop(cycle_guard);
     let mut audit_payload = signal_audit_payload(
         signal,
         "entry",
@@ -252,7 +258,8 @@ async fn submit_and_record_selected_order(
         effective_stop_loss_percent,
     ));
     audit_payload["submitted_notional"] = serde_json::json!(notional);
-    audit_payload["volatility_1m_percent"] = serde_json::json!(signal.components.volatility_1m_percent);
+    audit_payload["volatility_1m_percent"] =
+        serde_json::json!(signal.components.volatility_1m_percent);
     audit_payload["bid"] = serde_json::json!(bid);
     audit_payload["ask"] = serde_json::json!(ask);
     audit_payload["spread_bps"] = serde_json::json!((ask - bid) / mid * 10_000.0);
@@ -287,7 +294,7 @@ async fn submit_and_record_selected_order(
                 settings.last_risk_note = format!(
                     "Protective stop could not be refreshed: {error}; five-second exit monitor remains as fallback"
                 );
-                let _ = persist_settings(&state.settings_path, &settings);
+                let _ = request_settings_persist(state);
                 false
             }
         }

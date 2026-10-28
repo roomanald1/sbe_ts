@@ -44,7 +44,7 @@ wait_for_service() {
 "$NEWS_SENTIMENT_PYTHON" "$ROOT/src/rust/insights/scripts/classify_news.py" &
 sentiment_pid=$!
 children+=("$sentiment_pid")
-cargo run --manifest-path src/rust/insights/Cargo.toml --bin insights &
+cargo run --release --manifest-path src/rust/insights/Cargo.toml --bin insights &
 insights_pid=$!
 children+=("$insights_pid")
 wait_for_service "$insights_pid" 3004 "Insights"

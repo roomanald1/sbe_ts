@@ -144,7 +144,7 @@ async fn reconcile_auto_positions_with_ledger(
         }
     }
     if changed {
-        persist_settings(&state.settings_path, &settings)?;
+        request_settings_persist(state)?;
     }
     Ok(())
 }

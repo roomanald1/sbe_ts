@@ -3,14 +3,12 @@ impl SignalEngine {
         self.prune(now);
         let latest = self.prices.back().copied()?;
         let range_cutoff = now.saturating_sub(300_000);
+        let range_start = self.prices.partition_point(|sample| sample.0 < range_cutoff);
         let mut range_count = 0usize;
         let mut range_first_price = None;
         let mut range_low = f64::INFINITY;
         let mut range_high = f64::NEG_INFINITY;
-        for &(timestamp, price) in &self.prices {
-            if timestamp < range_cutoff {
-                continue;
-            }
+        for &(_, price) in self.prices.range(range_start..) {
             range_count += 1;
             range_first_price.get_or_insert(price);
             range_low = range_low.min(price);
@@ -34,10 +32,7 @@ impl SignalEngine {
             // edges but makes little net progress over the five-minute window.
             let mut low_touches = 0usize;
             let mut high_touches = 0usize;
-            for &(timestamp, price) in &self.prices {
-                if timestamp < range_cutoff {
-                    continue;
-                }
+            for &(_, price) in self.prices.range(range_start..) {
                 if (price / low - 1.0) * 100.0 <= width_percent * 0.15 {
                     low_touches += 1;
                 }
@@ -114,20 +109,29 @@ impl SignalEngine {
             if prior_depth <= 0.0 || (trade.price - touch).abs() > touch * 2.0 / 10_000.0 {
                 continue;
             }
-            let replenished = self.book_history.iter().any(|book| {
-                let (level, levels) = if bid_side {
-                    (book.bid, &book.bid_levels)
-                } else {
-                    (book.ask, &book.ask_levels)
-                };
-                book.timestamp >= trade.timestamp
-                    && book.timestamp <= trade.timestamp.saturating_add(2_000)
-                    && (level - touch).abs() <= touch * 1e-8
-                    && levels
-                        .iter()
-                        .find(|(px, _)| (*px - touch).abs() <= touch * 1e-8)
-                        .is_some_and(|(_, qty)| *qty >= prior_depth + trade.size * 0.5)
-            });
+            // Book history is timestamp ordered. Narrow the search to the two
+            // seconds after this trade instead of rescanning the full 60-second
+            // history for every trade on every snapshot.
+            let book_end_timestamp = trade.timestamp.saturating_add(2_000);
+            let first_book = self
+                .book_history
+                .partition_point(|book| book.timestamp < trade.timestamp);
+            let replenished = self
+                .book_history
+                .range(first_book..)
+                .take_while(|book| book.timestamp <= book_end_timestamp)
+                .any(|book| {
+                    let (level, levels) = if bid_side {
+                        (book.bid, &book.bid_levels)
+                    } else {
+                        (book.ask, &book.ask_levels)
+                    };
+                    (level - touch).abs() <= touch * 1e-8
+                        && levels
+                            .iter()
+                            .find(|(px, _)| (*px - touch).abs() <= touch * 1e-8)
+                            .is_some_and(|(_, qty)| *qty >= prior_depth + trade.size * 0.5)
+                });
             if replenished {
                 if bid_side {
                     absorbed_sell += trade.price * trade.size;
@@ -198,15 +202,14 @@ impl SignalEngine {
         // cross the boundary. Require both short-term momentum and trade flow
         // to confirm direction, plus a volatility-scaled minimum clearance.
         let breakout_cutoff = now.saturating_sub(10_000);
+        let breakout_end = self.prices.partition_point(|sample| sample.0 < breakout_cutoff);
         let mut prior_low = f64::INFINITY;
         let mut prior_high = f64::NEG_INFINITY;
         let mut prior_count = 0usize;
-        for &(timestamp, price) in &self.prices {
-            if timestamp >= range_cutoff && timestamp < breakout_cutoff {
-                prior_low = prior_low.min(price);
-                prior_high = prior_high.max(price);
-                prior_count += 1;
-            }
+        for &(_, price) in self.prices.range(range_start..breakout_end) {
+            prior_low = prior_low.min(price);
+            prior_high = prior_high.max(price);
+            prior_count += 1;
         }
         let breakout_clearance_percent = self
             .volatility_1m

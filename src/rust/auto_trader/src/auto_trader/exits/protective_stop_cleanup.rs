@@ -36,7 +36,7 @@ async fn cancel_protective_stops(
         }) {
             order.status = "cancelled".into();
         }
-        persist_settings(&state.settings_path, &settings)?;
+        request_settings_persist(state)?;
     }
     Ok(true)
 }

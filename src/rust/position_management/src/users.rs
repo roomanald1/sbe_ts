@@ -61,7 +61,7 @@ fn create_users(count: u64) -> Vec<User> {
 
 fn fake_last_logged_in(user_id: u64, now: u64) -> u64 {
     const THIRTY_DAYS_SECONDS: u64 = 30 * 24 * 60 * 60;
-    const UPDATE_INTERVAL_SECONDS: u64 = 20;
+    const UPDATE_INTERVAL_SECONDS: u64 = 10;
 
     let phase_offset = user_phase_offset(user_id);
     let update_slot = now.saturating_add(phase_offset) / UPDATE_INTERVAL_SECONDS;

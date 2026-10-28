@@ -221,7 +221,7 @@ struct Position {
     estimated_exit_fee_rate: f64,
     last_trade_timestamp: u64,
 }
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 struct PositionsResponse {
     positions: Vec<Position>,
     trade_count: usize,

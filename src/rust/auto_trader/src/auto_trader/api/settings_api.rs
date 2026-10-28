@@ -10,7 +10,7 @@ async fn set_enabled(
     state.enabled.store(request.enabled, Ordering::Relaxed);
     let mut settings = state.settings.lock().await;
     settings.enabled = request.enabled;
-    if let Err(error) = persist_settings(&state.settings_path, &settings) {
+    if let Err(error) = request_settings_persist(&state) {
         crate::service_log!(
             "ERROR",
             "Could not persist Auto Trader enabled state: {}",
@@ -34,7 +34,6 @@ async fn update_settings(
         || request
             .risk_appetite
             .is_some_and(|value| !value.is_finite() || !(0.0..=100.0).contains(&value))
-
         || request
             .vwap_duration_minutes
             .is_some_and(|value| !(5..=390).contains(&value))
@@ -57,10 +56,18 @@ async fn update_settings(
             .closed_trade_window
             .is_some_and(|value| !(1..=5000).contains(&value))
         || !(1..=20).contains(&request.max_open_positions)
-        || request.max_intraday_open_positions.is_some_and(|value| value > 20)
-        || request.max_daily_open_positions.is_some_and(|value| value > 20)
-        || request.intraday_notional_limit.is_some_and(|value| !value.is_finite() || value < 0.0)
-        || request.daily_strategy_notional_limit.is_some_and(|value| !value.is_finite() || value < 0.0)
+        || request
+            .max_intraday_open_positions
+            .is_some_and(|value| value > 20)
+        || request
+            .max_daily_open_positions
+            .is_some_and(|value| value > 20)
+        || request
+            .intraday_notional_limit
+            .is_some_and(|value| !value.is_finite() || value < 0.0)
+        || request
+            .daily_strategy_notional_limit
+            .is_some_and(|value| !value.is_finite() || value < 0.0)
     {
         return Err((StatusCode::BAD_REQUEST, "Order and total notional limits must be positive with total notional at least the per-order limit; daily loss cap must be positive, exploration must be between 0% and 100%, and max open positions must be between 1 and 20, and entries per position must be between 1 and 10".into()));
     }
@@ -138,10 +145,18 @@ async fn update_settings(
         settings.risk_appetite = value;
     }
     settings.max_open_positions = request.max_open_positions;
-    if let Some(value) = request.max_intraday_open_positions { settings.max_intraday_open_positions = value; }
-    if let Some(value) = request.max_daily_open_positions { settings.max_daily_open_positions = value; }
-    if let Some(value) = request.intraday_notional_limit { settings.intraday_notional_limit = value; }
-    if let Some(value) = request.daily_strategy_notional_limit { settings.daily_strategy_notional_limit = value; }
+    if let Some(value) = request.max_intraday_open_positions {
+        settings.max_intraday_open_positions = value;
+    }
+    if let Some(value) = request.max_daily_open_positions {
+        settings.max_daily_open_positions = value;
+    }
+    if let Some(value) = request.intraday_notional_limit {
+        settings.intraday_notional_limit = value;
+    }
+    if let Some(value) = request.daily_strategy_notional_limit {
+        settings.daily_strategy_notional_limit = value;
+    }
     if let Some(value) = request.max_entries_per_auto_position {
         settings.max_entries_per_auto_position = value;
     }
@@ -198,7 +213,7 @@ async fn update_settings(
         settings.closed_trade_realized_usd.clear();
         settings.closed_trade_fees_usd.clear();
     }
-    persist_settings(&state.settings_path, &settings)?;
+    request_settings_persist(&state)?;
     drop(settings);
 
     if request.reset_learning {

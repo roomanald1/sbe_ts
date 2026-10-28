@@ -200,17 +200,10 @@ async fn ingest_signal_event(
     }
     if let Some(snapshot) = snapshot.as_ref() {
         let markets = market.unwrap_or_else(|| serde_json::json!({}));
-        let missed_opportunity_bands = runtime
-            .store
-            .missed_opportunity_bands()
-            .await
-            .unwrap_or_else(|error| {
-                crate::service_log!(
-                    "WARN",
-                    "Could not refresh skipped-signal counterfactual outcomes: {error}"
-                );
-                runtime.store.cached_missed_opportunity_bands()
-            });
+        // Historical counterfactual analysis scans a large database. Signal
+        // ingestion only needs the latest completed result; dashboard reads
+        // schedule any refresh in the background.
+        let missed_opportunity_bands = runtime.store.cached_missed_opportunity_bands();
         let dashboard = serde_json::json!({
             "best": [snapshot],
             "walkForward": runtime.store.cached_walk_forward(),

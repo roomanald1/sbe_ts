@@ -30,10 +30,8 @@ impl SignalEngine {
         let mut previous: Option<f64> = None;
         let mut count = 0usize;
         let mut sum = 0.0f64;
-        for &(timestamp, price) in &self.prices {
-            if timestamp < cutoff {
-                continue;
-            }
+        let start = self.prices.partition_point(|sample| sample.0 < cutoff);
+        for &(_, price) in self.prices.range(start..) {
             count += 1;
             if let Some(previous_price) = previous {
                 let change = (price / previous_price).ln();

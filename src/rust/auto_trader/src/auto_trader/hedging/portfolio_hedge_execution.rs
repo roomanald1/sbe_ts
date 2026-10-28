@@ -33,7 +33,7 @@ async fn execute_portfolio_hedge(
         let excess = settings.orders.len() - MAX_RETAINED_AUTO_TRADER_ORDERS;
         settings.orders.drain(..excess);
     }
-    persist_settings(&state.settings_path, &settings)?;
+    request_settings_persist(state)?;
     drop(settings);
     if !cancel_protective_stops(client, base, state, &symbol, None).await? {
         let mut settings = state.settings.lock().await;
@@ -45,7 +45,7 @@ async fn execute_portfolio_hedge(
             order.status = "cancelled_stop_active".into();
         }
         settings.used_notional_today = allocated_notional(&settings);
-        persist_settings(&state.settings_path, &settings)?;
+        request_settings_persist(state)?;
         return Ok(Some(skipped(
             "Could not cancel the existing protective stop; deferred portfolio hedge",
         )));
@@ -61,7 +61,7 @@ async fn execute_portfolio_hedge(
             order.status = "cancelled_before_submit".into();
         }
         settings.used_notional_today = allocated_notional(&settings);
-        persist_settings(&state.settings_path, &settings)?;
+        request_settings_persist(state)?;
         drop(settings);
         ensure_protective_stops(client, base, state).await?;
         return Ok(Some(skipped(
@@ -93,7 +93,7 @@ async fn execute_portfolio_hedge(
             {
                 order.status = "failed".into();
             }
-            persist_settings(&state.settings_path, &settings)?;
+            request_settings_persist(state)?;
             drop(settings);
             ensure_protective_stops(client, base, state).await?;
             return Err(error);
@@ -166,7 +166,7 @@ async fn execute_portfolio_hedge(
         order.status = status.into();
     }
     settings.used_notional_today = allocated_notional(&settings);
-    persist_settings(&state.settings_path, &settings)?;
+    request_settings_persist(state)?;
     drop(settings);
     ensure_protective_stops(client, base, state).await?;
     Ok(Some(CycleResult {

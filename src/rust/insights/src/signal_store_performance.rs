@@ -12,9 +12,12 @@ impl SignalStore {
     }
 
     async fn compute_performance(&self) -> Result<Vec<SignalPerformance>> {
-        let outcomes = self.read_outcomes().await?;
+        let records = self.read_calibration_records().await?;
         let mut totals: HashMap<(String, u64), PerformanceTotals> = HashMap::new();
-        for outcome in outcomes {
+        for outcome in records.iter().filter_map(|record| match record {
+            StoredSignalRecord::Outcome(outcome) => Some(outcome),
+            _ => None,
+        }) {
             let total = totals
                 .entry((outcome.symbol.clone(), outcome.horizon_seconds))
                 .or_default();

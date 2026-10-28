@@ -30,7 +30,7 @@ impl SignalStore {
         }
         let mut cache = self.recent_cache.lock().await;
         if let Some((created, items)) = cache.as_ref() {
-            if created.elapsed() < Duration::from_secs(30) {
+            if created.elapsed() < Duration::from_secs(60) {
                 let start = items.len().saturating_sub(limit);
                 return Ok(items[start..].to_vec());
             }
@@ -64,7 +64,7 @@ impl SignalStore {
         }
         let mut cache = self.best_cache.lock().await;
         if let Some((created, items)) = cache.as_ref() {
-            if created.elapsed() < Duration::from_secs(8) {
+            if created.elapsed() < Duration::from_secs(60) {
                 return Ok(items.iter().take(limit).cloned().collect());
             }
         }
@@ -76,7 +76,7 @@ impl SignalStore {
     async fn load_best(&self, limit: usize) -> Result<Vec<SignalSnapshot>> {
         let records = self.read_calibration_records().await?;
         let mut latest: HashMap<String, SignalSnapshot> = HashMap::new();
-        for record in &records {
+        for record in records.iter() {
             let StoredSignalRecord::Snapshot(snapshot) = record else {
                 continue;
             };

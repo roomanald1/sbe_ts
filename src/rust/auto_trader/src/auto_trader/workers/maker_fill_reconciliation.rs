@@ -226,7 +226,7 @@ async fn reconcile_maker_fills(
         settings.daily_realized_pnl += realized_usd;
     }
     if changed {
-        persist_settings(&state.settings_path, &settings)?;
+        request_settings_persist(state)?;
     }
     Ok(())
 }

@@ -18,7 +18,10 @@ impl SignalStore {
     pub async fn missed_opportunity_bands(&self) -> Result<Vec<MissedOpportunityGateBand>> {
         let cache = self.missed_opportunity_cache.lock().await;
         if let Some((created, value)) = cache.as_ref() {
-            if created.elapsed() < Duration::from_secs(60) {
+            // This analysis scans a large audit/evaluation history. Keep the
+            // last complete result around longer and refresh it off the caller's
+            // path; signal ingestion must never wait for this database work.
+            if created.elapsed() < Duration::from_secs(15 * 60) {
                 return Ok(value.clone());
             }
             let stale = value.clone();
@@ -41,9 +44,23 @@ impl SignalStore {
             return Ok(stale);
         }
         drop(cache);
-        let value = self.compute_missed_opportunity_bands().await?;
-        *self.missed_opportunity_cache.lock().await = Some((Instant::now(), value.clone()));
-        Ok(value)
+        if self
+            .walk_forward_refreshing
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            let store = self.clone();
+            tokio::spawn(async move {
+                if let Ok(value) = store.compute_missed_opportunity_bands().await {
+                    *store.missed_opportunity_cache.lock().await =
+                        Some((Instant::now(), value));
+                }
+                store
+                    .walk_forward_refreshing
+                    .store(false, Ordering::Release);
+            });
+        }
+        Ok(Vec::new())
     }
 
     async fn compute_missed_opportunity_bands(&self) -> Result<Vec<MissedOpportunityGateBand>> {

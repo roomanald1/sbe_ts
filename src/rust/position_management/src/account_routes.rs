@@ -1,8 +1,9 @@
 async fn get_account(
     State(store): State<Arc<PositionStore>>,
 ) -> Result<Json<AccountResponse>, (StatusCode, String)> {
-    let ledger = store.ledger.lock().await.clone();
-    Ok(Json(account_snapshot(&store, &ledger).await?))
+    let rates = get_usd_rates().await?.0.rates;
+    let ledger = store.ledger.lock().await;
+    Ok(Json(account_snapshot_with_rates(&store, &ledger, &rates)?))
 }
 async fn set_account_leverage(
     State(store): State<Arc<PositionStore>>,
@@ -14,6 +15,7 @@ async fn set_account_leverage(
             "Maximum leverage must be between 1x and 10x".into(),
         ));
     }
+    let rates = get_usd_rates().await?.0.rates;
     let mut ledger = store.ledger.lock().await;
     ledger.max_leverage = Some(request.max_leverage);
     store.persist(&ledger).await.map_err(|error| {
@@ -22,7 +24,7 @@ async fn set_account_leverage(
             format!("Unable to persist leverage setting: {error}"),
         )
     })?;
-    Ok(Json(account_snapshot(&store, &ledger).await?))
+    Ok(Json(account_snapshot_with_rates(&store, &ledger, &rates)?))
 }
 async fn top_up_account(
     State(store): State<Arc<PositionStore>>,
@@ -34,6 +36,7 @@ async fn top_up_account(
             "Top-up amount must be positive".into(),
         ));
     }
+    let rates = get_usd_rates().await?.0.rates;
     let mut ledger = store.ledger.lock().await;
     ledger.topups.push(AccountTopup {
         amount: request.amount,
@@ -45,6 +48,6 @@ async fn top_up_account(
             format!("Unable to persist account top-up: {error}"),
         )
     })?;
-    Ok(Json(account_snapshot(&store, &ledger).await?))
+    Ok(Json(account_snapshot_with_rates(&store, &ledger, &rates)?))
 }
 

@@ -7,6 +7,10 @@ struct Dashboard {
     missed_opportunity_bands: Vec<MissedOpportunityGateBand>,
     #[serde(default)]
     markets: Arc<BTreeMap<String, serde_json::Value>>,
+    #[serde(skip)]
+    queued_at: Option<Instant>,
+    #[serde(skip)]
+    queue_wait_ms: Option<f64>,
 }
 #[derive(Clone, Deserialize)]
 struct Signal {

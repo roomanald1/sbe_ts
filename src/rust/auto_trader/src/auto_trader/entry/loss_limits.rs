@@ -28,7 +28,7 @@ async fn enforce_daily_realized_loss_limit(
         settings.daily_realized_loss_limit = (settings.daily_realized_loss_limit * 0.9)
             .max(MIN_DAILY_REALIZED_LOSS_LIMIT.min(settings.daily_realized_loss_limit));
         settings.daily_loss_limit_reduced = true;
-        let _ = persist_settings(&state.settings_path, &settings);
+        let _ = request_settings_persist(state);
     }
     Ok(Some(skipped(&format!(
         "Daily realized-loss limit reached at USD {:.2}; learned daily cap is now USD {:.2}",

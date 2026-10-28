@@ -6,18 +6,6 @@ async fn main() -> anyhow::Result<()> {
     tokio::spawn(poll_external_market_features(signal_store.clone()));
     tokio::spawn(run_dated_carry_signal_worker(signal_store.clone()));
     tokio::spawn(poll_daily_strategy_signals(signal_store.clone()));
-    let warm_store = signal_store.clone();
-    tokio::spawn(async move {
-        if let Err(error) = warm_store.walk_forward().await {
-            crate::service_log!("WARN", "Initial walk-forward cache warm failed: {error}");
-        }
-        if let Err(error) = warm_store.missed_opportunity_bands().await {
-            crate::service_log!(
-                "WARN",
-                "Initial skipped-signal counterfactual cache warm failed: {error}"
-            );
-        }
-    });
     let signal_push_cache = Arc::new(DashMap::new());
     let signal_push_notify = Arc::new(Notify::new());
     tokio::spawn(run_signal_push_worker(
@@ -65,19 +53,13 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 async fn process_cpu_seconds() -> String {
-    let stat = std::fs::read_to_string("/proc/self/stat").unwrap_or_default();
-    let fields = stat
-        .rsplit_once(')')
-        .map(|(_, fields)| fields)
-        .unwrap_or("");
-    let values: Vec<u64> = fields
-        .split_whitespace()
-        .filter_map(|value| value.parse().ok())
-        .collect();
-    values
-        .get(11)
-        .zip(values.get(12))
-        .map(|(user, system)| (*user + *system) as f64 / 100.0)
-        .unwrap_or(0.0)
-        .to_string()
+    let mut usage = std::mem::MaybeUninit::<libc::rusage>::zeroed();
+    let result = unsafe { libc::getrusage(libc::RUSAGE_SELF, usage.as_mut_ptr()) };
+    if result != 0 {
+        return "0".to_owned();
+    }
+    let usage = unsafe { usage.assume_init() };
+    let user = usage.ru_utime.tv_sec as f64 + usage.ru_utime.tv_usec as f64 / 1_000_000.0;
+    let system = usage.ru_stime.tv_sec as f64 + usage.ru_stime.tv_usec as f64 / 1_000_000.0;
+    (user + system).to_string()
 }

@@ -73,13 +73,39 @@ fn summarize_missing_days_sync(path: &PathBuf) -> anyhow::Result<()> {
     // Keep one day of raw records. Older records of every type are retained in
     // the compressed daily archive and remain available to historical readers.
     let retention_start = today_start - DAY_MS;
-    let day_starts = {
-        let mut statement = connection.prepare(
-            "SELECT DISTINCT (timestamp / ?1) * ?1 FROM signal_records WHERE timestamp < ?2 ORDER BY 1",
-        )?;
-        statement
-            .query_map(params![DAY_MS, today_start], |row| row.get::<_, i64>(0))?
-            .collect::<rusqlite::Result<Vec<_>>>()?
+    let first_and_last_record = connection.query_row(
+        "SELECT (SELECT timestamp FROM signal_records INDEXED BY signal_records_timestamp ORDER BY timestamp ASC LIMIT 1), (SELECT timestamp FROM signal_records INDEXED BY signal_records_timestamp ORDER BY timestamp DESC LIMIT 1)",
+        [],
+        |row| Ok((row.get::<_, Option<i64>>(0)?, row.get::<_, Option<i64>>(1)?)),
+    )?;
+    let day_starts = if let (Some(first_record), Some(last_record)) = first_and_last_record {
+        let summarized_days = {
+            let mut statement =
+                connection.prepare("SELECT day_start_ms FROM signal_daily_summary_runs")?;
+            statement
+                .query_map([], |row| row.get::<_, i64>(0))?
+                .collect::<rusqlite::Result<std::collections::HashSet<_>>>()?
+        };
+        let first_day = first_record.div_euclid(DAY_MS) * DAY_MS;
+        let last_day = (last_record.div_euclid(DAY_MS) * DAY_MS).min(today_start - DAY_MS);
+        let mut missing = Vec::new();
+        let mut day_start = first_day;
+        while day_start <= last_day {
+            if !summarized_days.contains(&day_start) {
+                let has_records = connection.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM signal_records INDEXED BY signal_records_timestamp WHERE timestamp >= ?1 AND timestamp < ?2)",
+                    params![day_start, day_start + DAY_MS],
+                    |row| row.get::<_, bool>(0),
+                )?;
+                if has_records {
+                    missing.push(day_start);
+                }
+            }
+            day_start += DAY_MS;
+        }
+        missing
+    } else {
+        Vec::new()
     };
     for day_start in day_starts {
         let aggregates = {

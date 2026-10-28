@@ -74,13 +74,15 @@ async fn run_cycle(
 fn cycle_decision_message(result: &Result<CycleResult, (StatusCode, String)>) -> String {
     match result {
         Ok(cycle) if cycle.status == "order_submitted" || cycle.status == "hedge_submitted" => {
-            format!(
+            let order = format!(
                 "{}: {} {} {}",
                 cycle.status,
                 cycle.side.as_deref().unwrap_or(""),
                 cycle.symbol.as_deref().unwrap_or(""),
                 cycle.order_type.as_deref().unwrap_or("")
-            )
+            );
+            cycle.reason.as_deref().filter(|reason| reason.starts_with("Daily strategy batch:"))
+                .map_or(order.clone(), |summary| format!("{order} · {summary}"))
         }
         Ok(cycle) => cycle
             .reason

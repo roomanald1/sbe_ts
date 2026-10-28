@@ -4,6 +4,18 @@ fn record_execution_stage_timings(
     stage_timings_ms: &mut BTreeMap<String, f64>,
 ) {
     stage_timings_ms.insert("order_submit_response".to_owned(), submit_response_ms);
+    for (response_key, stage) in [
+        ("client_response_headers_ms", "client_request_to_headers"),
+        ("client_body_read_decode_ms", "client_body_read_decode"),
+    ] {
+        if let Some(milliseconds) = response
+            .get(response_key)
+            .and_then(serde_json::Value::as_f64)
+            .filter(|value| value.is_finite() && *value >= 0.0)
+        {
+            stage_timings_ms.insert(stage.to_owned(), milliseconds);
+        }
+    }
     let Some(handler_ms) = response
         .get("position_manager_handler_ms")
         .and_then(serde_json::Value::as_f64)

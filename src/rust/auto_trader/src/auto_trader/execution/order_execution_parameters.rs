@@ -166,22 +166,28 @@ async fn submit_configured_order(
     let (endpoint, body) = build_order_request(
         symbol, side, quantity, bid, ask, kind, params, &client_order_id, now_ms,
     );
+    let request_started = Instant::now();
     let response = client
         .post(format!("{base}{endpoint}"))
         .json(&body)
         .send()
         .await
         .map_err(upstream_error)?;
+    let response_headers_ms = request_started.elapsed().as_secs_f64() * 1_000.0;
     let status = response.status();
     let position_manager_ms = response
         .headers()
         .get("x-position-manager-handler-ms")
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.parse::<f64>().ok());
+    let body_started = Instant::now();
     let response_body = response.bytes().await.map_err(upstream_error)?;
     let mut payload = serde_json::from_slice::<serde_json::Value>(&response_body).unwrap_or_else(
         |_| serde_json::json!({"error": String::from_utf8_lossy(&response_body).trim()}),
     );
+    payload["client_response_headers_ms"] = serde_json::json!(response_headers_ms);
+    payload["client_body_read_decode_ms"] =
+        serde_json::json!(body_started.elapsed().as_secs_f64() * 1_000.0);
     if let Some(handler_ms) = position_manager_ms {
         payload["position_manager_handler_ms"] = serde_json::json!(handler_ms);
     }

@@ -60,6 +60,18 @@ def metrics():
 
     base = SERVICES["position_management"][0]
     try:
+        persistence = get_json(base, "/internal/persistence-timing")
+        for phase, summary in persistence.items():
+            stage = f"position_manager_snapshot_{phase}"
+            for stat in ("latest", "average", "p95"):
+                value = summary.get(f"{stat}_ms")
+                if isinstance(value, (int, float)):
+                    output.append(sample("app_autotrader_stage_latency_ms", "Milliseconds spent serializing and writing a background position-ledger snapshot.", value, {"stage": stage, "stat": stat}))
+            if isinstance(summary.get("samples"), (int, float)):
+                output.append(sample("app_autotrader_stage_latency_samples", "Recent background position-ledger snapshot measurements.", summary["samples"], {"stage": stage}))
+    except (OSError, URLError, ValueError, TypeError):
+        pass
+    try:
         account = get_json(base, "/positions/account")
         for key, metric, help_text in [
             ("equity", "app_account_equity_usd", "Current account equity in USD."),
@@ -98,14 +110,22 @@ def metrics():
         pass
     try:
         activity = get_json(auto_trader_base, "/positions/auto-trader/activity")
-        for key, stat in [("insight_processing_latest_ms", "latest"), ("insight_processing_average_ms", "average"), ("insight_processing_p95_ms", "p95")]:
-            value = activity.get(key)
-            if isinstance(value, (int, float)):
-                output.append(sample("app_autotrader_insight_processing_duration_ms", "Milliseconds spent processing one pushed insight through an AutoTrader cycle.", value, {"stat": stat}))
-                output.append(sample("app_autotrader_stage_latency_ms", "Milliseconds spent in an AutoTrader cycle or recorded order pipeline stage.", value, {"stage": "cycle_total", "stat": stat}))
+        value = activity.get("insight_processing_latest_ms")
+        if isinstance(value, (int, float)):
+            output.append(sample("app_autotrader_insight_processing_duration_ms", "Latest milliseconds spent processing one pushed insight through an AutoTrader cycle.", value, {"stat": "latest"}))
+            output.append(sample("app_autotrader_stage_latency_ms", "Latest milliseconds spent in an AutoTrader cycle or recorded order pipeline stage.", value, {"stage": "cycle_total", "stat": "latest"}))
         if isinstance(activity.get("insight_processing_samples"), (int, float)):
             output.append(sample("app_autotrader_insight_processing_samples", "Number of recent pushed insight processing cycles included in the duration summary.", activity["insight_processing_samples"]))
             output.append(sample("app_autotrader_stage_latency_samples", "Number of recent insight cycles included in the cycle total duration summary.", activity["insight_processing_samples"], {"stage": "cycle_total"}))
+        settings_persistence = activity.get("settings_persistence_ms", {})
+        if isinstance(settings_persistence, dict):
+            for phase, summary in settings_persistence.items():
+                for stat in ("latest", "average", "p95"):
+                    value = summary.get(f"{stat}_ms")
+                    if isinstance(value, (int, float)):
+                        output.append(sample("app_autotrader_stage_latency_ms", "Milliseconds spent serializing or writing a background AutoTrader state snapshot.", value, {"stage": f"settings_{phase}", "stat": stat}))
+                if isinstance(summary.get("samples"), (int, float)):
+                    output.append(sample("app_autotrader_stage_latency_samples", "Recent AutoTrader settings snapshot measurements.", summary["samples"], {"stage": f"settings_{phase}"}))
         for phase, field in (("wait", "cycle_lock_wait_ms"), ("hold", "cycle_lock_hold_ms")):
             worker_summaries = activity.get(field, {})
             if not isinstance(worker_summaries, dict):
@@ -113,10 +133,9 @@ def metrics():
             for worker, summary in worker_summaries.items():
                 if not isinstance(summary, dict):
                     continue
-                for stat in ("latest", "average", "p95"):
-                    value = summary.get(f"{stat}_ms")
-                    if isinstance(value, (int, float)):
-                        output.append(sample("app_autotrader_cycle_lock_duration_ms", "Milliseconds waiting for or holding the shared AutoTrader cycle lock.", value, {"phase": phase, "worker": worker, "stat": stat}))
+                value = summary.get("latest_ms")
+                if isinstance(value, (int, float)):
+                    output.append(sample("app_autotrader_cycle_lock_duration_ms", "Latest milliseconds waiting for or holding the shared AutoTrader cycle lock.", value, {"phase": phase, "worker": worker, "stat": "latest"}))
                 if isinstance(summary.get("samples"), (int, float)):
                     output.append(sample("app_autotrader_cycle_lock_duration_samples", "Recent lock duration observations for an AutoTrader worker.", summary["samples"], {"phase": phase, "worker": worker}))
         for key, metric, help_text in [
@@ -141,9 +160,18 @@ def metrics():
             if isinstance(outcomes, (int, float)):
                 output.append(sample("app_autotrader_strategy_outcomes", "Number of realized trade outcomes grouped by AutoTrader strategy and quote currency.", outcomes, {"strategy": strategy, "quote": quote}))
         orders = activity.get("orders", [])
-        output.append(sample("app_autotrader_orders", "Number of recorded autotrader orders.", len(orders)))
-        for status_name in sorted({order.get("status", "unknown") for order in orders}):
-            output.append(sample("app_autotrader_orders_by_status", "Recorded autotrader orders by status.", sum(1 for order in orders if order.get("status", "unknown") == status_name), {"status": status_name}))
+        # Use the position manager's live order book, not AutoTrader's retained
+        # activity log. Historical statuses such as "armed" can remain after an
+        # exchange order is gone.
+        live_orders = get_json(SERVICES["position_management"][0], "/positions/orders")
+        resting_orders = [order for order in live_orders.get("orders", []) if order.get("source") == "auto"]
+        barrier_orders = live_orders.get("barrier_orders", [])
+        active_barriers = [order for order in barrier_orders if order.get("source") == "auto" and order.get("status") in ("armed", "triggering")]
+        live_count = len(resting_orders) + len(active_barriers)
+        output.append(sample("app_autotrader_orders", "Number of currently open resting and armed AutoTrader orders.", live_count))
+        output.append(sample("app_autotrader_orders_by_status", "Currently open AutoTrader orders by live order type.", len(resting_orders), {"status": "resting"}))
+        output.append(sample("app_autotrader_orders_by_status", "Currently open AutoTrader orders by live order type.", sum(1 for order in active_barriers if order.get("status") == "armed"), {"status": "armed"}))
+        output.append(sample("app_autotrader_orders_by_status", "Currently open AutoTrader orders by live order type.", sum(1 for order in active_barriers if order.get("status") == "triggering"), {"status": "triggering"}))
         tick_to_order = []
         for order in orders:
             if order.get("purpose") != "signal":
@@ -158,26 +186,23 @@ def metrics():
             except (AttributeError, TypeError, ValueError):
                 continue
         if tick_to_order:
-            latencies = sorted(latency for _, latency in tick_to_order)
-            p95_index = max(0, (95 * len(latencies) + 99) // 100 - 1)
-            event_timestamp = max(timestamp for timestamp, _ in tick_to_order)
-            output.append(sample("app_autotrader_tick_to_order_latency_ms", "Milliseconds from signal tick timestamp to autotrader order creation.", latencies[-1], {"stat": "latest"}, timestamp_ms=event_timestamp))
-            output.append(sample("app_autotrader_tick_to_order_latency_ms", "Milliseconds from signal tick timestamp to autotrader order creation.", sum(latencies) / len(latencies), {"stat": "average"}, timestamp_ms=event_timestamp))
-            output.append(sample("app_autotrader_tick_to_order_latency_ms", "Milliseconds from signal tick timestamp to autotrader order creation.", latencies[p95_index], {"stat": "p95"}, timestamp_ms=event_timestamp))
-            output.append(sample("app_autotrader_tick_to_order_samples", "Number of signal orders used in the tick-to-order latency summary.", len(latencies)))
+            _, latest_latency = max(tick_to_order, key=lambda item: item[0])
+            output.append(sample("app_autotrader_tick_to_order_latency_ms", "Latest milliseconds from signal tick timestamp to AutoTrader order creation.", latest_latency, {"stat": "latest"}))
+            output.append(sample("app_autotrader_tick_to_order_samples", "Number of retained signal orders available for the latest tick-to-order measurement.", len(tick_to_order)))
         stage_values = {}
         for order in orders:
             for stage, latency in order.get("stage_timings_ms", {}).items():
                 if isinstance(latency, (int, float)) and latency >= 0:
                     stage_values.setdefault(stage, []).append((int(order.get("timestamp", 0)), latency))
         for stage, samples in stage_values.items():
-            values = sorted(value for _, value in samples)
-            p95_index = max(0, (95 * len(values) + 99) // 100 - 1)
-            event_timestamp = max(timestamp for timestamp, _ in samples)
-            output.append(sample("app_autotrader_stage_latency_ms", "Milliseconds spent in a measured AutoTrader pipeline stage.", values[-1], {"stage": stage, "stat": "latest"}, timestamp_ms=event_timestamp))
-            output.append(sample("app_autotrader_stage_latency_ms", "Milliseconds spent in a measured AutoTrader pipeline stage.", sum(values) / len(values), {"stage": stage, "stat": "average"}, timestamp_ms=event_timestamp))
-            output.append(sample("app_autotrader_stage_latency_ms", "Milliseconds spent in a measured AutoTrader pipeline stage.", values[p95_index], {"stage": stage, "stat": "p95"}, timestamp_ms=event_timestamp))
-            output.append(sample("app_autotrader_stage_latency_samples", "Number of recent AutoTrader orders with a measurement for this pipeline stage.", len(values), {"stage": stage}, timestamp_ms=event_timestamp))
+            # The dashboard asks for one current value per stage. Resolve it by
+            # the newest recorded order, not the largest historical duration.
+            event_timestamp, latest_value = max(samples, key=lambda sample: sample[0])
+            metric_stage = "source_signal_age" if stage == "signal_age_at_order_record" else stage
+            description = "Latest milliseconds per AutoTrader stage; source_signal_age is signal age, not processing time."
+            output.append(sample("app_autotrader_stage_latency_ms", description, latest_value, {"stage": metric_stage, "stat": "latest"}))
+            output.append(sample("app_autotrader_stage_latency_samples", "Number of retained AutoTrader orders available for this stage's latest measurement.", len(samples), {"stage": metric_stage}))
+
     except (OSError, URLError, ValueError, TypeError):
         pass
     return "".join(output).encode()

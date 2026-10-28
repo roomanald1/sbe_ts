@@ -252,7 +252,7 @@ async fn submit_order(
         ));
     }
     processing_timings_ms.insert(
-        "persistence".to_owned(),
+        "persistence_enqueue".to_owned(),
         persistence_started.elapsed().as_secs_f64() * 1_000.0,
     );
     Ok(Json(OrderResponse {

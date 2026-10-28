@@ -890,6 +890,7 @@ dependencies = [
  "dashmap 6.1.0",
  "flate2",
  "futures-util",
+ "libc",
  "reqwest",
  "rsocket_rust",
  "rsocket_rust_transport_websocket",

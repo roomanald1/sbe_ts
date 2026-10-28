@@ -1,8 +1,52 @@
+fn daily_signal_candidate(signal: &Signal) -> bool {
+    signal.strategy_candidate
+        && signal.strategy.as_deref().is_some_and(is_independent_daily_strategy)
+}
+
+fn signal_allowed_by_positions(
+    signal: &Signal,
+    open_positions: &BTreeMap<String, TraderPosition>,
+    strategy_positions: &BTreeMap<String, BTreeMap<String, TraderPosition>>,
+    max_entries_per_auto_position: u32,
+) -> bool {
+    let direction = if signal.direction == "bullish" { 1.0 } else { -1.0 };
+    let Some(strategy_key) = signal.strategy.as_deref() else {
+        return open_positions.get(&signal.symbol).is_none_or(|position| {
+            position.quantity.signum() == direction
+                && position_entries_for_category(position, StrategyCategory::Intraday)
+                    < max_entries_per_auto_position
+        });
+    };
+    let category = strategy_category(Some(strategy_key));
+    let aggregate_position = open_positions.get(&signal.symbol);
+    if aggregate_position.is_some_and(|position| position.quantity.signum() != direction) {
+        return false;
+    }
+    if daily_signal_candidate(signal) {
+        let strategy_position = strategy_positions.get(&signal.symbol)
+            .and_then(|lots| lots.get(strategy_key))
+            .filter(|position| position.quantity.abs() > 1e-12)
+            .or_else(|| aggregate_position.filter(|position| {
+                strategy_positions.is_empty()
+                    && position.strategy.as_deref() == Some(strategy_key)
+            }));
+        return strategy_position.is_none_or(|position| {
+            position.quantity.signum() == direction
+                && position_entries_for_category(position, category) < max_entries_per_auto_position
+        });
+    }
+    aggregate_position.is_none_or(|position| {
+        position.quantity.signum() == direction
+            && position_entries_for_category(position, category) < max_entries_per_auto_position
+    })
+}
+
 fn collect_signal_candidates<'a>(
     signals: &'a [Signal],
     now: u64,
     risk_appetite: f64,
     open_positions: &BTreeMap<String, TraderPosition>,
+    strategy_positions: &BTreeMap<String, BTreeMap<String, TraderPosition>>,
     max_entries_per_auto_position: u32,
 ) -> FreshSignalCandidates<'a> {
     let mut stale_signal_count = 0;
@@ -27,16 +71,12 @@ fn collect_signal_candidates<'a>(
                 non_directional_count += 1;
                 return false;
             }
-            let allowed_by_position = open_positions.get(&signal.symbol).is_none_or(|position| {
-                let signal_quantity = if signal.direction == "bullish" {
-                    1.0
-                } else {
-                    -1.0
-                };
-                let category = strategy_category(signal.strategy.as_deref());
-                position.quantity.signum() == signal_quantity
-                    && position_entries_for_category(position, category) < max_entries_per_auto_position
-            });
+            let allowed_by_position = signal_allowed_by_positions(
+                signal,
+                open_positions,
+                strategy_positions,
+                max_entries_per_auto_position,
+            );
             if !allowed_by_position {
                 position_blocked_count += 1;
             }
@@ -62,19 +102,12 @@ fn collect_signal_candidates<'a>(
             } else {
                 "bearish".into()
             };
-            let allowed_by_position =
-                open_positions
-                    .get(&candidate.symbol)
-                    .is_none_or(|position| {
-                        let direction = if candidate.direction == "bullish" {
-                            1.0
-                        } else {
-                            -1.0
-                        };
-                        let category = strategy_category(candidate.strategy.as_deref());
-                        position.quantity.signum() == direction
-                            && position_entries_for_category(position, category) < max_entries_per_auto_position
-                    });
+            let allowed_by_position = signal_allowed_by_positions(
+                &candidate,
+                open_positions,
+                strategy_positions,
+                max_entries_per_auto_position,
+            );
             allowed_by_position.then_some(candidate)
         })
         .collect::<Vec<_>>();
@@ -216,3 +249,50 @@ fn format_no_tradeable_bias(
 
 
 include!("../diagnostics/candidate_entry_review.rs");
+
+#[cfg(test)]
+mod parallel_daily_candidate_tests {
+    use super::*;
+
+    fn signal(strategy: &str, direction: &str) -> Signal {
+        Signal {
+            symbol: "ETH-USDT".into(),
+            direction: direction.into(),
+            strength: 1.0,
+            timestamp: 100_000,
+            stale: false,
+            score: 1.0,
+            ranging_probability: None,
+            components: SignalComponents::default(),
+            strategy_candidate: true,
+            strategy: Some(strategy.into()),
+            strategy_decision: None,
+            market_regime: None,
+        }
+    }
+
+    #[test]
+    fn same_side_daily_strategy_is_not_blocked_by_another_strategy_lot() {
+        let mut aggregate = TraderPosition::default();
+        aggregate.quantity = 1.0;
+        aggregate.entries_by_category.insert("daily".into(), 1);
+        let open = BTreeMap::from([("ETH-USDT".into(), aggregate)]);
+        let mut existing_lot = TraderPosition::default();
+        existing_lot.quantity = 1.0;
+        existing_lot.entries_by_category.insert("daily".into(), 1);
+        let lots = BTreeMap::from([(
+            "ETH-USDT".into(),
+            BTreeMap::from([("donchian-55-btc200".into(), existing_lot)]),
+        )]);
+
+        assert!(signal_allowed_by_positions(
+            &signal("trend-50-200", "bullish"), &open, &lots, 1,
+        ));
+        assert!(!signal_allowed_by_positions(
+            &signal("donchian-55-btc200", "bullish"), &open, &lots, 1,
+        ));
+        assert!(!signal_allowed_by_positions(
+            &signal("trend-50-200", "bearish"), &open, &lots, 1,
+        ));
+    }
+}

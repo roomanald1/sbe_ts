@@ -1,9 +1,149 @@
+async fn submit_cycle_signal(
+    state: &AutoTraderState,
+    client: &reqwest::Client,
+    position_url: &str,
+    dashboard: &Dashboard,
+    signal: &Signal,
+    exploratory: bool,
+    scout: bool,
+    counterfactual_stop_loss_percent: f64,
+    counterfactual_take_profit_percent: f64,
+    dashboard_ms: f64,
+    signal_selection_ms: f64,
+    now: u64,
+) -> Result<CycleResult, (StatusCode, String)> {
+    let evidence = dashboard.walk_forward.iter().find(|item| {
+        item.symbol == signal.symbol && is_entry_evidence_horizon(item.horizon_seconds)
+    });
+    let selected_payload = signal_audit_payload(
+        signal,
+        "decision",
+        now.saturating_mul(1000),
+        "selected",
+        Some(if scout {
+            "scout candidate selected; capped paper exploration"
+        } else if exploratory {
+            "exploratory candidate selected"
+        } else {
+            "strategy candidate selected"
+        }),
+        Some(exploratory),
+        counterfactual_stop_loss_percent,
+        counterfactual_take_profit_percent,
+        evidence,
+    );
+    let mut selected_payload = selected_payload;
+    selected_payload["scout"] = serde_json::json!(scout);
+    queue_auto_trader_audit(state, selected_payload);
+    if !signal
+        .symbol
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+    {
+        return Ok(skipped_for_signal(
+            signal,
+            "Selected insight has an invalid instrument symbol",
+        ));
+    }
+    let SignalMarketSnapshot {
+        market,
+        bid,
+        ask,
+        mid,
+        market_inputs_ms,
+    } = match load_signal_market_snapshot(client, position_url, dashboard, now, signal).await {
+        Ok(snapshot) => snapshot,
+        Err(result) => return Ok(result),
+    };
+    // Market snapshot retrieval above is read-only and can be slow. The selected
+    // order path locks through the in-memory reservation, then releases before HTTP.
+    submit_selected_signal(SelectedSignalOrderRequest {
+        state,
+        client,
+        position_url,
+        dashboard,
+        signal,
+        exploratory,
+        scout,
+        counterfactual_stop_loss_percent,
+        counterfactual_take_profit_percent,
+        dashboard_ms,
+        signal_selection_ms,
+        now,
+        market,
+        bid,
+        ask,
+        mid,
+        market_inputs_ms,
+    })
+    .await
+}
+
+fn daily_candidate_priority(settings: &Settings, signal: &Signal) -> (f64, f64) {
+    let Some(strategy) = signal.strategy.as_deref().and_then(Strategy::from_name) else {
+        return (0.0, 0.0);
+    };
+    let outcomes = strategy_learning_stats(settings, &signal.symbol, strategy);
+    let confidence = confident_win_rate_edge(outcomes.positive, outcomes.samples);
+    let mean_realized_pnl = if outcomes.samples >= STRATEGY_PARAMETER_MIN_SAMPLES {
+        outcomes.realized_pnl / outcomes.samples as f64
+    } else {
+        0.0
+    };
+    (confidence, mean_realized_pnl)
+}
+
+fn daily_strategy_candidates<'a>(signals: &[&'a Signal], settings: &Settings) -> Vec<&'a Signal> {
+    let mut candidates = signals
+        .iter()
+        .copied()
+        .filter(|signal| daily_signal_candidate(signal))
+        .collect::<Vec<_>>();
+    candidates.sort_by(|left, right| {
+        let left_priority = daily_candidate_priority(settings, left);
+        let right_priority = daily_candidate_priority(settings, right);
+        right_priority
+            .0
+            .total_cmp(&left_priority.0)
+            .then_with(|| right_priority.1.total_cmp(&left_priority.1))
+            .then_with(|| left.strategy.cmp(&right.strategy))
+    });
+    candidates
+}
+
+fn daily_strategy_batch_result(
+    last_order: Option<CycleResult>,
+    evaluated: usize,
+    submitted: usize,
+    details: &[String],
+) -> CycleResult {
+    let summary = if details.is_empty() {
+        format!("Daily strategy batch: {submitted}/{evaluated} orders submitted; shared limits respected")
+    } else {
+        format!(
+            "Daily strategy batch: {submitted}/{evaluated} orders submitted; {}",
+            details.join("; ")
+        )
+    };
+    if let Some(mut result) = last_order {
+        result.reason = Some(summary);
+        return result;
+    }
+    CycleResult {
+        status: "skipped",
+        reason: Some(summary),
+        symbol: None,
+        side: None,
+        quantity: None,
+        order_type: None,
+        order_response: None,
+    }
+}
+
 async fn run_cycle_inner(
     state: &AutoTraderState,
     mut dashboard: Dashboard,
 ) -> Result<CycleResult, (StatusCode, String)> {
-    let cycle_started = Instant::now();
-    let _cycle = acquire_cycle_lock(state, "signal").await;
     {
         let mut settings = state.settings.lock().await;
         settings.last_risk_note.clear();
@@ -60,15 +200,27 @@ async fn run_cycle_inner(
         )
     };
     let has_live_signal_strategies = !live_strategies.is_empty() && !dashboard.best.is_empty();
-    let has_daily_strategy_signals = dashboard.best.iter().any(|signal| signal.strategy_candidate
-        && signal.strategy.as_deref().and_then(Strategy::from_name)
-            .is_some_and(|strategy| !strategy.is_live_insight() && !strategy.is_dated_carry()));
+    let has_daily_strategy_signals = dashboard.best.iter().any(|signal| {
+        signal.strategy_candidate
+            && signal
+                .strategy
+                .as_deref()
+                .and_then(Strategy::from_name)
+                .is_some_and(|strategy| !strategy.is_live_insight() && !strategy.is_dated_carry())
+    });
     if has_daily_strategy_signals {
-        dashboard.best.retain(|signal| signal.strategy_candidate
-            && signal.strategy.as_deref().and_then(Strategy::from_name)
-                .is_some_and(|strategy| !strategy.is_live_insight()
-                    && !strategy.is_dated_carry()
-                    && strategy_settings.strategies.contains(&strategy)));
+        dashboard.best.retain(|signal| {
+            signal.strategy_candidate
+                && signal
+                    .strategy
+                    .as_deref()
+                    .and_then(Strategy::from_name)
+                    .is_some_and(|strategy| {
+                        !strategy.is_live_insight()
+                            && !strategy.is_dated_carry()
+                            && strategy_settings.strategies.contains(&strategy)
+                    })
+        });
     } else if has_live_signal_strategies {
         dashboard.best = dashboard
             .best
@@ -165,7 +317,7 @@ async fn run_cycle_inner(
         counterfactual_stop_loss_percent,
         counterfactual_take_profit_percent,
     );
-    let (open_positions, max_entries_per_auto_position) = {
+    let (open_positions, strategy_positions, max_entries_per_auto_position) = {
         let settings = state.settings.lock().await;
         (
             settings
@@ -174,6 +326,7 @@ async fn run_cycle_inner(
                 .filter(|(_, position)| position.quantity.abs() > 1e-12)
                 .map(|(symbol, position)| (symbol.clone(), position.clone()))
                 .collect::<BTreeMap<_, _>>(),
+            settings.strategy_positions.clone(),
             settings.max_entries_per_auto_position,
         )
     };
@@ -190,8 +343,59 @@ async fn run_cycle_inner(
         now,
         risk_appetite,
         &open_positions,
+        &strategy_positions,
         max_entries_per_auto_position,
     );
+    let signal_selection_ms = selection_started.elapsed().as_secs_f64() * 1000.0;
+    if has_daily_strategy_signals {
+        let candidates = daily_strategy_candidates(&fresh_directional, &strategy_settings);
+        let evaluated = candidates.len();
+        if candidates.is_empty() {
+            let reason = format!(
+                "No daily strategy candidate passed entry checks; {} blocked by existing positions; {} stale",
+                position_blocked_count, stale_signal_count,
+            );
+            return Ok(skipped(&reason));
+        }
+        let mut submitted = 0;
+        let mut last_order = None;
+        let mut details = Vec::new();
+        for signal in candidates {
+            let strategy_name = signal.strategy.as_deref().unwrap_or("unknown-strategy");
+            let result = match submit_cycle_signal(
+                state,
+                &client,
+                &position_url,
+                &dashboard,
+                signal,
+                false,
+                false,
+                counterfactual_stop_loss_percent,
+                counterfactual_take_profit_percent,
+                dashboard_ms,
+                signal_selection_ms,
+                now,
+            )
+            .await
+            {
+                Ok(result) => result,
+                Err((status, error)) => {
+                    details.push(format!("{strategy_name}: request error {status}: {error}"));
+                    continue;
+                }
+            };
+            if result.status == "order_submitted" {
+                submitted += 1;
+                last_order = Some(result);
+            } else {
+                let reason = result.reason.as_deref().unwrap_or(result.status);
+                details.push(format!("{strategy_name}: {reason}"));
+            }
+        }
+        return Ok(daily_strategy_batch_result(
+            last_order, evaluated, submitted, &details,
+        ));
+    }
     let (signal, exploratory, scout) = match select_cycle_signal(SignalSelectionInput {
         state,
         dashboard: &dashboard,
@@ -218,68 +422,57 @@ async fn run_cycle_inner(
         Err(result) => return Ok(result),
     };
     let signal_selection_ms = selection_started.elapsed().as_secs_f64() * 1000.0;
-    let evidence = dashboard.walk_forward.iter().find(|item| {
-        item.symbol == signal.symbol && is_entry_evidence_horizon(item.horizon_seconds)
-    });
-    let selected_payload = signal_audit_payload(
-        signal,
-        "decision",
-        now.saturating_mul(1000),
-        "selected",
-        Some(if scout {
-            "scout candidate selected; capped paper exploration"
-        } else if exploratory {
-            "exploratory candidate selected"
-        } else {
-            "strict walk-forward candidate selected"
-        }),
-        Some(exploratory),
-        counterfactual_stop_loss_percent,
-        counterfactual_take_profit_percent,
-        evidence,
-    );
-    let mut selected_payload = selected_payload;
-    selected_payload["scout"] = serde_json::json!(scout);
-    queue_auto_trader_audit(state, selected_payload);
-    if !signal
-        .symbol
-        .bytes()
-        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
-    {
-        return Ok(skipped_for_signal(
-            signal,
-            "Selected insight has an invalid instrument symbol",
-        ));
-    }
-    let SignalMarketSnapshot {
-        market,
-        bid,
-        ask,
-        mid,
-        market_inputs_ms,
-    } = match load_signal_market_snapshot(&client, &position_url, &dashboard, now, signal).await {
-        Ok(snapshot) => snapshot,
-        Err(result) => return Ok(result),
-    };
-    submit_selected_signal(SelectedSignalOrderRequest {
+    submit_cycle_signal(
         state,
-        client: &client,
-        position_url: &position_url,
-        dashboard: &dashboard,
+        &client,
+        &position_url,
+        &dashboard,
         signal,
         exploratory,
         scout,
         counterfactual_stop_loss_percent,
         counterfactual_take_profit_percent,
-        cycle_started,
         dashboard_ms,
         signal_selection_ms,
         now,
-        market,
-        bid,
-        ask,
-        mid,
-        market_inputs_ms,
-    })
+    )
     .await
+}
+
+#[cfg(test)]
+mod parallel_daily_cycle_tests {
+    use super::*;
+
+    fn signal(strategy: &str) -> Signal {
+        Signal {
+            symbol: "ETH-USDT".into(),
+            direction: "bullish".into(),
+            strength: 1.0,
+            timestamp: 10,
+            stale: false,
+            score: 1.0,
+            ranging_probability: None,
+            components: SignalComponents::default(),
+            strategy_candidate: true,
+            strategy: Some(strategy.into()),
+            strategy_decision: None,
+            market_regime: None,
+        }
+    }
+
+    #[test]
+    fn batch_keeps_every_strategy_candidate_for_same_symbol() {
+        let signals = vec![
+            signal("trend-50-200"),
+            signal("donchian-55-btc200"),
+            signal("live-momentum"),
+        ];
+        let candidates =
+            daily_strategy_candidates(&signals.iter().collect::<Vec<_>>(), &Settings::default());
+        let names = candidates
+            .iter()
+            .map(|item| item.strategy.as_deref().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(names, vec!["donchian-55-btc200", "trend-50-200"]);
+    }
 }

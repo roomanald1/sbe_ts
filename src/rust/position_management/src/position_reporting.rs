@@ -3,6 +3,18 @@
 struct PositionSourceQuery {
     source: Option<String>,
 }
+#[derive(Clone)]
+struct RealizedPnlLedgerSnapshot {
+    trade_count: usize,
+    barrier_count: usize,
+    source: Option<String>,
+    since_ms: u64,
+    today_by_quote: BTreeMap<String, f64>,
+    today_by_parent_order: BTreeMap<String, f64>,
+    today_by_barrier_created_at: BTreeMap<String, f64>,
+    all_time_by_quote: BTreeMap<String, f64>,
+}
+
 async fn get_realized_pnl(
     State(store): State<Arc<PositionStore>>,
     Query(query): Query<RealizedPnlQuery>,
@@ -19,65 +31,93 @@ async fn get_realized_pnl(
     }
     let since_ms = query.since_ms.unwrap_or(0);
     let ledger = store.ledger.lock().await;
-    let mut trades = ledger
-        .trades
-        .iter()
-        .filter(|trade| {
-            query
-                .source
-                .as_deref()
-                .is_none_or(|source| trade.source == source)
-        })
-        .cloned()
-        .collect::<Vec<_>>();
-    trades.sort_by_key(|trade| trade.timestamp);
-    let mut positions = BTreeMap::<String, Position>::new();
-    let mut today_by_quote = BTreeMap::<String, f64>::new();
-    let mut today_by_parent_order = BTreeMap::<String, f64>::new();
-    let barrier_created_at = ledger
-        .barrier_orders
-        .iter()
-        .map(|barrier| (barrier.id.clone(), barrier.created_at.to_string()))
-        .collect::<HashMap<_, _>>();
-    let mut today_by_barrier_created_at = BTreeMap::<String, f64>::new();
-    let mut all_time_by_quote = BTreeMap::<String, f64>::new();
-    for trade in &trades {
-        let position = positions.entry(trade.symbol.clone()).or_insert(Position {
-            symbol: trade.symbol.clone(),
-            quantity: 0.0,
-            average_entry_price: 0.0,
-            realized_pnl: 0.0,
-            entry_fees: 0.0,
-            fees_paid: 0.0,
-            estimated_exit_fee_rate: 0.0,
-            last_trade_timestamp: trade.timestamp,
+    let snapshot = {
+        let mut cache = store
+            .realized_pnl_cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let is_current = cache.as_ref().is_some_and(|snapshot| {
+            snapshot.trade_count == ledger.trades.len()
+                && snapshot.barrier_count == ledger.barrier_orders.len()
+                && snapshot.source == query.source
+                && snapshot.since_ms == since_ms
         });
-        let prior_realized = position.realized_pnl;
-        apply_trade(position, trade);
-        let realized_delta = position.realized_pnl - prior_realized;
-        if realized_delta.abs() <= EPSILON {
-            continue;
-        }
-        let quote = trade
-            .symbol
-            .split_once('-')
-            .map(|(_, quote)| quote)
-            .unwrap_or("USD");
-        *all_time_by_quote.entry(quote.to_owned()).or_default() += realized_delta;
-        if trade.timestamp >= since_ms {
-            *today_by_quote.entry(quote.to_owned()).or_default() += realized_delta;
-            if let Some(parent_order_id) = trade.parent_order_id.as_deref() {
-                *today_by_parent_order
-                    .entry(parent_order_id.to_owned())
-                    .or_default() += realized_delta;
-                if let Some(created_at) = barrier_created_at.get(parent_order_id) {
-                    *today_by_barrier_created_at
-                        .entry(created_at.clone())
-                        .or_default() += realized_delta;
+        if !is_current {
+            let mut trades = ledger
+                .trades
+                .iter()
+                .filter(|trade| {
+                    query
+                        .source
+                        .as_deref()
+                        .is_none_or(|source| trade.source == source)
+                })
+                .cloned()
+                .collect::<Vec<_>>();
+            trades.sort_by_key(|trade| trade.timestamp);
+            let mut positions = BTreeMap::<String, Position>::new();
+            let mut today_by_quote = BTreeMap::<String, f64>::new();
+            let mut today_by_parent_order = BTreeMap::<String, f64>::new();
+            let barrier_created_at = ledger
+                .barrier_orders
+                .iter()
+                .map(|barrier| (barrier.id.clone(), barrier.created_at.to_string()))
+                .collect::<HashMap<_, _>>();
+            let mut today_by_barrier_created_at = BTreeMap::<String, f64>::new();
+            let mut all_time_by_quote = BTreeMap::<String, f64>::new();
+            for trade in &trades {
+                let position = positions.entry(trade.symbol.clone()).or_insert(Position {
+                    symbol: trade.symbol.clone(),
+                    quantity: 0.0,
+                    average_entry_price: 0.0,
+                    realized_pnl: 0.0,
+                    entry_fees: 0.0,
+                    fees_paid: 0.0,
+                    estimated_exit_fee_rate: 0.0,
+                    last_trade_timestamp: trade.timestamp,
+                });
+                let prior_realized = position.realized_pnl;
+                apply_trade(position, trade);
+                let realized_delta = position.realized_pnl - prior_realized;
+                if realized_delta.abs() <= EPSILON {
+                    continue;
+                }
+                let quote = trade
+                    .symbol
+                    .split_once('-')
+                    .map(|(_, quote)| quote)
+                    .unwrap_or("USD");
+                *all_time_by_quote.entry(quote.to_owned()).or_default() += realized_delta;
+                if trade.timestamp >= since_ms {
+                    *today_by_quote.entry(quote.to_owned()).or_default() += realized_delta;
+                    if let Some(parent_order_id) = trade.parent_order_id.as_deref() {
+                        *today_by_parent_order
+                            .entry(parent_order_id.to_owned())
+                            .or_default() += realized_delta;
+                        if let Some(created_at) = barrier_created_at.get(parent_order_id) {
+                            *today_by_barrier_created_at
+                                .entry(created_at.clone())
+                                .or_default() += realized_delta;
+                        }
+                    }
                 }
             }
+            *cache = Some(RealizedPnlLedgerSnapshot {
+                trade_count: ledger.trades.len(),
+                barrier_count: ledger.barrier_orders.len(),
+                source: query.source.clone(),
+                since_ms,
+                today_by_quote,
+                today_by_parent_order,
+                today_by_barrier_created_at,
+                all_time_by_quote,
+            });
         }
-    }
+        cache
+            .as_ref()
+            .expect("realized P&L cache populated")
+            .clone()
+    };
     drop(ledger);
     let rates = get_usd_rates().await?.0.rates;
     let convert_usd = |totals: &BTreeMap<String, f64>| -> Option<f64> {
@@ -86,13 +126,47 @@ async fn get_realized_pnl(
         })
     };
     Ok(Json(RealizedPnlResponse {
-        realized_pnl_usd: convert_usd(&today_by_quote),
-        realized_pnl_by_quote: today_by_quote,
-        realized_pnl_by_parent_order: today_by_parent_order,
-        realized_pnl_by_barrier_created_at: today_by_barrier_created_at,
-        realized_pnl_all_time_usd: convert_usd(&all_time_by_quote),
-        realized_pnl_all_time_by_quote: all_time_by_quote,
+        realized_pnl_usd: convert_usd(&snapshot.today_by_quote),
+        realized_pnl_by_quote: snapshot.today_by_quote,
+        realized_pnl_by_parent_order: snapshot.today_by_parent_order,
+        realized_pnl_by_barrier_created_at: snapshot.today_by_barrier_created_at,
+        realized_pnl_all_time_usd: convert_usd(&snapshot.all_time_by_quote),
+        realized_pnl_all_time_by_quote: snapshot.all_time_by_quote,
     }))
+}
+
+
+fn cached_position_summary(
+    store: &PositionStore,
+    ledger: &Ledger,
+    source: Option<&str>,
+) -> PositionsResponse {
+    let source = source.map(str::to_owned);
+    let mut cache = store
+        .positions_cache
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if cache
+        .as_ref()
+        .is_none_or(|snapshot| snapshot.trade_count != ledger.trades.len())
+    {
+        *cache = Some(PositionSummarySnapshot {
+            trade_count: ledger.trades.len(),
+            by_source: HashMap::new(),
+        });
+    }
+    let snapshot = cache.as_mut().expect("position summary cache populated");
+    if !snapshot.by_source.contains_key(&source) {
+        let response = summarize_positions_from(ledger.trades.iter().filter(|trade| {
+            source.as_deref().is_none_or(|source| trade.source == source)
+        }));
+        snapshot.by_source.insert(source.clone(), response);
+    }
+    snapshot
+        .by_source
+        .get(&source)
+        .expect("position summary inserted")
+        .clone()
 }
 
 async fn get_positions(
@@ -110,17 +184,6 @@ async fn get_positions(
         ));
     }
     let ledger = store.ledger.lock().await;
-    let trades = ledger
-        .trades
-        .iter()
-        .filter(|trade| {
-            query
-                .source
-                .as_deref()
-                .is_none_or(|source| trade.source == source)
-        })
-        .cloned()
-        .collect::<Vec<_>>();
-    Ok(Json(summarize_positions(&trades)))
+    let positions = cached_position_summary(&store, &ledger, query.source.as_deref());
+    Ok(Json(positions))
 }
-

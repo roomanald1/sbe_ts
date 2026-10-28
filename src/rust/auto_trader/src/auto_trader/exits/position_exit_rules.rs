@@ -84,7 +84,9 @@ fn profit_protection_state(
     }
 
     if current_return_percent >= parameters.activation_percent {
-        peak = Some(peak.map_or(current_return_percent, |prior| prior.max(current_return_percent)));
+        peak = Some(peak.map_or(current_return_percent, |prior| {
+            prior.max(current_return_percent)
+        }));
     }
     if peak.is_some_and(|high| {
         current_return_percent
@@ -107,7 +109,9 @@ async fn evaluate_position_exit(
 ) -> Result<Option<CycleResult>, (StatusCode, String)> {
     let position_is_current = {
         let settings = state.settings.lock().await;
-        settings.strategy_positions.get(&symbol)
+        settings
+            .strategy_positions
+            .get(&symbol)
             .and_then(|lots| lots.get(&strategy_key))
             .is_some_and(|current| {
                 (current.quantity - position.quantity).abs() <= 1e-12
@@ -135,18 +139,26 @@ async fn evaluate_position_exit(
         .as_millis() as u64;
     {
         let mut settings = state.settings.lock().await;
-        if let Some(current) = settings.strategy_positions.get_mut(&symbol).and_then(|lots| lots.get_mut(&strategy_key)) {
+        if let Some(current) = settings
+            .strategy_positions
+            .get_mut(&symbol)
+            .and_then(|lots| lots.get_mut(&strategy_key))
+        {
             let should_sample = current
                 .price_path
                 .last()
                 .is_none_or(|sample| observed_at.saturating_sub(sample.timestamp) >= 5_000);
             if should_sample {
-                current.price_path.push(TradePriceSample { timestamp: observed_at, bid, ask });
+                current.price_path.push(TradePriceSample {
+                    timestamp: observed_at,
+                    bid,
+                    ask,
+                });
                 if current.price_path.len() > 4096 {
                     current.price_path.drain(..current.price_path.len() - 4096);
                 }
                 position.price_path = current.price_path.clone();
-                persist_settings(&state.settings_path, &settings)?;
+                request_settings_persist(state)?;
             } else {
                 position.price_path = current.price_path.clone();
             }
@@ -180,10 +192,8 @@ async fn evaluate_position_exit(
                 .map(|target| target.max(configured_take_profit_percent))
         })
         .unwrap_or(configured_take_profit_percent);
-    let take_profit_percent = confidence_adjusted_take_profit_percent(
-        &closed_trade_returns,
-        take_profit_percent,
-    );
+    let take_profit_percent =
+        confidence_adjusted_take_profit_percent(&closed_trade_returns, take_profit_percent);
     let take_profit_percent = age_adjusted_take_profit_percent(
         position.strategy.as_deref(),
         position.entry_timestamp_ms,
@@ -193,42 +203,56 @@ async fn evaluate_position_exit(
     let protection_parameters = profit_protection_parameters(&position);
     let net_return_percent = return_fraction * 100.0;
     let previous_protection_peak = position.profit_protection_peak_return_percent;
-    let (protection_peak, profit_protection_exit) = profit_protection_state(
-        &position,
-        net_return_percent,
-        protection_parameters,
-    );
+    let (protection_peak, profit_protection_exit) =
+        profit_protection_state(&position, net_return_percent, protection_parameters);
     if protection_peak != previous_protection_peak {
         let mut settings = state.settings.lock().await;
-        if let Some(current) = settings.strategy_positions.get_mut(&symbol).and_then(|lots| lots.get_mut(&strategy_key)) {
+        if let Some(current) = settings
+            .strategy_positions
+            .get_mut(&symbol)
+            .and_then(|lots| lots.get_mut(&strategy_key))
+        {
             if (current.quantity - position.quantity).abs() <= 1e-12
                 && (current.average_entry_price - position.average_entry_price).abs() <= 1e-12
             {
                 current.profit_protection_peak_return_percent = protection_peak;
                 position.profit_protection_peak_return_percent = protection_peak;
-                persist_settings(&state.settings_path, &settings)?;
+                request_settings_persist(state)?;
             }
         }
     }
     let (strategy_disabled, strategy_no_longer_eligible) = {
         let settings = state.settings.lock().await;
         let strategy_disabled = position.strategy.as_ref().is_some_and(|name| {
-            let enabled = settings.strategies.iter().any(|strategy| strategy.as_str() == name);
-            Strategy::from_name(name).map_or(!enabled, |strategy| strategy.should_exit_when_disabled(enabled))
+            let enabled = settings
+                .strategies
+                .iter()
+                .any(|strategy| strategy.as_str() == name);
+            Strategy::from_name(name).map_or(!enabled, |strategy| {
+                strategy.should_exit_when_disabled(enabled)
+            })
         });
         (strategy_disabled, position.strategy.clone())
     };
-    let risk_adjusted_momentum = strategy_no_longer_eligible.as_deref()
-        == Some("risk-adjusted-monthly-momentum");
+    let risk_adjusted_momentum =
+        strategy_no_longer_eligible.as_deref() == Some("risk-adjusted-monthly-momentum");
     let research_state_unavailable = risk_adjusted_momentum && research_regime.is_none();
-    let research_exit = strategy_no_longer_eligible.as_deref().is_some_and(|strategy| {
-        research_regime.is_some_and(|regime| regime.strategy_exit_required(strategy, &symbol))
-    });
-    let strategy_rebalance = strategy_no_longer_eligible.as_deref().is_some_and(|strategy| {
-        research_regime.is_some_and(|regime| {
-            regime.strategy_rebalance_required(strategy, &symbol, position.strategy_decision.as_ref())
-        })
-    });
+    let research_exit = strategy_no_longer_eligible
+        .as_deref()
+        .is_some_and(|strategy| {
+            research_regime.is_some_and(|regime| regime.strategy_exit_required(strategy, &symbol))
+        });
+    let strategy_rebalance = strategy_no_longer_eligible
+        .as_deref()
+        .is_some_and(|strategy| {
+            research_regime.is_some_and(|regime| {
+                regime.strategy_rebalance_required(
+                    strategy,
+                    &symbol,
+                    position.strategy_decision.as_ref(),
+                )
+            })
+        });
     let signal_managed_strategy = matches!(
         strategy_no_longer_eligible.as_deref(),
         Some("donchian-55-btc200" | "donchian-20-btc200" | "risk-adjusted-monthly-momentum")
@@ -270,12 +294,16 @@ async fn evaluate_position_exit(
                 })?
                 .as_millis() as u64;
             let mut settings = state.settings.lock().await;
-            if let Some(current) = settings.strategy_positions.get_mut(&symbol).and_then(|lots| lots.get_mut(&strategy_key)) {
+            if let Some(current) = settings
+                .strategy_positions
+                .get_mut(&symbol)
+                .and_then(|lots| lots.get_mut(&strategy_key))
+            {
                 let was_deferred = current.take_profit_deferred_at_ms.is_some();
                 let deferred_at = *current.take_profit_deferred_at_ms.get_or_insert(now_ms);
                 if now_ms.saturating_sub(deferred_at) < MAX_TAKE_PROFIT_HOLD_MS {
                     if !was_deferred {
-                        persist_settings(&state.settings_path, &settings)?;
+                        request_settings_persist(state)?;
                         crate::service_log!(
                             "INFO",
                             "Deferring take-profit for {symbol}: five-minute profitable-close probability is {:.1}%",
@@ -286,6 +314,24 @@ async fn evaluate_position_exit(
                 }
             }
         }
+    }
+    // Serialize only the state-changing exit order. Position and market
+    // evaluation above may overlap with signal processing, so verify the
+    // captured position is still current once the lock has been acquired.
+    let _cycle = acquire_cycle_lock(state, "position_maintenance").await;
+    let position_is_current = {
+        let settings = state.settings.lock().await;
+        settings
+            .strategy_positions
+            .get(&symbol)
+            .and_then(|lots| lots.get(&strategy_key))
+            .is_some_and(|current| {
+                (current.quantity - position.quantity).abs() <= 1e-12
+                    && (current.average_entry_price - position.average_entry_price).abs() <= 1e-12
+            })
+    };
+    if !position_is_current {
+        return Ok(None);
     }
     submit_position_exit_order(
         client,
@@ -303,4 +349,3 @@ async fn evaluate_position_exit(
     )
     .await
 }
-
