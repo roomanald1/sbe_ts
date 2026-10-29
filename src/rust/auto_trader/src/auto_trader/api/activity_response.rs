@@ -50,6 +50,7 @@ async fn get_activity(State(state): State<AutoTraderState>) -> Json<ActivityResp
     let ActivityPositionSnapshot {
         mut orders,
         auto_positions,
+        strategy_positions,
         open_position_symbols,
         position_exit_policies,
     } = {
@@ -120,6 +121,12 @@ async fn get_activity(State(state): State<AutoTraderState>) -> Json<ActivityResp
     Json(ActivityResponse {
         orders,
         open_position_symbols,
+        open_positions: auto_positions.iter().map(|(symbol, position)| OpenPositionAttribution {
+            symbol: symbol.clone(),
+            strategy: position.strategy.clone(),
+            decision_id: position.entry_decision_id.clone(),
+        }).collect(),
+        strategy_positions,
         position_exit_policies,
         pnl_breakdown,
         realized_pnl,

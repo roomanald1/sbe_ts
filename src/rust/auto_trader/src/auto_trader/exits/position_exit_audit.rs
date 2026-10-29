@@ -22,8 +22,9 @@ fn position_exit_audit_payload(
 ) -> serde_json::Value {
     let mid = (bid + ask) / 2.0;
     let mut payload = serde_json::json!({
-        "record_schema_version": 1,
+        "record_schema_version": 2,
         "decision_id": decision_id,
+        "trade_id": decision_id,
         "stage": format!("exit:{submitted_at}"),
         "timestamp": observed_at,
         "symbol": symbol,

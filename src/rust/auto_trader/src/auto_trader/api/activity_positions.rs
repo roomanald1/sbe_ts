@@ -1,6 +1,7 @@
 struct ActivityPositionSnapshot {
     orders: Vec<TraderOrder>,
     auto_positions: Vec<(String, TraderPosition)>,
+    strategy_positions: Vec<OpenStrategyPosition>,
     open_position_symbols: Vec<String>,
     position_exit_policies: Vec<PositionExitPolicy>,
 }
@@ -47,8 +48,41 @@ fn snapshot_activity_positions(settings: &Settings, today_start: u64) -> Activit
         .positions
         .iter()
         .filter(|(_, position)| position.quantity.abs() > 1e-12)
-        .map(|(symbol, position)| (symbol.clone(), position.clone()))
+        .map(|(symbol, position)| {
+            let mut position = position.clone();
+            if position.strategy.is_none() {
+                // Reconciliation can leave zero-quantity strategy lots behind. They must
+                // not make an otherwise unambiguous live position lose its attribution.
+                let active_lots = settings.strategy_positions.get(symbol).into_iter()
+                    .flat_map(|lots| lots.iter())
+                    .filter(|(_, lot)| lot.quantity.abs() > 1e-12)
+                    .collect::<Vec<_>>();
+                if let [(strategy, lot)] = active_lots.as_slice() {
+                    position.strategy = Some((*strategy).clone());
+                    if position.entry_decision_id.is_none() {
+                        position.entry_decision_id = lot.entry_decision_id.clone();
+                    }
+                }
+            }
+            (symbol.clone(), position)
+        })
         .collect::<Vec<_>>();
+    let strategy_positions = settings.strategy_positions.iter().flat_map(|(symbol, lots)| {
+        lots.iter().filter(|(_, position)| position.quantity.abs() > 1e-12).map(|(strategy, position)| {
+            OpenStrategyPosition {
+                symbol: symbol.clone(),
+                strategy: strategy.clone(),
+                decision_id: position.entry_decision_id.clone(),
+                quantity: position.quantity,
+                average_entry_price: position.average_entry_price,
+                entry_fees: -position.entry_fees.abs(),
+                entry_timestamp_ms: position.entry_timestamp_ms,
+                stop_loss_percent: position.stop_loss_percent,
+                take_profit_percent: position.take_profit_percent,
+                horizon_take_profit_percent: position.horizon_take_profit_percent,
+            }
+        })
+    }).collect::<Vec<_>>();
     let open_position_symbols = auto_positions
         .iter()
         .map(|(symbol, _)| symbol.clone())
@@ -83,6 +117,7 @@ fn snapshot_activity_positions(settings: &Settings, today_start: u64) -> Activit
     ActivityPositionSnapshot {
         orders,
         auto_positions,
+        strategy_positions,
         open_position_symbols,
         position_exit_policies,
     }

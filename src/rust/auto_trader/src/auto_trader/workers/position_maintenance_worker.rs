@@ -306,6 +306,7 @@ async fn reconcile_inactive_execution_orders(
     let mut changed = false;
     for order in settings.orders.iter_mut().filter(|order| {
         matches!(order.purpose.as_str(), "signal" | "scout")
+            && !is_scheduled_execution_order_type(&order.order_type)
             && matches!(order.status.as_str(), "submitting" | "accepted" | "resting" | "partially_filled")
     }) {
         let Some(id) = order.execution_order_id.as_deref() else {
@@ -330,6 +331,10 @@ async fn reconcile_inactive_execution_orders(
 }
 
 
+fn is_scheduled_execution_order_type(order_type: &str) -> bool {
+    order_type.starts_with("Vwap") || order_type.starts_with("Twap")
+}
+
 fn inactive_execution_order_status(filled_quantity: f64) -> &'static str {
     if filled_quantity > 1e-12 {
         "partially_filled_closed"
@@ -340,11 +345,18 @@ fn inactive_execution_order_status(filled_quantity: f64) -> &'static str {
 
 #[cfg(test)]
 mod inactive_execution_order_tests {
-    use super::inactive_execution_order_status;
+    use super::{inactive_execution_order_status, is_scheduled_execution_order_type};
 
     #[test]
     fn removes_unfilled_and_partially_filled_orders_from_pending_state() {
         assert_eq!(inactive_execution_order_status(0.0), "expired_or_cancelled");
         assert_eq!(inactive_execution_order_status(0.25), "partially_filled_closed");
+    }
+
+    #[test]
+    fn scheduled_orders_are_not_checked_against_the_resting_order_ledger() {
+        assert!(is_scheduled_execution_order_type("Vwap · P0"));
+        assert!(is_scheduled_execution_order_type("Twap · P1"));
+        assert!(!is_scheduled_execution_order_type("PostOnlyLimit · P0"));
     }
 }

@@ -33,7 +33,8 @@ pub async fn subscribe_book_once(
     instrument: &str,
     updates: mpsc::Sender<Result<Bytes>>,
 ) -> Result<()> {
-    let (incoming_ws, _) = connect_async("wss://ws.okx.com:8443/ws/v5/public")
+    wait_for_okx_connection_slot().await;
+    let (incoming_ws, _) = connect_async(OKX_PUBLIC_WS_URL)
         .await
         .map_err(|error| anyhow::anyhow!("failed to connect to OKX book WebSocket: {error}"))?;
     let (mut write, mut read) = incoming_ws.split();
@@ -148,4 +149,3 @@ pub async fn subscribe_book_once(
         }
     }
 }
-

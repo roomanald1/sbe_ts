@@ -8,6 +8,24 @@ import { useBehaviorSnapshot } from '../use_behavior_snapshot';
 import { FeedToolbar } from './FeedToolbar';
 import { explainAutoTraderReason, money, timestamp } from './AutoTraderOrderGrid';
 const finiteFixed = (value: unknown, digits: number) => typeof value === 'number' && Number.isFinite(value) ? value.toFixed(digits) : 'n/a';
+const intradayStrategyLabels: Array<{ strategy: Strategy; label: string }> = [
+  { strategy: 'live-insights', label: 'Live insights' },
+  { strategy: 'live-momentum', label: 'Live momentum' },
+  { strategy: 'live-trade-flow', label: 'Live trade flow' },
+  { strategy: 'live-order-book', label: 'Live order book' },
+  { strategy: 'live-vwap-dislocation', label: 'Live VWAP dislocation' },
+  { strategy: 'live-absorption-pressure', label: 'Live absorption pressure' },
+];
+const dailyStrategyLabels: Array<{ strategy: Strategy; label: string }> = [
+  { strategy: 'donchian-55-btc200', label: '55-day Donchian breakout' },
+  { strategy: 'donchian-20-sma200', label: '20-day Donchian · asset SMA200' },
+  { strategy: 'donchian-20-btc200', label: '20-day Donchian · BTC SMA200' },
+  { strategy: 'trend-sleeves-btc200', label: 'Trend sleeves' },
+  { strategy: 'trend-50-200', label: 'Trend 50/200' },
+  { strategy: 'relative-strength-90-sma200', label: '90-day relative strength' },
+  { strategy: 'risk-adjusted-monthly-momentum', label: 'Risk-adjusted monthly momentum' },
+  { strategy: 'rsi2-oversold-rebound', label: 'RSI2 oversold rebound' },
+];
 export function AutoTrader() {
   const model = useMemo(() => new AutoTraderModel(), []);
   useEffect(() => { model.start(); return () => model.stop(); }, [model]);
@@ -31,6 +49,22 @@ export function AutoTrader() {
     };
   }, [state.orders]);
   const scoutOutcomeCohort = state.decisionQuality.cohorts.find((cohort) => cohort.dimension === 'selection' && cohort.value === 'scout');
+  const selectedIntradayStrategies = intradayStrategyLabels.filter(({ strategy }) => state.strategies.includes(strategy));
+  const selectedIntradayBudgetValuesValid = selectedIntradayStrategies.every(({ strategy }) => {
+    const value = state.intradayStrategyBudgets[strategy] ?? '';
+    return value.trim() !== '' && Number.isFinite(Number(value)) && Number(value) >= 0;
+  });
+  const selectedIntradayBudgetTotal = selectedIntradayStrategies.reduce((total, { strategy }) => total + (Number(state.intradayStrategyBudgets[strategy]) || 0), 0);
+  const intradayBudgetOverallocated = !selectedIntradayBudgetValuesValid
+    || selectedIntradayBudgetTotal > Number(state.intradayNotionalLimit) + 1e-9;
+  const selectedDailyStrategies = dailyStrategyLabels.filter(({ strategy }) => state.strategies.includes(strategy));
+  const selectedDailyBudgetValuesValid = selectedDailyStrategies.every(({ strategy }) => {
+    const value = state.dailyStrategyBudgets[strategy] ?? '';
+    return value.trim() !== '' && Number.isFinite(Number(value)) && Number(value) >= 0;
+  });
+  const selectedDailyBudgetTotal = selectedDailyStrategies.reduce((total, { strategy }) => total + (Number(state.dailyStrategyBudgets[strategy]) || 0), 0);
+  const dailyBudgetOverallocated = !selectedDailyBudgetValuesValid
+    || selectedDailyBudgetTotal > Number(state.dailyStrategyNotionalLimit) + 1e-9;
   return (
     <section className={"feed-section auto-trader-section" + (settingsOpen || parametersOpen ? " has-open-popup" : "")} aria-label="Auto Trader">
       <FeedToolbar title="Auto Trader" />
@@ -57,8 +91,8 @@ export function AutoTrader() {
             {state.decisionParameters && <div className="auto-trader-parameter-sections">
               <section><strong>Shared risk controls</strong><dl>
                 <div><dt>Risk appetite</dt><dd>{Number(state.riskAppetite)} · {Number(state.riskAppetite) < 34 ? 'Safe' : Number(state.riskAppetite) > 66 ? 'Risky' : 'Balanced'}</dd></div>
-                <div><dt>Maximum per order</dt><dd>{Number(state.maxOrderNotional).toLocaleString()}</dd></div>
-                <div><dt>Maximum allocated exposure</dt><dd>{Number(state.dailyNotionalLimit).toLocaleString()}</dd></div>
+                <div><dt>Maximum per order</dt><dd>{money.format(Number(state.maxOrderNotional))}</dd></div>
+                <div><dt>Maximum allocated exposure</dt><dd>{money.format(Number(state.dailyNotionalLimit))}</dd></div>
                 <div><dt>Daily loss cap</dt><dd>{Number(state.dailyRealizedLossLimit).toLocaleString()}</dd></div>
                 <div><dt>Maximum open positions</dt><dd>{state.maxOpenPositions}</dd></div>
                 <div><dt>Maximum entries per position</dt><dd>{state.maxEntriesPerPosition}</dd></div>
@@ -81,7 +115,7 @@ export function AutoTrader() {
             <div className="auto-trader-limits">
               <fieldset className="auto-trader-strategy-options" title="Live and candle-derived insight strategies share the same AutoTrader portfolio exposure, daily loss, and open-position limits."><legend>STRATEGIES · SHARED PORTFOLIO LIMITS</legend>
                 {([{ value: 'live-momentum', label: 'Live momentum · aligned 10-second momentum or 5-minute trend; configured entry order; shared protective stop/target' }, { value: 'live-trade-flow', label: 'Live trade flow · aligned imbalance ≥ 0.15; configured entry order; shared protective stop/target' }, { value: 'live-order-book', label: 'Live order book · aligned imbalance ≥ 0.15; configured entry order; shared protective stop/target' }, { value: 'live-vwap-dislocation', label: 'Live VWAP dislocation · aligned gap ≥ 1 bp; configured entry order; shared protective stop/target' }, { value: 'live-absorption-pressure', label: 'Live absorption · opposing pressure ≥ 0.2; configured entry order; shared protective stop/target' }, { value: 'donchian-55-btc200', label: '55-day Donchian breakout · trade highs only while BTC is above its SMA200' }, { value: 'donchian-20-sma200', label: '20-day Donchian breakout · buy assets above their own SMA200' }, { value: 'donchian-20-btc200', label: '20-day Donchian + BTC SMA200 · fixed 20/200 daily signal exit · no protective stop · paper research' }, { value: 'trend-sleeves-btc200', label: 'Trend sleeves · BTC/ETH SMA50 + BNB SMA100 · BTC SMA200 risk gate' }, { value: 'trend-50-200', label: 'Trend following · hold each asset above its SMA50 and SMA200' }, { value: 'relative-strength-90-sma200', label: 'Momentum rotation · hold the strongest 90-day asset above its SMA200' }, { value: 'risk-adjusted-monthly-momentum', label: 'Risk-adjusted monthly momentum · BTC SMA200 gate · 40% volatility target · signal exit, no fixed stop' }, { value: 'rsi2-oversold-rebound', label: 'Mean reversion · RSI(2) ≤ 10 above SMA200 · five-day max hold' }, { value: 'dated-futures-carry', label: 'Dated futures carry · Insights signal, paired BTC/ETH paper hedge, settlement-window exit' }] as Array<{ value: Strategy; label: string }>).map(({ value, label }) => <label key={value}><input type="checkbox" checked={state.strategies.includes(value)} onChange={(event) => model.setStrategies(event.target.checked ? [...state.strategies, value] : state.strategies.filter((strategy) => strategy !== value))} />{label}</label>)}
-                <small>Daily strategies are evaluated independently, get equal budget and position caps, and candidates with stronger measured net outcomes are submitted first when history is sufficient. Orders use shared account, exposure, and daily-loss limits; per-strategy P&L is tracked separately. The 20-day BTC-gated breakout and risk-adjusted monthly momentum use signal exits without fixed stops. Dated futures carry has its own paper size cap.</small>
+                <small>Intraday and daily strategies have editable per-strategy budget caps and separate position-slot limits. Learning adjusts effective strategy budgets and candidates with stronger measured net outcomes are submitted first when history is sufficient. Orders use shared account, exposure, and daily-loss limits; per-strategy P&L is tracked separately. The 20-day BTC-gated breakout and risk-adjusted monthly momentum use signal exits without fixed stops. Dated futures carry has its own paper size cap.</small>
                 {state.strategies.length === 0 && <small className="auto-trader-strategy-validation">Select at least one strategy before saving.</small>}
               </fieldset>
               <label>MAX PER ORDER (USD)<input type="number" min="0.01" step="any" value={state.maxOrderNotional} onChange={(event) => model.setLimits(event.target.value, state.dailyNotionalLimit, state.dailyRealizedLossLimit, state.explorationPercent, state.maxOpenPositions)} /></label>
@@ -97,6 +131,42 @@ export function AutoTrader() {
                 <label>DAILY BUDGET (USD)<input type="number" min="0" step="any" value={state.dailyStrategyNotionalLimit} onChange={(event) => model.setCategoryLimits({ dailyStrategyNotionalLimit: event.target.value })} /></label>
                 <small>Overall limits still apply. Each symbol can belong to one horizon at a time.</small>
               </fieldset>
+              {selectedIntradayStrategies.length > 0 && <details className="auto-trader-strategy-budgets">
+                <summary className={intradayBudgetOverallocated ? 'has-error' : ''}>
+                  <strong>INTRADAY STRATEGY BUDGETS</strong>
+                  <span>{money.format(selectedIntradayBudgetTotal)} / {money.format(Number(state.intradayNotionalLimit))} USD · {selectedIntradayStrategies.length} strategies{intradayBudgetOverallocated ? ' · fix allocations' : ''}</span>
+                </summary>
+                <div className="auto-trader-strategy-budget-grid">
+                  {selectedIntradayStrategies.map(({ strategy, label }) => {
+                    const learning = state.intradayStrategyLearning.find((item) => item.strategy === strategy);
+                    const outcome = state.closedStrategyOutcomes[strategy];
+                    const learnedSummary = 'Learning ×' + finiteFixed(learning?.learning_multiplier ?? 1, 2) + ' · ' + (outcome ? outcome.trades + ' closed trades · ' + finiteFixed(outcome.winRate, 1) + '% wins · avg return ' + finiteFixed(outcome.averageReturn, 3) + '%' : 'no closed trades');
+                    return <div className="auto-trader-strategy-budget-row" key={strategy}>
+                      <label>{label}<input aria-label={label + ' base budget in USD'} type="number" min="0" step="any" value={state.intradayStrategyBudgets[strategy] ?? '0'} onChange={(event) => model.setIntradayStrategyBudget(strategy, event.target.value)} /></label>
+                      <small>{learnedSummary} · effective cap {money.format(learning?.effective_budget ?? Number(state.intradayStrategyBudgets[strategy] ?? 0))} · used {money.format(learning?.used_notional ?? 0)}</small>
+                    </div>;
+                  })}
+                  <small>Learning scales the effective cap. Closed trade counts, win rates, and average returns match the completed positions table.</small>
+                </div>
+              </details>}
+              {selectedDailyStrategies.length > 0 && <details className="auto-trader-strategy-budgets">
+                <summary className={dailyBudgetOverallocated ? 'has-error' : ''}>
+                  <strong>DAILY STRATEGY BUDGETS</strong>
+                  <span>{money.format(selectedDailyBudgetTotal)} / {money.format(Number(state.dailyStrategyNotionalLimit))} USD · {selectedDailyStrategies.length} strategies{dailyBudgetOverallocated ? ' · fix allocations' : ''}</span>
+                </summary>
+                <div className="auto-trader-strategy-budget-grid">
+                  {selectedDailyStrategies.map(({ strategy, label }) => {
+                    const learning = state.dailyStrategyLearning.find((item) => item.strategy === strategy);
+                    const outcome = state.closedStrategyOutcomes[strategy];
+                    const learnedSummary = 'Learning ×' + finiteFixed(learning?.learning_multiplier ?? 1, 2) + ' · ' + (outcome ? outcome.trades + ' closed trades · ' + finiteFixed(outcome.winRate, 1) + '% wins · avg return ' + finiteFixed(outcome.averageReturn, 3) + '%' : 'no closed trades');
+                    return <div className="auto-trader-strategy-budget-row" key={strategy}>
+                      <label>{label}<input aria-label={label + ' base budget in USD'} type="number" min="0" step="any" value={state.dailyStrategyBudgets[strategy] ?? '0'} onChange={(event) => model.setDailyStrategyBudget(strategy, event.target.value)} /></label>
+                      <small>{learnedSummary} · effective cap {money.format(learning?.effective_budget ?? Number(state.dailyStrategyBudgets[strategy] ?? 0))} · used {money.format(learning?.used_notional ?? 0)}</small>
+                    </div>;
+                  })}
+                  <small>Learning scales the effective cap. Closed trade counts, win rates, and average returns match the completed positions table.</small>
+                </div>
+              </details>}
               <label title="Maximum number of entries Auto Trader can make while a position remains open, including the initial entry.">ENTRIES PER POSITION<input type="number" min="1" max="10" step="1" value={state.maxEntriesPerPosition} onChange={(event) => model.setMaxEntriesPerPosition(event.target.value)} /></label>
               <label>VWAP / TWAP DURATION (MIN)<input type="number" min="5" max="390" step="1" value={state.vwapDurationMinutes} onChange={(event) => model.setExecutionParameters({ vwapDurationMinutes: event.target.value })} /></label>
               <label>VWAP PARTICIPATION (%)<input type="number" min="1" max="50" step="1" value={state.vwapParticipationPercent} onChange={(event) => model.setExecutionParameters({ vwapParticipationPercent: event.target.value })} /></label>
@@ -104,7 +174,7 @@ export function AutoTrader() {
               <label>TRIGGER OFFSET (BPS)<input type="number" min="5" max="100" step="1" value={state.triggerOffsetBps} onChange={(event) => model.setExecutionParameters({ triggerOffsetBps: event.target.value })} /></label>
               <label>TRAILING DISTANCE (%)<input type="number" min="0.05" max="1" step="0.05" value={state.trailingDistancePercent} onChange={(event) => model.setExecutionParameters({ trailingDistancePercent: event.target.value })} /></label>
               <label title="Number of most recent fully closed exits used for rolling exit statistics. Range: 1–5000.">ROLLING CLOSED EXITS<input type="number" min="1" max="5000" step="1" value={state.closedTradeWindow} onChange={(event) => model.setClosedTradeWindow(event.target.value)} /></label>
-              <button type="button" disabled={state.busy || state.loading || (state.strategies.length === 0)} onClick={() => void model.saveLimits()}>Save settings</button>
+              <button type="button" disabled={state.busy || state.loading || (state.strategies.length === 0) || dailyBudgetOverallocated || intradayBudgetOverallocated} onClick={() => void model.saveLimits()}>Save settings</button>
               <button type="button" disabled={state.busy || state.loading} onClick={() => void model.resetLearning()}>Reset learned strategy parameters</button>
             </div>
           </div></div>, document.body)}
@@ -163,10 +233,7 @@ export function AutoTrader() {
           <span>Combined today: <strong className={state.realizedPnl == null || state.unrealizedPnl == null ? undefined : state.realizedPnl + state.unrealizedPnl >= 0 ? 'auto-trader-pnl-positive' : 'auto-trader-pnl-negative'}>{state.realizedPnl == null || state.unrealizedPnl == null ? 'Unavailable' : 'USD ' + money.format(state.realizedPnl + state.unrealizedPnl)}</strong></span>
         </div>
         {state.error && <p className="auto-trader-error" role="alert">{state.error}</p>}
-        <div className="auto-trader-orders" aria-label="Completed AutoTrader positions">
-          <div className="auto-trader-orders-heading"><strong>Completed positions · newest first</strong></div>
-          <AutoTraderOutcomes embedded closedOnly />
-        </div>
+        <AutoTraderOutcomes embedded strategyRatesOnly />
       </div>
     </section>
   );

@@ -244,28 +244,45 @@ async fn run_dated_carry_signal_worker(store: SignalStore) {
         ticker.tick().await;
         let now = now_ms();
         match carry_entry_signals(&client, &base, now).await {
-            Ok(signals) => for signal in signals {
-                let future = signal["candidate"]["future_symbol"].as_str().unwrap_or("");
-                let spot = signal["candidate"]["spot_symbol"].as_str().unwrap_or("");
-                let eligible = signal["candidate"]["eligible"].as_bool().unwrap_or(false);
-                let audit_key = format!("{future}:{eligible}");
-                if !future.is_empty() && audited_entries.insert(audit_key.clone()) {
-                    let audit = serde_json::json!({
-                        "decision_id": format!("dated-carry:{audit_key}"),
-                        "stage": "dated_carry_signal_entry",
-                        "timestamp": now_ms(),
-                        "symbol": spot,
-                        "signal": signal,
-                    });
-                    if let Err(error) = store.save_auto_trader_audit(audit).await {
-                        crate::service_log!("WARN", "Dated carry signal audit failed: {error}");
+            Ok(signals) => {
+                let candidates = signals.iter().filter_map(|signal| signal.get("candidate").cloned()).collect::<Vec<_>>();
+                let scan = serde_json::json!({
+                    "kind": "scan", "emitted_at_ms": now, "candidates": candidates, "last_error": null
+                });
+                if let Err(error) = carry_publish(&client, &base, &scan).await {
+                    crate::service_log!("WARN", "Dated carry scan status delivery failed: {error}");
+                }
+                for signal in signals {
+                    let future = signal["candidate"]["future_symbol"].as_str().unwrap_or("");
+                    let spot = signal["candidate"]["spot_symbol"].as_str().unwrap_or("");
+                    let eligible = signal["candidate"]["eligible"].as_bool().unwrap_or(false);
+                    let audit_key = format!("{future}:{eligible}");
+                    if !future.is_empty() && audited_entries.insert(audit_key.clone()) {
+                        let audit = serde_json::json!({
+                            "decision_id": format!("dated-carry:{audit_key}"),
+                            "stage": "dated_carry_signal_entry",
+                            "timestamp": now_ms(),
+                            "symbol": spot,
+                            "signal": signal,
+                        });
+                        if let Err(error) = store.save_auto_trader_audit(audit).await {
+                            crate::service_log!("WARN", "Dated carry signal audit failed: {error}");
+                        }
+                    }
+                    if let Err(error) = carry_publish(&client, &base, &signal).await {
+                        crate::service_log!("WARN", "Dated carry entry signal delivery failed: {error}");
                     }
                 }
-                if let Err(error) = carry_publish(&client, &base, &signal).await {
-                    crate::service_log!("WARN", "Dated carry entry signal delivery failed: {error}");
+            }
+            Err(error) => {
+                crate::service_log!("WARN", "Dated carry signal scan failed: {error}");
+                let scan = serde_json::json!({
+                    "kind": "scan", "emitted_at_ms": now, "candidates": [], "last_error": error.to_string()
+                });
+                if let Err(delivery_error) = carry_publish(&client, &base, &scan).await {
+                    crate::service_log!("WARN", "Dated carry scan error delivery failed: {delivery_error}");
                 }
-            },
-            Err(error) => crate::service_log!("WARN", "Dated carry signal scan failed: {error}"),
+            }
         }
         for (spot, future, expiry_ms) in carry_recent_expiries(now) {
             if sent_settlements.contains(&future) { continue; }

@@ -5,7 +5,8 @@ use axum::{Json, Router, http::StatusCode, routing::get};
 use dashmap::DashMap;
 use futures_util::StreamExt;
 use insights::signals::{
-    ExternalMarketFeatures, SignalEngine, SignalSnapshot, SignalStore, StoredSignalRecord,
+    ExternalMarketFeatures, NewsAttribution, NewsHeadlineAttribution, SignalEngine,
+    SignalSnapshot, SignalStore, StoredSignalRecord,
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -80,6 +81,7 @@ struct NewsArticle {
     signal_reason: String,
     sentiment_model: String,
     sentiment_confidence: f64,
+    matched_keywords: Vec<String>,
 }
 
 #[derive(Clone, Default, Serialize)]

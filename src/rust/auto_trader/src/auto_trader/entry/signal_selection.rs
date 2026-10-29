@@ -238,7 +238,7 @@ fn select_cycle_signal<'a>(
                 let evidence = dashboard.walk_forward.iter().find(|item| {
                     item.symbol == candidate.symbol && is_entry_evidence_horizon(item.horizon_seconds)
                 });
-                let payload = signal_audit_payload(
+                let mut payload = signal_audit_payload(
                     candidate,
                     "decision",
                     now.saturating_mul(1000),
@@ -248,6 +248,14 @@ fn select_cycle_signal<'a>(
                     counterfactual_stop_loss_percent,
                     counterfactual_take_profit_percent,
                     evidence,
+                );
+                payload["entry_gate"] = candidate_entry_audit_value(
+                    candidate,
+                    dashboard,
+                    learning,
+                    risk_appetite,
+                    active_scout_count,
+                    "rejected",
                 );
                 queue_auto_trader_audit(state, payload);
             }
@@ -263,4 +271,3 @@ struct PreparedSignals {
     inferred_direction_count: usize,
     neutral_direction_floor: f64,
 }
-

@@ -19,7 +19,7 @@ export function AutoTraderStrategyParameters({ profiles, overrides, saving, onCh
 
   return <section className="auto-trader-strategy-parameters" aria-label="Per-strategy learning parameters">
     <strong>Strategy learning parameters</strong>
-    <p>Each symbol and strategy adapts its own rule values from recent outcomes. Values stay within service-defined bounds; shared risk controls and walk-forward exit estimates remain active until this profile has enough outcomes.</p>
+    <p>Each symbol and strategy adapts its own rule values from recent outcomes. Early updates are smoothed, values stay within service-defined bounds, and shared risk controls remain active.</p>
     <div className="auto-trader-parameter-selectors">
       <label>SYMBOL<select value={symbols.includes(symbol) ? symbol : (symbols[0] ?? '')} onChange={(event) => setSymbol(event.target.value)}>
         {symbols.map((item) => <option key={item} value={item}>{item}</option>)}
@@ -30,7 +30,7 @@ export function AutoTraderStrategyParameters({ profiles, overrides, saving, onCh
     </div>
     {!profile && <p>No tunable parameters are registered for this strategy.</p>}
     {profile && <>
-      <small>{profile.learning_samples} recent-weighted outcomes · {profile.positive_rate == null ? 'positive rate unavailable' : (profile.positive_rate * 100).toFixed(1) + '% positive'} · learning starts after 10 outcomes · set Outcome adaptation weight to 0 to freeze this profile</small>
+      <small>{profile.learning_samples} recent-weighted outcomes · {profile.positive_rate == null ? 'positive rate unavailable' : (profile.positive_rate * 100).toFixed(1) + '% positive'} · smoothed adaptation after each outcome · set Outcome adaptation weight to 0 to freeze this profile</small>
       <div className="auto-trader-parameter-list">
         {profile.parameters.map((parameter) => {
           const key = profile.symbol + ':' + profile.strategy + ':' + parameter.key;

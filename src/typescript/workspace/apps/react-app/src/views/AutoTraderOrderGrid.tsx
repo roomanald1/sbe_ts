@@ -8,7 +8,7 @@ import {
   type ITooltipParams,
 } from 'ag-grid-community';
 
-export const money = new Intl.NumberFormat(undefined, { maximumFractionDigits: 2 });
+export const money = new Intl.NumberFormat(undefined, { minimumFractionDigits: 3, maximumFractionDigits: 3 });
 export const timestamp = new Intl.DateTimeFormat(undefined, { hour: '2-digit', minute: '2-digit', second: '2-digit' });
 
 export function explainAutoTraderReason(reason: string): string {
@@ -87,6 +87,12 @@ export function strategyLabel(strategy?: string): string {
     'relative-strength-90-sma200': '90-day momentum rotation',
     'risk-adjusted-monthly-momentum': 'Risk-adjusted monthly momentum',
     'rsi2-oversold-rebound': 'RSI(2) rebound',
+    'dated-futures-carry': 'Dated futures carry',
+    'live-momentum': 'Live momentum',
+    'live-trade-flow': 'Live trade flow',
+    'live-order-book': 'Live order book',
+    'live-vwap-dislocation': 'Live VWAP dislocation',
+    'live-absorption-pressure': 'Live absorption',
     'live-insights': 'Live Insights',
     'generic-insight-signals': 'Legacy Live Insights',
     'portfolio-hedge': 'Portfolio hedge',

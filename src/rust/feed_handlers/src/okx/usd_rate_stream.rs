@@ -62,7 +62,8 @@ async fn bootstrap_usd_rates() -> Result<(Vec<String>, UsdRateSnapshot)> {
 }
 
 async fn subscribe_usd_index_tickers(instruments: &[String], updates: mpsc::Sender<UsdIndexUpdate>) -> Result<()> {
-    let (incoming_ws, _) = connect_async("wss://ws.okx.com:8443/ws/v5/public").await?;
+    wait_for_okx_connection_slot().await;
+    let (incoming_ws, _) = connect_async(OKX_PUBLIC_WS_URL).await?;
     let (mut write, mut read) = incoming_ws.split();
     for (batch_index, batch) in instruments.chunks(240).enumerate() {
         let args = batch.iter().map(|instrument| json!({ "channel": "index-tickers", "instId": instrument })).collect::<Vec<_>>();
@@ -70,10 +71,33 @@ async fn subscribe_usd_index_tickers(instruments: &[String], updates: mpsc::Send
         write.send(tokio_tungstenite::tungstenite::Message::Text(Utf8Bytes::from(request.to_string()))).await?;
         if batch_index + 1 < instruments.chunks(240).len() { sleep(Duration::from_millis(500)).await; }
     }
+    let heartbeat = tokio::time::sleep(OKX_IDLE_HEARTBEAT_INTERVAL);
+    let pong_timeout = tokio::time::sleep(Duration::from_secs(60 * 60 * 24 * 365));
+    tokio::pin!(heartbeat);
+    tokio::pin!(pong_timeout);
+    let mut awaiting_pong = false;
     loop {
-        let Some(message) = read.next().await else { anyhow::bail!("OKX USD index ticker stream ended") };
-        let message = message?;
+        let message = tokio::select! {
+            _ = &mut pong_timeout, if awaiting_pong => anyhow::bail!("OKX USD index ticker WebSocket did not answer ping within {}s", OKX_PONG_TIMEOUT.as_secs()),
+            _ = &mut heartbeat => {
+                write.send(tokio_tungstenite::tungstenite::Message::Text(Utf8Bytes::from("ping"))).await?;
+                awaiting_pong = true;
+                pong_timeout.as_mut().reset(tokio::time::Instant::now() + OKX_PONG_TIMEOUT);
+                heartbeat.as_mut().reset(tokio::time::Instant::now() + OKX_IDLE_HEARTBEAT_INTERVAL);
+                continue;
+            }
+            message = read.next() => {
+                let Some(message) = message else { anyhow::bail!("OKX USD index ticker stream ended") };
+                message?
+            }
+        };
+        heartbeat.as_mut().reset(tokio::time::Instant::now() + OKX_IDLE_HEARTBEAT_INTERVAL);
         if !message.is_text() { continue; }
+        if message.to_text()? == "pong" {
+            awaiting_pong = false;
+            pong_timeout.as_mut().reset(tokio::time::Instant::now() + Duration::from_secs(60 * 60 * 24 * 365));
+            continue;
+        }
         let update = match serde_json::from_str::<IndexTickerWsMessage>(message.to_text()?) {
             Ok(update) => update,
             Err(error) => { crate::service_log!("ERROR", "Ignoring invalid OKX USD index ticker JSON: {error}"); continue; }
@@ -91,4 +115,3 @@ async fn subscribe_usd_index_tickers(instruments: &[String], updates: mpsc::Send
         }
     }
 }
-

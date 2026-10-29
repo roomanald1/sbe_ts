@@ -289,6 +289,7 @@ impl SignalEngine {
             strength: (score.abs() * count as f64 / 9.0).clamp(0.0, 1.0),
             components,
             reasons,
+            news_attribution: None,
             stale: now.saturating_sub(latest.0) > 5_000,
             ranging_probability,
             range_lower_bound: range_bounds.map(|(low, _)| low),

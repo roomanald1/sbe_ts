@@ -1,17 +1,48 @@
+fn is_scheduled_order_reconcilable(
+    order_type: &str,
+    status: &str,
+    failure_reason: Option<&str>,
+) -> bool {
+    let scheduled = order_type.starts_with("Twap") || order_type.starts_with("Vwap");
+    scheduled
+        && (matches!(status, "accepted" | "partially_filled" | "resting")
+            || (status == "failed"
+                && failure_reason.is_some_and(|reason| {
+                    reason.contains("Scheduled run is missing from the position manager")
+                }))
+            || (matches!(status, "expired_or_cancelled" | "partially_filled_closed")
+                && failure_reason == Some("removed_from_execution_ledger")))
+}
+
+#[cfg(test)]
+mod scheduled_order_reconciliation_tests {
+    use super::is_scheduled_order_reconcilable;
+
+    #[test]
+    fn recovers_scheduled_orders_misclassified_by_resting_order_reconciliation() {
+        assert!(is_scheduled_order_reconcilable(
+            "Vwap · P0", "expired_or_cancelled", Some("removed_from_execution_ledger")
+        ));
+        assert!(is_scheduled_order_reconcilable(
+            "Twap · P1", "partially_filled_closed", Some("removed_from_execution_ledger")
+        ));
+        assert!(!is_scheduled_order_reconcilable(
+            "PostOnlyLimit · P0", "expired_or_cancelled", Some("removed_from_execution_ledger")
+        ));
+    }
+}
+
 async fn reconcile_scheduled_fills(
     client: &reqwest::Client,
     base: &str,
     state: &AutoTraderState,
 ) -> Result<(), (StatusCode, String)> {
     let is_reconcilable = |order: &&TraderOrder| {
-        (order.order_type.starts_with("Twap") || order.order_type.starts_with("Vwap"))
-            && (matches!(
-                order.status.as_str(),
-                "accepted" | "partially_filled" | "resting"
-            ) || (order.status == "failed"
-                && order.failure_reason.as_deref().is_some_and(|reason| {
-                    reason.contains("Scheduled run is missing from the position manager")
-                })))
+        is_scheduled_order_reconcilable(
+            &order.order_type,
+            &order.status,
+            order.failure_reason.as_deref(),
+        )
     };
     let has_pending = state
         .settings
@@ -82,14 +113,11 @@ async fn reconcile_scheduled_fills(
             ..
         } = &mut *settings;
         for order in orders.iter_mut().filter(|order| {
-            (order.order_type.starts_with("Twap") || order.order_type.starts_with("Vwap"))
-                && (matches!(
-                    order.status.as_str(),
-                    "accepted" | "partially_filled" | "resting"
-                ) || (order.status == "failed"
-                    && order.failure_reason.as_deref().is_some_and(|reason| {
-                        reason.contains("Scheduled run is missing from the position manager")
-                    })))
+            is_scheduled_order_reconcilable(
+                &order.order_type,
+                &order.status,
+                order.failure_reason.as_deref(),
+            )
         }) {
             if order.execution_order_id.is_none() {
                 let candidate = run_rows

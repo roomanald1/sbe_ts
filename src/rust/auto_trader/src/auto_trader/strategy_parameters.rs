@@ -159,33 +159,19 @@ fn validate_strategy_parameter_overrides(values: &BTreeMap<String, f64>) -> Resu
     Ok(())
 }
 
-const STRATEGY_PARAMETER_MIN_SAMPLES: usize = 30;
-
 fn confident_win_rate_edge(positive: usize, samples: usize) -> f64 {
-    if samples < STRATEGY_PARAMETER_MIN_SAMPLES || positive > samples {
+    if samples == 0 || positive > samples {
         return 0.0;
     }
-
-    // Require the 95% Wilson interval to sit entirely on one side of 50%.
-    // The edge stays zero while observed outcomes are statistically ambiguous.
+    // A neutral prior tempers early noise while allowing every outcome to
+    // move the estimate; confidence grows continuously with sample count.
     let n = samples as f64;
-    let rate = positive as f64 / n;
-    let z = 1.96;
-    let z2 = z * z;
-    let denominator = 1.0 + z2 / n;
-    let center = (rate + z2 / (2.0 * n)) / denominator;
-    let margin = z * (rate * (1.0 - rate) / n + z2 / (4.0 * n * n)).sqrt() / denominator;
-    let lower = center - margin;
-    let upper = center + margin;
-
-    if lower > 0.5 {
-        ((lower - 0.5) * 2.0).clamp(0.0, 1.0)
-    } else if upper < 0.5 {
-        ((upper - 0.5) * 2.0).clamp(-1.0, 0.0)
-    } else {
-        0.0
-    }
+    let posterior_rate = (positive as f64 + 2.0) / (n + 4.0);
+    let confidence = n / (n + 8.0);
+    ((posterior_rate - 0.5) * 2.0 * confidence).clamp(-1.0, 1.0)
 }
+
+const WALK_FORWARD_POLICY_MIN_SAMPLES: usize = 30;
 
 fn strategy_parameter_value(parameters: &BTreeMap<String, f64>, key: &str, default: f64) -> f64 {
     parameters.get(key).copied().unwrap_or(default)

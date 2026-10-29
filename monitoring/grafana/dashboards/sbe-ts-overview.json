@@ -163,7 +163,8 @@
       },
       "fieldConfig": {
         "defaults": {
-          "unit": "currencyUSD"
+          "unit": "currency:financial:$",
+          "decimals": 3
         },
         "overrides": []
       },
@@ -504,12 +505,12 @@
       },
       "targets": [
         {
-          "expr": "app_autotrader_learning_win_rate",
+          "expr": "sum(app_autotrader_closed_trade_wins) / clamp_min(sum(app_autotrader_closed_trade_wins) + sum(app_autotrader_closed_trade_losses) + sum(app_autotrader_closed_trade_flat), 1)",
           "legendFormat": "Win rate",
           "refId": "A"
         }
       ],
-      "title": "Autotrader learning win rate",
+      "title": "Closed-trade win rate · today UTC",
       "type": "timeseries"
     },
     {
@@ -866,7 +867,7 @@
       },
       "targets": [
         {
-          "expr": "100 * rate(app_service_process_cpu_seconds_total{service=~\"feed_handlers|position_management|auto_trader|execution|insights\"}[5m])",
+          "expr": "100 * rate(app_service_process_cpu_seconds_total{service=~\"feed_handlers|position_management|auto_trader|execution|insights\"}[1m])",
           "legendFormat": "{{service}}",
           "refId": "A"
         }
@@ -1121,12 +1122,12 @@
         "query": "INFO,WARN,ERROR",
         "options": [
           {
-            "selected": true,
+            "selected": false,
             "text": "INFO",
             "value": "INFO"
           },
           {
-            "selected": true,
+            "selected": false,
             "text": "WARN",
             "value": "WARN"
           },
@@ -1138,16 +1139,8 @@
         ],
         "current": {
           "selected": true,
-          "text": [
-            "INFO",
-            "WARN",
-            "ERROR"
-          ],
-          "value": [
-            "INFO",
-            "WARN",
-            "ERROR"
-          ]
+          "text": "ERROR",
+          "value": "ERROR"
         },
         "multi": true,
         "includeAll": true,

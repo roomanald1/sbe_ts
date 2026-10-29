@@ -164,8 +164,10 @@ pub fn router() -> Router {
         latest_missed_opportunity_bands: Arc::new(Mutex::new(Vec::new())),
         latest_execution_parameters: Arc::new(Mutex::new(None)),
         cycle_lock: Arc::new(Mutex::new(())),
-        pending_signals: Arc::new(Mutex::new(BTreeMap::new())),
-        signal_notify: Arc::new(Notify::new()),
+        pending_daily_signals: Arc::new(Mutex::new(BTreeMap::new())),
+        daily_signal_notify: Arc::new(Notify::new()),
+        pending_live_signals: Arc::new(Mutex::new(BTreeMap::new())),
+        live_signal_notify: Arc::new(Notify::new()),
         signal_book_prewarms: Arc::new(Mutex::new(BTreeMap::new())),
         audit_tx,
         execution_audit_tx,
@@ -195,32 +197,79 @@ pub fn router() -> Router {
         }
     });
 
-    let generic_worker_state = state.clone();
+    let signal_worker_state = state.clone();
     tokio::spawn(async move {
+        let mut prefer_daily = true;
         loop {
-            let notification = generic_worker_state.signal_notify.notified();
-            tokio::pin!(notification);
-            let pending = {
-                let mut queue = generic_worker_state.pending_signals.lock().await;
-                take_next_pending_signal(&mut queue)
+            let daily_notification = signal_worker_state.daily_signal_notify.notified();
+            let live_notification = signal_worker_state.live_signal_notify.notified();
+            tokio::pin!(daily_notification);
+            tokio::pin!(live_notification);
+
+            let pending = if prefer_daily {
+                let daily = {
+                    let mut queue = signal_worker_state.pending_daily_signals.lock().await;
+                    take_next_pending_signal(&mut queue)
+                };
+                if let Some(dashboard) = daily {
+                    Some((PendingSignalKind::Daily, dashboard))
+                } else {
+                    let live = {
+                        let mut queue = signal_worker_state.pending_live_signals.lock().await;
+                        take_next_pending_signal(&mut queue)
+                    };
+                    live.map(|dashboard| (PendingSignalKind::Live, dashboard))
+                }
+            } else {
+                let live = {
+                    let mut queue = signal_worker_state.pending_live_signals.lock().await;
+                    take_next_pending_signal(&mut queue)
+                };
+                if let Some(dashboard) = live {
+                    Some((PendingSignalKind::Live, dashboard))
+                } else {
+                    let daily = {
+                        let mut queue = signal_worker_state.pending_daily_signals.lock().await;
+                        take_next_pending_signal(&mut queue)
+                    };
+                    daily.map(|dashboard| (PendingSignalKind::Daily, dashboard))
+                }
             };
-            if let Some(dashboard) = pending {
+
+            if let Some((kind, dashboard)) = pending {
+                prefer_daily = kind == PendingSignalKind::Live;
                 let enabled = {
-                    let settings = generic_worker_state.settings.lock().await;
-                    generic_worker_state.enabled.load(Ordering::Relaxed)
-                        && (settings.signal_strategies_enabled
-                            || settings
-                                .strategies
-                                .iter()
-                                .any(|strategy| !strategy.is_dated_carry()))
+                    let settings = signal_worker_state.settings.lock().await;
+                    signal_worker_state.enabled.load(Ordering::Relaxed)
+                        && match kind {
+                            PendingSignalKind::Daily => {
+                                settings.strategies.iter().any(|strategy| {
+                                    !strategy.is_live_insight() && !strategy.is_dated_carry()
+                                })
+                            }
+                            PendingSignalKind::Live => {
+                                settings.signal_strategies_enabled
+                                    || settings
+                                        .strategies
+                                        .iter()
+                                        .any(|strategy| !strategy.is_dated_carry())
+                            }
+                        }
                 };
                 if enabled {
-                    if let Err(error) = run_cycle(&generic_worker_state, dashboard).await {
-                        crate::service_log!("ERROR", "Generic insight cycle failed: {}", error.1);
+                    let worker = match kind {
+                        PendingSignalKind::Daily => "Daily strategy",
+                        PendingSignalKind::Live => "Live insight",
+                    };
+                    if let Err(error) = run_cycle(&signal_worker_state, dashboard).await {
+                        crate::service_log!("ERROR", "{worker} cycle failed: {}", error.1);
                     }
                 }
             } else {
-                notification.await;
+                tokio::select! {
+                    _ = &mut daily_notification => {},
+                    _ = &mut live_notification => {},
+                }
             }
         }
     });
@@ -307,7 +356,7 @@ async fn signal_ready(
                 .iter()
                 .any(|strategy| strategy.is_live_insight()));
     if generic_enabled {
-        let mut queue = state.pending_signals.lock().await;
+        let mut queue = state.pending_live_signals.lock().await;
         let mut prewarm_symbols = Vec::new();
         for signal in dashboard.best.iter().cloned() {
             let selected_live = settings
@@ -374,7 +423,7 @@ async fn signal_ready(
             });
         }
         drop(prewarms);
-        state.signal_notify.notify_one();
+        state.live_signal_notify.notify_one();
     }
     let requests = INGRESS_REQUESTS.fetch_add(1, Ordering::Relaxed) + 1;
     let symbols = INGRESS_SYMBOLS.fetch_add(incoming_symbols, Ordering::Relaxed) + incoming_symbols;

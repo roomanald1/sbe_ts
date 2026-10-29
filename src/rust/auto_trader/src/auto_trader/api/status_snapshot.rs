@@ -23,6 +23,47 @@ fn status(state: &AutoTraderState, settings: &Settings) -> StatusResponse {
         max_daily_open_positions: settings.max_daily_open_positions,
         intraday_notional_limit: settings.intraday_notional_limit,
         daily_strategy_notional_limit: settings.daily_strategy_notional_limit,
+        daily_strategy_budgets: settings
+            .strategies
+            .iter()
+            .copied()
+            .filter(|strategy| !strategy.is_live_insight() && !strategy.is_dated_carry())
+            .map(|strategy| {
+                // Match the decayed lifetime profile used to calculate this multiplier and cap.
+                let learning = strategy_learning_stats_across_symbols(settings, strategy);
+                StrategyBudgetStatus {
+                    strategy: strategy.as_str().to_owned(),
+                    base_budget: daily_strategy_budget(settings, strategy.as_str()),
+                    effective_budget: daily_strategy_effective_budget(settings, strategy.as_str()),
+                    used_notional: allocated_notional_for_strategy(settings, strategy.as_str()),
+                    learning_multiplier: learned_strategy_size_multiplier(&learning),
+                    learning_samples: learning.samples,
+                    positive_rate: (learning.samples > 0)
+                        .then_some(learning.positive as f64 / learning.samples as f64),
+                    realized_pnl: learning.realized_pnl,
+                }
+            })
+            .collect(),
+        intraday_strategy_budgets: settings
+            .strategies
+            .iter()
+            .copied()
+            .filter(|strategy| strategy.is_live_insight() && !strategy.is_legacy_composite())
+            .map(|strategy| {
+                let learning = strategy_learning_stats_across_symbols(settings, strategy);
+                StrategyBudgetStatus {
+                    strategy: strategy.as_str().to_owned(),
+                    base_budget: intraday_strategy_budget(settings, strategy.as_str()),
+                    effective_budget: intraday_strategy_effective_budget(settings, strategy.as_str()),
+                    used_notional: allocated_notional_for_strategy(settings, strategy.as_str()),
+                    learning_multiplier: intraday_strategy_size_multiplier(settings, strategy),
+                    learning_samples: learning.samples,
+                    positive_rate: (learning.samples > 0)
+                        .then_some(learning.positive as f64 / learning.samples as f64),
+                    realized_pnl: learning.realized_pnl,
+                }
+            })
+            .collect(),
         intraday_used_notional: allocated_notional_for_category(&settings, Some(StrategyCategory::Intraday)),
         daily_strategy_used_notional: allocated_notional_for_category(&settings, Some(StrategyCategory::Daily)),
         max_entries_per_auto_position: settings.max_entries_per_auto_position,

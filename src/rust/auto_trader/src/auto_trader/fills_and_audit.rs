@@ -51,8 +51,17 @@ fn apply_auto_fill(
             position.entries = 1;
             position.entry_timestamp_ms = current_time_ms();
             position.price_path.clear();
-        } else if count_entry {
-            position.entries = position.entries.saturating_add(1);
+            position.initial_entry_notional = incoming.abs() * price;
+            position.total_fees_paid = fee;
+        } else {
+            if position.initial_entry_notional <= 0.0 {
+                position.initial_entry_notional = old.abs() * position.average_entry_price;
+            }
+            position.initial_entry_notional += incoming.abs() * price;
+            position.total_fees_paid += fee;
+            if count_entry {
+                position.entries = position.entries.saturating_add(1);
+            }
         }
         let total = old.abs() + incoming.abs();
         position.average_entry_price =
@@ -103,6 +112,9 @@ fn apply_auto_fill(
         position.quantity = net;
         position.average_entry_price = price;
         position.entry_fees = fee - closing_fee;
+        position.realized_pnl = 0.0;
+        position.initial_entry_notional = net.abs() * price;
+        position.total_fees_paid = fee - closing_fee;
         position.entry_order_type = order_type.to_owned();
         position.entry_context = context.to_owned();
         position.scout_entry = context.starts_with("scout:");
@@ -112,6 +124,7 @@ fn apply_auto_fill(
     } else {
         position.quantity = net;
         position.entry_fees -= entry_fee_closed;
+        position.total_fees_paid += fee;
     }
     (pnl, Some(format!("{entry_context}:{entry_type}")))
 }
@@ -187,13 +200,14 @@ fn signal_audit_payload(
     take_profit_percent: f64,
     evidence: Option<&WalkForward>,
 ) -> serde_json::Value {
+    let decision_id = signal_decision_id(signal);
     let evidence_metrics = evidence.map(|item| serde_json::json!({
         "horizon_seconds": item.horizon_seconds,
         "metrics": if signal.direction == "bullish" { &item.all_signal_long } else { &item.all_signal_short },
     }));
-    serde_json::json!({
-        "record_schema_version": 1,
-        "decision_id": signal_decision_id(signal),
+    let mut payload = serde_json::json!({
+        "record_schema_version": 2,
+        "decision_id": decision_id,
         "stage": stage,
         "timestamp": timestamp,
         "signal_timestamp": signal.timestamp,
@@ -207,6 +221,8 @@ fn signal_audit_payload(
         "strategy": signal.strategy.as_deref().unwrap_or("live-insights"),
         "strategy_decision": signal.strategy_decision,
         "market_regime": signal.market_regime,
+        "news_attribution": signal.news_attribution,
+        "entry_gate": signal.entry_gate,
         "signal_components": signal.components,
         "exploratory": exploratory,
         "stop_loss_percent": stop_loss_percent,
@@ -214,7 +230,11 @@ fn signal_audit_payload(
         "walk_forward_evidence": evidence_metrics,
         "status": status,
         "reason": reason,
-    })
+    });
+    if stage == "entry" || (stage == "decision" && status == "selected") {
+        payload["trade_id"] = serde_json::json!(decision_id);
+    }
+    payload
 }
 
 fn queue_auto_trader_audit(state: &AutoTraderState, payload: serde_json::Value) {

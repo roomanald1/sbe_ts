@@ -51,7 +51,9 @@ fn context_learning_stats(
     let prefix = format!("{context}:");
     learning
         .iter()
-        .filter(|(key, _)| key.starts_with(&prefix))
+        .filter(|(key, _)| {
+            key.starts_with(&prefix) || key.starts_with(&format!("scout:{prefix}"))
+        })
         .map(|(_, stats)| stats)
         .fold(LearningStats::default(), |mut total, stats| {
             total.samples += stats.samples;
@@ -61,23 +63,30 @@ fn context_learning_stats(
         })
 }
 
+fn smoothed_win_rate(stats: &LearningStats) -> f64 {
+    // A light Beta(1, 1) prior prevents tiny cohorts from moving gates sharply.
+    (stats.positive as f64 + 1.0) / (stats.samples as f64 + 2.0)
+}
+
 fn adaptive_scout_thresholds(
     learning: &BTreeMap<String, LearningStats>,
     context: &str,
     active_scout_count: usize,
 ) -> (f64, f64) {
     let stats = context_learning_stats(learning, &format!("scout:{context}"));
-    let win_rate = stats.positive as f64 / stats.samples.max(1) as f64;
+    let win_rate = smoothed_win_rate(&stats);
+    let losing_cohort = stats.realized_pnl < 0.0;
     let density = active_scout_count.min(SCOUT_MAX_ACTIVE_POSITIONS) as f64;
     let mut strength =
         (SCOUT_MIN_STRENGTH - 0.15 + density * 0.025).clamp(SCOUT_MIN_STRENGTH_FLOOR, 0.25);
     let mut score =
         (SCOUT_MIN_ABS_SCORE - 0.15 + density * 0.05).clamp(SCOUT_MIN_SCORE_FLOOR, 0.40);
     if stats.samples >= LEARNED_STRENGTH_ADJUSTMENT_SAMPLES {
-        if win_rate < LEARNED_STRENGTH_ADJUSTMENT_WIN_RATE {
-            strength = (strength + 0.05).min(0.30);
-            score = (score + 0.10).min(0.50);
-        } else if win_rate >= 0.60 {
+        if losing_cohort && win_rate < LEARNED_STRENGTH_ADJUSTMENT_WIN_RATE {
+            let adjustment = if stats.samples >= 20 { 2.0 } else { 1.0 };
+            strength = (strength + 0.05 * adjustment).min(0.30);
+            score = (score + 0.10 * adjustment).min(0.50);
+        } else if stats.realized_pnl > 0.0 && win_rate >= 0.60 {
             strength = (strength - 0.02).max(SCOUT_MIN_STRENGTH_FLOOR);
             score = (score - 0.03).max(SCOUT_MIN_SCORE_FLOOR);
         }
@@ -95,12 +104,20 @@ fn risk_size_scale(risk_appetite: f64) -> f64 {
 
 fn adaptive_strength_floor(learning: &BTreeMap<String, LearningStats>, context: &str) -> f64 {
     let stats = context_learning_stats(learning, context);
-    let win_rate = stats.positive as f64 / stats.samples.max(1) as f64;
+    let win_rate = smoothed_win_rate(&stats);
+    let losing_cohort = stats.realized_pnl < 0.0;
     if stats.samples >= STRONG_NEGATIVE_LEARNING_SAMPLES
+        && losing_cohort
         && win_rate < STRONG_NEGATIVE_LEARNING_WIN_RATE
     {
         STRONG_NEGATIVE_STRENGTH_FLOOR
+    } else if stats.samples >= 20
+        && losing_cohort
+        && win_rate < LEARNED_STRENGTH_ADJUSTMENT_WIN_RATE
+    {
+        (LEARNED_STRENGTH_FLOOR + 0.07).min(0.60)
     } else if stats.samples >= LEARNED_STRENGTH_ADJUSTMENT_SAMPLES
+        && losing_cohort
         && win_rate < LEARNED_STRENGTH_ADJUSTMENT_WIN_RATE
     {
         LEARNED_STRENGTH_FLOOR
@@ -115,16 +132,20 @@ fn adaptive_exploration_score_floor(
     missed_opportunity_bands: &[MissedOpportunityGateBand],
 ) -> f64 {
     let stats = context_learning_stats(learning, context);
-    let win_rate = stats.positive as f64 / stats.samples.max(1) as f64;
+    let win_rate = smoothed_win_rate(&stats);
+    let losing_cohort = stats.realized_pnl < 0.0;
     let learned_floor = if stats.samples >= STRONG_NEGATIVE_LEARNING_SAMPLES
+        && losing_cohort
         && win_rate < STRONG_NEGATIVE_LEARNING_WIN_RATE
     {
         STRONG_NEGATIVE_SCORE_FLOOR
     } else if stats.samples >= EXPLORATION_SCORE_HIGH_SAMPLES
+        && losing_cohort
         && win_rate < EXPLORATION_SCORE_HIGH_WIN_RATE
     {
         EXPLORATION_SCORE_HIGH_FLOOR
     } else if stats.samples >= EXPLORATION_SCORE_MID_SAMPLES
+        && losing_cohort
         && win_rate < EXPLORATION_SCORE_MID_WIN_RATE
     {
         EXPLORATION_SCORE_MID_FLOOR

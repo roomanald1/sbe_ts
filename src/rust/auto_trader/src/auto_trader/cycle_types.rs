@@ -14,10 +14,31 @@ struct PositionExitPolicy {
     take_profit_percent: f64,
 }
 #[derive(Serialize)]
+struct OpenPositionAttribution {
+    symbol: String,
+    strategy: Option<String>,
+    decision_id: Option<String>,
+}
+#[derive(Serialize)]
+struct OpenStrategyPosition {
+    symbol: String,
+    strategy: String,
+    decision_id: Option<String>,
+    quantity: f64,
+    average_entry_price: f64,
+    entry_fees: f64,
+    entry_timestamp_ms: u64,
+    stop_loss_percent: Option<f64>,
+    take_profit_percent: Option<f64>,
+    horizon_take_profit_percent: Option<f64>,
+}
+#[derive(Serialize)]
 struct ActivityResponse {
     orders: Vec<TraderOrder>,
     position_exit_policies: Vec<PositionExitPolicy>,
     open_position_symbols: Vec<String>,
+    open_positions: Vec<OpenPositionAttribution>,
+    strategy_positions: Vec<OpenStrategyPosition>,
     pnl_breakdown: Vec<PnlBreakdown>,
     realized_pnl: Option<f64>,
     realized_pnl_by_quote: Option<BTreeMap<String, f64>>,

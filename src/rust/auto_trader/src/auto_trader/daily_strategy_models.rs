@@ -19,6 +19,8 @@ struct StrategySymbolDiagnostic {
     primary_rule: String,
     primary_level: f64,
     primary_distance_percent: f64,
+    primary_metric_value: Option<f64>,
+    primary_metric_unit: Option<String>,
     primary_passed: bool,
     secondary_rule: Option<String>,
     secondary_level: Option<f64>,
@@ -126,6 +128,8 @@ mod risk_adjusted_monthly_momentum_tests {
             strategy: Some("risk-adjusted-monthly-momentum".into()),
             strategy_decision: Some(serde_json::json!({"monthly_anchor_close_time_ms": anchor})),
             market_regime: None,
+            news_attribution: None,
+            entry_gate: None,
         }
     }
 

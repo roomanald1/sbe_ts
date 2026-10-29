@@ -507,8 +507,15 @@ fn insight_daily_batch(
             if let Some(regime) = btc {
                 strategy_btc = Some(regime.clone());
             }
+            let primary_metric_value = (strategy == "rsi2-oversold-rebound").then(|| {
+                let period = insight_parameter(&parameters, "rsi_period_days", 2.0).round().max(2.0) as usize;
+                insight_rsi(bars, period)
+            });
             let distance = if evaluation.primary_level > 0.0 {
-                (close / evaluation.primary_level - 1.0) * 100.0
+                match primary_metric_value {
+                    Some(value) => (value / evaluation.primary_level - 1.0) * 100.0,
+                    None => (close / evaluation.primary_level - 1.0) * 100.0,
+                }
             } else {
                 0.0
             };
@@ -524,6 +531,8 @@ fn insight_daily_batch(
                 "primary_rule": evaluation.primary_rule,
                 "primary_level": evaluation.primary_level,
                 "primary_distance_percent": distance,
+                "primary_metric_value": primary_metric_value,
+                "primary_metric_unit": primary_metric_value.map(|_| "RSI"),
                 "primary_passed": evaluation.primary_passed,
                 "secondary_rule": evaluation.secondary_rule,
                 "secondary_level": evaluation.secondary_level,
@@ -544,6 +553,8 @@ fn insight_daily_batch(
                 "primary_rule": evaluation.primary_rule,
                 "primary_level": evaluation.primary_level,
                 "primary_distance_percent": distance,
+                "primary_metric_value": primary_metric_value,
+                "primary_metric_unit": primary_metric_value.map(|_| "RSI"),
                 "primary_passed": evaluation.primary_passed,
                 "secondary_rule": evaluation.secondary_rule,
                 "secondary_level": evaluation.secondary_level,

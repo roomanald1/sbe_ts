@@ -123,6 +123,11 @@ async fn update_dated_carry(
 #[derive(Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 enum DatedCarrySignal {
+    Scan {
+        emitted_at_ms: u64,
+        candidates: Vec<DatedCarryCandidate>,
+        last_error: Option<String>,
+    },
     Entry {
         emitted_at_ms: u64,
         candidate: DatedCarryCandidate,
@@ -148,6 +153,17 @@ async fn receive_dated_carry_signal(
     let mut changed = false;
     let mut audit_payload = None;
     match signal {
+        DatedCarrySignal::Scan { emitted_at_ms, candidates, last_error } => {
+            if emitted_at_ms > now_ms + 5_000 || now_ms.saturating_sub(emitted_at_ms) > 120_000 {
+                return Err((StatusCode::BAD_REQUEST, "Carry scan update is stale".into()));
+            }
+            book.checked_at_ms = emitted_at_ms;
+            book.last_error = last_error;
+            if book.last_error.is_none() {
+                book.candidates = candidates;
+            }
+            changed = true;
+        }
         DatedCarrySignal::Entry { emitted_at_ms, candidate } => {
             if emitted_at_ms > now_ms + 5_000 || now_ms.saturating_sub(emitted_at_ms) > 120_000 {
                 return Err((StatusCode::BAD_REQUEST, "Carry entry signal is stale".into()));
@@ -171,6 +187,7 @@ async fn receive_dated_carry_signal(
                 return Err((StatusCode::BAD_REQUEST, "Carry entry outside the expiry window".into()));
             }
             book.checked_at_ms = emitted_at_ms;
+            book.last_error = None;
             book.candidates.retain(|item| item.future_symbol != candidate.future_symbol);
             book.candidates.push(candidate.clone());
             let selected = {

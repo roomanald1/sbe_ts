@@ -57,6 +57,9 @@ fn collect_signal_candidates<'a>(
     let fresh_directional = signals
         .iter()
         .filter(|signal| {
+            if is_stablecoin_pair(&signal.symbol) {
+                return false;
+            }
             if signal.stale || now.saturating_sub(signal.timestamp / 1000) > MAX_SIGNAL_AGE_SECONDS
             {
                 stale_signal_count += 1;
@@ -86,7 +89,8 @@ fn collect_signal_candidates<'a>(
     let neutral_scout_candidates = signals
         .iter()
         .filter_map(|signal| {
-            if signal.direction != "neutral"
+            if is_stablecoin_pair(&signal.symbol)
+                || signal.direction != "neutral"
                 || signal.stale
                 || now.saturating_sub(signal.timestamp / 1000) > MAX_SIGNAL_AGE_SECONDS
                 || !signal.score.is_finite()
@@ -200,7 +204,12 @@ fn format_no_tradeable_bias(
     }
     let early_filter_details = signals.iter().filter_map(|candidate| {
                 let age = now.saturating_sub(candidate.timestamp / 1000);
-                if candidate.stale {
+                if is_stablecoin_pair(&candidate.symbol) {
+                    Some(format!(
+                        "{} {} · Stablecoin pair excluded from directional and scout entries",
+                        candidate.symbol, candidate.direction
+                    ))
+                } else if candidate.stale {
                     Some(format!("{} {} · Signal freshness (stale flag true; age {}s; max age {}s)", candidate.symbol, candidate.direction, age, MAX_SIGNAL_AGE_SECONDS))
                 } else if age > MAX_SIGNAL_AGE_SECONDS {
                     Some(format!("{} {} · Signal freshness (age {}s > max {}s)", candidate.symbol, candidate.direction, age, MAX_SIGNAL_AGE_SECONDS))
@@ -268,6 +277,8 @@ mod parallel_daily_candidate_tests {
             strategy: Some(strategy.into()),
             strategy_decision: None,
             market_regime: None,
+            news_attribution: None,
+            entry_gate: None,
         }
     }
 

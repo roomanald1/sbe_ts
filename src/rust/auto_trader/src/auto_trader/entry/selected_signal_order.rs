@@ -21,6 +21,12 @@ struct SelectedSignalOrderRequest<'a> {
 async fn submit_selected_signal(
     request: SelectedSignalOrderRequest<'_>,
 ) -> Result<CycleResult, (StatusCode, String)> {
+    if is_stablecoin_pair(&request.signal.symbol) {
+        return Ok(skipped_for_signal(
+            request.signal,
+            "Stablecoin-to-stablecoin pairs are excluded from directional and scout entries",
+        ));
+    }
     let SelectedSignalOrderRequest {
         state,
         client,
@@ -227,12 +233,19 @@ async fn submit_selected_signal(
         let allocated = allocated_notional(&settings);
         let category = strategy_category(signal.strategy.as_deref());
         let category_allocated = allocated_notional_for_category(&settings, Some(category));
-        let strategy_remaining_budget = if is_independent_daily_strategy(strategy_key) {
-            daily_strategy_notional_share(&settings)
-                - allocated_notional_for_strategy(&settings, strategy_key)
-        } else {
-            f64::INFINITY
-        };
+        let strategy_remaining_budget = Strategy::from_name(strategy_key)
+            .map(|kind| match strategy_category(Some(kind.as_str())) {
+                StrategyCategory::Daily if !kind.is_live_insight() && !kind.is_dated_carry() => {
+                    daily_strategy_effective_budget(&settings, strategy_key)
+                        - allocated_notional_for_strategy(&settings, strategy_key)
+                }
+                StrategyCategory::Intraday if kind.is_live_insight() => {
+                    intraday_strategy_effective_budget(&settings, strategy_key)
+                        - allocated_notional_for_strategy(&settings, strategy_key)
+                }
+                _ => f64::INFINITY,
+            })
+            .unwrap_or(f64::INFINITY);
         let remaining_budget = (settings.daily_notional_limit - allocated)
             .min(category_notional_limit(&settings, category) - category_allocated)
             .min(strategy_remaining_budget)

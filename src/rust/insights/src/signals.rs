@@ -26,8 +26,8 @@ const WALK_FORWARD_MIN_TRAINING_SAMPLES: usize = 30;
 // are still computed on every feed event, while this cadence limits the
 // historical database growth from snapshots, book data, and their outcomes.
 pub const RESEARCH_SAMPLE_INTERVAL_MS: u64 = 10_000;
-/// Recompute and publish live signals at most once per symbol per second.
-pub const LIVE_SIGNAL_SNAPSHOT_INTERVAL_MS: u64 = 1_000;
+/// Recompute and publish live signals at most once per symbol every two seconds.
+pub const LIVE_SIGNAL_SNAPSHOT_INTERVAL_MS: u64 = 2_000;
 const WALK_FORWARD_MIN_THRESHOLD_SAMPLES: usize = 10;
 const WALK_FORWARD_TRAINING_WINDOW: usize = 200;
 const WALK_FORWARD_LOGISTIC_REFRESH_INTERVAL: usize = 100;

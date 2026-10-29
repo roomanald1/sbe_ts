@@ -57,7 +57,7 @@ async fn receive_daily_strategy_signals(
         }
     }
     if !by_symbol.is_empty() {
-        let mut queue = state.pending_signals.lock().await;
+        let mut queue = state.pending_daily_signals.lock().await;
         for (symbol, best) in by_symbol {
             queue_pending_signal(
                 &mut queue,
@@ -74,7 +74,7 @@ async fn receive_daily_strategy_signals(
             );
         }
         drop(queue);
-        state.signal_notify.notify_one();
+        state.daily_signal_notify.notify_one();
     }
     Ok(StatusCode::ACCEPTED)
 }

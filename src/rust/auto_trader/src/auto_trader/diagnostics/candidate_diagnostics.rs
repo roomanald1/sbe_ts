@@ -32,6 +32,58 @@ fn candidate_entry_diagnostic(
     )
 }
 
+fn candidate_entry_audit_value(
+    candidate: &Signal,
+    dashboard: &Dashboard,
+    learning: &BTreeMap<String, LearningStats>,
+    risk_appetite: f64,
+    active_scout_count: usize,
+    selection_mode: &str,
+) -> serde_json::Value {
+    let review = review_candidate_entry(
+        candidate,
+        dashboard,
+        learning,
+        risk_appetite,
+        active_scout_count,
+    );
+    let failures = if selection_mode == "rejected" {
+        candidate_entry_failures(candidate, &review, active_scout_count)
+    } else {
+        Vec::new()
+    };
+    serde_json::json!({
+        "selection_mode": selection_mode,
+        "market_context": review.context,
+        "observed": {
+            "score": candidate.score,
+            "absolute_score": candidate.score.abs(),
+            "strength": candidate.strength,
+        },
+        "thresholds": {
+            "strength_floor": review.strength_floor,
+            "exploration_score_absolute_floor": review.score_floor,
+            "scout_strength_floor": review.scout_strength_floor,
+            "scout_score_absolute_floor": review.scout_score_floor,
+            "minimum_side_walk_forward_samples": MIN_SIDE_WALK_FORWARD_SAMPLES,
+            "minimum_exploration_evidence_samples": MIN_EXPLORATION_EVIDENCE_SAMPLES,
+            "minimum_side_direction_match_rate": MIN_SIDE_DIRECTION_MATCH_RATE,
+            "minimum_side_positive_net_rate": MIN_SIDE_POSITIVE_NET_RATE,
+            "minimum_side_positive_net_lower_95": MIN_SIDE_POSITIVE_NET_LOWER_95,
+        },
+        "checks": {
+            "strength_pass": !review.strength_weak,
+            "exploration_score_pass": !review.score_weak,
+            "exploration_context_pass": !review.mixed_context,
+            "strict_walk_forward_pass": !review.strict_evidence_bad && !review.evidence_missing && !review.research_bad,
+            "scout_strength_pass": review.scout_strength_pass,
+            "scout_score_pass": review.scout_score_pass,
+            "scout_inventory_available": active_scout_count < SCOUT_MAX_ACTIVE_POSITIONS,
+        },
+        "rejection_reasons": failures,
+    })
+}
+
 fn candidate_entry_failures(
     candidate: &Signal,
     review: &CandidateEntryReview<'_>,
@@ -141,4 +193,3 @@ fn format_scout_wait_reason(review: &CandidateEntryReview<'_>) -> String {
         "measured negative-history scout probe waits for zero open scouts ({samples}; net {net_return}; positive {positive_rate})"
     )
 }
-

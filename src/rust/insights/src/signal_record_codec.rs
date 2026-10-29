@@ -26,6 +26,7 @@ fn deserialize_record(kind: i64, payload: &[u8]) -> Result<StoredSignalRecord> {
                 aggressor_cost_bps: snapshot.components.aggressor_cost_bps,
             },
             reasons: snapshot.reasons,
+            news_attribution: None,
             stale: snapshot.stale,
             ranging_probability: snapshot.ranging_probability,
             range_lower_bound: snapshot.range_lower_bound,

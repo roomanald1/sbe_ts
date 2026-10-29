@@ -1,66 +1,8 @@
 {
   "enabled": false,
   "max_spot_notional_usdt": 1000.0,
-  "candidates": [
-    {
-      "spot_symbol": "BTCUSDT",
-      "future_symbol": "BTCUSDT_261225",
-      "expiry_ms": 1798185600000,
-      "days_to_expiry": 58.84665167824074,
-      "quantity": 0.012,
-      "spot_ask": 79916.01,
-      "future_bid": 80600.3,
-      "basis_percent": 0.8562614675082125,
-      "net_after_budget_percent": 0.3562614675082125,
-      "eligible": true,
-      "reason": "premium exceeds 0.5% cost budget"
-    },
-    {
-      "spot_symbol": "ETHUSDT",
-      "future_symbol": "ETHUSDT_261225",
-      "expiry_ms": 1798185600000,
-      "days_to_expiry": 58.84665167824074,
-      "quantity": 0.431,
-      "spot_ask": 2316.0,
-      "future_bid": 2331.977192575406,
-      "basis_percent": 0.6898615101643468,
-      "net_after_budget_percent": 0.18986151016434685,
-      "eligible": true,
-      "reason": "premium exceeds 0.5% cost budget"
-    }
-  ],
-  "positions": [
-    {
-      "spot_symbol": "BTCUSDT",
-      "future_symbol": "BTCUSDT_261225",
-      "expiry_ms": 1798185600000,
-      "entry_ms": 1793101264580,
-      "quantity": 0.012,
-      "spot_entry_price": 79955.96800499999,
-      "future_entry_price": 80559.99985000001,
-      "entry_fees": 1.4428316151599998,
-      "status": "open",
-      "spot_exit_twap": null,
-      "settlement_price": null,
-      "net_pnl_usdt": null,
-      "settlement_source": null
-    },
-    {
-      "spot_symbol": "ETHUSDT",
-      "future_symbol": "ETHUSDT_261225",
-      "expiry_ms": 1798185600000,
-      "entry_ms": 1793101264597,
-      "quantity": 0.431,
-      "spot_entry_price": 2317.158,
-      "future_entry_price": 2330.8112039791185,
-      "entry_fees": 1.5009849124575,
-      "status": "open",
-      "spot_exit_twap": null,
-      "settlement_price": null,
-      "net_pnl_usdt": null,
-      "settlement_source": null
-    }
-  ],
-  "checked_at_ms": 1793101261455,
+  "candidates": [],
+  "positions": [],
+  "checked_at_ms": 1793300663711,
   "last_error": null
 }

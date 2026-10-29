@@ -14,6 +14,8 @@ struct StatusResponse {
     max_daily_open_positions: usize,
     intraday_notional_limit: f64,
     daily_strategy_notional_limit: f64,
+    daily_strategy_budgets: Vec<StrategyBudgetStatus>,
+    intraday_strategy_budgets: Vec<StrategyBudgetStatus>,
     intraday_used_notional: f64,
     daily_strategy_used_notional: f64,
     max_entries_per_auto_position: u32,
@@ -35,6 +37,17 @@ struct StatusResponse {
     symbol_gate_hits: Vec<SymbolGateHit>,
     latest_signal_diagnostic: String,
     strategy_diagnostics: Vec<StrategyDiagnostic>,
+}
+#[derive(Serialize)]
+struct StrategyBudgetStatus {
+    strategy: String,
+    base_budget: f64,
+    effective_budget: f64,
+    used_notional: f64,
+    learning_multiplier: f64,
+    learning_samples: usize,
+    positive_rate: Option<f64>,
+    realized_pnl: f64,
 }
 #[derive(Serialize)]
 struct GapReason {
@@ -84,6 +97,10 @@ struct SettingsRequest {
     intraday_notional_limit: Option<f64>,
     #[serde(default)]
     daily_strategy_notional_limit: Option<f64>,
+    #[serde(default)]
+    daily_strategy_budgets: Option<BTreeMap<String, f64>>,
+    #[serde(default)]
+    intraday_strategy_budgets: Option<BTreeMap<String, f64>>,
     #[serde(default)]
     max_entries_per_auto_position: Option<u32>,
     #[serde(default)]

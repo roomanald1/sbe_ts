@@ -93,6 +93,20 @@ fn has_material_adverse_event(text: &str) -> bool {
         .iter().any(|term| upper.contains(term))
 }
 
+fn matched_news_keywords(text: &str) -> Vec<String> {
+    const TERMS: [&str; 48] = [
+        "APPROVES", "APPROVAL", "ADOPTS", "LAUNCHES", "SURGES", "RALLIES", "GAINS",
+        "INFLOWS", "PARTNERSHIP", "INTEGRATES", "RECORD HIGH", "BREAKS OUT", "GOES LIVE",
+        "UPGRADE", "OVERHAUL", "HACK", "EXPLOIT", "BREACH", "LAWSUIT", "BANNED",
+        "PLUNGES", "FALLS", "DROPS", "OUTFLOWS", "LIQUIDATION", "BANKRUPT", "DELIST",
+        "DELAYED", "SUED", "BAN", "TAX", "TAXES", "TAXATION", "LEVY", "DUTY", "DUTIES",
+        "OBJECTION", "OPPOSITION", "PUSHBACK", "RESISTANCE", "LEVERAGE", "VOLATILITY",
+        "CRASH", "RISK", "ATTACK", "OUTAGE", "POSTPONED", "FAILS TO LAUNCH",
+    ];
+    let upper = text.to_ascii_uppercase();
+    TERMS.iter().filter(|term| upper.contains(**term)).map(|term| term.to_ascii_lowercase()).collect()
+}
+
 fn classify_news(title: &str, asset: &str, url: String, published_at: String, now: u64) -> NewsArticle {
     const POSITIVE: [&str; 16] = ["APPROVES", "APPROVAL", "ADOPTS", "LAUNCHES", "SURGES", "RALLIES", "GAINS", "INFLOWS", "PARTNERSHIP", "INTEGRATES", "RECORD HIGH", "BREAKS OUT", "GOES LIVE", "GO LIVE", "UPGRADE", "OVERHAUL"];
     const NEGATIVE: [&str; 25] = ["HACK", "EXPLOIT", "BREACH", "LAWSUIT", "SUES", "BANNED", "BAN", "PLUNGES", "FALLS", "DROPS", "OUTFLOWS", "LIQUIDATION", "BANKRUPT", "DELIST", "TAX", "TAXES", "TAXATION", "LEVY", "DUTY", "DUTIES", "OBJECTION", "OPPOSITION", "PUSHBACK", "RESISTANCE", "DELAYED"];
@@ -123,7 +137,7 @@ fn classify_news(title: &str, asset: &str, url: String, published_at: String, no
     } else {
         format!("Headline matched {} event keyword(s); heuristic only", if direction == "bullish" { positive as usize } else { negative as usize })
     };
-    NewsArticle { title: title.to_owned(), article_text: String::new(), url, published_at, received_at_ms: now, matched_asset: asset.to_owned(), direction: direction.to_owned(), score, signal_reason, sentiment_model: "keyword_fallback".to_owned(), sentiment_confidence: 0.0 }
+    NewsArticle { title: title.to_owned(), article_text: String::new(), url, published_at, received_at_ms: now, matched_asset: asset.to_owned(), direction: direction.to_owned(), score, signal_reason, sentiment_model: "keyword_fallback".to_owned(), sentiment_confidence: 0.0, matched_keywords: matched_news_keywords(title) }
 }
 
 fn parse_news_rss(xml: &str, now: u64) -> Vec<NewsArticle> {
@@ -147,6 +161,7 @@ fn parse_news_rss(xml: &str, now: u64) -> Vec<NewsArticle> {
         let asset = news_asset(&title);
         let mut article = classify_news(&title, &asset, url, published_at, now);
         article.article_text = rss_text.chars().take(4000).collect();
+        article.matched_keywords = matched_news_keywords(&format!("{} {}", article.title, article.article_text));
         articles.push(article);
         if articles.len() >= 50 { break; }
         remaining = &remaining[body_start + end + 7..];
@@ -167,6 +182,7 @@ fn apply_news_signal(snapshot: &mut SignalSnapshot, news: &NewsFeedSnapshot, now
         return None;
     }
     let news_score = relevant.iter().map(|article| article.score).sum::<f64>() / relevant.len() as f64;
+    let pre_news_score = snapshot.score;
     // Headline sentiment is noisy, so its learned contribution is capped at 20%.
     snapshot.score = (snapshot.score * (1.0 - weight) + news_score * weight).clamp(-1.0, 1.0);
     snapshot.direction = if snapshot.score > 0.2 {
@@ -176,6 +192,27 @@ fn apply_news_signal(snapshot: &mut SignalSnapshot, news: &NewsFeedSnapshot, now
     } else {
         "neutral".to_owned()
     };
+    snapshot.news_attribution = Some(NewsAttribution {
+        pre_news_score,
+        post_news_score: snapshot.score,
+        aggregate_score: news_score,
+        weight,
+        article_count: relevant.len(),
+        source: news.source.clone(),
+        articles: relevant.iter().map(|article| NewsHeadlineAttribution {
+            title: article.title.clone(),
+            url: article.url.clone(),
+            published_at: article.published_at.clone(),
+            received_at_ms: article.received_at_ms,
+            matched_asset: article.matched_asset.clone(),
+            direction: article.direction.clone(),
+            score: article.score,
+            sentiment_model: article.sentiment_model.clone(),
+            sentiment_confidence: article.sentiment_confidence,
+            matched_keywords: article.matched_keywords.clone(),
+            signal_reason: article.signal_reason.clone(),
+        }).collect(),
+    });
     snapshot.reasons.push(format!(
         "strategy_vote:news_sentiment;direction={};vote={news_score:.2};headlines={};weight={weight:.3};source=CoinDesk_RSS;context=headline+description;max_age_seconds=1800;classifier=local_crypto_finbert_or_keyword_fallback",
         if news_score > 0.0 { "bullish" } else { "bearish" },
@@ -231,4 +268,3 @@ async fn classify_headlines_with_model(articles: &mut [NewsArticle]) {
         }
     }
 }
-

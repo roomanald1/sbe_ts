@@ -12,6 +12,18 @@ struct Dashboard {
     #[serde(skip)]
     queue_wait_ms: Option<f64>,
 }
+
+fn is_stablecoin_pair(symbol: &str) -> bool {
+    const STABLECOINS: &[&str] = &[
+        "BUSD", "DAI", "FDUSD", "FRAX", "GUSD", "LUSD", "PYUSD", "RLUSD", "TUSD",
+        "USDC", "USDD", "USDE", "USDP", "USDS", "USDT", "USDG", "EURC",
+    ];
+    let Some((base, quote)) = symbol.split_once('-') else {
+        return false;
+    };
+    STABLECOINS.contains(&base.to_ascii_uppercase().as_str())
+        && STABLECOINS.contains(&quote.to_ascii_uppercase().as_str())
+}
 #[derive(Clone, Deserialize)]
 struct Signal {
     symbol: String,
@@ -33,6 +45,10 @@ struct Signal {
     strategy_decision: Option<serde_json::Value>,
     #[serde(default)]
     market_regime: Option<String>,
+    #[serde(default)]
+    news_attribution: Option<serde_json::Value>,
+    #[serde(default)]
+    entry_gate: Option<serde_json::Value>,
 }
 #[derive(Clone, Default, Deserialize, Serialize)]
 struct SignalComponents {

@@ -40,6 +40,10 @@ struct Settings {
     intraday_notional_limit: f64,
     #[serde(default = "default_daily_strategy_notional_limit")]
     daily_strategy_notional_limit: f64,
+    #[serde(default)]
+    daily_strategy_budgets: BTreeMap<String, f64>,
+    #[serde(default)]
+    intraday_strategy_budgets: BTreeMap<String, f64>,
     #[serde(default = "default_max_entries_per_auto_position")]
     max_entries_per_auto_position: u32,
     #[serde(default = "default_stop_loss_percent")]
@@ -185,6 +189,8 @@ impl Default for Settings {
             max_daily_open_positions: default_max_daily_open_positions(),
             intraday_notional_limit: default_intraday_notional_limit(),
             daily_strategy_notional_limit: default_daily_strategy_notional_limit(),
+            daily_strategy_budgets: BTreeMap::new(),
+            intraday_strategy_budgets: BTreeMap::new(),
             max_entries_per_auto_position: default_max_entries_per_auto_position(),
             stop_loss_percent: default_stop_loss_percent(),
             take_profit_percent: default_take_profit_percent(),

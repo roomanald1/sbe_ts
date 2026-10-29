@@ -1,4 +1,30 @@
 #[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct NewsHeadlineAttribution {
+    pub title: String,
+    pub url: String,
+    pub published_at: String,
+    pub received_at_ms: u64,
+    pub matched_asset: String,
+    pub direction: String,
+    pub score: f64,
+    pub sentiment_model: String,
+    pub sentiment_confidence: f64,
+    pub matched_keywords: Vec<String>,
+    pub signal_reason: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct NewsAttribution {
+    pub pre_news_score: f64,
+    pub post_news_score: f64,
+    pub aggregate_score: f64,
+    pub weight: f64,
+    pub article_count: usize,
+    pub source: String,
+    pub articles: Vec<NewsHeadlineAttribution>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SignalSnapshot {
     pub symbol: String,
     pub timestamp: u64,
@@ -7,6 +33,9 @@ pub struct SignalSnapshot {
     pub strength: f64,
     pub components: SignalComponents,
     pub reasons: Vec<String>,
+    /// News evidence that contributed to this signal, captured for decision audits.
+    #[serde(default)]
+    pub news_attribution: Option<NewsAttribution>,
     pub stale: bool,
     /// Heuristic probability (0..1) that recent prices are trading in a range.
     #[serde(default)]
@@ -291,4 +320,3 @@ pub struct CompletedSignalOutcome {
     pub legacy: SignalOutcome,
     pub evaluation: SignalEvaluation,
 }
-

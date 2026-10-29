@@ -22,6 +22,20 @@ const STABLE_CONNECTION_DURATION: Duration = Duration::from_secs(60);
 const VOLATILITY_HISTORY_MS: u64 = 300_000;
 const OKX_IDLE_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(20);
 const OKX_PONG_TIMEOUT: Duration = Duration::from_secs(10);
+const OKX_PUBLIC_WS_URL: &str = "wss://ws.okx.com/ws/v5/public";
+const OKX_CONNECT_MIN_INTERVAL: Duration = Duration::from_millis(350);
+static OKX_NEXT_CONNECT_SLOT: OnceLock<tokio::sync::Mutex<Instant>> = OnceLock::new();
+
+async fn wait_for_okx_connection_slot() {
+    let next_slot = OKX_NEXT_CONNECT_SLOT
+        .get_or_init(|| tokio::sync::Mutex::new(Instant::now()));
+    let mut next_slot = next_slot.lock().await;
+    let now = Instant::now();
+    if *next_slot > now {
+        tokio::time::sleep_until(*next_slot).await;
+    }
+    *next_slot = Instant::now() + OKX_CONNECT_MIN_INTERVAL;
+}
 
 #[derive(Default)]
 pub(crate) struct RollingVolatility {

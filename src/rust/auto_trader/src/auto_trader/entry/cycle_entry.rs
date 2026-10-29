@@ -85,7 +85,7 @@ fn daily_candidate_priority(settings: &Settings, signal: &Signal) -> (f64, f64) 
     };
     let outcomes = strategy_learning_stats(settings, &signal.symbol, strategy);
     let confidence = confident_win_rate_edge(outcomes.positive, outcomes.samples);
-    let mean_realized_pnl = if outcomes.samples >= STRATEGY_PARAMETER_MIN_SAMPLES {
+    let mean_realized_pnl = if outcomes.samples > 0 {
         outcomes.realized_pnl / outcomes.samples as f64
     } else {
         0.0
@@ -109,6 +109,18 @@ fn daily_strategy_candidates<'a>(signals: &[&'a Signal], settings: &Settings) ->
             .then_with(|| left.strategy.cmp(&right.strategy))
     });
     candidates
+}
+
+fn daily_agreement_size_multiplier(signal: &Signal, candidates: &[&Signal]) -> f64 {
+    let agreeing_strategies = candidates
+        .iter()
+        .filter(|candidate| {
+            candidate.symbol == signal.symbol && candidate.direction == signal.direction
+        })
+        .filter_map(|candidate| candidate.strategy.as_deref())
+        .collect::<std::collections::BTreeSet<_>>()
+        .len();
+    (1.0 + agreeing_strategies.saturating_sub(1).min(2) as f64 * 0.1).min(1.2)
 }
 
 fn daily_strategy_batch_result(
@@ -272,7 +284,7 @@ async fn run_cycle_inner(
     if dashboard.best.is_empty() {
         return Ok(CycleResult {
             status: "skipped",
-            reason: Some("No signal or daily strategies are enabled".into()),
+            reason: Some("No eligible signal is currently available from enabled live or daily strategies".into()),
             symbol: None,
             side: None,
             quantity: None,
@@ -360,14 +372,29 @@ async fn run_cycle_inner(
         let mut submitted = 0;
         let mut last_order = None;
         let mut details = Vec::new();
-        for signal in candidates {
+        for signal in &candidates {
             let strategy_name = signal.strategy.as_deref().unwrap_or("unknown-strategy");
+            let mut sized_signal = (**signal).clone();
+            let decision = sized_signal
+                .strategy_decision
+                .get_or_insert_with(|| serde_json::json!({}));
+            if let Some(decision) = decision.as_object_mut() {
+                decision.insert(
+                    "strategy_agreement_size_multiplier".into(),
+                    serde_json::json!(daily_agreement_size_multiplier(signal, &candidates)),
+                );
+            }
+            sized_signal.entry_gate = Some(serde_json::json!({
+                "selection_mode": "daily_strategy",
+                "strategy": strategy_name,
+                "strategy_decision": sized_signal.strategy_decision.clone(),
+            }));
             let result = match submit_cycle_signal(
                 state,
                 &client,
                 &position_url,
                 &dashboard,
-                signal,
+                &sized_signal,
                 false,
                 false,
                 counterfactual_stop_loss_percent,
@@ -422,12 +449,21 @@ async fn run_cycle_inner(
         Err(result) => return Ok(result),
     };
     let signal_selection_ms = selection_started.elapsed().as_secs_f64() * 1000.0;
+    let mut audited_signal = signal.clone();
+    audited_signal.entry_gate = Some(candidate_entry_audit_value(
+        signal,
+        &dashboard,
+        &learning,
+        risk_appetite,
+        active_scout_count,
+        if scout { "scout" } else if exploratory { "exploratory" } else { "strict" },
+    ));
     submit_cycle_signal(
         state,
         &client,
         &position_url,
         &dashboard,
-        signal,
+        &audited_signal,
         exploratory,
         scout,
         counterfactual_stop_loss_percent,
@@ -457,6 +493,8 @@ mod parallel_daily_cycle_tests {
             strategy: Some(strategy.into()),
             strategy_decision: None,
             market_regime: None,
+            news_attribution: None,
+            entry_gate: None,
         }
     }
 

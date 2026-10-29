@@ -10,8 +10,10 @@ struct AutoTraderState {
     latest_missed_opportunity_bands: Arc<Mutex<Vec<MissedOpportunityGateBand>>>,
     latest_execution_parameters: Arc<Mutex<Option<LatestExecutionParameters>>>,
     cycle_lock: Arc<Mutex<()>>,
-    pending_signals: Arc<Mutex<PendingSignalQueue>>,
-    signal_notify: Arc<Notify>,
+    pending_daily_signals: Arc<Mutex<PendingSignalQueue>>,
+    daily_signal_notify: Arc<Notify>,
+    pending_live_signals: Arc<Mutex<PendingSignalQueue>>,
+    live_signal_notify: Arc<Notify>,
     signal_book_prewarms: Arc<Mutex<BTreeMap<String, Instant>>>,
     audit_tx: mpsc::Sender<serde_json::Value>,
     execution_audit_tx: mpsc::UnboundedSender<serde_json::Value>,
@@ -96,6 +98,10 @@ struct TraderPosition {
     average_entry_price: f64,
     entry_fees: f64,
     realized_pnl: f64,
+    #[serde(default)]
+    initial_entry_notional: f64,
+    #[serde(default)]
+    total_fees_paid: f64,
     #[serde(default)]
     entries: u32,
     #[serde(default)]
@@ -229,6 +235,8 @@ mod pending_signal_queue_tests {
                 strategy: None,
                 strategy_decision: None,
                 market_regime: None,
+                news_attribution: None,
+                entry_gate: None,
             }],
             walk_forward: Arc::new(Vec::new()),
             missed_opportunity_bands: Vec::new(),
@@ -239,28 +247,31 @@ mod pending_signal_queue_tests {
     }
 
     #[test]
-    fn daily_signal_survives_live_update_for_same_symbol() {
-        let mut queue = PendingSignalQueue::new();
+    fn daily_and_live_signals_use_independent_queues() {
+        let mut daily_queue = PendingSignalQueue::new();
+        let mut live_queue = PendingSignalQueue::new();
         queue_pending_signal(
-            &mut queue,
+            &mut daily_queue,
             PendingSignalKind::Daily,
             "BNB-USDT".into(),
             dashboard(true),
         );
         queue_pending_signal(
-            &mut queue,
+            &mut live_queue,
             PendingSignalKind::Live,
             "BNB-USDT".into(),
             dashboard(false),
         );
         queue_pending_signal(
-            &mut queue,
+            &mut live_queue,
             PendingSignalKind::Live,
             "BNB-USDT".into(),
             dashboard(false),
         );
-        assert_eq!(queue.len(), 2);
-        assert!(take_next_pending_signal(&mut queue).unwrap().best[0].strategy_candidate);
-        assert!(!take_next_pending_signal(&mut queue).unwrap().best[0].strategy_candidate);
+
+        assert_eq!(daily_queue.len(), 1);
+        assert_eq!(live_queue.len(), 1);
+        assert!(!take_next_pending_signal(&mut live_queue).unwrap().best[0].strategy_candidate);
+        assert!(take_next_pending_signal(&mut daily_queue).unwrap().best[0].strategy_candidate);
     }
 }

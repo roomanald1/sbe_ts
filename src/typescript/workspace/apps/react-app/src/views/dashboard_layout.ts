@@ -22,6 +22,7 @@ export type DashboardWidgetType =
   | 'dated-carry'
   | 'auto-trader-diagnostics'
   | 'auto-trader-outcomes'
+  | 'auto-trader-completed-positions'
   | 'auto-trader-live-positions';
 export type DashboardWidget = {
   id: string;
@@ -63,6 +64,7 @@ export const DASHBOARD_WIDGET_TYPES: DashboardWidgetType[] = [
   'dated-carry',
   'auto-trader-diagnostics',
   'auto-trader-outcomes',
+  'auto-trader-completed-positions',
   'auto-trader-live-positions',
 ];
 export const DEFAULT_WIDGET_TYPES: DashboardWidgetType[] = [
@@ -102,6 +104,7 @@ export const WIDGET_LABELS: Record<DashboardWidgetType, string> = {
   'dated-carry': 'Dated futures carry',
   'auto-trader-diagnostics': 'Auto Trader diagnostics',
   'auto-trader-outcomes': 'AutoTrader outcomes',
+  'auto-trader-completed-positions': 'AutoTrader closed & partial positions',
   'auto-trader-live-positions': 'AutoTrader live positions',
 };
 
@@ -239,4 +242,3 @@ export function packDashboardWidgets(
     (widget) => packed.find((item) => item.id === widget.id) ?? widget,
   );
 }
-

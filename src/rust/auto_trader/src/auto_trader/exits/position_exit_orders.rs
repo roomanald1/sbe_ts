@@ -126,14 +126,23 @@ async fn submit_position_exit_order(
     settings.realized_pnl += realized_pnl_usd;
     settings.daily_realized_pnl += realized_pnl_usd;
     if filled + 1e-12 >= quantity {
-        let closed_quantity = filled.min(quantity);
-        let entry_notional = closed_quantity * position.average_entry_price;
+        let entry_notional = if position.initial_entry_notional > 0.0 {
+            position.initial_entry_notional
+        } else {
+            position.quantity.abs() * position.average_entry_price
+        };
         if entry_notional > 0.0 {
-            let fees_usd = realized_usd(&settings, &symbol, position.entry_fees + fee);
-            let strategy_realized_usd = realized_usd(&settings, &symbol, strategy_realized_pnl);
+            let total_trade_pnl = position.realized_pnl + strategy_realized_pnl;
+            let total_fees = if position.total_fees_paid > 0.0 {
+                position.total_fees_paid + fee
+            } else {
+                position.entry_fees + fee
+            };
+            let fees_usd = realized_usd(&settings, &symbol, total_fees);
+            let strategy_realized_usd = realized_usd(&settings, &symbol, total_trade_pnl);
             record_closed_trade_outcome(
                 &mut settings,
-                strategy_realized_pnl / entry_notional * 100.0,
+                total_trade_pnl / entry_notional * 100.0,
                 strategy_realized_usd,
                 fees_usd,
             );
@@ -180,7 +189,7 @@ async fn submit_position_exit_order(
             return_fraction, bid, ask, submit_response_ms, stop_loss_percent,
             take_profit_percent,
         );
-        store_auto_trader_audit(client, &payload).await;
+        queue_auto_trader_audit(state, payload);
     }
     Ok(Some(CycleResult {
         status: "order_submitted",
