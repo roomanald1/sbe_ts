@@ -19,6 +19,7 @@ fn status(state: &AutoTraderState, settings: &Settings) -> StatusResponse {
         exploration_percent: settings.exploration_percent,
         risk_appetite: settings.risk_appetite,
         max_open_positions: settings.max_open_positions,
+        max_concurrent_shadow_samples: settings.max_concurrent_shadow_samples,
         max_intraday_open_positions: settings.max_intraday_open_positions,
         max_daily_open_positions: settings.max_daily_open_positions,
         intraday_notional_limit: settings.intraday_notional_limit,

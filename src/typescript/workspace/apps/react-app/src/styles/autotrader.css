@@ -1,4 +1,5 @@
 .auto-trader-symbol-grid * { animation: none !important; transition: none !important; }
+.auto-trader-shadow-summary { display: flex; flex-wrap: wrap; gap: 8px 18px; margin: 8px 0; color: #a0a6ad; font-size: 11px; font-variant-numeric: tabular-nums; }
 
 
 /* Compact strategy selector inside AutoTrader settings. */

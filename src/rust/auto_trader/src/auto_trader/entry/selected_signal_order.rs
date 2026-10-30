@@ -184,6 +184,16 @@ async fn submit_selected_signal(
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64;
+    if timestamp.saturating_sub(signal.timestamp) > MAX_SIGNAL_AGE_SECONDS * 1_000 {
+        return Ok(skipped_for_signal(
+            signal,
+            &format!(
+                "Signal became stale before order creation (age {}ms; max {}ms)",
+                timestamp.saturating_sub(signal.timestamp),
+                MAX_SIGNAL_AGE_SECONDS * 1_000
+            ),
+        ));
+    }
     let mut stage_timings_ms = BTreeMap::new();
     stage_timings_ms.insert("dashboard_fetch".to_owned(), dashboard_ms);
     stage_timings_ms.insert("settings_lock_wait".to_owned(), settings_lock_wait_ms);

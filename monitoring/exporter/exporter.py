@@ -172,23 +172,22 @@ def metrics():
         output.append(sample("app_autotrader_orders_by_status", "Currently open AutoTrader orders by live order type.", len(resting_orders), {"status": "resting"}))
         output.append(sample("app_autotrader_orders_by_status", "Currently open AutoTrader orders by live order type.", sum(1 for order in active_barriers if order.get("status") == "armed"), {"status": "armed"}))
         output.append(sample("app_autotrader_orders_by_status", "Currently open AutoTrader orders by live order type.", sum(1 for order in active_barriers if order.get("status") == "triggering"), {"status": "triggering"}))
-        tick_to_order = []
-        for order in orders:
-            if order.get("purpose") != "signal":
-                continue
-            decision_id = order.get("decision_id")
-            try:
-                signal_timestamp = int(decision_id.split("|", 1)[0])
-                order_timestamp = int(order.get("timestamp", 0))
-                latency = order_timestamp - signal_timestamp
-                if signal_timestamp > 0 and latency >= 0:
-                    tick_to_order.append((order_timestamp, latency))
-            except (AttributeError, TypeError, ValueError):
-                continue
-        if tick_to_order:
-            _, latest_latency = max(tick_to_order, key=lambda item: item[0])
-            output.append(sample("app_autotrader_tick_to_order_latency_ms", "Latest milliseconds from signal tick timestamp to AutoTrader order creation.", latest_latency, {"stat": "latest"}))
-            output.append(sample("app_autotrader_tick_to_order_samples", "Number of retained signal orders available for the latest tick-to-order measurement.", len(tick_to_order)))
+        # A signal's source timestamp can precede its selection by many seconds
+        # (and is already reported as source_signal_age below). Do not label
+        # that age as order-creation processing latency. Use the measured cycle
+        # duration recorded immediately before the order is persisted.
+        order_creation = [
+            (int(order.get("timestamp", 0)), order["stage_timings_ms"]["cycle_to_order_record"])
+            for order in orders
+            if order.get("purpose") == "signal"
+            and isinstance(order.get("stage_timings_ms"), dict)
+            and isinstance(order["stage_timings_ms"].get("cycle_to_order_record"), (int, float))
+            and order["stage_timings_ms"]["cycle_to_order_record"] >= 0
+        ]
+        if order_creation:
+            _, latest_latency = max(order_creation, key=lambda item: item[0])
+            output.append(sample("app_autotrader_tick_to_order_latency_ms", "Latest measured AutoTrader cycle processing milliseconds from cycle start to signal order creation.", latest_latency, {"stat": "latest"}))
+            output.append(sample("app_autotrader_tick_to_order_samples", "Number of retained signal orders with a measured cycle-to-order duration.", len(order_creation)))
         stage_values = {}
         for order in orders:
             for stage, latency in order.get("stage_timings_ms", {}).items():

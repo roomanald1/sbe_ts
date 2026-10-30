@@ -157,6 +157,9 @@ async fn run_feed_signal_consumer(runtime: Arc<SignalRuntime>) {
     }
 }
 
+const AUTO_TRADER_SIGNAL_PUSH_CONCURRENCY: usize = 32;
+const AUTO_TRADER_SIGNAL_PUSH_TIMEOUT: Duration = Duration::from_secs(2);
+
 fn drain_latest(map: &DashMap<String, serde_json::Value>) -> Vec<(String, serde_json::Value)> {
     // Snapshot and sort keys before removing entries. Each shard guard is short
     // lived, and output order stays consistent with the previous BTreeMap queue.
@@ -168,6 +171,57 @@ fn drain_latest(map: &DashMap<String, serde_json::Value>) -> Vec<(String, serde_
     keys.into_iter()
         .filter_map(|key| map.remove(&key).map(|(_, value)| (key, value)))
         .collect()
+}
+
+async fn deliver_signal_dashboard(
+    client: reqwest::Client,
+    endpoint: String,
+    symbol: String,
+    dashboard: serde_json::Value,
+) -> (String, serde_json::Value, Result<(), reqwest::Error>) {
+    let result = client
+        .post(endpoint)
+        .timeout(AUTO_TRADER_SIGNAL_PUSH_TIMEOUT)
+        .json(&dashboard)
+        .send()
+        .await
+        .and_then(reqwest::Response::error_for_status)
+        .map(|_| ());
+
+    (symbol, dashboard, result)
+}
+
+async fn deliver_signal_batch(
+    client: &reqwest::Client,
+    base: &str,
+    dashboards: Vec<(String, serde_json::Value)>,
+) -> (BTreeMap<String, serde_json::Value>, Option<String>) {
+    // Bound load on AutoTrader while allowing unrelated symbols to progress
+    // together. Thirty-two is a conservative cap, not a benchmark-derived
+    // optimum; raise it only if delivery latency remains high and AutoTrader
+    // has spare capacity.
+    let results = futures_util::stream::iter(dashboards)
+        .map(|(symbol, dashboard)| {
+            deliver_signal_dashboard(
+                client.clone(),
+                format!("{base}/internal/auto-trader/signal"),
+                symbol,
+                dashboard,
+            )
+        })
+        .buffer_unordered(AUTO_TRADER_SIGNAL_PUSH_CONCURRENCY)
+        .collect::<Vec<_>>()
+        .await;
+
+    let mut failed = BTreeMap::new();
+    let mut first_error = None;
+    for (symbol, dashboard, result) in results {
+        if let Err(error) = result {
+            first_error.get_or_insert_with(|| error.to_string());
+            failed.insert(symbol, dashboard);
+        }
+    }
+    (failed, first_error)
 }
 
 async fn run_ui_snapshot_push_worker(
@@ -220,27 +274,17 @@ async fn run_signal_push_worker(
             notified.await;
             continue;
         };
-        let mut failed = BTreeMap::new();
-        for (symbol, dashboard) in dashboards {
-            let result = client
-                .post(format!("{base}/internal/auto-trader/signal"))
-                .timeout(std::time::Duration::from_secs(2))
-                .json(&dashboard)
-                .send()
-                .await
-                .and_then(reqwest::Response::error_for_status);
-            if let Err(error) = result {
-                if endpoint_available {
-                    crate::service_log!(
-                        "WARN",
-                        "Auto-trader signal delivery unavailable; retaining latest signal per symbol and retrying: {error}"
-                    );
-                    endpoint_available = false;
-                }
-                failed.insert(symbol, dashboard);
-            }
-        }
+        // Send symbols in parallel so one slow request cannot block the batch.
+        let (failed, first_error) = deliver_signal_batch(&client, &base, dashboards).await;
         if !failed.is_empty() {
+            if endpoint_available {
+                crate::service_log!(
+                    "WARN",
+                    "Auto-trader signal delivery failed; retaining latest signal per symbol and retrying: {}",
+                    first_error.as_deref().unwrap_or("unknown request error")
+                );
+                endpoint_available = false;
+            }
             for (symbol, dashboard) in failed {
                 pending_signals.entry(symbol).or_insert(dashboard);
             }

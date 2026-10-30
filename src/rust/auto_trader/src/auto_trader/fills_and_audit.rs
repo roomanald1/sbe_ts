@@ -252,7 +252,9 @@ fn signal_audit_payload(
         "status": status,
         "reason": reason,
     });
-    if stage == "entry" || (stage == "decision" && status == "selected") {
+    if stage == "entry"
+        || (stage == "decision" && matches!(status, "selected" | "shadowed"))
+    {
         payload["trade_id"] = serde_json::json!(decision_id);
     }
     payload

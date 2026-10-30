@@ -14,11 +14,15 @@ fn persist_settings(path: &PathBuf, settings: &Settings) -> Result<(), (StatusCo
     persist_settings_snapshot(path, settings)
 }
 
+fn settings_binary_path(json_path: &PathBuf) -> PathBuf {
+    json_path.with_extension("msgpack")
+}
+
 fn persist_settings_snapshot(
     path: &PathBuf,
     settings: &Settings,
 ) -> Result<(), (StatusCode, String)> {
-    let bytes = serde_json::to_vec(settings)
+    let bytes = rmp_serde::to_vec_named(settings)
         .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
     persist_settings_bytes(path, bytes)
 }
@@ -27,7 +31,7 @@ fn persist_settings_bytes(
     path: &PathBuf,
     bytes: Vec<u8>,
 ) -> Result<(), (StatusCode, String)> {
-    let temporary = path.with_extension("json.tmp");
+    let temporary = path.with_extension("msgpack.tmp");
     std::fs::write(&temporary, bytes)
         .and_then(|_| std::fs::rename(&temporary, path))
         .map_err(|error| {
@@ -70,7 +74,7 @@ fn start_settings_persistence_worker(state: &AutoTraderState) {
             let settings_guard = Arc::clone(&settings).lock_owned().await;
             let serialization_started = Instant::now();
             let bytes = match tokio::task::spawn_blocking(move || {
-                serde_json::to_vec(&*settings_guard)
+                rmp_serde::to_vec_named(&*settings_guard)
                     .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))
             })
             .await

@@ -1,4 +1,35 @@
 impl SignalStore {
+    pub async fn load_shadow_decisions_near(
+        &self,
+        symbol: String,
+        since: u64,
+        until: u64,
+    ) -> Result<Vec<serde_json::Value>> {
+        let path = self.path.clone();
+        tokio::task::spawn_blocking(move || {
+            let connection = Self::open_database_path(&path)?;
+            let mut statement = connection.prepare(
+                "SELECT payload FROM auto_trader_audit WHERE stage = 'decision' AND symbol = ?1 AND timestamp >= ?2 AND timestamp <= ?3",
+            )?;
+            let rows = statement.query_map(
+                params![symbol, since as i64, until as i64],
+                |row| row.get::<_, Vec<u8>>(0),
+            )?;
+            let compressed_rows = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+            compressed_rows
+                .into_iter()
+                .map(|compressed| {
+                    let mut decoder = MultiGzDecoder::new(compressed.as_slice());
+                    let mut json = Vec::new();
+                    decoder.read_to_end(&mut json)?;
+                    Ok(serde_json::from_slice(&json)?)
+                })
+                .collect()
+        })
+        .await
+        .map_err(|error| anyhow::anyhow!("shadow decision audit read task failed: {error}"))?
+    }
+
     pub async fn save_auto_trader_audit(&self, payload: serde_json::Value) -> Result<()> {
         let decision_id = payload
             .get("decision_id")

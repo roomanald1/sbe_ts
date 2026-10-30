@@ -10,6 +10,7 @@ struct StatusResponse {
     exploration_percent: f64,
     risk_appetite: f64,
     max_open_positions: usize,
+    max_concurrent_shadow_samples: usize,
     max_intraday_open_positions: usize,
     max_daily_open_positions: usize,
     intraday_notional_limit: f64,
@@ -90,6 +91,8 @@ struct SettingsRequest {
     risk_appetite: Option<f64>,
     max_open_positions: usize,
     #[serde(default)]
+    max_concurrent_shadow_samples: Option<usize>,
+    #[serde(default)]
     max_intraday_open_positions: Option<usize>,
     #[serde(default)]
     max_daily_open_positions: Option<usize>,
@@ -130,6 +133,12 @@ struct StrategyProfileReset {
 #[derive(Clone, Deserialize)]
 struct EnabledRequest {
     enabled: bool,
+}
+#[derive(Deserialize)]
+struct ShadowLearningOutcomeRequest {
+    decision_id: String,
+    learning_context: String,
+    simulated_net_pnl_usd: f64,
 }
 #[derive(Clone, Serialize)]
 struct DecisionParameter {

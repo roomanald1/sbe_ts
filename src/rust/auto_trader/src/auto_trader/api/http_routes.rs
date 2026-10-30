@@ -1,11 +1,23 @@
 pub fn router() -> Router {
-    let settings_path = settings_path();
-    let stored_state = std::fs::read(&settings_path)
+    let json_settings_path = settings_path();
+    let settings_path = settings_binary_path(&json_settings_path);
+    let binary_state = std::fs::read(&settings_path)
         .ok()
-        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok());
-    let mut settings = stored_state
-        .as_ref()
-        .and_then(|value| serde_json::from_value::<Settings>(value.clone()).ok())
+        .and_then(|bytes| rmp_serde::from_slice::<Settings>(&bytes).ok());
+    let loaded_binary = binary_state.is_some();
+    let stored_state = if binary_state.is_none() {
+        std::fs::read(&json_settings_path)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+    } else {
+        None
+    };
+    let mut settings = binary_state
+        .or_else(|| {
+            stored_state
+                .as_ref()
+                .and_then(|value| serde_json::from_value::<Settings>(value.clone()).ok())
+        })
         .unwrap_or_default();
     migrate_closed_trade_metrics(&mut settings);
     if stored_state.as_ref().is_some_and(|value| {
@@ -118,6 +130,16 @@ pub fn router() -> Router {
             "Could not persist AutoTrader state migrations: {}",
             error.1
         );
+    } else if !loaded_binary && stored_state.is_some() {
+        if let Err(error) = std::fs::remove_file(&json_settings_path) {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                crate::service_log!(
+                    "WARN",
+                    "Could not remove migrated JSON AutoTrader state {}: {error}",
+                    json_settings_path.display()
+                );
+            }
+        }
     }
     settings.used_notional_today = allocated_notional(&settings);
     if settings.utc_day != utc_day() {
@@ -143,7 +165,7 @@ pub fn router() -> Router {
             }
         }
     });
-    let carry_path = dated_carry_path(&settings_path);
+    let carry_path = dated_carry_path(&json_settings_path);
     let carry_book = std::fs::read(&carry_path)
         .ok()
         .and_then(|bytes| serde_json::from_slice::<DatedCarryBook>(&bytes).ok())
@@ -327,6 +349,10 @@ pub fn router() -> Router {
             axum::routing::post(receive_daily_strategy_signals),
         )
         .route(
+            "/internal/auto-trader/shadow-learning-outcome",
+            axum::routing::post(receive_shadow_learning_outcome),
+        )
+        .route(
             "/positions/auto-trader/parameters",
             get(get_decision_parameters),
         )
@@ -340,6 +366,39 @@ pub fn router() -> Router {
         )
         .route("/positions/auto-trader/activity", get(get_activity))
         .with_state(state)
+}
+
+async fn receive_shadow_learning_outcome(
+    State(state): State<AutoTraderState>,
+    Json(outcome): Json<ShadowLearningOutcomeRequest>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    if outcome.decision_id.is_empty()
+        || outcome.decision_id.len() > 160
+        || !outcome.learning_context.starts_with("scout:")
+        || !outcome.simulated_net_pnl_usd.is_finite()
+    {
+        return Err((StatusCode::BAD_REQUEST, "Invalid shadow learning outcome".into()));
+    }
+
+    let mut settings = state.settings.lock().await;
+    if settings.shadow_learning_outcome_ids.contains(&outcome.decision_id) {
+        return Ok(StatusCode::NO_CONTENT);
+    }
+    let stats = settings
+        .learning
+        .entry(outcome.learning_context)
+        .or_default();
+    record_learning_outcome(stats, outcome.simulated_net_pnl_usd);
+    settings.shadow_learning_outcome_ids.insert(outcome.decision_id);
+    while settings.shadow_learning_outcome_ids.len() > 20_000 {
+        let Some(oldest) = settings.shadow_learning_outcome_ids.iter().next().cloned() else {
+            break;
+        };
+        settings.shadow_learning_outcome_ids.remove(&oldest);
+    }
+    drop(settings);
+    request_settings_persist(&state)?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn auto_trader_stream(State(state): State<AutoTraderState>, websocket: axum::extract::ws::WebSocketUpgrade) -> axum::response::Response {

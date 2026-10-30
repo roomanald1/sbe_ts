@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { AutoTraderModel } from '../models/AutoTraderModel';
 import type { Strategy } from '../models/AutoTraderModel';
+import { autoTraderShadowModel } from '../models/AutoTraderShadowModel';
 import { AutoTraderStrategyParameters } from './AutoTraderStrategyParameters';
 import { AutoTraderOutcomes } from './AutoTraderOutcomes';
 import { useBehaviorSnapshot } from '../use_behavior_snapshot';
@@ -30,6 +31,8 @@ export function AutoTrader() {
   const model = useMemo(() => new AutoTraderModel(), []);
   useEffect(() => { model.start(); return () => model.stop(); }, [model]);
   const state = useBehaviorSnapshot(model.state$);
+  const shadowState = useBehaviorSnapshot(autoTraderShadowModel.state$);
+  useEffect(() => { autoTraderShadowModel.start(); return () => autoTraderShadowModel.stop(); }, []);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [parametersOpen, setParametersOpen] = useState(false);
   const [decisionDetailsOpen, setDecisionDetailsOpen] = useState(false);
@@ -42,6 +45,14 @@ export function AutoTrader() {
       failed: scouts.filter((order) => order.status === 'failed').length,
     };
   }, [state.orders]);
+  const scoutShadowRows = shadowState.rows.filter((row) => row.source === 'Scout');
+  const scoutShadowOpen = scoutShadowRows.filter((row) => row.status === 'Open').length;
+  const scoutShadowResolved = scoutShadowRows.filter((row) => ['Won', 'Lost', 'Flat'].includes(row.status));
+  const scoutShadowWins = scoutShadowRows.filter((row) => row.status === 'Won').length;
+  const scoutShadowLosses = scoutShadowRows.filter((row) => row.status === 'Lost').length;
+  const scoutShadowUnavailable = scoutShadowRows.filter((row) => row.status === 'Outcome unavailable').length;
+  const scoutShadowNetReturns = scoutShadowResolved.flatMap((row) => typeof row.netReturnPercent === 'number' && Number.isFinite(row.netReturnPercent) ? [row.netReturnPercent] : []);
+  const scoutShadowAverageReturn = scoutShadowNetReturns.length ? scoutShadowNetReturns.reduce((sum, value) => sum + value, 0) / scoutShadowNetReturns.length : undefined;
   const scoutOutcomeCohort = state.decisionQuality.cohorts.find((cohort) => cohort.dimension === 'selection' && cohort.value === 'scout');
   const selectedIntradayStrategies = intradayStrategyLabels.filter(({ strategy }) => state.strategies.includes(strategy));
   const selectedIntradayBudgetValuesValid = selectedIntradayStrategies.every(({ strategy }) => {
@@ -118,6 +129,7 @@ export function AutoTrader() {
               <label>EXPLORATION SIZE (%)<input type="number" min="0" max="100" step="1" value={state.explorationPercent} onChange={(event) => model.setLimits(state.maxOrderNotional, state.dailyNotionalLimit, state.dailyRealizedLossLimit, event.target.value, state.maxOpenPositions)} /></label>
               <label className="auto-trader-risk-slider" title="Shifts strength and score floors and adjusts take-profit. Riskier settings lower entry floors and move take-profit toward a 0.05% net win after fees; safer settings raise floors and preserve larger targets.">RISK APPETITE <span className="auto-trader-risk-value">{Number(state.riskAppetite)} · {Number(state.riskAppetite) < 34 ? 'Safe' : Number(state.riskAppetite) > 66 ? 'Risky' : 'Balanced'}</span><input aria-label="Auto Trader risk appetite" type="range" min="0" max="100" step="1" value={state.riskAppetite} onChange={(event) => model.setRiskAppetite(event.target.value)} /><span className="auto-trader-risk-scale"><span>Safe · higher floors</span><span>Risky · lower floors</span></span></label>
               <label title="Maximum number of distinct Auto Trader positions held at once.">MAX OPEN POSITIONS<input type="number" min="1" max="20" step="1" value={state.maxOpenPositions} onChange={(event) => model.setLimits(state.maxOrderNotional, state.dailyNotionalLimit, state.dailyRealizedLossLimit, state.explorationPercent, event.target.value)} /></label>
+              <label title="Maximum number of fee-free Scout and Exploratory shadow samples being evaluated at once. This does not limit or create real positions.">MAX CONCURRENT SHADOW SAMPLES<input type="number" min="0" max="100" step="1" value={state.maxConcurrentShadowSamples} onChange={(event) => model.setMaxConcurrentShadowSamples(event.target.value)} /></label>
               <fieldset className="auto-trader-category-limits" title="Intraday signal and daily strategy budgets are separate; the overall position and exposure caps still apply."><legend>HORIZON BUDGETS</legend>
                 <label>INTRADAY POSITIONS<input type="number" min="0" max="20" step="1" value={state.maxIntradayOpenPositions} onChange={(event) => model.setCategoryLimits({ maxIntradayOpenPositions: event.target.value })} /></label>
                 <label>DAILY POSITIONS<input type="number" min="0" max="20" step="1" value={state.maxDailyOpenPositions} onChange={(event) => model.setCategoryLimits({ maxDailyOpenPositions: event.target.value })} /></label>
@@ -193,8 +205,14 @@ export function AutoTrader() {
             <strong>{state.learningSamples} samples · {state.learningWinRate == null ? '—' : finiteFixed(state.learningWinRate * 100, 0) + '% positive'}</strong>
             <span className="auto-trader-learning-detail">Profiles P0/P1/P2: {state.parameterProfileSamples.join('/')} {state.preferredOrderType ? '· Best order: ' + state.preferredOrderType : ''}</span>
           </div>
-          <div className="auto-trader-insight auto-trader-scout-summary" aria-label="Today scout summary">
-            <span className="auto-trader-insight-label">Scout · today</span>
+          <div className="auto-trader-insight auto-trader-scout-summary" aria-label="Scout shadow outcomes">
+            <span className="auto-trader-insight-label">Scout · shadow · 5m · last 15m</span>
+            <strong>{shadowState.loading ? 'Loading shadow samples…' : `${scoutShadowOpen} open · ${scoutShadowResolved.length} resolved`}</strong>
+            <span className="auto-trader-learning-detail">{scoutShadowWins} wins · {scoutShadowLosses} losses · {scoutShadowUnavailable} outcome unavailable</span>
+            <span className="auto-trader-learning-detail">{scoutShadowAverageReturn === undefined ? 'No matched fee-aware outcomes yet.' : `${scoutShadowAverageReturn >= 0 ? '+' : ''}${finiteFixed(scoutShadowAverageReturn, 3)}% average net return · ${scoutShadowNetReturns.length} matched outcomes`}</span>
+          </div>
+          <div className="auto-trader-insight auto-trader-scout-summary" aria-label="Executed Scout positions and trades">
+            <span className="auto-trader-insight-label">Scout · executed · actual trades</span>
             <strong>{state.scoutOpenPositions} open · {state.decisionQuality.scout_completed_trade_samples} closed</strong>
             <span className="auto-trader-learning-detail">{state.decisionQuality.scout_filled_entry_samples} filled · {state.decisionQuality.scout_unresolved_trade_samples} unresolved</span>
             <span className="auto-trader-learning-detail">Orders: {scoutOrderCounts.filled} filled · {scoutOrderCounts.pending} pending · {scoutOrderCounts.failed} failed</span>

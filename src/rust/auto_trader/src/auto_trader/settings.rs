@@ -32,6 +32,8 @@ struct Settings {
     risk_appetite: f64,
     #[serde(default = "default_max_open_positions")]
     max_open_positions: usize,
+    #[serde(default = "default_max_concurrent_shadow_samples")]
+    max_concurrent_shadow_samples: usize,
     #[serde(default = "default_max_intraday_open_positions")]
     max_intraday_open_positions: usize,
     #[serde(default = "default_max_daily_open_positions")]
@@ -89,6 +91,10 @@ struct Settings {
     #[serde(default)]
     learning: BTreeMap<String, LearningStats>,
     #[serde(default)]
+    shadow_learning_outcome_ids: BTreeSet<String>,
+    #[serde(default)]
+    shadow_sample_at_ms: BTreeMap<String, u64>,
+    #[serde(default)]
     strategy_parameter_overrides: BTreeMap<String, f64>,
     #[serde(default)]
     last_hedge_at: BTreeMap<String, u64>,
@@ -120,6 +126,7 @@ fn default_risk_appetite() -> f64 {
     50.0
 }
 fn default_max_open_positions() -> usize { 20 }
+fn default_max_concurrent_shadow_samples() -> usize { DEFAULT_MAX_CONCURRENT_SHADOW_SAMPLES }
 fn default_max_intraday_open_positions() -> usize { DEFAULT_MAX_INTRADAY_OPEN_POSITIONS }
 fn default_max_daily_open_positions() -> usize { DEFAULT_MAX_DAILY_OPEN_POSITIONS }
 fn default_intraday_notional_limit() -> f64 { DEFAULT_INTRADAY_NOTIONAL_LIMIT }
@@ -185,6 +192,7 @@ impl Default for Settings {
             exploration_percent: default_exploration_percent(),
             risk_appetite: default_risk_appetite(),
             max_open_positions: default_max_open_positions(),
+            max_concurrent_shadow_samples: default_max_concurrent_shadow_samples(),
             max_intraday_open_positions: default_max_intraday_open_positions(),
             max_daily_open_positions: default_max_daily_open_positions(),
             intraday_notional_limit: default_intraday_notional_limit(),
@@ -213,6 +221,8 @@ impl Default for Settings {
             positions: BTreeMap::new(),
             strategy_positions: BTreeMap::new(),
             learning: BTreeMap::new(),
+            shadow_learning_outcome_ids: BTreeSet::new(),
+            shadow_sample_at_ms: BTreeMap::new(),
             strategy_parameter_overrides: BTreeMap::new(),
             last_hedge_at: BTreeMap::new(),
             last_decision: String::new(),

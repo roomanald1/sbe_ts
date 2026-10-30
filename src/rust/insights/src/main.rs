@@ -6,7 +6,7 @@ use dashmap::DashMap;
 use futures_util::StreamExt;
 use insights::signals::{
     ExternalMarketFeatures, NewsAttribution, NewsHeadlineAttribution, SignalEngine,
-    SignalSnapshot, SignalStore, StoredSignalRecord,
+    SignalEvaluation, SignalSnapshot, SignalStore, StoredSignalRecord,
 };
 use serde::{Deserialize, Serialize};
 use std::{

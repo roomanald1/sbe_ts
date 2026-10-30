@@ -15,15 +15,51 @@ async fn submit_cycle_signal(
     let evidence = dashboard.walk_forward.iter().find(|item| {
         item.symbol == signal.symbol && is_entry_evidence_horizon(item.horizon_seconds)
     });
+    let shadow_only = scout || exploratory;
+    if shadow_only {
+        let sampled_at = now.saturating_mul(1_000);
+        let sample_key = format!(
+            "{}|{}|{}",
+            signal.strategy.as_deref().unwrap_or("live-insights"),
+            signal.symbol,
+            signal.direction
+        );
+        let mut settings = state.settings.lock().await;
+        settings
+            .shadow_sample_at_ms
+            .retain(|_, timestamp| sampled_at.saturating_sub(*timestamp) < 86_400_000);
+        if settings.shadow_sample_at_ms.get(&sample_key).is_some_and(|previous| {
+            sampled_at.saturating_sub(*previous) < 300_000
+        }) {
+            return Ok(skipped_for_signal(
+                signal,
+                "A shadow learning sample for this strategy, symbol, and direction is already active",
+            ));
+        }
+        let active_shadow_samples = settings
+            .shadow_sample_at_ms
+            .values()
+            .filter(|timestamp| sampled_at.saturating_sub(**timestamp) < 300_000)
+            .count();
+        if active_shadow_samples >= settings.max_concurrent_shadow_samples {
+            return Ok(skipped_for_signal(
+                signal,
+                "Maximum number of active fee-free shadow samples is already in use",
+            ));
+        }
+        settings.shadow_sample_at_ms.insert(sample_key, sampled_at);
+        drop(settings);
+        request_settings_persist(state)?;
+    }
     let selected_payload = signal_audit_payload(
         signal,
         "decision",
         now.saturating_mul(1000),
-        "selected",
+        if shadow_only { "shadowed" } else { "selected" },
         Some(if scout {
-            "scout candidate selected; capped paper exploration"
+            "scout retained for fee-free shadow evaluation"
         } else if exploratory {
-            "exploratory candidate selected"
+            "exploratory candidate retained for fee-free shadow evaluation"
         } else {
             "strategy candidate selected"
         }),
@@ -34,7 +70,36 @@ async fn submit_cycle_signal(
     );
     let mut selected_payload = selected_payload;
     selected_payload["scout"] = serde_json::json!(scout);
+    if shadow_only {
+        let context = market_context(signal);
+        let learning_context = if scout {
+            format!("scout:{context}:P0:depth:shadow")
+        } else {
+            format!("{context}:P0:depth:shadow")
+        };
+        selected_payload["shadow_learning_context"] = serde_json::json!(learning_context);
+        if scout {
+            let settings = state.settings.lock().await;
+            selected_payload["shadow_notional_usd"] = serde_json::json!(
+                settings.max_order_notional * SCOUT_MAX_ORDER_FRACTION
+            );
+        }
+        if let Some(book) = dashboard.markets.get(&signal.symbol) {
+            selected_payload["shadow_entry_bid"] = book["bids"][0]["price"].clone();
+            selected_payload["shadow_entry_ask"] = book["asks"][0]["price"].clone();
+            selected_payload["shadow_entry_quote_timestamp"] =
+                book["updated_at_ms"].clone();
+        }
+        selected_payload["shadow_taker_fee_rate"] =
+            serde_json::json!(configured_taker_fee_rate());
+    }
     queue_auto_trader_audit(state, selected_payload);
+    if shadow_only {
+        return Ok(skipped_for_signal(
+            signal,
+            "Low-confidence candidate recorded for shadow evaluation; no fee-bearing order submitted",
+        ));
+    }
     if !signal
         .symbol
         .bytes()

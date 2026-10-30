@@ -42,11 +42,27 @@ impl PositionStore {
     }
 
     async fn load(spot_symbols: Arc<Vec<String>>) -> anyhow::Result<Self> {
-        let path = std::env::var_os("POSITIONS_FILE")
+        let json_path = std::env::var_os("POSITIONS_FILE")
             .map(PathBuf::from)
             .unwrap_or(std::env::current_dir()?.join("positions.json"));
-        let mut ledger = match tokio::fs::read(&path).await {
-            Ok(bytes) => {
+        let path = json_path.with_extension("msgpack");
+        let binary_snapshot = tokio::fs::read(&path).await;
+        let loaded_binary = binary_snapshot.is_ok();
+        let legacy_json_path = (!loaded_binary).then(|| json_path.clone());
+        let snapshot = match binary_snapshot {
+            Ok(bytes) => Some((bytes, true)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                match tokio::fs::read(&json_path).await {
+                    Ok(bytes) => Some((bytes, false)),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                    Err(error) => return Err(error.into()),
+                }
+            }
+            Err(error) => return Err(error.into()),
+        };
+        let mut ledger = match snapshot {
+            Some((bytes, true)) => rmp_serde::from_slice::<Ledger>(&bytes)?,
+            Some((bytes, false)) => {
                 let value: serde_json::Value = serde_json::from_slice(&bytes)?;
                 if value.is_array() {
                     Ledger {
@@ -62,11 +78,10 @@ impl PositionStore {
                     serde_json::from_value(value)?
                 }
             }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ledger {
+            None => Ledger {
                 initial_cash: default_account_cash(),
                 ..Ledger::default()
             },
-            Err(error) => return Err(error.into()),
         };
         for order in &mut ledger.orders {
             if order.maker_fee_rate == 0.0 {
@@ -137,6 +152,7 @@ impl PositionStore {
         let writer_timings = Arc::clone(&store.persistence_timings_ms);
         let writer_path = store.path.clone();
         tokio::spawn(async move {
+            let mut legacy_json_path = legacy_json_path;
             loop {
                 writer_notify.notified().await;
                 // Let a burst of fills and book updates collapse into one current snapshot.
@@ -144,7 +160,7 @@ impl PositionStore {
                 let ledger_guard = Arc::clone(&writer_ledger).lock_owned().await;
                 let serialization_started = Instant::now();
                 let snapshot = match tokio::task::spawn_blocking(move || {
-                    serde_json::to_vec(&*ledger_guard)
+                    rmp_serde::to_vec_named(&*ledger_guard)
                 })
                 .await
                 {
@@ -172,11 +188,24 @@ impl PositionStore {
                 match tokio::task::spawn_blocking(move || persist_ledger_bytes(&path, snapshot))
                     .await
                 {
-                    Ok(Ok(())) => record_position_persistence_sample(
-                        &writer_timings,
-                        "snapshot_write",
-                        write_started.elapsed().as_secs_f64() * 1_000.0,
-                    ),
+                    Ok(Ok(())) => {
+                        record_position_persistence_sample(
+                            &writer_timings,
+                            "snapshot_write",
+                            write_started.elapsed().as_secs_f64() * 1_000.0,
+                        );
+                        if let Some(legacy_path) = legacy_json_path.take() {
+                            if let Err(error) = std::fs::remove_file(&legacy_path) {
+                                if error.kind() != std::io::ErrorKind::NotFound {
+                                    crate::service_log!(
+                                        "WARN",
+                                        "Could not remove migrated JSON position ledger {}: {error}",
+                                        legacy_path.display()
+                                    );
+                                }
+                            }
+                        }
+                    }
                     Ok(Err(error)) => {
                         crate::service_log!(
                             "ERROR",
@@ -196,7 +225,7 @@ impl PositionStore {
                 }
             }
         });
-        if ledger_migrated {
+        if ledger_migrated || !loaded_binary {
             let ledger = store.ledger.lock().await;
             store.persist(&ledger).await?;
         }
@@ -229,7 +258,7 @@ fn persist_ledger_bytes(path: &std::path::Path, bytes: Vec<u8>) -> anyhow::Resul
     {
         std::fs::create_dir_all(parent)?;
     }
-    let temp = path.with_extension("positions.tmp");
+    let temp = path.with_extension("msgpack.tmp");
     std::fs::write(&temp, bytes)?;
     std::fs::rename(temp, path)?;
     Ok(())

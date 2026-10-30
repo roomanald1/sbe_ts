@@ -585,8 +585,9 @@
           "refId": "A"
         }
       ],
-      "title": "Autotrader signal tick to order creation latency",
-      "type": "timeseries"
+      "title": "Autotrader cycle processing to order creation latency",
+      "type": "timeseries",
+      "description": "Measured AutoTrader processing time from cycle start to signal order creation. Signal age before cycle start is reported separately in the latency breakdown."
     },
     {
       "collapsed": false,

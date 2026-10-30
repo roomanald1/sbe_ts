@@ -187,6 +187,17 @@ async fn ingest_signal_event(
         };
         (snapshot, records, market)
     };
+    let shadow_learning_outcomes = records
+        .iter()
+        .filter_map(|record| match record {
+            StoredSignalRecord::Evaluation(evaluation)
+                if evaluation.horizon_seconds == 300 =>
+            {
+                Some(evaluation.clone())
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
     if !records.is_empty() {
         let store = runtime.store.clone();
         tokio::spawn(async move {
@@ -196,6 +207,12 @@ async fn ingest_signal_event(
                     "Could not persist signal event off hot path: {error}"
                 );
             }
+        });
+    }
+    if !shadow_learning_outcomes.is_empty() {
+        let store = runtime.store.clone();
+        tokio::spawn(async move {
+            publish_shadow_learning_outcomes(&store, shadow_learning_outcomes).await;
         });
     }
     if let Some(snapshot) = snapshot.as_ref() {
@@ -223,3 +240,88 @@ async fn ingest_signal_event(
     Ok(Json(snapshot))
 }
 
+async fn publish_shadow_learning_outcomes(
+    store: &SignalStore,
+    outcomes: Vec<SignalEvaluation>,
+) {
+    let client = POSITION_MANAGEMENT_CLIENT.get_or_init(reqwest::Client::new);
+    let base = std::env::var("AUTO_TRADER_URL")
+        .unwrap_or_else(|_| "http://127.0.0.1:3005".to_owned());
+    for evaluation in outcomes {
+        let decisions = match store
+            .load_shadow_decisions_near(
+                evaluation.symbol.clone(),
+                evaluation.signal_timestamp.saturating_sub(10_000),
+                evaluation.signal_timestamp.saturating_add(5_000),
+            )
+            .await
+        {
+            Ok(decisions) => decisions,
+            Err(error) => {
+                crate::service_log!("WARN", "Could not load shadow decisions for learning: {error}");
+                continue;
+            }
+        };
+        for decision in decisions {
+            let Some(signal_timestamp) = decision["signal_timestamp"].as_u64() else {
+                continue;
+            };
+            if decision["status"] != "shadowed"
+                || decision["scout"] != true
+                || signal_timestamp > evaluation.signal_timestamp
+                || evaluation.signal_timestamp.saturating_sub(signal_timestamp) > 10_000
+            {
+                continue;
+            }
+            let direction = match decision["direction"].as_str() {
+                Some("bullish") => "bullish",
+                Some("bearish") => "bearish",
+                _ => continue,
+            };
+            let Some(decision_id) = decision["decision_id"].as_str() else {
+                continue;
+            };
+            let Some(learning_context) = decision["shadow_learning_context"].as_str() else {
+                continue;
+            };
+            let Some(notional_usd) = decision["shadow_notional_usd"].as_f64() else {
+                continue;
+            };
+            let net_return_percent = if direction == "bullish" {
+                evaluation.long_net_percent
+            } else {
+                evaluation.short_net_percent
+            };
+            let Some(net_return_percent) = net_return_percent else {
+                continue;
+            };
+            let simulated_net_pnl_usd = notional_usd * net_return_percent / 100.0;
+            if !simulated_net_pnl_usd.is_finite() {
+                continue;
+            }
+            let payload = serde_json::json!({
+                "decision_id": decision_id,
+                "learning_context": learning_context,
+                "simulated_net_pnl_usd": simulated_net_pnl_usd,
+            });
+            for attempt in 0..3 {
+                match client
+                    .post(format!("{base}/internal/auto-trader/shadow-learning-outcome"))
+                    .timeout(Duration::from_secs(2))
+                    .json(&payload)
+                    .send()
+                    .await
+                    .and_then(reqwest::Response::error_for_status)
+                {
+                    Ok(_) => break,
+                    Err(error) if attempt == 2 => crate::service_log!(
+                        "WARN",
+                        "Could not deliver fee-aware shadow Scout learning outcome {}: {error}",
+                        evaluation.symbol
+                    ),
+                    Err(_) => tokio::time::sleep(Duration::from_millis(100 * (attempt + 1))).await,
+                }
+            }
+        }
+    }
+}
