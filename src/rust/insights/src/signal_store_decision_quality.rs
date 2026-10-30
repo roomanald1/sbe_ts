@@ -4,7 +4,7 @@ impl SignalStore {
         since: Option<u64>,
     ) -> Result<AutoTraderDecisionQualitySummary> {
         let (records, decision_samples) = tokio::try_join!(
-            self.load_auto_trader_execution_audit(since),
+            self.load_auto_trader_execution_audit(since, 50_000),
             self.count_auto_trader_decisions(since),
         )?;
         let mut summary = AutoTraderDecisionQualitySummary {
@@ -13,8 +13,9 @@ impl SignalStore {
         };
         let mut trades: HashMap<String, DecisionTradeAudit> = HashMap::new();
         for record in records {
-            let Some(decision_id) = record
-                .get("decision_id")
+            let Some(trade_id) = record
+                .get("trade_id")
+                .or_else(|| record.get("decision_id"))
                 .and_then(serde_json::Value::as_str)
             else {
                 continue;
@@ -23,50 +24,58 @@ impl SignalStore {
                 .get("stage")
                 .and_then(serde_json::Value::as_str)
                 .unwrap_or_default();
-            let trade = trades.entry(decision_id.to_owned()).or_default();
+            let trade = trades.entry(trade_id.to_owned()).or_default();
             if stage == "entry" {
-                trade.entry_quantity = record
+                let entry_quantity = record
                     .get("filled_quantity")
                     .and_then(serde_json::Value::as_f64)
                     .unwrap_or(0.0)
                     .max(0.0);
-                trade.entry_price = record
+                let entry_price = record
                     .get("average_price")
                     .and_then(serde_json::Value::as_f64)
                     .filter(|v| v.is_finite() && *v > 0.0);
-                trade.entry_side = record
+                trade.entry_quantity += entry_quantity;
+                if let Some(price) = entry_price {
+                    trade.entry_notional += entry_quantity * price;
+                    trade.entry_price = (trade.entry_quantity > 0.0)
+                        .then_some(trade.entry_notional / trade.entry_quantity);
+                }
+                let first_entry = trade.entry_timestamp.is_none();
+                if first_entry {
+                    trade.entry_side = record
                     .get("side")
                     .and_then(serde_json::Value::as_str)
                     .map(str::to_owned);
-                trade.entry_fees = record
+                    trade.entry_fees = record
                     .get("fees")
                     .and_then(serde_json::Value::as_f64)
                     .unwrap_or(0.0)
                     .abs();
-                trade.strategy_parameters = record
+                    trade.strategy_parameters = record
                     .get("strategy_decision")
                     .and_then(|decision| decision.get("strategy_parameters"))
                     .cloned();
-                trade.exploratory = record
+                    trade.exploratory = record
                     .get("exploratory")
                     .and_then(serde_json::Value::as_bool);
-                trade.scout = record
+                    trade.scout = record
                     .get("scout")
                     .and_then(serde_json::Value::as_bool)
                     .unwrap_or(false);
-                trade.direction = record
+                    trade.direction = record
                     .get("direction")
                     .and_then(serde_json::Value::as_str)
                     .map(str::to_owned);
-                trade.strength = record
+                    trade.strength = record
                     .get("strength")
                     .and_then(serde_json::Value::as_f64)
                     .filter(|v| v.is_finite());
-                trade.market_context = record
+                    trade.market_context = record
                     .get("market_context")
                     .and_then(serde_json::Value::as_str)
                     .map(str::to_owned);
-                trade.strategy = record
+                    trade.strategy = record
                     .get("strategy")
                     .and_then(serde_json::Value::as_str)
                     .map(str::to_owned)
@@ -77,13 +86,34 @@ impl SignalStore {
                             .and_then(|context| context.rsplit(':').next())
                             .map(str::to_owned)
                     });
-                trade.quote_currency = record
+                    trade.quote_currency = record
                     .get("symbol")
                     .and_then(serde_json::Value::as_str)
                     .and_then(|symbol| symbol.rsplit_once('-').map(|(_, quote)| quote.to_owned()));
-                trade.entry_timestamp = record.get("timestamp").and_then(serde_json::Value::as_u64);
-                trade.signal_components = record.get("signal_components").cloned();
+                    trade.entry_timestamp = record.get("timestamp").and_then(serde_json::Value::as_u64);
+                    trade.signal_components = record.get("signal_components").cloned();
+                }
             } else if stage.starts_with("exit") {
+                if let Some(context) = record.get("entry_context") {
+                    if let Some(notional) = context
+                        .get("initial_entry_notional")
+                        .and_then(serde_json::Value::as_f64)
+                        .filter(|value| value.is_finite() && *value > 0.0)
+                    {
+                        trade.entry_notional = notional;
+                    }
+                    if let Some(quantity) = context
+                        .get("quantity")
+                        .and_then(serde_json::Value::as_f64)
+                        .filter(|value| value.is_finite() && *value > 0.0)
+                    {
+                        trade.position_entry_quantity = Some(quantity);
+                    }
+                }
+                trade.trade_closed |= record
+                    .get("trade_closed")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false);
                 trade.exit_records.push(record);
             }
         }
@@ -150,7 +180,13 @@ impl SignalStore {
             if trade.scout {
                 summary.scout_filled_entry_samples += 1;
             }
-            if exit_quantity + 1e-12 < trade.entry_quantity {
+            let expected_quantity = trade
+                .position_entry_quantity
+                .unwrap_or(trade.entry_quantity);
+            let fully_closed = trade.trade_closed
+                || (trade.position_entry_quantity.is_none()
+                    && exit_quantity + 1e-12 >= trade.entry_quantity);
+            if !fully_closed || exit_quantity + 1e-12 < expected_quantity {
                 summary.unresolved_trade_samples += 1;
                 if trade.scout {
                     summary.scout_unresolved_trade_samples += 1;
@@ -164,7 +200,11 @@ impl SignalStore {
                 }
                 continue;
             };
-            let entry_notional = trade.entry_quantity * entry_price;
+            let entry_notional = if trade.entry_notional > 0.0 {
+                trade.entry_notional
+            } else {
+                trade.entry_quantity * entry_price
+            };
             if entry_notional <= 0.0 || !entry_notional.is_finite() {
                 continue;
             }

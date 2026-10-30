@@ -30,7 +30,7 @@ export function AutoTraderStrategyParameters({ profiles, overrides, saving, onCh
     </div>
     {!profile && <p>No tunable parameters are registered for this strategy.</p>}
     {profile && <>
-      <small>{profile.learning_samples} recent-weighted outcomes · {profile.positive_rate == null ? 'positive rate unavailable' : (profile.positive_rate * 100).toFixed(1) + '% positive'} · smoothed adaptation after each outcome · set Outcome adaptation weight to 0 to freeze this profile</small>
+      <small>{profile.learning_samples} recent-weighted closed trades · {profile.positive_rate == null ? 'positive rate unavailable' : (profile.positive_rate * 100).toFixed(1) + '% positive'} · parameters adapt after each completed position · set Outcome adaptation weight to 0 to freeze this profile</small>
       <div className="auto-trader-parameter-list">
         {profile.parameters.map((parameter) => {
           const key = profile.symbol + ':' + profile.strategy + ':' + parameter.key;

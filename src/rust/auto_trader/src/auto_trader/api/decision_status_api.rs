@@ -94,7 +94,7 @@ fn learning_context_prefix(key: &str) -> Option<String> {
     } else {
         dimensions
     };
-    let prefix = parts[..dimensions].join(":");
+    let prefix = parts[offset..dimensions].join(":");
     Some(if offset == 1 {
         format!("scout:{prefix}")
     } else {

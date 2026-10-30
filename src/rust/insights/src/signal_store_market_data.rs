@@ -89,7 +89,7 @@ impl SignalStore {
     ) -> Result<Vec<SignalEvaluation>> {
         let lower_bound = since.map(|timestamp| timestamp.saturating_sub(3_600_000));
         let mut evaluations = self
-            .read_records(2, lower_bound, None)
+            .read_records(2, lower_bound, Some(limit))
             .await?
             .into_iter()
             .filter_map(|record| match record {

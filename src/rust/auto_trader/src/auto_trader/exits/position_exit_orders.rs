@@ -78,7 +78,7 @@ async fn submit_position_exit_order(
     let filled = response["filled_quantity"].as_f64().unwrap_or(0.0);
     let average_price = response["average_execution_price"].as_f64();
     let fee = response["estimated_fee"].as_f64().unwrap_or(0.0).abs();
-    let (realized_pnl, learned_key) = if filled > 0.0 {
+    let (realized_pnl, _learned_key) = if filled > 0.0 {
         average_price
             .map(|price| {
                 apply_auto_fill(
@@ -146,12 +146,16 @@ async fn submit_position_exit_order(
                 strategy_realized_usd,
                 fees_usd,
             );
+            record_strategy_trade_outcome(
+                &mut settings,
+                &symbol,
+                position.strategy.as_deref(),
+                Some(&position.entry_context),
+                position.scout_entry,
+                strategy_realized_usd,
+            );
             adapt_exit_policy(&mut settings);
         }
-    }
-    if let Some(key) = learned_key {
-        let stats = settings.learning.entry(key).or_default();
-        record_learning_outcome(stats, realized_pnl_usd);
     }
     if let Some(order) = settings
         .orders

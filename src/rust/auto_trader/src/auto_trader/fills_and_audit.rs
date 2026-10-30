@@ -169,6 +169,9 @@ fn apply_strategy_position_fill(
         if updated.entry_decision_id.is_none() {
             updated.entry_decision_id = decision_id.map(str::to_owned);
         }
+        if updated.trade_id.is_none() {
+            updated.trade_id = decision_id.map(str::to_owned);
+        }
         if updated.strategy_decision.is_none() {
             updated.strategy_decision = strategy_decision.cloned();
         }

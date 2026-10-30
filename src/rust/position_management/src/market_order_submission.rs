@@ -19,6 +19,14 @@ async fn submit_order(
             "Quantity must be finite and greater than zero".into(),
         ));
     }
+    if let Some(client_order_id) = request.client_order_id.as_deref() {
+        let ledger = store.ledger.try_lock().map_err(|_| {
+            (StatusCode::SERVICE_UNAVAILABLE, "Position ledger busy".to_owned())
+        })?;
+        if let Some(response) = existing_order_response(&ledger, client_order_id) {
+            return Ok(Json(response));
+        }
+    }
     if matches!(
         &request.order_type,
         OrderType::Barrier | OrderType::StopMarket | OrderType::StopLimit | OrderType::TrailingStop
@@ -50,7 +58,7 @@ async fn submit_order(
         None
     } else {
         let rates_started = Instant::now();
-        let rates = get_usd_rates().await?.0.rates;
+        let rates = cached_usd_rates_for_order().await?.rates;
         processing_timings_ms.insert(
             "capacity_rate_lookup".to_owned(),
             rates_started.elapsed().as_secs_f64() * 1_000.0,
@@ -58,11 +66,20 @@ async fn submit_order(
         Some(rates)
     };
     let ledger_lock_started = Instant::now();
-    let mut ledger = store.ledger.lock().await;
+    let mut ledger = store.ledger.try_lock().map_err(|_| {
+        (StatusCode::SERVICE_UNAVAILABLE, "Position ledger busy".to_owned())
+    })?;
     processing_timings_ms.insert(
         "ledger_lock_wait".to_owned(),
         ledger_lock_started.elapsed().as_secs_f64() * 1_000.0,
     );
+    if let Some(response) = request
+        .client_order_id
+        .as_deref()
+        .and_then(|id| existing_order_response(&ledger, id))
+    {
+        return Ok(Json(response));
+    }
     if request.reduce_only {
         let current_quantity = summarize_positions_from(
             ledger.trades.iter().filter(|trade| trade.source == request.source),
@@ -269,4 +286,43 @@ async fn submit_order(
     }))
 }
 
-
+fn existing_order_response(ledger: &Ledger, client_order_id: &str) -> Option<OrderResponse> {
+    let order = ledger
+        .orders
+        .iter()
+        .find(|order| order.parent_order_id.as_deref() == Some(client_order_id))
+        .cloned();
+    let barrier_order = ledger
+        .barrier_orders
+        .iter()
+        .find(|order| order.parent_order_id.as_deref() == Some(client_order_id))
+        .cloned();
+    let fills = ledger
+        .trades
+        .iter()
+        .filter(|trade| trade.parent_order_id.as_deref() == Some(client_order_id))
+        .collect::<Vec<_>>();
+    if order.is_none() && barrier_order.is_none() && fills.is_empty() {
+        return None;
+    }
+    let filled_quantity = fills.iter().map(|trade| trade.quantity).sum::<f64>();
+    let filled_notional = fills
+        .iter()
+        .map(|trade| trade.quantity * trade.execution_price)
+        .sum::<f64>();
+    let estimated_fee = fills.iter().map(|trade| trade.fee.abs()).sum::<f64>();
+    Some(OrderResponse {
+        estimated_fee,
+        filled_quantity,
+        remaining_quantity: order
+            .as_ref()
+            .map(|order| order.remaining_quantity)
+            .or_else(|| barrier_order.as_ref().map(|order| order.remaining_quantity))
+            .unwrap_or(0.0),
+        average_execution_price: (filled_quantity > EPSILON)
+            .then_some(filled_notional / filled_quantity),
+        order,
+        barrier_order,
+        processing_timings_ms: BTreeMap::new(),
+    })
+}

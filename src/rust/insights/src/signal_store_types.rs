@@ -90,6 +90,9 @@ pub struct AutoTraderDecisionQualityCohort {
 #[derive(Default)]
 struct DecisionTradeAudit {
     entry_quantity: f64,
+    entry_notional: f64,
+    position_entry_quantity: Option<f64>,
+    trade_closed: bool,
     entry_price: Option<f64>,
     entry_side: Option<String>,
     entry_fees: f64,
@@ -110,6 +113,7 @@ struct DecisionTradeAudit {
 struct EvaluationQuery {
     since: Option<u64>,
     limit: Option<usize>,
+    cursor: Option<i64>,
 }
 
 #[derive(Clone)]

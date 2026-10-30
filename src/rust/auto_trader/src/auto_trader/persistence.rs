@@ -71,10 +71,35 @@ fn start_settings_persistence_worker(state: &AutoTraderState) {
         loop {
             notify.notified().await;
             tokio::time::sleep(Duration::from_millis(10)).await;
+            let lock_wait_started = Instant::now();
             let settings_guard = Arc::clone(&settings).lock_owned().await;
+            record_settings_persist_sample(
+                &timings,
+                "snapshot_lock_wait",
+                lock_wait_started.elapsed().as_secs_f64() * 1_000.0,
+            );
+            let copy_started = Instant::now();
+            let settings_snapshot =
+                match tokio::task::spawn_blocking(move || settings_guard.clone()).await {
+                    Ok(snapshot) => snapshot,
+                    Err(error) => {
+                        crate::service_log!(
+                            "ERROR",
+                            "Auto Trader state snapshot copier failed: {error}"
+                        );
+                        tokio::time::sleep(Duration::from_secs(1)).await;
+                        notify.notify_one();
+                        continue;
+                    }
+                };
+            record_settings_persist_sample(
+                &timings,
+                "snapshot_copy",
+                copy_started.elapsed().as_secs_f64() * 1_000.0,
+            );
             let serialization_started = Instant::now();
             let bytes = match tokio::task::spawn_blocking(move || {
-                rmp_serde::to_vec_named(&*settings_guard)
+                rmp_serde::to_vec_named(&settings_snapshot)
                     .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))
             })
             .await

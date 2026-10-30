@@ -5,7 +5,7 @@ export type AutoTraderUiSnapshot = {
   activity: Record<string, unknown>;
   parameters: Record<string, unknown>;
   dated_carry: Record<string, unknown>;
-  execution_audit: Array<Record<string, unknown>>;
+  execution_audit: { items: Array<Record<string, unknown>>; nextCursor?: number | null };
 };
 
 const snapshot$ = new BehaviorSubject<AutoTraderUiSnapshot | undefined>(undefined);
@@ -30,7 +30,7 @@ function connect() {
         : message.type === 'delta' && snapshot$.value
           ? { ...snapshot$.value, ...message.changes }
           : undefined;
-      if (value && value.status && value.activity && value.parameters && value.dated_carry && Array.isArray(value.execution_audit)) snapshot$.next(value);
+      if (value && value.status && value.activity && value.parameters && value.dated_carry && Array.isArray(value.execution_audit?.items)) snapshot$.next(value);
     } catch { /* Keep the last valid snapshot. */ }
   };
   next.onclose = () => {

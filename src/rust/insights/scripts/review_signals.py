@@ -38,7 +38,24 @@ def timestamp_text(value):
 
 
 def summarize_execution_quality(records):
-    orders = [record for record in records if record.get("stage") == "entry" or str(record.get("stage", "")).startswith("exit")]
+    external_exit_ids = {
+        (record.get("trade_id") or record.get("decision_id"), fill.get("parent_order_id"))
+        for record in records
+        if record.get("exit_order_type") == "external-ledger-fill"
+        for fill in record.get("exit_fills") or []
+        if fill.get("parent_order_id")
+    }
+    orders = [
+        record for record in records
+        if record.get("stage") == "entry" or str(record.get("stage", "")).startswith("exit")
+        if not (
+            record.get("exit_order_type") == "StopMarket"
+            and (
+                record.get("trade_id") or record.get("decision_id"),
+                record.get("barrier_order_id"),
+            ) in external_exit_ids
+        )
+    ]
     requested = 0.0
     filled_total = 0.0
     filled_orders = 0
@@ -92,51 +109,81 @@ def summarize_execution_quality(records):
     }
 
 
-def summarize_decision_quality(records):
-    history_truncated = len(records) > 50_000
-    records = records[-50_000:]
-    decisions = {record.get("decision_id") for record in records if record.get("stage") == "decision" and record.get("decision_id")}
+def summarize_decision_quality(records, decision_samples):
     trades = {}
     for record in records:
-        decision_id = record.get("decision_id")
-        if not decision_id:
+        trade_id = record.get("trade_id") or record.get("decision_id")
+        if not trade_id:
             continue
-        trade = trades.setdefault(decision_id, {"entry_quantity": 0.0, "entry_price": None, "exit_quantity": 0.0, "realized_pnl": 0.0})
+        trade = trades.setdefault(trade_id, {
+            "entry_quantity": 0.0, "entry_notional": 0.0, "entry_price": None,
+            "position_entry_quantity": None, "exit_records": [], "trade_closed": False,
+        })
         stage = str(record.get("stage", ""))
         if stage == "entry":
-            trade.update({
-                "entry_quantity": max(0.0, record.get("filled_quantity") or 0.0),
-                "entry_price": record.get("average_price"),
-                "exploratory": record.get("exploratory"),
-                "direction": record.get("direction"),
-                "strength": record.get("strength"),
-                "market_context": record.get("market_context"),
-                "entry_timestamp": record.get("timestamp"),
-                "signal_components": record.get("signal_components") or {},
-            })
+            quantity = max(0.0, record.get("filled_quantity") or 0.0)
+            price = record.get("average_price")
+            trade["entry_quantity"] += quantity
+            if price and price > 0:
+                trade["entry_notional"] += quantity * price
+                trade["entry_price"] = trade["entry_notional"] / trade["entry_quantity"]
+            if "direction" not in trade:
+                trade.update({
+                    "exploratory": record.get("exploratory"),
+                    "direction": record.get("direction"),
+                    "strength": record.get("strength"),
+                    "market_context": record.get("market_context"),
+                    "entry_timestamp": record.get("timestamp"),
+                    "signal_components": record.get("signal_components") or {},
+                })
         elif stage.startswith("exit"):
-            trade["exit_quantity"] += max(0.0, record.get("exit_filled_quantity") or 0.0)
-            trade["realized_pnl"] += record.get("realized_pnl") or 0.0
+            trade["exit_records"].append(record)
+            context = record.get("entry_context") or {}
+            notional = context.get("initial_entry_notional")
+            if isinstance(notional, (int, float)) and notional > 0:
+                trade["entry_notional"] = notional
+            quantity = context.get("quantity")
+            if isinstance(quantity, (int, float)) and quantity > 0:
+                trade["position_entry_quantity"] = quantity
+            trade["trade_closed"] |= record.get("trade_closed") is True
 
-    summary = {"decision_samples": len(decisions), "filled_entry_samples": 0, "unresolved_trade_samples": 0, "unpriced_closed_trade_samples": 0, "completed_trade_samples": 0, "history_truncated": history_truncated, "cohorts": []}
+    summary = {"decision_samples": decision_samples, "filled_entry_samples": 0, "unresolved_trade_samples": 0, "unpriced_closed_trade_samples": 0, "completed_trade_samples": 0, "history_truncated": False, "cohorts": []}
     groups = {}
     for trade in trades.values():
         quantity = trade["entry_quantity"]
         if quantity <= 0:
             continue
         summary["filled_entry_samples"] += 1
-        if trade["exit_quantity"] + 1e-12 < quantity:
+        exit_records = trade["exit_records"]
+        external_fill_ids = {
+            fill.get("parent_order_id")
+            for record in exit_records
+            if record.get("exit_order_type") == "external-ledger-fill"
+            for fill in record.get("exit_fills") or []
+            if fill.get("parent_order_id")
+        }
+        canonical = [record for record in exit_records if not (
+            record.get("exit_order_type") == "StopMarket"
+            and record.get("barrier_order_id") in external_fill_ids
+        )]
+        exit_quantity = sum(max(0.0, record.get("exit_filled_quantity") or 0.0) for record in canonical)
+        realized_pnl = sum(record.get("realized_pnl") or 0.0 for record in canonical)
+        expected_quantity = trade["position_entry_quantity"] or quantity
+        complete = trade["trade_closed"] or (
+            trade["position_entry_quantity"] is None and exit_quantity + 1e-12 >= quantity
+        )
+        if not complete or exit_quantity + 1e-12 < expected_quantity:
             summary["unresolved_trade_samples"] += 1
             continue
         price = trade.get("entry_price")
         if not price or price <= 0:
             summary["unpriced_closed_trade_samples"] += 1
             continue
-        notional = quantity * price
+        notional = trade["entry_notional"] or quantity * price
         if notional <= 0:
             continue
         summary["completed_trade_samples"] += 1
-        net_return = trade["realized_pnl"] / notional * 100
+        net_return = realized_pnl / notional * 100
         strength = trade.get("strength") or 0.0
         strength_band = "<0.50" if strength < 0.50 else "0.50–0.59" if strength < 0.60 else "0.60–0.69" if strength < 0.70 else "0.70+"
         components = trade.get("signal_components") or {}
@@ -179,7 +226,7 @@ def summarize_decision_quality(records):
             group["samples"] += 1
             group["wins"] += int(net_return > 0)
             group["return_total"] += net_return
-            group["pnl_total"] += trade["realized_pnl"]
+            group["pnl_total"] += realized_pnl
     summary["cohorts"] = [
         {"dimension": dimension, "value": value, "completed_trade_samples": group["samples"],
          "average_net_return_percent": group["return_total"] / group["samples"],
@@ -260,8 +307,22 @@ def summarize_database(path):
         if "auto_trader_audit" in tables:
             all_audit_records = [
                 json.loads(gzip.decompress(payload))
-                for (payload,) in db.execute("SELECT payload FROM auto_trader_audit ORDER BY timestamp")
+                for (payload,) in db.execute(
+                    "SELECT payload FROM auto_trader_audit "
+                    "WHERE stage = 'entry' OR stage LIKE 'exit%' ORDER BY timestamp"
+                )
             ]
+            decision_samples = db.execute(
+                "SELECT COUNT(*) FROM auto_trader_audit WHERE stage = 'decision'"
+            ).fetchone()[0]
+            audit_count = db.execute("SELECT COUNT(*) FROM auto_trader_audit").fetchone()[0]
+            latest_audit = [
+                json.loads(gzip.decompress(payload))
+                for (payload,) in db.execute(
+                    "SELECT payload FROM auto_trader_audit ORDER BY timestamp DESC LIMIT 10"
+                )
+            ]
+            latest_audit.reverse()
             stage_rows = db.execute(
                 "SELECT stage, COUNT(*), MIN(timestamp), MAX(timestamp) FROM auto_trader_audit GROUP BY stage ORDER BY stage"
             ).fetchall()
@@ -273,15 +334,15 @@ def summarize_database(path):
                 entry["first"] = min(entry["first"], first)
                 entry["last"] = max(entry["last"], last)
             result["auto_trader_audit"] = {
-                "count": len(all_audit_records),
+                "count": audit_count,
                 "compressed_payload_bytes": db.execute("SELECT COALESCE(SUM(length(payload)), 0) FROM auto_trader_audit").fetchone()[0],
                 "by_stage": [
                     {"stage": stage, "count": value["count"], "first_timestamp_utc": timestamp_text(value["first"]), "last_timestamp_utc": timestamp_text(value["last"])}
                     for stage, value in sorted(stage_counts.items())
                 ],
                 "execution_quality": summarize_execution_quality(all_audit_records),
-                "decision_quality": summarize_decision_quality(all_audit_records),
-                "latest": all_audit_records[-10:],
+                "decision_quality": summarize_decision_quality(all_audit_records, decision_samples),
+                "latest": latest_audit,
             }
         return result
 

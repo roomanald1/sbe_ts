@@ -5,23 +5,6 @@ async fn submit_barrier_order(
 ) -> Result<Json<OrderResponse>, (StatusCode, String)> {
     store.ensure_subscription(&symbol);
     let trailing = matches!(&request.order_type, OrderType::TrailingStop);
-    if trailing && store.book(&symbol).is_none() {
-        let wait = async {
-            loop {
-                let notified = store.book_changed.notified();
-                if store.book(&symbol).is_some() {
-                    break;
-                }
-                notified.await;
-            }
-        };
-        timeout(Duration::from_secs(8), wait).await.map_err(|_| {
-            (
-                StatusCode::SERVICE_UNAVAILABLE,
-                "Waiting for live book to arm trailing stop timed out".into(),
-            )
-        })?;
-    }
     let (trigger_price, trigger_direction, trailing_amount, trailing_percent, extreme_price) =
         if trailing {
             let amount = request
@@ -109,7 +92,16 @@ async fn submit_barrier_order(
         None
     };
     let timestamp = now_ms().map_err(internal_error)?;
-    let mut ledger = store.ledger.lock().await;
+    let mut ledger = store.ledger.try_lock().map_err(|_| {
+        (StatusCode::SERVICE_UNAVAILABLE, "Position ledger busy".to_owned())
+    })?;
+    if let Some(response) = request
+        .client_order_id
+        .as_deref()
+        .and_then(|id| existing_order_response(&ledger, id))
+    {
+        return Ok(Json(response));
+    }
     ensure_paper_capacity(
         &store,
         &ledger,
@@ -172,4 +164,3 @@ async fn submit_barrier_order(
         processing_timings_ms: BTreeMap::new(),
     }));
 }
-

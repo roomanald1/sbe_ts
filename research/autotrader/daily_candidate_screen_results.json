@@ -1,0 +1,313 @@
+{
+  "source": "Binance Spot public REST daily klines, cached locally on first run",
+  "symbols": [
+    "BTCUSDT",
+    "ETHUSDT",
+    "BNBUSDT",
+    "XRPUSDT",
+    "ADAUSDT",
+    "SOLUSDT",
+    "DOGEUSDT",
+    "LTCUSDT",
+    "TRXUSDT",
+    "LINKUSDT",
+    "BCHUSDT",
+    "XLMUSDT",
+    "ETCUSDT",
+    "FILUSDT",
+    "AVAXUSDT",
+    "DOTUSDT"
+  ],
+  "data_range": [
+    "2017-08-17",
+    "2026-10-29"
+  ],
+  "timing": "Signals use prior UTC close, trades at current UTC open, returns current open to next open",
+  "cost": "15 or 30 bps each side on absolute portfolio weight turnover; cash return zero",
+  "baseline": "20-day high breakout, BTC SMA200 gate, one seventh max weight per coin, no minimum hold",
+  "A": "20-day high breakout, BTC SMA200 gate, 25% max weight per coin, no minimum hold",
+  "A2": "20-day high breakout, BTC SMA200 gate, min 3 open-to-open holding sessions, 25% max weight per coin, fully invested positions capped at 100% total",
+  "B": "BTC SMA200 gate; positive average 10/20/40/80/160-day returns; weights proportional to score divided by 30-day realized volatility; 25% per-coin cap",
+  "periods": {
+    "baseline": {
+      "15": {
+        "2018-2019": {
+          "return_percent": 13.219661324196075,
+          "max_drawdown_percent": -4.581559370788712,
+          "annualized_daily_sharpe": 0.6268671256531565,
+          "mean_exposure_percent": 2.016302016302016,
+          "turnover": 18.22142857142857,
+          "days": 666
+        },
+        "2020-2022": {
+          "return_percent": 208.8247778199161,
+          "max_drawdown_percent": -25.92146490565115,
+          "annualized_daily_sharpe": 1.3555349233060203,
+          "mean_exposure_percent": 8.511470281543273,
+          "turnover": 126.67504717504717,
+          "days": 1096
+        },
+        "2023-2024": {
+          "return_percent": 44.908761381418614,
+          "max_drawdown_percent": -22.472262860048687,
+          "annualized_daily_sharpe": 0.944295456762154,
+          "mean_exposure_percent": 11.393394567129176,
+          "turnover": 115.37937062937063,
+          "days": 731
+        },
+        "2025-2026-10-29": {
+          "return_percent": 21.714348698341546,
+          "max_drawdown_percent": -10.526690494590984,
+          "annualized_daily_sharpe": 0.7537085318435912,
+          "mean_exposure_percent": 4.89060489060489,
+          "turnover": 44.73936618936619,
+          "days": 666
+        }
+      },
+      "30": {
+        "2018-2019": {
+          "return_percent": 10.182525552182264,
+          "max_drawdown_percent": -4.805304828330659,
+          "annualized_daily_sharpe": 0.5045144969224313,
+          "mean_exposure_percent": 2.016302016302016,
+          "turnover": 18.22142857142857,
+          "days": 666
+        },
+        "2020-2022": {
+          "return_percent": 155.60541375674498,
+          "max_drawdown_percent": -29.66353617857518,
+          "annualized_daily_sharpe": 1.155844728442915,
+          "mean_exposure_percent": 8.511470281543273,
+          "turnover": 126.67504717504717,
+          "days": 1096
+        },
+        "2023-2024": {
+          "return_percent": 21.91676343202238,
+          "max_drawdown_percent": -25.901299650191522,
+          "annualized_daily_sharpe": 0.5555003592399705,
+          "mean_exposure_percent": 11.393394567129176,
+          "turnover": 115.37937062937063,
+          "days": 731
+        },
+        "2025-2026-10-29": {
+          "return_percent": 13.842230721109171,
+          "max_drawdown_percent": -11.411101479392405,
+          "annualized_daily_sharpe": 0.525617346243753,
+          "mean_exposure_percent": 4.89060489060489,
+          "turnover": 44.73936618936619,
+          "days": 666
+        }
+      }
+    },
+    "A": {
+      "15": {
+        "2018-2019": {
+          "return_percent": 17.063607722074003,
+          "max_drawdown_percent": -6.552478367275539,
+          "annualized_daily_sharpe": 0.6547227269187242,
+          "mean_exposure_percent": 3.1156156156156154,
+          "turnover": 28.483333333333334,
+          "days": 666
+        },
+        "2020-2022": {
+          "return_percent": 382.5152994404637,
+          "max_drawdown_percent": -37.04278242448027,
+          "annualized_daily_sharpe": 1.4261340851021558,
+          "mean_exposure_percent": 12.682481751824817,
+          "turnover": 196.4798090798091,
+          "days": 1096
+        },
+        "2023-2024": {
+          "return_percent": 52.367254996079325,
+          "max_drawdown_percent": -32.381402684350014,
+          "annualized_daily_sharpe": 0.8455539260234775,
+          "mean_exposure_percent": 16.997264021887826,
+          "turnover": 177.22222777222777,
+          "days": 731
+        },
+        "2025-2026-10-29": {
+          "return_percent": 10.971289586161204,
+          "max_drawdown_percent": -18.677906385568434,
+          "annualized_daily_sharpe": 0.38577002494924345,
+          "mean_exposure_percent": 6.944444444444445,
+          "turnover": 66.2536519036519,
+          "days": 666
+        }
+      },
+      "30": {
+        "2018-2019": {
+          "return_percent": 12.184546370173832,
+          "max_drawdown_percent": -6.84309412369778,
+          "annualized_daily_sharpe": 0.4988306820305106,
+          "mean_exposure_percent": 3.1156156156156154,
+          "turnover": 28.483333333333334,
+          "days": 666
+        },
+        "2020-2022": {
+          "return_percent": 259.9589615464721,
+          "max_drawdown_percent": -41.96333243768121,
+          "annualized_daily_sharpe": 1.2013629167132447,
+          "mean_exposure_percent": 12.682481751824817,
+          "turnover": 196.4798090798091,
+          "days": 1096
+        },
+        "2023-2024": {
+          "return_percent": 16.814592967738882,
+          "max_drawdown_percent": -37.229577813820825,
+          "annualized_daily_sharpe": 0.40307266302528133,
+          "mean_exposure_percent": 16.997264021887826,
+          "turnover": 177.22222777222777,
+          "days": 731
+        },
+        "2025-2026-10-29": {
+          "return_percent": 0.4820858359883662,
+          "max_drawdown_percent": -21.2102477903665,
+          "annualized_daily_sharpe": 0.11118267009862023,
+          "mean_exposure_percent": 6.944444444444445,
+          "turnover": 66.2536519036519,
+          "days": 666
+        }
+      }
+    },
+    "A2": {
+      "15": {
+        "2018-2019": {
+          "return_percent": 26.69498053501025,
+          "max_drawdown_percent": -11.52903563584805,
+          "annualized_daily_sharpe": 0.7672994879102231,
+          "mean_exposure_percent": 5.7057057057057055,
+          "turnover": 25.655555555555555,
+          "days": 666
+        },
+        "2020-2022": {
+          "return_percent": 2298.3095093509787,
+          "max_drawdown_percent": -30.193893782117375,
+          "annualized_daily_sharpe": 2.4091984188841966,
+          "mean_exposure_percent": 20.437956204379564,
+          "turnover": 158.2663281163281,
+          "days": 1096
+        },
+        "2023-2024": {
+          "return_percent": 110.867209863649,
+          "max_drawdown_percent": -24.78065362684836,
+          "annualized_daily_sharpe": 1.205751482473536,
+          "mean_exposure_percent": 28.72777017783858,
+          "turnover": 154.2403318903319,
+          "days": 731
+        },
+        "2025-2026-10-29": {
+          "return_percent": -0.13007684765690142,
+          "max_drawdown_percent": -21.036703097820197,
+          "annualized_daily_sharpe": 0.11316326583783368,
+          "mean_exposure_percent": 12.537537537537538,
+          "turnover": 62.815778665778666,
+          "days": 666
+        }
+      },
+      "30": {
+        "2018-2019": {
+          "return_percent": 21.93246422814974,
+          "max_drawdown_percent": -11.98082196192427,
+          "annualized_daily_sharpe": 0.6596189731307289,
+          "mean_exposure_percent": 5.7057057057057055,
+          "turnover": 25.655555555555555,
+          "days": 666
+        },
+        "2020-2022": {
+          "return_percent": 1794.5675475389073,
+          "max_drawdown_percent": -32.721241930855484,
+          "annualized_daily_sharpe": 2.251486869295904,
+          "mean_exposure_percent": 20.437956204379564,
+          "turnover": 158.2663281163281,
+          "days": 1096
+        },
+        "2023-2024": {
+          "return_percent": 67.34569550664715,
+          "max_drawdown_percent": -28.337255484448875,
+          "annualized_daily_sharpe": 0.8871429826045547,
+          "mean_exposure_percent": 28.72777017783858,
+          "turnover": 154.2403318903319,
+          "days": 731
+        },
+        "2025-2026-10-29": {
+          "return_percent": -9.094035488729856,
+          "max_drawdown_percent": -23.97253333935173,
+          "annualized_daily_sharpe": -0.10841463370019025,
+          "mean_exposure_percent": 12.537537537537538,
+          "turnover": 62.815778665778666,
+          "days": 666
+        }
+      }
+    },
+    "B": {
+      "15": {
+        "2018-2019": {
+          "return_percent": -23.972388693326764,
+          "max_drawdown_percent": -49.24835154149778,
+          "annualized_daily_sharpe": -0.20110892419990486,
+          "mean_exposure_percent": 27.177177177177175,
+          "turnover": 19.348134470554587,
+          "days": 666
+        },
+        "2020-2022": {
+          "return_percent": 1438.977844060126,
+          "max_drawdown_percent": -50.64309597944789,
+          "annualized_daily_sharpe": 1.6862150468574078,
+          "mean_exposure_percent": 49.42974452554744,
+          "turnover": 80.15906287978885,
+          "days": 1096
+        },
+        "2023-2024": {
+          "return_percent": 164.62181498666519,
+          "max_drawdown_percent": -47.36843931921657,
+          "annualized_daily_sharpe": 1.1565229545581037,
+          "mean_exposure_percent": 79.71956224350205,
+          "turnover": 96.08331907569242,
+          "days": 731
+        },
+        "2025-2026-10-29": {
+          "return_percent": -22.841713784093564,
+          "max_drawdown_percent": -48.68282493744619,
+          "annualized_daily_sharpe": -0.11988417885986263,
+          "mean_exposure_percent": 49.849849849849846,
+          "turnover": 62.23560744541471,
+          "days": 666
+        }
+      },
+      "30": {
+        "2018-2019": {
+          "return_percent": -26.14736703967724,
+          "max_drawdown_percent": -49.98661688121444,
+          "annualized_daily_sharpe": -0.24282607720167812,
+          "mean_exposure_percent": 27.177177177177175,
+          "turnover": 19.348134470554587,
+          "days": 666
+        },
+        "2020-2022": {
+          "return_percent": 1265.1730955008138,
+          "max_drawdown_percent": -52.03174748365464,
+          "annualized_daily_sharpe": 1.6275546313852196,
+          "mean_exposure_percent": 49.42974452554744,
+          "turnover": 80.15906287978885,
+          "days": 1096
+        },
+        "2023-2024": {
+          "return_percent": 129.14427258297957,
+          "max_drawdown_percent": -49.54060249517396,
+          "annualized_daily_sharpe": 1.026206211404688,
+          "mean_exposure_percent": 79.71956224350205,
+          "turnover": 96.08331907569242,
+          "days": 731
+        },
+        "2025-2026-10-29": {
+          "return_percent": -29.724856039719338,
+          "max_drawdown_percent": -50.112796408962645,
+          "annualized_daily_sharpe": -0.2403055988308933,
+          "mean_exposure_percent": 49.849849849849846,
+          "turnover": 62.23560744541471,
+          "days": 666
+        }
+      }
+    }
+  }
+}

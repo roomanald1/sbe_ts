@@ -14,21 +14,11 @@ async fn prepare_market_match(
     options: &MarketOrderOptions,
 ) -> Result<PreparedMarketMatch, (StatusCode, String)> {
     let mut timings = BTreeMap::new();
-    let book_wait_started = Instant::now();
     store.ensure_subscription(symbol);
-    let book_was_missing = store.book(symbol).is_none();
-    if book_was_missing {
-        wait_for_market_book(store, symbol).await?;
-    }
     let book = store.book(symbol).ok_or((
         StatusCode::SERVICE_UNAVAILABLE,
         "Live OKX book unavailable".into(),
     ))?;
-    timings.insert(
-        if book_was_missing { "book_wait_cold" } else { "book_wait_active" }.into(),
-        book_wait_started.elapsed().as_secs_f64() * 1_000.0,
-    );
-
     let matching_started = Instant::now();
     reject_crossing_post_only(request, options, &book)?;
     let (decision_timestamp, decision_price, decision_mid_price) =
@@ -47,29 +37,6 @@ async fn prepare_market_match(
         decision_mid_price,
         processing_timings_ms: timings,
     })
-}
-
-async fn wait_for_market_book(
-    store: &PositionStore,
-    symbol: &str,
-) -> Result<(), (StatusCode, String)> {
-    let wait = async {
-        loop {
-            let notified = store.book_changed.notified();
-            if store.book(symbol).is_some() {
-                break;
-            }
-            notified.await;
-        }
-    };
-    timeout(Duration::from_secs(8), wait)
-        .await
-        .map_err(|_| {
-            (
-                StatusCode::SERVICE_UNAVAILABLE,
-                "Waiting for live OKX book timed out".into(),
-            )
-        })
 }
 
 fn reject_crossing_post_only(

@@ -1,5 +1,5 @@
 async fn submit_and_record_selected_order(
-    input: SelectedOrderExecution<'_>,
+    input: SelectedOrderExecution,
 ) -> Result<CycleResult, (StatusCode, String)> {
     let SelectedOrderExecution {
         state,
@@ -33,6 +33,14 @@ async fn submit_and_record_selected_order(
         limit_to_crossing_quote_bps,
         expires_at,
     } = input;
+    let state = &state;
+    let client = &client;
+    let position_url = position_url.as_str();
+    let signal = &signal;
+    let evidence = evidence.as_ref();
+    let side = side.as_str();
+    let decision_id = decision_id.as_str();
+    let learning_context = learning_context.as_str();
     if !state.enabled.load(Ordering::Relaxed) {
         let mut settings = state.settings.lock().await;
         if let Some(order) = settings
@@ -49,7 +57,6 @@ async fn submit_and_record_selected_order(
             "Auto Trader was disabled before order submission",
         ));
     }
-    let submit_started = Instant::now();
     let response = match submit_configured_order(
         &client,
         &position_url,
@@ -76,12 +83,37 @@ async fn submit_and_record_selected_order(
                 order.status = "failed".into();
                 order.failure_reason = Some(error.1.clone());
             }
+            if let Some(order) = settings
+                .orders
+                .iter()
+                .find(|order| order.timestamp == timestamp)
+                .cloned()
+            {
+                let Settings {
+                    execution_learning,
+                    execution_learning_order_ids,
+                    ..
+                } = &mut *settings;
+                record_execution_order_quality(
+                    execution_learning,
+                    execution_learning_order_ids,
+                    &order,
+                );
+            }
             request_settings_persist(state)?;
             return Err(error);
         }
     };
-    let submit_response_ms = submit_started.elapsed().as_secs_f64() * 1000.0;
+    let submit_response_ms = response
+        .get("client_response_headers_ms")
+        .and_then(serde_json::Value::as_f64)
+        .unwrap_or_default()
+        + response
+            .get("client_body_read_ms")
+            .and_then(serde_json::Value::as_f64)
+            .unwrap_or_default();
     record_execution_stage_timings(&response, submit_response_ms, &mut stage_timings_ms);
+    let response_apply_started = Instant::now();
     let cycle_guard = acquire_cycle_lock(state, "signal").await;
     let mut settings = state.settings.lock().await;
     reset_daily_budget(&mut settings);
@@ -98,7 +130,9 @@ async fn submit_and_record_selected_order(
         .unwrap_or(0.0)
         .abs();
     let mut strategy_realized_delta = 0.0;
-    let (realized_delta, learned_type) = if filled > 0.0 {
+    let mut completed_strategy_trade: Option<(String, String, bool, f64)> = None;
+    let mut position_trade_id = decision_id.to_owned();
+    let (realized_delta, _learned_type) = if filled > 0.0 {
         let prior_quantity = settings
             .positions
             .get(&signal.symbol)
@@ -106,6 +140,12 @@ async fn submit_and_record_selected_order(
         let incoming_sign = if side == "buy" { 1.0_f64 } else { -1.0_f64 };
         let is_new_position_direction =
             prior_quantity == 0.0 || incoming_sign != prior_quantity.signum();
+        let strategy_key = signal.strategy.as_deref().unwrap_or("live-insights");
+        let prior_strategy_position = settings
+            .strategy_positions
+            .get(&signal.symbol)
+            .and_then(|lots| lots.get(strategy_key))
+            .cloned();
         let result = average_price
             .map(|price| {
                 apply_auto_fill(
@@ -146,6 +186,24 @@ async fn submit_and_record_selected_order(
                 Some(effective_stop_loss_percent),
                 Some(effective_take_profit_percent),
             );
+            position_trade_id = settings
+                .strategy_positions
+                .get(&signal.symbol)
+                .and_then(|lots| lots.get(strategy_key))
+                .and_then(|position| position.trade_id.clone())
+                .unwrap_or_else(|| decision_id.to_owned());
+        }
+        if let Some(prior) = prior_strategy_position.filter(|position| {
+            position.quantity.abs() > 1e-12
+                && incoming_sign != position.quantity.signum()
+                && filled + 1e-12 >= position.quantity.abs()
+        }) {
+            completed_strategy_trade = Some((
+                strategy_key.to_owned(),
+                prior.entry_context,
+                prior.scout_entry,
+                prior.realized_pnl + strategy_realized_delta,
+            ));
         }
         if let Some(position) = settings.positions.get_mut(&signal.symbol) {
             if position.entry_decision_id.is_none() {
@@ -169,9 +227,16 @@ async fn submit_and_record_selected_order(
     let realized_delta_usd = realized_usd(&settings, &signal.symbol, realized_delta);
     settings.realized_pnl += realized_delta_usd;
     settings.daily_realized_pnl += realized_delta_usd;
-    if let Some(kind) = learned_type {
-        let stats = settings.learning.entry(kind).or_default();
-        record_learning_outcome(stats, realized_delta_usd);
+    if let Some((strategy, learning_context, scout_entry, total_pnl)) = completed_strategy_trade {
+        let total_pnl_usd = realized_usd(&settings, &signal.symbol, total_pnl);
+        record_strategy_trade_outcome(
+            &mut settings,
+            &signal.symbol,
+            Some(&strategy),
+            Some(&learning_context),
+            scout_entry,
+            total_pnl_usd,
+        );
     }
     let status = if response
         .get("barrier_order")
@@ -207,10 +272,33 @@ async fn submit_and_record_selected_order(
         order.status = status.to_owned();
         order.realized_pnl = realized_delta;
         record_strategy_order_realized_pnl(order, strategy_realized_delta);
-        order.stage_timings_ms = stage_timings_ms;
         order.failure_reason = None;
     }
     settings.used_notional_today = allocated_notional(&settings);
+    stage_timings_ms.insert(
+        "order_response_apply_local".to_owned(),
+        response_apply_started.elapsed().as_secs_f64() * 1_000.0,
+    );
+    if let Some(order) = settings
+        .orders
+        .iter_mut()
+        .find(|order| order.timestamp == timestamp)
+    {
+        order.stage_timings_ms = stage_timings_ms;
+    }
+    if let Some(order) = settings
+        .orders
+        .iter()
+        .find(|order| order.timestamp == timestamp)
+        .cloned()
+    {
+        let Settings {
+            execution_learning,
+            execution_learning_order_ids,
+            ..
+        } = &mut *settings;
+        record_execution_order_quality(execution_learning, execution_learning_order_ids, &order);
+    }
     request_settings_persist(state)?;
     drop(settings);
     drop(cycle_guard);
@@ -226,6 +314,7 @@ async fn submit_and_record_selected_order(
         evidence,
     );
     audit_payload["scout"] = serde_json::json!(scout);
+    audit_payload["trade_id"] = serde_json::json!(position_trade_id);
     audit_payload["effective_stop_loss_percent"] = serde_json::json!(effective_stop_loss_percent);
     audit_payload["effective_take_profit_percent"] =
         serde_json::json!(effective_take_profit_percent);

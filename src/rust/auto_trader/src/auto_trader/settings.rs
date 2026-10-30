@@ -91,6 +91,10 @@ struct Settings {
     #[serde(default)]
     learning: BTreeMap<String, LearningStats>,
     #[serde(default)]
+    execution_learning: BTreeMap<String, ExecutionLearningStats>,
+    #[serde(default)]
+    execution_learning_order_ids: BTreeSet<String>,
+    #[serde(default)]
     shadow_learning_outcome_ids: BTreeSet<String>,
     #[serde(default)]
     shadow_sample_at_ms: BTreeMap<String, u64>,
@@ -213,7 +217,7 @@ impl Default for Settings {
             closed_trade_timestamps_ms: Vec::new(),
             closed_trade_realized_usd: Vec::new(),
             closed_trade_fees_usd: Vec::new(),
-            closed_trade_metrics_version: 2,
+            closed_trade_metrics_version: 3,
             daily_realized_pnl: 0.0,
             pnl_utc_day: utc_day(),
             utc_day: utc_day(),
@@ -221,6 +225,8 @@ impl Default for Settings {
             positions: BTreeMap::new(),
             strategy_positions: BTreeMap::new(),
             learning: BTreeMap::new(),
+            execution_learning: BTreeMap::new(),
+            execution_learning_order_ids: BTreeSet::new(),
             shadow_learning_outcome_ids: BTreeSet::new(),
             shadow_sample_at_ms: BTreeMap::new(),
             strategy_parameter_overrides: BTreeMap::new(),

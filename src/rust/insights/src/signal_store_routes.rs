@@ -142,10 +142,17 @@ impl SignalStore {
             )
             .route(
                 "/signals/auto-trader-execution-audit",
-                get(move || {
+                get(move |axum::extract::Query(query): axum::extract::Query<EvaluationQuery>| {
                     let store = execution_audit_store.clone();
                     async move {
-                        match store.load_auto_trader_execution_audit(None).await {
+                        match store
+                            .load_auto_trader_execution_audit_page(
+                                query.cursor,
+                                query.since,
+                                query.limit.unwrap_or(500),
+                            )
+                            .await
+                        {
                             Ok(items) => Ok(Json(items)),
                             Err(error) => {
                                 Err((StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))
@@ -310,7 +317,7 @@ async fn signal_ui_snapshot(store: &SignalStore) -> serde_json::Value {
     let since = Some(now / 86_400_000 * 86_400_000);
     let signal_dashboard = store.dashboard().await.ok();
     let auto_trader_dashboard = store.auto_trader_dashboard().await.ok();
-    let execution_audit = store.load_auto_trader_execution_audit(None).await.ok();
+    let execution_audit = store.load_auto_trader_execution_audit_page(None, None, 500).await.ok();
     let execution_quality = store.auto_trader_execution_quality(since).await.ok();
     let decision_quality = store.auto_trader_decision_quality(since).await.ok();
     let close_insights = get_position_insights().await.ok().map(|Json(response)| response);

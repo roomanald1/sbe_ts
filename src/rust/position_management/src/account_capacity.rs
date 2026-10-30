@@ -7,7 +7,7 @@ async fn ensure_paper_capacity(
     price: f64,
     fee_rate: f64,
 ) -> Result<(), (StatusCode, String)> {
-    let rates = get_usd_rates().await?.0.rates;
+    let rates = cached_usd_rates_for_order().await?.rates;
     ensure_paper_capacity_with_rates(
         store, ledger, &rates, symbol, side, quantity, price, fee_rate, None,
     )
@@ -79,7 +79,9 @@ async fn ensure_paper_capacity_with_rates(
                 (order.remaining_quantity * order.limit_price + order.estimated_fee) * rate;
         }
     }
-    let runs = store.vwap_runs.lock().await;
+    let runs = store.vwap_runs.try_lock().map_err(|_| {
+        (StatusCode::SERVICE_UNAVAILABLE, "VWAP reservations busy".to_owned())
+    })?;
     let books = store.books_snapshot();
     let mut reserved_sell = ledger
         .barrier_orders
@@ -92,7 +94,9 @@ async fn ensure_paper_capacity_with_rates(
         .map(|order| order.remaining_quantity)
         .sum::<f64>();
     for entry in runs.values() {
-        let status = entry.status.lock().await;
+        let status = entry.status.try_lock().map_err(|_| {
+            (StatusCode::SERVICE_UNAVAILABLE, "VWAP reservation busy".to_owned())
+        })?;
         if status.status != "running" {
             continue;
         }

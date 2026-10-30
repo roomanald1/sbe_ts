@@ -69,7 +69,7 @@ async fn sync_protective_stops(
                 .map(|position| position.average_entry_price)
                 .filter(|price| *price > 0.0)
                 .unwrap_or(fill_price);
-            let (price_path, effective_stop_loss_percent, effective_take_profit_percent, entry_fees, entry_quantity, position_entry_timestamp_ms, prior_realized_pnl, initial_entry_notional, prior_total_fees, total_entry_fees_paid) = settings
+            let (price_path, effective_stop_loss_percent, effective_take_profit_percent, entry_fees, entry_quantity, position_entry_timestamp_ms, prior_realized_pnl, initial_entry_notional, prior_total_fees, total_entry_fees_paid, entry_context, scout_entry) = settings
                 .strategy_positions.get(&symbol)
                 .and_then(|lots| lots.get(&strategy))
                 .map(|position| (
@@ -83,9 +83,11 @@ async fn sync_protective_stops(
                     position.initial_entry_notional,
                     position.total_fees_paid,
                     position.total_entry_fees_paid,
+                    position.entry_context.clone(),
+                    position.scout_entry,
                 ))
                 .unwrap_or_default();
-            let (realized_delta, learned_key) = apply_auto_fill(
+            let (realized_delta, _learned_key) = apply_auto_fill(
                 &mut settings.positions, &symbol, side, delta_quantity, fill_price,
                 delta_fee, "StopMarket", "stop-loss", false, None,
             );
@@ -122,11 +124,15 @@ async fn sync_protective_stops(
                     strategy_realized_usd,
                     fees_usd,
                 );
+                record_strategy_trade_outcome(
+                    &mut settings,
+                    &symbol,
+                    Some(&strategy),
+                    Some(&entry_context),
+                    scout_entry,
+                    strategy_realized_usd,
+                );
                 adapt_exit_policy(&mut settings);
-            }
-            if let Some(key) = learned_key {
-                let stats = settings.learning.entry(key).or_default();
-                record_learning_outcome(stats, realized_delta_usd);
             }
             if let Some(order) = settings
                 .orders
@@ -191,6 +197,7 @@ async fn sync_protective_stops(
                     effective_stop_loss_percent,
                     effective_take_profit_percent,
                     &price_path,
+                    fully_closed,
                 );
                 queue_auto_trader_audit(state, payload);
             }
@@ -239,10 +246,13 @@ fn protective_stop_audit_payload(
     effective_stop_loss_percent: f64,
     effective_take_profit_percent: f64,
     price_path: &[TradePriceSample],
+    trade_closed: bool,
 ) -> serde_json::Value {
     serde_json::json!({
         "record_schema_version": 1,
         "decision_id": decision_id,
+        "trade_id": decision_id,
+        "trade_closed": trade_closed,
         "strategy": strategy,
         "stage": format!("exit:stop:{}", stop.order_timestamp),
         "timestamp": update_timestamp,
@@ -263,17 +273,14 @@ fn protective_stop_audit_payload(
         "entry_fees_paid": total_entry_fees_paid,
         "entry_timestamp_ms": position_entry_timestamp_ms,
         "entry_context": {
+            "trade_id": decision_id,
             "average_price": entry_price_before,
             "fees": total_entry_fees_paid,
             "initial_entry_notional": initial_entry_notional,
             "total_entry_fees_paid": total_entry_fees_paid,
             "total_fees_paid": total_fees_paid,
             "timestamp_ms": position_entry_timestamp_ms,
-            "quantity": if entry_price_before > 0.0 && initial_entry_notional > 0.0 {
-                initial_entry_notional / entry_price_before
-            } else {
-                entry_quantity
-            },
+            "quantity": entry_quantity,
         },
         "duration_ms": (position_entry_timestamp_ms > 0)
             .then_some(update_timestamp.saturating_sub(position_entry_timestamp_ms)),
@@ -302,7 +309,7 @@ mod protective_stop_audit_tests {
         let stop = ProtectiveStop { barrier_id: "barrier-1".into(), order_timestamp: 1_000, quantity: 2.0, ..ProtectiveStop::default() };
         let path = [TradePriceSample { timestamp: 1_500, bid: 99.0, ask: 101.0 }];
         let barrier = serde_json::json!({"side":"sell","triggered_at":1200,"average_execution_price":98.0,"trigger_price":99.0,"trigger_direction":"below"});
-        let payload = protective_stop_audit_payload("decision-3", &stop, 2_000, "BTC-USDT", "strategy-a", "filled", &barrier, 2.0, 0.1, -4.1, 100.0, 0.2, 2.0, 200.0, 0.2, 0.3, 1_000, 5.0, 10.0, &path);
+        let payload = protective_stop_audit_payload("decision-3", &stop, 2_000, "BTC-USDT", "strategy-a", "filled", &barrier, 2.0, 0.1, -4.1, 100.0, 0.2, 2.0, 200.0, 0.2, 0.3, 1_000, 5.0, 10.0, &path, true);
 
         assert_eq!(payload["stage"], "exit:stop:1000");
         assert_eq!(payload["barrier_order_id"], "barrier-1");

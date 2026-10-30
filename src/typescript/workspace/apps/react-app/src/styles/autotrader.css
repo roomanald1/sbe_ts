@@ -90,3 +90,5 @@
 @media (max-width: 700px) { .auto-trader-parameter-list { grid-template-columns: 1fr; } .auto-trader-parameter-selectors { flex-direction: column; } }
 
 .auto-trader-profile-actions { display: flex; flex-wrap: wrap; gap: 7px; }
+.auto-trader-audit-more { margin: 8px 0; padding: 7px 11px; border: 1px solid #303d4d; border-radius: 5px; background: #111820; color: var(--ink); cursor: pointer; font: 600 11px var(--mono); }
+.auto-trader-audit-more:disabled { opacity: 0.55; cursor: default; }

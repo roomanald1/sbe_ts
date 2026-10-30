@@ -235,7 +235,7 @@ export class AutoTraderModel {
         activity = autoSnapshot.activity as TraderActivity;
         const autoPositions = currentPositionSnapshot()?.auto_positions.positions ?? [];
         positions = { positions: autoPositions.map(({ symbol, quantity }) => ({ symbol, quantity })) };
-        auditRows = autoSnapshot.execution_audit as typeof auditRows;
+        auditRows = autoSnapshot.execution_audit.items as typeof auditRows;
       } else {
         const [statusResponse, activityResponse, positionsResponse, auditResponse] = await Promise.all([fetch('/positions/auto-trader'), fetch('/positions/auto-trader/activity'), fetch('/positions?source=auto'), fetch('/signals/auto-trader-execution-audit')]);
         if (!statusResponse.ok) throw await this.responseError('status', statusResponse);
@@ -244,7 +244,8 @@ export class AutoTraderModel {
         status = await statusResponse.json() as TraderStatus;
         activity = await activityResponse.json() as TraderActivity;
         positions = await positionsResponse.json() as { positions: Array<{ symbol: string; quantity: number }> };
-        auditRows = auditResponse.ok ? await auditResponse.json() as typeof auditRows : [];
+        const auditPage = auditResponse.ok ? await auditResponse.json() as { items?: typeof auditRows } : undefined;
+        auditRows = auditPage?.items ?? [];
       }
       const usdRates = this.usdRates;
       const savedStrategies = status.strategies ?? [status.strategy ?? 'donchian-55-btc200'];

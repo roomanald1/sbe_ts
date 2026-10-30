@@ -6,7 +6,9 @@ fn record_execution_stage_timings(
     stage_timings_ms.insert("order_submit_response".to_owned(), submit_response_ms);
     for (response_key, stage) in [
         ("client_response_headers_ms", "client_request_to_headers"),
-        ("client_body_read_decode_ms", "client_body_read_decode"),
+        ("client_request_prepare_local_ms", "order_request_prepare_local"),
+        ("client_body_read_ms", "client_body_read"),
+        ("client_response_decode_local_ms", "client_response_decode_local"),
     ] {
         if let Some(milliseconds) = response
             .get(response_key)
@@ -25,7 +27,7 @@ fn record_execution_stage_timings(
     };
     stage_timings_ms.insert("position_manager_handler".to_owned(), handler_ms);
     stage_timings_ms.insert(
-        "client_transport_and_decode".to_owned(),
+        "client_transport_and_body_read".to_owned(),
         (submit_response_ms - handler_ms).max(0.0),
     );
     let Some(phases) = response

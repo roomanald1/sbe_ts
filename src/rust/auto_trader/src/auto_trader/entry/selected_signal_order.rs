@@ -8,14 +8,14 @@ struct SelectedSignalOrderRequest<'a> {
     scout: bool,
     counterfactual_stop_loss_percent: f64,
     counterfactual_take_profit_percent: f64,
-    dashboard_ms: f64,
     signal_selection_ms: f64,
     now: u64,
     market: serde_json::Value,
     bid: f64,
     ask: f64,
     mid: f64,
-    market_inputs_ms: f64,
+    market_cache_lookup_ms: f64,
+    market_http_fetch_ms: f64,
 }
 
 async fn submit_selected_signal(
@@ -37,14 +37,14 @@ async fn submit_selected_signal(
         scout,
         counterfactual_stop_loss_percent,
         counterfactual_take_profit_percent,
-        dashboard_ms,
         signal_selection_ms,
         now,
         market,
         bid,
         ask,
         mid,
-        market_inputs_ms,
+        market_cache_lookup_ms,
+        market_http_fetch_ms,
     } = request;
     let cycle_guard = acquire_cycle_lock(state, "signal").await;
     let cycle_started = Instant::now();
@@ -195,11 +195,14 @@ async fn submit_selected_signal(
         ));
     }
     let mut stage_timings_ms = BTreeMap::new();
-    stage_timings_ms.insert("dashboard_fetch".to_owned(), dashboard_ms);
     stage_timings_ms.insert("settings_lock_wait".to_owned(), settings_lock_wait_ms);
-    stage_timings_ms.insert("execution_plan_local".to_owned(), execution_plan_ms);
+    stage_timings_ms.insert(
+        "execution_plan_local".to_owned(),
+        (execution_plan_ms - deep_book_ms).max(0.0),
+    );
     stage_timings_ms.insert("signal_selection".to_owned(), signal_selection_ms);
-    stage_timings_ms.insert("local_market_book".to_owned(), market_inputs_ms);
+    stage_timings_ms.insert("market_cache_lookup".to_owned(), market_cache_lookup_ms);
+    stage_timings_ms.insert("market_http_fetch".to_owned(), market_http_fetch_ms);
     stage_timings_ms.insert("deep_book_local".to_owned(), deep_book_ms);
     stage_timings_ms.insert(
         "signal_queue_wait".to_owned(),
@@ -239,6 +242,7 @@ async fn submit_selected_signal(
             "reservation_lock_wait".to_owned(),
             reservation_lock_started.elapsed().as_secs_f64() * 1_000.0,
         );
+        let order_reservation_started = Instant::now();
         reset_daily_budget(&mut settings);
         let allocated = allocated_notional(&settings);
         let category = strategy_category(signal.strategy.as_deref());
@@ -272,6 +276,10 @@ async fn submit_selected_signal(
             ));
         }
         let quantity = notional / (mid * quote_rate);
+        stage_timings_ms.insert(
+            "order_reservation_record_local".to_owned(),
+            order_reservation_started.elapsed().as_secs_f64() * 1_000.0,
+        );
         settings.used_notional_today = allocated;
         settings
             .last_signal_at
@@ -343,19 +351,19 @@ async fn submit_selected_signal(
     // The pending order and notional reservation are durable-in-memory now.
     // Other cycles can proceed while Position Manager handles the request.
     drop(cycle_guard);
-    submit_and_record_selected_order(SelectedOrderExecution {
-        state,
-        client: &client,
-        position_url: &position_url,
-        signal,
+    let submission = SelectedOrderExecution {
+        state: state.clone(),
+        client: client.clone(),
+        position_url: position_url.to_owned(),
+        signal: signal.clone(),
         exploratory,
         scout,
         counterfactual_stop_loss_percent,
         counterfactual_take_profit_percent,
         effective_stop_loss_percent,
         effective_take_profit_percent,
-        evidence,
-        side,
+        evidence: evidence.cloned(),
+        side: side.to_owned(),
         quantity,
         notional,
         bid,
@@ -364,8 +372,8 @@ async fn submit_selected_signal(
         order_type,
         execution_params,
         timestamp,
-        decision_id: &decision_id,
-        learning_context: &learning_context,
+        decision_id: decision_id.clone(),
+        learning_context: learning_context.clone(),
         horizon_take_profit_percent,
         stage_timings_ms,
         deep_book,
@@ -374,8 +382,29 @@ async fn submit_selected_signal(
         limit_to_mid_bps,
         limit_to_crossing_quote_bps,
         expires_at,
+    };
+    let worker_state = state.clone();
+    tokio::spawn(async move {
+        match submit_and_record_selected_order(submission).await {
+            Ok(result) if result.status == "order_submitted" => {
+                record_cycle_gap_summary(&worker_state, &Ok(result));
+            }
+            Ok(_) => {}
+            Err((status, error)) => crate::service_log!(
+                "ERROR",
+                "Asynchronous signal order submission failed ({status}): {error}"
+            ),
+        }
+    });
+    Ok(CycleResult {
+        status: "order_submitting",
+        reason: Some("Order reserved locally and queued for Position Manager submission".into()),
+        symbol: Some(signal.symbol.clone()),
+        side: Some(side.to_owned()),
+        quantity: Some(quantity),
+        order_type: Some(format!("{order_type:?}")),
+        order_response: None,
     })
-    .await
 }
 
 // Lower-activity calendar periods get a larger measured-edge cushion. Calendar

@@ -72,95 +72,49 @@ fn adaptive_missed_opportunity_floor(
 fn order_type_learning_stats(
     context: &str,
     kind: AutoOrderType,
-    learning: &BTreeMap<String, LearningStats>,
-) -> LearningStats {
-    // Paper Market and IOC both execute immediately against the same book
-    // levels with the same taker fee and no resting remainder. Treat their
-    // historical cohorts as one execution behavior so evidence is not split
-    // across two labels for identical fills.
-    let equivalent_kinds: &[AutoOrderType] = match kind {
-        AutoOrderType::Market | AutoOrderType::Ioc => &[AutoOrderType::Market, AutoOrderType::Ioc],
-        _ => std::slice::from_ref(&kind),
-    };
-    let mut total = LearningStats::default();
-    for equivalent_kind in equivalent_kinds {
-        let prefix = format!("{context}:P");
-        let suffix = format!(":{equivalent_kind:?}");
-        for stats in learning
-            .iter()
-            .filter(|(key, _)| key.starts_with(&prefix) && key.ends_with(&suffix))
-            .map(|(_, stats)| stats)
-        {
-            total.samples += stats.samples;
-            total.positive += stats.positive;
-            total.realized_pnl += stats.realized_pnl;
-        }
-        if let Some(stats) = learning.get(&format!("{context}:{equivalent_kind:?}")) {
-            total.samples += stats.samples;
-            total.positive += stats.positive;
-            total.realized_pnl += stats.realized_pnl;
-        }
-    }
-    total
+    learning: &BTreeMap<String, ExecutionLearningStats>,
+) -> ExecutionLearningStats {
+    aggregate_execution_quality(
+        learning,
+        &format!("{context}:P"),
+        &format!(":exec:{kind:?}"),
+    )
 }
 
 fn adapt_order_type(
     baseline: AutoOrderType,
     context: &str,
-    learning: &BTreeMap<String, LearningStats>,
-    risk_appetite: f64,
+    learning: &BTreeMap<String, ExecutionLearningStats>,
+    _risk_appetite: f64,
 ) -> Option<AutoOrderType> {
-    let favor_non_post_only = risk_appetite >= AGGRESSIVE_ORDER_PRIORITY_APPETITE;
-    // A post-only entry is intentionally allowed as a cold-start experiment in
-    // calm, costly-to-aggress conditions. Do not let the default IOC fallback
-    // erase that signal before the maker cohort has enough outcomes to learn.
-    if matches!(baseline, AutoOrderType::PostOnlyLimit) && !favor_non_post_only {
-        let maker_stats =
-            order_type_learning_stats(context, AutoOrderType::PostOnlyLimit, learning);
-        if maker_stats.samples < MIN_EXECUTION_LEARNING_SAMPLES {
-            return Some(AutoOrderType::PostOnlyLimit);
-        }
+    let baseline_stats = order_type_learning_stats(context, baseline, learning);
+    if baseline_stats.samples < MIN_EXECUTION_QUALITY_SAMPLES
+        || baseline_stats.filled_samples < MIN_EXECUTION_QUALITY_FILLS
+        || baseline_stats.cost_notional <= 0.0
+    {
+        return Some(baseline);
     }
-    let candidates = ALL_ORDER_TYPES
+    let baseline_cost =
+        baseline_stats.all_in_cost_notional_bps / baseline_stats.cost_notional;
+    let baseline_fill_rate = baseline_stats.fill_rate_total / baseline_stats.samples as f64;
+    ALL_ORDER_TYPES
         .iter()
         .copied()
+        .filter(|kind| *kind != baseline)
         .filter_map(|kind| {
             let stats = order_type_learning_stats(context, kind, learning);
-            let average_pnl = stats.realized_pnl / stats.samples.max(1) as f64;
-            let positive_rate = stats.positive as f64 / stats.samples.max(1) as f64;
-            (stats.samples >= MIN_EXECUTION_LEARNING_SAMPLES
-                && !(favor_non_post_only && matches!(kind, AutoOrderType::PostOnlyLimit))
-                && average_pnl > 0.0
-                && positive_rate >= 0.55)
-                .then_some((kind, average_pnl))
+            if stats.samples < MIN_EXECUTION_QUALITY_SAMPLES
+                || stats.filled_samples < MIN_EXECUTION_QUALITY_FILLS
+                || stats.cost_notional <= 0.0
+            {
+                return None;
+            }
+            let cost = stats.all_in_cost_notional_bps / stats.cost_notional;
+            let fill_rate = stats.fill_rate_total / stats.samples as f64;
+            (fill_rate + 0.05 >= baseline_fill_rate && cost + 0.5 < baseline_cost)
+                .then_some((kind, cost))
         })
-        .collect::<Vec<_>>();
-    if candidates.is_empty() {
-        // A losing record rules out that order type, not the signal. Keep
-        // trying the alternate execution type while its own evidence is
-        // immature; only stop when both choices have mature losing records.
-        let is_mature_unprofitable = |kind| {
-            let stats = order_type_learning_stats(context, kind, learning);
-            stats.samples >= MIN_EXECUTION_LEARNING_SAMPLES
-                && (stats.realized_pnl / stats.samples as f64 <= 0.0
-                    || (stats.positive as f64 / stats.samples as f64) < 0.55)
-        };
-        let baseline_unprofitable = is_mature_unprofitable(baseline);
-        let ioc_unprofitable = is_mature_unprofitable(AutoOrderType::Ioc);
-        if baseline_unprofitable && ioc_unprofitable {
-            return None;
-        }
-        return Some(if baseline_unprofitable {
-            AutoOrderType::Ioc
-        } else if ioc_unprofitable {
-            baseline
-        } else {
-            AutoOrderType::Ioc
-        });
-    }
-    candidates
-        .into_iter()
-        .max_by(|a, b| a.1.total_cmp(&b.1))
+        .min_by(|left, right| left.1.total_cmp(&right.1))
         .map(|(kind, _)| kind)
+        .or(Some(baseline))
 }
-

@@ -202,8 +202,8 @@ export function AutoTrader() {
           </div>
           <div className="auto-trader-insight">
             <span className="auto-trader-insight-label">Learning · today UTC</span>
-            <strong>{state.learningSamples} samples · {state.learningWinRate == null ? '—' : finiteFixed(state.learningWinRate * 100, 0) + '% positive'}</strong>
-            <span className="auto-trader-learning-detail">Profiles P0/P1/P2: {state.parameterProfileSamples.join('/')} {state.preferredOrderType ? '· Best order: ' + state.preferredOrderType : ''}</span>
+            <strong>{state.learningSamples} closed trades today · {state.learningWinRate == null ? '—' : finiteFixed(state.learningWinRate * 100, 0) + '% positive'}</strong>
+            <span className="auto-trader-learning-detail">Execution samples P0/P1/P2: {state.parameterProfileSamples.join('/')} {state.preferredOrderType ? '· Lowest observed cost: ' + state.preferredOrderType : ''}</span>
           </div>
           <div className="auto-trader-insight auto-trader-scout-summary" aria-label="Scout shadow outcomes">
             <span className="auto-trader-insight-label">Scout · shadow · 5m · last 15m</span>

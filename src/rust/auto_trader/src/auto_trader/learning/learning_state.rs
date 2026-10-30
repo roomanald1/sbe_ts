@@ -44,7 +44,11 @@ fn record_closed_trade_outcome(
 ) {
     // Closed spot trades cannot lose more than their entry notional. Reject
     // malformed returns before they enter the persisted rolling statistics.
-    if !return_percent.is_finite() || return_percent < -100.0 {
+    if !return_percent.is_finite()
+        || return_percent < -100.0
+        || !realized_usd.is_finite()
+        || !fees_usd.is_finite()
+    {
         return;
     }
     // These parallel arrays are a persisted legacy format. Discard an already
@@ -69,6 +73,32 @@ fn record_closed_trade_outcome(
         settings.closed_trade_timestamps_ms.drain(0..excess);
         settings.closed_trade_realized_usd.drain(0..excess);
         settings.closed_trade_fees_usd.drain(0..excess);
+    }
+}
+
+fn strategy_trade_learning_key(symbol: &str, strategy: &str) -> String {
+    format!("trade:{symbol}:{strategy}")
+}
+
+fn record_strategy_trade_outcome(
+    settings: &mut Settings,
+    symbol: &str,
+    strategy: Option<&str>,
+    learning_context: Option<&str>,
+    scout: bool,
+    realized_pnl_usd: f64,
+) {
+    if !realized_pnl_usd.is_finite() {
+        return;
+    }
+    if let Some(strategy) = strategy.filter(|_| !scout) {
+        let key = strategy_trade_learning_key(symbol, strategy);
+        record_learning_outcome(settings.learning.entry(key).or_default(), realized_pnl_usd);
+    }
+    if let Some(context) = learning_context.filter(|context| !context.is_empty()) {
+        let base_context = context.split(":P").next().unwrap_or(context);
+        let key = format!("{base_context}:trade");
+        record_learning_outcome(settings.learning.entry(key).or_default(), realized_pnl_usd);
     }
 }
 

@@ -301,6 +301,24 @@ async fn sync_auto_positions(
                 &known_exit_ids,
             );
             for audit in audits {
+                if audit["trade_closed"].as_bool() == Some(true) {
+                    if let (Some(strategy), Some(realized)) = (
+                        audit["strategy"].as_str(),
+                        audit["trade_realized_pnl"].as_f64(),
+                    ) {
+                        let mut settings = state.settings.lock().await;
+                        let realized_usd = realized_usd(&settings, &symbol, realized);
+                        record_strategy_trade_outcome(
+                            &mut settings,
+                            &symbol,
+                            Some(strategy),
+                            audit["learning_context"].as_str(),
+                            audit["scout"].as_bool().unwrap_or(false),
+                            realized_usd,
+                        );
+                        request_settings_persist(state)?;
+                    }
+                }
                 let has_known_auto_exit = audit["exit_fills"].as_array().into_iter().flatten().any(|fill| {
                     fill["parent_order_id"].as_str().is_some_and(|parent_id| known_exit_ids.contains(parent_id))
                 });
@@ -350,6 +368,7 @@ async fn reconcile_inactive_execution_orders(
         .unwrap_or_default()
         .as_millis() as u64;
     let mut changed = false;
+    let mut completed_orders = Vec::new();
     for order in settings.orders.iter_mut().filter(|order| {
         matches!(order.purpose.as_str(), "signal" | "scout")
             && !is_scheduled_execution_order_type(&order.order_type)
@@ -369,6 +388,15 @@ async fn reconcile_inactive_execution_orders(
             "removed_from_execution_ledger".into()
         });
         changed |= order.status != prior_status;
+        completed_orders.push(order.clone());
+    }
+    for order in completed_orders {
+        let Settings {
+            execution_learning,
+            execution_learning_order_ids,
+            ..
+        } = &mut *settings;
+        record_execution_order_quality(execution_learning, execution_learning_order_ids, &order);
     }
     if changed {
         request_settings_persist(state)?;

@@ -24,7 +24,8 @@ fn position_exit_audit_payload(
     let mut payload = serde_json::json!({
         "record_schema_version": 2,
         "decision_id": decision_id,
-        "trade_id": decision_id,
+        "trade_id": position.trade_id.as_deref().unwrap_or(decision_id),
+        "trade_closed": filled + 1e-12 >= quantity,
         "strategy": position.strategy,
         "stage": format!("exit:{submitted_at}"),
         "timestamp": observed_at,
@@ -56,6 +57,7 @@ fn position_exit_audit_payload(
         serde_json::json!({ "timestamp": sample.timestamp, "bid": sample.bid, "ask": sample.ask })
     }).collect::<Vec<_>>());
     payload["entry_context"] = serde_json::json!({
+        "trade_id": position.trade_id.as_deref().unwrap_or(decision_id),
         "strategy_decision": position.strategy_decision,
         "average_price": position.average_entry_price,
         "fees": position.entry_fees,
@@ -64,11 +66,7 @@ fn position_exit_audit_payload(
         "total_fees_paid": position.total_fees_paid + fee,
         "timestamp_ms": position.entry_timestamp_ms,
         "duration_ms": (position.entry_timestamp_ms > 0).then_some(observed_at.saturating_sub(position.entry_timestamp_ms)),
-        "quantity": if position.average_entry_price > 0.0 && position.initial_entry_notional > 0.0 {
-            position.initial_entry_notional / position.average_entry_price
-        } else {
-            position.quantity.abs()
-        },
+        "quantity": position.quantity.abs(),
     });
     payload["exit_rule_trace"] = serde_json::json!({
         "reason": reason,

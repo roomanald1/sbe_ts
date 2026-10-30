@@ -100,14 +100,14 @@ async fn reconcile_scheduled_fills(
     let run_rows = runs["runs"].as_array().cloned().unwrap_or_default();
     let mut settings = state.settings.lock().await;
     let mut changed = false;
-    let mut learning_updates = Vec::new();
     {
         let usd_rates = settings.usd_rates.clone();
         let Settings {
             orders,
             positions,
             strategy_positions,
-            learning,
+            execution_learning,
+            execution_learning_order_ids,
             realized_pnl,
             daily_realized_pnl,
             ..
@@ -145,6 +145,11 @@ async fn reconcile_scheduled_fills(
                     order.status = "failed".into();
                     order.failure_reason =
                         Some("Scheduled run could not be found in the position manager".into());
+                    record_execution_order_quality(
+                        execution_learning,
+                        execution_learning_order_ids,
+                        order,
+                    );
                     changed = true;
                     continue;
                 }
@@ -194,7 +199,7 @@ async fn reconcile_scheduled_fills(
                     continue;
                 }
                 let count_entry = order.filled_quantity <= 1e-12;
-                let (realized, learned) = apply_auto_fill(
+                let (realized, _learned) = apply_auto_fill(
                     positions,
                     &order.symbol,
                     &order.side,
@@ -239,9 +244,6 @@ async fn reconcile_scheduled_fills(
                 let realized_usd = realized * quote_usd_rate_for_map(&usd_rates, &order.symbol);
                 *realized_pnl += realized_usd;
                 *daily_realized_pnl += realized_usd;
-                if let Some(kind) = learned {
-                    learning_updates.push((kind, realized_usd));
-                }
                 changed = true;
             }
             // Compatibility for schedules created before ledger source/parent tags were added.
@@ -255,7 +257,7 @@ async fn reconcile_scheduled_fills(
                 if delta_quantity > 1e-12 && price.is_finite() && price > 0.0 {
                     let fee = delta_quantity * price * configured_taker_fee_rate();
                     let count_entry = order.filled_quantity <= 1e-12;
-                    let (realized, learned) = apply_auto_fill(
+                    let (realized, _learned) = apply_auto_fill(
                         positions,
                         &order.symbol,
                         &order.side,
@@ -299,9 +301,6 @@ async fn reconcile_scheduled_fills(
                     let realized_usd = realized * quote_usd_rate_for_map(&usd_rates, &order.symbol);
                     *realized_pnl += realized_usd;
                     *daily_realized_pnl += realized_usd;
-                    if let Some(kind) = learned {
-                        learning_updates.push((kind, realized_usd));
-                    }
                     changed = true;
                 }
             }
@@ -332,10 +331,11 @@ async fn reconcile_scheduled_fills(
                     changed = true;
                 }
             }
-        }
-        for (kind, realized) in learning_updates {
-            let stats = learning.entry(kind).or_default();
-            record_learning_outcome(stats, realized);
+            record_execution_order_quality(
+                execution_learning,
+                execution_learning_order_ids,
+                order,
+            );
         }
     }
     if changed {

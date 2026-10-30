@@ -159,6 +159,7 @@ async fn submit_configured_order(
     params: ExecutionParameters,
     client_order_id: String,
 ) -> Result<serde_json::Value, (StatusCode, String)> {
+    let request_prepare_started = Instant::now();
     let now_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
@@ -166,10 +167,14 @@ async fn submit_configured_order(
     let (endpoint, body) = build_order_request(
         symbol, side, quantity, bid, ask, kind, params, &client_order_id, now_ms,
     );
+    let request_body = serde_json::to_vec(&body)
+        .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
+    let request_prepare_ms = request_prepare_started.elapsed().as_secs_f64() * 1_000.0;
     let request_started = Instant::now();
     let response = client
         .post(format!("{base}{endpoint}"))
-        .json(&body)
+        .header(reqwest::header::CONTENT_TYPE, "application/json")
+        .body(request_body)
         .send()
         .await
         .map_err(upstream_error)?;
@@ -182,12 +187,16 @@ async fn submit_configured_order(
         .and_then(|value| value.parse::<f64>().ok());
     let body_started = Instant::now();
     let response_body = response.bytes().await.map_err(upstream_error)?;
+    let body_read_ms = body_started.elapsed().as_secs_f64() * 1_000.0;
+    let decode_started = Instant::now();
     let mut payload = serde_json::from_slice::<serde_json::Value>(&response_body).unwrap_or_else(
         |_| serde_json::json!({"error": String::from_utf8_lossy(&response_body).trim()}),
     );
+    let response_decode_ms = decode_started.elapsed().as_secs_f64() * 1_000.0;
+    payload["client_request_prepare_local_ms"] = serde_json::json!(request_prepare_ms);
     payload["client_response_headers_ms"] = serde_json::json!(response_headers_ms);
-    payload["client_body_read_decode_ms"] =
-        serde_json::json!(body_started.elapsed().as_secs_f64() * 1_000.0);
+    payload["client_body_read_ms"] = serde_json::json!(body_read_ms);
+    payload["client_response_decode_local_ms"] = serde_json::json!(response_decode_ms);
     if let Some(handler_ms) = position_manager_ms {
         payload["position_manager_handler_ms"] = serde_json::json!(handler_ms);
     }

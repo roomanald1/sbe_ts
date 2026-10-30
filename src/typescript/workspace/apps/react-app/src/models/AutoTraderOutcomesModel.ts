@@ -44,7 +44,7 @@ type TradeAudit = { entry?: AuditRecord; exits: AuditRecord[] };
 const quoteCurrency = (symbol: string) => symbol.includes('-') ? symbol.slice(symbol.lastIndexOf('-') + 1) : 'Unknown';
 
 export class AutoTraderOutcomesModel {
-  readonly state$ = new BehaviorSubject<{ rows: AutoTraderOutcome[]; strategyLearning: Record<string, StrategyLearning>; autoTraderEnabled: boolean; autoTraderStatusAvailable: boolean; enabledStrategies: string[]; strategyDiagnostics: StrategyDiagnostic[]; strategyOrders: StrategyOrder[]; strictEntryGates: Record<string, StrictEntryGateSummary>; strictBaseStrengthFloor?: number; todayStrategyRealizedUsd?: Record<string, number | null>; datedCarryDiagnostics?: DatedCarryDiagnostics; openStrategyPositions: Array<{ symbol: string; strategy?: string }>; loading: boolean; error?: string; confirmingCloseSymbols: Set<string>; closingSymbols: Set<string> }>({ rows: [], strategyLearning: {}, autoTraderEnabled: false, autoTraderStatusAvailable: false, enabledStrategies: [], strategyDiagnostics: [], strategyOrders: [], strictEntryGates: {}, strictBaseStrengthFloor: undefined, todayStrategyRealizedUsd: undefined, datedCarryDiagnostics: undefined, openStrategyPositions: [], loading: true, confirmingCloseSymbols: new Set(), closingSymbols: new Set() });
+  readonly state$ = new BehaviorSubject<{ rows: AutoTraderOutcome[]; strategyLearning: Record<string, StrategyLearning>; autoTraderEnabled: boolean; autoTraderStatusAvailable: boolean; enabledStrategies: string[]; strategyDiagnostics: StrategyDiagnostic[]; strategyOrders: StrategyOrder[]; strictEntryGates: Record<string, StrictEntryGateSummary>; strictBaseStrengthFloor?: number; todayStrategyRealizedUsd?: Record<string, number | null>; datedCarryDiagnostics?: DatedCarryDiagnostics; openStrategyPositions: Array<{ symbol: string; strategy?: string }>; loading: boolean; error?: string; confirmingCloseSymbols: Set<string>; closingSymbols: Set<string>; auditCursor?: number | null; loadingOlderAudit: boolean }>({ rows: [], strategyLearning: {}, autoTraderEnabled: false, autoTraderStatusAvailable: false, enabledStrategies: [], strategyDiagnostics: [], strategyOrders: [], strictEntryGates: {}, strictBaseStrengthFloor: undefined, todayStrategyRealizedUsd: undefined, datedCarryDiagnostics: undefined, openStrategyPositions: [], loading: true, confirmingCloseSymbols: new Set(), closingSymbols: new Set(), auditCursor: null, loadingOlderAudit: false });
   private timer?: ReturnType<typeof setInterval>;
   private stopPositionStream?: () => void;
   private stopAutoTraderStream?: () => void;
@@ -54,6 +54,8 @@ export class AutoTraderOutcomesModel {
   private refreshing = false;
   private consumers = 0;
   private gateAuditCache: { records: AuditRecord[]; refreshedAt: number } = { records: [], refreshedAt: 0 };
+  private auditRows: AuditRecord[] = [];
+  private auditCursor?: number | null;
   start() {
     this.consumers += 1;
     if (this.consumers > 1) return;
@@ -124,7 +126,7 @@ export class AutoTraderOutcomesModel {
       const autoSnapshot = this.autoTraderSnapshot;
       const refreshGateAudit = Date.now() - this.gateAuditCache.refreshedAt >= 30_000;
       const [auditResponse, activityResponse, learningResponse, datedCarryResponse, positionsResponse, tradesResponse, gateAuditResponse, parametersResponse] = await Promise.all([
-        autoSnapshot ? Promise.resolve(undefined) : fetch('/signals/auto-trader-execution-audit'),
+        autoSnapshot ? Promise.resolve(undefined) : fetch('/signals/auto-trader-execution-audit?limit=500'),
         autoSnapshot ? Promise.resolve(undefined) : fetch('/positions/auto-trader/activity'),
         autoSnapshot ? Promise.resolve(undefined) : fetch('/positions/auto-trader'),
         autoSnapshot ? Promise.resolve(undefined) : fetch('/positions/auto-trader/dated-carry'),
@@ -136,7 +138,14 @@ export class AutoTraderOutcomesModel {
       if (!autoSnapshot && !auditResponse?.ok) throw new Error('Audit unavailable');
       if (!streamSnapshot && !positionsResponse?.ok) throw new Error('AutoTrader positions unavailable');
       if (!streamSnapshot && !tradesResponse?.ok) throw new Error('AutoTrader fills unavailable');
-      const records = autoSnapshot?.execution_audit as AuditRecord[] ?? await auditResponse!.json() as AuditRecord[];
+      const auditPage = autoSnapshot?.execution_audit ?? await auditResponse!.json() as { items?: AuditRecord[]; nextCursor?: number | null };
+      const isInitialAuditPage = this.auditRows.length === 0;
+      if (isInitialAuditPage) this.auditCursor = auditPage.nextCursor ?? null;
+      const mergedAuditRows = new Map<string, AuditRecord>();
+      for (const record of [...this.auditRows, ...(auditPage.items ?? [])]) {
+        mergedAuditRows.set(`${record.decision_id ?? ''}:${record.stage ?? ''}`, record);
+      }
+      this.auditRows = [...mergedAuditRows.values()].sort((left, right) => (left.timestamp ?? 0) - (right.timestamp ?? 0));
       if (gateAuditResponse?.ok) {
         try {
           const gateRecords = await gateAuditResponse.json() as AuditRecord[];
@@ -213,7 +222,7 @@ export class AutoTraderOutcomesModel {
         adverseSlippageBySymbol.set(trade.symbol, values);
       }
       const trades = new Map<string, TradeAudit>();
-      for (const record of records) {
+      for (const record of this.auditRows) {
         if (!record.decision_id) continue;
         const trade = trades.get(record.decision_id) ?? { exits: [] };
         if (record.stage === 'entry') trade.entry = record;
@@ -343,9 +352,28 @@ export class AutoTraderOutcomesModel {
           components: entry?.signal_components ?? {} });
       }
       rows.sort((a, b) => (a.status === b.status ? b.openedAt - a.openedAt : a.status === 'Open' ? -1 : 1));
-      this.state$.next({ ...this.state$.value, rows, strategyLearning, autoTraderEnabled: learningData.enabled ?? false, autoTraderStatusAvailable: Boolean(autoSnapshot || learningResponse?.ok), enabledStrategies: learningData.strategies ?? [], strategyDiagnostics: learningData.strategy_diagnostics ?? [], strategyOrders: activityData.orders ?? [], strictEntryGates, strictBaseStrengthFloor, todayStrategyRealizedUsd, datedCarryDiagnostics, openStrategyPositions: strategyLots.length ? strategyLots.map(({ symbol, strategy }) => ({ symbol, strategy })) : activityData.open_positions ?? [], loading: false });
+      this.state$.next({ ...this.state$.value, rows, strategyLearning, autoTraderEnabled: learningData.enabled ?? false, autoTraderStatusAvailable: Boolean(autoSnapshot || learningResponse?.ok), enabledStrategies: learningData.strategies ?? [], strategyDiagnostics: learningData.strategy_diagnostics ?? [], strategyOrders: activityData.orders ?? [], strictEntryGates, strictBaseStrengthFloor, todayStrategyRealizedUsd, datedCarryDiagnostics, openStrategyPositions: strategyLots.length ? strategyLots.map(({ symbol, strategy }) => ({ symbol, strategy })) : activityData.open_positions ?? [], loading: false, auditCursor: this.auditCursor });
     } catch { this.state$.next({ ...this.state$.value, loading: false, error: 'AutoTrader positions or closed trade audit are unavailable.' }); }
     finally { this.refreshing = false; }
+  }
+
+  async loadOlderAudit() {
+    const cursor = this.state$.value.auditCursor;
+    if (cursor == null || this.state$.value.loadingOlderAudit) return;
+    this.state$.next({ ...this.state$.value, loadingOlderAudit: true });
+    try {
+      const response = await fetch(`/signals/auto-trader-execution-audit?cursor=${cursor}&limit=500`);
+      if (!response.ok) throw new Error('Could not load older execution history');
+      const page = await response.json() as { items?: AuditRecord[]; nextCursor?: number | null };
+      const rows = new Map(this.auditRows.map((record) => [`${record.decision_id ?? ''}:${record.stage ?? ''}`, record]));
+      for (const record of page.items ?? []) rows.set(`${record.decision_id ?? ''}:${record.stage ?? ''}`, record);
+      this.auditRows = [...rows.values()].sort((left, right) => (left.timestamp ?? 0) - (right.timestamp ?? 0));
+      this.auditCursor = page.nextCursor ?? null;
+      this.state$.next({ ...this.state$.value, loadingOlderAudit: false });
+      await this.refresh();
+    } catch (error) {
+      this.state$.next({ ...this.state$.value, loadingOlderAudit: false, error: error instanceof Error ? error.message : 'Could not load older execution history' });
+    }
   }
   private canonicalExits(exits: AuditRecord[]) {
     const externalFillIds = new Set(exits

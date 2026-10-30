@@ -3,12 +3,39 @@ impl SignalStore {
         &self,
         since: Option<u64>,
     ) -> Result<AutoTraderExecutionQualitySummary> {
-        let records = self.load_auto_trader_execution_audit(since).await?;
+        let records = self.load_auto_trader_execution_audit(since, 50_000).await?;
         let mut summary = AutoTraderExecutionQualitySummary::default();
         let (mut requested_quantity, mut filled_quantity, mut measured_notional) = (0.0, 0.0, 0.0);
         let (mut shortfall_total, mut fee_total, mut all_in_total, mut fee_notional) =
             (0.0, 0.0, 0.0, 0.0);
         let (mut response_latency_total, mut response_latency_samples) = (0u64, 0usize);
+        let external_exit_ids = records
+            .iter()
+            .filter(|record| {
+                record
+                    .get("exit_order_type")
+                    .and_then(serde_json::Value::as_str)
+                    == Some("external-ledger-fill")
+            })
+            .flat_map(|record| {
+                let trade_id = record
+                    .get("trade_id")
+                    .or_else(|| record.get("decision_id"))
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned();
+                record
+                    .get("exit_fills")
+                    .and_then(serde_json::Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(move |fill| {
+                        fill.get("parent_order_id")
+                            .and_then(serde_json::Value::as_str)
+                            .map(|id| (trade_id.clone(), id.to_owned()))
+                    })
+            })
+            .collect::<HashSet<_>>();
 
         for record in records {
             let stage = record
@@ -16,6 +43,22 @@ impl SignalStore {
                 .and_then(serde_json::Value::as_str)
                 .unwrap_or_default();
             if stage != "entry" && !stage.starts_with("exit") {
+                continue;
+            }
+            let trade_id = record
+                .get("trade_id")
+                .or_else(|| record.get("decision_id"))
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default();
+            if record
+                .get("exit_order_type")
+                .and_then(serde_json::Value::as_str)
+                == Some("StopMarket")
+                && record
+                    .get("barrier_order_id")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|id| external_exit_ids.contains(&(trade_id.to_owned(), id.to_owned())))
+            {
                 continue;
             }
             summary.order_samples += 1;

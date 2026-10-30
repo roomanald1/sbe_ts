@@ -1,4 +1,53 @@
 impl SignalStore {
+    pub async fn load_auto_trader_execution_audit_page(
+        &self,
+        before_id: Option<i64>,
+        since: Option<u64>,
+        limit: usize,
+    ) -> Result<AuditPage> {
+        let path = self.path.clone();
+        tokio::task::spawn_blocking(move || {
+            Self::load_auto_trader_execution_audit_page_sync(&path, before_id, since, limit)
+        })
+        .await
+        .map_err(|error| anyhow::anyhow!("execution audit page read task failed: {error}"))?
+    }
+
+    fn load_auto_trader_execution_audit_page_sync(
+        path: &PathBuf,
+        before_id: Option<i64>,
+        since: Option<u64>,
+        limit: usize,
+    ) -> Result<AuditPage> {
+        let limit = limit.clamp(1, 5_000);
+        let connection = Self::open_database_path(path)?;
+        let mut statement = connection.prepare(
+            "SELECT rowid, payload FROM auto_trader_audit WHERE (stage = 'entry' OR stage LIKE 'exit%') AND (?1 IS NULL OR rowid < ?1) AND (?2 IS NULL OR timestamp >= ?2) ORDER BY rowid DESC LIMIT ?3",
+        )?;
+        let rows = statement.query_map(
+            params![before_id, since.map(|value| value as i64), (limit + 1) as i64],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?)),
+        )?;
+        let mut rows = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+        let has_more = rows.len() > limit;
+        rows.truncate(limit);
+        drop(statement);
+        drop(connection);
+
+        let next_cursor = has_more.then(|| rows.last().map(|(id, _)| *id)).flatten();
+        let mut items = rows
+            .into_iter()
+            .map(|(_, compressed)| {
+                let mut decoder = MultiGzDecoder::new(compressed.as_slice());
+                let mut json = Vec::new();
+                decoder.read_to_end(&mut json)?;
+                Ok(serde_json::from_slice(&json)?)
+            })
+            .collect::<Result<Vec<_>>>()?;
+        items.reverse();
+        Ok(AuditPage { items, next_cursor })
+    }
+
     pub async fn load_shadow_decisions_near(
         &self,
         symbol: String,
@@ -120,10 +169,11 @@ impl SignalStore {
     async fn load_auto_trader_execution_audit(
         &self,
         since: Option<u64>,
+        limit: usize,
     ) -> Result<Vec<serde_json::Value>> {
         let path = self.path.clone();
         tokio::task::spawn_blocking(move || {
-            Self::load_auto_trader_execution_audit_sync(&path, since)
+            Self::load_auto_trader_execution_audit_sync(&path, since, limit)
         })
         .await
         .map_err(|error| anyhow::anyhow!("execution audit read task failed: {error}"))?
@@ -132,18 +182,20 @@ impl SignalStore {
     fn load_auto_trader_execution_audit_sync(
         path: &PathBuf,
         since: Option<u64>,
+        limit: usize,
     ) -> Result<Vec<serde_json::Value>> {
         let connection = Self::open_database_path(path)?;
         let mut statement = connection.prepare(
-            "SELECT payload FROM auto_trader_audit WHERE (stage = 'entry' OR stage LIKE 'exit%') AND (?1 IS NULL OR timestamp >= ?1) ORDER BY timestamp ASC",
+            "SELECT payload FROM auto_trader_audit WHERE (stage = 'entry' OR stage LIKE 'exit%') AND (?1 IS NULL OR timestamp >= ?1) ORDER BY timestamp DESC LIMIT ?2",
         )?;
-        let rows = statement.query_map(params![since.map(|value| value as i64)], |row| {
-            row.get::<_, Vec<u8>>(0)
-        })?;
+        let rows = statement.query_map(
+            params![since.map(|value| value as i64), limit.clamp(1, 50_000) as i64],
+            |row| row.get::<_, Vec<u8>>(0),
+        )?;
         let compressed_rows = rows.collect::<rusqlite::Result<Vec<_>>>()?;
         drop(statement);
         drop(connection);
-        compressed_rows
+        let mut result = compressed_rows
             .into_iter()
             .map(|compressed| {
                 let mut decoder = MultiGzDecoder::new(compressed.as_slice());
@@ -151,7 +203,9 @@ impl SignalStore {
                 decoder.read_to_end(&mut json)?;
                 Ok(serde_json::from_slice(&json)?)
             })
-            .collect()
+            .collect::<Result<Vec<_>>>()?;
+        result.reverse();
+        Ok(result)
     }
 
     async fn count_auto_trader_decisions(&self, since: Option<u64>) -> Result<usize> {
@@ -168,4 +222,11 @@ impl SignalStore {
         .await
         .map_err(|error| anyhow::anyhow!("decision audit count task failed: {error}"))?
     }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AuditPage {
+    pub items: Vec<serde_json::Value>,
+    pub next_cursor: Option<i64>,
 }

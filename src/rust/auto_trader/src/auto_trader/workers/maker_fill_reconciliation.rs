@@ -7,7 +7,6 @@ struct MakerFillRecord {
     quantity: f64,
     execution_price: f64,
     fee: f64,
-    fee_liquidity: String,
     resting_order_id: Option<String>,
 }
 
@@ -18,7 +17,8 @@ async fn reconcile_maker_fills(
 ) -> Result<(), (StatusCode, String)> {
     let has_pending = state.settings.lock().await.orders.iter().any(|order| {
         order.execution_order_id.is_some()
-            && order.order_type.starts_with("PostOnlyLimit")
+            && (order.order_type.starts_with("PostOnlyLimit")
+                || order.order_type.starts_with("Gtd"))
             && order.status != "filled"
             && order.status != "cancelled"
     });
@@ -91,12 +91,13 @@ async fn reconcile_maker_fills(
         .collect::<std::collections::HashSet<_>>();
     let mut settings = state.settings.lock().await;
     let mut changed = false;
-    let mut learning_updates = Vec::new();
     let Settings {
-        orders, positions, strategy_positions, ..
+        orders, positions, strategy_positions, execution_learning,
+        execution_learning_order_ids, ..
     } = &mut *settings;
     for order in orders.iter_mut().filter(|order| {
-        order.order_type.starts_with("PostOnlyLimit")
+        (order.order_type.starts_with("PostOnlyLimit")
+            || order.order_type.starts_with("Gtd"))
             && matches!(
                 order.status.as_str(),
                 "resting" | "partially_filled" | "accepted"
@@ -111,7 +112,6 @@ async fn reconcile_maker_fills(
                 fill.resting_order_id.as_deref() == Some(id.as_str())
                     && fill.symbol == order.symbol
                     && fill.side == order.side
-                    && fill.fee_liquidity == "maker"
                     && !order
                         .processed_fill_trade_ids
                         .iter()
@@ -128,14 +128,19 @@ async fn reconcile_maker_fills(
                 continue;
             }
             let count_entry = order.filled_quantity <= 1e-12;
-            let (realized, learned) = apply_auto_fill(
+            let execution_kind = order
+                .order_type
+                .split(" · ")
+                .next()
+                .unwrap_or("PostOnlyLimit");
+            let (realized, _learned) = apply_auto_fill(
                 positions,
                 &order.symbol,
                 &order.side,
                 fill.quantity,
                 fill.execution_price,
                 fill.fee.abs(),
-                "PostOnlyLimit",
+                execution_kind,
                 order.learning_context.as_deref().unwrap_or(&order.symbol),
                 count_entry,
                 order.horizon_take_profit_percent,
@@ -150,7 +155,7 @@ async fn reconcile_maker_fills(
                 fill.quantity,
                 fill.execution_price,
                 fill.fee.abs(),
-                "PostOnlyLimit",
+                execution_kind,
                 order.learning_context.as_deref().unwrap_or(&order.symbol),
                 count_entry,
                 order.horizon_take_profit_percent,
@@ -169,13 +174,9 @@ async fn reconcile_maker_fills(
             order.realized_pnl += realized;
             record_strategy_order_realized_pnl(order, strategy_realized);
             order.processed_fill_trade_ids.push(fill.id.clone());
-            if let Some(kind) = learned {
-                learning_updates.push((kind, order.symbol.clone(), realized));
-            }
             changed = true;
         }
         let prior_status = order.status.clone();
-        let mut unfilled_post_only_removal = false;
         if order.filled_quantity + 1e-12 >= order.quantity {
             order.status = "filled".into();
         } else if active_ids.contains(&id) {
@@ -205,26 +206,13 @@ async fn reconcile_maker_fills(
                     "removed_before_expiry".to_owned()
                 },
             );
-            unfilled_post_only_removal =
-                order.filled_quantity <= 1e-12 && prior_status != "expired_or_cancelled";
-        }
-        if unfilled_post_only_removal {
-            if let Some(context) = order.learning_context.as_deref() {
-                learning_updates.push((
-                    format!("{context}:PostOnlyLimit"),
-                    order.symbol.clone(),
-                    0.0,
-                ));
-            }
         }
         changed |= order.status != prior_status;
-    }
-    for (kind, symbol, realized) in learning_updates {
-        let realized_usd = realized_usd(&settings, &symbol, realized);
-        let stats = settings.learning.entry(kind).or_default();
-        record_learning_outcome(stats, realized_usd);
-        settings.realized_pnl += realized_usd;
-        settings.daily_realized_pnl += realized_usd;
+        record_execution_order_quality(
+            execution_learning,
+            execution_learning_order_ids,
+            order,
+        );
     }
     if changed {
         request_settings_persist(state)?;

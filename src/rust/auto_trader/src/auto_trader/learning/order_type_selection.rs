@@ -1,34 +1,28 @@
 fn choose_parameter_profile(
     kind: AutoOrderType,
     context: &str,
-    learning: &BTreeMap<String, LearningStats>,
+    learning: &BTreeMap<String, ExecutionLearningStats>,
     explore: bool,
 ) -> usize {
     let profiles = (0..PARAMETER_PROFILE_COUNT)
         .map(|profile| {
             let prefix = format!("{context}:P{profile}:");
-            let suffix = format!(":{kind:?}");
-            let stats = learning.iter()
-                .filter(|(key, _)| key.starts_with(&prefix) && key.ends_with(&suffix))
-                .fold(LearningStats::default(), |mut total, (_, item)| {
-                    total.samples += item.samples;
-                    total.positive += item.positive;
-                    total.realized_pnl += item.realized_pnl;
-                    total
-                });
+            let suffix = format!(":exec:{kind:?}");
+            let stats = aggregate_execution_quality(learning, &prefix, &suffix);
             (profile, stats)
         })
         .collect::<Vec<_>>();
     let proven = profiles
         .iter()
         .filter(|(_, stats)| {
-            stats.samples >= MIN_EXECUTION_LEARNING_SAMPLES
-                && stats.realized_pnl > 0.0
-                && stats.positive as f64 / stats.samples as f64 >= 0.55
+            stats.samples >= MIN_EXECUTION_QUALITY_SAMPLES
+                && stats.filled_samples >= MIN_EXECUTION_QUALITY_FILLS
+                && stats.cost_notional > 0.0
+                && stats.fill_rate_total / stats.samples as f64 >= 0.60
         })
-        .max_by(|a, b| {
-            (a.1.realized_pnl / a.1.samples as f64)
-                .total_cmp(&(b.1.realized_pnl / b.1.samples as f64))
+        .min_by(|a, b| {
+            (a.1.all_in_cost_notional_bps / a.1.cost_notional)
+                .total_cmp(&(b.1.all_in_cost_notional_bps / b.1.cost_notional))
         });
     if let Some((profile, _)) = proven {
         return *profile;
@@ -141,7 +135,7 @@ fn schedule_depth_ratio_bucket(ratio: f64) -> &'static str {
 }
 
 fn learned_schedule_depth_threshold(
-    learning: &BTreeMap<String, LearningStats>,
+    learning: &BTreeMap<String, ExecutionLearningStats>,
     context: &str,
 ) -> (f64, usize) {
     let mut threshold = DEFAULT_SCHEDULE_DEPTH_RATIO;
@@ -155,41 +149,54 @@ fn learned_schedule_depth_threshold(
     ];
     for (bucket, lower, upper) in cohorts {
         let marker = format!(":depth:{bucket}:");
-        let mut scheduled = LearningStats::default();
-        let mut alternatives = LearningStats::default();
+        let mut scheduled = ExecutionLearningStats::default();
+        let mut alternatives = ExecutionLearningStats::default();
         for (key, stats) in learning.iter().filter(|(key, _)| {
             key.starts_with(&format!("{context}:P")) && key.contains(&marker)
         }) {
-            if key.ends_with(":Vwap") || key.ends_with(":Twap") {
-                scheduled.samples += stats.samples;
-                scheduled.positive += stats.positive;
-                scheduled.realized_pnl += stats.realized_pnl;
+            let mut recent = stats.clone();
+            decay_execution_quality(&mut recent, current_time_ms());
+            if key.ends_with(":exec:Vwap") || key.ends_with(":exec:Twap") {
+                scheduled.samples += recent.samples;
+                scheduled.filled_samples += recent.filled_samples;
+                scheduled.fill_rate_total += recent.fill_rate_total;
+                scheduled.cost_notional += recent.cost_notional;
+                scheduled.all_in_cost_notional_bps += recent.all_in_cost_notional_bps;
             } else {
-                alternatives.samples += stats.samples;
-                alternatives.positive += stats.positive;
-                alternatives.realized_pnl += stats.realized_pnl;
+                alternatives.samples += recent.samples;
+                alternatives.filled_samples += recent.filled_samples;
+                alternatives.fill_rate_total += recent.fill_rate_total;
+                alternatives.cost_notional += recent.cost_notional;
+                alternatives.all_in_cost_notional_bps += recent.all_in_cost_notional_bps;
             }
         }
-        if scheduled.samples < MIN_EXECUTION_LEARNING_SAMPLES {
+        if scheduled.samples < MIN_EXECUTION_QUALITY_SAMPLES
+            || scheduled.filled_samples < MIN_EXECUTION_QUALITY_FILLS
+            || scheduled.cost_notional <= 0.0
+        {
             continue;
         }
         paired_samples += scheduled.samples + alternatives.samples;
-        let scheduled_average = scheduled.realized_pnl / scheduled.samples as f64;
-        let scheduled_win_rate = scheduled.positive as f64 / scheduled.samples as f64;
-        if alternatives.samples >= MIN_EXECUTION_LEARNING_SAMPLES {
-            let alternatives_average = alternatives.realized_pnl / alternatives.samples as f64;
-            let alternatives_win_rate = alternatives.positive as f64 / alternatives.samples as f64;
-            if scheduled_average > alternatives_average && scheduled_win_rate + 0.03 >= alternatives_win_rate {
+        let scheduled_average =
+            scheduled.all_in_cost_notional_bps / scheduled.cost_notional;
+        let scheduled_fill_rate = scheduled.fill_rate_total / scheduled.samples as f64;
+        if alternatives.samples >= MIN_EXECUTION_QUALITY_SAMPLES
+            && alternatives.filled_samples >= MIN_EXECUTION_QUALITY_FILLS
+            && alternatives.cost_notional > 0.0
+        {
+            let alternatives_average =
+                alternatives.all_in_cost_notional_bps / alternatives.cost_notional;
+            let alternatives_fill_rate = alternatives.fill_rate_total / alternatives.samples as f64;
+            if scheduled_average + 0.5 < alternatives_average
+                && scheduled_fill_rate + 0.05 >= alternatives_fill_rate
+            {
                 threshold = threshold.min(lower.max(MIN_SCHEDULE_DEPTH_RATIO));
-            } else if scheduled_average < alternatives_average && scheduled_win_rate + 0.05 < alternatives_win_rate {
+            } else if scheduled_average > alternatives_average + 0.5
+                && scheduled_fill_rate + 0.05 < alternatives_fill_rate
+            {
                 threshold = threshold.max(upper.min(MAX_SCHEDULE_DEPTH_RATIO));
             }
-        } else if lower >= threshold && scheduled_average <= 0.0 && scheduled_win_rate < 0.45 {
-            // Large orders are scheduled by policy, so use their own mature,
-            // consistently losing outcomes to back the threshold off safely.
-            threshold = threshold.max(upper.min(MAX_SCHEDULE_DEPTH_RATIO));
         }
     }
     (threshold.clamp(MIN_SCHEDULE_DEPTH_RATIO, MAX_SCHEDULE_DEPTH_RATIO), paired_samples)
 }
-

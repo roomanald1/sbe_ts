@@ -76,11 +76,18 @@ fn calculate_activity_learning_metrics(
             .sum()
     });
     let today = utc_day();
-    let learning_samples = settings
+    let completed_trade_stats = settings
         .learning
-        .values()
-        .map(|stats| learning_stats_for_day(stats, &today).samples)
-        .sum();
+        .iter()
+        .filter(|(key, _)| key.starts_with("trade:"))
+        .map(|(_, stats)| learning_stats_for_day(stats, &today))
+        .fold(LearningStats::default(), |mut total, stats| {
+            total.samples += stats.samples;
+            total.positive += stats.positive;
+            total.realized_pnl += stats.realized_pnl;
+            total
+        });
+    let learning_samples = completed_trade_stats.samples;
     let scout_open_positions = settings
         .positions
         .values()
@@ -89,7 +96,7 @@ fn calculate_activity_learning_metrics(
     let scout_learning = settings
         .learning
         .iter()
-        .filter(|(key, _)| key.starts_with("scout:"))
+        .filter(|(key, _)| key.starts_with("scout:") && key.ends_with(":trade"))
         .map(|(_, stats)| learning_stats_for_day(stats, &today))
         .fold(LearningStats::default(), |mut total, stats| {
             total.samples += stats.samples;
@@ -99,46 +106,49 @@ fn calculate_activity_learning_metrics(
         });
     let scout_learning_win_rate = (scout_learning.samples > 0)
         .then_some(scout_learning.positive as f64 / scout_learning.samples as f64);
-    let learning_positive = settings
-        .learning
-        .values()
-        .map(|stats| learning_stats_for_day(stats, &today).positive)
-        .sum::<usize>();
     let preferred_order_type = ALL_ORDER_TYPES
         .iter()
         .filter_map(|kind| {
-            let suffix = format!(":{kind:?}");
+            let quality_suffix = format!(":exec:{kind:?}");
             let stats = settings
-                .learning
+                .execution_learning
                 .iter()
-                .filter(|(key, _)| key.ends_with(&suffix))
-                .map(|(_, stats)| learning_stats_for_day(stats, &today))
-                .fold(LearningStats::default(), |mut total, stats| {
+                .filter(|(key, _)| key.ends_with(&quality_suffix))
+                .map(|(_, stats)| {
+                    let mut recent = stats.clone();
+                    decay_execution_quality(&mut recent, current_time_ms());
+                    recent
+                })
+                .fold(ExecutionLearningStats::default(), |mut total, stats| {
                     total.samples += stats.samples;
-                    total.positive += stats.positive;
-                    total.realized_pnl += stats.realized_pnl;
+                    total.filled_samples += stats.filled_samples;
+                    total.fill_rate_total += stats.fill_rate_total;
+                    total.cost_notional += stats.cost_notional;
+                    total.all_in_cost_notional_bps += stats.all_in_cost_notional_bps;
                     total
                 });
-            (stats.samples >= MIN_EXECUTION_LEARNING_SAMPLES
-                && stats.positive as f64 / stats.samples as f64 >= 0.55)
-                .then_some((
-                    format!("{kind:?}"),
-                    stats.realized_pnl / stats.samples as f64,
-                ))
+            (stats.samples >= MIN_EXECUTION_QUALITY_SAMPLES
+                && stats.filled_samples >= MIN_EXECUTION_QUALITY_FILLS
+                && stats.cost_notional > 0.0
+                && stats.fill_rate_total / stats.samples as f64 >= 0.60)
+                .then_some((format!("{kind:?}"), stats.all_in_cost_notional_bps / stats.cost_notional))
         })
-        .filter(|(_, pnl)| *pnl > 0.0)
-        .max_by(|a, b| a.1.total_cmp(&b.1))
+        .min_by(|a, b| a.1.total_cmp(&b.1))
         .map(|(kind, _)| kind);
-    let learning_win_rate =
-        (learning_samples > 0).then_some(learning_positive as f64 / learning_samples as f64);
+    let learning_win_rate = (learning_samples > 0)
+        .then_some(completed_trade_stats.positive as f64 / learning_samples as f64);
     let scout_learning_samples = scout_learning.samples;
     let scout_learning_realized_pnl = scout_learning.realized_pnl;
     let parameter_profile_samples = std::array::from_fn(|profile| {
         settings
-            .learning
+            .execution_learning
             .iter()
             .filter(|(key, _)| key.contains(&format!(":P{profile}:")))
-            .map(|(_, stats)| learning_stats_for_day(stats, &today).samples)
+            .map(|(_, stats)| {
+                let mut recent = stats.clone();
+                decay_execution_quality(&mut recent, current_time_ms());
+                recent.samples
+            })
             .sum()
     });
     ActivityLearningMetrics {
@@ -159,4 +169,3 @@ fn calculate_activity_learning_metrics(
         scout_learning_realized_pnl,
     }
 }
-

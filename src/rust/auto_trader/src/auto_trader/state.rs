@@ -121,6 +121,10 @@ struct TraderPosition {
     entry_context: String,
     #[serde(default)]
     entry_decision_id: Option<String>,
+    // Stable identifier for the lifetime of this strategy/symbol position.
+    // It is initialized from the first entry decision and survives add-on fills.
+    #[serde(default)]
+    trade_id: Option<String>,
     #[serde(default)]
     #[serde(alias = "research_strategy")]
     strategy: Option<String>,
@@ -177,6 +181,17 @@ struct LearningStats {
     daily_positive: usize,
     #[serde(default)]
     daily_realized_pnl: f64,
+}
+
+#[derive(Clone, Default, Serialize, Deserialize)]
+struct ExecutionLearningStats {
+    samples: usize,
+    filled_samples: usize,
+    fill_rate_total: f64,
+    cost_notional: f64,
+    all_in_cost_notional_bps: f64,
+    #[serde(default)]
+    updated_at_ms: u64,
 }
 
 #[derive(Clone, Copy, Eq, PartialEq, Ord, PartialOrd)]

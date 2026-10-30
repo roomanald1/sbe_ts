@@ -8,7 +8,6 @@ async fn submit_cycle_signal(
     scout: bool,
     counterfactual_stop_loss_percent: f64,
     counterfactual_take_profit_percent: f64,
-    dashboard_ms: f64,
     signal_selection_ms: f64,
     now: u64,
 ) -> Result<CycleResult, (StatusCode, String)> {
@@ -115,7 +114,8 @@ async fn submit_cycle_signal(
         bid,
         ask,
         mid,
-        market_inputs_ms,
+        market_cache_lookup_ms,
+        market_http_fetch_ms,
     } = match load_signal_market_snapshot(client, position_url, dashboard, now, signal).await {
         Ok(snapshot) => snapshot,
         Err(result) => return Ok(result),
@@ -132,14 +132,14 @@ async fn submit_cycle_signal(
         scout,
         counterfactual_stop_loss_percent,
         counterfactual_take_profit_percent,
-        dashboard_ms,
         signal_selection_ms,
         now,
         market,
         bid,
         ask,
         mid,
-        market_inputs_ms,
+        market_cache_lookup_ms,
+        market_http_fetch_ms,
     })
     .await
 }
@@ -195,10 +195,10 @@ fn daily_strategy_batch_result(
     details: &[String],
 ) -> CycleResult {
     let summary = if details.is_empty() {
-        format!("Daily strategy batch: {submitted}/{evaluated} orders submitted; shared limits respected")
+        format!("Daily strategy batch: {submitted}/{evaluated} orders queued; shared limits respected")
     } else {
         format!(
-            "Daily strategy batch: {submitted}/{evaluated} orders submitted; {}",
+            "Daily strategy batch: {submitted}/{evaluated} orders queued; {}",
             details.join("; ")
         )
     };
@@ -243,7 +243,6 @@ async fn run_cycle_inner(
     if let Some(result) = enforce_daily_realized_loss_limit(state).await? {
         return Ok(result);
     }
-    let dashboard_ms = 0.0;
     let (live_strategies, strategies_enabled, strategy_settings) = {
         let settings = state.settings.lock().await;
         let legacy_composite = settings
@@ -464,7 +463,6 @@ async fn run_cycle_inner(
                 false,
                 counterfactual_stop_loss_percent,
                 counterfactual_take_profit_percent,
-                dashboard_ms,
                 signal_selection_ms,
                 now,
             )
@@ -476,7 +474,7 @@ async fn run_cycle_inner(
                     continue;
                 }
             };
-            if result.status == "order_submitted" {
+            if result.status == "order_submitting" {
                 submitted += 1;
                 last_order = Some(result);
             } else {
@@ -533,7 +531,6 @@ async fn run_cycle_inner(
         scout,
         counterfactual_stop_loss_percent,
         counterfactual_take_profit_percent,
-        dashboard_ms,
         signal_selection_ms,
         now,
     )

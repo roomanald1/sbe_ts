@@ -1,3 +1,110 @@
+const MIN_EXECUTION_QUALITY_SAMPLES: usize = 10;
+const MIN_EXECUTION_QUALITY_FILLS: usize = 5;
+
+fn execution_quality_key(context: &str, order_type: &str) -> String {
+    format!("{context}:exec:{order_type}")
+}
+
+fn decay_execution_quality(stats: &mut ExecutionLearningStats, now_ms: u64) {
+    if stats.updated_at_ms == 0 {
+        stats.updated_at_ms = now_ms;
+        return;
+    }
+    let elapsed = now_ms.saturating_sub(stats.updated_at_ms);
+    if elapsed == 0 {
+        return;
+    }
+    let weight = 0.5_f64.powf(elapsed as f64 / LEARNING_HALF_LIFE_MS as f64);
+    stats.samples = (stats.samples as f64 * weight).round() as usize;
+    stats.filled_samples = ((stats.filled_samples as f64 * weight).round() as usize)
+        .min(stats.samples);
+    stats.fill_rate_total *= weight;
+    stats.cost_notional *= weight;
+    stats.all_in_cost_notional_bps *= weight;
+    stats.updated_at_ms = now_ms;
+}
+
+fn record_execution_order_quality(
+    execution_learning: &mut BTreeMap<String, ExecutionLearningStats>,
+    recorded_order_ids: &mut BTreeSet<String>,
+    order: &TraderOrder,
+) {
+    let id = order.timestamp.to_string();
+    if recorded_order_ids.contains(&id)
+        || !matches!(
+            order.status.as_str(),
+            "filled" | "partially_filled_closed" | "expired_or_cancelled" | "cancelled" | "failed" | "interrupted" | "accepted"
+        )
+        || (order.status == "accepted" && order.execution_order_id.is_some())
+        || !matches!(order.purpose.as_str(), "signal" | "scout")
+    {
+        return;
+    }
+    let Some(context) = order.learning_context.as_deref() else {
+        return;
+    };
+    let order_type = order.order_type.split(" · ").next().unwrap_or(&order.order_type);
+    let stats = execution_learning
+        .entry(execution_quality_key(context, order_type))
+        .or_default();
+    let now = current_time_ms();
+    decay_execution_quality(stats, now);
+    stats.samples += 1;
+    stats.fill_rate_total += order.fill_rate.clamp(0.0, 1.0);
+    if order.filled_quantity > 0.0 {
+        stats.filled_samples += 1;
+        if let (Some(price), Some(mid)) = (
+            order.average_price.filter(|value| value.is_finite() && *value > 0.0),
+            order.decision_mid.filter(|value| value.is_finite() && *value > 0.0),
+        ) {
+            let notional = order.filled_quantity * price;
+            if notional.is_finite() && notional > 0.0 {
+                let shortfall_bps = if order.side == "buy" {
+                    (price / mid - 1.0) * 10_000.0
+                } else {
+                    (1.0 - price / mid) * 10_000.0
+                };
+                let fee_bps = order.fees_paid.abs() / notional * 10_000.0;
+                let cost_bps = shortfall_bps + fee_bps;
+                if cost_bps.is_finite() {
+                    stats.cost_notional += notional;
+                    stats.all_in_cost_notional_bps += cost_bps * notional;
+                }
+            }
+        }
+    }
+    stats.updated_at_ms = now;
+    recorded_order_ids.insert(id);
+    while recorded_order_ids.len() > 20_000 {
+        if let Some(oldest) = recorded_order_ids.iter().next().cloned() {
+            recorded_order_ids.remove(&oldest);
+        }
+    }
+}
+
+fn aggregate_execution_quality(
+    learning: &BTreeMap<String, ExecutionLearningStats>,
+    prefix: &str,
+    suffix: &str,
+) -> ExecutionLearningStats {
+    learning
+        .iter()
+        .filter(|(key, _)| key.starts_with(prefix) && key.ends_with(suffix))
+        .map(|(_, stats)| {
+            let mut recent = stats.clone();
+            decay_execution_quality(&mut recent, current_time_ms());
+            recent
+        })
+        .fold(ExecutionLearningStats::default(), |mut total, stats| {
+            total.samples += stats.samples;
+            total.filled_samples += stats.filled_samples;
+            total.fill_rate_total += stats.fill_rate_total;
+            total.cost_notional += stats.cost_notional;
+            total.all_in_cost_notional_bps += stats.all_in_cost_notional_bps;
+            total
+        })
+}
+
 fn score_execution_order_type(
     signal: &Signal,
     risk_appetite: f64,

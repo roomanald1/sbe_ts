@@ -51,9 +51,7 @@ fn context_learning_stats(
     let prefix = format!("{context}:");
     learning
         .iter()
-        .filter(|(key, _)| {
-            key.starts_with(&prefix) || key.starts_with(&format!("scout:{prefix}"))
-        })
+        .filter(|(key, _)| key.starts_with(&prefix) && key.ends_with(":trade"))
         .map(|(_, stats)| stats)
         .fold(LearningStats::default(), |mut total, stats| {
             total.samples += stats.samples;

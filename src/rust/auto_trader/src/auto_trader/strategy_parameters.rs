@@ -12,23 +12,14 @@ fn legacy_strategy_parameter_name(parameter: &str) -> Option<&'static str> {
 }
 
 fn strategy_learning_stats(settings: &Settings, symbol: &str, strategy: Strategy) -> LearningStats {
-    let marker = format!(":{symbol}:{}:", strategy.as_str());
     let now_ms = current_time_ms();
-    settings
+    let mut stats = settings
         .learning
-        .iter()
-        .filter(|(key, _)| key.contains(&marker))
-        .map(|(_, stats)| {
-            let mut recent = stats.clone();
-            decay_learning_stats(&mut recent, now_ms);
-            recent
-        })
-        .fold(LearningStats::default(), |mut total, stats| {
-            total.samples += stats.samples;
-            total.positive += stats.positive;
-            total.realized_pnl += stats.realized_pnl;
-            total
-        })
+        .get(&strategy_trade_learning_key(symbol, strategy.as_str()))
+        .cloned()
+        .unwrap_or_default();
+    decay_learning_stats(&mut stats, now_ms);
+    stats
 }
 
 fn strategy_parameter_profile(

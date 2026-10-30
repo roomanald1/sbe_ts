@@ -43,6 +43,17 @@ async fn start_scheduled_run(
     store: Arc<PositionStore>,
     request: NewVwapRun,
 ) -> Result<Json<VwapRunStatus>, (StatusCode, String)> {
+    if let Some(client_order_id) = request.client_order_id.as_deref() {
+        let existing = store
+            .vwap_runs
+            .try_lock()
+            .map_err(|_| (StatusCode::SERVICE_UNAVAILABLE, "VWAP reservations busy".to_owned()))?
+            .get(client_order_id)
+            .map(|entry| Arc::clone(&entry.status));
+        if let Some(status) = existing {
+            return Ok(Json(status.try_lock().map_err(|_| (StatusCode::SERVICE_UNAVAILABLE, "VWAP status busy".to_owned()))?.clone()));
+        }
+    }
     let symbol = request.symbol.to_ascii_uppercase();
     if !valid_position_symbol(&symbol) {
         return Err((StatusCode::BAD_REQUEST, "Invalid instrument symbol".into()));
@@ -75,23 +86,6 @@ async fn start_scheduled_run(
         ));
     }
     store.ensure_subscription(&symbol);
-    if store.book(&symbol).is_none() {
-        let wait = async {
-            loop {
-                let notified = store.book_changed.notified();
-                if store.book(&symbol).is_some() {
-                    break;
-                }
-                notified.await;
-            }
-        };
-        timeout(Duration::from_secs(8), wait).await.map_err(|_| {
-            (
-                StatusCode::SERVICE_UNAVAILABLE,
-                "Waiting for live OKX book timed out".to_owned(),
-            )
-        })?;
-    }
     let side_book = store.book(&symbol).ok_or((
         StatusCode::SERVICE_UNAVAILABLE,
         "Live book is required to reserve VWAP buying power".to_owned(),
@@ -114,7 +108,18 @@ async fn start_scheduled_run(
             "Live reference price unavailable for VWAP".into(),
         ));
     }
-    let mut account_ledger = store.ledger.lock().await;
+    let mut account_ledger = store.ledger.try_lock().map_err(|_| {
+        (StatusCode::SERVICE_UNAVAILABLE, "Position ledger busy".to_owned())
+    })?;
+    if let Some(client_order_id) = request.client_order_id.as_deref() {
+        if let Some(existing) = account_ledger
+            .scheduled_runs
+            .iter()
+            .find(|run| run.id == client_order_id)
+        {
+            return Ok(Json(existing.clone()));
+        }
+    }
     ensure_paper_capacity(
         &store,
         &account_ledger,
@@ -125,6 +130,9 @@ async fn start_scheduled_run(
         configured_fee_rates().taker,
     )
     .await?;
+    let mut vwap_runs = store.vwap_runs.try_lock().map_err(|_| {
+        (StatusCode::SERVICE_UNAVAILABLE, "VWAP reservations busy".to_owned())
+    })?;
     let timestamp = now_ms().map_err(internal_error)?;
     let id = request
         .client_order_id
@@ -150,9 +158,9 @@ async fn start_scheduled_run(
         error: None,
     }));
     let cancelled = Arc::new(AtomicBool::new(false));
-    account_ledger
-        .scheduled_runs
-        .push(status.lock().await.clone());
+    account_ledger.scheduled_runs.push(status.try_lock().map_err(|_| {
+        (StatusCode::SERVICE_UNAVAILABLE, "VWAP status busy".to_owned())
+    })?.clone());
     if account_ledger.scheduled_runs.len() > 500 {
         account_ledger.scheduled_runs.remove(0);
     }
@@ -162,7 +170,7 @@ async fn start_scheduled_run(
             format!("Unable to persist scheduled execution: {error}"),
         )
     })?;
-    store.vwap_runs.lock().await.insert(
+    vwap_runs.insert(
         id,
         VwapRunEntry {
             status: status.clone(),
@@ -171,7 +179,9 @@ async fn start_scheduled_run(
     );
     store.ensure_subscription(&symbol);
     drop(account_ledger);
-    let initial_status = status.lock().await.clone();
+    let initial_status = status.try_lock().map_err(|_| {
+        (StatusCode::SERVICE_UNAVAILABLE, "VWAP status busy".to_owned())
+    })?.clone();
     if request.strategy == ExecutionStrategy::Twap {
         tokio::spawn(run_twap(
             Arc::clone(&store),
@@ -191,4 +201,3 @@ async fn start_scheduled_run(
     }
     Ok(Json(initial_status))
 }
-

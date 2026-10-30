@@ -3,7 +3,7 @@ import { BehaviorSubject } from 'rxjs';
 export type InsightsUiSnapshot = {
   signal_dashboard?: Record<string, unknown>;
   auto_trader_dashboard?: Record<string, unknown>;
-  execution_audit?: Array<Record<string, unknown>>;
+  execution_audit?: { items: Array<Record<string, unknown>>; nextCursor?: number | null };
   execution_quality?: Record<string, unknown>;
   decision_quality?: Record<string, unknown>;
   close_insights?: { insights?: Array<Record<string, unknown>> };

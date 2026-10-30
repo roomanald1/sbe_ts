@@ -114,6 +114,27 @@ async fn get_usd_rates() -> Result<Json<UsdRatesResponse>, (StatusCode, String)>
     Ok(Json(rates))
 }
 
+// Order submission must never wait for an external rate request. The background
+// refresh loop owns cache population; requests may use the last cached snapshot.
+async fn cached_usd_rates_for_order() -> Result<UsdRatesResponse, (StatusCode, String)> {
+    let stream_rates = latest_stream_usd_rates();
+    let cache = USD_RATE_CACHE.get_or_init(|| Mutex::new(None));
+    let cached = cache
+        .try_lock()
+        .map_err(|_| (StatusCode::SERVICE_UNAVAILABLE, "USD rate cache busy".to_owned()))?
+        .as_ref()
+        .map(|(_, rates)| rates.clone());
+    match (stream_rates, cached) {
+        (Some(stream), Some(cached)) => Ok(merge_usd_rate_snapshots(&stream, &cached)),
+        (Some(stream), None) => Ok(stream),
+        (None, Some(cached)) => Ok(cached),
+        (None, None) => Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "USD conversion rates are not warmed yet".to_owned(),
+        )),
+    }
+}
+
 async fn fetch_usd_rates() -> Result<UsdRatesResponse, (StatusCode, String)> {
     let response = HTTP_CLIENT
         .get_or_init(reqwest::Client::new)

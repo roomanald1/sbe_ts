@@ -157,10 +157,35 @@ impl PositionStore {
                 writer_notify.notified().await;
                 // Let a burst of fills and book updates collapse into one current snapshot.
                 tokio::time::sleep(Duration::from_millis(10)).await;
+                let lock_wait_started = Instant::now();
                 let ledger_guard = Arc::clone(&writer_ledger).lock_owned().await;
+                record_position_persistence_sample(
+                    &writer_timings,
+                    "snapshot_lock_wait",
+                    lock_wait_started.elapsed().as_secs_f64() * 1_000.0,
+                );
+                let copy_started = Instant::now();
+                let ledger_snapshot =
+                    match tokio::task::spawn_blocking(move || ledger_guard.clone()).await {
+                        Ok(snapshot) => snapshot,
+                        Err(error) => {
+                            crate::service_log!(
+                                "ERROR",
+                                "Position ledger snapshot copier failed: {error}"
+                            );
+                            tokio::time::sleep(Duration::from_secs(1)).await;
+                            writer_notify.notify_one();
+                            continue;
+                        }
+                    };
+                record_position_persistence_sample(
+                    &writer_timings,
+                    "snapshot_copy",
+                    copy_started.elapsed().as_secs_f64() * 1_000.0,
+                );
                 let serialization_started = Instant::now();
                 let snapshot = match tokio::task::spawn_blocking(move || {
-                    rmp_serde::to_vec_named(&*ledger_guard)
+                    rmp_serde::to_vec_named(&ledger_snapshot)
                 })
                 .await
                 {

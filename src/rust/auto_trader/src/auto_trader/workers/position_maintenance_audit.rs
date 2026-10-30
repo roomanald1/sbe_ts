@@ -8,7 +8,9 @@ fn external_close_audit_payload(
     serde_json::json!({
         "record_schema_version": 1,
         "decision_id": position.entry_decision_id,
-        "trade_id": position.entry_decision_id,
+        "trade_id": position.trade_id.as_deref().or(position.entry_decision_id.as_deref()),
+        "trade_closed": closed_quantity + 1e-12 >= prior_quantity.abs(),
+        "learning_context": position.entry_context,
         "strategy": position.strategy,
         "symbol": symbol,
         "entry_average_price": prior_average_entry_price,
@@ -24,16 +26,13 @@ fn external_close_audit_payload(
         "entry_position_side": if prior_quantity > 0.0 { "long" } else { "short" },
         "entry_context": {
             "average_price": prior_average_entry_price,
+            "trade_id": position.trade_id.as_deref().or(position.entry_decision_id.as_deref()),
             "fees": position.total_entry_fees_paid,
             "initial_entry_notional": position.initial_entry_notional,
             "total_entry_fees_paid": position.total_entry_fees_paid,
             "total_fees_paid": position.total_fees_paid,
             "timestamp_ms": position.entry_timestamp_ms,
-            "quantity": if prior_average_entry_price > 0.0 && position.initial_entry_notional > 0.0 {
-                position.initial_entry_notional / prior_average_entry_price
-            } else {
-                prior_quantity.abs()
-            },
+            "quantity": prior_quantity.abs(),
         },
     })
 }
@@ -152,6 +151,10 @@ fn external_strategy_close_audits(
         }
     }
 
+    let remaining_by_lot = lots
+        .iter()
+        .map(|(_, lot)| lot.quantity.abs())
+        .collect::<Vec<_>>();
     lots.into_iter().enumerate().filter_map(|(index, (strategy, _))| {
         let position = &originals[index];
         let closed_quantity = closed_by_lot[index];
@@ -167,11 +170,7 @@ fn external_strategy_close_audits(
         }).sum::<f64>();
         let exit_fees = fills.iter().filter_map(|fill| fill["fee"].as_f64()).sum::<f64>();
         let entry_notional = position.initial_entry_notional;
-        let entry_quantity = if entry_notional > 0.0 && position.average_entry_price > 0.0 {
-            entry_notional / position.average_entry_price
-        } else {
-            position.quantity.abs()
-        };
+        let entry_quantity = position.quantity.abs();
         let entry_fees = if position.total_entry_fees_paid > 0.0 {
             position.total_entry_fees_paid
         } else {
@@ -180,8 +179,12 @@ fn external_strategy_close_audits(
         Some(serde_json::json!({
             "record_schema_version": 2,
             "decision_id": decision_id,
-            "trade_id": decision_id,
+            "trade_id": position.trade_id.as_deref().unwrap_or(decision_id),
+            "trade_closed": remaining_by_lot[index] <= 1e-12,
+            "trade_realized_pnl": position.realized_pnl + pnl_by_lot[index],
+            "learning_context": position.entry_context,
             "strategy": strategy,
+            "scout": position.scout_entry,
             "stage": format!("exit:external:{symbol}:{}:{observed_at}", position.entry_timestamp_ms),
             "timestamp": observed_at,
             "symbol": symbol,
@@ -199,6 +202,7 @@ fn external_strategy_close_audits(
             "entry_fees_paid": entry_fees,
             "entry_timestamp_ms": position.entry_timestamp_ms,
             "entry_context": {
+                "trade_id": position.trade_id.as_deref().unwrap_or(decision_id),
                 "average_price": position.average_entry_price,
                 "fees": entry_fees,
                 "initial_entry_notional": entry_notional,

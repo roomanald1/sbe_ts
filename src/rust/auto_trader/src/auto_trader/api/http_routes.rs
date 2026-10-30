@@ -46,6 +46,9 @@ pub fn router() -> Router {
             .sum();
     }
     for (symbol, position) in settings.positions.iter_mut() {
+        if position.trade_id.is_none() {
+            position.trade_id = position.entry_decision_id.clone();
+        }
         if position.quantity.abs() > 1e-12 && position.strategy.is_none() {
             position.strategy = strategy_from_entry_context(&position.entry_context);
         }
@@ -103,6 +106,13 @@ pub fn router() -> Router {
         }
         if let Some(aggregate) = settings.positions.get_mut(&symbol) {
             aggregate.entries_by_category = entries_by_category;
+        }
+    }
+    for lots in settings.strategy_positions.values_mut() {
+        for position in lots.values_mut() {
+            if position.trade_id.is_none() {
+                position.trade_id = position.entry_decision_id.clone();
+            }
         }
     }
     let strategy_by_symbol = settings
@@ -445,7 +455,7 @@ async fn auto_trader_stream_snapshot(state: &AutoTraderState) -> serde_json::Val
     let parameters = get_decision_parameters(State(state.clone())).await.0;
     let dated_carry = get_dated_carry(State(state.clone())).await.0;
     let insights_url = std::env::var("INSIGHTS_URL").unwrap_or_else(|_| "http://127.0.0.1:3004".into());
-    let audit = match state.client.get(format!("{insights_url}/signals/auto-trader-execution-audit")).send().await {
+    let audit = match state.client.get(format!("{insights_url}/signals/auto-trader-execution-audit?limit=500")).send().await {
         Ok(response) if response.status().is_success() => response.json::<serde_json::Value>().await.ok(),
         _ => None,
     };
@@ -560,16 +570,43 @@ async fn signal_ready(
 }
 
 fn migrate_closed_trade_metrics(settings: &mut Settings) {
-    // Older windows contain cumulative symbol fees and residual-position returns.
-    // Clear them once so exit adaptation never learns from those invalid samples.
-    if settings.closed_trade_metrics_version >= 2 {
+    if settings.closed_trade_metrics_version >= 3 {
         return;
     }
-    settings.closed_trade_returns_percent.clear();
-    settings.closed_trade_timestamps_ms.clear();
-    settings.closed_trade_realized_usd.clear();
-    settings.closed_trade_fees_usd.clear();
-    settings.closed_trade_metrics_version = 2;
+    let count = settings.closed_trade_returns_percent.len();
+    if settings.closed_trade_timestamps_ms.len() != count
+        || settings.closed_trade_realized_usd.len() != count
+        || settings.closed_trade_fees_usd.len() != count
+    {
+        settings.closed_trade_returns_percent.clear();
+        settings.closed_trade_timestamps_ms.clear();
+        settings.closed_trade_realized_usd.clear();
+        settings.closed_trade_fees_usd.clear();
+    } else {
+        let mut valid = Vec::with_capacity(count);
+        for index in 0..count {
+            let return_percent = settings.closed_trade_returns_percent[index];
+            let realized = settings.closed_trade_realized_usd[index];
+            let fees = settings.closed_trade_fees_usd[index];
+            if return_percent.is_finite()
+                && return_percent >= -100.0
+                && realized.is_finite()
+                && fees.is_finite()
+            {
+                valid.push((
+                    return_percent,
+                    settings.closed_trade_timestamps_ms[index],
+                    realized,
+                    fees,
+                ));
+            }
+        }
+        settings.closed_trade_returns_percent = valid.iter().map(|item| item.0).collect();
+        settings.closed_trade_timestamps_ms = valid.iter().map(|item| item.1).collect();
+        settings.closed_trade_realized_usd = valid.iter().map(|item| item.2).collect();
+        settings.closed_trade_fees_usd = valid.iter().map(|item| item.3).collect();
+    }
+    settings.closed_trade_metrics_version = 3;
 }
 
 #[cfg(test)]
@@ -594,6 +631,6 @@ mod closed_trade_metrics_migration_tests {
         assert!(settings.closed_trade_fees_usd.is_empty());
         assert_eq!(settings.daily_realized_pnl, -11.15);
         migrate_closed_trade_metrics(&mut settings);
-        assert_eq!(settings.closed_trade_metrics_version, 2);
+        assert_eq!(settings.closed_trade_metrics_version, 3);
     }
 }

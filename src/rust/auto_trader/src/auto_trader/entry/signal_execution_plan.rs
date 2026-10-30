@@ -22,15 +22,7 @@ fn strategy_learning_stats_across_symbols(settings: &Settings, strategy: Strateg
         .learning
         .iter()
         .filter(|(key, _)| {
-            let Some(context) = key.split(":P").next() else {
-                return false;
-            };
-            context
-                .strip_prefix("scout:")
-                .unwrap_or(context)
-                .rsplit(':')
-                .next()
-                == Some(strategy.as_str())
+            key.starts_with("trade:") && key.ends_with(&format!(":{}", strategy.as_str()))
         })
         .map(|(_, stats)| {
             let mut recent = stats.clone();
@@ -353,7 +345,7 @@ async fn prepare_signal_execution_plan(
     } else if let Some(order_type) = adapt_order_type(
         baseline_type,
         &context,
-        &settings.learning,
+        &settings.execution_learning,
         settings.risk_appetite,
     ) {
         order_type
@@ -377,7 +369,7 @@ async fn prepare_signal_execution_plan(
         0.0
     };
     let (schedule_depth_threshold, schedule_threshold_samples) =
-        learned_schedule_depth_threshold(&settings.learning, &context);
+        learned_schedule_depth_threshold(&settings.execution_learning, &context);
     let depth_ratio_bucket = schedule_depth_ratio_bucket(depth_ratio);
     let order_type = score_execution_order_type(
         signal,
@@ -388,7 +380,12 @@ async fn prepare_signal_execution_plan(
         deep_book,
         schedule_depth_threshold,
     );
-    let profile = choose_parameter_profile(order_type, &context, &settings.learning, exploratory);
+    let profile = choose_parameter_profile(
+        order_type,
+        &context,
+        &settings.execution_learning,
+        exploratory,
+    );
     let execution_params = parameter_profile(baseline_params, profile);
     *state.latest_execution_parameters.lock().await = Some(LatestExecutionParameters {
         timestamp: now_ms,
