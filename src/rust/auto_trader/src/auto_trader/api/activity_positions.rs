@@ -7,10 +7,15 @@ struct ActivityPositionSnapshot {
 }
 
 fn snapshot_activity_positions(settings: &Settings, today_start: u64) -> ActivityPositionSnapshot {
+    let today = utc_day();
     let orders = settings
         .orders
         .iter()
-        .filter(|order| order.timestamp >= today_start)
+        // A protective order can be armed on a prior day and execute today.
+        // Keep it so the position ledger's since-today barrier P&L is attributed.
+        .filter(|order| order.timestamp >= today_start
+            || order.purpose == "stop-loss"
+            || order.strategy_realized_pnl_day.as_deref() == Some(today.as_str()))
         .rev()
         .take(MAX_RETAINED_AUTO_TRADER_ORDERS)
         .cloned()
@@ -154,7 +159,17 @@ async fn await_activity_realized_pnl(
         }
         let mut grouped = BTreeMap::<(String, String, String, String), (f64, usize)>::new();
         for order in orders.iter() {
-            if order.realized_pnl.abs() <= 1e-12 {
+            let today = utc_day();
+            let strategy_realized = if order.strategy_realized_pnl_day.as_deref() == Some(today.as_str()) {
+                order.strategy_realized_pnl_today.unwrap_or_default()
+            } else if order.purpose == "stop-loss" {
+                // For legacy or pre-midnight barriers, `realized_pnl` has just
+                // been replaced with the ledger's since-UTC-midnight amount.
+                order.realized_pnl
+            } else {
+                order.strategy_realized_pnl.unwrap_or(order.realized_pnl)
+            };
+            if strategy_realized.abs() <= 1e-12 {
                 continue;
             }
             let direction = if order.side.eq_ignore_ascii_case("sell") {
@@ -170,7 +185,7 @@ async fn await_activity_realized_pnl(
                     order.strategy.clone().unwrap_or_else(|| "legacy-unknown".into()),
                 ))
                 .or_default();
-            total.0 += order.realized_pnl;
+            total.0 += strategy_realized;
             total.1 += 1;
         }
         let mut breakdown = grouped
@@ -201,4 +216,3 @@ async fn await_activity_realized_pnl(
     };
     (realized_pnl, realized_pnl_by_quote, pnl_breakdown)
 }
-

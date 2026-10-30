@@ -138,7 +138,7 @@ async fn sync_auto_positions(
         if pending_signal_symbols.contains(&source_position.symbol) {
             continue;
         }
-        let (prior_quantity, realized_delta, learning_key, close_audit) = {
+        let (realized_delta, learning_key, close_audit, closed_out) = {
             let position = settings
                 .positions
                 .entry(source_position.symbol.clone())
@@ -159,14 +159,19 @@ async fn sync_auto_positions(
                     &position.entry_order_type
                 },
             );
+            let closed_quantity = external_close_quantity(prior_quantity, source_position.quantity);
             let close_audit = (prior_quantity.abs() > 1e-12
-                && source_position.quantity.abs() <= 1e-12)
+                && closed_quantity > 1e-12
+                && realized_delta.abs() > 1e-12)
                 .then(|| external_close_audit_payload(
                     &source_position.symbol,
                     prior_quantity,
+                    closed_quantity,
                     prior_average_entry_price,
                     position,
                 ));
+            let closed_out = prior_quantity.abs() > 1e-12
+                && source_position.quantity.abs() <= 1e-12;
             if (position.quantity - source_position.quantity).abs() > 1e-12
                 || (position.average_entry_price - source_position.average_entry_price).abs()
                     > 1e-12
@@ -179,12 +184,25 @@ async fn sync_auto_positions(
                 changed = true;
             }
             position.realized_pnl = source_position.realized_pnl;
-            (prior_quantity, realized_delta, learning_key, close_audit)
+            (realized_delta, learning_key, close_audit, closed_out)
         };
         if let Some(audit) = close_audit {
-            if audit["decision_id"].as_str().is_some() {
-                external_closes.push((audit, realized_delta));
+            let strategy_lots = settings.strategy_positions
+                .get(&source_position.symbol)
+                .map(|lots| lots.iter()
+                    .filter(|(_, lot)| lot.quantity.abs() > 1e-12)
+                    .map(|(strategy, lot)| (strategy.clone(), lot.clone()))
+                    .collect::<Vec<_>>())
+                .unwrap_or_default();
+            let mut known_exit_ids = settings.orders.iter()
+                .filter(|order| !matches!(order.purpose.as_str(), "signal" | "scout"))
+                .flat_map(|order| [Some(order.timestamp.to_string()), order.execution_order_id.clone()])
+                .flatten()
+                .collect::<BTreeSet<_>>();
+            for (_, lot) in &strategy_lots {
+                known_exit_ids.extend(lot.protective_stops.iter().map(|stop| stop.barrier_id.clone()));
             }
+            external_closes.push((audit, realized_delta, strategy_lots, current_time_ms(), known_exit_ids));
         }
         if realized_delta.is_finite() && realized_delta.abs() > 1e-12 {
             // Manual position-manager fills bypass apply_auto_fill. Use the
@@ -192,7 +210,7 @@ async fn sync_auto_positions(
             let realized_delta_usd =
                 realized_usd(&settings, &source_position.symbol, realized_delta);
             changed = true;
-            if prior_quantity.abs() > 1e-12 && source_position.quantity.abs() <= 1e-12 {
+            if closed_out {
                 // This is a symbol-level reconciliation delta, not one matched
                 // round trip. The old quantity may be a tiny residual and
                 // source fees are cumulative, so do not write a trade return.
@@ -223,10 +241,10 @@ async fn sync_auto_positions(
     }
     drop(settings);
     drop(_cycle);
-    for (mut payload, realized_pnl) in external_closes {
+    for (mut payload, realized_pnl, strategy_lots, closed_at_ms, known_exit_ids) in external_closes {
         let symbol = payload["symbol"].as_str().unwrap_or_default().to_owned();
         let entry_timestamp = payload["entry_timestamp_ms"].as_u64().unwrap_or_default();
-        let now = current_time_ms();
+        let now = closed_at_ms;
         let stage = format!("exit:external:{symbol}:{entry_timestamp}");
         payload["stage"] = serde_json::json!(stage);
         payload["timestamp"] = serde_json::json!(now);
@@ -235,7 +253,6 @@ async fn sync_auto_positions(
         payload["status"] = serde_json::json!("filled");
         payload["realized_pnl"] = serde_json::json!(realized_pnl);
         payload["duration_ms"] = serde_json::json!((entry_timestamp > 0).then_some(now.saturating_sub(entry_timestamp)));
-        store_execution_audit_until_saved(&client, &payload).await;
         let trades_url = format!(
             "{base}/positions/trades?symbol={symbol}&source=auto&since_ms={entry_timestamp}"
         );
@@ -250,28 +267,57 @@ async fn sync_auto_positions(
             .await
             .map_err(upstream_error)?;
         let close_side = if payload["entry_position_side"].as_str() == Some("long") { "sell" } else { "buy" };
-        let close_fills = trades["trades"].as_array().into_iter().flatten()
-            .filter(|trade| trade["side"].as_str() == Some(close_side))
-            .filter_map(|trade| {
-                let quantity = trade["quantity"].as_f64()?;
-                let price = trade["execution_price"].as_f64()?;
-                Some(serde_json::json!({
-                    "timestamp": trade["timestamp"], "quantity": quantity,
-                    "price": price, "fee": trade["fee"], "parent_order_id": trade["parent_order_id"]
-                }))
-            })
-            .collect::<Vec<_>>();
-        let exit_quantity = close_fills.iter().filter_map(|fill| fill["quantity"].as_f64()).sum::<f64>();
-        let exit_notional = close_fills.iter().filter_map(|fill| {
-            Some(fill["quantity"].as_f64()? * fill["price"].as_f64()?)
-        }).sum::<f64>();
-        let exit_fees = close_fills.iter().filter_map(|fill| fill["fee"].as_f64()).map(f64::abs).sum::<f64>();
-        payload["exit_filled_quantity"] = serde_json::json!(exit_quantity);
-        payload["exit_average_price"] = serde_json::json!((exit_quantity > 0.0).then_some(exit_notional / exit_quantity));
-        payload["exit_fees"] = serde_json::json!(exit_fees);
-        payload["exit_fills"] = serde_json::json!(close_fills);
-        payload["realized_pnl"] = serde_json::json!(realized_pnl);
-        store_execution_audit_until_saved(&client, &payload).await;
+        let trade_rows = trades["trades"].as_array().cloned().unwrap_or_default();
+        let closed_quantity = payload["close_quantity"].as_f64().unwrap_or(0.0);
+        if strategy_lots.is_empty() {
+            let close_fills = external_close_fills(closed_quantity, &close_side, &trade_rows, closed_at_ms, &known_exit_ids);
+            let exit_quantity = close_fills.iter().filter_map(|fill| fill["quantity"].as_f64()).sum::<f64>();
+            let exit_notional = close_fills.iter().filter_map(|fill| Some(fill["quantity"].as_f64()? * fill["price"].as_f64()?)).sum::<f64>();
+            let exit_fees = close_fills.iter().filter_map(|fill| fill["fee"].as_f64()).map(f64::abs).sum::<f64>();
+            payload["exit_filled_quantity"] = serde_json::json!(exit_quantity);
+            payload["exit_average_price"] = serde_json::json!((exit_quantity > 0.0).then_some(exit_notional / exit_quantity));
+            payload["exit_fees"] = serde_json::json!(exit_fees);
+            payload["exit_fills"] = serde_json::json!(close_fills);
+            payload["realized_pnl"] = serde_json::json!(realized_pnl);
+            payload["strategy"] = serde_json::json!(payload["strategy"].as_str().unwrap_or("manual"));
+            if let Some(order) = external_close_order(&payload) {
+                let mut settings = state.settings.lock().await;
+                settings.orders.push(order);
+                if settings.orders.len() > MAX_RETAINED_AUTO_TRADER_ORDERS {
+                    let excess = settings.orders.len() - MAX_RETAINED_AUTO_TRADER_ORDERS;
+                    settings.orders.drain(..excess);
+                }
+                request_settings_persist(state)?;
+            }
+            store_execution_audit_until_saved(&client, &payload).await;
+        } else {
+            let audits = external_strategy_close_audits(
+                &symbol,
+                closed_quantity,
+                &close_side,
+                &strategy_lots,
+                &trade_rows,
+                closed_at_ms,
+                &known_exit_ids,
+            );
+            for audit in audits {
+                let has_known_auto_exit = audit["exit_fills"].as_array().into_iter().flatten().any(|fill| {
+                    fill["parent_order_id"].as_str().is_some_and(|parent_id| known_exit_ids.contains(parent_id))
+                });
+                if !has_known_auto_exit {
+                    if let Some(order) = external_close_order(&audit) {
+                        let mut settings = state.settings.lock().await;
+                        settings.orders.push(order);
+                        if settings.orders.len() > MAX_RETAINED_AUTO_TRADER_ORDERS {
+                            let excess = settings.orders.len() - MAX_RETAINED_AUTO_TRADER_ORDERS;
+                            settings.orders.drain(..excess);
+                        }
+                        request_settings_persist(state)?;
+                    }
+                }
+                store_execution_audit_until_saved(&client, &audit).await;
+            }
+        }
     }
     Ok(())
 }

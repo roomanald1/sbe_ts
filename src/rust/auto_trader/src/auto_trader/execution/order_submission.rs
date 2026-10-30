@@ -97,6 +97,7 @@ async fn submit_and_record_selected_order(
         .and_then(serde_json::Value::as_f64)
         .unwrap_or(0.0)
         .abs();
+    let mut strategy_realized_delta = 0.0;
     let (realized_delta, learned_type) = if filled > 0.0 {
         let prior_quantity = settings
             .positions
@@ -127,7 +128,7 @@ async fn submit_and_record_selected_order(
                 positions,
                 ..
             } = &mut *settings;
-            apply_strategy_position_fill(
+            (strategy_realized_delta, _) = apply_strategy_position_fill(
                 strategy_positions,
                 positions,
                 &signal.symbol,
@@ -147,10 +148,14 @@ async fn submit_and_record_selected_order(
             );
         }
         if let Some(position) = settings.positions.get_mut(&signal.symbol) {
-            position.entry_decision_id = Some(decision_id.to_owned());
+            if position.entry_decision_id.is_none() {
+                position.entry_decision_id = Some(decision_id.to_owned());
+            }
             if signal.strategy.is_some() {
                 position.strategy = signal.strategy.clone();
-                position.strategy_decision = signal.strategy_decision.clone();
+                if position.strategy_decision.is_none() {
+                    position.strategy_decision = signal.strategy_decision.clone();
+                }
             }
             if position.quantity.abs() > 1e-12 && is_new_position_direction {
                 position.stop_loss_percent = Some(effective_stop_loss_percent);
@@ -201,6 +206,7 @@ async fn submit_and_record_selected_order(
             .map(str::to_owned);
         order.status = status.to_owned();
         order.realized_pnl = realized_delta;
+        record_strategy_order_realized_pnl(order, strategy_realized_delta);
         order.stage_timings_ms = stage_timings_ms;
         order.failure_reason = None;
     }

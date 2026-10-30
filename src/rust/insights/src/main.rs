@@ -60,6 +60,8 @@ struct SignalRuntime {
     snapshot_diagnostic_at: DashMap<String, u64>,
 }
 
+static POSITION_MANAGEMENT_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+
 #[derive(Default)]
 struct NewsLearning {
     samples: usize,
@@ -94,7 +96,6 @@ struct NewsFeedSnapshot {
 }
 
 
-static POSITION_MANAGEMENT_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
 
 fn now_ms() -> u64 {
     SystemTime::now()
@@ -123,6 +124,5 @@ include!("signal_feed_workers.rs");
 
 include!("signal_ingestion.rs");
 
-include!("close_insights_api.rs");
 
 include!("service_startup.rs");

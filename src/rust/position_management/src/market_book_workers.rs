@@ -116,6 +116,32 @@ async fn barrier_order_loop(store: Arc<PositionStore>) {
                 else {
                     continue;
                 };
+                let is_auto_stop = barrier.source == "auto"
+                    && barrier.parent_order_id.as_deref().is_some_and(|id| id.starts_with("auto-stop-"));
+                let superseded_auto_stop = is_auto_stop && ledger.trades.iter()
+                    .filter(|trade| trade.symbol == barrier.symbol && trade.source == barrier.source)
+                    .max_by_key(|trade| trade.timestamp)
+                    .is_some_and(|trade| {
+                        trade.timestamp > barrier.created_at
+                            && trade.parent_order_id.as_deref() != Some(barrier.id.as_str())
+                    });
+                if superseded_auto_stop {
+                    // A later trade means this barrier belongs to an older
+                    // position generation. Reduce-only alone is insufficient:
+                    // it could still close a newer same-side position.
+                    ledger.barrier_orders[index].status = "cancelled".to_owned();
+                    ledger.barrier_orders[index].triggered_at = None;
+                    ledger.barrier_orders[index].retry_after = None;
+                    if let Err(error) = store.persist(&ledger).await {
+                        crate::service_log!(
+                            "ERROR",
+                            "Could not cancel superseded protective barrier {}: {error}",
+                            barrier.id
+                        );
+                        ledger.barrier_orders[index].status = "armed".to_owned();
+                    }
+                    continue;
+                }
                 ledger.barrier_orders[index].status = "triggering".to_owned();
                 ledger.barrier_orders[index].triggered_at = Some(now);
                 ledger.barrier_orders[index].retry_after = None;
@@ -218,5 +244,4 @@ async fn barrier_order_loop(store: Arc<PositionStore>) {
         }
     }
 }
-
 

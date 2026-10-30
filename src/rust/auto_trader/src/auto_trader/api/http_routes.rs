@@ -148,6 +148,7 @@ pub fn router() -> Router {
         .ok()
         .and_then(|bytes| serde_json::from_slice::<DatedCarryBook>(&bytes).ok())
         .unwrap_or_default();
+    let (state_updates, _) = tokio::sync::broadcast::channel(64);
     let state = AutoTraderState {
         // Every worker shares the cycle lock. Bound upstream calls so an
         // unresponsive position manager cannot stall signal decisions forever.
@@ -160,6 +161,7 @@ pub fn router() -> Router {
         enabled: Arc::new(AtomicBool::new(enabled)),
         settings: Arc::new(Mutex::new(settings)),
         settings_persist_notify: Arc::new(Notify::new()),
+        state_updates,
         settings_persist_timings_ms: Arc::new(std::sync::Mutex::new(BTreeMap::new())),
         latest_missed_opportunity_bands: Arc::new(Mutex::new(Vec::new())),
         latest_execution_parameters: Arc::new(Mutex::new(None)),
@@ -310,6 +312,7 @@ pub fn router() -> Router {
         }
     });
     Router::new()
+        .route("/positions/auto-trader/stream", get(auto_trader_stream))
         .route("/positions/auto-trader", get(get_status).put(set_enabled))
         .route(
             "/positions/auto-trader/dated-carry",
@@ -337,6 +340,57 @@ pub fn router() -> Router {
         )
         .route("/positions/auto-trader/activity", get(get_activity))
         .with_state(state)
+}
+
+async fn auto_trader_stream(State(state): State<AutoTraderState>, websocket: axum::extract::ws::WebSocketUpgrade) -> axum::response::Response {
+    websocket.on_upgrade(move |socket| async move {
+        use axum::extract::ws::Message;
+        use futures_util::{SinkExt, StreamExt};
+        let mut updates = state.state_updates.subscribe();
+        let (mut sender, mut receiver) = socket.split();
+        let mut periodic = tokio::time::interval(Duration::from_secs(15));
+        periodic.tick().await;
+        let mut previous = auto_trader_stream_snapshot(&state).await;
+        let initial = serde_json::json!({ "type": "snapshot", "state": previous }).to_string();
+        if sender.send(Message::Text(initial.into())).await.is_err() { return; }
+        loop {
+            let should_refresh = tokio::select! {
+                update = updates.recv() => match update {
+                    Ok(()) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => true,
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                },
+                _ = periodic.tick() => true,
+                incoming = receiver.next() => if incoming.is_none() { break } else { false },
+            };
+            if should_refresh {
+                let snapshot = auto_trader_stream_snapshot(&state).await;
+                let mut changes = serde_json::Map::new();
+                if let (Some(current), Some(old)) = (snapshot.as_object(), previous.as_object()) {
+                    for (key, value) in current {
+                        if old.get(key) != Some(value) { changes.insert(key.clone(), value.clone()); }
+                    }
+                }
+                previous = snapshot;
+                if !changes.is_empty() {
+                    let payload = serde_json::json!({ "type": "delta", "changes": changes }).to_string();
+                    if sender.send(Message::Text(payload.into())).await.is_err() { break; }
+                }
+            }
+        }
+    })
+}
+
+async fn auto_trader_stream_snapshot(state: &AutoTraderState) -> serde_json::Value {
+    let status = get_status(State(state.clone())).await.0;
+    let activity = get_activity(State(state.clone())).await.0;
+    let parameters = get_decision_parameters(State(state.clone())).await.0;
+    let dated_carry = get_dated_carry(State(state.clone())).await.0;
+    let insights_url = std::env::var("INSIGHTS_URL").unwrap_or_else(|_| "http://127.0.0.1:3004".into());
+    let audit = match state.client.get(format!("{insights_url}/signals/auto-trader-execution-audit")).send().await {
+        Ok(response) if response.status().is_success() => response.json::<serde_json::Value>().await.ok(),
+        _ => None,
+    };
+    serde_json::json!({ "status": status, "activity": activity, "parameters": parameters, "dated_carry": dated_carry, "execution_audit": audit.unwrap_or_else(|| serde_json::json!([])) })
 }
 
 async fn signal_ready(

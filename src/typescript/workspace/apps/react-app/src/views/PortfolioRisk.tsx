@@ -11,6 +11,7 @@ import type { Connection } from '../connection';
 import { PnlModel } from '../models/PnlModel';
 import { useBehaviorSnapshot } from '../use_behavior_snapshot';
 import { FeedToolbar } from './FeedToolbar';
+import { currentPositionSnapshot, subscribePositionStream } from '../position_stream';
 
 type HedgeCorrelationResponse = { pair_correlations?: { symbol_a: string; symbol_b: string; correlation: number | null }[]; positions?: { symbol: string; candidates?: { symbol: string; correlation: number | null }[] }[] };
 
@@ -58,13 +59,7 @@ function PortfolioRiskComponent({ connection, paused = false }: { connection: Co
   }, [model]);
   const { rows, loading, error } = useBehaviorSnapshot(model.state$);
   useEffect(() => {
-    let active = true;
-    const loadCorrelations = async () => {
-      try {
-        const response = await fetch('/positions/hedge-candidates');
-        if (!response.ok) throw new Error('Could not load correlations');
-        const data = await response.json() as HedgeCorrelationResponse;
-        if (!active) return;
+    const applyCorrelations = (data: HedgeCorrelationResponse) => {
         const next: Record<string, number | null> = {};
         for (const pair of data.pair_correlations ?? []) {
           next[[pair.symbol_a, pair.symbol_b].sort().join('|')] = pair.correlation;
@@ -77,13 +72,11 @@ function PortfolioRiskComponent({ connection, paused = false }: { connection: Co
         }
         setCorrelations(next);
         setCorrelationsLoaded(true);
-      } catch {
-        if (active) setCorrelationsLoaded(false);
-      }
     };
-    void loadCorrelations();
-    const timer = setInterval(() => void loadCorrelations(), 15000);
-    return () => { active = false; clearInterval(timer); };
+    const stop = subscribePositionStream((snapshot) => { if (snapshot.hedge_candidates) applyCorrelations(snapshot.hedge_candidates); });
+    const current = currentPositionSnapshot()?.hedge_candidates;
+    if (current) applyCorrelations(current);
+    return stop;
   }, []);
   const openRows = useMemo(() => rows.filter((row) => Math.abs(row.position.quantity) > 1e-12), [rows]);
   const exposureAvailable = openRows.every((row) => row.exposureUsd !== undefined);

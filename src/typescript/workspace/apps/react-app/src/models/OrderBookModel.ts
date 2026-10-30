@@ -15,8 +15,6 @@ export class OrderBookModel {
   private feed?: BookFeed;
   private feedSub?: Subscription;
   private errorSub?: Subscription;
-  private deepTimer?: ReturnType<typeof setInterval>;
-  private deepRequest?: AbortController;
   private frozen = false;
   constructor(props: Props) {
     this.props$ = new BehaviorSubject(props);
@@ -60,21 +58,13 @@ export class OrderBookModel {
         return;
       }
       const depth = decodeBookDepth(raw);
-      if (depth?.symbol === symbol) this.patch({ depth, error: undefined });
+      if (depth?.symbol === symbol) this.patch({ depth, deepDepth: depth, error: undefined });
     });
     this.errorSub = feed.error.subscribe((error) => {
       if (error) this.patch({ error });
     });
-    if (!this.frozen) {
-      void this.refreshDeepBook();
-      this.deepTimer = setInterval(() => void this.refreshDeepBook(), 2000);
-    }
   }
   stop(): void {
-    if (this.deepTimer) clearInterval(this.deepTimer);
-    this.deepTimer = undefined;
-    this.deepRequest?.abort();
-    this.deepRequest = undefined;
     if (!this.feed) return;
     this.feedSub?.unsubscribe();
     this.errorSub?.unsubscribe();
@@ -88,32 +78,6 @@ export class OrderBookModel {
     this.patch({ frozen: this.frozen });
     this.stop();
     this.start();
-  }
-  private async refreshDeepBook(): Promise<void> {
-    const { symbol } = this.props$.value;
-    this.deepRequest?.abort();
-    const controller = new AbortController();
-    this.deepRequest = controller;
-    try {
-      const response = await fetch('https://www.okx.com/api/v5/market/books?instId=' + encodeURIComponent(symbol) + '&sz=50', { signal: controller.signal });
-      if (!response.ok) throw new Error('OKX returned HTTP ' + response.status);
-      const result = await response.json() as { code: string; msg?: string; data?: Array<{ ts: string; bids: string[][]; asks: string[][] }> };
-      if (result.code !== '0' || !result.data?.[0]) throw new Error(result.msg || 'No deeper book returned');
-      const book = result.data[0];
-      const mapSide = (rows: string[][]): BookDepth['bids'] => {
-        let cumulativeSize = 0, cumulativeNotional = 0;
-        return rows.map(([rawPrice, rawSize]) => {
-          const price = Number(rawPrice), size = Number(rawSize);
-          cumulativeSize += size;
-          cumulativeNotional += price * size;
-          return { price, size, cumulativeSize, cumulativeNotional };
-        }).filter((level) => Number.isFinite(level.price) && level.price > 0 && Number.isFinite(level.size) && level.size >= 0);
-      };
-      const deepDepth: BookDepth = { symbol, timestamp: Number(book.ts), bids: mapSide(book.bids), asks: mapSide(book.asks) };
-      if (this.props$.value.symbol === symbol) this.patch({ deepDepth });
-    } catch (error) {
-      if (!controller.signal.aborted && this.props$.value.symbol === symbol) this.patch({ error: 'Deep book unavailable: ' + (error instanceof Error ? error.message : 'request failed') });
-    }
   }
   private patch(patch: Partial<OrderBookState>): void {
     this.state$.next({ ...this.state$.value, ...patch });

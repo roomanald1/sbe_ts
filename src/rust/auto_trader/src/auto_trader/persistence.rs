@@ -54,6 +54,7 @@ fn record_settings_persist_sample(
 
 fn request_settings_persist(state: &AutoTraderState) -> Result<(), (StatusCode, String)> {
     state.settings_persist_notify.notify_one();
+    let _ = state.state_updates.send(());
     Ok(())
 }
 

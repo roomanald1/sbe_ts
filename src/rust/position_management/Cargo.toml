@@ -7,7 +7,7 @@ edition = "2024"
 arc-swap = "1.7.1"
 execution = { path = "../execution" }
 anyhow = "1.0.104"
-axum = "0.8.9"
+axum = { version = "0.8.9", features = ["ws"] }
 bytes = "1.12.1"
 reqwest = { version = "0.13.5", features = ["json"] }
 rsocket_rust = "0.7.5"

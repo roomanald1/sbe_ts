@@ -4,16 +4,19 @@ import { deriveOrderManagerState } from './OrderManagerDerived';
 import { OrderManagerBookFeeds } from './OrderManagerBookFeeds';
 import type {
   BarrierDirection, BarrierOrder, OrderManagerProps, OrderManagerState,
-  OrderType, OrdersResponse, TradeSide, VwapRun, VwapRunsResponse,
+  OrderType, OrdersResponse, TradeSide, VwapRun,
 } from './OrderManagerTypes';
 import { orderSubmissionBody, validateOrderSubmission } from './OrderManagerSubmission';
+import { currentPositionSnapshot, subscribePositionStream } from '../position_stream';
 
 export class OrderManagerModel {
   readonly props$: BehaviorSubject<OrderManagerProps>;
   readonly state$: BehaviorSubject<OrderManagerState>;
   private bookFeeds!: OrderManagerBookFeeds;
   private timer?: ReturnType<typeof setInterval>;
-  private vwapTimer?: ReturnType<typeof setInterval>;
+  private stopPositionStream?: () => void;
+  private lastPositionStreamAt = 0;
+  private refreshingOrders = false;
   constructor(props: OrderManagerProps) {
     this.props$ = new BehaviorSubject(props);
     this.state$ = new BehaviorSubject<OrderManagerState>({
@@ -81,14 +84,29 @@ export class OrderManagerModel {
   start(): void {
     if (this.timer) return;
     this.syncFeeds();
+    this.stopPositionStream = subscribePositionStream((snapshot) => {
+      this.lastPositionStreamAt = Date.now();
+      const vwapRuns = (snapshot.vwap_runs?.runs ?? []) as VwapRun[];
+      const selectedRun = vwapRuns.find((run) => run.id === this.state$.value.vwapRunId)
+        ?? [...vwapRuns].reverse().find((run) => run.symbol === this.state$.value.selectedSymbol && run.status === 'running');
+      this.patch({
+        orders: snapshot.orders.orders, barrierOrders: snapshot.orders.barrier_orders ?? [],
+        vwapRuns, ...(snapshot.fee_rates ? { makerFeeRate: snapshot.fee_rates.maker, takerFeeRate: snapshot.fee_rates.taker } : {}),
+        ...(selectedRun ? { vwapRunId: selectedRun.id, vwapStatus: selectedRun.status, vwapExecutedQuantity: selectedRun.executed_quantity } : {}),
+        loading: false, error: undefined,
+      });
+      this.syncFeeds();
+    });
     void this.loadFeeRates();
-    void this.refreshOrders();
+    if (!currentPositionSnapshot()) void this.refreshOrders();
     void this.loadActiveVwap(this.state$.value.selectedSymbol);
-    this.timer = setInterval(() => void this.refreshOrders(), 5000);
+    this.timer = setInterval(() => {
+      if (Date.now() - this.lastPositionStreamAt > 45_000) void this.refreshOrders();
+    }, 30_000);
   }
   stop(): void {
-    if (this.vwapTimer) clearInterval(this.vwapTimer);
-    this.vwapTimer = undefined;
+    this.stopPositionStream?.();
+    this.stopPositionStream = undefined;
     if (this.timer) clearInterval(this.timer);
     this.timer = undefined;
     this.closeFeeds();
@@ -122,14 +140,12 @@ export class OrderManagerModel {
     this.patch({ barrierDirection });
   }
   private async loadFeeRates(): Promise<void> {
-    try {
-      const response = await fetch("/positions/fee-rates");
-      if (!response.ok) return;
-      const rates = await response.json() as { maker: number; taker: number };
-      if (Number.isFinite(rates.maker) && Number.isFinite(rates.taker)) this.patch({ makerFeeRate: rates.maker, takerFeeRate: rates.taker });
-    } catch { /* use displayed paper fee defaults until rates load */ }
+    const rates = currentPositionSnapshot()?.fee_rates;
+    if (rates && Number.isFinite(rates.maker) && Number.isFinite(rates.taker)) this.patch({ makerFeeRate: rates.maker, takerFeeRate: rates.taker });
   }
   async refreshOrders(): Promise<void> {
+    if (this.refreshingOrders) return;
+    this.refreshingOrders = true;
     try {
       const response = await fetch('/positions/orders');
       if (!response.ok)
@@ -149,6 +165,8 @@ export class OrderManagerModel {
             ? reason.message
             : 'Could not load resting orders',
       });
+    } finally {
+      this.refreshingOrders = false;
     }
   }
   async submit(): Promise<void> {
@@ -193,7 +211,7 @@ export class OrderManagerModel {
       }
       if (isVwap && result.id) {
         this.patch({ vwapRunId: result.id, vwapStatus: result.status ?? 'running', vwapExecutedQuantity: result.executed_quantity ?? 0, vwapRuns: [...this.state$.value.vwapRuns.filter((run) => run.id !== result.id), result as VwapRun], error: undefined, quantity: '', orderType: 'ioc' });
-        this.startVwapPolling(result.id);
+        this.syncVwapFromStream(result.id);
         return;
       }
       await this.refreshOrders();
@@ -211,31 +229,16 @@ export class OrderManagerModel {
     }
   }
   private async loadActiveVwap(symbol: string): Promise<void> {
-    try {
-      const response = await fetch('/positions/vwap');
-      if (!response.ok || !symbol || this.state$.value.selectedSymbol !== symbol) return;
-      const data = (await response.json()) as VwapRunsResponse;
-      this.patch({ vwapRuns: data.runs });
-      const run = [...data.runs].reverse().find((item) => item.symbol === symbol && item.status === 'running');
-      if (!run) return;
-      this.patch({ vwapRunId: run.id, vwapStatus: run.status, vwapExecutedQuantity: run.executed_quantity });
-      this.startVwapPolling(run.id);
-    } catch { /* retry when Orders is reopened */ }
+    if (!symbol || this.state$.value.selectedSymbol !== symbol) return;
+    const runs = currentPositionSnapshot()?.vwap_runs?.runs as VwapRun[] | undefined;
+    if (!runs) return;
+    this.patch({ vwapRuns: runs });
+    const run = [...runs].reverse().find((item) => item.symbol === symbol && item.status === 'running');
+    if (run) this.patch({ vwapRunId: run.id, vwapStatus: run.status, vwapExecutedQuantity: run.executed_quantity });
   }
-  private startVwapPolling(runId: string): void {
-    if (this.vwapTimer) clearInterval(this.vwapTimer);
-    this.vwapTimer = setInterval(async () => {
-      try {
-        const response = await fetch('/positions/vwap');
-        if (!response.ok) return;
-        const data = (await response.json()) as VwapRunsResponse;
-        const run = data.runs.find((item) => item.id === runId);
-        this.patch({ vwapRuns: data.runs });
-        if (!run) return;
-        this.patch({ vwapStatus: run.status, vwapExecutedQuantity: run.executed_quantity });
-        if (run.status !== 'running') { clearInterval(this.vwapTimer); this.vwapTimer = undefined; }
-      } catch { /* retry on the next interval */ }
-    }, 1000);
+  private syncVwapFromStream(runId: string): void {
+    const run = (currentPositionSnapshot()?.vwap_runs?.runs as VwapRun[] | undefined)?.find((item) => item.id === runId);
+    if (run) this.patch({ vwapStatus: run.status, vwapExecutedQuantity: run.executed_quantity });
   }
   async cancelVwap(runId = this.state$.value.vwapRunId): Promise<void> {
     if (!runId) return;
@@ -288,8 +291,3 @@ export class OrderManagerModel {
   }
 
 }
-
-
-
-
-

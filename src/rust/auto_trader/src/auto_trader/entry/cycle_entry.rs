@@ -175,7 +175,7 @@ async fn run_cycle_inner(
     let position_url =
         std::env::var("POSITION_MANAGEMENT_URL").unwrap_or_else(|_| "http://127.0.0.1:3002".into());
     let client = state.client.clone();
-    if let Some(result) = enforce_daily_realized_loss_limit(state, &client, &position_url).await? {
+    if let Some(result) = enforce_daily_realized_loss_limit(state).await? {
         return Ok(result);
     }
     let dashboard_ms = 0.0;

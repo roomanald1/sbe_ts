@@ -352,6 +352,7 @@
 .auto-trader-strategy-budget-row small { color: #9ba5af; font-size: 10px; line-height: 1.35; overflow-wrap: anywhere; }
 .auto-trader-strategy-budget-grid > small { grid-column: 1 / -1; color: #9ba5af; font-size: 10px; line-height: 1.35; }
 .auto-trader-strategy-winrate-title { display: block; margin: 8px 0 4px; color: #c6cbd1; }
+.auto-trader-strategy-winrate-note { margin: 0 0 6px; color: #9ba5af; font-size: 10px; line-height: 1.4; }
 
 .dated-carry-content { display: grid; gap: 12px; padding: 12px; }
 .dated-carry-content p { margin: 0; }

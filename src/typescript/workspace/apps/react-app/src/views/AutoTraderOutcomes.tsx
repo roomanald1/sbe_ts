@@ -1,7 +1,7 @@
 import { memo, useEffect, useMemo, useRef, useState } from 'react';
 import { AgGridReact } from 'ag-grid-react';
 import { ClientSideRowModelModule, ModuleRegistry, themeQuartz, type ColDef, type ColGroupDef, type GridApi } from 'ag-grid-community';
-import { AutoTraderOutcomesModel, type AutoTraderOutcome } from '../models/AutoTraderOutcomesModel';
+import { AutoTraderOutcomesModel, type AutoTraderOutcome, type StrictEntryGateSummary } from '../models/AutoTraderOutcomesModel';
 import type { Strategy } from '../models/AutoTraderModel';
 import type { SymbolPriceTick } from '../types/symbol_price';
 import { useBehaviorSnapshot } from '../use_behavior_snapshot';
@@ -14,9 +14,10 @@ const pct = (v: unknown) => typeof v === 'number' && Number.isFinite(v) ? v.toFi
 const usd = new Intl.NumberFormat(undefined, { style: 'currency', currency: 'USD', minimumFractionDigits: 3, maximumFractionDigits: 3 });
 const signed = { 'pnl-positive': (p: { value: unknown }) => typeof p.value === 'number' && p.value > 0, 'pnl-negative': (p: { value: unknown }) => typeof p.value === 'number' && p.value < 0 };
 type OutcomeGridRow = AutoTraderOutcome & { markPrice?: number };
-type StrategyWinRateRow = { strategy: string; enabled?: boolean; runStatus: string; runReason: string; trades: number; wins: number; losses: number; flat: number; feesUsd?: number; netPnlUsd?: number; todayRealizedUsd?: number; winRate?: number; averageReturn?: number; netExpectancyUsd?: number; averageNetWinUsd?: number; averageNetWinPercent?: number; averageNetLossUsd?: number; averageNetLossPercent?: number; profitFactor?: number; medianHoldingMs?: number; averageHoldingMs?: number; periodStart: number; periodEnd: number; averageEntrySizeUsd?: number; lowSample: boolean; learningMultiplier?: number; learningSamples?: number; learningPositiveRate?: number };
+const sharedOutcomesModel = new AutoTraderOutcomesModel();
+type StrategyWinRateRow = { strategy: string; enabled?: boolean; runStatus: string; runReason: string; trades: number; wins: number; losses: number; flat: number; feesUsd?: number; netPnlUsd?: number; todayRealizedUsd?: number; winRate?: number; averageReturn?: number; averageNetWinUsd?: number; averageNetWinPercent?: number; averageNetLossUsd?: number; averageNetLossPercent?: number; profitFactor?: number; medianHoldingMs?: number; averageHoldingMs?: number; periodStart: number; periodEnd: number; averageEntrySizeUsd?: number; lowSample: boolean; learningMultiplier?: number; learningSamples?: number; learningPositiveRate?: number; strictEntryGate?: StrictEntryGateSummary; strictBaseStrengthFloor?: number; strictGateApplies?: boolean };
 const allStrategies: Strategy[] = ['live-momentum', 'live-trade-flow', 'live-order-book', 'live-vwap-dislocation', 'live-absorption-pressure', 'donchian-55-btc200', 'donchian-20-sma200', 'donchian-20-btc200', 'trend-sleeves-btc200', 'trend-50-200', 'relative-strength-90-sma200', 'risk-adjusted-monthly-momentum', 'rsi2-oversold-rebound', 'dated-futures-carry'];
-const strategyCellTints = { status: 'rgba(148, 157, 170, 0.06)', learning: 'rgba(74, 127, 151, 0.075)', sample: 'rgba(161, 139, 75, 0.075)', performance: 'rgba(77, 132, 91, 0.075)', profile: 'rgba(125, 100, 157, 0.075)' } as const;
+const strategyCellTints = { status: 'rgba(148, 157, 170, 0.06)', learning: 'rgba(74, 127, 151, 0.075)', sample: 'rgba(161, 139, 75, 0.075)', performance: 'rgba(77, 132, 91, 0.075)', profile: 'rgba(125, 100, 157, 0.075)', gate: 'rgba(178, 118, 72, 0.075)' } as const;
 const colorStrategyColumns = (columns: ColDef<StrategyWinRateRow>[], group: keyof typeof strategyCellTints) => columns.map((column, index) => ({ ...column, headerClass: ['strategy-column-' + group + '-header', index === 0 && 'strategy-group-start', index === columns.length - 1 && 'strategy-group-end'].filter(Boolean).join(' '), cellClass: ['strategy-column-' + group + '-cell', index === 0 && 'strategy-group-start', index === columns.length - 1 && 'strategy-group-end'].filter(Boolean).join(' '), cellStyle: { backgroundColor: strategyCellTints[group] } }));
 const dateLabel = (value: number) => new Intl.DateTimeFormat(undefined, { year: '2-digit', month: 'short', day: 'numeric' }).format(value);
 const median = (values: number[]) => {
@@ -44,7 +45,7 @@ const openPnl = (row?: OutcomeGridRow) => {
   return grossPnl + row.entryFees - estimatedExitFee - estimatedExitSlippage;
 };
 function AutoTraderOutcomesComponent({ embedded = false, ticks = [], liveOnly = false, closedOnly = false, strategyRatesOnly = false }: { embedded?: boolean; ticks?: SymbolPriceTick[]; liveOnly?: boolean; closedOnly?: boolean; strategyRatesOnly?: boolean }) {
-  const model = useMemo(() => new AutoTraderOutcomesModel(), []);
+  const model = useMemo(() => sharedOutcomesModel, []);
   const state = useBehaviorSnapshot(model.state$);
   const outcomesGridApi = useRef<GridApi<OutcomeGridRow> | null>(null);
   useEffect(() => { void model.start(); return () => model.stop(); }, [model]);
@@ -147,7 +148,7 @@ function AutoTraderOutcomesComponent({ embedded = false, ticks = [], liveOnly = 
       const losses = outcomes.filter((value) => value < 0).length;
       const netSamples = netComplete ? trades.flatMap((trade, index) => {
         const value = netValues[index];
-        const capital = trade.quantity * trade.entryPrice * (trade.quoteUsdRate ?? 1);
+        const capital = trade.entryNotionalUsd ?? trade.quantity * trade.entryPrice * (trade.quoteUsdRate ?? 1);
         return typeof value === 'number' && Number.isFinite(capital) && capital > 0
           ? [{ value, returnPercent: value / capital * 100 }]
           : [];
@@ -175,7 +176,6 @@ function AutoTraderOutcomesComponent({ embedded = false, ticks = [], liveOnly = 
         netPnlUsd: totalNet,
         winRate: trades.length ? wins / trades.length * 100 : undefined,
         averageReturn,
-        netExpectancyUsd: totalNet !== undefined && trades.length ? totalNet / trades.length : undefined,
         averageNetWinUsd: netComplete ? mean(netWins.map((sample) => sample.value)) : undefined,
         averageNetWinPercent: netComplete ? mean(netWins.map((sample) => sample.returnPercent)) : undefined,
         averageNetLossUsd: netComplete ? mean(netLosses.map((sample) => sample.value)) : undefined,
@@ -189,24 +189,26 @@ function AutoTraderOutcomesComponent({ embedded = false, ticks = [], liveOnly = 
         lowSample: trades.length > 0 && trades.length < 30,
         learningMultiplier: state.strategyLearning[strategy]?.learning_multiplier,
         learningSamples: state.strategyLearning[strategy]?.learning_samples,
-        learningPositiveRate: state.strategyLearning[strategy]?.positive_rate ?? undefined };
+        learningPositiveRate: state.strategyLearning[strategy]?.positive_rate ?? undefined,
+        strictEntryGate: state.strictEntryGates[strategy],
+        strictBaseStrengthFloor: state.strictBaseStrengthFloor,
+        strictGateApplies: strategy.startsWith('live-') && strategy !== 'live-insights' };
     }).sort((a, b) => b.trades - a.trades || a.strategy.localeCompare(b.strategy));
-  }, [closedRows, state.strategyLearning, state.enabledStrategies, state.autoTraderEnabled, state.strategyDiagnostics, state.strategyOrders, state.todayStrategyRealizedUsd, state.openStrategyPositions, state.autoTraderStatusAvailable, openRows]);
+  }, [closedRows, state.strategyLearning, state.enabledStrategies, state.autoTraderEnabled, state.strategyDiagnostics, state.strategyOrders, state.strictEntryGates, state.strictBaseStrengthFloor, state.todayStrategyRealizedUsd, state.openStrategyPositions, state.autoTraderStatusAvailable, openRows]);
   const strategyColumns = useMemo<(ColDef<StrategyWinRateRow> | ColGroupDef<StrategyWinRateRow>)[]>(() => [
     { field: 'strategy', headerName: 'Strategy', valueFormatter: ({ value }) => strategyLabel(value), headerClass: 'strategy-column-strategy-header strategy-group-end', cellClass: 'strategy-column-strategy-cell strategy-group-end', cellStyle: { backgroundColor: '#15181d' }, minWidth: 170 },
     { headerName: 'Performance', headerClass: 'strategy-group-performance', children: colorStrategyColumns([
       { field: 'feesUsd', headerName: 'Fees', headerTooltip: 'Entry and exit fees for fully closed trades, converted using the latest quote currency rate.', cellClassRules: { 'pnl-negative': (p) => typeof p.value === 'number' && p.value > 0 }, valueFormatter: ({ value }) => typeof value === 'number' && Number.isFinite(value) ? usd.format(value) : '—', width: 64, minWidth: 64, maxWidth: 72, flex: 0 },
-      { field: 'todayRealizedUsd', headerName: 'Today USD', headerTooltip: 'Realized P&L today for this strategy, grouped from the same position ledger used by the Realized today summary. Converted using the latest quote currency rates.', cellClassRules: signed, valueFormatter: ({ value }) => typeof value === 'number' && Number.isFinite(value) ? usd.format(value) : '—', width: 78, minWidth: 78, maxWidth: 86, flex: 0 },
-      { field: 'netPnlUsd', headerName: 'Sample net', headerTooltip: 'Realized P&L after fees for fully closed trades in the available strategy sample, converted using the latest quote currency rate.', cellClassRules: signed, valueFormatter: ({ value }) => typeof value === 'number' && Number.isFinite(value) ? usd.format(value) : '—', width: 78, minWidth: 78, maxWidth: 86, flex: 0 },
-      { field: 'netExpectancyUsd', headerName: 'Exp/trade', headerTooltip: 'Average audited realized net P&L per closed trade after fees; unavailable if any trade lacks quote conversion data.', cellClassRules: signed, valueFormatter: ({ value }) => typeof value === 'number' && Number.isFinite(value) ? usd.format(value) : '—', width: 82, minWidth: 82, maxWidth: 90, flex: 0 },
+      { field: 'todayRealizedUsd', headerName: 'Today P&L', headerTooltip: 'Today’s realized P&L for this strategy. Includes partial exits from positions that are still open; excludes unrealized P&L. Converted using the latest quote currency rates.', cellClassRules: signed, valueFormatter: ({ value }) => typeof value === 'number' && Number.isFinite(value) ? usd.format(value) : '—', width: 78, minWidth: 78, maxWidth: 86, flex: 0 },
+      { field: 'netPnlUsd', headerName: 'Closed net', headerTooltip: 'Realized P&L after fees for fully closed, audited trades in the available strategy sample. Partial exits from open trades are excluded.', cellClassRules: signed, valueFormatter: ({ value }) => typeof value === 'number' && Number.isFinite(value) ? usd.format(value) : '—', width: 78, minWidth: 78, maxWidth: 86, flex: 0 },
       { field: 'averageNetWinUsd', headerName: 'Avg win', headerTooltip: 'Mean net P&L for winning trades, shown as USD and return percent.', cellClassRules: signed, valueFormatter: ({ value, data }) => typeof value === 'number' && Number.isFinite(value) ? usd.format(value) + ' (' + pct(data?.averageNetWinPercent) + ')' : '—', width: 95, minWidth: 95, maxWidth: 103, flex: 0 },
       { field: 'averageNetLossUsd', headerName: 'Avg loss', headerTooltip: 'Mean net P&L for losing trades, shown as USD and return percent.', cellClassRules: signed, valueFormatter: ({ value, data }) => typeof value === 'number' && Number.isFinite(value) ? usd.format(value) + ' (' + pct(data?.averageNetLossPercent) + ')' : '—', width: 125, minWidth: 125, maxWidth: 133, flex: 0 },
       { field: 'profitFactor', headerName: 'PF', headerTooltip: 'Gross realized profits divided by gross realized losses before fees; requires fee data for every trade.', valueFormatter: ({ value }) => typeof value === 'number' && value === Number.POSITIVE_INFINITY ? '∞' : typeof value === 'number' && Number.isFinite(value) ? value.toFixed(2) : '—', width: 48, minWidth: 48, maxWidth: 54, flex: 0 },
       { field: 'winRate', headerName: 'Win%', sort: 'desc', valueFormatter: ({ value }) => typeof value === 'number' ? value.toFixed(1) + '%' : '—', width: 55, minWidth: 55, maxWidth: 62, flex: 0 },
       { field: 'averageReturn', headerName: 'Ret%', cellClassRules: signed, valueFormatter: ({ value }) => pct(value), width: 58, minWidth: 58, maxWidth: 65, flex: 0 },
     ], 'performance') },
-    { headerName: 'Closed sample', headerClass: 'strategy-group-sample', children: colorStrategyColumns([
-      { field: 'trades', headerName: 'Trades', headerTooltip: 'Trade count is flagged as low sample below 30 closed trades.', cellRenderer: ({ data }: { data?: StrategyWinRateRow }) => data ? <span>{data.trades}{data.lowSample && <small title="Fewer than 30 closed trades; treat the statistics as preliminary"> · low sample</small>}</span> : '—', width: 112, minWidth: 112, maxWidth: 128, flex: 0 },
+    { headerName: 'Fully closed trades', headerClass: 'strategy-group-sample', children: colorStrategyColumns([
+      { field: 'trades', headerName: 'Trades', headerTooltip: 'Counts only fully closed, audited trades. Partial exits from positions that remain open do not count. Fewer than 30 trades is flagged as a low sample.', cellRenderer: ({ data }: { data?: StrategyWinRateRow }) => data ? <span>{data.trades}{data.lowSample && <small title="Fewer than 30 closed trades; treat the statistics as preliminary"> · low sample</small>}</span> : '—', width: 112, minWidth: 112, maxWidth: 128, flex: 0 },
       { field: 'wins', headerName: 'Wins', width: 46, minWidth: 46, maxWidth: 52, flex: 0 },
       { field: 'losses', headerName: 'Losses', width: 50, minWidth: 50, maxWidth: 56, flex: 0 },
       { field: 'periodStart', headerName: 'Period', headerTooltip: 'Date range from the oldest to newest fully closed trade in this strategy.', valueFormatter: ({ value, data }) => typeof value === 'number' && value > 0 && typeof data?.periodEnd === 'number' && data.periodEnd > 0 ? dateLabel(value) + (dateLabel(value) === dateLabel(data.periodEnd) ? '' : ' – ' + dateLabel(data.periodEnd)) : '—', width: 100, minWidth: 100, maxWidth: 130, flex: 0 },
@@ -216,6 +218,21 @@ function AutoTraderOutcomesComponent({ embedded = false, ticks = [], liveOnly = 
       { field: 'runStatus', headerName: 'Run state', tooltipField: 'runStatus', width: 148, minWidth: 148, maxWidth: 148, flex: 0 },
       { field: 'runReason', headerName: 'Latest reason', tooltipField: 'runReason', minWidth: 140 },
     ], 'status') },
+    { headerName: 'Strict entry gate', headerClass: 'strategy-group-gate', children: colorStrategyColumns([
+      { field: 'strictEntryGate', headerName: 'Strength / floor', headerTooltip: 'For live signal strategies, shows the strongest recent audited candidate relative to its effective strict strength floor, plus the absolute gap. Strength is a score, not a win probability. The walk-forward evidence gate can still block entry. If no recent candidate is available, the current base floor is shown.', valueFormatter: ({ value, data }) => {
+        const candidate = value as StrictEntryGateSummary | undefined;
+        if (candidate) return candidate.strength.toFixed(3) + ' / ' + candidate.floor.toFixed(3) + ' · Δ ' + candidate.gap.toFixed(3);
+        if (data?.strictGateApplies && typeof data.strictBaseStrengthFloor === 'number') return 'base ' + data.strictBaseStrengthFloor.toFixed(3);
+        return '—';
+      }, tooltipValueGetter: ({ data }) => {
+        const candidate = data?.strictEntryGate;
+        if (!candidate) return data?.strictGateApplies ? 'No audited live candidate in the last 10 minutes. The base strict strength floor is shown; learned/contextual floors can be higher.' : 'Strict live-signal strength gating does not apply to this strategy; see Latest reason for its strategy-specific entry rule.';
+        const gapText = candidate.gap > 0 ? 'Strength is short by ' + candidate.gap.toFixed(3) + '.' : 'Strength floor is met.';
+        const walkForward = candidate.strictWalkForwardPassed === false ? 'Strict walk-forward evidence did not pass.' : candidate.strictWalkForwardPassed === true ? 'Strict walk-forward evidence passed.' : 'Walk-forward result unavailable.';
+        const detail = candidate.rejectionReasons.length ? ' Recent gate detail: ' + candidate.rejectionReasons.join('; ') : '';
+        return candidate.symbol + ' ' + candidate.direction + ' · strength ' + candidate.strength.toFixed(3) + ' · effective floor ' + candidate.floor.toFixed(3) + ' · ' + gapText + ' ' + walkForward + detail;
+      }, sortable: false, width: 150, minWidth: 150, maxWidth: 170, flex: 0 },
+    ], 'gate') },
     { headerName: 'Trade profile', headerClass: 'strategy-group-profile', children: colorStrategyColumns([
       { field: 'medianHoldingMs', headerName: 'Hold M/A', headerTooltip: 'Median and average time from entry to final exit.', valueFormatter: ({ value, data }) => typeof value === 'number' && typeof data?.averageHoldingMs === 'number' ? durationLabel(value) + ' / ' + durationLabel(data.averageHoldingMs) : '—', width: 82, minWidth: 82, maxWidth: 92, flex: 0 },
       { field: 'averageEntrySizeUsd', headerName: 'Entry USD', headerTooltip: 'Mean USD notional at entry for fully closed trades; uses entry price and the latest quote currency conversion rate.', valueFormatter: ({ value }) => typeof value === 'number' && Number.isFinite(value) ? usd.format(value) : '—', width: 72, minWidth: 72, maxWidth: 82, flex: 0 },
@@ -281,7 +298,7 @@ function AutoTraderOutcomesComponent({ embedded = false, ticks = [], liveOnly = 
     { field: 'closedAt', headerName: 'Closed', valueFormatter: ({ value, data }) => value ? new Date(value).toLocaleString() : data?.status === 'Partially closed' ? '' : '—', minWidth: 150 },
     { field: 'symbol', headerName: 'Symbol', minWidth: 100 },
     { headerName: 'Open for', valueGetter: ({ data }) => data?.status === 'Open' ? Math.max(0, now - data.openedAt) : undefined, valueFormatter: ({ value }) => durationLabel(value), minWidth: 95, maxWidth: 115, flex: 0 },
-    { headerName: 'Manual close', colId: 'manual-close', sortable: false, filter: false, minWidth: 180, maxWidth: 190, flex: 0, suppressMouseEventHandling: ({ event }) => event.target instanceof Element && Boolean(event.target.closest('button')), cellRenderer: ({ data }: { data?: OutcomeGridRow }) => {
+    { headerName: 'Manual close', colId: 'manual-close', sortable: false, filter: false, minWidth: 180, maxWidth: 190, flex: 0, suppressMouseEventHandling: ({ event }: { event: Event }) => event.target instanceof Element && Boolean(event.target.closest('button')), cellRenderer: ({ data }: { data?: OutcomeGridRow }) => {
       if (!liveOnly || !data || data.status !== 'Open') return null;
       const confirming = state.confirmingCloseSymbols.has(data.symbol);
       const closing = state.closingSymbols.has(data.symbol);
@@ -295,9 +312,10 @@ function AutoTraderOutcomesComponent({ embedded = false, ticks = [], liveOnly = 
         <button className="is-confirm" type="button" disabled={closing} onClick={(event) => { event.stopPropagation(); void model.confirmClose(data.symbol); }}>Confirm</button>
         <button className="is-cancel" type="button" disabled={closing} onClick={(event) => { event.stopPropagation(); model.cancelClose(data.symbol); }}>Cancel</button>
       </div>;
-      return <button className="auto-trader-position-close-button" type="button" disabled={closing} title="Submit an IOC order to close the combined AutoTrader position for this symbol at available market liquidity">Close symbol</button>;
+      return <button className="auto-trader-position-close-button" type="button" disabled={closing} title="Submit an IOC order to close the combined AutoTrader position for this symbol at available market liquidity" onClick={(event) => { event.stopPropagation(); model.requestClose(data.symbol); }}>Close symbol</button>;
     } },
     { field: 'strategy', headerName: 'Strategy', valueFormatter: ({ value }) => strategyLabel(value), minWidth: 170 },
+    { field: 'source', headerName: 'Source', headerTooltip: 'Entry selection path recorded by AutoTrader: Scout, Exploratory, or Strict.', valueFormatter: ({ value }) => value === 'scout' ? 'Scout' : value === 'exploratory' ? 'Exploratory' : value === 'strict' ? 'Strict' : 'Unknown', minWidth: 105 },
     { field: 'side', headerName: 'Side', valueFormatter: ({ value }) => typeof value === 'string' ? value.toUpperCase() : '—', minWidth: 75 },
     { field: 'quantity', headerName: 'Quantity', valueFormatter: ({ value }) => typeof value === 'number' ? value.toPrecision(6) : '—', minWidth: 100 },
     { headerName: 'Remaining', valueGetter: ({ data }) => data?.status === 'Partially closed' ? data.remainingQuantity : undefined, valueFormatter: ({ value }) => typeof value === 'number' ? value.toPrecision(6) : '—', minWidth: 100 },
@@ -337,7 +355,7 @@ function AutoTraderOutcomesComponent({ embedded = false, ticks = [], liveOnly = 
   ], [now, liveOnly, model, rows, state.confirmingCloseSymbols, state.closingSymbols, state.datedCarryDiagnostics]);
   const completedOnlyColumns = new Set(['Open for', 'Manual close', 'Mark', 'Size USD', 'At stop (USD)', 'At target (USD)', 'Unrealized P&L (USD)', 'Entry fees', 'Est. exit fee', 'Est. exit slippage', 'Net vs breakeven', 'State']);
   const visibleColumns = liveOnly
-    ? ['Symbol', 'Strategy', 'Open for', 'Size USD', 'At stop (USD)', 'At target (USD)', 'Unrealized P&L (USD)', 'Net vs breakeven', 'Manual close'].flatMap((headerName) => columns
+    ? ['Symbol', 'Strategy', 'Source', 'Open for', 'Size USD', 'At stop (USD)', 'At target (USD)', 'Unrealized P&L (USD)', 'Net vs breakeven', 'Manual close'].flatMap((headerName) => columns
       .filter((column) => column.headerName === headerName)
       .map((column) => headerName === 'Net vs breakeven'
         ? { ...column, flex: 1, minWidth: 320 }
@@ -353,16 +371,10 @@ function AutoTraderOutcomesComponent({ embedded = false, ticks = [], liveOnly = 
       <span><i className="is-breakeven" />BE</span><span className="is-target">TP</span>
     </div>}
     {(strategyRatesOnly || (!liveOnly && !closedOnly)) && <><strong className="auto-trader-strategy-winrate-title">Strategy performance and today’s realized P&L</strong>
+    <p className="auto-trader-strategy-winrate-note">Today P&amp;L includes all realized exits today, including partial exits on positions still open. Wins, losses, and Closed net use fully closed audited trades only. Unrealized P&amp;L is shown with open positions and is not included in Today P&amp;L.</p>
     <div className="data-grid-wrap signal-info-grid auto-trader-strategy-winrate-grid"><AgGridReact<StrategyWinRateRow> rowData={strategyWinRates} columnDefs={strategyColumns} getRowId={({ data }) => data.strategy} defaultColDef={{ sortable: true, resizable: true, flex: 1, minWidth: 48 }} theme={theme} domLayout="autoHeight" rowHeight={26} headerHeight={28} /></div>
     {strategyWinRates.length === 0 && !state.loading && <p className="positions-empty">No closed trades to calculate strategy win rates yet.</p>}</>}
-    {!strategyRatesOnly && <div className="data-grid-wrap signal-info-grid"><AgGridReact<OutcomeGridRow> rowData={rows} columnDefs={visibleColumns} onGridReady={(event) => { outcomesGridApi.current = event.api; }} getRowHeight={({ data }) => data && state.confirmingCloseSymbols.has(data.symbol) ? 72 : 48} onCellClicked={(event) => {
-      if (!liveOnly || event.column.getColId() !== 'manual-close' || !event.data || event.data.status !== 'Open') return;
-      const target = event.event?.target;
-      if (!(target instanceof Element)) return;
-      if (target.closest('.is-confirm')) void model.confirmClose(event.data.symbol);
-      else if (target.closest('.is-cancel')) model.cancelClose(event.data.symbol);
-      else if (target.closest('.auto-trader-position-close-button')) model.requestClose(event.data.symbol);
-    }} onFirstDataRendered={liveOnly ? (event) => {
+    {!strategyRatesOnly && <div className="data-grid-wrap signal-info-grid"><AgGridReact<OutcomeGridRow> rowData={rows} columnDefs={visibleColumns} onGridReady={(event) => { outcomesGridApi.current = event.api; }} getRowHeight={({ data }) => data && state.confirmingCloseSymbols.has(data.symbol) ? 72 : 48} onFirstDataRendered={liveOnly ? (event) => {
       const columnIds = (event.api.getColumns() ?? []).map((column) => column.getColId()).filter((columnId) => columnId !== 'net-vs-breakeven');
       if (columnIds.length) event.api.autoSizeColumns(columnIds);
     } : undefined} getRowId={({ data }) => data.rowId} getRowClass={({ data }) => data?.status === 'Open' ? 'auto-trader-open-position-row' : 'auto-trader-closed-position-row'} defaultColDef={{ sortable: true, resizable: true, flex: 1, minWidth: 80 }} theme={theme} domLayout="autoHeight" rowHeight={48} headerHeight={28} /></div>}

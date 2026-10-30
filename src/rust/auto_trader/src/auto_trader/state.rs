@@ -6,6 +6,7 @@ struct AutoTraderState {
     enabled: Arc<AtomicBool>,
     settings: Arc<Mutex<Settings>>,
     settings_persist_notify: Arc<Notify>,
+    state_updates: broadcast::Sender<()>,
     settings_persist_timings_ms: Arc<std::sync::Mutex<BTreeMap<String, Vec<f64>>>>,
     latest_missed_opportunity_bands: Arc<Mutex<Vec<MissedOpportunityGateBand>>>,
     latest_execution_parameters: Arc<Mutex<Option<LatestExecutionParameters>>>,
@@ -91,6 +92,12 @@ struct TraderOrder {
     stage_timings_ms: BTreeMap<String, f64>,
     status: String,
     realized_pnl: f64,
+    #[serde(default)]
+    strategy_realized_pnl: Option<f64>,
+    #[serde(default)]
+    strategy_realized_pnl_today: Option<f64>,
+    #[serde(default)]
+    strategy_realized_pnl_day: Option<String>,
 }
 #[derive(Clone, Default, Serialize, Deserialize)]
 struct TraderPosition {
@@ -102,6 +109,8 @@ struct TraderPosition {
     initial_entry_notional: f64,
     #[serde(default)]
     total_fees_paid: f64,
+    #[serde(default)]
+    total_entry_fees_paid: f64,
     #[serde(default)]
     entries: u32,
     #[serde(default)]

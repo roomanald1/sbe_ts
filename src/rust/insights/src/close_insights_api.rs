@@ -51,7 +51,7 @@ struct CloseInsightsResponse {
 async fn get_position_insights() -> Result<Json<CloseInsightsResponse>, (StatusCode, String)> {
     let base = std::env::var("POSITION_MANAGEMENT_URL")
         .unwrap_or_else(|_| "http://127.0.0.1:3002".to_owned());
-    let source: PositionInsightsInput = POSITION_MANAGEMENT_CLIENT
+    let source: PositionInsightsInput = POSITION_INSIGHTS_CLIENT
         .get_or_init(reqwest::Client::new)
         .get(format!("{base}/internal/insights-inputs"))
         .send()
@@ -209,4 +209,3 @@ fn normal_cdf(value: f64) -> f64 {
             * (-x * x).exp();
     0.5 * (1.0 + sign * erf)
 }
-

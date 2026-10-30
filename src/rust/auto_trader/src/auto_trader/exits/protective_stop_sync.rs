@@ -69,7 +69,7 @@ async fn sync_protective_stops(
                 .map(|position| position.average_entry_price)
                 .filter(|price| *price > 0.0)
                 .unwrap_or(fill_price);
-            let (price_path, effective_stop_loss_percent, effective_take_profit_percent, entry_fees, entry_quantity, position_entry_timestamp_ms, prior_realized_pnl, initial_entry_notional, prior_total_fees) = settings
+            let (price_path, effective_stop_loss_percent, effective_take_profit_percent, entry_fees, entry_quantity, position_entry_timestamp_ms, prior_realized_pnl, initial_entry_notional, prior_total_fees, total_entry_fees_paid) = settings
                 .strategy_positions.get(&symbol)
                 .and_then(|lots| lots.get(&strategy))
                 .map(|position| (
@@ -82,6 +82,7 @@ async fn sync_protective_stops(
                     position.realized_pnl,
                     position.initial_entry_notional,
                     position.total_fees_paid,
+                    position.total_entry_fees_paid,
                 ))
                 .unwrap_or_default();
             let (realized_delta, learned_key) = apply_auto_fill(
@@ -142,6 +143,7 @@ async fn sync_protective_stops(
                 order.average_price = barrier["average_execution_price"].as_f64();
                 order.fees_paid = total_fee;
                 order.realized_pnl += realized_delta;
+                record_strategy_order_realized_pnl(order, strategy_realized_delta);
                 order.status = status.to_owned();
             }
             let Settings { strategy_positions, positions, .. } = &mut *settings;
@@ -156,12 +158,12 @@ async fn sync_protective_stops(
                 }
             }
             request_settings_persist(state)?;
-            let cumulative_pnl = settings
+            let cumulative_strategy_pnl = settings
                 .orders
                 .iter()
                 .find(|order| order.timestamp == stop.order_timestamp)
-                .map(|order| order.realized_pnl)
-                .unwrap_or(realized_delta);
+                .and_then(|order| order.strategy_realized_pnl)
+                .unwrap_or(strategy_realized_delta);
             drop(settings);
             if let Some(decision_id) = entry_decision_id {
                 let update_timestamp = SystemTime::now()
@@ -173,14 +175,18 @@ async fn sync_protective_stops(
                     &stop,
                     update_timestamp,
                     &symbol,
+                    &strategy,
                     status,
                     barrier,
                     total_filled,
                     total_fee,
-                    cumulative_pnl,
+                    cumulative_strategy_pnl,
                     entry_price_before,
                     entry_fees,
                     entry_quantity,
+                    initial_entry_notional,
+                    total_entry_fees_paid,
+                    prior_total_fees + delta_fee,
                     position_entry_timestamp_ms,
                     effective_stop_loss_percent,
                     effective_take_profit_percent,
@@ -217,14 +223,18 @@ fn protective_stop_audit_payload(
     stop: &ProtectiveStop,
     update_timestamp: u64,
     symbol: &str,
+    strategy: &str,
     status: &str,
     barrier: &serde_json::Value,
     total_filled: f64,
     total_fee: f64,
     cumulative_pnl: f64,
     entry_price_before: f64,
-    entry_fees: f64,
+    _entry_fees: f64,
     entry_quantity: f64,
+    initial_entry_notional: f64,
+    total_entry_fees_paid: f64,
+    total_fees_paid: f64,
     position_entry_timestamp_ms: u64,
     effective_stop_loss_percent: f64,
     effective_take_profit_percent: f64,
@@ -233,6 +243,7 @@ fn protective_stop_audit_payload(
     serde_json::json!({
         "record_schema_version": 1,
         "decision_id": decision_id,
+        "strategy": strategy,
         "stage": format!("exit:stop:{}", stop.order_timestamp),
         "timestamp": update_timestamp,
         "observed_at": update_timestamp,
@@ -249,13 +260,20 @@ fn protective_stop_audit_payload(
         "exit_fees": total_fee,
         "realized_pnl": cumulative_pnl,
         "entry_average_price": entry_price_before,
-        "entry_fees_paid": entry_fees,
+        "entry_fees_paid": total_entry_fees_paid,
         "entry_timestamp_ms": position_entry_timestamp_ms,
         "entry_context": {
             "average_price": entry_price_before,
-            "fees": entry_fees,
+            "fees": total_entry_fees_paid,
+            "initial_entry_notional": initial_entry_notional,
+            "total_entry_fees_paid": total_entry_fees_paid,
+            "total_fees_paid": total_fees_paid,
             "timestamp_ms": position_entry_timestamp_ms,
-            "quantity": entry_quantity,
+            "quantity": if entry_price_before > 0.0 && initial_entry_notional > 0.0 {
+                initial_entry_notional / entry_price_before
+            } else {
+                entry_quantity
+            },
         },
         "duration_ms": (position_entry_timestamp_ms > 0)
             .then_some(update_timestamp.saturating_sub(position_entry_timestamp_ms)),
@@ -269,7 +287,7 @@ fn protective_stop_audit_payload(
             "ask": sample.ask,
         })).collect::<Vec<_>>(),
         "net_return_percent": (entry_price_before > 0.0).then_some(
-            cumulative_pnl / (total_filled * entry_price_before).max(1e-12) * 100.0
+            cumulative_pnl / initial_entry_notional.max(1e-12) * 100.0
         ),
     })
 }
@@ -284,7 +302,7 @@ mod protective_stop_audit_tests {
         let stop = ProtectiveStop { barrier_id: "barrier-1".into(), order_timestamp: 1_000, quantity: 2.0, ..ProtectiveStop::default() };
         let path = [TradePriceSample { timestamp: 1_500, bid: 99.0, ask: 101.0 }];
         let barrier = serde_json::json!({"side":"sell","triggered_at":1200,"average_execution_price":98.0,"trigger_price":99.0,"trigger_direction":"below"});
-        let payload = protective_stop_audit_payload("decision-3", &stop, 2_000, "BTC-USDT", "filled", &barrier, 2.0, 0.1, -4.1, 100.0, 0.2, 2.0, 1_000, 5.0, 10.0, &path);
+        let payload = protective_stop_audit_payload("decision-3", &stop, 2_000, "BTC-USDT", "strategy-a", "filled", &barrier, 2.0, 0.1, -4.1, 100.0, 0.2, 2.0, 200.0, 0.2, 0.3, 1_000, 5.0, 10.0, &path);
 
         assert_eq!(payload["stage"], "exit:stop:1000");
         assert_eq!(payload["barrier_order_id"], "barrier-1");

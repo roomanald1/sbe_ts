@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import {
   DASHBOARD_COLUMNS, DASHBOARD_LAYOUT_KEY, DASHBOARD_LAYOUTS_KEY,
   DASHBOARD_ACTIVE_LAYOUT_KEY, type DashboardWidget, type DashboardWidgetType,
@@ -72,7 +72,7 @@ export function useDashboardLayout(selectedSymbol: string) {
     return [...current, makeWidget(type, symbol, position.x, position.y)];
   });
   const removeWidget = (id: string) => setWidgets((current) => current.filter((widget) => widget.id !== id));
-  const updateWidgetSymbol = (id: string, symbol: string) => setWidgets((current) => current.map((widget) => widget.id === id ? { ...widget, symbol } : widget));
+  const updateWidgetSymbol = useCallback((id: string, symbol: string) => setWidgets((current) => current.map((widget) => widget.id === id ? { ...widget, symbol } : widget)), []);
   const moveWidget = (id: string, x: number, y: number) => setWidgets((current) => shiftWidgetsForAnchor(current.map((widget) => widget.id === id ? { ...widget, x, y } : widget), id));
   const resizeWidget = (id: string, width: number, height: number) => setWidgets((current) => {
     const widget = current.find((item) => item.id === id);

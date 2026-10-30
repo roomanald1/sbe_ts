@@ -1,3 +1,3 @@
-import { ModuleRegistry, RowStyleModule, TooltipModule } from 'ag-grid-community';
+import { ColumnApiModule, ModuleRegistry, RowStyleModule, TooltipModule } from 'ag-grid-community';
 
-ModuleRegistry.registerModules([RowStyleModule, TooltipModule]);
+ModuleRegistry.registerModules([ColumnApiModule, RowStyleModule, TooltipModule]);

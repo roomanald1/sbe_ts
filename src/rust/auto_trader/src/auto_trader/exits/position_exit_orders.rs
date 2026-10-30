@@ -167,6 +167,7 @@ async fn submit_position_exit_order(
         order.average_price = average_price;
         order.fees_paid = fee;
         order.realized_pnl = realized_pnl;
+        record_strategy_order_realized_pnl(order, strategy_realized_pnl);
         order.status = if filled + 1e-12 >= quantity {
             "filled"
         } else if filled > 0.0 {

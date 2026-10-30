@@ -94,20 +94,3 @@ struct IndexTickerRestItem {
     ts: String,
 }
 
-#[derive(Deserialize)]
-struct IndexTickerWsMessage {
-    event: Option<String>,
-    msg: Option<String>,
-    data: Option<Vec<IndexTickerWsItem>>,
-}
-
-#[derive(Deserialize)]
-struct IndexTickerWsItem {
-    #[serde(rename = "instId")] instrument: String,
-    #[serde(rename = "idxPx")] index_price: String,
-    ts: String,
-}
-
-#[derive(Clone, Debug)]
-struct UsdIndexUpdate { currency: String, rate: f64, timestamp: u64 }
-

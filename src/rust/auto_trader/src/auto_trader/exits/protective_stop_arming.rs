@@ -190,5 +190,8 @@ fn new_protective_stop_order(
         stage_timings_ms: BTreeMap::new(),
         status: "armed".into(),
         realized_pnl: 0.0,
+        strategy_realized_pnl: None,
+        strategy_realized_pnl_today: None,
+        strategy_realized_pnl_day: None,
     }
 }

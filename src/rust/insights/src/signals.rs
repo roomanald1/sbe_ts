@@ -9,7 +9,7 @@ use std::{
     path::PathBuf,
     sync::{
         atomic::{AtomicBool, Ordering},
-        Arc,
+        Arc, OnceLock,
     },
     time::{Duration, Instant},
 };
@@ -20,6 +20,7 @@ const TRADE_WINDOW_MS: u64 = 60_000;
 const ABSORPTION_WINDOW_MS: u64 = 30_000;
 const MAX_BOOK_AGE_MS: u64 = 5_000;
 const MAX_PRICE_LOOKBACK_GAP_MS: u64 = 5_000;
+static POSITION_INSIGHTS_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
 const WALK_FORWARD_MIN_TRAINING_SAMPLES: usize = 30;
 /// Heavy research capture is sampled independently from live signal generation.
 // Persist one research/signal sample every ten seconds. Live signal snapshots
@@ -164,6 +165,7 @@ include!("signal_store_execution_quality.rs");
 const DECISION_QUALITY_MIN_COHORT_SAMPLES: usize = 10;
 include!("signal_store_decision_quality.rs");
 include!("signal_store_routes.rs");
+include!("close_insights_api.rs");
 include!("signal_store_market_data.rs");
 include!("signal_store_dashboard.rs");
 include!("signal_store_performance.rs");

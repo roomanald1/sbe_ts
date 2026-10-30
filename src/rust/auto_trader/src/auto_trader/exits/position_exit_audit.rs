@@ -25,6 +25,7 @@ fn position_exit_audit_payload(
         "record_schema_version": 2,
         "decision_id": decision_id,
         "trade_id": decision_id,
+        "strategy": position.strategy,
         "stage": format!("exit:{submitted_at}"),
         "timestamp": observed_at,
         "symbol": symbol,
@@ -58,9 +59,16 @@ fn position_exit_audit_payload(
         "strategy_decision": position.strategy_decision,
         "average_price": position.average_entry_price,
         "fees": position.entry_fees,
+        "initial_entry_notional": position.initial_entry_notional,
+        "total_entry_fees_paid": position.total_entry_fees_paid,
+        "total_fees_paid": position.total_fees_paid + fee,
         "timestamp_ms": position.entry_timestamp_ms,
         "duration_ms": (position.entry_timestamp_ms > 0).then_some(observed_at.saturating_sub(position.entry_timestamp_ms)),
-        "quantity": position.quantity,
+        "quantity": if position.average_entry_price > 0.0 && position.initial_entry_notional > 0.0 {
+            position.initial_entry_notional / position.average_entry_price
+        } else {
+            position.quantity.abs()
+        },
     });
     payload["exit_rule_trace"] = serde_json::json!({
         "reason": reason,
@@ -148,6 +156,9 @@ fn new_position_exit_order(
         stage_timings_ms: BTreeMap::new(),
         status: "submitting".into(),
         realized_pnl: 0.0,
+        strategy_realized_pnl: None,
+        strategy_realized_pnl_today: None,
+        strategy_realized_pnl_day: None,
     }
 }
 

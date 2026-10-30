@@ -102,13 +102,13 @@ async fn reconcile_maker_fills(
                 "resting" | "partially_filled" | "accepted"
             )
     }) {
-        let Some(id) = order.execution_order_id.as_deref() else {
+        let Some(id) = order.execution_order_id.clone() else {
             continue;
         };
         let pending_fills = records
             .iter()
             .filter(|fill| {
-                fill.resting_order_id.as_deref() == Some(id)
+                fill.resting_order_id.as_deref() == Some(id.as_str())
                     && fill.symbol == order.symbol
                     && fill.side == order.side
                     && fill.fee_liquidity == "maker"
@@ -141,7 +141,7 @@ async fn reconcile_maker_fills(
                 order.horizon_take_profit_percent,
             );
             tag_position_strategy(positions, &order.symbol, order.strategy.as_deref());
-            apply_strategy_position_fill(
+            let (strategy_realized, _) = apply_strategy_position_fill(
                 strategy_positions,
                 positions,
                 &order.symbol,
@@ -167,6 +167,7 @@ async fn reconcile_maker_fills(
                 + fill.execution_price * fill.quantity;
             order.average_price = Some(total_notional / order.filled_quantity);
             order.realized_pnl += realized;
+            record_strategy_order_realized_pnl(order, strategy_realized);
             order.processed_fill_trade_ids.push(fill.id.clone());
             if let Some(kind) = learned {
                 learning_updates.push((kind, order.symbol.clone(), realized));
@@ -177,14 +178,14 @@ async fn reconcile_maker_fills(
         let mut unfilled_post_only_removal = false;
         if order.filled_quantity + 1e-12 >= order.quantity {
             order.status = "filled".into();
-        } else if active_ids.contains(id) {
+        } else if active_ids.contains(&id) {
             order.status = if order.filled_quantity > 0.0 {
                 "partially_filled"
             } else {
                 "resting"
             }
             .into();
-        } else if !active_ids.contains(id) {
+        } else if !active_ids.contains(&id) {
             order.status = if order.filled_quantity > 0.0 {
                 "partially_filled_closed"
             } else {
@@ -230,4 +231,3 @@ async fn reconcile_maker_fills(
     }
     Ok(())
 }
-

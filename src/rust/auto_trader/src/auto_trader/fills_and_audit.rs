@@ -53,12 +53,14 @@ fn apply_auto_fill(
             position.price_path.clear();
             position.initial_entry_notional = incoming.abs() * price;
             position.total_fees_paid = fee;
+            position.total_entry_fees_paid = fee;
         } else {
             if position.initial_entry_notional <= 0.0 {
                 position.initial_entry_notional = old.abs() * position.average_entry_price;
             }
             position.initial_entry_notional += incoming.abs() * price;
             position.total_fees_paid += fee;
+            position.total_entry_fees_paid += fee;
             if count_entry {
                 position.entries = position.entries.saturating_add(1);
             }
@@ -115,6 +117,7 @@ fn apply_auto_fill(
         position.realized_pnl = 0.0;
         position.initial_entry_notional = net.abs() * price;
         position.total_fees_paid = fee - closing_fee;
+        position.total_entry_fees_paid = fee - closing_fee;
         position.entry_order_type = order_type.to_owned();
         position.entry_context = context.to_owned();
         position.scout_entry = context.starts_with("scout:");
@@ -161,8 +164,14 @@ fn apply_strategy_position_fill(
     if active {
         let mut updated = updated;
         updated.strategy = Some(strategy.to_owned());
-        if let Some(decision_id) = decision_id { updated.entry_decision_id = Some(decision_id.to_owned()); }
-        if let Some(decision) = strategy_decision { updated.strategy_decision = Some(decision.clone()); }
+        // One strategy/symbol lot can receive add-on fills. Keep its original
+        // trade key so every later exit stays attached to the same position.
+        if updated.entry_decision_id.is_none() {
+            updated.entry_decision_id = decision_id.map(str::to_owned);
+        }
+        if updated.strategy_decision.is_none() {
+            updated.strategy_decision = strategy_decision.cloned();
+        }
         if updated.stop_loss_percent.is_none() { updated.stop_loss_percent = stop_loss_percent; }
         if updated.take_profit_percent.is_none() { updated.take_profit_percent = take_profit_percent; }
         lots.insert(strategy.to_owned(), updated);
@@ -187,6 +196,18 @@ fn signal_decision_id(signal: &Signal) -> String {
         "{}|{}|{}",
         signal.timestamp, signal.symbol, signal.direction
     )
+}
+
+fn record_strategy_order_realized_pnl(order: &mut TraderOrder, realized_delta: f64) {
+    order.strategy_realized_pnl = Some(order.strategy_realized_pnl.unwrap_or_default() + realized_delta);
+    let today = utc_day();
+    if order.strategy_realized_pnl_day.as_deref() != Some(today.as_str()) {
+        order.strategy_realized_pnl_day = Some(today);
+        order.strategy_realized_pnl_today = Some(0.0);
+    }
+    order.strategy_realized_pnl_today = Some(
+        order.strategy_realized_pnl_today.unwrap_or_default() + realized_delta,
+    );
 }
 
 fn signal_audit_payload(

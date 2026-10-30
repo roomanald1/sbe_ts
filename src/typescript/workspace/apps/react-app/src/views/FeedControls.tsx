@@ -1,6 +1,6 @@
-import { registerInstrumentPrecisions, type InstrumentPrecision } from '../instrument_precision';
+import { getInstrumentList } from '../instrument_precision';
 import { createPortal } from 'react-dom';
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import type { Connection, ConnectionState, FeedSource } from '../connection';
 import { Users } from './Users';
 import { TradeTicketPopup } from './TradeTicketPopup';
@@ -48,22 +48,15 @@ export function FeedControls({
     let active = true;
     const loadSpotSymbols = async () => {
       try {
-        const response = await fetch('/instruments');
-        if (!response.ok) throw new Error('Could not load spot instruments');
-        const data = await response.json() as { symbols?: unknown; instruments?: InstrumentPrecision[] };
-        if (active && Array.isArray(data.symbols)) {
-          registerInstrumentPrecisions(data.instruments ?? []);
-          setSpotSymbols(data.symbols.filter((symbol): symbol is string => typeof symbol === 'string'));
-        }
+        const data = await getInstrumentList();
+        if (active) setSpotSymbols(data.symbols);
       } catch (error) {
         console.warn('Could not load the full OKX spot instrument list', error);
       }
     };
     void loadSpotSymbols();
-    const timer = setInterval(() => void loadSpotSymbols(), 15 * 60 * 1000);
     return () => {
       active = false;
-      clearInterval(timer);
     };
   }, []);
   const priceChanges = useBehaviorSnapshot(priceChangesModel.state$);
@@ -219,11 +212,11 @@ export function FeedControls({
           }}
         >
           {dashboardWidgets.map((widget) =>
-            renderWidget(
+            <Fragment key={widget.id}>{renderWidget(
               widget,
               true,
               displayWidgetLayout.find((item) => item.id === widget.id) ?? widget,
-            ),
+            )}</Fragment>,
           )}
           {resizePreview && (
             <div

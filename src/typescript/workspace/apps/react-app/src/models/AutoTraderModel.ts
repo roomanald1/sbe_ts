@@ -1,4 +1,7 @@
 import { BehaviorSubject } from 'rxjs';
+import { currentPositionSnapshot, subscribePositionStream } from '../position_stream';
+import { currentAutoTraderSnapshot, subscribeAutoTraderStream, type AutoTraderUiSnapshot } from '../auto_trader_stream';
+import { subscribeInsightsStream } from '../insights_stream';
 
 export type AutoTraderOrder = {
   timestamp: number;
@@ -130,6 +133,7 @@ const emptyExecutionQuality: AutoTraderExecutionQuality = { order_samples: 0, fi
 const emptyDecisionQuality: AutoTraderDecisionQuality = { decision_samples: 0, filled_entry_samples: 0, unresolved_trade_samples: 0, unpriced_closed_trade_samples: 0, completed_trade_samples: 0, history_truncated: false, cohorts: [] };
 
 type TraderStatus = { enabled: boolean; strategy?: Strategy; strategies?: Strategy[]; signal_strategies_enabled?: boolean; max_order_notional: number; daily_notional_limit: number; daily_realized_loss_limit: number; exploration_percent: number; risk_appetite?: number; max_open_positions: number; max_intraday_open_positions: number; max_daily_open_positions: number; intraday_notional_limit: number; daily_strategy_notional_limit: number; daily_strategy_budgets?: StrategyBudget[]; intraday_strategy_budgets?: StrategyBudget[]; intraday_used_notional: number; daily_strategy_used_notional: number; max_entries_per_auto_position: number; stop_loss_percent: number; take_profit_percent: number; vwap_duration_minutes: number; vwap_participation_percent: number; limit_offset_bps: number; trigger_offset_bps: number; trailing_distance_percent: number; closed_trade_window?: number; used_notional_today: number; available_notional: number; last_decision?: string; last_decision_at?: number; decisions_since_trade?: number; gap_reasons?: Array<{ reason: string; count: number }>; gate_hits?: Array<{ gate: string; count: number }>; symbol_gate_hits?: Array<{ symbol: string; direction: string; gate: string; count: number; last_detail: string; distance_to_pass?: number | null;}>; latest_signal_diagnostic?: string; strategy_diagnostics?: StrategyDiagnostic[] };
+type TraderActivity = { orders: AutoTraderOrder[]; open_position_symbols?: string[]; scout_open_positions?: number; scout_max_active_positions?: number; scout_learning_samples?: number; scout_learning_win_rate?: number; scout_learning_realized_pnl?: number; realized_pnl?: number | null; realized_pnl_by_quote?: Record<string, number> | null; unrealized_pnl?: number | null; unrealized_pnl_by_quote?: Record<string, number> | null; exit_learning_samples: number; closed_trade_average_return_percent?: number; closed_trade_wins?: number; closed_trade_losses?: number; closed_trade_flat?: number; closed_trade_realized_usd?: number; closed_trade_fees_usd?: number; learning_samples: number; learning_win_rate?: number; preferred_order_type?: string; parameter_profile_samples?: number[] };
 
 export class AutoTraderModel {
   readonly state$ = new BehaviorSubject<AutoTraderState>({ enabled: false, strategies: ['donchian-55-btc200', 'live-momentum', 'live-trade-flow', 'live-order-book', 'live-vwap-dislocation', 'live-absorption-pressure'], loading: true, busy: false, maxOrderNotional: '100', dailyNotionalLimit: '1000', usedNotionalToday: 0, availableNotional: 1000, serverDailyNotionalLimit: 1000, serverExplorationPercent: 10, lastDecision: '', lastDecisionAt: 0, decisionsSinceTrade: 0, gapReasons: [], gateHits: [], symbolGateHits: [], latestSignalDiagnostic: '', strategyDiagnostics: [], orders: [], openPositionSymbols: [], ledgerOpenPositionSymbols: [], executionQuality: emptyExecutionQuality, decisionQuality: emptyDecisionQuality, scoutOpenPositions: 0, scoutMaxActivePositions: 5, scoutLearningSamples: 0, scoutLearningRealizedPnl: 0, realizedPnl: 0, unrealizedPnl: 0, exitLearningSamples: 0, closedTradeWins: 0, closedTradeLosses: 0, closedTradeFlat: 0, dailyRealizedLossLimit: '10', explorationPercent: '10', riskAppetite: '50', maxOpenPositions: '20', maxIntradayOpenPositions: '10', maxDailyOpenPositions: '10', intradayNotionalLimit: '500', dailyStrategyNotionalLimit: '500', dailyStrategyBudgets: {}, dailyStrategyLearning: [], closedStrategyOutcomes: {}, intradayStrategyBudgets: {}, intradayStrategyLearning: [], intradayUsedNotional: 0, dailyStrategyUsedNotional: 0, maxEntriesPerPosition: '1', stopLossPercent: 0.5, takeProfitPercent: 0.8, vwapDurationMinutes: '5', vwapParticipationPercent: '20', limitOffsetBps: '0', triggerOffsetBps: '20', trailingDistancePercent: '0.10', closedTradeWindow: '200', learningSamples: 0, parameterProfileSamples: [0, 0, 0], strategyParameterOverrides: {} });
@@ -139,10 +143,50 @@ export class AutoTraderModel {
   private executionParametersDirty = false;
   private strategyParametersDirty = false;
   private refreshInFlight = false;
-  private analyticsRefreshInFlight = false;
-  private lastAnalyticsRefreshAt = 0;
-  start() { if (!this.timer) { void this.refresh(); this.timer = setInterval(() => void this.refresh(), 5000); } }
-  stop() { if (this.timer) clearInterval(this.timer); this.timer = undefined; }
+  private usdRates: Record<string, number> = {};
+  private stopPositionStream?: () => void;
+  private stopAutoTraderStream?: () => void;
+  private stopInsightsStream?: () => void;
+  private autoTraderSnapshot?: AutoTraderUiSnapshot;
+  private autoTraderSnapshotAt = 0;
+  start() {
+    if (this.timer) return;
+    this.usdRates = currentPositionSnapshot()?.usd_rates?.rates ?? {};
+    this.stopPositionStream = subscribePositionStream((snapshot) => {
+      this.usdRates = snapshot.usd_rates?.rates ?? this.usdRates;
+      if (this.autoTraderSnapshot) void this.refresh();
+    });
+    this.autoTraderSnapshot = currentAutoTraderSnapshot();
+    if (this.autoTraderSnapshot) this.autoTraderSnapshotAt = Date.now();
+    this.stopAutoTraderStream = subscribeAutoTraderStream((snapshot) => {
+      this.autoTraderSnapshot = snapshot;
+      this.autoTraderSnapshotAt = Date.now();
+      const decisionParameters = snapshot.parameters as AutoTraderDecisionParameters;
+      const savedOverrides = Object.fromEntries(decisionParameters.strategy_profiles.flatMap((profile) => profile.parameters
+        .filter((parameter) => parameter.configured_value !== undefined && parameter.configured_value !== null)
+        .map((parameter) => [profile.symbol + ':' + profile.strategy + ':' + parameter.key, parameter.configured_value!] as const)));
+      this.state$.next({ ...this.state$.value, decisionParameters, strategyParameterOverrides: this.strategyParametersDirty ? this.state$.value.strategyParameterOverrides : savedOverrides, decisionParametersError: undefined });
+      void this.refresh();
+    });
+    this.stopInsightsStream = subscribeInsightsStream((snapshot) => {
+      this.state$.next({ ...this.state$.value,
+        executionQuality: snapshot.execution_quality as AutoTraderExecutionQuality ?? this.state$.value.executionQuality,
+        decisionQuality: snapshot.decision_quality as AutoTraderDecisionQuality ?? this.state$.value.decisionQuality,
+      });
+    });
+    void this.refresh();
+    this.timer = setInterval(() => { if (Date.now() - this.autoTraderSnapshotAt > 45_000) void this.refresh(); }, 30_000);
+  }
+  stop() {
+    if (this.timer) clearInterval(this.timer);
+    this.timer = undefined;
+    this.stopPositionStream?.();
+    this.stopPositionStream = undefined;
+    this.stopAutoTraderStream?.();
+    this.stopAutoTraderStream = undefined;
+    this.stopInsightsStream?.();
+    this.stopInsightsStream = undefined;
+  }
   setLimits(maxOrderNotional: string, dailyNotionalLimit: string, dailyRealizedLossLimit: string, explorationPercent: string, maxOpenPositions: string) { this.limitsDirty = true; this.state$.next({ ...this.state$.value, maxOrderNotional, dailyNotionalLimit, dailyRealizedLossLimit, explorationPercent, maxOpenPositions }); }
   setCategoryLimits(values: Partial<Pick<AutoTraderState, 'maxIntradayOpenPositions' | 'maxDailyOpenPositions' | 'intradayNotionalLimit' | 'dailyStrategyNotionalLimit'>>) { this.categoryLimitsDirty = true; this.state$.next({ ...this.state$.value, ...values }); }
 
@@ -165,20 +209,6 @@ export class AutoTraderModel {
 
   setExecutionParameters(values: Partial<Pick<AutoTraderState, 'vwapDurationMinutes' | 'vwapParticipationPercent' | 'limitOffsetBps' | 'triggerOffsetBps' | 'trailingDistancePercent'>>) { this.executionParametersDirty = true; this.state$.next({ ...this.state$.value, ...values }); }
 
-  async refreshDecisionParameters() {
-    try {
-      const response = await fetch('/positions/auto-trader/parameters');
-      if (!response.ok) throw await this.responseError('decision parameters', response);
-      const decisionParameters = await response.json() as AutoTraderDecisionParameters;
-      const savedOverrides = Object.fromEntries(decisionParameters.strategy_profiles.flatMap((profile) => profile.parameters
-        .filter((parameter) => parameter.configured_value !== undefined && parameter.configured_value !== null)
-        .map((parameter) => [profile.symbol + ':' + profile.strategy + ':' + parameter.key, parameter.configured_value!] as const)));
-      this.state$.next({ ...this.state$.value, decisionParameters, strategyParameterOverrides: this.strategyParametersDirty ? this.state$.value.strategyParameterOverrides : savedOverrides, decisionParametersError: undefined });
-    } catch (error) {
-      this.state$.next({ ...this.state$.value, decisionParametersError: error instanceof Error ? error.message : 'Could not load live decision parameters.' });
-    }
-  }
-
   setStrategyParameter(key: string, value?: number) {
     const overrides = { ...this.state$.value.strategyParameterOverrides };
     if (value === undefined) delete overrides[key];
@@ -190,20 +220,34 @@ export class AutoTraderModel {
   async refresh() {
     if (this.refreshInFlight) return;
     this.refreshInFlight = true;
-    void this.refreshAnalyticsIfDue();
     try {
-      const [statusResponse, activityResponse, positionsResponse, ratesResponse, auditResponse] = await Promise.all([fetch('/positions/auto-trader'), fetch('/positions/auto-trader/activity'), fetch('/positions?source=auto'), fetch('/positions/usd-rates'), fetch('/signals/auto-trader-execution-audit')]);
-      if (!statusResponse.ok) throw await this.responseError('status', statusResponse);
-      if (!activityResponse.ok) throw await this.responseError('activity', activityResponse);
-      if (!positionsResponse.ok) throw await this.responseError('positions', positionsResponse);
-      const usdRates = ratesResponse.ok ? (await ratesResponse.json() as { rates?: Record<string, number> }).rates ?? {} : {};
-      const status = await statusResponse.json() as TraderStatus;
+      let status: TraderStatus;
+      let activity: TraderActivity;
+      let positions: { positions: Array<{ symbol: string; quantity: number }> };
+      let auditRows: Array<{ decision_id?: string; stage?: string; strategy?: string; symbol?: string; timestamp?: number; filled_quantity?: number; average_price?: number; exit_filled_quantity?: number; realized_pnl?: number; exit_order_type?: string; barrier_order_id?: string; exit_fills?: Array<{ parent_order_id?: string }>; entry_context?: { quantity?: number; average_price?: number } }>;
+      const autoSnapshot = this.autoTraderSnapshot;
+      const useStreamSnapshot = autoSnapshot && Date.now() - this.autoTraderSnapshotAt <= 45_000;
+      if (useStreamSnapshot && autoSnapshot) {
+        status = autoSnapshot.status as TraderStatus;
+        activity = autoSnapshot.activity as TraderActivity;
+        const autoPositions = currentPositionSnapshot()?.auto_positions.positions ?? [];
+        positions = { positions: autoPositions.map(({ symbol, quantity }) => ({ symbol, quantity })) };
+        auditRows = autoSnapshot.execution_audit as typeof auditRows;
+      } else {
+        const [statusResponse, activityResponse, positionsResponse, auditResponse] = await Promise.all([fetch('/positions/auto-trader'), fetch('/positions/auto-trader/activity'), fetch('/positions?source=auto'), fetch('/signals/auto-trader-execution-audit')]);
+        if (!statusResponse.ok) throw await this.responseError('status', statusResponse);
+        if (!activityResponse.ok) throw await this.responseError('activity', activityResponse);
+        if (!positionsResponse.ok) throw await this.responseError('positions', positionsResponse);
+        status = await statusResponse.json() as TraderStatus;
+        activity = await activityResponse.json() as TraderActivity;
+        positions = await positionsResponse.json() as { positions: Array<{ symbol: string; quantity: number }> };
+        auditRows = auditResponse.ok ? await auditResponse.json() as typeof auditRows : [];
+      }
+      const usdRates = this.usdRates;
       const savedStrategies = status.strategies ?? [status.strategy ?? 'donchian-55-btc200'];
       if (status.signal_strategies_enabled && savedStrategies.includes('live-insights')) { savedStrategies.splice(savedStrategies.indexOf('live-insights'), 1, 'live-momentum', 'live-trade-flow', 'live-order-book', 'live-vwap-dislocation', 'live-absorption-pressure'); }
       if (status.signal_strategies_enabled && !savedStrategies.some((strategy) => strategy.startsWith('live-'))) savedStrategies.push('live-momentum', 'live-trade-flow', 'live-order-book', 'live-vwap-dislocation', 'live-absorption-pressure');
-      const positions = await positionsResponse.json() as { positions: Array<{ symbol: string; quantity: number }> };
       const ledgerOpenPositionSymbols = positions.positions.filter((position) => Math.abs(position.quantity) > 1e-12).map((position) => position.symbol);
-      const activity = await activityResponse.json() as { orders: AutoTraderOrder[]; open_position_symbols?: string[]; scout_open_positions?: number; scout_max_active_positions?: number; scout_learning_samples?: number; scout_learning_win_rate?: number; scout_learning_realized_pnl?: number; realized_pnl?: number | null; realized_pnl_by_quote?: Record<string, number> | null; unrealized_pnl?: number | null; unrealized_pnl_by_quote?: Record<string, number> | null; exit_learning_samples: number; closed_trade_average_return_percent?: number; closed_trade_wins?: number; closed_trade_losses?: number; closed_trade_flat?: number; closed_trade_realized_usd?: number; closed_trade_fees_usd?: number; learning_samples: number; learning_win_rate?: number; preferred_order_type?: string; parameter_profile_samples?: number[] };
       const rateForQuote = (quote: string) => quote === 'USD' ? 1 : usdRates[quote];
       const convertQuoteTotals = (totals?: Record<string, number> | null) => {
         if (!totals) return null;
@@ -220,7 +264,6 @@ export class AutoTraderModel {
         const rate = quote ? rateForQuote(quote) : undefined;
         return { ...order, realized_pnl_usd: typeof rate === 'number' && Number.isFinite(rate) ? order.realized_pnl * rate : null };
       });
-      const auditRows = auditResponse.ok ? await auditResponse.json() as Array<{ decision_id?: string; stage?: string; strategy?: string; symbol?: string; timestamp?: number; filled_quantity?: number; average_price?: number; exit_filled_quantity?: number; realized_pnl?: number; exit_order_type?: string; barrier_order_id?: string; exit_fills?: Array<{ parent_order_id?: string }>; entry_context?: { quantity?: number; average_price?: number } }> : [];
       const auditTrades = new Map<string, { entry?: typeof auditRows[number]; exits: typeof auditRows }>();
       for (const row of auditRows) {
         if (!row.decision_id) continue;
@@ -260,30 +303,6 @@ export class AutoTraderModel {
     }
   }
 
-  private async refreshAnalyticsIfDue() {
-    const now = Date.now();
-    if (this.analyticsRefreshInFlight || now - this.lastAnalyticsRefreshAt < 60_000) return;
-    this.analyticsRefreshInFlight = true;
-    this.lastAnalyticsRefreshAt = now;
-    try {
-      const now = new Date();
-      const todayStartUtc = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
-      const since = 'since=' + todayStartUtc;
-      const [executionResponse, decisionResponse] = await Promise.all([
-        fetch('/signals/auto-trader-execution-quality?' + since),
-        fetch('/signals/auto-trader-decision-quality?' + since),
-      ]);
-      if (!executionResponse.ok) throw await this.responseError('execution quality', executionResponse);
-      if (!decisionResponse.ok) throw await this.responseError('decision quality', decisionResponse);
-      const [executionQuality, decisionQuality] = await Promise.all([executionResponse.json() as Promise<AutoTraderExecutionQuality>, decisionResponse.json() as Promise<AutoTraderDecisionQuality>]);
-      this.state$.next({ ...this.state$.value, executionQuality, decisionQuality });
-    } catch (error) {
-      console.error('Auto Trader analytics refresh failed:', error);
-    } finally {
-      this.analyticsRefreshInFlight = false;
-    }
-  }
-
   private async responseError(endpoint: 'status' | 'activity' | 'positions' | 'execution quality' | 'decision quality' | 'decision parameters', response: Response) {
     const detail = (await response.text()).trim();
     return new Error('Could not load Auto Trader ' + endpoint + ' (' + response.status + ')' + (detail ? ': ' + detail : '.'));
@@ -307,7 +326,6 @@ export class AutoTraderModel {
       if (!response.ok) throw new Error(await response.text());
       this.limitsDirty = false; this.categoryLimitsDirty = false; this.executionParametersDirty = false; this.strategyParametersDirty = false;
       await this.refresh();
-      await this.refreshDecisionParameters();
       this.state$.next({ ...this.state$.value, busy: false });
     } catch (error) { this.state$.next({ ...this.state$.value, busy: false, error: error instanceof Error ? error.message : 'Could not save limits.' }); }
   }

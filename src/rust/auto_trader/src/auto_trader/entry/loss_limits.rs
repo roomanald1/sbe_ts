@@ -1,26 +1,8 @@
 async fn enforce_daily_realized_loss_limit(
     state: &AutoTraderState,
-    client: &reqwest::Client,
-    position_url: &str,
 ) -> Result<Option<CycleResult>, (StatusCode, String)> {
-    {
-        let mut settings = state.settings.lock().await;
-        reset_daily_budget(&mut settings);
-    }
-    let ledger = fetch_ledger_realized_pnl(client, position_url).await?;
-    let realized_today_usd = match ledger.realized_pnl_usd {
-        Some(value) => value,
-        None => {
-            let rates = state.settings.lock().await.usd_rates.clone();
-            return Err((
-                StatusCode::SERVICE_UNAVAILABLE,
-                missing_fx_rate_error("Daily realized P&L", &ledger.realized_pnl_by_quote, &rates),
-            ));
-        }
-    };
     let mut settings = state.settings.lock().await;
     reset_daily_budget(&mut settings);
-    settings.daily_realized_pnl = realized_today_usd;
     if settings.daily_realized_pnl > -settings.daily_realized_loss_limit {
         return Ok(None);
     }

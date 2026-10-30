@@ -64,6 +64,33 @@
   background: #20364d;
 }
 
+@media (max-width: 1000px) {
+  .terminal:has(.market-dashboard) > .feed-controls {
+    flex-wrap: wrap;
+  }
+
+  .terminal:has(.market-dashboard) .workspace-controls {
+    order: 3;
+    width: 100%;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    margin-left: 0;
+  }
+
+  .terminal:has(.market-dashboard) .workspace-selector {
+    flex: 1 1 240px;
+    justify-content: space-between;
+  }
+
+  .terminal:has(.market-dashboard) .workspace-selector select {
+    flex: 0 1 220px;
+  }
+
+  .terminal:has(.market-dashboard) .workspace-name-input {
+    flex: 0 1 180px;
+  }
+}
+
 .widget-store-menu {
   position: relative;
   flex: 0 0 auto;

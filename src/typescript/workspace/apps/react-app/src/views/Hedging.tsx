@@ -1,5 +1,5 @@
 import { formatForSymbol } from '../instrument_precision';
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { memo, useEffect, useMemo, useRef, useState } from 'react';
 import { usePausedValue } from '../use_paused_value';
 import { AgGridReact } from 'ag-grid-react';
 import {
@@ -10,6 +10,7 @@ import {
 } from 'ag-grid-community';
 import type { Position } from '../models/PositionTypes';
 import { FeedToolbar } from './FeedToolbar';
+import { currentPositionSnapshot, subscribePositionStream } from '../position_stream';
 
 ModuleRegistry.registerModules([ClientSideRowModelModule]);
 
@@ -51,23 +52,17 @@ function HedgingComponent({ paused = false }: { paused?: boolean }) {
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const [busy, setBusy] = useState<string>();
   const [error, setError] = useState<string>();
-  const refresh = useCallback(async () => {
-    if (document.activeElement instanceof HTMLElement && document.activeElement.closest('.hedging-grid-input')) return;
-    try {
-      const response = await fetch('/positions/hedge-candidates');
-      if (!response.ok) throw new Error('Could not load positions');
-      const data = await response.json() as Response;
-      setPositions(data.positions.filter((position) => Math.abs(position.quantity) > 1e-12));
-      setError(undefined);
-    } catch (reason) {
-      setError(reason instanceof Error ? reason.message : 'Could not load positions');
-    }
-  }, []);
   useEffect(() => {
-    void refresh();
-    const timer = setInterval(() => void refresh(), 5000);
-    return () => clearInterval(timer);
-  }, [refresh]);
+    const applySnapshot = (candidates: Response) => {
+      if (document.activeElement instanceof HTMLElement && document.activeElement.closest('.hedging-grid-input')) return;
+      setPositions(candidates.positions.filter((position) => Math.abs(position.quantity) > 1e-12));
+      setError(undefined);
+    };
+    const stop = subscribePositionStream((snapshot) => { if (snapshot.hedge_candidates) applySnapshot(snapshot.hedge_candidates); });
+    const current = currentPositionSnapshot()?.hedge_candidates;
+    if (current) applySnapshot(current);
+    return stop;
+  }, []);
 
   async function hedge(position: HedgePosition, symbol: string, candidate?: HedgeCandidate) {
     const ratio = Number(fractionsRef.current[position.symbol] ?? '50');
@@ -95,7 +90,6 @@ function HedgingComponent({ paused = false }: { paused?: boolean }) {
         body: JSON.stringify({ symbol, side, quantity, order_type: 'ioc' }),
       });
       if (!response.ok) throw new Error((await response.text()).trim() || 'Hedge order rejected');
-      await refresh();
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : 'Could not submit hedge order');
     } finally {

@@ -227,6 +227,9 @@ fn new_portfolio_hedge_order(
         stage_timings_ms: BTreeMap::new(),
         status: "submitting".into(),
         realized_pnl: 0.0,
+        strategy_realized_pnl: None,
+        strategy_realized_pnl_today: None,
+        strategy_realized_pnl_day: None,
     }
 }
 

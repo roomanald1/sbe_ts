@@ -42,6 +42,11 @@ fn record_closed_trade_outcome(
     realized_usd: f64,
     fees_usd: f64,
 ) {
+    // Closed spot trades cannot lose more than their entry notional. Reject
+    // malformed returns before they enter the persisted rolling statistics.
+    if !return_percent.is_finite() || return_percent < -100.0 {
+        return;
+    }
     // These parallel arrays are a persisted legacy format. Discard an already
     // misaligned window rather than attaching new money values to old returns.
     let count = settings.closed_trade_returns_percent.len();

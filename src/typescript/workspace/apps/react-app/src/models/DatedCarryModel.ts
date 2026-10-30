@@ -1,4 +1,5 @@
 import { BehaviorSubject } from 'rxjs';
+import { currentAutoTraderSnapshot, subscribeAutoTraderStream } from '../auto_trader_stream';
 
 export type DatedCarryCandidate = {
   spot_symbol: string; future_symbol: string; expiry_ms: number; days_to_expiry: number;
@@ -25,22 +26,36 @@ export class DatedCarryModel {
   });
   private timer?: ReturnType<typeof setInterval>;
   private stopped = false;
+  private stopStream?: () => void;
 
   start() {
     this.stopped = false;
-    void this.refresh();
-    this.timer = setInterval(() => void this.refresh(), 15_000);
+    const update = (book: DatedCarryBook) => {
+      const current = this.state$.value;
+      this.state$.next({ ...current, loading: false, book, error: undefined, notional: current.loading ? String(book.max_spot_notional_usdt) : current.notional });
+    };
+    const snapshot = currentAutoTraderSnapshot();
+    if (snapshot?.dated_carry) update(snapshot.dated_carry as DatedCarryBook);
+    this.stopStream = subscribeAutoTraderStream((next) => { if (next.dated_carry) update(next.dated_carry as DatedCarryBook); });
+    if (!snapshot) void this.refresh();
   }
   stop() {
     this.stopped = true;
     if (this.timer) clearInterval(this.timer);
     this.timer = undefined;
+    this.stopStream?.();
+    this.stopStream = undefined;
   }
   setNotional(value: string) {
     this.state$.next({ ...this.state$.value, notional: value });
   }
   async refresh() {
     try {
+      const streamed = currentAutoTraderSnapshot()?.dated_carry as DatedCarryBook | undefined;
+      if (streamed) {
+        if (!this.stopped) this.state$.next({ ...this.state$.value, loading: false, book: streamed, error: undefined });
+        return;
+      }
       const response = await fetch('/positions/auto-trader/dated-carry');
       if (!response.ok) throw new Error(await response.text());
       const book = await response.json() as DatedCarryBook;

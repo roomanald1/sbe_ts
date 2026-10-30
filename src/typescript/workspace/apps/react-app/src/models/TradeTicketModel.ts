@@ -4,6 +4,7 @@ import type { BookFeed, Connection } from '../connection';
 import { decodeBookDepth, type BookDepth } from '../types/symbol_price';
 import { deriveTradeTicketState } from './TradeTicketDerived';
 import { fetchFeeRates } from './fee_rates';
+import { currentPositionSnapshot, subscribePositionStream } from '../position_stream';
 
 export type Side = 'buy' | 'sell';
 export type OrderType = 'market' | 'ioc' | 'limit' | 'vwap' | 'twap' | 'barrier' | 'stop-market' | 'stop-limit' | 'trailing-stop' | 'post-only-limit' | 'fok' | 'gtd';
@@ -50,7 +51,7 @@ export class TradeTicketModel {
   private feed?: BookFeed;
   private dataSub?: { unsubscribe(): void };
   private errorSub?: { unsubscribe(): void };
-  private vwapTimer?: ReturnType<typeof setInterval>;
+  private stopPositionStream?: () => void;
   constructor(props: Props) {
     this.props$ = new BehaviorSubject(props);
     this.state$ = new BehaviorSubject<TradeTicketState>({
@@ -98,6 +99,13 @@ export class TradeTicketModel {
   start(): void {
     if (this.feed) return;
     const { connection, symbol } = this.props$.value;
+    this.stopPositionStream = subscribePositionStream((snapshot) => {
+      if (snapshot.fee_rates) this.update({ makerFeeRate: snapshot.fee_rates.maker, takerFeeRate: snapshot.fee_rates.taker });
+      const runs = snapshot.vwap_runs?.runs ?? [];
+      const run = (runs.find((item) => item.id === this.state$.value.vwapRunId)
+        ?? [...runs].reverse().find((item) => item.symbol === this.props$.value.symbol && item.status === 'running')) as { id: string; symbol: string; status: string; executed_quantity: number; strategy?: string; error?: string } | undefined;
+      if (run) this.update({ orderType: run.strategy ? (run.strategy === 'twap' ? 'twap' : 'vwap') : this.state$.value.orderType, vwapRunId: run.id, vwapStatus: run.status, vwapExecutedQuantity: run.executed_quantity, message: run.error ?? ((run.strategy === 'twap' ? 'TWAP ' : 'VWAP ') + run.status + ' · filled ' + run.executed_quantity) });
+    });
     void this.loadFeeRates();
     void this.loadActiveVwap(symbol);
     const key = 'order-ticket:' + symbol;
@@ -116,8 +124,8 @@ export class TradeTicketModel {
     });
   }
   stop(): void {
-    if (this.vwapTimer) clearInterval(this.vwapTimer);
-    this.vwapTimer = undefined;
+    this.stopPositionStream?.();
+    this.stopPositionStream = undefined;
     const feed = this.feed;
     if (!feed) return;
     this.dataSub?.unsubscribe();
@@ -230,7 +238,7 @@ export class TradeTicketModel {
       }
       if (scheduled && result.id) {
         this.update({ vwapRunId: result.id, vwapStatus: result.status ?? 'running', vwapExecutedQuantity: result.executed_quantity ?? 0, message: (isTwap ? 'TWAP' : 'VWAP') + ' execution started.' });
-        this.startVwapPolling(result.id);
+        this.syncVwapFromStream(result.id);
         return;
       }
       const fillText =
@@ -256,30 +264,14 @@ export class TradeTicketModel {
     }
   }
   private async loadActiveVwap(symbol: string): Promise<void> {
-    try {
-      const response = await fetch('/positions/vwap');
-      if (!response.ok) return;
-      const data = (await response.json()) as { runs: Array<{ id: string; symbol: string; status: string; executed_quantity: number; strategy?: string }> };
-      if (!this.feed || this.props$.value.symbol !== symbol) return;
-      const run = [...data.runs].reverse().find((item) => item.symbol === symbol && item.status === 'running');
-      if (!run) return;
-      this.update({ orderType: run.strategy === 'twap' ? 'twap' : 'vwap', vwapRunId: run.id, vwapStatus: run.status, vwapExecutedQuantity: run.executed_quantity, message: 'Resumed monitoring ' + (run.strategy === 'twap' ? 'TWAP' : 'VWAP') + ' execution.' });
-      this.startVwapPolling(run.id);
-    } catch { /* execution status can be loaded on the next ticket open */ }
+    const runs = currentPositionSnapshot()?.vwap_runs?.runs as Array<{ id: string; symbol: string; status: string; executed_quantity: number; strategy?: string }> | undefined;
+    if (!runs || this.props$.value.symbol !== symbol) return;
+    const run = [...runs].reverse().find((item) => item.symbol === symbol && item.status === 'running');
+    if (run) this.update({ orderType: run.strategy === 'twap' ? 'twap' : 'vwap', vwapRunId: run.id, vwapStatus: run.status, vwapExecutedQuantity: run.executed_quantity, message: 'Resumed monitoring ' + (run.strategy === 'twap' ? 'TWAP' : 'VWAP') + ' execution.' });
   }
-  private startVwapPolling(runId: string): void {
-    if (this.vwapTimer) clearInterval(this.vwapTimer);
-    this.vwapTimer = setInterval(async () => {
-      try {
-        const response = await fetch('/positions/vwap');
-        if (!response.ok) return;
-        const data = (await response.json()) as { runs: Array<{ id: string; status: string; executed_quantity: number; error?: string; strategy?: string }> };
-        const run = data.runs.find((item) => item.id === runId);
-        if (!run) return;
-        this.update({ vwapStatus: run.status, vwapExecutedQuantity: run.executed_quantity, message: run.error ?? ((run.strategy === 'twap' ? 'TWAP ' : 'VWAP ') + run.status + ' � filled ' + run.executed_quantity) });
-        if (run.status !== 'running') { clearInterval(this.vwapTimer); this.vwapTimer = undefined; }
-      } catch { /* polling retries on the next interval */ }
-    }, 1000);
+  private syncVwapFromStream(runId: string): void {
+    const run = (currentPositionSnapshot()?.vwap_runs?.runs ?? []).find((item) => item.id === runId) as { status: string; executed_quantity: number; error?: string; strategy?: string } | undefined;
+    if (run) this.update({ vwapStatus: run.status, vwapExecutedQuantity: run.executed_quantity, message: run.error ?? ((run.strategy === 'twap' ? 'TWAP ' : 'VWAP ') + run.status + ' · filled ' + run.executed_quantity) });
   }
   async cancelVwap(): Promise<void> {
     const id = this.state$.value.vwapRunId;
@@ -291,10 +283,6 @@ export class TradeTicketModel {
     this.state$.next(deriveTradeTicketState(this.state$.value, update));
   }
 }
-
-
-
-
 
 
 

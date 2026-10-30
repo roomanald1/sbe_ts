@@ -1,7 +1,8 @@
 import { BehaviorSubject } from 'rxjs';
 import type { Position } from './PositionTypes';
+import { currentPositionSnapshot, subscribePositionStream } from '../position_stream';
+import { currentInsightsSnapshot, subscribeInsightsStream } from '../insights_stream';
 
-type PositionsResponse = { positions: Position[] };
 type BackendInsight = {
   symbol: string;
   close_side: 'buy' | 'sell';
@@ -16,8 +17,6 @@ type BackendInsight = {
   profitable_close_probability_5m?: number;
   probability_samples: number;
 };
-type InsightsResponse = { insights: BackendInsight[] };
-type UsdRatesResponse = { rates: Record<string, number> };
 type BarrierOrder = { id: string; symbol: string; quantity: number; remaining_quantity: number; trigger_price: number; trigger_direction: 'above' | 'below'; status: string };
 export type CloseInsight = {
   position: Position;
@@ -48,33 +47,41 @@ export type CloseInsightsState = {
 
 export class CloseInsightsModel {
   readonly state$ = new BehaviorSubject<CloseInsightsState>({ insights: [], loading: true, barrierTargetUsd: '1', barriers: [], pendingBarrierSymbols: [] });
-  private timer?: ReturnType<typeof setInterval>;
-  private refreshInFlight = false;
+  private livePositions?: Position[];
+  private liveInsights?: BackendInsight[];
+  private liveBarriers: BarrierOrder[] = [];
+  private usdRates: Record<string, number> = {};
+  private stopPositionStream?: () => void;
+  private stopInsightsStream?: () => void;
 
   start(): void {
-    if (this.timer) return;
+    if (this.stopPositionStream) return;
+    this.usdRates = currentPositionSnapshot()?.usd_rates?.rates ?? {};
+    this.stopPositionStream = subscribePositionStream((snapshot) => {
+      this.usdRates = snapshot.usd_rates?.rates ?? this.usdRates;
+      this.livePositions = snapshot.positions.positions;
+      this.liveBarriers = snapshot.orders.barrier_orders ?? [];
+      void this.refresh();
+    });
+    this.liveInsights = currentInsightsSnapshot()?.close_insights?.insights as BackendInsight[] | undefined;
+    this.stopInsightsStream = subscribeInsightsStream((snapshot) => {
+      this.liveInsights = snapshot.close_insights?.insights as BackendInsight[] | undefined;
+      void this.refresh();
+    });
     void this.refresh();
-    this.timer = setInterval(() => void this.refresh(), 5000);
   }
 
   stop(): void {
-    if (this.timer) clearInterval(this.timer);
-    this.timer = undefined;
+    this.stopPositionStream?.();
+    this.stopPositionStream = undefined;
+    this.stopInsightsStream?.();
+    this.stopInsightsStream = undefined;
   }
 
   async refresh(): Promise<void> {
-    if (this.refreshInFlight) return;
-    this.refreshInFlight = true;
-    try {
-      const ratesRequest = fetch('/positions/usd-rates');
-      const barriersRequest = fetch('/positions/barriers');
-      const [positionsResponse, insightsResponse] = await Promise.all([
-        fetch('/positions'),
-        fetch('/positions/insights'),
-      ]);
-      if (!positionsResponse.ok || !insightsResponse.ok) throw new Error('Could not load close-out insights');
-      const positions = (await positionsResponse.json() as PositionsResponse).positions;
-      const insights = (await insightsResponse.json() as InsightsResponse).insights;
+    const positions = this.livePositions ?? currentPositionSnapshot()?.positions.positions;
+    const insights = this.liveInsights ?? currentInsightsSnapshot()?.close_insights?.insights as BackendInsight[] | undefined;
+    if (!positions || !insights) return;
       const positionsBySymbol = new Map(positions.map((position) => [position.symbol, position]));
       const rows = insights.flatMap((insight) => {
         const position = positionsBySymbol.get(insight.symbol);
@@ -95,16 +102,12 @@ export class CloseInsightsModel {
             }]
           : [];
       });
-      const [ratesResult, barriersResult] = await Promise.allSettled([ratesRequest, barriersRequest]);
-      const ratesResponse = ratesResult.status === 'fulfilled' ? ratesResult.value : undefined;
-      const barriersResponse = barriersResult.status === 'fulfilled' ? barriersResult.value : undefined;
-      const rates = ratesResponse?.ok ? (await ratesResponse.json() as UsdRatesResponse).rates : {};
-      const barriers = barriersResponse?.ok ? await barriersResponse.json() as BarrierOrder[] : this.state$.value.barriers;
+      const rates = this.usdRates;
       this.state$.next({
         ...this.state$.value,
         loading: false,
         error: undefined,
-        barriers,
+        barriers: this.liveBarriers,
         insights: rows.map((row) => {
           const quote = row.position.symbol.split('-')[1] ?? '';
           const rate = rates[quote];
@@ -115,15 +118,6 @@ export class CloseInsightsModel {
           };
         }),
       });
-    } catch (reason) {
-      this.state$.next({
-        ...this.state$.value,
-        loading: false,
-        error: reason instanceof Error ? reason.message : 'Could not load close-out insights',
-      });
-    } finally {
-      this.refreshInFlight = false;
-    }
   }
 
   setBarrierTargetUsd(barrierTargetUsd: string): void {

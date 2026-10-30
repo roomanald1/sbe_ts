@@ -38,13 +38,6 @@ async fn run_cycle(
     dashboard: Dashboard,
 ) -> Result<CycleResult, (StatusCode, String)> {
     let processing_started = Instant::now();
-    if let Err(error) = refresh_usd_rates(state).await {
-        crate::service_log!(
-            "WARN",
-            "USD allocation rates refresh failed; using cached rates: {}",
-            error.1
-        );
-    }
     let result = run_cycle_inner(state, dashboard).await;
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -177,4 +170,3 @@ fn record_cycle_gap_summary(
     }
 
 }
-

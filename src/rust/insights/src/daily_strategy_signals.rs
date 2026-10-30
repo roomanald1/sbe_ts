@@ -617,7 +617,7 @@ async fn poll_daily_strategy_signals(store: SignalStore) {
     let feed =
         std::env::var("FEED_HANDLERS_URL").unwrap_or_else(|_| "http://127.0.0.1:3001".into());
     let mut audited = std::collections::BTreeSet::<String>::new();
-    let mut ticker = tokio::time::interval(Duration::from_secs(300));
+    let mut ticker = tokio::time::interval(Duration::from_secs(30));
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         ticker.tick().await;

@@ -114,10 +114,12 @@ impl PositionStore {
             ledger.orders.len(),
             path.display()
         );
+        let (state_updates, _) = broadcast::channel(32);
         let store = Self {
             path,
             ledger: Arc::new(Mutex::new(ledger)),
             persistence_notify: Arc::new(Notify::new()),
+            state_updates,
             persistence_timings_ms: Arc::new(StdMutex::new(BTreeMap::new())),
             account_ledger_cache: StdMutex::new(None),
             realized_pnl_cache: StdMutex::new(None),
@@ -204,6 +206,7 @@ impl PositionStore {
         // Snapshotting and disk I/O are handled by one coalescing background writer.
         // It reads the latest ledger after the caller releases its ledger lock.
         self.persistence_notify.notify_one();
+        let _ = self.state_updates.send(());
         Ok(())
     }
     async fn record_ticker_sample(&self, instrument: String, price: f64, timestamp: u64) {

@@ -20,6 +20,9 @@ fn calculate_activity_learning_metrics(
     settings: &Settings,
     today_start: u64,
 ) -> ActivityLearningMetrics {
+    // Ignore legacy/corrupt return samples. In a spot position, net return
+    // cannot be materially below -100%; an invalid sample must not dominate
+    // the daily average (or the win/loss counts).
     let today_closed_returns = settings
         .closed_trade_returns_percent
         .iter()
@@ -31,6 +34,7 @@ fn calculate_activity_learning_metrics(
                 .is_some_and(|timestamp| *timestamp >= today_start)
         })
         .map(|(_, value)| *value)
+        .filter(|value| value.is_finite() && *value >= -100.0)
         .collect::<Vec<_>>();
     let exit_learning_samples = today_closed_returns.len();
     let closed_trade_average_return_percent = (exit_learning_samples > 0)
@@ -155,5 +159,4 @@ fn calculate_activity_learning_metrics(
         scout_learning_realized_pnl,
     }
 }
-
 

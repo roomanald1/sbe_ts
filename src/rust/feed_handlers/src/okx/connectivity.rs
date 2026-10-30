@@ -6,11 +6,11 @@ use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
-    collections::{BTreeMap, HashSet, VecDeque},
-    sync::{atomic::{AtomicU64, Ordering}, Arc},
+    collections::{BTreeMap, HashMap, HashSet, VecDeque},
+    sync::{atomic::{AtomicU64, Ordering}, Arc, Mutex as StdMutex, OnceLock},
     time::{SystemTime, UNIX_EPOCH},
 };
-use tokio::sync::{broadcast::Sender, mpsc, watch};
+use tokio::sync::{broadcast::{self, Sender}, mpsc, watch};
 use tokio::time::{Duration, Instant, sleep};
 use tokio_tungstenite::{connect_async, tungstenite::Utf8Bytes};
 
@@ -24,6 +24,8 @@ const OKX_IDLE_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(20);
 const OKX_PONG_TIMEOUT: Duration = Duration::from_secs(10);
 const OKX_PUBLIC_WS_URL: &str = "wss://ws.okx.com/ws/v5/public";
 const OKX_CONNECT_MIN_INTERVAL: Duration = Duration::from_millis(350);
+const SHARED_TRADE_UPDATE_CAPACITY: usize = 32;
+const SHARED_BOOK_UPDATE_CAPACITY: usize = 32;
 static OKX_NEXT_CONNECT_SLOT: OnceLock<tokio::sync::Mutex<Instant>> = OnceLock::new();
 
 async fn wait_for_okx_connection_slot() {
@@ -56,3 +58,4 @@ include!("market_book_stream.rs");
 include!("book_update_helpers.rs");
 include!("okx_connection_loop.rs");
 include!("reconnect_policy.rs");
+include!("shared_market_feeds.rs");

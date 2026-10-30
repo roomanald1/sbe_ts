@@ -1,6 +1,25 @@
 export type InstrumentPrecision = { symbol: string; tickSz: string; lotSz: string };
+export type InstrumentList = { symbols: string[]; instruments: InstrumentPrecision[] };
 let precisionCache: Map<string, InstrumentPrecision> | undefined;
 let pending: Promise<Map<string, InstrumentPrecision>> | undefined;
+let instrumentList: InstrumentList | undefined;
+let instrumentListPending: Promise<InstrumentList> | undefined;
+let instrumentListFetchedAt = 0;
+
+export async function getInstrumentList(): Promise<InstrumentList> {
+  if (instrumentList && Date.now() - instrumentListFetchedAt < 15 * 60 * 1000) return instrumentList;
+  instrumentListPending ??= fetch('/instruments').then(async (response) => {
+    if (!response.ok) throw new Error('Could not load instruments');
+    const body = await response.json() as { symbols?: unknown; instruments?: unknown };
+    const symbols = Array.isArray(body.symbols) ? body.symbols.filter((symbol): symbol is string => typeof symbol === 'string') : [];
+    const instruments = Array.isArray(body.instruments) ? body.instruments as InstrumentPrecision[] : [];
+    instrumentList = { symbols, instruments };
+    instrumentListFetchedAt = Date.now();
+    registerInstrumentPrecisions(instruments);
+    return instrumentList;
+  }).finally(() => { instrumentListPending = undefined; });
+  return instrumentListPending;
+}
 
 export function registerInstrumentPrecisions(items: InstrumentPrecision[]): void {
   if (items.length > 0) precisionCache = new Map(items.map((item) => [item.symbol, item]));
@@ -14,12 +33,7 @@ export function formatForSymbol(value: number | undefined, symbol: string, kind:
 
 export async function getInstrumentPrecision(symbol: string): Promise<InstrumentPrecision | undefined> {
   if (!precisionCache) {
-    pending ??= fetch('/instruments').then(async (response) => {
-      if (!response.ok) throw new Error('Instrument precision unavailable');
-      const body = await response.json() as { instruments?: InstrumentPrecision[] };
-      registerInstrumentPrecisions(body.instruments ?? []);
-      return precisionCache!;
-    }).finally(() => { pending = undefined; });
+    pending ??= getInstrumentList().then(() => precisionCache!).finally(() => { pending = undefined; });
     try { await pending; } catch { return undefined; }
   }
   return precisionCache?.get(symbol);

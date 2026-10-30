@@ -120,6 +120,7 @@ pub async fn router() -> anyhow::Result<Router> {
         }
     });
     Ok(Router::new()
+        .route("/positions/stream", get(position_ui_stream))
         .route("/internal/persistence-timing", get(get_persistence_timing))
         .route("/positions", get(get_positions))
         .route("/positions/realized-pnl", get(get_realized_pnl))
@@ -158,6 +159,131 @@ pub async fn router() -> anyhow::Result<Router> {
             axum::routing::delete(cancel_order),
         )
         .with_state(store))
+}
+
+async fn position_ui_stream(
+    State(store): State<Arc<PositionStore>>,
+    websocket: axum::extract::ws::WebSocketUpgrade,
+) -> axum::response::Response {
+    websocket.on_upgrade(move |socket| async move {
+        use axum::extract::ws::Message;
+        use futures_util::{SinkExt, StreamExt};
+
+        let mut updates = store.state_updates.subscribe();
+        let (mut sender, mut receiver) = socket.split();
+        let mut rates_refresh = tokio::time::interval(Duration::from_secs(30));
+        rates_refresh.tick().await;
+        let mut hedge_refresh = tokio::time::interval(Duration::from_secs(15));
+        hedge_refresh.tick().await;
+        let mut previous = position_ui_snapshot(&store).await;
+        previous["hedge_candidates"] = hedge_candidates_snapshot(&store).await;
+        let Ok(initial) = serde_json::to_string(&serde_json::json!({ "type": "snapshot", "state": previous })) else { return };
+        if sender.send(Message::Text(initial.into())).await.is_err() { return; }
+        loop {
+            tokio::select! {
+                update = updates.recv() => match update {
+                    Ok(()) | Err(broadcast::error::RecvError::Lagged(_)) => {
+                        let snapshot = position_ui_snapshot(&store).await;
+                        let mut snapshot = snapshot;
+                        snapshot["hedge_candidates"] = previous["hedge_candidates"].clone();
+                        let mut changes = serde_json::Map::new();
+                        let mut auto_trade_appends = Vec::new();
+                        if let (Some(current), Some(old)) = (snapshot.as_object(), previous.as_object()) {
+                            for (key, value) in current {
+                                if key == "auto_trades" {
+                                    let current_trades = value.get("trades").and_then(serde_json::Value::as_array);
+                                    let previous_trades = old.get(key).and_then(|value| value.get("trades")).and_then(serde_json::Value::as_array);
+                                    if let (Some(current_trades), Some(previous_trades)) = (current_trades, previous_trades) {
+                                        if current_trades.starts_with(previous_trades) {
+                                            auto_trade_appends.extend(current_trades[previous_trades.len()..].iter().cloned());
+                                            continue;
+                                        }
+                                    }
+                                }
+                                if old.get(key) != Some(value) {
+                                    changes.insert(key.clone(), value.clone());
+                                }
+                            }
+                        }
+                        previous = snapshot;
+                        if !changes.is_empty() || !auto_trade_appends.is_empty() {
+                            let Ok(payload) = serde_json::to_string(&serde_json::json!({ "type": "delta", "changes": changes, "auto_trade_appends": auto_trade_appends })) else { break };
+                            if sender.send(Message::Text(payload.into())).await.is_err() { break; }
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Closed) => break,
+                },
+                _ = rates_refresh.tick() => {
+                    let rates = serde_json::to_value(latest_stream_usd_rates()).unwrap_or(serde_json::Value::Null);
+                    let account = account_ui_snapshot(&store, &rates).await;
+                    let mut changes = serde_json::Map::new();
+                    if previous.get("usd_rates") != Some(&rates) {
+                        changes.insert("usd_rates".into(), rates.clone());
+                    }
+                    if previous.get("account") != Some(&account) {
+                        changes.insert("account".into(), account.clone());
+                    }
+                    previous["usd_rates"] = rates;
+                    previous["account"] = account;
+                    if !changes.is_empty() {
+                        let payload = serde_json::json!({ "type": "delta", "changes": changes }).to_string();
+                        if sender.send(Message::Text(payload.into())).await.is_err() { break; }
+                    }
+                },
+                _ = hedge_refresh.tick() => {
+                    let hedge = hedge_candidates_snapshot(&store).await;
+                    if previous.get("hedge_candidates") != Some(&hedge) {
+                        previous["hedge_candidates"] = hedge.clone();
+                        let payload = serde_json::json!({ "type": "delta", "changes": { "hedge_candidates": hedge } }).to_string();
+                        if sender.send(Message::Text(payload.into())).await.is_err() { break; }
+                    }
+                },
+                incoming = receiver.next() => if incoming.is_none() { break; },
+            }
+        }
+    })
+}
+
+async fn position_ui_snapshot(store: &Arc<PositionStore>) -> serde_json::Value {
+    let (positions, auto_positions, orders, trades, auto_trades, account) = {
+        let ledger = store.ledger.lock().await;
+        let positions = cached_position_summary(store, &ledger, None);
+        let auto_positions = cached_position_summary(store, &ledger, Some("auto"));
+        let orders = OrdersResponse { orders: ledger.orders.clone(), barrier_orders: ledger.barrier_orders.clone() };
+        let trades = TradesResponse { trades: ledger.trades.iter().cloned().map(|mut trade| { trade.fee = signed_fee_cashflow(trade.fee); trade }).collect() };
+        let auto_trades = TradesResponse { trades: ledger.trades.iter()
+            .filter(|trade| trade.source == "auto")
+            .cloned()
+            .map(|mut trade| { trade.fee = signed_fee_cashflow(trade.fee); trade })
+            .collect() };
+        let rates = latest_stream_usd_rates().map(|rates| rates.rates).unwrap_or_default();
+        let account = account_snapshot_with_rates(store, &ledger, &rates).ok();
+        (positions, auto_positions, orders, trades, auto_trades, account)
+    };
+    let Json(vwap_runs) = get_vwap_runs(State(Arc::clone(store))).await;
+    let Json(fee_rates) = get_fee_rates().await;
+    serde_json::json!({
+        "positions": positions,
+        "auto_positions": auto_positions,
+        "orders": orders,
+        "trades": trades,
+        "auto_trades": auto_trades,
+        "account": account,
+        "fee_rates": fee_rates,
+        "vwap_runs": vwap_runs,
+        "usd_rates": latest_stream_usd_rates(),
+    })
+}
+
+async fn hedge_candidates_snapshot(store: &Arc<PositionStore>) -> serde_json::Value {
+    let Json(response) = get_hedge_candidates(State(Arc::clone(store))).await;
+    serde_json::to_value(response).unwrap_or(serde_json::Value::Null)
+}
+
+async fn account_ui_snapshot(store: &Arc<PositionStore>, rates: &serde_json::Value) -> serde_json::Value {
+    let rates = rates.get("rates").cloned().and_then(|rates| serde_json::from_value(rates).ok()).unwrap_or_default();
+    let ledger = store.ledger.lock().await;
+    serde_json::to_value(account_snapshot_with_rates(store, &ledger, &rates).ok()).unwrap_or(serde_json::Value::Null)
 }
 
 async fn order_handler_timing(request: Request<Body>, next: Next) -> Response {

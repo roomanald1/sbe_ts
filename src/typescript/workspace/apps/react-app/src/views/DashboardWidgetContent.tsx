@@ -1,4 +1,4 @@
-import type { ReactNode } from 'react';
+import { useCallback, type ReactNode } from 'react';
 import type { Connection, ConnectionState, FeedSource } from '../connection';
 import type { PriceChanges } from '../price_change_data';
 import type { DashboardWidget } from './dashboard_layout';
@@ -38,7 +38,7 @@ type Props = {
 
 export function DashboardWidgetContent(props: Props): ReactNode {
   const { widget, symbol, prices, connection, feedSource, connectionState, selectionSymbols, paused, onTrade, onRangeOrders, onSymbolChange } = props;
-  const updateSymbol = (value: string) => onSymbolChange(widget.id, value);
+  const updateSymbol = useCallback((value: string) => onSymbolChange(widget.id, value), [onSymbolChange, widget.id]);
   switch (widget.type) {
     case 'grid': return <SymbolPriceGrid ticks={prices.ticks} feedSource={feedSource} compact onSelectSymbol={onTrade} />;
     case 'table': return <SymbolPriceTable ticks={prices.ticks} histories={prices.histories} state={connectionState} onSelectSymbol={onTrade} />;

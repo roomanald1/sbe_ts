@@ -314,6 +314,9 @@ async fn submit_selected_signal(
             stage_timings_ms: stage_timings_ms.clone(),
             status: "submitting".to_owned(),
             realized_pnl: 0.0,
+            strategy_realized_pnl: None,
+            strategy_realized_pnl_today: None,
+            strategy_realized_pnl_day: None,
         });
         if settings.orders.len() > MAX_RETAINED_AUTO_TRADER_ORDERS {
             let excess = settings.orders.len() - MAX_RETAINED_AUTO_TRADER_ORDERS;

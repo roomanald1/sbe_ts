@@ -48,7 +48,7 @@ export class UsersModel {
     isFetching: false,
     count: 0,
   });
-  private timer?: ReturnType<typeof setInterval>;
+  private started = false;
   private request = 0;
   getSnapshot = (): UsersState => this.state$.value;
   subscribe = (notify: () => void): (() => void) => {
@@ -56,13 +56,12 @@ export class UsersModel {
     return () => sub.unsubscribe();
   };
   start(): void {
-    if (this.timer) return;
+    if (this.started) return;
+    this.started = true;
     void this.refresh();
-    this.timer = setInterval(() => void this.refresh(), 5000);
   }
   stop(): void {
-    if (this.timer) clearInterval(this.timer);
-    this.timer = undefined;
+    this.started = false;
     this.request++;
   }
   setPageInput(pageInput: string): void {

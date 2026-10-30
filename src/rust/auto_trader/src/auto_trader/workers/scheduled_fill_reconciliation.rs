@@ -207,7 +207,7 @@ async fn reconcile_scheduled_fills(
                     order.horizon_take_profit_percent,
                 );
                 tag_position_strategy(positions, &order.symbol, order.strategy.as_deref());
-                apply_strategy_position_fill(
+                let (strategy_realized, _) = apply_strategy_position_fill(
                     strategy_positions,
                     positions,
                     &order.symbol,
@@ -234,6 +234,7 @@ async fn reconcile_scheduled_fills(
                 );
                 order.fees_paid += fee;
                 order.realized_pnl += realized;
+                record_strategy_order_realized_pnl(order, strategy_realized);
                 order.processed_fill_trade_ids.push(id);
                 let realized_usd = realized * quote_usd_rate_for_map(&usd_rates, &order.symbol);
                 *realized_pnl += realized_usd;
@@ -267,7 +268,7 @@ async fn reconcile_scheduled_fills(
                         order.horizon_take_profit_percent,
                     );
                     tag_position_strategy(positions, &order.symbol, order.strategy.as_deref());
-                    apply_strategy_position_fill(
+                    let (strategy_realized, _) = apply_strategy_position_fill(
                         strategy_positions,
                         positions,
                         &order.symbol,
@@ -294,6 +295,7 @@ async fn reconcile_scheduled_fills(
                     order.fill_rate = (next_quantity / order.quantity).clamp(0.0, 1.0);
                     order.fees_paid += fee;
                     order.realized_pnl += realized;
+                    record_strategy_order_realized_pnl(order, strategy_realized);
                     let realized_usd = realized * quote_usd_rate_for_map(&usd_rates, &order.symbol);
                     *realized_pnl += realized_usd;
                     *daily_realized_pnl += realized_usd;
@@ -342,4 +344,3 @@ async fn reconcile_scheduled_fills(
     }
     Ok(())
 }
-

@@ -41,7 +41,6 @@ async fn main() -> anyhow::Result<()> {
         .merge(daily_summary::router())
         .route("/health", get(|| async { "ok" }))
         .route("/process-cpu-seconds", get(process_cpu_seconds))
-        .route("/positions/insights", get(get_position_insights))
         .route(
             "/internal/signals/event",
             axum::routing::post(ingest_signal_event).with_state(signal_runtime),

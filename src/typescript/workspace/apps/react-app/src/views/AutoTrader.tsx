@@ -33,12 +33,6 @@ export function AutoTrader() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [parametersOpen, setParametersOpen] = useState(false);
   const [decisionDetailsOpen, setDecisionDetailsOpen] = useState(false);
-  useEffect(() => {
-    if (!parametersOpen) return;
-    void model.refreshDecisionParameters();
-    const timer = setInterval(() => void model.refreshDecisionParameters(), 5000);
-    return () => clearInterval(timer);
-  }, [model, parametersOpen]);
   const scoutOrderCounts = useMemo(() => {
     const scouts = state.orders.filter((order) => order.purpose === 'scout');
     return {

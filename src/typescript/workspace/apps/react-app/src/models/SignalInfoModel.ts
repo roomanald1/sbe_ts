@@ -1,5 +1,6 @@
 import { BehaviorSubject } from 'rxjs';
 import type { SignalSnapshot } from './SignalsModel';
+import { currentInsightsSnapshot, subscribeInsightsStream } from '../insights_stream';
 
 export type SignalPerformanceRow = {
   symbol: string;
@@ -75,45 +76,19 @@ export type SignalInfoState = {
 
 export class SignalInfoModel {
   readonly state$ = new BehaviorSubject<SignalInfoState>({ best: [], history: [], performance: [], walkForward: [], missedOpportunityBands: [] });
-  private timer?: ReturnType<typeof setInterval>;
-  async start() {
-    if (this.timer) return;
-    await this.refresh();
-    this.timer = setInterval(() => void this.refresh(), 15_000);
+  private stopStream?: () => void;
+  start() {
+    if (this.stopStream) return;
+    const apply = (snapshot: NonNullable<ReturnType<typeof currentInsightsSnapshot>>) => {
+      const dashboard = snapshot.signal_dashboard as { best?: SignalSnapshot[]; history?: SignalSnapshot[]; performance?: SignalPerformanceRow[]; walkForward?: SignalWalkForwardRow[] } | undefined;
+      const autoDashboard = snapshot.auto_trader_dashboard as { missedOpportunityBands?: MissedOpportunityBand[] } | undefined;
+      this.state$.next({ ...this.state$.value, ...dashboard,
+        missedOpportunityBands: autoDashboard?.missedOpportunityBands ?? this.state$.value.missedOpportunityBands,
+        bestError: undefined, historyError: undefined, performanceError: undefined, walkForwardError: undefined, missedOpportunityBandsError: undefined });
+    };
+    const current = currentInsightsSnapshot();
+    if (current) apply(current);
+    this.stopStream = subscribeInsightsStream(apply);
   }
-  stop() {
-    if (this.timer) clearInterval(this.timer);
-    this.timer = undefined;
-  }
-  private async refresh() {
-    try {
-      const bandsResponse = await fetch('/signals/auto-trader-dashboard');
-      if (!bandsResponse.ok) throw new Error('Could not load missed opportunity bands');
-      const bandsDashboard = await bandsResponse.json() as { missedOpportunityBands?: MissedOpportunityBand[] };
-      const previousBands = this.state$.value;
-      this.state$.next({ ...previousBands, missedOpportunityBands: bandsDashboard.missedOpportunityBands ?? [], missedOpportunityBandsError: undefined });
-    } catch {
-      this.state$.next({ ...this.state$.value, missedOpportunityBandsError: 'Missed opportunity bands are unavailable.' });
-    }
-    try {
-      const response = await fetch('/signals/dashboard');
-      if (!response.ok) throw new Error('Could not load signal dashboard');
-      const dashboard = await response.json() as {
-        best: SignalSnapshot[];
-        history: SignalSnapshot[];
-        performance: SignalPerformanceRow[];
-        walkForward: SignalWalkForwardRow[];
-      };
-      this.state$.next({ ...this.state$.value, ...dashboard });
-    } catch {
-      const previous = this.state$.value;
-      this.state$.next({
-        ...previous,
-        bestError: 'Best signals are unavailable.',
-        historyError: 'Signal history is unavailable.',
-        performanceError: 'Signal performance is unavailable.',
-        walkForwardError: 'Walk-forward evaluation is unavailable.',
-      });
-    }
-  }
+  stop() { this.stopStream?.(); this.stopStream = undefined; }
 }

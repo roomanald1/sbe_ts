@@ -2,9 +2,8 @@ import { BehaviorSubject } from 'rxjs';
 import type { BookFeed, Connection } from '../connection';
 import { decodeBookDepth, type BookDepth } from '../types/symbol_price';
 import type { Position } from './PositionTypes';
+import { subscribePositionStream } from '../position_stream';
 
-type PositionsResponse = { positions: Position[]; trade_count: number };
-type UsdRatesResponse = { rates: Record<string, number>; updated_at: number };
 type ActiveFeed = {
   feed: BookFeed;
   data: { unsubscribe(): void };
@@ -53,7 +52,7 @@ export class PnlModel {
   private books: Record<string, BookDepth> = {};
   private errors: Record<string, string> = {};
   private feeds = new Map<string, ActiveFeed>();
-  private timer?: ReturnType<typeof setInterval>;
+  private stopPositionStream?: () => void;
   private connection: Connection;
   private readonly feedKeyPrefix: string;
   constructor(connection: Connection, feedKeyPrefix = 'pnl-mark') {
@@ -67,13 +66,17 @@ export class PnlModel {
     return () => sub.unsubscribe();
   };
   start(): void {
-    if (this.timer) return;
-    void this.refresh();
-    this.timer = setInterval(() => void this.refresh(), 5000);
+    if (this.stopPositionStream) return;
+    this.stopPositionStream = subscribePositionStream((snapshot) => {
+      this.positions = snapshot.positions.positions;
+      if (snapshot.usd_rates?.rates) this.usdRates = snapshot.usd_rates.rates;
+      this.syncFeeds();
+      this.publishState();
+    });
   }
   stop(): void {
-    if (this.timer) clearInterval(this.timer);
-    this.timer = undefined;
+    this.stopPositionStream?.();
+    this.stopPositionStream = undefined;
     for (const feed of this.feeds.values()) this.closeFeed(feed);
     this.feeds.clear();
   }
@@ -83,33 +86,6 @@ export class PnlModel {
     this.connection = connection;
     this.props$.next({ connection });
     this.start();
-  }
-  async refresh(): Promise<void> {
-    try {
-      const positionsResponse = await fetch('/positions');
-      if (!positionsResponse.ok)
-        throw new Error('Could not load fill-based P&L (' + positionsResponse.status + ')');
-      const data = (await positionsResponse.json()) as PositionsResponse;
-      if (!Array.isArray(data.positions))
-        throw new Error('The positions API returned invalid data');
-      this.positions = data.positions;
-      this.syncFeeds();
-      try {
-        const ratesResponse = await fetch('/positions/usd-rates');
-        if (!ratesResponse.ok)
-          throw new Error('Could not load OKX USD conversion rates (' + ratesResponse.status + ')');
-        const rates = (await ratesResponse.json()) as UsdRatesResponse;
-        if (!rates.rates || typeof rates.rates !== 'object')
-          throw new Error('The USD rates API returned invalid data');
-        this.usdRates = rates.rates;
-        this.publishState();
-      } catch (reason) {
-        this.usdRates = {};
-        this.publishState(reason instanceof Error ? reason.message : 'Could not load USD conversion rates');
-      }
-    } catch (reason) {
-      this.publishState(reason instanceof Error ? reason.message : 'Could not load P&L');
-    }
   }
   private syncFeeds(): void {
     const symbols = new Set(
@@ -217,5 +193,3 @@ export class PnlModel {
     });
   }
 }
-
-

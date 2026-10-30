@@ -156,6 +156,7 @@ struct PositionStore {
     path: PathBuf,
     ledger: Arc<Mutex<Ledger>>,
     persistence_notify: Arc<Notify>,
+    state_updates: broadcast::Sender<()>,
     persistence_timings_ms: Arc<StdMutex<BTreeMap<String, Vec<f64>>>>,
     account_ledger_cache: StdMutex<Option<AccountLedgerSnapshot>>,
     realized_pnl_cache: StdMutex<Option<RealizedPnlLedgerSnapshot>>,
@@ -168,4 +169,3 @@ struct PositionStore {
     spot_symbols: Arc<Vec<String>>,
     vwap_runs: Mutex<HashMap<String, VwapRunEntry>>,
 }
-

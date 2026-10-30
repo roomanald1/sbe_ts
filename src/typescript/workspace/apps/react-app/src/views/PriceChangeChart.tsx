@@ -1,4 +1,4 @@
-import { useEffect, useMemo } from 'react';
+import { useCallback, useEffect, useMemo } from 'react';
 import type { PriceChanges } from '../price_change_data';
 import { PriceChangeChartModel } from '../models/PriceChangeChartModel';
 import { useBehaviorSnapshot } from '../use_behavior_snapshot';
@@ -40,16 +40,17 @@ export function PriceChangeChart({
       onSymbolChange,
     });
   }, [model, changes, initialSymbol, selectedSymbol, onSymbolChange]);
+  const handleResize = useCallback((width: number, height: number) => model.setChartSize(width, height), [model]);
+  const handleSymbolChange = useCallback((symbol: string) => model.selectSymbol(symbol), [model]);
   return (
     <PriceChangeChartView
       data={data}
       chartSize={chartSize}
-      onResize={(width, height) => model.setChartSize(width, height)}
-      onSymbolChange={(symbol) => model.selectSymbol(symbol)}
+      onResize={handleResize}
+      onSymbolChange={handleSymbolChange}
       showSymbolSelector={showSymbolSelector}
       onTrade={onTrade}
     />
   );
 }
-
 
