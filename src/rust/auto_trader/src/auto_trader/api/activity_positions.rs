@@ -72,8 +72,34 @@ fn snapshot_activity_positions(settings: &Settings, today_start: u64) -> Activit
             (symbol.clone(), position)
         })
         .collect::<Vec<_>>();
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
     let strategy_positions = settings.strategy_positions.iter().flat_map(|(symbol, lots)| {
         lots.iter().filter(|(_, position)| position.quantity.abs() > 1e-12).map(|(strategy, position)| {
+            let strategy_kind = Strategy::from_name(strategy);
+            let stop_loss_active = strategy_kind.map_or(true, Strategy::uses_protective_stops);
+            let take_profit_active = strategy_kind.map_or(true, Strategy::uses_fixed_take_profit);
+            let effective_stop_loss = position.stop_loss_percent.unwrap_or(settings.stop_loss_percent);
+            let effective_take_profit = if take_profit_active {
+                let candidate = position.take_profit_percent.or_else(|| {
+                    position.horizon_take_profit_percent
+                        .map(|target| target.max(settings.take_profit_percent))
+                }).unwrap_or(settings.take_profit_percent);
+                Some(age_adjusted_take_profit_percent(
+                    Some(strategy.as_str()),
+                    position.entry_timestamp_ms,
+                    now_ms,
+                    confidence_adjusted_take_profit_percent(
+                        &settings.closed_trade_returns_percent,
+                        candidate,
+                        effective_stop_loss,
+                    ),
+                ))
+            } else {
+                None
+            };
             OpenStrategyPosition {
                 symbol: symbol.clone(),
                 strategy: strategy.clone(),
@@ -82,9 +108,18 @@ fn snapshot_activity_positions(settings: &Settings, today_start: u64) -> Activit
                 average_entry_price: position.average_entry_price,
                 entry_fees: -position.entry_fees.abs(),
                 entry_timestamp_ms: position.entry_timestamp_ms,
-                stop_loss_percent: position.stop_loss_percent,
-                take_profit_percent: position.take_profit_percent,
+                entry_order_type: position.entry_order_type.clone(),
+                entry_order_types: if position.entry_order_types.is_empty() && !position.entry_order_type.is_empty() {
+                    vec![position.entry_order_type.split(" · ").next().unwrap_or(&position.entry_order_type).to_owned()]
+                } else {
+                    position.entry_order_types.clone()
+                },
+                stop_loss_percent: stop_loss_active.then_some(effective_stop_loss),
+                take_profit_percent: effective_take_profit,
                 horizon_take_profit_percent: position.horizon_take_profit_percent,
+                stop_loss_active,
+                take_profit_active,
+                carry_details: None,
             }
         })
     }).collect::<Vec<_>>();
@@ -92,10 +127,6 @@ fn snapshot_activity_positions(settings: &Settings, today_start: u64) -> Activit
         .iter()
         .map(|(symbol, _)| symbol.clone())
         .collect::<Vec<_>>();
-    let now_ms = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64;
     let position_exit_policies = auto_positions
         .iter()
         .map(|(symbol, position)| {
@@ -103,13 +134,15 @@ fn snapshot_activity_positions(settings: &Settings, today_start: u64) -> Activit
                 .take_profit_percent
                 .or_else(|| position.horizon_take_profit_percent.map(|target| target.max(settings.take_profit_percent)))
                 .unwrap_or(settings.take_profit_percent);
+            let stop_loss_percent = position.stop_loss_percent.unwrap_or(settings.stop_loss_percent);
             let take_profit_percent = confidence_adjusted_take_profit_percent(
                 &settings.closed_trade_returns_percent,
                 take_profit_candidate,
+                stop_loss_percent,
             );
             PositionExitPolicy {
                 symbol: symbol.clone(),
-                stop_loss_percent: position.stop_loss_percent.unwrap_or(settings.stop_loss_percent),
+                stop_loss_percent,
                 take_profit_percent: age_adjusted_take_profit_percent(
                     position.strategy.as_deref(),
                     position.entry_timestamp_ms,

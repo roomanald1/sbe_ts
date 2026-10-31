@@ -148,19 +148,14 @@ struct Ledger {
     #[serde(default)]
     scheduled_runs: Vec<VwapRunStatus>,
 }
-struct PositionSummarySnapshot {
-    trade_count: usize,
-    by_source: HashMap<Option<String>, PositionsResponse>,
-}
 struct PositionStore {
     path: PathBuf,
     ledger: Arc<Mutex<Ledger>>,
     persistence_notify: Arc<Notify>,
     state_updates: broadcast::Sender<()>,
     persistence_timings_ms: Arc<StdMutex<BTreeMap<String, Vec<f64>>>>,
-    account_ledger_cache: StdMutex<Option<AccountLedgerSnapshot>>,
+    trade_index: StdMutex<LedgerTradeIndex>,
     realized_pnl_cache: StdMutex<Option<RealizedPnlLedgerSnapshot>>,
-    positions_cache: StdMutex<Option<PositionSummarySnapshot>>,
     books: StdRwLock<HashMap<String, Arc<ArcSwapOption<BookSnapshot>>>>,
     price_samples: Mutex<HashMap<String, Vec<(u64, f64)>>>,
     hedge_samples: Mutex<HashMap<String, Vec<(u64, f64)>>>,

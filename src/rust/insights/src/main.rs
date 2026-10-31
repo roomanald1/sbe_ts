@@ -119,6 +119,8 @@ include!("news_classification.rs");
 include!("external_market_feed.rs");
 include!("dated_carry_signals.rs");
 include!("daily_strategy_signals.rs");
+mod alternative_insights;
+async fn run_alternative_strategy_worker(store: SignalStore) { alternative_insights::run(store).await }
 
 include!("signal_feed_workers.rs");
 

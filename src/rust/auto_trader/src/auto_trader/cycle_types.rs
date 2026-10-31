@@ -28,9 +28,15 @@ struct OpenStrategyPosition {
     average_entry_price: f64,
     entry_fees: f64,
     entry_timestamp_ms: u64,
+    entry_order_type: String,
+    entry_order_types: Vec<String>,
     stop_loss_percent: Option<f64>,
     take_profit_percent: Option<f64>,
     horizon_take_profit_percent: Option<f64>,
+    stop_loss_active: bool,
+    take_profit_active: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    carry_details: Option<DatedCarryPosition>,
 }
 #[derive(Serialize)]
 struct ActivityResponse {

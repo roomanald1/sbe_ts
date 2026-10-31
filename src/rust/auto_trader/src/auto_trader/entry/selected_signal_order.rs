@@ -184,13 +184,14 @@ async fn submit_selected_signal(
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64;
-    if timestamp.saturating_sub(signal.timestamp) > MAX_SIGNAL_AGE_SECONDS * 1_000 {
+    let max_signal_age_ms = signal_max_age_seconds(signal) * 1_000;
+    if timestamp.saturating_sub(signal.timestamp) > max_signal_age_ms {
         return Ok(skipped_for_signal(
             signal,
             &format!(
                 "Signal became stale before order creation (age {}ms; max {}ms)",
                 timestamp.saturating_sub(signal.timestamp),
-                MAX_SIGNAL_AGE_SECONDS * 1_000
+                max_signal_age_ms
             ),
         ));
     }

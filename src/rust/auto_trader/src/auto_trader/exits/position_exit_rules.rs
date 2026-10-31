@@ -109,7 +109,13 @@ async fn evaluate_position_exit(
 ) -> Result<Option<CycleResult>, (StatusCode, String)> {
     let position_is_current = {
         let settings = state.settings.lock().await;
-        settings
+        let already_exiting = settings.orders.iter().any(|order| {
+            order.symbol == symbol
+                && order.strategy.as_deref() == Some(strategy_key.as_str())
+                && order.order_type == "Ioc"
+                && matches!(order.status.as_str(), "submitting" | "accepted" | "resting" | "partially_filled")
+        });
+        !already_exiting && settings
             .strategy_positions
             .get(&symbol)
             .and_then(|lots| lots.get(&strategy_key))
@@ -193,7 +199,11 @@ async fn evaluate_position_exit(
         })
         .unwrap_or(configured_take_profit_percent);
     let take_profit_percent =
-        confidence_adjusted_take_profit_percent(&closed_trade_returns, take_profit_percent);
+        confidence_adjusted_take_profit_percent(
+            &closed_trade_returns,
+            take_profit_percent,
+            stop_loss_percent,
+        );
     let take_profit_percent = age_adjusted_take_profit_percent(
         position.strategy.as_deref(),
         position.entry_timestamp_ms,
@@ -234,13 +244,20 @@ async fn evaluate_position_exit(
         });
         (strategy_disabled, position.strategy.clone())
     };
-    let risk_adjusted_momentum =
-        strategy_no_longer_eligible.as_deref() == Some("risk-adjusted-monthly-momentum");
-    let research_state_unavailable = risk_adjusted_momentum && research_regime.is_none();
+    let daily_signal_strategy = strategy_no_longer_eligible.as_deref().is_some_and(|strategy| matches!(
+        strategy,
+        "risk-adjusted-monthly-momentum" | "donchian-20-btc200-hold3" | "risk-adjusted-trend-portfolio"
+    ));
+    let research_state_unavailable = daily_signal_strategy && research_regime.is_none();
+    let minimum_hold_active = strategy_no_longer_eligible.as_deref()
+        == Some("donchian-20-btc200-hold3")
+        && position.entry_timestamp_ms > 0
+        && observed_at.saturating_sub(position.entry_timestamp_ms) < 3 * 86_400_000;
     let research_exit = strategy_no_longer_eligible
         .as_deref()
         .is_some_and(|strategy| {
-            research_regime.is_some_and(|regime| regime.strategy_exit_required(strategy, &symbol))
+            !minimum_hold_active
+                && research_regime.is_some_and(|regime| regime.strategy_exit_required(strategy, &symbol))
         });
     let strategy_rebalance = strategy_no_longer_eligible
         .as_deref()
@@ -253,10 +270,10 @@ async fn evaluate_position_exit(
                 )
             })
         });
-    let signal_managed_strategy = matches!(
-        strategy_no_longer_eligible.as_deref(),
-        Some("donchian-55-btc200" | "donchian-20-btc200" | "risk-adjusted-monthly-momentum")
-    );
+    let signal_managed_strategy = strategy_no_longer_eligible
+        .as_deref()
+        .and_then(Strategy::from_name)
+        .is_some_and(|strategy| !strategy.uses_fixed_take_profit());
     let reason = if strategy_disabled {
         Some("strategy-disabled")
     } else if research_state_unavailable {
@@ -321,7 +338,13 @@ async fn evaluate_position_exit(
     let _cycle = acquire_cycle_lock(state, "position_maintenance").await;
     let position_is_current = {
         let settings = state.settings.lock().await;
-        settings
+        let already_exiting = settings.orders.iter().any(|order| {
+            order.symbol == symbol
+                && order.strategy.as_deref() == Some(strategy_key.as_str())
+                && order.order_type == "Ioc"
+                && matches!(order.status.as_str(), "submitting" | "accepted" | "resting" | "partially_filled")
+        });
+        !already_exiting && settings
             .strategy_positions
             .get(&symbol)
             .and_then(|lots| lots.get(&strategy_key))
@@ -333,6 +356,31 @@ async fn evaluate_position_exit(
     if !position_is_current {
         return Ok(None);
     }
+    if reason == "stop-loss"
+        && position.protective_stops.iter()
+            .map(|stop| (stop.quantity - stop.processed_quantity).max(0.0))
+            .sum::<f64>() + 1e-12 >= position.quantity.abs()
+    {
+        return Ok(None);
+    }
+    // Reserve the exit while holding the cycle lock, then release it before
+    // protective-stop cancellation and order submission perform network I/O.
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+    let side = if position.quantity > 0.0 { "sell" } else { "buy" };
+    let notional = position.quantity.abs() * (bid + ask) / 2.0;
+    {
+        let mut settings = state.settings.lock().await;
+        reset_daily_budget(&mut settings);
+        settings.used_notional_today = allocated_notional(&settings);
+        settings.orders.push(new_position_exit_order(
+            timestamp, &symbol, side, reason, &position,
+            position.quantity.abs(), notional,
+        ));
+    }
+    drop(_cycle);
     submit_position_exit_order(
         client,
         base,
@@ -346,6 +394,7 @@ async fn evaluate_position_exit(
         return_fraction,
         stop_loss_percent,
         take_profit_percent,
+        timestamp,
     )
     .await
 }

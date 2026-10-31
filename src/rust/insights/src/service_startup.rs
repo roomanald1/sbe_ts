@@ -6,6 +6,7 @@ async fn main() -> anyhow::Result<()> {
     tokio::spawn(poll_external_market_features(signal_store.clone()));
     tokio::spawn(run_dated_carry_signal_worker(signal_store.clone()));
     tokio::spawn(poll_daily_strategy_signals(signal_store.clone()));
+    tokio::spawn(run_alternative_strategy_worker(signal_store.clone()));
     let signal_push_cache = Arc::new(DashMap::new());
     let signal_push_notify = Arc::new(Notify::new());
     tokio::spawn(run_signal_push_worker(

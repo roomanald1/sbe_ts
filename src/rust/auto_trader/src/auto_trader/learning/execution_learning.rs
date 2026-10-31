@@ -123,6 +123,13 @@ fn score_execution_order_type(
     let urgency = (signal.components.momentum_10s_percent.unwrap_or(0.0).abs() / 0.30)
         .max(signal.components.pressure_without_price_move.unwrap_or(0.0).abs())
         .clamp(0.0, 1.0);
+    // `learned` is returned only after its observed all-in cost beats the
+    // baseline without materially worse fill rate. Preserve that choice for
+    // normal-sized, non-urgent orders instead of letting the heuristic score
+    // silently switch back to the baseline (or another candidate).
+    if !large_order && learned != baseline && urgency < 0.80 {
+        return learned;
+    }
     let ranging = signal.ranging_probability.unwrap_or(0.0).clamp(0.0, 1.0);
     let trend = (signal.components.trend_5m_volatility_units.unwrap_or(0.0).abs() / 3.0).clamp(0.0, 1.0);
     let fee_bps = configured_taker_fee_rate() * 10_000.0;

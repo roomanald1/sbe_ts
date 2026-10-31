@@ -1,19 +1,4 @@
-async fn ensure_paper_capacity(
-    store: &PositionStore,
-    ledger: &Ledger,
-    symbol: &str,
-    side: &TradeSide,
-    quantity: f64,
-    price: f64,
-    fee_rate: f64,
-) -> Result<(), (StatusCode, String)> {
-    let rates = cached_usd_rates_for_order().await?.rates;
-    ensure_paper_capacity_with_rates(
-        store, ledger, &rates, symbol, side, quantity, price, fee_rate, None,
-    )
-    .await
-}
-async fn ensure_paper_capacity_with_rates(
+fn ensure_paper_capacity_with_rates(
     store: &PositionStore,
     ledger: &Ledger,
     rates: &BTreeMap<String, f64>,
@@ -145,7 +130,7 @@ async fn ensure_paper_capacity_with_rates(
             ));
         }
     } else {
-        let positions = summarize_positions(&ledger.trades).positions;
+        let positions = indexed_position_summary(store, ledger, None).positions;
         let held = positions
             .iter()
             .find(|position| position.symbol == symbol)

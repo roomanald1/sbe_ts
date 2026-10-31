@@ -11,6 +11,7 @@ async fn submit_position_exit_order(
     return_fraction: f64,
     stop_loss_percent: f64,
     take_profit_percent: f64,
+    timestamp: u64,
 ) -> Result<Option<CycleResult>, (StatusCode, String)> {
     let is_long = position.quantity > 0.0;
     let entry_notional = position.quantity.abs() * position.average_entry_price;
@@ -24,25 +25,29 @@ async fn submit_position_exit_order(
         // The server-side barrier is already watching this price; don't race it with a second IOC.
         return Ok(None);
     }
-    if !cancel_protective_stops(client, base, state, &symbol, Some(&strategy_key)).await? {
+    let stops_cancelled = match cancel_protective_stops(client, base, state, &symbol, Some(&strategy_key)).await {
+        Ok(cancelled) => cancelled,
+        Err(error) => {
+            let mut settings = state.settings.lock().await;
+            if let Some(order) = settings.orders.iter_mut().find(|order| order.timestamp == timestamp) {
+                order.status = "failed".into();
+            }
+            request_settings_persist(state)?;
+            return Err(error);
+        }
+    };
+    if !stops_cancelled {
         // A stop is already triggering or could not be cancelled. Let its server-side execution settle.
+        let mut settings = state.settings.lock().await;
+        if let Some(order) = settings.orders.iter_mut().find(|order| order.timestamp == timestamp) {
+            order.status = "cancelled".into();
+        }
+        request_settings_persist(state)?;
         return Ok(None);
     }
     let side = if is_long { "sell" } else { "buy" };
     let quantity = position.quantity.abs();
     let notional = quantity * (bid + ask) / 2.0;
-    let timestamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64;
-    {
-        let mut settings = state.settings.lock().await;
-        reset_daily_budget(&mut settings);
-        settings.used_notional_today = allocated_notional(&settings);
-        settings.orders.push(new_position_exit_order(
-            timestamp, &symbol, side, reason, &position, quantity, notional,
-        ));
-    }
     let submit_started = Instant::now();
     let response = match submit_configured_order(
         client,

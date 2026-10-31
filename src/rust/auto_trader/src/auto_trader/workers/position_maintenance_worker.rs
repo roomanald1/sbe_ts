@@ -2,10 +2,11 @@ async fn run_position_maintenance(state: &AutoTraderState) -> Result<(), (Status
     let position_url =
         std::env::var("POSITION_MANAGEMENT_URL").unwrap_or_else(|_| "http://127.0.0.1:3002".into());
     let client = state.client.clone();
+    // Consume fills before classifying disappeared resting orders as inactive.
+    reconcile_maker_fills(&client, &position_url, state).await?;
     if let Err(error) = reconcile_inactive_execution_orders(&client, &position_url, state).await {
         crate::service_log!("WARN", "Pending-order reconciliation failed: {}", error.1);
     }
-    reconcile_maker_fills(&client, &position_url, state).await?;
     reconcile_scheduled_fills(&client, &position_url, state).await?;
     sync_auto_positions(&client, &position_url, state).await?;
     let _ = maybe_exit_auto_position(&client, &position_url, state).await?;
@@ -372,6 +373,7 @@ async fn reconcile_inactive_execution_orders(
     for order in settings.orders.iter_mut().filter(|order| {
         matches!(order.purpose.as_str(), "signal" | "scout")
             && !is_scheduled_execution_order_type(&order.order_type)
+            && !is_maker_execution_order_type(&order.order_type)
             && matches!(order.status.as_str(), "submitting" | "accepted" | "resting" | "partially_filled")
     }) {
         let Some(id) = order.execution_order_id.as_deref() else {

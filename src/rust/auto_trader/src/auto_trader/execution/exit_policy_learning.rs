@@ -77,7 +77,17 @@ fn risk_adjusted_take_profit_percent(stop_loss_percent: f64, risk_appetite: f64)
         .max(stop_loss_percent * MIN_EXIT_REWARD_RISK_RATIO)
         .clamp(MIN_TAKE_PROFIT_PERCENT, MAX_TAKE_PROFIT_PERCENT);
     let risk = risk_appetite.clamp(0.0, 100.0) / 100.0;
-    (safe_target * (1.0 - risk) + SMALL_NET_TAKE_PROFIT_PERCENT * risk)
+    minimum_reward_risk_take_profit_percent(
+        stop_loss_percent,
+        safe_target * (1.0 - risk) + SMALL_NET_TAKE_PROFIT_PERCENT * risk,
+    )
+}
+
+fn minimum_reward_risk_take_profit_percent(stop_loss_percent: f64, target_percent: f64) -> f64 {
+    let reward_risk_floor = (stop_loss_percent.max(0.0) * MIN_EXIT_REWARD_RISK_RATIO)
+        .min(MAX_TAKE_PROFIT_PERCENT);
+    target_percent
+        .max(reward_risk_floor)
         .clamp(MIN_TAKE_PROFIT_PERCENT, MAX_TAKE_PROFIT_PERCENT)
 }
 
@@ -102,12 +112,17 @@ fn win_rate_supports_extended_hold(returns: &[f64]) -> bool {
             >= EXTENDED_HOLD_MIN_WIN_RATE
 }
 
-fn confidence_adjusted_take_profit_percent(returns: &[f64], candidate: f64) -> f64 {
-    if win_rate_supports_extended_hold(returns) {
-        candidate.clamp(MIN_TAKE_PROFIT_PERCENT, MAX_TAKE_PROFIT_PERCENT)
+fn confidence_adjusted_take_profit_percent(
+    returns: &[f64],
+    candidate: f64,
+    stop_loss_percent: f64,
+) -> f64 {
+    let target = if win_rate_supports_extended_hold(returns) {
+        candidate
     } else {
         EARLY_NET_TAKE_PROFIT_PERCENT
-    }
+    };
+    minimum_reward_risk_take_profit_percent(stop_loss_percent, target)
 }
 
 
@@ -155,5 +170,6 @@ fn adapt_exit_policy(settings: &mut Settings) {
     settings.take_profit_percent = confidence_adjusted_take_profit_percent(
         &settings.closed_trade_returns_percent,
         candidate,
+        settings.stop_loss_percent,
     );
 }

@@ -98,8 +98,8 @@ def run(dates, data, policy, side_cost, universe=SYMBOLS):
             target = previous
             if policy == "buy_hold":
                 target = True
-            elif policy in ("pulse55_btc200", "pulse20_btc200", "pulse20_own200"):
-                days = 55 if policy == "pulse55_btc200" else 20
+            elif policy in ("pulse55_btc200", "pulse20_btc200", "pulse10_btc200", "pulse20_own200"):
+                days = 55 if policy == "pulse55_btc200" else 10 if policy == "pulse10_btc200" else 20
                 high = max(data[symbol][dates[j]]["high"] for j in range(i - days - 1, i - 1))
                 gate = btc_on
                 if policy == "pulse20_own200":
@@ -168,7 +168,7 @@ def summarize(rows):
 def main():
     dates, data = load()
     policies = (
-        "buy_hold", "pulse55_btc200", "pulse20_btc200", "pulse20_own200",
+        "buy_hold", "pulse55_btc200", "pulse20_btc200", "pulse10_btc200", "pulse20_own200",
         "turtle55_20_btc200", "turtle55_20",
         "turtle20_10_btc200",
         "eth_sma50", "eth_sma50_100",

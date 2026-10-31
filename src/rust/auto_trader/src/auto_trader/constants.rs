@@ -94,6 +94,7 @@ const MAX_TAKE_PROFIT_HOLD_MS: u64 = 5 * 60 * 1_000;
 const LIVE_SIGNAL_TP_DECAY_START_MS: u64 = 15 * 60 * 1_000;
 const LIVE_SIGNAL_TP_DECAY_END_MS: u64 = 60 * 60 * 1_000;
 const MAX_SIGNAL_AGE_SECONDS: u64 = 5;
+const MAX_DAILY_SIGNAL_AGE_SECONDS: u64 = 10 * 60;
 const NEUTRAL_INFERENCE_MAX_RANGE_PROBABILITY: f64 = 0.75;
 const LEARNED_STRENGTH_ADJUSTMENT_SAMPLES: usize = 10;
 const LEARNED_STRENGTH_ADJUSTMENT_WIN_RATE: f64 = 0.45;
@@ -148,3 +149,5 @@ fn configured_taker_fee_rate() -> f64 {
         .filter(|value| value.is_finite() && *value >= 0.0 && *value <= 0.1)
         .unwrap_or(0.001)
 }
+
+const STRATEGY_SIZING_RECENT_TRADES: usize = 5;

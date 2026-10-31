@@ -294,6 +294,11 @@
 
 .signal-info-grid .ag-row.auto-trader-open-position-row { background-color: #111b18; }
 .auto-trader-pnl-bar-cell { display: flex; width: 100%; min-width: 290px; height: 100%; flex-direction: column; justify-content: center; gap: 5px; padding: 2px 0; }
+.auto-trader-carry-pnl { align-items: center; gap: 3px; padding: 4px 0; text-align: center; }
+.auto-trader-carry-bar-wrap { position: relative; width: 100%; height: 10px; }
+.auto-trader-carry-pnl .auto-trader-pnl-bar-track { width: 100%; height: 10px; }
+.auto-trader-carry-details { width: 100%; color: #a0a6ad; font: 10px/13px var(--mono); text-align: center; white-space: nowrap; }
+.auto-trader-carry-details strong { font: inherit; }
 .auto-trader-pnl-bar-track { position: relative; width: 100%; height: 10px; overflow: hidden; border-radius: 999px; background: #292e35; }
 .auto-trader-pnl-bar-fill { position: absolute; top: 0; bottom: 0; border-radius: 999px; }
 .auto-trader-pnl-bar-fill.is-positive { background: #45c989; }
@@ -305,6 +310,7 @@
 .auto-trader-pnl-bar-label.is-flat, .auto-trader-pnl-bar-unavailable { color: #a0a6ad; }
 .auto-trader-pnl-exit-percentages { position: relative; width: 100%; height: 10px; font: 9px/10px var(--mono); white-space: nowrap; }
 .auto-trader-pnl-exit-percentages > span { position: absolute; top: 0; transform: translateX(-50%); }
+.auto-trader-pnl-exit-percentages > .is-managed { left: 0; transform: none; }
 .auto-trader-pnl-exit-percentages .is-stop { color: #ff8589; }
 .auto-trader-pnl-exit-percentages .is-target { color: #67e6ae; }
 .auto-trader-pnl-bar-track { overflow: hidden; }
@@ -319,6 +325,12 @@
 .auto-trader-pnl-marker-legend i.is-breakeven { background: #58a6ff; }
 .auto-trader-pnl-marker-legend .is-stop { color: #ff8589; }
 .auto-trader-pnl-marker-legend .is-target { color: #67e6ae; }
+.auto-trader-pnl-marker-legend.is-compact { gap: 10px; margin: 1px 0; font-size: 9px; }
+.auto-trader-live-position-grid .ag-cell { padding-inline: 5px; font-size: 9px; }
+.auto-trader-live-position-grid .auto-trader-pnl-bar-cell { min-width: 0; gap: 2px; padding: 0; }
+.auto-trader-live-position-grid .auto-trader-pnl-bar-track { height: 7px; }
+.auto-trader-live-position-grid .auto-trader-pnl-bar-label { font-size: 9px; }
+.auto-trader-live-position-grid .auto-trader-pnl-exit-percentages { height: 8px; font-size: 8px; line-height: 8px; }
 .auto-trader-position-close-actions { display: grid; width: 100%; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); align-items: center; gap: 4px; white-space: normal; }
 .auto-trader-position-close-actions > span { grid-column: 1 / -1; color: #f0c879; font-size: 9px; line-height: 1.15; white-space: normal; }
 .auto-trader-position-close-button, .auto-trader-position-close-actions button { position: relative; z-index: 2; pointer-events: auto; padding: 3px 7px; border: 1px solid #75474a; border-radius: 4px; background: #301d20; color: #ffb1b4; font: 10px var(--mono); cursor: pointer; }
@@ -351,7 +363,10 @@
 .auto-trader-strategy-budget-row input { min-width: 0; height: 32px; border: 1px solid #303d4d; border-radius: 4px; padding: 6px; background: #111820; color: var(--ink); }
 .auto-trader-strategy-budget-row small { color: #9ba5af; font-size: 10px; line-height: 1.35; overflow-wrap: anywhere; }
 .auto-trader-strategy-budget-grid > small { grid-column: 1 / -1; color: #9ba5af; font-size: 10px; line-height: 1.35; }
-.auto-trader-strategy-winrate-title { display: block; margin: 8px 0 4px; color: #c6cbd1; }
+.auto-trader-strategy-winrate-heading { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin: 8px 0 4px; }
+.auto-trader-strategy-winrate-title { display: block; color: #c6cbd1; }
+.auto-trader-strategy-winrate-heading label { display: inline-flex; align-items: center; gap: 5px; color: #9ba5af; font: 10px/1.2 var(--mono); cursor: pointer; }
+.auto-trader-strategy-winrate-heading input { accent-color: #8296ad; }
 .auto-trader-strategy-winrate-note { margin: 0 0 6px; color: #9ba5af; font-size: 10px; line-height: 1.4; }
 
 .dated-carry-content { display: grid; gap: 12px; padding: 12px; }
@@ -390,3 +405,14 @@
 .auto-trader-strategy-winrate-grid .ag-header-cell.strategy-column-status-header { background: #151519; }
 
 .auto-trader-strategy-winrate-grid .ag-header-cell.strategy-column-strategy-header { background: #1a1c22; }
+
+.alternative-strategies { margin: 12px 0; padding: 12px; border: 1px solid #242a31; border-radius: 6px; }
+.alternative-strategies > summary { cursor: pointer; font-weight: 600; }
+.alternative-strategies p, .alternative-strategies > small { color: #a0a6ad; font-size: 12px; line-height: 1.5; }
+.alternative-strategy-settings { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 12px; }
+.alternative-strategy-settings fieldset { min-width: 0; padding: 10px; }
+.alternative-strategy-settings label { display: flex; flex-direction: column; gap: 5px; margin: 6px 0; }
+.alternative-strategy-settings label:has(input[type="checkbox"]) { flex-direction: row; align-items: center; }
+.alternative-strategy-settings small { display: block; min-height: 52px; line-height: 1.4; }
+.alternative-strategy-grid { margin: 10px 0; min-height: 100px; }
+.alternative-strategy-events { height: 260px; margin: 10px 0; }

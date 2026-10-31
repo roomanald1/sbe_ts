@@ -118,6 +118,8 @@ struct TraderPosition {
     #[serde(default)]
     entry_order_type: String,
     #[serde(default)]
+    entry_order_types: Vec<String>,
+    #[serde(default)]
     entry_context: String,
     #[serde(default)]
     entry_decision_id: Option<String>,
@@ -181,6 +183,10 @@ struct LearningStats {
     daily_positive: usize,
     #[serde(default)]
     daily_realized_pnl: f64,
+    // Ordered outcomes used by strategy sizing so old wins cannot dominate
+    // the current performance estimate.
+    #[serde(default)]
+    recent_trade_pnls: Vec<(u64, f64)>,
 }
 
 #[derive(Clone, Default, Serialize, Deserialize)]

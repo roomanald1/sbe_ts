@@ -1,3 +1,12 @@
+// Queue behind ordinary ledger readers/writers instead of rejecting on contention.
+async fn lock_order_ledger(
+    ledger: &Mutex<Ledger>,
+) -> Result<tokio::sync::MutexGuard<'_, Ledger>, (StatusCode, String)> {
+    timeout(Duration::from_millis(5), ledger.lock())
+        .await
+        .map_err(|_| (StatusCode::SERVICE_UNAVAILABLE, "Position ledger busy".to_owned()))
+}
+
 async fn submit_order(
     State(store): State<Arc<PositionStore>>,
     Json(request): Json<NewOrder>,
@@ -20,11 +29,12 @@ async fn submit_order(
         ));
     }
     if let Some(client_order_id) = request.client_order_id.as_deref() {
-        let ledger = store.ledger.try_lock().map_err(|_| {
-            (StatusCode::SERVICE_UNAVAILABLE, "Position ledger busy".to_owned())
-        })?;
-        if let Some(response) = existing_order_response(&ledger, client_order_id) {
-            return Ok(Json(response));
+        // This is only a fast duplicate check; the authoritative check below
+        // runs under the mutation lock. Do not spend the wait budget twice.
+        if let Ok(ledger) = store.ledger.try_lock() {
+            if let Some(response) = existing_order_response(&store, &ledger, client_order_id) {
+                return Ok(Json(response));
+            }
         }
     }
     if matches!(
@@ -40,18 +50,7 @@ async fn submit_order(
     let is_limit = options.limit;
     let is_fok = options.fill_or_kill;
     let limit_price = options.limit_price;
-    let prepared = prepare_market_match(&store, &symbol, &request, &options).await?;
-    let book = prepared.book;
-    let mut matched = prepared.matched;
-    let decision_timestamp = prepared.decision_timestamp;
-    let decision_price = prepared.decision_price;
-    let decision_mid_price = prepared.decision_mid_price;
-    let mut processing_timings_ms = prepared.processing_timings_ms;
-    let levels = match request.side {
-        TradeSide::Buy => &book.asks,
-        TradeSide::Sell => &book.bids,
-    };
-    let timestamp = now_ms().map_err(internal_error)?;
+    let mut processing_timings_ms = BTreeMap::new();
     // Reduce-only orders cannot consume additional buying power, so they do
     // not need an FX lookup before matching or ledger persistence.
     let capacity_rates = if request.reduce_only {
@@ -66,9 +65,7 @@ async fn submit_order(
         Some(rates)
     };
     let ledger_lock_started = Instant::now();
-    let mut ledger = store.ledger.try_lock().map_err(|_| {
-        (StatusCode::SERVICE_UNAVAILABLE, "Position ledger busy".to_owned())
-    })?;
+    let mut ledger = lock_order_ledger(&store.ledger).await?;
     processing_timings_ms.insert(
         "ledger_lock_wait".to_owned(),
         ledger_lock_started.elapsed().as_secs_f64() * 1_000.0,
@@ -76,14 +73,24 @@ async fn submit_order(
     if let Some(response) = request
         .client_order_id
         .as_deref()
-        .and_then(|id| existing_order_response(&ledger, id))
+        .and_then(|id| existing_order_response(&store, &ledger, id))
     {
         return Ok(Json(response));
     }
+    let prepared = prepare_market_match(&store, &symbol, &request, &options).await?;
+    let book = prepared.book;
+    let mut matched = prepared.matched;
+    let decision_timestamp = prepared.decision_timestamp;
+    let decision_price = prepared.decision_price;
+    let decision_mid_price = prepared.decision_mid_price;
+    processing_timings_ms.extend(prepared.processing_timings_ms);
+    let levels = match request.side {
+        TradeSide::Buy => &book.asks,
+        TradeSide::Sell => &book.bids,
+    };
+    let timestamp = now_ms().map_err(internal_error)?;
     if request.reduce_only {
-        let current_quantity = summarize_positions_from(
-            ledger.trades.iter().filter(|trade| trade.source == request.source),
-        )
+        let current_quantity = indexed_position_summary(&store, &ledger, Some(&request.source))
             .positions
             .into_iter()
             .find(|position| position.symbol == symbol)
@@ -160,8 +167,7 @@ async fn submit_order(
             reserve_price,
             taker_fee_rate,
             Some(&mut processing_timings_ms),
-        )
-        .await?;
+        )?;
     }
     processing_timings_ms.insert(
         "capacity_check".to_owned(),
@@ -211,9 +217,7 @@ async fn submit_order(
     // Retire them as soon as the authoritative auto ledger becomes flat, rather
     // than waiting for the next AutoTrader maintenance pass to notice.
     if request.source == "auto" {
-        let auto_quantity = summarize_positions_from(
-            ledger.trades.iter().filter(|trade| trade.source == "auto"),
-        )
+        let auto_quantity = indexed_position_summary(&store, &ledger, Some("auto"))
         .positions
         .into_iter()
         .find(|position| position.symbol == symbol)
@@ -286,7 +290,7 @@ async fn submit_order(
     }))
 }
 
-fn existing_order_response(ledger: &Ledger, client_order_id: &str) -> Option<OrderResponse> {
+fn existing_order_response(store: &PositionStore, ledger: &Ledger, client_order_id: &str) -> Option<OrderResponse> {
     let order = ledger
         .orders
         .iter()
@@ -297,11 +301,10 @@ fn existing_order_response(ledger: &Ledger, client_order_id: &str) -> Option<Ord
         .iter()
         .find(|order| order.parent_order_id.as_deref() == Some(client_order_id))
         .cloned();
-    let fills = ledger
-        .trades
-        .iter()
-        .filter(|trade| trade.parent_order_id.as_deref() == Some(client_order_id))
-        .collect::<Vec<_>>();
+    let fills = with_ledger_trade_index(store, ledger, |index| {
+        index.by_parent.get(client_order_id).into_iter().flatten()
+            .map(|&offset| &ledger.trades[offset]).collect::<Vec<_>>()
+    });
     if order.is_none() && barrier_order.is_none() && fills.is_empty() {
         return None;
     }
@@ -325,4 +328,35 @@ fn existing_order_response(ledger: &Ledger, client_order_id: &str) -> Option<Ord
         barrier_order,
         processing_timings_ms: BTreeMap::new(),
     })
+}
+
+
+#[cfg(test)]
+mod order_ledger_contention_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn submission_waits_for_a_busy_ledger() {
+        let ledger = Arc::new(Mutex::new(Ledger::default()));
+        let held = ledger.lock().await;
+        let pending_ledger = Arc::clone(&ledger);
+        let pending = tokio::spawn(async move {
+            lock_order_ledger(&pending_ledger).await.is_ok()
+        });
+        tokio::task::yield_now().await;
+        assert!(!pending.is_finished());
+        drop(held);
+        assert!(pending.await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn submission_rejects_prolonged_contention() {
+        let ledger = Mutex::new(Ledger::default());
+        let _held = ledger.lock().await;
+        let started = Instant::now();
+        let error = lock_order_ledger(&ledger).await.err().expect("busy ledger rejected");
+        assert_eq!(error.0, StatusCode::SERVICE_UNAVAILABLE);
+        assert!(started.elapsed() < Duration::from_millis(250));
+    }
+
 }

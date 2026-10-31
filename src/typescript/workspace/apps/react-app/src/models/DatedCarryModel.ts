@@ -3,7 +3,7 @@ import { currentAutoTraderSnapshot, subscribeAutoTraderStream } from '../auto_tr
 
 export type DatedCarryCandidate = {
   spot_symbol: string; future_symbol: string; expiry_ms: number; days_to_expiry: number;
-  quantity: number; spot_ask: number; future_bid: number; basis_percent: number;
+  quantity: number; spot_ask: number; future_bid: number; spot_bid?: number; future_ask?: number; basis_percent: number;
   net_after_budget_percent: number; eligible: boolean; reason: string;
 };
 export type DatedCarryPosition = {
@@ -11,6 +11,10 @@ export type DatedCarryPosition = {
   quantity: number; spot_entry_price: number; future_entry_price: number;
   entry_fees: number; status: string; spot_exit_twap?: number | null;
   settlement_price?: number | null; settlement_source?: string | null; net_pnl_usdt?: number | null;
+  spot_mark_bid?: number | null; future_mark_ask?: number | null;
+  spot_leg_pnl_usdt?: number | null; future_leg_pnl_usdt?: number | null;
+  estimated_exit_fees_usdt?: number | null; estimated_exit_slippage_usdt?: number | null;
+  marked_net_pnl_usdt?: number | null; mark_checked_at_ms?: number | null;
 };
 export type DatedCarryBook = {
   enabled: boolean; max_spot_notional_usdt: number; candidates: DatedCarryCandidate[];

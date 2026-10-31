@@ -246,7 +246,7 @@ async fn position_ui_stream(
 
 async fn position_ui_snapshot(store: &Arc<PositionStore>) -> serde_json::Value {
     let (positions, auto_positions, orders, trades, auto_trades, account) = {
-        let ledger = store.ledger.lock().await;
+        let (ledger, _, _) = snapshot_position_ledger(&store.ledger).await;
         let positions = cached_position_summary(store, &ledger, None);
         let auto_positions = cached_position_summary(store, &ledger, Some("auto"));
         let orders = OrdersResponse { orders: ledger.orders.clone(), barrier_orders: ledger.barrier_orders.clone() };
@@ -282,8 +282,11 @@ async fn hedge_candidates_snapshot(store: &Arc<PositionStore>) -> serde_json::Va
 
 async fn account_ui_snapshot(store: &Arc<PositionStore>, rates: &serde_json::Value) -> serde_json::Value {
     let rates = rates.get("rates").cloned().and_then(|rates| serde_json::from_value(rates).ok()).unwrap_or_default();
-    let ledger = store.ledger.lock().await;
-    serde_json::to_value(account_snapshot_with_rates(store, &ledger, &rates).ok()).unwrap_or(serde_json::Value::Null)
+    let account = {
+        let ledger = store.ledger.lock().await;
+        account_snapshot_with_rates(store, &ledger, &rates).ok()
+    };
+    serde_json::to_value(account).unwrap_or(serde_json::Value::Null)
 }
 
 async fn order_handler_timing(request: Request<Body>, next: Next) -> Response {

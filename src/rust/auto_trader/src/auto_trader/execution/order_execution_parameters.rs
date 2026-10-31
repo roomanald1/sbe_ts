@@ -203,7 +203,11 @@ async fn submit_configured_order(
     if !status.is_success() {
         return Err((
             StatusCode::BAD_GATEWAY,
-            format!("Configured paper order rejected ({status}): {payload}"),
+            format!(
+                "Configured paper order rejected ({status}): {}",
+                payload.get("error").and_then(serde_json::Value::as_str)
+                    .map(str::to_owned).unwrap_or_else(|| payload.to_string())
+            ),
         ));
     }
     if !payload.is_object() {

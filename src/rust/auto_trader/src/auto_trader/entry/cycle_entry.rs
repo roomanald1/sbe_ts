@@ -176,6 +176,63 @@ fn daily_strategy_candidates<'a>(signals: &[&'a Signal], settings: &Settings) ->
     candidates
 }
 
+async fn prefetch_daily_candidate_market_books(
+    client: &reqwest::Client,
+    position_url: &str,
+    dashboard: &Dashboard,
+    candidates: &[&Signal],
+    now: u64,
+) -> Dashboard {
+    let now_ms = now.saturating_mul(1_000);
+    let stale_symbols = candidates
+        .iter()
+        .map(|signal| signal.symbol.as_str())
+        .filter(|symbol| {
+            !dashboard.markets.get(*symbol).is_some_and(|market| {
+                let updated_at = market
+                    .get("updated_at_ms")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or_default();
+                updated_at > 0 && now_ms.saturating_sub(updated_at) <= 5_000
+            })
+        })
+        .map(str::to_owned)
+        .collect::<BTreeSet<_>>();
+    if stale_symbols.is_empty() {
+        return dashboard.clone();
+    }
+
+    // Daily strategy orders are still reserved and submitted in candidate
+    // priority order below. Only the independent market-book waits are
+    // parallelized so a slow symbol cannot add its polling timeout to every
+    // candidate behind it.
+    let mut tasks = JoinSet::new();
+    for symbol in stale_symbols {
+        let client = client.clone();
+        let position_url = position_url.to_owned();
+        tasks.spawn(async move {
+            let market = fresh_subscribed_market_book(&client, &position_url, &symbol).await;
+            (symbol, market)
+        });
+    }
+    let mut markets = (*dashboard.markets).clone();
+    while let Some(result) = tasks.join_next().await {
+        if let Ok((symbol, market)) = result {
+            if let Some(market) = market {
+                markets.insert(symbol, market);
+            } else {
+                // Record this cycle's failed fetch as fresh-but-empty, so the
+                // ordered submission pass skips it instead of retrying the
+                // same bounded polling loop serially for each strategy.
+                markets.insert(symbol, serde_json::json!({"updated_at_ms": now_ms}));
+            }
+        }
+    }
+    let mut prefetched = dashboard.clone();
+    prefetched.markets = Arc::new(markets);
+    prefetched
+}
+
 fn daily_agreement_size_multiplier(signal: &Signal, candidates: &[&Signal]) -> f64 {
     let agreeing_strategies = candidates
         .iter()
@@ -186,6 +243,47 @@ fn daily_agreement_size_multiplier(signal: &Signal, candidates: &[&Signal]) -> f
         .collect::<std::collections::BTreeSet<_>>()
         .len();
     (1.0 + agreeing_strategies.saturating_sub(1).min(2) as f64 * 0.1).min(1.2)
+}
+
+fn rebalance_trend_portfolio_candidate(
+    signal: &Signal,
+    dashboard: &Dashboard,
+    settings: &Settings,
+) -> Option<Signal> {
+    if signal.strategy.as_deref() != Some("risk-adjusted-trend-portfolio") {
+        return Some(signal.clone());
+    }
+    let weight = signal.strategy_decision.as_ref()?
+        .get("strategy_order_size_multiplier")?.as_f64()?;
+    let position = settings.strategy_positions.get(&signal.symbol)
+        .and_then(|lots| lots.get("risk-adjusted-trend-portfolio"))
+        .or_else(|| settings.positions.get(&signal.symbol)
+            .filter(|position| settings.strategy_positions.is_empty()
+                && position.strategy.as_deref() == Some("risk-adjusted-trend-portfolio")));
+    let usd_rate = quote_usd_rate(settings, &signal.symbol);
+    let current_value = if let Some(position) = position.filter(|position| position.quantity.abs() > 1e-12) {
+        let book = dashboard.markets.get(&signal.symbol)?;
+        let bid = book.get("bids")?.as_array()?.first()?.get("price")?.as_f64()?;
+        let ask = book.get("asks")?.as_array()?.first()?.get("price")?.as_f64()?;
+        let mid = (bid + ask) * 0.5;
+        if !mid.is_finite() || mid <= 0.0 { return None; }
+        position.quantity.abs() * mid * usd_rate
+    } else {
+        0.0
+    };
+    let target_value = daily_strategy_effective_budget(settings, "risk-adjusted-trend-portfolio") * weight;
+    let delta = target_value - current_value;
+    let rebalance_band = (target_value * 0.05).max(MIN_DEEP_BOOK_ORDER_NOTIONAL * usd_rate);
+    if !delta.is_finite() || delta.abs() < rebalance_band { return None; }
+    let mut adjusted = signal.clone();
+    adjusted.direction = if delta > 0.0 { "bullish" } else { "bearish" }.into();
+    let decision = adjusted.strategy_decision.get_or_insert_with(|| serde_json::json!({}));
+    if let Some(object) = decision.as_object_mut() {
+        object.insert("portfolio_rebalance_delta_usd".into(), serde_json::json!(delta.abs()));
+        object.insert("portfolio_rebalance_target_usd".into(), serde_json::json!(target_value));
+        object.insert("portfolio_rebalance_current_usd".into(), serde_json::json!(current_value));
+    }
+    Some(adjusted)
 }
 
 fn daily_strategy_batch_result(
@@ -433,19 +531,33 @@ async fn run_cycle_inner(
             );
             return Ok(skipped(&reason));
         }
+        let candidate_dashboard = prefetch_daily_candidate_market_books(
+            &client,
+            &position_url,
+            &dashboard,
+            &candidates,
+            now,
+        )
+        .await;
         let mut submitted = 0;
         let mut last_order = None;
         let mut details = Vec::new();
-        for signal in &candidates {
+        let rebalance_candidates = {
+            let settings = state.settings.lock().await;
+            candidates.iter().filter_map(|signal| {
+                rebalance_trend_portfolio_candidate(signal, &candidate_dashboard, &settings)
+            }).collect::<Vec<_>>()
+        };
+        for signal in &rebalance_candidates {
             let strategy_name = signal.strategy.as_deref().unwrap_or("unknown-strategy");
-            let mut sized_signal = (**signal).clone();
+            let mut sized_signal = signal.clone();
             let decision = sized_signal
                 .strategy_decision
                 .get_or_insert_with(|| serde_json::json!({}));
             if let Some(decision) = decision.as_object_mut() {
                 decision.insert(
                     "strategy_agreement_size_multiplier".into(),
-                    serde_json::json!(daily_agreement_size_multiplier(signal, &candidates)),
+                    serde_json::json!(if signal.strategy.as_deref() == Some("risk-adjusted-trend-portfolio") && decision.get("portfolio_rebalance_delta_usd").is_some() { 1.0 } else { daily_agreement_size_multiplier(signal, &candidates) }),
                 );
             }
             sized_signal.entry_gate = Some(serde_json::json!({
@@ -457,7 +569,7 @@ async fn run_cycle_inner(
                 state,
                 &client,
                 &position_url,
-                &dashboard,
+                &candidate_dashboard,
                 &sized_signal,
                 false,
                 false,

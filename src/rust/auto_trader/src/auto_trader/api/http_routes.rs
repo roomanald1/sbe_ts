@@ -343,6 +343,7 @@ pub fn router() -> Router {
             }
         }
     });
+    let alternatives = alternative_strategies::router(&state);
     Router::new()
         .route("/positions/auto-trader/stream", get(auto_trader_stream))
         .route("/positions/auto-trader", get(get_status).put(set_enabled))
@@ -376,6 +377,7 @@ pub fn router() -> Router {
         )
         .route("/positions/auto-trader/activity", get(get_activity))
         .with_state(state)
+        .merge(alternatives)
 }
 
 async fn receive_shadow_learning_outcome(

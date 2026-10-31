@@ -37,6 +37,12 @@ enum Strategy {
     Donchian20Sma200,
     #[serde(rename = "donchian-20-btc200")]
     Donchian20Btc200,
+    #[serde(rename = "donchian-10-btc200")]
+    Donchian10Btc200,
+    #[serde(rename = "donchian-20-btc200-hold3")]
+    Donchian20Btc200Hold3,
+    #[serde(rename = "risk-adjusted-trend-portfolio")]
+    RiskAdjustedTrendPortfolio,
     #[serde(rename = "trend-sleeves-btc200")]
     TrendSleevesBtc200,
     #[serde(rename = "trend-50-200")]
@@ -210,6 +216,21 @@ pub(super) mod strategy_donchian_20_btc200 {
         include!("strategy_donchian_20_btc200/parameters.rs");
     }
 }
+pub(super) mod strategy_donchian_10_btc200 {
+    pub(super) mod exit { include!("strategy_donchian_10_btc200/exit.rs"); }
+    pub(super) mod definition { include!("strategy_donchian_10_btc200/contract.rs"); }
+    pub(super) mod parameters { include!("strategy_donchian_10_btc200/parameters.rs"); }
+}
+pub(super) mod strategy_donchian_20_btc200_hold3 {
+    pub(super) mod exit { include!("strategy_donchian_20_btc200_hold3/exit.rs"); }
+    pub(super) mod definition { include!("strategy_donchian_20_btc200_hold3/contract.rs"); }
+    pub(super) mod parameters { include!("strategy_donchian_20_btc200_hold3/parameters.rs"); }
+}
+pub(super) mod strategy_risk_adjusted_trend_portfolio {
+    pub(super) mod exit { include!("strategy_risk_adjusted_trend_portfolio/exit.rs"); }
+    pub(super) mod definition { include!("strategy_risk_adjusted_trend_portfolio/contract.rs"); }
+    pub(super) mod parameters { include!("strategy_risk_adjusted_trend_portfolio/parameters.rs"); }
+}
 pub(super) mod strategy_trend_sleeves_btc200 {
     pub(super) mod exit {
         include!("strategy_trend_sleeves_btc200/exit.rs");
@@ -339,9 +360,24 @@ impl Strategy {
     fn uses_protective_stops(self) -> bool {
         match self {
             Self::Donchian20Btc200 => strategy_donchian_20_btc200::exit::uses_protective_stops(),
+            Self::Donchian10Btc200 => strategy_donchian_10_btc200::exit::uses_protective_stops(),
+            Self::Donchian20Btc200Hold3 => strategy_donchian_20_btc200_hold3::exit::uses_protective_stops(),
+            Self::RiskAdjustedTrendPortfolio => strategy_risk_adjusted_trend_portfolio::exit::uses_protective_stops(),
             Self::RiskAdjustedMonthlyMomentum => strategy_risk_adjusted_monthly_momentum::exit::uses_protective_stops(),
             _ => true,
         }
+    }
+
+    fn uses_fixed_take_profit(self) -> bool {
+        !matches!(
+            self,
+            Self::Donchian55Btc200
+                | Self::Donchian20Btc200
+                | Self::Donchian10Btc200
+                | Self::Donchian20Btc200Hold3
+                | Self::RiskAdjustedTrendPortfolio
+                | Self::RiskAdjustedMonthlyMomentum
+        )
     }
 
 }
@@ -375,7 +411,7 @@ static DATED_CARRY_DEFINITION: StrategyDefinition = StrategyDefinition {
     parameter_specs: dated_carry_no_parameters,
 };
 
-static STRATEGY_DEFINITIONS: [&StrategyDefinition; 15] = [
+static STRATEGY_DEFINITIONS: [&StrategyDefinition; 18] = [
     &strategy_live_insights::definition::DEFINITION,
     &strategy_live_momentum::definition::DEFINITION,
     &strategy_live_trade_flow::definition::DEFINITION,
@@ -385,6 +421,9 @@ static STRATEGY_DEFINITIONS: [&StrategyDefinition; 15] = [
     &strategy_donchian_55_btc200::definition::DEFINITION,
     &strategy_donchian_20_sma200::definition::DEFINITION,
     &strategy_donchian_20_btc200::definition::DEFINITION,
+    &strategy_donchian_10_btc200::definition::DEFINITION,
+    &strategy_donchian_20_btc200_hold3::definition::DEFINITION,
+    &strategy_risk_adjusted_trend_portfolio::definition::DEFINITION,
     &strategy_trend_sleeves_btc200::definition::DEFINITION,
     &strategy_trend_50_200::definition::DEFINITION,
     &strategy_relative_strength_90_sma200::definition::DEFINITION,

@@ -8,7 +8,15 @@ const DAILY_PAIRS: [(&str, &str); 7] = [
     ("ADA-USDT", "ADAUSDT"),
     ("DOGE-USDT", "DOGEUSDT"),
 ];
-const DAILY_STRATEGIES: [&str; 8] = [
+const TREND_PORTFOLIO_PAIRS: [(&str, &str); 16] = [
+    ("BTC-USDT", "BTCUSDT"), ("ETH-USDT", "ETHUSDT"), ("BNB-USDT", "BNBUSDT"),
+    ("XRP-USDT", "XRPUSDT"), ("ADA-USDT", "ADAUSDT"), ("SOL-USDT", "SOLUSDT"),
+    ("DOGE-USDT", "DOGEUSDT"), ("LTC-USDT", "LTCUSDT"), ("TRX-USDT", "TRXUSDT"),
+    ("LINK-USDT", "LINKUSDT"), ("BCH-USDT", "BCHUSDT"), ("XLM-USDT", "XLMUSDT"),
+    ("ETC-USDT", "ETCUSDT"), ("FIL-USDT", "FILUSDT"), ("AVAX-USDT", "AVAXUSDT"),
+    ("DOT-USDT", "DOTUSDT"),
+];
+const DAILY_STRATEGIES: [&str; 11] = [
     "donchian-55-btc200",
     "donchian-20-sma200",
     "donchian-20-btc200",
@@ -17,6 +25,9 @@ const DAILY_STRATEGIES: [&str; 8] = [
     "relative-strength-90-sma200",
     "risk-adjusted-monthly-momentum",
     "rsi2-oversold-rebound",
+    "donchian-20-btc200-hold3",
+    "risk-adjusted-trend-portfolio",
+    "donchian-10-btc200",
 ];
 
 #[derive(Clone, Deserialize)]
@@ -153,6 +164,49 @@ fn insight_realized_daily_volatility(bars: &[InsightDailyBar], days: usize) -> O
     (variance.is_finite() && variance > 0.0).then(|| variance.sqrt())
 }
 
+fn insight_trend_portfolio_weights(
+    candles: &BTreeMap<String, Vec<InsightDailyBar>>,
+) -> anyhow::Result<(InsightBtcRegime, BTreeMap<String, f64>)> {
+    let regime = insight_btc_regime(candles, 200)?;
+    let mut raw = BTreeMap::<String, f64>::new();
+    if regime.risk_on {
+        for &(_, pair) in &TREND_PORTFOLIO_PAIRS {
+            let Some(bars) = candles.get(pair) else { continue };
+            if bars.len() < 161 { continue; }
+            let close = bars.last().expect("nonempty history").close;
+            let score = [10, 20, 40, 80, 160].iter()
+                .map(|days| close / bars[bars.len() - 1 - days].close - 1.0)
+                .sum::<f64>() / 5.0;
+            let Some(volatility) = insight_realized_daily_volatility(bars, 30) else { continue };
+            let weight = score / volatility;
+            if score.is_finite() && score > 0.0 && weight.is_finite() && weight > 0.0 {
+                raw.insert(pair.to_owned(), weight);
+            }
+        }
+    }
+    let mut weights = BTreeMap::<String, f64>::new();
+    let mut remaining = 1.0;
+    while !raw.is_empty() && remaining > 1e-12 {
+        let total = raw.values().sum::<f64>();
+        if !total.is_finite() || total <= 0.0 { break; }
+        let capped = raw.iter().filter_map(|(pair, score)|
+            (*score / total * remaining >= 0.25).then_some(pair.clone())
+        ).collect::<Vec<_>>();
+        if capped.is_empty() {
+            for (pair, score) in raw {
+                weights.insert(pair, score / total * remaining);
+            }
+            break;
+        }
+        for pair in capped {
+            weights.insert(pair.clone(), 0.25);
+            remaining -= 0.25;
+            raw.remove(&pair);
+        }
+    }
+    Ok((regime, weights))
+}
+
 struct InsightRiskAdjustedCandidate {
     symbol: &'static str,
     momentum: f64,
@@ -278,6 +332,54 @@ fn insight_evaluate_daily(
                 active: regime.risk_on && passed,
                 btc_regime: Some(regime),
                 strategy_order_size_multiplier: None,
+                monthly_anchor_close_time_ms: None,
+            })
+        }
+        "donchian-20-btc200-hold3" => {
+            let regime = insight_btc_regime(candles, 200)?;
+            let level = insight_prior_high(bars, 20)?;
+            let passed = close > level;
+            Ok(InsightDailyEvaluation {
+                primary_rule: "Prior 20-day high; minimum 3-day hold".into(),
+                primary_level: level,
+                primary_passed: passed,
+                secondary_rule: None,
+                secondary_level: None,
+                active: regime.risk_on && passed,
+                btc_regime: Some(regime),
+                strategy_order_size_multiplier: Some(0.25),
+                monthly_anchor_close_time_ms: None,
+            })
+        }
+        "donchian-10-btc200" => {
+            let regime = insight_btc_regime(candles, 200)?;
+            let level = insight_prior_high(bars, 10)?;
+            let passed = close > level;
+            Ok(InsightDailyEvaluation {
+                primary_rule: "Prior 10-day high".into(),
+                primary_level: level,
+                primary_passed: passed,
+                secondary_rule: None,
+                secondary_level: None,
+                active: regime.risk_on && passed,
+                btc_regime: Some(regime),
+                strategy_order_size_multiplier: None,
+                monthly_anchor_close_time_ms: None,
+            })
+        }
+        "risk-adjusted-trend-portfolio" => {
+            let (regime, weights) = insight_trend_portfolio_weights(candles)?;
+            let weight = weights.get(pair).copied();
+            let active = weight.is_some();
+            Ok(InsightDailyEvaluation {
+                primary_rule: "Positive average 10/20/40/80/160-day return, inverse 30-day volatility weighted".into(),
+                primary_level: weight.unwrap_or(0.0),
+                primary_passed: active,
+                secondary_rule: Some("BTC above SMA200".into()),
+                secondary_level: Some(regime.sma),
+                active,
+                btc_regime: Some(regime),
+                strategy_order_size_multiplier: weight,
                 monthly_anchor_close_time_ms: None,
             })
         }
@@ -487,7 +589,12 @@ fn insight_daily_batch(
     {
         let mut diagnostic_symbols = Vec::new();
         let mut strategy_btc: Option<InsightBtcRegime> = None;
-        for &(symbol, pair) in &DAILY_PAIRS {
+        let pairs = if strategy == "risk-adjusted-trend-portfolio" {
+            &TREND_PORTFOLIO_PAIRS[..]
+        } else {
+            &DAILY_PAIRS[..]
+        };
+        for &(symbol, pair) in pairs {
             if strategy == "trend-sleeves-btc200"
                 && !matches!(symbol, "BTC-USDT" | "ETH-USDT" | "BNB-USDT")
             {
@@ -507,10 +614,17 @@ fn insight_daily_batch(
             if let Some(regime) = btc {
                 strategy_btc = Some(regime.clone());
             }
-            let primary_metric_value = (strategy == "rsi2-oversold-rebound").then(|| {
+            let primary_metric_value = if strategy == "rsi2-oversold-rebound" {
                 let period = insight_parameter(&parameters, "rsi_period_days", 2.0).round().max(2.0) as usize;
-                insight_rsi(bars, period)
-            });
+                Some(insight_rsi(bars, period))
+            } else if strategy == "risk-adjusted-trend-portfolio" {
+                evaluation.strategy_order_size_multiplier
+            } else { None };
+            let primary_metric_unit = if strategy == "rsi2-oversold-rebound" {
+                Some("RSI")
+            } else if strategy == "risk-adjusted-trend-portfolio" {
+                Some("target weight")
+            } else { None };
             let distance = if evaluation.primary_level > 0.0 {
                 match primary_metric_value {
                     Some(value) => (value / evaluation.primary_level - 1.0) * 100.0,
@@ -532,7 +646,7 @@ fn insight_daily_batch(
                 "primary_level": evaluation.primary_level,
                 "primary_distance_percent": distance,
                 "primary_metric_value": primary_metric_value,
-                "primary_metric_unit": primary_metric_value.map(|_| "RSI"),
+                "primary_metric_unit": primary_metric_unit,
                 "primary_passed": evaluation.primary_passed,
                 "secondary_rule": evaluation.secondary_rule,
                 "secondary_level": evaluation.secondary_level,
@@ -554,7 +668,7 @@ fn insight_daily_batch(
                 "primary_level": evaluation.primary_level,
                 "primary_distance_percent": distance,
                 "primary_metric_value": primary_metric_value,
-                "primary_metric_unit": primary_metric_value.map(|_| "RSI"),
+                "primary_metric_unit": primary_metric_unit,
                 "primary_passed": evaluation.primary_passed,
                 "secondary_rule": evaluation.secondary_rule,
                 "secondary_level": evaluation.secondary_level,
@@ -621,26 +735,32 @@ async fn poll_daily_strategy_signals(store: SignalStore) {
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         ticker.tick().await;
-        let now = now_ms();
         let result = async {
-            let (status_result, parameters_result, candles_result) = tokio::join!(
+            let (status_result, parameters_result) = tokio::join!(
                 client.get(format!("{auto}/positions/auto-trader")).send(),
                 client.get(format!("{auto}/positions/auto-trader/parameters")).send(),
-                client.get(format!("{feed}/market-data/daily-candles?symbols=BTCUSDT,ETHUSDT,BNBUSDT,XRPUSDT,SOLUSDT,ADAUSDT,DOGEUSDT")).send(),
             );
             let status = status_result?.error_for_status()?.json::<serde_json::Value>().await?;
             let parameters = parameters_result?.error_for_status()?.json::<serde_json::Value>().await?;
-            let mut candles = candles_result?.error_for_status()?
-                .json::<BTreeMap<String, Vec<InsightDailyBar>>>().await?;
-            for bars in candles.values_mut() {
-                bars.retain(|bar| bar.close_time_ms < now && bar.close.is_finite() && bar.close > 0.0
-                    && bar.high.is_finite() && bar.high > 0.0);
-                bars.sort_by_key(|bar| bar.close_time_ms);
-            }
             let strategies = status.get("strategies").and_then(serde_json::Value::as_array)
                 .into_iter().flatten().filter_map(|item| item.as_str().map(str::to_owned))
                 .collect::<Vec<_>>();
-            insight_daily_batch(&strategies, &parameters["strategy_profiles"], &candles, now)
+            let symbols = if strategies.iter().any(|strategy| strategy == "risk-adjusted-trend-portfolio") {
+                "BTCUSDT,ETHUSDT,BNBUSDT,XRPUSDT,ADAUSDT,SOLUSDT,DOGEUSDT,LTCUSDT,TRXUSDT,LINKUSDT,BCHUSDT,XLMUSDT,ETCUSDT,FILUSDT,AVAXUSDT,DOTUSDT"
+            } else {
+                "BTCUSDT,ETHUSDT,BNBUSDT,XRPUSDT,SOLUSDT,ADAUSDT,DOGEUSDT"
+            };
+            let mut candles = client.get(format!("{feed}/market-data/daily-candles?symbols={symbols}"))
+                .send().await?.error_for_status()?
+                .json::<BTreeMap<String, Vec<InsightDailyBar>>>().await?;
+            let candle_snapshot_at = now_ms();
+            for bars in candles.values_mut() {
+                bars.retain(|bar| bar.close_time_ms < candle_snapshot_at && bar.close.is_finite() && bar.close > 0.0
+                    && bar.high.is_finite() && bar.high > 0.0);
+                bars.sort_by_key(|bar| bar.close_time_ms);
+            }
+            let batch_as_of = now_ms();
+            insight_daily_batch(&strategies, &parameters["strategy_profiles"], &candles, batch_as_of)
         }.await;
         let (batch, audits) = match result {
             Ok(value) => value,
@@ -680,6 +800,7 @@ async fn poll_daily_strategy_signals(store: SignalStore) {
                 }
             }
         }
+        let now = now_ms();
         audited.retain(|key| {
             key.rsplit(':')
                 .next()

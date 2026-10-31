@@ -5,6 +5,13 @@ use axum::routing::get;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    let args = std::env::args().collect::<Vec<_>>();
+    if args.get(1).is_some_and(|arg| arg == "--replay-alternatives") {
+        anyhow::ensure!(args.len() == 4, "Usage: auto_trader --replay-alternatives INPUT.jsonl OUTPUT.json");
+        return auto_trader::alternative_strategies::replay::run(
+            std::path::Path::new(&args[2]), std::path::Path::new(&args[3]),
+        ).map_err(anyhow::Error::msg);
+    }
     let app = auto_trader::router()
         .route("/health", get(|| async { "ok" }))
         .route("/process-cpu-seconds", get(process_cpu_seconds));

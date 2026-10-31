@@ -1,6 +1,6 @@
 # Spot strategy candidates for the current AutoTrader
 
-Prepared 28 October 2026. Research only; no strategy was activated or traded for this review.
+Prepared 28 October 2026; 10-day follow-up added 30 October 2026. Research only; strategy selection and budgets remain user-controlled.
 
 ## Decision
 
@@ -22,6 +22,10 @@ The BTC gate is the previous BTC close above its trailing 200-close SMA. The new
 | Seven-asset buy-and-hold | -20.0% | +514.8% | -42.7% | -68.0% | -42.7% |
 
 The 20-day BTC-gated pulse was +14.1% in 2025 and +12.3% in 2026 through 27 October at 15 bp per side. It was flat in 2022 because BTC failed the gate. The 55-day BTC-gated rule was also positive in the three broad periods, which supports the **breakout plus risk gate family** more than any one exact lookback. The 20-day result is still selection-biased because it was compared after earlier 2025-26 results were known.
+
+### Higher-frequency 10-day variant
+
+A later cadence check compared a 10-day BTC-gated pulse using the same seven pairs, signal timing, fixed 1/7 sleeves, and fee model. It raised entries from about 4 to 5–11 per month, depending on period, while staying positive at 30 bp per side. At 15 bp per side it returned +15.0% in 2021-22, +38.2% in 2023-24, and +28.9% in 2025 through 27 October 2026. At 30 bp, those periods returned +9.9%, +24.3%, and +22.7%. This traded more often but underperformed the 20-day rule in 2021-22 and at 30 bp in all three periods. Treat it as an optional frequency experiment, not a replacement with established superiority. Exact results are in the [screen JSON](./spot_trailing_breakout_results.json) under `pulse10_btc200`.
 
 An [older three-asset check](./spot_trailing_breakout_results.json) used BTC, ETH and BNB from 27 May 2018 onward, when all three had 200 prior daily bars. The 20-day BTC-gated rule stayed in cash during the remaining 2018 bear window while matched buy-and-hold lost 59.8%. It made +6.0% in 2019 and +14.9% in 2020 at 15 bp per side, but those two years turned slightly negative at 50 bp per side. That is a useful older-regime check with a different asset universe, not a clean replication of the seven-asset portfolio.
 
@@ -76,5 +80,7 @@ The first script reads the retained archive and frozen recent snapshot. The 28 O
 ## Implementation update, 28 October 2026
 
 The researched rule is now implemented as the selectable paper strategy `donchian-20-btc200`. [Insights daily signals](../../src/rust/insights/src/daily_strategy_signals.rs) fix the lookback at 20 closed days and the BTC regime at 200 closed days. [The strategy contract](../../src/rust/auto_trader/src/auto_trader/strategies/strategy_donchian_20_btc200/contract.rs) uses its own active/inactive daily state for exits. AutoTrader does not apply its shared 0.5% stop or target to this strategy, and [protective-stop maintenance](../../src/rust/auto_trader/src/auto_trader/exits/protective_stop_maintenance.rs) does not arm a fixed barrier for its positions. This matches the signal-exit replay but permits larger losses between daily evaluations; the UI label states this explicitly.
+
+The 10-day variant is also selectable as `donchian-10-btc200` for a higher-frequency paper comparison. It uses the same BTC SMA200 gate and signal-based exit with a fixed 10-day high lookback; it has no fixed stop or target. Its historical screen results remain discovery evidence and do not remove the need for an untouched forward period.
 
 The new strategy is available in AutoTrader settings and order labels. Existing selected strategies and persisted paper positions were not changed. The services were not restarted, so the running binaries do not yet use this source change. Validation passed: the Insights rule test, 14 AutoTrader tests, both Rust builds, React typecheck, and ESLint on the three changed React files. The repository-wide React lint still has pre-existing errors outside those files.

@@ -5,8 +5,13 @@ fn signal_position_block_reason(
     strategy_key: &str,
     now_ms: u64,
 ) -> Option<String> {
+    let portfolio_rebalance = signal.strategy.as_deref() == Some("risk-adjusted-trend-portfolio")
+        && signal.strategy_decision.as_ref()
+            .and_then(|decision| decision.get("portfolio_rebalance_delta_usd"))
+            .and_then(serde_json::Value::as_f64)
+            .is_some_and(|delta| delta.is_finite() && delta > 0.0);
     let strategy_cooldown_ms = strategy_post_stop_cooldown_ms(strategy_key, &settings.orders);
-    if let Some(stopped_at) = settings
+    if !portfolio_rebalance { if let Some(stopped_at) = settings
         .orders
         .iter()
         .filter(|order| {
@@ -23,7 +28,7 @@ fn signal_position_block_reason(
         let seconds_remaining =
             strategy_cooldown_ms.saturating_sub(now_ms.saturating_sub(stopped_at)) / 1000;
         return Some(format!("Post-stop cooldown: {signal_key} / {strategy_key} paused for {seconds_remaining}s after a losing protective stop"));
-    }
+    }}
     let category = strategy_category(Some(strategy_key));
     let open_position_count = total_open_position_count(settings)
         + pending_entry_strategy_keys(settings).len();
@@ -71,20 +76,20 @@ fn signal_position_block_reason(
         .filter(|position| position.quantity.abs() > 1e-12)
     {
         let signal_quantity = if signal.direction == "bullish" { 1.0 } else { -1.0 };
-        if position.quantity.signum() != signal_quantity {
+        if position.quantity.signum() != signal_quantity && !portfolio_rebalance {
             return Some(format!("Opposite signal for {signal_key}; waiting for the other strategy lots to close"));
         }
     }
     if let Some(position) = strategy_position {
         let signal_quantity = if signal.direction == "bullish" { 1.0 } else { -1.0 };
-        if position.quantity.signum() != signal_quantity {
+        if position.quantity.signum() != signal_quantity && !portfolio_rebalance {
             return Some(format!("Opposite signal for {signal_key} / {strategy_key}"));
         }
         let strategy_entries = position.entries_by_category
             .get(strategy_category_key(category))
             .copied()
             .unwrap_or(position.entries);
-        if strategy_entries >= settings.max_entries_per_auto_position {
+        if !portfolio_rebalance && strategy_entries >= settings.max_entries_per_auto_position {
             return Some(format!("Add-on limit reached for {signal_key} / {strategy_key} ({strategy_entries} entries >= max {})", settings.max_entries_per_auto_position));
         }
     }

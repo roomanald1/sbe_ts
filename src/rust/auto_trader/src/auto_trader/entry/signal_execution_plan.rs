@@ -17,24 +17,25 @@ fn learned_strategy_size_multiplier(outcomes: &LearningStats) -> f64 {
 }
 
 fn strategy_learning_stats_across_symbols(settings: &Settings, strategy: Strategy) -> LearningStats {
-    let now_ms = current_time_ms();
-    settings
+    let mut recent_outcomes = settings
         .learning
         .iter()
         .filter(|(key, _)| {
             key.starts_with("trade:") && key.ends_with(&format!(":{}", strategy.as_str()))
         })
-        .map(|(_, stats)| {
-            let mut recent = stats.clone();
-            decay_learning_stats(&mut recent, now_ms);
-            recent
-        })
-        .fold(LearningStats::default(), |mut total, stats| {
-            total.samples += stats.samples;
-            total.positive += stats.positive;
-            total.realized_pnl += stats.realized_pnl;
-            total
-        })
+        .flat_map(|(_, stats)| stats.recent_trade_pnls.iter().copied())
+        .collect::<Vec<_>>();
+    recent_outcomes.sort_unstable_by(|left, right| right.0.cmp(&left.0));
+
+    let mut recent = LearningStats::default();
+    for (_, pnl) in recent_outcomes.into_iter().take(STRATEGY_SIZING_RECENT_TRADES) {
+        recent.samples += 1;
+        recent.realized_pnl += pnl;
+        if pnl > 0.0 {
+            recent.positive += 1;
+        }
+    }
+    recent
 }
 
 fn daily_strategy_effective_budget(settings: &Settings, strategy: &str) -> f64 {
@@ -65,11 +66,11 @@ fn signal_strategy_order_size_multiplier(
     decision: Option<&serde_json::Value>,
 ) -> Result<f64, String> {
     match strategy {
-        Some(Strategy::RiskAdjustedMonthlyMomentum) => decision
+        Some(Strategy::RiskAdjustedMonthlyMomentum | Strategy::Donchian20Btc200Hold3 | Strategy::RiskAdjustedTrendPortfolio) => decision
             .and_then(|decision| decision.get("strategy_order_size_multiplier"))
             .and_then(serde_json::Value::as_f64)
             .filter(|value| value.is_finite() && *value > 0.0 && *value <= 1.0)
-            .ok_or_else(|| "Monthly momentum signal is missing a valid volatility size multiplier".to_owned()),
+            .ok_or_else(|| "Research strategy signal is missing a valid size multiplier".to_owned()),
         _ => Ok(1.0),
     }
 }
@@ -129,8 +130,14 @@ async fn prepare_signal_execution_plan(
     let strategy = signal.strategy.as_deref().and_then(Strategy::from_name);
     let strategy_profile =
         strategy.map(|strategy| strategy_parameter_profile(&settings, &signal.symbol, strategy));
-    let strategy_order_size_multiplier =
-        signal_strategy_order_size_multiplier(strategy, signal.strategy_decision.as_ref())?;
+    let is_portfolio_rebalance = strategy == Some(Strategy::RiskAdjustedTrendPortfolio)
+        && signal.strategy_decision.as_ref()
+        .and_then(|decision| decision.get("portfolio_rebalance_delta_usd"))
+        .and_then(serde_json::Value::as_f64)
+        .is_some_and(|delta| delta.is_finite() && delta > 0.0);
+    let strategy_order_size_multiplier = if is_portfolio_rebalance { 1.0 } else {
+        signal_strategy_order_size_multiplier(strategy, signal.strategy_decision.as_ref())?
+    };
     let agreement_size_multiplier =
         signal_agreement_size_multiplier(strategy, signal.strategy_decision.as_ref())?;
     let stop_parameter = strategy_profile
@@ -245,12 +252,19 @@ async fn prepare_signal_execution_plan(
     } else {
         normal_order_cap
     };
+    let rebalance_delta = strategy
+        .filter(|kind| *kind == Strategy::RiskAdjustedTrendPortfolio)
+        .and_then(|_| signal.strategy_decision.as_ref())
+        .and_then(|decision| decision.get("portfolio_rebalance_delta_usd"))
+        .and_then(serde_json::Value::as_f64)
+        .filter(|delta| delta.is_finite() && *delta > 0.0);
     let risk_order_cap = (exploration_cap
         .min(settings.max_order_notional)
         .min(settings.max_order_notional * risk_fraction)
         * learned_size_multiplier
         * strategy_order_size_multiplier
-        * agreement_size_multiplier)
+        * if rebalance_delta.is_some() { 1.0 } else { agreement_size_multiplier })
+        .min(rebalance_delta.unwrap_or(f64::INFINITY))
         .min(settings.max_order_notional);
     let stop_headroom_multiplier = if strategy.is_some_and(|kind| !kind.uses_protective_stops()) {
         1.0
@@ -262,7 +276,7 @@ async fn prepare_signal_execution_plan(
     let category = strategy_category(signal.strategy.as_deref());
     let total_allocated = allocated_notional(&settings);
     let category_allocated = allocated_notional_for_category(&settings, Some(category));
-    let strategy_remaining_budget = signal
+    let strategy_remaining_budget = if rebalance_delta.is_some() { f64::INFINITY } else { signal
         .strategy
         .as_deref()
         .and_then(Strategy::from_name)
@@ -277,11 +291,15 @@ async fn prepare_signal_execution_plan(
             }
             _ => f64::INFINITY,
         })
-        .unwrap_or(f64::INFINITY);
-    let remaining_budget = (settings.daily_notional_limit - total_allocated)
-        .min(category_notional_limit(&settings, category) - category_allocated)
-        .min(strategy_remaining_budget)
-        .max(0.0);
+        .unwrap_or(f64::INFINITY) };
+    let remaining_budget = if rebalance_delta.is_some() && signal.direction == "bearish" {
+        f64::INFINITY
+    } else {
+        (settings.daily_notional_limit - total_allocated)
+            .min(category_notional_limit(&settings, category) - category_allocated)
+            .min(strategy_remaining_budget)
+            .max(0.0)
+    };
     let mut notional = risk_order_cap.min(remaining_budget / stop_headroom_multiplier);
     // Size against the unlearned stop so a wider validated stop does not
     // silently increase the dollar risk of the position.
@@ -335,6 +353,7 @@ async fn prepare_signal_execution_plan(
             let effective_take_profit_percent = confidence_adjusted_take_profit_percent(
                 &settings.closed_trade_returns_percent,
                 horizon_take_profit_percent.unwrap_or(configured_target),
+                effective_stop_loss_percent,
             );
             (effective_take_profit_percent, horizon_take_profit_percent)
         };

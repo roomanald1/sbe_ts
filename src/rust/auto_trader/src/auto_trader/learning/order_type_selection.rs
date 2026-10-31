@@ -38,7 +38,6 @@ fn choose_parameter_profile(
 }
 
 fn choose_order_type(signal: &Signal, risk_appetite: f64) -> AutoOrderType {
-    let ranging = signal.ranging_probability.unwrap_or(0.0);
     let volatility = signal.components.volatility_1m_percent.unwrap_or(0.0).abs();
     let trend_units = signal
         .components
@@ -46,17 +45,11 @@ fn choose_order_type(signal: &Signal, risk_appetite: f64) -> AutoOrderType {
         .unwrap_or(0.0)
         .abs();
     let momentum = signal.components.momentum_10s_percent.unwrap_or(0.0).abs();
-    let mispricing = signal
-        .components
-        .mispricing_vs_vwap_bps
-        .unwrap_or(0.0)
-        .abs();
     let pressure = signal
         .components
         .pressure_without_price_move
         .unwrap_or(0.0)
         .abs();
-    let aggressor_cost = signal.components.aggressor_cost_bps.unwrap_or(0.0).abs();
     let strength_scale = risk_floor_scale(risk_appetite);
     if risk_appetite >= AGGRESSIVE_ORDER_PRIORITY_APPETITE {
         if trend_units >= ORDER_STOP_MARKET_TREND_UNITS
@@ -75,26 +68,10 @@ fn choose_order_type(signal: &Signal, risk_appetite: f64) -> AutoOrderType {
             return AutoOrderType::Ioc;
         }
     }
-    let post_only_range = (ORDER_POST_ONLY_RANGE
-        + ORDER_POST_ONLY_RANGE_RISK_ADJUSTMENT * risk_appetite / 100.0)
-        .clamp(0.0, 1.0);
-    let gtd_range = (ORDER_GTD_RANGE
-        + ORDER_GTD_RANGE_RISK_ADJUSTMENT * risk_appetite / 100.0)
-        .clamp(0.0, 1.0);
-    let limit_range = (ORDER_LIMIT_RANGE
-        + ORDER_LIMIT_RANGE_RISK_ADJUSTMENT * risk_appetite / 100.0)
-        .clamp(0.0, 1.0);
-    if ranging >= post_only_range && aggressor_cost >= ORDER_POST_ONLY_AGGRESSOR_COST_BPS {
-        AutoOrderType::PostOnlyLimit
-    } else if ranging >= gtd_range
-        && mispricing >= ORDER_GTD_MIN_MISPRICING_BPS
-        && mispricing < ORDER_GTD_MAX_MISPRICING_BPS
-        && aggressor_cost < ORDER_POST_ONLY_AGGRESSOR_COST_BPS
-    {
-        AutoOrderType::Gtd
-    } else if ranging >= limit_range && mispricing >= ORDER_GTD_MAX_MISPRICING_BPS {
-        AutoOrderType::Limit
-    } else if volatility >= ORDER_STOP_LIMIT_VOLATILITY_PERCENT
+    // Use passive maker execution by default to reduce fee drag. The explicit
+    // high urgency rules below, learned alternatives, and large-order
+    // scheduling still provide routes to faster execution.
+    if volatility >= ORDER_STOP_LIMIT_VOLATILITY_PERCENT
         && trend_units >= ORDER_STOP_LIMIT_TREND_UNITS
     {
         AutoOrderType::StopLimit
@@ -110,16 +87,8 @@ fn choose_order_type(signal: &Signal, risk_appetite: f64) -> AutoOrderType {
         && signal.strength >= ORDER_IOC_STRENGTH * strength_scale
     {
         AutoOrderType::Ioc
-    } else if signal.strength >= ORDER_VWAP_STRENGTH * strength_scale {
-        AutoOrderType::Vwap
-    } else if ranging >= ORDER_TWAP_RANGE {
-        AutoOrderType::Twap
-    } else if volatility >= ORDER_TRAILING_VOLATILITY_PERCENT {
-        AutoOrderType::TrailingStop
-    } else if signal.strength >= ORDER_FOK_STRENGTH * strength_scale {
-        AutoOrderType::Fok
     } else {
-        AutoOrderType::Ioc
+        AutoOrderType::PostOnlyLimit
     }
 }
 

@@ -127,6 +127,11 @@ fn record_learning_outcome(stats: &mut LearningStats, realized_pnl: f64) {
     stats.daily_samples += 1;
     stats.daily_realized_pnl += realized_pnl;
     stats.samples += 1;
+    stats.recent_trade_pnls.push((now_ms, realized_pnl));
+    if stats.recent_trade_pnls.len() > STRATEGY_SIZING_RECENT_TRADES {
+        let excess = stats.recent_trade_pnls.len() - STRATEGY_SIZING_RECENT_TRADES;
+        stats.recent_trade_pnls.drain(0..excess);
+    }
     if realized_pnl > 0.0 {
         stats.positive += 1;
         stats.daily_positive += 1;

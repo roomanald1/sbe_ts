@@ -21,6 +21,7 @@
 
 ## Running the full stack
 
+- Do not start, stop, restart, or otherwise cycle running services unless the user explicitly instructs you to do so. This includes `./start-all.sh`, `./stop-all.sh`, Compose commands, and service-specific process commands. If a task appears to need a restart, explain that and leave the services running until explicitly asked.
 - Start the complete local stack from the repository root with `./start-all.sh`. It builds and starts the monitoring Compose services, backend services, and React app. Keep the terminal running to supervise the stack; use Ctrl+C or `./stop-all.sh` to stop it.
 - Stop the stack from the repository root with `./stop-all.sh`. This stops this repository backend and UI processes and tears down its monitoring Compose services.
 - Before starting, ensure `monitoring/.env` exists. Create it from `monitoring/.env.example` and set a unique Grafana password when needed.

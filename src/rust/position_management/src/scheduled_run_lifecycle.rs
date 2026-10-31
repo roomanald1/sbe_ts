@@ -108,9 +108,8 @@ async fn start_scheduled_run(
             "Live reference price unavailable for VWAP".into(),
         ));
     }
-    let mut account_ledger = store.ledger.try_lock().map_err(|_| {
-        (StatusCode::SERVICE_UNAVAILABLE, "Position ledger busy".to_owned())
-    })?;
+    let capacity_rates = cached_usd_rates_for_order().await?.rates;
+    let mut account_ledger = lock_order_ledger(&store.ledger).await?;
     if let Some(client_order_id) = request.client_order_id.as_deref() {
         if let Some(existing) = account_ledger
             .scheduled_runs
@@ -120,16 +119,17 @@ async fn start_scheduled_run(
             return Ok(Json(existing.clone()));
         }
     }
-    ensure_paper_capacity(
+    ensure_paper_capacity_with_rates(
         &store,
         &account_ledger,
+        &capacity_rates,
         &symbol,
         &request.side,
         request.quantity,
         price,
         configured_fee_rates().taker,
-    )
-    .await?;
+        None,
+    )?;
     let mut vwap_runs = store.vwap_runs.try_lock().map_err(|_| {
         (StatusCode::SERVICE_UNAVAILABLE, "VWAP reservations busy".to_owned())
     })?;

@@ -3,6 +3,7 @@ use std::collections::BTreeSet;
 
 const CARRY_SIGNAL_DAY_MS: u64 = 86_400_000;
 const CARRY_SIGNAL_COST_PERCENT: f64 = 0.5;
+const CARRY_MIN_DAYS_TO_EXPIRY: f64 = 7.0;
 
 #[derive(Serialize)]
 struct CarryEntryCandidate {
@@ -13,6 +14,8 @@ struct CarryEntryCandidate {
     quantity: f64,
     spot_ask: f64,
     future_bid: f64,
+    spot_bid: f64,
+    future_ask: f64,
     basis_percent: f64,
     net_after_budget_percent: f64,
     eligible: bool,
@@ -74,7 +77,7 @@ async fn carry_entry_signals(
     let exchange = carry_market_json(client, "https://fapi.binance.com/fapi/v1/exchangeInfo").await?;
     let symbols = exchange.get("symbols").and_then(serde_json::Value::as_array)
         .ok_or_else(|| anyhow::anyhow!("Futures exchangeInfo symbols missing"))?;
-    let mut signals = Vec::new();
+    let mut contracts = Vec::new();
     for symbol in symbols {
         let Some(future_symbol) = symbol.get("symbol").and_then(serde_json::Value::as_str) else { continue };
         let spot_symbol = if future_symbol.starts_with("BTCUSDT_") { "BTCUSDT" }
@@ -84,7 +87,16 @@ async fn carry_entry_signals(
         let Some(expiry_ms) = symbol.get("deliveryDate").and_then(serde_json::Value::as_u64) else { continue };
         if expiry_ms <= now { continue; }
         let days = (expiry_ms - now) as f64 / CARRY_SIGNAL_DAY_MS as f64;
-        if !(58.0..=62.0).contains(&days) { continue; }
+        if days < CARRY_MIN_DAYS_TO_EXPIRY { continue; }
+        contracts.push((spot_symbol, future_symbol, expiry_ms, days, symbol));
+    }
+    // Scan only the nearest quarterly expiry for each underlying. This keeps
+    // the carry signal focused while allowing entries throughout its lifecycle.
+    contracts.sort_by_key(|(_, _, expiry_ms, _, _)| *expiry_ms);
+    let mut selected_spots = BTreeSet::new();
+    let mut signals = Vec::new();
+    for (spot_symbol, future_symbol, expiry_ms, days, symbol) in contracts {
+        if !selected_spots.insert(spot_symbol) { continue; }
         let spot_url = format!("https://api.binance.com/api/v3/depth?symbol={spot_symbol}&limit=100");
         let future_url = format!("https://fapi.binance.com/fapi/v1/depth?symbol={future_symbol}&limit=100");
         let (spot_result, future_result) = tokio::join!(
@@ -94,12 +106,16 @@ async fn carry_entry_signals(
         let spot_book = spot_result?;
         let future_book = future_result?;
         let asks = carry_book_levels(&spot_book, "asks");
+        let spot_bids = carry_book_levels(&spot_book, "bids");
         let bids = carry_book_levels(&future_book, "bids");
+        let future_asks = carry_book_levels(&future_book, "asks");
         let Some(best_ask) = asks.first().map(|item| item.0) else { continue };
         let step = carry_future_step(symbol);
         let quantity = ((size / (best_ask * 1.0005)) / step).floor() * step;
         let Some(spot_ask) = carry_book_walk(&asks, quantity) else { continue };
         let Some(future_bid) = carry_book_walk(&bids, quantity) else { continue };
+        let Some(spot_bid) = carry_book_walk(&spot_bids, quantity) else { continue };
+        let Some(future_ask) = carry_book_walk(&future_asks, quantity) else { continue };
         let basis_percent = (future_bid / spot_ask - 1.0) * 100.0;
         let net_after_budget_percent = basis_percent - CARRY_SIGNAL_COST_PERCENT;
         let eligible = net_after_budget_percent > 0.0;
@@ -111,6 +127,8 @@ async fn carry_entry_signals(
             quantity,
             spot_ask,
             future_bid,
+            spot_bid,
+            future_ask,
             basis_percent,
             net_after_budget_percent,
             eligible,

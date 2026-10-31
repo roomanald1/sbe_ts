@@ -19,6 +19,8 @@ use tokio::{
     time::{Duration, interval},
 };
 
+pub(crate) mod alternative_strategies;
+
 include!("auto_trader/constants.rs");
 include!("auto_trader/market_data.rs");
 include!("auto_trader/daily_strategy_models.rs");
@@ -58,7 +60,7 @@ mod strategy_cleanup_integration_tests {
         StatusCode::NO_CONTENT
     }
 
-    fn test_state(settings: Settings) -> AutoTraderState {
+    pub(super) fn test_state(settings: Settings) -> AutoTraderState {
         let (audit_tx, _) = mpsc::channel(1);
         let (execution_audit_tx, _) = mpsc::unbounded_channel();
         let (state_updates, _) = tokio::sync::broadcast::channel(1);
@@ -93,7 +95,7 @@ mod strategy_cleanup_integration_tests {
         }
     }
 
-    fn order(strategy: &str, timestamp: u64) -> TraderOrder {
+    pub(super) fn order(strategy: &str, timestamp: u64) -> TraderOrder {
         TraderOrder {
             timestamp, triggered_at: None, symbol: "BTC-USDT".into(), side: "sell".into(),
             order_type: "stop-market".into(), purpose: "stop-loss".into(), strategy: Some(strategy.into()),

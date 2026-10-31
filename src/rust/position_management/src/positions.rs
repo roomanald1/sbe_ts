@@ -57,6 +57,8 @@ include!("twap_execution.rs");
 
 include!("vwap_execution.rs");
 
+include!("ledger_trade_index.rs");
+
 include!("account_snapshot.rs");
 
 include!("account_capacity.rs");

@@ -1,0 +1,191 @@
+{
+  "data": {
+    "spot_source": "retained Binance BTCUSDT daily candles plus 2026-10-28 snapshot",
+    "implied_vol_source": "Deribit public/get_volatility_index_data, currency BTC, resolution 1D",
+    "dvol_range": [
+      "2021-03-24",
+      "2026-10-29"
+    ],
+    "dvol_first_available_date": "2021-03-24",
+    "execution": "prior daily close signal and volatility, next open exposure, open-to-next-open returns",
+    "position_rule": "60-day positive BTC time-series momentum; 50% annualized volatility target; exposure capped at 100%",
+    "costs": "15/30/50 bp per side on absolute exposure change"
+  },
+  "option_premium_proxy": {
+    "observations": 66,
+    "mean_dvol_percent": 58.69772727272727,
+    "mean_next_30d_realized_vol_percent": 52.093195974573625,
+    "mean_spread_volatility_points": 6.60453129815365,
+    "median_spread_volatility_points": 8.855676874327088,
+    "positive_spread_percent": 65.15151515151516,
+    "correlation_dvol_forward_realized_vol": 0.5906732590725419,
+    "interpretation": "Descriptive volatility spread only; not option premium P&L."
+  },
+  "risk_sizing_results": {
+    "15": {
+      "fixed": {
+        "2021-03-24-to-2022": {
+          "net_return_percent": -30.020878428176722,
+          "max_drawdown_percent": -60.59218312619647,
+          "days": 647
+        },
+        "2023-2024": {
+          "net_return_percent": 229.02913205527295,
+          "max_drawdown_percent": -37.97515126853028,
+          "days": 731
+        },
+        "2025-to-2026-10-28": {
+          "net_return_percent": 13.082600932127919,
+          "max_drawdown_percent": -28.516453652456963,
+          "days": 665
+        }
+      },
+      "realized_vol_target": {
+        "2021-03-24-to-2022": {
+          "net_return_percent": -38.391792151706824,
+          "max_drawdown_percent": -58.385790040259835,
+          "days": 647
+        },
+        "2023-2024": {
+          "net_return_percent": 212.15623985032502,
+          "max_drawdown_percent": -33.547653605385264,
+          "days": 731
+        },
+        "2025-to-2026-10-28": {
+          "net_return_percent": 12.831994926897906,
+          "max_drawdown_percent": -28.516453652456985,
+          "days": 665
+        }
+      },
+      "dvol_target": {
+        "2021-03-24-to-2022": {
+          "net_return_percent": -26.75031610856734,
+          "max_drawdown_percent": -46.75343556431065,
+          "days": 647
+        },
+        "2023-2024": {
+          "net_return_percent": 184.48409926751194,
+          "max_drawdown_percent": -33.500456126439815,
+          "days": 731
+        },
+        "2025-to-2026-10-28": {
+          "net_return_percent": 11.769983252513372,
+          "max_drawdown_percent": -28.51645365245702,
+          "days": 665
+        }
+      }
+    },
+    "30": {
+      "fixed": {
+        "2021-03-24-to-2022": {
+          "net_return_percent": -33.30775484021531,
+          "max_drawdown_percent": -61.81689448944721,
+          "days": 647
+        },
+        "2023-2024": {
+          "net_return_percent": 209.3606026868972,
+          "max_drawdown_percent": -40.62121623953687,
+          "days": 731
+        },
+        "2025-to-2026-10-28": {
+          "net_return_percent": 9.239282318209273,
+          "max_drawdown_percent": -30.1113588224039,
+          "days": 665
+        }
+      },
+      "realized_vol_target": {
+        "2021-03-24-to-2022": {
+          "net_return_percent": -41.168531965498566,
+          "max_drawdown_percent": -59.595725555046286,
+          "days": 647
+        },
+        "2023-2024": {
+          "net_return_percent": 192.88049377783233,
+          "max_drawdown_percent": -36.25717296434788,
+          "days": 731
+        },
+        "2025-to-2026-10-28": {
+          "net_return_percent": 8.989627967344571,
+          "max_drawdown_percent": -30.111358822403933,
+          "days": 665
+        }
+      },
+      "dvol_target": {
+        "2021-03-24-to-2022": {
+          "net_return_percent": -29.456204701450474,
+          "max_drawdown_percent": -48.067844085303626,
+          "days": 647
+        },
+        "2023-2024": {
+          "net_return_percent": 164.36547807547007,
+          "max_drawdown_percent": -36.25855881572285,
+          "days": 731
+        },
+        "2025-to-2026-10-28": {
+          "net_return_percent": 7.936592588356417,
+          "max_drawdown_percent": -30.11135882240388,
+          "days": 665
+        }
+      }
+    },
+    "50": {
+      "fixed": {
+        "2021-03-24-to-2022": {
+          "net_return_percent": -37.45841897145564,
+          "max_drawdown_percent": -63.39354961906692,
+          "days": 647
+        },
+        "2023-2024": {
+          "net_return_percent": 184.91139880167884,
+          "max_drawdown_percent": -43.98026521540239,
+          "days": 731
+        },
+        "2025-to-2026-10-28": {
+          "net_return_percent": 4.308825230921665,
+          "max_drawdown_percent": -32.32108998782065,
+          "days": 665
+        }
+      },
+      "realized_vol_target": {
+        "2021-03-24-to-2022": {
+          "net_return_percent": -44.681692726493814,
+          "max_drawdown_percent": -61.15668850324278,
+          "days": 647
+        },
+        "2023-2024": {
+          "net_return_percent": 168.9830732943879,
+          "max_drawdown_percent": -39.70409645079359,
+          "days": 731
+        },
+        "2025-to-2026-10-28": {
+          "net_return_percent": 4.060886405993913,
+          "max_drawdown_percent": -32.321089987820606,
+          "days": 665
+        }
+      },
+      "dvol_target": {
+        "2021-03-24-to-2022": {
+          "net_return_percent": -32.9126148387836,
+          "max_drawdown_percent": -49.77198570421194,
+          "days": 647
+        },
+        "2023-2024": {
+          "net_return_percent": 139.7051804995259,
+          "max_drawdown_percent": -39.76417663494867,
+          "days": 731
+        },
+        "2025-to-2026-10-28": {
+          "net_return_percent": 3.021001803093215,
+          "max_drawdown_percent": -32.32108998782057,
+          "days": 665
+        }
+      }
+    }
+  },
+  "limitations": [
+    "The DVOL index is not a complete historical options surface or executable option quote.",
+    "No entry/exit bid-ask, option-specific fees, delta hedging, margin, or tail-loss P&L is modeled for option selling.",
+    "The DVOL strategy starts on the first date with available prior-day DVOL, 2021-03-24; its first period is shorter than the existing BTC trend replay.",
+    "This historical test uses Binance BTC spot returns, not OKX fills, and the latest dates were examined in prior research."
+  ]
+}

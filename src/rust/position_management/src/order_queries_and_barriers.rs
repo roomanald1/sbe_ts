@@ -74,17 +74,19 @@ async fn create_profit_barrier(
     };
     store.ensure_subscription(&symbol);
     let timestamp = now_ms().map_err(internal_error)?;
+    let capacity_rates = cached_usd_rates_for_order().await?.rates;
     let mut ledger = store.ledger.lock().await;
-    ensure_paper_capacity(
+    ensure_paper_capacity_with_rates(
         &store,
         &ledger,
+        &capacity_rates,
         &symbol,
         &side,
         quantity,
         trigger_price,
         configured_fee_rates().taker,
-    )
-    .await?;
+        None,
+    )?;
     let barrier_order = BarrierOrder {
         id: format!("barrier-{timestamp}-{}", ledger.barrier_orders.len()),
         symbol,

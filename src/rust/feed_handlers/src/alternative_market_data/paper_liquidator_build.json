@@ -1,0 +1,14 @@
+{
+  "compiler": "0.8.30",
+  "compiler_sha256": "0xf3e987dc6ecebd4bd350c48edcbc320b46cf9e3109bd3fc3d88f1acaf4c428f7",
+  "evm_version": "paris",
+  "source_sha256": "21d577a3bbc5c5a49cb4705dc67ffdfc9f423cc8e4ec7932fc244a830d393916",
+  "method_identifiers": {
+    "probe()": "b74af5a9",
+    "simulate(address,address,address,address,uint256,address,uint24)": "2ab10875",
+    "simulateStaking(uint256)": "71860d85"
+  },
+  "via_ir": true,
+  "optimizer_runs": 200,
+  "runtime_sha256": "519b9e22d4a71253f01ec13fc666e26b3930e4e3d5201c184c7ee2156ec3bf2c"
+}

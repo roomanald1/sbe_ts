@@ -12,6 +12,10 @@ struct DatedCarryCandidate {
     quantity: f64,
     spot_ask: f64,
     future_bid: f64,
+    #[serde(default)]
+    spot_bid: f64,
+    #[serde(default)]
+    future_ask: f64,
     basis_percent: f64,
     net_after_budget_percent: f64,
     eligible: bool,
@@ -37,6 +41,22 @@ struct DatedCarryPosition {
     net_pnl_usdt: Option<f64>,
     #[serde(default)]
     settlement_source: Option<String>,
+    #[serde(default)]
+    spot_mark_bid: Option<f64>,
+    #[serde(default)]
+    future_mark_ask: Option<f64>,
+    #[serde(default)]
+    spot_leg_pnl_usdt: Option<f64>,
+    #[serde(default)]
+    future_leg_pnl_usdt: Option<f64>,
+    #[serde(default)]
+    estimated_exit_fees_usdt: Option<f64>,
+    #[serde(default)]
+    estimated_exit_slippage_usdt: Option<f64>,
+    #[serde(default)]
+    marked_net_pnl_usdt: Option<f64>,
+    #[serde(default)]
+    mark_checked_at_ms: Option<u64>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -71,6 +91,36 @@ fn carry_now_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64
+}
+
+fn update_dated_carry_mark(
+    position: &mut DatedCarryPosition,
+    spot_mark_bid: f64,
+    future_mark_ask: f64,
+    checked_at_ms: u64,
+) {
+    if !spot_mark_bid.is_finite() || spot_mark_bid <= 0.0
+        || !future_mark_ask.is_finite() || future_mark_ask <= 0.0
+    {
+        return;
+    }
+    let quantity = position.quantity;
+    let spot_leg_pnl = quantity * (spot_mark_bid - position.spot_entry_price);
+    let future_leg_pnl = quantity * (position.future_entry_price - future_mark_ask);
+    let exit_fees = quantity * (0.001 * spot_mark_bid + 0.0005 * future_mark_ask);
+    let exit_slippage = quantity * CARRY_ENTRY_SLIPPAGE * (spot_mark_bid + future_mark_ask);
+    let net = spot_leg_pnl + future_leg_pnl - position.entry_fees - exit_fees - exit_slippage;
+    if [spot_leg_pnl, future_leg_pnl, exit_fees, exit_slippage, net].iter().any(|value| !value.is_finite()) {
+        return;
+    }
+    position.spot_mark_bid = Some(spot_mark_bid);
+    position.future_mark_ask = Some(future_mark_ask);
+    position.spot_leg_pnl_usdt = Some(spot_leg_pnl);
+    position.future_leg_pnl_usdt = Some(future_leg_pnl);
+    position.estimated_exit_fees_usdt = Some(exit_fees);
+    position.estimated_exit_slippage_usdt = Some(exit_slippage);
+    position.marked_net_pnl_usdt = Some(net);
+    position.mark_checked_at_ms = Some(checked_at_ms);
 }
 
 fn dated_carry_path(settings_path: &PathBuf) -> PathBuf {
@@ -160,6 +210,14 @@ async fn receive_dated_carry_signal(
             book.checked_at_ms = emitted_at_ms;
             book.last_error = last_error;
             if book.last_error.is_none() {
+                for position in book.positions.iter_mut().filter(|position| position.status == "open") {
+                    if let Some(candidate) = candidates.iter().find(|candidate| {
+                        candidate.future_symbol == position.future_symbol
+                            && candidate.spot_symbol == position.spot_symbol
+                    }) {
+                        update_dated_carry_mark(position, candidate.spot_bid, candidate.future_ask, emitted_at_ms);
+                    }
+                }
                 book.candidates = candidates;
             }
             changed = true;
@@ -171,11 +229,15 @@ async fn receive_dated_carry_signal(
             if !candidate.quantity.is_finite()
                 || !candidate.spot_ask.is_finite()
                 || !candidate.future_bid.is_finite()
+                || !candidate.spot_bid.is_finite()
+                || !candidate.future_ask.is_finite()
                 || !candidate.basis_percent.is_finite()
                 || !candidate.net_after_budget_percent.is_finite()
                 || candidate.quantity <= 0.0
                 || candidate.spot_ask <= 0.0
                 || candidate.future_bid <= 0.0
+                || candidate.spot_bid <= 0.0
+                || candidate.future_ask <= 0.0
                 || candidate.expiry_ms <= now_ms
                 || candidate.spot_symbol != "BTCUSDT" && candidate.spot_symbol != "ETHUSDT"
                 || !candidate.future_symbol.starts_with(&format!("{}_", candidate.spot_symbol))
@@ -183,8 +245,8 @@ async fn receive_dated_carry_signal(
                 return Err((StatusCode::BAD_REQUEST, "Invalid dated carry entry signal".into()));
             }
             let days = (candidate.expiry_ms - now_ms) as f64 / CARRY_DAY_MS as f64;
-            if !(58.0..=62.0).contains(&days) {
-                return Err((StatusCode::BAD_REQUEST, "Carry entry outside the expiry window".into()));
+            if days < 7.0 {
+                return Err((StatusCode::BAD_REQUEST, "Carry entry inside the 7-day expiry cutoff".into()));
             }
             book.checked_at_ms = emitted_at_ms;
             book.last_error = None;
@@ -218,7 +280,7 @@ async fn receive_dated_carry_signal(
                     "entry_fees": fees,
                     "signal_basis_percent": candidate.basis_percent,
                 }));
-                book.positions.push(DatedCarryPosition {
+                let mut position = DatedCarryPosition {
                     spot_symbol: candidate.spot_symbol,
                     future_symbol: candidate.future_symbol,
                     expiry_ms: candidate.expiry_ms,
@@ -232,7 +294,17 @@ async fn receive_dated_carry_signal(
                     settlement_price: None,
                     net_pnl_usdt: None,
                     settlement_source: None,
-                });
+                    spot_mark_bid: None,
+                    future_mark_ask: None,
+                    spot_leg_pnl_usdt: None,
+                    future_leg_pnl_usdt: None,
+                    estimated_exit_fees_usdt: None,
+                    estimated_exit_slippage_usdt: None,
+                    marked_net_pnl_usdt: None,
+                    mark_checked_at_ms: None,
+                };
+                update_dated_carry_mark(&mut position, candidate.spot_bid, candidate.future_ask, emitted_at_ms);
+                book.positions.push(position);
                 changed = true;
             }
         }

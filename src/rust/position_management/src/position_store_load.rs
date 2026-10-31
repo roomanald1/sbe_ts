@@ -1,3 +1,39 @@
+// Trades are append-only after load. Capture metadata and its trade cutoff
+// together, then copy that immutable prefix in short, fair lock acquisitions.
+async fn snapshot_position_ledger(ledger: &Mutex<Ledger>) -> (Ledger, f64, f64) {
+    let wait_started = Instant::now();
+    let guard = ledger.lock().await;
+    let mut wait_ms = wait_started.elapsed().as_secs_f64() * 1_000.0;
+    let hold_started = Instant::now();
+    let trade_count = guard.trades.len();
+    let mut snapshot = Ledger {
+        trades: Vec::new(),
+        initial_cash: guard.initial_cash,
+        topups: guard.topups.clone(),
+        max_leverage: guard.max_leverage,
+        orders: guard.orders.clone(),
+        barrier_orders: guard.barrier_orders.clone(),
+        scheduled_runs: guard.scheduled_runs.clone(),
+    };
+    drop(guard);
+    let mut max_hold_ms = hold_started.elapsed().as_secs_f64() * 1_000.0;
+    // Allocation and all report calculations happen without the ledger lock.
+    snapshot.trades.reserve_exact(trade_count);
+    while snapshot.trades.len() < trade_count {
+        tokio::task::yield_now().await;
+        let start = snapshot.trades.len();
+        let end = (start + 128).min(trade_count);
+        let wait_started = Instant::now();
+        let guard = ledger.lock().await;
+        wait_ms += wait_started.elapsed().as_secs_f64() * 1_000.0;
+        let hold_started = Instant::now();
+        snapshot.trades.extend_from_slice(&guard.trades[start..end]);
+        drop(guard);
+        max_hold_ms = max_hold_ms.max(hold_started.elapsed().as_secs_f64() * 1_000.0);
+    }
+    (snapshot, wait_ms, max_hold_ms)
+}
+
 fn record_position_persistence_sample(
     samples: &StdMutex<BTreeMap<String, Vec<f64>>>,
     phase: &str,
@@ -136,9 +172,8 @@ impl PositionStore {
             persistence_notify: Arc::new(Notify::new()),
             state_updates,
             persistence_timings_ms: Arc::new(StdMutex::new(BTreeMap::new())),
-            account_ledger_cache: StdMutex::new(None),
+            trade_index: StdMutex::new(LedgerTradeIndex::default()),
             realized_pnl_cache: StdMutex::new(None),
-            positions_cache: StdMutex::new(None),
             books: StdRwLock::new(HashMap::new()),
             price_samples: Mutex::new(HashMap::new()),
             hedge_samples: Mutex::new(HashMap::new()),
@@ -147,6 +182,10 @@ impl PositionStore {
             spot_symbols,
             vwap_runs: Mutex::new(vwap_runs),
         };
+        {
+            let ledger = store.ledger.lock().await;
+            with_ledger_trade_index(&store, &ledger, |_| ());
+        }
         let writer_ledger = Arc::clone(&store.ledger);
         let writer_notify = Arc::clone(&store.persistence_notify);
         let writer_timings = Arc::clone(&store.persistence_timings_ms);
@@ -157,27 +196,15 @@ impl PositionStore {
                 writer_notify.notified().await;
                 // Let a burst of fills and book updates collapse into one current snapshot.
                 tokio::time::sleep(Duration::from_millis(10)).await;
-                let lock_wait_started = Instant::now();
-                let ledger_guard = Arc::clone(&writer_ledger).lock_owned().await;
-                record_position_persistence_sample(
-                    &writer_timings,
-                    "snapshot_lock_wait",
-                    lock_wait_started.elapsed().as_secs_f64() * 1_000.0,
-                );
                 let copy_started = Instant::now();
-                let ledger_snapshot =
-                    match tokio::task::spawn_blocking(move || ledger_guard.clone()).await {
-                        Ok(snapshot) => snapshot,
-                        Err(error) => {
-                            crate::service_log!(
-                                "ERROR",
-                                "Position ledger snapshot copier failed: {error}"
-                            );
-                            tokio::time::sleep(Duration::from_secs(1)).await;
-                            writer_notify.notify_one();
-                            continue;
-                        }
-                    };
+                let (ledger_snapshot, wait_ms, max_hold_ms) =
+                    snapshot_position_ledger(&writer_ledger).await;
+                record_position_persistence_sample(
+                    &writer_timings, "snapshot_lock_wait", wait_ms,
+                );
+                record_position_persistence_sample(
+                    &writer_timings, "snapshot_max_lock_hold", max_hold_ms,
+                );
                 record_position_persistence_sample(
                     &writer_timings,
                     "snapshot_copy",
@@ -287,4 +314,35 @@ fn persist_ledger_bytes(path: &std::path::Path, bytes: Vec<u8>) -> anyhow::Resul
     std::fs::write(&temp, bytes)?;
     std::fs::rename(temp, path)?;
     Ok(())
+}
+
+
+#[cfg(test)]
+mod ledger_snapshot_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn batched_snapshot_keeps_cutoff_consistent_during_append() {
+        let trade: PositionTrade = serde_json::from_value(serde_json::json!({
+            "id": "original", "symbol": "BTC-USDT", "side": "buy",
+            "quantity": 1.0, "execution_price": 100.0, "timestamp": 1
+        })).unwrap();
+        let ledger = Mutex::new(Ledger {
+            trades: vec![trade.clone(); 300],
+            initial_cash: 1000.0,
+            ..Ledger::default()
+        });
+        let (snapshot, ()) = tokio::join!(
+            snapshot_position_ledger(&ledger),
+            async {
+                let mut ledger = ledger.lock().await;
+                ledger.trades.push(trade);
+                ledger.initial_cash = 2000.0;
+            }
+        );
+        assert_eq!(snapshot.0.trades.len(), 300);
+        assert_eq!(snapshot.0.initial_cash, 1000.0);
+        assert!(snapshot.0.trades.iter().all(|trade| trade.id == "original"));
+        assert_eq!(ledger.lock().await.trades.len(), 301);
+    }
 }

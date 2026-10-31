@@ -17,6 +17,9 @@ fn strategy_from_entry_context(context: &str) -> Option<String> {
         "donchian-55-btc200",
         "donchian-20-sma200",
         "donchian-20-btc200",
+        "donchian-10-btc200",
+        "donchian-20-btc200-hold3",
+        "risk-adjusted-trend-portfolio",
         "trend-sleeves-btc200",
         "trend-50-200",
         "relative-strength-90-sma200",
@@ -44,6 +47,13 @@ fn apply_auto_fill(
     let old = position.quantity;
     let incoming = if side == "buy" { quantity } else { -quantity };
     if old == 0.0 || old.signum() == incoming.signum() {
+        if position.entry_order_types.is_empty() && !position.entry_order_type.is_empty() {
+            position.entry_order_types.push(position.entry_order_type.split(" · ").next().unwrap_or(&position.entry_order_type).to_owned());
+        }
+        let entry_kind = order_type.split(" · ").next().unwrap_or(order_type).to_owned();
+        if !position.entry_order_types.iter().any(|kind| kind == &entry_kind) {
+            position.entry_order_types.push(entry_kind);
+        }
         // A changed entry basis starts a fresh profit-protection trail.
         position.profit_protection_peak_return_percent = None;
         if old == 0.0 {
@@ -119,6 +129,7 @@ fn apply_auto_fill(
         position.total_fees_paid = fee - closing_fee;
         position.total_entry_fees_paid = fee - closing_fee;
         position.entry_order_type = order_type.to_owned();
+        position.entry_order_types = vec![order_type.split(" · ").next().unwrap_or(order_type).to_owned()];
         position.entry_context = context.to_owned();
         position.scout_entry = context.starts_with("scout:");
         position.entries = 1;

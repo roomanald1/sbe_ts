@@ -91,27 +91,27 @@ async fn submit_barrier_order(
     } else {
         None
     };
+    let capacity_rates = cached_usd_rates_for_order().await?.rates;
     let timestamp = now_ms().map_err(internal_error)?;
-    let mut ledger = store.ledger.try_lock().map_err(|_| {
-        (StatusCode::SERVICE_UNAVAILABLE, "Position ledger busy".to_owned())
-    })?;
+    let mut ledger = lock_order_ledger(&store.ledger).await?;
     if let Some(response) = request
         .client_order_id
         .as_deref()
-        .and_then(|id| existing_order_response(&ledger, id))
+        .and_then(|id| existing_order_response(&store, &ledger, id))
     {
         return Ok(Json(response));
     }
-    ensure_paper_capacity(
+    ensure_paper_capacity_with_rates(
         &store,
         &ledger,
+        &capacity_rates,
         &symbol,
         &request.side,
         request.quantity,
         stop_limit_price.unwrap_or(trigger_price),
         configured_fee_rates().taker,
-    )
-    .await?;
+        None,
+    )?;
     let barrier_order = BarrierOrder {
         id: format!("barrier-{timestamp}-{}", ledger.barrier_orders.len()),
         symbol,

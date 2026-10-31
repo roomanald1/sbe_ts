@@ -30,7 +30,7 @@ async fn get_realized_pnl(
         ));
     }
     let since_ms = query.since_ms.unwrap_or(0);
-    let ledger = store.ledger.lock().await;
+    let (ledger, _, _) = snapshot_position_ledger(&store.ledger).await;
     let snapshot = {
         let mut cache = store
             .realized_pnl_cache
@@ -54,15 +54,16 @@ async fn get_realized_pnl(
                 })
                 .cloned()
                 .collect::<Vec<_>>();
+            let trade_count = ledger.trades.len();
+            let barrier_count = ledger.barrier_orders.len();
+            let barrier_created_at = ledger.barrier_orders.iter()
+                .map(|barrier| (barrier.id.clone(), barrier.created_at.to_string()))
+                .collect::<HashMap<_, _>>();
+            drop(ledger);
             trades.sort_by_key(|trade| trade.timestamp);
             let mut positions = BTreeMap::<String, Position>::new();
             let mut today_by_quote = BTreeMap::<String, f64>::new();
             let mut today_by_parent_order = BTreeMap::<String, f64>::new();
-            let barrier_created_at = ledger
-                .barrier_orders
-                .iter()
-                .map(|barrier| (barrier.id.clone(), barrier.created_at.to_string()))
-                .collect::<HashMap<_, _>>();
             let mut today_by_barrier_created_at = BTreeMap::<String, f64>::new();
             let mut all_time_by_quote = BTreeMap::<String, f64>::new();
             for trade in &trades {
@@ -103,8 +104,8 @@ async fn get_realized_pnl(
                 }
             }
             *cache = Some(RealizedPnlLedgerSnapshot {
-                trade_count: ledger.trades.len(),
-                barrier_count: ledger.barrier_orders.len(),
+                trade_count,
+                barrier_count,
                 source: query.source.clone(),
                 since_ms,
                 today_by_quote,
@@ -112,13 +113,14 @@ async fn get_realized_pnl(
                 today_by_barrier_created_at,
                 all_time_by_quote,
             });
+        } else {
+            drop(ledger);
         }
         cache
             .as_ref()
             .expect("realized P&L cache populated")
             .clone()
     };
-    drop(ledger);
     let rates = get_usd_rates().await?.0.rates;
     let convert_usd = |totals: &BTreeMap<String, f64>| -> Option<f64> {
         totals.iter().try_fold(0.0, |sum, (quote, amount)| {
@@ -141,32 +143,7 @@ fn cached_position_summary(
     ledger: &Ledger,
     source: Option<&str>,
 ) -> PositionsResponse {
-    let source = source.map(str::to_owned);
-    let mut cache = store
-        .positions_cache
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    if cache
-        .as_ref()
-        .is_none_or(|snapshot| snapshot.trade_count != ledger.trades.len())
-    {
-        *cache = Some(PositionSummarySnapshot {
-            trade_count: ledger.trades.len(),
-            by_source: HashMap::new(),
-        });
-    }
-    let snapshot = cache.as_mut().expect("position summary cache populated");
-    if !snapshot.by_source.contains_key(&source) {
-        let response = summarize_positions_from(ledger.trades.iter().filter(|trade| {
-            source.as_deref().is_none_or(|source| trade.source == source)
-        }));
-        snapshot.by_source.insert(source.clone(), response);
-    }
-    snapshot
-        .by_source
-        .get(&source)
-        .expect("position summary inserted")
-        .clone()
+    indexed_position_summary(store, ledger, source)
 }
 
 async fn get_positions(

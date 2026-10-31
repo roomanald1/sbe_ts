@@ -67,6 +67,43 @@ Reproduce with:
 
 The next strategies with plausible external evidence are either already represented in the app's research (trend, funding/carry, mean reversion) or require a different execution/data stack (cross-venue arbitrage, multi-asset spot shorting, minute-level microstructure). The local results do not justify turning a strategy on live. The new risk-adjusted rotation is a paper candidate only, and the bracket check below identifies a required exit-policy change. These are historical screens with overlapping periods, not out-of-sample profit guarantees.
 
+## Reviewed longer-horizon portfolio ideas (31 October 2026)
+
+Three additional monthly/quarterly concepts were screened after the previous review. All returns below are compounded within each date block. Costs are modeled at 15 or 30 bp per side on traded weight; they combine a fee scenario and assumed slippage, not verified OKX fills.
+
+| Strategy and implementation tested | Period | Net return, 15 bp/side | Net return, 30 bp/side | Decision |
+|---|---|---:|---:|---|
+| Quarterly rebalance to equal BTC/ETH/BNB weights | 2018–19 / 2020–22 / 2023–24 / 2025–26 to Oct 28 | -29.1% / +916.5% / +268.5% / -8.6% | -29.3% / +913.6% / +268.2% / -8.7% | Rejected: it lagged the matched non-rebalanced equal-initial-weight basket in three of four blocks. It reduced the basket's 2023–24 drawdown (about -40% to -32%) while improving that block's return, but did not transfer to the other blocks. |
+| Drawdown ladder on equal BTC/ETH/BNB sleeves: target 25% exposure per completed 10% drawdown from the running all-time high; return to cash at a new high | 2018–19 / 2020–22 / 2023–24 / 2025–26 to Oct 28 | -32.3% / +135.0% / +204.3% / -1.1% | -33.7% / +124.9% / +198.9% / -2.8% | Rejected: lower recent drawdown than the matched buy-and-hold basket (-40% versus -58% in the latest block), but it lost money in 2018–19 and the latest block and gave up most 2020–22 gains. This is a drawdown-triggered exposure rule, not recurring-contribution DCA. |
+| Quarterly rebalance into equal-weight top five assets ranked in the point-in-time CoinMarketCap top 100 by trailing 26-week return; stablecoins excluded; missing next top-500 marks treated as total loss | 2020–22 / 2023–24 / 2025–26 to Oct 18 | +480.8% / +102.2% / -45.4% | +467.2% / +98.8% / -46.3% | Rejected: strong earlier blocks did not persist. Two holdings were missing from the next top-500 snapshot; only 12, 8 and 7 quarter observations were available in the respective blocks. |
+
+The BTC/ETH/BNB market-data screens use today's surviving assets. The point-in-time momentum screen reduces that particular selection bias, but snapshot marks are not executable prices and do not resolve token identity, liquidity or delisting uncertainty. None of these results justifies adding a selectable paper strategy. The original scripts for the in-session comparison were not retained; the values are exploratory and should be rerun from a versioned screen before being used as a benchmark.
+
+## Additional strategy ideas screened (31 October 2026)
+
+These long-horizon ideas were screened against the equal-initial-weight BTC/ETH/BNB buy-and-hold basket. Returns are net of modeled costs at 15 or 30 bp per side; the figures are exploratory, and no strategy was added to AutoTrader.
+
+| Idea tested | Periods tested | Net return at 15 bp/side | Net return at 30 bp/side | Review |
+|---|---|---:|---:|---|
+| Quarterly rebalance to one-third BTC, ETH and BNB | 2018–19 / 2020–22 / 2023–24 / 2025–26 to Oct 28 | -29.1% / +916.5% / +268.5% / -8.6% | -29.3% / +913.6% / +268.2% / -8.7% | Beat the non-rebalanced basket only in 2023–24; rejected as inconsistent. |
+| All-time-high drawdown ladder: raise each BTC/ETH/BNB sleeve by 25% per completed 10% drawdown, return to cash on a new high | Same periods | -32.3% / +135.0% / +204.3% / -1.1% | -33.7% / +124.9% / +198.9% / -2.8% | Reduced the latest-block drawdown, but lost in 2018–19 and the latest block and gave up most 2020–22 gains. This is not recurring-contribution DCA. |
+| Quarterly top-five momentum from a point-in-time top-100 universe, ranked on trailing 26-week returns | 2020–22 / 2023–24 / 2025–26 to Oct 18 | +480.8% / +102.2% / -45.4% | +467.2% / +98.8% / -46.3% | Large later loss; two selected assets lacked a next top-500 mark and were treated as total losses. Only 12, 8 and 7 quarter observations in these periods. |
+
+The BTC/ETH/BNB tests use today's surviving assets. Point-in-time momentum reduces survivorship bias, but snapshot prices are not executable and do not resolve token identity or liquidity changes. Fee/slippage rates are scenarios, not account-specific OKX execution costs. The comparison scripts used for this screen were temporary and were not retained; rerun and version the source before using these figures as a baseline.
+
+## Options-premium and implied-volatility sizing review (31 October 2026)
+
+Deribit BTC daily DVOL history is available from 24 March 2021 in the public volatility-index endpoint. The index is an implied-volatility measure, not an executable option-chain history. The current test joins it to retained Binance BTC spot candles.
+
+| Idea tested | Net result at 15 bp/side | Net result at 30 bp/side | Review |
+|---|---|---|---|
+| Sell option premium when implied volatility exceeds subsequent realized volatility | Not established | Not established | The descriptive proxy from 66 month-end observations is unchanged: mean DVOL 58.7%, mean following 30-day realized volatility 52.1%, mean spread +6.6 volatility points (median +8.9; positive in 65.2% of observations). A subsequent 30-day ATM inverse iron-fly replay used Deribit historical option trade candles, the month's last-Friday expiry, approximately 5%-OTM wings, historical instrument taker fees and published delivery prices. Only **1 of 66** monthly entry dates had first-trade candles for all four legs. That one sample returned +0.66% of BTC notional on opening-price fills, but -0.90% under an adverse within-day OHLC fill stress. One trade is not evidence of profitability. A naked short-straddle diagnostic also had only one priced trade and lost 24.3% of notional; it is not a defined-risk result and is not suitable for a conclusion. Do not implement. |
+| Size a long-only BTC 60-day time-series-momentum sleeve to 50% annualized volatility using prior-day DVOL; cap exposure at 100% | 2021-03-24–2022: -26.8%; 2023–24: +184.5%; 2025–26 to Oct 28: +11.8% | -29.5%; +164.4%; +7.9% | Risk overlay only: reduced 2021–22 maximum drawdown from -60.6% fixed exposure to -46.8%, but returned less than fixed exposure in 2023–24 and the later block. It did not establish a separate return edge. |
+
+For comparison, fixed BTC exposure returned -30.0%, +229.0%, and +13.1% in those periods at 15 bp per side; sizing from trailing realized volatility returned -38.4%, +212.2%, and +12.8%. At 30 bp per side those matched-period results were -33.3%, +209.4%, +9.2% fixed and -41.2%, +192.9%, +9.0% realized-vol sized. The first block begins on the first date with prior-day DVOL available (24 March 2021), so it is shorter than the existing BTC trend screen's 2021–22 block.
+
+Reproduce the DVOL analysis with `python3 research/autotrader/dvol_risk_sizing_screen.py` and the option trade-candle probe with `python3 research/autotrader/deribit_iron_fly_history_screen.py`. The latter saves [the result JSON](./deribit_iron_fly_history_results.json) and [entry candles](./data/deribit_ironfly_entry_candles.json). Deribit documents its historical instrument/trade API and delivery prices; option trade candles are not historical bid/ask quotes. The sample is too sparse for a meaningful spread P&L estimate, so neither options idea was implemented.
+
 
 ## Candidate found: risk-adjusted monthly momentum rotation
 

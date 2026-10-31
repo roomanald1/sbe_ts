@@ -50,13 +50,35 @@ async fn get_activity(State(state): State<AutoTraderState>) -> Json<ActivityResp
     let ActivityPositionSnapshot {
         mut orders,
         auto_positions,
-        strategy_positions,
+        mut strategy_positions,
         open_position_symbols,
         position_exit_policies,
     } = {
         let settings = state.settings.lock().await;
         snapshot_activity_positions(&settings, today_start)
     };
+    let carry_positions = state.dated_carry.lock().await.positions.clone();
+    strategy_positions.extend(carry_positions.into_iter()
+        .filter(|position| position.status.eq_ignore_ascii_case("open"))
+        .map(|position| {
+            OpenStrategyPosition {
+                symbol: position.future_symbol.clone(),
+                strategy: "dated-futures-carry".into(),
+                decision_id: Some(format!("dated-carry:{}", position.future_symbol)),
+                quantity: position.quantity,
+                average_entry_price: position.spot_entry_price,
+                entry_fees: -position.entry_fees.abs(),
+                entry_timestamp_ms: position.entry_ms,
+                entry_order_type: "dated-carry".into(),
+                entry_order_types: vec!["dated-carry".into()],
+                stop_loss_percent: None,
+                take_profit_percent: None,
+                horizon_take_profit_percent: None,
+                stop_loss_active: false,
+                take_profit_active: false,
+                carry_details: Some(position),
+            }
+        }));
     let position_url =
         std::env::var("POSITION_MANAGEMENT_URL").unwrap_or_else(|_| "http://127.0.0.1:3002".into());
     apply_protection_order_failure_reasons(

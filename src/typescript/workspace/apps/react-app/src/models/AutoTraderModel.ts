@@ -28,7 +28,7 @@ export type AutoTraderLatestExecutionParameters = { timestamp: number; symbol: s
 export type AutoTraderStrategyParameter = { key: string; label: string; value: number; learned_value: number; configured_value?: number | null; default_value: number; min: number; max: number; step: number; unit: string; overridden: boolean };
 export type AutoTraderStrategyProfile = { symbol: string; strategy: Strategy; learning_samples: number; positive_rate?: number; parameters: AutoTraderStrategyParameter[] };
 export type AutoTraderDecisionParameters = { refreshed_at: number; thresholds: AutoTraderDecisionParameter[]; contexts: AutoTraderContextParameters[]; strategy_profiles: AutoTraderStrategyProfile[]; active_exit_policy: { stop_loss_percent: number; take_profit_percent: number }; latest_execution?: AutoTraderLatestExecutionParameters };
-export type Strategy = 'live-insights' | 'live-momentum' | 'live-trade-flow' | 'live-order-book' | 'live-vwap-dislocation' | 'live-absorption-pressure' | 'donchian-55-btc200' | 'donchian-20-sma200' | 'donchian-20-btc200' | 'trend-sleeves-btc200' | 'trend-50-200' | 'relative-strength-90-sma200' | 'risk-adjusted-monthly-momentum' | 'rsi2-oversold-rebound' | 'dated-futures-carry';
+export type Strategy = 'live-insights' | 'live-momentum' | 'live-trade-flow' | 'live-order-book' | 'live-vwap-dislocation' | 'live-absorption-pressure' | 'donchian-55-btc200' | 'donchian-20-sma200' | 'donchian-20-btc200' | 'donchian-10-btc200' | 'donchian-20-btc200-hold3' | 'risk-adjusted-trend-portfolio' | 'trend-sleeves-btc200' | 'trend-50-200' | 'relative-strength-90-sma200' | 'risk-adjusted-monthly-momentum' | 'rsi2-oversold-rebound' | 'dated-futures-carry';
 export type StrategyBudget = { strategy: Strategy; base_budget: number; effective_budget: number; used_notional: number; learning_multiplier: number; learning_samples: number; positive_rate?: number | null; realized_pnl: number };
 export type ClosedStrategyOutcome = { trades: number; wins: number; losses: number; flat: number; winRate: number; averageReturn: number };
 export type StrategyDiagnostic = {
@@ -205,7 +205,20 @@ export class AutoTraderModel {
 
   setMaxConcurrentShadowSamples(maxConcurrentShadowSamples: string) { this.limitsDirty = true; this.state$.next({ ...this.state$.value, maxConcurrentShadowSamples }); }
 
-  setStrategies(strategies: Strategy[]) { this.limitsDirty = true; this.state$.next({ ...this.state$.value, strategies }); }
+  setStrategies(strategies: Strategy[]) {
+    this.limitsDirty = true;
+    const current = this.state$.value;
+    const dailyStrategyBudgets = { ...current.dailyStrategyBudgets };
+    const intradayStrategyBudgets = { ...current.intradayStrategyBudgets };
+    for (const strategy of strategies) {
+      if (strategy.startsWith('live-')) {
+        intradayStrategyBudgets[strategy] ??= '0';
+      } else if (strategy !== 'dated-futures-carry') {
+        dailyStrategyBudgets[strategy] ??= '0';
+      }
+    }
+    this.state$.next({ ...current, strategies, dailyStrategyBudgets, intradayStrategyBudgets });
+  }
 
   setClosedTradeWindow(closedTradeWindow: string) { this.limitsDirty = true; this.state$.next({ ...this.state$.value, closedTradeWindow }); }
   setMaxEntriesPerPosition(maxEntriesPerPosition: string) { this.limitsDirty = true; this.state$.next({ ...this.state$.value, maxEntriesPerPosition }); }

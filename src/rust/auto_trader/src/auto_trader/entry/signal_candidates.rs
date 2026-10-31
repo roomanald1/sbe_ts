@@ -3,6 +3,16 @@ fn daily_signal_candidate(signal: &Signal) -> bool {
         && signal.strategy.as_deref().is_some_and(is_independent_daily_strategy)
 }
 
+fn signal_max_age_seconds(signal: &Signal) -> u64 {
+    if signal.strategy.as_deref().and_then(Strategy::from_name)
+        .is_some_and(|strategy| !strategy.is_live_insight() && !strategy.is_dated_carry())
+    {
+        MAX_DAILY_SIGNAL_AGE_SECONDS
+    } else {
+        MAX_SIGNAL_AGE_SECONDS
+    }
+}
+
 fn signal_allowed_by_positions(
     signal: &Signal,
     open_positions: &BTreeMap<String, TraderPosition>,
@@ -18,6 +28,11 @@ fn signal_allowed_by_positions(
         });
     };
     let category = strategy_category(Some(strategy_key));
+    let has_portfolio_weight = signal.strategy.as_deref() == Some("risk-adjusted-trend-portfolio")
+        && signal.strategy_decision.as_ref()
+            .and_then(|decision| decision.get("strategy_order_size_multiplier"))
+            .and_then(serde_json::Value::as_f64)
+            .is_some_and(|weight| weight.is_finite() && (0.0..=0.25).contains(&weight));
     let aggregate_position = open_positions.get(&signal.symbol);
     if aggregate_position.is_some_and(|position| position.quantity.signum() != direction) {
         return false;
@@ -32,7 +47,7 @@ fn signal_allowed_by_positions(
             }));
         return strategy_position.is_none_or(|position| {
             position.quantity.signum() == direction
-                && position_entries_for_category(position, category) < max_entries_per_auto_position
+                && (has_portfolio_weight || position_entries_for_category(position, category) < max_entries_per_auto_position)
         });
     }
     aggregate_position.is_none_or(|position| {
@@ -60,7 +75,8 @@ fn collect_signal_candidates<'a>(
             if is_stablecoin_pair(&signal.symbol) {
                 return false;
             }
-            if signal.stale || now.saturating_sub(signal.timestamp / 1000) > MAX_SIGNAL_AGE_SECONDS
+            let max_age = signal_max_age_seconds(signal);
+            if signal.stale || now.saturating_sub(signal.timestamp / 1000) > max_age
             {
                 stale_signal_count += 1;
                 let age = now.saturating_sub(signal.timestamp / 1000);
@@ -92,7 +108,7 @@ fn collect_signal_candidates<'a>(
             if is_stablecoin_pair(&signal.symbol)
                 || signal.direction != "neutral"
                 || signal.stale
-                || now.saturating_sub(signal.timestamp / 1000) > MAX_SIGNAL_AGE_SECONDS
+                || now.saturating_sub(signal.timestamp / 1000) > signal_max_age_seconds(signal)
                 || !signal.score.is_finite()
                 || signal.score.abs() < SCOUT_NEUTRAL_SCORE_FLOOR * risk_floor_scale(risk_appetite)
                 || signal.ranging_probability.unwrap_or(0.0)
@@ -210,9 +226,9 @@ fn format_no_tradeable_bias(
                         candidate.symbol, candidate.direction
                     ))
                 } else if candidate.stale {
-                    Some(format!("{} {} · Signal freshness (stale flag true; age {}s; max age {}s)", candidate.symbol, candidate.direction, age, MAX_SIGNAL_AGE_SECONDS))
-                } else if age > MAX_SIGNAL_AGE_SECONDS {
-                    Some(format!("{} {} · Signal freshness (age {}s > max {}s)", candidate.symbol, candidate.direction, age, MAX_SIGNAL_AGE_SECONDS))
+                    Some(format!("{} {} · Signal freshness (stale flag true; age {}s; max age {}s)", candidate.symbol, candidate.direction, age, signal_max_age_seconds(candidate)))
+                } else if age > signal_max_age_seconds(candidate) {
+                    Some(format!("{} {} · Signal freshness (age {}s > max {}s)", candidate.symbol, candidate.direction, age, signal_max_age_seconds(candidate)))
                 } else if !matches!(candidate.direction.as_str(), "bullish" | "bearish") {
                     let ranging = candidate.ranging_probability.map(|value| format!("{:.1}%", value * 100.0)).unwrap_or_else(|| "n/a (defaults to 0%)".into());
                     Some(format!("{} {} · Directional signal (|score| {:.3} vs floor {:.2}; range probability {} must be below {:.0}% to infer direction)", candidate.symbol, candidate.direction, candidate.score.abs(), neutral_direction_floor, ranging, NEUTRAL_INFERENCE_MAX_RANGE_PROBABILITY * 100.0))

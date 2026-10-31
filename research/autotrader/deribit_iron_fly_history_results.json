@@ -1,0 +1,141 @@
+{
+  "strategy": "Monthly BTC inverse iron fly: sell ATM call/put, buy approximately 5%-OTM wings, hold to last-Friday expiry.",
+  "fees": "Historical instrument taker_commission capped at 12.5% of premium; 0.00015 BTC delivery fee on ITM legs, also capped at 12.5% of intrinsic.",
+  "entry_price": "Historical option trade-candle open; adverse sensitivity sells at the entry-day low and buys wings at the entry-day high.",
+  "data": {
+    "scheduled_entries": 66,
+    "selected_contract_sets": 62,
+    "priced_trades": 1,
+    "dvol_gated_trades": 1,
+    "skipped": {
+      "missing_delivery": 0,
+      "missing_entry_candle": 61
+    }
+  },
+  "by_period": {
+    "2021-2022": {
+      "all_months_first_trade_prices": {
+        "trades": 1,
+        "win_rate_percent": 100.0,
+        "mean_net_pnl_percent_underlying_notional": 0.6604567375394846,
+        "median_net_pnl_percent_underlying_notional": 0.6604567375394846,
+        "mean_net_pnl_percent_defined_risk": 20.948662345404042,
+        "compounded_defined_risk_return_percent": 20.948662345404045
+      },
+      "dvol_above_realized_gate": {
+        "trades": 1,
+        "win_rate_percent": 100.0,
+        "mean_net_pnl_percent_underlying_notional": 0.6604567375394846,
+        "median_net_pnl_percent_underlying_notional": 0.6604567375394846,
+        "mean_net_pnl_percent_defined_risk": 20.948662345404042,
+        "compounded_defined_risk_return_percent": 20.948662345404045
+      },
+      "adverse_intraday_range_fills": {
+        "trades": 1,
+        "win_rate_percent": 0.0,
+        "mean_net_pnl_percent_underlying_notional": -0.9033891043333955,
+        "median_net_pnl_percent_underlying_notional": -0.9033891043333955,
+        "mean_net_pnl_percent_defined_risk": -16.12406066419843,
+        "compounded_defined_risk_return_percent": -16.124060664198424
+      }
+    },
+    "2023-2024": {
+      "all_months_first_trade_prices": {
+        "trades": 0
+      },
+      "dvol_above_realized_gate": {
+        "trades": 0
+      },
+      "adverse_intraday_range_fills": {
+        "trades": 0
+      }
+    },
+    "2025-2026": {
+      "all_months_first_trade_prices": {
+        "trades": 0
+      },
+      "dvol_above_realized_gate": {
+        "trades": 0
+      },
+      "adverse_intraday_range_fills": {
+        "trades": 0
+      }
+    }
+  },
+  "naked_short_straddle_diagnostic_not_recommended": {
+    "warning": "This is not the defined-risk iron fly; short-straddle loss is unbounded and no margin/liquidation path is modeled.",
+    "priced_trades": 1,
+    "by_period": {
+      "2021-2022": {
+        "all_months_open_prices": {
+          "trades": 1,
+          "win_rate_percent": 0.0,
+          "mean_net_pnl_percent_underlying_notional": -24.339520354089657,
+          "median_net_pnl_percent_underlying_notional": -24.339520354089657,
+          "total_net_pnl_percent_of_one_btc_notional_per_month": -24.339520354089657
+        },
+        "dvol_above_realized_gate": {
+          "trades": 1,
+          "win_rate_percent": 0.0,
+          "mean_net_pnl_percent_underlying_notional": -24.339520354089657,
+          "median_net_pnl_percent_underlying_notional": -24.339520354089657,
+          "total_net_pnl_percent_of_one_btc_notional_per_month": -24.339520354089657
+        },
+        "adverse_entry_low_prices": {
+          "trades": 1,
+          "win_rate_percent": 0.0,
+          "mean_net_pnl_percent_underlying_notional": -25.073570443132034,
+          "median_net_pnl_percent_underlying_notional": -25.073570443132034,
+          "total_net_pnl_percent_of_one_btc_notional_per_month": -25.073570443132034
+        }
+      },
+      "2023-2024": {
+        "all_months_open_prices": {
+          "trades": 0
+        },
+        "dvol_above_realized_gate": {
+          "trades": 0
+        },
+        "adverse_entry_low_prices": {
+          "trades": 0
+        }
+      },
+      "2025-2026": {
+        "all_months_open_prices": {
+          "trades": 0
+        },
+        "dvol_above_realized_gate": {
+          "trades": 0
+        },
+        "adverse_entry_low_prices": {
+          "trades": 0
+        }
+      }
+    }
+  },
+  "trade_log": [
+    {
+      "entry_date": "2021-05-01",
+      "expiry_date": "2021-05-28",
+      "entry_spot": 57697.25,
+      "delivery_spot": 36828.41,
+      "contracts": {
+        "short_put": "BTC-28MAY21-56000-P",
+        "long_put": "BTC-28MAY21-55000-P",
+        "short_call": "BTC-28MAY21-56000-C",
+        "long_call": "BTC-28MAY21-60000-C"
+      },
+      "net_pnl_usd": 381.0653750000003,
+      "net_pnl_percent_underlying_notional": 0.6604567375394846,
+      "net_pnl_percent_defined_risk": 20.948662345404042,
+      "defined_risk_usd_per_1btc_structure": 1819.0439499999998,
+      "entry_fee_btc": 0.0012,
+      "delivery_fee_btc": 0.0003
+    }
+  ],
+  "limitations": [
+    "Trade-candle prices are not historical bid/ask quotes or guaranteed fills; no queue or liquidation replay.",
+    "The adverse OHLC sensitivity is a stress proxy, not proof all legs could fill at those prices.",
+    "Binance entry spot sizes strikes; Deribit options and delivery prices determine trade cash flows."
+  ]
+}

@@ -20,6 +20,7 @@ fn calculate_activity_learning_metrics(
     settings: &Settings,
     today_start: u64,
 ) -> ActivityLearningMetrics {
+    let today = utc_day();
     // Ignore legacy/corrupt return samples. In a spot position, net return
     // cannot be materially below -100%; an invalid sample must not dominate
     // the daily average (or the win/loss counts).
@@ -75,19 +76,11 @@ fn calculate_activity_learning_metrics(
             .map(|index| settings.closed_trade_fees_usd[*index])
             .sum()
     });
-    let today = utc_day();
-    let completed_trade_stats = settings
-        .learning
-        .iter()
-        .filter(|(key, _)| key.starts_with("trade:"))
-        .map(|(_, stats)| learning_stats_for_day(stats, &today))
-        .fold(LearningStats::default(), |mut total, stats| {
-            total.samples += stats.samples;
-            total.positive += stats.positive;
-            total.realized_pnl += stats.realized_pnl;
-            total
-        });
-    let learning_samples = completed_trade_stats.samples;
+    // The per-strategy and per-context learning maps both record the same
+    // completed position. Use the closed-position ledger for a user-facing
+    // trade count so a trade is counted once, and its return (including fees)
+    // determines whether it was positive.
+    let learning_samples = exit_learning_samples;
     let scout_open_positions = settings
         .positions
         .values()
@@ -136,7 +129,7 @@ fn calculate_activity_learning_metrics(
         .min_by(|a, b| a.1.total_cmp(&b.1))
         .map(|(kind, _)| kind);
     let learning_win_rate = (learning_samples > 0)
-        .then_some(completed_trade_stats.positive as f64 / learning_samples as f64);
+        .then_some(closed_trade_wins as f64 / learning_samples as f64);
     let scout_learning_samples = scout_learning.samples;
     let scout_learning_realized_pnl = scout_learning.realized_pnl;
     let parameter_profile_samples = std::array::from_fn(|profile| {

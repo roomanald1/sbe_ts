@@ -97,28 +97,8 @@ impl PositionStore {
         let Some(book) = self.book(symbol) else {
             return Ok(());
         };
-        {
-            let mut ledger = self.ledger.lock().await;
-            let old_len = ledger.orders.len();
-            ledger.orders.retain(|order| {
-                if !order.post_only || order.symbol != symbol {
-                    return true;
-                }
-                match order.side {
-                    TradeSide::Buy => !book
-                        .asks
-                        .first()
-                        .is_some_and(|ask| order.limit_price >= ask.price),
-                    TradeSide::Sell => !book
-                        .bids
-                        .first()
-                        .is_some_and(|bid| order.limit_price <= bid.price),
-                }
-            });
-            if ledger.orders.len() != old_len {
-                self.persist(&ledger).await?;
-            }
-        }
+        // Post-only is checked when accepting the order. Once resting, a
+        // later crossing book is a fill opportunity, not a reason to cancel.
         let orders = self
             .ledger
             .lock()
@@ -134,12 +114,19 @@ impl PositionStore {
         let matches = orders
             .into_iter()
             .map(|order| {
-                let response = match_book(
+                let mut response = match_book(
                     &order.side,
                     order.remaining_quantity,
                     Some(order.limit_price),
                     &book,
                 );
+                // This order was already resting: its maker fills execute at
+                // its own limit, even if the next observed book gaps through it.
+                for fill in &mut response.fills {
+                    fill.price = order.limit_price;
+                }
+                response.average_execution_price =
+                    (response.filled_quantity > EPSILON).then_some(order.limit_price);
                 (order.id, response)
             })
             .collect::<Vec<_>>();
@@ -210,3 +197,92 @@ impl PositionStore {
     }
 }
 
+
+
+#[cfg(test)]
+mod resting_post_only_tests {
+    use super::*;
+
+    fn store_with_order(side: &str) -> PositionStore {
+        let order: RestingOrder = serde_json::from_value(serde_json::json!({
+            "id": "resting-1", "symbol": "BTC-USDT", "side": side,
+            "quantity": 2.0, "remaining_quantity": 2.0, "limit_price": 100.0,
+            "timestamp": 1, "maker_fee_rate": -0.0008, "estimated_fee": -0.16,
+            "time_in_force": "gtc", "post_only": true,
+            "source": "auto", "parent_order_id": "entry-1"
+        })).unwrap();
+        let (state_updates, _) = broadcast::channel(1);
+        PositionStore {
+            path: PathBuf::new(),
+            ledger: Arc::new(Mutex::new(Ledger {
+                orders: vec![order], ..Ledger::default()
+            })),
+            persistence_notify: Arc::new(Notify::new()),
+            state_updates,
+            persistence_timings_ms: Arc::new(StdMutex::new(BTreeMap::new())),
+            trade_index: StdMutex::new(LedgerTradeIndex::default()),
+            realized_pnl_cache: StdMutex::new(None),
+            books: StdRwLock::new(HashMap::new()),
+            price_samples: Mutex::new(HashMap::new()),
+            hedge_samples: Mutex::new(HashMap::new()),
+            book_changed: Notify::new(),
+            subscriptions: StdMutex::new(HashMap::new()),
+            spot_symbols: Arc::new(Vec::new()),
+            vwap_runs: Mutex::new(HashMap::new()),
+        }
+    }
+
+    #[tokio::test]
+    async fn accepted_post_only_orders_fill_on_later_cross_for_both_sides() {
+        for side in ["buy", "sell"] {
+            let store = store_with_order(side);
+            let (bid, ask) = if side == "buy" { (99.0, 99.5) } else { (100.5, 101.0) };
+            store.book_slot("BTC-USDT").store(Some(Arc::new(BookSnapshot {
+                bids: vec![BookLevel { price: bid, size: 1.0 }],
+                asks: vec![BookLevel { price: ask, size: 1.0 }],
+                updated_at_ms: now_ms().unwrap(),
+            })));
+            store.match_resting("BTC-USDT").await.unwrap();
+            let ledger = store.ledger.lock().await;
+            assert_eq!(ledger.trades.len(), 1, "{side} should fill, not cancel");
+            assert_eq!(ledger.trades[0].quantity, 1.0);
+            assert_eq!(ledger.trades[0].execution_price, 100.0);
+            assert_eq!(ledger.trades[0].fee_liquidity, "maker");
+            assert_eq!(ledger.trades[0].parent_order_id.as_deref(), Some("entry-1"));
+            assert_eq!(ledger.orders.len(), 1);
+            assert_eq!(ledger.orders[0].remaining_quantity, 1.0);
+        }
+    }
+
+    #[tokio::test]
+    async fn non_crossing_post_only_order_stays_resting_without_a_fill() {
+        let store = store_with_order("buy");
+        store.book_slot("BTC-USDT").store(Some(Arc::new(BookSnapshot {
+            bids: vec![BookLevel { price: 100.0, size: 2.0 }],
+            asks: vec![BookLevel { price: 101.0, size: 2.0 }],
+            updated_at_ms: now_ms().unwrap(),
+        })));
+        store.match_resting("BTC-USDT").await.unwrap();
+        let ledger = store.ledger.lock().await;
+        assert!(ledger.trades.is_empty());
+        assert_eq!(ledger.orders[0].remaining_quantity, 2.0);
+    }
+
+    #[test]
+    fn initially_crossing_post_only_orders_are_still_rejected() {
+        for side in ["buy", "sell"] {
+            let request: NewOrder = serde_json::from_value(serde_json::json!({
+                "symbol": "BTC-USDT", "side": side, "quantity": 1.0,
+                "order_type": "post-only-limit", "limit_price": 100.0
+            })).unwrap();
+            let options = validate_market_order_options(&request).unwrap();
+            let book = BookSnapshot {
+                bids: vec![BookLevel { price: 100.0, size: 2.0 }],
+                asks: vec![BookLevel { price: 100.0, size: 2.0 }],
+                updated_at_ms: 1,
+            };
+            assert_eq!(reject_crossing_post_only(&request, &options, &book).unwrap_err().0,
+                StatusCode::CONFLICT);
+        }
+    }
+}
