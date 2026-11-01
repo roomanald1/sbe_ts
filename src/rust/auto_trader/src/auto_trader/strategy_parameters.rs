@@ -154,11 +154,12 @@ fn confident_win_rate_edge(positive: usize, samples: usize) -> f64 {
     if samples == 0 || positive > samples {
         return 0.0;
     }
-    // A neutral prior tempers early noise while allowing every outcome to
-    // move the estimate; confidence grows continuously with sample count.
+    // Use a light Beta(1, 1) prior and a short confidence ramp so the recent
+    // sizing window can move exposure promptly without letting one trade
+    // dominate the estimate.
     let n = samples as f64;
-    let posterior_rate = (positive as f64 + 2.0) / (n + 4.0);
-    let confidence = n / (n + 8.0);
+    let posterior_rate = (positive as f64 + 1.0) / (n + 2.0);
+    let confidence = n / (n + 2.0);
     ((posterior_rate - 0.5) * 2.0 * confidence).clamp(-1.0, 1.0)
 }
 

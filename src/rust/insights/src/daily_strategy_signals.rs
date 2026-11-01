@@ -207,6 +207,7 @@ fn insight_trend_portfolio_weights(
     Ok((regime, weights))
 }
 
+#[derive(Clone)]
 struct InsightRiskAdjustedCandidate {
     symbol: &'static str,
     momentum: f64,
@@ -219,6 +220,7 @@ struct InsightRiskAdjustedCandidate {
 struct InsightRiskAdjustedSelection {
     btc_regime: InsightBtcRegime,
     candidate: Option<InsightRiskAdjustedCandidate>,
+    ranked_candidates: Vec<InsightRiskAdjustedCandidate>,
 }
 
 fn insight_risk_adjusted_monthly_selection(
@@ -239,7 +241,7 @@ fn insight_risk_adjusted_monthly_selection(
         risk_on: btc_close > btc_sma,
     };
     if !btc_regime.risk_on {
-        return Ok(InsightRiskAdjustedSelection { btc_regime, candidate: None });
+        return Ok(InsightRiskAdjustedSelection { btc_regime, candidate: None, ranked_candidates: Vec::new() });
     }
 
     let btc_anchor_time = btc_history.last().expect("anchor index exists").close_time_ms;
@@ -277,10 +279,28 @@ fn insight_risk_adjusted_monthly_selection(
             anchor_close_time_ms: history.last().expect("anchor index exists").close_time_ms,
         });
     }
-    let candidate = candidates.into_iter().max_by(|left, right| {
-        left.score.total_cmp(&right.score).then_with(|| right.symbol.cmp(left.symbol))
-    });
-    Ok(InsightRiskAdjustedSelection { btc_regime, candidate })
+    candidates.sort_by(|left, right| right.score.total_cmp(&left.score).then_with(|| right.symbol.cmp(left.symbol)));
+    let candidate = candidates.first().cloned();
+    Ok(InsightRiskAdjustedSelection { btc_regime, candidate, ranked_candidates: candidates })
+}
+
+fn insight_relative_strength_ranking(
+    candles: &BTreeMap<String, Vec<InsightDailyBar>>,
+    profiles: &serde_json::Value,
+) -> Vec<(String, f64)> {
+    let mut ranking = DAILY_PAIRS.iter().filter_map(|(symbol, pair)| {
+        let bars = candles.get(*pair)?;
+        let parameters = insight_profile_parameters(profiles, symbol, "relative-strength-90-sma200");
+        let rotation_days = insight_parameter(&parameters, "relative_strength_days", 90.0).round().max(1.0) as usize;
+        let trend_days = insight_parameter(&parameters, "trend_sma_days", 200.0).round().max(1.0) as usize;
+        if bars.len() < trend_days.max(rotation_days + 1) { return None; }
+        let close = bars.last()?.close;
+        if close <= insight_daily_sma(bars, trend_days).ok()? { return None; }
+        let reference = bars.get(bars.len().checked_sub(rotation_days + 1)?)?.close;
+        Some(((*symbol).to_owned(), close / reference - 1.0))
+    }).collect::<Vec<_>>();
+    ranking.sort_by(|left, right| right.1.total_cmp(&left.1).then_with(|| right.0.cmp(&left.0)));
+    ranking
 }
 
 fn insight_evaluate_daily(
@@ -589,6 +609,12 @@ fn insight_daily_batch(
     {
         let mut diagnostic_symbols = Vec::new();
         let mut strategy_btc: Option<InsightBtcRegime> = None;
+        let monthly_selection = if strategy == "risk-adjusted-monthly-momentum" {
+            Some(insight_risk_adjusted_monthly_selection(candles, now)?)
+        } else { None };
+        let relative_strength_ranking = if strategy == "relative-strength-90-sma200" {
+            insight_relative_strength_ranking(candles, profiles)
+        } else { Vec::new() };
         let pairs = if strategy == "risk-adjusted-trend-portfolio" {
             &TREND_PORTFOLIO_PAIRS[..]
         } else {
@@ -637,6 +663,18 @@ fn insight_daily_batch(
                 .secondary_level
                 .map(|level| (close / level - 1.0) * 100.0);
             let secondary_passed = evaluation.secondary_level.map(|level| close > level);
+            let trend_return_windows = if strategy == "risk-adjusted-trend-portfolio" {
+                [10_usize, 20, 40, 80, 160].iter().filter_map(|days| {
+                    bars.len().checked_sub(1 + *days).map(|index| {
+                        let reference_close = bars[index].close;
+                        serde_json::json!({
+                            "days": days,
+                            "reference_close": reference_close,
+                            "return_percent": (close / reference_close - 1.0) * 100.0,
+                        })
+                    })
+                }).collect::<Vec<_>>()
+            } else { Vec::new() };
             let decision = serde_json::json!({
                 "strategy": strategy,
                 "symbol": symbol,
@@ -662,8 +700,23 @@ fn insight_daily_batch(
                 "strategy_order_size_multiplier": evaluation.strategy_order_size_multiplier,
                 "monthly_anchor_close_time_ms": evaluation.monthly_anchor_close_time_ms,
             });
+            let leader_gap_percent = monthly_selection.as_ref().and_then(|selection| {
+                let leader = selection.ranked_candidates.first()?;
+                if leader.symbol != symbol { return None; }
+                let runner_up = selection.ranked_candidates.get(1)?;
+                (leader.score > 0.0).then_some((leader.score - runner_up.score) / leader.score * 100.0)
+            });
+            let relative_strength_gap_pp = relative_strength_ranking.first().and_then(|(leader, score)| {
+                if leader != symbol { return None; }
+                let runner_up = relative_strength_ranking.get(1)?;
+                Some((score - runner_up.1) * 100.0)
+            });
             diagnostic_symbols.push(serde_json::json!({
                 "symbol": symbol, "close": close, "eligible": true,
+                "leader_gap_percent": leader_gap_percent,
+                "relative_strength_gap_pp": relative_strength_gap_pp,
+                "rsi_exit_level": (strategy == "rsi2-oversold-rebound").then(|| insight_parameter(&parameters, "rsi_exit_level", 70.0)),
+                "maximum_hold_days": (strategy == "rsi2-oversold-rebound").then(|| insight_parameter(&parameters, "maximum_hold_days", 5.0)),
                 "primary_rule": evaluation.primary_rule,
                 "primary_level": evaluation.primary_level,
                 "primary_distance_percent": distance,
@@ -675,6 +728,7 @@ fn insight_daily_batch(
                 "secondary_distance_percent": secondary_distance,
                 "secondary_passed": secondary_passed,
                 "signal_active": evaluation.active,
+                "trend_return_windows": if trend_return_windows.is_empty() { None } else { Some(trend_return_windows) },
             }));
             let audit_key = format!(
                 "{strategy}:{symbol}:{}",

@@ -6,7 +6,7 @@ import { currentAutoTraderSnapshot, subscribeAutoTraderStream, type AutoTraderUi
 export type AutoTraderOutcome = {
   rowId: string; status: 'Open' | 'Partially closed' | 'Closed'; decisionId: string; symbol: string; side: string; openedAt: number; closedAt?: number;
   quantity: number; remainingQuantity?: number; signedQuantity: number; entryPrice: number; pnl: number; entryFees: number; estimatedExitFeeRate: number; estimatedExitSlippageBps: number;
-  feesUsd?: number; netPnlUsd?: number;
+  feesUsd?: number; netPnlUsd?: number; todayRealizedPnlUsd?: number;
   entryNotionalUsd?: number;
   pnlQuoteCurrency: string; quoteUsdRate?: number; strategy: string; direction: string; strength: number | null;
   stopLossPercent?: number; takeProfitPercent?: number;
@@ -23,8 +23,8 @@ type DecisionParametersResponse = { thresholds?: Array<{ section?: string; name?
 type PositionsResponse = { positions?: Position[] };
 type TradesResponse = { trades?: PositionTrade[] };
 type StrategyLearning = { strategy: string; learning_multiplier: number; learning_samples: number; positive_rate?: number | null; realized_pnl?: number };
-type StrategySymbolDiagnostic = { symbol: string; eligible: boolean; primary_rule: string; primary_distance_percent: number; primary_metric_value?: number | null; primary_metric_unit?: string | null; primary_passed: boolean; secondary_rule?: string | null; secondary_distance_percent?: number | null; secondary_passed?: boolean | null; signal_active: boolean };
-type StrategyDiagnostic = { strategy: string; as_of_ms: number; btc_distance_percent: number | null; btc_window_days: number | null; btc_gate_required: boolean; btc_gate_passed: boolean | null; symbols: StrategySymbolDiagnostic[] };
+type StrategySymbolDiagnostic = { symbol: string; close: number; trend_return_windows?: Array<{ days: number; reference_close: number; return_percent: number }>; eligible: boolean; primary_rule: string; primary_level: number; primary_distance_percent: number; primary_metric_value?: number | null; primary_metric_unit?: string | null; primary_passed: boolean; secondary_rule?: string | null; secondary_level?: number | null; secondary_distance_percent?: number | null; secondary_passed?: boolean | null; signal_active: boolean; leader_gap_percent?: number | null; relative_strength_gap_pp?: number | null; rsi_exit_level?: number | null; maximum_hold_days?: number | null };
+type StrategyDiagnostic = { strategy: string; as_of_ms: number; btc_close?: number | null; btc_sma?: number | null; btc_distance_percent: number | null; btc_window_days: number | null; btc_gate_required: boolean; btc_gate_passed: boolean | null; symbols: StrategySymbolDiagnostic[] };
 type StrategyOrder = { timestamp: number; symbol: string; side: string; purpose?: string; strategy?: string; decision_id?: string; filled_quantity: number; average_price?: number | null; status?: string; failure_reason?: string | null; order_type?: string };
 type DatedCarryPosition = { spot_symbol: string; future_symbol: string; expiry_ms: number; entry_ms: number; quantity: number; spot_entry_price: number; future_entry_price: number; entry_fees: number; status: string; spot_exit_twap?: number | null; settlement_price?: number | null; net_pnl_usdt?: number | null; settlement_source?: string | null; spot_mark_bid?: number | null; future_mark_ask?: number | null; spot_leg_pnl_usdt?: number | null; future_leg_pnl_usdt?: number | null; estimated_exit_fees_usdt?: number | null; estimated_exit_slippage_usdt?: number | null; marked_net_pnl_usdt?: number | null; mark_checked_at_ms?: number | null };
 type OpenStrategyPosition = { symbol: string; strategy: string; decision_id?: string | null; quantity: number; average_entry_price: number; entry_fees: number; entry_timestamp_ms: number; entry_order_type?: string; entry_order_types?: string[]; stop_loss_percent?: number | null; take_profit_percent?: number | null; horizon_take_profit_percent?: number | null; stop_loss_active?: boolean; take_profit_active?: boolean; carry_details?: DatedCarryPosition };
@@ -32,7 +32,7 @@ type OpenPositionLot = { symbol: string; quantity: number; average_entry_price: 
 type AutoTraderLearningResponse = { enabled?: boolean; strategies?: string[]; strategy_diagnostics?: StrategyDiagnostic[]; daily_strategy_budgets?: StrategyLearning[]; intraday_strategy_budgets?: StrategyLearning[] };
 type ActivityResponse = {
   orders?: StrategyOrder[];
-  pnl_breakdown?: Array<{ symbol: string; strategy: string; realized_pnl: number }>;
+  pnl_breakdown?: Array<{ symbol: string; strategy: string; decision_id?: string | null; direction: string; purpose: string; realized_pnl: number; outcomes: number }>;
   realized_pnl_by_quote?: Record<string, number> | null;
   open_positions?: Array<{ symbol: string; strategy?: string; decision_id?: string }>;
   strategy_positions?: OpenStrategyPosition[];
@@ -307,6 +307,36 @@ export class AutoTraderOutcomesModel {
           source: scoutEntry || entry.scout ? 'scout' : entry.exploratory === true ? 'exploratory' : entry.exploratory === false ? 'strict' : 'unknown',
           components: entry.signal_components ?? {} }];
       });
+      // The activity breakdown is computed from realized position-ledger trades. Keep one
+      // row per strategy instance and symbol so its daily P&L reconciles with the summary.
+      const realizedByPosition = new Map<string, { symbol: string; strategy: string; decisionId: string; direction: string; pnlUsd: number | null; quote: string }>();
+      for (const item of activityData.pnl_breakdown ?? []) {
+        const quote = quoteCurrency(item.symbol);
+        const rate = quote === 'USD' ? 1 : usdRates[quote];
+        const decisionId = item.decision_id ?? ('legacy:' + item.strategy + ':' + item.symbol);
+        const key = item.strategy + ':' + decisionId + ':' + item.symbol;
+        const previous = realizedByPosition.get(key);
+        const itemUsd = typeof rate === 'number' && Number.isFinite(rate) ? item.realized_pnl * rate : null;
+        realizedByPosition.set(key, {
+          symbol: item.symbol, strategy: item.strategy, decisionId, direction: item.direction,
+          quote, pnlUsd: previous?.pnlUsd === null || itemUsd === null ? null : (previous?.pnlUsd ?? 0) + itemUsd,
+        });
+      }
+      const auditedByInstance = new Map(rows.map((row) => [row.strategy + ':' + row.decisionId + ':' + row.symbol, row]));
+      for (const [key, item] of realizedByPosition) {
+        const audited = auditedByInstance.get(key);
+        if (audited) {
+          audited.todayRealizedPnlUsd = item.pnlUsd ?? undefined;
+          continue;
+        }
+        rows.push({ rowId: 'ledger-today:' + key, status: 'Partially closed', decisionId: item.decisionId,
+          symbol: item.symbol, side: item.direction === 'LONG' ? 'buy' : 'sell', openedAt: 0,
+          quantity: 0, signedQuantity: 0, entryPrice: 0, pnl: 0, entryFees: 0,
+          estimatedExitFeeRate: 0, estimatedExitSlippageBps: 0, todayRealizedPnlUsd: item.pnlUsd ?? undefined,
+          netPnlUsd: item.pnlUsd ?? undefined, pnlQuoteCurrency: item.quote, quoteUsdRate: item.quote === 'USD' ? 1 : usdRates[item.quote],
+          strategy: item.strategy, direction: item.direction, strength: null, scout: false,
+          source: 'unknown', components: {} });
+      }
       const aggregatePositions = new Map((positionsData.positions ?? []).map((position) => [position.symbol, position]));
       const strategyLots = (activityData.strategy_positions ?? []).filter((position) => Math.abs(position.quantity) > 1e-12);
       const strategyPositionSymbols = new Set(strategyLots.map((position) => position.symbol));

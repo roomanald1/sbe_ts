@@ -34,7 +34,7 @@ export type ClosedStrategyOutcome = { trades: number; wins: number; losses: numb
 export type StrategyDiagnostic = {
   strategy: Strategy; as_of_ms: number; btc_close: number | null; btc_sma: number | null;
   btc_distance_percent: number | null; btc_window_days: number | null; btc_gate_required: boolean; btc_gate_passed: boolean | null;
-  symbols: Array<{ symbol: string; close: number; eligible: boolean; primary_rule: string; primary_level: number; primary_distance_percent: number; primary_metric_value?: number | null; primary_metric_unit?: string | null; primary_passed: boolean; secondary_rule?: string | null; secondary_level?: number | null; secondary_distance_percent?: number | null; secondary_passed?: boolean | null; signal_active: boolean }>;
+  symbols: Array<{ symbol: string; close: number; eligible: boolean; primary_rule: string; primary_level: number; primary_distance_percent: number; primary_metric_value?: number | null; primary_metric_unit?: string | null; primary_passed: boolean; secondary_rule?: string | null; secondary_level?: number | null; secondary_distance_percent?: number | null; secondary_passed?: boolean | null; signal_active: boolean; leader_gap_percent?: number | null; relative_strength_gap_pp?: number | null }>;
 };
 export type AutoTraderState = {
   enabled: boolean;

@@ -4,6 +4,7 @@ struct PnlBreakdown {
     direction: String,
     purpose: String,
     strategy: String,
+    decision_id: Option<String>,
     realized_pnl: f64,
     outcomes: usize,
 }

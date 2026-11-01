@@ -190,7 +190,7 @@ async fn await_activity_realized_pnl(
             };
             order.realized_pnl = realized.unwrap_or(0.0);
         }
-        let mut grouped = BTreeMap::<(String, String, String, String), (f64, usize)>::new();
+        let mut grouped = BTreeMap::<(String, String, String, String, Option<String>), (f64, usize)>::new();
         for order in orders.iter() {
             let today = utc_day();
             let strategy_realized = if order.strategy_realized_pnl_day.as_deref() == Some(today.as_str()) {
@@ -216,6 +216,7 @@ async fn await_activity_realized_pnl(
                     direction.to_owned(),
                     order.purpose.clone(),
                     order.strategy.clone().unwrap_or_else(|| "legacy-unknown".into()),
+                    order.decision_id.clone(),
                 ))
                 .or_default();
             total.0 += strategy_realized;
@@ -224,11 +225,12 @@ async fn await_activity_realized_pnl(
         let mut breakdown = grouped
             .into_iter()
             .map(
-                |((symbol, direction, purpose, strategy), (realized_pnl, outcomes))| PnlBreakdown {
+                |((symbol, direction, purpose, strategy, decision_id), (realized_pnl, outcomes))| PnlBreakdown {
                     symbol,
                     direction,
                     purpose,
                     strategy,
+                    decision_id,
                     realized_pnl,
                     outcomes,
                 },

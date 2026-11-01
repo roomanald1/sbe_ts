@@ -27,6 +27,18 @@ struct StrategySymbolDiagnostic {
     secondary_distance_percent: Option<f64>,
     secondary_passed: Option<bool>,
     signal_active: bool,
+    leader_gap_percent: Option<f64>,
+    relative_strength_gap_pp: Option<f64>,
+    rsi_exit_level: Option<f64>,
+    maximum_hold_days: Option<f64>,
+    trend_return_windows: Option<Vec<TrendReturnWindow>>,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+struct TrendReturnWindow {
+    days: usize,
+    reference_close: f64,
+    return_percent: f64,
 }
 
 #[derive(Clone, Deserialize)]
