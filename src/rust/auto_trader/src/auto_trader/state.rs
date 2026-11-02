@@ -168,6 +168,15 @@ struct ProtectiveStop {
     processed_notional: f64,
     processed_fee: f64,
 }
+#[derive(Clone, Serialize, Deserialize)]
+struct StrategyThresholdSample {
+    timestamp_ms: u64,
+    parameter_key: StrategyParameterKey,
+    threshold: f64,
+    feature_value: f64,
+    net_return_percent: f64,
+}
+
 #[derive(Clone, Default, Serialize, Deserialize)]
 struct LearningStats {
     samples: usize,
@@ -187,6 +196,8 @@ struct LearningStats {
     // current win-rate or net-P&L estimates.
     #[serde(default)]
     recent_trade_pnls: Vec<(u64, f64)>,
+    #[serde(default)]
+    threshold_samples: Vec<StrategyThresholdSample>,
 }
 
 #[derive(Clone, Default, Serialize, Deserialize)]

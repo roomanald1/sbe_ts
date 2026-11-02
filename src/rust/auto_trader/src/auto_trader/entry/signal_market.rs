@@ -45,7 +45,7 @@ async fn load_signal_market_snapshot(
             ),
         ));
     };
-    let mid = (bid + ask) / 2.0;
+    let mid = bid + (ask - bid) * 0.5;
     // Warm the paper manager's book subscription while the remaining order
     // checks run, so the submit path doesn't pay the feed's first-book delay.
     let warm_client = client.clone();
@@ -74,4 +74,5 @@ struct FreshSignalCandidates<'a> {
     stale_symbols: Vec<String>,
     non_directional_count: usize,
     position_blocked_count: usize,
+    position_block_details: Vec<String>,
 }

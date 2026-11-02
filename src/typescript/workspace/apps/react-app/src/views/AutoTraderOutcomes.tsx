@@ -64,6 +64,7 @@ const allStrategies: Strategy[] = ['live-momentum', 'live-trade-flow', 'live-ord
 const strategyCellTints = { status: 'rgba(148, 157, 170, 0.06)', learning: 'rgba(74, 127, 151, 0.075)', sample: 'rgba(161, 139, 75, 0.075)', performance: 'rgba(77, 132, 91, 0.075)', profile: 'rgba(125, 100, 157, 0.075)', gate: 'rgba(178, 118, 72, 0.075)' } as const;
 const colorStrategyColumns = (columns: ColDef<StrategyWinRateRow>[], group: keyof typeof strategyCellTints) => columns.map((column, index) => ({ ...column, headerClass: ['strategy-column-' + group + '-header', index === 0 && 'strategy-group-start', index === columns.length - 1 && 'strategy-group-end'].filter(Boolean).join(' '), cellClass: ['strategy-column-' + group + '-cell', index === 0 && 'strategy-group-start', index === columns.length - 1 && 'strategy-group-end'].filter(Boolean).join(' '), cellStyle: { backgroundColor: strategyCellTints[group] } }));
 const dateLabel = (value: number) => new Intl.DateTimeFormat(undefined, { year: '2-digit', month: 'short', day: 'numeric' }).format(value);
+const utcDateLabel = (value: number) => new Intl.DateTimeFormat('en-GB', { day: '2-digit', month: 'short', year: '2-digit', timeZone: 'UTC' }).format(value).replace(' ', '-').replace(' ', '-');
 const median = (values: number[]) => {
   const sorted = [...values].sort((a, b) => a - b);
   const middle = Math.floor(sorted.length / 2);
@@ -323,7 +324,7 @@ function AutoTraderOutcomesComponent({ embedded = false, ticks = [], liveOnly = 
       if (data.carryDetails) {
         const carry = data.carryDetails;
         const net = carry.marked_net_pnl_usdt;
-        if (typeof net !== 'number' || !Number.isFinite(net)) return <div className="auto-trader-carry-settlement" title="At expiry, the spot leg is sold using TWAP over the settlement window and the future is cash-settled.">NEXT · SETTLEMENT · in {durationLabel(Math.max(0, carry.expiry_ms - now))} · {new Date(carry.expiry_ms).toISOString().slice(0, 10)} UTC</div>;
+        if (typeof net !== 'number' || !Number.isFinite(net)) return <div className="auto-trader-carry-settlement" title="At expiry, the spot leg is sold using TWAP over the settlement window and the future is cash-settled.">{durationLabel(Math.max(0, carry.expiry_ms - now))} · {utcDateLabel(carry.expiry_ms)} · NEXT SETTLEMENT</div>;
         const carryNotional = carry.quantity * carry.spot_entry_price;
         const carryReturnPct = carryNotional > 0 ? net / carryNotional * 100 : 0;
         const carryPosition = Math.max(10, Math.min(90, 50 + carryReturnPct / 5 * 40));
@@ -335,23 +336,21 @@ function AutoTraderOutcomesComponent({ embedded = false, ticks = [], liveOnly = 
         const signedPct = (value: number | undefined) => value === undefined ? '—' : (value >= 0 ? '+' : '−') + Math.abs(value).toFixed(2) + '%';
         const signedPp = (value: number | undefined) => value === undefined ? '—' : (value >= 0 ? '+' : '−') + Math.abs(value).toFixed(2) + ' pp';
         const relativeMovePct = spotMovePct !== undefined && futureMovePct !== undefined ? spotMovePct - futureMovePct : undefined;
-        const relativeTone = relativeMovePct === undefined ? 'is-flat' : relativeMovePct > 0 ? 'is-positive' : relativeMovePct < 0 ? 'is-negative' : 'is-flat';
         const carryResultLabel = net > 0 ? 'Profit' : net < 0 ? 'Loss' : 'Breakeven';
-        const carrySignalExit = '· SETTLEMENT · in ' + durationLabel(Math.max(0, carry.expiry_ms - now)) + ' · ' + new Date(carry.expiry_ms).toISOString().slice(0, 10) + ' UTC';
-        return <div className="auto-trader-pnl-bar-cell auto-trader-carry-pnl" title="Net result includes entry fees, estimated exit fees and slippage. Center is breakeven; the white marker is current marked P&L.">
-          <div className="auto-trader-carry-settlement" title="At expiry, the spot leg is sold using TWAP over the settlement window and the future is cash-settled.">NEXT {carrySignalExit}</div>
+        const carrySignalExit = durationLabel(Math.max(0, carry.expiry_ms - now)) + ' · ' + utcDateLabel(carry.expiry_ms) + ' · NEXT SETTLEMENT';
+        return <div className="auto-trader-pnl-bar-cell auto-trader-carry-pnl" title="Estimated net P&L if both legs were closed now at the current spot bid and futures ask. Includes entry fees, estimated exit fees and slippage. Center is breakeven.">
+          <div className="auto-trader-exit-summary auto-trader-carry-summary" aria-label="Settlement and carry details">
+            <span className="is-rebalance" title="At expiry, the spot leg is sold using TWAP over the settlement window and the future is cash-settled."><b>{carrySignalExit}</b></span>
+            <span><b>Spot</b> {signedPct(spotMovePct)} − <b>Future</b> {signedPct(futureMovePct)} = {signedPp(relativeMovePct)}</span>
+          </div>
           <div className="auto-trader-carry-bar-wrap" aria-label={'Net return ' + carryReturnPct.toFixed(2) + '%; red is loss, green is profit, center is breakeven'}>
             <div className="auto-trader-pnl-bar-track">
               <span className={'auto-trader-pnl-bar-fill ' + carryTone} style={{ left: carryFillLeft + '%', width: carryFillWidth + '%' }} />
               <span className="auto-trader-pnl-marker is-breakeven" style={{ left: '50%' }} title="Net breakeven" />
-              <span className="auto-trader-pnl-marker is-current" style={{ left: carryPosition + '%' }} title="Current net result" />
+              <span className="auto-trader-pnl-marker is-current" style={{ left: carryPosition + '%' }} title="Estimated close-now net P&L" />
             </div>
           </div>
-          <div className="auto-trader-pnl-bar-label"><strong className={carryTone}>{carryResultLabel} · {(net >= 0 ? '+$' : '−$') + Math.abs(net).toFixed(3)} · {carryReturnPct >= 0 ? '+' : ''}{carryReturnPct.toFixed(2)}%</strong></div>
-          <div className="auto-trader-carry-details" title="Spot and futures percentage moves are measured from their respective entry prices. Their difference is in percentage points.">
-            <span>Spot {signedPct(spotMovePct)} − Future {signedPct(futureMovePct)} = </span>
-            <strong className={relativeTone}>{signedPp(relativeMovePct)}</strong>
-          </div>
+          <div className="auto-trader-pnl-bar-label"><strong className={carryTone}>Close now · {carryResultLabel} · {(net >= 0 ? '+$' : '−$') + Math.abs(net).toFixed(3)} · {carryReturnPct >= 0 ? '+' : ''}{carryReturnPct.toFixed(2)}%</strong></div>
         </div>;
       }
       const netQuote = openPnl(data);
@@ -380,7 +379,7 @@ function AutoTraderOutcomesComponent({ embedded = false, ticks = [], liveOnly = 
       const monthlyLeader = monthlyLeaderDiagnostic?.symbol;
       const isRiskAdjustedTrend = data.strategy === 'risk-adjusted-trend-portfolio';
       const resultLabel = netUsd > 0 ? 'Profit' : netUsd < 0 ? 'Loss' : 'Breakeven';
-      const pnlLabel = resultLabel + ' · ' + (netUsd >= 0 ? '+' : '−') + 'USD ' + Math.abs(netUsd).toFixed(3) + ' · ' + (returnPct >= 0 ? '+' : '') + returnPct.toFixed(2) + '%';
+      const pnlLabel = 'Close now · ' + resultLabel + ' · ' + (netUsd >= 0 ? '+' : '−') + 'USD ' + Math.abs(netUsd).toFixed(3) + ' · ' + (returnPct >= 0 ? '+' : '') + returnPct.toFixed(2) + '%';
       const trendDetail = 'Asset ' + (trendCurrentPrice !== undefined ? trendPriceLabel.toLowerCase() + formatForSymbol(trendCurrentPrice, data.symbol, 'price') : 'price unavailable') + trendReferencePrices + (trendMeanReturn !== undefined ? ' · mean return ' + (trendMeanReturn >= 0 ? '+' : '') + trendMeanReturn.toFixed(2) + '%' : '') + ' · exit if BTC closes below SMA200 or the mean 10/20/40/80/160d return, from the last closed daily candle, is 0% or less.';
       const label = pnlLabel;
       const hasTarget = data.takeProfitActive !== false && typeof data.takeProfitPercent === 'number' && Number.isFinite(data.takeProfitPercent) && data.takeProfitPercent > 0;
@@ -416,12 +415,12 @@ function AutoTraderOutcomesComponent({ embedded = false, ticks = [], liveOnly = 
       const btcExitDistance = typeof btcNow === 'number' && btcNow > 0 && typeof strategyDiagnostic?.btc_sma === 'number' ? (btcNow / strategyDiagnostic.btc_sma - 1) * 100 : undefined;
       if (isRiskAdjustedTrend) {
         const nextDailyCheck = Date.UTC(new Date(now).getUTCFullYear(), new Date(now).getUTCMonth(), new Date(now).getUTCDate() + 1);
-        exitFacts.push({ label: 'NEXT', value: '· DAILY REBALANCE CHECK · in ' + durationLabel(Math.max(0, nextDailyCheck - now)) + ' · ' + new Date(nextDailyCheck).toISOString().slice(0, 10) + ' UTC', tone: 'is-rebalance', detail: 'Exit signals use the latest closed daily candle. Target weights are adjusted daily only when drift exceeds 5%; this is the next expected check date, not a guaranteed trade.' });
+        exitFacts.push({ label: durationLabel(Math.max(0, nextDailyCheck - now)) + ' · ' + utcDateLabel(nextDailyCheck), value: '· NEXT DAILY REBALANCE CHECK', tone: 'is-rebalance', detail: 'Exit signals use the latest closed daily candle. Target weights are adjusted daily only when drift exceeds 5%; this is the next expected check date, not a guaranteed trade.' });
         exitFacts.push({ label: 'BTC SMA200 buffer', value: btcExitDistance === undefined ? 'unavailable' : (btcExitDistance >= 0 ? '+' + btcExitDistance.toFixed(2) + '% buffer' : Math.abs(btcExitDistance).toFixed(2) + '% below exit threshold'), near: btcExitDistance !== undefined && btcExitDistance <= 1, detail: 'Exit on a closed daily candle below BTC SMA200' });
         exitFacts.push({ label: '5-window mean', value: trendMeanReturn === undefined ? 'unavailable' : (trendMeanReturn === 0 ? 'at 0%' : thresholdDistanceLabel(trendMeanReturn) + ' zero'), near: trendMeanReturn !== undefined && trendMeanReturn <= 1, detail: 'Exit at 0% or below using the last closed daily candle' });
       } else if (isMonthlyMomentum) {
         const nextMonthlyRebalance = Date.UTC(new Date(now).getUTCFullYear(), new Date(now).getUTCMonth() + 1, 1);
-        exitFacts.push({ label: 'NEXT', value: '· MONTHLY REBALANCE · in ' + durationLabel(Math.max(0, nextMonthlyRebalance - now)) + ' · ' + new Date(nextMonthlyRebalance).toISOString().slice(0, 10) + ' UTC', tone: 'is-rebalance', detail: 'The strategy evaluates the new monthly selection on the first daily scan after the UTC month begins, using the previous month’s final daily close. Exact scan time depends on data arrival.' });
+        exitFacts.push({ label: durationLabel(Math.max(0, nextMonthlyRebalance - now)) + ' · ' + utcDateLabel(nextMonthlyRebalance), value: '· NEXT MONTHLY REBALANCE', tone: 'is-rebalance', detail: 'The strategy evaluates the new monthly selection on the first daily scan after the UTC month begins, using the previous month’s final daily close. Exact scan time depends on data arrival.' });
         exitFacts.push({ label: 'BTC SMA200 buffer', value: btcExitDistance === undefined ? 'unavailable' : (btcExitDistance >= 0 ? '+' + btcExitDistance.toFixed(2) + '% buffer' : Math.abs(btcExitDistance).toFixed(2) + '% below exit threshold'), near: btcExitDistance !== undefined && btcExitDistance <= 1 });
         const ownSmaDistance = distanceFromPriceLevel(symbolDiagnostic?.primary_level);
         if (ownSmaDistance !== undefined) exitFacts.push({ label: 'Own SMA100', value: thresholdDistanceLabel(ownSmaDistance), near: ownSmaDistance <= 1 });
@@ -461,7 +460,10 @@ function AutoTraderOutcomesComponent({ embedded = false, ticks = [], liveOnly = 
         if (strategyDiagnostic?.btc_gate_required && btcExitDistance !== undefined) exitFacts.push({ label: 'BTC SMA' + (strategyDiagnostic.btc_window_days ?? ''), value: thresholdDistanceLabel(btcExitDistance), near: btcExitDistance <= 1 });
       }
       if (exitFacts.length === 0) exitFacts.push({ label: 'Signal exit', value: 'distance unavailable', detail: 'This strategy exits on a signal change rather than a fixed price threshold' });
-      return <div className="auto-trader-pnl-bar-cell" title={label + ' net of entry fees, estimated exit fees, and estimated adverse exit slippage' + (data.strategy === 'risk-adjusted-trend-portfolio' ? '. ' + trendDetail : '')}>
+      return <div className="auto-trader-pnl-bar-cell" title={label + '. Estimated net P&L if closed now at the current mark, after entry fees, estimated exit fees, and estimated adverse exit slippage' + (data.strategy === 'risk-adjusted-trend-portfolio' ? '. ' + trendDetail : '')}>
+        <div className="auto-trader-exit-summary" aria-label="Exit distances">
+          {exitFacts.map((fact, index) => <span key={fact.label + index} className={[fact.near && 'is-near', fact.tone].filter(Boolean).join(' ') || undefined} title={fact.detail ?? fact.label}><b>{fact.label}</b> {fact.value}</span>)}
+        </div>
         <div className="auto-trader-pnl-bar-track" aria-label={'Net return ' + returnPct.toFixed(2) + '%; colored fill shows profit or loss, blue marker is breakeven'}>
           <span className={'auto-trader-pnl-bar-fill ' + (positive ? 'is-positive' : netUsd < 0 ? 'is-negative' : 'is-flat')} style={{ left: fillLeft + '%', width: fillWidth + '%' }} />
           <span className="auto-trader-pnl-marker is-breakeven" style={{ left: breakEvenPosition + '%' }} title="Net breakeven" />
@@ -471,9 +473,6 @@ function AutoTraderOutcomesComponent({ embedded = false, ticks = [], liveOnly = 
           {signalExitPosition !== undefined && <span className="auto-trader-pnl-marker is-signal-exit" style={{ left: signalExitPosition + '%' }} title={'Signal exit: BTC 200-day average ' + formatForSymbol(btcSignal!.btc_sma!, 'BTC-USDT', 'price') + ' (' + signalExitReturn!.toFixed(2) + '% from entry)'} />}
         </div>
         <span className={'auto-trader-pnl-bar-label ' + (positive ? 'is-positive' : netUsd < 0 ? 'is-negative' : 'is-flat')}>{label}</span>
-        <div className="auto-trader-exit-summary" aria-label="Exit distances">
-          {exitFacts.map((fact, index) => <span key={fact.label + index} className={[fact.near && 'is-near', fact.tone].filter(Boolean).join(' ') || undefined} title={fact.detail ?? fact.label}><b>{fact.label}</b> {fact.value}</span>)}
-        </div>
       </div>;
     }, minWidth: 320, flex: 2 },
     { field: 'status', headerName: 'State', minWidth: 75 },
@@ -582,10 +581,11 @@ function AutoTraderOutcomesComponent({ embedded = false, ticks = [], liveOnly = 
     {(strategyRatesOnly || (!liveOnly && !closedOnly)) && <><div className="auto-trader-strategy-winrate-heading"><strong className="auto-trader-strategy-winrate-title">Strategy performance and today’s realized P&L</strong><label><input type="checkbox" checked={hideDisabledStrategies} onChange={(event) => updateHideDisabledStrategies(event.target.checked)} /> Hide disabled strategies</label></div>
     <p className="auto-trader-strategy-winrate-note">Today P&amp;L includes all realized exits today, including partial exits on positions still open. Wins, losses, and Closed net use fully closed audited trades only. Unrealized P&amp;L is shown with open positions and is not included in Today P&amp;L.</p>
     <div className="data-grid-wrap signal-info-grid auto-trader-strategy-winrate-grid"><AgGridReact<StrategyWinRateRow> rowData={visibleStrategyWinRates} columnDefs={strategyColumns} getRowId={({ data }) => data.strategy} defaultColDef={{ sortable: true, resizable: true, flex: 0, minWidth: 48 }} theme={theme} domLayout="autoHeight" rowHeight={26} headerHeight={28} /></div>
-    {visibleStrategyWinRates.length === 0 && !state.loading && <p className="positions-empty">{hideDisabledStrategies ? 'No enabled strategies to show.' : 'No closed trades to calculate strategy win rates yet.'}</p>}</>}
+    {visibleStrategyWinRates.length === 0 && !state.loading && <p className="positions-empty">{hideDisabledStrategies ? 'No enabled strategies to show.' : 'No closed trades to calculate strategy win rates yet.'}</p>}
+</>}
     {closedOnly && state.hasOlderLedgerTrades && <button type="button" className="auto-trader-audit-more" disabled={state.loadingOlderLedgerTrades} onClick={() => void model.loadOlderLedgerTrades()}>{state.loadingOlderLedgerTrades ? 'Loading older trades…' : 'Load older trades'}</button>}
     {!liveOnly && !closedOnly && !strategyRatesOnly && state.auditCursor != null && <button type="button" className="auto-trader-audit-more" disabled={state.loadingOlderAudit} onClick={() => void model.loadOlderAudit()}>{state.loadingOlderAudit ? 'Loading older history…' : 'Load older history'}</button>}
-    {!strategyRatesOnly && <div className={'data-grid-wrap signal-info-grid' + (liveOnly ? ' auto-trader-live-position-grid' : closedOnly ? ' auto-trader-ledger-grid' : '')}><AgGridReact<OutcomeGridRow> rowData={rows} columnDefs={visibleColumns} onGridReady={(event) => { outcomesGridApi.current = event.api; if (closedOnly) restoreClosedGridSort(event.api); }} onSortChanged={(event) => { if (closedOnly) persistClosedGridSort(event.api); }} getRowId={({ data }) => data.rowId} getRowHeight={({ data }) => closedOnly ? 30 : liveOnly && data?.strategy === 'dated-futures-carry' ? 60 : liveOnly && data?.strategy === 'risk-adjusted-monthly-momentum' ? 68 : liveOnly && data?.strategy === 'risk-adjusted-trend-portfolio' ? 68 : liveOnly ? 38 : 48} getRowClass={({ data }) => data?.rowId.startsWith('ledger-summary:') ? 'auto-trader-closed-position-row auto-trader-ledger-summary-row' : data?.rowId.startsWith('ledger-trade:') ? 'auto-trader-closed-position-row auto-trader-ledger-child-row' : data?.status === 'Open' ? 'auto-trader-open-position-row' : 'auto-trader-closed-position-row'} defaultColDef={{ sortable: true, resizable: true, flex: 1, minWidth: 80 }} postSortRows={closedOnly ? ({ nodes }) => keepLedgerGroupsTogether(nodes) : undefined} theme={theme} domLayout={closedOnly ? 'normal' : 'autoHeight'} rowHeight={closedOnly ? 30 : liveOnly ? 34 : 48} headerHeight={closedOnly || liveOnly ? 24 : 28} /></div>}
+    {!strategyRatesOnly && <div className={'data-grid-wrap signal-info-grid' + (liveOnly ? ' auto-trader-live-position-grid' : closedOnly ? ' auto-trader-ledger-grid' : '')}><AgGridReact<OutcomeGridRow> rowData={rows} columnDefs={visibleColumns} onGridReady={(event) => { outcomesGridApi.current = event.api; if (closedOnly) restoreClosedGridSort(event.api); }} onSortChanged={(event) => { if (closedOnly) persistClosedGridSort(event.api); }} getRowId={({ data }) => data.rowId} getRowHeight={() => closedOnly ? 30 : liveOnly ? 52 : 48} getRowClass={({ data }) => data?.rowId.startsWith('ledger-summary:') ? 'auto-trader-closed-position-row auto-trader-ledger-summary-row' : data?.rowId.startsWith('ledger-trade:') ? 'auto-trader-closed-position-row auto-trader-ledger-child-row' : data?.status === 'Open' ? 'auto-trader-open-position-row' : 'auto-trader-closed-position-row'} defaultColDef={{ sortable: true, resizable: true, flex: 1, minWidth: 80 }} postSortRows={closedOnly ? ({ nodes }) => keepLedgerGroupsTogether(nodes) : undefined} theme={theme} domLayout={closedOnly ? 'normal' : 'autoHeight'} rowHeight={closedOnly ? 30 : liveOnly ? 52 : 48} headerHeight={closedOnly || liveOnly ? 24 : 28} /></div>}
     {!strategyRatesOnly && !state.loading && rows.length === 0 && !state.error && <p className="positions-empty">{liveOnly ? 'No live AutoTrader positions are open.' : closedOnly ? 'No AutoTrader position-ledger trades are available yet.' : 'No open AutoTrader positions or fully closed audited trades are available yet.'}</p>}
   </section>;
 }

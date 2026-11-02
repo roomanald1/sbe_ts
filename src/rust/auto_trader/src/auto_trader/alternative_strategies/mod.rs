@@ -2,7 +2,7 @@
 //! No authenticated exchange or blockchain transaction submission exists here.
 mod api;
 mod engine;
-pub(crate) mod replay;
+pub mod replay;
 #[cfg(test)]
 mod tests;
 mod types;

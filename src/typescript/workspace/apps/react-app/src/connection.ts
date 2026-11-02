@@ -51,7 +51,9 @@ export class Connection {
 
   public readonly url =
     import.meta.env.VITE_RSOCKET_URL ??
-    (import.meta.env.DEV
+    (import.meta.env.DEV ||
+    (typeof window !== 'undefined' &&
+      ['localhost', '127.0.0.1'].includes(window.location.hostname))
       ? 'ws://localhost:10001'
       : 'wss://sbe-ts.onrender.com');
   private cancelled: boolean = false;

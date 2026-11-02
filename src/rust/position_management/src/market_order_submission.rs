@@ -57,7 +57,7 @@ async fn submit_order(
         None
     } else {
         let rates_started = Instant::now();
-        let rates = cached_usd_rates_for_order().await?.rates;
+        let rates = cached_usd_rates_for_order().await?;
         processing_timings_ms.insert(
             "capacity_rate_lookup".to_owned(),
             rates_started.elapsed().as_secs_f64() * 1_000.0,
@@ -160,7 +160,7 @@ async fn submit_order(
         ensure_paper_capacity_with_rates(
             &store,
             &ledger,
-            capacity_rates.as_ref().expect("capacity rates loaded for opening order"),
+            &capacity_rates.as_ref().expect("capacity rates loaded for opening order").rates,
             &symbol,
             &request.side,
             request.quantity,

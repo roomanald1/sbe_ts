@@ -121,6 +121,28 @@ fn symbol_gate_hits_for_reason(reason: &str) -> Vec<(String, String, String, Str
             }
         }
     }
+    if let Some(details) = reason.split("; strategy filters: ").nth(1) {
+        for filter in details.split(" | ") {
+            let Some((identity, detail)) = filter.split_once(" · ") else {
+                continue;
+            };
+            let mut identity = identity.split_whitespace();
+            let (Some(symbol), Some(direction)) = (identity.next(), identity.next()) else {
+                continue;
+            };
+            let gate = if detail.starts_with("Strategy disabled") {
+                "Strategy enablement"
+            } else if detail.starts_with("Strategy evaluation error") {
+                "Strategy evaluation"
+            } else {
+                "Strategy entry rule"
+            };
+            hits.insert(
+                (symbol.to_owned(), direction.to_owned(), gate.to_owned()),
+                detail.to_owned(),
+            );
+        }
+    }
     hits.into_iter()
         .map(|((symbol, direction, gate), detail)| {
             let distance = gate_distance_to_pass(&gate, &detail);

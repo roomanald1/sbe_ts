@@ -21,6 +21,7 @@ def get_json(base, path):
 
 
 METRIC_HEADERS = set()
+LAST_EXPORTED_ORDER_STAGE_TIMESTAMP = {}
 
 
 def sample(name, help_text, value, labels=None, kind="gauge", timestamp_ms=None):
@@ -55,6 +56,9 @@ def metrics():
             with urlopen(base + "/process-cpu-seconds", timeout=2) as response:
                 cpu_seconds = float(response.read().decode().strip())
             output.append(sample("app_service_process_cpu_seconds_total", "Cumulative CPU time consumed by an application service process in seconds.", cpu_seconds, {"service": name}, kind="counter"))
+            with urlopen(base + "/process-memory-bytes", timeout=2) as response:
+                memory_bytes = int(response.read().decode().strip())
+            output.append(sample("app_service_process_resident_memory_bytes", "Current resident memory (RSS) used by an application service process in bytes.", memory_bytes, {"service": name}))
         except (OSError, URLError, ValueError):
             pass
 
@@ -194,14 +198,24 @@ def metrics():
                 if isinstance(latency, (int, float)) and latency >= 0:
                     stage_values.setdefault(stage, []).append((int(order.get("timestamp", 0)), latency))
         for stage, samples in stage_values.items():
-            # The dashboard asks for one current value per stage. Resolve it by
-            # the newest recorded order, not the largest historical duration.
-            event_timestamp, latest_value = max(samples, key=lambda sample: sample[0])
+            # Emit each order-stage observation once. Re-exporting the latest
+            # value on every scrape makes event timings look like repeated data.
             metric_stage = "source_signal_age" if stage == "signal_age_at_order_record" else stage
             description = "Latest milliseconds per AutoTrader stage; source_signal_age is signal age, not processing time."
-            output.append(sample("app_autotrader_stage_latency_ms", description, latest_value, {"stage": metric_stage, "stat": "latest"}))
-            output.append(sample("app_autotrader_stage_latency_samples", "Number of retained AutoTrader orders available for this stage's latest measurement.", len(samples), {"stage": metric_stage}))
+            last_timestamp = LAST_EXPORTED_ORDER_STAGE_TIMESTAMP.get(metric_stage, -1)
+            new_samples = sorted((timestamp, value) for timestamp, value in samples if timestamp > last_timestamp)
+            for event_timestamp, value in new_samples:
+                output.append(sample("app_autotrader_stage_latency_ms", description, value, {"stage": metric_stage, "stat": "latest"}))
+                LAST_EXPORTED_ORDER_STAGE_TIMESTAMP[metric_stage] = event_timestamp
 
+    except (OSError, URLError, ValueError, TypeError):
+        pass
+    try:
+        counts = get_json(SERVICES["feed_handlers"][0], "/internal/message-counts")
+        for feed in ("trades", "books", "tickers"):
+            value = counts.get(feed)
+            if isinstance(value, (int, float)):
+                output.append(sample("app_feed_messages_total", "Cumulative accepted market feed updates by channel.", value, {"channel": feed}, kind="counter"))
     except (OSError, URLError, ValueError, TypeError):
         pass
     return "".join(output).encode()

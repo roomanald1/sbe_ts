@@ -51,22 +51,22 @@ wait_for_service "$insights_pid" 3004 "Insights"
 wait_for_service "$sentiment_pid" 3006 "News sentiment"
 
 
-cargo run --manifest-path src/rust/feed_handlers/Cargo.toml &
+cargo run --release --manifest-path src/rust/feed_handlers/Cargo.toml &
 feed_pid=$!
 children+=("$feed_pid")
 wait_for_service "$feed_pid" 3001 "FeedHandlers"
 
-cargo run --manifest-path src/rust/position_management/Cargo.toml &
+cargo run --release --manifest-path src/rust/position_management/Cargo.toml &
 position_pid=$!
 children+=("$position_pid")
 wait_for_service "$position_pid" 3002 "Position Management"
 
-cargo run --manifest-path src/rust/auto_trader/Cargo.toml &
+cargo run --release --manifest-path src/rust/auto_trader/Cargo.toml &
 auto_trader_pid=$!
 children+=("$auto_trader_pid")
 wait_for_service "$auto_trader_pid" 3005 "AutoTrader"
 
-cargo run --manifest-path src/rust/execution/Cargo.toml &
+cargo run --release --manifest-path src/rust/execution/Cargo.toml &
 execution_pid=$!
 children+=("$execution_pid")
 wait_for_service "$execution_pid" 3003 "Execution"

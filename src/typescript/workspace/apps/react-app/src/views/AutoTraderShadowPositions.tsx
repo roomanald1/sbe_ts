@@ -43,7 +43,8 @@ function AutoTraderShadowPositionsComponent({ ticks = [], histories = new Map() 
     if (row.status !== 'Outcome unavailable' || !row.entryPrice) {
       return { ...row, markPrice, openNetReturnPercent: estimatedOpenReturn };
     }
-    const targetTime = row.openedAt + 300_000;
+    const outcomeHorizonMs = row.scoutLevelPercent === undefined ? 300_000 : 3_600_000;
+    const targetTime = row.openedAt + outcomeHorizonMs;
     const exitSample = histories.get(row.symbol)?.find((sample) => sample.timestamp >= targetTime && sample.timestamp <= targetTime + 60_000);
     if (!exitSample) return { ...row, markPrice, openNetReturnPercent: estimatedOpenReturn };
     const grossAtHorizon = (row.direction === 'bullish'
@@ -58,16 +59,33 @@ function AutoTraderShadowPositionsComponent({ ticks = [], histories = new Map() 
   const losses = rows.filter((row) => row.status === 'Lost').length;
   const flats = rows.filter((row) => row.status === 'Flat').length;
   const unavailable = rows.filter((row) => row.status === 'Outcome unavailable').length;
+  const scoutLevelSummaries = useMemo(() => {
+    const groups = new Map<number, AutoTraderShadowPosition[]>([[0.25, []], [0.5, []], [1, []], [2, []]]);
+    for (const row of rows) {
+      if (row.source !== 'Scout' || row.scoutLevelPercent === undefined) continue;
+      const group = groups.get(row.scoutLevelPercent) ?? [];
+      group.push(row);
+      groups.set(row.scoutLevelPercent, group);
+    }
+    return [...groups.entries()].sort(([left], [right]) => left - right).map(([level, samples]) => {
+      const resolved = samples.filter((row) => ['Won', 'Lost', 'Flat'].includes(row.status));
+      const wins = resolved.filter((row) => row.status === 'Won').length;
+      const returns = resolved.flatMap((row) => typeof row.netReturnPercent === 'number' ? [row.netReturnPercent] : []);
+      const average = returns.length ? returns.reduce((sum, value) => sum + value, 0) / returns.length : undefined;
+      return { level, count: resolved.length, wins, average };
+    });
+  }, [rows]);
   const columns = useMemo<ColDef<ShadowGridRow>[]>(() => [
     { field: 'symbol', headerName: 'Symbol', minWidth: 110 },
     { field: 'strategy', headerName: 'Strategy', valueFormatter: ({ value }) => strategyLabel(value), minWidth: 165 },
     { field: 'source', headerName: 'Source', minWidth: 105 },
+    { headerName: 'Scout level', valueGetter: ({ data }) => data?.scoutLevelPercent, valueFormatter: ({ value }) => typeof value === 'number' ? String(value.toFixed(2)) + '% below breakout' : '—', minWidth: 150 },
     { headerName: 'Opened at', valueGetter: ({ data }) => data?.openedAt, valueFormatter: ({ value }) => typeof value === 'number' ? new Date(value).toLocaleString() : '—', minWidth: 165 },
-    { headerName: 'Duration', headerTooltip: 'Elapsed time for open shadows; holding time until the five-minute outcome for resolved shadows.', valueGetter: ({ data }) => {
+    { headerName: 'Duration', headerTooltip: 'Elapsed time for open shadows; holding time until each shadow evaluation horizon.', valueGetter: ({ data }) => {
       if (!data) return undefined;
       if (data.status === 'Open') return Math.max(0, now - data.openedAt);
       if (typeof data.closedAt === 'number') return Math.max(0, data.closedAt - data.openedAt);
-      return Math.min(300_000, Math.max(0, now - data.openedAt));
+      return Math.min(3_600_000, Math.max(0, now - data.openedAt));
     }, valueFormatter: ({ value }) => typeof value === 'number' ? durationLabel(value) : '—', minWidth: 95 },
     { headerName: 'Entry', valueGetter: ({ data }) => data?.entryPrice, valueFormatter: ({ value }) => typeof value === 'number' ? value.toPrecision(8) : '—', minWidth: 115 },
     { headerName: 'Mark', valueGetter: ({ data }) => data?.markPrice, valueFormatter: ({ value }) => typeof value === 'number' ? value.toPrecision(8) : '—', minWidth: 115 },
@@ -98,14 +116,19 @@ function AutoTraderShadowPositionsComponent({ ticks = [], histories = new Map() 
 
   return <section className="feed-section signal-info-panel" aria-label="AutoTrader shadow positions">
     <FeedToolbar title="AutoTrader shadow positions" />
-    <p className="signal-info-note">No orders are placed for these candidates. Concurrency is controlled by AutoTrader settings; repeated refreshes are coalesced into one five-minute shadow per symbol, strategy, and direction. Open marks are indicative and net out estimated round-trip taker fees and observed entry spread. Completed results use the five-minute bid/ask evaluation when available, otherwise a labelled ticker estimate. Shadow outcomes are separate from real position winners and losers.</p>
+    <p className="signal-info-note">No orders are placed for these candidates. Daily Donchian scouts are shadowed at 0.25%, 0.5%, 1%, and 2% below the breakout when each level qualifies. Outcomes use the one-hour bid/ask response to compare entry-level cohorts; this measures the initial response, not the full daily strategy holding period. Entry prices use the daily close as a reference; open marks are indicative and subtract estimated round-trip taker fees. Shadow outcomes are separate from real position winners and losers.</p>
     <div className="auto-trader-shadow-summary" aria-live="polite">
       <span>{openCount} open</span><span>{wins} wins</span><span>{losses} losses</span><span>{flats} flat</span>{unavailable > 0 && <span>{unavailable} outcome unavailable</span>}
+    </div>
+    <div className="auto-trader-shadow-summary" aria-label="Scout level comparison">
+      {scoutLevelSummaries.map(({ level, count, wins: levelWins, average }) => <span key={level}>
+        {String(level) + '%: ' + count + ' outcomes · ' + (count ? String(Math.round(levelWins / count * 100)) + '% wins' : 'no outcomes') + (average === undefined ? '' : ' · ' + percent(average) + ' avg net')}
+      </span>)}
     </div>
     {state.error && <div className="positions-error">{state.error}</div>}
     <div className="data-grid-wrap signal-info-grid"><AgGridReact<ShadowGridRow> rowData={rows} columnDefs={columns} getRowId={({ data }) => data.decisionId} defaultColDef={{ sortable: true, resizable: true, flex: 1 }} theme={theme} domLayout="autoHeight" rowHeight={34} headerHeight={30} /></div>
     {state.loading && <p className="positions-empty">Loading shadow outcomes…</p>}
-    {!state.loading && !state.error && rows.length === 0 && <p className="positions-empty">No scout or exploratory shadow candidates recorded in the last 15 minutes.</p>}
+    {!state.loading && !state.error && rows.length === 0 && <p className="positions-empty">No scout or exploratory shadow candidates recorded in the last hour.</p>}
   </section>;
 }
 

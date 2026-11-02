@@ -486,11 +486,13 @@ async fn prepare_signal_execution_plan(
         deep_book,
         schedule_depth_threshold,
     );
+    let explore_execution_profile =
+        exploratory || should_explore_execution_profile(signal, order_type);
     let profile = choose_parameter_profile(
         order_type,
         &context,
         &settings.execution_learning,
-        exploratory,
+        explore_execution_profile,
     );
     let execution_params = parameter_profile(baseline_params, profile);
     *state.latest_execution_parameters.lock().await = Some(LatestExecutionParameters {

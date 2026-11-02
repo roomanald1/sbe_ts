@@ -1,19 +1,19 @@
 use anyhow::Result;
-use axum::{http::StatusCode, routing::get, Json, Router};
-use flate2::{read::MultiGzDecoder, write::GzEncoder, Compression};
-use rusqlite::{params, Connection};
+use axum::{Json, Router, http::StatusCode, routing::get};
+use flate2::{Compression, read::MultiGzDecoder, write::GzEncoder};
+use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 use std::io::{Read, Write};
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque},
     path::PathBuf,
     sync::{
-        atomic::{AtomicBool, Ordering},
         Arc, OnceLock,
+        atomic::{AtomicBool, Ordering},
     },
     time::{Duration, Instant},
 };
-use tokio::sync::{mpsc, oneshot, Mutex};
+use tokio::sync::{Mutex, mpsc, oneshot};
 
 const PRICE_WINDOW_MS: u64 = 3_610_000;
 const TRADE_WINDOW_MS: u64 = 60_000;
@@ -103,7 +103,7 @@ fn breakout_watch(
         return None;
     }
 
-    let midpoint = (lower + upper) / 2.0;
+    let midpoint = lower + (upper - lower) * 0.5;
     let width_percent = if midpoint > 0.0 {
         (upper - lower) / midpoint * 100.0
     } else {

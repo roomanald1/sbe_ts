@@ -193,7 +193,7 @@ fn assess_deep_book(
     if best_ask < best_bid {
         return None;
     }
-    let mid = (best_bid + best_ask) / 2.0;
+    let mid = best_bid + (best_ask - best_bid) * 0.5;
     let bid_depth_10bps = quote_depth_within_band(&bids, mid, true);
     let ask_depth_10bps = quote_depth_within_band(&asks, mid, false);
     let total_depth = bid_depth_10bps + ask_depth_10bps;

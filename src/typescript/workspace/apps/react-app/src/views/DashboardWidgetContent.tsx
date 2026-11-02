@@ -17,6 +17,7 @@ import { DatedCarry } from './DatedCarry';
 import { AutoTraderDiagnostics } from './AutoTraderDiagnostics';
 import { AutoTraderOutcomes } from './AutoTraderOutcomes';
 import { AutoTraderShadowPositions } from './AutoTraderShadowPositions';
+import { ExecutionFees } from './ExecutionFees';
 import { OrderBookPopup } from './OrderBookPopup';
 import { TradesView } from './TradesView';
 import { NewsTicker } from './NewsTicker';
@@ -58,6 +59,7 @@ export function DashboardWidgetContent(props: Props): ReactNode {
     case 'auto-trader-completed-positions': return <AutoTraderOutcomes closedOnly />;
     case 'auto-trader-live-positions': return <AutoTraderOutcomes ticks={prices.ticks} liveOnly />;
     case 'auto-trader-shadow-positions': return <AutoTraderShadowPositions ticks={prices.ticks} histories={prices.histories} />;
+    case 'execution-fees': return <ExecutionFees />;
     case 'trades': return feedSource === 'okx' ? <TradesView streamKey={widget.id} symbol={symbol} symbols={selectionSymbols} onSymbolChange={updateSymbol} connection={connection} paused={paused} /> : <UnavailableFeed label="Recent trades" message="Recent trade data is available with the OKX feed." />;
     case 'liquidity': return feedSource === 'okx' ? <MarketLiquidity streamKey={widget.id} symbol={symbol} symbols={selectionSymbols} onSymbolChange={updateSymbol} connection={connection} paused={paused} /> : <UnavailableFeed label="Market liquidity" message="Market liquidity indicators are available with the OKX feed." />;
     case 'signals': return <BestSignalsView onTradeSymbol={onTrade} onRangeOrders={onRangeOrders} />;

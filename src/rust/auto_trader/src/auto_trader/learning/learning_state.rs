@@ -67,7 +67,10 @@ fn record_closed_trade_outcome(
     settings.closed_trade_timestamps_ms.push(current_time_ms());
     settings.closed_trade_realized_usd.push(realized_usd);
     settings.closed_trade_fees_usd.push(fees_usd);
-    let excess = settings.closed_trade_returns_percent.len().saturating_sub(settings.closed_trade_window);
+    let excess = settings
+        .closed_trade_returns_percent
+        .len()
+        .saturating_sub(settings.closed_trade_window);
     if excess > 0 {
         settings.closed_trade_returns_percent.drain(0..excess);
         settings.closed_trade_timestamps_ms.drain(0..excess);
@@ -99,6 +102,45 @@ fn record_strategy_trade_outcome(
         let base_context = context.split(":P").next().unwrap_or(context);
         let key = format!("{base_context}:trade");
         record_learning_outcome(settings.learning.entry(key).or_default(), realized_pnl_usd);
+    }
+}
+
+const MAX_STRATEGY_THRESHOLD_SAMPLES: usize = 64;
+
+fn record_strategy_threshold_sample(
+    settings: &mut Settings,
+    symbol: &str,
+    strategy: Option<&str>,
+    scout: bool,
+    entry_decision: Option<&serde_json::Value>,
+    net_return_percent: f64,
+) {
+    let Some(strategy) = strategy.filter(|_| !scout) else {
+        return;
+    };
+    let Some(entry_decision) = entry_decision else {
+        return;
+    };
+    if !net_return_percent.is_finite() {
+        return;
+    }
+    let Some((parameter_key, threshold, feature_value)) =
+        threshold_observation(strategy, entry_decision)
+    else {
+        return;
+    };
+    let key = strategy_trade_learning_key(symbol, strategy);
+    let samples = &mut settings.learning.entry(key).or_default().threshold_samples;
+    samples.push(StrategyThresholdSample {
+        timestamp_ms: current_time_ms(),
+        parameter_key,
+        threshold,
+        feature_value,
+        net_return_percent,
+    });
+    if samples.len() > MAX_STRATEGY_THRESHOLD_SAMPLES {
+        let excess = samples.len() - MAX_STRATEGY_THRESHOLD_SAMPLES;
+        samples.drain(..excess);
     }
 }
 

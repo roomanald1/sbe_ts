@@ -231,42 +231,35 @@ async fn evaluate_position_exit(
             }
         }
     }
-    let (strategy_disabled, strategy_no_longer_eligible) = {
+    let (strategy_enabled, strategy_no_longer_eligible) = {
         let settings = state.settings.lock().await;
-        let strategy_disabled = position.strategy.as_ref().is_some_and(|name| {
-            let enabled = settings
-                .strategies
-                .iter()
-                .any(|strategy| strategy.as_str() == name);
-            Strategy::from_name(name).map_or(!enabled, |strategy| {
-                strategy.should_exit_when_disabled(enabled)
-            })
+        let enabled = position.strategy.as_ref().is_some_and(|name| {
+            settings.strategies.iter().any(|strategy| strategy.as_str() == name)
         });
-        (strategy_disabled, position.strategy.clone())
+        (enabled, position.strategy.clone())
     };
     let minimum_hold_active = strategy_no_longer_eligible.as_deref()
         == Some("donchian-20-btc200-hold3")
         && position.entry_timestamp_ms > 0
         && observed_at.saturating_sub(position.entry_timestamp_ms) < 3 * 86_400_000;
-    // A missing or stale research snapshot is a data gap, not an exit signal.
-    // Keep the position until fresh strategy state can confirm an exit.
-    let research_exit = strategy_no_longer_eligible
-        .as_deref()
-        .is_some_and(|strategy| {
-            !minimum_hold_active
-                && research_regime.is_some_and(|regime| regime.strategy_exit_required(strategy, &symbol))
-        });
-    let strategy_rebalance = strategy_no_longer_eligible
-        .as_deref()
-        .is_some_and(|strategy| {
-            research_regime.is_some_and(|regime| {
-                regime.strategy_rebalance_required(
-                    strategy,
-                    &symbol,
-                    position.strategy_decision.as_ref(),
-                )
-            })
-        });
+    // Evaluate signal state and strategy enablement through the strategy lifecycle evaluator.
+    let strategy_decision = strategy_no_longer_eligible.as_deref().map(|strategy| {
+        if let Some(regime) = research_regime.as_ref() {
+            regime.evaluate_position(strategy, &symbol, strategy_enabled,
+                position.strategy_decision.as_ref(), minimum_hold_active)
+        } else {
+            let parameters = BTreeMap::new();
+            Strategy::from_name(strategy).map_or(
+                if strategy_enabled { StrategyDecision::Hold } else { StrategyDecision::Exit },
+                |kind| kind.evaluate(&StrategySignal::position(
+                    &parameters, strategy_enabled, None, false,
+                )).unwrap_or(StrategyDecision::Hold),
+            )
+        }
+    }).unwrap_or(StrategyDecision::Hold);
+    let strategy_disabled = strategy_decision == StrategyDecision::Exit && !strategy_enabled;
+    let research_exit = strategy_decision == StrategyDecision::Exit && strategy_enabled;
+    let strategy_rebalance = strategy_decision == StrategyDecision::Rebalance;
     let signal_managed_strategy = strategy_no_longer_eligible
         .as_deref()
         .and_then(Strategy::from_name)
@@ -365,7 +358,7 @@ async fn evaluate_position_exit(
         .unwrap_or_default()
         .as_millis() as u64;
     let side = if position.quantity > 0.0 { "sell" } else { "buy" };
-    let notional = position.quantity.abs() * (bid + ask) / 2.0;
+    let notional = position.quantity.abs() * (bid + (ask - bid) * 0.5);
     {
         let mut settings = state.settings.lock().await;
         reset_daily_budget(&mut settings);

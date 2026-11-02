@@ -68,6 +68,7 @@ async fn subscribe_once(
                             continue;
                         };
                         if price.is_finite() && price > 0.0 {
+                            crate::metrics::record_ticker();
                             let timestamp_ms = item
                                 .ts
                                 .and_then(|value| value.parse::<u64>().ok())

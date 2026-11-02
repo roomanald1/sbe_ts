@@ -72,6 +72,26 @@ fn cached_usd_rates_with_stream(
     )
 }
 
+fn refresh_order_usd_rate_snapshot() {
+    let cache = USD_RATE_CACHE.get_or_init(|| Mutex::new(None));
+    let Ok(cached_guard) = cache.try_lock() else {
+        return;
+    };
+    let cached = cached_guard
+        .as_ref()
+        .map(|(_, rates)| rates.clone());
+    let stream = latest_stream_usd_rates();
+    let merged = match (stream, cached) {
+        (Some(stream), Some(cached)) => Some(merge_usd_rate_snapshots(&stream, &cached)),
+        (Some(stream), None) => Some(stream),
+        (None, Some(cached)) => Some(cached),
+        (None, None) => None,
+    };
+    USD_RATE_ORDER_SNAPSHOT
+        .get_or_init(ArcSwapOption::empty)
+        .store(merged.map(Arc::new));
+}
+
 async fn get_usd_rates() -> Result<Json<UsdRatesResponse>, (StatusCode, String)> {
     let stream_rates = latest_stream_usd_rates();
     let cache = USD_RATE_CACHE.get_or_init(|| Mutex::new(None));
@@ -89,10 +109,12 @@ async fn get_usd_rates() -> Result<Json<UsdRatesResponse>, (StatusCode, String)>
                 if let Ok(rates) = fetch_usd_rates().await {
                     let cache = USD_RATE_CACHE.get_or_init(|| Mutex::new(None));
                     *cache.lock().await = Some((Instant::now(), rates));
+                    refresh_order_usd_rate_snapshot();
                 }
                 USD_RATE_REFRESHING.store(false, Ordering::Release);
             });
         }
+        refresh_order_usd_rate_snapshot();
         return Ok(Json(cached_usd_rates_with_stream(
             stream_rates.as_ref(),
             &rates,
@@ -104,6 +126,7 @@ async fn get_usd_rates() -> Result<Json<UsdRatesResponse>, (StatusCode, String)>
         match fetch_usd_rates().await {
             Ok(fallback) => {
                 *cache.lock().await = Some((Instant::now(), fallback.clone()));
+                refresh_order_usd_rate_snapshot();
                 return Ok(Json(merge_usd_rate_snapshots(&stream, &fallback)));
             }
             Err(_) => return Ok(Json(stream)),
@@ -111,28 +134,20 @@ async fn get_usd_rates() -> Result<Json<UsdRatesResponse>, (StatusCode, String)>
     }
     let rates = fetch_usd_rates().await?;
     *cache.lock().await = Some((Instant::now(), rates.clone()));
+    refresh_order_usd_rate_snapshot();
     Ok(Json(rates))
 }
 
 // Order submission must never wait for an external rate request. The background
 // refresh loop owns cache population; requests may use the last cached snapshot.
-async fn cached_usd_rates_for_order() -> Result<UsdRatesResponse, (StatusCode, String)> {
-    let stream_rates = latest_stream_usd_rates();
-    let cache = USD_RATE_CACHE.get_or_init(|| Mutex::new(None));
-    let cached = cache
-        .try_lock()
-        .map_err(|_| (StatusCode::SERVICE_UNAVAILABLE, "USD rate cache busy".to_owned()))?
-        .as_ref()
-        .map(|(_, rates)| rates.clone());
-    match (stream_rates, cached) {
-        (Some(stream), Some(cached)) => Ok(merge_usd_rate_snapshots(&stream, &cached)),
-        (Some(stream), None) => Ok(stream),
-        (None, Some(cached)) => Ok(cached),
-        (None, None) => Err((
+async fn cached_usd_rates_for_order() -> Result<Arc<UsdRatesResponse>, (StatusCode, String)> {
+    USD_RATE_ORDER_SNAPSHOT
+        .get_or_init(ArcSwapOption::empty)
+        .load_full()
+        .ok_or((
             StatusCode::SERVICE_UNAVAILABLE,
             "USD conversion rates are not warmed yet".to_owned(),
-        )),
-    }
+        ))
 }
 
 async fn fetch_usd_rates() -> Result<UsdRatesResponse, (StatusCode, String)> {
@@ -225,7 +240,7 @@ async fn fetch_usd_rates() -> Result<UsdRatesResponse, (StatusCode, String)> {
 
 #[cfg(test)]
 mod tests {
-    use super::{UsdRatesResponse, cached_usd_rates_with_stream};
+    use super::{ArcSwapOption, UsdRatesResponse, cached_usd_rates_with_stream};
 
     fn rates(
         values: &[(&str, f64)],
@@ -243,6 +258,36 @@ mod tests {
                 .map(|(currency, timestamp)| ((*currency).to_owned(), *timestamp))
                 .collect(),
         }
+    }
+
+    #[test]
+    #[ignore = "manual microbenchmark; run with cargo test --release usd_rate_order_lookup_benchmark -- --ignored --nocapture"]
+    fn usd_rate_order_lookup_benchmark() {
+        use std::{hint::black_box, sync::Arc, time::Instant};
+
+        let stream = rates(&[("USD", 1.0), ("USDT", 0.999), ("BTC", 68_000.0)], 200, &[("USDT", 200), ("BTC", 200)]);
+        let cached = rates(
+            &[("USD", 1.0), ("USDT", 1.0), ("BTC", 67_900.0), ("EUR", 1.08), ("GBP", 1.27), ("JPY", 0.0067)],
+            150,
+            &[("USDT", 150), ("BTC", 150), ("EUR", 150), ("GBP", 150), ("JPY", 150)],
+        );
+        let merged = cached_usd_rates_with_stream(Some(&stream), &cached);
+        let snapshot = ArcSwapOption::from(Some(Arc::new(merged)));
+        const ITERATIONS: usize = 1_000_000;
+
+        let started = Instant::now();
+        for _ in 0..ITERATIONS {
+            black_box(cached_usd_rates_with_stream(Some(&stream), &cached));
+        }
+        let merge_ns = started.elapsed().as_nanos() as f64 / ITERATIONS as f64;
+
+        let started = Instant::now();
+        for _ in 0..ITERATIONS {
+            black_box(snapshot.load_full());
+        }
+        let snapshot_ns = started.elapsed().as_nanos() as f64 / ITERATIONS as f64;
+
+        println!("USD rate order lookup: merge+clone={merge_ns:.1} ns/op, premerged snapshot={snapshot_ns:.1} ns/op, speedup={:.1}x", merge_ns / snapshot_ns);
     }
 
     #[test]

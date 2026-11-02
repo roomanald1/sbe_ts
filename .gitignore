@@ -17,3 +17,6 @@ signals.sqlite*
 src/rust/insights/.news-python-packages/
 src/rust/insights/.news-model-cache/
 research/autotrader/runtime/
+
+# Generated coverage reports
+coverage/

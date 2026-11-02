@@ -16,9 +16,9 @@ fn retry_delay_after_failure(current_delay: Duration, connection_duration: Durat
 #[cfg(test)]
 mod tests {
     use super::{
-        BOOK_DEPTH, BookMessage, INITIAL_RECONNECT_DELAY, MAX_RECONNECT_DELAY,
+        BOOK_DEPTH, BookLevel, BookMessage, INITIAL_RECONNECT_DELAY, MAX_RECONNECT_DELAY,
         STABLE_CONNECTION_DURATION, TickerMessage, apply_book_side, retry_delay_after_failure,
-        select_top_instruments, top_book_side,
+        select_top_instruments, top_book_side, load_book_snapshot,
     };
     use serde_json::json;
     use std::time::Duration;
@@ -86,15 +86,15 @@ mod tests {
 
     #[test]
     fn parses_okx_book_snapshot_and_keeps_seven_best_levels() {
-        let text = r#"{"arg":{"channel":"books","instId":"BTC-USDT"},"action":"snapshot","data":[{"asks":[["101","1"],["102","2"]],"bids":[["99","3"],["98","4"]],"ts":"1700000000000"}]}"#;
+        let text = r#"{"arg":{"channel":"books","instId":"BTC-USDT"},"action":"snapshot","data":[{"asks":[["101","1","0","1"],["102","2","0","1"]],"bids":[["99","3","0","1"],["98","4","0","1"]],"ts":"1700000000000"}]}"#;
         let message: BookMessage<'_> = serde_json::from_str(text).unwrap();
         let update = &message.data.unwrap()[0];
         let mut bid_book = Vec::new();
         let mut ask_book = Vec::new();
-        apply_book_side(&mut bid_book, &update.bids).unwrap();
-        apply_book_side(&mut ask_book, &update.asks).unwrap();
-        let bids = top_book_side(&bid_book, true);
-        let asks = top_book_side(&ask_book, false);
+        load_book_snapshot(&mut bid_book, &update.bids).unwrap();
+        load_book_snapshot(&mut ask_book, &update.asks).unwrap();
+        let bids = top_book_side(&bid_book);
+        let asks = top_book_side(&ask_book);
 
         assert_eq!(message.arg.unwrap().instrument, "BTC-USDT");
         assert_eq!(update.ts, "1700000000000");
@@ -107,8 +107,30 @@ mod tests {
 
     #[test]
     fn rejects_invalid_okx_book_levels() {
-        assert!(apply_book_side(&mut Vec::new(), &[vec!["NaN", "1"]]).is_err());
-        assert!(apply_book_side(&mut Vec::new(), &[vec!["100", "-1"]]).is_err());
-        assert!(apply_book_side(&mut Vec::new(), &[vec!["100"]]).is_err());
+        assert!(
+            apply_book_side(
+                &mut Vec::new(),
+                &[BookLevel {
+                    price: "NaN",
+                    size: "1"
+                }],
+                true
+            )
+            .is_err()
+        );
+        assert!(
+            apply_book_side(
+                &mut Vec::new(),
+                &[BookLevel {
+                    price: "100",
+                    size: "-1"
+                }],
+                true
+            )
+            .is_err()
+        );
+        assert!(serde_json::from_str::<BookMessage<'_>>(
+            r#"{"arg":{"channel":"books","instId":"BTC-USDT"},"data":[{"asks":[["100"]],"bids":[],"ts":"1"}]}"#
+        ).is_err());
     }
 }

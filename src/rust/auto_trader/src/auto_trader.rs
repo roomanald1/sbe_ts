@@ -19,7 +19,7 @@ use tokio::{
     time::{Duration, interval},
 };
 
-pub(crate) mod alternative_strategies;
+pub mod alternative_strategies;
 
 include!("auto_trader/constants.rs");
 include!("auto_trader/market_data.rs");
@@ -153,3 +153,7 @@ mod strategy_cleanup_integration_tests {
         assert_eq!(deleted.iter().collect::<BTreeSet<_>>().len(), deleted.len(), "a strategy barrier was canceled more than once");
     }
 }
+
+#[cfg(test)]
+#[path = "auto_trader/dated_carry_tests.rs"]
+mod dated_carry_tests;

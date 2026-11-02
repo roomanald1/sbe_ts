@@ -185,7 +185,4 @@ mod book_update_tests {
         assert_eq!(book.best_bid().unwrap().size, 4.0);
         assert_eq!(book.best_ask(), None);
     }
-
-    #[test]
-
 }

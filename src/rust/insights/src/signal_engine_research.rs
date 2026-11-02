@@ -19,11 +19,10 @@ impl SignalEngine {
             } else {
                 &sample.ask_levels
             };
+            let midpoint = sample.bid + (sample.ask - sample.bid) * 0.5;
             levels
                 .iter()
-                .filter(|(price, _)| {
-                    ((*price / ((sample.bid + sample.ask) / 2.0) - 1.0).abs() * 10_000.0) <= 10.0
-                })
+                .filter(|(price, _)| ((*price / midpoint - 1.0).abs() * 10_000.0) <= 10.0)
                 .map(|(price, size)| price * size)
                 .sum::<f64>()
         };
@@ -49,7 +48,7 @@ impl SignalEngine {
             let ask = depth(sample, false);
             (bid + ask > 0.0).then_some((bid - ask) / (bid + ask))
         });
-        let current_mid = quote.map(|(_, bid, ask)| (bid + ask) / 2.0);
+        let current_mid = quote.map(|(_, bid, ask)| bid + (ask - bid) * 0.5);
         let top_sizes = current_book
             .and_then(|sample| Some((*sample.bid_levels.first()?, *sample.ask_levels.first()?)));
         let microprice = current_mid.zip(top_sizes).and_then(|(mid, (bid, ask))| {
@@ -57,28 +56,40 @@ impl SignalEngine {
                 .then_some(((sample_microprice(bid.0, bid.1, ask.0, ask.1) / mid) - 1.0) * 10_000.0)
         });
         let spread = quote.and_then(|(_, bid, ask)| {
-            ((bid + ask) > 0.0).then_some((ask - bid) / ((ask + bid) / 2.0) * 10_000.0)
+            let mid = bid + (ask - bid) * 0.5;
+            (mid > 0.0).then_some((ask - bid) / mid * 10_000.0)
         });
-        let flow = |window_ms: u64| {
-            let start = timestamp.saturating_sub(window_ms);
-            let mut signed = 0.0;
-            let mut total = 0.0;
-            let mut count = 0u64;
-            for (_, price, size, is_buy, _) in self
-                .trades
-                .iter()
-                .filter(|(trade_time, ..)| *trade_time >= start && *trade_time <= timestamp)
-            {
-                let notional = price * size;
-                total += notional;
-                signed += if *is_buy { notional } else { -notional };
-                count += 1;
+        let start5 = timestamp.saturating_sub(5_000);
+        let start15 = timestamp.saturating_sub(15_000);
+        let start60 = timestamp.saturating_sub(60_000);
+        let mut flow5 = (0.0, 0.0, 0u64);
+        let mut flow15 = (0.0, 0.0, 0u64);
+        let mut flow60 = (0.0, 0.0, 0u64);
+        for (trade_time, price, size, is_buy, _) in &self.trades {
+            if *trade_time < start60 || *trade_time > timestamp {
+                continue;
             }
-            (total > 0.0).then_some((signed / total, signed, total, count))
-        };
-        let flow5 = flow(5_000);
-        let flow15 = flow(15_000);
-        let flow60 = flow(60_000);
+            let notional = price * size;
+            let signed_notional = if *is_buy { notional } else { -notional };
+            flow60.0 += signed_notional;
+            flow60.1 += notional;
+            flow60.2 += 1;
+            if *trade_time >= start15 {
+                flow15.0 += signed_notional;
+                flow15.1 += notional;
+                flow15.2 += 1;
+            }
+            if *trade_time >= start5 {
+                flow5.0 += signed_notional;
+                flow5.1 += notional;
+                flow5.2 += 1;
+            }
+        }
+        let flow5 = (flow5.1 > 0.0).then_some((flow5.0 / flow5.1, flow5.0, flow5.1, flow5.2));
+        let flow15 =
+            (flow15.1 > 0.0).then_some((flow15.0 / flow15.1, flow15.0, flow15.1, flow15.2));
+        let flow60 =
+            (flow60.1 > 0.0).then_some((flow60.0 / flow60.1, flow60.0, flow60.1, flow60.2));
         let signed5 = flow5.map(|(_, signed, _, _)| signed);
         let signed15 = flow15.map(|(_, signed, _, _)| signed);
         let trade_count_5s = flow5.map_or(0, |(_, _, _, count)| count);

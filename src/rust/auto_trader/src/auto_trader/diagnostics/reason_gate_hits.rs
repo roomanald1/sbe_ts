@@ -63,6 +63,16 @@ fn gate_hits_for_reason(reason: &str) -> Vec<String> {
                 gates.push("Candidate selection / combined entry checks".into());
             }
         }
+    } else if lower.contains("strategy filters:") {
+        if lower.contains("strategy disabled") {
+            gates.push("Strategy enablement".into());
+        }
+        if lower.contains("strategy entry rule returned") {
+            gates.push("Strategy entry rule".into());
+        }
+        if lower.contains("strategy evaluation error") {
+            gates.push("Strategy evaluation".into());
+        }
     } else if lower.contains("daily realized-loss limit") {
         gates.push("Daily realized-loss limit".into());
     } else if lower.contains("invalid instrument symbol") {

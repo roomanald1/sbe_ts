@@ -57,6 +57,7 @@ pub async fn router() -> anyhow::Result<Router> {
                                 if let Ok(mut current) = cache.write() {
                                     *current = Some(snapshot);
                                 }
+                                refresh_order_usd_rate_snapshot();
                             }
                             Ok(_) => crate::service_log!(
                                 "WARN",
@@ -124,6 +125,7 @@ pub async fn router() -> anyhow::Result<Router> {
         .route("/internal/persistence-timing", get(get_persistence_timing))
         .route("/positions", get(get_positions))
         .route("/positions/realized-pnl", get(get_realized_pnl))
+        .route("/positions/fee-summary", get(get_fee_summary))
         .route("/positions/account", get(get_account))
         .route("/account", get(get_account))
         .route("/positions/account/topups", post(top_up_account))

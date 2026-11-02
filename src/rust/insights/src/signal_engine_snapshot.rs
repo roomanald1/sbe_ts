@@ -1,18 +1,49 @@
 impl SignalEngine {
     pub fn snapshot(&mut self, symbol: &str, now: u64) -> Option<SignalSnapshot> {
+        self.snapshot_with_reasons(symbol, now, true)
+    }
+
+    pub fn snapshot_with_reasons(
+        &mut self,
+        symbol: &str,
+        now: u64,
+        include_reasons: bool,
+    ) -> Option<SignalSnapshot> {
         self.prune(now);
         let latest = self.prices.back().copied()?;
         let range_cutoff = now.saturating_sub(300_000);
-        let range_start = self.prices.partition_point(|sample| sample.0 < range_cutoff);
+        let range_start = self
+            .prices
+            .partition_point(|sample| sample.0 < range_cutoff);
+        let breakout_cutoff = now.saturating_sub(10_000);
+        let breakout_end = self
+            .prices
+            .partition_point(|sample| sample.0 < breakout_cutoff);
         let mut range_count = 0usize;
         let mut range_first_price = None;
         let mut range_low = f64::INFINITY;
         let mut range_high = f64::NEG_INFINITY;
-        for &(_, price) in self.prices.range(range_start..) {
+        let mut prior_low = f64::INFINITY;
+        let mut prior_high = f64::NEG_INFINITY;
+        let mut prior_count = 0usize;
+        let mut previous_price: Option<f64> = None;
+        let mut volatility_sum = 0.0_f64;
+        for (offset, &(_, price)) in self.prices.range(range_start..).enumerate() {
+            let index = range_start + offset;
             range_count += 1;
             range_first_price.get_or_insert(price);
             range_low = range_low.min(price);
             range_high = range_high.max(price);
+            if let Some(previous) = previous_price {
+                let change = (price / previous).ln();
+                volatility_sum += change * change;
+            }
+            previous_price = Some(price);
+            if index < breakout_end {
+                prior_low = prior_low.min(price);
+                prior_high = prior_high.max(price);
+                prior_count += 1;
+            }
         }
         let range_bounds = if range_count >= 12
             && range_low.is_finite()
@@ -49,7 +80,10 @@ impl SignalEngine {
         let trend = self.price_return(now.saturating_sub(60_000));
         let momentum = self.price_return(now.saturating_sub(10_000));
         let trend_5m = self.price_return(now.saturating_sub(300_000));
-        let volatility_5m = self.realized_volatility(now.saturating_sub(300_000));
+        let volatility_5m = (range_count >= 2).then_some(volatility_sum.sqrt() * 100.0);
+        let volatility_1m = self
+            .volatility_1m
+            .or_else(|| self.realized_volatility(now.saturating_sub(60_000)));
         let trend_5m_volatility_units = trend_5m
             .zip(volatility_5m)
             .and_then(|(trend, volatility)| (volatility > 1e-9).then_some(trend / volatility));
@@ -154,9 +188,7 @@ impl SignalEngine {
             momentum_10s_percent: momentum,
             trade_flow_imbalance: flow,
             book_imbalance: self.book_imbalance,
-            volatility_1m_percent: self
-                .volatility_1m
-                .or_else(|| self.realized_volatility(now.saturating_sub(60_000))),
+            volatility_1m_percent: volatility_1m,
             trend_5m_percent: trend_5m,
             trend_5m_volatility_units,
             mispricing_vs_vwap_bps,
@@ -201,19 +233,7 @@ impl SignalEngine {
         // excludes the most recent ten seconds, so a new breakout can actually
         // cross the boundary. Require both short-term momentum and trade flow
         // to confirm direction, plus a volatility-scaled minimum clearance.
-        let breakout_cutoff = now.saturating_sub(10_000);
-        let breakout_end = self.prices.partition_point(|sample| sample.0 < breakout_cutoff);
-        let mut prior_low = f64::INFINITY;
-        let mut prior_high = f64::NEG_INFINITY;
-        let mut prior_count = 0usize;
-        for &(_, price) in self.prices.range(range_start..breakout_end) {
-            prior_low = prior_low.min(price);
-            prior_high = prior_high.max(price);
-            prior_count += 1;
-        }
-        let breakout_clearance_percent = self
-            .volatility_1m
-            .or_else(|| self.realized_volatility(now.saturating_sub(60_000)))
+        let breakout_clearance_percent = volatility_1m
             .map(|volatility| (volatility.abs() * 0.20).max(0.02))
             .unwrap_or(0.02);
         let volatility_breakout_signal = if prior_count >= 12 {
@@ -260,27 +280,31 @@ impl SignalEngine {
         } else {
             "neutral"
         };
-        let reasons = snapshot_reasons(SnapshotReasonInputs {
-            trend,
-            momentum,
-            flow,
-            book_imbalance: self.book_imbalance,
-            order_book_pressure_signal,
-            volatility_breakout_signal,
-            mispricing_vs_vwap_bps,
-            range_bounds,
-            mean_reversion_signal,
-            price: latest.1,
-            absorption_imbalance,
-            flow_without_move,
-            aggressor_cost_bps,
-            direction,
-            components: &components,
-            ranging_probability,
-            prior_low,
-            prior_high,
-            breakout_clearance_percent,
-        });
+        let reasons = include_reasons
+            .then(|| {
+                snapshot_reasons(SnapshotReasonInputs {
+                    trend,
+                    momentum,
+                    flow,
+                    book_imbalance: self.book_imbalance,
+                    order_book_pressure_signal,
+                    volatility_breakout_signal,
+                    mispricing_vs_vwap_bps,
+                    range_bounds,
+                    mean_reversion_signal,
+                    price: latest.1,
+                    absorption_imbalance,
+                    flow_without_move,
+                    aggressor_cost_bps,
+                    direction,
+                    components: &components,
+                    ranging_probability,
+                    prior_low,
+                    prior_high,
+                    breakout_clearance_percent,
+                })
+            })
+            .unwrap_or_default();
         Some(SignalSnapshot {
             symbol: symbol.to_owned(),
             timestamp: now,

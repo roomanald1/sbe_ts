@@ -221,7 +221,7 @@ fn select_cycle_signal<'a>(
                         m.sample_count >= MIN_SIDE_WALK_FORWARD_SAMPLES
                             && m.average_net_return_percent.is_none_or(|v| v <= 0.0)
                     });
-                    !measured_negative || active_scout_count == 0
+                    !measured_negative
                 })
                 .max_by(|a, b| a.strength.total_cmp(&b.strength))
         } else {

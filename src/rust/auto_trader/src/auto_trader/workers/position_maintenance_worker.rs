@@ -212,6 +212,7 @@ async fn sync_auto_positions(
                 realized_usd(&settings, &source_position.symbol, realized_delta);
             changed = true;
             if closed_out {
+                mark_symbol_reentry_cooldown(&mut settings, &source_position.symbol);
                 // This is a symbol-level reconciliation delta, not one matched
                 // round trip. The old quantity may be a tiny residual and
                 // source fees are cumulative, so do not write a trade return.
@@ -309,6 +310,8 @@ async fn sync_auto_positions(
                     ) {
                         let mut settings = state.settings.lock().await;
                         let realized_usd = realized_usd(&settings, &symbol, realized);
+                        let entry_notional = audit["entry_context"]["initial_entry_notional"]
+                            .as_f64().unwrap_or_default();
                         record_strategy_trade_outcome(
                             &mut settings,
                             &symbol,
@@ -317,6 +320,16 @@ async fn sync_auto_positions(
                             audit["scout"].as_bool().unwrap_or(false),
                             realized_usd,
                         );
+                        if entry_notional > 0.0 {
+                            record_strategy_threshold_sample(
+                                &mut settings,
+                                &symbol,
+                                Some(strategy),
+                                audit["scout"].as_bool().unwrap_or(false),
+                                audit["strategy_decision"].as_object().map(|_| &audit["strategy_decision"]),
+                                audit["trade_realized_pnl"].as_f64().unwrap_or_default() / entry_notional * 100.0,
+                            );
+                        }
                         request_settings_persist(state)?;
                     }
                 }

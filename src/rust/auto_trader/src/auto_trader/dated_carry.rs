@@ -189,7 +189,7 @@ enum DatedCarrySignal {
         expiry_ms: u64,
         spot_exit_twap: f64,
         settlement_price: f64,
-        settlement_source: String,
+        settlement_source: DatedCarrySettlementSource,
     },
 }
 
@@ -226,6 +226,12 @@ async fn receive_dated_carry_signal(
             if emitted_at_ms > now_ms + 5_000 || now_ms.saturating_sub(emitted_at_ms) > 120_000 {
                 return Err((StatusCode::BAD_REQUEST, "Carry entry signal is stale".into()));
             }
+            let strategy_parameters = BTreeMap::new();
+            let entry_decision = Strategy::DatedCarry
+                .evaluate(&StrategySignal::dated_carry_entry(
+                    &candidate, emitted_at_ms, now_ms, &strategy_parameters,
+                ))
+                .unwrap_or(StrategyDecision::Reject);
             if !candidate.quantity.is_finite()
                 || !candidate.spot_ask.is_finite()
                 || !candidate.future_bid.is_finite()
@@ -257,9 +263,8 @@ async fn receive_dated_carry_signal(
                 state.enabled.load(Ordering::Relaxed)
                     && settings.strategies.contains(&Strategy::DatedCarry)
             };
-            if selected && candidate.eligible
-                && candidate.net_after_budget_percent > 0.0
-                && candidate.basis_percent > CARRY_COST_GATE_PERCENT
+            if selected
+                && entry_decision == StrategyDecision::Enter
                 && !book.positions.iter().any(|position| position.future_symbol == candidate.future_symbol)
             {
                 let spot_entry = candidate.spot_ask * (1.0 + CARRY_ENTRY_SLIPPAGE);
@@ -317,14 +322,21 @@ async fn receive_dated_carry_signal(
             settlement_price,
             settlement_source,
         } => {
-            if emitted_at_ms > now_ms + 5_000
-                || expiry_ms > now_ms
-                || !spot_exit_twap.is_finite()
-                || !settlement_price.is_finite()
-                || spot_exit_twap <= 0.0
-                || settlement_price <= 0.0
-                || !matches!(settlement_source.as_str(), "official" | "index_1m_estimate")
-            {
+            let strategy_parameters = BTreeMap::new();
+            let exit_decision = Strategy::DatedCarry
+                .evaluate(&StrategySignal::dated_carry_settlement(
+                    emitted_at_ms,
+                    now_ms,
+                    &spot_symbol,
+                    &future_symbol,
+                    expiry_ms,
+                    spot_exit_twap,
+                    settlement_price,
+                    Some(settlement_source),
+                    &strategy_parameters,
+                ))
+                .unwrap_or(StrategyDecision::Hold);
+            if exit_decision != StrategyDecision::Exit {
                 return Err((StatusCode::BAD_REQUEST, "Invalid dated carry settlement signal".into()));
             }
             if let Some(position) = book.positions.iter_mut().find(|position| {
@@ -341,7 +353,7 @@ async fn receive_dated_carry_signal(
                     + spot_exit - settlement_price) - position.entry_fees - exit_fees;
                 position.spot_exit_twap = Some(spot_exit);
                 position.settlement_price = Some(settlement_price);
-                position.settlement_source = Some(settlement_source.clone());
+                position.settlement_source = Some(settlement_source.as_str().into());
                 position.net_pnl_usdt = Some(net);
                 audit_payload = Some(serde_json::json!({
                     "decision_id": format!("dated-carry:{}", position.future_symbol),
@@ -355,7 +367,7 @@ async fn receive_dated_carry_signal(
                     "settlement_source": settlement_source,
                     "net_pnl_usdt": net,
                 }));
-                position.status = if settlement_source == "official" { "closed" }
+                position.status = if settlement_source == DatedCarrySettlementSource::Official { "closed" }
                     else { "closed_estimated" }.into();
                 changed = true;
             }

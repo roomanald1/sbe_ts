@@ -86,6 +86,7 @@ impl SignalStore {
         &self,
         since: Option<u64>,
         limit: usize,
+        horizons: Option<&[u64]>,
     ) -> Result<Vec<SignalEvaluation>> {
         let lower_bound = since.map(|timestamp| timestamp.saturating_sub(3_600_000));
         let mut evaluations = self
@@ -94,8 +95,8 @@ impl SignalStore {
             .into_iter()
             .filter_map(|record| match record {
                 StoredSignalRecord::Evaluation(evaluation)
-                    if since
-                        .is_none_or(|timestamp| evaluation.evaluated_timestamp >= timestamp) =>
+                    if since.is_none_or(|timestamp| evaluation.evaluated_timestamp >= timestamp)
+                        && horizons.is_none_or(|values| values.contains(&evaluation.horizon_seconds)) =>
                 {
                     Some(evaluation)
                 }

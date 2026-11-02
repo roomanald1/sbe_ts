@@ -510,7 +510,7 @@
           "refId": "A"
         }
       ],
-      "title": "Closed-trade win rate · today UTC",
+      "title": "Closed-trade win rate \u00b7 today UTC",
       "type": "timeseries"
     },
     {
@@ -856,9 +856,9 @@
         "overrides": []
       },
       "gridPos": {
-        "x": 8,
-        "y": 47,
-        "w": 8,
+        "x": 0,
+        "y": 57,
+        "w": 12,
         "h": 5
       },
       "id": 23,
@@ -873,7 +873,7 @@
       },
       "targets": [
         {
-          "expr": "100 * rate(app_service_process_cpu_seconds_total{service=~\"feed_handlers|position_management|auto_trader|execution|insights\"}[1m])",
+          "expr": "100 * rate(app_service_process_cpu_seconds_total{service=~\"feed_handlers|position_management|auto_trader|execution|insights|news_sentiment\"}[1m])",
           "legendFormat": "{{service}}",
           "refId": "A"
         }
@@ -895,7 +895,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 64,
+        "y": 69,
         "w": 24,
         "h": 7
       },
@@ -933,7 +933,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 57,
+        "y": 62,
         "w": 24,
         "h": 7
       },
@@ -1014,7 +1014,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 72,
+        "y": 77,
         "w": 24,
         "h": 5
       },
@@ -1051,7 +1051,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 77,
+        "y": 82,
         "w": 24,
         "h": 7
       },
@@ -1091,7 +1091,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 84,
+        "y": 89,
         "w": 24,
         "h": 7
       },
@@ -1114,6 +1114,83 @@
         }
       ],
       "title": "AutoTrader trade outcomes by strategy",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 57,
+        "w": 12,
+        "h": 5
+      },
+      "id": 44,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "single"
+        }
+      },
+      "targets": [
+        {
+          "expr": "app_service_process_resident_memory_bytes{service=~\"feed_handlers|position_management|auto_trader|execution|insights|news_sentiment\"}",
+          "legendFormat": "{{service}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Memory usage per service",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 96,
+        "w": 24,
+        "h": 8
+      },
+      "id": 45,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum by (channel) (rate(app_feed_messages_total[1m]))",
+          "legendFormat": "{{channel}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Market feed throughput",
       "type": "timeseries"
     }
   ],
@@ -1169,5 +1246,5 @@
   "timezone": "browser",
   "title": "SBE TS System and Trading",
   "uid": "sbe-ts-overview",
-  "version": 5
+  "version": 6
 }

@@ -135,7 +135,10 @@ impl PositionStore {
             } else if order.status == "unfilled"
                 && order.triggered_at.is_some()
                 && order.source == "auto"
-                && order.parent_order_id.as_deref().is_some_and(|id| id.starts_with("auto-stop-"))
+                && order
+                    .parent_order_id
+                    .as_deref()
+                    .is_some_and(|id| id.starts_with("auto-stop-"))
             {
                 // Older versions left triggered AutoTrader stops as "unfilled" when
                 // the reduce-only fill returned no quantity. They are terminal, not armed.
@@ -199,11 +202,11 @@ impl PositionStore {
                 let copy_started = Instant::now();
                 let (ledger_snapshot, wait_ms, max_hold_ms) =
                     snapshot_position_ledger(&writer_ledger).await;
+                record_position_persistence_sample(&writer_timings, "snapshot_lock_wait", wait_ms);
                 record_position_persistence_sample(
-                    &writer_timings, "snapshot_lock_wait", wait_ms,
-                );
-                record_position_persistence_sample(
-                    &writer_timings, "snapshot_max_lock_hold", max_hold_ms,
+                    &writer_timings,
+                    "snapshot_max_lock_hold",
+                    max_hold_ms,
                 );
                 record_position_persistence_sample(
                     &writer_timings,
@@ -218,7 +221,10 @@ impl PositionStore {
                 {
                     Ok(Ok(snapshot)) => snapshot,
                     Ok(Err(error)) => {
-                        crate::service_log!("ERROR", "Position ledger serialization failed: {error}");
+                        crate::service_log!(
+                            "ERROR",
+                            "Position ledger serialization failed: {error}"
+                        );
                         tokio::time::sleep(Duration::from_secs(1)).await;
                         writer_notify.notify_one();
                         continue;
@@ -316,30 +322,87 @@ fn persist_ledger_bytes(path: &std::path::Path, bytes: Vec<u8>) -> anyhow::Resul
     Ok(())
 }
 
-
 #[cfg(test)]
 mod ledger_snapshot_tests {
     use super::*;
+
+    #[test]
+    fn atomic_snapshot_replace_never_exposes_partial_json_to_readers() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        };
+        use std::thread;
+
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "position-ledger-{}-{nonce}.msgpack",
+            std::process::id()
+        ));
+        let initial =
+            serde_json::to_vec(&serde_json::json!({"version": 0, "payload": "x".repeat(64_000)}))
+                .unwrap();
+        persist_ledger_bytes(&path, initial).unwrap();
+
+        let finished = Arc::new(AtomicBool::new(false));
+        let mut readers = Vec::new();
+        for _ in 0..4 {
+            let path = path.clone();
+            let finished = Arc::clone(&finished);
+            readers.push(thread::spawn(move || {
+                let mut reads = 0;
+                while !finished.load(Ordering::Acquire) {
+                    let bytes = std::fs::read(&path).unwrap();
+                    let snapshot: serde_json::Value = serde_json::from_slice(&bytes)
+                        .expect("reader sees a complete JSON snapshot");
+                    assert!(
+                        snapshot["version"]
+                            .as_u64()
+                            .is_some_and(|version| version <= 100)
+                    );
+                    assert_eq!(snapshot["payload"].as_str().unwrap().len(), 64_000);
+                    reads += 1;
+                }
+                reads
+            }));
+        }
+
+        for version in 1..=100 {
+            let bytes = serde_json::to_vec(
+                &serde_json::json!({"version": version, "payload": "y".repeat(64_000)}),
+            )
+            .unwrap();
+            persist_ledger_bytes(&path, bytes).unwrap();
+        }
+        finished.store(true, Ordering::Release);
+        let reads: usize = readers
+            .into_iter()
+            .map(|reader| reader.join().unwrap())
+            .sum();
+        assert!(reads > 0, "readers must overlap snapshot writes");
+        std::fs::remove_file(path).unwrap();
+    }
 
     #[tokio::test]
     async fn batched_snapshot_keeps_cutoff_consistent_during_append() {
         let trade: PositionTrade = serde_json::from_value(serde_json::json!({
             "id": "original", "symbol": "BTC-USDT", "side": "buy",
             "quantity": 1.0, "execution_price": 100.0, "timestamp": 1
-        })).unwrap();
+        }))
+        .unwrap();
         let ledger = Mutex::new(Ledger {
             trades: vec![trade.clone(); 300],
             initial_cash: 1000.0,
             ..Ledger::default()
         });
-        let (snapshot, ()) = tokio::join!(
-            snapshot_position_ledger(&ledger),
-            async {
-                let mut ledger = ledger.lock().await;
-                ledger.trades.push(trade);
-                ledger.initial_cash = 2000.0;
-            }
-        );
+        let (snapshot, ()) = tokio::join!(snapshot_position_ledger(&ledger), async {
+            let mut ledger = ledger.lock().await;
+            ledger.trades.push(trade);
+            ledger.initial_cash = 2000.0;
+        });
         assert_eq!(snapshot.0.trades.len(), 300);
         assert_eq!(snapshot.0.initial_cash, 1000.0);
         assert!(snapshot.0.trades.iter().all(|trade| trade.id == "original"));

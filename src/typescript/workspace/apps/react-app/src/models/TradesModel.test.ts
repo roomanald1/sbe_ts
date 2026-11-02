@@ -248,7 +248,10 @@ describe('TradesModel', () => {
   });
 
   it('purges expired trades when the retention timer ticks', (t) => {
-    t.mock.timers.enable({ apis: ['setInterval', 'Date'] });
+    t.mock.timers.enable(['setInterval'] as never);
+    const originalNow = Date.now;
+    let clockNow = originalNow();
+    Date.now = () => clockNow;
 
     const connection = createMockConnection();
     const model = new TradesModel({
@@ -260,11 +263,11 @@ describe('TradesModel', () => {
     model.start();
     const feed = connection.feeds.get('widget-1')!;
 
-    const now = Date.now();
+    const tradeTime = Date.now();
     const recentTrade = makeTradeBuffer({
       symbol: 'BTC-USDT',
       tradeId: 't-recent',
-      timestamp: now,
+      timestamp: tradeTime,
       price: 65000.0,
       size: 1.0,
       side: 'buy',
@@ -274,15 +277,18 @@ describe('TradesModel', () => {
     assert.strictEqual(model.state$.value.trades.length, 1);
 
     // Fast-forward 2 minutes (trades still within 5 min retention)
+    clockNow += 2 * 60 * 1000;
     t.mock.timers.tick(2 * 60 * 1000);
     assert.strictEqual(model.state$.value.trades.length, 1);
 
     // Fast-forward past 5 minutes total (3.5 minutes more = 5.5 minutes)
+    clockNow += 3.5 * 60 * 1000;
     t.mock.timers.tick(3.5 * 60 * 1000);
     assert.strictEqual(model.state$.value.trades.length, 0);
 
     model.stop();
     t.mock.timers.reset();
+    Date.now = originalNow;
   });
 
   it('handles updateProps correctly when symbol changes', () => {

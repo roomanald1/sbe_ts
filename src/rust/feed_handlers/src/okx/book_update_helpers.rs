@@ -1,45 +1,64 @@
-fn apply_book_side(book: &mut Vec<(f64, f64)>, rows: &[Vec<&str>]) -> Result<()> {
+fn apply_book_side(book: &mut Vec<(f64, f64)>, rows: &[BookLevel<'_>], bids: bool) -> Result<()> {
     for (row_index, row) in rows.iter().enumerate() {
-        anyhow::ensure!(
-            row.len() >= 2,
-            "book row {row_index} must contain price and size"
-        );
-        let price = row[0]
+        let price = row
+            .price
             .parse::<f64>()
             .map_err(|error| anyhow::anyhow!("invalid price in book row {row_index}: {error}"))?;
-        let size = row[1]
+        let size = row
+            .size
             .parse::<f64>()
             .map_err(|error| anyhow::anyhow!("invalid size in book row {row_index}: {error}"))?;
         anyhow::ensure!(
             price.is_finite() && price > 0.0 && size.is_finite() && size >= 0.0,
             "book row {row_index} contains an invalid price or size"
         );
-        if let Some(index) = book.iter().position(|(book_price, _)| *book_price == price) {
-            if size == 0.0 {
-                book.remove(index);
+        let position = book.binary_search_by(|(level_price, _)| {
+            if bids {
+                price.total_cmp(level_price)
             } else {
-                book[index].1 = size;
+                level_price.total_cmp(&price)
             }
-        } else if size > 0.0 {
+        });
+        match position {
+            Ok(index) if size == 0.0 => {
+                book.remove(index);
+            }
+            Ok(index) => book[index].1 = size,
+            Err(index) if size > 0.0 => book.insert(index, (price, size)),
+            Err(_) => {}
+        }
+    }
+    Ok(())
+}
+
+fn load_book_snapshot(book: &mut Vec<(f64, f64)>, rows: &[BookLevel<'_>]) -> Result<()> {
+    book.clear();
+    book.reserve(rows.len());
+    for (row_index, row) in rows.iter().enumerate() {
+        let price = row
+            .price
+            .parse::<f64>()
+            .map_err(|error| anyhow::anyhow!("invalid price in book row {row_index}: {error}"))?;
+        let size = row
+            .size
+            .parse::<f64>()
+            .map_err(|error| anyhow::anyhow!("invalid size in book row {row_index}: {error}"))?;
+        anyhow::ensure!(
+            price.is_finite() && price > 0.0 && size.is_finite() && size >= 0.0,
+            "book row {row_index} contains an invalid price or size"
+        );
+        if size > 0.0 {
+            // OKX snapshots are unique and ordered by price on each side.
             book.push((price, size));
         }
     }
     Ok(())
 }
 
-fn top_book_side(book: &[(f64, f64)], bids: bool) -> [(f64, f64); BOOK_DEPTH] {
+fn top_book_side(book: &[(f64, f64)]) -> [(f64, f64); BOOK_DEPTH] {
     let mut top = [(0.0, 0.0); BOOK_DEPTH];
-    let mut len = 0;
-    for &level in book {
-        let position = top[..len].iter().position(|existing| {
-            if bids { level.0 > existing.0 } else { level.0 < existing.0 }
-        }).unwrap_or(len);
-        if position == BOOK_DEPTH { continue; }
-        let new_len = (len + 1).min(BOOK_DEPTH);
-        for index in (position + 1..new_len).rev() { top[index] = top[index - 1]; }
-        top[position] = level;
-        len = new_len;
+    for (target, &level) in top.iter_mut().zip(book.iter()) {
+        *target = level;
     }
     top
 }
-

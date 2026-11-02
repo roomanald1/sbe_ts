@@ -60,7 +60,7 @@ impl SignalEngine {
                     && *ask >= *bid
             })
             .map(|(_, bid, ask)| {
-                let midpoint = (bid + ask) / 2.0;
+                let midpoint = bid + (ask - bid) * 0.5;
                 let paid_vs_mid = if is_buy {
                     price - midpoint
                 } else {

@@ -1,9 +1,51 @@
+fn should_explore_execution_profile(signal: &Signal, kind: AutoOrderType) -> bool {
+    if !matches!(
+        kind,
+        AutoOrderType::Limit
+            | AutoOrderType::Gtd
+            | AutoOrderType::StopMarket
+            | AutoOrderType::StopLimit
+            | AutoOrderType::TrailingStop
+            | AutoOrderType::Barrier
+            | AutoOrderType::Vwap
+            | AutoOrderType::Twap
+    ) {
+        return false;
+    }
+    // Reserve one in ten eligible strict entries for bounded, repeatable
+    // profile comparisons. Hash the signal identity so retries keep their
+    // assignment and the remaining orders stay on the established path.
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    signal.symbol.hash(&mut hasher);
+    signal.direction.hash(&mut hasher);
+    signal.strategy.hash(&mut hasher);
+    signal.timestamp.hash(&mut hasher);
+    format!("{kind:?}").hash(&mut hasher);
+    hasher.finish() % 10 == 0
+}
+
 fn choose_parameter_profile(
     kind: AutoOrderType,
     context: &str,
     learning: &BTreeMap<String, ExecutionLearningStats>,
     explore: bool,
 ) -> usize {
+    // Profiles only change parameters used by these order types. Keeping the
+    // others on P0 avoids recording duplicate, indistinguishable executions.
+    if !matches!(
+        kind,
+        AutoOrderType::Limit
+            | AutoOrderType::Gtd
+            | AutoOrderType::StopMarket
+            | AutoOrderType::StopLimit
+            | AutoOrderType::TrailingStop
+            | AutoOrderType::Barrier
+            | AutoOrderType::Vwap
+            | AutoOrderType::Twap
+    ) {
+        return 0;
+    }
     let profiles = (0..PARAMETER_PROFILE_COUNT)
         .map(|profile| {
             let prefix = format!("{context}:P{profile}:");
@@ -12,6 +54,18 @@ fn choose_parameter_profile(
             (profile, stats)
         })
         .collect::<Vec<_>>();
+    if explore {
+        // Do not let a proven P0 baseline prevent P1/P2 from ever receiving
+        // observations. Test the least-observed profile until each has enough
+        // submissions and fills to be compared meaningfully.
+        if let Some((profile, _)) = profiles.iter().filter(|(_, stats)| {
+            stats.samples < MIN_EXECUTION_QUALITY_SAMPLES
+                || stats.filled_samples < MIN_EXECUTION_QUALITY_FILLS
+        }).min_by_key(|(_, stats)| stats.samples)
+        {
+            return *profile;
+        }
+    }
     let proven = profiles
         .iter()
         .filter(|(_, stats)| {
@@ -26,13 +80,6 @@ fn choose_parameter_profile(
         });
     if let Some((profile, _)) = proven {
         return *profile;
-    }
-    if explore {
-        return profiles
-            .iter()
-            .min_by_key(|(_, stats)| stats.samples)
-            .map(|(profile, _)| *profile)
-            .unwrap_or(0);
     }
     0
 }

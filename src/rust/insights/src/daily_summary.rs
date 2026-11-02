@@ -278,7 +278,6 @@ fn initialize_schema(connection: &Connection) -> anyhow::Result<()> {
     Ok(())
 }
 
-
 fn database_path() -> PathBuf {
     std::env::var_os("SIGNALS_DB_FILE")
         .map(PathBuf::from)

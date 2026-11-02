@@ -91,7 +91,7 @@ async fn submit_barrier_order(
     } else {
         None
     };
-    let capacity_rates = cached_usd_rates_for_order().await?.rates;
+    let capacity_rates = cached_usd_rates_for_order().await?;
     let timestamp = now_ms().map_err(internal_error)?;
     let mut ledger = lock_order_ledger(&store.ledger).await?;
     if let Some(response) = request
@@ -104,7 +104,7 @@ async fn submit_barrier_order(
     ensure_paper_capacity_with_rates(
         &store,
         &ledger,
-        &capacity_rates,
+        &capacity_rates.rates,
         &symbol,
         &request.side,
         request.quantity,

@@ -1,3 +1,76 @@
+
+#[derive(Serialize)]
+struct FeeSummaryRow {
+    source: String,
+    liquidity: String,
+    fee_currency: String,
+    fills: usize,
+    traded_notional: f64,
+    fees_paid: f64,
+    effective_fee_bps: Option<f64>,
+    first_fill_ms: u64,
+    last_fill_ms: u64,
+}
+#[derive(Serialize)]
+struct FeeSummaryResponse {
+    fills: usize,
+    rows: Vec<FeeSummaryRow>,
+    first_fill_ms: Option<u64>,
+    last_fill_ms: Option<u64>,
+}
+
+async fn get_fee_summary(
+    State(store): State<Arc<PositionStore>>,
+) -> Json<FeeSummaryResponse> {
+    let ledger = store.ledger.lock().await;
+    let mut groups = BTreeMap::<(String, String, String), FeeSummaryRow>::new();
+    let mut first_fill_ms: Option<u64> = None;
+    let mut last_fill_ms: Option<u64> = None;
+    for trade in &ledger.trades {
+        let source = if trade.source.is_empty() { "unknown" } else { &trade.source }.to_owned();
+        let liquidity = if trade.fee_liquidity.is_empty() { "unknown" } else { &trade.fee_liquidity }.to_owned();
+        let fee_currency = if trade.fee_currency.is_empty() {
+            trade.symbol.split_once('-').map(|(_, quote)| quote).unwrap_or("unknown").to_owned()
+        } else {
+            trade.fee_currency.clone()
+        };
+        let row = groups.entry((source.clone(), liquidity.clone(), fee_currency.clone())).or_insert(FeeSummaryRow {
+            source,
+            liquidity,
+            fee_currency,
+            fills: 0,
+            traded_notional: 0.0,
+            fees_paid: 0.0,
+            effective_fee_bps: None,
+            first_fill_ms: trade.timestamp,
+            last_fill_ms: trade.timestamp,
+        });
+        row.fills += 1;
+        row.traded_notional += trade.quantity.abs() * trade.execution_price.abs();
+        row.fees_paid += trade.fee.abs();
+        row.first_fill_ms = row.first_fill_ms.min(trade.timestamp);
+        row.last_fill_ms = row.last_fill_ms.max(trade.timestamp);
+        first_fill_ms = Some(first_fill_ms.map_or(trade.timestamp, |current| current.min(trade.timestamp)));
+        last_fill_ms = Some(last_fill_ms.map_or(trade.timestamp, |current| current.max(trade.timestamp)));
+    }
+    let mut rows = groups.into_values().collect::<Vec<_>>();
+    for row in &mut rows {
+        row.effective_fee_bps = (row.traded_notional > 0.0)
+            .then_some(row.fees_paid / row.traded_notional * 10_000.0);
+    }
+    rows.sort_by(|left, right| {
+        left.source.cmp(&right.source)
+            .then_with(|| left.liquidity.cmp(&right.liquidity))
+            .then_with(|| left.fee_currency.cmp(&right.fee_currency))
+    });
+    Json(FeeSummaryResponse {
+        fills: ledger.trades.len(),
+        rows,
+        first_fill_ms,
+        last_fill_ms,
+    })
+}
+
 #[derive(Deserialize)]
 
 struct PositionSourceQuery {

@@ -13,6 +13,7 @@ async fn main() -> anyhow::Result<()> {
         Arc::clone(&signal_push_cache),
         Arc::clone(&signal_push_notify),
     ));
+    let market_cache = Arc::new(DashMap::new());
     let ui_snapshot_cache = Arc::new(DashMap::new());
     let ui_snapshot_notify = Arc::new(Notify::new());
     tokio::spawn(run_ui_snapshot_push_worker(
@@ -31,17 +32,22 @@ async fn main() -> anyhow::Result<()> {
         engines: Mutex::new(HashMap::new()),
         signal_push_cache,
         signal_push_notify,
+        market_cache,
+        market_push_at: DashMap::new(),
         ui_snapshot_cache,
         ui_snapshot_notify,
         news: news_rx,
-        news_learning: Mutex::new(NewsLearning { weight: 0.20, ..NewsLearning::default() }),
+        news_learning: Mutex::new(NewsLearning {
+            weight: 0.20,
+            ..NewsLearning::default()
+        }),
         snapshot_diagnostic_at: DashMap::new(),
     });
     tokio::spawn(run_feed_signal_consumer(Arc::clone(&signal_runtime)));
     let app = Router::new()
         .merge(daily_summary::router())
         .route("/health", get(|| async { "ok" }))
-        .route("/process-cpu-seconds", get(process_cpu_seconds))
+        .route("/process-cpu-seconds", get(process_cpu_seconds)).route("/process-memory-bytes", get(process_memory_bytes))
         .route(
             "/internal/signals/event",
             axum::routing::post(ingest_signal_event).with_state(signal_runtime),
@@ -52,6 +58,14 @@ async fn main() -> anyhow::Result<()> {
     axum::serve(listener, app).await?;
     Ok(())
 }
+async fn process_memory_bytes() -> String {
+    std::fs::read_to_string("/proc/self/status")
+        .ok()
+        .and_then(|status| status.lines().find_map(|line| line.strip_prefix("VmRSS:")?.split_whitespace().next()?.parse::<u64>().ok()))
+        .map(|kilobytes| (kilobytes * 1024).to_string())
+        .unwrap_or_else(|| "0".to_owned())
+}
+
 async fn process_cpu_seconds() -> String {
     let mut usage = std::mem::MaybeUninit::<libc::rusage>::zeroed();
     let result = unsafe { libc::getrusage(libc::RUSAGE_SELF, usage.as_mut_ptr()) };

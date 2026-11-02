@@ -20,7 +20,7 @@ fn position_exit_audit_payload(
     stop_loss_percent: f64,
     take_profit_percent: f64,
 ) -> serde_json::Value {
-    let mid = (bid + ask) / 2.0;
+    let mid = bid + (ask - bid) * 0.5;
     let mut payload = serde_json::json!({
         "record_schema_version": 2,
         "decision_id": decision_id,

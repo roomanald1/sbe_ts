@@ -114,6 +114,7 @@ struct EvaluationQuery {
     since: Option<u64>,
     limit: Option<usize>,
     cursor: Option<i64>,
+    horizons: Option<String>,
 }
 
 #[derive(Clone)]

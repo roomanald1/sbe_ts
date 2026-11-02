@@ -1,3 +1,31 @@
+fn encode_market_levels(levels: &[(f64, f64)]) -> Vec<serde_json::Value> {
+    levels
+        .iter()
+        .filter(|(price, size)| {
+            price.is_finite() && *price > 0.0 && size.is_finite() && *size > 0.0
+        })
+        .map(|(price, size)| serde_json::json!({"price": price, "size": size}))
+        .collect()
+}
+
+fn market_value(
+    timestamp: u64,
+    best_bid: f64,
+    best_ask: f64,
+    bids: &[(f64, f64)],
+    asks: &[(f64, f64)],
+) -> Option<serde_json::Value> {
+    (best_bid.is_finite() && best_ask.is_finite() && best_bid > 0.0 && best_ask >= best_bid).then(
+        || {
+            serde_json::json!({
+                "bids": encode_market_levels(bids),
+                "asks": encode_market_levels(asks),
+                "updated_at_ms": timestamp,
+            })
+        },
+    )
+}
+
 async fn ingest_signal_event(
     axum::extract::State(runtime): axum::extract::State<Arc<SignalRuntime>>,
     Json(request): Json<SignalEventRequest>,
@@ -7,8 +35,12 @@ async fn ingest_signal_event(
     }
     // Nonblocking snapshot read: market feed handling never waits on RSS/model work.
     let current_news = Arc::clone(&runtime.news.borrow());
-    let current_news_weight = runtime.news_learning.try_lock().map(|learning| learning.weight).unwrap_or(0.0);
-    let (snapshot, records, market) = {
+    let current_news_weight = runtime
+        .news_learning
+        .try_lock()
+        .map(|learning| learning.weight)
+        .unwrap_or(0.0);
+    let (snapshot, records, market, event_timestamp) = {
         let event_timestamp = match &request.event {
             SignalFeedEvent::Price { timestamp, .. }
             | SignalFeedEvent::Trade { timestamp, .. }
@@ -39,8 +71,7 @@ async fn ingest_signal_event(
                     && price > 0.0
                     && latest_price == Some((timestamp, price))
                     && (price_count_after > price_count_before || previous_price != latest_price);
-                if !accepted && signal_diagnostic_due(&runtime, &request.symbol, timestamp)
-                {
+                if !accepted && signal_diagnostic_due(&runtime, &request.symbol, timestamp) {
                     let reason = if !price.is_finite() || price <= 0.0 {
                         "invalid_price"
                     } else {
@@ -60,12 +91,19 @@ async fn ingest_signal_event(
                 for outcome in outcomes {
                     if outcome.legacy.horizon_seconds == 60 {
                         if let Ok(mut learning) = runtime.news_learning.try_lock() {
-                            if let Some(vote) = learning.pending.remove(&(outcome.legacy.symbol.clone(), outcome.legacy.signal_timestamp)) {
+                            if let Some(vote) = learning.pending.remove(&(
+                                outcome.legacy.symbol.clone(),
+                                outcome.legacy.signal_timestamp,
+                            )) {
                                 learning.samples += 1;
-                                if vote * outcome.legacy.return_percent > 0.0 { learning.correct += 1; }
+                                if vote * outcome.legacy.return_percent > 0.0 {
+                                    learning.correct += 1;
+                                }
                                 if learning.samples >= 30 {
-                                    let accuracy = learning.correct as f64 / learning.samples as f64;
-                                    learning.weight = (0.20 * ((accuracy - 0.45) / 0.20)).clamp(0.0, 0.20);
+                                    let accuracy =
+                                        learning.correct as f64 / learning.samples as f64;
+                                    learning.weight =
+                                        (0.20 * ((accuracy - 0.45) / 0.20)).clamp(0.0, 0.20);
                                 }
                             }
                         }
@@ -74,11 +112,24 @@ async fn ingest_signal_event(
                     records.push(StoredSignalRecord::Evaluation(outcome.evaluation));
                 }
                 let should_compute_snapshot = accepted && engine.live_snapshot_due(timestamp);
+                let should_capture_research =
+                    should_compute_snapshot && engine.research_sample_is_due(timestamp);
                 let mut snapshot = should_compute_snapshot
-                    .then(|| engine.snapshot(&request.symbol, timestamp))
+                    .then(|| {
+                        engine.snapshot_with_reasons(
+                            &request.symbol,
+                            timestamp,
+                            should_capture_research,
+                        )
+                    })
                     .flatten();
-                if should_compute_snapshot && snapshot.is_none()
-                    && signal_diagnostic_due(&runtime, &format!("missing:{}", request.symbol), timestamp)
+                if should_compute_snapshot
+                    && snapshot.is_none()
+                    && signal_diagnostic_due(
+                        &runtime,
+                        &format!("missing:{}", request.symbol),
+                        timestamp,
+                    )
                 {
                     crate::service_log!(
                         "WARN",
@@ -89,7 +140,11 @@ async fn ingest_signal_event(
                     );
                 } else if should_compute_snapshot
                     && snapshot.is_some()
-                    && signal_diagnostic_due(&runtime, &format!("generated:{}", request.symbol), timestamp)
+                    && signal_diagnostic_due(
+                        &runtime,
+                        &format!("generated:{}", request.symbol),
+                        timestamp,
+                    )
                 {
                     let age_ms = now_ms().saturating_sub(timestamp);
                     crate::service_log!(
@@ -101,55 +156,41 @@ async fn ingest_signal_event(
                         engine.input_diagnostic(timestamp)
                     );
                 }
-                let news_vote;
                 if let Some(snapshot) = snapshot.as_mut() {
-                    news_vote = apply_news_signal(snapshot, &current_news, now_ms(), current_news_weight);
-                    // The pushed decision needs the latest available market cache on
-                    // every price event, regardless of the research sampling cadence.
-                    if let Some(book_snapshot) =
-                        engine.book_snapshot(&request.symbol, snapshot.timestamp)
-                    {
-                        let levels = |levels: Vec<(f64, f64)>| {
-                            levels.into_iter()
-                            .map(|(price, size)| serde_json::json!({"price": price, "size": size}))
-                            .collect::<Vec<_>>()
-                        };
-                        market = Some(serde_json::json!({
-                            request.symbol.clone(): {
-                                "bids": levels(book_snapshot.bid_levels.clone()),
-                                "asks": levels(book_snapshot.ask_levels.clone()),
-                                "updated_at_ms": book_snapshot.timestamp
-                            }
-                        }));
-                        if engine.research_sample_due(snapshot.timestamp) {
-                            let features = engine.research_features(
-                                &request.symbol,
-                                snapshot.timestamp,
-                                btc_context,
-                                eth_context,
-                            );
-                            records.push(StoredSignalRecord::BookSnapshot(book_snapshot));
-                            records.push(StoredSignalRecord::ResearchFeatures(features));
-                            engine.track(snapshot);
-                            if let Some(vote) = news_vote {
-                                if let Ok(mut learning) = runtime.news_learning.try_lock() {
-                                    learning.pending.insert((snapshot.symbol.clone(), snapshot.timestamp), vote);
-                                }
-                            }
-                            records.push(StoredSignalRecord::Snapshot(snapshot.clone()));
-                        }
-                    } else if engine.research_sample_due(snapshot.timestamp) {
-                        // Preserve feature and snapshot samples when a fresh book is
-                        // unavailable; depth data is optional in the research schema.
+                    let news_vote =
+                        apply_news_signal(snapshot, &current_news, now_ms(), current_news_weight);
+                    market =
+                        runtime
+                            .market_cache
+                            .get(&request.symbol)
+                            .and_then(|cached| {
+                                let (book_timestamp, value) = cached.value();
+                                (snapshot.timestamp >= *book_timestamp
+                            && snapshot.timestamp.saturating_sub(*book_timestamp) <= 5_000)
+                            .then(|| serde_json::json!({ request.symbol.clone(): value.clone() }))
+                            });
+                    if should_capture_research {
+                        engine.research_sample_due(snapshot.timestamp);
                         let features = engine.research_features(
                             &request.symbol,
                             snapshot.timestamp,
                             btc_context,
                             eth_context,
                         );
+                        if let Some(book_snapshot) =
+                            engine.book_snapshot(&request.symbol, snapshot.timestamp)
+                        {
+                            records.push(StoredSignalRecord::BookSnapshot(book_snapshot));
+                        }
                         records.push(StoredSignalRecord::ResearchFeatures(features));
                         engine.track(snapshot);
-                        if let Some(vote) = news_vote { if let Ok(mut learning) = runtime.news_learning.try_lock() { learning.pending.insert((snapshot.symbol.clone(), snapshot.timestamp), vote); } }
+                        if let Some(vote) = news_vote {
+                            if let Ok(mut learning) = runtime.news_learning.try_lock() {
+                                learning
+                                    .pending
+                                    .insert((snapshot.symbol.clone(), snapshot.timestamp), vote);
+                            }
+                        }
                         records.push(StoredSignalRecord::Snapshot(snapshot.clone()));
                     }
                 }
@@ -182,17 +223,51 @@ async fn ingest_signal_event(
                     &bid_levels,
                     &ask_levels,
                 );
+                if let Some(value) =
+                    market_value(timestamp, best_bid, best_ask, &bid_levels, &ask_levels)
+                {
+                    runtime
+                        .market_cache
+                        .insert(request.symbol.clone(), (timestamp, value.clone()));
+                    market = Some(serde_json::json!({ request.symbol.clone(): value }));
+                }
                 None
             }
         };
-        (snapshot, records, market)
+        (snapshot, records, market, event_timestamp)
     };
+    if snapshot.is_none() {
+        if let Some(markets) = market.as_ref() {
+            if let Some(mut dashboard) = runtime.signal_push_cache.get_mut(&request.symbol) {
+                dashboard["markets"] = markets.clone();
+                drop(dashboard);
+                let mut should_notify = false;
+                runtime
+                    .market_push_at
+                    .entry(request.symbol.clone())
+                    .and_modify(|last| {
+                        if event_timestamp < *last
+                            || event_timestamp.saturating_sub(*last)
+                                >= LIVE_SIGNAL_SNAPSHOT_INTERVAL_MS
+                        {
+                            *last = event_timestamp;
+                            should_notify = true;
+                        }
+                    })
+                    .or_insert_with(|| {
+                        should_notify = true;
+                        event_timestamp
+                    });
+                if should_notify {
+                    runtime.signal_push_notify.notify_one();
+                }
+            }
+        }
+    }
     let shadow_learning_outcomes = records
         .iter()
         .filter_map(|record| match record {
-            StoredSignalRecord::Evaluation(evaluation)
-                if evaluation.horizon_seconds == 300 =>
-            {
+            StoredSignalRecord::Evaluation(evaluation) if evaluation.horizon_seconds == 300 => {
                 Some(evaluation.clone())
             }
             _ => None,
@@ -240,13 +315,10 @@ async fn ingest_signal_event(
     Ok(Json(snapshot))
 }
 
-async fn publish_shadow_learning_outcomes(
-    store: &SignalStore,
-    outcomes: Vec<SignalEvaluation>,
-) {
+async fn publish_shadow_learning_outcomes(store: &SignalStore, outcomes: Vec<SignalEvaluation>) {
     let client = POSITION_MANAGEMENT_CLIENT.get_or_init(reqwest::Client::new);
-    let base = std::env::var("AUTO_TRADER_URL")
-        .unwrap_or_else(|_| "http://127.0.0.1:3005".to_owned());
+    let base =
+        std::env::var("AUTO_TRADER_URL").unwrap_or_else(|_| "http://127.0.0.1:3005".to_owned());
     for evaluation in outcomes {
         let decisions = match store
             .load_shadow_decisions_near(
@@ -258,7 +330,10 @@ async fn publish_shadow_learning_outcomes(
         {
             Ok(decisions) => decisions,
             Err(error) => {
-                crate::service_log!("WARN", "Could not load shadow decisions for learning: {error}");
+                crate::service_log!(
+                    "WARN",
+                    "Could not load shadow decisions for learning: {error}"
+                );
                 continue;
             }
         };
@@ -306,7 +381,9 @@ async fn publish_shadow_learning_outcomes(
             });
             for attempt in 0..3 {
                 match client
-                    .post(format!("{base}/internal/auto-trader/shadow-learning-outcome"))
+                    .post(format!(
+                        "{base}/internal/auto-trader/shadow-learning-outcome"
+                    ))
                     .timeout(Duration::from_secs(2))
                     .json(&payload)
                     .send()

@@ -69,6 +69,9 @@ async fn sync_protective_stops(
                 .map(|position| position.average_entry_price)
                 .filter(|price| *price > 0.0)
                 .unwrap_or(fill_price);
+            let strategy_decision = settings.strategy_positions.get(&symbol)
+                .and_then(|lots| lots.get(&strategy))
+                .and_then(|position| position.strategy_decision.clone());
             let (price_path, effective_stop_loss_percent, effective_take_profit_percent, entry_fees, entry_quantity, position_entry_timestamp_ms, prior_realized_pnl, initial_entry_notional, prior_total_fees, total_entry_fees_paid, entry_context, scout_entry) = settings
                 .strategy_positions.get(&symbol)
                 .and_then(|lots| lots.get(&strategy))
@@ -109,6 +112,9 @@ async fn sync_protective_stops(
             } else {
                 delta_quantity * entry_price_before
             };
+            if fully_closed && settings.positions.get(&symbol).is_none_or(|position| position.quantity.abs() <= 1e-12) {
+                mark_symbol_reentry_cooldown(&mut settings, &symbol);
+            }
             if fully_closed && entry_notional > 0.0 {
                 let total_trade_pnl = prior_realized_pnl + strategy_realized_delta;
                 let total_fees = if prior_total_fees > 0.0 {
@@ -131,6 +137,14 @@ async fn sync_protective_stops(
                     Some(&entry_context),
                     scout_entry,
                     strategy_realized_usd,
+                );
+                record_strategy_threshold_sample(
+                    &mut settings,
+                    &symbol,
+                    Some(&strategy),
+                    scout_entry,
+                    strategy_decision.as_ref(),
+                    total_trade_pnl / entry_notional * 100.0,
                 );
                 adapt_exit_policy(&mut settings);
             }

@@ -62,6 +62,50 @@ fn signal_allowed_by_positions(
     })
 }
 
+fn signal_candidate_position_block_reason(
+    signal: &Signal,
+    open_positions: &BTreeMap<String, TraderPosition>,
+    strategy_positions: &BTreeMap<String, BTreeMap<String, TraderPosition>>,
+    max_entries_per_auto_position: u32,
+) -> Option<String> {
+    let direction = if signal.direction == "bullish" { 1.0 } else { -1.0 };
+    let strategy = signal.strategy.as_deref();
+    let aggregate = open_positions.get(&signal.symbol);
+    if let Some(position) = aggregate.filter(|position| position.quantity.signum() != direction) {
+        return Some(format!("opposite aggregate position ({:.8})", position.quantity));
+    }
+    if daily_signal_candidate(signal) {
+        if let Some(strategy) = strategy {
+            let existing = strategy_positions.get(&signal.symbol).and_then(|lots| lots.get(strategy))
+                .filter(|position| position.quantity.abs() > 1e-12)
+                .or_else(|| aggregate.filter(|position| {
+                    strategy_positions.is_empty() && position.strategy.as_deref() == Some(strategy)
+                }));
+            if let Some(position) = existing {
+                if position.quantity.signum() != direction {
+                    return Some(format!("opposite {strategy} position ({:.8})", position.quantity));
+                }
+                let portfolio_weight = strategy == "risk-adjusted-trend-portfolio"
+                    && signal.strategy_decision.as_ref()
+                        .and_then(|decision| decision.get("strategy_order_size_multiplier"))
+                        .and_then(serde_json::Value::as_f64)
+                        .is_some_and(|weight| weight.is_finite() && (0.0..=0.25).contains(&weight));
+                let entries = position_entries_for_category(position, strategy_category(Some(strategy)));
+                if !portfolio_weight && entries >= max_entries_per_auto_position {
+                    return Some(format!("{strategy} entries {entries} reached per-position maximum {max_entries_per_auto_position}"));
+                }
+            }
+        }
+    } else if let Some(position) = aggregate {
+        let category = strategy_category(strategy);
+        let entries = position_entries_for_category(position, category);
+        if entries >= max_entries_per_auto_position {
+            return Some(format!("aggregate {} entries {entries} reached per-position maximum {max_entries_per_auto_position}", strategy_category_key(category)));
+        }
+    }
+    None
+}
+
 fn collect_signal_candidates<'a>(
     signals: &'a [Signal],
     now: u64,
@@ -75,6 +119,7 @@ fn collect_signal_candidates<'a>(
     let mut stale_symbols = Vec::new();
     let mut non_directional_count = 0;
     let mut position_blocked_count = 0;
+    let mut position_block_details = Vec::new();
     let fresh_directional = signals
         .iter()
         .filter(|signal| {
@@ -96,14 +141,21 @@ fn collect_signal_candidates<'a>(
                 non_directional_count += 1;
                 return false;
             }
-            let allowed_by_position = signal_allowed_by_positions(
-                signal,
-                open_positions,
-                strategy_positions,
-                max_entries_per_auto_position,
+            let block_reason = signal_candidate_position_block_reason(
+                signal, open_positions, strategy_positions, max_entries_per_auto_position,
             );
+            let allowed_by_position = block_reason.is_none();
             if !allowed_by_position {
                 position_blocked_count += 1;
+                if position_block_details.len() < 20 {
+                    position_block_details.push(format!(
+                        "{} {} [{}] · Existing position / re-entry limit: {}",
+                        signal.symbol,
+                        signal.direction,
+                        signal.strategy.as_deref().unwrap_or("unattributed"),
+                        block_reason.unwrap_or_default()
+                    ));
+                }
             }
             allowed_by_position
         })
@@ -145,6 +197,7 @@ fn collect_signal_candidates<'a>(
         stale_symbols,
         non_directional_count,
         position_blocked_count,
+        position_block_details,
     }
 }
 
@@ -163,6 +216,7 @@ struct SignalSelectionInput<'a> {
     stale_symbols: &'a [String],
     non_directional_count: usize,
     position_blocked_count: usize,
+    position_block_details: &'a [String],
     learning: &'a BTreeMap<String, LearningStats>,
     risk_appetite: f64,
     active_scout_count: usize,
@@ -190,6 +244,7 @@ fn format_no_tradeable_bias(
         stale_symbols,
         non_directional_count,
         position_blocked_count,
+        position_block_details,
         learning,
         risk_appetite,
         active_scout_count,
@@ -224,7 +279,7 @@ fn format_no_tradeable_bias(
             stale_symbols.join(", ")
         ));
     }
-    let early_filter_details = signals.iter().filter_map(|candidate| {
+    let mut early_filter_details = signals.iter().filter_map(|candidate| {
                 let age = now.saturating_sub(candidate.timestamp / 1000);
                 if is_stablecoin_pair(&candidate.symbol) {
                     Some(format!(
@@ -252,8 +307,12 @@ fn format_no_tradeable_bias(
                 }
             }).collect::<Vec<_>>();
     if !early_filter_details.is_empty() {
+        early_filter_details.extend(position_block_details.iter().cloned());
         reason.push_str("; early filters: ");
         reason.push_str(&early_filter_details.join(" | "));
+    } else if !position_block_details.is_empty() {
+        reason.push_str("; early filters: ");
+        reason.push_str(&position_block_details.join(" | "));
     }
     let candidate_details = fresh_directional
         .iter()

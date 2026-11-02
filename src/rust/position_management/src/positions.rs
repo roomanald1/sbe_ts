@@ -33,6 +33,7 @@ static HTTP_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
 static USD_RATE_CACHE: OnceLock<Mutex<Option<(Instant, UsdRatesResponse)>>> = OnceLock::new();
 static USD_RATE_REFRESHING: AtomicBool = AtomicBool::new(false);
 static USD_RATE_STREAM_CACHE: OnceLock<StdRwLock<Option<UsdRatesResponse>>> = OnceLock::new();
+static USD_RATE_ORDER_SNAPSHOT: OnceLock<ArcSwapOption<UsdRatesResponse>> = OnceLock::new();
 const USD_RATE_CACHE_TTL: Duration = Duration::from_secs(15);
 const USD_RATE_STREAM_MAX_AGE: Duration = Duration::from_secs(120);
 

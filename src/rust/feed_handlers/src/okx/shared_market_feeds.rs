@@ -73,11 +73,7 @@ impl SharedMarketFeed {
             commands,
             entries: StdMutex::new(HashMap::new()),
         });
-        tokio::spawn(run_shared_market_feed(
-            kind,
-            receiver,
-            Arc::clone(&feed),
-        ));
+        tokio::spawn(run_shared_market_feed(kind, receiver, Arc::clone(&feed)));
         feed
     }
 
@@ -220,11 +216,13 @@ async fn send_market_feed_request(
             .collect::<Vec<_>>();
         let request = json!({ "op": operation, "args": args });
         write
-            .send(tokio_tungstenite::tungstenite::Message::Text(Utf8Bytes::from(
-                request.to_string(),
-            )))
+            .send(tokio_tungstenite::tungstenite::Message::Text(
+                Utf8Bytes::from(request.to_string()),
+            ))
             .await
-            .map_err(|_| anyhow::anyhow!("failed to send OKX {} {operation} request", kind.label()))?;
+            .map_err(|_| {
+                anyhow::anyhow!("failed to send OKX {} {operation} request", kind.label())
+            })?;
     }
     Ok(())
 }
@@ -236,9 +234,12 @@ async fn run_shared_market_feed_connection(
     active: &mut HashSet<String>,
 ) -> Result<()> {
     wait_for_okx_connection_slot().await;
-    let (socket, _) = connect_async(OKX_PUBLIC_WS_URL)
-        .await
-        .map_err(|error| anyhow::anyhow!("failed to connect to shared OKX {} stream: {error}", kind.label()))?;
+    let (socket, _) = connect_async(OKX_PUBLIC_WS_URL).await.map_err(|error| {
+        anyhow::anyhow!(
+            "failed to connect to shared OKX {} stream: {error}",
+            kind.label()
+        )
+    })?;
     crate::service_log!("INFO", "Shared OKX {} WebSocket connected", kind.label());
     let (mut write, mut read) = socket.split();
     let instruments = active.iter().cloned().collect::<Vec<_>>();
@@ -324,6 +325,7 @@ async fn run_shared_market_feed_connection(
                                 size,
                                 trade.side,
                             )?;
+                            crate::metrics::record_trade();
                             feed.publish(trade.instrument, encoded);
                         }
                     }
@@ -342,16 +344,18 @@ async fn run_shared_market_feed_connection(
                         let state = book_state.entry(argument.instrument.to_owned()).or_default();
                         for item in items {
                             if update.action == Some("snapshot") {
-                                state.0.clear();
-                                state.1.clear();
+                                load_book_snapshot(&mut state.0, &item.bids)?;
+                                load_book_snapshot(&mut state.1, &item.asks)?;
+                            } else {
+                                apply_book_side(&mut state.0, &item.bids, true)?;
+                                apply_book_side(&mut state.1, &item.asks, false)?;
                             }
-                            apply_book_side(&mut state.0, &item.bids)?;
-                            apply_book_side(&mut state.1, &item.asks)?;
-                            let bids = top_book_side(&state.0, true);
-                            let asks = top_book_side(&state.1, false);
+                            let bids = top_book_side(&state.0);
+                            let asks = top_book_side(&state.1);
                             let timestamp = item.ts.parse::<u64>()
                                 .map_err(|error| anyhow::anyhow!("invalid OKX book timestamp: {error}"))?;
                             let encoded = encode_book_depth(argument.instrument, timestamp, &bids, &asks)?;
+                            crate::metrics::record_book();
                             feed.publish(argument.instrument, encoded);
                         }
                     }

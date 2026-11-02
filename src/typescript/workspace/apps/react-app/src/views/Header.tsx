@@ -17,6 +17,9 @@ export function Header(props: { state$: any; error$: any; feedUrl: string }) {
           >
             Grafana ↗
           </a>
+          <a className="grafana-link" href="/coverage/index.html" target="_blank" rel="noreferrer">
+            Coverage ↗
+          </a>
           <div className={`connection-status ${props.state$}`}>
             <span className="status-dot" />
             {props.state$ === 'connected'

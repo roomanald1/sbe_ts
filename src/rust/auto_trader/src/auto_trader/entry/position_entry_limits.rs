@@ -1,3 +1,13 @@
+
+fn mark_symbol_reentry_cooldown(settings: &mut Settings, symbol: &str) {
+    let now_ms = current_time_ms();
+    settings.reentry_cooldown_until_ms.retain(|_, until| *until > now_ms);
+    settings.reentry_cooldown_until_ms.insert(
+        symbol.to_owned(),
+        now_ms.saturating_add(DEFAULT_REENTRY_COOLDOWN_MS),
+    );
+}
+
 fn signal_position_block_reason(
     settings: &Settings,
     signal: &Signal,
@@ -42,6 +52,16 @@ fn signal_position_block_reason(
                 && position.quantity.abs() > 1e-12
                 && position.strategy.as_deref() == Some(strategy_key)));
     let already_open = strategy_position.is_some();
+    if !already_open && !portfolio_rebalance {
+        if let Some(until_ms) = settings.reentry_cooldown_until_ms.get(signal_key)
+            .filter(|until_ms| now_ms < **until_ms)
+        {
+            let seconds_remaining = until_ms.saturating_sub(now_ms).div_ceil(1000);
+            return Some(format!(
+                "Symbol re-entry cooldown: {signal_key} paused for {seconds_remaining}s after a completed position"
+            ));
+        }
+    }
     if !already_open && open_position_count >= settings.max_open_positions {
         return Some(format!("Total open-position cap reached ({}/{})", open_position_count, settings.max_open_positions));
     }

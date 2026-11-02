@@ -130,7 +130,7 @@ async fn submit_and_record_selected_order(
         .unwrap_or(0.0)
         .abs();
     let mut strategy_realized_delta = 0.0;
-    let mut completed_strategy_trade: Option<(String, String, bool, f64)> = None;
+    let mut completed_strategy_trade: Option<(String, String, bool, f64, Option<serde_json::Value>, f64)> = None;
     let mut position_trade_id = decision_id.to_owned();
     let (realized_delta, _learned_type) = if filled > 0.0 {
         let prior_quantity = settings
@@ -198,11 +198,19 @@ async fn submit_and_record_selected_order(
                 && incoming_sign != position.quantity.signum()
                 && filled + 1e-12 >= position.quantity.abs()
         }) {
+            let total_trade_pnl = prior.realized_pnl + strategy_realized_delta;
+            let entry_notional = if prior.initial_entry_notional > 0.0 {
+                prior.initial_entry_notional
+            } else {
+                prior.average_entry_price * prior.quantity.abs()
+            };
             completed_strategy_trade = Some((
                 strategy_key.to_owned(),
                 prior.entry_context,
                 prior.scout_entry,
-                prior.realized_pnl + strategy_realized_delta,
+                total_trade_pnl,
+                prior.strategy_decision,
+                if entry_notional > 0.0 { total_trade_pnl / entry_notional * 100.0 } else { f64::NAN },
             ));
         }
         if let Some(position) = settings.positions.get_mut(&signal.symbol) {
@@ -227,7 +235,7 @@ async fn submit_and_record_selected_order(
     let realized_delta_usd = realized_usd(&settings, &signal.symbol, realized_delta);
     settings.realized_pnl += realized_delta_usd;
     settings.daily_realized_pnl += realized_delta_usd;
-    if let Some((strategy, learning_context, scout_entry, total_pnl)) = completed_strategy_trade {
+    if let Some((strategy, learning_context, scout_entry, total_pnl, decision, return_percent)) = completed_strategy_trade {
         let total_pnl_usd = realized_usd(&settings, &signal.symbol, total_pnl);
         record_strategy_trade_outcome(
             &mut settings,
@@ -236,6 +244,14 @@ async fn submit_and_record_selected_order(
             Some(&learning_context),
             scout_entry,
             total_pnl_usd,
+        );
+        record_strategy_threshold_sample(
+            &mut settings,
+            &signal.symbol,
+            Some(&strategy),
+            scout_entry,
+            decision.as_ref(),
+            return_percent,
         );
     }
     let status = if response

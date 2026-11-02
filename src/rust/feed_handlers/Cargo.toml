@@ -25,3 +25,11 @@ harness = false
 [[bench]]
 name = "order_book"
 harness = false
+
+[[bench]]
+name = "feed_processing"
+harness = false
+
+[[bench]]
+name = "feed_to_subscriber"
+harness = false

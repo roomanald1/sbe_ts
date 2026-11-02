@@ -44,6 +44,13 @@
         "cwd": "apps/react-app",
         "command": "tsc -b --pretty false"
       }
+    },
+    "coverage": {
+      "executor": "nx:run-commands",
+      "options": {
+        "cwd": "apps/react-app",
+        "command": "npm run coverage"
+      }
     }
   }
 }

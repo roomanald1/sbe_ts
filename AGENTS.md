@@ -35,6 +35,14 @@
 - The strategy consumes the existing OKX trade and book feeds; it does not require SBE schema or generated-code changes. For VWAP tasks, start with the files above and trace feed/SBE code only if the data path changes.
 - Exclude positions.json from broad searches with -g !positions.json: it is a large runtime fill ledger, not source. Avoid generated SBE output unless the schema or encoding is part of the task.
 
+## Strategy conventions
+
+- Every active strategy under src/rust/auto_trader/src/auto_trader/strategies/ has one evaluate.rs that owns its signal-based entry rule and open-position decision (Enter, Reject, Hold, Exit, or Rebalance). Do not split strategy decisions across entry.rs and exit.rs.
+- Strategy evaluators receive StrategySignal only; convert serialized text to enums before evaluation. Keep market-data calculations upstream and price-triggered protective order execution in position management.
+- Tunable evaluator thresholds must come from StrategySignal parameters produced by the bounded learned profile. Keep defaults and bounds in the strategy parameter specs; do not duplicate fallback numbers in evaluate.rs. Reject entry if a required learned parameter is missing.
+- Put per-strategy entry, exit, and parameter-bound tests in that strategy's evaluate.rs. Add a folder, evaluate.rs, contract.rs, and parameter definitions for every new strategy, and register it in strategies/mod.rs.
+- LiveInsights is a legacy compatibility alias for old saved settings and remains inline in the registry; do not recreate its removed strategy folder unless that compatibility design changes.
+
 ## Project conventions
 
 - Use AG Grid for tabular data in views instead of native HTML tables, matching the shared data-grid styling. Style inputs and selects with existing app form/control styles rather than browser defaults.
@@ -46,7 +54,8 @@
 
 - Run frontend targets from the repo root with ./nx <target> react-app. Nx caches build, lint, and typecheck; serve and preview are continuous.
 - Cargo reuses build artifacts in the crate's target directory. Avoid cleaning caches unless stale output is suspected.
-- Prefer the narrowest relevant validation; avoid broad builds or tests unless requested or needed.
+- After any TypeScript source or test changes, run the React app TypeScript test suite with npm test from src/typescript/workspace/apps/react-app, even when the change seems unrelated to the tests. Run any additional focused typecheck, lint, or build target when the change warrants it.
+- After any Rust source or test changes, run the relevant Rust tests and benchmarks for the affected crate(s). Before benchmarking, read research/BENCHMARK_BASELINE.md. Compare the same workloads with the latest recorded run, report any performance degradation along with meaningful changes and environment/workload differences, and append a dated run section with results. Preserve earlier entries. Mark skipped or failed targets explicitly; do not compare unlike workloads as regressions.
 
 ## Shell command hygiene
 

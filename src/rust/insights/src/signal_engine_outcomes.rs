@@ -9,12 +9,16 @@ impl SignalEngine {
         due
     }
 
-    /// Gate research feature extraction and persistence, independently of live snapshots.
-
-    pub fn research_sample_due(&mut self, timestamp: u64) -> bool {
-        let due = self.last_research_sample_at.map_or(true, |last| {
+    /// Check the research cadence without consuming its slot.
+    pub fn research_sample_is_due(&self, timestamp: u64) -> bool {
+        self.last_research_sample_at.map_or(true, |last| {
             timestamp < last || timestamp.saturating_sub(last) >= RESEARCH_SAMPLE_INTERVAL_MS
-        });
+        })
+    }
+
+    /// Gate research feature extraction and persistence, independently of live snapshots.
+    pub fn research_sample_due(&mut self, timestamp: u64) -> bool {
+        let due = self.research_sample_is_due(timestamp);
         if due {
             self.last_research_sample_at = Some(timestamp);
         }

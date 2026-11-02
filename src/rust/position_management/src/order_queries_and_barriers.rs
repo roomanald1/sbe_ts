@@ -74,12 +74,12 @@ async fn create_profit_barrier(
     };
     store.ensure_subscription(&symbol);
     let timestamp = now_ms().map_err(internal_error)?;
-    let capacity_rates = cached_usd_rates_for_order().await?.rates;
+    let capacity_rates = cached_usd_rates_for_order().await?;
     let mut ledger = store.ledger.lock().await;
     ensure_paper_capacity_with_rates(
         &store,
         &ledger,
-        &capacity_rates,
+        &capacity_rates.rates,
         &symbol,
         &side,
         quantity,

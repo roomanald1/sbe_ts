@@ -298,18 +298,13 @@
 .auto-trader-carry-bar-wrap { position: relative; width: 100%; height: 10px; }
 .auto-trader-carry-pnl .auto-trader-pnl-bar-track { width: 100%; height: 10px; }
 .auto-trader-carry-settlement { width: 100%; color: #f0c879; font: 600 9px/11px var(--mono); text-align: left; white-space: nowrap; }
-.auto-trader-carry-details { width: 100%; color: #a0a6ad; font: 10px/13px var(--mono); text-align: center; white-space: nowrap; }
-.auto-trader-carry-details strong { font: inherit; }
-.auto-trader-carry-details strong.is-positive { color: #45c989; }
-.auto-trader-carry-details strong.is-negative { color: #f06e72; }
-.auto-trader-carry-details strong.is-flat { color: #a0a6ad; }
 .auto-trader-pnl-bar-track { position: relative; width: 100%; height: 10px; overflow: hidden; border-radius: 999px; background: #292e35; }
 .auto-trader-pnl-marker.is-signal-exit { top: -5px; width: 3px; height: 20px; border-radius: 2px; background: #f0c879; box-shadow: 0 0 4px #f0c879; }
 .auto-trader-pnl-bar-fill { position: absolute; top: 0; bottom: 0; border-radius: 999px; }
 .auto-trader-pnl-bar-fill.is-positive { background: #45c989; }
 .auto-trader-pnl-bar-fill.is-negative { background: #f06e72; }
 .auto-trader-pnl-bar-fill.is-flat { background: #a0a6ad; }
-.auto-trader-pnl-bar-label { display: block; width: 100%; text-align: center; font: 11px/1.2 var(--mono); white-space: nowrap; }
+.auto-trader-pnl-bar-label { display: block; width: 100%; text-align: left; font: 11px/1.2 var(--mono); white-space: nowrap; }
 .auto-trader-pnl-bar-label.is-positive { color: #45c989; }
 .auto-trader-pnl-bar-label.is-negative { color: #f06e72; }
 .auto-trader-pnl-bar-label.is-flat, .auto-trader-pnl-bar-unavailable { color: #a0a6ad; }
@@ -418,8 +413,7 @@
 
 
 
-.auto-trader-pnl-bar-label { display: block; width: 100%; text-align: center; font: 9px/1.2 var(--mono); white-space: nowrap; }
-.auto-trader-carry-pnl .auto-trader-pnl-bar-label { display: flex; justify-content: space-between; gap: 10px; text-align: left; }
+.auto-trader-pnl-bar-label { display: block; width: 100%; text-align: left; font: 9px/1.2 var(--mono); white-space: nowrap; }
 .auto-trader-pnl-bar-label > strong { font-weight: 600; }
 .auto-trader-pnl-bar-label > strong.is-positive { color: #45c989; }
 .auto-trader-pnl-bar-label > strong.is-negative { color: #f06e72; }
@@ -434,6 +428,7 @@
 .auto-trader-exit-summary > span.is-near { color: #ff8589; }
 .auto-trader-exit-summary > span.is-near b { color: #ff8589; }
 .auto-trader-exit-summary > span.is-positive, .auto-trader-exit-summary > span.is-positive b { color: #45c989; }
+.auto-trader-carry-summary { gap: 6px 14px; }
 .auto-trader-exit-summary > span.is-rebalance, .auto-trader-exit-summary > span.is-rebalance b { color: #f0c879; font-size: 9px; }
 .auto-trader-live-position-grid .auto-trader-pnl-bar-cell { gap: 3px; }
 .auto-trader-live-position-grid .auto-trader-pnl-bar-label { font-size: 8px; }

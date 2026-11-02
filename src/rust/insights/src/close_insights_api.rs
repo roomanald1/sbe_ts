@@ -108,7 +108,7 @@ async fn get_position_insights() -> Result<Json<CloseInsightsResponse>, (StatusC
             let current_price = market.and_then(|m| {
                 let bid = m.bids.first()?.price;
                 let ask = m.asks.first()?.price;
-                let mid = (bid + ask) / 2.0;
+                let mid = bid + (ask - bid) * 0.5;
                 (bid.is_finite() && ask.is_finite() && bid > 0.0 && ask >= bid && mid.is_finite())
                     .then_some(mid)
             });

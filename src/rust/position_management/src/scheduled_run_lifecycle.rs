@@ -108,7 +108,7 @@ async fn start_scheduled_run(
             "Live reference price unavailable for VWAP".into(),
         ));
     }
-    let capacity_rates = cached_usd_rates_for_order().await?.rates;
+    let capacity_rates = cached_usd_rates_for_order().await?;
     let mut account_ledger = lock_order_ledger(&store.ledger).await?;
     if let Some(client_order_id) = request.client_order_id.as_deref() {
         if let Some(existing) = account_ledger
@@ -122,7 +122,7 @@ async fn start_scheduled_run(
     ensure_paper_capacity_with_rates(
         &store,
         &account_ledger,
-        &capacity_rates,
+        &capacity_rates.rates,
         &symbol,
         &request.side,
         request.quantity,

@@ -227,10 +227,14 @@ impl SignalStore {
                     move |axum::extract::Query(query): axum::extract::Query<EvaluationQuery>| {
                         let store = raw_evaluation_store.clone();
                         async move {
+                            let horizons = query.horizons.as_deref().map(|value| {
+                                value.split(',').filter_map(|item| item.parse::<u64>().ok()).collect::<Vec<_>>()
+                            });
                             match store
                                 .evaluations(
                                     query.since,
-                                    query.limit.unwrap_or(10_000).clamp(1, 50_000),
+                                    query.limit.unwrap_or(10_000).clamp(1, 150_000),
+                                    horizons.as_deref(),
                                 )
                                 .await
                             {

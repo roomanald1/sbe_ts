@@ -34,12 +34,44 @@ struct BookArg<'a> {
     instrument: &'a str,
 }
 
+struct BookLevel<'a> {
+    price: &'a str,
+    size: &'a str,
+}
+
+impl<'de: 'a, 'a> Deserialize<'de> for BookLevel<'a> {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct BookLevelVisitor;
+        impl<'de> serde::de::Visitor<'de> for BookLevelVisitor {
+            type Value = BookLevel<'de>;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("an OKX book level containing price and size")
+            }
+
+            fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+            where
+                A: serde::de::SeqAccess<'de>,
+            {
+                let price = seq.next_element()?.ok_or_else(|| serde::de::Error::invalid_length(0, &self))?;
+                let size = seq.next_element()?.ok_or_else(|| serde::de::Error::invalid_length(1, &self))?;
+                while seq.next_element::<serde::de::IgnoredAny>()?.is_some() {}
+                Ok(BookLevel { price, size })
+            }
+        }
+        deserializer.deserialize_seq(BookLevelVisitor)
+    }
+}
+
 #[derive(Deserialize)]
 struct BookUpdate<'a> {
     #[serde(borrow)]
-    asks: Vec<Vec<&'a str>>,
+    asks: Vec<BookLevel<'a>>,
     #[serde(borrow)]
-    bids: Vec<Vec<&'a str>>,
+    bids: Vec<BookLevel<'a>>,
     #[serde(borrow)]
     ts: &'a str,
 }

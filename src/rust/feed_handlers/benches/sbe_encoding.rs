@@ -5,7 +5,8 @@ use std::{
 
 use bytes::Bytes;
 use rsocket_rust::prelude::Payload;
-use sbe_schema::{SBE_BLOCK_LENGTH, SymbolPriceEncoder, WriteBuf, message_header_codec};
+use sbe_schema::symbol_price_codec::SBE_BLOCK_LENGTH;
+use sbe_schema::{SymbolPriceEncoder, WriteBuf, message_header_codec};
 use tokio::sync::broadcast;
 
 const SYMBOL_LENGTH: usize = 32;

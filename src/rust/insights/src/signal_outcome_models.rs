@@ -41,7 +41,7 @@ fn stop_target_counterfactual_return(
     {
         return None;
     }
-    let half_spread = (entry_ask - entry_bid) / 2.0;
+    let half_spread = (entry_ask - entry_bid) * 0.5;
     let (best_net, worst_net, terminal_net) = match direction {
         "bullish" => (
             directional_net_return(

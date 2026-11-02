@@ -1,5 +1,4 @@
-mod auto_trader;
-mod logging;
+use ::auto_trader::auto_trader;
 
 use axum::routing::get;
 
@@ -14,14 +13,22 @@ async fn main() -> anyhow::Result<()> {
     }
     let app = auto_trader::router()
         .route("/health", get(|| async { "ok" }))
-        .route("/process-cpu-seconds", get(process_cpu_seconds));
+        .route("/process-cpu-seconds", get(process_cpu_seconds)).route("/process-memory-bytes", get(process_memory_bytes));
     let listener = tokio::net::TcpListener::bind(("0.0.0.0", 3005)).await?;
-    crate::service_log!(
+    ::auto_trader::service_log!(
         "INFO",
         "AutoTrader service listening on http://0.0.0.0:3005"
     );
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+async fn process_memory_bytes() -> String {
+    std::fs::read_to_string("/proc/self/status")
+        .ok()
+        .and_then(|status| status.lines().find_map(|line| line.strip_prefix("VmRSS:")?.split_whitespace().next()?.parse::<u64>().ok()))
+        .map(|kilobytes| (kilobytes * 1024).to_string())
+        .unwrap_or_else(|| "0".to_owned())
 }
 
 async fn process_cpu_seconds() -> String {

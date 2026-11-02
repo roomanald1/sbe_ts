@@ -1,5 +1,15 @@
 {
-  "rust-analyzer.linkedProjects": ["src/rust/rust_sbe_publisher/Cargo.toml"],
+  "rust-analyzer.linkedProjects": [
+    "src/rust/auto_trader/Cargo.toml",
+    "src/rust/execution/Cargo.toml",
+    "src/rust/feed_handlers/Cargo.toml",
+    "src/rust/insights/Cargo.toml",
+    "src/rust/position_management/Cargo.toml"
+  ],
+  "rust-analyzer.cargo.allTargets": true,
+  "rust-analyzer.lens.enable": true,
+  "rust-analyzer.lens.run.enable": true,
+  "editor.codeLens": true,
   "editor.formatOnSave": true,
   "editor.tabSize": 2,
   "[typescript]": {

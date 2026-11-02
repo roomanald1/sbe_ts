@@ -5,8 +5,9 @@ use axum::{Json, Router, http::StatusCode, routing::get};
 use dashmap::DashMap;
 use futures_util::StreamExt;
 use insights::signals::{
-    ExternalMarketFeatures, NewsAttribution, NewsHeadlineAttribution, SignalEngine,
-    SignalEvaluation, SignalSnapshot, SignalStore, StoredSignalRecord,
+    ExternalMarketFeatures, LIVE_SIGNAL_SNAPSHOT_INTERVAL_MS, NewsAttribution,
+    NewsHeadlineAttribution, SignalEngine, SignalEvaluation, SignalSnapshot, SignalStore,
+    StoredSignalRecord,
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -14,7 +15,10 @@ use std::{
     sync::{Arc, OnceLock},
     time::{SystemTime, UNIX_EPOCH},
 };
-use tokio::{sync::{watch, Mutex, Notify}, time::{Duration, Instant}};
+use tokio::{
+    sync::{Mutex, Notify, watch},
+    time::{Duration, Instant},
+};
 
 #[derive(Clone, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -53,6 +57,8 @@ struct SignalRuntime {
     engines: Mutex<HashMap<String, SignalEngine>>,
     signal_push_cache: Arc<DashMap<String, serde_json::Value>>,
     signal_push_notify: Arc<Notify>,
+    market_cache: Arc<DashMap<String, (u64, serde_json::Value)>>,
+    market_push_at: DashMap<String, u64>,
     ui_snapshot_cache: Arc<DashMap<String, serde_json::Value>>,
     ui_snapshot_notify: Arc<Notify>,
     news: watch::Receiver<Arc<NewsFeedSnapshot>>,
@@ -95,8 +101,6 @@ struct NewsFeedSnapshot {
     articles: Vec<NewsArticle>,
 }
 
-
-
 fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -105,7 +109,10 @@ fn now_ms() -> u64 {
 }
 
 fn signal_diagnostic_due(runtime: &SignalRuntime, symbol: &str, timestamp: u64) -> bool {
-    let mut last = runtime.snapshot_diagnostic_at.entry(symbol.to_owned()).or_insert(0);
+    let mut last = runtime
+        .snapshot_diagnostic_at
+        .entry(symbol.to_owned())
+        .or_insert(0);
     if timestamp >= *last && timestamp.saturating_sub(*last) < 60_000 {
         return false;
     }
@@ -113,18 +120,18 @@ fn signal_diagnostic_due(runtime: &SignalRuntime, symbol: &str, timestamp: u64) 
     true
 }
 
-
 include!("news_classification.rs");
 
 include!("external_market_feed.rs");
 include!("dated_carry_signals.rs");
 include!("daily_strategy_signals.rs");
 mod alternative_insights;
-async fn run_alternative_strategy_worker(store: SignalStore) { alternative_insights::run(store).await }
+async fn run_alternative_strategy_worker(store: SignalStore) {
+    alternative_insights::run(store).await
+}
 
 include!("signal_feed_workers.rs");
 
 include!("signal_ingestion.rs");
-
 
 include!("service_startup.rs");

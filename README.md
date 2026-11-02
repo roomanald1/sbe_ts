@@ -34,3 +34,9 @@ Set a unique Grafana password in monitoring/.env (copy monitoring/.env.example f
     ./start-all.sh
 
 This launches the backend services, React UI, and Grafana monitoring in the background and returns to the shell. Open the UI at http://localhost:5173 and use its Grafana link for the dashboard. Run ./stop-all.sh to stop everything. Monitoring and app logs are written under logs/; startup and supervisor output is in logs/start-all.log.
+
+## Code coverage
+
+Run ./coverage.sh from the repository root to generate HTML coverage reports. The frontend report is at src/typescript/workspace/apps/react-app/public/coverage/index.html. Rust reports are at src/rust/<crate>/coverage/html/index.html for each service crate. The frontend command uses the existing Node test suite, and Rust coverage runs each crate's unit tests through cargo-llvm-cov.
+
+Install the Rust coverage tool once with cargo install cargo-llvm-cov if it is missing.

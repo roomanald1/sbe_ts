@@ -156,7 +156,7 @@ fn option_volatility_summary(
     let put_atm = select("P", 0.5);
     let iv = call_atm
         .zip(put_atm)
-        .map(|(call, put)| (call.2 + put.2) / 2.0)
+        .map(|(call, put)| call.2 + (put.2 - call.2) * 0.5)
         .or_else(|| call_atm.map(|row| row.2))
         .or_else(|| put_atm.map(|row| row.2));
     let call_25d = select("C", 0.25);

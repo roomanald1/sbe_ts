@@ -29,7 +29,8 @@ async fn receive_daily_strategy_signals(
             "Daily strategy signal batch is stale".into(),
         ));
     }
-    if batch.snapshot.generated_signals.iter().any(|signal| {
+    let mut snapshot = batch.snapshot;
+    if snapshot.generated_signals.iter().any(|signal| {
         !signal.strategy_candidate
             || signal.stale
             || signal.timestamp > now_ms + 5_000
@@ -45,9 +46,23 @@ async fn receive_daily_strategy_signals(
             "Daily strategy batch has an invalid signal".into(),
         ));
     }
-    *state.latest_daily_strategy_snapshot.lock().await = Some(batch.snapshot.clone());
+    let parameters = BTreeMap::new();
+    snapshot.active_strategy_symbols = snapshot.generated_signals.iter().filter_map(|signal| {
+        let strategy = signal.strategy.as_deref().and_then(Strategy::from_name)?;
+        let input = StrategySignal::entry(signal, &parameters);
+        matches!(strategy.evaluate(&input), Ok(StrategyDecision::Enter))
+            .then(|| (strategy.as_str().to_owned(), signal.symbol.clone()))
+    }).collect();
+    let active_symbols = snapshot.active_strategy_symbols.clone();
+    *state.latest_daily_strategy_snapshot.lock().await = Some(snapshot.clone());
     if let Ok(mut current) = state.strategy_diagnostic.lock() {
-        *current = batch.diagnostics;
+        let mut diagnostics = batch.diagnostics;
+        for diagnostic in &mut diagnostics {
+            for item in &mut diagnostic.symbols {
+                item.signal_active = active_symbols.contains(&(diagnostic.strategy.clone(), item.symbol.clone()));
+            }
+        }
+        *current = diagnostics;
     }
     if !state.enabled.load(Ordering::Relaxed) {
         return Ok(StatusCode::ACCEPTED);
@@ -55,7 +70,7 @@ async fn receive_daily_strategy_signals(
     let mut settings = state.settings.lock().await;
     let mut by_symbol = BTreeMap::<String, Vec<Signal>>::new();
     let mut cursors_changed = false;
-    for signal in batch.snapshot.generated_signals {
+    for signal in snapshot.generated_signals {
         let Some(strategy) = signal.strategy.as_deref().and_then(Strategy::from_name) else {
             continue;
         };

@@ -132,7 +132,8 @@ async fn serve_http() -> anyhow::Result<()> {
     let app = Router::new()
         .merge(alternative_market_data::router())
         .route("/health", get(|| async { "ok" }))
-        .route("/process-cpu-seconds", get(process_cpu_seconds))
+        .route("/internal/message-counts", get(message_counts))
+        .route("/process-cpu-seconds", get(process_cpu_seconds)).route("/process-memory-bytes", get(process_memory_bytes))
         .route("/instruments", get(get_instruments))
         .route("/market-data/daily-candles", get(get_daily_candles))
         .route("/internal/signals/snapshot", post(publish_signal_snapshot))
@@ -154,9 +155,22 @@ async fn main() -> anyhow::Result<()> {
     )?;
     Ok(())
 }
+async fn message_counts() -> Json<serde_json::Value> {
+    let (trades, books, tickers) = feed_handlers::metrics::snapshot();
+    Json(serde_json::json!({"trades": trades, "books": books, "tickers": tickers}))
+}
+
 async fn process_cpu_seconds() -> String {
     let stat = std::fs::read_to_string("/proc/self/stat").unwrap_or_default();
     let fields = stat.rsplit_once(')').map(|(_, fields)| fields).unwrap_or("");
     let values: Vec<u64> = fields.split_whitespace().filter_map(|value| value.parse().ok()).collect();
     values.get(11).zip(values.get(12)).map(|(user, system)| (*user + *system) as f64 / 100.0).unwrap_or(0.0).to_string()
+}
+
+async fn process_memory_bytes() -> String {
+    std::fs::read_to_string("/proc/self/status")
+        .ok()
+        .and_then(|status| status.lines().find_map(|line| line.strip_prefix("VmRSS:")?.split_whitespace().next()?.parse::<u64>().ok()))
+        .map(|kilobytes| (kilobytes * 1024).to_string())
+        .unwrap_or_else(|| "0".to_owned())
 }

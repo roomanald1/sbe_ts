@@ -47,7 +47,7 @@ async fn submit_position_exit_order(
     }
     let side = if is_long { "sell" } else { "buy" };
     let quantity = position.quantity.abs();
-    let notional = quantity * (bid + ask) / 2.0;
+    let notional = quantity * (bid + (ask - bid) * 0.5);
     let submit_started = Instant::now();
     let response = match submit_configured_order(
         client,
@@ -131,6 +131,9 @@ async fn submit_position_exit_order(
     settings.realized_pnl += realized_pnl_usd;
     settings.daily_realized_pnl += realized_pnl_usd;
     if filled + 1e-12 >= quantity {
+        if settings.positions.get(&symbol).is_none_or(|position| position.quantity.abs() <= 1e-12) {
+            mark_symbol_reentry_cooldown(&mut settings, &symbol);
+        }
         let entry_notional = if position.initial_entry_notional > 0.0 {
             position.initial_entry_notional
         } else {
@@ -158,6 +161,14 @@ async fn submit_position_exit_order(
                 Some(&position.entry_context),
                 position.scout_entry,
                 strategy_realized_usd,
+            );
+            record_strategy_threshold_sample(
+                &mut settings,
+                &symbol,
+                position.strategy.as_deref(),
+                position.scout_entry,
+                position.strategy_decision.as_ref(),
+                total_trade_pnl / entry_notional * 100.0,
             );
             adapt_exit_policy(&mut settings);
         }
