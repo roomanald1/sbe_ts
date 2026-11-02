@@ -22,12 +22,79 @@ fn strategy_learning_stats(settings: &Settings, symbol: &str, strategy: Strategy
     stats
 }
 
+const MIN_SCOUT_PARAMETER_VARIANT_SAMPLES: usize = 2;
+
+fn next_scout_parameter_probe(
+    symbol: &str,
+    strategy: Strategy,
+    parameters: &BTreeMap<String, f64>,
+    day: u64,
+) -> Option<(String, f64)> {
+    let candidates = all_strategy_parameter_specs(strategy).into_iter().filter_map(|spec| {
+        if spec.key == StrategyParameterKey::LearningRate || spec.min >= spec.max || spec.step <= 0.0 {
+            return None;
+        }
+        let current = parameters.get(spec.key.as_str()).copied().unwrap_or(spec.default);
+        if !current.is_finite() { return None; }
+        let direction = if day % 2 == 0 { 1.0 } else { -1.0 };
+        let preferred = current + direction * spec.step;
+        let value = if preferred >= spec.min && preferred <= spec.max {
+            preferred
+        } else {
+            current - direction * spec.step
+        };
+        (value >= spec.min && value <= spec.max && (value - current).abs() >= spec.step * 0.5)
+            .then_some((spec.key.as_str().to_owned(), value))
+    }).collect::<Vec<_>>();
+    if candidates.is_empty() { return None; }
+    let hash = symbol.bytes().chain(strategy.as_str().bytes()).fold(2_166_136_261_u64, |hash, byte| {
+        hash.wrapping_mul(16_777_619) ^ u64::from(byte)
+    });
+    candidates.get((day.wrapping_add(hash) % candidates.len() as u64) as usize).cloned()
+}
+
+fn best_scout_parameter_value(
+    settings: &Settings,
+    symbol: &str,
+    strategy: Strategy,
+    spec: &StrategyParameterSpec,
+) -> Option<f64> {
+    let prefix = format!("probe:{symbol}:{}:{}:", strategy.as_str(), spec.key.as_str());
+    settings.learning.iter().filter_map(|(key, stored)| {
+        let value = key.strip_prefix(&prefix)?.parse::<f64>().ok()?;
+        if !value.is_finite() || value < spec.min || value > spec.max {
+            return None;
+        }
+        let mut stats = stored.clone();
+        decay_learning_stats(&mut stats, current_time_ms());
+        if stats.samples < MIN_SCOUT_PARAMETER_VARIANT_SAMPLES {
+            return None;
+        }
+        Some((value, stats.realized_pnl / stats.samples as f64))
+    }).max_by(|left, right| left.1.total_cmp(&right.1)).map(|(value, _)| value)
+}
+
 fn strategy_parameter_profile(
     settings: &Settings,
     symbol: &str,
     strategy: Strategy,
 ) -> StrategyParameterProfile {
-    let learning = strategy_learning_stats(settings, symbol, strategy);
+    let mut learning = strategy_learning_stats(settings, symbol, strategy);
+    let legacy_shadow_key = format!("shadow:{symbol}:{}", strategy.as_str());
+    let scenario_shadow_prefix = format!("{legacy_shadow_key}:");
+    for (key, stored_shadow) in &settings.learning {
+        if key != &legacy_shadow_key && !key.starts_with(&scenario_shadow_prefix) {
+            continue;
+        }
+        let mut shadow = stored_shadow.clone();
+        decay_learning_stats(&mut shadow, current_time_ms());
+        learning.samples += shadow.samples;
+        learning.positive += shadow.positive;
+        learning.realized_pnl += shadow.realized_pnl;
+        learning.recent_trade_pnls.extend(shadow.recent_trade_pnls);
+    }
+    learning.recent_trade_pnls.sort_unstable_by(|left, right| right.0.cmp(&left.0));
+    learning.recent_trade_pnls.truncate(STRATEGY_SIZING_RECENT_TRADES);
     let positive_rate =
         (learning.samples > 0).then_some(learning.positive as f64 / learning.samples as f64);
     let performance = recent_net_pnl_edge(&learning)
@@ -58,26 +125,20 @@ fn strategy_parameter_profile(
                 });
             let default_value = spec.default;
             let base = configured.unwrap_or(default_value);
-            // Win rate or realized PnL alone cannot safely tune stop and target
-            // distances. The entry planner may use a wider walk-forward policy
-            // only after its held-out results beat the conservative baseline.
-            let learned_value = if is_walk_forward_threshold(spec.key) {
-                walk_forward_threshold(spec, base, &learning.threshold_samples).unwrap_or(base)
-            } else {
-                let adaptive_step = if matches!(
-                    spec.key,
-                    StrategyParameterKey::LearningRate
-                        | StrategyParameterKey::StopLossPercent
-                        | StrategyParameterKey::TakeProfitPercent
-                ) {
-                    0.0
+            let learned_value = best_scout_parameter_value(settings, symbol, strategy, spec).unwrap_or_else(|| {
+                if is_walk_forward_threshold(spec.key) {
+                    walk_forward_threshold(spec, base, &learning.threshold_samples).unwrap_or(base)
                 } else {
-                    (spec.max - spec.min) * learning_rate * performance * spec.learning_direction
-                };
-                let candidate = (base + adaptive_step).clamp(spec.min, spec.max);
-                let step_position = (candidate - spec.min) / spec.step;
-                (spec.min + step_position.round() * spec.step).clamp(spec.min, spec.max)
-            };
+                    let adaptive_step = if spec.key == StrategyParameterKey::LearningRate {
+                        0.0
+                    } else {
+                        (spec.max - spec.min) * learning_rate * performance * spec.learning_direction
+                    };
+                    let candidate = (base + adaptive_step).clamp(spec.min, spec.max);
+                    let step_position = (candidate - spec.min) / spec.step;
+                    (spec.min + step_position.round() * spec.step).clamp(spec.min, spec.max)
+                }
+            });
             StrategyParameterValue {
                 key: spec.key.as_str().into(),
                 label: spec.label.into(),
@@ -374,11 +435,14 @@ fn confident_win_rate_edge(positive: usize, samples: usize) -> f64 {
 
 const WALK_FORWARD_POLICY_MIN_SAMPLES: usize = 30;
 
-fn strategy_parameter_value(
+pub(crate) fn strategy_parameter_value(
     parameters: &BTreeMap<String, f64>,
     key: StrategyParameterKey,
 ) -> Option<f64> {
-    parameters.get(key.as_str()).copied().filter(|value| value.is_finite())
+    parameters
+        .get(key.as_str())
+        .copied()
+        .filter(|value| value.is_finite())
 }
 
 fn strategy_profile_value(profile: &StrategyParameterProfile, key: &str) -> Option<f64> {
@@ -392,6 +456,24 @@ fn strategy_profile_value(profile: &StrategyParameterProfile, key: &str) -> Opti
 #[cfg(test)]
 mod strategy_parameter_bounds_tests {
     use super::*;
+
+    #[test]
+    fn daily_rule_inputs_are_registered_for_learning_profiles() {
+        let cases = [
+            (Strategy::Donchian10Btc200, StrategyParameterKey::BreakoutLookbackDays),
+            (Strategy::Donchian20Btc200, StrategyParameterKey::BreakoutLookbackDays),
+            (Strategy::Donchian20Btc200Hold3, StrategyParameterKey::MinimumHoldDays),
+            (Strategy::RiskAdjustedTrendPortfolio, StrategyParameterKey::TrendPortfolioLookbackDays),
+            (Strategy::RiskAdjustedTrendPortfolio, StrategyParameterKey::TrendPortfolioWeightCap),
+            (Strategy::RiskAdjustedMonthlyMomentum, StrategyParameterKey::MonthlyMomentumLookbackDays),
+            (Strategy::RiskAdjustedMonthlyMomentum, StrategyParameterKey::MonthlyMomentumVolatilityTarget),
+            (Strategy::DatedCarry, StrategyParameterKey::CarryMinimumDaysToExpiry),
+        ];
+        for (strategy, key) in cases {
+            assert!(all_strategy_parameter_specs(strategy).iter().any(|spec| spec.key == key),
+                "{} must expose {}", strategy.as_str(), key.as_str());
+        }
+    }
 
     #[test]
     fn every_registered_strategy_accepts_bounds_and_rejects_values_outside_them() {
@@ -634,5 +716,90 @@ mod threshold_walk_forward_tests {
         assert!(
             threshold.min <= threshold.learned_value && threshold.learned_value <= threshold.max
         );
+    }
+}
+
+#[cfg(test)]
+mod scout_shadow_parameter_learning_tests {
+    use super::*;
+
+    #[test]
+    fn scout_outcomes_contribute_to_strategy_parameter_learning() {
+        let mut settings = Settings::default();
+        let strategy = Strategy::Donchian55Btc200;
+        let key = strategy_shadow_learning_key("BTC-USDT", strategy.as_str(), "strategy");
+        let shadow = settings.learning.entry(key).or_default();
+        shadow.samples = 20;
+        shadow.positive = 15;
+        shadow.realized_pnl = 1.5;
+        shadow.recent_trade_pnls = (0..20)
+            .map(|index| (current_time_ms(), if index < 15 { 0.1 } else { -0.05 }))
+            .collect();
+        let tight_key = strategy_shadow_learning_key("BTC-USDT", strategy.as_str(), "tight");
+        let tight = settings.learning.entry(tight_key).or_default();
+        tight.samples = 10;
+        tight.positive = 8;
+        tight.realized_pnl = 0.8;
+        tight.recent_trade_pnls = (0..10)
+            .map(|index| (current_time_ms(), if index < 8 { 0.1 } else { -0.1 }))
+            .collect();
+
+        let profile = strategy_parameter_profile(&settings, "BTC-USDT", strategy);
+        assert_eq!(profile.learning_samples, 30);
+        let lookback = profile.parameters.iter()
+            .find(|parameter| parameter.key == StrategyParameterKey::BreakoutLookbackDays.as_str())
+            .unwrap();
+        assert_ne!(lookback.learned_value, lookback.default_value);
+        assert!(lookback.min <= lookback.learned_value && lookback.learned_value <= lookback.max);
+    }
+}
+
+#[cfg(test)]
+mod scout_parameter_variant_tests {
+    use super::*;
+
+    #[test]
+    fn feedback_selects_the_best_probed_value_without_pooling_it_with_baseline_samples() {
+        let mut settings = Settings::default();
+        let strategy = Strategy::Donchian55Btc200;
+        for _ in 0..4 {
+            record_learning_outcome(
+                settings.learning.entry(strategy_parameter_probe_learning_key(
+                    "BTC-USDT", strategy.as_str(), "breakout_lookback_days", 50.0,
+                )).or_default(),
+                -1.0,
+            );
+            record_learning_outcome(
+                settings.learning.entry(strategy_parameter_probe_learning_key(
+                    "BTC-USDT", strategy.as_str(), "breakout_lookback_days", 52.0,
+                )).or_default(),
+                2.0,
+            );
+        }
+        let profile = strategy_parameter_profile(&settings, "BTC-USDT", strategy);
+        let lookback = profile.parameters.iter()
+            .find(|parameter| parameter.key == StrategyParameterKey::BreakoutLookbackDays.as_str())
+            .unwrap();
+        assert_eq!(lookback.learned_value, 52.0);
+        assert_eq!(profile.learning_samples, 0);
+    }
+}
+
+#[cfg(test)]
+mod scout_parameter_scheduling_tests {
+    use super::*;
+
+    #[test]
+    fn live_strategy_probe_rotates_one_bounded_parameter_value() {
+        let strategy = Strategy::LiveMomentum;
+        let parameters = strategy_parameter_values(&Settings::default(), "ETH-USDT", strategy);
+        let (key, value) = next_scout_parameter_probe("ETH-USDT", strategy, &parameters, 2).unwrap();
+        assert_ne!(key, StrategyParameterKey::LearningRate.as_str());
+        let spec = all_strategy_parameter_specs(strategy).into_iter()
+            .find(|spec| spec.key.as_str() == key).unwrap();
+        assert!(spec.min <= value && value <= spec.max);
+        let current = parameters[&key];
+        assert!((value - current).abs() <= spec.step + 1e-9);
+        assert!((value - current).abs() > 0.0);
     }
 }

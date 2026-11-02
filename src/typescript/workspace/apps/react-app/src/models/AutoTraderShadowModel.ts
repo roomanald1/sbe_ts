@@ -6,6 +6,7 @@ export type AutoTraderShadowPosition = {
   strategy: string;
   source: 'Scout' | 'Exploratory';
   scoutLevelPercent?: number;
+  exitScenario: 'strategy' | 'tight';
   direction: 'bullish' | 'bearish';
   strength: number;
   openedAt: number;
@@ -16,11 +17,12 @@ export type AutoTraderShadowPosition = {
   takerFeeRate: number;
   status: 'Open' | 'Won' | 'Lost' | 'Flat' | 'Outcome unavailable';
   netReturnPercent?: number;
-  returnBasis?: 'one-hour bid/ask evaluation' | 'five-minute bid/ask evaluation' | 'ticker estimate';
+  returnBasis?: 'strategy exit' | 'ticker estimate';
 };
 
 type AuditRecord = {
   decision_id?: string;
+  shadow_decision_id?: string;
   stage?: string;
   status?: string;
   timestamp?: number;
@@ -31,11 +33,14 @@ type AuditRecord = {
   strength?: number;
   scout?: boolean;
   scout_level_percent?: number;
+  shadow_exit_scenario?: 'strategy' | 'tight';
   exploratory?: boolean | null;
   shadow_entry_bid?: number;
   shadow_entry_ask?: number;
   shadow_entry_price?: number;
   shadow_taker_fee_rate?: number;
+  shadow_net_return_percent?: number;
+  evaluated_timestamp?: number;
 };
 
 type SignalEvaluation = {
@@ -49,9 +54,8 @@ type SignalEvaluation = {
   taker_fee_rate: number;
 };
 
-const dailyScoutHorizonSeconds = 3_600;
-const exploratoryHorizonSeconds = 300;
-const historyWindowMs = 60 * 60_000;
+const historyWindowMs = 7 * 24 * 60 * 60_000;
+const repeatedScenarioCooldownMs = 60 * 60_000;
 
 export class AutoTraderShadowModel {
   readonly state$ = new BehaviorSubject<{ rows: AutoTraderShadowPosition[]; loading: boolean; error?: string }>({ rows: [], loading: true });
@@ -79,23 +83,23 @@ export class AutoTraderShadowModel {
     const since = Date.now() - historyWindowMs;
     try {
       const [auditResponse, evaluationResponse] = await Promise.all([
-        fetch(`/signals/auto-trader-audit?since=${since}&limit=10000`),
-        fetch(`/signals/evaluations?since=${since}&limit=150000&horizons=300,3600`),
+        fetch(`/signals/auto-trader-audit?since=${since}&limit=50000`),
+        fetch('/signals/evaluations?since=' + since + '&limit=150000'),
       ]);
       if (!auditResponse.ok || !evaluationResponse.ok) throw new Error('Shadow outcome data unavailable');
       const [auditRows, evaluations] = await Promise.all([
         auditResponse.json() as Promise<AuditRecord[]>,
         evaluationResponse.json() as Promise<SignalEvaluation[]>,
       ]);
-      const evaluationsBySymbol = new Map<string, SignalEvaluation[]>();
+      const evaluationsBySignal = new Map<string, SignalEvaluation>();
       for (const evaluation of evaluations) {
-        if (evaluation.horizon_seconds !== dailyScoutHorizonSeconds && evaluation.horizon_seconds !== exploratoryHorizonSeconds) continue;
-        const matching = evaluationsBySymbol.get(evaluation.symbol) ?? [];
-        matching.push(evaluation);
-        evaluationsBySymbol.set(evaluation.symbol, matching);
+        evaluationsBySignal.set(evaluation.symbol + '|' + evaluation.signal_timestamp, evaluation);
       }
-      for (const matching of evaluationsBySymbol.values()) {
-        matching.sort((a, b) => a.signal_timestamp - b.signal_timestamp);
+      const outcomesByDecision = new Map<string, AuditRecord>();
+      for (const audit of auditRows) {
+        if (audit.stage === 'scout-outcome' && audit.shadow_decision_id) {
+          outcomesByDecision.set(audit.shadow_decision_id, audit);
+        }
       }
       const shadowDecisions = auditRows
         .filter((audit) => audit.stage === 'decision' && audit.status === 'shadowed' && audit.decision_id)
@@ -104,27 +108,25 @@ export class AutoTraderShadowModel {
       const lastSampleAt = new Map<string, number>();
       for (const audit of shadowDecisions) {
         const timestamp = audit.timestamp ?? audit.signal_timestamp ?? 0;
-        const horizon = audit.scout_level_percent === undefined ? exploratoryHorizonSeconds : dailyScoutHorizonSeconds;
-        const sampleKey = (audit.symbol ?? '') + '|' + (audit.strategy ?? '') + '|' + (audit.direction ?? '') + '|' + (audit.scout_level_percent ?? 'exploratory');
+        const sampleKey = (audit.symbol ?? '') + '|' + (audit.strategy ?? '') + '|' + (audit.direction ?? '') + '|' + (audit.scout_level_percent ?? 'exploratory') + '|' + (audit.shadow_exit_scenario ?? 'strategy');
         const priorSampleAt = lastSampleAt.get(sampleKey);
-        if (priorSampleAt !== undefined && timestamp - priorSampleAt < horizon * 1_000) continue;
+        if (priorSampleAt !== undefined && timestamp - priorSampleAt < repeatedScenarioCooldownMs) continue;
         latestShadowDecisions.set(audit.decision_id!, audit);
         lastSampleAt.set(sampleKey, timestamp);
       }
-      const now = Date.now();
       const rows = [...latestShadowDecisions.values()].flatMap((audit): AutoTraderShadowPosition[] => {
         const { decision_id: decisionId, signal_timestamp: signalTimestamp, symbol, direction } = audit;
         if (!decisionId || !signalTimestamp || !symbol || (direction !== 'bullish' && direction !== 'bearish')) return [];
-        const horizon = audit.scout_level_percent === undefined ? exploratoryHorizonSeconds : dailyScoutHorizonSeconds;
-        const evaluation = (evaluationsBySymbol.get(symbol) ?? [])
-          .filter((item) => item.horizon_seconds === horizon && Math.abs(item.signal_timestamp - signalTimestamp) <= 5_000)
-          .sort((a, b) => Math.abs(a.signal_timestamp - signalTimestamp) - Math.abs(b.signal_timestamp - signalTimestamp))[0];
-        const netReturn = evaluation
-          ? direction === 'bullish' ? evaluation.long_net_percent : evaluation.short_net_percent
-          : undefined;
+        const outcome = outcomesByDecision.get(decisionId);
+        const evaluation = evaluationsBySignal.get(symbol + '|' + signalTimestamp);
+        const netReturn = typeof outcome?.shadow_net_return_percent === 'number'
+          ? outcome.shadow_net_return_percent
+          : evaluation
+            ? direction === 'bullish' ? evaluation.long_net_percent : evaluation.short_net_percent
+            : undefined;
         const status: AutoTraderShadowPosition['status'] = typeof netReturn === 'number' && Number.isFinite(netReturn)
           ? netReturn > 1e-12 ? 'Won' : netReturn < -1e-12 ? 'Lost' : 'Flat'
-          : now < (audit.timestamp ?? signalTimestamp) + horizon * 1_000 ? 'Open' : 'Outcome unavailable';
+          : outcome || evaluation ? 'Outcome unavailable' : 'Open';
         const entryPrice = direction === 'bullish'
           ? audit.shadow_entry_ask ?? audit.shadow_entry_price
           : audit.shadow_entry_bid ?? audit.shadow_entry_price;
@@ -134,17 +136,20 @@ export class AutoTraderShadowModel {
           strategy: audit.strategy ?? 'live-insights',
           source: audit.scout ? 'Scout' : 'Exploratory',
           scoutLevelPercent: typeof audit.scout_level_percent === 'number' ? audit.scout_level_percent : undefined,
+          exitScenario: audit.shadow_exit_scenario ?? 'strategy',
           direction,
           strength: audit.strength ?? 0,
           openedAt: audit.timestamp ?? signalTimestamp,
-          closedAt: typeof evaluation?.evaluated_timestamp === 'number' ? evaluation.evaluated_timestamp : undefined,
+          closedAt: typeof outcome?.evaluated_timestamp === 'number'
+            ? outcome.evaluated_timestamp
+            : typeof evaluation?.evaluated_timestamp === 'number' ? evaluation.evaluated_timestamp : undefined,
           entryPrice: typeof entryPrice === 'number' && Number.isFinite(entryPrice) ? entryPrice : undefined,
           entryBid: typeof audit.shadow_entry_bid === 'number' && Number.isFinite(audit.shadow_entry_bid) ? audit.shadow_entry_bid : undefined,
           entryAsk: typeof audit.shadow_entry_ask === 'number' && Number.isFinite(audit.shadow_entry_ask) ? audit.shadow_entry_ask : undefined,
-          takerFeeRate: evaluation?.taker_fee_rate ?? audit.shadow_taker_fee_rate ?? 0.001,
+          takerFeeRate: outcome?.shadow_taker_fee_rate ?? evaluation?.taker_fee_rate ?? audit.shadow_taker_fee_rate ?? 0.001,
           status,
           netReturnPercent: typeof netReturn === 'number' && Number.isFinite(netReturn) ? netReturn : undefined,
-          returnBasis: typeof netReturn === 'number' && Number.isFinite(netReturn) ? horizon === dailyScoutHorizonSeconds ? 'one-hour bid/ask evaluation' : 'five-minute bid/ask evaluation' : undefined,
+          returnBasis: typeof netReturn === 'number' && Number.isFinite(netReturn) ? 'strategy exit' : undefined,
         }];
       }).sort((a, b) => b.openedAt - a.openedAt);
       this.state$.next({ rows, loading: false });

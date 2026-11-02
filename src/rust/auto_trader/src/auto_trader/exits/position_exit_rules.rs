@@ -238,10 +238,17 @@ async fn evaluate_position_exit(
         });
         (enabled, position.strategy.clone())
     };
+    let minimum_hold_days = position.strategy_decision.as_ref()
+        .and_then(|decision| decision.get("strategy_parameters"))
+        .and_then(|parameters| parameters.get("minimum_hold_days"))
+        .and_then(serde_json::Value::as_f64)
+        .filter(|days| days.is_finite() && *days > 0.0)
+        .unwrap_or(3.0);
     let minimum_hold_active = strategy_no_longer_eligible.as_deref()
         == Some("donchian-20-btc200-hold3")
         && position.entry_timestamp_ms > 0
-        && observed_at.saturating_sub(position.entry_timestamp_ms) < 3 * 86_400_000;
+        && observed_at.saturating_sub(position.entry_timestamp_ms)
+            < (minimum_hold_days * 86_400_000.0) as u64;
     // Evaluate signal state and strategy enablement through the strategy lifecycle evaluator.
     let strategy_decision = strategy_no_longer_eligible.as_deref().map(|strategy| {
         if let Some(regime) = research_regime.as_ref() {

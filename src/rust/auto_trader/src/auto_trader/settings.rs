@@ -99,6 +99,8 @@ struct Settings {
     #[serde(default)]
     shadow_sample_at_ms: BTreeMap<String, u64>,
     #[serde(default)]
+    shadow_sample_active_scenarios: BTreeMap<String, BTreeSet<String>>,
+    #[serde(default)]
     strategy_parameter_overrides: BTreeMap<String, f64>,
     #[serde(default)]
     last_hedge_at: BTreeMap<String, u64>,
@@ -234,6 +236,7 @@ impl Default for Settings {
             execution_learning_order_ids: BTreeSet::new(),
             shadow_learning_outcome_ids: BTreeSet::new(),
             shadow_sample_at_ms: BTreeMap::new(),
+            shadow_sample_active_scenarios: BTreeMap::new(),
             strategy_parameter_overrides: BTreeMap::new(),
             last_hedge_at: BTreeMap::new(),
             last_decision: String::new(),

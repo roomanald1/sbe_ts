@@ -26,6 +26,94 @@ fn market_value(
     )
 }
 
+
+#[derive(serde::Deserialize)]
+struct ScoutShadowRegistration {
+    decision_id: String,
+    symbol: String,
+    timestamp: u64,
+    direction: String,
+    entry_price: f64,
+    strategy: String,
+    exit_scenario: String,
+    stop_loss_percent: f64,
+    take_profit_percent: f64,
+    profit_protection_activation_percent: f64,
+    profit_protection_giveback_percent: f64,
+    profit_protection_minimum_lock_percent: f64,
+    #[serde(default)]
+    scout_parameter_key: Option<String>,
+    #[serde(default)]
+    scout_parameter_value: Option<f64>,
+    #[serde(default)]
+    scout_minimum_hold_days: Option<f64>,
+    #[serde(default)]
+    scout_maximum_hold_days: Option<f64>,
+}
+
+async fn register_scout_shadow(
+    axum::extract::State(runtime): axum::extract::State<Arc<SignalRuntime>>,
+    Json(sample): Json<ScoutShadowRegistration>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    let now = now_ms();
+    if sample.decision_id.is_empty() || sample.decision_id.len() > 240
+        || sample.symbol.is_empty() || sample.symbol.len() > 32
+        || sample.timestamp > now + 5_000 || now.saturating_sub(sample.timestamp) > 7 * 86_400_000
+        || !sample.entry_price.is_finite() || sample.entry_price <= 0.0
+        || !sample.stop_loss_percent.is_finite() || sample.stop_loss_percent <= 0.0
+        || !sample.take_profit_percent.is_finite() || sample.take_profit_percent <= 0.0
+        || !sample.profit_protection_activation_percent.is_finite() || sample.profit_protection_activation_percent < 0.0
+        || !sample.profit_protection_giveback_percent.is_finite() || sample.profit_protection_giveback_percent < 0.0
+        || !sample.profit_protection_minimum_lock_percent.is_finite() || sample.profit_protection_minimum_lock_percent < 0.0
+        || sample.strategy.is_empty()
+        || !matches!(sample.exit_scenario.as_str(), "strategy" | "tight")
+        || sample.scout_minimum_hold_days.is_some_and(|days| !days.is_finite() || !(1.0..=365.0).contains(&days))
+        || sample.scout_maximum_hold_days.is_some_and(|days| !days.is_finite() || !(1.0..=365.0).contains(&days))
+        || !matches!(sample.direction.as_str(), "bullish" | "bearish")
+    {
+        return Err((StatusCode::BAD_REQUEST, "Invalid scout shadow sample".to_owned()));
+    }
+    let mut engines = runtime.engines.lock().await;
+    let engine = engines.entry(sample.symbol.clone()).or_default();
+    if !engine.track_scout_shadow(
+        sample.decision_id, sample.symbol, sample.strategy,
+        sample.timestamp, sample.direction, sample.entry_price,
+        sample.stop_loss_percent, sample.take_profit_percent,
+        sample.profit_protection_activation_percent,
+        sample.profit_protection_giveback_percent,
+        sample.profit_protection_minimum_lock_percent,
+        sample.scout_parameter_key,
+        sample.scout_parameter_value,
+        sample.scout_minimum_hold_days,
+        sample.scout_maximum_hold_days,
+    ) {
+        return Ok(StatusCode::NO_CONTENT);
+    }
+    Ok(StatusCode::ACCEPTED)
+}
+
+#[derive(serde::Deserialize)]
+struct ScoutStrategyStatusUpdate {
+    active_strategy_symbols: Vec<(String, String)>,
+    #[serde(default)]
+    active_parameter_profiles: Vec<(String, String, String, String)>,
+    enabled_strategies: Vec<String>,
+}
+
+async fn update_scout_strategy_status(
+    axum::extract::State(runtime): axum::extract::State<Arc<SignalRuntime>>,
+    Json(update): Json<ScoutStrategyStatusUpdate>,
+) -> StatusCode {
+    let active = update.active_strategy_symbols.into_iter().collect::<BTreeSet<_>>();
+    let active_parameter_profiles = update.active_parameter_profiles.into_iter().collect::<BTreeSet<_>>();
+    let enabled = update.enabled_strategies.into_iter().collect::<BTreeSet<_>>();
+    let mut engines = runtime.engines.lock().await;
+    for engine in engines.values_mut() {
+        engine.update_scout_strategy_state(&active, &active_parameter_profiles, &enabled);
+    }
+    StatusCode::NO_CONTENT
+}
+
 async fn ingest_signal_event(
     axum::extract::State(runtime): axum::extract::State<Arc<SignalRuntime>>,
     Json(request): Json<SignalEventRequest>,
@@ -40,6 +128,7 @@ async fn ingest_signal_event(
         .try_lock()
         .map(|learning| learning.weight)
         .unwrap_or(0.0);
+    let mut shadow_learning_outcomes = Vec::new();
     let (snapshot, records, market, event_timestamp) = {
         let event_timestamp = match &request.event {
             SignalFeedEvent::Price { timestamp, .. }
@@ -89,6 +178,9 @@ async fn ingest_signal_event(
                     );
                 }
                 for outcome in outcomes {
+                    if outcome.scout_shadow_id.is_some() {
+                        shadow_learning_outcomes.push(outcome.evaluation.clone());
+                    }
                     if outcome.legacy.horizon_seconds == 60 {
                         if let Ok(mut learning) = runtime.news_learning.try_lock() {
                             if let Some(vote) = learning.pending.remove(&(
@@ -264,15 +356,6 @@ async fn ingest_signal_event(
             }
         }
     }
-    let shadow_learning_outcomes = records
-        .iter()
-        .filter_map(|record| match record {
-            StoredSignalRecord::Evaluation(evaluation) if evaluation.horizon_seconds == 300 => {
-                Some(evaluation.clone())
-            }
-            _ => None,
-        })
-        .collect::<Vec<_>>();
     if !records.is_empty() {
         let store = runtime.store.clone();
         tokio::spawn(async move {
@@ -323,8 +406,8 @@ async fn publish_shadow_learning_outcomes(store: &SignalStore, outcomes: Vec<Sig
         let decisions = match store
             .load_shadow_decisions_near(
                 evaluation.symbol.clone(),
-                evaluation.signal_timestamp.saturating_sub(10_000),
-                evaluation.signal_timestamp.saturating_add(5_000),
+                evaluation.signal_timestamp,
+                evaluation.signal_timestamp.saturating_add(1),
             )
             .await
         {
@@ -362,7 +445,11 @@ async fn publish_shadow_learning_outcomes(store: &SignalStore, outcomes: Vec<Sig
             let Some(notional_usd) = decision["shadow_notional_usd"].as_f64() else {
                 continue;
             };
-            let net_return_percent = if direction == "bullish" {
+            let parameter_entry_rejected = decision.get("scout_parameter_key").is_some()
+                && decision.get("scout_parameter_entry_eligible").and_then(serde_json::Value::as_bool) == Some(false);
+            let net_return_percent = if parameter_entry_rejected {
+                Some(0.0)
+            } else if direction == "bullish" {
                 evaluation.long_net_percent
             } else {
                 evaluation.short_net_percent
@@ -378,6 +465,17 @@ async fn publish_shadow_learning_outcomes(store: &SignalStore, outcomes: Vec<Sig
                 "decision_id": decision_id,
                 "learning_context": learning_context,
                 "simulated_net_pnl_usd": simulated_net_pnl_usd,
+                "net_return_percent": net_return_percent,
+                "signal_timestamp_ms": evaluation.signal_timestamp,
+                "evaluated_timestamp_ms": evaluation.evaluated_timestamp,
+                "taker_fee_rate": evaluation.taker_fee_rate,
+                "symbol": evaluation.symbol.as_str(),
+                "strategy": decision["strategy"].as_str().unwrap_or(""),
+                "exit_scenario": decision["shadow_exit_scenario"].as_str().unwrap_or("strategy"),
+                "sample_group_id": decision["shadow_sample_group_id"].as_str().unwrap_or(""),
+                "scout_parameter_key": decision.get("scout_parameter_key"),
+                "scout_parameter_value": decision.get("scout_parameter_value"),
+                "scout_parameter_profile_symbol": decision.get("scout_parameter_profile_symbol"),
             });
             for attempt in 0..3 {
                 match client

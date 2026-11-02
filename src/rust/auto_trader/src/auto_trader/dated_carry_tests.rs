@@ -2,11 +2,7 @@ use super::strategy_dated_futures_carry::evaluate::evaluate;
 use super::*;
 use std::collections::BTreeMap;
 
-fn candidate(
-    evaluated_at_ms: u64,
-    basis_percent: f64,
-    expiry_days: f64,
-) -> DatedCarryCandidate {
+fn candidate(evaluated_at_ms: u64, basis_percent: f64, expiry_days: f64) -> DatedCarryCandidate {
     let spot_ask = 100.0;
     let future_bid = spot_ask * (1.0 + basis_percent / 100.0);
     let expiry_ms = evaluated_at_ms + (expiry_days * 86_400_000.0) as u64;

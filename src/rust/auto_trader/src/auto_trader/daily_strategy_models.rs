@@ -349,7 +349,6 @@ impl<'a> StrategySignal<'a> {
     }
 
     fn within_scout_breakout_buffer(&self) -> bool {
-        const SCOUT_BREAKOUT_BUFFER_PERCENT: f64 = 2.0;
         self.scout_breakout_distance_percent()
             .is_some_and(|distance| (-SCOUT_BREAKOUT_BUFFER_PERCENT..=0.0).contains(&distance))
     }

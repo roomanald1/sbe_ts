@@ -83,18 +83,28 @@ fn strategy_trade_learning_key(symbol: &str, strategy: &str) -> String {
     format!("trade:{symbol}:{strategy}")
 }
 
+fn strategy_shadow_learning_key(symbol: &str, strategy: &str, scenario: &str) -> String {
+    format!("shadow:{symbol}:{strategy}:{scenario}")
+}
+
+fn strategy_parameter_probe_learning_key(symbol: &str, strategy: &str, parameter: &str, value: f64) -> String {
+    format!("probe:{symbol}:{strategy}:{parameter}:{value:.8}")
+}
+
 fn record_strategy_trade_outcome(
     settings: &mut Settings,
     symbol: &str,
     strategy: Option<&str>,
     learning_context: Option<&str>,
-    scout: bool,
+    _scout: bool,
     realized_pnl_usd: f64,
 ) {
     if !realized_pnl_usd.is_finite() {
         return;
     }
-    if let Some(strategy) = strategy.filter(|_| !scout) {
+    // Scout fills are deliberately small, but still provide strategy-specific
+    // evidence for tuning the profile that produced them.
+    if let Some(strategy) = strategy {
         let key = strategy_trade_learning_key(symbol, strategy);
         record_learning_outcome(settings.learning.entry(key).or_default(), realized_pnl_usd);
     }
@@ -111,11 +121,11 @@ fn record_strategy_threshold_sample(
     settings: &mut Settings,
     symbol: &str,
     strategy: Option<&str>,
-    scout: bool,
+    _scout: bool,
     entry_decision: Option<&serde_json::Value>,
     net_return_percent: f64,
 ) {
-    let Some(strategy) = strategy.filter(|_| !scout) else {
+    let Some(strategy) = strategy else {
         return;
     };
     let Some(entry_decision) = entry_decision else {

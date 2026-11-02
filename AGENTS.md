@@ -37,6 +37,10 @@
 
 ## Strategy conventions
 
+- Build every new strategy by following the complete pattern of an existing active strategy, including its strategy folder, evaluator, contract, parameter definitions, registry entry, signal path, and learning integration. Do not add a strategy that bypasses established layers.
+- Subscribe to each strategy's required market data in feed_handlers, pass the resulting inputs through insights, and publish them to auto_trader as StrategySignal data. Keep calculations in the appropriate upstream market-data/insights layer; evaluators must make decisions from StrategySignal rather than subscribing to feeds or reading market data directly.
+- Parameterize every variable strategy behavior, including entry and exit thresholds, timing, sizing, and any other tunable decision. Define defaults and bounds in the strategy parameter specs, carry the parameters in the signal/profile contract, and ensure bounded learning can update them from feedback. Do not hard-code tunable behavior or introduce untracked per-strategy defaults.
+- Preserve the learning feedback loop for new strategies: outcomes/feedback must be attributed to the strategy and its parameter profile so learning can evaluate and adjust those parameters. Scouts may be sent with different adjusted parameter profiles; each scout's evaluations and feedback must remain associated with the parameters it actually used, so feedback updates the corresponding learning profile rather than being mixed across variants.
 - Every active strategy under src/rust/auto_trader/src/auto_trader/strategies/ has one evaluate.rs that owns its signal-based entry rule and open-position decision (Enter, Reject, Hold, Exit, or Rebalance). Do not split strategy decisions across entry.rs and exit.rs.
 - Strategy evaluators receive StrategySignal only; convert serialized text to enums before evaluation. Keep market-data calculations upstream and price-triggered protective order execution in position management.
 - Tunable evaluator thresholds must come from StrategySignal parameters produced by the bounded learned profile. Keep defaults and bounds in the strategy parameter specs; do not duplicate fallback numbers in evaluate.rs. Reject entry if a required learned parameter is missing.
@@ -56,6 +60,7 @@
 - Cargo reuses build artifacts in the crate's target directory. Avoid cleaning caches unless stale output is suspected.
 - After any TypeScript source or test changes, run the React app TypeScript test suite with npm test from src/typescript/workspace/apps/react-app, even when the change seems unrelated to the tests. Run any additional focused typecheck, lint, or build target when the change warrants it.
 - After any Rust source or test changes, run the relevant Rust tests and benchmarks for the affected crate(s). Before benchmarking, read research/BENCHMARK_BASELINE.md. Compare the same workloads with the latest recorded run, report any performance degradation along with meaningful changes and environment/workload differences, and append a dated run section with results. Preserve earlier entries. Mark skipped or failed targets explicitly; do not compare unlike workloads as regressions.
+- After modifying Rust code, run `cargo fmt` for the affected crate(s) as the final Rust code maintenance step.
 
 ## Shell command hygiene
 

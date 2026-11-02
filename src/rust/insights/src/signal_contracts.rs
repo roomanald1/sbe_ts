@@ -319,4 +319,5 @@ pub struct SignalEvaluation {
 pub struct CompletedSignalOutcome {
     pub legacy: SignalOutcome,
     pub evaluation: SignalEvaluation,
+    pub scout_shadow_id: Option<String>,
 }

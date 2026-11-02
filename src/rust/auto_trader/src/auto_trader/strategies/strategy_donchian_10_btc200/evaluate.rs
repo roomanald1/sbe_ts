@@ -86,7 +86,7 @@ mod tests {
         );
         let mut failed_rule = own.clone();
         let features = failed_rule.strategy_decision.as_mut().unwrap();
-        features["observed_close"] = serde_json::json!(90.0);
+        features["observed_close"] = serde_json::json!(89.9);
         assert_eq!(
             evaluate(&StrategySignal::entry(&failed_rule, &parameters)).unwrap(),
             StrategyDecision::Reject

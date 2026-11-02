@@ -30,7 +30,10 @@ function AutoTraderShadowPositionsComponent({ ticks = [], histories = new Map() 
   useEffect(() => { const timer = setInterval(() => setNow(Date.now()), 5_000); return () => clearInterval(timer); }, []);
   const marks = useMemo(() => new Map(ticks.filter((tick) => Number.isFinite(tick.price) && now - tick.receivedAt < 60_000).map((tick) => [tick.symbol, tick.price])), [ticks, now]);
   const rows = useMemo<ShadowGridRow[]>(() => state.rows.map((row) => {
-    const markPrice = row.status === 'Open' ? marks.get(row.symbol) : undefined;
+    const latestHistory = histories.get(row.symbol)?.at(-1);
+    const markPrice = row.status === 'Open'
+      ? marks.get(row.symbol) ?? (latestHistory && now - latestHistory.timestamp < 60_000 ? latestHistory.price : undefined)
+      : undefined;
     const grossReturn = row.entryPrice && markPrice
       ? (row.direction === 'bullish' ? markPrice / row.entryPrice - 1 : row.entryPrice / markPrice - 1) * 100
       : undefined;
@@ -40,52 +43,44 @@ function AutoTraderShadowPositionsComponent({ ticks = [], histories = new Map() 
     const estimatedOpenReturn = grossReturn === undefined
       ? undefined
       : grossReturn - row.takerFeeRate * 2 * 100 - entrySpreadPercent;
-    if (row.status !== 'Outcome unavailable' || !row.entryPrice) {
-      return { ...row, markPrice, openNetReturnPercent: estimatedOpenReturn };
-    }
-    const outcomeHorizonMs = row.scoutLevelPercent === undefined ? 300_000 : 3_600_000;
-    const targetTime = row.openedAt + outcomeHorizonMs;
-    const exitSample = histories.get(row.symbol)?.find((sample) => sample.timestamp >= targetTime && sample.timestamp <= targetTime + 60_000);
-    if (!exitSample) return { ...row, markPrice, openNetReturnPercent: estimatedOpenReturn };
-    const grossAtHorizon = (row.direction === 'bullish'
-      ? exitSample.price / row.entryPrice - 1
-      : row.entryPrice / exitSample.price - 1) * 100;
-    const netReturnPercent = grossAtHorizon - row.takerFeeRate * 2 * 100 - entrySpreadPercent;
-    const status: AutoTraderShadowPosition['status'] = netReturnPercent > 1e-12 ? 'Won' : netReturnPercent < -1e-12 ? 'Lost' : 'Flat';
-    return { ...row, status, closedAt: exitSample.timestamp, markPrice: exitSample.price, netReturnPercent, returnBasis: 'ticker estimate' };
-  }), [state.rows, marks, histories]);
+    return { ...row, markPrice, openNetReturnPercent: estimatedOpenReturn };
+  }), [state.rows, marks, histories, now]);
   const openCount = rows.filter((row) => row.status === 'Open').length;
   const wins = rows.filter((row) => row.status === 'Won').length;
   const losses = rows.filter((row) => row.status === 'Lost').length;
   const flats = rows.filter((row) => row.status === 'Flat').length;
   const unavailable = rows.filter((row) => row.status === 'Outcome unavailable').length;
   const scoutLevelSummaries = useMemo(() => {
-    const groups = new Map<number, AutoTraderShadowPosition[]>([[0.25, []], [0.5, []], [1, []], [2, []]]);
+    const groups = new Map<string, AutoTraderShadowPosition[]>();
     for (const row of rows) {
       if (row.source !== 'Scout' || row.scoutLevelPercent === undefined) continue;
-      const group = groups.get(row.scoutLevelPercent) ?? [];
+      const key = row.exitScenario + '|' + row.scoutLevelPercent;
+      const group = groups.get(key) ?? [];
       group.push(row);
-      groups.set(row.scoutLevelPercent, group);
+      groups.set(key, group);
     }
-    return [...groups.entries()].sort(([left], [right]) => left - right).map(([level, samples]) => {
+    return [...groups.entries()].map(([key, samples]) => {
+      const [scenario, levelText] = key.split('|');
+      const level = Number(levelText);
       const resolved = samples.filter((row) => ['Won', 'Lost', 'Flat'].includes(row.status));
       const wins = resolved.filter((row) => row.status === 'Won').length;
       const returns = resolved.flatMap((row) => typeof row.netReturnPercent === 'number' ? [row.netReturnPercent] : []);
       const average = returns.length ? returns.reduce((sum, value) => sum + value, 0) / returns.length : undefined;
-      return { level, count: resolved.length, wins, average };
-    });
+      return { scenario, level, count: resolved.length, wins, average };
+    }).sort((left, right) => left.scenario.localeCompare(right.scenario) || left.level - right.level);
   }, [rows]);
   const columns = useMemo<ColDef<ShadowGridRow>[]>(() => [
     { field: 'symbol', headerName: 'Symbol', minWidth: 110 },
     { field: 'strategy', headerName: 'Strategy', valueFormatter: ({ value }) => strategyLabel(value), minWidth: 165 },
     { field: 'source', headerName: 'Source', minWidth: 105 },
+    { field: 'exitScenario', headerName: 'Exit scenario', valueFormatter: ({ value }) => value === 'tight' ? 'Tighter exits' : 'Strategy exits', minWidth: 130 },
     { headerName: 'Scout level', valueGetter: ({ data }) => data?.scoutLevelPercent, valueFormatter: ({ value }) => typeof value === 'number' ? String(value.toFixed(2)) + '% below breakout' : '—', minWidth: 150 },
     { headerName: 'Opened at', valueGetter: ({ data }) => data?.openedAt, valueFormatter: ({ value }) => typeof value === 'number' ? new Date(value).toLocaleString() : '—', minWidth: 165 },
-    { headerName: 'Duration', headerTooltip: 'Elapsed time for open shadows; holding time until each shadow evaluation horizon.', valueGetter: ({ data }) => {
+    { headerName: 'Duration', headerTooltip: 'Elapsed time until the strategy, protective stop, take-profit, or profit-protection exit.', valueGetter: ({ data }) => {
       if (!data) return undefined;
       if (data.status === 'Open') return Math.max(0, now - data.openedAt);
       if (typeof data.closedAt === 'number') return Math.max(0, data.closedAt - data.openedAt);
-      return Math.min(3_600_000, Math.max(0, now - data.openedAt));
+      return Math.max(0, now - data.openedAt);
     }, valueFormatter: ({ value }) => typeof value === 'number' ? durationLabel(value) : '—', minWidth: 95 },
     { headerName: 'Entry', valueGetter: ({ data }) => data?.entryPrice, valueFormatter: ({ value }) => typeof value === 'number' ? value.toPrecision(8) : '—', minWidth: 115 },
     { headerName: 'Mark', valueGetter: ({ data }) => data?.markPrice, valueFormatter: ({ value }) => typeof value === 'number' ? value.toPrecision(8) : '—', minWidth: 115 },
@@ -116,19 +111,19 @@ function AutoTraderShadowPositionsComponent({ ticks = [], histories = new Map() 
 
   return <section className="feed-section signal-info-panel" aria-label="AutoTrader shadow positions">
     <FeedToolbar title="AutoTrader shadow positions" />
-    <p className="signal-info-note">No orders are placed for these candidates. Daily Donchian scouts are shadowed at 0.25%, 0.5%, 1%, and 2% below the breakout when each level qualifies. Outcomes use the one-hour bid/ask response to compare entry-level cohorts; this measures the initial response, not the full daily strategy holding period. Entry prices use the daily close as a reference; open marks are indicative and subtract estimated round-trip taker fees. Shadow outcomes are separate from real position winners and losers.</p>
+    <p className="signal-info-note">No orders are placed for these candidates. Each qualifying Donchian level is evaluated twice: with the strategy’s configured stop, target, and profit protection, and with stop and target distances halved. Both scenarios also exit when the daily strategy signal invalidates after becoming active. Entry prices use the simulated level below breakout; open marks are indicative and returns include estimated spread and taker fees. Results feed the strategy’s shadow-learning profile and remain separate from real position sizing.</p>
     <div className="auto-trader-shadow-summary" aria-live="polite">
       <span>{openCount} open</span><span>{wins} wins</span><span>{losses} losses</span><span>{flats} flat</span>{unavailable > 0 && <span>{unavailable} outcome unavailable</span>}
     </div>
     <div className="auto-trader-shadow-summary" aria-label="Scout level comparison">
-      {scoutLevelSummaries.map(({ level, count, wins: levelWins, average }) => <span key={level}>
-        {String(level) + '%: ' + count + ' outcomes · ' + (count ? String(Math.round(levelWins / count * 100)) + '% wins' : 'no outcomes') + (average === undefined ? '' : ' · ' + percent(average) + ' avg net')}
+      {scoutLevelSummaries.map(({ scenario, level, count, wins: levelWins, average }) => <span key={scenario + '|' + level}>
+        {(scenario === 'tight' ? 'Tight' : 'Strategy') + ' · ' + String(level) + '%: ' + count + ' outcomes · ' + (count ? String(Math.round(levelWins / count * 100)) + '% wins' : 'no outcomes') + (average === undefined ? '' : ' · ' + percent(average) + ' avg net')}
       </span>)}
     </div>
     {state.error && <div className="positions-error">{state.error}</div>}
     <div className="data-grid-wrap signal-info-grid"><AgGridReact<ShadowGridRow> rowData={rows} columnDefs={columns} getRowId={({ data }) => data.decisionId} defaultColDef={{ sortable: true, resizable: true, flex: 1 }} theme={theme} domLayout="autoHeight" rowHeight={34} headerHeight={30} /></div>
     {state.loading && <p className="positions-empty">Loading shadow outcomes…</p>}
-    {!state.loading && !state.error && rows.length === 0 && <p className="positions-empty">No scout or exploratory shadow candidates recorded in the last hour.</p>}
+    {!state.loading && !state.error && rows.length === 0 && <p className="positions-empty">No scout or exploratory shadow candidates recorded in the last 7 days.</p>}
   </section>;
 }
 

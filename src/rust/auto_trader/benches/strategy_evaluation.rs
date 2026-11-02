@@ -6,7 +6,9 @@ fn main() {
         auto_trader::auto_trader::benchmark_strategy_evaluation(ITERATIONS)
     {
         black_box((&strategy, entry_ns, position_ns));
-        println!("{strategy}: entry {entry_ns:.1} ns/evaluation, position {position_ns:.1} ns/evaluation");
+        println!(
+            "{strategy}: entry {entry_ns:.1} ns/evaluation, position {position_ns:.1} ns/evaluation"
+        );
     }
     for (path, ns) in auto_trader::auto_trader::benchmark_autotrader_paths(ITERATIONS) {
         black_box((&path, ns));

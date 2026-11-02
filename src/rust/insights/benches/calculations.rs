@@ -102,7 +102,6 @@ fn book_snapshot_calculation_benchmark() {
     report("book snapshot", started, ITERATIONS);
 }
 
-
 fn main() {
     snapshot_calculation_benchmark();
     snapshot_with_explanations_benchmark();

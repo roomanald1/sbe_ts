@@ -215,6 +215,18 @@ pub fn router() -> Router {
         dated_carry_path: carry_path,
     };
     start_settings_persistence_worker(&state);
+    let shadow_replay_state = state.clone();
+    tokio::spawn(async move {
+        for attempt in 0..12 {
+            if replay_recent_scout_shadows(&shadow_replay_state).await {
+                break;
+            }
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            if attempt == 11 {
+                crate::service_log!("WARN", "Recent Scout shadow replay stopped after repeated Insights connection failures");
+            }
+        }
+    });
     let rates_worker_state = state.clone();
     tokio::spawn(async move {
         let mut ticker = interval(Duration::from_secs(30));
@@ -385,22 +397,117 @@ async fn receive_shadow_learning_outcome(
     Json(outcome): Json<ShadowLearningOutcomeRequest>,
 ) -> Result<StatusCode, (StatusCode, String)> {
     if outcome.decision_id.is_empty()
-        || outcome.decision_id.len() > 160
+        || outcome.decision_id.len() > 240
         || !outcome.learning_context.starts_with("scout:")
         || !outcome.simulated_net_pnl_usd.is_finite()
+        || outcome.symbol.is_empty()
+        || !matches!(outcome.exit_scenario.as_str(), "strategy" | "tight")
+        || outcome.scout_parameter_key.is_some() != outcome.scout_parameter_value.is_some()
+        || outcome.signal_timestamp_ms > outcome.evaluated_timestamp_ms
+        || outcome.evaluated_timestamp_ms > current_time_ms().saturating_add(5_000)
+        || current_time_ms().saturating_sub(outcome.signal_timestamp_ms) > 7 * 86_400_000
     {
         return Err((StatusCode::BAD_REQUEST, "Invalid shadow learning outcome".into()));
     }
+    let strategy = Strategy::from_name(&outcome.strategy)
+        .ok_or((StatusCode::BAD_REQUEST, "Unknown strategy in shadow learning outcome".into()))?;
+    let probe_key = match (outcome.scout_parameter_key.as_deref(), outcome.scout_parameter_value) {
+        (Some(parameter), Some(value)) => {
+            if parameter == StrategyParameterKey::LearningRate.as_str() {
+                return Err((StatusCode::BAD_REQUEST, "Learning rate is not a scoutable strategy behavior".into()));
+            }
+            let Some(spec) = all_strategy_parameter_specs(strategy).into_iter().find(|spec| spec.key.as_str() == parameter) else {
+                return Err((StatusCode::BAD_REQUEST, "Unknown strategy parameter in scout outcome".into()));
+            };
+            let position = (value - spec.min) / spec.step;
+            if !value.is_finite() || value < spec.min || value > spec.max
+                || (position - position.round()).abs() > 1e-6
+            {
+                return Err((StatusCode::BAD_REQUEST, "Scout parameter value is outside its registered bounds or step".into()));
+            }
+            let expected_profile_symbol = if matches!(strategy, Strategy::RiskAdjustedTrendPortfolio | Strategy::RiskAdjustedMonthlyMomentum) {
+                "BTC-USDT"
+            } else {
+                outcome.symbol.as_str()
+            };
+            let profile_symbol = outcome.scout_parameter_profile_symbol.as_deref().unwrap_or(&outcome.symbol);
+            if profile_symbol != expected_profile_symbol || profile_symbol.is_empty() || profile_symbol.len() > 32 {
+                return Err((StatusCode::BAD_REQUEST, "Invalid strategy profile symbol".into()));
+            }
+            Some(strategy_parameter_probe_learning_key(profile_symbol, strategy.as_str(), parameter, value))
+        }
+        (None, None) => None,
+        _ => unreachable!("parameter probe pair was validated"),
+    };
 
+    if !outcome.net_return_percent.is_finite()
+        || !outcome.taker_fee_rate.is_finite()
+        || outcome.taker_fee_rate < 0.0
+    {
+        return Err((StatusCode::BAD_REQUEST, "Invalid shadow return metrics".into()));
+    }
+    let outcome_status = if outcome.net_return_percent > 1e-12 {
+        "won"
+    } else if outcome.net_return_percent < -1e-12 {
+        "lost"
+    } else {
+        "flat"
+    };
+    let outcome_audit = serde_json::json!({
+        "record_schema_version": 1,
+        "decision_id": format!("{}|outcome", outcome.decision_id),
+        "shadow_decision_id": outcome.decision_id.clone(),
+        "stage": "scout-outcome",
+        "status": outcome_status,
+        "timestamp": outcome.evaluated_timestamp_ms,
+        "signal_timestamp": outcome.signal_timestamp_ms,
+        "evaluated_timestamp": outcome.evaluated_timestamp_ms,
+        "symbol": outcome.symbol.clone(),
+        "strategy": outcome.strategy.clone(),
+        "scout": true,
+        "shadow_exit_scenario": outcome.exit_scenario.clone(),
+        "shadow_net_return_percent": outcome.net_return_percent,
+        "shadow_taker_fee_rate": outcome.taker_fee_rate,
+        "scout_parameter_key": outcome.scout_parameter_key,
+        "scout_parameter_value": outcome.scout_parameter_value,
+        "scout_parameter_profile_symbol": outcome.scout_parameter_profile_symbol,
+    });
     let mut settings = state.settings.lock().await;
     if settings.shadow_learning_outcome_ids.contains(&outcome.decision_id) {
+        drop(settings);
+        queue_auto_trader_audit(&state, outcome_audit);
         return Ok(StatusCode::NO_CONTENT);
     }
-    let stats = settings
-        .learning
-        .entry(outcome.learning_context)
-        .or_default();
-    record_learning_outcome(stats, outcome.simulated_net_pnl_usd);
+    if let Some(probe_key) = probe_key {
+        // Keep the exact probe cohort for parameter attribution.
+        record_learning_outcome(settings.learning.entry(probe_key).or_default(), outcome.simulated_net_pnl_usd);
+    } else {
+        let stats = settings.learning.entry(outcome.learning_context).or_default();
+        record_learning_outcome(stats, outcome.simulated_net_pnl_usd);
+    }
+    // Every scout exit also contributes to the strategy-level profile, including
+    // parameter-probe samples, so shadow results can ease sparse trade learning.
+    let strategy_profile_symbol = outcome.scout_parameter_profile_symbol.as_deref().unwrap_or(&outcome.symbol);
+    let strategy_key = strategy_shadow_learning_key(
+        strategy_profile_symbol,
+        strategy.as_str(),
+        &outcome.exit_scenario,
+    );
+    record_learning_outcome(
+        settings.learning.entry(strategy_key).or_default(),
+        outcome.simulated_net_pnl_usd,
+    );
+    if !outcome.sample_group_id.is_empty() {
+        let group_finished = settings.shadow_sample_active_scenarios
+            .get_mut(&outcome.sample_group_id)
+            .is_some_and(|scenarios| {
+                scenarios.remove(&outcome.exit_scenario);
+                scenarios.is_empty()
+            });
+        if group_finished {
+            settings.shadow_sample_active_scenarios.remove(&outcome.sample_group_id);
+        }
+    }
     settings.shadow_learning_outcome_ids.insert(outcome.decision_id);
     while settings.shadow_learning_outcome_ids.len() > 20_000 {
         let Some(oldest) = settings.shadow_learning_outcome_ids.iter().next().cloned() else {
@@ -410,6 +517,7 @@ async fn receive_shadow_learning_outcome(
     }
     drop(settings);
     request_settings_persist(&state)?;
+    queue_auto_trader_audit(&state, outcome_audit);
     Ok(StatusCode::NO_CONTENT)
 }
 

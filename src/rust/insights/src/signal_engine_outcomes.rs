@@ -1,3 +1,46 @@
+const MAX_SCOUT_SHADOW_DURATION_MS: u64 = 7 * 86_400_000;
+
+fn scout_shadow_stop_or_target_hit(
+    pending: &mut PendingOutcome,
+    quote: Option<(u64, f64, f64)>,
+) -> bool {
+    let Some((_, bid, ask)) = quote else { return false; };
+    let (entry, exit) = match pending.direction.as_str() {
+        "bullish" => (pending.entry_ask, bid),
+        "bearish" => (pending.entry_bid, ask),
+        _ => return false,
+    };
+    let (Some(entry), Some(stop), Some(target)) = (
+        entry,
+        pending.stop_loss_percent,
+        pending.take_profit_percent,
+    ) else {
+        return false;
+    };
+    let Some(return_percent) = directional_net_return(
+        &pending.direction,
+        entry,
+        exit,
+        pending.taker_fee_rate,
+    ) else {
+        return false;
+    };
+    if let Some(activation) = pending.profit_protection_activation_percent {
+        if return_percent >= activation {
+            pending.profit_protection_peak_return_percent = Some(
+                pending.profit_protection_peak_return_percent
+                    .map_or(return_percent, |peak| peak.max(return_percent)),
+            );
+        }
+    }
+    let protection_exit = pending.profit_protection_peak_return_percent.is_some_and(|peak| {
+        let giveback = pending.profit_protection_giveback_percent.unwrap_or_default();
+        let minimum_lock = pending.profit_protection_minimum_lock_percent.unwrap_or_default();
+        return_percent <= (peak - giveback).max(minimum_lock)
+    });
+    return_percent <= -stop || return_percent >= target || protection_exit
+}
+
 impl SignalEngine {
     pub fn live_snapshot_due(&mut self, timestamp: u64) -> bool {
         let due = self.last_live_snapshot_at.map_or(true, |last| {
@@ -83,11 +126,35 @@ impl SignalEngine {
                     }
                 }
             }
-            if timestamp
-                >= pending
-                    .timestamp
-                    .saturating_add(pending.horizon_seconds * 1000)
-            {
+            let current_quote = self.best_quote.filter(|(quote_time, _, _)| {
+                *quote_time <= timestamp
+                    && timestamp.saturating_sub(*quote_time) <= MAX_BOOK_AGE_MS
+            });
+            let is_scout_shadow = pending.sample_id.is_some();
+            let shadow_age_ms = timestamp.saturating_sub(pending.timestamp);
+            let minimum_hold_active = pending.scout_minimum_hold_days
+                .is_some_and(|days| shadow_age_ms < (days * 86_400_000.0) as u64);
+            let maximum_hold_elapsed = pending.scout_maximum_hold_days
+                .is_some_and(|days| shadow_age_ms >= (days * 86_400_000.0) as u64);
+            let maximum_shadow_duration_elapsed =
+                is_scout_shadow && shadow_age_ms >= MAX_SCOUT_SHADOW_DURATION_MS;
+            let shadow_exit = is_scout_shadow
+                && current_quote.is_some()
+                && ((pending.strategy_exit_requested && !minimum_hold_active)
+                    || maximum_hold_elapsed
+                    || maximum_shadow_duration_elapsed
+                    || scout_shadow_stop_or_target_hit(&mut pending, current_quote));
+            let fixed_horizon_exit = !is_scout_shadow
+                && timestamp
+                    >= pending
+                        .timestamp
+                        .saturating_add(pending.horizon_seconds * 1000);
+            if shadow_exit || fixed_horizon_exit {
+                let evaluation_horizon_seconds = if is_scout_shadow {
+                    timestamp.saturating_sub(pending.timestamp).saturating_div(1000).max(1)
+                } else {
+                    pending.horizon_seconds
+                };
                 let change = (price / pending.base_price - 1.0) * 100.0;
                 let direction_match = match pending.direction.as_str() {
                     "bullish" => change > 0.0,
@@ -151,7 +218,7 @@ impl SignalEngine {
                     symbol: pending.symbol.clone(),
                     signal_timestamp: pending.timestamp,
                     evaluated_timestamp: timestamp,
-                    horizon_seconds: pending.horizon_seconds,
+                    horizon_seconds: evaluation_horizon_seconds,
                     return_percent: change,
                     direction_match,
                     direction: pending.direction.clone(),
@@ -202,7 +269,7 @@ impl SignalEngine {
                     symbol: pending.symbol,
                     signal_timestamp: pending.timestamp,
                     evaluated_timestamp: timestamp,
-                    horizon_seconds: pending.horizon_seconds,
+                    horizon_seconds: evaluation_horizon_seconds,
                     signal_direction: pending.direction,
                     signal_score: pending.score,
                     ranging_probability: pending.ranging_probability,
@@ -230,7 +297,11 @@ impl SignalEngine {
                         .first_short_positive_net_timestamp
                         .map(|first| first.saturating_sub(pending.timestamp) / 1000),
                 };
-                outcomes.push(CompletedSignalOutcome { legacy, evaluation });
+                let scout_shadow_id = pending.sample_id.clone();
+                if let Some(sample_id) = scout_shadow_id.as_ref() {
+                    self.completed_scout_shadow_ids.insert(sample_id.clone());
+                }
+                outcomes.push(CompletedSignalOutcome { legacy, evaluation, scout_shadow_id });
             } else {
                 remaining.push_back(pending);
             }

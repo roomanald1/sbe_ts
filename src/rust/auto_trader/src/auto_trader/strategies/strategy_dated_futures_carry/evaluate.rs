@@ -1,6 +1,7 @@
 use crate::auto_trader::{
-    DatedCarryCandidate, DatedCarrySettlementSource, Strategy, StrategyDecision, StrategySignal,
-    StrategySpecificSignal, CARRY_COST_GATE_PERCENT,
+    strategy_parameter_value, DatedCarryCandidate, DatedCarrySettlementSource, Strategy,
+    StrategyDecision, StrategyParameterKey, StrategySignal, StrategySpecificSignal,
+    CARRY_COST_GATE_PERCENT,
 };
 
 const MIN_DAYS_TO_EXPIRY: f64 = 7.0;
@@ -27,7 +28,18 @@ pub(crate) fn evaluate(input: &StrategySignal<'_>) -> Result<StrategyDecision, S
             evaluated_at_ms,
             candidate,
         }) if !input.position_open => {
-            if dated_carry_entry_is_eligible(candidate, emitted_at_ms, evaluated_at_ms) {
+            let minimum_days = strategy_parameter_value(
+                input.parameters,
+                StrategyParameterKey::CarryMinimumDaysToExpiry,
+            ).unwrap_or(MIN_DAYS_TO_EXPIRY);
+            let cost_gate_percent = strategy_parameter_value(
+                input.parameters,
+                StrategyParameterKey::CarryCostGatePercent,
+            ).unwrap_or(CARRY_COST_GATE_PERCENT);
+            if dated_carry_entry_is_eligible(
+                candidate, emitted_at_ms, evaluated_at_ms,
+                minimum_days, cost_gate_percent,
+            ) {
                 Ok(StrategyDecision::Enter)
             } else {
                 Ok(StrategyDecision::Reject)
@@ -67,8 +79,12 @@ fn dated_carry_entry_is_eligible(
     candidate: &DatedCarryCandidate,
     emitted_at_ms: u64,
     evaluated_at_ms: u64,
+    minimum_days: f64,
+    cost_gate_percent: f64,
 ) -> bool {
-    if emitted_at_ms > evaluated_at_ms.saturating_add(FUTURE_SIGNAL_TOLERANCE_MS)
+    if !minimum_days.is_finite() || minimum_days < 1.0
+        || !cost_gate_percent.is_finite() || cost_gate_percent < 0.0
+        || emitted_at_ms > evaluated_at_ms.saturating_add(FUTURE_SIGNAL_TOLERANCE_MS)
         || candidate.expiry_ms <= evaluated_at_ms
         || !candidate
             .future_symbol
@@ -96,7 +112,7 @@ fn dated_carry_entry_is_eligible(
     }
 
     let days_to_expiry = (candidate.expiry_ms - evaluated_at_ms) as f64 / 86_400_000.0;
-    if days_to_expiry < MIN_DAYS_TO_EXPIRY
+    if days_to_expiry < minimum_days
         || (candidate.days_to_expiry - days_to_expiry).abs() > 0.02
     {
         return false;
@@ -105,13 +121,13 @@ fn dated_carry_entry_is_eligible(
     // The executable carry edge is futures bid minus the spot ask, expressed
     // relative to spot cost. Recompute it instead of trusting the prefilled text fields.
     let basis_percent = (candidate.future_bid / candidate.spot_ask - 1.0) * 100.0;
-    let net_after_cost_percent = basis_percent - CARRY_COST_GATE_PERCENT;
+    let net_after_cost_percent = basis_percent - cost_gate_percent;
     candidate.eligible
         && basis_percent.is_finite()
         && net_after_cost_percent > 0.0
         && (candidate.basis_percent - basis_percent).abs() <= CARRY_METRIC_TOLERANCE
-        && (candidate.net_after_budget_percent - net_after_cost_percent).abs()
-            <= CARRY_METRIC_TOLERANCE
+        && (candidate.net_after_budget_percent
+            - (basis_percent - CARRY_COST_GATE_PERCENT)).abs() <= CARRY_METRIC_TOLERANCE
 }
 
 fn dated_carry_settlement_is_valid(

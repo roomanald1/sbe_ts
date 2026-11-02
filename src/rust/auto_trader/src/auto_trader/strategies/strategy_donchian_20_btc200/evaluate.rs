@@ -84,9 +84,21 @@ mod tests {
             evaluate(&StrategySignal::entry(&inactive, &parameters)).unwrap(),
             StrategyDecision::Reject
         );
+        let mut scout_at_limit = own.clone();
+        scout_at_limit.strategy_decision.as_mut().unwrap()["observed_close"] = serde_json::json!(90.0);
+        assert_eq!(
+            evaluate(&StrategySignal::entry(&scout_at_limit, &parameters)).unwrap(),
+            StrategyDecision::Scout
+        );
+        let mut beyond_limit = scout_at_limit.clone();
+        beyond_limit.strategy_decision.as_mut().unwrap()["observed_close"] = serde_json::json!(89.9);
+        assert_eq!(
+            evaluate(&StrategySignal::entry(&beyond_limit, &parameters)).unwrap(),
+            StrategyDecision::Reject
+        );
         let mut failed_rule = own.clone();
         let features = failed_rule.strategy_decision.as_mut().unwrap();
-        features["observed_close"] = serde_json::json!(90.0);
+        features["observed_close"] = serde_json::json!(89.9);
         assert_eq!(
             evaluate(&StrategySignal::entry(&failed_rule, &parameters)).unwrap(),
             StrategyDecision::Reject

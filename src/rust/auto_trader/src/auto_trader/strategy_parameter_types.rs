@@ -1,6 +1,6 @@
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
-enum StrategyParameterKey {
+pub(crate) enum StrategyParameterKey {
     BnbSmaDays,
     BreakoutLookbackDays,
     BtcEthSmaDays,
@@ -9,6 +9,7 @@ enum StrategyParameterKey {
     FastSmaDays,
     LearningRate,
     MaximumHoldDays,
+    MinimumHoldDays,
     MinimumAbsorptionPressure,
     MinimumBookImbalance,
     MinimumFlowImbalance,
@@ -24,6 +25,15 @@ enum StrategyParameterKey {
     SlowSmaDays,
     StopLossPercent,
     TakeProfitPercent,
+    TrendPortfolioLookbackDays,
+    TrendPortfolioVolatilityDays,
+    TrendPortfolioBtcRegimeDays,
+    TrendPortfolioWeightCap,
+    MonthlyMomentumLookbackDays,
+    MonthlyMomentumVolatilityDays,
+    MonthlyMomentumVolatilityTarget,
+    CarryMinimumDaysToExpiry,
+    CarryCostGatePercent,
     TrendSmaDays,
 }
 
@@ -38,6 +48,7 @@ impl StrategyParameterKey {
             Self::FastSmaDays => "fast_sma_days",
             Self::LearningRate => "learning_rate",
             Self::MaximumHoldDays => "maximum_hold_days",
+            Self::MinimumHoldDays => "minimum_hold_days",
             Self::MinimumAbsorptionPressure => "minimum_absorption_pressure",
             Self::MinimumBookImbalance => "minimum_book_imbalance",
             Self::MinimumFlowImbalance => "minimum_flow_imbalance",
@@ -53,6 +64,15 @@ impl StrategyParameterKey {
             Self::SlowSmaDays => "slow_sma_days",
             Self::StopLossPercent => "stop_loss_percent",
             Self::TakeProfitPercent => "take_profit_percent",
+            Self::TrendPortfolioLookbackDays => "trend_portfolio_lookback_days",
+            Self::TrendPortfolioVolatilityDays => "trend_portfolio_volatility_days",
+            Self::TrendPortfolioBtcRegimeDays => "trend_portfolio_btc_regime_days",
+            Self::TrendPortfolioWeightCap => "trend_portfolio_weight_cap",
+            Self::MonthlyMomentumLookbackDays => "monthly_momentum_lookback_days",
+            Self::MonthlyMomentumVolatilityDays => "monthly_momentum_volatility_days",
+            Self::MonthlyMomentumVolatilityTarget => "monthly_momentum_volatility_target",
+            Self::CarryMinimumDaysToExpiry => "carry_minimum_days_to_expiry",
+            Self::CarryCostGatePercent => "carry_cost_gate_percent",
             Self::TrendSmaDays => "trend_sma_days",
         }
     }

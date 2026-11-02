@@ -24,6 +24,20 @@ struct PendingOutcome {
     taker_fee_rate: f64,
     first_long_positive_net_timestamp: Option<u64>,
     first_short_positive_net_timestamp: Option<u64>,
+    sample_id: Option<String>,
+    strategy: Option<String>,
+    scout_parameter_key: Option<String>,
+    scout_parameter_value: Option<f64>,
+    scout_minimum_hold_days: Option<f64>,
+    scout_maximum_hold_days: Option<f64>,
+    stop_loss_percent: Option<f64>,
+    take_profit_percent: Option<f64>,
+    profit_protection_activation_percent: Option<f64>,
+    profit_protection_giveback_percent: Option<f64>,
+    profit_protection_minimum_lock_percent: Option<f64>,
+    profit_protection_peak_return_percent: Option<f64>,
+    strategy_active_seen: bool,
+    strategy_exit_requested: bool,
 }
 #[derive(Default)]
 struct PerformanceTotals {
@@ -65,4 +79,5 @@ pub struct SignalEngine {
     volatility_1m: Option<f64>,
     last_research_sample_at: Option<u64>,
     last_live_snapshot_at: Option<u64>,
+    completed_scout_shadow_ids: std::collections::BTreeSet<String>,
 }

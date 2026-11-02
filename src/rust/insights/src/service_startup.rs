@@ -50,7 +50,15 @@ async fn main() -> anyhow::Result<()> {
         .route("/process-cpu-seconds", get(process_cpu_seconds)).route("/process-memory-bytes", get(process_memory_bytes))
         .route(
             "/internal/signals/event",
-            axum::routing::post(ingest_signal_event).with_state(signal_runtime),
+            axum::routing::post(ingest_signal_event).with_state(Arc::clone(&signal_runtime)),
+        )
+        .route(
+            "/internal/signals/scout-shadow",
+            axum::routing::post(register_scout_shadow).with_state(Arc::clone(&signal_runtime)),
+        )
+        .route(
+            "/internal/signals/scout-strategy-status",
+            axum::routing::post(update_scout_strategy_status).with_state(signal_runtime),
         )
         .merge(signal_store.router());
     let listener = tokio::net::TcpListener::bind(("0.0.0.0", 3004)).await?;

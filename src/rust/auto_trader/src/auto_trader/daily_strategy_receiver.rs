@@ -1,3 +1,59 @@
+fn publish_scout_strategy_status(
+    state: &AutoTraderState,
+    active_strategy_symbols: Vec<(String, String)>,
+    active_parameter_profiles: Vec<(String, String, String, String)>,
+    enabled_strategies: Vec<String>,
+) {
+    let base = std::env::var("INSIGHTS_URL").unwrap_or_else(|_| "http://127.0.0.1:3004".into());
+    let client = state.client.clone();
+    tokio::spawn(async move {
+        if let Err(error) = client
+            .post(format!("{base}/internal/signals/scout-strategy-status"))
+            .timeout(std::time::Duration::from_secs(2))
+            .json(&serde_json::json!({
+                "active_strategy_symbols": active_strategy_symbols,
+                "active_parameter_profiles": active_parameter_profiles,
+                "enabled_strategies": enabled_strategies,
+            }))
+            .send()
+            .await
+            .and_then(reqwest::Response::error_for_status)
+        {
+            crate::service_log!("WARN", "Could not publish daily Scout exit status: {error}");
+        }
+    });
+}
+
+fn valid_scout_parameter_probe(signal: &Signal, strategy: Strategy) -> bool {
+    let Some(decision) = signal.strategy_decision.as_ref() else { return false; };
+    if decision.get("scout_parameter_probe").and_then(serde_json::Value::as_bool) != Some(true) {
+        return true;
+    }
+    let Some(key) = decision.get("scout_parameter_key").and_then(serde_json::Value::as_str) else { return false; };
+    let Some(value) = decision.get("scout_parameter_value").and_then(serde_json::Value::as_f64) else { return false; };
+    let expected_profile_symbol = if matches!(strategy, Strategy::RiskAdjustedTrendPortfolio | Strategy::RiskAdjustedMonthlyMomentum) {
+        "BTC-USDT"
+    } else {
+        signal.symbol.as_str()
+    };
+    if decision.get("scout_parameter_profile_symbol").and_then(serde_json::Value::as_str)
+        != Some(expected_profile_symbol)
+    {
+        return false;
+    }
+    let Some(spec) = all_strategy_parameter_specs(strategy).into_iter().find(|spec| spec.key.as_str() == key) else {
+        return false;
+    };
+    if spec.key == StrategyParameterKey::LearningRate || !value.is_finite() || value < spec.min || value > spec.max {
+        return false;
+    }
+    let position = (value - spec.min) / spec.step;
+    (position - position.round()).abs() <= 1e-6
+        && decision.get("strategy_parameters")
+            .and_then(|parameters| parameters.get(key))
+            .and_then(serde_json::Value::as_f64) == Some(value)
+}
+
 fn daily_strategy_signal_key(signal: &Signal) -> Option<(String, String, u64)> {
     let strategy = signal.strategy.as_deref()?;
     let decision = signal.strategy_decision.as_ref()?;
@@ -39,7 +95,10 @@ async fn receive_daily_strategy_signals(
                 .strategy
                 .as_deref()
                 .and_then(Strategy::from_name)
-                .is_some_and(|strategy| !strategy.is_live_insight() && !strategy.is_dated_carry())
+                .is_some_and(|strategy| {
+                    !strategy.is_live_insight() && !strategy.is_dated_carry()
+                        && valid_scout_parameter_probe(signal, strategy)
+                })
     }) {
         return Err((
             StatusCode::BAD_REQUEST,
@@ -47,11 +106,36 @@ async fn receive_daily_strategy_signals(
         ));
     }
     let parameters = BTreeMap::new();
+    let mut active_parameter_profiles = BTreeSet::new();
     snapshot.active_strategy_symbols = snapshot.generated_signals.iter().filter_map(|signal| {
         let strategy = signal.strategy.as_deref().and_then(Strategy::from_name)?;
         let input = StrategySignal::entry(signal, &parameters);
-        matches!(strategy.evaluate(&input), Ok(StrategyDecision::Enter))
-            .then(|| (strategy.as_str().to_owned(), signal.symbol.clone()))
+        let probe = signal.strategy_decision.as_ref().and_then(|decision| {
+            Some((
+                decision.get("scout_parameter_key")?.as_str()?,
+                decision.get("scout_parameter_value")?.as_f64()?,
+            ))
+        });
+        let entered = if let Some(("rsi_exit_level", value)) = probe {
+            signal.strategy_decision.as_ref().is_some_and(|decision| {
+                decision.get("primary_metric_value").and_then(serde_json::Value::as_f64)
+                    .is_some_and(|rsi| rsi < value)
+                    && decision.get("secondary_passed").and_then(serde_json::Value::as_bool) == Some(true)
+            })
+        } else {
+            matches!(strategy.evaluate(&input), Ok(StrategyDecision::Enter))
+        };
+        if !entered {
+            return None;
+        }
+        if let Some((key, value)) = probe {
+            active_parameter_profiles.insert((
+                strategy.as_str().to_owned(), signal.symbol.clone(), key.to_owned(), format!("{value:.8}"),
+            ));
+            None
+        } else {
+            Some((strategy.as_str().to_owned(), signal.symbol.clone()))
+        }
     }).collect();
     let active_symbols = snapshot.active_strategy_symbols.clone();
     *state.latest_daily_strategy_snapshot.lock().await = Some(snapshot.clone());
@@ -65,9 +149,21 @@ async fn receive_daily_strategy_signals(
         *current = diagnostics;
     }
     if !state.enabled.load(Ordering::Relaxed) {
+        publish_scout_strategy_status(&state, Vec::new(), Vec::new(), Vec::new());
         return Ok(StatusCode::ACCEPTED);
     }
     let mut settings = state.settings.lock().await;
+    let enabled_strategies = settings.strategies.iter()
+        .filter(|strategy| !strategy.is_live_insight() && !strategy.is_dated_carry())
+        .map(|strategy| strategy.as_str().to_owned())
+        .collect::<Vec<_>>();
+    let active_strategy_symbols = snapshot.active_strategy_symbols.iter()
+        .filter(|(strategy, _)| enabled_strategies.iter().any(|enabled| enabled == strategy))
+        .cloned()
+        .collect::<Vec<_>>();
+    let active_parameter_profiles = active_parameter_profiles.into_iter()
+        .filter(|(strategy, _, _, _)| enabled_strategies.iter().any(|enabled| enabled == strategy))
+        .collect::<Vec<_>>();
     let mut by_symbol = BTreeMap::<String, Vec<Signal>>::new();
     let mut cursors_changed = false;
     for signal in snapshot.generated_signals {
@@ -79,12 +175,27 @@ async fn receive_daily_strategy_signals(
         }
         if let Some((strategy_name, symbol, candle_or_anchor)) = daily_strategy_signal_key(&signal) {
             let cursor_key = format!("{strategy_name}|{symbol}");
-            if settings.daily_strategy_signal_cursors.get(&cursor_key).is_some_and(|previous| *previous >= candle_or_anchor)
-            {
-                continue;
+            let already_processed = settings.daily_strategy_signal_cursors
+                .get(&cursor_key)
+                .is_some_and(|previous| *previous >= candle_or_anchor);
+            if already_processed {
+                // Parameter probes are always shadow-only and may share the
+                // same candle cursor as their baseline signal.
+                let parameter_probe = signal.strategy_decision.as_ref()
+                    .and_then(|decision| decision.get("scout_parameter_probe"))
+                    .and_then(serde_json::Value::as_bool) == Some(true);
+                if !parameter_probe {
+                    // Revisit ordinary Scouts after a restart; per-level cooldowns
+                    // prevent duplicate samples.
+                    let input = StrategySignal::entry(&signal, &parameters);
+                    if !matches!(strategy.evaluate(&input), Ok(StrategyDecision::Scout)) {
+                        continue;
+                    }
+                }
+            } else {
+                settings.daily_strategy_signal_cursors.insert(cursor_key, candle_or_anchor);
+                cursors_changed = true;
             }
-            settings.daily_strategy_signal_cursors.insert(cursor_key, candle_or_anchor);
-            cursors_changed = true;
         }
         by_symbol
             .entry(signal.symbol.clone())
@@ -95,6 +206,7 @@ async fn receive_daily_strategy_signals(
         request_settings_persist(&state)?;
     }
     drop(settings);
+    publish_scout_strategy_status(&state, active_strategy_symbols, active_parameter_profiles, enabled_strategies);
     if !by_symbol.is_empty() {
         let mut queue = state.pending_daily_signals.lock().await;
         for (symbol, best) in by_symbol {

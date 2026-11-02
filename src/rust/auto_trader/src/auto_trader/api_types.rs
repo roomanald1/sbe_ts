@@ -139,6 +139,21 @@ struct ShadowLearningOutcomeRequest {
     decision_id: String,
     learning_context: String,
     simulated_net_pnl_usd: f64,
+    net_return_percent: f64,
+    signal_timestamp_ms: u64,
+    evaluated_timestamp_ms: u64,
+    taker_fee_rate: f64,
+    symbol: String,
+    strategy: String,
+    exit_scenario: String,
+    #[serde(default)]
+    sample_group_id: String,
+    #[serde(default)]
+    scout_parameter_key: Option<String>,
+    #[serde(default)]
+    scout_parameter_value: Option<f64>,
+    #[serde(default)]
+    scout_parameter_profile_symbol: Option<String>,
 }
 #[derive(Clone, Serialize)]
 struct DecisionParameter {

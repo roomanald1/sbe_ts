@@ -34,6 +34,10 @@ struct DatedCarryPosition {
     entry_fees: f64,
     status: String,
     #[serde(default)]
+    scout_parameter_key: Option<String>,
+    #[serde(default)]
+    scout_parameter_value: Option<f64>,
+    #[serde(default)]
     spot_exit_twap: Option<f64>,
     #[serde(default)]
     settlement_price: Option<f64>,
@@ -202,6 +206,7 @@ async fn receive_dated_carry_signal(
     let mut book = state.dated_carry.lock().await;
     let mut changed = false;
     let mut audit_payload = None;
+    let mut parameter_feedback = Vec::<(String, String, String, f64)>::new();
     match signal {
         DatedCarrySignal::Scan { emitted_at_ms, candidates, last_error } => {
             if emitted_at_ms > now_ms + 5_000 || now_ms.saturating_sub(emitted_at_ms) > 120_000 {
@@ -226,7 +231,24 @@ async fn receive_dated_carry_signal(
             if emitted_at_ms > now_ms + 5_000 || now_ms.saturating_sub(emitted_at_ms) > 120_000 {
                 return Err((StatusCode::BAD_REQUEST, "Carry entry signal is stale".into()));
             }
-            let strategy_parameters = BTreeMap::new();
+            let spot_profile_symbol = candidate.spot_symbol.replace("USDT", "-USDT");
+            let strategy_parameters = {
+                let settings = state.settings.lock().await;
+                strategy_parameter_values(&settings, &spot_profile_symbol, Strategy::DatedCarry)
+            };
+            let minimum_days = strategy_parameter_value(
+                &strategy_parameters, StrategyParameterKey::CarryMinimumDaysToExpiry,
+            ).unwrap_or(7.0);
+            let probe = next_scout_parameter_probe(
+                &spot_profile_symbol, Strategy::DatedCarry, &strategy_parameters, now_ms / CARRY_DAY_MS,
+            );
+            let mut probe_parameters = strategy_parameters.clone();
+            if let Some((key, value)) = probe.as_ref() {
+                probe_parameters.insert(key.clone(), *value);
+            }
+            let probe_entry_decision = Strategy::DatedCarry.evaluate(&StrategySignal::dated_carry_entry(
+                &candidate, emitted_at_ms, now_ms, &probe_parameters,
+            )).unwrap_or(StrategyDecision::Reject);
             let entry_decision = Strategy::DatedCarry
                 .evaluate(&StrategySignal::dated_carry_entry(
                     &candidate, emitted_at_ms, now_ms, &strategy_parameters,
@@ -251,8 +273,8 @@ async fn receive_dated_carry_signal(
                 return Err((StatusCode::BAD_REQUEST, "Invalid dated carry entry signal".into()));
             }
             let days = (candidate.expiry_ms - now_ms) as f64 / CARRY_DAY_MS as f64;
-            if days < 7.0 {
-                return Err((StatusCode::BAD_REQUEST, "Carry entry inside the 7-day expiry cutoff".into()));
+            if days < minimum_days {
+                return Err((StatusCode::BAD_REQUEST, format!("Carry entry inside the {minimum_days:.0}-day expiry cutoff")));
             }
             book.checked_at_ms = emitted_at_ms;
             book.last_error = None;
@@ -295,6 +317,10 @@ async fn receive_dated_carry_signal(
                     future_entry_price: future_entry,
                     entry_fees: fees,
                     status: "open".into(),
+                    scout_parameter_key: probe.as_ref().and_then(|(key, _)|
+                        (probe_entry_decision == StrategyDecision::Enter).then(|| key.clone())),
+                    scout_parameter_value: probe.as_ref().and_then(|(_, value)|
+                        (probe_entry_decision == StrategyDecision::Enter).then_some(*value)),
                     spot_exit_twap: None,
                     settlement_price: None,
                     net_pnl_usdt: None,
@@ -310,6 +336,11 @@ async fn receive_dated_carry_signal(
                 };
                 update_dated_carry_mark(&mut position, candidate.spot_bid, candidate.future_ask, emitted_at_ms);
                 book.positions.push(position);
+                if let Some((parameter, value)) = probe.as_ref()
+                    .filter(|_| probe_entry_decision != StrategyDecision::Enter)
+                {
+                    parameter_feedback.push((spot_profile_symbol.clone(), parameter.clone(), format!("{value:.8}"), 0.0));
+                }
                 changed = true;
             }
         }
@@ -355,6 +386,20 @@ async fn receive_dated_carry_signal(
                 position.settlement_price = Some(settlement_price);
                 position.settlement_source = Some(settlement_source.as_str().into());
                 position.net_pnl_usdt = Some(net);
+                if settlement_source == DatedCarrySettlementSource::Official {
+                    if let (Some(parameter), Some(value)) = (
+                        position.scout_parameter_key.as_ref(), position.scout_parameter_value,
+                    ) {
+                        let entry_notional = q * position.spot_entry_price;
+                        if entry_notional.is_finite() && entry_notional > 0.0 {
+                            parameter_feedback.push((
+                                position.spot_symbol.replace("USDT", "-USDT"),
+                                parameter.clone(), format!("{value:.8}"),
+                                net / entry_notional * 100.0,
+                            ));
+                        }
+                    }
+                }
                 audit_payload = Some(serde_json::json!({
                     "decision_id": format!("dated-carry:{}", position.future_symbol),
                     "stage": "dated_carry_exit",
@@ -378,6 +423,18 @@ async fn receive_dated_carry_signal(
             .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error))?;
     }
     drop(book);
+    if !parameter_feedback.is_empty() {
+        let mut settings = state.settings.lock().await;
+        for (symbol, parameter, value, return_percent) in parameter_feedback {
+            let Ok(value) = value.parse::<f64>() else { continue; };
+            let key = strategy_parameter_probe_learning_key(
+                &symbol, Strategy::DatedCarry.as_str(), &parameter, value,
+            );
+            record_learning_outcome(settings.learning.entry(key).or_default(), return_percent);
+        }
+        drop(settings);
+        request_settings_persist(&state)?;
+    }
     if let Some(payload) = audit_payload {
         if let Err(error) = state.audit_tx.try_send(payload) {
             crate::service_log!("WARN", "Dated carry paper audit queue unavailable: {error}");
