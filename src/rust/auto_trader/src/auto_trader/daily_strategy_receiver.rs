@@ -1,3 +1,15 @@
+fn daily_strategy_signal_key(signal: &Signal) -> Option<(String, String, u64)> {
+    let strategy = signal.strategy.as_deref()?;
+    let decision = signal.strategy_decision.as_ref()?;
+    let candle_or_anchor = if strategy == "risk-adjusted-monthly-momentum" {
+        decision.get("monthly_anchor_close_time_ms")
+    } else {
+        decision.get("bar_close_timestamp")
+    }?
+    .as_u64()?;
+    Some((strategy.to_owned(), signal.symbol.clone(), candle_or_anchor))
+}
+
 #[derive(Deserialize)]
 struct DailyStrategySignalBatch {
     snapshot: DailyStrategySnapshot,
@@ -37,25 +49,37 @@ async fn receive_daily_strategy_signals(
     if let Ok(mut current) = state.strategy_diagnostic.lock() {
         *current = batch.diagnostics;
     }
-    let selected = {
-        let settings = state.settings.lock().await;
-        if !state.enabled.load(Ordering::Relaxed) {
-            return Ok(StatusCode::ACCEPTED);
-        }
-        settings.strategies.clone()
-    };
+    if !state.enabled.load(Ordering::Relaxed) {
+        return Ok(StatusCode::ACCEPTED);
+    }
+    let mut settings = state.settings.lock().await;
     let mut by_symbol = BTreeMap::<String, Vec<Signal>>::new();
+    let mut cursors_changed = false;
     for signal in batch.snapshot.generated_signals {
         let Some(strategy) = signal.strategy.as_deref().and_then(Strategy::from_name) else {
             continue;
         };
-        if selected.contains(&strategy) {
-            by_symbol
-                .entry(signal.symbol.clone())
-                .or_default()
-                .push(signal);
+        if !settings.strategies.contains(&strategy) {
+            continue;
         }
+        if let Some((strategy_name, symbol, candle_or_anchor)) = daily_strategy_signal_key(&signal) {
+            let cursor_key = format!("{strategy_name}|{symbol}");
+            if settings.daily_strategy_signal_cursors.get(&cursor_key).is_some_and(|previous| *previous >= candle_or_anchor)
+            {
+                continue;
+            }
+            settings.daily_strategy_signal_cursors.insert(cursor_key, candle_or_anchor);
+            cursors_changed = true;
+        }
+        by_symbol
+            .entry(signal.symbol.clone())
+            .or_default()
+            .push(signal);
     }
+    if cursors_changed {
+        request_settings_persist(&state)?;
+    }
+    drop(settings);
     if !by_symbol.is_empty() {
         let mut queue = state.pending_daily_signals.lock().await;
         for (symbol, best) in by_symbol {

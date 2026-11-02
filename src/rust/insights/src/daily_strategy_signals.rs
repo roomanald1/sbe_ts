@@ -530,31 +530,18 @@ fn insight_evaluate_daily(
         "rsi2-oversold-rebound" => {
             let trend_days = days("trend_sma_days", 200.0);
             let rsi_days = days("rsi_period_days", 2.0);
-            let max_hold = days("maximum_hold_days", 5.0);
             let entry_max = insight_parameter(params, "rsi_entry_max", 10.0);
-            let exit_level = insight_parameter(params, "rsi_exit_level", 70.0);
             let trend = insight_daily_sma(bars, trend_days)?;
             let rsi = insight_rsi(bars, rsi_days);
-            let hold_active = bars
-                .iter()
-                .enumerate()
-                .rev()
-                .take(max_hold)
-                .any(|(end, bar)| {
-                    let history = &bars[..=end];
-                    bar.close_time_ms <= now
-                        && insight_daily_sma(history, trend_days)
-                            .ok()
-                            .is_some_and(|sma| bar.close > sma)
-                        && insight_rsi(history, rsi_days) <= entry_max
-                });
+            // The maximum hold window belongs to exits, not delayed entries after RSI rebounds.
+            let entry_passed = rsi <= entry_max;
             Ok(InsightDailyEvaluation {
                 primary_rule: format!("RSI({rsi_days}) at or below {entry_max:.0}"),
                 primary_level: entry_max,
-                primary_passed: rsi <= entry_max,
+                primary_passed: entry_passed,
                 secondary_rule: Some(format!("Own {trend_days}-day SMA")),
                 secondary_level: Some(trend),
-                active: hold_active && rsi < exit_level && close > trend,
+                active: entry_passed && close > trend,
                 btc_regime: None,
                 strategy_order_size_multiplier: None,
                 monthly_anchor_close_time_ms: None,
@@ -659,10 +646,21 @@ fn insight_daily_batch(
             } else {
                 0.0
             };
-            let secondary_distance = evaluation
-                .secondary_level
-                .map(|level| (close / level - 1.0) * 100.0);
-            let secondary_passed = evaluation.secondary_level.map(|level| close > level);
+            let (secondary_distance, secondary_passed) = match (
+                strategy.as_str(),
+                evaluation.secondary_level,
+                btc,
+            ) {
+                ("risk-adjusted-trend-portfolio", Some(level), Some(regime)) => (
+                    Some((regime.close / level - 1.0) * 100.0),
+                    Some(regime.risk_on),
+                ),
+                (_, Some(level), _) => (
+                    Some((close / level - 1.0) * 100.0),
+                    Some(close > level),
+                ),
+                (_, None, _) => (None, None),
+            };
             let trend_return_windows = if strategy == "risk-adjusted-trend-portfolio" {
                 [10_usize, 20, 40, 80, 160].iter().filter_map(|days| {
                     bars.len().checked_sub(1 + *days).map(|index| {

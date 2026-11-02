@@ -149,13 +149,9 @@ fn daily_candidate_priority(settings: &Settings, signal: &Signal) -> (f64, f64) 
         return (0.0, 0.0);
     };
     let outcomes = strategy_learning_stats(settings, &signal.symbol, strategy);
+    let net_pnl_edge = recent_net_pnl_edge(&outcomes).unwrap_or(0.0);
     let confidence = confident_win_rate_edge(outcomes.positive, outcomes.samples);
-    let mean_realized_pnl = if outcomes.samples > 0 {
-        outcomes.realized_pnl / outcomes.samples as f64
-    } else {
-        0.0
-    };
-    (confidence, mean_realized_pnl)
+    (net_pnl_edge, confidence)
 }
 
 fn daily_strategy_candidates<'a>(signals: &[&'a Signal], settings: &Settings) -> Vec<&'a Signal> {

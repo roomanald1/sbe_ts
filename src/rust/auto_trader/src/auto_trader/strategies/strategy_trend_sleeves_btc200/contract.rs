@@ -4,7 +4,7 @@ pub(super) fn contract() -> StrategyContract {
         insight: "daily candle insight",
         entry: "BTC/ETH above own SMA50 or BNB above own SMA100, with BTC above SMA200",
         exit: super::exit::description(),
-        entry_order: "configured AutoOrderType (default IOC); VWAP/TWAP use configured duration and participation",
+        entry_order: "passive PostOnlyLimit by default; IOC is reserved for high urgency; VWAP/TWAP use configured duration and participation",
         exit_order: "StopMarket protective order; IOC close order for strategy and take-profit exits",
         behavior: "long-only BTC/ETH/BNB sleeves; other symbols are ineligible",
     }

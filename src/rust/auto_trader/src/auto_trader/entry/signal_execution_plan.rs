@@ -1,15 +1,33 @@
+fn recent_net_pnl_edge(outcomes: &LearningStats) -> Option<f64> {
+    if outcomes.recent_trade_pnls.is_empty() {
+        return None;
+    }
+    let now_ms = current_time_ms();
+    let (net, gross, effective_samples) = outcomes.recent_trade_pnls.iter().fold(
+        (0.0, 0.0, 0.0),
+        |(net, gross, samples), (timestamp, pnl)| {
+            let age_ms = now_ms.saturating_sub(*timestamp);
+            let weight = 0.5_f64.powf(age_ms as f64 / LEARNING_HALF_LIFE_MS as f64);
+            (net + pnl * weight, gross + pnl.abs() * weight, samples + weight)
+        },
+    );
+    if gross <= 1e-12 {
+        return Some(0.0);
+    }
+    let confidence = effective_samples / (effective_samples + 2.0);
+    Some((net / gross * confidence).clamp(-1.0, 1.0))
+}
+
 fn learned_strategy_size_multiplier(outcomes: &LearningStats) -> f64 {
     if outcomes.samples == 0 || outcomes.positive > outcomes.samples {
         return 1.0;
     }
-    let edge = confident_win_rate_edge(outcomes.positive, outcomes.samples);
-    // Win rates below 50% reduce exposure even when aggregate P&L is
-    // temporarily positive. A positive win rate is not penalized just because
-    // aggregate P&L is negative; it simply cannot increase exposure then.
+    let edge = recent_net_pnl_edge(outcomes)
+        .unwrap_or_else(|| confident_win_rate_edge(outcomes.positive, outcomes.samples));
+    // Net outcomes include allocated fees. This reduces size for frequent-small-
+    // win strategies whose larger losses make the recent book unprofitable.
     let target = if edge < 0.0 {
         1.0 + edge * (1.0 - POOR_STRATEGY_SIZE_MULTIPLIER)
-    } else if outcomes.realized_pnl < 0.0 {
-        1.0
     } else {
         1.0 + edge * (MAX_LEARNED_STRATEGY_SIZE_MULTIPLIER - 1.0)
     };
@@ -28,12 +46,13 @@ fn strategy_learning_stats_across_symbols(settings: &Settings, strategy: Strateg
     recent_outcomes.sort_unstable_by(|left, right| right.0.cmp(&left.0));
 
     let mut recent = LearningStats::default();
-    for (_, pnl) in recent_outcomes.into_iter().take(STRATEGY_SIZING_RECENT_TRADES) {
+    for (timestamp, pnl) in recent_outcomes.into_iter().take(STRATEGY_SIZING_RECENT_TRADES) {
         recent.samples += 1;
         recent.realized_pnl += pnl;
         if pnl > 0.0 {
             recent.positive += 1;
         }
+        recent.recent_trade_pnls.push((timestamp, pnl));
     }
     recent
 }
@@ -51,6 +70,74 @@ fn daily_strategy_effective_budget(settings: &Settings, strategy: &str) -> f64 {
 fn intraday_strategy_size_multiplier(settings: &Settings, strategy: Strategy) -> f64 {
     learned_strategy_size_multiplier(&strategy_learning_stats_across_symbols(settings, strategy))
         .min(1.0)
+}
+
+fn signal_weighted_strategy_budget(
+    settings: &Settings,
+    dashboard: &Dashboard,
+    strategy: Strategy,
+    category: StrategyCategory,
+    now_ms: u64,
+) -> f64 {
+    let (enabled, pool, configured) = match category {
+        StrategyCategory::Daily => (
+            settings.strategies.iter().copied()
+                .filter(|kind| !kind.is_live_insight() && !kind.is_dated_carry())
+                .collect::<Vec<_>>(),
+            settings.daily_strategy_notional_limit,
+            !settings.daily_strategy_budgets.is_empty(),
+        ),
+        StrategyCategory::Intraday => (
+            settings.strategies.iter().copied()
+                .filter(|kind| kind.is_live_insight() && !kind.is_legacy_composite())
+                .collect::<Vec<_>>(),
+            settings.intraday_notional_limit,
+            !settings.intraday_strategy_budgets.is_empty(),
+        ),
+    };
+    if configured || enabled.is_empty() || !enabled.contains(&strategy) {
+        return match category {
+            StrategyCategory::Daily => daily_strategy_effective_budget(settings, strategy.as_str()),
+            StrategyCategory::Intraday => intraday_strategy_effective_budget(settings, strategy.as_str()),
+        };
+    }
+
+    // Half the pool is an equal opportunity floor. The rest follows current
+    // signal confidence, expected opportunity frequency, and learned net results.
+    const GUARANTEED_SHARE: f64 = 0.5;
+    let floor = pool * GUARANTEED_SHARE / enabled.len() as f64;
+    let mut weights = BTreeMap::<String, f64>::new();
+    for signal in dashboard.best.iter().filter(|signal| {
+        signal.strategy_candidate
+            && !signal.stale
+            && matches!(signal.direction.as_str(), "bullish" | "bearish")
+            && now_ms.saturating_sub(signal.timestamp) <= signal_max_age_seconds(signal) * 1_000
+    }) {
+        let Some(kind) = signal.strategy.as_deref().and_then(Strategy::from_name)
+            .filter(|kind| enabled.contains(kind)) else { continue; };
+        let learning = match category {
+            StrategyCategory::Daily => learned_strategy_size_multiplier(&strategy_learning_stats_across_symbols(settings, kind)),
+            StrategyCategory::Intraday => intraday_strategy_size_multiplier(settings, kind),
+        };
+        let confidence = if signal.strength.is_finite() { signal.strength.clamp(0.0, 1.0) } else { 0.0 };
+        *weights.entry(kind.as_str().to_owned()).or_default() += confidence * learning;
+    }
+    // sqrt(count) in the aggregate gives genuinely frequent strategies more
+    // room while keeping a broad signal universe from overwhelming the floor.
+    let weights = weights.into_iter().map(|(kind, sum)| {
+        let count = dashboard.best.iter().filter(|signal| {
+            signal.strategy.as_deref() == Some(kind.as_str())
+                && signal.strategy_candidate && !signal.stale
+                && matches!(signal.direction.as_str(), "bullish" | "bearish")
+                && now_ms.saturating_sub(signal.timestamp) <= signal_max_age_seconds(signal) * 1_000
+        }).count().max(1) as f64;
+        (kind, sum / count.sqrt())
+    }).collect::<BTreeMap<_, _>>();
+    let total_weight = weights.values().sum::<f64>();
+    let variable = if total_weight > 0.0 {
+        (pool - floor * enabled.len() as f64) * weights.get(strategy.as_str()).copied().unwrap_or(0.0) / total_weight
+    } else { 0.0 };
+    (floor + variable).max(0.0)
 }
 
 fn intraday_strategy_effective_budget(settings: &Settings, strategy: &str) -> f64 {
@@ -282,11 +369,11 @@ async fn prepare_signal_execution_plan(
         .and_then(Strategy::from_name)
         .map(|kind| match strategy_category(Some(kind.as_str())) {
             StrategyCategory::Daily if !kind.is_live_insight() && !kind.is_dated_carry() => {
-                daily_strategy_effective_budget(&settings, kind.as_str())
+                signal_weighted_strategy_budget(&settings, dashboard, kind, StrategyCategory::Daily, now_ms)
                     - allocated_notional_for_strategy(&settings, kind.as_str())
             }
             StrategyCategory::Intraday if kind.is_live_insight() => {
-                intraday_strategy_effective_budget(&settings, kind.as_str())
+                signal_weighted_strategy_budget(&settings, dashboard, kind, StrategyCategory::Intraday, now_ms)
                     - allocated_notional_for_strategy(&settings, kind.as_str())
             }
             _ => f64::INFINITY,

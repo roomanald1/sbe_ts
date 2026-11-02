@@ -116,6 +116,9 @@ struct Settings {
     last_signal_direction: BTreeMap<String, String>,
     #[serde(default)]
     last_signal_strength: BTreeMap<String, f64>,
+    // Persisted so a service restart cannot replay the same closed-candle signal.
+    #[serde(default)]
+    daily_strategy_signal_cursors: BTreeMap<String, u64>,
 }
 fn default_order_limit() -> f64 {
     DEFAULT_MAX_ORDER_NOTIONAL
@@ -238,6 +241,7 @@ impl Default for Settings {
             last_signal_at: BTreeMap::new(),
             last_signal_direction: BTreeMap::new(),
             last_signal_strength: BTreeMap::new(),
+            daily_strategy_signal_cursors: BTreeMap::new(),
         }
     }
 }

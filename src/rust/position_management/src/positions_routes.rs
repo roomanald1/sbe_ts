@@ -194,8 +194,12 @@ async fn position_ui_stream(
                                     let current_trades = value.get("trades").and_then(serde_json::Value::as_array);
                                     let previous_trades = old.get(key).and_then(|value| value.get("trades")).and_then(serde_json::Value::as_array);
                                     if let (Some(current_trades), Some(previous_trades)) = (current_trades, previous_trades) {
-                                        if current_trades.starts_with(previous_trades) {
-                                            auto_trade_appends.extend(current_trades[previous_trades.len()..].iter().cloned());
+                                        let previous_last_id = previous_trades.last().and_then(|trade| trade.get("id"));
+                                        if let Some(last_index) = previous_last_id.and_then(|id| current_trades.iter().position(|trade| trade.get("id") == Some(id))) {
+                                            auto_trade_appends.extend(current_trades[last_index + 1..].iter().cloned());
+                                            continue;
+                                        }
+                                        if current_trades.last().and_then(|trade| trade.get("id")) == previous_last_id {
                                             continue;
                                         }
                                     }
@@ -250,12 +254,13 @@ async fn position_ui_snapshot(store: &Arc<PositionStore>) -> serde_json::Value {
         let positions = cached_position_summary(store, &ledger, None);
         let auto_positions = cached_position_summary(store, &ledger, Some("auto"));
         let orders = OrdersResponse { orders: ledger.orders.clone(), barrier_orders: ledger.barrier_orders.clone() };
-        let trades = TradesResponse { trades: ledger.trades.iter().cloned().map(|mut trade| { trade.fee = signed_fee_cashflow(trade.fee); trade }).collect() };
-        let auto_trades = TradesResponse { trades: ledger.trades.iter()
-            .filter(|trade| trade.source == "auto")
-            .cloned()
-            .map(|mut trade| { trade.fee = signed_fee_cashflow(trade.fee); trade })
-            .collect() };
+        const STREAM_TRADE_LIMIT: usize = 256;
+        let mut recent_trades = ledger.trades.iter().rev().take(STREAM_TRADE_LIMIT).cloned().map(|mut trade| { trade.fee = signed_fee_cashflow(trade.fee); trade }).collect::<Vec<_>>();
+        recent_trades.reverse();
+        let trades = TradesResponse { trades: recent_trades, total: None, next_offset: None, has_older: None };
+        let mut recent_auto_trades = ledger.trades.iter().rev().filter(|trade| trade.source == "auto").take(STREAM_TRADE_LIMIT).cloned().map(|mut trade| { trade.fee = signed_fee_cashflow(trade.fee); trade }).collect::<Vec<_>>();
+        recent_auto_trades.reverse();
+        let auto_trades = TradesResponse { trades: recent_auto_trades, total: None, next_offset: None, has_older: None };
         let rates = latest_stream_usd_rates().map(|rates| rates.rates).unwrap_or_default();
         let account = account_snapshot_with_rates(store, &ledger, &rates).ok();
         (positions, auto_positions, orders, trades, auto_trades, account)

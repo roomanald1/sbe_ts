@@ -244,15 +244,12 @@ async fn evaluate_position_exit(
         });
         (strategy_disabled, position.strategy.clone())
     };
-    let daily_signal_strategy = strategy_no_longer_eligible.as_deref().is_some_and(|strategy| matches!(
-        strategy,
-        "risk-adjusted-monthly-momentum" | "donchian-20-btc200-hold3" | "risk-adjusted-trend-portfolio"
-    ));
-    let research_state_unavailable = daily_signal_strategy && research_regime.is_none();
     let minimum_hold_active = strategy_no_longer_eligible.as_deref()
         == Some("donchian-20-btc200-hold3")
         && position.entry_timestamp_ms > 0
         && observed_at.saturating_sub(position.entry_timestamp_ms) < 3 * 86_400_000;
+    // A missing or stale research snapshot is a data gap, not an exit signal.
+    // Keep the position until fresh strategy state can confirm an exit.
     let research_exit = strategy_no_longer_eligible
         .as_deref()
         .is_some_and(|strategy| {
@@ -276,8 +273,6 @@ async fn evaluate_position_exit(
         .is_some_and(|strategy| !strategy.uses_fixed_take_profit());
     let reason = if strategy_disabled {
         Some("strategy-disabled")
-    } else if research_state_unavailable {
-        Some("daily-signal-state-unavailable")
     } else if research_exit {
         Some("research-regime-exit")
     } else if strategy_rebalance {

@@ -243,6 +243,12 @@ struct RealizedPnlQuery {
 #[derive(Serialize)]
 struct TradesResponse {
     trades: Vec<PositionTrade>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    total: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    next_offset: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    has_older: Option<bool>,
 }
 #[derive(Serialize)]
 struct HedgeCandidate {

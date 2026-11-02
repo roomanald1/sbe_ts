@@ -1,6 +1,12 @@
 fn daily_signal_candidate(signal: &Signal) -> bool {
-    signal.strategy_candidate
-        && signal.strategy.as_deref().is_some_and(is_independent_daily_strategy)
+    let is_daily_candidate = signal.strategy_candidate
+        && signal.strategy.as_deref().is_some_and(is_independent_daily_strategy);
+    // Defense in depth: RSI entries must still satisfy the primary rule when queued.
+    let failed_rsi_entry_gate = signal.strategy.as_deref() == Some("rsi2-oversold-rebound")
+        && signal.strategy_decision.as_ref()
+            .and_then(|decision| decision.get("primary_passed"))
+            .and_then(serde_json::Value::as_bool) == Some(false);
+    is_daily_candidate && !failed_rsi_entry_gate
 }
 
 fn signal_max_age_seconds(signal: &Signal) -> u64 {

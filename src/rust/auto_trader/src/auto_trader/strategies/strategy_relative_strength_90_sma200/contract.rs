@@ -4,7 +4,7 @@ pub(super) fn contract() -> StrategyContract {
         insight: "daily candle insight",
         entry: "strongest eligible 90-day performer with close above own SMA200",
         exit: super::exit::description(),
-        entry_order: "configured AutoOrderType (default IOC); VWAP/TWAP use configured duration and participation",
+        entry_order: "passive PostOnlyLimit by default; IOC is reserved for high urgency; VWAP/TWAP use configured duration and participation",
         exit_order: "StopMarket protective order; IOC close order for strategy and take-profit exits",
         behavior: "long-only relative-strength rotation; only current leader is active",
     }

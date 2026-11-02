@@ -4,7 +4,7 @@ pub(super) fn contract() -> StrategyContract {
         insight: "live absorption insight",
         entry: "pressure-without-price-move points against the signal direction with magnitude at least 0.2",
         exit: super::exit::description(),
-        entry_order: "configured AutoOrderType (default IOC); VWAP/TWAP use configured duration and participation",
+        entry_order: "passive PostOnlyLimit by default; IOC is reserved for high urgency; VWAP/TWAP use configured duration and participation",
         exit_order: "StopMarket protective order; IOC close order for strategy and take-profit exits",
         behavior: "directional entries supported by observed absorption pressure",
     }

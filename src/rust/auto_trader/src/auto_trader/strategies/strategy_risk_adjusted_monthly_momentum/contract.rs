@@ -5,7 +5,7 @@ pub(super) fn contract() -> StrategyContract {
         insight: "closed daily candles; monthly anchor from the prior month's final close",
         entry: "BTC above SMA200; select the eligible positive 90-day return leader by 90-day return / 60-day realized volatility",
         exit: super::exit::description(),
-        entry_order: "configured AutoOrderType (default IOC), scaled by the 40% volatility target",
+        entry_order: "passive PostOnlyLimit by default; IOC is reserved for high urgency, scaled by the 40% volatility target",
         exit_order: "signal-driven monthly rotation; fixed stop and take-profit disabled",
         behavior: "long-only, one selected spot asset or cash; 7-symbol universe",
     }

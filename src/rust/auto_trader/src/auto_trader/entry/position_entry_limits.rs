@@ -10,7 +10,7 @@ fn signal_position_block_reason(
             .and_then(|decision| decision.get("portfolio_rebalance_delta_usd"))
             .and_then(serde_json::Value::as_f64)
             .is_some_and(|delta| delta.is_finite() && delta > 0.0);
-    let strategy_cooldown_ms = strategy_post_stop_cooldown_ms(strategy_key, &settings.orders);
+    let strategy_cooldown_ms = strategy_post_stop_cooldown_ms(strategy_key, signal_key, settings);
     if !portfolio_rebalance { if let Some(stopped_at) = settings
         .orders
         .iter()

@@ -127,7 +127,11 @@ fn score_execution_order_type(
     // baseline without materially worse fill rate. Preserve that choice for
     // normal-sized, non-urgent orders instead of letting the heuristic score
     // silently switch back to the baseline (or another candidate).
-    if !large_order && learned != baseline && urgency < 0.80 {
+    if !large_order
+        && learned != baseline
+        && urgency < 0.80
+        && !(learned == AutoOrderType::Ioc && baseline == AutoOrderType::PostOnlyLimit)
+    {
         return learned;
     }
     let ranging = signal.ranging_probability.unwrap_or(0.0).clamp(0.0, 1.0);
@@ -144,6 +148,12 @@ fn score_execution_order_type(
     for (index, candidate) in candidates.into_iter().enumerate() {
         if candidates[..index].contains(&candidate) { continue; }
         if large_order && !matches!(candidate, AutoOrderType::Vwap | AutoOrderType::Twap) { continue; }
+        if candidate == AutoOrderType::Ioc
+            && baseline == AutoOrderType::PostOnlyLimit
+            && urgency < 0.80
+        {
+            continue;
+        }
         let maker = matches!(candidate, AutoOrderType::PostOnlyLimit | AutoOrderType::Gtd);
         let impact_multiplier = match candidate {
             AutoOrderType::Vwap | AutoOrderType::Twap => 0.45,
@@ -177,33 +187,18 @@ fn score_execution_order_type(
 }
 
 
-fn strategy_post_stop_cooldown_ms(strategy: &str, orders: &[TraderOrder]) -> u64 {
-    let outcomes = orders
-        .iter()
-        .rev()
-        .filter(|order| {
-            order.strategy.as_deref() == Some(strategy)
-                && matches!(
-                    order.purpose.as_str(),
-                    "stop-loss" | "take-profit" | "profit-protection" | "shadow-profit-protection" | "strategy-disabled" | "research-regime-exit"
-                )
-                && order.status == "filled"
-                && order.filled_quantity > 0.0
-                && order.realized_pnl.is_finite()
-        })
-        .take(POST_STOP_OUTCOME_WINDOW)
-        .collect::<Vec<_>>();
-
-    if outcomes.len() < MIN_POST_STOP_OUTCOMES_FOR_ADAPTATION {
+fn strategy_post_stop_cooldown_ms(strategy: &str, symbol: &str, settings: &Settings) -> u64 {
+    let Some(outcomes) = settings
+        .learning
+        .get(&strategy_trade_learning_key(symbol, strategy))
+    else {
+        return DEFAULT_POST_STOP_REENTRY_COOLDOWN_MS;
+    };
+    if outcomes.recent_trade_pnls.len() < MIN_POST_STOP_OUTCOMES_FOR_ADAPTATION {
         return DEFAULT_POST_STOP_REENTRY_COOLDOWN_MS;
     }
-
-    let win_rate = outcomes
-        .iter()
-        .filter(|order| order.realized_pnl > 0.0)
-        .count() as f64
-        / outcomes.len() as f64;
-    let loss_pressure = ((0.55 - win_rate) / 0.35).clamp(0.0, 1.0);
+    let net_pnl_edge = recent_net_pnl_edge(outcomes).unwrap_or(0.0);
+    let loss_pressure = ((0.1 - net_pnl_edge) / 1.1).clamp(0.0, 1.0);
     MIN_POST_STOP_REENTRY_COOLDOWN_MS
         + ((MAX_POST_STOP_REENTRY_COOLDOWN_MS - MIN_POST_STOP_REENTRY_COOLDOWN_MS) as f64
             * loss_pressure) as u64

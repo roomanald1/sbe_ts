@@ -4,7 +4,7 @@ pub(super) fn contract() -> StrategyContract {
         insight: "legacy live composite market insight",
         entry: "legacy stored selection; migrates to the enabled live component strategies",
         exit: super::exit::description(),
-        entry_order: "configured AutoOrderType (default IOC); VWAP/TWAP use configured duration and participation",
+        entry_order: "passive PostOnlyLimit by default; IOC is reserved for high urgency; VWAP/TWAP use configured duration and participation",
         exit_order: "StopMarket protective order; IOC close order for strategy and take-profit exits",
         behavior: "legacy configuration compatibility",
     }

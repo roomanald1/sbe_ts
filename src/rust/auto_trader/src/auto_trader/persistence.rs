@@ -175,6 +175,48 @@ fn allocated_notional(settings: &Settings) -> f64 {
     allocated_notional_for_category(settings, None)
 }
 
+fn allocated_notional_for_symbol(settings: &Settings, symbol: &str) -> f64 {
+    let quote_rate = quote_usd_rate(settings, symbol);
+    let open_exposure = if let Some(lots) = settings.strategy_positions.get(symbol) {
+        lots.values()
+            .map(|position| position.quantity.abs() * position.average_entry_price.max(0.0) * quote_rate)
+            .sum()
+    } else {
+        settings.positions.get(symbol).map_or(0.0, |position| {
+            position.quantity.abs() * position.average_entry_price.max(0.0) * quote_rate
+        })
+    };
+    let mut pending_exposure = 0.0;
+    let mut pending_quantity = 0.0;
+    let current_quantity = settings.positions.get(symbol).map_or(0.0, |position| position.quantity);
+    for order in settings.orders.iter().filter(|order| {
+        order.symbol == symbol
+            && matches!(order.purpose.as_str(), "signal" | "scout")
+            && matches!(order.status.as_str(), "submitting" | "accepted" | "resting" | "partially_filled")
+            && order.quantity > order.filled_quantity + 1e-12
+    }) {
+        let remaining = (order.quantity - order.filled_quantity).max(0.0);
+        if remaining <= 1e-12 {
+            continue;
+        }
+        let direction = if order.side == "buy" { 1.0 } else { -1.0 };
+        let net_quantity = current_quantity + pending_quantity;
+        let exposure_increase = if net_quantity == 0.0 || net_quantity.signum() == direction {
+            remaining
+        } else {
+            (remaining - net_quantity.abs()).max(0.0)
+        };
+        let reference_notional = if order.reserved_notional > 0.0 {
+            order.reserved_notional
+        } else {
+            order.average_price.unwrap_or(0.0) * order.quantity * quote_rate
+        };
+        pending_exposure += reference_notional * exposure_increase / order.quantity;
+        pending_quantity += direction * remaining;
+    }
+    open_exposure + pending_exposure
+}
+
 fn allocated_notional_for_category(settings: &Settings, category: Option<StrategyCategory>) -> f64 {
     let open_positions = if let Some(category) = category {
         let mut lots_total = 0.0;

@@ -5,7 +5,7 @@ pub(super) fn contract() -> StrategyContract {
         insight: "closed daily candles",
         entry: "close above prior 10-day high while BTC closes above SMA200",
         exit: super::exit::description(),
-        entry_order: "configured AutoOrderType (default IOC); daily strategy budget and account limits apply",
+        entry_order: "passive PostOnlyLimit by default; IOC is reserved for high urgency; daily strategy budget and account limits apply",
         exit_order: "IOC close when the daily breakout or BTC regime becomes inactive",
         behavior: "long-only 10-day breakout; fixed BTC 200-day regime gate; paper signal exit",
     }

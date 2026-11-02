@@ -30,7 +30,8 @@ fn strategy_parameter_profile(
     let learning = strategy_learning_stats(settings, symbol, strategy);
     let positive_rate =
         (learning.samples > 0).then_some(learning.positive as f64 / learning.samples as f64);
-    let performance = confident_win_rate_edge(learning.positive, learning.samples);
+    let performance = recent_net_pnl_edge(&learning)
+        .unwrap_or_else(|| confident_win_rate_edge(learning.positive, learning.samples));
     let specs = all_strategy_parameter_specs(strategy);
     let learning_key = strategy_parameter_key(symbol, strategy, "learning_rate");
     let learning_rate = settings

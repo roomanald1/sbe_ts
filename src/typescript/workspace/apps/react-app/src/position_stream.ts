@@ -43,7 +43,7 @@ function connect() {
         if (message.auto_trade_appends?.length) {
           value.auto_trades = {
             ...value.auto_trades,
-            trades: [...value.auto_trades.trades, ...message.auto_trade_appends],
+            trades: [...value.auto_trades.trades, ...message.auto_trade_appends].slice(-256),
           };
         }
       }

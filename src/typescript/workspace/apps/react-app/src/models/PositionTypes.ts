@@ -6,6 +6,8 @@ export type PositionTrade = {
   execution_price: number;
   reference_price?: number;
   timestamp: number;
+  source?: string;
+  parent_order_id?: string | null;
   fee?: number;
   fee_currency?: string;
   fee_rate?: number;

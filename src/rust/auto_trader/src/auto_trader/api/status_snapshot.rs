@@ -30,7 +30,7 @@ fn status(state: &AutoTraderState, settings: &Settings) -> StatusResponse {
             .copied()
             .filter(|strategy| !strategy.is_live_insight() && !strategy.is_dated_carry())
             .map(|strategy| {
-                // Match the decayed lifetime profile used to calculate this multiplier and cap.
+                // Match the recent-outcome profile used to calculate this multiplier and cap.
                 let learning = strategy_learning_stats_across_symbols(settings, strategy);
                 StrategyBudgetStatus {
                     strategy: strategy.as_str().to_owned(),

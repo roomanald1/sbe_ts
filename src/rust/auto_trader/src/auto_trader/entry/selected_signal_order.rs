@@ -248,14 +248,17 @@ async fn submit_selected_signal(
         let allocated = allocated_notional(&settings);
         let category = strategy_category(signal.strategy.as_deref());
         let category_allocated = allocated_notional_for_category(&settings, Some(category));
+        // Cap gross open and pending exposure for this symbol across all strategies.
+        let symbol_remaining_budget = settings.max_order_notional
+            - allocated_notional_for_symbol(&settings, &signal.symbol);
         let strategy_remaining_budget = Strategy::from_name(strategy_key)
             .map(|kind| match strategy_category(Some(kind.as_str())) {
                 StrategyCategory::Daily if !kind.is_live_insight() && !kind.is_dated_carry() => {
-                    daily_strategy_effective_budget(&settings, strategy_key)
+                    signal_weighted_strategy_budget(&settings, dashboard, kind, StrategyCategory::Daily, now_ms)
                         - allocated_notional_for_strategy(&settings, strategy_key)
                 }
                 StrategyCategory::Intraday if kind.is_live_insight() => {
-                    intraday_strategy_effective_budget(&settings, strategy_key)
+                    signal_weighted_strategy_budget(&settings, dashboard, kind, StrategyCategory::Intraday, now_ms)
                         - allocated_notional_for_strategy(&settings, strategy_key)
                 }
                 _ => f64::INFINITY,
@@ -264,6 +267,7 @@ async fn submit_selected_signal(
         let remaining_budget = (settings.daily_notional_limit - allocated)
             .min(category_notional_limit(&settings, category) - category_allocated)
             .min(strategy_remaining_budget)
+            .min(symbol_remaining_budget)
             .max(0.0);
         notional = notional.min(remaining_budget / stop_headroom_multiplier);
         if notional < minimum_book_order {

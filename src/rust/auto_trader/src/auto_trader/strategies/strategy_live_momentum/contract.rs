@@ -4,7 +4,7 @@ pub(super) fn contract() -> StrategyContract {
         insight: "live momentum insight",
         entry: "direction agrees with nonzero 10-second momentum or 5-minute trend evidence; then shared walk-forward and risk gates apply",
         exit: super::exit::description(),
-        entry_order: "configured AutoOrderType (default IOC); VWAP/TWAP use configured duration and participation",
+        entry_order: "passive PostOnlyLimit by default; IOC is reserved for high urgency; VWAP/TWAP use configured duration and participation",
         exit_order: "StopMarket protective order; IOC close order for strategy and take-profit exits",
         behavior: "directional continuation from short-horizon trend and momentum",
     }

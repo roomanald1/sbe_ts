@@ -183,8 +183,8 @@ struct LearningStats {
     daily_positive: usize,
     #[serde(default)]
     daily_realized_pnl: f64,
-    // Ordered outcomes used by strategy sizing so old wins cannot dominate
-    // the current performance estimate.
+    // Ordered recent outcomes used by strategy sizing so old results cannot dominate
+    // current win-rate or net-P&L estimates.
     #[serde(default)]
     recent_trade_pnls: Vec<(u64, f64)>,
 }
