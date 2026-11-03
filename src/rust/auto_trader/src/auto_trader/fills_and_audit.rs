@@ -288,10 +288,10 @@ fn queue_auto_trader_audit(state: &AutoTraderState, payload: serde_json::Value) 
                 "Auto-trader execution audit writer stopped; event could not be queued"
             );
         }
-    } else if state.audit_tx.try_send(payload).is_err() {
+    } else if state.audit_tx.send(payload).is_err() {
         crate::service_log!(
-            "WARN",
-            "Auto-trader audit queue is full; dropping a decision event"
+            "ERROR",
+            "Auto-trader decision audit writer stopped; event could not be queued"
         );
     }
 }

@@ -65,7 +65,7 @@ mod strategy_cleanup_integration_tests {
     }
 
     pub(super) fn test_state(settings: Settings) -> AutoTraderState {
-        let (audit_tx, _) = mpsc::channel(1);
+        let (audit_tx, _) = mpsc::unbounded_channel();
         let (execution_audit_tx, _) = mpsc::unbounded_channel();
         let (state_updates, _) = tokio::sync::broadcast::channel(1);
         let path =

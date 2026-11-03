@@ -159,20 +159,21 @@ pub fn router() -> Router {
         .map(|value| value == "true")
         .unwrap_or(settings.enabled);
     settings.enabled = enabled;
-    let (audit_tx, mut audit_rx) = mpsc::channel(256);
+    let (audit_tx, mut audit_rx) = mpsc::unbounded_channel();
     let (execution_audit_tx, mut execution_audit_rx) = mpsc::unbounded_channel();
     let audit_client = reqwest::Client::builder()
         .timeout(Duration::from_secs(5))
         .build()
         .unwrap_or_else(|_| reqwest::Client::new());
+    let execution_audit_client = audit_client.clone();
     tokio::spawn(async move {
-        loop {
-            tokio::select! {
-                biased;
-                Some(payload) = execution_audit_rx.recv() => store_execution_audit_until_saved(&audit_client, &payload).await,
-                Some(payload) = audit_rx.recv() => { store_auto_trader_audit(&audit_client, &payload).await; },
-                else => break,
-            }
+        while let Some(payload) = execution_audit_rx.recv().await {
+            store_execution_audit_until_saved(&execution_audit_client, &payload).await;
+        }
+    });
+    tokio::spawn(async move {
+        while let Some(payload) = audit_rx.recv().await {
+            store_execution_audit_until_saved(&audit_client, &payload).await;
         }
     });
     let carry_path = dated_carry_path(&json_settings_path);

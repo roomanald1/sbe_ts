@@ -565,8 +565,8 @@ async fn receive_dated_carry_signal(
         request_settings_persist(&state)?;
     }
     if let Some(payload) = audit_payload {
-        if let Err(error) = state.audit_tx.try_send(payload) {
-            crate::service_log!("WARN", "Dated carry paper audit queue unavailable: {error}");
+        if let Err(error) = state.audit_tx.send(payload) {
+            crate::service_log!("ERROR", "Dated carry paper audit writer stopped: {error}");
         }
     }
     Ok(StatusCode::ACCEPTED)

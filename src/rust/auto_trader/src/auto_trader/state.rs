@@ -16,7 +16,7 @@ struct AutoTraderState {
     pending_live_signals: Arc<Mutex<PendingSignalQueue>>,
     live_signal_notify: Arc<Notify>,
     signal_book_prewarms: Arc<Mutex<BTreeMap<String, Instant>>>,
-    audit_tx: mpsc::Sender<serde_json::Value>,
+    audit_tx: mpsc::UnboundedSender<serde_json::Value>,
     execution_audit_tx: mpsc::UnboundedSender<serde_json::Value>,
     gap_summary: Arc<std::sync::Mutex<GapSummary>>,
     insight_processing_ms: Arc<Mutex<Vec<f64>>>,

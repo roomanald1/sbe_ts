@@ -205,9 +205,10 @@ fn select_cycle_signal<'a>(
                 .copied()
                 .chain(neutral_scout_candidates.iter())
                 .filter(|signal| {
-                    if scout_walk_forward_thresholds(signal).is_none()
-                        || !passes_pullback_confirmation(signal)
-                    {
+                    // Scouts are deliberately small probes. A missing pullback
+                    // confirmation keeps a signal out of normal entry, but must not
+                    // prevent a scout from sampling a directionally qualified opportunity.
+                    if scout_walk_forward_thresholds(signal).is_none() {
                         return false;
                     }
                     let live_scout_only = is_live_scout_only_signal(signal);
@@ -319,7 +320,7 @@ mod signal_selection_behavior_tests {
 
     fn state() -> AutoTraderState {
         let (state_updates, _) = tokio::sync::broadcast::channel(8);
-        let (audit_tx, _) = tokio::sync::mpsc::channel(8);
+        let (audit_tx, _) = tokio::sync::mpsc::unbounded_channel();
         let (execution_audit_tx, _) = tokio::sync::mpsc::unbounded_channel();
         AutoTraderState {
             client: reqwest::Client::new(),
@@ -394,6 +395,23 @@ mod signal_selection_behavior_tests {
         assert!(passes_pullback_confirmation(&pullback));
         pullback.direction = "neutral".into();
         assert!(!passes_pullback_confirmation(&pullback));
+    }
+
+    #[test]
+    fn scout_can_probe_pullback_strategy_without_pullback_confirmation() {
+        let state = state();
+        let candidate = signal(0.9, 0.9, Some("live-order-book"), false);
+        assert!(needs_pullback_confirmation(&candidate));
+        assert!(!passes_pullback_confirmation(&candidate));
+        let signals = vec![candidate.clone()];
+        let fresh = vec![&candidate];
+        let empty_dashboard = dashboard(Vec::new());
+        let selected = select_cycle_signal(input(
+            &state, &empty_dashboard, &signals, &fresh, &[], 50.0, 0,
+        ))
+        .unwrap_or_else(|_| panic!("a small scout should sample a qualified signal without pullback confirmation"));
+        assert_eq!(selected.0.strategy.as_deref(), Some("live-order-book"));
+        assert!(selected.1 && selected.2);
     }
 
     #[test]
