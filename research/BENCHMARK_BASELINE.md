@@ -509,3 +509,19 @@ Same serial benchmark targets, WSL2 environment, and optimized Cargo profiles. A
 | Book snapshot | 44.6 ns/calculation | 44.5 ns/calculation | -0.2% |
 
 Same serial workloads, WSL2 environment, and optimized Cargo profiles. Evaluator and Insights snapshot paths remain near baseline. The signal serialization result rose 6.9% in one run; this does not measure the added scout serialization or outcome persistence path, so treat it as an unconfirmed timing outlier. No services were started or stopped.
+
+
+## Final follow-up run (2026-11-02 21:57 UTC)
+
+### Scout fallback guard
+
+| Workload | Latest comparable run (20:20 UTC) | Current run | Change |
+|---|---:|---:|---:|
+| Auto-trader entry evaluation | 1.1–5.1 ns/evaluation | 1.1–5.0 ns/evaluation | Within baseline range |
+| Auto-trader position evaluation | 1.1–1.9 ns/evaluation | 1.1–1.9 ns/evaluation | Within baseline range |
+| Signal serialization | 524.6 ns/operation | 487.2 ns/operation | -7.1% |
+| Market depth assessment | 557.4 ns/operation | 544.3 ns/operation | -2.4% |
+| Limit-order request construction | 402.5 ns/operation | 387.4 ns/operation | -3.7% |
+| Strategy parameter validation | 1.9 ns/operation | 1.9 ns/operation | No change |
+
+Same auto-trader bench target, WSL2 environment, and optimized Cargo profile. This change is in candidate routing and shadow-only guards, outside the measured hot loops. All measured workloads remained within recent run variation. No services were started or stopped.

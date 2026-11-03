@@ -448,7 +448,7 @@ async fn submit_cycle_signal(
     let evidence = dashboard.walk_forward.iter().find(|item| {
         item.symbol == signal.symbol && is_entry_evidence_horizon(item.horizon_seconds)
     });
-    if scout && daily_signal_candidate(signal) {
+    if should_shadow_daily_scout(scout, signal) {
         return Ok(CycleResult {
             status: "shadowed",
             reason: Some("Daily scout candidate is shadow-only; no order submitted".into()),
@@ -1257,7 +1257,7 @@ async fn run_cycle_inner(
     let live_signals = if has_daily_strategy_signals {
         signals
             .iter()
-            .filter(|signal| !daily_signal_candidate(signal))
+            .filter(|signal| is_fallback_signal_candidate(signal))
             .cloned()
             .collect::<Vec<_>>()
     } else {
@@ -1267,7 +1267,7 @@ async fn run_cycle_inner(
         fresh_directional
             .iter()
             .copied()
-            .filter(|signal| !daily_signal_candidate(signal))
+            .filter(|signal| is_fallback_signal_candidate(signal))
             .collect::<Vec<_>>()
     } else {
         Vec::new()
@@ -1275,7 +1275,7 @@ async fn run_cycle_inner(
     let live_neutral_scout_candidates = if has_daily_strategy_signals {
         neutral_scout_candidates
             .iter()
-            .filter(|signal| !daily_signal_candidate(signal))
+            .filter(|signal| is_fallback_signal_candidate(signal))
             .cloned()
             .collect::<Vec<_>>()
     } else {

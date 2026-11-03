@@ -1,12 +1,24 @@
+fn is_daily_strategy_signal(signal: &Signal) -> bool {
+    signal.strategy_candidate
+        && signal.strategy.as_deref().is_some_and(is_independent_daily_strategy)
+}
+
 fn daily_signal_candidate(signal: &Signal) -> bool {
-    let is_daily_candidate = signal.strategy_candidate
-        && signal.strategy.as_deref().is_some_and(is_independent_daily_strategy);
+    let is_daily_candidate = is_daily_strategy_signal(signal);
     // Defense in depth: RSI entries must still satisfy the primary rule when queued.
     let failed_rsi_entry_gate = signal.strategy.as_deref() == Some("rsi2-oversold-rebound")
         && signal.strategy_decision.as_ref()
             .and_then(|decision| decision.get("primary_passed"))
             .and_then(serde_json::Value::as_bool) == Some(false);
     is_daily_candidate && !failed_rsi_entry_gate
+}
+
+fn is_fallback_signal_candidate(signal: &Signal) -> bool {
+    !is_daily_strategy_signal(signal)
+}
+
+fn should_shadow_daily_scout(scout: bool, signal: &Signal) -> bool {
+    scout && is_daily_strategy_signal(signal)
 }
 
 fn signal_max_age_seconds(signal: &Signal) -> u64 {
@@ -361,6 +373,32 @@ mod parallel_daily_candidate_tests {
             news_attribution: None,
             entry_gate: None,
         }
+    }
+
+
+    #[test]
+    fn failed_rsi_daily_candidate_cannot_fall_back_to_strict_selection() {
+        let mut candidate = signal("rsi2-oversold-rebound", "bullish");
+        candidate.strategy_decision = Some(serde_json::json!({
+            "primary_passed": false,
+            "primary_metric_value": 100.0,
+            "primary_level": 10.0,
+            "scout_parameter_probe": true,
+            "scout_parameter_key": "maximum_hold_days",
+            "scout_parameter_value": 4.0
+        }));
+
+        assert!(is_daily_strategy_signal(&candidate));
+        assert!(!daily_signal_candidate(&candidate));
+        assert!(!is_fallback_signal_candidate(&candidate));
+    }
+
+    #[test]
+    fn daily_scouts_are_shadow_only() {
+        let candidate = signal("trend-50-200", "bullish");
+
+        assert!(should_shadow_daily_scout(true, &candidate));
+        assert!(!should_shadow_daily_scout(false, &candidate));
     }
 
     #[test]

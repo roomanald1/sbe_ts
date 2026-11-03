@@ -1,5 +1,6 @@
 import { BehaviorSubject } from 'rxjs';
 import type { Position, PositionTrade } from './PositionTypes';
+import { buildLegacyLedgerOutcomes } from './legacy_ledger_outcomes';
 import { currentPositionSnapshot, subscribePositionStream, type PositionUiSnapshot } from '../position_stream';
 import { currentAutoTraderSnapshot, subscribeAutoTraderStream, type AutoTraderUiSnapshot } from '../auto_trader_stream';
 
@@ -374,10 +375,17 @@ export class AutoTraderOutcomesModel {
         for (const fill of record.exit_fills ?? []) if (fill.parent_order_id) orderByLedgerId.set(fill.parent_order_id, auditOrder);
       }
       const instanceGroups = new Map<string, { strategy: string; instanceId: string; symbol: string; trades: PositionTrade[]; quoteRate?: number }>();
+      const legacyTradesBySymbol = new Map<string, PositionTrade[]>();
       for (const trade of ledgerTrades) {
         if (trade.source && trade.source !== 'auto') continue;
         const order = trade.parent_order_id ? orderByLedgerId.get(trade.parent_order_id) : undefined;
-        const strategy = order?.strategy ?? 'legacy-unknown';
+        if (!order?.decision_id) {
+          const symbolTrades = legacyTradesBySymbol.get(trade.symbol) ?? [];
+          symbolTrades.push(trade);
+          legacyTradesBySymbol.set(trade.symbol, symbolTrades);
+          continue;
+        }
+        const strategy = order.strategy ?? 'legacy-unknown';
         const instanceId = order?.decision_id ?? ('ledger:' + (trade.parent_order_id ?? trade.id));
         const instanceKey = strategy + ':' + instanceId;
         const groupKey = instanceKey + ':' + trade.symbol;
@@ -387,6 +395,11 @@ export class AutoTraderOutcomesModel {
       }
       const openPositionKeys = new Set((activityData.strategy_positions ?? []).filter((position) => Math.abs(position.quantity) > 1e-12).map((position) => (position.strategy + ':' + (position.decision_id ?? '') + ':' + position.symbol)));
       const ledgerOutcomeRows: AutoTraderOutcome[] = [];
+      for (const [symbol, symbolTrades] of legacyTradesBySymbol) {
+        const quote = quoteCurrency(symbol);
+        const rate = quote === 'USD' ? 1 : usdRates[quote];
+        ledgerOutcomeRows.push(...buildLegacyLedgerOutcomes(symbol, symbolTrades, quote, rate, ledgerRealizedData?.realized_pnl_by_parent_order ?? {}, new Map([...orderByLedgerId].map(([id, order]) => [id, order.order_type ?? '']))));
+      }
       for (const [groupKey, group] of instanceGroups) {
         const status = openPositionKeys.has(group.strategy + ':' + group.instanceId + ':' + group.symbol) ? 'Partially closed' : 'Closed';
         const orderedTrades = [...group.trades].sort((a, b) => a.timestamp - b.timestamp);
