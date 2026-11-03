@@ -47,7 +47,31 @@ pub struct SignalSnapshot {
     pub range_upper_bound: Option<f64>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct WindowedSignalValue {
+    pub window_seconds: u16,
+    pub value: Option<f64>,
+    #[serde(default)]
+    pub sample_count: u16,
+    #[serde(default)]
+    pub span_ms: u32,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct DepthSignalValue {
+    pub depth_levels: u8,
+    pub value: Option<f64>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct AbsorptionPressureValue {
+    pub window_seconds: u16,
+    pub replenishment_window_ms: u32,
+    pub touch_tolerance_bps: f64,
+    pub value: Option<f64>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct SignalComponents {
     pub trend_1m_percent: Option<f64>,
     pub momentum_10s_percent: Option<f64>,
@@ -64,6 +88,20 @@ pub struct SignalComponents {
     pub pressure_without_price_move: Option<f64>,
     #[serde(default)]
     pub aggressor_cost_bps: Option<f64>,
+    /// Feature values at supported live-strategy lookbacks; window is in seconds.
+    #[serde(default)]
+    pub momentum_by_window: Vec<WindowedSignalValue>,
+    #[serde(default)]
+    pub trend_volatility_units_by_window: Vec<WindowedSignalValue>,
+    #[serde(default)]
+    pub trade_flow_by_window: Vec<WindowedSignalValue>,
+    /// Bid/ask size imbalance using the first N displayed book levels.
+    #[serde(default)]
+    pub book_imbalance_by_depth: Vec<DepthSignalValue>,
+    #[serde(default)]
+    pub vwap_dislocation_by_window: Vec<WindowedSignalValue>,
+    #[serde(default)]
+    pub absorption_pressure_by_window: Vec<AbsorptionPressureValue>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

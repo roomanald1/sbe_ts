@@ -3,7 +3,6 @@ use std::collections::BTreeSet;
 
 const CARRY_SIGNAL_DAY_MS: u64 = 86_400_000;
 const CARRY_SIGNAL_COST_PERCENT: f64 = 0.5;
-const CARRY_MIN_DAYS_TO_EXPIRY: f64 = 7.0;
 
 #[derive(Serialize)]
 struct CarryEntryCandidate {
@@ -87,24 +86,24 @@ async fn carry_entry_signals(
         let Some(expiry_ms) = symbol.get("deliveryDate").and_then(serde_json::Value::as_u64) else { continue };
         if expiry_ms <= now { continue; }
         let days = (expiry_ms - now) as f64 / CARRY_SIGNAL_DAY_MS as f64;
-        if days < CARRY_MIN_DAYS_TO_EXPIRY { continue; }
         contracts.push((spot_symbol, future_symbol, expiry_ms, days, symbol));
     }
-    // Scan only the nearest quarterly expiry for each underlying. This keeps
-    // the carry signal focused while allowing entries throughout its lifecycle.
+    // Publish each live expiry so AutoTrader can score parameter variants against
+    // the same opportunity set. Its entry path still permits only one open lot per asset.
     contracts.sort_by_key(|(_, _, expiry_ms, _, _)| *expiry_ms);
-    let mut selected_spots = BTreeSet::new();
+    let mut spot_books: BTreeMap<&str, serde_json::Value> = BTreeMap::new();
     let mut signals = Vec::new();
     for (spot_symbol, future_symbol, expiry_ms, days, symbol) in contracts {
-        if !selected_spots.insert(spot_symbol) { continue; }
-        let spot_url = format!("https://api.binance.com/api/v3/depth?symbol={spot_symbol}&limit=100");
+        let spot_book = if let Some(book) = spot_books.get(spot_symbol) {
+            book.clone()
+        } else {
+            let spot_url = format!("https://api.binance.com/api/v3/depth?symbol={spot_symbol}&limit=100");
+            let book = carry_market_json(client, &spot_url).await?;
+            spot_books.insert(spot_symbol, book.clone());
+            book
+        };
         let future_url = format!("https://fapi.binance.com/fapi/v1/depth?symbol={future_symbol}&limit=100");
-        let (spot_result, future_result) = tokio::join!(
-            carry_market_json(client, &spot_url),
-            carry_market_json(client, &future_url)
-        );
-        let spot_book = spot_result?;
-        let future_book = future_result?;
+        let future_book = carry_market_json(client, &future_url).await?;
         let asks = carry_book_levels(&spot_book, "asks");
         let spot_bids = carry_book_levels(&spot_book, "bids");
         let bids = carry_book_levels(&future_book, "bids");

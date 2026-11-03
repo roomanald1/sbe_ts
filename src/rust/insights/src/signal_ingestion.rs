@@ -291,7 +291,16 @@ async fn ingest_signal_event(
                                     .insert((snapshot.symbol.clone(), snapshot.timestamp), vote);
                             }
                         }
-                        records.push(StoredSignalRecord::Snapshot(snapshot.clone()));
+                        let mut persisted_snapshot = snapshot.clone();
+                        // Granular live-only variants are used by AutoTrader and
+                        // are not needed in the long-term research snapshot store.
+                        persisted_snapshot.components.momentum_by_window.clear();
+                        persisted_snapshot.components.trend_volatility_units_by_window.clear();
+                        persisted_snapshot.components.trade_flow_by_window.clear();
+                        persisted_snapshot.components.book_imbalance_by_depth.clear();
+                        persisted_snapshot.components.vwap_dislocation_by_window.clear();
+                        persisted_snapshot.components.absorption_pressure_by_window.clear();
+                        records.push(StoredSignalRecord::Snapshot(persisted_snapshot));
                     }
                 }
                 snapshot
@@ -397,7 +406,14 @@ async fn ingest_signal_event(
             .signal_push_cache
             .insert(snapshot.symbol.clone(), dashboard);
         runtime.signal_push_notify.notify_one();
-        let snapshot_json = serde_json::to_value(snapshot).unwrap_or(serde_json::Value::Null);
+        let mut ui_snapshot = snapshot.clone();
+        ui_snapshot.components.momentum_by_window.clear();
+        ui_snapshot.components.trend_volatility_units_by_window.clear();
+        ui_snapshot.components.trade_flow_by_window.clear();
+        ui_snapshot.components.book_imbalance_by_depth.clear();
+        ui_snapshot.components.vwap_dislocation_by_window.clear();
+        ui_snapshot.components.absorption_pressure_by_window.clear();
+        let snapshot_json = serde_json::to_value(ui_snapshot).unwrap_or(serde_json::Value::Null);
         runtime
             .ui_snapshot_cache
             .insert(snapshot.symbol.clone(), snapshot_json);

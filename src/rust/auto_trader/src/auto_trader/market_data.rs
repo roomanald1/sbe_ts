@@ -51,6 +51,27 @@ struct Signal {
     entry_gate: Option<serde_json::Value>,
 }
 #[derive(Clone, Default, Deserialize, Serialize)]
+struct WindowedSignalValue {
+    window_seconds: u16,
+    value: Option<f64>,
+    #[serde(default)]
+    sample_count: u16,
+    #[serde(default)]
+    span_ms: u32,
+}
+#[derive(Clone, Default, Deserialize, Serialize)]
+struct DepthSignalValue {
+    depth_levels: u8,
+    value: Option<f64>,
+}
+#[derive(Clone, Default, Deserialize, Serialize)]
+struct AbsorptionPressureValue {
+    window_seconds: u16,
+    replenishment_window_ms: u32,
+    touch_tolerance_bps: f64,
+    value: Option<f64>,
+}
+#[derive(Clone, Default, Deserialize, Serialize)]
 struct SignalComponents {
     momentum_10s_percent: Option<f64>,
     trend_5m_volatility_units: Option<f64>,
@@ -62,6 +83,18 @@ struct SignalComponents {
     mispricing_vs_vwap_bps: Option<f64>,
     pressure_without_price_move: Option<f64>,
     aggressor_cost_bps: Option<f64>,
+    #[serde(default)]
+    momentum_by_window: Vec<WindowedSignalValue>,
+    #[serde(default)]
+    trend_volatility_units_by_window: Vec<WindowedSignalValue>,
+    #[serde(default)]
+    trade_flow_by_window: Vec<WindowedSignalValue>,
+    #[serde(default)]
+    book_imbalance_by_depth: Vec<DepthSignalValue>,
+    #[serde(default)]
+    vwap_dislocation_by_window: Vec<WindowedSignalValue>,
+    #[serde(default)]
+    absorption_pressure_by_window: Vec<AbsorptionPressureValue>,
 }
 #[derive(Clone, Deserialize, Serialize)]
 struct LearnedExitPolicy {

@@ -13,6 +13,10 @@ pub(super) fn parameters() -> Vec<StrategyParameterSpec> {
         -1.0,
     )];
     specs.extend([
+        param(StrategyParameterKey::MomentumLookbackSeconds, "Momentum lookback", 10.0, 5.0, 30.0, 5.0, "seconds", 0.0),
+        param(StrategyParameterKey::TrendLookbackSeconds, "Trend lookback", 300.0, 60.0, 900.0, 60.0, "seconds", 0.0),
+    ]);
+    specs.extend([
         param(
             StrategyParameterKey::StopLossPercent,
             "Protective stop distance",

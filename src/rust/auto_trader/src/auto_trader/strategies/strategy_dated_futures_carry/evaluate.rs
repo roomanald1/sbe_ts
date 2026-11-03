@@ -4,7 +4,6 @@ use crate::auto_trader::{
     CARRY_COST_GATE_PERCENT,
 };
 
-const MIN_DAYS_TO_EXPIRY: f64 = 7.0;
 const CARRY_METRIC_TOLERANCE: f64 = 1e-6;
 const FUTURE_SIGNAL_TOLERANCE_MS: u64 = 5_000;
 
@@ -28,14 +27,18 @@ pub(crate) fn evaluate(input: &StrategySignal<'_>) -> Result<StrategyDecision, S
             evaluated_at_ms,
             candidate,
         }) if !input.position_open => {
-            let minimum_days = strategy_parameter_value(
-                input.parameters,
-                StrategyParameterKey::CarryMinimumDaysToExpiry,
-            ).unwrap_or(MIN_DAYS_TO_EXPIRY);
-            let cost_gate_percent = strategy_parameter_value(
-                input.parameters,
-                StrategyParameterKey::CarryCostGatePercent,
-            ).unwrap_or(CARRY_COST_GATE_PERCENT);
+            let (Some(minimum_days), Some(cost_gate_percent)) = (
+                strategy_parameter_value(
+                    input.parameters,
+                    StrategyParameterKey::CarryMinimumDaysToExpiry,
+                ),
+                strategy_parameter_value(
+                    input.parameters,
+                    StrategyParameterKey::CarryCostGatePercent,
+                ),
+            ) else {
+                return Ok(StrategyDecision::Reject);
+            };
             if dated_carry_entry_is_eligible(
                 candidate, emitted_at_ms, evaluated_at_ms,
                 minimum_days, cost_gate_percent,
@@ -121,13 +124,15 @@ fn dated_carry_entry_is_eligible(
     // The executable carry edge is futures bid minus the spot ask, expressed
     // relative to spot cost. Recompute it instead of trusting the prefilled text fields.
     let basis_percent = (candidate.future_bid / candidate.spot_ask - 1.0) * 100.0;
-    let net_after_cost_percent = basis_percent - cost_gate_percent;
+    let net_after_cost_percent = candidate.net_after_budget_percent;
+    let expected_net_after_budget_percent = basis_percent - CARRY_COST_GATE_PERCENT;
     candidate.eligible
         && basis_percent.is_finite()
-        && net_after_cost_percent > 0.0
+        && net_after_cost_percent.is_finite()
+        && net_after_cost_percent >= cost_gate_percent
         && (candidate.basis_percent - basis_percent).abs() <= CARRY_METRIC_TOLERANCE
-        && (candidate.net_after_budget_percent
-            - (basis_percent - CARRY_COST_GATE_PERCENT)).abs() <= CARRY_METRIC_TOLERANCE
+        && (candidate.net_after_budget_percent - expected_net_after_budget_percent).abs()
+            <= CARRY_METRIC_TOLERANCE
 }
 
 fn dated_carry_settlement_is_valid(
@@ -189,7 +194,12 @@ mod tests {
 
     fn parameters() -> &'static BTreeMap<String, f64> {
         static PARAMETERS: OnceLock<BTreeMap<String, f64>> = OnceLock::new();
-        PARAMETERS.get_or_init(BTreeMap::new)
+        PARAMETERS.get_or_init(|| {
+            BTreeMap::from([
+                ("carry_minimum_days_to_expiry".to_owned(), 7.0),
+                ("carry_cost_gate_percent".to_owned(), 0.5),
+            ])
+        })
     }
 
     fn input<'a>(
@@ -239,6 +249,43 @@ mod tests {
         below_cost.net_after_budget_percent = -0.1;
         assert_eq!(
             evaluate(&input(entry(&below_cost), false)).unwrap(),
+            StrategyDecision::Reject
+        );
+    }
+
+    #[test]
+    fn entry_uses_profile_edge_gate_and_rejects_missing_parameters() {
+        let mut candidate = candidate();
+        candidate.future_bid = 100.95;
+        candidate.basis_percent = 0.95;
+        candidate.net_after_budget_percent = 0.45;
+        let lower_gate = BTreeMap::from([
+            ("carry_minimum_days_to_expiry".to_owned(), 7.0),
+            ("carry_cost_gate_percent".to_owned(), 0.4),
+        ]);
+        let mut lower_gate_input = input(entry(&candidate), false);
+        lower_gate_input.parameters = &lower_gate;
+        assert_eq!(
+            evaluate(&lower_gate_input).unwrap(),
+            StrategyDecision::Enter
+        );
+
+        let higher_gate = BTreeMap::from([
+            ("carry_minimum_days_to_expiry".to_owned(), 7.0),
+            ("carry_cost_gate_percent".to_owned(), 0.5),
+        ]);
+        let mut higher_gate_input = input(entry(&candidate), false);
+        higher_gate_input.parameters = &higher_gate;
+        assert_eq!(
+            evaluate(&higher_gate_input).unwrap(),
+            StrategyDecision::Reject
+        );
+
+        let missing = BTreeMap::from([("carry_minimum_days_to_expiry".to_owned(), 7.0)]);
+        let mut missing_input = input(entry(&candidate), false);
+        missing_input.parameters = &missing;
+        assert_eq!(
+            evaluate(&missing_input).unwrap(),
             StrategyDecision::Reject
         );
     }

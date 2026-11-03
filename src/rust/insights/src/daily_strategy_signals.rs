@@ -606,29 +606,67 @@ fn insight_parameter_probe(
     let stable_hash = profile_symbol.bytes().chain(strategy.bytes()).fold(2_166_136_261_u64, |hash, byte| {
         hash.wrapping_mul(16_777_619) ^ u64::from(byte)
     });
-    let index = (day.wrapping_add(stable_hash) % candidates.len() as u64) as usize;
-    let (key, current, min, max, step) = &candidates[index];
-    let direction = if day % 2 == 0 { 1.0 } else { -1.0 };
-    let preferred = current + direction * step;
-    let probe = if preferred >= *min && preferred <= *max {
-        preferred
-    } else {
-        current - direction * step
-    };
-    if probe < *min || probe > *max || (probe - current).abs() < step * 0.5 {
-        return None;
+    let direction = if (day >> 1) & 1 == 0 { 1.0 } else { -1.0 };
+    if candidates.len() == 1 {
+        let (key, current, min, max, step) = &candidates[0];
+        let single_direction = if day % 2 == 0 { 1.0 } else { -1.0 };
+        let preferred = current + single_direction * step;
+        let value = if preferred >= *min && preferred <= *max { preferred } else { current - single_direction * step };
+        if value < *min || value > *max || (value-current).abs() < step * 0.5 { return None; }
+        let mut probe_profiles = profiles.clone();
+        let matching_profile = probe_profiles.as_array_mut()?.iter_mut().find(|profile| {
+            profile.get("symbol").and_then(serde_json::Value::as_str) == Some(profile_symbol)
+                && profile.get("strategy").and_then(serde_json::Value::as_str) == Some(strategy)
+        })?;
+        let matching_parameter = matching_profile.get_mut("parameters")?.as_array_mut()?.iter_mut().find(|parameter| {
+            parameter.get("key").and_then(serde_json::Value::as_str) == Some(key.as_str())
+        })?;
+        matching_parameter["value"] = serde_json::json!(value);
+        let parameters = insight_profile_parameters(&probe_profiles, profile_symbol, strategy);
+        return Some((key.clone(), value, parameters, probe_profiles));
+    }
+    let pair_count = candidates.len() * (candidates.len() - 1) / 2;
+    let wanted = (day.wrapping_add(stable_hash) % pair_count as u64) as usize;
+    let mut pair_index = 0;
+    let mut selected = None;
+    for left in 0..candidates.len() {
+        for right in left + 1..candidates.len() {
+            if pair_index == wanted { selected = Some((left, right)); break; }
+            pair_index += 1;
+        }
+        if selected.is_some() { break; }
+    }
+    let (left, right) = selected?;
+    let mut combination = BTreeMap::new();
+    for index in [left, right] {
+        let (key, current, min, max, step) = &candidates[index];
+        let preferred = current + direction * step;
+        let value = if preferred >= *min && preferred <= *max { preferred } else { current - direction * step };
+        if value < *min || value > *max || (value-current).abs() < step * 0.5 { return None; }
+        combination.insert(key.clone(), value);
     }
     let mut probe_profiles = profiles.clone();
     let matching_profile = probe_profiles.as_array_mut()?.iter_mut().find(|profile| {
         profile.get("symbol").and_then(serde_json::Value::as_str) == Some(profile_symbol)
             && profile.get("strategy").and_then(serde_json::Value::as_str) == Some(strategy)
     })?;
-    let matching_parameter = matching_profile.get_mut("parameters")?.as_array_mut()?.iter_mut().find(|parameter| {
-        parameter.get("key").and_then(serde_json::Value::as_str) == Some(key)
-    })?;
-    matching_parameter["value"] = serde_json::json!(probe);
+    let matching_parameters = matching_profile.get_mut("parameters")?.as_array_mut()?;
+    for (key, value) in &combination {
+        let matching_parameter = matching_parameters.iter_mut().find(|parameter| {
+            parameter.get("key").and_then(serde_json::Value::as_str) == Some(key.as_str())
+        })?;
+        matching_parameter["value"] = serde_json::json!(value);
+    }
     let parameters = insight_profile_parameters(&probe_profiles, profile_symbol, strategy);
-    Some((key.clone(), probe, parameters, probe_profiles))
+    let pair = combination.iter().map(|(key, value)| format!("{key}={value:.8}")).collect::<Vec<_>>().join(",");
+    let mut context_hash = 14_695_981_039_346_656_037_u64;
+    for (key, value) in parameters.iter().filter(|(key, _)| !combination.contains_key(*key)) {
+        for byte in format!("{key}={value:.8};").bytes() {
+            context_hash = (context_hash ^ u64::from(byte)).wrapping_mul(1_099_511_628_211);
+        }
+    }
+    let probe_key = format!("combo:{pair}|ctx:{context_hash:016x}");
+    Some((probe_key, 0.0, parameters, probe_profiles))
 }
 
 fn insight_profile_parameters(
@@ -1169,6 +1207,28 @@ mod risk_adjusted_monthly_momentum_tests {
 #[cfg(test)]
 mod strategy_parameter_probe_tests {
     use super::*;
+
+    #[test]
+    fn probes_two_parameters_as_a_single_profile_variant() {
+        let profiles = serde_json::json!([{
+            "symbol": "ETH-USDT",
+            "strategy": "donchian-20-sma200",
+            "parameters": [
+                {"key": "breakout_lookback_days", "value": 20.0, "min": 5.0, "max": 30.0, "step": 1.0},
+                {"key": "breakout_entry_distance_percent", "value": 0.5, "min": 0.0, "max": 2.0, "step": 0.1}
+            ]
+        }]);
+        let probe = insight_parameter_probe(&profiles, "ETH-USDT", "donchian-20-sma200", 2).unwrap();
+        assert!(probe.0.starts_with("combo:"));
+        assert_eq!(probe.1, 0.0);
+        let changed = probe.3[0]["parameters"].as_array().unwrap().iter()
+            .filter(|parameter| parameter["value"] != profiles[0]["parameters"][
+                if parameter["key"] == "breakout_lookback_days" { 0 } else { 1 }
+            ]["value"])
+            .count();
+        assert_eq!(changed, 2);
+        assert_eq!(probe.2["breakout_lookback_days"], 19.0);
+    }
 
     #[test]
     fn rotates_parameter_values_within_profile_bounds() {

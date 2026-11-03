@@ -13,6 +13,15 @@ pub(super) fn parameters() -> Vec<StrategyParameterSpec> {
         -1.0,
     )];
     specs.extend([
+        param(StrategyParameterKey::TradeFlowWindowSeconds, "Trade-flow fallback window", 60.0, 10.0, 120.0, 10.0, "seconds", 0.0),
+        param(StrategyParameterKey::MomentumLookbackSeconds, "Price-movement lookback", 10.0, 5.0, 30.0, 5.0, "seconds", 0.0),
+        param(StrategyParameterKey::AbsorptionLookbackSeconds, "Absorption lookback", 30.0, 10.0, 60.0, 10.0, "seconds", 0.0),
+        param(StrategyParameterKey::AbsorptionReplenishmentSeconds, "Replenishment window", 2.0, 1.0, 5.0, 1.0, "seconds", 0.0),
+        param(StrategyParameterKey::AbsorptionTouchToleranceBps, "Touch tolerance", 2.0, 1.0, 5.0, 1.0, "bps", 0.0),
+        param(StrategyParameterKey::AbsorptionMaximumPriceMovePercent, "Maximum price movement", 0.025, 0.005, 0.100, 0.005, "%", -1.0),
+        param(StrategyParameterKey::AbsorptionMinimumFlowImbalance, "Minimum flow without price movement", 0.55, 0.20, 0.90, 0.05, "ratio", -1.0),
+    ]);
+    specs.extend([
         param(
             StrategyParameterKey::StopLossPercent,
             "Protective stop distance",

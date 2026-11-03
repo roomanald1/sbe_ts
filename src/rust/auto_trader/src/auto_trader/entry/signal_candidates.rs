@@ -21,6 +21,137 @@ fn live_strategy_source_signals(signals: &[Signal]) -> Vec<Signal> {
     signals.iter().filter(|signal| !is_daily_strategy_signal(signal)).cloned().collect()
 }
 
+fn live_strategy_feature_signal(
+    signal: &Signal,
+    strategy: Strategy,
+    parameters: &BTreeMap<String, f64>,
+) -> Option<Signal> {
+    let parameter = |key: StrategyParameterKey| parameters.get(key.as_str()).copied();
+    let mut configured = signal.clone();
+    match strategy {
+        Strategy::LiveMomentum => {
+            let momentum_window = parameter(StrategyParameterKey::MomentumLookbackSeconds)? as u16;
+            let trend_window = parameter(StrategyParameterKey::TrendLookbackSeconds)? as u16;
+            configured.components.momentum_10s_percent = signal.components.momentum_by_window
+                .iter().find(|feature| feature.window_seconds == momentum_window)?.value;
+            configured.components.trend_5m_volatility_units = signal.components.trend_volatility_units_by_window
+                .iter().find(|feature| feature.window_seconds == trend_window)?.value;
+        }
+        Strategy::LiveTradeFlow => {
+            let window = parameter(StrategyParameterKey::TradeFlowWindowSeconds)? as u16;
+            configured.components.trade_flow_imbalance = signal.components.trade_flow_by_window
+                .iter().find(|feature| feature.window_seconds == window)?.value;
+        }
+        Strategy::LiveOrderBook => {
+            let depth = parameter(StrategyParameterKey::BookDepthLevels)? as u8;
+            let momentum_window = parameter(StrategyParameterKey::MomentumLookbackSeconds)? as u16;
+            configured.components.book_imbalance = signal.components.book_imbalance_by_depth
+                .iter().find(|feature| feature.depth_levels == depth)?.value;
+            configured.components.momentum_10s_percent = signal.components.momentum_by_window
+                .iter().find(|feature| feature.window_seconds == momentum_window)?.value;
+        }
+        Strategy::LiveVwapDislocation => {
+            let window = parameter(StrategyParameterKey::VwapLookbackSeconds)? as u16;
+            let momentum_window = parameter(StrategyParameterKey::MomentumLookbackSeconds)? as u16;
+            let minimum_count = parameter(StrategyParameterKey::VwapMinimumTradeCount)? as u16;
+            let minimum_span_ms = (parameter(StrategyParameterKey::VwapMinimumTradeSpanSeconds)? * 1_000.0) as u32;
+            configured.components.momentum_10s_percent = signal.components.momentum_by_window
+                .iter().find(|feature| feature.window_seconds == momentum_window)?.value;
+            let feature = signal.components.vwap_dislocation_by_window
+                .iter().find(|feature| feature.window_seconds == window)?;
+            configured.components.mispricing_vs_vwap_bps =
+                (feature.sample_count >= minimum_count && feature.span_ms >= minimum_span_ms)
+                    .then_some(feature.value).flatten();
+        }
+        Strategy::LiveAbsorptionPressure => {
+            let window = parameter(StrategyParameterKey::AbsorptionLookbackSeconds)? as u16;
+            let replenishment_ms = (parameter(StrategyParameterKey::AbsorptionReplenishmentSeconds)? * 1_000.0).round() as u32;
+            let tolerance = parameter(StrategyParameterKey::AbsorptionTouchToleranceBps)?;
+            let maximum_move = parameter(StrategyParameterKey::AbsorptionMaximumPriceMovePercent)?;
+            let momentum_window = parameter(StrategyParameterKey::MomentumLookbackSeconds)? as u16;
+            let movement = signal.components.momentum_by_window.iter()
+                .find(|feature| feature.window_seconds == momentum_window)?.value?;
+            configured.components.momentum_10s_percent = Some(movement);
+            if movement.abs() > maximum_move { return None; }
+            let pressure = signal.components.absorption_pressure_by_window.iter()
+                .find(|feature| feature.window_seconds == window
+                    && feature.replenishment_window_ms == replenishment_ms
+                    && (feature.touch_tolerance_bps - tolerance).abs() < 1e-6)
+                .and_then(|feature| feature.value);
+            let flow_window = parameter(StrategyParameterKey::TradeFlowWindowSeconds)? as u16;
+            let minimum_flow = parameter(StrategyParameterKey::AbsorptionMinimumFlowImbalance)?;
+            let flow_fallback = signal.components.trade_flow_by_window.iter()
+                .find(|feature| feature.window_seconds == flow_window)
+                .and_then(|feature| feature.value)
+                .filter(|flow| flow.abs() >= minimum_flow)
+                .map(|flow| -flow);
+            configured.components.pressure_without_price_move = pressure.or(flow_fallback);
+        }
+        _ => return None,
+    }
+    // The selected scalar features and applied parameters are retained in the
+    // decision audit; raw variants are only needed before strategy evaluation.
+    configured.components.momentum_by_window.clear();
+    configured.components.trend_volatility_units_by_window.clear();
+    configured.components.trade_flow_by_window.clear();
+    configured.components.book_imbalance_by_depth.clear();
+    configured.components.vwap_dislocation_by_window.clear();
+    configured.components.absorption_pressure_by_window.clear();
+    Some(configured)
+}
+
+fn live_scout_direction_candidates(
+    signal: &Signal,
+    strategy: Strategy,
+    parameters: &BTreeMap<String, f64>,
+) -> Vec<Signal> {
+    let Some(signal) = live_strategy_feature_signal(signal, strategy, parameters) else {
+        return Vec::new();
+    };
+    let source_values: Vec<f64> = match strategy {
+        Strategy::LiveMomentum => [
+            signal.components.momentum_10s_percent,
+            signal.components.trend_5m_volatility_units,
+        ]
+        .into_iter()
+        .flatten()
+        .collect(),
+        Strategy::LiveTradeFlow => signal.components.trade_flow_imbalance.into_iter().collect(),
+        Strategy::LiveOrderBook => signal.components.book_imbalance.into_iter().collect(),
+        Strategy::LiveVwapDislocation => signal.components.mispricing_vs_vwap_bps.into_iter().collect(),
+        Strategy::LiveAbsorptionPressure => signal.components.pressure_without_price_move
+            .map(|pressure| -pressure)
+            .into_iter()
+            .collect(),
+        _ => Vec::new(),
+    };
+    let mut directions = source_values
+        .into_iter()
+        .filter(|value| value.is_finite() && *value != 0.0)
+        .map(|value| if value > 0.0 { "bullish" } else { "bearish" })
+        .collect::<Vec<_>>();
+    directions.sort_unstable();
+    directions.dedup();
+
+    let passing = directions
+        .into_iter()
+        .filter_map(|direction| {
+            let mut candidate = signal.clone();
+            candidate.direction = direction.to_owned();
+            let input = StrategySignal::entry(&candidate, parameters);
+            matches!(strategy.evaluate(&input), Ok(StrategyDecision::Enter)).then_some(candidate)
+        })
+        .collect::<Vec<_>>();
+    let distinct_directions = passing
+        .iter()
+        .map(|candidate| candidate.direction.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+
+    // Momentum has two inputs. If they independently qualify in opposite
+    // directions, the scout has no unambiguous side and must wait.
+    if distinct_directions.len() == 1 { passing } else { Vec::new() }
+}
+
 fn should_shadow_daily_scout(scout: bool, signal: &Signal) -> bool {
     scout && is_daily_strategy_signal(signal)
 }
@@ -355,6 +486,127 @@ fn format_no_tradeable_bias(
 
 
 include!("../diagnostics/candidate_entry_review.rs");
+
+#[cfg(test)]
+mod live_scout_direction_tests {
+    use super::*;
+
+    fn source() -> Signal {
+        Signal {
+            symbol: "ETH-USDT".into(),
+            direction: "neutral".into(),
+            strength: 0.5,
+            timestamp: 100_000,
+            stale: false,
+            score: 0.0,
+            ranging_probability: None,
+            components: SignalComponents::default(),
+            strategy_candidate: false,
+            strategy: None,
+            strategy_decision: None,
+            market_regime: None,
+            news_attribution: None,
+            entry_gate: None,
+        }
+    }
+
+    fn parameters(strategy: Strategy) -> BTreeMap<String, f64> {
+        all_strategy_parameter_specs(strategy)
+            .into_iter()
+            .map(|spec| (spec.key.as_str().to_owned(), spec.default))
+            .collect()
+    }
+
+    #[test]
+    fn neutral_aggregate_signal_can_produce_independent_live_scout_directions() {
+        let cases = [
+            (Strategy::LiveMomentum, "bullish", 0),
+            (Strategy::LiveTradeFlow, "bearish", 1),
+            (Strategy::LiveOrderBook, "bullish", 2),
+            (Strategy::LiveVwapDislocation, "bearish", 3),
+            (Strategy::LiveAbsorptionPressure, "bearish", 4),
+        ];
+        for (strategy, expected_direction, component) in cases {
+            let mut signal = source();
+            match component {
+                0 => {
+                    signal.components.momentum_by_window = vec![WindowedSignalValue {
+                        window_seconds: 10, value: Some(0.05), ..Default::default()
+                    }];
+                    signal.components.trend_volatility_units_by_window = vec![WindowedSignalValue {
+                        window_seconds: 300, value: Some(0.1), ..Default::default()
+                    }];
+                }
+                1 => signal.components.trade_flow_by_window = vec![WindowedSignalValue {
+                    window_seconds: 60, value: Some(-0.5), ..Default::default()
+                }],
+                2 => {
+                    signal.components.book_imbalance_by_depth = vec![DepthSignalValue {
+                        depth_levels: 5, value: Some(0.5)
+                    }];
+                    signal.components.momentum_by_window = vec![WindowedSignalValue {
+                        window_seconds: 10, value: Some(-0.1), ..Default::default()
+                    }];
+                }
+                3 => {
+                    signal.components.vwap_dislocation_by_window = vec![WindowedSignalValue {
+                        window_seconds: 60, value: Some(-2.0), sample_count: 5, span_ms: 10_000
+                    }];
+                    signal.components.momentum_by_window = vec![WindowedSignalValue {
+                        window_seconds: 10, value: Some(0.1), ..Default::default()
+                    }];
+                }
+                4 => {
+                    signal.components.momentum_by_window = vec![WindowedSignalValue {
+                        window_seconds: 10, value: Some(0.0), ..Default::default()
+                    }];
+                    signal.components.absorption_pressure_by_window = vec![AbsorptionPressureValue {
+                        window_seconds: 30, replenishment_window_ms: 2_000,
+                        touch_tolerance_bps: 2.0, value: Some(0.5)
+                    }];
+                }
+                _ => unreachable!(),
+            }
+            let candidates = live_scout_direction_candidates(&signal, strategy, &parameters(strategy));
+            assert_eq!(candidates.len(), 1, "{} should pass from its own input", strategy.as_str());
+            assert_eq!(candidates[0].direction, expected_direction);
+        }
+    }
+
+    #[test]
+    fn learned_book_depth_parameter_selects_the_matching_insight() {
+        let mut signal = source();
+        signal.components.book_imbalance_by_depth = vec![
+            DepthSignalValue { depth_levels: 1, value: Some(0.5) },
+            DepthSignalValue { depth_levels: 5, value: Some(-0.5) },
+        ];
+        signal.components.momentum_by_window = vec![WindowedSignalValue {
+            window_seconds: 10, value: Some(0.1), ..Default::default()
+        }];
+        let mut parameters = parameters(Strategy::LiveOrderBook);
+        let baseline = live_scout_direction_candidates(&signal, Strategy::LiveOrderBook, &parameters);
+        assert_eq!(baseline[0].direction, "bearish");
+        parameters.insert("book_depth_levels".into(), 1.0);
+        let learned = live_scout_direction_candidates(&signal, Strategy::LiveOrderBook, &parameters);
+        assert_eq!(learned[0].direction, "bullish");
+    }
+
+    #[test]
+    fn conflicting_live_momentum_inputs_do_not_create_two_opposing_scouts() {
+        let mut signal = source();
+        signal.components.momentum_by_window = vec![WindowedSignalValue {
+            window_seconds: 10, value: Some(0.05), ..Default::default()
+        }];
+        signal.components.trend_volatility_units_by_window = vec![WindowedSignalValue {
+            window_seconds: 300, value: Some(-1.0), ..Default::default()
+        }];
+        assert!(live_scout_direction_candidates(
+            &signal,
+            Strategy::LiveMomentum,
+            &parameters(Strategy::LiveMomentum),
+        ).is_empty());
+    }
+}
 
 #[cfg(test)]
 mod parallel_daily_candidate_tests {

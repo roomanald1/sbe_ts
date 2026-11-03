@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { AutoTraderModel } from '../models/AutoTraderModel';
 import type { Strategy } from '../models/AutoTraderModel';
-import { AutoTraderScoutOptions, AutoTraderStrategyParameters } from './AutoTraderStrategyParameters';
+import { AutoTraderScoutOptions } from './AutoTraderStrategyParameters';
 import { AutoTraderOutcomes } from './AutoTraderOutcomes';
 import { AlternativeStrategies } from './AlternativeStrategies';
 import { useBehaviorSnapshot } from '../use_behavior_snapshot';
@@ -101,7 +101,6 @@ export function AutoTrader() {
               <section><strong>Service decision parameters</strong><dl>
                 {state.decisionParameters.thresholds.map((parameter) => <div key={parameter.section + parameter.name}><dt>{parameter.section} · {parameter.name}</dt><dd>{Number.isInteger(parameter.value) ? parameter.value : finiteFixed(parameter.value, 4)} {parameter.unit}</dd></div>)}
               </dl></section>
-              <AutoTraderStrategyParameters profiles={state.decisionParameters.strategy_profiles} overrides={state.strategyParameterOverrides} saving={state.busy} onChange={(key, value) => model.setStrategyParameter(key, value)} onSave={() => void model.saveLimits()} onResetProfile={(symbol, strategy) => void model.resetStrategyProfile(symbol, strategy)} />
               <section><strong>Learned symbol and strategy profiles</strong>
                 {state.decisionParameters.contexts.length === 0 ? <p>No closed outcomes have produced learned profiles yet.</p> : <dl>
                   {state.decisionParameters.contexts.map((profile) => <div key={profile.context}><dt>{profile.context}</dt><dd>{profile.learning_samples} outcomes · {profile.positive_rate == null ? 'win rate n/a' : finiteFixed(profile.positive_rate * 100, 1) + '% positive'} · strength ≥ {finiteFixed(profile.strength_floor, 3)} · score ≥ {finiteFixed(profile.exploration_score_floor, 3)}{profile.exploration_allowed ? '' : ' · exploration disabled'}</dd></div>)}
@@ -124,7 +123,7 @@ export function AutoTrader() {
               <label>EXPLORATION SIZE (%)<input type="number" min="0" max="100" step="1" value={state.explorationPercent} onChange={(event) => model.setLimits(state.maxOrderNotional, state.dailyNotionalLimit, state.dailyRealizedLossLimit, event.target.value, state.maxOpenPositions)} /></label>
               <label className="auto-trader-risk-slider" title="Shifts strength and score floors and adjusts take-profit. Riskier settings lower entry floors and move take-profit toward a 0.05% net win after fees; safer settings raise floors and preserve larger targets.">RISK APPETITE <span className="auto-trader-risk-value">{Number(state.riskAppetite)} · {Number(state.riskAppetite) < 34 ? 'Safe' : Number(state.riskAppetite) > 66 ? 'Risky' : 'Balanced'}</span><input aria-label="Auto Trader risk appetite" type="range" min="0" max="100" step="1" value={state.riskAppetite} onChange={(event) => model.setRiskAppetite(event.target.value)} /><span className="auto-trader-risk-scale"><span>Safe · higher floors</span><span>Risky · lower floors</span></span></label>
               <label title="Maximum number of distinct Auto Trader positions held at once.">MAX OPEN POSITIONS<input type="number" min="1" max="20" step="1" value={state.maxOpenPositions} onChange={(event) => model.setLimits(state.maxOrderNotional, state.dailyNotionalLimit, state.dailyRealizedLossLimit, state.explorationPercent, event.target.value)} /></label>
-              <label title="Maximum number of fee-free Scout and Exploratory shadow samples being evaluated at once. This does not limit or create real positions.">MAX CONCURRENT SHADOW SAMPLES<input type="number" min="0" max="100" step="1" value={state.maxConcurrentShadowSamples} onChange={(event) => model.setMaxConcurrentShadowSamples(event.target.value)} /></label>
+              <label title="Maximum number of fee-free Scout and Exploratory shadow samples being evaluated at once. This does not limit or create real positions.">MAX CONCURRENT SHADOW SAMPLES<input type="number" min="0" max="5000" step="1" value={state.maxConcurrentShadowSamples} onChange={(event) => model.setMaxConcurrentShadowSamples(event.target.value)} /></label>
               <fieldset className="auto-trader-category-limits" title="Intraday signal and daily strategy budgets are separate; the overall position and exposure caps still apply."><legend>HORIZON BUDGETS</legend>
                 <label>INTRADAY POSITIONS<input type="number" min="0" max="20" step="1" value={state.maxIntradayOpenPositions} onChange={(event) => model.setCategoryLimits({ maxIntradayOpenPositions: event.target.value })} /></label>
                 <label>DAILY POSITIONS<input type="number" min="0" max="20" step="1" value={state.maxDailyOpenPositions} onChange={(event) => model.setCategoryLimits({ maxDailyOpenPositions: event.target.value })} /></label>
@@ -205,6 +204,7 @@ export function AutoTrader() {
             <strong>{state.scoutOpenPositions} open · {state.decisionQuality.scout_completed_trade_samples} closed</strong>
             <span className="auto-trader-learning-detail">Entries: {state.decisionQuality.scout_filled_entry_samples} filled · {state.decisionQuality.scout_unresolved_trade_samples} unresolved</span>
             <span className="auto-trader-learning-detail">Orders: {scoutOrderCounts.filled} filled · {scoutOrderCounts.pending} pending · {scoutOrderCounts.failed} failed</span>
+            <span className="auto-trader-learning-detail">Live strategy Scout shadows · 24h: {state.liveScoutShadowSamples} samples{state.liveScoutShadowStrategies.length ? ' · ' + state.liveScoutShadowStrategies.join(', ') : ''}</span>
             {scoutOutcomeCohort ? <span className="auto-trader-learning-detail">Linked outcomes: {scoutOutcomeCohort.completed_trade_samples} closed · {scoutOutcomeCohort.average_net_return_percent >= 0 ? '+' : ''}{finiteFixed(scoutOutcomeCohort.average_net_return_percent, 2)}% avg · {finiteFixed(scoutOutcomeCohort.win_rate * 100, 0)}% wins{scoutOutcomeCohort.total_net_pnl == null ? '' : ' · ' + scoutOutcomeCohort.pnl_quote_currency + ' ' + money.format(scoutOutcomeCohort.total_net_pnl)}</span> : <span className="auto-trader-learning-detail">Linked outcome breakdown unavailable</span>}
           </div>
           <div className="auto-trader-insight auto-trader-decision-quality">

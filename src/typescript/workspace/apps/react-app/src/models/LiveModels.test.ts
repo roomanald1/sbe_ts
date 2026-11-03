@@ -16,6 +16,19 @@ async function withFetch(impl: typeof fetch, run: () => Promise<void>) {
 function jsonResponse(body: unknown) { return { ok: true, json: async () => body, text: async () => '' } as Response; }
 
 describe('AutoTraderShadowModel', () => {
+  it('marks legacy live scouts without an entry price as outcome unavailable', async () => {
+    const timestamp = Date.now();
+    await withFetch(async (url) => String(url).includes('/auto-trader-audit')
+      ? jsonResponse([{ decision_id: 'missing-entry', stage: 'decision', status: 'shadowed', timestamp, signal_timestamp: timestamp, symbol: 'ETH-USDT', direction: 'bearish', strategy: 'live-trade-flow', strength: 0.5, scout: true }])
+      : jsonResponse([]), async () => {
+      const model = new AutoTraderShadowModel();
+      model.start();
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+      assert.equal(model.state$.value.rows[0].status, 'Outcome unavailable');
+      model.stop();
+    });
+  });
+
   it('matches five-minute evaluations to shadow decisions and derives outcomes', async () => {
     const timestamp = Date.now();
     await withFetch(async (url) => String(url).includes('/auto-trader-audit')

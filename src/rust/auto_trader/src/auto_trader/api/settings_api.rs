@@ -58,7 +58,7 @@ async fn update_settings(
         || !(1..=20).contains(&request.max_open_positions)
         || request
             .max_concurrent_shadow_samples
-            .is_some_and(|value| value > 100)
+            .is_some_and(|value| value > 5000)
         || request
             .max_intraday_open_positions
             .is_some_and(|value| value > 20)
@@ -72,7 +72,7 @@ async fn update_settings(
             .daily_strategy_notional_limit
             .is_some_and(|value| !value.is_finite() || value < 0.0)
     {
-        return Err((StatusCode::BAD_REQUEST, "Order and total notional limits must be positive with total notional at least the per-order limit; daily loss cap must be positive, exploration must be between 0% and 100%, max open positions must be 1–20, shadow samples must be 0–100, and entries per position must be 1–10".into()));
+        return Err((StatusCode::BAD_REQUEST, "Order and total notional limits must be positive with total notional at least the per-order limit; daily loss cap must be positive, exploration must be between 0% and 100%, max open positions must be 1–20, shadow samples must be 0–5000, and entries per position must be 1–10".into()));
     }
     if request.strategies.as_ref().is_some_and(|strategies| {
         strategies.iter().all(|strategy| strategy.is_live_insight())

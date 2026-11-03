@@ -839,3 +839,256 @@ Same AutoTrader benchmark target and optimized Cargo profile. Strategy evaluator
 | Strategy parameter validation | 1.9 ns/operation | 2.0 ns/operation | +0.1 ns |
 
 Same AutoTrader benchmark target and optimized Cargo profile. Strategy evaluator timings were recorded but are not directly compared because the benchmark fixture supplies registered parameter profiles; older empty-map runs are not comparable. Matched workloads remain within prior single-run variation; the parameter validation change is 0.1 ns/operation. AutoTrader tests passed (163 tests). No services were started or stopped.
+
+## Follow-up run (2026-11-03, scoutable dated-carry expiry and edge gates)
+
+### Auto-trader strategy evaluation
+
+| Workload | Latest comparable run | Current run | Change |
+|---|---:|---:|---:|
+| Strategy entry evaluation | 1.1–10.7 ns/evaluation | 1.1–10.7 ns/evaluation | Within run range |
+| Strategy position evaluation | 1.1–2.0 ns/evaluation | 1.1–2.0 ns/evaluation | Within run range |
+| Signal serialization | 499.3 ns/operation | 500.8 ns/operation | +0.3% |
+| Market depth assessment | 565.9 ns/operation | 647.2 ns/operation | +14.4% |
+| Limit-order request construction | 401.7 ns/operation | 438.4 ns/operation | +9.1% |
+| Strategy parameter validation | 2.0 ns/operation | 2.1 ns/operation | +5.0% |
+
+### Insights calculations
+
+| Workload | Latest comparable run | Current run | Change |
+|---|---:|---:|---:|
+| Live signal snapshot | 1,742.8 ns/calculation | 1,804.1 ns/calculation | +3.5% |
+| Snapshot including explanations | 2,280.0 ns/calculation | 2,296.4 ns/calculation | +0.7% |
+| Research feature extraction | 142.6 ns/calculation | 146.5 ns/calculation | +2.7% |
+| Price return context | 17.1 ns/calculation | 17.5 ns/calculation | +2.3% |
+| Market input diagnostics | 224.1 ns/calculation | 225.5 ns/calculation | +0.6% |
+| Book snapshot | 45.3 ns/calculation | 46.6 ns/calculation | +2.9% |
+
+The same benchmark targets and optimized Cargo profiles ran serially under WSL2. Strategy entry and position workloads stayed within their recorded ranges. Several unrelated AutoTrader microbenchmarks rose in this single run, especially market depth and order construction; treat those as unconfirmed timing outliers. Insights calculations were within small single-run variation. The changed carry eligibility paths are not isolated by these benchmarks. AutoTrader tests passed (164 tests); Insights tests passed (21 tests, one ignored). No services were started or stopped.
+
+## Follow-up run (2026-11-03, dated-carry candidate shadow learning)
+
+### Auto-trader strategy evaluation
+
+| Workload | Latest comparable run | Current run | Change |
+|---|---:|---:|---:|
+| Strategy entry evaluation | 1.1–10.7 ns/evaluation | 1.1–11.2 ns/evaluation | Within measurement range |
+| Strategy position evaluation | 1.1–2.0 ns/evaluation | 1.1–1.8 ns/evaluation | Within measurement range |
+| Signal serialization | 500.8 ns/operation | 526.5 ns/operation | +5.1% |
+| Market depth assessment | 647.2 ns/operation | 579.7 ns/operation | -10.4% |
+| Limit-order request construction | 438.4 ns/operation | 430.2 ns/operation | -1.9% |
+| Strategy parameter validation | 2.1 ns/operation | 1.9 ns/operation | -9.5% |
+
+### Insights calculations
+
+| Workload | Latest comparable run | Current run | Change |
+|---|---:|---:|---:|
+| Live signal snapshot | 1,804.1 ns/calculation | 1,854.3 ns/calculation | +2.8% |
+| Snapshot including explanations | 2,296.4 ns/calculation | 2,292.2 ns/calculation | -0.2% |
+| Research feature extraction | 146.5 ns/calculation | 140.4 ns/calculation | -4.2% |
+| Price return context | 17.5 ns/calculation | 17.4 ns/calculation | -0.6% |
+| Market input diagnostics | 225.5 ns/calculation | 227.5 ns/calculation | +0.9% |
+| Book snapshot | 46.6 ns/calculation | 44.9 ns/calculation | -3.6% |
+
+The same benchmark targets and optimized Cargo profiles ran serially under WSL2. Strategy evaluator workloads remained within the recorded range. Signal serialization rose 5.1% in this single run; the changed candidate scanning and shadow-outcome paths are outside the evaluator benchmark and were not isolated. Insights calculations stayed within small single-run variation. AutoTrader tests passed (167 tests); Insights tests passed (21 tests, one ignored). No services were started or stopped.
+
+## Follow-up run (2026-11-03, repeated dated-carry shadow benchmark)
+
+A second serial run followed an isolated AutoTrader evaluator outlier in the first run. Results returned to the recent ranges.
+
+### Auto-trader strategy evaluation
+
+| Workload | Latest comparable run | Repeated run | Change |
+|---|---:|---:|---:|
+| Strategy entry evaluation | 1.1–11.2 ns/evaluation | 1.1–11.6 ns/evaluation | Within run range |
+| Strategy position evaluation | 1.1–1.8 ns/evaluation | 1.1–1.9 ns/evaluation | Within run range |
+| Signal serialization | 507.3 ns/operation | 513.7 ns/operation | +1.3% |
+| Market depth assessment | 579.7 ns/operation | 593.8 ns/operation | +2.4% |
+| Limit-order request construction | 430.2 ns/operation | 419.1 ns/operation | -2.6% |
+| Strategy parameter validation | 1.9 ns/operation | 1.9 ns/operation | No change |
+
+### Insights calculations
+
+| Workload | Latest comparable run | Repeated run | Change |
+|---|---:|---:|---:|
+| Live signal snapshot | 1,784.0 ns/calculation | 1,809.5 ns/calculation | +1.4% |
+| Snapshot including explanations | 2,238.3 ns/calculation | 2,332.5 ns/calculation | +4.2% |
+| Research feature extraction | 146.4 ns/calculation | 145.1 ns/calculation | -0.9% |
+| Price return context | 19.2 ns/calculation | 17.0 ns/calculation | -11.5% |
+| Market input diagnostics | 262.2 ns/calculation | 226.9 ns/calculation | -13.5% |
+| Book snapshot | 50.2 ns/calculation | 45.4 ns/calculation | -9.6% |
+
+Same benchmark targets, optimized Cargo profiles, and serial WSL2 execution. The first run's Donchian evaluator values (9.5–10.5 ns) returned to 5.7–6.3 ns in the repeat. Insights explanation timing varied +4.2% in this repeat while other measurements were flat or lower; no consistent regression is indicated. Candidate streaming and one-day shadow scoring are not represented by these microbenchmarks. AutoTrader tests passed (168 tests); Insights tests passed (21 tests, one ignored). No services were started or stopped.
+
+## Follow-up run (2026-11-03, independent live scout direction)
+
+### Auto-trader strategy evaluation
+
+| Workload | Latest comparable run | Current run | Change |
+|---|---:|---:|---:|
+| Strategy entry evaluation | 1.1–11.6 ns/evaluation | 1.1–11.4 ns/evaluation | Within recorded range |
+| Strategy position evaluation | 1.1–1.9 ns/evaluation | 1.1–1.9 ns/evaluation | Within recorded range |
+| Signal serialization | 513.7 ns/operation | 513.7 ns/operation | No change |
+| Market depth assessment | 593.8 ns/operation | 600.0 ns/operation | +1.0% |
+| Limit-order request construction | 419.1 ns/operation | 407.8 ns/operation | -2.7% |
+| Strategy parameter validation | 1.9 ns/operation | 2.4 ns/operation | +26.3% |
+
+The same AutoTrader benchmark target and optimized Cargo profile ran serially under WSL2. Strategy evaluator workloads stayed within the latest recorded range. Parameter validation increased 0.5 ns/operation in this single run; candidate direction construction and scout selection are not isolated by this benchmark. No services were started or stopped.
+
+## Follow-up run (2026-11-03, live scout shadow exit tracking)
+
+### Auto-trader strategy evaluation
+
+| Workload | Latest comparable run | Current run | Change |
+|---|---:|---:|---:|
+| Strategy entry evaluation | 1.1–11.4 ns/evaluation | 1.2–10.8 ns/evaluation | Within recorded range |
+| Strategy position evaluation | 1.1–1.9 ns/evaluation | 1.2–4.1 ns/evaluation | One run showed higher values |
+| Signal serialization | 513.7 ns/operation | 565.8 ns/operation | +10.2% |
+| Market depth assessment | 600.0 ns/operation | 584.7 ns/operation | -2.6% |
+| Limit-order request construction | 407.8 ns/operation | 412.1 ns/operation | +1.1% |
+| Strategy parameter validation | 2.4 ns/operation | 2.0 ns/operation | -16.7% |
+
+The same AutoTrader benchmark target and optimized Cargo profile ran serially under WSL2. Entry evaluations stayed within the recorded range. The position-evaluation range rose due to a single 4.1 ns dated-carry result; serialization rose 10.2% in this run. These timing-only workloads do not exercise fresh market-book retrieval for shadow samples, which is the changed path. Treat the position and serialization results as single-run variation pending repeat. AutoTrader tests passed (171 tests); React app tests passed (85 tests). No services were started or stopped.
+
+## Follow-up run (2026-11-03, live scout exit without synchronized book)
+
+### Insights calculations
+
+| Workload | Latest comparable run | Current run | Change |
+|---|---:|---:|---:|
+| Live signal snapshot | 1,809.5 ns/calculation | 1,794.0 ns/calculation | -0.9% |
+| Snapshot including explanations | 2,332.5 ns/calculation | 2,287.4 ns/calculation | -1.9% |
+| Research feature extraction | 145.1 ns/calculation | 144.4 ns/calculation | -0.5% |
+| Price return context | 17.0 ns/calculation | 17.5 ns/calculation | +2.9% |
+| Market input diagnostics | 226.9 ns/calculation | 231.1 ns/calculation | +1.9% |
+| Book snapshot | 45.4 ns/calculation | 45.6 ns/calculation | +0.4% |
+
+The same Insights benchmark target and optimized Cargo profile ran under WSL2. All calculations were within 3% of the latest comparable run. The changed scout exit path is not isolated by this benchmark. AutoTrader tests passed (171 tests), Insights tests passed (22 tests, one intentionally ignored), and React app tests passed (85 tests). No services were started or stopped.
+
+## Follow-up run (2026-11-03, pair-based strategy parameter scouts)
+
+### Auto-trader strategy evaluation
+
+| Workload | Latest recorded run | Current serial run | Change |
+|---|---:|---:|---:|
+| Strategy entry evaluation | 1.1–11.4 ns/evaluation | 1.3–10.3 ns/evaluation | Within recorded range |
+| Strategy position evaluation | 1.1–4.1 ns/evaluation | 1.1–2.0 ns/evaluation | Within recorded range |
+| Signal serialization | 565.8 ns/operation | 482.5 ns/operation | -14.7% |
+| Market depth assessment | 584.7 ns/operation | 548.5 ns/operation | -6.2% |
+| Limit-order request construction | 412.1 ns/operation | 400.8 ns/operation | -2.7% |
+| Strategy parameter validation | 2.0 ns/operation | 1.9 ns/operation | -5.0% |
+
+### Insights calculations
+
+| Workload | Latest recorded run | Current serial run | Change |
+|---|---:|---:|---:|
+| Live insight snapshot | 1,794.0 ns/calculation | 1,783.9 ns/calculation | -0.6% |
+| Snapshot including explanations | 2,287.4 ns/calculation | 2,247.5 ns/calculation | -1.7% |
+| Research feature extraction | 144.4 ns/calculation | 140.7 ns/calculation | -2.6% |
+| Price return context | 17.5 ns/calculation | 17.3 ns/calculation | -1.1% |
+| Market input diagnostics | 231.1 ns/calculation | 226.9 ns/calculation | -1.8% |
+| Book snapshot | 45.6 ns/calculation | 45.0 ns/calculation | -1.3% |
+
+The same AutoTrader and Insights bench targets ran serially under WSL2 with optimized Cargo profiles. All measured workloads were within the latest recorded ranges or faster; no performance degradation was observed. The pair-selection and outcome-attribution work is not isolated by these microbenchmarks. AutoTrader tests passed (173 tests); Insights tests passed (16 tests, one intentionally ignored). No services were started or stopped. No benchmark target was skipped or failed.
+
+### Repeated serial run (2026-11-03)
+
+This repeat used the same bench targets and optimized Cargo profiles, after the first serial run above.
+
+| AutoTrader workload | First pair-learning run | Repeat | Change |
+|---|---:|---:|---:|
+| Strategy entry evaluation range | 1.3–10.3 ns/evaluation | 1.5–13.7 ns/evaluation | One evaluator reached 13.7 ns |
+| Strategy position evaluation range | 1.1–2.0 ns/evaluation | 1.1–2.6 ns/evaluation | Within recorded range |
+| Signal serialization | 482.5 ns/operation | 500.4 ns/operation | +3.7% |
+| Market depth assessment | 548.5 ns/operation | 584.6 ns/operation | +6.6% |
+| Limit-order request construction | 400.8 ns/operation | 413.7 ns/operation | +3.2% |
+| Strategy parameter validation | 1.9 ns/operation | 1.9 ns/operation | No change |
+
+| Insights workload | First pair-learning run | Repeat | Change |
+|---|---:|---:|---:|
+| Live insight snapshot | 1,783.9 ns/calculation | 1,774.6 ns/calculation | -0.5% |
+| Snapshot including explanations | 2,247.5 ns/calculation | 2,364.2 ns/calculation | +5.2% |
+| Research feature extraction | 140.7 ns/calculation | 150.6 ns/calculation | +7.0% |
+| Price return context | 17.3 ns/calculation | 18.6 ns/calculation | +7.5% |
+| Market input diagnostics | 226.9 ns/calculation | 230.9 ns/calculation | +1.8% |
+| Book snapshot | 45.0 ns/calculation | 46.5 ns/calculation | +3.3% |
+
+The live-momentum entry evaluator reached 13.7 ns in the repeat, above the latest recorded 11.4 ns maximum; the prior pair-learning run measured 11.4 ns for it. Evaluator code was not changed by this work, and the variation was isolated to that measurement. Market depth and several Insights timings moved by 5–8% between single runs. Treat these as noisy microbenchmark changes; the pair-selection and profile-attribution paths are not represented by these workloads. AutoTrader tests passed (173 tests); Insights tests passed (16 tests, one intentionally ignored). No targets were skipped or failed, and no services were started or stopped.
+
+### Final serial repeat (2026-11-03)
+
+| AutoTrader workload | Previous serial repeat | Final repeat | Change |
+|---|---:|---:|---:|
+| Strategy entry evaluation range | 1.5–13.7 ns/evaluation | 1.2–7.1 ns/evaluation | Back within recent range |
+| Strategy position evaluation range | 1.1–2.6 ns/evaluation | 1.1–1.9 ns/evaluation | Within recorded range |
+| Signal serialization | 500.4 ns/operation | 500.2 ns/operation | No material change |
+| Market depth assessment | 584.6 ns/operation | 561.3 ns/operation | -4.0% |
+| Limit-order request construction | 413.7 ns/operation | 393.7 ns/operation | -4.8% |
+| Strategy parameter validation | 1.9 ns/operation | 1.9 ns/operation | No change |
+
+| Insights workload | Previous serial repeat | Final repeat | Change |
+|---|---:|---:|---:|
+| Live insight snapshot | 1,774.6 ns/calculation | 1,774.4 ns/calculation | No material change |
+| Snapshot including explanations | 2,364.2 ns/calculation | 2,232.4 ns/calculation | -5.6% |
+| Research feature extraction | 150.6 ns/calculation | 141.2 ns/calculation | -6.2% |
+| Price return context | 18.6 ns/calculation | 17.4 ns/calculation | -6.5% |
+| Market input diagnostics | 230.9 ns/calculation | 225.2 ns/calculation | -2.5% |
+| Book snapshot | 46.5 ns/calculation | 44.5 ns/calculation | -4.3% |
+
+All final workloads returned to or stayed within recent ranges. The earlier 13.7 ns live-momentum evaluator result did not repeat; evaluator code remains outside this change. The pair scouting paths are not isolated by these benchmarks. AutoTrader tests passed (174 tests); Insights tests passed (16 tests, one intentionally ignored). No targets were skipped or failed, and no services were started or stopped.
+
+## Follow-up run (2026-11-03, learned live insight windows and depth)
+
+### Auto-trader strategy evaluation
+
+| Workload | Latest comparable run | Current run | Change |
+|---|---:|---:|---:|
+| Strategy entry evaluation | 1.2–16.4 ns/evaluation | 1.1–18.0 ns/evaluation | Live absorption upper reading +9.8% |
+| Strategy position evaluation | 1.1–2.4 ns/evaluation | 1.1–2.4 ns/evaluation | Within run range |
+| Signal serialization | 507.5 ns/operation | 509.1 ns/operation | +0.3% |
+| Market depth assessment | 584.7 ns/operation | 582.6 ns/operation | -0.4% |
+| Limit-order request construction | 412.1 ns/operation | 415.5 ns/operation | +0.8% |
+| Strategy parameter validation | 2.0 ns/operation | 2.0 ns/operation | No change |
+
+### Insights calculations
+
+| Workload | Latest comparable run | Current run | Change |
+|---|---:|---:|---:|
+| Live signal snapshot | 1,794.0 ns/calculation | 11,516.6 ns/calculation | +542% |
+| Snapshot including explanations | 2,287.4 ns/calculation | 11,778.3 ns/calculation | +415% |
+| Research feature extraction | 144.4 ns/calculation | 315.1 ns/calculation | +118% |
+| Price return context | 17.5 ns/calculation | 28.9 ns/calculation | +65% |
+| Market input diagnostics | 231.1 ns/calculation | 465.8 ns/calculation | +102% |
+| Book snapshot | 45.6 ns/calculation | 48.2 ns/calculation | +5.7% |
+
+The same optimized Cargo benchmark targets ran serially under WSL2. A repeat Insights run measured 11,861 ns for snapshots and 12,259 ns with explanations, confirming the added feature calculations account for the increase. The absolute cost is about 12 microseconds per snapshot; the benchmark is a single-symbol micro-workload and does not represent whole-service throughput. The larger research and diagnostic readings may include the same added component work and remain unisolated. AutoTrader tests passed (175 tests); Insights tests passed (23 tests, one intentionally ignored). No services were started or stopped.
+
+## Repeat run (2026-11-03, learned live insight windows and depth)
+
+A repeat serial run measured the granular snapshot workload close to the prior run.
+
+| Workload | Prior run | Repeat run | Change |
+|---|---:|---:|---:|
+| Live signal snapshot | 11,516.6 ns/calculation | 12,489.1 ns/calculation | +8.4% |
+| Snapshot including explanations | 11,778.3 ns/calculation | 13,226.9 ns/calculation | +12.3% |
+| Research feature extraction | 315.1 ns/calculation | 259.9 ns/calculation | -17.5% |
+| Price return context | 28.9 ns/calculation | 17.6 ns/calculation | -39.1% |
+| Market input diagnostics | 338.9 ns/calculation | 415.6 ns/calculation | +22.6% |
+| Book snapshot | 47.2 ns/calculation | 53.0 ns/calculation | +12.3% |
+
+Same optimized Insights benchmark target and serial WSL2 environment. Snapshot timings repeat within roughly 12%; standalone helper timings vary more, indicating microbenchmark noise. The snapshot increase versus the old scalar-only baseline remains substantial (about 7x); in absolute terms it is 12–13 microseconds per symbol snapshot. No service was started or stopped.
+
+## Repeat run (2026-11-03, granular live strategy parameter selection)
+
+### Auto-trader live strategy evaluation
+
+| Strategy | Prior run | Repeat run | Change |
+|---|---:|---:|---:|
+| Live momentum | 13.6 ns/evaluation | 11.0 ns/evaluation | -19.1% |
+| Live trade flow | 8.3 ns/evaluation | 6.9 ns/evaluation | -16.9% |
+| Live order book | 10.4 ns/evaluation | 10.4 ns/evaluation | No change |
+| Live VWAP dislocation | 10.5 ns/evaluation | 11.3 ns/evaluation | +7.6% |
+| Live absorption pressure | 18.0 ns/evaluation | 16.6 ns/evaluation | -7.8% |
+| Signal serialization | 509.1 ns/operation | 509.1 ns/operation | No change |
+
+The same optimized strategy benchmark ran serially under WSL2. Live strategy evaluator results repeated within the prior run's range. Feature selection from the newly transmitted granular vectors is not isolated by this evaluator microbenchmark.

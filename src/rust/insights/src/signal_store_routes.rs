@@ -169,7 +169,7 @@ impl SignalStore {
                         let store = store.clone();
                         async move {
                             match store
-                                .load_auto_trader_audit(query.since, query.limit.unwrap_or(10_000))
+                                .load_auto_trader_audit_page(query.since, query.cursor, query.limit.unwrap_or(10_000))
                                 .await
                             {
                                 Ok(items) => Ok(Json(items)),

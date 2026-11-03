@@ -2,7 +2,7 @@ use super::super::{Strategy, StrategyContract, StrategyDefinition};
 pub(super) fn contract() -> StrategyContract {
     StrategyContract {
         insight: "live trade-flow insight",
-        entry: "signed flow agrees with signal direction and magnitude is at least 0.15",
+        entry: "signed flow over the learned window agrees with strategy direction and exceeds its learned minimum imbalance",
         exit: super::evaluate::description(),
         entry_order: "passive PostOnlyLimit by default; IOC is reserved for high urgency; VWAP/TWAP use configured duration and participation",
         exit_order: "StopMarket protective order; IOC close order for strategy and take-profit exits",

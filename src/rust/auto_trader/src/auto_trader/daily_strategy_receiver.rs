@@ -41,16 +41,18 @@ fn valid_scout_parameter_probe(signal: &Signal, strategy: Strategy) -> bool {
     {
         return false;
     }
-    let Some(spec) = all_strategy_parameter_specs(strategy).into_iter().find(|spec| spec.key.as_str() == key) else {
-        return false;
-    };
-    if spec.key == StrategyParameterKey::LearningRate || !value.is_finite() || value < spec.min || value > spec.max {
-        return false;
+    if key.starts_with("combo:") {
+        let Some(combination) = parse_scout_combination(key, strategy) else { return false; };
+        return value == 0.0 && combination.iter().all(|(parameter, expected)| {
+            decision.get("strategy_parameters").and_then(|parameters| parameters.get(parameter))
+                .and_then(serde_json::Value::as_f64).is_some_and(|actual| (actual - expected).abs() <= 1e-7)
+        });
     }
+    let Some(spec) = all_strategy_parameter_specs(strategy).into_iter().find(|spec| spec.key.as_str() == key) else { return false; };
+    if spec.key == StrategyParameterKey::LearningRate || !value.is_finite() || value < spec.min || value > spec.max { return false; }
     let position = (value - spec.min) / spec.step;
     (position - position.round()).abs() <= 1e-6
-        && decision.get("strategy_parameters")
-            .and_then(|parameters| parameters.get(key))
+        && decision.get("strategy_parameters").and_then(|parameters| parameters.get(key))
             .and_then(serde_json::Value::as_f64) == Some(value)
 }
 
@@ -159,10 +161,13 @@ async fn receive_daily_strategy_signals(
     }
     let mut settings = state.settings.lock().await;
     let enabled_strategies = settings.strategies.iter()
-        .filter(|strategy| !strategy.is_live_insight() && !strategy.is_dated_carry())
+        .filter(|strategy| !strategy.is_dated_carry())
         .map(|strategy| strategy.as_str().to_owned())
         .collect::<Vec<_>>();
-    let scout_strategies = settings.scout_strategies.iter().filter(|strategy| !strategy.is_live_insight() && !strategy.is_dated_carry()).map(|strategy| strategy.as_str().to_owned()).collect::<Vec<_>>();
+    let scout_strategies = settings.scout_strategies.iter()
+        .filter(|strategy| !strategy.is_dated_carry())
+        .map(|strategy| strategy.as_str().to_owned())
+        .collect::<Vec<_>>();
     let active_strategy_symbols = snapshot.active_strategy_symbols.iter()
         .filter(|(strategy, _)| enabled_strategies.iter().any(|enabled| enabled == strategy))
         .cloned()

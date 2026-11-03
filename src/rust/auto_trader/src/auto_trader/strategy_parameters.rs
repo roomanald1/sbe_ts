@@ -70,13 +70,126 @@ fn next_scout_parameter_probe(
     candidates.get((day.wrapping_add(hash) % candidates.len() as u64) as usize).cloned()
 }
 
+// Pair scouts measure interactions while keeping exploration bounded to two
+// tunables at a time. The day selects a deterministic pair and direction so
+// retries generate the same variant.
+fn next_scout_parameter_combination(
+    symbol: &str,
+    strategy: Strategy,
+    parameters: &BTreeMap<String, f64>,
+    day: u64,
+) -> Option<BTreeMap<String, f64>> {
+    let candidates = all_strategy_parameter_specs(strategy).into_iter().filter_map(|spec| {
+        if matches!(spec.key, StrategyParameterKey::LearningRate
+            | StrategyParameterKey::ScoutMinimumWalkForwardSamples
+            | StrategyParameterKey::ScoutMinimumPositiveNetRate)
+            || spec.min >= spec.max || spec.step <= 0.0 { return None; }
+        let current = parameters.get(spec.key.as_str()).copied().unwrap_or(spec.default);
+        if !current.is_finite() { return None; }
+        let direction = if (day >> 1) & 1 == 0 { 1.0 } else { -1.0 };
+        let preferred = current + direction * spec.step;
+        let value = if preferred >= spec.min && preferred <= spec.max { preferred }
+            else { current - direction * spec.step };
+        (value >= spec.min && value <= spec.max && (value-current).abs() >= spec.step*0.5)
+            .then_some((spec.key.as_str().to_owned(), value))
+    }).collect::<Vec<_>>();
+    if candidates.len() < 2 { return None; }
+    let hash = symbol.bytes().chain(strategy.as_str().bytes()).fold(2_166_136_261_u64, |h,b| h.wrapping_mul(16_777_619) ^ u64::from(b));
+    let pair_count = candidates.len() * (candidates.len() - 1) / 2;
+    let wanted = (day.wrapping_add(hash) % pair_count as u64) as usize;
+    let mut index = 0;
+    for left in 0..candidates.len() {
+        for right in left + 1..candidates.len() {
+            if index == wanted {
+                return Some(BTreeMap::from([candidates[left].clone(), candidates[right].clone()]));
+            }
+            index += 1;
+        }
+    }
+    None
+}
+
+fn scout_context_hash(parameters: &BTreeMap<String, f64>, excluded: &BTreeMap<String, f64>) -> String {
+    let mut hash = 14_695_981_039_346_656_037_u64;
+    for (key, value) in parameters.iter().filter(|(key, _)| !excluded.contains_key(*key)) {
+        for byte in format!("{key}={value:.8};").bytes() {
+            hash = (hash ^ u64::from(byte)).wrapping_mul(1_099_511_628_211);
+        }
+    }
+    format!("{hash:016x}")
+}
+
+fn scout_combination_key(
+    values: &BTreeMap<String, f64>, full_profile: &BTreeMap<String, f64>,
+) -> Option<String> {
+    if values.len() != 2 || values.values().any(|value| !value.is_finite()) { return None; }
+    let pair = values.iter().map(|(key, value)| format!("{key}={value:.8}")).collect::<Vec<_>>().join(",");
+    Some(format!("combo:{pair}|ctx:{}", scout_context_hash(full_profile, values)))
+}
+
+fn scout_combination_context(key: &str) -> Option<&str> {
+    let (_, context) = key.strip_prefix("combo:")?.rsplit_once("|ctx:")?;
+    (context.len() == 16 && context.bytes().all(|byte| byte.is_ascii_hexdigit())).then_some(context)
+}
+
+fn parse_scout_combination(key: &str, strategy: Strategy) -> Option<BTreeMap<String, f64>> {
+    let body = key.strip_prefix("combo:")?.split_once("|ctx:")?.0;
+    scout_combination_context(key)?;
+    let specs = all_strategy_parameter_specs(strategy);
+    let mut values = BTreeMap::new();
+    for item in body.split(',') {
+        let (name, raw) = item.split_once('=')?;
+        let value = raw.parse::<f64>().ok()?;
+        let spec = specs.iter().find(|spec| spec.key.as_str() == name)?;
+        if spec.key == StrategyParameterKey::LearningRate || !value.is_finite()
+            || value < spec.min || value > spec.max { return None; }
+        let step = (value - spec.min) / spec.step;
+        if (step - step.round()).abs() > 1e-6 || values.insert(name.to_owned(), value).is_some() { return None; }
+    }
+    (values.len() == 2).then_some(values)
+}
+
+fn scout_parameter_learning_key(symbol: &str, strategy: Strategy, parameter: &str, value: f64) -> String {
+    if parameter.starts_with("combo:") {
+        format!("probe_combo:{symbol}:{}:{parameter}", strategy.as_str())
+    } else {
+        strategy_parameter_probe_learning_key(symbol, strategy.as_str(), parameter, value)
+    }
+}
+
+fn best_scout_parameter_combination(
+    settings: &Settings, symbol: &str, strategy: Strategy, baseline: &BTreeMap<String, f64>,
+) -> Option<BTreeMap<String, f64>> {
+    let learning_prefix = if strategy == Strategy::DatedCarry { "probe_combo_shadow" } else { "probe_combo" };
+    let prefix = format!("{learning_prefix}:{symbol}:{}:combo:", strategy.as_str());
+    settings.learning.iter().filter_map(|(key, stored)| {
+        let candidate = format!("combo:{}", key.strip_prefix(&prefix)?);
+        let values = parse_scout_combination(&candidate, strategy)?;
+        if scout_combination_context(&candidate)? != scout_context_hash(baseline, &values) { return None; }
+        let mut stats = stored.clone();
+        decay_learning_stats(&mut stats, current_time_ms());
+        if stats.samples < MIN_SCOUT_PARAMETER_VARIANT_SAMPLES
+            || stats.recent_trade_pnls.len() < MIN_SCOUT_PARAMETER_VARIANT_SAMPLES { return None; }
+        let returns = stats.recent_trade_pnls.iter().map(|(_, pnl)| *pnl).collect::<Vec<_>>();
+        let mean = returns.iter().sum::<f64>() / returns.len() as f64;
+        let variance = returns.iter().map(|pnl| (pnl - mean).powi(2)).sum::<f64>() / (returns.len()-1) as f64;
+        let lower_95 = mean - 1.96 * (variance / returns.len() as f64).sqrt();
+        (lower_95 > 0.0).then_some((values, mean))
+    }).max_by(|left, right| left.1.total_cmp(&right.1)).map(|(values, _)| values)
+}
+
 fn best_scout_parameter_value(
     settings: &Settings,
     symbol: &str,
     strategy: Strategy,
     spec: &StrategyParameterSpec,
 ) -> Option<f64> {
-    let prefix = format!("probe:{symbol}:{}:{}:", strategy.as_str(), spec.key.as_str());
+    let learning_prefix = if strategy == Strategy::DatedCarry {
+        "probe_shadow"
+    } else {
+        "probe"
+    };
+    let prefix = format!("{learning_prefix}:{symbol}:{}:{}:", strategy.as_str(), spec.key.as_str());
     settings.learning.iter().filter_map(|(key, stored)| {
         let value = key.strip_prefix(&prefix)?.parse::<f64>().ok()?;
         if !value.is_finite() || value < spec.min || value > spec.max {
@@ -131,6 +244,27 @@ fn strategy_parameter_profile(
         .copied()
         .unwrap_or(0.05)
         .clamp(0.0, 0.25);
+    let baseline_values = specs.iter().map(|spec| {
+        let key = strategy_parameter_key(symbol, strategy, spec.key.as_str());
+        let configured = settings.strategy_parameter_overrides.get(&key).copied().or_else(|| {
+            legacy_strategy_parameter_name(spec.key.as_str()).and_then(|legacy| {
+                settings.strategy_parameter_overrides.get(&strategy_parameter_key(symbol, strategy, legacy)).copied()
+            })
+        });
+        let base = configured.unwrap_or(spec.default);
+        let value = best_scout_parameter_value(settings, symbol, strategy, spec).unwrap_or_else(|| {
+            if is_walk_forward_threshold(spec.key) {
+                walk_forward_threshold(spec, base, &learning.threshold_samples).unwrap_or(base)
+            } else {
+                let adaptive_step = if spec.key == StrategyParameterKey::LearningRate { 0.0 }
+                    else { (spec.max - spec.min) * learning_rate * performance * spec.learning_direction };
+                let candidate = (base + adaptive_step).clamp(spec.min, spec.max);
+                (spec.min + ((candidate - spec.min) / spec.step).round() * spec.step).clamp(spec.min, spec.max)
+            }
+        });
+        (spec.key.as_str().to_owned(), value)
+    }).collect::<BTreeMap<_, _>>();
+    let learned_combination = best_scout_parameter_combination(settings, symbol, strategy, &baseline_values);
     let parameters = specs
         .iter()
         .map(|spec| {
@@ -149,20 +283,10 @@ fn strategy_parameter_profile(
                 });
             let default_value = spec.default;
             let base = configured.unwrap_or(default_value);
-            let learned_value = best_scout_parameter_value(settings, symbol, strategy, spec).unwrap_or_else(|| {
-                if is_walk_forward_threshold(spec.key) {
-                    walk_forward_threshold(spec, base, &learning.threshold_samples).unwrap_or(base)
-                } else {
-                    let adaptive_step = if spec.key == StrategyParameterKey::LearningRate {
-                        0.0
-                    } else {
-                        (spec.max - spec.min) * learning_rate * performance * spec.learning_direction
-                    };
-                    let candidate = (base + adaptive_step).clamp(spec.min, spec.max);
-                    let step_position = (candidate - spec.min) / spec.step;
-                    (spec.min + step_position.round() * spec.step).clamp(spec.min, spec.max)
-                }
-            });
+            let learned_value = learned_combination.as_ref()
+                .and_then(|values| values.get(spec.key.as_str()).copied())
+                .or_else(|| baseline_values.get(spec.key.as_str()).copied())
+                .unwrap_or(base);
             StrategyParameterValue {
                 key: spec.key.as_str().into(),
                 label: spec.label.into(),
@@ -892,6 +1016,63 @@ mod scout_parameter_variant_tests {
 }
 
 #[cfg(test)]
+mod dated_carry_shadow_probe_learning_tests {
+    use super::*;
+
+    #[test]
+    fn promotion_uses_one_day_shadow_markouts_for_dated_carry_variants() {
+        let mut settings = Settings::default();
+        let strategy = Strategy::DatedCarry;
+        let shadow_key = strategy_parameter_shadow_probe_learning_key(
+            "BTC-USDT", strategy.as_str(), "carry_minimum_days_to_expiry", 6.0,
+        );
+        for _ in 0..20 {
+            record_learning_outcome(settings.learning.entry(shadow_key.clone()).or_default(), 0.02);
+        }
+        let profile = strategy_parameter_profile(&settings, "BTC-USDT", strategy);
+        let minimum_days = profile.parameters.iter()
+            .find(|parameter| parameter.key == "carry_minimum_days_to_expiry")
+            .unwrap();
+        assert_eq!(minimum_days.learned_value, 6.0);
+
+        let settlement_key = strategy_parameter_probe_learning_key(
+            "BTC-USDT", strategy.as_str(), "carry_minimum_days_to_expiry", 5.0,
+        );
+        for _ in 0..25 {
+            record_learning_outcome(settings.learning.entry(settlement_key.clone()).or_default(), 1.0);
+        }
+        let profile = strategy_parameter_profile(&settings, "BTC-USDT", strategy);
+        let minimum_days = profile.parameters.iter()
+            .find(|parameter| parameter.key == "carry_minimum_days_to_expiry")
+            .unwrap();
+        assert_eq!(minimum_days.learned_value, 6.0);
+    }
+
+    #[test]
+    fn dated_carry_shadow_markouts_promote_the_tested_pair_in_its_profile_context() {
+        let mut settings = Settings::default();
+        let strategy = Strategy::DatedCarry;
+        let baseline = all_strategy_parameter_specs(strategy).into_iter()
+            .map(|spec| (spec.key.as_str().to_owned(), spec.default)).collect::<BTreeMap<_, _>>();
+        let combination = next_scout_parameter_combination("BTC-USDT", strategy, &baseline, 3).unwrap();
+        let mut probe_profile = baseline.clone();
+        for (key, value) in &combination { probe_profile.insert(key.clone(), *value); }
+        let combination_key = scout_combination_key(&combination, &probe_profile).unwrap();
+        let learning_key = strategy_parameter_shadow_combination_learning_key(
+            "BTC-USDT", strategy.as_str(), &combination_key,
+        );
+        for _ in 0..MIN_SCOUT_PARAMETER_VARIANT_SAMPLES {
+            record_learning_outcome(settings.learning.entry(learning_key.clone()).or_default(), 0.02);
+        }
+        let profile = strategy_parameter_profile(&settings, "BTC-USDT", strategy);
+        for (key, value) in combination {
+            let learned = profile.parameters.iter().find(|parameter| parameter.key == key).unwrap();
+            assert_eq!(learned.learned_value, value);
+        }
+    }
+}
+
+#[cfg(test)]
 mod scout_parameter_scheduling_tests {
     use super::*;
 
@@ -907,5 +1088,42 @@ mod scout_parameter_scheduling_tests {
         let current = parameters[&key];
         assert!((value - current).abs() <= spec.step + 1e-9);
         assert!((value - current).abs() > 0.0);
+    }
+}
+
+#[cfg(test)]
+mod scout_parameter_combination_tests {
+    use super::*;
+
+    #[test]
+    fn pair_probes_change_two_bounded_parameters_and_have_stable_keys() {
+        let strategy = Strategy::Donchian20Sma200;
+        let parameters = all_strategy_parameter_specs(strategy).into_iter()
+            .map(|spec| (spec.key.as_str().to_owned(), spec.default)).collect::<BTreeMap<_, _>>();
+        let combination = next_scout_parameter_combination("BTC-USDT", strategy, &parameters, 8).unwrap();
+        assert_eq!(combination.len(), 2);
+        let key = scout_combination_key(&combination, &parameters).unwrap();
+        let parsed = parse_scout_combination(&key, strategy).unwrap();
+        assert_eq!(parsed.keys().collect::<Vec<_>>(), combination.keys().collect::<Vec<_>>());
+        for (name, value) in &combination { assert!((parsed[name] - value).abs() < 1e-7); }
+        let repeated = next_scout_parameter_combination("BTC-USDT", strategy, &parameters, 8).unwrap();
+        assert_eq!(repeated.keys().collect::<Vec<_>>(), combination.keys().collect::<Vec<_>>());
+        for (name, value) in &combination { assert!((repeated[name] - value).abs() < 1e-12); }
+    }
+
+    #[test]
+    fn validated_pair_outcome_promotes_both_values_together() {
+        let strategy = Strategy::Donchian20Sma200;
+        let mut settings = Settings::default();
+        let values = BTreeMap::from([
+            ("breakout_lookback_days".to_owned(), 22.0),
+            ("breakout_entry_distance_percent".to_owned(), 0.5),
+        ]);
+        let combination_key = scout_combination_key(&values, &values).unwrap();
+        let learning_key = format!("probe_combo:BTC-USDT:{}:{combination_key}", strategy.as_str());
+        for _ in 0..MIN_SCOUT_PARAMETER_VARIANT_SAMPLES {
+            record_learning_outcome(settings.learning.entry(learning_key.clone()).or_default(), 1.0);
+        }
+        assert_eq!(best_scout_parameter_combination(&settings, "BTC-USDT", strategy, &values), Some(values));
     }
 }

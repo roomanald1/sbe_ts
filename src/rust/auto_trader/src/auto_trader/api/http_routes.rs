@@ -413,28 +413,32 @@ async fn receive_shadow_learning_outcome(
         .ok_or((StatusCode::BAD_REQUEST, "Unknown strategy in shadow learning outcome".into()))?;
     let probe_key = match (outcome.scout_parameter_key.as_deref(), outcome.scout_parameter_value) {
         (Some(parameter), Some(value)) => {
-            if parameter == StrategyParameterKey::LearningRate.as_str() {
-                return Err((StatusCode::BAD_REQUEST, "Learning rate is not a scoutable strategy behavior".into()));
-            }
-            let Some(spec) = all_strategy_parameter_specs(strategy).into_iter().find(|spec| spec.key.as_str() == parameter) else {
-                return Err((StatusCode::BAD_REQUEST, "Unknown strategy parameter in scout outcome".into()));
-            };
-            let position = (value - spec.min) / spec.step;
-            if !value.is_finite() || value < spec.min || value > spec.max
-                || (position - position.round()).abs() > 1e-6
-            {
-                return Err((StatusCode::BAD_REQUEST, "Scout parameter value is outside its registered bounds or step".into()));
-            }
             let expected_profile_symbol = if matches!(strategy, Strategy::RiskAdjustedTrendPortfolio | Strategy::RiskAdjustedMonthlyMomentum) {
                 "BTC-USDT"
-            } else {
-                outcome.symbol.as_str()
-            };
+            } else { outcome.symbol.as_str() };
             let profile_symbol = outcome.scout_parameter_profile_symbol.as_deref().unwrap_or(&outcome.symbol);
             if profile_symbol != expected_profile_symbol || profile_symbol.is_empty() || profile_symbol.len() > 32 {
                 return Err((StatusCode::BAD_REQUEST, "Invalid strategy profile symbol".into()));
             }
-            Some(strategy_parameter_probe_learning_key(profile_symbol, strategy.as_str(), parameter, value))
+            if parameter.starts_with("combo:") {
+                if !value.is_finite() || value != 0.0 || parse_scout_combination(parameter, strategy).is_none() {
+                    return Err((StatusCode::BAD_REQUEST, "Invalid scout parameter combination".into()));
+                }
+                Some(format!("probe_combo:{profile_symbol}:{}:{parameter}", strategy.as_str()))
+            } else {
+                if parameter == StrategyParameterKey::LearningRate.as_str() {
+                    return Err((StatusCode::BAD_REQUEST, "Learning rate is not a scoutable strategy behavior".into()));
+                }
+                let Some(spec) = all_strategy_parameter_specs(strategy).into_iter().find(|spec| spec.key.as_str() == parameter) else {
+                    return Err((StatusCode::BAD_REQUEST, "Unknown strategy parameter in scout outcome".into()));
+                };
+                let position = (value - spec.min) / spec.step;
+                if !value.is_finite() || value < spec.min || value > spec.max
+                    || (position - position.round()).abs() > 1e-6 {
+                    return Err((StatusCode::BAD_REQUEST, "Scout parameter value is outside its registered bounds or step".into()));
+                }
+                Some(strategy_parameter_probe_learning_key(profile_symbol, strategy.as_str(), parameter, value))
+            }
         }
         (None, None) => None,
         _ => unreachable!("parameter probe pair was validated"),

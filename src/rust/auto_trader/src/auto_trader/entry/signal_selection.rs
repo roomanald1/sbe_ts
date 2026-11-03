@@ -210,6 +210,7 @@ fn select_cycle_signal<'a>(
                     {
                         return false;
                     }
+                    let live_scout_only = is_live_scout_only_signal(signal);
                     let context = market_context(signal);
                     let (strength_floor, score_floor) =
                         adaptive_scout_thresholds(&learning, &context, active_scout_count);
@@ -218,9 +219,9 @@ fn select_cycle_signal<'a>(
                     let score_floor = (score_floor * risk_floor_scale(risk_appetite)).max(0.0);
                     if active_scout_count >= SCOUT_MAX_ACTIVE_POSITIONS
                         || !signal.strength.is_finite()
-                        || signal.strength < strength_floor
                         || !signal.score.is_finite()
-                        || signal.score.abs() < score_floor
+                        || (!live_scout_only
+                            && (signal.strength < strength_floor || signal.score.abs() < score_floor))
                     {
                         return false;
                     }
@@ -416,6 +417,27 @@ mod signal_selection_behavior_tests {
         let selected = select_cycle_signal(input(&state, &empty_dashboard, &unvalidated_signals, &unvalidated_fresh, &[], 50.0, 0)).unwrap_or_else(|_| panic!("expected signal selection to succeed"));
         assert!(selected.1);
         assert!(!selected.2);
+    }
+
+    #[test]
+    fn live_scout_uses_its_own_entry_rule_without_aggregate_score_floors() {
+        let state = state();
+        let mut candidate = signal(0.01, 0.001, Some("live-trade-flow"), false);
+        candidate.strategy_decision = Some(serde_json::json!({
+            "scout_only": true,
+            "strategy_parameters": {
+                "scout_minimum_walk_forward_samples": 10.0,
+                "scout_minimum_positive_net_rate": 0.45
+            }
+        }));
+        let signals = vec![candidate.clone()];
+        let fresh = vec![&candidate];
+        let empty_dashboard = dashboard(Vec::new());
+        let selected = select_cycle_signal(input(
+            &state, &empty_dashboard, &signals, &fresh, &[], 50.0, 0,
+        )).unwrap_or_else(|_| panic!("a strategy-qualified scout should not need aggregate score floors"));
+        assert_eq!(selected.0.strategy.as_deref(), Some("live-trade-flow"));
+        assert!(selected.2);
     }
 
     #[test]

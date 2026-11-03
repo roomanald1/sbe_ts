@@ -64,6 +64,15 @@ struct DatedCarryPosition {
 }
 
 #[derive(Clone, Serialize, Deserialize)]
+struct DatedCarryScoutShadow {
+    candidate: DatedCarryCandidate,
+    opened_at_ms: u64,
+    parameter_key: String,
+    parameter_value: f64,
+    would_enter: bool,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
 struct DatedCarryBook {
     enabled: bool,
     max_spot_notional_usdt: f64,
@@ -75,6 +84,10 @@ struct DatedCarryBook {
     checked_at_ms: u64,
     #[serde(default)]
     last_error: Option<String>,
+    #[serde(default)]
+    scout_shadow_probes: Vec<DatedCarryScoutShadow>,
+    #[serde(default)]
+    scout_shadow_last_started: BTreeMap<String, u64>,
 }
 
 impl Default for DatedCarryBook {
@@ -86,8 +99,39 @@ impl Default for DatedCarryBook {
             positions: Vec::new(),
             checked_at_ms: 0,
             last_error: None,
+            scout_shadow_probes: Vec::new(),
+            scout_shadow_last_started: BTreeMap::new(),
         }
     }
+}
+
+
+fn dated_carry_shadow_key(candidate: &DatedCarryCandidate, key: &str, value: f64) -> String {
+    format!("{}:{key}:{value:.8}", candidate.spot_symbol)
+}
+
+fn dated_carry_shadow_return_percent(
+    entry: &DatedCarryCandidate,
+    exit: &DatedCarryCandidate,
+) -> Option<f64> {
+    let quantity = entry.quantity;
+    let entry_spot = entry.spot_ask * (1.0 + CARRY_ENTRY_SLIPPAGE);
+    let entry_future = entry.future_bid * (1.0 - CARRY_ENTRY_SLIPPAGE);
+    let exit_spot = exit.spot_bid * (1.0 - CARRY_ENTRY_SLIPPAGE);
+    let exit_future = exit.future_ask * (1.0 + CARRY_ENTRY_SLIPPAGE);
+    let entry_fees = quantity * (0.001 * entry_spot + 0.0005 * entry_future);
+    let exit_fees = quantity * (0.001 * exit_spot + 0.0005 * exit_future);
+    let net = quantity * (exit_spot - entry_spot + entry_future - exit_future)
+        - entry_fees
+        - exit_fees;
+    let entry_notional = quantity * entry_spot;
+    (quantity.is_finite()
+        && quantity > 0.0
+        && [entry_spot, entry_future, exit_spot, exit_future, entry_notional]
+            .iter()
+            .all(|value| value.is_finite() && *value > 0.0)
+        && net.is_finite())
+    .then_some(net / entry_notional * 100.0)
 }
 
 fn carry_now_ms() -> u64 {
@@ -223,6 +267,80 @@ async fn receive_dated_carry_signal(
                         update_dated_carry_mark(position, candidate.spot_bid, candidate.future_ask, emitted_at_ms);
                     }
                 }
+
+                let mut pending_shadows = Vec::new();
+                for shadow in std::mem::take(&mut book.scout_shadow_probes) {
+                    if emitted_at_ms.saturating_sub(shadow.opened_at_ms) >= CARRY_DAY_MS {
+                        let return_percent = if shadow.would_enter {
+                            candidates.iter().find(|candidate| {
+                                candidate.future_symbol == shadow.candidate.future_symbol
+                                    && candidate.spot_symbol == shadow.candidate.spot_symbol
+                            }).and_then(|exit| dated_carry_shadow_return_percent(&shadow.candidate, exit))
+                        } else {
+                            Some(0.0)
+                        };
+                        if let Some(return_percent) = return_percent {
+                            parameter_feedback.push((
+                                shadow.candidate.spot_symbol.replace("USDT", "-USDT"),
+                                shadow.parameter_key,
+                                format!("{:.8}", shadow.parameter_value),
+                                return_percent,
+                            ));
+                            continue;
+                        }
+                    }
+                    if emitted_at_ms.saturating_sub(shadow.opened_at_ms) <= 3 * CARRY_DAY_MS {
+                        pending_shadows.push(shadow);
+                    }
+                }
+                book.scout_shadow_probes = pending_shadows;
+
+                let settings = state.settings.lock().await;
+                let enabled = state.enabled.load(Ordering::Relaxed)
+                    && settings.strategies.contains(&Strategy::DatedCarry);
+                if enabled {
+                    let day = emitted_at_ms / CARRY_DAY_MS;
+                    for candidate in &candidates {
+                        if !candidate.eligible {
+                            continue;
+                        }
+                        let profile_symbol = candidate.spot_symbol.replace("USDT", "-USDT");
+                        let strategy_parameters = strategy_parameter_values(
+                            &settings, &profile_symbol, Strategy::DatedCarry,
+                        );
+                        let Some(combination) = next_scout_parameter_combination(
+                            &profile_symbol, Strategy::DatedCarry, &strategy_parameters, day,
+                        ) else { continue; };
+                        let Some(parameter_key) = scout_combination_key(&combination, &strategy_parameters) else { continue; };
+                        let parameter_value = 0.0;
+                        let key = dated_carry_shadow_key(candidate, &parameter_key, parameter_value);
+                        if book.scout_shadow_last_started.get(&key).is_some_and(|started_day| *started_day >= day)
+                            || book.scout_shadow_probes.iter().any(|shadow| {
+                                dated_carry_shadow_key(&shadow.candidate, &shadow.parameter_key, shadow.parameter_value) == key
+                            })
+                        {
+                            continue;
+                        }
+                        if candidate.expiry_ms <= emitted_at_ms.saturating_add(CARRY_DAY_MS) {
+                            continue;
+                        }
+                        let mut probe_parameters = strategy_parameters;
+                        for (key, value) in &combination { probe_parameters.insert(key.clone(), *value); }
+                        let would_enter = Strategy::DatedCarry.evaluate(&StrategySignal::dated_carry_entry(
+                            candidate, emitted_at_ms, emitted_at_ms, &probe_parameters,
+                        )).unwrap_or(StrategyDecision::Reject) == StrategyDecision::Enter;
+                        book.scout_shadow_probes.push(DatedCarryScoutShadow {
+                            candidate: candidate.clone(),
+                            opened_at_ms: emitted_at_ms,
+                            parameter_key: parameter_key.clone(),
+                            parameter_value,
+                            would_enter,
+                        });
+                        book.scout_shadow_last_started.insert(key, day);
+                    }
+                    book.scout_shadow_last_started.retain(|_, started_day| day.saturating_sub(*started_day) <= 30);
+                }
+                drop(settings);
                 book.candidates = candidates;
             }
             changed = true;
@@ -236,15 +354,18 @@ async fn receive_dated_carry_signal(
                 let settings = state.settings.lock().await;
                 strategy_parameter_values(&settings, &spot_profile_symbol, Strategy::DatedCarry)
             };
-            let minimum_days = strategy_parameter_value(
+            let Some(minimum_days) = strategy_parameter_value(
                 &strategy_parameters, StrategyParameterKey::CarryMinimumDaysToExpiry,
-            ).unwrap_or(7.0);
-            let probe = next_scout_parameter_probe(
+            ) else {
+                return Err((StatusCode::BAD_REQUEST, "Missing learned carry expiry parameter".into()));
+            };
+            let probe = next_scout_parameter_combination(
                 &spot_profile_symbol, Strategy::DatedCarry, &strategy_parameters, now_ms / CARRY_DAY_MS,
-            );
+            ).and_then(|combination| scout_combination_key(&combination, &strategy_parameters)
+                .map(|key| (key, 0.0, combination)));
             let mut probe_parameters = strategy_parameters.clone();
-            if let Some((key, value)) = probe.as_ref() {
-                probe_parameters.insert(key.clone(), *value);
+            if let Some((_, _, combination)) = probe.as_ref() {
+                for (key, value) in combination { probe_parameters.insert(key.clone(), *value); }
             }
             let probe_entry_decision = Strategy::DatedCarry.evaluate(&StrategySignal::dated_carry_entry(
                 &candidate, emitted_at_ms, now_ms, &probe_parameters,
@@ -274,7 +395,7 @@ async fn receive_dated_carry_signal(
             }
             let days = (candidate.expiry_ms - now_ms) as f64 / CARRY_DAY_MS as f64;
             if days < minimum_days {
-                return Err((StatusCode::BAD_REQUEST, format!("Carry entry inside the {minimum_days:.0}-day expiry cutoff")));
+                return Ok(StatusCode::ACCEPTED);
             }
             book.checked_at_ms = emitted_at_ms;
             book.last_error = None;
@@ -287,7 +408,9 @@ async fn receive_dated_carry_signal(
             };
             if selected
                 && entry_decision == StrategyDecision::Enter
-                && !book.positions.iter().any(|position| position.future_symbol == candidate.future_symbol)
+                && !book.positions.iter().any(|position| {
+                    position.spot_symbol == candidate.spot_symbol && position.status == "open"
+                })
             {
                 let spot_entry = candidate.spot_ask * (1.0 + CARRY_ENTRY_SLIPPAGE);
                 let future_entry = candidate.future_bid * (1.0 - CARRY_ENTRY_SLIPPAGE);
@@ -317,9 +440,9 @@ async fn receive_dated_carry_signal(
                     future_entry_price: future_entry,
                     entry_fees: fees,
                     status: "open".into(),
-                    scout_parameter_key: probe.as_ref().and_then(|(key, _)|
+                    scout_parameter_key: probe.as_ref().and_then(|(key, _, _)|
                         (probe_entry_decision == StrategyDecision::Enter).then(|| key.clone())),
-                    scout_parameter_value: probe.as_ref().and_then(|(_, value)|
+                    scout_parameter_value: probe.as_ref().and_then(|(_, value, _)|
                         (probe_entry_decision == StrategyDecision::Enter).then_some(*value)),
                     spot_exit_twap: None,
                     settlement_price: None,
@@ -336,7 +459,7 @@ async fn receive_dated_carry_signal(
                 };
                 update_dated_carry_mark(&mut position, candidate.spot_bid, candidate.future_ask, emitted_at_ms);
                 book.positions.push(position);
-                if let Some((parameter, value)) = probe.as_ref()
+                if let Some((parameter, value, _)) = probe.as_ref()
                     .filter(|_| probe_entry_decision != StrategyDecision::Enter)
                 {
                     parameter_feedback.push((spot_profile_symbol.clone(), parameter.clone(), format!("{value:.8}"), 0.0));
@@ -427,9 +550,15 @@ async fn receive_dated_carry_signal(
         let mut settings = state.settings.lock().await;
         for (symbol, parameter, value, return_percent) in parameter_feedback {
             let Ok(value) = value.parse::<f64>() else { continue; };
-            let key = strategy_parameter_probe_learning_key(
-                &symbol, Strategy::DatedCarry.as_str(), &parameter, value,
-            );
+            let key = if parameter.starts_with("combo:") {
+                strategy_parameter_shadow_combination_learning_key(
+                    &symbol, Strategy::DatedCarry.as_str(), &parameter,
+                )
+            } else {
+                strategy_parameter_shadow_probe_learning_key(
+                    &symbol, Strategy::DatedCarry.as_str(), &parameter, value,
+                )
+            };
             record_learning_outcome(settings.learning.entry(key).or_default(), return_percent);
         }
         drop(settings);

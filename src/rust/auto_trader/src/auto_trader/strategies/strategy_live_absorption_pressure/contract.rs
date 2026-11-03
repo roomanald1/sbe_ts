@@ -2,7 +2,7 @@ use super::super::{Strategy, StrategyContract, StrategyDefinition};
 pub(super) fn contract() -> StrategyContract {
     StrategyContract {
         insight: "live absorption insight",
-        entry: "pressure-without-price-move points against the signal direction with magnitude at least 0.2",
+        entry: "absorption pressure uses learned lookback, touch, replenishment, and price-movement settings and exceeds its learned minimum",
         exit: super::evaluate::description(),
         entry_order: "passive PostOnlyLimit by default; IOC is reserved for high urgency; VWAP/TWAP use configured duration and participation",
         exit_order: "StopMarket protective order; IOC close order for strategy and take-profit exits",

@@ -49,6 +49,8 @@ type AuditRecord = {
   evaluated_timestamp?: number;
 };
 
+type AuditPage = { items: AuditRecord[]; next_cursor?: number | null };
+
 type SignalEvaluation = {
   symbol: string;
   signal_timestamp: number;
@@ -64,7 +66,7 @@ const historyWindowMs = 7 * 24 * 60 * 60_000;
 const repeatedScenarioCooldownMs = 60 * 60_000;
 
 export class AutoTraderShadowModel {
-  readonly state$ = new BehaviorSubject<{ rows: AutoTraderShadowPosition[]; learningOutcomes: Array<{ strategy: string; netReturnPercent: number }>; loading: boolean; error?: string }>({ rows: [], learningOutcomes: [], loading: true });
+  readonly state$ = new BehaviorSubject<{ rows: AutoTraderShadowPosition[]; learningOutcomes: Array<{ strategy: string; netReturnPercent: number; parameterKey?: string; parameterValue?: number }>; loading: boolean; error?: string }>({ rows: [], learningOutcomes: [], loading: true });
   private timer?: ReturnType<typeof setInterval>;
   private refreshing = false;
   private consumers = 0;
@@ -83,20 +85,32 @@ export class AutoTraderShadowModel {
     this.timer = undefined;
   }
 
+  private async loadAuditHistory(since: number): Promise<AuditRecord[]> {
+    const rows: AuditRecord[] = [];
+    let cursor: number | undefined;
+    do {
+      const query = new URLSearchParams({ since: String(since), limit: '10000' });
+      if (cursor !== undefined) query.set('cursor', String(cursor));
+      const response = await fetch("/signals/auto-trader-audit?" + query.toString());
+      if (!response.ok) throw new Error('Shadow outcome data unavailable');
+      const page = await response.json() as AuditPage;
+      rows.push(...page.items);
+      cursor = typeof page.next_cursor === 'number' ? page.next_cursor : undefined;
+    } while (cursor !== undefined);
+    return rows;
+  }
+
   private async refresh() {
     if (this.refreshing) return;
     this.refreshing = true;
     const since = Date.now() - historyWindowMs;
     try {
-      const [auditResponse, evaluationResponse] = await Promise.all([
-        fetch(`/signals/auto-trader-audit?since=${since}&limit=50000`),
+      const [auditRows, evaluationResponse] = await Promise.all([
+        this.loadAuditHistory(since),
         fetch('/signals/evaluations?since=' + since + '&limit=150000'),
       ]);
-      if (!auditResponse.ok || !evaluationResponse.ok) throw new Error('Shadow outcome data unavailable');
-      const [auditRows, evaluations] = await Promise.all([
-        auditResponse.json() as Promise<AuditRecord[]>,
-        evaluationResponse.json() as Promise<SignalEvaluation[]>,
-      ]);
+      if (!evaluationResponse.ok) throw new Error('Shadow outcome data unavailable');
+      const evaluations = await evaluationResponse.json() as SignalEvaluation[];
       const evaluationsBySignal = new Map<string, SignalEvaluation>();
       for (const evaluation of evaluations) {
         evaluationsBySignal.set(evaluation.symbol + '|' + evaluation.signal_timestamp, evaluation);
@@ -130,12 +144,15 @@ export class AutoTraderShadowModel {
           : evaluation
             ? direction === 'bullish' ? evaluation.long_net_percent : evaluation.short_net_percent
             : undefined;
-        const status: AutoTraderShadowPosition['status'] = typeof netReturn === 'number' && Number.isFinite(netReturn)
-          ? netReturn > 1e-12 ? 'Won' : netReturn < -1e-12 ? 'Lost' : 'Flat'
-          : outcome || evaluation ? 'Outcome unavailable' : 'Open';
         const entryPrice = direction === 'bullish'
           ? audit.shadow_entry_ask ?? audit.shadow_entry_price
           : audit.shadow_entry_bid ?? audit.shadow_entry_price;
+        const missingLiveScoutEntry = audit.scout === true
+          && audit.strategy?.startsWith('live-') === true
+          && !(typeof entryPrice === 'number' && Number.isFinite(entryPrice) && entryPrice > 0);
+        const status: AutoTraderShadowPosition['status'] = typeof netReturn === 'number' && Number.isFinite(netReturn)
+          ? netReturn > 1e-12 ? 'Won' : netReturn < -1e-12 ? 'Lost' : 'Flat'
+          : outcome || evaluation || missingLiveScoutEntry ? 'Outcome unavailable' : 'Open';
         return [{
           decisionId,
           symbol,
@@ -164,7 +181,12 @@ export class AutoTraderShadowModel {
       const learningOutcomes = auditRows.flatMap((audit) =>
         audit.stage === 'scout-outcome' && typeof audit.strategy === 'string' &&
         typeof audit.shadow_net_return_percent === 'number' && Number.isFinite(audit.shadow_net_return_percent)
-          ? [{ strategy: audit.strategy, netReturnPercent: audit.shadow_net_return_percent }]
+          ? [{
+              strategy: audit.strategy,
+              netReturnPercent: audit.shadow_net_return_percent,
+              ...(typeof audit.scout_parameter_key === 'string' ? { parameterKey: audit.scout_parameter_key } : {}),
+              ...(typeof audit.scout_parameter_value === 'number' && Number.isFinite(audit.scout_parameter_value) ? { parameterValue: audit.scout_parameter_value } : {}),
+            }]
           : []);
       this.state$.next({ rows, learningOutcomes, loading: false });
     } catch (error) {

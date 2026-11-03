@@ -107,13 +107,41 @@ impl SignalStore {
         .await
     }
 
-    async fn load_auto_trader_audit(
+    pub async fn load_auto_trader_audit_page(
         &self,
         since: Option<u64>,
+        before_id: Option<i64>,
         limit: usize,
-    ) -> Result<Vec<serde_json::Value>> {
-        self.load_auto_trader_audit_with_corrupt_rows(since, limit, false)
-            .await
+    ) -> Result<AuditPage> {
+        let path = self.path.clone();
+        tokio::task::spawn_blocking(move || {
+            let limit = limit.clamp(1, 10_000);
+            let connection = Self::open_database_path(&path)?;
+            let mut statement = connection.prepare(
+                "SELECT rowid, payload FROM auto_trader_audit WHERE (?1 IS NULL OR timestamp >= ?1) AND (?2 IS NULL OR rowid < ?2) ORDER BY rowid DESC LIMIT ?3",
+            )?;
+            let rows = statement.query_map(
+                params![since.map(|value| value as i64), before_id, (limit + 1) as i64],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?)),
+            )?;
+            let mut rows = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+            let has_more = rows.len() > limit;
+            rows.truncate(limit);
+            drop(statement);
+            drop(connection);
+            let next_cursor = has_more.then(|| rows.last().map(|(id, _)| *id)).flatten();
+            let mut items = Vec::with_capacity(rows.len());
+            for (_, compressed) in rows {
+                let mut decoder = MultiGzDecoder::new(compressed.as_slice());
+                let mut json = Vec::new();
+                decoder.read_to_end(&mut json)?;
+                items.push(serde_json::from_slice(&json)?);
+            }
+            items.reverse();
+            Ok(AuditPage { items, next_cursor })
+        })
+        .await
+        .map_err(|error| anyhow::anyhow!("audit page read task failed: {error}"))?
     }
 
     async fn load_auto_trader_audit_with_corrupt_rows(

@@ -11,6 +11,25 @@ impl SignalEngine {
     ) -> Option<SignalSnapshot> {
         self.prune(now);
         let latest = self.prices.back().copied()?;
+        let price_count = self.prices.len();
+        let mut price_change_square_prefix = vec![0.0; price_count + 1];
+        for index in 1..price_count {
+            let previous = self.prices[index - 1].1;
+            let current = self.prices[index].1;
+            let change = (current / previous).ln();
+            price_change_square_prefix[index + 1] = price_change_square_prefix[index] + change * change;
+        }
+        let trade_count = self.trades.len();
+        let (mut trade_buy_prefix, mut trade_sell_prefix) = (vec![0.0; trade_count + 1], vec![0.0; trade_count + 1]);
+        let (mut trade_notional_prefix, mut trade_quantity_prefix) = (vec![0.0; trade_count + 1], vec![0.0; trade_count + 1]);
+        for (index, &(timestamp, price, size, is_buy, _)) in self.trades.iter().enumerate() {
+            let notional = price * size;
+            trade_buy_prefix[index + 1] = trade_buy_prefix[index] + if is_buy { notional } else { 0.0 };
+            trade_sell_prefix[index + 1] = trade_sell_prefix[index] + if is_buy { 0.0 } else { notional };
+            trade_notional_prefix[index + 1] = trade_notional_prefix[index] + notional;
+            trade_quantity_prefix[index + 1] = trade_quantity_prefix[index] + size;
+            let _ = timestamp;
+        }
         let range_cutoff = now.saturating_sub(300_000);
         let range_start = self
             .prices
@@ -94,10 +113,12 @@ impl SignalEngine {
         let (mut weighted_cost, mut cost_notional) = (0.0, 0.0);
         for &(timestamp, price, size, is_buy, aggressor_cost) in &self.trades {
             let notional = price * size;
-            if is_buy {
-                buy += notional;
-            } else {
-                sell += notional;
+            if timestamp >= now.saturating_sub(60_000) {
+                if is_buy {
+                    buy += notional;
+                } else {
+                    sell += notional;
+                }
             }
             if timestamp >= trade_cutoff {
                 recent_count += 1;
@@ -133,7 +154,7 @@ impl SignalEngine {
         for trade in self
             .absorption_trades
             .iter()
-            .filter(|t| t.timestamp >= now.saturating_sub(ABSORPTION_WINDOW_MS))
+            .filter(|t| t.timestamp >= now.saturating_sub(30_000))
         {
             let (touch, prior_depth, bid_side) = if trade.is_buy {
                 (trade.ask, trade.ask_depth, false)
@@ -183,6 +204,143 @@ impl SignalEngine {
         };
         // Reuse the existing serialized field to keep persisted bincode records compatible.
         let pressure_without_price_move = absorption_imbalance.or(flow_without_move);
+        let momentum_by_window = (5..=30)
+            .step_by(5)
+            .map(|window_seconds| WindowedSignalValue {
+                window_seconds,
+                value: self.price_return(now.saturating_sub(u64::from(window_seconds) * 1_000)),
+                sample_count: 0,
+                span_ms: 0,
+            })
+            .collect::<Vec<_>>();
+        let trend_volatility_units_by_window = (60..=900)
+            .step_by(60)
+            .map(|window_seconds| {
+                let cutoff = now.saturating_sub(u64::from(window_seconds) * 1_000);
+                let start = self.prices.partition_point(|sample| sample.0 < cutoff);
+                let sample_count = price_count.saturating_sub(start);
+                let volatility = (sample_count >= 2).then(|| {
+                    (price_change_square_prefix[price_count] - price_change_square_prefix[start + 1]).sqrt() * 100.0
+                });
+                let value = self.price_return(cutoff)
+                    .zip(volatility)
+                    .and_then(|(trend, volatility)| (volatility > 1e-9).then_some(trend / volatility));
+                WindowedSignalValue {
+                    window_seconds,
+                    value,
+                    sample_count: 0,
+                    span_ms: 0,
+                }
+            })
+            .collect::<Vec<_>>();
+        let trade_flow_by_window = (10..=120)
+            .step_by(10)
+            .map(|window_seconds| {
+                let cutoff = now.saturating_sub(u64::from(window_seconds) * 1_000);
+                let start = self.trades.partition_point(|sample| sample.0 < cutoff);
+                let buy = trade_buy_prefix[trade_count] - trade_buy_prefix[start];
+                let sell = trade_sell_prefix[trade_count] - trade_sell_prefix[start];
+                let first = self.trades.get(start).map(|sample| sample.0);
+                let last = self.trades.back().map(|sample| sample.0);
+                WindowedSignalValue {
+                    window_seconds,
+                    value: (buy + sell > 0.0).then_some((buy - sell) / (buy + sell)),
+                    sample_count: trade_count.saturating_sub(start).min(u16::MAX as usize) as u16,
+                    span_ms: last.zip(first).map_or(0, |(last, first)| last.saturating_sub(first).min(u64::from(u32::MAX)) as u32),
+                }
+            })
+            .collect::<Vec<_>>();
+        let book_imbalance_by_depth = (1..=10)
+            .map(|depth_levels| {
+                let bid = self.book_bid_levels.iter().take(depth_levels).map(|(_, size)| size).sum::<f64>();
+                let ask = self.book_ask_levels.iter().take(depth_levels).map(|(_, size)| size).sum::<f64>();
+                DepthSignalValue {
+                    depth_levels: depth_levels as u8,
+                    value: (depth_levels <= self.book_bid_levels.len()
+                        && depth_levels <= self.book_ask_levels.len()
+                        && bid + ask > 0.0)
+                        .then_some((bid - ask) / (bid + ask)),
+                }
+            })
+            .collect::<Vec<_>>();
+        let vwap_dislocation_by_window = (10..=300)
+            .step_by(10)
+            .map(|window_seconds| {
+                let cutoff = now.saturating_sub(u64::from(window_seconds) * 1_000);
+                let start = self.trades.partition_point(|sample| sample.0 < cutoff);
+                let notional = trade_notional_prefix[trade_count] - trade_notional_prefix[start];
+                let quantity = trade_quantity_prefix[trade_count] - trade_quantity_prefix[start];
+                let first = self.trades.get(start).map(|sample| sample.0);
+                let last = self.trades.back().map(|sample| sample.0);
+                let span_ms = last.zip(first).map_or(0, |(last, first)| last.saturating_sub(first).min(u64::from(u32::MAX)) as u32);
+                let vwap = (quantity > 0.0).then_some(notional / quantity);
+                WindowedSignalValue {
+                    window_seconds,
+                    value: vwap.filter(|value| value.is_finite() && *value > 0.0)
+                        .map(|value| (latest.1 / value - 1.0) * 10_000.0),
+                    sample_count: trade_count.saturating_sub(start).min(u16::MAX as usize) as u16,
+                    span_ms,
+                }
+            })
+            .collect::<Vec<_>>();
+        let mut absorption_events = Vec::new();
+        for trade in self.absorption_trades.iter().filter(|trade| trade.timestamp >= now.saturating_sub(60_000)) {
+            let (touch, prior_depth, bid_side) = if trade.is_buy {
+                (trade.ask, trade.ask_depth, false)
+            } else {
+                (trade.bid, trade.bid_depth, true)
+            };
+            if prior_depth <= 0.0 || touch <= 0.0 { continue; }
+            let touch_distance_bps = (trade.price - touch).abs() / touch * 10_000.0;
+            let first_book = self.book_history.partition_point(|book| book.timestamp < trade.timestamp);
+            let replenishment_delay_ms = self.book_history.range(first_book..)
+                .take_while(|book| book.timestamp <= trade.timestamp.saturating_add(5_000))
+                .find_map(|book| {
+                    let (level, levels) = if bid_side { (book.bid, &book.bid_levels) } else { (book.ask, &book.ask_levels) };
+                    ((level - touch).abs() <= touch * 1e-8
+                        && levels.iter().find(|(price, _)| (*price - touch).abs() <= touch * 1e-8)
+                            .is_some_and(|(_, size)| *size >= prior_depth + trade.size * 0.5))
+                        .then_some(book.timestamp.saturating_sub(trade.timestamp).min(u64::from(u32::MAX)) as u32)
+                });
+            absorption_events.push((trade.timestamp, trade.price * trade.size, bid_side, touch_distance_bps, replenishment_delay_ms));
+        }
+        // Accumulate each qualifying event into all wider windows and looser
+        // gates once, rather than rescanning every event for every combination.
+        let mut absorbed_sell = vec![vec![vec![0.0; 5]; 5]; 6];
+        let mut absorbed_buy = vec![vec![vec![0.0; 5]; 5]; 6];
+        for (timestamp, notional, bid_side, touch_distance, replenishment_delay) in &absorption_events {
+            let age_ms = now.saturating_sub(*timestamp);
+            if age_ms > 60_000 { continue; }
+            let minimum_window = age_ms.div_ceil(10_000).saturating_sub(1).min(5) as usize;
+            let Some(delay_ms) = replenishment_delay else { continue; };
+            if *touch_distance > 5.0 { continue; }
+            let minimum_replenishment = delay_ms.div_ceil(1_000).saturating_sub(1).min(4) as usize;
+            let minimum_tolerance = (touch_distance.ceil() as usize).saturating_sub(1).min(4);
+            let totals = if *bid_side { &mut absorbed_sell } else { &mut absorbed_buy };
+            for windows in totals.iter_mut().skip(minimum_window) {
+                for replenishment in windows.iter_mut().skip(minimum_replenishment) {
+                    for value in replenishment.iter_mut().skip(minimum_tolerance) {
+                        *value += *notional;
+                    }
+                }
+            }
+        }
+        let mut absorption_pressure_by_window = Vec::with_capacity(6 * 5 * 5);
+        for (window_index, window_seconds) in (10..=60).step_by(10).enumerate() {
+            for (replenishment_index, replenishment_window_ms) in (1_000..=5_000).step_by(1_000).enumerate() {
+                for (touch_index, touch_tolerance_bps) in (1..=5).enumerate() {
+                    let sell = absorbed_sell[window_index][replenishment_index][touch_index];
+                    let buy = absorbed_buy[window_index][replenishment_index][touch_index];
+                    let pressure = (sell + buy > 0.0).then_some((sell - buy) / (sell + buy));
+                    absorption_pressure_by_window.push(AbsorptionPressureValue {
+                        window_seconds,
+                        replenishment_window_ms,
+                        touch_tolerance_bps: f64::from(touch_tolerance_bps),
+                        value: pressure,
+                    });
+                }
+            }
+        }
         let components = SignalComponents {
             trend_1m_percent: trend,
             momentum_10s_percent: momentum,
@@ -194,6 +352,12 @@ impl SignalEngine {
             mispricing_vs_vwap_bps,
             pressure_without_price_move,
             aggressor_cost_bps,
+            momentum_by_window,
+            trend_volatility_units_by_window,
+            trade_flow_by_window,
+            book_imbalance_by_depth,
+            vwap_dislocation_by_window,
+            absorption_pressure_by_window,
         };
         let mispricing_signal =
             mispricing_vs_vwap_bps.map(|value| (-value / 20.0).clamp(-1.0, 1.0));

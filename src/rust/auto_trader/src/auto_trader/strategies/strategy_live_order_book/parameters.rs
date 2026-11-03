@@ -13,6 +13,10 @@ pub(super) fn parameters() -> Vec<StrategyParameterSpec> {
         -1.0,
     )];
     specs.extend([
+        param(StrategyParameterKey::BookDepthLevels, "Book depth levels", 5.0, 1.0, 10.0, 1.0, "levels", 0.0),
+        param(StrategyParameterKey::MomentumLookbackSeconds, "Pullback momentum lookback", 10.0, 5.0, 30.0, 5.0, "seconds", 0.0),
+    ]);
+    specs.extend([
         param(
             StrategyParameterKey::StopLossPercent,
             "Protective stop distance",

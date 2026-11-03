@@ -25,24 +25,87 @@ fn candidate(evaluated_at_ms: u64, basis_percent: f64, expiry_days: f64) -> Date
 }
 
 #[test]
-fn entry_requires_executable_spot_future_edge_above_cost_and_seven_days_to_expiry() {
-    let parameters = BTreeMap::new();
+fn shadow_probe_dedupes_maturities_for_one_asset_and_parameter_variant() {
+    let first = candidate(1_000 * 86_400_000, 1.0, 12.0);
+    let mut second = first.clone();
+    second.future_symbol = "BTCUSDT_Q2".into();
+    assert_eq!(
+        dated_carry_shadow_key(&first, "carry_minimum_days_to_expiry", 6.0),
+        dated_carry_shadow_key(&second, "carry_minimum_days_to_expiry", 6.0),
+    );
+}
+
+#[test]
+fn lower_expiry_probe_can_shadow_an_expiry_filtered_by_the_baseline() {
     let now = 1_000 * 86_400_000;
-    let eligible = candidate(now, 0.60, 8.0);
-    let at_cost_floor = candidate(now, 0.50, 8.0);
+    let candidate = candidate(now, 1.0, 6.0);
+    let baseline_parameters = BTreeMap::from([
+        ("carry_minimum_days_to_expiry".to_owned(), 7.0),
+        ("carry_cost_gate_percent".to_owned(), 0.5),
+    ]);
+    let probe_parameters = BTreeMap::from([
+        ("carry_minimum_days_to_expiry".to_owned(), 5.0),
+        ("carry_cost_gate_percent".to_owned(), 0.5),
+    ]);
+    let baseline = evaluate(&StrategySignal::dated_carry_entry(
+        &candidate,
+        now,
+        now,
+        &baseline_parameters,
+    ))
+    .unwrap();
+    let probe = evaluate(&StrategySignal::dated_carry_entry(
+        &candidate,
+        now,
+        now,
+        &probe_parameters,
+    ))
+    .unwrap();
+    assert_eq!(baseline, StrategyDecision::Reject);
+    assert_eq!(probe, StrategyDecision::Enter);
+}
+
+#[test]
+fn scout_shadow_markout_records_positive_and_negative_net_returns() {
+    let entry = candidate(1_000 * 86_400_000, 1.0, 12.0);
+    let mut favorable = entry.clone();
+    favorable.spot_bid = 101.0;
+    favorable.future_ask = 100.0;
+    let favorable_return = dated_carry_shadow_return_percent(&entry, &favorable).unwrap();
+    assert!(favorable_return > 0.0);
+
+    let mut adverse = entry.clone();
+    adverse.spot_bid = 99.0;
+    adverse.future_ask = 102.0;
+    let adverse_return = dated_carry_shadow_return_percent(&entry, &adverse).unwrap();
+    assert!(adverse_return < 0.0);
+}
+
+#[test]
+fn entry_requires_executable_spot_future_edge_above_cost_and_seven_days_to_expiry() {
+    let parameters = BTreeMap::from([
+        ("carry_minimum_days_to_expiry".to_owned(), 7.0),
+        ("carry_cost_gate_percent".to_owned(), 0.50),
+    ]);
+    let now = 1_000 * 86_400_000;
+    let eligible = candidate(now, 1.00, 8.0);
+    let below_minimum_net_edge = candidate(now, 0.99, 8.0);
     let too_close = candidate(now, 0.80, 6.99);
     let entry = |candidate: &DatedCarryCandidate| {
         let input = StrategySignal::dated_carry_entry(candidate, now, now, &parameters);
         evaluate(&input).unwrap()
     };
     assert_eq!(entry(&eligible), StrategyDecision::Enter);
-    assert_eq!(entry(&at_cost_floor), StrategyDecision::Reject);
+    assert_eq!(entry(&below_minimum_net_edge), StrategyDecision::Reject);
     assert_eq!(entry(&too_close), StrategyDecision::Reject);
 }
 
 #[test]
 fn entry_rejects_prices_that_do_not_match_the_published_basis() {
-    let parameters = BTreeMap::new();
+    let parameters = BTreeMap::from([
+        ("carry_minimum_days_to_expiry".to_owned(), 7.0),
+        ("carry_cost_gate_percent".to_owned(), 0.50),
+    ]);
     let now = 1_000 * 86_400_000;
     let mut invalid = candidate(now, 0.70, 9.0);
     invalid.future_bid = invalid.spot_ask * 1.001;

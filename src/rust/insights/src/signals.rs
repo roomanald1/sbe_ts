@@ -16,8 +16,8 @@ use std::{
 use tokio::sync::{Mutex, mpsc, oneshot};
 
 const PRICE_WINDOW_MS: u64 = 3_610_000;
-const TRADE_WINDOW_MS: u64 = 60_000;
-const ABSORPTION_WINDOW_MS: u64 = 30_000;
+const TRADE_WINDOW_MS: u64 = 300_000;
+const ABSORPTION_WINDOW_MS: u64 = 60_000;
 const MAX_BOOK_AGE_MS: u64 = 5_000;
 const MAX_PRICE_LOOKBACK_GAP_MS: u64 = 5_000;
 static POSITION_INSIGHTS_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
@@ -253,6 +253,7 @@ mod coverage_tests {
             mispricing_vs_vwap_bps: None,
             pressure_without_price_move: None,
             aggressor_cost_bps: None,
+            ..SignalComponents::default()
         };
         assert_eq!(
             breakout_watch(&bullish, Some((99.0, 101.0)), Some(0.64)),
@@ -275,6 +276,7 @@ mod coverage_tests {
             mispricing_vs_vwap_bps: None,
             pressure_without_price_move: None,
             aggressor_cost_bps: None,
+            ..SignalComponents::default()
         };
         assert_eq!(
             breakout_watch(&bearish, Some((99.0, 101.0)), Some(0.9))
@@ -294,7 +296,8 @@ mod coverage_tests {
                     trend_5m_volatility_units: None,
                     mispricing_vs_vwap_bps: None,
                     pressure_without_price_move: None,
-                    aggressor_cost_bps: None
+                    aggressor_cost_bps: None,
+                    ..SignalComponents::default()
                 },
                 Some((99.0, 101.0)),
                 Some(0.9)
@@ -336,5 +339,75 @@ mod coverage_tests {
             })
             .collect::<Vec<_>>();
         assert_eq!(select_strength_threshold(&losses, 200), None);
+    }
+}
+
+#[cfg(test)]
+mod granular_live_feature_tests {
+    use super::*;
+
+    #[test]
+    fn snapshots_publish_window_and_depth_variants_for_live_scouts() {
+        let mut engine = SignalEngine::default();
+        for index in 0..=120_u64 {
+            let timestamp = 1_000 + index * 1_000;
+            let price = 100.0 + index as f64 * 0.01;
+            engine.on_price(timestamp, price, 0.0);
+            if index % 5 == 0 {
+                engine.on_book(
+                    timestamp,
+                    price - 0.01,
+                    price + 0.01,
+                    &[1.0, 2.0, 3.0, 4.0, 5.0],
+                    &[5.0, 4.0, 3.0, 2.0, 1.0],
+                    &[
+                        (price - 0.01, 1.0),
+                        (price - 0.02, 2.0),
+                        (price - 0.03, 3.0),
+                        (price - 0.04, 4.0),
+                        (price - 0.05, 5.0),
+                    ],
+                    &[
+                        (price + 0.01, 5.0),
+                        (price + 0.02, 4.0),
+                        (price + 0.03, 3.0),
+                        (price + 0.04, 2.0),
+                        (price + 0.05, 1.0),
+                    ],
+                );
+                engine.on_trade(timestamp, price + 0.01, 1.0, true);
+            }
+        }
+
+        let snapshot = engine.snapshot("ETH-USDT", 121_000).unwrap();
+        let components = snapshot.components;
+        assert!(
+            components
+                .momentum_by_window
+                .iter()
+                .any(|feature| { feature.window_seconds == 10 && feature.value.is_some() })
+        );
+        assert!(components.trade_flow_by_window.iter().any(|feature| {
+            feature.window_seconds == 60 && feature.value.is_some() && feature.sample_count > 0
+        }));
+        assert!(
+            components
+                .book_imbalance_by_depth
+                .iter()
+                .any(|feature| { feature.depth_levels == 5 && feature.value.is_some() })
+        );
+        assert!(components.vwap_dislocation_by_window.iter().any(|feature| {
+            feature.window_seconds == 60 && feature.value.is_some() && feature.sample_count >= 5
+        }));
+        assert!(
+            components
+                .absorption_pressure_by_window
+                .iter()
+                .any(|feature| {
+                    feature.window_seconds == 30
+                        && feature.replenishment_window_ms == 2_000
+                        && feature.touch_tolerance_bps == 2.0
+                })
+        );
     }
 }

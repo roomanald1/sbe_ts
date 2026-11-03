@@ -2,7 +2,7 @@ use super::super::{Strategy, StrategyContract, StrategyDefinition};
 pub(super) fn contract() -> StrategyContract {
     StrategyContract {
         insight: "live momentum insight",
-        entry: "direction agrees with nonzero 10-second momentum or 5-minute trend evidence; then shared walk-forward and risk gates apply",
+        entry: "direction follows learned momentum and trend lookbacks; their minimum aligned values, lookbacks, and exits are bounded learned parameters",
         exit: super::evaluate::description(),
         entry_order: "passive PostOnlyLimit by default; IOC is reserved for high urgency; VWAP/TWAP use configured duration and participation",
         exit_order: "StopMarket protective order; IOC close order for strategy and take-profit exits",

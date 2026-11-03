@@ -2,7 +2,7 @@ use super::super::{Strategy, StrategyContract, StrategyDefinition};
 pub(super) fn contract() -> StrategyContract {
     StrategyContract {
         insight: "live VWAP dislocation insight",
-        entry: "signed VWAP dislocation agrees with signal direction and magnitude is at least 1 bp; wait for 10-second momentum to pull back against the signal",
+        entry: "VWAP dislocation over the learned window meets its learned trade-count, span, and bps gates; wait for learned-window momentum to pull back",
         exit: super::evaluate::description(),
         entry_order: "passive PostOnlyLimit by default; IOC is reserved for high urgency; VWAP/TWAP use configured duration and participation",
         exit_order: "StopMarket protective order; IOC close order for strategy and take-profit exits",

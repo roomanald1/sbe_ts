@@ -15,6 +15,7 @@ import { Hedging } from './Hedging';
 import { AutoTrader } from './AutoTrader';
 import { DatedCarry } from './DatedCarry';
 import { AutoTraderDiagnostics } from './AutoTraderDiagnostics';
+import { AutoTraderLearningWidget } from './AutoTraderLearningWidget';
 import { AutoTraderOutcomes } from './AutoTraderOutcomes';
 import { AutoTraderShadowPositions } from './AutoTraderShadowPositions';
 import { ExecutionFees } from './ExecutionFees';
@@ -55,6 +56,7 @@ function DashboardWidgetContentComponent(props: Props): ReactNode {
     case 'auto-trader': return <AutoTrader />;
     case 'dated-carry': return <DatedCarry />;
     case 'auto-trader-diagnostics': return <AutoTraderDiagnostics />;
+    case 'auto-trader-learning': return <AutoTraderLearningWidget />;
     case 'auto-trader-outcomes': return <AutoTraderOutcomes ticks={prices.ticks} />;
     case 'auto-trader-completed-positions': return <AutoTraderOutcomes closedOnly />;
     case 'auto-trader-live-positions': return <AutoTraderOutcomes ticks={prices.ticks} liveOnly />;

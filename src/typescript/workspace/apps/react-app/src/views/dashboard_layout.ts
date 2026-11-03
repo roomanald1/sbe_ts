@@ -21,6 +21,7 @@ export type DashboardWidgetType =
   | 'auto-trader'
   | 'dated-carry'
   | 'auto-trader-diagnostics'
+  | 'auto-trader-learning'
   | 'auto-trader-outcomes'
   | 'auto-trader-completed-positions'
   | 'auto-trader-live-positions'
@@ -65,6 +66,7 @@ export const DASHBOARD_WIDGET_TYPES: DashboardWidgetType[] = [
   'auto-trader',
   'dated-carry',
   'auto-trader-diagnostics',
+  'auto-trader-learning',
   'auto-trader-outcomes',
   'auto-trader-completed-positions',
   'auto-trader-live-positions',
@@ -107,6 +109,7 @@ export const WIDGET_LABELS: Record<DashboardWidgetType, string> = {
   'auto-trader': 'Auto Trader',
   'dated-carry': 'Dated futures carry',
   'auto-trader-diagnostics': 'Auto Trader diagnostics',
+  'auto-trader-learning': 'Strategy learning impact',
   'auto-trader-outcomes': 'AutoTrader outcomes',
   'auto-trader-completed-positions': 'AutoTrader closed & partial positions',
   'auto-trader-live-positions': 'AutoTrader live positions',

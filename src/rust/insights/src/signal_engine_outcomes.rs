@@ -131,6 +131,11 @@ impl SignalEngine {
                     && timestamp.saturating_sub(*quote_time) <= MAX_BOOK_AGE_MS
             });
             let is_scout_shadow = pending.sample_id.is_some();
+            // Live scout feeds can carry trades without a synchronized book
+            // update. Use the current trade as a zero-spread mark for shadow
+            // exits so these simulated positions do not remain open forever.
+            let shadow_mark_quote = current_quote
+                .or_else(|| is_scout_shadow.then_some((timestamp, price, price)));
             let shadow_age_ms = timestamp.saturating_sub(pending.timestamp);
             let minimum_hold_active = pending.scout_minimum_hold_days
                 .is_some_and(|days| shadow_age_ms < (days * 86_400_000.0) as u64);
@@ -146,14 +151,14 @@ impl SignalEngine {
                 Some("maximum_hold")
             } else if maximum_shadow_duration_elapsed {
                 Some("maximum_shadow_duration")
-            } else if current_quote.is_some()
-                && scout_shadow_stop_or_target_hit(&mut pending, current_quote)
+            } else if shadow_mark_quote.is_some()
+                && scout_shadow_stop_or_target_hit(&mut pending, shadow_mark_quote)
             {
                 Some("stop_or_target")
             } else {
                 None
             };
-            let shadow_exit = is_scout_shadow && current_quote.is_some() && scout_exit_reason.is_some();
+            let shadow_exit = is_scout_shadow && shadow_mark_quote.is_some() && scout_exit_reason.is_some();
             let fixed_horizon_exit = !is_scout_shadow
                 && timestamp
                     >= pending
@@ -171,10 +176,14 @@ impl SignalEngine {
                     "bearish" => change < 0.0,
                     _ => false,
                 };
-                let exit_quote = self.best_quote.filter(|(quote_time, _, _)| {
-                    *quote_time <= timestamp
-                        && timestamp.saturating_sub(*quote_time) <= MAX_BOOK_AGE_MS
-                });
+                let exit_quote = if is_scout_shadow {
+                    shadow_mark_quote
+                } else {
+                    self.best_quote.filter(|(quote_time, _, _)| {
+                        *quote_time <= timestamp
+                            && timestamp.saturating_sub(*quote_time) <= MAX_BOOK_AGE_MS
+                    })
+                };
                 let fee_rate = pending.taker_fee_rate;
                 let net_return_percent = match (
                     pending.direction.as_str(),
@@ -257,10 +266,14 @@ impl SignalEngine {
                         path_low_timestamp = *sample_time;
                     }
                 }
-                let exit_quote = self.best_quote.filter(|(quote_time, _, _)| {
-                    *quote_time <= timestamp
-                        && timestamp.saturating_sub(*quote_time) <= MAX_BOOK_AGE_MS
-                });
+                let exit_quote = if is_scout_shadow {
+                    shadow_mark_quote
+                } else {
+                    self.best_quote.filter(|(quote_time, _, _)| {
+                        *quote_time <= timestamp
+                            && timestamp.saturating_sub(*quote_time) <= MAX_BOOK_AGE_MS
+                    })
+                };
                 let (exit_bid, exit_ask, exit_quote_timestamp) = exit_quote
                     .map_or((None, None, None), |(quote_time, bid, ask)| {
                         (Some(bid), Some(ask), Some(quote_time))

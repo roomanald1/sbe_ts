@@ -12,6 +12,16 @@ pub(super) fn parameters() -> Vec<StrategyParameterSpec> {
         "ratio",
         -1.0,
     )];
+    specs.push(param(
+        StrategyParameterKey::TradeFlowWindowSeconds,
+        "Trade-flow window",
+        60.0,
+        10.0,
+        120.0,
+        10.0,
+        "seconds",
+        0.0,
+    ));
     specs.extend([
         param(
             StrategyParameterKey::StopLossPercent,

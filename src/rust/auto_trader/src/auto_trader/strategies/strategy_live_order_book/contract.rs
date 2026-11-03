@@ -2,7 +2,7 @@ use super::super::{Strategy, StrategyContract, StrategyDefinition};
 pub(super) fn contract() -> StrategyContract {
     StrategyContract {
         insight: "live order-book insight",
-        entry: "signed book imbalance agrees with signal direction and magnitude is at least 0.15; wait for 10-second momentum to pull back against the signal",
+        entry: "book imbalance at the learned depth agrees with strategy direction; wait for learned-window momentum to pull back against the signal",
         exit: super::evaluate::description(),
         entry_order: "passive PostOnlyLimit by default; IOC is reserved for high urgency; VWAP/TWAP use configured duration and participation",
         exit_order: "StopMarket protective order; IOC close order for strategy and take-profit exits",

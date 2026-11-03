@@ -24,6 +24,7 @@ fn deserialize_record(kind: i64, payload: &[u8]) -> Result<StoredSignalRecord> {
                     .pressure_without_price_move
                     .or(snapshot.components.absorption_imbalance),
                 aggressor_cost_bps: snapshot.components.aggressor_cost_bps,
+                ..SignalComponents::default()
             },
             reasons: snapshot.reasons,
             news_attribution: None,

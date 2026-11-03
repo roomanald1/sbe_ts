@@ -91,6 +91,21 @@ fn strategy_parameter_probe_learning_key(symbol: &str, strategy: &str, parameter
     format!("probe:{symbol}:{strategy}:{parameter}:{value:.8}")
 }
 
+fn strategy_parameter_shadow_combination_learning_key(
+    symbol: &str, strategy: &str, combination: &str,
+) -> String {
+    format!("probe_combo_shadow:{symbol}:{strategy}:{combination}")
+}
+
+fn strategy_parameter_shadow_probe_learning_key(
+    symbol: &str,
+    strategy: &str,
+    parameter: &str,
+    value: f64,
+) -> String {
+    format!("probe_shadow:{symbol}:{strategy}:{parameter}:{value:.8}")
+}
+
 fn record_strategy_trade_outcome(
     settings: &mut Settings,
     symbol: &str,

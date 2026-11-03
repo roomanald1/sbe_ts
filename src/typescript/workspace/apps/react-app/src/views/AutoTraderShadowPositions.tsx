@@ -34,6 +34,7 @@ function AutoTraderShadowPositionsComponent({ ticks = [], histories = new Map() 
   const state = useBehaviorSnapshot(autoTraderShadowModel.state$);
   const [now, setNow] = useState(Date.now);
   const [positionFilter, setPositionFilter] = useState<'all' | 'open' | 'closed'>('all');
+  const [sourceFilter, setSourceFilter] = useState<'live' | 'all'>('live');
   const [scoutSymbolFilter, setScoutSymbolFilter] = useState('all');
   useEffect(() => { autoTraderShadowModel.start(); return () => autoTraderShadowModel.stop(); }, []);
   useEffect(() => { const timer = setInterval(() => setNow(Date.now()), 1_000); return () => clearInterval(timer); }, []);
@@ -54,12 +55,14 @@ function AutoTraderShadowPositionsComponent({ ticks = [], histories = new Map() 
       : grossReturn - row.takerFeeRate * 2 * 100 - entrySpreadPercent;
     return { ...row, markPrice, openNetReturnPercent: estimatedOpenReturn };
   }), [state.rows, marks, histories, now]);
-  const openCount = rows.filter((row) => row.status === 'Open').length;
-  const closedCount = rows.length - openCount;
-  const wins = rows.filter((row) => row.status === 'Won').length;
-  const losses = rows.filter((row) => row.status === 'Lost').length;
-  const flats = rows.filter((row) => row.status === 'Flat').length;
-  const unavailable = rows.filter((row) => row.status === 'Outcome unavailable').length;
+  const liveStrategyRows = useMemo(() => rows.filter((row) => row.source === 'Scout' && row.strategy.startsWith('live-')), [rows]);
+  const sourceRows = sourceFilter === 'live' ? liveStrategyRows : rows;
+  const openCount = sourceRows.filter((row) => row.status === 'Open').length;
+  const closedCount = sourceRows.length - openCount;
+  const wins = sourceRows.filter((row) => row.status === 'Won').length;
+  const losses = sourceRows.filter((row) => row.status === 'Lost').length;
+  const flats = sourceRows.filter((row) => row.status === 'Flat').length;
+  const unavailable = sourceRows.filter((row) => row.status === 'Outcome unavailable').length;
   const sourceCounts = useMemo(() => {
     const counts = {
       Scout: { open: 0, resolved: 0, unavailable: 0 },
@@ -139,21 +142,19 @@ function AutoTraderShadowPositionsComponent({ ticks = [], histories = new Map() 
     { field: 'average', headerName: 'Avg net', width: 120, sortable: true, sort: 'desc', sortIndex: 0, valueFormatter: ({ value }) => percent(value), cellClassRules: { 'pnl-positive': ({ value }) => typeof value === 'number' && value > 1e-12, 'pnl-negative': ({ value }) => typeof value === 'number' && value < -1e-12 } },
   ], []);
   const columns = useMemo<ColDef<ShadowGridRow>[]>(() => [
-    { field: 'symbol', headerName: 'Symbol', width: 115, minWidth: 95 },
-    { field: 'strategy', headerName: 'Strategy', valueFormatter: ({ value }) => strategyLabel(value), width: 205, minWidth: 155 },
-    { field: 'source', headerName: 'Source', width: 100, minWidth: 85 },
-    { field: 'exitScenario', headerName: 'Exit scenario', valueFormatter: ({ value }) => value === 'tight' ? 'Tighter exits' : 'Strategy exits', width: 145, minWidth: 115 },
-    { headerName: 'Scout level', valueGetter: ({ data }) => data?.scoutLevelPercent, valueFormatter: ({ value }) => typeof value === 'number' ? String(value.toFixed(2)) + '% below breakout' : '—', width: 180, minWidth: 145 },
-    { headerName: 'Opened at', valueGetter: ({ data }) => data?.openedAt, valueFormatter: ({ value }) => typeof value === 'number' ? new Date(value).toLocaleString() : '—', width: 190, minWidth: 160 },
-    { headerName: 'Duration', headerTooltip: 'Elapsed time until the strategy, protective stop, take-profit, or profit-protection exit.', width: 95, valueGetter: ({ data }) => {
-      if (!data) return undefined;
-      if (data.status === 'Open') return Math.max(0, now - data.openedAt);
-      if (typeof data.closedAt === 'number') return Math.max(0, data.closedAt - data.openedAt);
+    { field: 'symbol', headerName: 'Symbol', width: 85, minWidth: 75 },
+    { field: 'strategy', headerName: 'Strategy', valueFormatter: ({ value }) => strategyLabel(value), width: 130, minWidth: 110 },
+    { field: 'status', headerName: 'State', width: 85, minWidth: 75, cellStyle: ({ value }) => value === 'Won' ? { color: '#45c989', fontWeight: 700 } : value === 'Lost' ? { color: '#f06e72', fontWeight: 700 } : undefined },
+    { field: 'exitScenario', headerName: 'Exit scenario', valueFormatter: ({ value }) => value === 'tight' ? 'Tighter exits' : 'Strategy exits', width: 105, minWidth: 90 },
+    { headerName: 'Scout level', valueGetter: ({ data }) => data?.scoutLevelPercent, valueFormatter: ({ value }) => typeof value === 'number' ? String(value.toFixed(2)) + '% below breakout' : '—', width: 125, minWidth: 105 },
+    { headerName: 'Opened at', valueGetter: ({ data }) => data?.openedAt, valueFormatter: ({ value }) => typeof value === 'number' ? new Date(value).toLocaleString() : '—', width: 140, minWidth: 120 },
+    { headerName: 'Duration', headerTooltip: 'Elapsed time for open shadow positions.', width: 80, sort: 'asc', sortIndex: 0, valueGetter: ({ data }) => {
+      if (!data || data.status !== 'Open') return undefined;
       return Math.max(0, now - data.openedAt);
-    }, valueFormatter: ({ value }) => typeof value === 'number' ? durationLabel(value) : '—', minWidth: 95 },
-    { headerName: 'Entry', valueGetter: ({ data }) => data?.entryPrice, valueFormatter: ({ value }) => typeof value === 'number' ? value.toPrecision(8) : '—', width: 120, minWidth: 100 },
-    { headerName: 'Mark', valueGetter: ({ data }) => data?.markPrice, valueFormatter: ({ value }) => typeof value === 'number' ? value.toPrecision(8) : '—', minWidth: 115 },
-    { headerName: 'Net vs breakeven', width: 240, headerTooltip: 'Net return after estimated or configured round-trip taker fees and spread. The bar is centred on breakeven and scaled from −2% to +2%; larger returns are clipped visually.', minWidth: 290, cellRenderer: ({ data }: { data?: ShadowGridRow }) => {
+    }, valueFormatter: ({ value }) => typeof value === 'number' ? durationLabel(value) : '—', minWidth: 80 },
+    { headerName: 'Entry', valueGetter: ({ data }) => data?.entryPrice, valueFormatter: ({ value }) => typeof value === 'number' ? value.toPrecision(8) : '—', width: 95, minWidth: 80 },
+    { headerName: 'Mark', valueGetter: ({ data }) => data?.markPrice, valueFormatter: ({ value }) => typeof value === 'number' ? value.toPrecision(8) : '—', width: 105, minWidth: 90 },
+    { headerName: 'Net vs breakeven', width: 130, headerTooltip: 'Net return after estimated or configured round-trip taker fees and spread. The bar is centred on breakeven and scaled from −2% to +2%; larger returns are clipped visually.', minWidth: 120, cellRenderer: ({ data }: { data?: ShadowGridRow }) => {
       if (!data) return null;
       const value = data.status === 'Open' ? data.openNetReturnPercent : data.netReturnPercent;
       if (typeof value !== 'number' || !Number.isFinite(value)) {
@@ -174,11 +175,10 @@ function AutoTraderShadowPositionsComponent({ ticks = [], histories = new Map() 
         <span className={'auto-trader-pnl-bar-label ' + tone}>{label}</span>
       </div>;
     } },
-    { headerName: 'Net', headerTooltip: 'Closed net return after configured taker fees and spread. Open positions show the estimated net return.', valueGetter: ({ data }) => data?.status === 'Open' ? data.openNetReturnPercent : data?.netReturnPercent, valueFormatter: ({ value }) => percent(value), cellClassRules: { 'is-positive': ({ value }) => typeof value === 'number' && value > 1e-12, 'is-negative': ({ value }) => typeof value === 'number' && value < -1e-12 }, minWidth: 90, maxWidth: 110 },
-    { field: 'status', headerName: 'State', width: 145, minWidth: 120 },
+    { headerName: 'Net', headerTooltip: 'Closed net return after configured taker fees and spread. Open positions show the estimated net return.', valueGetter: ({ data }) => data?.status === 'Open' ? data.openNetReturnPercent : data?.netReturnPercent, valueFormatter: ({ value }) => percent(value), cellClassRules: { 'is-positive': ({ value }) => typeof value === 'number' && value > 1e-12, 'is-negative': ({ value }) => typeof value === 'number' && value < -1e-12 }, minWidth: 75, maxWidth: 90 },
     { field: 'strength', headerName: 'Signal strength', valueFormatter: ({ value }) => typeof value === 'number' ? `${(value * 100).toFixed(0)}%` : '—', minWidth: 115 },
   ], [now]);
-  const visibleRows = useMemo(() => rows.filter((row) => positionFilter === 'all' || (positionFilter === 'open' ? row.status === 'Open' : row.status !== 'Open')), [rows, positionFilter]);
+  const visibleRows = useMemo(() => sourceRows.filter((row) => positionFilter === 'all' || (positionFilter === 'open' ? row.status === 'Open' : row.status !== 'Open')), [sourceRows, positionFilter]);
 
   return <section className="feed-section signal-info-panel" aria-label="AutoTrader shadow outcomes">
     <FeedToolbar title="Scout and exploratory shadow outcomes" />
@@ -188,10 +188,12 @@ function AutoTraderShadowPositionsComponent({ ticks = [], histories = new Map() 
     </div>
     <div className="auto-trader-shadow-summary" aria-label="Shadow outcomes by source">
       <span>Scout shadows · {sourceCounts.Scout.open} open · {sourceCounts.Scout.resolved} resolved{sourceCounts.Scout.unavailable ? ' · ' + sourceCounts.Scout.unavailable + ' unavailable' : ''}</span>
+      <span>Live strategy Scouts · {liveStrategyRows.filter((row) => row.status === 'Open').length} open · {liveStrategyRows.filter((row) => row.status !== 'Open').length} resolved</span>
       <span>Exploratory shadows · {sourceCounts.Exploratory.open} open · {sourceCounts.Exploratory.resolved} resolved{sourceCounts.Exploratory.unavailable ? ' · ' + sourceCounts.Exploratory.unavailable + ' unavailable' : ''}</span>
     </div>
     <div className="auto-trader-shadow-position-filters" role="group" aria-label="Filter shadow positions">
-      <button type="button" aria-pressed={positionFilter === 'all'} onClick={() => setPositionFilter('all')}>All ({rows.length})</button>
+      <button type="button" aria-pressed={sourceFilter === 'live'} onClick={() => { setSourceFilter('live'); setPositionFilter('all'); }}>Live strategy Scouts ({liveStrategyRows.length})</button>
+      <button type="button" aria-pressed={sourceFilter === 'all'} onClick={() => { setSourceFilter('all'); setPositionFilter('all'); }}>All shadows ({rows.length})</button>
       <button type="button" aria-pressed={positionFilter === 'open'} onClick={() => setPositionFilter('open')}>Open ({openCount})</button>
       <button type="button" aria-pressed={positionFilter === 'closed'} onClick={() => setPositionFilter('closed')}>Closed ({closedCount})</button>
     </div>
@@ -206,7 +208,7 @@ function AutoTraderShadowPositionsComponent({ ticks = [], histories = new Map() 
     {state.error && <div className="positions-error">{state.error}</div>}
     <div className="data-grid-wrap signal-info-grid auto-trader-shadow-position-grid"><AgGridReact<ShadowGridRow> rowData={visibleRows} columnDefs={columns} getRowId={({ data }) => data.decisionId} defaultColDef={{ sortable: true, resizable: true }} theme={theme} domLayout="normal" rowHeight={34} headerHeight={30} /></div>
     {state.loading && <p className="positions-empty">Loading shadow outcomes…</p>}
-    {!state.loading && !state.error && visibleRows.length === 0 && <p className="positions-empty">{positionFilter === 'closed' ? 'No closed shadow positions recorded in the last 7 days.' : positionFilter === 'open' ? 'No open shadow positions.' : 'No scout or exploratory shadow candidates recorded in the last 7 days.'}</p>}
+    {!state.loading && !state.error && visibleRows.length === 0 && <p className="positions-empty">{sourceFilter === 'live' ? 'No live strategy Scout shadows recorded in the last 7 days.' : positionFilter === 'closed' ? 'No closed shadow positions recorded in the last 7 days.' : positionFilter === 'open' ? 'No open shadow positions.' : 'No scout or exploratory shadow candidates recorded in the last 7 days.'}</p>}
   </section>;
 }
 

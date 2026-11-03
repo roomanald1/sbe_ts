@@ -371,6 +371,33 @@ mod scout_shadow_tests {
     }
 
     #[test]
+    fn live_scout_stop_and_target_exits_use_trade_price_when_book_quote_is_missing() {
+        let mut engine = SignalEngine::default();
+        assert!(engine.track_scout_shadow(
+            "live-flow-target".into(),
+            "ETH-USDT".into(),
+            "live-trade-flow".into(),
+            1_000,
+            "bullish".into(),
+            100.0,
+            0.5,
+            0.8,
+            0.15,
+            0.1,
+            0.05,
+            None,
+            None,
+            None,
+            None,
+        ));
+
+        let outcomes = engine.on_price(2_000, 101.2, 0.0);
+        assert_eq!(outcomes.len(), 1);
+        assert_eq!(outcomes[0].scout_exit_reason, Some("stop_or_target"));
+        assert!(outcomes[0].evaluation.long_net_percent.is_some());
+    }
+
+    #[test]
     fn tight_stop_target_scenario_exits_before_standard_scenario() {
         let mut pending = PendingOutcome {
             symbol: "BTC-USDT".into(), timestamp: 1_000, base_price: 100.0,
