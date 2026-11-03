@@ -19,6 +19,7 @@ fn position_exit_audit_payload(
     submit_response_ms: f64,
     stop_loss_percent: f64,
     take_profit_percent: f64,
+    exit_decision_context: &serde_json::Value,
 ) -> serde_json::Value {
     let mid = bid + (ask - bid) * 0.5;
     let mut payload = serde_json::json!({
@@ -68,6 +69,7 @@ fn position_exit_audit_payload(
         "duration_ms": (position.entry_timestamp_ms > 0).then_some(observed_at.saturating_sub(position.entry_timestamp_ms)),
         "quantity": position.quantity.abs(),
     });
+    payload["exit_decision_context"] = exit_decision_context.clone();
     payload["exit_rule_trace"] = serde_json::json!({
         "reason": reason,
         "net_open_pnl": return_fraction * entry_notional,
@@ -180,6 +182,7 @@ mod tests {
             "decision-1", 2_000, 1_800, "BTC-USDT", "take-profit", "sell",
             &serde_json::json!({"ok": true}), &position, 2.0, 2.0, Some(110.0),
             0.1, 19.7, 200.0, 0.0985, 109.0, 111.0, 2.0, 5.0, 10.0,
+            &serde_json::json!({"signal_active": true}),
         );
 
         assert_eq!(payload["stage"], "exit:1800");
@@ -188,6 +191,7 @@ mod tests {
         assert_eq!(payload["entry_context"]["duration_ms"], 1_000);
         assert_eq!(payload["price_path"][0]["timestamp"], 1_500);
         assert_eq!(payload["exit_rule_trace"]["reason"], "take-profit");
+        assert_eq!(payload["exit_decision_context"]["signal_active"], true);
     }
 
     #[test]
@@ -196,6 +200,7 @@ mod tests {
             "decision-2", 2, 1, "ETH-USDT", "stop-loss", "buy",
             &serde_json::Value::Null, &TraderPosition::default(), 0.0, 0.0,
             None, 0.0, 0.0, 0.0, 0.0, 99.0, 101.0, 0.0, 5.0, 10.0,
+            &serde_json::Value::Null,
         );
         assert_eq!(payload["status"], "filled");
         assert_eq!(payload["fill_rate"], serde_json::Value::Null);

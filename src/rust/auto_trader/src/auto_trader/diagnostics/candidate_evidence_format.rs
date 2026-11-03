@@ -39,3 +39,50 @@ fn format_rate(rate: Option<f64>) -> String {
 fn format_net_return(net_return: Option<f64>) -> String {
     net_return.map_or_else(|| "n/a".into(), |value| format!("{value:+.3}%"))
 }
+
+#[cfg(test)]
+mod candidate_evidence_format_tests {
+    use super::*;
+
+    #[test]
+    fn renders_present_and_missing_walk_forward_metrics() {
+        let evidence: WalkForward = serde_json::from_value(serde_json::json!({
+            "symbol": "BTC-USDT",
+            "horizon_seconds": 300
+        }))
+        .unwrap();
+        let side = SideWalkForwardMetrics {
+            sample_count: 20,
+            direction_match_rate: Some(0.75),
+            average_net_return_percent: Some(0.125),
+            positive_net_rate: Some(0.6),
+            positive_net_rate_lower_95: None,
+        };
+        let research = SideWalkForwardMetrics {
+            sample_count: 8,
+            average_net_return_percent: None,
+            ..SideWalkForwardMetrics::default()
+        };
+        let review = CandidateEntryReview {
+            context: "test".into(), strength_floor: 0.0, score_floor: 0.0,
+            scout_strength_floor: 0.0, scout_score_floor: 0.0,
+            scout_minimum_samples: MIN_EXPLORATION_EVIDENCE_SAMPLES,
+            scout_minimum_positive_rate: NEGATIVE_EVIDENCE_FLOOR,
+            scout_thresholds_valid: true,
+            evidence: Some(&evidence), side: Some(&side), research: Some(&research),
+            strength_weak: false, score_weak: false, mixed_context: false,
+            evidence_missing: false, evidence_bad: false, research_bad: false,
+            strict_evidence_bad: false, scout_negative: false,
+            scout_strength_pass: true, scout_score_pass: true,
+        };
+        let (walk_forward, research_text) = format_candidate_evidence(&review);
+        assert_eq!(walk_forward, "walk-forward 300s n=20 hit=75.0% net=+0.125% positive=60.0% lower95=n/a");
+        assert_eq!(research_text, "research-model n=8 net=n/a");
+
+        let missing = CandidateEntryReview { evidence: None, ..review };
+        assert_eq!(format_candidate_evidence(&missing), (
+            "walk-forward evidence unavailable".into(),
+            "research-model evidence unavailable".into(),
+        ));
+    }
+}

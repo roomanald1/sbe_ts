@@ -474,6 +474,7 @@ async fn receive_shadow_learning_outcome(
     });
     let mut settings = state.settings.lock().await;
     if settings.shadow_learning_outcome_ids.contains(&outcome.decision_id) {
+        crate::service_log!("INFO", "Duplicate Scout learning outcome ignored: sample_id={} symbol={}", outcome.decision_id, outcome.symbol);
         drop(settings);
         queue_auto_trader_audit(&state, outcome_audit);
         return Ok(StatusCode::NO_CONTENT);
@@ -508,7 +509,7 @@ async fn receive_shadow_learning_outcome(
             settings.shadow_sample_active_scenarios.remove(&outcome.sample_group_id);
         }
     }
-    settings.shadow_learning_outcome_ids.insert(outcome.decision_id);
+    settings.shadow_learning_outcome_ids.insert(outcome.decision_id.clone());
     while settings.shadow_learning_outcome_ids.len() > 20_000 {
         let Some(oldest) = settings.shadow_learning_outcome_ids.iter().next().cloned() else {
             break;
@@ -517,6 +518,7 @@ async fn receive_shadow_learning_outcome(
     }
     drop(settings);
     request_settings_persist(&state)?;
+    crate::service_log!("INFO", "Scout learning outcome recorded: sample_id={} symbol={} strategy={} scenario={} net_return_percent={} simulated_pnl_usd={}", outcome.decision_id, outcome.symbol, outcome.strategy, outcome.exit_scenario, outcome.net_return_percent, outcome.simulated_net_pnl_usd);
     queue_auto_trader_audit(&state, outcome_audit);
     Ok(StatusCode::NO_CONTENT)
 }
@@ -587,16 +589,26 @@ async fn signal_ready(
             || settings
                 .strategies
                 .iter()
+                .any(|strategy| strategy.is_live_insight())
+            || settings
+                .scout_strategies
+                .iter()
                 .any(|strategy| strategy.is_live_insight()));
     if generic_enabled {
         let mut queue = state.pending_live_signals.lock().await;
         let mut prewarm_symbols = Vec::new();
         for signal in dashboard.best.iter().cloned() {
-            let selected_live = settings
+            let mut selected_live = settings
                 .strategies
                 .iter()
                 .filter(|strategy| strategy.is_live_insight())
                 .collect::<Vec<_>>();
+            selected_live.extend(
+                settings
+                    .scout_strategies
+                    .iter()
+                    .filter(|strategy| strategy.is_live_insight()),
+            );
             let has_subscription = if selected_live.is_empty() && settings.signal_strategies_enabled
             {
                 Strategy::any_live_strategy_receives(&signal)

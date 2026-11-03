@@ -152,4 +152,4 @@ fn configured_taker_fee_rate() -> f64 {
         .unwrap_or(0.001)
 }
 
-const STRATEGY_SIZING_RECENT_TRADES: usize = 20;
+const STRATEGY_SIZING_RECENT_TRADES: usize = 5_000;

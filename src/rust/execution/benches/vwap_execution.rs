@@ -41,7 +41,11 @@ fn construction_benchmarks() {
     for _ in 0..ITERATIONS {
         black_box(VwapScheduler::new(black_box(config)).expect("valid benchmark config"));
     }
-    report("VWAP scheduler construction and validation", started, ITERATIONS);
+    report(
+        "VWAP scheduler construction and validation",
+        started,
+        ITERATIONS,
+    );
 
     let started = Instant::now();
     for _ in 0..ITERATIONS {
@@ -55,7 +59,11 @@ fn construction_benchmarks() {
             .expect("valid benchmark config"),
         );
     }
-    report("VWAP order manager construction and validation", started, ITERATIONS);
+    report(
+        "VWAP order manager construction and validation",
+        started,
+        ITERATIONS,
+    );
 }
 
 fn scheduler_child_order_benchmark() {
@@ -68,7 +76,11 @@ fn scheduler_child_order_benchmark() {
             black_box((index % 101) as f64 / 100.0),
         ));
     }
-    report("VWAP scheduler child order calculation", started, ITERATIONS);
+    report(
+        "VWAP scheduler child order calculation",
+        started,
+        ITERATIONS,
+    );
 }
 
 fn no_action_trade_benchmark() {
@@ -80,7 +92,11 @@ fn no_action_trade_benchmark() {
             manager.on_bin_transition();
         }
     }
-    report("VWAP market trade with no order action", started, MANAGERS * NUM_BINS);
+    report(
+        "VWAP market trade with no order action",
+        started,
+        MANAGERS * NUM_BINS,
+    );
 }
 
 fn new_order_benchmark() {
@@ -96,7 +112,11 @@ fn new_order_benchmark() {
             manager.on_bin_transition();
         }
     }
-    report("VWAP market trade creating a new order", started, MANAGERS * NUM_BINS);
+    report(
+        "VWAP market trade creating a new order",
+        started,
+        MANAGERS * NUM_BINS,
+    );
 }
 
 fn modify_order_benchmark() {
@@ -113,7 +133,11 @@ fn modify_order_benchmark() {
             manager.on_bin_transition();
         }
     }
-    report("VWAP market trade modifying an order", started, MANAGERS * NUM_BINS);
+    report(
+        "VWAP market trade modifying an order",
+        started,
+        MANAGERS * NUM_BINS,
+    );
 }
 
 fn cancel_order_benchmark() {
@@ -122,15 +146,15 @@ fn cancel_order_benchmark() {
     for manager in &mut managers {
         for _ in 0..NUM_BINS {
             let _ = manager.on_market_trade(black_box(1_000.0), black_box(100.0), black_box(300.0));
-            black_box(manager.on_market_trade(
-                black_box(1.0),
-                black_box(100.0),
-                black_box(0.0),
-            ));
+            black_box(manager.on_market_trade(black_box(1.0), black_box(100.0), black_box(0.0)));
             manager.on_bin_transition();
         }
     }
-    report("VWAP market trade cancelling an order", started, MANAGERS * NUM_BINS);
+    report(
+        "VWAP market trade cancelling an order",
+        started,
+        MANAGERS * NUM_BINS,
+    );
 }
 
 fn fill_processing_benchmark() {
@@ -144,7 +168,11 @@ fn fill_processing_benchmark() {
             manager.on_bin_transition();
         }
     }
-    report("VWAP order manager execution fill", started, MANAGERS * NUM_BINS);
+    report(
+        "VWAP order manager execution fill",
+        started,
+        MANAGERS * NUM_BINS,
+    );
 }
 
 fn full_run_with_fills_benchmark() {

@@ -265,6 +265,18 @@ async fn evaluate_position_exit(
         }
     }).unwrap_or(StrategyDecision::Hold);
     let strategy_disabled = strategy_decision == StrategyDecision::Exit && !strategy_enabled;
+    let research_signal_active = research_regime
+        .and_then(|snapshot| snapshot.signal_active(&strategy_key, &symbol));
+    let exit_decision_context = serde_json::json!({
+        "strategy_decision": format!("{strategy_decision:?}"),
+        "minimum_hold_active": minimum_hold_active,
+        "research_snapshot_available": research_regime.is_some(),
+        "research_snapshot_as_of_ms": research_regime.map(|snapshot| snapshot.as_of_ms),
+        "symbol_evaluated": research_signal_active.is_some(),
+        "signal_active": research_signal_active,
+        "symbol_diagnostic": research_regime
+            .and_then(|snapshot| snapshot.symbol_diagnostic(&strategy_key, &symbol)),
+    });
     let research_exit = strategy_decision == StrategyDecision::Exit && strategy_enabled;
     let strategy_rebalance = strategy_decision == StrategyDecision::Rebalance;
     let signal_managed_strategy = strategy_no_longer_eligible
@@ -390,6 +402,98 @@ async fn evaluate_position_exit(
         stop_loss_percent,
         take_profit_percent,
         timestamp,
+        exit_decision_context,
     )
     .await
+}
+
+#[cfg(test)]
+mod position_exit_profit_protection_tests {
+    use super::*;
+
+    fn position(quantity: f64, decision: serde_json::Value, peak: Option<f64>) -> TraderPosition {
+        serde_json::from_value(serde_json::json!({
+            "quantity": quantity,
+            "average_entry_price": 100.0,
+            "entry_fees": 0.0,
+            "realized_pnl": 0.0,
+            "strategy_decision": decision,
+            "profit_protection_peak_return_percent": peak
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn strategy_parameters_and_legacy_aliases_are_bounded() {
+        let defaults = profit_protection_parameters(&position(1.0, serde_json::json!({}), None));
+        assert_eq!(defaults.activation_percent, DEFAULT_PROFIT_PROTECTION_ACTIVATION_PERCENT);
+        assert_eq!(defaults.giveback_percent, DEFAULT_PROFIT_PROTECTION_GIVEBACK_PERCENT);
+        assert_eq!(defaults.minimum_lock_percent, DEFAULT_PROFIT_PROTECTION_MINIMUM_LOCK_PERCENT);
+
+        let custom = profit_protection_parameters(&position(1.0, serde_json::json!({
+            "strategy_parameters": {
+                "profit_protection_activation_percent": 9.0,
+                "profit_protection_giveback_percent": 0.001,
+                "profit_protection_minimum_lock_percent": 1.0
+            }
+        }), None));
+        assert_eq!(custom.activation_percent, 0.50);
+        assert_eq!(custom.giveback_percent, 0.05);
+        assert_eq!(custom.minimum_lock_percent, 0.50);
+
+        let legacy = profit_protection_parameters(&position(1.0, serde_json::json!({
+            "strategy_parameters": {
+                "shadow_profit_activation_percent": 0.25,
+                "shadow_profit_giveback_percent": 0.1,
+                "shadow_profit_minimum_lock_percent": 0.05
+            }
+        }), None));
+        assert_eq!(legacy.activation_percent, 0.25);
+        assert_eq!(legacy.giveback_percent, 0.1);
+        assert_eq!(legacy.minimum_lock_percent, 0.05);
+    }
+
+    #[test]
+    fn peak_profit_is_raised_and_giveback_crosses_the_minimum_lock_floor() {
+        let open_position = position(1.0, serde_json::json!({}), Some(1.0));
+        let parameters = ProfitProtectionParameters {
+            activation_percent: 1.0,
+            giveback_percent: 0.5,
+            minimum_lock_percent: 0.25,
+        };
+        assert_eq!(profit_protection_state(&open_position, 1.5, parameters), (Some(1.5), false));
+        assert_eq!(profit_protection_state(&open_position, 1.0, parameters), (Some(1.0), false));
+        assert_eq!(profit_protection_state(&open_position, 0.5, parameters), (Some(1.0), true));
+        assert_eq!(profit_protection_state(&position(1.0, serde_json::json!({}), None), 0.5, parameters), (None, false));
+    }
+
+    #[test]
+    fn legacy_price_path_seeds_long_and_short_profit_peaks_and_ignores_bad_marks() {
+        let parameters = ProfitProtectionParameters {
+            activation_percent: 0.1,
+            giveback_percent: 0.2,
+            minimum_lock_percent: 0.0,
+        };
+        let long: TraderPosition = serde_json::from_value(serde_json::json!({
+            "quantity": 1.0, "average_entry_price": 100.0, "entry_fees": 0.0,
+            "realized_pnl": 0.0,
+            "price_path": [
+                {"timestamp":1,"bid":-1.0,"ask":101.0},
+                {"timestamp":2,"bid":101.0,"ask":102.0},
+                {"timestamp":3,"bid":100.5,"ask":101.0}
+            ]
+        })).unwrap();
+        let (long_peak, long_crossed) = profit_protection_state(&long, 0.0, parameters);
+        assert!(long_peak.is_some_and(|peak| (0.89..0.90).contains(&peak)));
+        assert!(long_crossed);
+
+        let short: TraderPosition = serde_json::from_value(serde_json::json!({
+            "quantity": -1.0, "average_entry_price": 100.0, "entry_fees": 0.0,
+            "realized_pnl": 0.0,
+            "price_path": [{"timestamp":1,"bid":98.0,"ask":99.0}]
+        })).unwrap();
+        let (short_peak, short_crossed) = profit_protection_state(&short, 0.0, parameters);
+        assert!(short_peak.is_some_and(|peak| (0.90..1.0).contains(&peak)));
+        assert!(short_crossed);
+    }
 }

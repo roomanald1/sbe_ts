@@ -202,3 +202,38 @@ fn gate_distance_to_pass(gate: &str, detail: &str) -> Option<f64> {
         .reduce(f64::max)
 }
 
+
+#[cfg(test)]
+mod gate_pass_distance_tests {
+    use super::gate_distance_to_pass;
+
+    #[test]
+    fn computes_normalized_distance_for_signal_candidate_and_market_gates() {
+        let cases = [
+            ("Learned strength floor", "candidate failed: strength 0.5 < 0.8", 0.375),
+            ("Execution cost versus measured edge", "failed: 1.5 > 1.0", 0.5),
+            ("Signal freshness", "signal age 12s > max age 10s", 0.2),
+            ("Directional signal", "score 0.2 vs floor 0.4; range probability 0.3 must be below 0.2", 0.5),
+            ("Strict walk-forward sample minimum", "side n=10 needs 20 samples", 0.5),
+            ("Strict walk-forward quality thresholds", "hit=40% net=-0.2% positive=50% lower95=40%", 0.15 / 0.55),
+            ("Exploration walk-forward return and positive-rate floor", "net=-0.4% positive=20%", 0.25 / 0.45),
+            ("Research-model side evidence", "walk-forward n=20 net=0.5%; research-model n=10 net=-0.3%", 0.3),
+            ("Existing position / re-entry limit", "entries 5 >= max 4", 0.25),
+            ("Deep-book minimum order capacity", "Deep-book capacity for ETH (8) is below minimum paper order (10)", 0.2),
+            ("Deep-book impact limit", "estimated impact 20 bps exceeds 10 bps", 1.0),
+        ];
+        for (gate, detail, expected) in cases {
+            let actual = gate_distance_to_pass(gate, detail).unwrap_or_else(|| panic!("no distance for {gate}: {detail}"));
+            assert!((actual - expected).abs() < 1e-9, "{gate}: {actual}");
+        }
+        assert_eq!(gate_distance_to_pass("unknown", "no structured measurements"), None);
+        assert_eq!(gate_distance_to_pass("Signal freshness", "age n/a"), None);
+    }
+
+    #[test]
+    fn strict_sample_and_capacity_gaps_do_not_report_negative_distance() {
+        assert_eq!(gate_distance_to_pass("Strict walk-forward sample minimum", "n=30 needs 20 samples"), Some(0.0));
+        assert_eq!(gate_distance_to_pass("Deep-book impact limit", "estimated impact 5 bps exceeds 10 bps"), Some(0.0));
+        assert_eq!(gate_distance_to_pass("Directional signal", "range probability 0.1 must be below 0"), None);
+    }
+}

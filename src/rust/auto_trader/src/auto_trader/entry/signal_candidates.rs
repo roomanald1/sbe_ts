@@ -17,6 +17,10 @@ fn is_fallback_signal_candidate(signal: &Signal) -> bool {
     !is_daily_strategy_signal(signal)
 }
 
+fn live_strategy_source_signals(signals: &[Signal]) -> Vec<Signal> {
+    signals.iter().filter(|signal| !is_daily_strategy_signal(signal)).cloned().collect()
+}
+
 fn should_shadow_daily_scout(scout: bool, signal: &Signal) -> bool {
     scout && is_daily_strategy_signal(signal)
 }
@@ -391,6 +395,17 @@ mod parallel_daily_candidate_tests {
         assert!(is_daily_strategy_signal(&candidate));
         assert!(!daily_signal_candidate(&candidate));
         assert!(!is_fallback_signal_candidate(&candidate));
+    }
+
+    #[test]
+    fn live_signal_sources_remain_available_alongside_daily_candidates() {
+        let daily = signal("trend-50-200", "bullish");
+        let mut live_source = signal("live-insights", "bullish");
+        live_source.strategy_candidate = false;
+
+        let sources = live_strategy_source_signals(&[daily, live_source.clone()]);
+        assert_eq!(sources.len(), 1);
+        assert_eq!(sources[0].strategy.as_deref(), Some("live-insights"));
     }
 
     #[test]

@@ -201,11 +201,11 @@
 .auto-trader-section { overflow: visible; position: relative; z-index: 1; }
 .auto-trader-section.has-open-popup { z-index: 100; }
 
-.auto-trader-insights { grid-template-columns: repeat(auto-fit, minmax(min(100%, 260px), 1fr)); gap: 10px; }
-.auto-trader-insight { gap: 7px; min-height: 112px; padding: 12px 14px; }
-.auto-trader-insight-label { font-size: 10px; }
-.auto-trader-insights .auto-trader-insight > strong { font-size: 16px; line-height: 1.25; }
-.auto-trader-insights .auto-trader-learning-detail { font-size: 12px; line-height: 1.4; }
+.auto-trader-insights { grid-template-columns: repeat(auto-fit, minmax(min(100%, 210px), 1fr)); gap: 7px; }
+.auto-trader-insight { gap: 4px; min-height: 0; padding: 8px 9px; }
+.auto-trader-insight-label { font-size: 9px; }
+.auto-trader-insights .auto-trader-insight > strong { font-size: 12px; line-height: 1.3; }
+.auto-trader-insights .auto-trader-learning-detail { font-size: 10px; line-height: 1.3; }
 .auto-trader-gap-reasons li { font-size: 12px; }
 .auto-trader-gap-reasons li strong { font-size: 11px; }
 .auto-trader-allocation { font-size: 13px; }

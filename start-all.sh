@@ -78,7 +78,7 @@ backend_pid=$!
 children+=("$backend_pid")
 echo "$backend_pid" > "$BACKEND_PID_FILE"
 
-(cd "$ROOT/src/typescript/workspace/apps/react-app" && npm run build && npm run preview -- --host 0.0.0.0 --port 5173) >"$LOG_DIR/ui.log" 2>&1 &
+(cd "$ROOT/src/typescript/workspace/apps/react-app" && npm run dev -- --host 0.0.0.0 --port 5173 --strictPort) >"$LOG_DIR/ui.log" 2>&1 &
 ui_pid=$!
 children+=("$ui_pid")
 echo "$ui_pid" > "$UI_PID_FILE"

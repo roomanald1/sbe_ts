@@ -320,4 +320,5 @@ pub struct CompletedSignalOutcome {
     pub legacy: SignalOutcome,
     pub evaluation: SignalEvaluation,
     pub scout_shadow_id: Option<String>,
+    pub scout_exit_reason: Option<&'static str>,
 }

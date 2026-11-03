@@ -235,3 +235,106 @@ fn run_database_writer(mut connection: Connection, mut receiver: mpsc::Receiver<
         }
     }
 }
+
+#[cfg(test)]
+mod coverage_tests {
+    use super::*;
+
+    #[test]
+    fn breakout_watch_requires_confidence_range_and_directional_pressure() {
+        let bullish = SignalComponents {
+            trend_1m_percent: Some(0.25),
+            momentum_10s_percent: Some(0.12),
+            trade_flow_imbalance: Some(1.0),
+            book_imbalance: Some(1.0),
+            volatility_1m_percent: Some(0.2),
+            trend_5m_percent: None,
+            trend_5m_volatility_units: None,
+            mispricing_vs_vwap_bps: None,
+            pressure_without_price_move: None,
+            aggressor_cost_bps: None,
+        };
+        assert_eq!(
+            breakout_watch(&bullish, Some((99.0, 101.0)), Some(0.64)),
+            None
+        );
+        assert_eq!(breakout_watch(&bullish, None, Some(0.9)), None);
+        let (direction, pressure) =
+            breakout_watch(&bullish, Some((99.0, 101.0)), Some(0.9)).unwrap();
+        assert_eq!(direction, "UP");
+        assert!(pressure >= 0.35);
+
+        let bearish = SignalComponents {
+            trend_1m_percent: None,
+            momentum_10s_percent: None,
+            trade_flow_imbalance: Some(-1.0),
+            book_imbalance: Some(-1.0),
+            volatility_1m_percent: None,
+            trend_5m_percent: None,
+            trend_5m_volatility_units: None,
+            mispricing_vs_vwap_bps: None,
+            pressure_without_price_move: None,
+            aggressor_cost_bps: None,
+        };
+        assert_eq!(
+            breakout_watch(&bearish, Some((99.0, 101.0)), Some(0.9))
+                .unwrap()
+                .0,
+            "DOWN"
+        );
+        assert_eq!(
+            breakout_watch(
+                &SignalComponents {
+                    trend_1m_percent: None,
+                    momentum_10s_percent: None,
+                    trade_flow_imbalance: None,
+                    book_imbalance: None,
+                    volatility_1m_percent: None,
+                    trend_5m_percent: None,
+                    trend_5m_volatility_units: None,
+                    mispricing_vs_vwap_bps: None,
+                    pressure_without_price_move: None,
+                    aggressor_cost_bps: None
+                },
+                Some((99.0, 101.0)),
+                Some(0.9)
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn strength_threshold_uses_only_available_positive_training_cohorts() {
+        let training = (0..10)
+            .map(|index| SignalOutcome {
+                record_type: "outcome".into(),
+                symbol: "BTCUSDT".into(),
+                signal_timestamp: 1,
+                evaluated_timestamp: 100 + index,
+                horizon_seconds: 60,
+                return_percent: 1.0,
+                direction_match: true,
+                direction: "long".into(),
+                strength: 0.3,
+                net_return_percent: Some(1.0),
+                execution_cost_percent: None,
+                trend_5m_volatility_units: None,
+                trend_5m_direction_match: None,
+                trend_5m_net_return_percent: None,
+                features: None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(select_strength_threshold(&training, 105), None);
+        assert_eq!(select_strength_threshold(&training, 200), Some(0.3));
+
+        let losses = training
+            .into_iter()
+            .map(|mut sample| {
+                sample.evaluated_timestamp = 1;
+                sample.net_return_percent = Some(-1.0);
+                sample
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(select_strength_threshold(&losses, 200), None);
+    }
+}

@@ -75,8 +75,9 @@ async fn update_settings(
         return Err((StatusCode::BAD_REQUEST, "Order and total notional limits must be positive with total notional at least the per-order limit; daily loss cap must be positive, exploration must be between 0% and 100%, max open positions must be 1–20, shadow samples must be 0–100, and entries per position must be 1–10".into()));
     }
     if request.strategies.as_ref().is_some_and(|strategies| {
-        strategies.is_empty() || strategies.iter().all(|strategy| strategy.is_live_insight())
+        strategies.iter().all(|strategy| strategy.is_live_insight())
     }) && request.signal_strategies_enabled == Some(false)
+        && request.scout_strategies.as_ref().is_none_or(Vec::is_empty)
     {
         return Err((
             StatusCode::BAD_REQUEST,
@@ -157,6 +158,13 @@ async fn update_settings(
         settings.strategies = unique;
     } else if let Some(strategy) = request.strategy {
         settings.strategies = vec![strategy];
+    }
+    if let Some(strategies) = request.scout_strategies {
+        let mut unique = Vec::new();
+        for strategy in strategies {
+            if !unique.contains(&strategy) { unique.push(strategy); }
+        }
+        settings.scout_strategies = unique;
     }
     if let Some(enabled) = request.signal_strategies_enabled {
         settings.signal_strategies_enabled = enabled;

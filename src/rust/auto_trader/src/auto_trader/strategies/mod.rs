@@ -471,6 +471,27 @@ static STRATEGY_DEFINITIONS: [&StrategyDefinition; 18] = [
 ];
 
 #[cfg(test)]
+mod registered_strategy_contract_tests {
+    use super::*;
+
+    #[test]
+    fn every_registered_strategy_has_a_complete_contract() {
+        assert_eq!(STRATEGY_DEFINITIONS.len(), Strategy::all().count());
+        for definition in STRATEGY_DEFINITIONS {
+            let contract = (definition.contract)();
+            assert!(!definition.name.is_empty(), "strategy name");
+            assert!(!contract.insight.trim().is_empty(), "{} insight", definition.name);
+            assert!(!contract.entry.trim().is_empty(), "{} entry", definition.name);
+            assert!(!contract.exit.trim().is_empty(), "{} exit", definition.name);
+            assert!(!contract.entry_order.trim().is_empty(), "{} entry order", definition.name);
+            assert!(!contract.exit_order.trim().is_empty(), "{} exit order", definition.name);
+            assert!(!contract.behavior.trim().is_empty(), "{} behavior", definition.name);
+            assert_eq!(definition.strategy.as_str(), definition.name);
+        }
+    }
+}
+
+#[cfg(test)]
 mod donchian_20_btc200_registry_tests {
     use super::*;
 
@@ -485,10 +506,20 @@ mod donchian_20_btc200_registry_tests {
             as_of_ms: 0,
             active_strategy_symbols: BTreeSet::new(),
             generated_signals: Vec::new(),
+            evaluated_strategy_symbols: BTreeSet::new(),
+            diagnostics: Vec::new(),
         };
         assert_eq!(
             snapshot.evaluate_position("donchian-20-btc200", "ETH-USDT", true, None, false),
-            StrategyDecision::Exit
+            StrategyDecision::Hold,
+            "an unevaluated symbol must not be treated as an explicit exit"
+        );
+        snapshot.evaluated_strategy_symbols
+            .insert(("donchian-20-btc200".into(), "ETH-USDT".into()));
+        assert_eq!(
+            snapshot.evaluate_position("donchian-20-btc200", "ETH-USDT", true, None, false),
+            StrategyDecision::Exit,
+            "an explicitly evaluated inactive symbol should exit"
         );
         snapshot
             .active_strategy_symbols
@@ -550,9 +581,12 @@ fn benchmark_signal(strategy: &str, candidate: bool) -> Signal {
 pub fn benchmark_strategy_evaluation(iterations: usize) -> Vec<(String, f64, f64)> {
     use std::{hint::black_box, time::Instant};
     assert!(iterations > 0, "benchmark iterations must be positive");
-    let parameters = BTreeMap::new();
     Strategy::all()
         .map(|strategy| {
+            let parameters = all_strategy_parameter_specs(strategy)
+                .into_iter()
+                .map(|spec| (spec.key.as_str().to_owned(), spec.default))
+                .collect::<BTreeMap<_, _>>();
             let signal = benchmark_signal(strategy.as_str(), true);
             let entry = StrategySignal::entry(&signal, &parameters);
             let started = Instant::now();
@@ -632,7 +666,10 @@ mod strategy_signal_contract_tests {
             let own_candidate = benchmark_signal(strategy.as_str(), true);
             let other_candidate = benchmark_signal("another-strategy", true);
             let inactive = benchmark_signal(strategy.as_str(), false);
-            let parameters = BTreeMap::new();
+            let parameters = all_strategy_parameter_specs(strategy)
+                .into_iter()
+                .map(|spec| (spec.key.as_str().to_owned(), spec.default))
+                .collect::<BTreeMap<_, _>>();
             let evaluate = |signal| {
                 strategy
                     .evaluate(&StrategySignal::entry(signal, &parameters))

@@ -82,8 +82,7 @@ impl VwapScheduler {
         let planned_bin_qty = if expected_bin_volume.is_finite() && expected_bin_volume > 0.0 {
             expected_bin_volume * self.config.max_participation_rate
         } else {
-            self.config.parent_qty * self.config.historical_vwap_curve[bin]
-                / self.curve_total
+            self.config.parent_qty * self.config.historical_vwap_curve[bin] / self.curve_total
         };
         let target = planned_bin_qty * elapsed_bin_fraction.clamp(0.0, 1.0);
         let cap = live_bin_volume * self.config.max_participation_rate;
@@ -262,5 +261,59 @@ impl OrderManager {
         self.raw_bin_volume = 0.0;
         self.filled_in_current_bin = 0.0;
         self.working_order_qty = 0.0;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    fn config() -> VwapConfig {
+        let mut curve = [0.0; NUM_BINS];
+        curve[0] = 1.0;
+        VwapConfig {
+            parent_qty: 10.0,
+            historical_vwap_curve: curve,
+            max_participation_rate: 0.5,
+        }
+    }
+    #[test]
+    fn validates_scheduler_inputs_and_caps_child_order() {
+        let mut bad = config();
+        bad.parent_qty = f64::INFINITY;
+        assert!(VwapScheduler::new(bad).is_err());
+        let scheduler = VwapScheduler::new(config()).unwrap();
+        assert_eq!(scheduler.calculate_child_order(20.0, 0.0, 0.5), 5.0);
+        assert_eq!(scheduler.calculate_child_order(2.0, 20.0, 1.0), 1.0);
+    }
+    #[test]
+    fn order_manager_emits_new_modify_and_tracks_fill() {
+        let mut expected = [0.0; NUM_BINS];
+        expected[0] = 10.0;
+        let mut manager = OrderManager::new(config(), expected, 0.0, 10.0).unwrap();
+        assert_eq!(
+            manager.on_market_trade(10.0, 10.0, 5.0),
+            Some(OrderAction::NewOrder { qty: 2.5 })
+        );
+        assert_eq!(
+            manager.on_market_trade(10.0, 11.0, 10.0),
+            Some(OrderAction::ModifyOrder { new_qty: 5.0 })
+        );
+        manager.on_execution_fill(12.0, 2.0);
+        assert_eq!(manager.state().executed_qty, 2.0);
+        assert_eq!(manager.benchmark().execution_vwap(), 12.0);
+        manager.on_order_complete();
+        assert_eq!(manager.on_market_trade(f64::NAN, 1.0, 1.0), None);
+        manager.on_bin_transition();
+        assert_eq!(manager.state().current_bin, 1);
+    }
+    #[test]
+    fn benchmark_ignores_invalid_values_and_calculates_slippage() {
+        let mut b = VwapBenchmark::default();
+        b.update_market(10.0, 2.0);
+        b.update_market(f64::NAN, 2.0);
+        b.update_exec(11.0, 2.0);
+        assert_eq!(b.market_vwap(), 10.0);
+        assert_eq!(b.execution_vwap(), 11.0);
+        assert_eq!(b.slippage(), 1.0);
     }
 }

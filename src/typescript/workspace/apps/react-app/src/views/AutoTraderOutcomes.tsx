@@ -2,11 +2,13 @@ import { memo, useEffect, useMemo, useRef, useState } from 'react';
 import { AgGridReact } from 'ag-grid-react';
 import { ClientSideRowModelModule, ModuleRegistry, themeQuartz, type ColDef, type ColGroupDef, type GridApi, type IRowNode } from 'ag-grid-community';
 import { AutoTraderOutcomesModel, type AutoTraderOutcome, type StrictEntryGateSummary } from '../models/AutoTraderOutcomesModel';
-import type { Strategy } from '../models/AutoTraderModel';
+import { autoTraderShadowModel } from '../models/AutoTraderShadowModel';
+import { AutoTraderModel, type Strategy } from '../models/AutoTraderModel';
 import type { SymbolPriceTick } from '../types/symbol_price';
 import { formatForSymbol } from '../instrument_precision';
 import { useBehaviorSnapshot } from '../use_behavior_snapshot';
 import { FeedToolbar } from './FeedToolbar';
+import { scoutableStrategies } from './AutoTraderStrategyParameters';
 import { money, strategyLabel } from './AutoTraderOrderGrid';
 
 ModuleRegistry.registerModules([ClientSideRowModelModule]);
@@ -52,14 +54,21 @@ function keepLedgerGroupsTogether(nodes: IRowNode<OutcomeGridRow>[]) {
     group.push(node);
     groups.set(key, group);
   }
-  const ordered = [...groups.values()].flatMap((group) => [
-    ...group.filter((node) => node.data?.rowId.startsWith('ledger-summary:')),
-    ...group.filter((node) => !node.data?.rowId.startsWith('ledger-summary:')),
-  ]);
+  const originalPosition = new Map(nodes.map((node, index) => [node, index]));
+  const ordered = [...groups.values()]
+    .sort((left, right) => {
+      const leftSummary = left.find((node) => node.data?.rowId.startsWith('ledger-summary:')) ?? left[0];
+      const rightSummary = right.find((node) => node.data?.rowId.startsWith('ledger-summary:')) ?? right[0];
+      return (originalPosition.get(leftSummary) ?? 0) - (originalPosition.get(rightSummary) ?? 0);
+    })
+    .flatMap((group) => [
+      ...group.filter((node) => node.data?.rowId.startsWith('ledger-summary:')),
+      ...group.filter((node) => !node.data?.rowId.startsWith('ledger-summary:')),
+    ]);
   nodes.splice(0, nodes.length, ...ordered);
 }
 const sharedOutcomesModel = new AutoTraderOutcomesModel();
-type StrategyWinRateRow = { strategy: string; enabled?: boolean; runStatus: string; runReason: string; trades: number; wins: number; losses: number; flat: number; feesUsd?: number; netPnlUsd?: number; todayRealizedUsd?: number; winRate?: number; averageReturn?: number; averageNetWinUsd?: number; averageNetWinPercent?: number; averageNetLossUsd?: number; averageNetLossPercent?: number; profitFactor?: number; medianHoldingMs?: number; averageHoldingMs?: number; periodStart: number; periodEnd: number; averageEntrySizeUsd?: number; lowSample: boolean; learningMultiplier?: number; learningSamples?: number; learningPositiveRate?: number; learningNetUsd?: number; strictEntryGate?: StrictEntryGateSummary; strictBaseStrengthFloor?: number; strictGateApplies?: boolean };
+type StrategyWinRateRow = { strategy: string; enabled?: boolean; scoutEnabled?: boolean; scoutable?: boolean; runStatus: string; runReason: string; trades: number; wins: number; losses: number; flat: number; feesUsd?: number; netPnlUsd?: number; todayRealizedUsd?: number; winRate?: number; averageReturn?: number; averageNetWinUsd?: number; averageNetWinPercent?: number; averageNetLossUsd?: number; averageNetLossPercent?: number; profitFactor?: number; medianHoldingMs?: number; averageHoldingMs?: number; periodStart: number; periodEnd: number; averageEntrySizeUsd?: number; lowSample: boolean; learningMultiplier?: number; learningSamples?: number; learningPositiveRate?: number; learningAverageNet?: number; strictEntryGate?: StrictEntryGateSummary; strictBaseStrengthFloor?: number; strictGateApplies?: boolean };
 const allStrategies: Strategy[] = ['live-momentum', 'live-trade-flow', 'live-order-book', 'live-vwap-dislocation', 'live-absorption-pressure', 'donchian-55-btc200', 'donchian-20-sma200', 'donchian-20-btc200', 'donchian-10-btc200', 'donchian-20-btc200-hold3', 'risk-adjusted-trend-portfolio', 'trend-sleeves-btc200', 'trend-50-200', 'relative-strength-90-sma200', 'risk-adjusted-monthly-momentum', 'rsi2-oversold-rebound', 'dated-futures-carry'];
 const strategyCellTints = { status: 'rgba(148, 157, 170, 0.06)', learning: 'rgba(74, 127, 151, 0.075)', sample: 'rgba(161, 139, 75, 0.075)', performance: 'rgba(77, 132, 91, 0.075)', profile: 'rgba(125, 100, 157, 0.075)', gate: 'rgba(178, 118, 72, 0.075)' } as const;
 const colorStrategyColumns = (columns: ColDef<StrategyWinRateRow>[], group: keyof typeof strategyCellTints) => columns.map((column, index) => ({ ...column, headerClass: ['strategy-column-' + group + '-header', index === 0 && 'strategy-group-start', index === columns.length - 1 && 'strategy-group-end'].filter(Boolean).join(' '), cellClass: ['strategy-column-' + group + '-cell', index === 0 && 'strategy-group-start', index === columns.length - 1 && 'strategy-group-end'].filter(Boolean).join(' '), cellStyle: { backgroundColor: strategyCellTints[group] } }));
@@ -97,6 +106,9 @@ const openPnl = (row?: OutcomeGridRow) => {
 function AutoTraderOutcomesComponent({ embedded = false, ticks = [], liveOnly = false, closedOnly = false, strategyRatesOnly = false }: { embedded?: boolean; ticks?: SymbolPriceTick[]; liveOnly?: boolean; closedOnly?: boolean; strategyRatesOnly?: boolean }) {
   const model = useMemo(() => sharedOutcomesModel, []);
   const state = useBehaviorSnapshot(model.state$);
+  const settingsModel = useMemo(() => new AutoTraderModel(), []);
+  const settings = useBehaviorSnapshot(settingsModel.state$);
+  const scoutState = useBehaviorSnapshot(autoTraderShadowModel.state$);
   const outcomesGridApi = useRef<GridApi<OutcomeGridRow> | null>(null);
   const [hideDisabledStrategies, setHideDisabledStrategies] = useState(() => {
     try { return localStorage.getItem(HIDE_DISABLED_STRATEGIES_KEY) === 'true'; }
@@ -109,6 +121,8 @@ function AutoTraderOutcomesComponent({ embedded = false, ticks = [], liveOnly = 
   };
   const [expandedLedgerGroups, setExpandedLedgerGroups] = useState<Set<string>>(() => new Set());
   useEffect(() => { void model.start(); return () => model.stop(); }, [model]);
+  useEffect(() => { settingsModel.start(); return () => settingsModel.stop(); }, [settingsModel]);
+  useEffect(() => { autoTraderShadowModel.start(); return () => autoTraderShadowModel.stop(); }, []);
   useEffect(() => { outcomesGridApi.current?.resetRowHeights(); }, [state.confirmingCloseSymbols, state.closingSymbols]);
   const [now, setNow] = useState(Date.now);
   useEffect(() => { const timer = setInterval(() => setNow(Date.now()), 15_000); return () => clearInterval(timer); }, []);
@@ -128,18 +142,37 @@ function AutoTraderOutcomesComponent({ embedded = false, ticks = [], liveOnly = 
     }
     return visible;
   }, [rowSource, rowMarks, liveOnly, closedOnly, expandedLedgerGroups]);
+  const loadedOutcomesTodayUsd = useMemo(() => rowSource.filter((row) => row.rowId.startsWith('ledger-summary:')).reduce((sum, row) => sum + (row.todayRealizedUsd ?? 0), 0), [rowSource]);
   const closedRows = useMemo(() => closedOnly ? [] : rows.filter((row) => row.status === 'Closed'), [rows, closedOnly]);
   const openRows = useMemo(() => closedOnly ? [] : rows.filter((row) => row.status === 'Open'), [rows, closedOnly]);
+  const scoutLearningByStrategy = useMemo(() => {
+    const cohorts = new Map<string, { positive: number; count: number; returnTotal: number }>();
+    for (const outcome of scoutState.learningOutcomes) {
+      const cohort = cohorts.get(outcome.strategy) ?? { positive: 0, count: 0, returnTotal: 0 };
+      cohort.count += 1;
+      cohort.returnTotal += outcome.netReturnPercent;
+      if (outcome.netReturnPercent > 0) cohort.positive += 1;
+      cohorts.set(outcome.strategy, cohort);
+    }
+    return new Map([...cohorts].map(([strategy, cohort]) => [strategy, {
+      count: cohort.count,
+      positive: cohort.positive,
+      positiveRate: cohort.positive / cohort.count,
+      returnTotal: cohort.returnTotal,
+    }]));
+  }, [scoutState.rows]);
   const strategyWinRates = useMemo<StrategyWinRateRow[]>(() => {
     const grouped = new Map<string, AutoTraderOutcome[]>();
     for (const row of closedRows) {
       if (row.strategy === 'live-insights') continue;
       grouped.set(row.strategy, [...(grouped.get(row.strategy) ?? []), row]);
     }
-    const strategyNames = [...new Set([...allStrategies, ...grouped.keys(), ...Object.keys(state.todayStrategyRealizedUsd ?? {})])];
+    const strategyNames = [...new Set([...allStrategies, ...grouped.keys(), ...Object.keys(state.todayStrategyRealizedUsd ?? {}), ...Object.keys(state.strategyLearning), ...scoutLearningByStrategy.keys()])];
     return strategyNames.map((strategy) => {
       const trades = grouped.get(strategy) ?? [];
-      const enabled = state.autoTraderStatusAvailable ? state.enabledStrategies.includes(strategy) : undefined;
+      const enabled = settings.loading ? undefined : settings.strategies.includes(strategy as Strategy);
+      const scoutEnabled = settings.scoutStrategies.includes(strategy as Strategy);
+      const scoutable = scoutableStrategies.some((item) => item.strategy === strategy);
       const diagnostic = state.strategyDiagnostics.find((item) => item.strategy === strategy);
       const openPosition = state.openStrategyPositions.find((position) => position.strategy === strategy) ?? openRows.find((position) => position.strategy === strategy);
       const orders = state.strategyOrders.filter((order) => order.strategy === strategy).sort((a, b) => b.timestamp - a.timestamp);
@@ -242,6 +275,11 @@ function AutoTraderOutcomesComponent({ embedded = false, ticks = [], liveOnly = 
       const lastClosed = closedTimes.length ? Math.max(...closedTimes) : 0;
       const totalNet = netComplete ? netValues.reduce((sum, value) => sum + value, 0) : undefined;
       const mean = (values: number[]) => values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : undefined;
+      const realLearningReturns = trades.flatMap((trade) => typeof trade.netPnlUsd === 'number' && Number.isFinite(trade.netPnlUsd) && typeof trade.entryNotionalUsd === 'number' && Number.isFinite(trade.entryNotionalUsd) && trade.entryNotionalUsd > 0 ? [trade.netPnlUsd / trade.entryNotionalUsd * 100] : []);
+      const scoutLearning = scoutLearningByStrategy.get(strategy);
+      const learningSamples = realLearningReturns.length + (scoutLearning?.count ?? 0);
+      const learningPositiveCount = realLearningReturns.filter((value) => value > 0).length + (scoutLearning?.positive ?? 0);
+      const learningAverageNetTotal = realLearningReturns.reduce((sum, value) => sum + value, 0) + (scoutLearning?.returnTotal ?? 0);
       return { strategy, trades: trades.length, wins, losses, flat: trades.length - wins - losses,
         enabled, runStatus, runReason,
         todayRealizedUsd: state.todayStrategyRealizedUsd?.[strategy] ?? (state.todayStrategyRealizedUsd ? 0 : undefined),
@@ -262,14 +300,14 @@ function AutoTraderOutcomesComponent({ embedded = false, ticks = [], liveOnly = 
         averageEntrySizeUsd: validEntrySizes.length === trades.length ? mean(validEntrySizes) : undefined,
         lowSample: trades.length > 0 && trades.length < 30,
         learningMultiplier: state.strategyLearning[strategy]?.learning_multiplier,
-        learningSamples: state.strategyLearning[strategy]?.learning_samples,
-        learningPositiveRate: state.strategyLearning[strategy]?.positive_rate ?? undefined,
-        learningNetUsd: state.strategyLearning[strategy]?.realized_pnl,
+        learningSamples,
+        learningPositiveRate: learningSamples ? learningPositiveCount / learningSamples : undefined,
+        learningAverageNet: learningSamples ? learningAverageNetTotal / learningSamples : undefined,
         strictEntryGate: state.strictEntryGates[strategy],
         strictBaseStrengthFloor: state.strictBaseStrengthFloor,
-        strictGateApplies: strategy.startsWith('live-') && strategy !== 'live-insights' };
+        strictGateApplies: strategy.startsWith('live-') && strategy !== 'live-insights', scoutEnabled, scoutable };
     }).sort((a, b) => b.trades - a.trades || a.strategy.localeCompare(b.strategy));
-  }, [closedRows, state.strategyLearning, state.enabledStrategies, state.autoTraderEnabled, state.strategyDiagnostics, state.strategyOrders, state.strictEntryGates, state.strictBaseStrengthFloor, state.todayStrategyRealizedUsd, state.openStrategyPositions, state.autoTraderStatusAvailable, openRows]);
+  }, [closedRows, state.strategyLearning, state.enabledStrategies, state.autoTraderEnabled, state.strategyDiagnostics, state.strategyOrders, state.strictEntryGates, state.strictBaseStrengthFloor, state.todayStrategyRealizedUsd, state.openStrategyPositions, state.autoTraderStatusAvailable, openRows, scoutLearningByStrategy, settings.scoutStrategies, settings.strategies, settings.loading]);
   const visibleStrategyWinRates = useMemo(() => hideDisabledStrategies
     ? strategyWinRates.filter((row) => row.enabled !== false)
     : strategyWinRates, [strategyWinRates, hideDisabledStrategies]);
@@ -292,7 +330,8 @@ function AutoTraderOutcomesComponent({ embedded = false, ticks = [], liveOnly = 
       { field: 'periodStart', headerName: 'Period', headerTooltip: 'Date range from the oldest to newest fully closed trade in this strategy.', valueFormatter: ({ value, data }) => typeof value === 'number' && value > 0 && typeof data?.periodEnd === 'number' && data.periodEnd > 0 ? dateLabel(value) + (dateLabel(value) === dateLabel(data.periodEnd) ? '' : ' – ' + dateLabel(data.periodEnd)) : '—', width: 100, minWidth: 100, maxWidth: 130, flex: 0 },
     ], 'sample') },
     { headerName: 'Strategy status', headerClass: 'strategy-group-status', children: colorStrategyColumns([
-      { field: 'enabled', headerName: 'On', valueFormatter: ({ value }) => value === true ? 'Yes' : value === false ? 'No' : '—', width: 42, minWidth: 42, maxWidth: 48, flex: 0 },
+      { field: 'enabled', headerName: 'On', cellRenderer: ({ data }: { data?: StrategyWinRateRow }) => data ? <input type="checkbox" aria-label={'Enable ' + strategyLabel(data.strategy)} checked={data.enabled === true} disabled={settings.loading || settings.busy} onClick={(event) => event.stopPropagation()} onChange={(event) => { const strategies = event.target.checked ? [...settings.strategies, data.strategy as Strategy] : settings.strategies.filter((item) => item !== data.strategy); settingsModel.setStrategies(strategies); void settingsModel.saveLimits(); }} /> : null, width: 42, minWidth: 42, maxWidth: 48, flex: 0 },
+      { field: 'scoutEnabled', headerName: 'Scout', headerTooltip: 'Evaluate this strategy as a Scout in shadow mode. Scout selection is independent of trading enablement.', cellRenderer: ({ data }: { data?: StrategyWinRateRow }) => data ? <input type="checkbox" aria-label={'Enable Scout for ' + strategyLabel(data.strategy)} checked={data.scoutEnabled === true} disabled={!data.scoutable || settings.loading || settings.busy} onClick={(event) => event.stopPropagation()} onChange={(event) => { const strategies = event.target.checked ? [...settings.scoutStrategies, data.strategy as Strategy] : settings.scoutStrategies.filter((item) => item !== data.strategy); settingsModel.setScoutStrategies(strategies); void settingsModel.saveLimits(); }} /> : null, width: 52, minWidth: 52, maxWidth: 58, flex: 0 },
       { field: 'runStatus', headerName: 'Run state', tooltipField: 'runStatus', width: 148, minWidth: 148, maxWidth: 148, flex: 0 },
       { field: 'runReason', headerName: 'Latest reason', tooltipField: 'runReason', width: 300, minWidth: 240, flex: 0 },
     ], 'status') },
@@ -301,10 +340,10 @@ function AutoTraderOutcomesComponent({ embedded = false, ticks = [], liveOnly = 
       { field: 'averageEntrySizeUsd', headerName: 'Entry USD', headerTooltip: 'Mean USD notional at entry for fully closed trades; uses entry price and the latest quote currency conversion rate.', valueFormatter: ({ value }) => typeof value === 'number' && Number.isFinite(value) ? usd.format(value) : '—', width: 72, minWidth: 72, maxWidth: 82, flex: 0 },
     ], 'profile') },
     { headerName: 'Learning · all symbols · recent', headerClass: 'strategy-group-learning', children: colorStrategyColumns([
-      { field: 'learningMultiplier', headerName: 'Mult.', headerTooltip: 'Current size multiplier from the latest 20 closed outcomes pooled across symbols. Both poor win rate and negative net P&L reduce exposure.', valueFormatter: ({ value }) => typeof value === 'number' && Number.isFinite(value) ? '×' + value.toFixed(2) : '—', width: 56, minWidth: 56, maxWidth: 64, flex: 0 },
-      { field: 'learningNetUsd', headerName: 'Recent net', headerTooltip: 'Net realized USD P&L across the same recent outcomes used for the size multiplier. This can differ from Today P&L and Closed net, which use separate windows.', cellClassRules: signed, valueFormatter: ({ value }) => typeof value === 'number' && Number.isFinite(value) ? money.format(value) : '—', width: 88, minWidth: 88, maxWidth: 96, flex: 0 },
-      { field: 'learningSamples', headerName: 'Learn n', headerTooltip: 'Number of recent closed outcomes used by sizing, pooled across symbols for this strategy (up to 20).', valueFormatter: ({ value }) => typeof value === 'number' && Number.isFinite(value) ? value.toLocaleString() : '—', width: 60, minWidth: 60, maxWidth: 68, flex: 0 },
-      { field: 'learningPositiveRate', headerName: 'Positive', headerTooltip: 'Share of pooled learning outcomes with positive net realized P&L across all symbols.', valueFormatter: ({ value }) => typeof value === 'number' && Number.isFinite(value) ? (value * 100).toFixed(1) + '%' : '—', width: 62, minWidth: 62, maxWidth: 70, flex: 0 },
+      { field: 'learningMultiplier', headerName: 'Mult.', headerTooltip: 'Trade sizing multiplier from closed real-trade outcomes. Scout outcomes are reported in the learning metrics but do not directly set real trade size.', valueFormatter: ({ value }) => typeof value === 'number' && Number.isFinite(value) ? '×' + value.toFixed(2) : '—', width: 56, minWidth: 56, maxWidth: 64, flex: 0 },
+      { field: 'learningAverageNet', headerName: 'Avg net', headerTooltip: 'Average net return across closed real trades and shadow outcomes, pooled across symbols. Shadow outcomes use the last 7 days; real trades use the closed outcomes currently loaded.', cellClassRules: signed, valueFormatter: ({ value }) => pct(value), width: 72, minWidth: 72, maxWidth: 82, flex: 0 },
+      { field: 'learningSamples', headerName: 'Learn n', headerTooltip: 'Count of closed real trade and shadow outcomes pooled across symbols for this strategy.', valueFormatter: ({ value }) => typeof value === 'number' && Number.isFinite(value) ? value.toLocaleString() : '—', width: 60, minWidth: 60, maxWidth: 68, flex: 0 },
+      { field: 'learningPositiveRate', headerName: 'Positive', headerTooltip: 'Share of closed real trade and shadow outcomes with positive net return.', valueFormatter: ({ value }) => typeof value === 'number' && Number.isFinite(value) ? (value * 100).toFixed(1) + '%' : '—', width: 62, minWidth: 62, maxWidth: 70, flex: 0 },
     ], 'learning') },
   ], []);
   const summary = useMemo(() => ({
@@ -535,7 +574,7 @@ function AutoTraderOutcomesComponent({ embedded = false, ticks = [], liveOnly = 
     { headerName: 'Entry fees', valueGetter: ({ data }) => data?.status === 'Open' ? Math.abs(data.entryFees) : undefined, valueFormatter: ({ value, data }) => typeof value === 'number' ? (data?.pnlQuoteCurrency ?? '') + ' ' + value.toFixed(4) : '—', minWidth: 110 },
     { headerName: 'Est. exit fee', valueGetter: ({ data }) => data?.status === 'Open' && data.markPrice !== undefined ? Math.abs(data.signedQuantity * data.markPrice) * data.estimatedExitFeeRate : undefined, valueFormatter: ({ value, data }) => typeof value === 'number' ? (data?.pnlQuoteCurrency ?? '') + ' ' + value.toFixed(4) : '—', minWidth: 120 },
     { headerName: 'Est. exit slippage', valueGetter: ({ data }) => data?.status === 'Open' && data.markPrice !== undefined ? Math.abs(data.signedQuantity * data.markPrice) * data.estimatedExitSlippageBps / 10_000 : undefined, valueFormatter: ({ value, data }) => typeof value === 'number' ? (data?.pnlQuoteCurrency ?? '') + ' ' + value.toFixed(4) : '—', minWidth: 135 },
-    { field: 'netPnlUsd', headerName: 'Net realized USD', headerTooltip: 'Lifetime realized P&L from the position ledger for the strategy instance, net of allocated entry and exit fees. Shows realized P&L from closed fills, including partial exits while a position remains open. Historical fills are loaded as you paginate.', cellClassRules: signed, valueFormatter: ({ value }) => typeof value === 'number' && Number.isFinite(value) ? money.format(value) : '—', minWidth: 145 },
+    { field: 'netPnlUsd', headerName: 'Net today (USD)', headerTooltip: 'Net realized P&L from this strategy instance during the current UTC day. Matches the position ledger Realized today total.', cellClassRules: signed, valueFormatter: ({ value }) => typeof value === 'number' && Number.isFinite(value) ? money.format(value) : '—', minWidth: 145 },
     { headerName: 'Realized / open P&L (USD)', headerTooltip: 'Realized closed-trade P&L or estimated open P&L converted from quote currency to USD.', valueGetter: ({ data }) => data?.status === 'Open' ? (openPnl(data) !== undefined && typeof data.quoteUsdRate === 'number' && Number.isFinite(data.quoteUsdRate) ? openPnl(data)! * data.quoteUsdRate : undefined) : data?.netPnlUsd, cellClassRules: signed, valueFormatter: ({ value }) => typeof value === 'number' && Number.isFinite(value) ? money.format(value) : '—', minWidth: 170 },
     { field: 'direction', headerName: 'Signal direction', minWidth: 110 },
     { field: 'strength', headerName: 'Strength', valueFormatter: ({ value }) => typeof value === 'number' ? (value * 100).toFixed(0) + '%' : '—', minWidth: 85 },
@@ -564,15 +603,21 @@ function AutoTraderOutcomesComponent({ embedded = false, ticks = [], liveOnly = 
         if (!data?.rowId.startsWith('ledger-summary:')) return <span className="auto-trader-ledger-child-marker" aria-hidden="true">↳</span>;
         const expanded = expandedLedgerGroups.has(data.rowId);
         return <button type="button" className="auto-trader-ledger-expander" aria-label={(expanded ? 'Hide' : 'Show') + ' child trades for ' + data.symbol} aria-expanded={expanded} onClick={() => setExpandedLedgerGroups((current) => { const next = new Set(current); if (next.has(data.rowId)) next.delete(data.rowId); else next.add(data.rowId); return next; })}>{expanded ? '−' : '+'}</button>;
-      } }, ...columns.filter((column) => ['Net vs breakeven', 'Symbol', 'Strategy', 'Strategy instance ID', 'Ledger source', 'Trade type', 'Source', 'Side', 'Quantity', 'Fee %', 'Entry', 'Opened', 'Net realized USD'].includes(String(column.headerName ?? ''))).map((column) => {
-        if (column.headerName === 'Net vs breakeven') return { ...column, headerName: 'Status' };
-        if (column.headerName === 'Opened') return { ...column, headerName: 'Timestamp', sortable: true };
-        return column;
+      } }, ...columns.filter((column) => ['Symbol', 'Strategy', 'Strategy instance ID', 'Trade type', 'Side', 'Quantity', 'Fee %', 'Entry', 'Opened', 'Net today (USD)'].includes(String(column.headerName ?? ''))).map((column) => {
+        const widths: Record<string, number> = {
+          Symbol: 90, Strategy: 170, 'Strategy instance ID': 230, 'Trade type': 95,
+          Side: 80, Quantity: 105, 'Fee %': 85, Entry: 105, Opened: 155,
+          'Net today (USD)': 135,
+        };
+        const originalHeader = String(column.headerName ?? '');
+        const width = widths[originalHeader] ?? 100;
+        return { ...column, ...(originalHeader === 'Opened' ? { headerName: 'Trade time' } : {}), width, minWidth: width, maxWidth: width, flex: 0 };
       })]
       : columns.filter((column) => !['strategyInstanceId', 'ledgerSource'].includes(String(column.field ?? '')));
   return <section className={embedded ? 'auto-trader-outcomes-embedded' : 'feed-section signal-info-panel'} aria-label={strategyRatesOnly ? 'AutoTrader strategy win rates' : liveOnly ? 'Live AutoTrader positions' : 'AutoTrader position outcomes'}>
     {!embedded && <FeedToolbar title={liveOnly ? 'AutoTrader live positions' : closedOnly ? 'AutoTrader closed & partial positions' : 'AutoTrader positions & outcomes'} />}
     {!liveOnly && !closedOnly && !strategyRatesOnly && <p className="signal-info-note">{openRows.length} open positions · {summary.markedOpenCount}/{openRows.length} marked · indicative open P&amp;L {summary.markedOpenCount ? Object.entries(summary.openPnlByQuote).map(([quote, value]) => quote + ' ' + (value >= 0 ? '+' : '') + value.toFixed(4)).join(' · ') : 'unavailable'} · {summary.wins} closed winners · {summary.losses} closed losers · {summary.avg.toFixed(3)}% average closed return. Open marks use the latest price tick and net out signed entry fees, estimated exit fees, and estimated adverse exit slippage based on AutoTrader fills for that symbol; closed P&amp;L uses audited realized values. Signal values show the recorded entry decision, not proof of causation.</p>}
+    {closedOnly && <p className="signal-info-note">Today’s realized P&amp;L by strategy instance · total {money.format(loadedOutcomesTodayUsd)}. Expand an instance to see today’s individual fills. Totals use the same UTC-day ledger calculation as Realized today.</p>}
     {!strategyRatesOnly && state.error && <div className="positions-error">{state.error}</div>}
     {!closedOnly && !strategyRatesOnly && <div className={'auto-trader-pnl-marker-legend' + (liveOnly ? ' is-compact' : '')} aria-label="Position bar marker key">
       <span><i className="is-current" />Now</span><span><i className="is-breakeven" />BE</span>
@@ -583,7 +628,7 @@ function AutoTraderOutcomesComponent({ embedded = false, ticks = [], liveOnly = 
     <div className="data-grid-wrap signal-info-grid auto-trader-strategy-winrate-grid"><AgGridReact<StrategyWinRateRow> rowData={visibleStrategyWinRates} columnDefs={strategyColumns} getRowId={({ data }) => data.strategy} defaultColDef={{ sortable: true, resizable: true, flex: 0, minWidth: 48 }} theme={theme} domLayout="autoHeight" rowHeight={26} headerHeight={28} /></div>
     {visibleStrategyWinRates.length === 0 && !state.loading && <p className="positions-empty">{hideDisabledStrategies ? 'No enabled strategies to show.' : 'No closed trades to calculate strategy win rates yet.'}</p>}
 </>}
-    {closedOnly && state.hasOlderLedgerTrades && <button type="button" className="auto-trader-audit-more" disabled={state.loadingOlderLedgerTrades} onClick={() => void model.loadOlderLedgerTrades()}>{state.loadingOlderLedgerTrades ? 'Loading older trades…' : 'Load older trades'}</button>}
+    {closedOnly && state.hasOlderLedgerTrades && <button type="button" className="auto-trader-audit-more" disabled={state.loadingOlderLedgerTrades} onClick={() => void model.loadOlderLedgerTrades()}>{state.loadingOlderLedgerTrades ? 'Loading today’s fills…' : 'Load more today’s fills'}</button>}
     {!liveOnly && !closedOnly && !strategyRatesOnly && state.auditCursor != null && <button type="button" className="auto-trader-audit-more" disabled={state.loadingOlderAudit} onClick={() => void model.loadOlderAudit()}>{state.loadingOlderAudit ? 'Loading older history…' : 'Load older history'}</button>}
     {!strategyRatesOnly && <div className={'data-grid-wrap signal-info-grid' + (liveOnly ? ' auto-trader-live-position-grid' : closedOnly ? ' auto-trader-ledger-grid' : '')}><AgGridReact<OutcomeGridRow> rowData={rows} columnDefs={visibleColumns} onGridReady={(event) => { outcomesGridApi.current = event.api; if (closedOnly) restoreClosedGridSort(event.api); }} onSortChanged={(event) => { if (closedOnly) persistClosedGridSort(event.api); }} getRowId={({ data }) => data.rowId} getRowHeight={() => closedOnly ? 30 : liveOnly ? 52 : 48} getRowClass={({ data }) => data?.rowId.startsWith('ledger-summary:') ? 'auto-trader-closed-position-row auto-trader-ledger-summary-row' : data?.rowId.startsWith('ledger-trade:') ? 'auto-trader-closed-position-row auto-trader-ledger-child-row' : data?.status === 'Open' ? 'auto-trader-open-position-row' : 'auto-trader-closed-position-row'} defaultColDef={{ sortable: true, resizable: true, flex: 1, minWidth: 80 }} postSortRows={closedOnly ? ({ nodes }) => keepLedgerGroupsTogether(nodes) : undefined} theme={theme} domLayout={closedOnly ? 'normal' : 'autoHeight'} rowHeight={closedOnly ? 30 : liveOnly ? 52 : 48} headerHeight={closedOnly || liveOnly ? 24 : 28} /></div>}
     {!strategyRatesOnly && !state.loading && rows.length === 0 && !state.error && <p className="positions-empty">{liveOnly ? 'No live AutoTrader positions are open.' : closedOnly ? 'No AutoTrader position-ledger trades are available yet.' : 'No open AutoTrader positions or fully closed audited trades are available yet.'}</p>}

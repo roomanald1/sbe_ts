@@ -1,4 +1,4 @@
-use crate::auto_trader::{Strategy, StrategyDecision, StrategySignal};
+use crate::auto_trader::{strategy_parameter_value, Strategy, StrategyDecision, StrategyParameterKey, StrategySignal};
 
 pub(crate) fn evaluate(input: &StrategySignal<'_>) -> Result<StrategyDecision, String> {
     let exit_when_inactive = input
@@ -13,9 +13,11 @@ pub(crate) fn evaluate(input: &StrategySignal<'_>) -> Result<StrategyDecision, S
     let Some(signal) = input.signal else {
         return Ok(StrategyDecision::Reject);
     };
-    let qualifies = input.daily_features.is_some_and(|features| {
-        features.close_above(features.primary_level) && features.btc_gate_passes()
-    });
+    let Some(entry_distance) = strategy_parameter_value(input.parameters, StrategyParameterKey::BreakoutEntryDistancePercent) else {
+        return Err("Missing learned breakout entry distance".into());
+    };
+    let qualifies = input.within_learned_breakout_entry_distance(entry_distance)
+        && input.daily_features.is_some_and(|features| features.btc_gate_passes());
     if signal.strategy_candidate && input.strategy == Some(Strategy::Donchian20Btc200) && qualifies {
         Ok(StrategyDecision::Enter)
     } else if signal.strategy_candidate
@@ -68,7 +70,7 @@ mod tests {
 
     #[test]
     fn accepts_only_its_own_published_candidate_signal() {
-        let parameters = BTreeMap::new();
+        let parameters = BTreeMap::from([("breakout_entry_distance_percent".to_owned(), 0.0)]);
         let own = signal("donchian-20-btc200", true);
         let wrong = signal("another-strategy", true);
         let inactive = signal("donchian-20-btc200", false);

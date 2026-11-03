@@ -173,3 +173,60 @@ fn adapt_exit_policy(settings: &mut Settings) {
         settings.stop_loss_percent,
     );
 }
+
+#[cfg(test)]
+mod exit_policy_learning_tests {
+    use super::*;
+
+    #[test]
+    fn risk_and_volatility_adjustments_stay_within_policy_bounds() {
+        assert_eq!(volatility_adjusted_stop_loss_percent(1.0, None), 1.0);
+        assert!(volatility_adjusted_stop_loss_percent(1.0, Some(1.0)) > 1.0);
+        assert_eq!(volatility_adjusted_stop_loss_percent(1.0, Some(f64::NAN)), 1.0);
+        assert_eq!(volatility_size_scale(2.0, 4.0), 0.5);
+        assert_eq!(volatility_size_scale(2.0, 1.0), 1.0);
+        let conservative = risk_adjusted_take_profit_percent(2.0, 0.0);
+        let aggressive = risk_adjusted_take_profit_percent(2.0, 100.0);
+        assert!(conservative >= aggressive);
+        assert_eq!(minimum_reward_risk_take_profit_percent(1.0, 0.1), 1.0 * MIN_EXIT_REWARD_RISK_RATIO);
+        assert_eq!(minimum_reward_risk_take_profit_percent(200.0, 1.0), MAX_TAKE_PROFIT_PERCENT);
+    }
+
+    #[test]
+    fn extended_hold_requires_enough_positive_outcomes_and_respects_reward_risk() {
+        let mixed = vec![1.0, -1.0, 1.0];
+        let strong = vec![1.0; EXTENDED_HOLD_MIN_SAMPLES];
+        assert!(!win_rate_supports_extended_hold(&mixed));
+        assert!(win_rate_supports_extended_hold(&strong));
+        assert_eq!(confidence_adjusted_take_profit_percent(&mixed, 3.0, 1.0),
+            minimum_reward_risk_take_profit_percent(1.0, EARLY_NET_TAKE_PROFIT_PERCENT));
+        assert_eq!(confidence_adjusted_take_profit_percent(&strong, 3.0, 1.0),
+            minimum_reward_risk_take_profit_percent(1.0, 3.0));
+    }
+
+    #[test]
+    fn learned_exit_policy_requires_validated_positive_evidence_for_matching_side() {
+        let signal: Signal = serde_json::from_value(serde_json::json!({
+            "symbol":"ETH-USDT", "direction":"bullish", "strength":1.0,
+            "timestamp":1, "stale":false
+        })).unwrap();
+        let accepted: WalkForward = serde_json::from_value(serde_json::json!({
+            "symbol":"ETH-USDT", "horizon_seconds":900,
+            "learned_long_exit_policy": {
+                "stop_loss_percent":1.5, "take_profit_percent":3.0,
+                "validation_samples":20, "validation_average_net_return_percent":0.4,
+                "validation_positive_net_rate":0.5
+            }
+        })).unwrap();
+        assert_eq!(learned_exit_policy(&signal, std::slice::from_ref(&accepted)), Some((1.5,3.0,20)));
+        let insufficient: WalkForward = serde_json::from_value(serde_json::json!({
+            "symbol":"ETH-USDT", "horizon_seconds":900,
+            "learned_long_exit_policy": {
+                "stop_loss_percent":1.5, "take_profit_percent":3.0,
+                "validation_samples":19, "validation_average_net_return_percent":0.4,
+                "validation_positive_net_rate":0.5
+            }
+        })).unwrap();
+        assert_eq!(learned_exit_policy(&signal, &[insufficient]), None);
+    }
+}

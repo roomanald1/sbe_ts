@@ -1,3 +1,12 @@
+fn signal_strategy_parameters(signal: &Signal) -> BTreeMap<String, f64> {
+    signal.strategy_decision.as_ref()
+        .and_then(|decision| decision.get("strategy_parameters"))
+        .and_then(serde_json::Value::as_object)
+        .into_iter().flatten()
+        .filter_map(|(key, value)| Some((key.clone(), value.as_f64()?)))
+        .collect()
+}
+
 fn strategy_parameter_key(symbol: &str, strategy: Strategy, parameter: &str) -> String {
     format!("{symbol}:{}:{parameter}", strategy.as_str())
 }
@@ -22,7 +31,10 @@ fn strategy_learning_stats(settings: &Settings, symbol: &str, strategy: Strategy
     stats
 }
 
-const MIN_SCOUT_PARAMETER_VARIANT_SAMPLES: usize = 2;
+// A parameter probe only becomes the active profile after a meaningful sample
+// and positive evidence that is not explained by noise. Until then the
+// configured/learned baseline remains in use.
+const MIN_SCOUT_PARAMETER_VARIANT_SAMPLES: usize = 20;
 
 fn next_scout_parameter_probe(
     symbol: &str,
@@ -31,7 +43,12 @@ fn next_scout_parameter_probe(
     day: u64,
 ) -> Option<(String, f64)> {
     let candidates = all_strategy_parameter_specs(strategy).into_iter().filter_map(|spec| {
-        if spec.key == StrategyParameterKey::LearningRate || spec.min >= spec.max || spec.step <= 0.0 {
+        if matches!(
+            spec.key,
+            StrategyParameterKey::LearningRate
+                | StrategyParameterKey::ScoutMinimumWalkForwardSamples
+                | StrategyParameterKey::ScoutMinimumPositiveNetRate
+        ) || spec.min >= spec.max || spec.step <= 0.0 {
             return None;
         }
         let current = parameters.get(spec.key.as_str()).copied().unwrap_or(spec.default);
@@ -67,10 +84,17 @@ fn best_scout_parameter_value(
         }
         let mut stats = stored.clone();
         decay_learning_stats(&mut stats, current_time_ms());
-        if stats.samples < MIN_SCOUT_PARAMETER_VARIANT_SAMPLES {
+        if stats.samples < MIN_SCOUT_PARAMETER_VARIANT_SAMPLES
+            || stats.recent_trade_pnls.len() < MIN_SCOUT_PARAMETER_VARIANT_SAMPLES
+        {
             return None;
         }
-        Some((value, stats.realized_pnl / stats.samples as f64))
+        let returns = stats.recent_trade_pnls.iter().map(|(_, pnl)| *pnl).collect::<Vec<_>>();
+        let mean = returns.iter().sum::<f64>() / returns.len() as f64;
+        let variance = returns.iter().map(|pnl| (pnl - mean).powi(2)).sum::<f64>()
+            / (returns.len() - 1) as f64;
+        let lower_95 = mean - 1.96 * (variance / returns.len() as f64).sqrt();
+        (lower_95 > 0.0).then_some((value, mean))
     }).max_by(|left, right| left.1.total_cmp(&right.1)).map(|(value, _)| value)
 }
 
@@ -682,6 +706,32 @@ mod threshold_walk_forward_tests {
     }
 
     #[test]
+    fn profitable_scout_outcomes_relax_scout_walk_forward_thresholds_within_bounds() {
+        let strategy = Strategy::LiveTradeFlow;
+        let mut settings = Settings::default();
+        settings.strategy_parameter_overrides.insert(
+            strategy_parameter_key("BTC-USDT", strategy, "learning_rate"),
+            0.25,
+        );
+        let key = strategy_trade_learning_key("BTC-USDT", strategy.as_str());
+        let stats = settings.learning.entry(key).or_default();
+        for _ in 0..30 {
+            record_learning_outcome(stats, 1.0);
+        }
+        let profile = strategy_parameter_profile(&settings, "BTC-USDT", strategy);
+        let samples = profile.parameters.iter()
+            .find(|parameter| parameter.key == StrategyParameterKey::ScoutMinimumWalkForwardSamples.as_str())
+            .unwrap();
+        let positive_rate = profile.parameters.iter()
+            .find(|parameter| parameter.key == StrategyParameterKey::ScoutMinimumPositiveNetRate.as_str())
+            .unwrap();
+        assert!(samples.learned_value < samples.default_value);
+        assert!(positive_rate.learned_value < positive_rate.default_value);
+        assert!((samples.min..=samples.max).contains(&samples.learned_value));
+        assert!((positive_rate.min..=positive_rate.max).contains(&positive_rate.learned_value));
+    }
+
+    #[test]
     fn parameter_profile_uses_validated_walk_forward_threshold() {
         let strategy = Strategy::LiveTradeFlow;
         let spec = all_strategy_parameter_specs(strategy)
@@ -759,10 +809,66 @@ mod scout_parameter_variant_tests {
     use super::*;
 
     #[test]
+    fn probe_does_not_replace_the_profile_before_minimum_evidence() {
+        let mut settings = Settings::default();
+        let strategy = Strategy::Donchian55Btc200;
+        for _ in 0..19 {
+            record_learning_outcome(
+                settings.learning.entry(strategy_parameter_probe_learning_key(
+                    "BTC-USDT", strategy.as_str(), "breakout_lookback_days", 52.0,
+                )).or_default(),
+                2.0,
+            );
+        }
+        let profile = strategy_parameter_profile(&settings, "BTC-USDT", strategy);
+        let lookback = profile.parameters.iter()
+            .find(|parameter| parameter.key == StrategyParameterKey::BreakoutLookbackDays.as_str())
+            .unwrap();
+        assert_eq!(lookback.learned_value, lookback.default_value);
+    }
+
+    #[test]
+    fn breakout_entry_distance_promotes_per_symbol_after_confident_probe_outcomes() {
+        let mut settings = Settings::default();
+        let strategy = Strategy::Donchian10Btc200;
+        for _ in 0..19 {
+            record_learning_outcome(
+                settings.learning.entry(strategy_parameter_probe_learning_key(
+                    "BTC-USDT", strategy.as_str(), "breakout_entry_distance_percent", 10.0,
+                )).or_default(),
+                2.0,
+            );
+        }
+        let btc_before_threshold = strategy_parameter_profile(&settings, "BTC-USDT", strategy);
+        let btc_before = btc_before_threshold.parameters.iter()
+            .find(|parameter| parameter.key == StrategyParameterKey::BreakoutEntryDistancePercent.as_str())
+            .unwrap();
+        assert_eq!(btc_before.learned_value, 0.0);
+
+        record_learning_outcome(
+            settings.learning.entry(strategy_parameter_probe_learning_key(
+                "BTC-USDT", strategy.as_str(), "breakout_entry_distance_percent", 10.0,
+            )).or_default(),
+            2.0,
+        );
+        let btc_after = strategy_parameter_profile(&settings, "BTC-USDT", strategy);
+        let btc_distance = btc_after.parameters.iter()
+            .find(|parameter| parameter.key == StrategyParameterKey::BreakoutEntryDistancePercent.as_str())
+            .unwrap();
+        assert_eq!(btc_distance.learned_value, 10.0);
+
+        let eth_profile = strategy_parameter_profile(&settings, "ETH-USDT", strategy);
+        let eth_distance = eth_profile.parameters.iter()
+            .find(|parameter| parameter.key == StrategyParameterKey::BreakoutEntryDistancePercent.as_str())
+            .unwrap();
+        assert_eq!(eth_distance.learned_value, 0.0);
+    }
+
+    #[test]
     fn feedback_selects_the_best_probed_value_without_pooling_it_with_baseline_samples() {
         let mut settings = Settings::default();
         let strategy = Strategy::Donchian55Btc200;
-        for _ in 0..4 {
+        for _ in 0..24 {
             record_learning_outcome(
                 settings.learning.entry(strategy_parameter_probe_learning_key(
                     "BTC-USDT", strategy.as_str(), "breakout_lookback_days", 50.0,

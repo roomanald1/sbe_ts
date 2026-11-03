@@ -3,6 +3,7 @@ struct StatusResponse {
     enabled: bool,
     strategy: String,
     strategies: Vec<String>,
+    scout_strategies: Vec<String>,
     signal_strategies_enabled: bool,
     max_order_notional: f64,
     daily_notional_limit: f64,
@@ -82,6 +83,8 @@ struct SettingsRequest {
     strategy: Option<Strategy>,
     #[serde(default, alias = "research_strategies")]
     strategies: Option<Vec<Strategy>>,
+    #[serde(default)]
+    scout_strategies: Option<Vec<Strategy>>,
     #[serde(default, alias = "generic_signals_enabled")]
     signal_strategies_enabled: Option<bool>,
     daily_notional_limit: f64,

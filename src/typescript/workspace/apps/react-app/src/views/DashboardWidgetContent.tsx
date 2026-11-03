@@ -1,4 +1,4 @@
-import { useCallback, type ReactNode } from 'react';
+import { memo, useCallback, type ReactNode } from 'react';
 import type { Connection, ConnectionState, FeedSource } from '../connection';
 import type { PriceChanges } from '../price_change_data';
 import type { DashboardWidget } from './dashboard_layout';
@@ -38,7 +38,7 @@ type Props = {
   onSymbolChange: (widgetId: string, symbol: string) => void;
 };
 
-export function DashboardWidgetContent(props: Props): ReactNode {
+function DashboardWidgetContentComponent(props: Props): ReactNode {
   const { widget, symbol, prices, connection, feedSource, connectionState, selectionSymbols, paused, onTrade, onRangeOrders, onSymbolChange } = props;
   const updateSymbol = useCallback((value: string) => onSymbolChange(widget.id, value), [onSymbolChange, widget.id]);
   switch (widget.type) {
@@ -75,3 +75,19 @@ export function DashboardWidgetContent(props: Props): ReactNode {
 function UnavailableFeed({ label, message }: { label: string; message: string }) {
   return <section className="feed-section" aria-label={label}><div className="book-popup-message">{message}</div></section>;
 }
+
+const priceDrivenWidgets = new Set<DashboardWidget['type']>(['grid', 'table', 'chart', 'close-insights', 'auto-trader-outcomes', 'auto-trader-live-positions', 'auto-trader-shadow-positions']);
+
+export const DashboardWidgetContent = memo(DashboardWidgetContentComponent, (previous, next) =>
+  previous.widget === next.widget
+  && previous.symbol === next.symbol
+  && previous.connection === next.connection
+  && previous.feedSource === next.feedSource
+  && previous.connectionState === next.connectionState
+  && previous.selectionSymbols === next.selectionSymbols
+  && previous.paused === next.paused
+  && previous.onTrade === next.onTrade
+  && previous.onRangeOrders === next.onRangeOrders
+  && previous.onSymbolChange === next.onSymbolChange
+  && (!priceDrivenWidgets.has(next.widget.type) || previous.prices === next.prices)
+);

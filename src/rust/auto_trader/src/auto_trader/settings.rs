@@ -9,6 +9,8 @@ struct Settings {
     enabled: bool,
     #[serde(default = "default_strategies", alias = "research_strategies")]
     strategies: Vec<Strategy>,
+    #[serde(default)]
+    scout_strategies: Vec<Strategy>,
     #[serde(
         default = "default_signal_strategies_enabled",
         alias = "generic_signals_enabled"
@@ -193,6 +195,7 @@ impl Default for Settings {
         Self {
             enabled: false,
             strategies: default_strategies(),
+            scout_strategies: Vec::new(),
             signal_strategies_enabled: default_signal_strategies_enabled(),
             max_order_notional: default_order_limit(),
             daily_notional_limit: default_daily_limit(),

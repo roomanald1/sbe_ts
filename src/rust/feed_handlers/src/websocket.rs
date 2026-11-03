@@ -15,8 +15,8 @@ use tokio::time::{Duration, sleep};
 
 use crate::encoders::{SYMBOL_LENGTH, encode_symbol_price_bytes};
 use crate::okx::connectivity::{
-    RollingVolatility, get_all_spot_instruments, get_instrument_data, subscribe,
-    run_usd_rate_stream, subscribe_shared_books, subscribe_shared_trades,
+    RollingVolatility, get_all_spot_instruments, get_instrument_data, run_usd_rate_stream,
+    subscribe, subscribe_shared_books, subscribe_shared_trades,
 };
 
 const PRICE_UPDATE_CAPACITY: usize = 4096;
@@ -28,9 +28,9 @@ const TICKER_BATCH_CAPACITY: usize = SYMBOL_PRICE_MESSAGE_LENGTH * MAX_TICKER_BA
 // find fresh candidates beyond the first 30 instruments.
 const SIGNAL_INSTRUMENT_LIMIT: usize = 100;
 static SIGNAL_FEEDS: OnceLock<Arc<DashMap<String, broadcast::Sender<Bytes>>>> = OnceLock::new();
-static SIGNAL_PRICE_FEEDS: OnceLock<Arc<DashMap<String, broadcast::Sender<Bytes>>>> = OnceLock::new();
+static SIGNAL_PRICE_FEEDS: OnceLock<Arc<DashMap<String, broadcast::Sender<Bytes>>>> =
+    OnceLock::new();
 static NEWS_SNAPSHOT: OnceLock<watch::Sender<Bytes>> = OnceLock::new();
-
 
 include!("websocket_server.rs");
 include!("websocket_responder.rs");

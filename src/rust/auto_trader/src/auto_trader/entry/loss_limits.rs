@@ -137,3 +137,65 @@ fn missing_fx_rate_error(
         )
     }
 }
+
+#[cfg(test)]
+mod loss_limit_probability_tests {
+    use super::*;
+
+    fn position(quantity: f64, entry: f64) -> TraderPosition {
+        TraderPosition { quantity, average_entry_price: entry, ..TraderPosition::default() }
+    }
+
+    fn samples(increasing: bool) -> Vec<serde_json::Value> {
+        (0..31).map(|index| {
+            let movement = index as f64 * 0.05 + (index % 2) as f64 * 0.01;
+            let price = if increasing { 100.0 + movement } else { 100.0 - movement };
+            serde_json::json!([index * 10_000, price])
+        }).collect()
+    }
+
+    #[test]
+    fn normal_cdf_is_symmetric_and_has_expected_center_and_tails() {
+        assert!((normal_cdf(0.0) - 0.5).abs() < 1e-6);
+        assert!((normal_cdf(1.0) + normal_cdf(-1.0) - 1.0).abs() < 1e-6);
+        assert!(normal_cdf(-5.0) < 0.001);
+        assert!(normal_cdf(5.0) > 0.999);
+    }
+
+    #[test]
+    fn profitable_close_probability_uses_bid_for_longs_ask_for_shorts_and_price_history() {
+        let long_market = serde_json::json!({
+            "bids": [{"price":110.0,"size":2.0}], "asks": [], "price_samples": samples(true)
+        });
+        let long = profitable_close_probability_5m(&long_market, &position(1.0, 100.0)).unwrap();
+        assert!(long > 0.5 && long <= 1.0);
+
+        let short_market = serde_json::json!({
+            "bids": [], "asks": [{"price":90.0,"size":2.0}], "price_samples": samples(false)
+        });
+        let short = profitable_close_probability_5m(&short_market, &position(-1.0, 100.0)).unwrap();
+        assert!(short > 0.5 && short <= 1.0);
+    }
+
+    #[test]
+    fn probability_fails_closed_for_missing_depth_invalid_levels_short_history_or_zero_variance() {
+        let good = samples(true);
+        assert_eq!(profitable_close_probability_5m(&serde_json::json!({"bids":[],"price_samples":good}), &position(1.0, 100.0)), None);
+        assert_eq!(profitable_close_probability_5m(&serde_json::json!({"bids":[{"price":100.0,"size":0.5}],"price_samples":samples(true)}), &position(1.0, 100.0)), None);
+        assert_eq!(profitable_close_probability_5m(&serde_json::json!({"bids":[{"price":100.0,"size":2.0}],"price_samples":[[0,100.0]]}), &position(1.0, 100.0)), None);
+        assert_eq!(profitable_close_probability_5m(&serde_json::json!({"bids":[{"price":-1.0,"size":2.0}],"price_samples":samples(true)}), &position(1.0, 100.0)), None);
+        assert_eq!(profitable_close_probability_5m(&serde_json::json!({"bids":[{"price":100.0,"size":2.0}],"price_samples":(0..31).map(|i| serde_json::json!([i*10_000,100.0])).collect::<Vec<_>>()}), &position(1.0, 100.0)), None);
+        assert_eq!(profitable_close_probability_5m(&serde_json::json!({"bids":[{"price":100.0,"size":2.0}],"price_samples":samples(true)}), &position(0.0, 100.0)), None);
+    }
+
+    #[test]
+    fn missing_fx_error_distinguishes_uncached_and_cached_quote_rates() {
+        let pnl = BTreeMap::from([("USDT".to_owned(), 2.0), ("EUR".to_owned(), -1.0)]);
+        let missing = missing_fx_rate_error("Realized PnL", &pnl, &BTreeMap::new());
+        assert!(missing.contains("missing FX rates"));
+        assert!(missing.contains("EUR, USDT"));
+        let cached = BTreeMap::from([("EUR".to_owned(), 1.1), ("USDT".to_owned(), 1.0)]);
+        let unavailable = missing_fx_rate_error("Realized PnL", &pnl, &cached);
+        assert!(unavailable.contains("cached rates cover quote currencies EUR, USDT"));
+    }
+}

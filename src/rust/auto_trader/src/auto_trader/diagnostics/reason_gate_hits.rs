@@ -116,3 +116,32 @@ fn gate_hits_for_reason(reason: &str) -> Vec<String> {
     gates
 }
 
+
+#[cfg(test)]
+mod reason_gate_hits_tests {
+    use super::gate_hits_for_reason;
+
+    #[test]
+    fn maps_combined_candidate_reasons_to_distinct_gates() {
+        let reason = "No tradeable bias: filtered: 2 stale, 1 non-directional, 3 strength 0.2 < 0.4; score 0.1 < 0.3; exploration blocked for mixed context; exploration needs positive history; normal entry needs 30 side samples; research-model side return must be positive; 2 candidate(s) blocked by negative walk-forward history";
+        let gates = gate_hits_for_reason(reason);
+        for expected in [
+            "Signal freshness", "Directional signal", "Existing position / re-entry limit",
+            "Learned strength floor", "Exploration score floor", "Exploration disabled for mixed context",
+            "Exploration walk-forward return and positive-rate floor", "Strict walk-forward sample minimum",
+            "Research-model side evidence", "Negative walk-forward evidence",
+        ] { assert!(gates.iter().any(|gate| gate == expected), "missing {expected}: {gates:?}"); }
+        assert_eq!(gate_hits_for_reason("No tradeable bias: fresh directional 0/0"), vec!["No fresh directional candidate"]);
+        assert_eq!(gate_hits_for_reason("Daily realized-loss limit reached"), vec!["Daily realized-loss limit"]);
+        assert_eq!(gate_hits_for_reason("No cached local order book"), vec!["Local order book availability"]);
+    }
+
+    #[test]
+    fn maps_strategy_and_position_failures_without_duplicate_gates() {
+        assert_eq!(gate_hits_for_reason("Strategy filters: strategy disabled; strategy entry rule returned false; strategy evaluation error"), vec!["Strategy enablement", "Strategy entry rule", "Strategy evaluation"]);
+        assert_eq!(gate_hits_for_reason("Post-stop cooldown blocked re-entry"), vec!["Position / re-entry / cooldown"]);
+        assert_eq!(gate_hits_for_reason("No profitable order type after spread and sweep cost"), vec!["Learned order-type profitability"]);
+        assert_eq!(gate_hits_for_reason("Deep book cannot support the estimated impact"), vec!["Deep-book impact limit"]);
+        assert_eq!(gate_hits_for_reason("unclassified reason"), vec!["unclassified reason"]);
+    }
+}

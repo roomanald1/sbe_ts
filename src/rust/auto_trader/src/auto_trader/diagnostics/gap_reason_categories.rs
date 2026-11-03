@@ -53,9 +53,8 @@ fn gap_reason_category(reason: &str) -> String {
             return "Signal too weak for entry".into();
         }
         let blocked = lower
-            .split("candidate(s) blocked by negative walk-forward history")
-            .next()
-            .and_then(|prefix| prefix.split_whitespace().last())
+            .split_once("candidate(s) blocked by negative walk-forward history")
+            .and_then(|(prefix, _)| prefix.split_whitespace().last())
             .and_then(|value| value.parse::<usize>().ok())
             .unwrap_or_default();
         if blocked > 0 {
@@ -95,3 +94,32 @@ fn gap_reason_category(reason: &str) -> String {
         .to_owned()
 }
 
+
+#[cfg(test)]
+mod gap_reason_category_tests {
+    use super::gap_reason_category;
+
+    #[test]
+    fn summarizes_common_entry_gap_reasons() {
+        let cases = [
+            ("No tradeable bias: fresh directional 0/8 filtered: 4 non-directional, 0", "Signals were stale"),
+            ("No tradeable bias: fresh directional 0/8 non-directional, 4", "No directional signal"),
+            ("No tradeable bias: fresh directional 0/8 blocked by existing positions 2", "Existing position blocked signals"),
+            ("No tradeable bias: fresh directional 0/0", "No insights available"),
+            ("No tradeable bias: fresh directional 2/8 contextual learned strength floors passed 0 contextual raw-score floors passed 0", "Signal too weak for entry"),
+            ("No tradeable bias: fresh directional 2/8 contextual learned strength floors passed 1 contextual raw-score floors passed 0 2 candidate(s) blocked by negative walk-forward history", "Walk-forward history blocked candidates"),
+            ("No tradeable bias: fresh directional 2/8 contextual learned strength floors passed 1 contextual raw-score floors passed 1", "No candidate passed all entry checks"),
+            ("Daily realized-loss limit reached", "Daily realized-loss limit reached"),
+            ("daily notional budget reached", "Available trading budget or position capacity was insufficient"),
+            ("negative walk-forward history", "Historical walk-forward evidence did not qualify"),
+            ("stale local order book", "Local order book data was stale"),
+            ("no cached local order book", "No cached local order book was available"),
+            ("already open position", "Existing position or cooldown blocked another entry"),
+            ("Cycle error: upstream unavailable", "Cycle error"),
+            ("Rejected: insufficient data; retry later", "Rejected"),
+        ];
+        for (reason, expected) in cases {
+            assert_eq!(gap_reason_category(reason), expected, "{reason}");
+        }
+    }
+}

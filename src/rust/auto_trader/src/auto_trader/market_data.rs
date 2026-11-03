@@ -251,3 +251,65 @@ fn assess_deep_book(
         depth_imbalance_10bps,
     })
 }
+
+#[cfg(test)]
+mod stablecoin_pair_tests {
+    use super::is_stablecoin_pair;
+
+    #[test]
+    fn recognizes_stablecoin_pairs_case_insensitively_and_rejects_other_symbols() {
+        for symbol in ["USDT-USDC", "usdc-usdt", "EURC-USDP"] {
+            assert!(is_stablecoin_pair(symbol), "{symbol}");
+        }
+        for symbol in ["BTC-USDT", "USDT-BTC", "BTCUSDT", "-USDC", "USDC-"] {
+            assert!(!is_stablecoin_pair(symbol), "{symbol}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod deep_book_assessment_tests {
+    use super::{assess_deep_book, market_levels, quote_depth_within_band};
+
+    #[test]
+    fn filters_invalid_book_levels_and_computes_each_side_depth_inside_band() {
+        let market = serde_json::json!({
+            "bids": [
+                {"price":100.0,"size":2.0},
+                {"price":99.89,"size":10.0},
+                {"price":99.0,"size":1.0},
+                {"price":-1.0,"size":3.0},
+                {"price":99.9,"size":0.0}
+            ],
+            "asks": [{"price":100.0,"size":1.0},{"price":100.11,"size":8.0},{"price":101.0,"size":2.0}]
+        });
+        let bids = market_levels(&market, "bids");
+        let asks = market_levels(&market, "asks");
+        assert_eq!(bids.len(), 3);
+        assert_eq!(asks.len(), 3);
+        assert_eq!(quote_depth_within_band(&bids, 100.0, true), 200.0);
+        assert_eq!(quote_depth_within_band(&asks, 100.0, false), 100.0);
+        assert_eq!(quote_depth_within_band(&[], 100.0, false), 0.0);
+    }
+
+    #[test]
+    fn deep_book_assessment_handles_buy_sell_capacity_impact_and_invalid_markets() {
+        let market = serde_json::json!({
+            "bids": [{"price":100.0,"size":10.0},{"price":99.95,"size":10.0}],
+            "asks": [{"price":100.1,"size":10.0},{"price":100.15,"size":10.0}]
+        });
+        let buy = assess_deep_book(&market, "BTC-USDT", true, 10.0, 1.0).unwrap();
+        assert!(buy.available_within_band > 0.0);
+        assert!(buy.notional_cap > 0.0);
+        assert!(buy.impact_bps.is_finite() && buy.impact_bps >= 0.0);
+        let sell = assess_deep_book(&market, "BTC-USDT", false, 10.0, 1.0).unwrap();
+        assert!(sell.available_within_band > 0.0);
+        assert!(sell.impact_bps.is_finite() && sell.impact_bps >= 0.0);
+        let too_small = assess_deep_book(&market, "BTC-USDT", true, 1.0, 10.0).unwrap();
+        assert!(too_small.impact_bps.is_infinite());
+        assert!(assess_deep_book(&market, "BTC-EUR", true, 10.0, 1.0).is_none());
+        assert!(assess_deep_book(&serde_json::json!({"bids":[],"asks":[]}), "BTC-USDT", true, 10.0, 1.0).is_none());
+        let crossed = serde_json::json!({"bids":[{"price":101.0,"size":1.0}],"asks":[{"price":100.0,"size":1.0}]});
+        assert!(assess_deep_book(&crossed, "BTC-USDT", true, 10.0, 1.0).is_none());
+    }
+}

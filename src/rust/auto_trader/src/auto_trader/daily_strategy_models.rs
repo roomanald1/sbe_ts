@@ -27,6 +27,8 @@ struct StrategySymbolDiagnostic {
     secondary_distance_percent: Option<f64>,
     secondary_passed: Option<bool>,
     #[serde(default)]
+    evaluated: bool,
+    #[serde(default)]
     signal_active: bool,
     leader_gap_percent: Option<f64>,
     relative_strength_gap_pp: Option<f64>,
@@ -47,6 +49,12 @@ struct DailyStrategySnapshot {
     as_of_ms: u64,
     active_strategy_symbols: BTreeSet<(String, String)>,
     generated_signals: Vec<Signal>,
+    // A symbol is inactive only when the latest batch explicitly evaluated it.
+    // Missing symbols are unknown (for example, if a batch is partial).
+    #[serde(skip)]
+    evaluated_strategy_symbols: BTreeSet<(String, String)>,
+    #[serde(skip)]
+    diagnostics: Vec<StrategyDiagnostic>,
 }
 
 impl DailyStrategySnapshot {
@@ -61,15 +69,29 @@ impl DailyStrategySnapshot {
         let Some(strategy_kind) = Strategy::from_name(strategy) else {
             return if strategy_enabled { StrategyDecision::Hold } else { StrategyDecision::Exit };
         };
-        let active = self.active_strategy_symbols.contains(&(strategy.to_owned(), symbol.to_owned()));
+        let signal_active = self.signal_active(strategy, symbol);
         let rebalance = self.strategy_rebalance_required(strategy, symbol, previous_decision);
         let parameters = BTreeMap::new();
         strategy_kind.evaluate(&StrategySignal {
             signal: None, specific_signal: None, daily_features: None, direction: None,
             strategy: Some(strategy_kind), parameters: &parameters, position_open: true,
-            strategy_enabled, signal_active: (!minimum_hold_active).then_some(active),
+            strategy_enabled, signal_active: if minimum_hold_active { None } else { signal_active },
             rebalance_required: rebalance && !minimum_hold_active,
         }).unwrap_or(StrategyDecision::Hold)
+    }
+
+    fn signal_active(&self, strategy: &str, symbol: &str) -> Option<bool> {
+        let key = (strategy.to_owned(), symbol.to_owned());
+        self.evaluated_strategy_symbols.contains(&key).then(|| {
+            self.active_strategy_symbols.contains(&key)
+        })
+    }
+
+    fn symbol_diagnostic(&self, strategy: &str, symbol: &str) -> Option<serde_json::Value> {
+        self.diagnostics.iter()
+            .find(|diagnostic| diagnostic.strategy == strategy)
+            .and_then(|diagnostic| diagnostic.symbols.iter().find(|item| item.symbol == symbol))
+            .and_then(|item| serde_json::to_value(item).ok())
     }
 
     fn strategy_rebalance_required(
@@ -348,6 +370,15 @@ impl<'a> StrategySignal<'a> {
         })
     }
 
+    fn within_learned_breakout_entry_distance(&self, entry_distance_percent: f64) -> bool {
+        self.daily_features.is_some_and(|features| {
+            features.close_above(features.primary_level)
+                || (entry_distance_percent > 0.0
+                    && features.observed_close.zip(features.primary_level)
+                        .is_some_and(|(close, level)| (close / level - 1.0) * 100.0 >= -entry_distance_percent))
+        })
+    }
+
     fn within_scout_breakout_buffer(&self) -> bool {
         self.scout_breakout_distance_percent()
             .is_some_and(|distance| (-SCOUT_BREAKOUT_BUFFER_PERCENT..=0.0).contains(&distance))
@@ -407,6 +438,10 @@ mod risk_adjusted_monthly_momentum_tests {
                 "ETH-USDT".into(),
             )]),
             generated_signals: vec![candidate(2_000)],
+            evaluated_strategy_symbols: BTreeSet::from([(
+                "risk-adjusted-monthly-momentum".into(), "ETH-USDT".into(),
+            )]),
+            diagnostics: Vec::new(),
         };
         assert!(snapshot.strategy_rebalance_required(
             "risk-adjusted-monthly-momentum",

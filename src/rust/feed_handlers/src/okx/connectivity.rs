@@ -1,16 +1,22 @@
 use anyhow::Result;
 use bytes::Bytes;
+use dashmap::DashMap;
 use futures_util::{SinkExt, StreamExt, TryStreamExt};
 use reqwest::header::USER_AGENT;
-use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, HashMap, HashSet, VecDeque},
-    sync::{atomic::{AtomicU64, Ordering}, Arc, Mutex as StdMutex, OnceLock},
+    sync::{
+        Arc, Mutex as StdMutex, OnceLock,
+        atomic::{AtomicU64, Ordering},
+    },
     time::{SystemTime, UNIX_EPOCH},
 };
-use tokio::sync::{broadcast::{self, Sender}, mpsc, watch};
+use tokio::sync::{
+    broadcast::{self, Sender},
+    mpsc, watch,
+};
 use tokio::time::{Duration, Instant, sleep};
 use tokio_tungstenite::{connect_async, tungstenite::Utf8Bytes};
 
@@ -29,8 +35,7 @@ const SHARED_BOOK_UPDATE_CAPACITY: usize = 32;
 static OKX_NEXT_CONNECT_SLOT: OnceLock<tokio::sync::Mutex<Instant>> = OnceLock::new();
 
 async fn wait_for_okx_connection_slot() {
-    let next_slot = OKX_NEXT_CONNECT_SLOT
-        .get_or_init(|| tokio::sync::Mutex::new(Instant::now()));
+    let next_slot = OKX_NEXT_CONNECT_SLOT.get_or_init(|| tokio::sync::Mutex::new(Instant::now()));
     let mut next_slot = next_slot.lock().await;
     let now = Instant::now();
     if *next_slot > now {
@@ -47,7 +52,6 @@ pub(crate) struct RollingVolatility {
     minute_squared_sum: f64,
     window_squared_sum: f64,
 }
-
 
 include!("volatility_tracking.rs");
 include!("instrument_catalog.rs");

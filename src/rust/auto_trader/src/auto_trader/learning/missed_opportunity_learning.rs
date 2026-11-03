@@ -118,3 +118,47 @@ fn adapt_order_type(
         .map(|(kind, _)| kind)
         .or(Some(baseline))
 }
+
+#[cfg(test)]
+mod missed_opportunity_learning_behavior_tests {
+    use super::*;
+
+    fn band(gate: MissedOpportunityGate, threshold: f64, horizon_seconds: u64) -> MissedOpportunityGateBand {
+        MissedOpportunityGateBand {
+            gate, threshold, horizon_seconds, sample_count: 100,
+            average_net_return_percent: Some(0.2), positive_net_rate: Some(0.65),
+            time_to_profit_sample_count: 100, time_to_profit_rate: Some(0.75),
+            average_time_to_profit_seconds: Some(400.0), stop_target_sample_count: 100,
+            stop_target_average_net_return_percent: Some(0.3),
+            stop_target_positive_net_rate: Some(0.7),
+        }
+    }
+
+    #[test]
+    fn longer_horizon_multiplier_requires_positive_stop_target_and_timely_profit_evidence() {
+        let short = band(MissedOpportunityGate::Score, 0.4, 300);
+        let mut long = band(MissedOpportunityGate::Score, 0.4, 900);
+        long.average_net_return_percent = Some(0.4);
+        long.positive_net_rate = Some(0.75);
+        assert_eq!(longer_horizon_score_multiplier(0.5, &[short.clone()]), 1.0);
+        assert_eq!(longer_horizon_score_multiplier(f64::NAN, &[short.clone(), long.clone()]), 1.0);
+        assert_eq!(longer_horizon_score_multiplier(0.5, &[short.clone(), long.clone()]), 1.5);
+        let mut bad_long = long.clone();
+        bad_long.stop_target_average_net_return_percent = Some(-0.1);
+        assert_eq!(longer_horizon_score_multiplier(0.5, &[short.clone(), bad_long]), 1.0);
+        let mut too_slow = long;
+        too_slow.average_time_to_profit_seconds = Some(901.0);
+        assert_eq!(longer_horizon_score_multiplier(0.5, &[short, too_slow]), 1.0);
+    }
+
+    #[test]
+    fn adaptive_floor_uses_only_validated_short_horizon_stop_target_bands() {
+        let valid_high = band(MissedOpportunityGate::Strength, 0.5, 300);
+        let valid_low = band(MissedOpportunityGate::Strength, 0.35, 300);
+        assert_eq!(adaptive_missed_opportunity_floor(0.8, MissedOpportunityGate::Strength, &[valid_high.clone(), valid_low.clone()]), 0.35);
+        assert_eq!(adaptive_missed_opportunity_floor(0.8, MissedOpportunityGate::Score, &[valid_high.clone()]), 0.8);
+        let mut invalid = valid_low;
+        invalid.stop_target_sample_count = 0;
+        assert_eq!(adaptive_missed_opportunity_floor(0.8, MissedOpportunityGate::Strength, &[valid_high, invalid]), 0.5);
+    }
+}

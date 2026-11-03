@@ -2,8 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { AutoTraderModel } from '../models/AutoTraderModel';
 import type { Strategy } from '../models/AutoTraderModel';
-import { autoTraderShadowModel } from '../models/AutoTraderShadowModel';
-import { AutoTraderStrategyParameters } from './AutoTraderStrategyParameters';
+import { AutoTraderScoutOptions, AutoTraderStrategyParameters } from './AutoTraderStrategyParameters';
 import { AutoTraderOutcomes } from './AutoTraderOutcomes';
 import { AlternativeStrategies } from './AlternativeStrategies';
 import { useBehaviorSnapshot } from '../use_behavior_snapshot';
@@ -35,8 +34,6 @@ export function AutoTrader() {
   const model = useMemo(() => new AutoTraderModel(), []);
   useEffect(() => { model.start(); return () => model.stop(); }, [model]);
   const state = useBehaviorSnapshot(model.state$);
-  const shadowState = useBehaviorSnapshot(autoTraderShadowModel.state$);
-  useEffect(() => { autoTraderShadowModel.start(); return () => autoTraderShadowModel.stop(); }, []);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [parametersOpen, setParametersOpen] = useState(false);
   const [decisionDetailsOpen, setDecisionDetailsOpen] = useState(false);
@@ -49,14 +46,6 @@ export function AutoTrader() {
       failed: scouts.filter((order) => order.status === 'failed').length,
     };
   }, [state.orders]);
-  const scoutShadowRows = shadowState.rows.filter((row) => row.source === 'Scout');
-  const scoutShadowOpen = scoutShadowRows.filter((row) => row.status === 'Open').length;
-  const scoutShadowResolved = scoutShadowRows.filter((row) => ['Won', 'Lost', 'Flat'].includes(row.status));
-  const scoutShadowWins = scoutShadowRows.filter((row) => row.status === 'Won').length;
-  const scoutShadowLosses = scoutShadowRows.filter((row) => row.status === 'Lost').length;
-  const scoutShadowUnavailable = scoutShadowRows.filter((row) => row.status === 'Outcome unavailable').length;
-  const scoutShadowNetReturns = scoutShadowResolved.flatMap((row) => typeof row.netReturnPercent === 'number' && Number.isFinite(row.netReturnPercent) ? [row.netReturnPercent] : []);
-  const scoutShadowAverageReturn = scoutShadowNetReturns.length ? scoutShadowNetReturns.reduce((sum, value) => sum + value, 0) / scoutShadowNetReturns.length : undefined;
   const scoutOutcomeCohort = state.decisionQuality.cohorts.find((cohort) => cohort.dimension === 'selection' && cohort.value === 'scout');
   const selectedIntradayStrategies = intradayStrategyLabels.filter(({ strategy }) => state.strategies.includes(strategy));
   const selectedIntradayBudgetValuesValid = selectedIntradayStrategies.every(({ strategy }) => {
@@ -126,8 +115,9 @@ export function AutoTrader() {
               <fieldset className="auto-trader-strategy-options" title="Live and candle-derived insight strategies share the same AutoTrader portfolio exposure, daily loss, and open-position limits."><legend>STRATEGIES · SHARED PORTFOLIO LIMITS</legend>
                 {([{ value: 'live-momentum', label: 'Live momentum · aligned 10-second momentum or 5-minute trend; configured entry order; shared protective stop/target' }, { value: 'live-trade-flow', label: 'Live trade flow · aligned imbalance ≥ 0.15; configured entry order; shared protective stop/target' }, { value: 'live-order-book', label: 'Live order book · aligned imbalance ≥ 0.15; configured entry order; shared protective stop/target' }, { value: 'live-vwap-dislocation', label: 'Live VWAP dislocation · aligned gap ≥ 1 bp; configured entry order; shared protective stop/target' }, { value: 'live-absorption-pressure', label: 'Live absorption · opposing pressure ≥ 0.2; configured entry order; shared protective stop/target' }, { value: 'donchian-55-btc200', label: '55-day Donchian breakout · trade highs only while BTC is above its SMA200' }, { value: 'donchian-20-sma200', label: '20-day Donchian breakout · buy assets above their own SMA200' }, { value: 'donchian-20-btc200', label: '20-day Donchian + BTC SMA200 · fixed 20/200 daily signal exit · no protective stop · paper research' }, { value: 'donchian-10-btc200', label: '10-day Donchian + BTC SMA200 · higher-frequency candidate · signal exit · no protective stop' }, { value: 'donchian-20-btc200-hold3', label: 'A2 · 20-day Donchian + BTC SMA200 · 72-hour minimum hold · 25% per-order size cap · paper only' }, { value: 'risk-adjusted-trend-portfolio', label: 'B · 16-coin trend score / volatility · BTC SMA200 · 25% target weight cap · paper only' }, { value: 'trend-sleeves-btc200', label: 'Trend sleeves · BTC/ETH SMA50 + BNB SMA100 · BTC SMA200 risk gate' }, { value: 'trend-50-200', label: 'Trend following · hold each asset above its SMA50 and SMA200' }, { value: 'relative-strength-90-sma200', label: 'Momentum rotation · hold the strongest 90-day asset above its SMA200' }, { value: 'risk-adjusted-monthly-momentum', label: 'Risk-adjusted monthly momentum · BTC SMA200 gate · 40% volatility target · signal exit, no fixed stop' }, { value: 'rsi2-oversold-rebound', label: 'Mean reversion · RSI(2) ≤ 10 above SMA200 · five-day max hold' }, { value: 'dated-futures-carry', label: 'Dated futures carry · Insights signal, paired BTC/ETH paper hedge, settlement-window exit' }] as Array<{ value: Strategy; label: string }>).map(({ value, label }) => <label key={value}><input type="checkbox" checked={state.strategies.includes(value)} onChange={(event) => model.setStrategies(event.target.checked ? [...state.strategies, value] : state.strategies.filter((strategy) => strategy !== value))} />{label}</label>)}
                 <small>Intraday and daily strategies have editable per-strategy budget caps and separate position-slot limits. Learning adjusts effective strategy budgets and candidates with stronger measured net outcomes are submitted first when history is sufficient. Orders use shared account, exposure, and daily-loss limits; per-strategy P&L is tracked separately. The 20-day BTC-gated breakout, A2, and B use signal exits without fixed stops. A2 applies a 72-hour minimum hold and 0.25 order-size multiplier. B rebalances open paper positions toward capped inverse-volatility target weights when drift exceeds 5% of target value, subject to shared limits and book liquidity. Dated futures carry has its own paper size cap.</small>
-                {state.strategies.length === 0 && <small className="auto-trader-strategy-validation">Select at least one strategy before saving.</small>}
+                {state.strategies.length === 0 && state.scoutStrategies.length === 0 && <small className="auto-trader-strategy-validation">Select at least one strategy or Scout before saving.</small>}
               </fieldset>
+              <AutoTraderScoutOptions scoutStrategies={state.scoutStrategies} saving={state.busy} onChange={(strategies) => model.setScoutStrategies(strategies)} />
               <label title="Maximum per order and combined open plus pending exposure per symbol across all AutoTrader strategies.">MAX PER ORDER / SYMBOL (USD)<input type="number" min="0.01" step="any" value={state.maxOrderNotional} onChange={(event) => model.setLimits(event.target.value, state.dailyNotionalLimit, state.dailyRealizedLossLimit, state.explorationPercent, state.maxOpenPositions)} /></label>
               <label title="Maximum USD notional allocated to Auto Trader positions and pending orders that add exposure. Opening positions uses available capacity; closing fills release it. Manual positions are not included.">MAX ALLOCATED EXPOSURE (USD)<input type="number" min="0.01" step="any" value={state.dailyNotionalLimit} onChange={(event) => model.setLimits(state.maxOrderNotional, event.target.value, state.dailyRealizedLossLimit, state.explorationPercent, state.maxOpenPositions)} /></label>
               <label>DAILY LOSS CAP (USD)<input type="number" min="0.01" step="any" value={state.dailyRealizedLossLimit} onChange={(event) => model.setLimits(state.maxOrderNotional, state.dailyNotionalLimit, event.target.value, state.explorationPercent, state.maxOpenPositions)} /></label>
@@ -185,7 +175,7 @@ export function AutoTrader() {
               <label>TRIGGER OFFSET (BPS)<input type="number" min="5" max="100" step="1" value={state.triggerOffsetBps} onChange={(event) => model.setExecutionParameters({ triggerOffsetBps: event.target.value })} /></label>
               <label>TRAILING DISTANCE (%)<input type="number" min="0.05" max="1" step="0.05" value={state.trailingDistancePercent} onChange={(event) => model.setExecutionParameters({ trailingDistancePercent: event.target.value })} /></label>
               <label title="Number of most recent fully closed exits used for rolling exit statistics. Range: 1–5000.">ROLLING CLOSED EXITS<input type="number" min="1" max="5000" step="1" value={state.closedTradeWindow} onChange={(event) => model.setClosedTradeWindow(event.target.value)} /></label>
-              <button type="button" disabled={state.busy || state.loading || (state.strategies.length === 0) || dailyBudgetOverallocated || intradayBudgetOverallocated} onClick={() => void model.saveLimits()}>Save settings</button>
+              <button type="button" disabled={state.busy || state.loading || (state.strategies.length === 0 && state.scoutStrategies.length === 0) || dailyBudgetOverallocated || intradayBudgetOverallocated} onClick={() => void model.saveLimits()}>Save settings</button>
               <button type="button" disabled={state.busy || state.loading} onClick={() => void model.resetLearning()}>Reset learned strategy parameters</button>
             </div>
           </div></div>, document.body)}
@@ -210,18 +200,12 @@ export function AutoTrader() {
             <strong>{state.learningSamples} closed trades today · {state.learningWinRate == null ? '—' : finiteFixed(state.learningWinRate * 100, 0) + '% positive'}</strong>
             <span className="auto-trader-learning-detail">Execution samples P0/P1/P2: {state.parameterProfileSamples.join('/')} {state.preferredOrderType ? '· Lowest observed cost: ' + state.preferredOrderType : ''}</span>
           </div>
-          <div className="auto-trader-insight auto-trader-scout-summary" aria-label="Scout shadow outcomes">
-            <span className="auto-trader-insight-label">Scout · shadow · 5m · last 15m</span>
-            <strong>{shadowState.loading ? 'Loading shadow samples…' : `${scoutShadowOpen} open · ${scoutShadowResolved.length} resolved`}</strong>
-            <span className="auto-trader-learning-detail">{scoutShadowWins} wins · {scoutShadowLosses} losses · {scoutShadowUnavailable} outcome unavailable</span>
-            <span className="auto-trader-learning-detail">{scoutShadowAverageReturn === undefined ? 'No matched fee-aware outcomes yet.' : `${scoutShadowAverageReturn >= 0 ? '+' : ''}${finiteFixed(scoutShadowAverageReturn, 3)}% average net return · ${scoutShadowNetReturns.length} matched outcomes`}</span>
-          </div>
-          <div className="auto-trader-insight auto-trader-scout-summary" aria-label="Executed Scout positions and trades">
-            <span className="auto-trader-insight-label">Scout · executed · actual trades</span>
+          <div className="auto-trader-insight auto-trader-scout-metrics" aria-label="Executed Scout positions and trades">
+            <span className="auto-trader-insight-label">Scout trades · filled · {state.scoutStrategies.length} strategies selected</span>
             <strong>{state.scoutOpenPositions} open · {state.decisionQuality.scout_completed_trade_samples} closed</strong>
-            <span className="auto-trader-learning-detail">{state.decisionQuality.scout_filled_entry_samples} filled · {state.decisionQuality.scout_unresolved_trade_samples} unresolved</span>
+            <span className="auto-trader-learning-detail">Entries: {state.decisionQuality.scout_filled_entry_samples} filled · {state.decisionQuality.scout_unresolved_trade_samples} unresolved</span>
             <span className="auto-trader-learning-detail">Orders: {scoutOrderCounts.filled} filled · {scoutOrderCounts.pending} pending · {scoutOrderCounts.failed} failed</span>
-            {scoutOutcomeCohort ? <span className="auto-trader-learning-detail">Closed: {scoutOutcomeCohort.completed_trade_samples} · {scoutOutcomeCohort.average_net_return_percent >= 0 ? '+' : ''}{finiteFixed(scoutOutcomeCohort.average_net_return_percent, 2)}% avg · {finiteFixed(scoutOutcomeCohort.win_rate * 100, 0)}% wins{scoutOutcomeCohort.total_net_pnl == null ? '' : ' · ' + scoutOutcomeCohort.pnl_quote_currency + ' ' + money.format(scoutOutcomeCohort.total_net_pnl)}</span> : <span className="auto-trader-learning-detail">{state.scoutLearningSamples > 0 ? state.scoutLearningSamples + ' closed · ' + (state.scoutLearningWinRate == null ? 'win rate n/a' : finiteFixed(state.scoutLearningWinRate * 100, 0) + '% positive') : 'No scout outcomes closed today.'}</span>}
+            {scoutOutcomeCohort ? <span className="auto-trader-learning-detail">Linked outcomes: {scoutOutcomeCohort.completed_trade_samples} closed · {scoutOutcomeCohort.average_net_return_percent >= 0 ? '+' : ''}{finiteFixed(scoutOutcomeCohort.average_net_return_percent, 2)}% avg · {finiteFixed(scoutOutcomeCohort.win_rate * 100, 0)}% wins{scoutOutcomeCohort.total_net_pnl == null ? '' : ' · ' + scoutOutcomeCohort.pnl_quote_currency + ' ' + money.format(scoutOutcomeCohort.total_net_pnl)}</span> : <span className="auto-trader-learning-detail">Linked outcome breakdown unavailable</span>}
           </div>
           <div className="auto-trader-insight auto-trader-decision-quality">
             <span className="auto-trader-insight-label">Decisions · today · {state.decisionQuality.completed_trade_samples}/{state.decisionQuality.filled_entry_samples} closed</span>

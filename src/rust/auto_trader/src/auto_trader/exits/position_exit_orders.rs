@@ -12,6 +12,7 @@ async fn submit_position_exit_order(
     stop_loss_percent: f64,
     take_profit_percent: f64,
     timestamp: u64,
+    exit_decision_context: serde_json::Value,
 ) -> Result<Option<CycleResult>, (StatusCode, String)> {
     let is_long = position.quantity > 0.0;
     let entry_notional = position.quantity.abs() * position.average_entry_price;
@@ -209,6 +210,7 @@ async fn submit_position_exit_order(
             quantity, filled, average_price, fee, strategy_realized_pnl, entry_notional,
             return_fraction, bid, ask, submit_response_ms, stop_loss_percent,
             take_profit_percent,
+            &exit_decision_context,
         );
         queue_auto_trader_audit(state, payload);
     }

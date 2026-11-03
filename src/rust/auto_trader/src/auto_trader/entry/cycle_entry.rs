@@ -217,10 +217,33 @@ async fn record_daily_scout_shadow_ladder(
         let Some(strategy) = signal.strategy.as_deref().and_then(Strategy::from_name) else {
             continue;
         };
-        let parameters = BTreeMap::new();
+        let parameters = signal_strategy_parameters(signal);
         let input = StrategySignal::entry(signal, &parameters);
-        if evaluate_daily_strategy_signal(signal) != Ok(StrategyDecision::Scout) {
+        let scout_only = !settings.strategies.contains(&strategy)
+            && settings.scout_strategies.contains(&strategy);
+        if !matches!(
+            evaluate_daily_strategy_signal(signal),
+            Ok(StrategyDecision::Scout) | Ok(StrategyDecision::Enter) if scout_only
+        ) && evaluate_daily_strategy_signal(signal) != Ok(StrategyDecision::Scout) {
             continue;
+        }
+        let parameter_probe = signal.strategy_decision.as_ref().and_then(|decision| {
+            Some((decision.get("scout_parameter_key")?.as_str()?, decision.get("scout_parameter_value")?.as_f64()?))
+        });
+        if let Some((parameter_key, parameter_value)) = parameter_probe {
+            if !matches!(strategy.evaluate(&input), Ok(StrategyDecision::Enter)) {
+                let profile_symbol = signal.strategy_decision.as_ref()
+                    .and_then(|decision| decision.get("scout_parameter_profile_symbol"))
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or(&signal.symbol);
+                let outcome_id = format!("{}|{}|{}|probe:{parameter_key}:{parameter_value:.8}|rejected", signal.timestamp, signal.symbol, strategy.as_str());
+                if settings.shadow_learning_outcome_ids.insert(outcome_id) {
+                    let learning_key = strategy_parameter_probe_learning_key(profile_symbol, strategy.as_str(), parameter_key, parameter_value);
+                    record_learning_outcome(settings.learning.entry(learning_key).or_default(), 0.0);
+                    settings_changed = true;
+                }
+                continue;
+            }
         }
         // Breakout-distance ladders apply to Donchian. Other daily strategies
         // use a neutral shadow level and learn from the resulting simulated
@@ -233,13 +256,15 @@ async fn record_daily_scout_shadow_ladder(
         } else {
             0.0
         };
-        let eligible_levels = DAILY_SCOUT_SHADOW_LEVELS_PERCENT
+        let level_candidates = match parameter_probe {
+            Some(("breakout_entry_distance_percent", value)) => vec![value],
+            _ => DAILY_SCOUT_SHADOW_LEVELS_PERCENT.to_vec(),
+        };
+        let eligible_levels = level_candidates
             .into_iter()
-            .filter(|level| distance_percent <= 0.0 && distance_percent >= -*level)
+            .filter(|level| parameter_probe.is_some_and(|(key, _)| key == "breakout_entry_distance_percent")
+                || (distance_percent <= 0.0 && distance_percent >= -*level))
             .filter(|level| {
-                let parameter_probe = signal.strategy_decision.as_ref().and_then(|decision| {
-            Some((decision.get("scout_parameter_key")?.as_str()?, decision.get("scout_parameter_value")?.as_f64()?))
-        });
         let probe_suffix = parameter_probe.map_or_else(String::new, |(key, value)| format!("|probe:{key}:{value:.8}"));
         let sample_key = format!(
                     "daily-scout-level:{level:.2}|{}|{}|{}{probe_suffix}",
@@ -378,18 +403,20 @@ async fn record_live_parameter_probe(
         request_settings_persist(state)?;
     }
 
-    let input = StrategySignal::entry(signal, &parameters);
-    let entry_eligible = matches!(strategy.evaluate(&input), Ok(StrategyDecision::Enter));
     let mut probe_signal = signal.clone();
     let mut decision = probe_signal.strategy_decision.clone().unwrap_or_else(|| serde_json::json!({}));
     decision["strategy_parameters"] = serde_json::to_value(&parameters).unwrap_or_default();
     decision["observed_close"] = serde_json::json!(entry_price);
     decision["scout_parameter_probe"] = serde_json::json!(true);
-    decision["scout_parameter_entry_eligible"] = serde_json::json!(entry_eligible);
     decision["scout_parameter_key"] = serde_json::json!(parameter_key);
     decision["scout_parameter_value"] = serde_json::json!(parameter_value);
     decision["scout_parameter_profile_symbol"] = serde_json::json!(signal.symbol);
     probe_signal.strategy_decision = Some(decision);
+    let input = StrategySignal::entry(&probe_signal, &parameters);
+    let entry_eligible = matches!(strategy.evaluate(&input), Ok(StrategyDecision::Enter))
+        && passes_pullback_confirmation(&probe_signal);
+    probe_signal.strategy_decision.as_mut().unwrap()["scout_parameter_entry_eligible"] =
+        serde_json::json!(entry_eligible);
 
     if !entry_eligible {
         let mut settings = state.settings.lock().await;
@@ -661,7 +688,7 @@ fn evaluate_daily_strategy_signal(signal: &Signal) -> Result<StrategyDecision, S
     {
         return Ok(StrategyDecision::Scout);
     }
-    let parameters = BTreeMap::new();
+    let parameters = signal_strategy_parameters(signal);
     let input = StrategySignal::entry(signal, &parameters);
     let decision = strategy.evaluate(&input)?;
     // Every published independent daily-strategy candidate with daily feature
@@ -932,7 +959,7 @@ async fn run_cycle_inner(
             .copied()
             .filter(|strategy| strategy.is_live_insight() && !strategy.is_legacy_composite())
             .collect::<Vec<_>>();
-        let live =
+        let enabled_live =
             if legacy_composite || (settings.signal_strategies_enabled && selected.is_empty()) {
                 settings
                     .strategies
@@ -943,6 +970,10 @@ async fn run_cycle_inner(
             } else {
                 selected
             };
+        let mut live = enabled_live.clone();
+        live.extend(settings.scout_strategies.iter().copied().filter(|strategy| {
+            strategy.is_live_insight() && !strategy.is_legacy_composite() && !enabled_live.contains(strategy)
+        }));
         (
             live,
             settings
@@ -952,7 +983,8 @@ async fn run_cycle_inner(
             settings.clone(),
         )
     };
-    let has_live_signal_strategies = !live_strategies.is_empty() && !dashboard.best.is_empty();
+    let live_source_signals = live_strategy_source_signals(&dashboard.best);
+    let has_live_signal_strategies = !live_strategies.is_empty() && !live_source_signals.is_empty();
     let has_daily_strategy_signals = dashboard.best.iter().any(|signal| {
         signal.strategy_candidate
             && signal
@@ -972,6 +1004,22 @@ async fn run_cycle_inner(
                 return false;
             };
             if !strategy_settings.strategies.contains(&strategy) {
+                if strategy_settings.scout_strategies.contains(&strategy) {
+                    match evaluate_daily_strategy_signal(signal) {
+                        Ok(StrategyDecision::Scout | StrategyDecision::Enter) => {
+                            daily_scout_shadow_candidates.push(signal.clone());
+                        }
+                        Ok(_) => {}
+                        Err(error) if strategy_filter_details.len() < 20 => {
+                            strategy_filter_details.push(format!(
+                                "{} {} [{}] · Scout evaluation error: {}",
+                                signal.symbol, signal.direction, strategy.as_str(), error
+                            ));
+                        }
+                        Err(_) => {}
+                    }
+                    return false;
+                }
                 if strategy_filter_details.len() < 20 {
                     strategy_filter_details.push(format!(
                         "{} {} [{}] · Strategy disabled in AutoTrader selection",
@@ -1014,37 +1062,43 @@ async fn run_cycle_inner(
                 }
             }
         });
-    } else if has_live_signal_strategies {
-        dashboard.best = dashboard
-            .best
-            .iter()
-            .flat_map(|source_signal| {
-                let strategy_settings = &strategy_settings;
-                live_strategies.iter().copied().filter_map(move |strategy| {
-                    let parameters = strategy_parameter_values(
-                        &strategy_settings,
-                        &source_signal.symbol,
-                        strategy,
-                    );
-                    let input = StrategySignal::entry(source_signal, &parameters);
-                    if !matches!(strategy.evaluate(&input), Ok(StrategyDecision::Enter)) {
-                        return None;
-                    }
-                    let mut signal = source_signal.clone();
-                    signal.strategy = Some(strategy.as_str().to_owned());
-                    signal.strategy_decision = Some(serde_json::json!({
-                        "strategy": strategy.as_str(),
-                        "contract": strategy.contract(),
-                        "strategy_parameters": parameters,
-                        "observed_insight": signal.components,
-                        "direction": signal.direction,
-                        "strength": signal.strength,
-                        "score": signal.score,
-                    }));
-                    Some(signal)
-                })
+    }
+    let live_strategy_signals = if has_live_signal_strategies {
+        live_source_signals.iter().flat_map(|source_signal| {
+            let strategy_settings = &strategy_settings;
+            live_strategies.iter().copied().filter_map(move |strategy| {
+                let parameters = strategy_parameter_values(
+                    strategy_settings,
+                    &source_signal.symbol,
+                    strategy,
+                );
+                let input = StrategySignal::entry(source_signal, &parameters);
+                if !matches!(strategy.evaluate(&input), Ok(StrategyDecision::Enter)) {
+                    return None;
+                }
+                let mut signal = source_signal.clone();
+                signal.strategy = Some(strategy.as_str().to_owned());
+                let scout_only = !strategy_settings.strategies.contains(&strategy);
+                signal.strategy_decision = Some(serde_json::json!({
+                    "scout_only": scout_only,
+                    "strategy": strategy.as_str(),
+                    "contract": strategy.contract(),
+                    "strategy_parameters": parameters,
+                    "observed_insight": signal.components,
+                    "direction": signal.direction,
+                    "strength": signal.strength,
+                    "score": signal.score,
+                }));
+                Some(signal)
             })
-            .collect();
+        }).collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+    if has_daily_strategy_signals {
+        dashboard.best.extend(live_strategy_signals);
+    } else if has_live_signal_strategies {
+        dashboard.best = live_strategy_signals;
     } else if strategies_enabled {
         return Ok(CycleResult {
             status: "skipped",
@@ -1071,24 +1125,6 @@ async fn run_cycle_inner(
                     "Could not record daily Scout shadow ladder ({status}): {error}"
                 );
             }
-        });
-    }
-    if dashboard.best.is_empty() {
-        let mut reason =
-            "No eligible signal is currently available from enabled live or daily strategies"
-                .to_owned();
-        if !strategy_filter_details.is_empty() {
-            reason.push_str("; strategy filters: ");
-            reason.push_str(&strategy_filter_details.join(" | "));
-        }
-        return Ok(CycleResult {
-            status: "skipped",
-            reason: Some(reason),
-            symbol: None,
-            side: None,
-            quantity: None,
-            order_type: None,
-            order_response: None,
         });
     }
     let selection_started = Instant::now();
@@ -1296,7 +1332,7 @@ async fn run_cycle_inner(
     } else {
         &neutral_scout_candidates
     };
-    let (signal, exploratory, scout) = match select_cycle_signal(SignalSelectionInput {
+    let (signal, exploratory, mut scout) = match select_cycle_signal(SignalSelectionInput {
         state,
         dashboard: &dashboard,
         signals: selection_signals,
@@ -1322,6 +1358,9 @@ async fn run_cycle_inner(
         Ok(selected) => selected,
         Err(result) => return Ok(daily_batch_result.unwrap_or(result)),
     };
+    scout |= signal.strategy_decision.as_ref()
+        .and_then(|decision| decision.get("scout_only"))
+        .and_then(serde_json::Value::as_bool) == Some(true);
     let signal_selection_ms = selection_started.elapsed().as_secs_f64() * 1000.0;
     let mut audited_signal = signal.clone();
     audited_signal.entry_gate = Some(candidate_entry_audit_value(

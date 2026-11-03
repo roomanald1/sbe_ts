@@ -12,6 +12,7 @@ fn status(state: &AutoTraderState, settings: &Settings) -> StatusResponse {
         enabled: state.enabled.load(Ordering::Relaxed),
         strategy: settings.strategies.first().copied().unwrap_or_default().as_str().to_owned(),
         strategies: settings.strategies.iter().map(|strategy| strategy.as_str().to_owned()).collect(),
+        scout_strategies: settings.scout_strategies.iter().map(|strategy| strategy.as_str().to_owned()).collect(),
         signal_strategies_enabled: settings.signal_strategies_enabled,
         max_order_notional: settings.max_order_notional,
         daily_notional_limit: settings.daily_notional_limit,

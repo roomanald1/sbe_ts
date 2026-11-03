@@ -1,12 +1,12 @@
 use arc_swap::ArcSwapOption;
 use axum::{
+    Json, Router,
     body::Body,
     extract::{Path, Query, State},
-    http::{header::HeaderName, Request, StatusCode},
+    http::{Request, StatusCode, header::HeaderName},
     middleware::{self, Next},
     response::Response,
     routing::{get, post},
-    Json, Router,
 };
 use bytes::Bytes;
 use futures_util::StreamExt;
@@ -15,14 +15,14 @@ use std::{
     collections::{BTreeMap, HashMap},
     path::PathBuf,
     sync::{
-        atomic::{AtomicBool, Ordering},
         Arc, Mutex as StdMutex, OnceLock, RwLock as StdRwLock,
+        atomic::{AtomicBool, Ordering},
     },
     time::{SystemTime, UNIX_EPOCH},
 };
 use tokio::{
-    sync::{broadcast, mpsc, Mutex, Notify},
-    time::{timeout, Duration, Instant},
+    sync::{Mutex, Notify, broadcast, mpsc},
+    time::{Duration, Instant, timeout},
 };
 
 const SYMBOL_PRICE_MESSAGE_LENGTH: usize = 64;
@@ -36,7 +36,6 @@ static USD_RATE_STREAM_CACHE: OnceLock<StdRwLock<Option<UsdRatesResponse>>> = On
 static USD_RATE_ORDER_SNAPSHOT: OnceLock<ArcSwapOption<UsdRatesResponse>> = OnceLock::new();
 const USD_RATE_CACHE_TTL: Duration = Duration::from_secs(15);
 const USD_RATE_STREAM_MAX_AGE: Duration = Duration::from_secs(120);
-
 
 include!("positions_routes.rs");
 

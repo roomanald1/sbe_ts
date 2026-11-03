@@ -138,12 +138,22 @@ impl SignalEngine {
                 .is_some_and(|days| shadow_age_ms >= (days * 86_400_000.0) as u64);
             let maximum_shadow_duration_elapsed =
                 is_scout_shadow && shadow_age_ms >= MAX_SCOUT_SHADOW_DURATION_MS;
-            let shadow_exit = is_scout_shadow
-                && current_quote.is_some()
-                && ((pending.strategy_exit_requested && !minimum_hold_active)
-                    || maximum_hold_elapsed
-                    || maximum_shadow_duration_elapsed
-                    || scout_shadow_stop_or_target_hit(&mut pending, current_quote));
+            let scout_exit_reason = if !is_scout_shadow {
+                None
+            } else if pending.strategy_exit_requested && !minimum_hold_active {
+                Some("strategy")
+            } else if maximum_hold_elapsed {
+                Some("maximum_hold")
+            } else if maximum_shadow_duration_elapsed {
+                Some("maximum_shadow_duration")
+            } else if current_quote.is_some()
+                && scout_shadow_stop_or_target_hit(&mut pending, current_quote)
+            {
+                Some("stop_or_target")
+            } else {
+                None
+            };
+            let shadow_exit = is_scout_shadow && current_quote.is_some() && scout_exit_reason.is_some();
             let fixed_horizon_exit = !is_scout_shadow
                 && timestamp
                     >= pending
@@ -301,7 +311,7 @@ impl SignalEngine {
                 if let Some(sample_id) = scout_shadow_id.as_ref() {
                     self.completed_scout_shadow_ids.insert(sample_id.clone());
                 }
-                outcomes.push(CompletedSignalOutcome { legacy, evaluation, scout_shadow_id });
+                outcomes.push(CompletedSignalOutcome { legacy, evaluation, scout_shadow_id, scout_exit_reason });
             } else {
                 remaining.push_back(pending);
             }

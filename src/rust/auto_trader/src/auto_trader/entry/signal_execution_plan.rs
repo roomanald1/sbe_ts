@@ -39,7 +39,11 @@ fn strategy_learning_stats_across_symbols(settings: &Settings, strategy: Strateg
         .learning
         .iter()
         .filter(|(key, _)| {
-            key.starts_with("trade:") && key.ends_with(&format!(":{}", strategy.as_str()))
+            let parts = key.split(':').collect::<Vec<_>>();
+            (parts.len() == 3 && parts[0] == "trade" && parts[2] == strategy.as_str())
+                || (matches!(parts.len(), 3 | 4)
+                    && parts[0] == "shadow"
+                    && parts[2] == strategy.as_str())
         })
         .flat_map(|(_, stats)| stats.recent_trade_pnls.iter().copied())
         .collect::<Vec<_>>();
@@ -555,5 +559,107 @@ mod risk_adjusted_monthly_momentum_sizing_tests {
             "strategy_order_size_multiplier": 2.0
         }))).is_err());
         assert_eq!(signal_strategy_order_size_multiplier(Some(Strategy::Donchian55Btc200), None).unwrap(), 1.0);
+    }
+
+    #[test]
+    fn recent_strategy_learning_includes_scout_shadow_outcomes_across_symbols() {
+        let strategy = Strategy::Donchian55Btc200;
+        let timestamp = current_time_ms();
+        let mut settings = Settings::default();
+        settings.learning.insert(
+            strategy_trade_learning_key("BTC-USDT", strategy.as_str()),
+            LearningStats { samples: 1, positive: 1, realized_pnl: 2.0,
+                recent_trade_pnls: vec![(timestamp, 2.0)], ..LearningStats::default() },
+        );
+        settings.learning.insert(
+            strategy_shadow_learning_key("ETH-USDT", strategy.as_str(), "strategy"),
+            LearningStats { samples: 1, positive: 0, realized_pnl: -1.0,
+                recent_trade_pnls: vec![(timestamp, -1.0)], ..LearningStats::default() },
+        );
+        settings.learning.insert(
+            strategy_shadow_learning_key("ETH-USDT", strategy.as_str(), "tight"),
+            LearningStats { samples: 1, positive: 1, realized_pnl: 0.5,
+                recent_trade_pnls: vec![(timestamp, 0.5)], ..LearningStats::default() },
+        );
+
+        let stats = strategy_learning_stats_across_symbols(&settings, strategy);
+        assert_eq!(stats.samples, 3);
+        assert_eq!(stats.positive, 2);
+        assert_eq!(stats.realized_pnl, 1.5);
+    }
+}
+
+#[cfg(test)]
+mod signal_execution_budget_tests {
+    use super::*;
+
+    fn signal(strategy: &str, strength: f64, timestamp: u64) -> Signal {
+        Signal {
+            symbol: "ETH-USDT".into(), direction: "bullish".into(), strength,
+            timestamp, stale: false, score: strength, ranging_probability: None,
+            components: SignalComponents::default(), strategy_candidate: true,
+            strategy: Some(strategy.into()), strategy_decision: None,
+            market_regime: None, news_attribution: None, entry_gate: None,
+        }
+    }
+
+    fn dashboard(best: Vec<Signal>) -> Dashboard {
+        Dashboard {
+            best, walk_forward: Arc::new(Vec::new()), missed_opportunity_bands: Vec::new(),
+            markets: Arc::new(BTreeMap::new()), queued_at: None, queue_wait_ms: None,
+        }
+    }
+
+    #[test]
+    fn recent_net_edge_and_learned_size_multiplier_handle_empty_profitable_and_losing_samples() {
+        assert_eq!(recent_net_pnl_edge(&LearningStats::default()), None);
+        let zero = LearningStats { recent_trade_pnls: vec![(current_time_ms(), 0.0)], ..LearningStats::default() };
+        assert_eq!(recent_net_pnl_edge(&zero), Some(0.0));
+        let wins = LearningStats { samples: 10, positive: 8, recent_trade_pnls: vec![(current_time_ms(), 5.0), (current_time_ms(), 3.0)], ..LearningStats::default() };
+        let losses = LearningStats { samples: 10, positive: 2, recent_trade_pnls: vec![(current_time_ms(), -8.0), (current_time_ms(), 1.0)], ..LearningStats::default() };
+        assert!(recent_net_pnl_edge(&wins).unwrap() > 0.0);
+        assert!(learned_strategy_size_multiplier(&wins) > 1.0);
+        assert!(recent_net_pnl_edge(&losses).unwrap() < 0.0);
+        assert!(learned_strategy_size_multiplier(&losses) < 1.0);
+        assert_eq!(learned_strategy_size_multiplier(&LearningStats::default()), 1.0);
+        assert_eq!(learned_strategy_size_multiplier(&LearningStats { samples: 2, positive: 3, ..LearningStats::default() }), 1.0);
+    }
+
+    #[test]
+    fn signal_weighted_daily_budget_keeps_a_floor_and_rewards_eligible_signals() {
+        let mut settings = Settings::default();
+        settings.strategies = vec![Strategy::Donchian20Btc200, Strategy::Donchian55Btc200];
+        settings.daily_notional_limit = 500.0;
+        settings.daily_strategy_notional_limit = 500.0;
+        let no_signals = dashboard(Vec::new());
+        assert_eq!(signal_weighted_strategy_budget(&settings, &no_signals, Strategy::Donchian20Btc200, StrategyCategory::Daily, 100_000), 125.0);
+        let signals = dashboard(vec![signal("donchian-20-btc200", 1.0, 100_000), signal("donchian-20-btc200", 1.0, 100_000)]);
+        let favored = signal_weighted_strategy_budget(&settings, &signals, Strategy::Donchian20Btc200, StrategyCategory::Daily, 100_000);
+        let other = signal_weighted_strategy_budget(&settings, &signals, Strategy::Donchian55Btc200, StrategyCategory::Daily, 100_000);
+        assert!(favored > other);
+        assert!(other >= 125.0);
+        assert!((favored + other - 500.0).abs() < 1e-9);
+
+        let stale = dashboard(vec![signal("donchian-20-btc200", 1.0, 1)]);
+        assert_eq!(signal_weighted_strategy_budget(&settings, &stale, Strategy::Donchian20Btc200, StrategyCategory::Daily, 100_000_000), 125.0);
+    }
+
+    #[test]
+    fn configured_budgets_bypass_signal_weighting_and_order_multipliers_validate_contracts() {
+        let mut settings = Settings::default();
+        settings.strategies = vec![Strategy::Donchian20Btc200, Strategy::Donchian55Btc200];
+        settings.daily_strategy_budgets.insert("donchian-20-btc200".into(), 200.0);
+        let signals = dashboard(vec![signal("donchian-55-btc200", 1.0, 100_000)]);
+        assert_eq!(signal_weighted_strategy_budget(&settings, &signals, Strategy::Donchian20Btc200, StrategyCategory::Daily, 100_000), 200.0);
+        assert_eq!(daily_strategy_effective_budget(&settings, "live-momentum"), 0.0);
+        assert_eq!(intraday_strategy_effective_budget(&settings, "donchian-20-btc200"), 0.0);
+
+        let strategy = Some(Strategy::RiskAdjustedMonthlyMomentum);
+        assert_eq!(signal_strategy_order_size_multiplier(strategy, Some(&serde_json::json!({"strategy_order_size_multiplier":0.5}))).unwrap(), 0.5);
+        assert!(signal_strategy_order_size_multiplier(strategy, Some(&serde_json::json!({"strategy_order_size_multiplier":0.0}))).is_err());
+        assert_eq!(signal_strategy_order_size_multiplier(None, None).unwrap(), 1.0);
+        assert_eq!(signal_agreement_size_multiplier(Some(Strategy::Donchian20Btc200), None).unwrap(), 1.0);
+        assert_eq!(signal_agreement_size_multiplier(Some(Strategy::Donchian20Btc200), Some(&serde_json::json!({"strategy_agreement_size_multiplier":1.1}))).unwrap(), 1.1);
+        assert!(signal_agreement_size_multiplier(Some(Strategy::Donchian20Btc200), Some(&serde_json::json!({"strategy_agreement_size_multiplier":1.3}))).is_err());
     }
 }

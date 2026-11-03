@@ -216,3 +216,102 @@ fn learned_schedule_depth_threshold(
     }
     (threshold.clamp(MIN_SCHEDULE_DEPTH_RATIO, MAX_SCHEDULE_DEPTH_RATIO), paired_samples)
 }
+
+#[cfg(test)]
+mod order_type_selection_behavior_tests {
+    use super::*;
+
+    fn signal() -> Signal {
+        Signal {
+            symbol: "BTC-USDT".into(), direction: "bullish".into(), strength: 1.0,
+            timestamp: 10, stale: false, score: 1.0, ranging_probability: None,
+            components: SignalComponents::default(), strategy_candidate: false,
+            strategy: None, strategy_decision: None, market_regime: None,
+            news_attribution: None, entry_gate: None,
+        }
+    }
+
+    fn stats(samples: usize, fills: usize, cost: f64) -> ExecutionLearningStats {
+        ExecutionLearningStats {
+            samples, filled_samples: fills, fill_rate_total: fills as f64,
+            cost_notional: 100.0, all_in_cost_notional_bps: cost * 100.0,
+            updated_at_ms: current_time_ms(),
+        }
+    }
+
+    #[test]
+    fn exploration_assignment_is_stable_and_only_uses_parameterized_order_types() {
+        let mut candidate = signal();
+        assert!(!should_explore_execution_profile(&candidate, AutoOrderType::Ioc));
+        assert!(!should_explore_execution_profile(&candidate, AutoOrderType::Market));
+        let assignment = should_explore_execution_profile(&candidate, AutoOrderType::Limit);
+        assert_eq!(should_explore_execution_profile(&candidate, AutoOrderType::Limit), assignment);
+        candidate.timestamp += 1;
+        assert_eq!(should_explore_execution_profile(&candidate, AutoOrderType::Limit), should_explore_execution_profile(&candidate, AutoOrderType::Limit));
+    }
+
+    #[test]
+    fn parameter_profiles_explore_unobserved_cohorts_then_select_lowest_validated_cost() {
+        let context = "long:trend:BTC-USDT";
+        let mut learning = BTreeMap::new();
+        learning.insert(format!("{context}:P0:BTC-USDT:exec:Limit"), stats(MIN_EXECUTION_QUALITY_SAMPLES, MIN_EXECUTION_QUALITY_FILLS, 3.0));
+        assert_eq!(choose_parameter_profile(AutoOrderType::Limit, context, &learning, true), 1);
+        assert_eq!(choose_parameter_profile(AutoOrderType::Market, context, &learning, true), 0);
+        learning.insert(format!("{context}:P1:BTC-USDT:exec:Limit"), stats(12, 10, 1.0));
+        learning.insert(format!("{context}:P2:BTC-USDT:exec:Limit"), stats(2, 1, 2.0));
+        assert_eq!(choose_parameter_profile(AutoOrderType::Limit, context, &learning, false), 1);
+        assert_eq!(choose_parameter_profile(AutoOrderType::Limit, context, &learning, true), 2);
+    }
+
+    #[test]
+    fn order_selection_uses_aggressive_rules_then_passive_fallback() {
+        let mut signal = signal();
+        assert_eq!(choose_order_type(&signal, 50.0), AutoOrderType::PostOnlyLimit);
+        signal.components.trend_5m_volatility_units = Some(10.0);
+        assert_eq!(choose_order_type(&signal, 100.0), AutoOrderType::StopMarket);
+        signal.components.trend_5m_volatility_units = None;
+        signal.components.pressure_without_price_move = Some(10.0);
+        assert_eq!(choose_order_type(&signal, 100.0), AutoOrderType::Market);
+        signal.components.pressure_without_price_move = None;
+        signal.components.momentum_10s_percent = Some(10.0);
+        assert_eq!(choose_order_type(&signal, 100.0), AutoOrderType::Ioc);
+        signal.strength = 0.0;
+        signal.components.momentum_10s_percent = None;
+        signal.components.volatility_1m_percent = Some(10.0);
+        signal.components.trend_5m_volatility_units = Some(10.0);
+        assert_eq!(choose_order_type(&signal, 10.0), AutoOrderType::StopLimit);
+    }
+
+    #[test]
+    fn order_type_adaptation_requires_validated_fill_and_cost_advantage() {
+        let context = "long:trend:BTC-USDT";
+        let mut learning = BTreeMap::new();
+        assert_eq!(adapt_order_type(AutoOrderType::Ioc, context, &learning, 50.0), Some(AutoOrderType::Ioc));
+        learning.insert(format!("{context}:P0:BTC-USDT:exec:Ioc"), stats(20, 16, 3.0));
+        learning.insert(format!("{context}:P0:BTC-USDT:exec:Limit"), stats(20, 16, 1.0));
+        learning.insert(format!("{context}:P1:BTC-USDT:exec:Vwap"), stats(20, 18, 0.2));
+        assert_eq!(adapt_order_type(AutoOrderType::Ioc, context, &learning, 50.0), Some(AutoOrderType::Vwap));
+        assert_eq!(schedule_depth_ratio_bucket(0.049), "lt05");
+        assert_eq!(schedule_depth_ratio_bucket(0.05), "05_10");
+        assert_eq!(schedule_depth_ratio_bucket(0.10), "10_15");
+        assert_eq!(schedule_depth_ratio_bucket(0.15), "15_25");
+        assert_eq!(schedule_depth_ratio_bucket(0.25), "25_40");
+        assert_eq!(schedule_depth_ratio_bucket(0.40), "ge40");
+    }
+
+    #[test]
+    fn schedule_threshold_learning_requires_paired_samples_and_moves_by_cost_and_fill_quality() {
+        let context = "long:trend:BTC-USDT";
+        let baseline = learned_schedule_depth_threshold(&BTreeMap::new(), context);
+        assert_eq!(baseline, (DEFAULT_SCHEDULE_DEPTH_RATIO, 0));
+        let mut learning = BTreeMap::new();
+        learning.insert(format!("{context}:P0:depth:10_15:exec:Vwap"), stats(20, 16, 1.0));
+        learning.insert(format!("{context}:P0:depth:10_15:exec:Limit"), stats(20, 16, 3.0));
+        assert_eq!(learned_schedule_depth_threshold(&learning, context), (0.10_f64.max(MIN_SCHEDULE_DEPTH_RATIO), 40));
+        learning.insert(format!("{context}:P0:depth:25_40:exec:Vwap"), stats(20, 10, 5.0));
+        learning.insert(format!("{context}:P0:depth:25_40:exec:Limit"), stats(20, 18, 1.0));
+        let (threshold, paired) = learned_schedule_depth_threshold(&learning, context);
+        assert_eq!(paired, 80);
+        assert!(threshold >= 0.25);
+    }
+}

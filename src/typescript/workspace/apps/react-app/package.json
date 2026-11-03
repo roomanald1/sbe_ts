@@ -8,8 +8,8 @@
     "build": "tsc -b && vite build",
     "lint": "eslint .",
     "preview": "vite preview",
-    "test": "node --experimental-strip-types --import ./test-loader.mjs --test 'src/**/*.test.ts'",
-    "coverage": "c8 --all --include 'src/**/*.ts' --include 'src/**/*.tsx' --exclude 'src/**/*.test.ts' --reporter=text --reporter=html --report-dir=public/coverage node --experimental-strip-types --import ./test-loader.mjs --test 'src/**/*.test.ts'"
+    "test": "node --import ./test-loader.mjs --test src/**/*.test.ts",
+    "coverage": "c8 --all --include 'src/**/*.ts' --include 'src/**/*.tsx' --exclude 'src/**/*.test.ts' --reporter=text --reporter=html --report-dir=public/coverage/typescript node --import ./test-loader.mjs --test src/**/*.test.ts"
   },
   "dependencies": {
     "@tanstack/react-query": "^5.104.1",

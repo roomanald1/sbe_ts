@@ -66,6 +66,27 @@ fn strategy_rule_parameter_specs(strategy: Strategy) -> Vec<StrategyParameterSpe
         ],
         _ => Vec::new(),
     };
+    if strategy.is_live_insight() && !strategy.is_legacy_composite() {
+        specs.extend([
+            param(K::ScoutMinimumWalkForwardSamples, "Scout minimum negative-evidence samples", 10.0, 3.0, 30.0, 1.0, "samples", -1.0),
+            param(K::ScoutMinimumPositiveNetRate, "Scout minimum positive net rate", 0.45, 0.20, 0.65, 0.05, "rate", -1.0),
+        ]);
+    }
+    if matches!(strategy, Strategy::LiveOrderBook | Strategy::LiveVwapDislocation) {
+        specs.push(param(
+            K::MinimumCounterMomentumPercent,
+            "Minimum counter-momentum for pullback confirmation",
+            0.0,
+            0.0,
+            0.02,
+            0.001,
+            "%",
+            -1.0,
+        ));
+    }
+    if matches!(strategy, Strategy::Donchian10Btc200 | Strategy::Donchian20Btc200 | Strategy::Donchian20Btc200Hold3 | Strategy::Donchian20Sma200 | Strategy::Donchian55Btc200) {
+        specs.push(param(K::BreakoutEntryDistancePercent, "Entry distance below breakout", 0.0, 0.0, 10.0, 0.25, "%", 1.0));
+    }
     let existing = specs.iter().map(|spec| spec.key).collect::<Vec<_>>();
     for spec in common_risk {
         if !existing.contains(&spec.key) {

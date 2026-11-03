@@ -149,3 +149,30 @@ fn return_correlation(a: &[(u64, f64)], b: &[(u64, f64)]) -> (Option<f64>, usize
     (correlation.filter(|value| value.is_finite()), count)
 }
 
+
+#[cfg(test)]
+mod hedge_candidates_tests {
+    use super::*;
+
+    #[test]
+    fn history_key_uses_only_base_and_quote() {
+        assert_eq!(hedge_history_key("BTC-USDT-SWAP"), "BTC-USDT");
+        assert_eq!(hedge_history_key("invalid"), "invalid");
+    }
+
+    #[test]
+    fn correlation_handles_insufficient_invalid_and_perfectly_aligned_data() {
+        let a = (0..12).map(|i| (i * 10_000, 100.0 + i as f64)).collect::<Vec<_>>();
+        let b = (0..12).map(|i| (i * 10_000, 200.0 + 2.0 * i as f64)).collect::<Vec<_>>();
+        let (correlation, count) = return_correlation(&a, &b);
+        assert_eq!(count, 11);
+        assert!((correlation.unwrap() - 1.0).abs() < 1e-10);
+
+        let (correlation, count) = return_correlation(&a[..3], &b[..3]);
+        assert_eq!(count, 2);
+        assert_eq!(correlation, None);
+
+        let invalid = vec![(0, 0.0), (10_000, f64::NAN)];
+        assert_eq!(return_correlation(&invalid, &invalid), (None, 0));
+    }
+}

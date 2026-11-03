@@ -8,6 +8,17 @@ fn mark_symbol_reentry_cooldown(settings: &mut Settings, symbol: &str) {
     );
 }
 
+fn strategy_exit_pending(order: &TraderOrder, symbol: &str, strategy: &str) -> bool {
+    order.symbol == symbol
+        && order.strategy.as_deref() == Some(strategy)
+        && order.order_type == "Ioc"
+        && !matches!(order.purpose.as_str(), "signal" | "scout")
+        && matches!(
+            order.status.as_str(),
+            "submitting" | "accepted" | "resting" | "partially_filled"
+        )
+}
+
 fn signal_position_block_reason(
     settings: &Settings,
     signal: &Signal,
@@ -20,6 +31,9 @@ fn signal_position_block_reason(
             .and_then(|decision| decision.get("portfolio_rebalance_delta_usd"))
             .and_then(serde_json::Value::as_f64)
             .is_some_and(|delta| delta.is_finite() && delta > 0.0);
+    if settings.orders.iter().any(|order| strategy_exit_pending(order, signal_key, strategy_key)) {
+        return Some(format!("Exit already pending for {signal_key} / {strategy_key}"));
+    }
     let strategy_cooldown_ms = strategy_post_stop_cooldown_ms(strategy_key, signal_key, settings);
     if !portfolio_rebalance { if let Some(stopped_at) = settings
         .orders
@@ -81,7 +95,10 @@ fn signal_position_block_reason(
     let pending_entries = settings.orders.iter().filter(|order| {
         order.symbol == signal_key
             && matches!(order.purpose.as_str(), "signal" | "scout")
-            && matches!(order.status.as_str(), "submitting" | "accepted" | "resting" | "partially_filled")
+            && matches!(
+            order.status.as_str(),
+            "submitting" | "accepted" | "resting" | "partially_filled"
+        )
             && order.quantity > order.filled_quantity + 1e-12
     });
     for order in pending_entries {
@@ -114,4 +131,42 @@ fn signal_position_block_reason(
         }
     }
     None
+}
+
+#[cfg(test)]
+mod pending_exit_tests {
+    use super::*;
+
+    #[test]
+    fn blocks_reentry_while_strategy_exit_is_pending() {
+        let mut order = new_position_exit_order(
+            1,
+            "BCH-USDT",
+            "sell",
+            "research-regime-exit",
+            &TraderPosition {
+                strategy: Some("risk-adjusted-trend-portfolio".into()),
+                ..TraderPosition::default()
+            },
+            1.0,
+            100.0,
+        );
+        order.status = "accepted".into();
+        assert!(strategy_exit_pending(
+            &order,
+            "BCH-USDT",
+            "risk-adjusted-trend-portfolio"
+        ));
+        assert!(!strategy_exit_pending(
+            &order,
+            "BCH-USDT",
+            "another-strategy"
+        ));
+        order.purpose = "signal".into();
+        assert!(!strategy_exit_pending(
+            &order,
+            "BCH-USDT",
+            "risk-adjusted-trend-portfolio"
+        ));
+    }
 }

@@ -30,7 +30,11 @@ fn symbol_gate_hits_for_reason(reason: &str) -> Vec<(String, String, String, Str
             }
         }
     }
-    if let Some(details) = reason.split("; candidate checks: ").nth(1) {
+    if let Some(details) = reason
+        .split("; candidate checks: ")
+        .nth(1)
+        .and_then(|part| part.split("; strategy filters: ").next())
+    {
         for candidate in details.split(" | ") {
             let Some((identity, checks)) = candidate.rsplit_once(" · ") else {
                 continue;
@@ -151,3 +155,21 @@ fn symbol_gate_hits_for_reason(reason: &str) -> Vec<(String, String, String, Str
         .collect()
 }
 
+
+#[cfg(test)]
+mod reason_symbol_gate_hits_tests {
+    use super::symbol_gate_hits_for_reason;
+
+    #[test]
+    fn extracts_early_candidate_and_strategy_gate_details_with_distances() {
+        let reason = "No tradeable bias; early filters: ETH-USDT bullish · Signal freshness age 12s > max age 10s | ETH-USDT bullish · Directional signal score 0.2 vs floor 0.4; candidate checks: ETH-USDT bullish · strength 0.2 < 0.4, score 0.1 < 0.3, exploration blocked for mixed context, exploration needs positive history, normal entry needs 30 side samples; strategy filters: BTC-USDT bearish · Strategy disabled for this strategy";
+        let hits = symbol_gate_hits_for_reason(reason);
+        assert!(hits.iter().any(|(symbol, direction, gate, _, distance)|
+            symbol == "ETH-USDT" && direction == "bullish" && gate == "Signal freshness" && *distance == Some(0.2)));
+        assert!(hits.iter().any(|(_, _, gate, _, _)| gate == "Directional signal"));
+        for gate in ["Learned strength floor", "Exploration score floor", "Exploration disabled for mixed context", "Exploration walk-forward return and positive-rate floor", "Strict walk-forward sample minimum", "Strategy enablement"] {
+            assert!(hits.iter().any(|hit| hit.2 == gate), "missing {gate}: {hits:?}");
+        }
+        assert_eq!(symbol_gate_hits_for_reason("reason without structured filters"), Vec::new());
+    }
+}

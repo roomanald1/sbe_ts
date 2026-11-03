@@ -7,7 +7,7 @@ import { currentAutoTraderSnapshot, subscribeAutoTraderStream, type AutoTraderUi
 export type AutoTraderOutcome = {
   rowId: string; status: 'Open' | 'Partially closed' | 'Closed'; decisionId: string; symbol: string; side: string; openedAt: number; closedAt?: number;
   quantity: number; remainingQuantity?: number; signedQuantity: number; entryPrice: number; pnl: number; entryFees: number; estimatedExitFeeRate: number; estimatedExitSlippageBps: number;
-  feesUsd?: number; netPnlUsd?: number;
+  feesUsd?: number; netPnlUsd?: number; todayRealizedUsd?: number;
   strategyInstanceId?: string; ledgerSource?: string; ledgerOrderType?: string; ledgerTrade?: PositionTrade;
   entryNotionalUsd?: number; feePercent?: number;
   pnlQuoteCurrency: string; quoteUsdRate?: number; strategy: string; direction: string; strength: number | null;
@@ -28,7 +28,7 @@ type LedgerRealizedResponse = { realized_pnl_by_parent_order?: Record<string, nu
 type UsdRatesResponse = { rates?: Record<string, number> };
 type LedgerHistoryCache = { dayStart?: number; trades?: PositionTrade[]; recentTrades?: PositionTrade[]; todayTradeOffset?: number; todayLoadedOffset?: number; olderTradeOffset?: number; olderHistoryExhausted?: boolean };
 type StrategyLearning = { strategy: string; learning_multiplier: number; learning_samples: number; positive_rate?: number | null; realized_pnl?: number };
-type StrategySymbolDiagnostic = { symbol: string; close: number; trend_return_windows?: Array<{ days: number; reference_close: number; return_percent: number }>; eligible: boolean; primary_rule: string; primary_level: number; primary_distance_percent: number; primary_metric_value?: number | null; primary_metric_unit?: string | null; primary_passed: boolean; secondary_rule?: string | null; secondary_level?: number | null; secondary_distance_percent?: number | null; secondary_passed?: boolean | null; signal_active: boolean; leader_gap_percent?: number | null; relative_strength_gap_pp?: number | null; rsi_exit_level?: number | null; maximum_hold_days?: number | null };
+type StrategySymbolDiagnostic = { symbol: string; close: number; trend_return_windows?: Array<{ days: number; reference_close: number; return_percent: number }>; eligible: boolean; primary_rule: string; primary_level: number; primary_distance_percent: number; primary_metric_value?: number | null; primary_metric_unit?: string | null; primary_passed: boolean; secondary_rule?: string | null; secondary_level?: number | null; secondary_distance_percent?: number | null; secondary_passed?: boolean | null; evaluated?: boolean; signal_active: boolean; leader_gap_percent?: number | null; relative_strength_gap_pp?: number | null; rsi_exit_level?: number | null; maximum_hold_days?: number | null };
 type StrategyDiagnostic = { strategy: string; as_of_ms: number; btc_close?: number | null; btc_sma?: number | null; btc_distance_percent: number | null; btc_window_days: number | null; btc_gate_required: boolean; btc_gate_passed: boolean | null; symbols: StrategySymbolDiagnostic[] };
 type StrategyOrder = { timestamp: number; symbol: string; side: string; execution_order_id?: string; purpose?: string; strategy?: string; decision_id?: string; filled_quantity: number; average_price?: number | null; status?: string; failure_reason?: string | null; order_type?: string };
 type DatedCarryPosition = { spot_symbol: string; future_symbol: string; expiry_ms: number; entry_ms: number; quantity: number; spot_entry_price: number; future_entry_price: number; entry_fees: number; status: string; spot_exit_twap?: number | null; settlement_price?: number | null; net_pnl_usdt?: number | null; settlement_source?: string | null; spot_mark_bid?: number | null; future_mark_ask?: number | null; spot_leg_pnl_usdt?: number | null; future_leg_pnl_usdt?: number | null; estimated_exit_fees_usdt?: number | null; estimated_exit_slippage_usdt?: number | null; marked_net_pnl_usdt?: number | null; mark_checked_at_ms?: number | null };
@@ -157,7 +157,7 @@ export class AutoTraderOutcomesModel {
       this.ledgerDayStart = todayStart;
       if (!this.historyCacheLoaded) { this.restoreLedgerHistory(todayStart); this.historyCacheLoaded = true; }
       const refreshRecentTrades = !this.recentLedgerLoaded || Date.now() - this.recentLedgerLoadedAt >= 30_000;
-      const [auditResponse, activityResponse, learningResponse, datedCarryResponse, positionsResponse, tradesResponse, gateAuditResponse, parametersResponse, ledgerRealizedResponse, usdRatesResponse] = await Promise.all([
+      const [auditResponse, activityResponse, learningResponse, datedCarryResponse, positionsResponse, tradesResponse, gateAuditResponse, parametersResponse, ledgerRealizedResponse, todayLedgerRealizedResponse, usdRatesResponse] = await Promise.all([
         autoSnapshot ? Promise.resolve(undefined) : fetch('/signals/auto-trader-execution-audit?limit=500'),
         autoSnapshot ? Promise.resolve(undefined) : fetch('/positions/auto-trader/activity'),
         autoSnapshot ? Promise.resolve(undefined) : fetch('/positions/auto-trader'),
@@ -167,6 +167,7 @@ export class AutoTraderOutcomesModel {
         refreshGateAudit ? fetch('/signals/auto-trader-audit?limit=100').catch(() => undefined) : Promise.resolve(undefined),
         autoSnapshot ? Promise.resolve(undefined) : fetch('/positions/auto-trader/parameters').catch(() => undefined),
         fetch('/positions/realized-pnl?source=auto&since_ms=0').catch(() => undefined),
+        fetch('/positions/realized-pnl?source=auto&since_ms=' + todayStart).catch(() => undefined),
         fetch('/positions/usd-rates').catch(() => undefined),
       ]);
       if (!autoSnapshot && !auditResponse?.ok) throw new Error('Audit unavailable');
@@ -188,13 +189,14 @@ export class AutoTraderOutcomesModel {
       }
       const positionsData = streamSnapshot?.auto_positions ?? await positionsResponse!.json() as PositionsResponse;
       const ledgerRealizedData = ledgerRealizedResponse?.ok ? await ledgerRealizedResponse.json() as LedgerRealizedResponse : undefined;
+      const todayLedgerRealizedData = todayLedgerRealizedResponse?.ok ? await todayLedgerRealizedResponse.json() as LedgerRealizedResponse : undefined;
       if (tradesResponse?.ok) {
         const page = await tradesResponse.json() as TradesResponse;
         this.recentLedgerTrades = page.trades ?? [];
         this.recentLedgerLoadedAt = Date.now();
         this.recentLedgerLoaded = true;
         if (this.todayLoadedOffset === 0) this.todayTradeOffset = page.next_offset ?? undefined;
-        this.state$.next({ ...this.state$.value, hasOlderLedgerTrades: this.todayTradeOffset !== undefined || (!this.olderHistoryExhausted && page.has_older === true) });
+        this.state$.next({ ...this.state$.value, hasOlderLedgerTrades: this.todayTradeOffset !== undefined });
         this.persistLedgerHistory();
       }
       const ledgerTradeMap = new Map<string, PositionTrade>();
@@ -358,7 +360,7 @@ export class AutoTraderOutcomesModel {
           source: scoutEntry || entry.scout ? 'scout' : entry.exploratory === true ? 'exploratory' : entry.exploratory === false ? 'strict' : 'unknown',
           components: entry.signal_components ?? {} }];
       });
-      const ledgerTrades = tradesData.trades ?? [];
+      const ledgerTrades = (tradesData.trades ?? []).filter((trade) => trade.timestamp >= todayStart);
       const ordersForLedger = activityData.orders ?? [];
       const ledgerSignature = ledgerTrades.length + ':' + (ledgerTrades[0]?.id ?? '') + ':' + (ledgerTrades[ledgerTrades.length - 1]?.id ?? '') + ':' + this.auditRows.length + ':' + ordersForLedger.length + ':' + (ordersForLedger[0]?.timestamp ?? 0);
       if (ledgerSignature !== this.ledgerTradeSignature && (!this.ledgerTradeSignature || Date.now() - this.ledgerRowsBuiltAt >= 15_000)) {
@@ -398,18 +400,20 @@ export class AutoTraderOutcomesModel {
       for (const [symbol, symbolTrades] of legacyTradesBySymbol) {
         const quote = quoteCurrency(symbol);
         const rate = quote === 'USD' ? 1 : usdRates[quote];
-        ledgerOutcomeRows.push(...buildLegacyLedgerOutcomes(symbol, symbolTrades, quote, rate, ledgerRealizedData?.realized_pnl_by_parent_order ?? {}, new Map([...orderByLedgerId].map(([id, order]) => [id, order.order_type ?? '']))));
+        ledgerOutcomeRows.push(...buildLegacyLedgerOutcomes(symbol, symbolTrades, quote, rate, ledgerRealizedData?.realized_pnl_by_parent_order ?? {}, todayLedgerRealizedData?.realized_pnl_by_parent_order ?? {}, new Map([...orderByLedgerId].map(([id, order]) => [id, order.order_type ?? '']))));
       }
       for (const [groupKey, group] of instanceGroups) {
         const status = openPositionKeys.has(group.strategy + ':' + group.instanceId + ':' + group.symbol) ? 'Partially closed' : 'Closed';
         const orderedTrades = [...group.trades].sort((a, b) => a.timestamp - b.timestamp);
         const realizedParents = new Set<string>();
         let realizedQuote = 0;
+        let todayRealizedQuote = 0;
         for (const trade of orderedTrades) {
           const parentId = trade.parent_order_id;
           if (!parentId || realizedParents.has(parentId)) continue;
           realizedParents.add(parentId);
           realizedQuote += ledgerRealizedData?.realized_pnl_by_parent_order?.[parentId] ?? 0;
+          todayRealizedQuote += todayLedgerRealizedData?.realized_pnl_by_parent_order?.[parentId] ?? 0;
         }
         const firstTrade = orderedTrades[0];
         const lastTrade = orderedTrades[orderedTrades.length - 1];
@@ -425,7 +429,10 @@ export class AutoTraderOutcomesModel {
           // A round trip has two traded legs; normalize the combined fees to
           // one average leg's notional so maker + taker costs are both shown.
           feePercent: tradedNotional > 0 ? feesPaid / (tradedNotional / 2) * 100 : undefined,
-          netPnlUsd: ledgerRealizedData && typeof group.quoteRate === 'number' ? realizedQuote * group.quoteRate : undefined,
+          // This view is a UTC-day ledger: its instance total must reconcile
+          // with the same realized-today ledger used by the dashboard.
+          netPnlUsd: todayLedgerRealizedData && typeof group.quoteRate === 'number' ? todayRealizedQuote * group.quoteRate : undefined,
+          todayRealizedUsd: todayLedgerRealizedData && typeof group.quoteRate === 'number' ? todayRealizedQuote * group.quoteRate : undefined,
           pnlQuoteCurrency: quoteCurrency(group.symbol), quoteUsdRate: group.quoteRate, strategy: group.strategy, direction: netQuantity >= 0 ? 'LONG' : 'SHORT', strength: null,
           scout: positionSource === 'scout', source: positionSource, components: entryAudit?.signal_components ?? {} });
         for (const trade of orderedTrades) {
@@ -435,6 +442,9 @@ export class AutoTraderOutcomesModel {
             quantity: trade.quantity, signedQuantity: trade.side === 'buy' ? trade.quantity : -trade.quantity, entryPrice: trade.execution_price,
             pnl: 0, entryFees: trade.fee ?? 0, estimatedExitFeeRate: trade.fee_rate ?? 0, estimatedExitSlippageBps: 0,
             feePercent: Math.abs(trade.quantity * trade.execution_price) > 0 ? Math.abs(trade.fee ?? 0) / Math.abs(trade.quantity * trade.execution_price) * 100 : trade.fee_rate !== undefined ? trade.fee_rate * 100 : undefined,
+            netPnlUsd: todayLedgerRealizedData && typeof group.quoteRate === 'number' && trade.parent_order_id
+              ? (todayLedgerRealizedData.realized_pnl_by_parent_order?.[trade.parent_order_id] ?? 0) * group.quoteRate
+              : undefined,
             pnlQuoteCurrency: quoteCurrency(trade.symbol), quoteUsdRate: group.quoteRate, strategy: group.strategy, direction: trade.side.toUpperCase(), strength: null,
             scout: order?.purpose === 'scout' || entryAudit?.scout === true, source: positionSource, components: entryAudit?.signal_components ?? {} });
         }
@@ -544,13 +554,12 @@ export class AutoTraderOutcomesModel {
     try {
       let url: string;
       let pageKind: 'today' | 'older';
-      if (this.todayTradeOffset !== undefined) {
-        pageKind = 'today';
-        url = '/positions/trades?source=auto&since_ms=' + this.ledgerDayStart + '&limit=500&offset=' + this.todayTradeOffset;
-      } else {
-        pageKind = 'older';
-        url = '/positions/trades?source=auto&before_ms=' + this.ledgerDayStart + '&limit=500&offset=' + (this.olderTradeOffset ?? 0);
+      if (this.todayTradeOffset === undefined) {
+        this.state$.next({ ...this.state$.value, loadingOlderLedgerTrades: false, hasOlderLedgerTrades: false });
+        return;
       }
+      pageKind = 'today';
+      url = '/positions/trades?source=auto&since_ms=' + this.ledgerDayStart + '&limit=500&offset=' + this.todayTradeOffset;
       const [response, auditResponse] = await Promise.all([
         fetch(url),
         this.auditCursor == null ? Promise.resolve(undefined) : fetch('/signals/auto-trader-execution-audit?cursor=' + this.auditCursor + '&limit=500').catch(() => undefined),
@@ -573,7 +582,7 @@ export class AutoTraderOutcomesModel {
         this.olderTradeOffset = page.next_offset ?? undefined;
         if (page.next_offset == null) this.olderHistoryExhausted = true;
       }
-      const hasMore = this.todayTradeOffset !== undefined || (!this.olderHistoryExhausted && (pageKind === 'today' ? page.has_older === true : page.next_offset != null));
+      const hasMore = this.todayTradeOffset !== undefined;
       this.persistLedgerHistory();
       this.state$.next({ ...this.state$.value, loadingOlderLedgerTrades: false, hasOlderLedgerTrades: hasMore });
       this.ledgerTradeSignature = '';

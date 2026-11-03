@@ -164,3 +164,43 @@ struct PositionStore {
     spot_symbols: Arc<Vec<String>>,
     vwap_runs: Mutex<HashMap<String, VwapRunEntry>>,
 }
+
+#[cfg(test)]
+mod book_matching_tests {
+    use super::*;
+
+    fn book() -> BookSnapshot {
+        BookSnapshot {
+            bids: vec![BookLevel { price: 99.0, size: 2.0 }, BookLevel { price: 98.0, size: 3.0 }],
+            asks: vec![BookLevel { price: 101.0, size: 1.0 }, BookLevel { price: 102.0, size: 4.0 }],
+            updated_at_ms: 1,
+        }
+    }
+
+    #[test]
+    fn matches_buy_across_eligible_ask_levels_and_reports_vwap() {
+        let result = match_book(&TradeSide::Buy, 3.0, Some(102.0), &book());
+        assert_eq!(result.reference_price, Some(101.0));
+        assert_eq!(result.filled_quantity, 3.0);
+        assert_eq!(result.remaining_quantity, 0.0);
+        assert_eq!(result.average_execution_price, Some((101.0 + 2.0 * 102.0) / 3.0));
+        assert_eq!(result.fills.len(), 2);
+    }
+
+    #[test]
+    fn respects_limit_and_leaves_unfilled_quantity() {
+        let result = match_book(&TradeSide::Sell, 4.0, Some(99.0), &book());
+        assert_eq!(result.filled_quantity, 2.0);
+        assert_eq!(result.remaining_quantity, 2.0);
+        assert_eq!(result.average_execution_price, Some(99.0));
+    }
+
+    #[test]
+    fn empty_book_returns_full_remainder_without_average() {
+        let empty = BookSnapshot { bids: vec![], asks: vec![], updated_at_ms: 0 };
+        let result = match_book(&TradeSide::Buy, 1.0, None, &empty);
+        assert_eq!(result.filled_quantity, 0.0);
+        assert_eq!(result.remaining_quantity, 1.0);
+        assert_eq!(result.average_execution_price, None);
+    }
+}

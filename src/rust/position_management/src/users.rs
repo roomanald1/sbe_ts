@@ -10,7 +10,10 @@ use std::{
 
 pub fn router() -> Router {
     let users = Arc::new(create_users(10_000));
-    Router::new().route("/users/{page}", get(move |path| get_user_page(path, Arc::clone(&users))))
+    Router::new().route(
+        "/users/{page}",
+        get(move |path| get_user_page(path, Arc::clone(&users))),
+    )
 }
 
 async fn get_user_page(

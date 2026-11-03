@@ -75,6 +75,11 @@ async fn register_scout_shadow(
     }
     let mut engines = runtime.engines.lock().await;
     let engine = engines.entry(sample.symbol.clone()).or_default();
+    let decision_id = sample.decision_id.clone();
+    let symbol = sample.symbol.clone();
+    let strategy = sample.strategy.clone();
+    let exit_scenario = sample.exit_scenario.clone();
+    let timestamp = sample.timestamp;
     if !engine.track_scout_shadow(
         sample.decision_id, sample.symbol, sample.strategy,
         sample.timestamp, sample.direction, sample.entry_price,
@@ -87,8 +92,10 @@ async fn register_scout_shadow(
         sample.scout_minimum_hold_days,
         sample.scout_maximum_hold_days,
     ) {
+        crate::service_log!("INFO", "Scout shadow registration ignored as duplicate: sample_id={} symbol={}", decision_id, symbol);
         return Ok(StatusCode::NO_CONTENT);
     }
+    crate::service_log!("INFO", "Scout shadow registered: sample_id={} symbol={} strategy={} exit_scenario={} age_ms={}", decision_id, symbol, strategy, exit_scenario, now.saturating_sub(timestamp));
     Ok(StatusCode::ACCEPTED)
 }
 
@@ -179,6 +186,7 @@ async fn ingest_signal_event(
                 }
                 for outcome in outcomes {
                     if outcome.scout_shadow_id.is_some() {
+                        crate::service_log!("INFO", "Scout shadow completed: sample_id={} symbol={} exit_reason={} age_seconds={}", outcome.scout_shadow_id.as_deref().unwrap_or("unknown"), outcome.evaluation.symbol, outcome.scout_exit_reason.unwrap_or("unknown"), outcome.evaluation.horizon_seconds);
                         shadow_learning_outcomes.push(outcome.evaluation.clone());
                     }
                     if outcome.legacy.horizon_seconds == 60 {
@@ -488,10 +496,14 @@ async fn publish_shadow_learning_outcomes(store: &SignalStore, outcomes: Vec<Sig
                     .await
                     .and_then(reqwest::Response::error_for_status)
                 {
-                    Ok(_) => break,
+                    Ok(response) => {
+                        crate::service_log!("INFO", "Scout learning outcome delivered: sample_id={} symbol={} scenario={} status={} attempt={}", decision_id, evaluation.symbol, decision["shadow_exit_scenario"].as_str().unwrap_or("strategy"), response.status(), attempt + 1);
+                        break;
+                    }
                     Err(error) if attempt == 2 => crate::service_log!(
                         "WARN",
-                        "Could not deliver fee-aware shadow Scout learning outcome {}: {error}",
+                        "Could not deliver fee-aware shadow Scout learning outcome sample_id={} symbol={}: {error}",
+                        decision_id,
                         evaluation.symbol
                     ),
                     Err(_) => tokio::time::sleep(Duration::from_millis(100 * (attempt + 1))).await,

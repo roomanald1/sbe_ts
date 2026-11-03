@@ -4,6 +4,9 @@ struct CandidateEntryReview<'a> {
     score_floor: f64,
     scout_strength_floor: f64,
     scout_score_floor: f64,
+    scout_minimum_samples: usize,
+    scout_minimum_positive_rate: f64,
+    scout_thresholds_valid: bool,
     evidence: Option<&'a WalkForward>,
     side: Option<&'a SideWalkForwardMetrics>,
     research: Option<&'a SideWalkForwardMetrics>,
@@ -80,11 +83,17 @@ fn review_candidate_entry<'a>(
         && candidate.strength >= scout_strength_floor;
     let scout_score_pass = candidate.score.is_finite()
         && candidate.score.abs() >= scout_score_floor;
-    let scout_negative = side.is_some_and(has_negative_exploration_evidence)
-        || research.is_some_and(|metrics| {
-            metrics.sample_count >= MIN_SIDE_WALK_FORWARD_SAMPLES
-                && metrics.average_net_return_percent.is_none_or(|net| net <= 0.0)
-        });
+    let scout_thresholds = scout_walk_forward_thresholds(candidate);
+    let scout_thresholds_valid = scout_thresholds.is_some();
+    let (scout_minimum_samples, _scout_research_minimum_samples, scout_minimum_positive_rate) =
+        scout_thresholds.unwrap_or((
+            MIN_EXPLORATION_EVIDENCE_SAMPLES,
+            MIN_SIDE_WALK_FORWARD_SAMPLES,
+            NEGATIVE_EVIDENCE_FLOOR,
+        ));
+    let scout_negative = side
+        .is_some_and(|metrics| has_negative_scout_evidence(candidate, metrics, false))
+        || research.is_some_and(|metrics| has_negative_scout_evidence(candidate, metrics, true));
 
     CandidateEntryReview {
         context,
@@ -92,6 +101,9 @@ fn review_candidate_entry<'a>(
         score_floor,
         scout_strength_floor,
         scout_score_floor,
+        scout_minimum_samples,
+        scout_minimum_positive_rate,
+        scout_thresholds_valid,
         evidence,
         side,
         research,

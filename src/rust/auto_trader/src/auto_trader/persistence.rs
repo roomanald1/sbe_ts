@@ -723,3 +723,149 @@ mod daily_strategy_allocator_tests {
         assert_eq!(daily_strategy_position_limit(&settings), 4);
     }
 }
+
+#[cfg(test)]
+mod persistence_allocation_tests {
+    use super::*;
+
+    fn position(strategy: &str, quantity: f64, price: f64) -> TraderPosition {
+        serde_json::from_value(serde_json::json!({
+            "strategy": strategy,
+            "quantity": quantity,
+            "average_entry_price": price,
+            "entry_fees": 0.0,
+            "realized_pnl": 0.0,
+            "entry_order_type": "Limit"
+        }))
+        .unwrap()
+    }
+
+    fn pending_order(symbol: &str, strategy: &str, side: &str, quantity: f64) -> TraderOrder {
+        serde_json::from_value(serde_json::json!({
+            "timestamp": 1,
+            "symbol": symbol,
+            "side": side,
+            "order_type": "Limit",
+            "purpose": "signal",
+            "strategy": strategy,
+            "quantity": quantity,
+            "filled_quantity": 1.0,
+            "reserved_notional": 100.0,
+            "average_price": 10.0,
+            "status": "accepted",
+            "realized_pnl": 0.0
+        }))
+        .unwrap()
+    }
+
+    fn settings_with_rates() -> Settings {
+        let mut settings = Settings::default();
+        settings.usd_rates.insert("USDT".into(), 1.0);
+        settings
+    }
+
+    #[test]
+    fn allocated_symbol_exposure_counts_open_lots_and_only_incremental_pending_risk() {
+        let mut settings = settings_with_rates();
+        settings.positions.insert("ETH-USDT".into(), position("live-momentum", 2.0, 10.0));
+        settings.orders.push(pending_order("ETH-USDT", "live-momentum", "buy", 5.0));
+        assert_eq!(allocated_notional_for_symbol(&settings, "ETH-USDT"), 100.0);
+
+        settings.orders[0].side = "sell".into();
+        assert_eq!(allocated_notional_for_symbol(&settings, "ETH-USDT"), 60.0);
+        settings.orders[0].purpose = "stop-loss".into();
+        assert_eq!(allocated_notional_for_symbol(&settings, "ETH-USDT"), 20.0);
+    }
+
+    #[test]
+    fn category_allocation_and_open_counts_support_strategy_lots_and_legacy_positions() {
+        let mut settings = settings_with_rates();
+        settings.strategy_positions.entry("ETH-USDT".into()).or_default().insert(
+            "donchian-20-btc200".into(), position("donchian-20-btc200", 2.0, 10.0));
+        settings.strategy_positions.entry("BTC-USDT".into()).or_default().insert(
+            "live-momentum".into(), position("live-momentum", -1.0, 50.0));
+        assert_eq!(allocated_notional_for_category(&settings, Some(StrategyCategory::Daily)), 20.0);
+        assert_eq!(allocated_notional_for_category(&settings, Some(StrategyCategory::Intraday)), 50.0);
+        assert_eq!(allocated_notional(&settings), 70.0);
+        assert_eq!(total_open_position_count(&settings), 2);
+        assert_eq!(category_open_position_count(&settings, StrategyCategory::Daily), 1);
+        assert_eq!(category_open_position_count(&settings, StrategyCategory::Intraday), 1);
+
+        settings.strategy_positions.clear();
+        settings.positions.insert("ETH-USDT".into(), position("donchian-20-btc200", 2.0, 10.0));
+        settings.positions.insert("BTC-USDT".into(), position("live-momentum", -1.0, 50.0));
+        assert_eq!(allocated_notional_for_category(&settings, Some(StrategyCategory::Daily)), 20.0);
+        assert_eq!(category_open_position_count(&settings, StrategyCategory::Intraday), 1);
+    }
+
+    #[test]
+    fn strategy_budgets_allocate_configured_remainder_and_exposure() {
+        let mut settings = settings_with_rates();
+        settings.strategies = vec![
+            Strategy::Donchian20Btc200,
+            Strategy::Donchian55Btc200,
+            Strategy::LiveMomentum,
+            Strategy::LiveTradeFlow,
+        ];
+        settings.daily_strategy_notional_limit = 300.0;
+        settings.daily_strategy_budgets.insert("donchian-20-btc200".into(), 80.0);
+        assert_eq!(enabled_daily_strategy_count(&settings), 2);
+        assert_eq!(daily_strategy_notional_share(&settings), 150.0);
+        assert_eq!(daily_strategy_budget(&settings, "donchian-20-btc200"), 80.0);
+        assert_eq!(daily_strategy_budget(&settings, "donchian-55-btc200"), 220.0);
+        assert_eq!(daily_strategy_budget(&settings, "not-enabled"), 0.0);
+
+        settings.intraday_notional_limit = 120.0;
+        settings.intraday_strategy_budgets.insert("live-momentum".into(), 45.0);
+        assert_eq!(enabled_intraday_strategy_count(&settings), 2);
+        assert_eq!(intraday_strategy_notional_share(&settings), 60.0);
+        assert_eq!(intraday_strategy_budget(&settings, "live-momentum"), 45.0);
+        assert_eq!(intraday_strategy_budget(&settings, "live-trade-flow"), 75.0);
+
+        settings.strategy_positions.entry("ETH-USDT".into()).or_default().insert(
+            "live-momentum".into(), position("live-momentum", 2.0, 10.0));
+        settings.orders.push(pending_order("ETH-USDT", "live-momentum", "buy", 5.0));
+        assert_eq!(allocated_notional_for_strategy(&settings, "live-momentum"), 100.0);
+        assert_eq!(daily_strategy_open_position_count(&settings, "live-momentum"), 1);
+        assert_eq!(daily_strategy_open_position_count(&settings, "donchian-20-btc200"), 0);
+    }
+
+    #[test]
+    fn pending_entries_are_unique_and_existing_strategy_positions_are_excluded() {
+        let mut settings = settings_with_rates();
+        settings.orders = vec![
+            pending_order("ETH-USDT", "live-momentum", "buy", 5.0),
+            pending_order("ETH-USDT", "live-momentum", "buy", 3.0),
+            pending_order("BTC-USDT", "donchian-20-btc200", "buy", 2.0),
+        ];
+        let keys = pending_entry_strategy_keys(&settings);
+        assert_eq!(keys.len(), 2);
+        assert_eq!(pending_entry_position_count_for_category(&settings, StrategyCategory::Intraday), 1);
+        assert_eq!(pending_entry_position_count_for_category(&settings, StrategyCategory::Daily), 1);
+        assert_eq!(pending_entry_position_count_for_strategy(&settings, "live-momentum"), 1);
+
+        settings.strategy_positions.entry("ETH-USDT".into()).or_default().insert(
+            "live-momentum".into(), position("live-momentum", 1.0, 10.0));
+        assert_eq!(pending_entry_position_count_for_strategy(&settings, "live-momentum"), 0);
+    }
+
+    #[test]
+    fn category_limits_and_quote_conversion_use_safe_fallbacks() {
+        let mut settings = settings_with_rates();
+        settings.max_daily_open_positions = 7;
+        settings.strategies = vec![Strategy::Donchian20Btc200, Strategy::Donchian55Btc200];
+        settings.daily_strategy_notional_limit = 320.0;
+        settings.intraday_notional_limit = 90.0;
+        assert_eq!(category_position_limit(&settings, StrategyCategory::Daily), 7);
+        assert_eq!(category_notional_limit(&settings, StrategyCategory::Daily), 320.0);
+        assert_eq!(category_notional_limit(&settings, StrategyCategory::Intraday), 90.0);
+        assert_eq!(daily_strategy_position_limit(&settings), 4);
+        assert_eq!(quote_usd_rate(&settings, "ETH-USDT"), 1.0);
+        assert_eq!(quote_usd_rate_for_map(&BTreeMap::new(), "ETH-XYZ"), 10.0);
+        assert_eq!(quote_usd_rate_for_map(&BTreeMap::from([("XYZ".into(), f64::NAN)]), "ETH-XYZ"), 10.0);
+        assert_eq!(scheduled_stop_headroom_multiplier("Vwap", Some("live-momentum")), 2.0);
+        assert_eq!(scheduled_stop_headroom_multiplier("Limit", Some("live-momentum")), 1.0);
+        assert!(!is_independent_daily_strategy("live-momentum"));
+        assert!(is_independent_daily_strategy("donchian-20-btc200"));
+    }
+}

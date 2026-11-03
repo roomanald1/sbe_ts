@@ -6,6 +6,9 @@ export type AutoTraderShadowPosition = {
   strategy: string;
   source: 'Scout' | 'Exploratory';
   scoutLevelPercent?: number;
+  scoutParameterKey?: string;
+  scoutParameterValue?: number;
+  scoutParameterEntryEligible?: boolean;
   exitScenario: 'strategy' | 'tight';
   direction: 'bullish' | 'bearish';
   strength: number;
@@ -33,6 +36,9 @@ type AuditRecord = {
   strength?: number;
   scout?: boolean;
   scout_level_percent?: number;
+  scout_parameter_key?: string;
+  scout_parameter_value?: number;
+  scout_parameter_entry_eligible?: boolean;
   shadow_exit_scenario?: 'strategy' | 'tight';
   exploratory?: boolean | null;
   shadow_entry_bid?: number;
@@ -58,7 +64,7 @@ const historyWindowMs = 7 * 24 * 60 * 60_000;
 const repeatedScenarioCooldownMs = 60 * 60_000;
 
 export class AutoTraderShadowModel {
-  readonly state$ = new BehaviorSubject<{ rows: AutoTraderShadowPosition[]; loading: boolean; error?: string }>({ rows: [], loading: true });
+  readonly state$ = new BehaviorSubject<{ rows: AutoTraderShadowPosition[]; learningOutcomes: Array<{ strategy: string; netReturnPercent: number }>; loading: boolean; error?: string }>({ rows: [], learningOutcomes: [], loading: true });
   private timer?: ReturnType<typeof setInterval>;
   private refreshing = false;
   private consumers = 0;
@@ -108,7 +114,7 @@ export class AutoTraderShadowModel {
       const lastSampleAt = new Map<string, number>();
       for (const audit of shadowDecisions) {
         const timestamp = audit.timestamp ?? audit.signal_timestamp ?? 0;
-        const sampleKey = (audit.symbol ?? '') + '|' + (audit.strategy ?? '') + '|' + (audit.direction ?? '') + '|' + (audit.scout_level_percent ?? 'exploratory') + '|' + (audit.shadow_exit_scenario ?? 'strategy');
+        const sampleKey = (audit.symbol ?? '') + '|' + (audit.strategy ?? '') + '|' + (audit.direction ?? '') + '|' + (audit.scout_level_percent ?? 'exploratory') + '|' + (audit.scout_parameter_key ?? '') + ':' + (audit.scout_parameter_value ?? '') + '|' + (audit.shadow_exit_scenario ?? 'strategy');
         const priorSampleAt = lastSampleAt.get(sampleKey);
         if (priorSampleAt !== undefined && timestamp - priorSampleAt < repeatedScenarioCooldownMs) continue;
         latestShadowDecisions.set(audit.decision_id!, audit);
@@ -136,6 +142,9 @@ export class AutoTraderShadowModel {
           strategy: audit.strategy ?? 'live-insights',
           source: audit.scout ? 'Scout' : 'Exploratory',
           scoutLevelPercent: typeof audit.scout_level_percent === 'number' ? audit.scout_level_percent : undefined,
+          scoutParameterKey: audit.scout_parameter_key,
+          scoutParameterValue: typeof audit.scout_parameter_value === 'number' ? audit.scout_parameter_value : undefined,
+          scoutParameterEntryEligible: typeof audit.scout_parameter_entry_eligible === 'boolean' ? audit.scout_parameter_entry_eligible : undefined,
           exitScenario: audit.shadow_exit_scenario ?? 'strategy',
           direction,
           strength: audit.strength ?? 0,
@@ -152,7 +161,12 @@ export class AutoTraderShadowModel {
           returnBasis: typeof netReturn === 'number' && Number.isFinite(netReturn) ? 'strategy exit' : undefined,
         }];
       }).sort((a, b) => b.openedAt - a.openedAt);
-      this.state$.next({ rows, loading: false });
+      const learningOutcomes = auditRows.flatMap((audit) =>
+        audit.stage === 'scout-outcome' && typeof audit.strategy === 'string' &&
+        typeof audit.shadow_net_return_percent === 'number' && Number.isFinite(audit.shadow_net_return_percent)
+          ? [{ strategy: audit.strategy, netReturnPercent: audit.shadow_net_return_percent }]
+          : []);
+      this.state$.next({ rows, learningOutcomes, loading: false });
     } catch (error) {
       this.state$.next({ ...this.state$.value, loading: false, error: error instanceof Error ? error.message : 'Could not load shadow outcomes' });
     } finally {

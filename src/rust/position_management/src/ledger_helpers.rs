@@ -130,3 +130,40 @@ fn apply_trade(position: &mut Position, trade: &PositionTrade) {
         position.quantity = net;
     }
 }
+
+#[cfg(test)]
+mod ledger_helper_tests {
+    use super::*;
+
+    #[test]
+    fn validates_spot_symbols_without_accepting_malformed_components() {
+        assert!(valid_position_symbol("BTC-USDT"));
+        assert!(valid_position_symbol("A1-B2"));
+        assert!(!valid_position_symbol("-USDT"));
+        assert!(!valid_position_symbol("BTC-"));
+        assert!(!valid_position_symbol("BTC-USDT-SWAP"));
+        assert!(!valid_position_symbol("BTC/USDT"));
+        assert!(!valid_position_symbol("BÉ-USDT"));
+        assert!(!valid_position_symbol("A".repeat(33).as_str()));
+    }
+
+    #[test]
+    fn reads_only_finite_positive_prices_and_nonnegative_sizes() {
+        let level = [100.0_f64.to_le_bytes(), 2.5_f64.to_le_bytes()].concat();
+        let parsed = read_level(&level, 0).unwrap();
+        assert_eq!(parsed.price, 100.0);
+        assert_eq!(parsed.size, 2.5);
+        assert!(read_level(&level[..15], 0).is_none());
+        let invalid_price = [0.0_f64.to_le_bytes(), 1.0_f64.to_le_bytes()].concat();
+        assert!(read_level(&invalid_price, 0).is_none());
+        let invalid_size = [1.0_f64.to_le_bytes(), (-1.0_f64).to_le_bytes()].concat();
+        assert!(read_level(&invalid_size, 0).is_none());
+    }
+
+    #[test]
+    fn historical_positive_fees_are_normalized_to_cash_outflows() {
+        assert_eq!(signed_fee_cashflow(0.25), -0.25);
+        assert_eq!(signed_fee_cashflow(-0.25), -0.25);
+        assert_eq!(signed_fee_cashflow(0.0), 0.0);
+    }
+}
