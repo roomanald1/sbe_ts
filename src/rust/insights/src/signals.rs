@@ -31,6 +31,8 @@ pub const RESEARCH_SAMPLE_INTERVAL_MS: u64 = 10_000;
 pub const LIVE_SIGNAL_SNAPSHOT_INTERVAL_MS: u64 = 2_000;
 const WALK_FORWARD_MIN_THRESHOLD_SAMPLES: usize = 10;
 const WALK_FORWARD_TRAINING_WINDOW: usize = 200;
+/// Bound the historical records held together by walk-forward analysis.
+pub const WALK_FORWARD_RECORD_LIMIT: usize = 20_000;
 const WALK_FORWARD_LOGISTIC_REFRESH_INTERVAL: usize = 100;
 const TREND_LOGISTIC_CONFIDENCE_THRESHOLDS: [f64; 3] = [0.55, 0.60, 0.65];
 const STRENGTH_THRESHOLDS: [f64; 8] = [0.0, 0.1, 0.15, 0.2, 0.25, 0.3, 0.4, 0.5];
@@ -57,6 +59,7 @@ impl Default for SignalEngine {
             last_research_sample_at: None,
             last_live_snapshot_at: None,
             completed_scout_shadow_ids: BTreeSet::new(),
+            completed_scout_shadow_order: VecDeque::new(),
         }
     }
 }

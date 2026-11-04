@@ -1,4 +1,4 @@
-import { memo, useEffect, useMemo, useRef, useState } from 'react';
+import { memo, useEffect, useMemo, useRef, useState, type WheelEvent } from 'react';
 import { AgGridReact } from 'ag-grid-react';
 import { ClientSideRowModelModule, ModuleRegistry, themeQuartz, type ColDef, type ColGroupDef, type GridApi, type IRowNode } from 'ag-grid-community';
 import { AutoTraderOutcomesModel, type AutoTraderOutcome, type StrictEntryGateSummary } from '../models/AutoTraderOutcomesModel';
@@ -42,6 +42,22 @@ function persistClosedGridSort(api: GridApi<OutcomeGridRow>) {
     localStorage.setItem(CLOSED_GRID_SORT_KEY, JSON.stringify(state));
   } catch { /* Sorting still works if browser storage is unavailable. */ }
 }
+function scrollPageFromStrategyGrid(event: WheelEvent<HTMLDivElement>) {
+  if (!event.deltaY) return;
+
+  let pageScroller: HTMLElement | null = event.currentTarget.parentElement;
+  while (pageScroller) {
+    const { overflowY } = window.getComputedStyle(pageScroller);
+    if ((overflowY === 'auto' || overflowY === 'scroll') && pageScroller.scrollHeight > pageScroller.clientHeight) break;
+    pageScroller = pageScroller.parentElement;
+  }
+
+  const target = pageScroller ?? document.scrollingElement;
+  if (!target) return;
+  event.preventDefault();
+  target.scrollTop += event.deltaY;
+}
+
 function keepLedgerGroupsTogether(nodes: IRowNode<OutcomeGridRow>[]) {
   const groups = new Map<string, IRowNode<OutcomeGridRow>[]>();
   for (const node of nodes) {
@@ -68,7 +84,7 @@ function keepLedgerGroupsTogether(nodes: IRowNode<OutcomeGridRow>[]) {
   nodes.splice(0, nodes.length, ...ordered);
 }
 const sharedOutcomesModel = new AutoTraderOutcomesModel();
-type StrategyWinRateRow = { strategy: string; enabled?: boolean; scoutEnabled?: boolean; scoutable?: boolean; runStatus: string; runReason: string; trades: number; wins: number; losses: number; flat: number; feesUsd?: number; netPnlUsd?: number; todayRealizedUsd?: number; winRate?: number; averageReturn?: number; averageNetWinUsd?: number; averageNetWinPercent?: number; averageNetLossUsd?: number; averageNetLossPercent?: number; profitFactor?: number; medianHoldingMs?: number; averageHoldingMs?: number; periodStart: number; periodEnd: number; averageEntrySizeUsd?: number; lowSample: boolean; learningMultiplier?: number; learningSamples?: number; learningPositiveRate?: number; learningAverageNet?: number; strictEntryGate?: StrictEntryGateSummary; strictBaseStrengthFloor?: number; strictGateApplies?: boolean };
+type StrategyWinRateRow = { strategy: string; enabled?: boolean; scoutEnabled?: boolean; scoutable?: boolean; runStatus: string; runReason: string; trades: number; wins: number; losses: number; flat: number; feesUsd?: number; netPnlUsd?: number; todayRealizedUsd?: number; winRate?: number; averageReturn?: number; averageNetWinUsd?: number; averageNetWinPercent?: number; averageNetLossUsd?: number; averageNetLossPercent?: number; profitFactor?: number; medianHoldingMs?: number; averageHoldingMs?: number; periodStart: number; periodEnd: number; averageEntrySizeUsd?: number; lowSample: boolean; learningSamples?: number; learningPositiveRate?: number; learningAverageNet?: number; strictEntryGate?: StrictEntryGateSummary; strictBaseStrengthFloor?: number; strictGateApplies?: boolean };
 const allStrategies: Strategy[] = ['live-momentum', 'live-trade-flow', 'live-order-book', 'live-vwap-dislocation', 'live-absorption-pressure', 'donchian-55-btc200', 'donchian-20-sma200', 'donchian-20-btc200', 'donchian-10-btc200', 'donchian-20-btc200-hold3', 'risk-adjusted-trend-portfolio', 'trend-sleeves-btc200', 'trend-50-200', 'relative-strength-90-sma200', 'risk-adjusted-monthly-momentum', 'rsi2-oversold-rebound', 'dated-futures-carry'];
 const strategyCellTints = { status: 'rgba(148, 157, 170, 0.06)', learning: 'rgba(74, 127, 151, 0.075)', sample: 'rgba(161, 139, 75, 0.075)', performance: 'rgba(77, 132, 91, 0.075)', profile: 'rgba(125, 100, 157, 0.075)', gate: 'rgba(178, 118, 72, 0.075)' } as const;
 const colorStrategyColumns = (columns: ColDef<StrategyWinRateRow>[], group: keyof typeof strategyCellTints) => columns.map((column, index) => ({ ...column, headerClass: ['strategy-column-' + group + '-header', index === 0 && 'strategy-group-start', index === columns.length - 1 && 'strategy-group-end'].filter(Boolean).join(' '), cellClass: ['strategy-column-' + group + '-cell', index === 0 && 'strategy-group-start', index === columns.length - 1 && 'strategy-group-end'].filter(Boolean).join(' '), cellStyle: { backgroundColor: strategyCellTints[group] } }));
@@ -275,11 +291,7 @@ function AutoTraderOutcomesComponent({ embedded = false, ticks = [], liveOnly = 
       const lastClosed = closedTimes.length ? Math.max(...closedTimes) : 0;
       const totalNet = netComplete ? netValues.reduce((sum, value) => sum + value, 0) : undefined;
       const mean = (values: number[]) => values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : undefined;
-      const realLearningReturns = trades.flatMap((trade) => typeof trade.netPnlUsd === 'number' && Number.isFinite(trade.netPnlUsd) && typeof trade.entryNotionalUsd === 'number' && Number.isFinite(trade.entryNotionalUsd) && trade.entryNotionalUsd > 0 ? [trade.netPnlUsd / trade.entryNotionalUsd * 100] : []);
-      const scoutLearning = scoutLearningByStrategy.get(strategy);
-      const learningSamples = realLearningReturns.length + (scoutLearning?.count ?? 0);
-      const learningPositiveCount = realLearningReturns.filter((value) => value > 0).length + (scoutLearning?.positive ?? 0);
-      const learningAverageNetTotal = realLearningReturns.reduce((sum, value) => sum + value, 0) + (scoutLearning?.returnTotal ?? 0);
+      const learning = state.learningSummary[strategy];
       return { strategy, trades: trades.length, wins, losses, flat: trades.length - wins - losses,
         enabled, runStatus, runReason,
         todayRealizedUsd: state.todayStrategyRealizedUsd?.[strategy] ?? (state.todayStrategyRealizedUsd ? 0 : undefined),
@@ -299,15 +311,14 @@ function AutoTraderOutcomesComponent({ embedded = false, ticks = [], liveOnly = 
         periodEnd: lastClosed,
         averageEntrySizeUsd: validEntrySizes.length === trades.length ? mean(validEntrySizes) : undefined,
         lowSample: trades.length > 0 && trades.length < 30,
-        learningMultiplier: state.strategyLearning[strategy]?.learning_multiplier,
-        learningSamples,
-        learningPositiveRate: learningSamples ? learningPositiveCount / learningSamples : undefined,
-        learningAverageNet: learningSamples ? learningAverageNetTotal / learningSamples : undefined,
+        learningSamples: learning?.learning_samples,
+        learningPositiveRate: learning?.positive_rate,
+        learningAverageNet: learning?.average_net_return_percent,
         strictEntryGate: state.strictEntryGates[strategy],
         strictBaseStrengthFloor: state.strictBaseStrengthFloor,
         strictGateApplies: strategy.startsWith('live-') && strategy !== 'live-insights', scoutEnabled, scoutable };
     }).sort((a, b) => b.trades - a.trades || a.strategy.localeCompare(b.strategy));
-  }, [closedRows, state.strategyLearning, state.enabledStrategies, state.autoTraderEnabled, state.strategyDiagnostics, state.strategyOrders, state.strictEntryGates, state.strictBaseStrengthFloor, state.todayStrategyRealizedUsd, state.openStrategyPositions, state.autoTraderStatusAvailable, openRows, scoutLearningByStrategy, settings.scoutStrategies, settings.strategies, settings.loading]);
+  }, [closedRows, state.learningSummary, state.strategyLearning, state.enabledStrategies, state.autoTraderEnabled, state.strategyDiagnostics, state.strategyOrders, state.strictEntryGates, state.strictBaseStrengthFloor, state.todayStrategyRealizedUsd, state.openStrategyPositions, state.autoTraderStatusAvailable, openRows, scoutLearningByStrategy, settings.scoutStrategies, settings.strategies, settings.loading]);
   const visibleStrategyWinRates = useMemo(() => hideDisabledStrategies
     ? strategyWinRates.filter((row) => row.enabled !== false)
     : strategyWinRates, [strategyWinRates, hideDisabledStrategies]);
@@ -340,7 +351,6 @@ function AutoTraderOutcomesComponent({ embedded = false, ticks = [], liveOnly = 
       { field: 'averageEntrySizeUsd', headerName: 'Entry USD', headerTooltip: 'Mean USD notional at entry for fully closed trades; uses entry price and the latest quote currency conversion rate.', valueFormatter: ({ value }) => typeof value === 'number' && Number.isFinite(value) ? usd.format(value) : '—', width: 72, minWidth: 72, maxWidth: 82, flex: 0 },
     ], 'profile') },
     { headerName: 'Learning · all symbols · recent', headerClass: 'strategy-group-learning', children: colorStrategyColumns([
-      { field: 'learningMultiplier', headerName: 'Mult.', headerTooltip: 'Trade sizing multiplier from closed trades and baseline Scout shadow outcomes. Paired parameter-variant outcomes train parameter promotion and are not counted again as independent trades.', valueFormatter: ({ value }) => typeof value === 'number' && Number.isFinite(value) ? '×' + value.toFixed(2) : '—', width: 56, minWidth: 56, maxWidth: 64, flex: 0 },
       { field: 'learningAverageNet', headerName: 'Avg net', headerTooltip: 'Average net return across closed real trades and Scout outcomes across tested parameter combinations, pooled across symbols. Scout outcomes use the last 7 days; real trades use the closed outcomes currently loaded.', cellClassRules: signed, valueFormatter: ({ value }) => pct(value), width: 72, minWidth: 72, maxWidth: 82, flex: 0 },
       { field: 'learningSamples', headerName: 'Recent n', headerTooltip: 'Recent closed real trades plus Scout outcomes pooled across symbols and tested parameter combinations. The effective persisted profile history and learned parameters are shown in Strategy learning impact.', valueFormatter: ({ value }) => typeof value === 'number' && Number.isFinite(value) ? value.toLocaleString() : '—', width: 60, minWidth: 60, maxWidth: 68, flex: 0 },
       { field: 'learningPositiveRate', headerName: 'Positive', headerTooltip: 'Share of closed real trades and Scout outcomes across tested parameter combinations with positive net return.', valueFormatter: ({ value }) => typeof value === 'number' && Number.isFinite(value) ? (value * 100).toFixed(1) + '%' : '—', width: 62, minWidth: 62, maxWidth: 70, flex: 0 },
@@ -442,6 +452,10 @@ function AutoTraderOutcomesComponent({ embedded = false, ticks = [], liveOnly = 
       const distanceFromPriceLevel = (level: number | undefined) => typeof level === 'number' && level > 0 && typeof currentAssetPrice === 'number' ? (currentAssetPrice / level - 1) * 100 : undefined;
       const marketReturnFromEntry = data.entryPrice > 0 && typeof data.markPrice === 'number' ? (data.markPrice / data.entryPrice - 1) * (data.signedQuantity >= 0 ? 100 : -100) : undefined;
       const exitFacts: Array<{ label: string; value: string; near?: boolean; tone?: string; detail?: string }> = [];
+      if (data.entryOrderExpiresAt !== undefined) {
+        const remaining = Math.max(0, data.entryOrderExpiresAt - now);
+        if (remaining > 0) exitFacts.push({ label: 'Post-only entry', value: durationLabel(remaining) + ' left · expires ' + new Date(data.entryOrderExpiresAt).toLocaleString(), tone: 'is-rebalance', detail: 'Expiry date and time of the still-active post-only entry order. A partial fill may remain open after the unfilled remainder expires.' });
+      }
       const thresholdDistanceLabel = (distance: number) => distance === 0 ? 'at threshold' : distance > 0 ? '+' + distance.toFixed(2) + '% above' : Math.abs(distance).toFixed(2) + '% below';
       if (hasStop && marketReturnFromEntry !== undefined) {
         const distance = data.stopLossPercent! + marketReturnFromEntry;
@@ -615,7 +629,7 @@ function AutoTraderOutcomesComponent({ embedded = false, ticks = [], liveOnly = 
       })]
       : columns.filter((column) => !['strategyInstanceId', 'ledgerSource'].includes(String(column.field ?? '')));
   return <section className={embedded ? 'auto-trader-outcomes-embedded' : 'feed-section signal-info-panel'} aria-label={strategyRatesOnly ? 'AutoTrader strategy win rates' : liveOnly ? 'Live AutoTrader positions' : 'AutoTrader position outcomes'}>
-    {!embedded && <FeedToolbar title={liveOnly ? 'AutoTrader live positions' : closedOnly ? 'AutoTrader closed & partial positions' : 'AutoTrader positions & outcomes'} />}
+    {!embedded && <FeedToolbar title={liveOnly ? 'AutoTrader live positions' : closedOnly ? 'AutoTrader closed positions' : 'AutoTrader positions & outcomes'} />}
     {!liveOnly && !closedOnly && !strategyRatesOnly && <p className="signal-info-note">{openRows.length} open positions · {summary.markedOpenCount}/{openRows.length} marked · indicative open P&amp;L {summary.markedOpenCount ? Object.entries(summary.openPnlByQuote).map(([quote, value]) => quote + ' ' + (value >= 0 ? '+' : '') + value.toFixed(4)).join(' · ') : 'unavailable'} · {summary.wins} closed winners · {summary.losses} closed losers · {summary.avg.toFixed(3)}% average closed return. Open marks use the latest price tick and net out signed entry fees, estimated exit fees, and estimated adverse exit slippage based on AutoTrader fills for that symbol; closed P&amp;L uses audited realized values. Signal values show the recorded entry decision, not proof of causation.</p>}
     {closedOnly && <p className="signal-info-note">Today’s realized P&amp;L by strategy instance · total {money.format(loadedOutcomesTodayUsd)}. Expand an instance to see today’s individual fills. Totals use the same UTC-day ledger calculation as Realized today.</p>}
     {!strategyRatesOnly && state.error && <div className="positions-error">{state.error}</div>}
@@ -625,7 +639,7 @@ function AutoTraderOutcomesComponent({ embedded = false, ticks = [], liveOnly = 
     </div>}
     {(strategyRatesOnly || (!liveOnly && !closedOnly)) && <><div className="auto-trader-strategy-winrate-heading"><strong className="auto-trader-strategy-winrate-title">Strategy performance and today’s realized P&L</strong><label><input type="checkbox" checked={hideDisabledStrategies} onChange={(event) => updateHideDisabledStrategies(event.target.checked)} /> Hide disabled strategies</label></div>
     <p className="auto-trader-strategy-winrate-note">Today P&amp;L includes all realized exits today, including partial exits on positions still open. Wins, losses, and Closed net use fully closed audited trades only. Unrealized P&amp;L is shown with open positions and is not included in Today P&amp;L.</p>
-    <div className="data-grid-wrap signal-info-grid auto-trader-strategy-winrate-grid"><AgGridReact<StrategyWinRateRow> rowData={visibleStrategyWinRates} columnDefs={strategyColumns} getRowId={({ data }) => data.strategy} defaultColDef={{ sortable: true, resizable: true, flex: 0, minWidth: 48 }} theme={theme} domLayout="autoHeight" rowHeight={26} headerHeight={28} /></div>
+    <div className="data-grid-wrap signal-info-grid auto-trader-strategy-winrate-grid" onWheelCapture={scrollPageFromStrategyGrid}><AgGridReact<StrategyWinRateRow> rowData={visibleStrategyWinRates} columnDefs={strategyColumns} getRowId={({ data }) => data.strategy} defaultColDef={{ sortable: true, resizable: true, flex: 0, minWidth: 48 }} theme={theme} domLayout="autoHeight" rowHeight={26} headerHeight={28} /></div>
     {visibleStrategyWinRates.length === 0 && !state.loading && <p className="positions-empty">{hideDisabledStrategies ? 'No enabled strategies to show.' : 'No closed trades to calculate strategy win rates yet.'}</p>}
 </>}
     {closedOnly && state.hasOlderLedgerTrades && <button type="button" className="auto-trader-audit-more" disabled={state.loadingOlderLedgerTrades} onClick={() => void model.loadOlderLedgerTrades()}>{state.loadingOlderLedgerTrades ? 'Loading today’s fills…' : 'Load more today’s fills'}</button>}

@@ -1,10 +1,11 @@
 use axum::{Json, Router, extract::Query, http::StatusCode, routing::get};
 use flate2::{Compression, read::MultiGzDecoder, write::GzEncoder};
 use insights::signals::StoredSignalRecord;
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, MAIN_DB, params};
 use serde::{Deserialize, Serialize};
 use std::{
-    io::{Read, Write},
+    fs::{File, OpenOptions},
+    io::Read,
     path::PathBuf,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -127,31 +128,11 @@ fn summarize_missing_days_sync(path: &PathBuf) -> anyhow::Result<()> {
                 })?
                 .collect::<rusqlite::Result<Vec<_>>>()?
         };
-        let training_payloads = if day_start < retention_start {
-            let mut statement = connection.prepare(
-                "SELECT kind, payload FROM signal_records WHERE timestamp >= ?1 AND timestamp < ?2 ORDER BY kind, timestamp, id",
-            )?;
-            let rows = statement.query_map(params![day_start, day_start + DAY_MS], |row| {
-                Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?))
-            })?;
-            let mut grouped = std::collections::BTreeMap::<i64, Vec<StoredSignalRecord>>::new();
-            for row in rows {
-                let (kind, compressed) = row?;
-                let mut decoder = MultiGzDecoder::new(compressed.as_slice());
-                let mut payload = Vec::new();
-                decoder.read_to_end(&mut payload)?;
-                grouped
-                    .entry(kind)
-                    .or_default()
-                    .push(bincode::deserialize(&payload)?);
-            }
-            grouped
-                .into_iter()
-                .map(|(kind, records)| {
-                    let serialized = bincode::serialize(&records)?;
-                    let mut encoder = GzEncoder::new(Vec::new(), Compression::fast());
-                    encoder.write_all(&serialized)?;
-                    Ok::<_, anyhow::Error>((kind, encoder.finish()?))
+        let training_archives = if day_start < retention_start {
+            aggregates
+                .iter()
+                .map(|(kind, count, ..)| {
+                    write_training_archive(&connection, day_start, *kind, *count)
                 })
                 .collect::<anyhow::Result<Vec<_>>>()?
         } else {
@@ -173,11 +154,26 @@ fn summarize_missing_days_sync(path: &PathBuf) -> anyhow::Result<()> {
                 params![day_start, kind, count, bytes, first, last],
             )?;
         }
-        for (kind, payload) in training_payloads {
+        for archive in training_archives {
             transaction.execute(
-                "UPDATE signal_daily_summary SET training_payload = ?3 WHERE day_start_ms = ?1 AND kind = ?2",
-                params![day_start, kind, payload],
+                "UPDATE signal_daily_summary SET training_payload = zeroblob(?3) WHERE day_start_ms = ?1 AND kind = ?2",
+                params![day_start, archive.kind, archive.size as i64],
             )?;
+            let row_id = transaction.query_row(
+                "SELECT rowid FROM signal_daily_summary WHERE day_start_ms = ?1 AND kind = ?2",
+                params![day_start, archive.kind],
+                |row| row.get::<_, i64>(0),
+            )?;
+            let mut source = File::open(&archive.path)?;
+            let mut destination = transaction.blob_open(
+                MAIN_DB,
+                "signal_daily_summary",
+                "training_payload",
+                row_id,
+                false,
+            )?;
+            std::io::copy(&mut source, &mut destination)?;
+            drop(destination);
         }
         if day_start < retention_start {
             transaction.execute(
@@ -195,6 +191,121 @@ fn summarize_missing_days_sync(path: &PathBuf) -> anyhow::Result<()> {
     // database takes an exclusive lock and blocks the live signal writer.
     // SQLite can reuse the freed pages for future inserts.
     Ok(())
+}
+
+struct TrainingArchiveFile {
+    kind: i64,
+    path: PathBuf,
+    size: u64,
+}
+
+impl Drop for TrainingArchiveFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+fn write_training_archive(
+    connection: &Connection,
+    day_start: i64,
+    kind: i64,
+    record_count: i64,
+) -> anyhow::Result<TrainingArchiveFile> {
+    let path = std::env::temp_dir().join(format!(
+        "insights-training-{}-{day_start}-{kind}-{}.gz",
+        std::process::id(),
+        now_ms()
+    ));
+    let file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)?;
+    let result = (|| {
+        let mut encoder = GzEncoder::new(file, Compression::fast());
+        bincode::serialize_into(&mut encoder, &(record_count as u64))?;
+        let mut statement = connection.prepare(
+            "SELECT payload FROM signal_records WHERE kind = ?1 AND timestamp >= ?2 AND timestamp < ?3 ORDER BY timestamp, id",
+        )?;
+        let rows = statement.query_map(params![kind, day_start, day_start + DAY_MS], |row| {
+            row.get::<_, Vec<u8>>(0)
+        })?;
+        for row in rows {
+            let compressed = row?;
+            let mut payload = Vec::new();
+            MultiGzDecoder::new(compressed.as_slice()).read_to_end(&mut payload)?;
+            let record: StoredSignalRecord = bincode::deserialize(&payload)?;
+            bincode::serialize_into(&mut encoder, &record)?;
+        }
+        let file = encoder.finish()?;
+        file.sync_all()?;
+        let size = file.metadata()?.len();
+        Ok(TrainingArchiveFile {
+            kind,
+            path: path.clone(),
+            size,
+        })
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&path);
+    }
+    result
+}
+
+#[cfg(test)]
+mod training_archive_tests {
+    use super::*;
+    use std::io::Write;
+
+    #[test]
+    fn archives_records_as_a_bincode_vector_without_materializing_the_day() {
+        let connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute(
+                "CREATE TABLE signal_records (id INTEGER PRIMARY KEY, timestamp INTEGER NOT NULL, kind INTEGER NOT NULL, payload BLOB NOT NULL)",
+                [],
+            )
+            .unwrap();
+        for timestamp in 1..=3 {
+            let record =
+                StoredSignalRecord::ExternalMarket(insights::signals::ExternalMarketFeatures {
+                    underlying: "BTC".to_owned(),
+                    timestamp,
+                    swap_instrument: "BTC-USDT-SWAP".to_owned(),
+                    funding_rate: None,
+                    next_funding_rate: None,
+                    open_interest_contracts: None,
+                    open_interest_currency: None,
+                    open_interest_change_percent: None,
+                    mark_price: None,
+                    index_price: None,
+                    perp_basis_bps: None,
+                    options_atm_iv: None,
+                    options_25d_skew: None,
+                    options_expiry_timestamp: None,
+                });
+            let payload = bincode::serialize(&record).unwrap();
+            let mut encoder = GzEncoder::new(Vec::new(), Compression::fast());
+            encoder.write_all(&payload).unwrap();
+            connection
+                .execute(
+                    "INSERT INTO signal_records (timestamp, kind, payload) VALUES (?1, 5, ?2)",
+                    params![timestamp as i64, encoder.finish().unwrap()],
+                )
+                .unwrap();
+        }
+
+        let archive = write_training_archive(&connection, 0, 5, 3).unwrap();
+        let mut decoder = MultiGzDecoder::new(File::open(&archive.path).unwrap());
+        let mut payload = Vec::new();
+        decoder.read_to_end(&mut payload).unwrap();
+        let archived: Vec<StoredSignalRecord> = bincode::deserialize(&payload).unwrap();
+        assert_eq!(archived.len(), 3);
+        assert_eq!(archive.kind, 5);
+        assert_eq!(
+            archive.size as usize,
+            std::fs::metadata(&archive.path).unwrap().len() as usize
+        );
+    }
 }
 
 fn read_summaries(path: &PathBuf, days: i64) -> anyhow::Result<Vec<DailySummary>> {

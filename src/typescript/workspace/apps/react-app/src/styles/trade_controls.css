@@ -400,17 +400,6 @@
 
 .auto-trader-strategy-winrate-grid .ag-header-cell.strategy-column-strategy-header { background: #1a1c22; }
 
-.alternative-strategies { margin: 12px 0; padding: 12px; border: 1px solid #242a31; border-radius: 6px; }
-.alternative-strategies > summary { cursor: pointer; font-weight: 600; }
-.alternative-strategies p, .alternative-strategies > small { color: #a0a6ad; font-size: 12px; line-height: 1.5; }
-.alternative-strategy-settings { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 12px; }
-.alternative-strategy-settings fieldset { min-width: 0; padding: 10px; }
-.alternative-strategy-settings label { display: flex; flex-direction: column; gap: 5px; margin: 6px 0; }
-.alternative-strategy-settings label:has(input[type="checkbox"]) { flex-direction: row; align-items: center; }
-.alternative-strategy-settings small { display: block; min-height: 52px; line-height: 1.4; }
-.alternative-strategy-grid { margin: 10px 0; min-height: 100px; }
-.alternative-strategy-events { height: 260px; margin: 10px 0; }
-
 
 
 .auto-trader-pnl-bar-label { display: block; width: 100%; text-align: left; font: 9px/1.2 var(--mono); white-space: nowrap; }
@@ -437,3 +426,6 @@
 .auto-trader-audit-alert { display: grid; gap: 4px; padding: 10px 12px; border: 1px solid #a94d4d; border-radius: 6px; background: #2a1719; color: #ffd4d4; font-size: 12px; }
 .auto-trader-audit-alert span { color: #e6baba; line-height: 1.45; }
 .auto-trader-audit-coalesced { color: #d0b887; font-size: 11px; }
+
+/* This grid grows with its rows; keep it out of the page's vertical scroll chain. */
+.data-grid-wrap.auto-trader-strategy-winrate-grid { overflow: visible; }

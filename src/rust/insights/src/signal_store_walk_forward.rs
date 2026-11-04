@@ -2,7 +2,7 @@ impl SignalStore {
     async fn compute_walk_forward(&self) -> Result<Vec<SignalWalkForward>> {
         let outcomes = self.read_outcomes().await?;
         let evaluations = self
-            .read_recent_records_with_corrupt_rows(2, 100_000, true)
+            .read_recent_records_with_corrupt_rows(2, WALK_FORWARD_RECORD_LIMIT, true)
             .await?
             .into_iter()
             .filter_map(|record| match record {
@@ -25,7 +25,9 @@ impl SignalStore {
             .into_iter()
             .map(|snapshot| ((snapshot.symbol.clone(), snapshot.timestamp), snapshot))
             .collect::<HashMap<_, _>>();
-        let research_features = self.research_features(None, usize::MAX).await?;
+        let research_features = self
+            .research_features(None, WALK_FORWARD_RECORD_LIMIT)
+            .await?;
         let research_features_by_key = research_features
             .into_iter()
             .filter_map(|features| {

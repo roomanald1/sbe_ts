@@ -73,6 +73,7 @@ struct ActivityResponse {
     insight_processing_samples: usize,
     cycle_lock_wait_ms: BTreeMap<String, CycleLockWaitSummary>,
     cycle_lock_hold_ms: BTreeMap<String, CycleLockWaitSummary>,
+    cycle_lock_scope_ms: BTreeMap<String, CycleLockWaitSummary>,
     settings_persistence_ms: BTreeMap<String, CycleLockWaitSummary>,
 }
 #[derive(Clone, Serialize)]

@@ -30,7 +30,7 @@ const OKX_IDLE_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(20);
 const OKX_PONG_TIMEOUT: Duration = Duration::from_secs(10);
 const OKX_PUBLIC_WS_URL: &str = "wss://ws.okx.com/ws/v5/public";
 const OKX_CONNECT_MIN_INTERVAL: Duration = Duration::from_millis(350);
-const SHARED_TRADE_UPDATE_CAPACITY: usize = 32;
+const SHARED_TRADE_UPDATE_CAPACITY: usize = 512;
 const SHARED_BOOK_UPDATE_CAPACITY: usize = 32;
 static OKX_NEXT_CONNECT_SLOT: OnceLock<tokio::sync::Mutex<Instant>> = OnceLock::new();
 

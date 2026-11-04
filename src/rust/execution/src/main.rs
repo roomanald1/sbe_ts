@@ -1,4 +1,6 @@
 mod logging;
+#[path = "../../service_docs.rs"]
+mod service_docs;
 use axum::{
     Router,
     body::Body,
@@ -86,6 +88,20 @@ async fn main() -> anyhow::Result<()> {
     };
     let gateway = Router::new().fallback(any(proxy)).with_state(gateway_state);
     let app = Router::new()
+        .merge(service_docs::routes(
+            "Execution",
+            &[
+                ("/health", &["get"]),
+                ("/positions/orders", &["get", "post"]),
+                ("/positions/orders/{id}", &["delete"]),
+                ("/positions/vwap", &["get", "post"]),
+                ("/positions/vwap/{id}", &["delete"]),
+                ("/positions/twap", &["post"]),
+                ("/positions/barriers", &["get"]),
+                ("/positions/barriers/profit-target", &["post"]),
+                ("/positions/close-profitable", &["post"]),
+            ],
+        ))
         .route("/health", get(|| async { "ok" }))
         .route("/process-cpu-seconds", get(process_cpu_seconds))
         .route("/process-memory-bytes", get(process_memory_bytes))

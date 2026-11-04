@@ -71,6 +71,9 @@
   gap: 4px;
   min-width: 0;
 }
+.auto-trader-scout-metrics-summary { display: grid; gap: 4px; cursor: pointer; list-style: disclosure-closed; }
+.auto-trader-scout-metrics[open] > .auto-trader-scout-metrics-summary { list-style: disclosure-open; }
+.auto-trader-scout-metrics-summary::marker { color: #a0a6ad; }
 .auto-trader-scout-metrics > span {
   color: #a0a6ad;
   font: inherit;

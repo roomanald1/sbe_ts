@@ -11,3 +11,67 @@
 @import './styles/hedging_grids.css';
 @import './styles/trade_controls.css';
 @import './styles/autotrader.css';
+
+/* Shared surfaces follow the layered navy treatment used across the terminal. */
+.topbar {
+  border-color: var(--line);
+}
+
+.brand-mark {
+  color: white;
+  background: linear-gradient(145deg, #75a0ff, #655cf4);
+  box-shadow: 0 6px 22px rgb(83 112 255 / 28%);
+}
+
+.connection-status,
+.view-switcher,
+.feed-section,
+.dashboard-widget,
+.dashboard-widget-frame,
+.auto-trader-settings-popup,
+.order-book-popup,
+.price-history-popup,
+.range-order-popup {
+  border-color: var(--line);
+  background-color: rgb(19 28 48 / 92%);
+}
+
+.feed-section,
+.dashboard-widget {
+  box-shadow: 0 16px 40px rgb(2 7 20 / 28%), inset 0 1px rgb(255 255 255 / 3%);
+}
+
+.feed-section:hover,
+.dashboard-widget:hover {
+  border-color: #3a4c70;
+  box-shadow: 0 20px 46px rgb(2 7 20 / 34%), 0 0 28px rgb(98 139 255 / 5%);
+}
+
+.feed-toolbar {
+  border-color: var(--line);
+  background: linear-gradient(100deg, #17223a, #131c30 58%, #14222b);
+}
+
+.view-switcher {
+  background: rgb(12 19 34 / 78%);
+}
+
+.view-switcher button:hover {
+  background: #202e4c;
+}
+
+.view-switcher button[aria-pressed='true'] {
+  border-color: #3e5790;
+  background: #26395e;
+  color: #dbe6ff;
+}
+
+.feed-notice {
+  background: rgb(62 35 49 / 88%);
+}
+
+input,
+select,
+textarea {
+  accent-color: var(--blue);
+}

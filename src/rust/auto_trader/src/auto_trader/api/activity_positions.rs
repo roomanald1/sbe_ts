@@ -174,8 +174,11 @@ async fn await_activity_realized_pnl(
     let (realized_pnl, realized_pnl_by_quote, pnl_breakdown) = if let Some(pnl) = ledger_pnl {
         for order in orders.iter_mut() {
             let realized = if order.purpose == "stop-loss" {
-                pnl.realized_pnl_by_barrier_created_at
-                    .get(&order.timestamp.to_string())
+                // Barrier IDs are the ledger parent_order_id for stop fills.
+                // Timestamp keys collide when multiple stops are armed in the
+                // same millisecond, incorrectly repeating their combined P&L.
+                order.execution_order_id.as_ref()
+                    .and_then(|id| pnl.realized_pnl_by_parent_order.get(id))
                     .copied()
             } else if order.order_type.starts_with("Twap") || order.order_type.starts_with("Vwap") {
                 order
@@ -184,9 +187,8 @@ async fn await_activity_realized_pnl(
                     .and_then(|id| pnl.realized_pnl_by_parent_order.get(id))
                     .copied()
             } else {
-                pnl.realized_pnl_by_parent_order
-                    .get(&order.timestamp.to_string())
-                    .copied()
+                let key = order.timestamp.to_string();
+                pnl.realized_pnl_by_parent_order.get(&key).copied()
             };
             order.realized_pnl = realized.unwrap_or(0.0);
         }

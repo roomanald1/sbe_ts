@@ -25,6 +25,7 @@ struct AutoTraderState {
     insight_processing_ms: Arc<Mutex<Vec<f64>>>,
     cycle_lock_wait_ms: Arc<Mutex<BTreeMap<String, Vec<f64>>>>,
     cycle_lock_hold_ms: Arc<std::sync::Mutex<BTreeMap<String, Vec<f64>>>>,
+    cycle_lock_scope_ms: Arc<std::sync::Mutex<BTreeMap<String, Vec<f64>>>>,
     settings_path: PathBuf,
     dated_carry: Arc<Mutex<DatedCarryBook>>,
     dated_carry_work_lock: Arc<Mutex<()>>,

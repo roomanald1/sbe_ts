@@ -221,6 +221,9 @@ async fn prepare_signal_execution_plan(
     let strategy = signal.strategy.as_deref().and_then(Strategy::from_name);
     let strategy_profile =
         strategy.map(|strategy| strategy_parameter_profile(&settings, &signal.symbol, strategy));
+    if let (Some(strategy), Some(profile)) = (strategy, strategy_profile.as_ref()) {
+        queue_strategy_profile_registration(&mut settings, &signal.symbol, strategy, profile);
+    }
     let is_portfolio_rebalance = strategy == Some(Strategy::RiskAdjustedTrendPortfolio)
         && signal.strategy_decision.as_ref()
         .and_then(|decision| decision.get("portfolio_rebalance_delta_usd"))

@@ -81,18 +81,6 @@ impl SignalStore {
             })?;
             rows.collect::<rusqlite::Result<Vec<_>>>()?
         };
-        let compressed_archives = if (0..=5).contains(&kind) {
-            let since_day = since.map(|timestamp| (timestamp / 86_400_000) as i64 * 86_400_000);
-            let mut statement = connection.prepare(
-                "SELECT training_payload FROM signal_daily_summary WHERE kind = ?1 AND training_payload IS NOT NULL AND (?2 IS NULL OR day_start_ms >= ?2)",
-            )?;
-            statement
-                .query_map(params![kind, since_day], |row| row.get::<_, Vec<u8>>(0))?
-                .collect::<rusqlite::Result<Vec<_>>>()?
-        } else {
-            Vec::new()
-        };
-        drop(connection);
         let mut records = Vec::new();
         for compressed in compressed_records {
             let mut decoder = MultiGzDecoder::new(compressed.as_slice());
@@ -100,16 +88,27 @@ impl SignalStore {
             decoder.read_to_end(&mut payload)?;
             records.push(deserialize_record(kind, &payload)?);
         }
-        for compressed in compressed_archives {
-            let mut decoder = MultiGzDecoder::new(compressed.as_slice());
-            let mut payload = Vec::new();
-            decoder.read_to_end(&mut payload)?;
-            let mut archived: Vec<StoredSignalRecord> = bincode::deserialize(&payload)?;
-            if let Some(timestamp) = since {
-                archived.retain(|record| record_timestamp(record) >= timestamp);
+        if (0..=5).contains(&kind) && limit.is_none_or(|limit| records.len() < limit) {
+            let since_day = since.map(|timestamp| (timestamp / 86_400_000) as i64 * 86_400_000);
+            let mut statement = connection.prepare(
+                "SELECT training_payload FROM signal_daily_summary WHERE kind = ?1 AND training_payload IS NOT NULL AND (?2 IS NULL OR day_start_ms >= ?2) ORDER BY day_start_ms DESC",
+            )?;
+            let mut archives = statement.query(params![kind, since_day])?;
+            loop {
+                let Some(row) = archives.next()? else { break };
+                if limit.is_some_and(|limit| records.len() >= limit) {
+                    break;
+                }
+                let compressed = row.get::<_, Vec<u8>>(0)?;
+                let remaining = limit.map_or(usize::MAX, |limit| limit - records.len());
+                let mut archived = read_archive_tail(&compressed, remaining)?;
+                if let Some(timestamp) = since {
+                    archived.retain(|record| record_timestamp(record) >= timestamp);
+                }
+                records.append(&mut archived);
             }
-            records.extend(archived);
         }
+        drop(connection);
         records.sort_by_key(record_timestamp);
         if let Some(limit) = limit {
             let start = records.len().saturating_sub(limit);
@@ -174,21 +173,15 @@ impl SignalStore {
             let mut statement = connection.prepare(
                 "SELECT training_payload FROM signal_daily_summary WHERE kind = ?1 AND training_payload IS NOT NULL ORDER BY day_start_ms DESC",
             )?;
-            let archives = statement.query_map([kind], |row| row.get::<_, Vec<u8>>(0))?;
-            let archives = archives.collect::<rusqlite::Result<Vec<_>>>()?;
-            drop(statement);
-            for compressed in archives {
+            let mut archives = statement.query([kind])?;
+            while records.len() < limit {
+                let Some(row) = archives.next()? else { break };
+                let compressed = row.get::<_, Vec<u8>>(0)?;
+                let remaining = limit - records.len();
                 if records.len() >= limit {
                     break;
                 }
-                let mut payload = Vec::new();
-                let decoded = MultiGzDecoder::new(compressed.as_slice())
-                    .read_to_end(&mut payload)
-                    .map_err(anyhow::Error::from)
-                    .and_then(|_| {
-                        bincode::deserialize::<Vec<StoredSignalRecord>>(&payload)
-                            .map_err(anyhow::Error::from)
-                    });
+                let decoded = read_archive_tail(&compressed, remaining);
                 match decoded {
                     Ok(mut archived) => records.append(&mut archived),
                     Err(_) if skip_corrupt_rows => continue,
@@ -218,5 +211,77 @@ impl SignalStore {
         let records = Arc::new(records);
         *cache = Some((Instant::now(), Arc::clone(&records)));
         Ok(records)
+    }
+}
+
+/// Read only the newest `limit` records from a daily archive. Archives are
+/// serialized as a bincode Vec in timestamp order; decoding one record at a
+/// time avoids materializing both the full decompressed archive and its full
+/// decoded Vec when a caller only needs a recent window.
+fn read_archive_tail(compressed: &[u8], limit: usize) -> Result<Vec<StoredSignalRecord>> {
+    use std::collections::VecDeque;
+
+    use bincode::Options;
+
+    let decoder = MultiGzDecoder::new(compressed);
+    let mut records = bincode::Deserializer::with_reader(
+        decoder,
+        bincode::DefaultOptions::new().with_fixint_encoding(),
+    );
+    let count: u64 = serde::Deserialize::deserialize(&mut records)?;
+    let mut tail = VecDeque::with_capacity(limit.min(count as usize));
+    for _ in 0..count {
+        let record = StoredSignalRecord::deserialize(&mut records)?;
+        if limit == 0 {
+            continue;
+        }
+        if tail.len() == limit {
+            tail.pop_front();
+        }
+        tail.push_back(record);
+    }
+    Ok(tail.into_iter().collect())
+}
+
+#[cfg(test)]
+mod archive_reader_tests {
+    use super::*;
+
+    #[test]
+    fn archive_reader_keeps_only_the_newest_records() {
+        let records = (0..20)
+            .map(|timestamp| {
+                StoredSignalRecord::ExternalMarket(ExternalMarketFeatures {
+                    underlying: "BTC".to_owned(),
+                    timestamp,
+                    swap_instrument: "BTC-USDT-SWAP".to_owned(),
+                    funding_rate: None,
+                    next_funding_rate: None,
+                    open_interest_contracts: None,
+                    open_interest_currency: None,
+                    open_interest_change_percent: None,
+                    mark_price: None,
+                    index_price: None,
+                    perp_basis_bps: None,
+                    options_atm_iv: None,
+                    options_25d_skew: None,
+                    options_expiry_timestamp: None,
+                })
+            })
+            .collect::<Vec<_>>();
+        let serialized = bincode::serialize(&records).unwrap();
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::fast());
+        encoder.write_all(&serialized).unwrap();
+        let compressed = encoder.finish().unwrap();
+
+        let tail = read_archive_tail(&compressed, 4).unwrap();
+        let timestamps = tail
+            .iter()
+            .map(|record| match record {
+                StoredSignalRecord::ExternalMarket(features) => features.timestamp,
+                _ => unreachable!(),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(timestamps, [16, 17, 18, 19]);
     }
 }

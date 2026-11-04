@@ -10,6 +10,9 @@ export NEWS_SENTIMENT_PYTHON="${NEWS_SENTIMENT_PYTHON:-python3}"
 export PYTHONPATH="$ROOT/src/rust/insights/.news-python-packages${PYTHONPATH:+:$PYTHONPATH}"
 export HF_HOME="${HF_HOME:-$ROOT/src/rust/insights/.news-model-cache}"
 export NEWS_SENTIMENT_URL="${NEWS_SENTIMENT_URL:-http://127.0.0.1:3006/classify}"
+export LEARNING_SERVICE_URL="${LEARNING_SERVICE_URL:-http://127.0.0.1:3010}"
+export SCOUTS_SERVICE_URL="${SCOUTS_SERVICE_URL:-http://127.0.0.1:3011}"
+export LEARNING_STATE_FILE="${LEARNING_STATE_FILE:-$ROOT/src/rust/position_management/learning_state.json}"
 children=()
 cleanup() {
   trap - INT TERM EXIT
@@ -40,6 +43,16 @@ wait_for_service() {
   echo "$name did not become ready on port $port within 60 seconds" >&2
   return 1
 }
+
+cargo run --release --manifest-path src/rust/learning/Cargo.toml --bin learning &
+learning_pid=$!
+children+=("$learning_pid")
+wait_for_service "$learning_pid" 3010 "Learning"
+
+cargo run --release --manifest-path src/rust/scouts/Cargo.toml --bin scouts &
+scouts_pid=$!
+children+=("$scouts_pid")
+wait_for_service "$scouts_pid" 3011 "Scouts"
 
 "$NEWS_SENTIMENT_PYTHON" "$ROOT/src/rust/insights/scripts/classify_news.py" &
 sentiment_pid=$!

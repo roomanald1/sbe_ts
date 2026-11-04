@@ -7,6 +7,9 @@ struct CandidateEntryReview<'a> {
     scout_score_floor: f64,
     scout_minimum_samples: usize,
     scout_minimum_positive_rate: f64,
+    scout_outcome_samples: usize,
+    scout_outcome_positive_rate: Option<f64>,
+    scout_outcome_realized_pnl: f64,
     scout_thresholds_valid: bool,
     evidence: Option<&'a WalkForward>,
     side: Option<&'a SideWalkForwardMetrics>,
@@ -18,7 +21,6 @@ struct CandidateEntryReview<'a> {
     evidence_bad: bool,
     research_bad: bool,
     strict_evidence_bad: bool,
-    scout_negative: bool,
     scout_strength_pass: bool,
     scout_score_pass: bool,
 }
@@ -53,7 +55,9 @@ fn review_candidate_entry<'a>(
     let score_weak = candidate.score.abs() < score_floor;
     let exploration_qualified = !mixed_context
         && candidate.strength.is_finite()
-        && candidate.strength >= MIN_EXPLORATION_STRENGTH * risk_scale
+        && candidate.strength
+            >= adaptive_strength_floor(learning, &context).max(MIN_EXPLORATION_STRENGTH)
+                * risk_scale
         && candidate.score.is_finite()
         && candidate.score.abs() >= score_floor;
     let evidence_missing = !strength_weak
@@ -86,6 +90,9 @@ fn review_candidate_entry<'a>(
     let scout_score_pass = candidate.score.is_finite()
         && candidate.score.abs() >= scout_score_floor;
     let scout_thresholds = scout_walk_forward_thresholds(candidate);
+    let scout_outcomes = context_learning_stats(learning, &format!("scout:{context}"));
+    let scout_outcome_positive_rate = (scout_outcomes.samples > 0)
+        .then_some(scout_outcomes.positive as f64 / scout_outcomes.samples as f64);
     let scout_thresholds_valid = scout_thresholds.is_some();
     let (scout_minimum_samples, _scout_research_minimum_samples, scout_minimum_positive_rate) =
         scout_thresholds.unwrap_or((
@@ -93,10 +100,6 @@ fn review_candidate_entry<'a>(
             MIN_SIDE_WALK_FORWARD_SAMPLES,
             NEGATIVE_EVIDENCE_FLOOR,
         ));
-    let scout_negative = side
-        .is_some_and(|metrics| has_negative_scout_evidence(candidate, metrics, false))
-        || research.is_some_and(|metrics| has_negative_scout_evidence(candidate, metrics, true));
-
     CandidateEntryReview {
         context,
         scout_max_active_positions,
@@ -106,6 +109,9 @@ fn review_candidate_entry<'a>(
         scout_score_floor,
         scout_minimum_samples,
         scout_minimum_positive_rate,
+        scout_outcome_samples: scout_outcomes.samples,
+        scout_outcome_positive_rate,
+        scout_outcome_realized_pnl: scout_outcomes.realized_pnl,
         scout_thresholds_valid,
         evidence,
         side,
@@ -117,7 +123,6 @@ fn review_candidate_entry<'a>(
         evidence_bad,
         research_bad,
         strict_evidence_bad,
-        scout_negative,
         scout_strength_pass,
         scout_score_pass,
     }

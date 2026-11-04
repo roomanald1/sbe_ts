@@ -16,7 +16,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 use tokio::{
-    sync::{Mutex, Notify, watch},
+    sync::{Mutex, Notify, Semaphore, watch},
     time::{Duration, Instant},
 };
 
@@ -64,9 +64,12 @@ struct SignalRuntime {
     news: watch::Receiver<Arc<NewsFeedSnapshot>>,
     news_learning: Mutex<NewsLearning>,
     snapshot_diagnostic_at: DashMap<String, u64>,
+    latest_prices: DashMap<String, (u64, f64)>,
+    scout_shadow_cache: Mutex<Option<(Instant, serde_json::Value)>>,
 }
 
 static POSITION_MANAGEMENT_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+static SHADOW_LEARNING_DELIVERY_LIMIT: OnceLock<Semaphore> = OnceLock::new();
 
 #[derive(Default)]
 struct NewsLearning {
@@ -125,12 +128,9 @@ include!("news_classification.rs");
 include!("external_market_feed.rs");
 include!("dated_carry_signals.rs");
 include!("daily_strategy_signals.rs");
-mod alternative_insights;
-async fn run_alternative_strategy_worker(store: SignalStore) {
-    alternative_insights::run(store).await
-}
-
 include!("signal_feed_workers.rs");
+
+mod scout_shadow_api;
 
 include!("signal_ingestion.rs");
 

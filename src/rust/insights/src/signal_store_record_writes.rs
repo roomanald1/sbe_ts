@@ -1,7 +1,7 @@
 impl SignalStore {
     async fn read_outcomes(&self) -> Result<Vec<SignalOutcome>> {
         Ok(self
-            .read_recent_records(1, 100_000)
+            .read_recent_records(1, WALK_FORWARD_RECORD_LIMIT)
             .await?
             .into_iter()
             .filter_map(|record| match record {
@@ -13,7 +13,7 @@ impl SignalStore {
 
     async fn read_snapshots(&self) -> Result<Vec<SignalSnapshot>> {
         Ok(self
-            .read_recent_records(0, 100_000)
+            .read_recent_records(0, WALK_FORWARD_RECORD_LIMIT)
             .await?
             .into_iter()
             .filter_map(|record| match record {

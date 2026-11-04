@@ -12,6 +12,8 @@ SERVICES = {
     "execution": (os.getenv("EXECUTION_URL", "http://127.0.0.1:3003"), "/health"),
     "insights": (os.getenv("INSIGHTS_URL", "http://127.0.0.1:3004"), "/health"),
     "news_sentiment": (os.getenv("NEWS_SENTIMENT_URL", "http://127.0.0.1:3006"), "/health"),
+    "learning": (os.getenv("LEARNING_SERVICE_URL", "http://127.0.0.1:3010"), "/health"),
+    "scouts": (os.getenv("SCOUTS_SERVICE_URL", "http://127.0.0.1:3011"), "/health"),
 }
 
 
@@ -137,11 +139,24 @@ def metrics():
             for worker, summary in worker_summaries.items():
                 if not isinstance(summary, dict):
                     continue
-                value = summary.get("latest_ms")
-                if isinstance(value, (int, float)):
-                    output.append(sample("app_autotrader_cycle_lock_duration_ms", "Latest milliseconds waiting for or holding the shared AutoTrader cycle lock.", value, {"phase": phase, "worker": worker, "stat": "latest"}))
+                for stat in ("latest", "average", "p95"):
+                    value = summary.get(f"{stat}_ms")
+                    if isinstance(value, (int, float)):
+                        output.append(sample("app_autotrader_cycle_lock_duration_ms", "Milliseconds waiting for or holding the shared AutoTrader cycle lock; summary stats cover recent observations.", value, {"phase": phase, "worker": worker, "stat": stat}))
                 if isinstance(summary.get("samples"), (int, float)):
                     output.append(sample("app_autotrader_cycle_lock_duration_samples", "Recent lock duration observations for an AutoTrader worker.", summary["samples"], {"phase": phase, "worker": worker}))
+        cycle_lock_scopes = activity.get("cycle_lock_scope_ms", {})
+        if not isinstance(cycle_lock_scopes, dict):
+            cycle_lock_scopes = {}
+        for scope, summary in cycle_lock_scopes.items():
+            if not isinstance(summary, dict):
+                continue
+            for stat in ("latest", "average", "p95"):
+                value = summary.get(f"{stat}_ms")
+                if isinstance(value, (int, float)):
+                    output.append(sample("app_autotrader_cycle_lock_scope_duration_ms", "Milliseconds spent in measured sections while holding the AutoTrader cycle lock.", value, {"scope": scope, "stat": stat}))
+            if isinstance(summary.get("samples"), (int, float)):
+                output.append(sample("app_autotrader_cycle_lock_scope_duration_samples", "Recent observations for a measured AutoTrader cycle-lock section.", summary["samples"], {"scope": scope}))
         for key, metric, help_text in [
             ("realized_pnl", "app_autotrader_realized_pnl_usd", "Autotrader cumulative realized P and L in USD."),
             ("unrealized_pnl", "app_autotrader_unrealized_pnl_usd", "Autotrader unrealized P and L in USD."),

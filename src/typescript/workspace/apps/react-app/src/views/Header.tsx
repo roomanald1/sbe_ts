@@ -9,6 +9,17 @@ export function Header(props: { state$: any; error$: any; feedUrl: string }) {
           <span>{props.feedUrl}</span>
         </div>
         <div className="topbar-actions">
+          <a className="grafana-link" href="http://localhost:5173" target="_blank" rel="noreferrer">
+            Web app ↗
+          </a>
+          {[
+            ['Feed', 3001], ['Positions', 3002], ['Execution', 3003],
+            ['Insights', 3004], ['AutoTrader', 3005], ['Learning', 3010], ['Scouts', 3011],
+          ].map(([name, port]) => (
+            <a key={name} className="grafana-link" href={`http://localhost:${port}/docs`} target="_blank" rel="noreferrer">
+              {name} Swagger ↗
+            </a>
+          ))}
           <a
             className="grafana-link"
             href="http://localhost:3000/d/sbe-ts-overview/sbe-ts-system-and-trading"

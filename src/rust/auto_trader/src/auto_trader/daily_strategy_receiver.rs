@@ -107,7 +107,7 @@ async fn receive_daily_strategy_signals(
             "Daily strategy batch has an invalid signal".into(),
         ));
     }
-    let mut active_parameter_profiles = BTreeSet::new();
+    let mut _active_parameter_profiles = BTreeSet::new();
     snapshot.active_strategy_symbols = snapshot.generated_signals.iter().filter_map(|signal| {
         let strategy = signal.strategy.as_deref().and_then(Strategy::from_name)?;
         let parameters = signal_strategy_parameters(signal);
@@ -131,7 +131,7 @@ async fn receive_daily_strategy_signals(
             return None;
         }
         if let Some((key, value)) = probe {
-            active_parameter_profiles.insert((
+            _active_parameter_profiles.insert((
                 strategy.as_str().to_owned(), signal.symbol.clone(), key.to_owned(), format!("{value:.8}"),
             ));
             None
@@ -151,15 +151,59 @@ async fn receive_daily_strategy_signals(
         }
     }
     snapshot.diagnostics = diagnostics.clone();
-    *state.latest_daily_strategy_snapshot.lock().await = Some(snapshot.clone());
+    {
+        let mut latest = state.latest_daily_strategy_snapshot.lock().await;
+        if let Some(previous) = latest.as_ref().filter(|previous| {
+            !snapshot.sweep_id.is_empty() && previous.sweep_id == snapshot.sweep_id
+        }) {
+            snapshot.active_strategy_symbols.extend(previous.active_strategy_symbols.iter().cloned());
+            snapshot.evaluated_strategy_symbols.extend(previous.evaluated_strategy_symbols.iter().cloned());
+        }
+        *latest = Some(snapshot.clone());
+    }
     if let Ok(mut current) = state.strategy_diagnostic.lock() {
-        *current = diagnostics;
+        *current = diagnostics.clone();
     }
     if !state.enabled.load(Ordering::Relaxed) {
         publish_scout_strategy_status(&state, Vec::new(), Vec::new(), Vec::new());
         return Ok(StatusCode::ACCEPTED);
     }
     let mut settings = state.settings.lock().await;
+    for signal in &mut snapshot.generated_signals {
+        inject_learned_parameters(&settings, signal);
+    }
+    let mut active_profiles = BTreeSet::new();
+    snapshot.active_strategy_symbols = snapshot.generated_signals.iter().filter_map(|signal| {
+        let strategy = signal.strategy.as_deref().and_then(Strategy::from_name)?;
+        let parameters = signal_strategy_parameters(signal);
+        let probe = signal.strategy_decision.as_ref().and_then(|decision| Some((
+            decision.get("scout_parameter_key")?.as_str()?,
+            decision.get("scout_parameter_value")?.as_f64()?,
+        )));
+        let entered = if let Some(("rsi_exit_level", value)) = probe {
+            signal.strategy_decision.as_ref().is_some_and(|decision| {
+                decision.get("primary_metric_value").and_then(serde_json::Value::as_f64)
+                    .is_some_and(|rsi| rsi < value)
+                    && decision.get("secondary_passed").and_then(serde_json::Value::as_bool) == Some(true)
+            })
+        } else {
+            matches!(strategy.evaluate(&StrategySignal::entry(signal, &parameters)), Ok(StrategyDecision::Enter))
+        };
+        if !entered { return None; }
+        if let Some((key, value)) = probe {
+            active_profiles.insert((strategy.as_str().to_owned(), signal.symbol.clone(), key.to_owned(), format!("{value:.8}")));
+            None
+        } else {
+            Some((strategy.as_str().to_owned(), signal.symbol.clone()))
+        }
+    }).collect();
+    let active_symbols = snapshot.active_strategy_symbols.clone();
+    for diagnostic in &mut diagnostics {
+        for item in &mut diagnostic.symbols {
+            item.signal_active = active_symbols.contains(&(diagnostic.strategy.clone(), item.symbol.clone()));
+        }
+    }
+    snapshot.diagnostics = diagnostics.clone();
     let enabled_strategies = settings.strategies.iter()
         .filter(|strategy| !strategy.is_dated_carry())
         .map(|strategy| strategy.as_str().to_owned())
@@ -172,13 +216,13 @@ async fn receive_daily_strategy_signals(
         .filter(|(strategy, _)| enabled_strategies.iter().any(|enabled| enabled == strategy))
         .cloned()
         .collect::<Vec<_>>();
-    let active_parameter_profiles = active_parameter_profiles.into_iter()
+    let active_parameter_profiles = active_profiles.into_iter()
         .filter(|(strategy, _, _, _)| enabled_strategies.iter().any(|enabled| enabled == strategy)
             || scout_strategies.iter().any(|scout| scout == strategy))
         .collect::<Vec<_>>();
     let mut by_symbol = BTreeMap::<String, Vec<Signal>>::new();
     let mut cursors_changed = false;
-    for signal in snapshot.generated_signals {
+    for signal in snapshot.generated_signals.iter().cloned() {
         let Some(strategy) = signal.strategy.as_deref().and_then(Strategy::from_name) else {
             continue;
         };
@@ -226,6 +270,17 @@ async fn receive_daily_strategy_signals(
         request_settings_persist(&state)?;
     }
     drop(settings);
+    {
+        let mut latest = state.latest_daily_strategy_snapshot.lock().await;
+        if let Some(previous) = latest.as_ref().filter(|previous| {
+            !snapshot.sweep_id.is_empty() && previous.sweep_id == snapshot.sweep_id
+        }) {
+            snapshot.active_strategy_symbols.extend(previous.active_strategy_symbols.iter().cloned());
+            snapshot.evaluated_strategy_symbols.extend(previous.evaluated_strategy_symbols.iter().cloned());
+        }
+        *latest = Some(snapshot.clone());
+    }
+    if let Ok(mut current) = state.strategy_diagnostic.lock() { *current = diagnostics.clone(); }
     let mut sampled_strategies = enabled_strategies;
     sampled_strategies.extend(scout_strategies);
     sampled_strategies.sort();

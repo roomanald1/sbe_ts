@@ -61,35 +61,36 @@ fn context_learning_stats(
         })
 }
 
+fn entry_context_learning_stats(
+    learning: &BTreeMap<String, LearningStats>,
+    context: &str,
+) -> LearningStats {
+    let mut stats = context_learning_stats(learning, context);
+    // Baseline Scout outcomes are paper evidence for the corresponding live
+    // context. Keep them out of Scout qualification so sampling remains open.
+    let scout = context_learning_stats(learning, &format!("scout:{context}"));
+    stats.samples += scout.samples;
+    stats.positive += scout.positive;
+    stats.realized_pnl += scout.realized_pnl;
+    stats
+}
+
 fn smoothed_win_rate(stats: &LearningStats) -> f64 {
     // A light Beta(1, 1) prior prevents tiny cohorts from moving gates sharply.
     (stats.positive as f64 + 1.0) / (stats.samples as f64 + 2.0)
 }
 
 fn adaptive_scout_thresholds(
-    learning: &BTreeMap<String, LearningStats>,
-    context: &str,
+    _learning: &BTreeMap<String, LearningStats>,
+    _context: &str,
     active_scout_count: usize,
     scout_max_active_positions: usize,
 ) -> (f64, f64) {
-    let stats = context_learning_stats(learning, &format!("scout:{context}"));
-    let win_rate = smoothed_win_rate(&stats);
-    let losing_cohort = stats.realized_pnl < 0.0;
     let density = active_scout_count.min(scout_max_active_positions) as f64;
-    let mut strength =
+    let strength =
         (SCOUT_MIN_STRENGTH - 0.15 + density * 0.025).clamp(SCOUT_MIN_STRENGTH_FLOOR, 0.25);
-    let mut score =
+    let score =
         (SCOUT_MIN_ABS_SCORE - 0.15 + density * 0.05).clamp(SCOUT_MIN_SCORE_FLOOR, 0.40);
-    if stats.samples >= LEARNED_STRENGTH_ADJUSTMENT_SAMPLES {
-        if losing_cohort && win_rate < LEARNED_STRENGTH_ADJUSTMENT_WIN_RATE {
-            let adjustment = if stats.samples >= 20 { 2.0 } else { 1.0 };
-            strength = (strength + 0.05 * adjustment).min(0.30);
-            score = (score + 0.10 * adjustment).min(0.50);
-        } else if stats.realized_pnl > 0.0 && win_rate >= 0.60 {
-            strength = (strength - 0.02).max(SCOUT_MIN_STRENGTH_FLOOR);
-            score = (score - 0.03).max(SCOUT_MIN_SCORE_FLOOR);
-        }
-    }
     (strength, score)
 }
 
@@ -102,7 +103,7 @@ fn risk_size_scale(risk_appetite: f64) -> f64 {
 }
 
 fn adaptive_strength_floor(learning: &BTreeMap<String, LearningStats>, context: &str) -> f64 {
-    let stats = context_learning_stats(learning, context);
+    let stats = entry_context_learning_stats(learning, context);
     let win_rate = smoothed_win_rate(&stats);
     let losing_cohort = stats.realized_pnl < 0.0;
     if stats.samples >= STRONG_NEGATIVE_LEARNING_SAMPLES
@@ -130,7 +131,7 @@ fn adaptive_exploration_score_floor(
     context: &str,
     missed_opportunity_bands: &[MissedOpportunityGateBand],
 ) -> f64 {
-    let stats = context_learning_stats(learning, context);
+    let stats = entry_context_learning_stats(learning, context);
     let win_rate = smoothed_win_rate(&stats);
     let losing_cohort = stats.realized_pnl < 0.0;
     let learned_floor = if stats.samples >= STRONG_NEGATIVE_LEARNING_SAMPLES
@@ -203,4 +204,48 @@ fn adaptive_exploration_score_floor(
 
 fn is_mixed_market_context(context: &str) -> bool {
     context.split(':').nth(1) == Some("mixed")
+}
+
+#[cfg(test)]
+mod scout_floor_tests {
+    use super::*;
+
+    #[test]
+    fn exploration_does_not_remove_minimum_strength_and_score_floors() {
+        let (strength, score) = adaptive_scout_thresholds(
+            &BTreeMap::new(),
+            "long:range:XRP-USDC:live-momentum",
+            0,
+            DEFAULT_SCOUT_MAX_ACTIVE_POSITIONS,
+        );
+        assert!(strength >= SCOUT_MIN_STRENGTH_FLOOR);
+        assert!(score >= SCOUT_MIN_SCORE_FLOOR);
+        assert_eq!(strength, 0.0);
+        assert_eq!(score, SCOUT_MIN_ABS_SCORE - 0.15);
+    }
+
+    #[test]
+    fn losing_scout_outcomes_raise_actual_entry_strength_floor() {
+        let context = "long:range:XRP-USDC:live-momentum";
+        let mut learning = BTreeMap::new();
+        learning.insert(
+            format!("scout:{context}:trade"),
+            LearningStats {
+                samples: 30,
+                positive: 2,
+                realized_pnl: -0.5,
+                ..LearningStats::default()
+            },
+        );
+
+        assert!(adaptive_strength_floor(&learning, context) > MIN_STRENGTH);
+        assert!(adaptive_exploration_score_floor(&learning, context, &[]) > MIN_EXPLORATION_SCORE);
+        let (scout_strength, _) = adaptive_scout_thresholds(
+            &learning,
+            context,
+            0,
+            DEFAULT_SCOUT_MAX_ACTIVE_POSITIONS,
+        );
+        assert_eq!(scout_strength, 0.0);
+    }
 }

@@ -226,12 +226,14 @@ pub fn router() -> Router {
         insight_processing_ms: Arc::new(Mutex::new(Vec::new())),
         cycle_lock_wait_ms: Arc::new(Mutex::new(BTreeMap::new())),
         cycle_lock_hold_ms: Arc::new(std::sync::Mutex::new(BTreeMap::new())),
+        cycle_lock_scope_ms: Arc::new(std::sync::Mutex::new(BTreeMap::new())),
         settings_path,
         dated_carry: Arc::new(Mutex::new(carry_book)),
         dated_carry_work_lock: Arc::new(Mutex::new(())),
         dated_carry_path: carry_path,
     };
     start_settings_persistence_worker(&state);
+    start_learning_feedback_worker(&state);
     let shadow_replay_state = state.clone();
     tokio::spawn(async move {
         for attempt in 0..12 {
@@ -372,7 +374,6 @@ pub fn router() -> Router {
             }
         }
     });
-    let alternatives = alternative_strategies::router(&state);
     Router::new()
         .route("/positions/auto-trader/stream", get(auto_trader_stream))
         .route("/positions/auto-trader", get(get_status).put(set_enabled))
@@ -405,8 +406,126 @@ pub fn router() -> Router {
             axum::routing::put(update_settings),
         )
         .route("/positions/auto-trader/activity", get(get_activity))
+        .route("/positions/auto-trader/learning-summary", get(get_learning_summary))
         .with_state(state)
-        .merge(alternatives)
+}
+
+async fn get_learning_summary() -> Result<axum::Json<serde_json::Value>, (axum::http::StatusCode, String)> {
+    let base = std::env::var("LEARNING_SERVICE_URL").map_err(|_| (axum::http::StatusCode::SERVICE_UNAVAILABLE, "Learning service is not configured".into()))?;
+    let response = reqwest::Client::new().get(format!("{}/summary", base.trim_end_matches('/'))).timeout(Duration::from_secs(3)).send().await
+        .map_err(|error| (axum::http::StatusCode::BAD_GATEWAY, error.to_string()))?
+        .error_for_status().map_err(|error| (axum::http::StatusCode::BAD_GATEWAY, error.to_string()))?;
+    let value = response.json().await.map_err(|error| (axum::http::StatusCode::BAD_GATEWAY, error.to_string()))?;
+    Ok(axum::Json(value))
+}
+
+fn feedback_event_id(event: &FeedbackEvent) -> &str {
+    match event {
+        FeedbackEvent::ScoutOutcome { event_id, .. }
+        | FeedbackEvent::TradeOutcome { event_id, .. } => event_id,
+    }
+}
+
+fn scout_feedback_parameter_keys(
+    strategy: Strategy,
+    parameter_key: Option<&str>,
+) -> BTreeSet<String> {
+    match parameter_key {
+        Some(key) if key.starts_with("combo:") => parse_scout_combination(key, strategy)
+            .map(|parameters| parameters.into_keys().collect())
+            .unwrap_or_default(),
+        Some(key)
+            if all_strategy_parameter_specs(strategy)
+                .iter()
+                .any(|spec| spec.key.as_str() == key) =>
+        {
+            BTreeSet::from([key.to_owned()])
+        }
+        _ => BTreeSet::new(),
+    }
+}
+
+fn start_learning_feedback_worker(state: &AutoTraderState) {
+    let learning_url = std::env::var("LEARNING_SERVICE_URL").ok();
+    let scouts_url = std::env::var("SCOUTS_SERVICE_URL").ok();
+    if learning_url.is_none() && scouts_url.is_none() { return; }
+    let profile_learning_url = learning_url.clone();
+
+    let publisher_state = state.clone();
+    tokio::spawn(async move {
+        let mut ticker = interval(Duration::from_millis(500));
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            ticker.tick().await;
+            let registration = publisher_state.settings.lock().await.profile_registration_outbox.first().cloned();
+            if let Some(registration) = registration {
+                let Some(base) = learning_url.as_deref() else { continue };
+                let response = publisher_state.client.post(format!("{}/profiles", base.trim_end_matches('/')))
+                    .timeout(Duration::from_secs(3)).json(&registration).send().await;
+                if response.is_ok_and(|response| response.status().is_success()) {
+                    let profile_id = registration.profile.profile_id;
+                    let mut settings = publisher_state.settings.lock().await;
+                    settings.profile_registration_outbox.retain(|pending| pending.profile.profile_id != profile_id);
+                    settings.registered_profile_ids.insert(profile_id);
+                    drop(settings);
+                    if let Err(error) = request_settings_persist(&publisher_state) {
+                        crate::service_log!("WARN", "Could not persist profile-registration acknowledgement: {}", error.1);
+                    }
+                }
+                continue;
+            }
+            let event = publisher_state.settings.lock().await.feedback_outbox.first().cloned();
+            let Some(event) = event else { continue };
+            let (base, path) = match &event {
+                FeedbackEvent::ScoutOutcome { .. } => (scouts_url.as_deref(), "/outcomes"),
+                FeedbackEvent::TradeOutcome { .. } => (learning_url.as_deref(), "/feedback"),
+            };
+            let Some(base) = base else { continue };
+            let response = publisher_state.client.post(format!("{}{path}", base.trim_end_matches('/')))
+                .timeout(Duration::from_secs(3)).json(&event).send().await;
+            if response.is_ok_and(|response| response.status().is_success()) {
+                let event_id = feedback_event_id(&event).to_owned();
+                let mut settings = publisher_state.settings.lock().await;
+                settings.feedback_outbox.retain(|pending| feedback_event_id(pending) != event_id);
+                drop(settings);
+                if let Err(error) = request_settings_persist(&publisher_state) {
+                    crate::service_log!("WARN", "Could not persist Scout/trade feedback acknowledgement: {}", error.1);
+                }
+            }
+        }
+    });
+
+    if let Some(base) = profile_learning_url {
+        let profile_state = state.clone();
+        let client = state.client.clone();
+        tokio::spawn(async move {
+            let mut ticker = interval(Duration::from_secs(3));
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                ticker.tick().await;
+                let Ok(response) = client.get(format!("{}/profiles", base.trim_end_matches('/')))
+                    .timeout(Duration::from_secs(3)).send().await else { continue };
+                let Ok(response) = response.error_for_status() else { continue };
+                let Ok(profiles) = response.json::<Vec<strategy_core::StrategyProfile>>().await else { continue };
+                let mut settings = profile_state.settings.lock().await;
+                let mut changed = false;
+                for profile in profiles {
+                    let key = format!("{}:{}", profile.symbol, profile.strategy);
+                    settings.registered_profile_ids.insert(profile.profile_id.clone());
+                    if settings.learned_profiles.get(&key).is_none_or(|previous| profile.version > previous.version) {
+                        settings.learned_profiles.insert(key, profile);
+                        changed = true;
+                    }
+                }
+                drop(settings);
+                if changed {
+                    if let Err(error) = request_settings_persist(&profile_state) {
+                        crate::service_log!("WARN", "Could not persist learned profile snapshot: {}", error.1);
+                    }
+                }
+            }
+        });
+    }
 }
 
 async fn receive_shadow_learning_outcome(
@@ -418,6 +537,7 @@ async fn receive_shadow_learning_outcome(
         || !outcome.learning_context.starts_with("scout:")
         || !outcome.simulated_net_pnl_usd.is_finite()
         || outcome.symbol.is_empty()
+        || outcome.strategy_parameters.values().any(|value| !value.is_finite())
         || !matches!(outcome.exit_scenario.as_str(), "strategy" | "tight" | "wide")
         || outcome.scout_parameter_key.is_some() != outcome.scout_parameter_value.is_some()
         || outcome.scout_comparison_id.is_some() != outcome.scout_comparison_role.is_some()
@@ -507,6 +627,51 @@ async fn receive_shadow_learning_outcome(
         queue_auto_trader_audit(&state, outcome_audit);
         return Ok(StatusCode::NO_CONTENT);
     }
+    // Every parameter variant's standard strategy-exit outcome contributes to
+    // live-entry context learning. Tight/wide exits are counterfactual exit
+    // policies for that same sample, so they do not triple-count entry evidence.
+    if outcome.exit_scenario == "strategy"
+        && outcome.scout_comparison_role.as_deref() != Some("baseline")
+        && let Some(key) = scout_context_learning_key(&outcome.learning_context)
+    {
+        record_learning_outcome(
+            settings.learning.entry(key).or_default(),
+            outcome.simulated_net_pnl_usd,
+        );
+    }
+    let profile_symbol = outcome.scout_parameter_profile_symbol.as_deref().unwrap_or(&outcome.symbol);
+    let mut strategy_parameters = outcome.strategy_parameters;
+    if let (Some(key), Some(value)) = (outcome.scout_parameter_key.as_ref(), outcome.scout_parameter_value) {
+        if !key.starts_with("combo:") {
+            strategy_parameters.insert(key.clone(), value);
+        }
+    }
+    let profile_id = strategy_core::profile_id(profile_symbol, &outcome.strategy, &strategy_parameters);
+    let tested_parameter_keys = scout_feedback_parameter_keys(
+        strategy,
+        outcome.scout_parameter_key.as_deref(),
+    );
+    let parameter_specs = strategy.parameter_specs().into_iter().map(|spec| strategy_core::ParameterSpec {
+        key: spec.key.as_str().to_owned(), label: spec.label.to_owned(), default: spec.default,
+        min: spec.min, max: spec.max, step: spec.step, unit: spec.unit.to_owned(),
+        learning_direction: spec.learning_direction,
+    }).filter(|spec| tested_parameter_keys.contains(&spec.key) && strategy_parameters.contains_key(&spec.key)).collect::<Vec<_>>();
+    let scout_event_id = format!("scout:{}:{}", outcome.decision_id, outcome.exit_scenario);
+    let scout_event = FeedbackEvent::ScoutOutcome {
+        event_id: scout_event_id.clone(),
+        observed_at_ms: outcome.evaluated_timestamp_ms,
+        symbol: profile_symbol.to_owned(),
+        strategy: strategy.as_str().to_owned(),
+        profile_id,
+        parameters: strategy_parameters,
+        specs: parameter_specs,
+        net_return_percent: outcome.net_return_percent,
+    };
+    if !settings.feedback_outbox.iter().any(|event| matches!(event,
+        FeedbackEvent::ScoutOutcome { event_id, .. } if event_id == &scout_event_id
+    )) {
+        settings.feedback_outbox.push(scout_event);
+    }
     let mut paired_delta_percent = None;
     if let (Some(comparison_id), Some(role)) = (
         outcome.scout_comparison_id.as_deref(), outcome.scout_comparison_role.as_deref(),
@@ -526,14 +691,6 @@ async fn receive_shadow_learning_outcome(
         {
             let delta = variant - baseline;
             paired_delta_percent = Some(delta);
-            if !pair.learning_key.is_empty() {
-                let paired_key = if pair.learning_key.starts_with("probe_combo:") {
-                    pair.learning_key.replacen("probe_combo:", "paired_probe_combo:", 1)
-                } else {
-                    pair.learning_key.replacen("probe:", "paired_probe:", 1)
-                };
-                record_learning_outcome(settings.learning.entry(paired_key).or_default(), delta);
-            }
             settings.scout_comparisons.remove(comparison_id);
         }
         settings.scout_comparisons.retain(|_, pair| {
@@ -544,35 +701,20 @@ async fn receive_shadow_learning_outcome(
                 .min_by_key(|(_, pair)| pair.updated_at_ms).map(|(key, _)| key.clone()) else { break; };
             settings.scout_comparisons.remove(&oldest);
         }
-    } else if let Some(probe_key) = probe_key {
-        record_learning_outcome(settings.learning.entry(probe_key).or_default(), outcome.simulated_net_pnl_usd);
-    } else {
-        let stats = settings.learning.entry(outcome.learning_context).or_default();
-        record_learning_outcome(stats, outcome.simulated_net_pnl_usd);
     }
     if let Some(delta) = paired_delta_percent {
         outcome_audit["paired_delta_percent"] = serde_json::json!(delta);
     }
     // Every scout exit also contributes to the strategy-level profile, including
     // parameter-probe samples, so shadow results can ease sparse trade learning.
-    let contributes_to_base_profile = outcome.scout_comparison_id.is_none();
-    let strategy_profile_symbol = outcome.scout_parameter_profile_symbol.as_deref().unwrap_or(&outcome.symbol);
-    let strategy_key = strategy_shadow_learning_key(
-        strategy_profile_symbol,
-        strategy.as_str(),
-        &outcome.exit_scenario,
-    );
-    if contributes_to_base_profile {
-        record_learning_outcome(
-            settings.learning.entry(strategy_key).or_default(),
-            outcome.simulated_net_pnl_usd,
-        );
-    }
     if !outcome.sample_group_id.is_empty() {
         let group_finished = settings.shadow_sample_active_scenarios
             .get_mut(&outcome.sample_group_id)
             .is_some_and(|scenarios| {
-                scenarios.remove(&outcome.exit_scenario);
+                let token = format!("{}|{}", outcome.decision_id, outcome.exit_scenario);
+                if !scenarios.remove(&token) {
+                    scenarios.remove(&outcome.exit_scenario);
+                }
                 scenarios.is_empty()
             });
         if group_finished {
@@ -588,6 +730,7 @@ async fn receive_shadow_learning_outcome(
     }
     drop(settings);
     request_settings_persist(&state)?;
+    state.settings_persist_notify.notify_one();
     crate::service_log!("INFO", "Scout learning outcome recorded: sample_id={} symbol={} strategy={} scenario={} net_return_percent={} simulated_pnl_usd={}", outcome.decision_id, outcome.symbol, outcome.strategy, outcome.exit_scenario, outcome.net_return_percent, outcome.simulated_net_pnl_usd);
     queue_auto_trader_audit(&state, outcome_audit);
     Ok(StatusCode::NO_CONTENT)
@@ -824,5 +967,31 @@ mod closed_trade_metrics_migration_tests {
         assert_eq!(settings.daily_realized_pnl, -11.15);
         migrate_closed_trade_metrics(&mut settings);
         assert_eq!(settings.closed_trade_metrics_version, 3);
+    }
+
+    #[test]
+    fn scout_parameter_feedback_targets_only_the_tested_parameter_values() {
+        let strategy = Strategy::from_name("live-momentum").unwrap();
+        let specs = all_strategy_parameter_specs(strategy);
+        let tested = specs[0].key.as_str();
+        assert_eq!(
+            scout_feedback_parameter_keys(strategy, Some(tested)),
+            BTreeSet::from([tested.to_owned()])
+        );
+        assert!(scout_feedback_parameter_keys(strategy, None).is_empty());
+
+        let full_profile = specs
+            .iter()
+            .map(|spec| (spec.key.as_str().to_owned(), spec.default))
+            .collect::<BTreeMap<_, _>>();
+        let combination = BTreeMap::from([
+            (specs[0].key.as_str().to_owned(), specs[0].default),
+            (specs[1].key.as_str().to_owned(), specs[1].default),
+        ]);
+        let key = scouts::combination_key(&combination, &full_profile).unwrap();
+        assert_eq!(
+            scout_feedback_parameter_keys(strategy, Some(&key)),
+            combination.keys().cloned().collect()
+        );
     }
 }

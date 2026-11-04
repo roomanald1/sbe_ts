@@ -111,7 +111,7 @@ export const WIDGET_LABELS: Record<DashboardWidgetType, string> = {
   'auto-trader-diagnostics': 'Auto Trader diagnostics',
   'auto-trader-learning': 'Strategy learning impact',
   'auto-trader-outcomes': 'AutoTrader outcomes',
-  'auto-trader-completed-positions': 'AutoTrader closed & partial positions',
+  'auto-trader-completed-positions': 'AutoTrader closed positions',
   'auto-trader-live-positions': 'AutoTrader live positions',
   'auto-trader-shadow-positions': 'AutoTrader shadow positions',
   'execution-fees': 'Execution fees',

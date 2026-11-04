@@ -69,11 +69,14 @@ mod candidate_evidence_format_tests {
             scout_strength_floor: 0.0, scout_score_floor: 0.0,
             scout_minimum_samples: MIN_EXPLORATION_EVIDENCE_SAMPLES,
             scout_minimum_positive_rate: NEGATIVE_EVIDENCE_FLOOR,
+            scout_outcome_samples: 0,
+            scout_outcome_positive_rate: None,
+            scout_outcome_realized_pnl: 0.0,
             scout_thresholds_valid: true,
             evidence: Some(&evidence), side: Some(&side), research: Some(&research),
             strength_weak: false, score_weak: false, mixed_context: false,
             evidence_missing: false, evidence_bad: false, research_bad: false,
-            strict_evidence_bad: false, scout_negative: false,
+            strict_evidence_bad: false,
             scout_strength_pass: true, scout_score_pass: true,
         };
         let (walk_forward, research_text) = format_candidate_evidence(&review);

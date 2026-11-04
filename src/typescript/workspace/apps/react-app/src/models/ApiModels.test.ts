@@ -1,7 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { AccountModel } from './AccountModel';
-import { AlternativeStrategiesModel } from './AlternativeStrategiesModel';
 import { DatedCarryModel } from './DatedCarryModel';
 import { ExecutionFeesModel } from './ExecutionFeesModel';
 import { FillsModel } from './FillsModel';
@@ -36,38 +35,6 @@ describe('AccountModel API behavior', () => {
     assert.equal(model.state$.value.submitting, false);
     assert.equal(model.state$.value.error, 'leverage rejected');
   }));
-});
-
-describe('AlternativeStrategiesModel API behavior', () => {
-  it('loads a snapshot and derives rows, events, positions, and feed freshness', async () => {
-    const now = Date.now();
-    const sleeve = { id: 'residual-momentum', config: { enabled: true, max_trade_usd: 100, daily_loss_limit_usd: 50, spot_fee_bps: 5, short_borrow_apr: 0, min_edge_bps: 2 }, initial_capital_usd: 100, cash_usd: 100, equity_usd: 100, max_drawdown_percent: 0, realized_pnl_usd: 0, fees_usd: 0, last_observation_ms: now, status: 'ready', positions: { BTC: { kind: 'spot', quantity: 1 } }, events: [{ timestamp_ms: now, observation_id: 'e1', action: 'hold', detail: 'ok', cash_usd: 100, equity_usd: 100 }], feed: { ready: true, signal: 'positive', source_timestamp_ms: now, computed_at_ms: now, summary: 'fresh', features: {} } };
-    await withFetch(async () => jsonResponse({ mode: 'paper', auto_trader_enabled: true, book: { sleeves: { [sleeve.id]: sleeve } } }), async () => {
-      const model = new AlternativeStrategiesModel();
-      model.start();
-      await new Promise<void>((resolve) => setImmediate(resolve));
-      assert.equal(model.state$.value.loading, false);
-      assert.equal(model.feedReady(sleeve.id), true);
-      assert.equal(model.rows()[0].open_positions, 1);
-      assert.equal(model.events()[0].key, sleeve.id + ':e1:0');
-      assert.equal(model.positions()[0].instrument, 'BTC');
-      model.stop();
-    });
-  });
-
-  it('rejects an invalid draft without sending a save request', async () => {
-    let requests = 0;
-    await withFetch(async () => { requests++; return jsonResponse({ mode: 'paper', auto_trader_enabled: false, book: { sleeves: {} } }); }, async () => {
-      const model = new AlternativeStrategiesModel();
-      model.start();
-      await new Promise<void>((resolve) => setImmediate(resolve));
-      model.state$.next({ ...model.state$.value, drafts: { x: { enabled: true, max_trade_usd: 0, daily_loss_limit_usd: 1, spot_fee_bps: 0, short_borrow_apr: 0, min_edge_bps: 0 } } });
-      await model.save('x');
-      assert.equal(requests, 1);
-      assert.match(model.state$.value.error ?? '', /Check the paper size/);
-      model.stop();
-    });
-  });
 });
 
 describe('ExecutionFeesModel API behavior', () => {

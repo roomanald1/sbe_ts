@@ -16,6 +16,7 @@ export type AutoTraderOutcome = {
   carryDetails?: DatedCarryPosition;
   entryOrderType?: string;
   entryOrderTypes?: string[];
+  entryOrderExpiresAt?: number;
   scout: boolean; source: 'scout' | 'exploratory' | 'strict' | 'paper-carry' | 'unknown'; components: Record<string, number | null>;
 };
 
@@ -28,9 +29,10 @@ type LedgerRealizedResponse = { realized_pnl_by_parent_order?: Record<string, nu
 type UsdRatesResponse = { rates?: Record<string, number> };
 type LedgerHistoryCache = { dayStart?: number; trades?: PositionTrade[]; recentTrades?: PositionTrade[]; todayTradeOffset?: number; todayLoadedOffset?: number; olderTradeOffset?: number; olderHistoryExhausted?: boolean };
 type StrategyLearning = { strategy: string; learning_multiplier: number; learning_samples: number; positive_rate?: number | null; realized_pnl?: number };
+export type LearningSummary = { strategy: string; learning_samples: number; positive_rate?: number; average_net_return_percent?: number };
 type StrategySymbolDiagnostic = { symbol: string; close: number; trend_return_windows?: Array<{ days: number; reference_close: number; return_percent: number }>; eligible: boolean; primary_rule: string; primary_level: number; primary_distance_percent: number; primary_metric_value?: number | null; primary_metric_unit?: string | null; primary_passed: boolean; secondary_rule?: string | null; secondary_level?: number | null; secondary_distance_percent?: number | null; secondary_passed?: boolean | null; evaluated?: boolean; signal_active: boolean; leader_gap_percent?: number | null; relative_strength_gap_pp?: number | null; rsi_exit_level?: number | null; maximum_hold_days?: number | null };
 type StrategyDiagnostic = { strategy: string; as_of_ms: number; btc_close?: number | null; btc_sma?: number | null; btc_distance_percent: number | null; btc_window_days: number | null; btc_gate_required: boolean; btc_gate_passed: boolean | null; symbols: StrategySymbolDiagnostic[] };
-type StrategyOrder = { timestamp: number; symbol: string; side: string; execution_order_id?: string; purpose?: string; strategy?: string; decision_id?: string; filled_quantity: number; average_price?: number | null; status?: string; failure_reason?: string | null; order_type?: string };
+type StrategyOrder = { timestamp: number; symbol: string; side: string; execution_order_id?: string; purpose?: string; strategy?: string; decision_id?: string; filled_quantity: number; quantity?: number; average_price?: number | null; status?: string; failure_reason?: string | null; order_type?: string; expires_at?: number | null };
 
 export function resolveLedgerOrder(trade: PositionTrade, orderByLedgerId: Map<string, StrategyOrder>, orders: StrategyOrder[]): StrategyOrder | undefined {
   let order = trade.parent_order_id ? orderByLedgerId.get(trade.parent_order_id) : undefined;
@@ -71,7 +73,7 @@ type DatedCarryDiagnostics = {
 type TradeAudit = { entry?: AuditRecord; exits: AuditRecord[] };
 const quoteCurrency = (symbol: string) => symbol.includes('-') ? symbol.slice(symbol.lastIndexOf('-') + 1) : 'Unknown';
 export class AutoTraderOutcomesModel {
-  readonly state$ = new BehaviorSubject<{ rows: AutoTraderOutcome[]; closedLedgerRows: AutoTraderOutcome[]; strategyLearning: Record<string, StrategyLearning>; autoTraderEnabled: boolean; autoTraderStatusAvailable: boolean; enabledStrategies: string[]; strategyDiagnostics: StrategyDiagnostic[]; strategyOrders: StrategyOrder[]; strictEntryGates: Record<string, StrictEntryGateSummary>; strictBaseStrengthFloor?: number; todayStrategyRealizedUsd?: Record<string, number | null>; datedCarryDiagnostics?: DatedCarryDiagnostics; openStrategyPositions: Array<{ symbol: string; strategy?: string }>; loading: boolean; error?: string; confirmingCloseSymbols: Set<string>; closingSymbols: Set<string>; auditCursor?: number | null; loadingOlderAudit: boolean; hasOlderLedgerTrades: boolean; loadingOlderLedgerTrades: boolean }>({ rows: [], closedLedgerRows: [], strategyLearning: {}, autoTraderEnabled: false, autoTraderStatusAvailable: false, enabledStrategies: [], strategyDiagnostics: [], strategyOrders: [], strictEntryGates: {}, strictBaseStrengthFloor: undefined, todayStrategyRealizedUsd: undefined, datedCarryDiagnostics: undefined, openStrategyPositions: [], loading: true, confirmingCloseSymbols: new Set(), closingSymbols: new Set(), auditCursor: null, loadingOlderAudit: false, hasOlderLedgerTrades: false, loadingOlderLedgerTrades: false });
+  readonly state$ = new BehaviorSubject<{ rows: AutoTraderOutcome[]; closedLedgerRows: AutoTraderOutcome[]; learningSummary: Record<string, LearningSummary>; strategyLearning: Record<string, StrategyLearning>; autoTraderEnabled: boolean; autoTraderStatusAvailable: boolean; enabledStrategies: string[]; strategyDiagnostics: StrategyDiagnostic[]; strategyOrders: StrategyOrder[]; strictEntryGates: Record<string, StrictEntryGateSummary>; strictBaseStrengthFloor?: number; todayStrategyRealizedUsd?: Record<string, number | null>; datedCarryDiagnostics?: DatedCarryDiagnostics; openStrategyPositions: Array<{ symbol: string; strategy?: string }>; loading: boolean; error?: string; confirmingCloseSymbols: Set<string>; closingSymbols: Set<string>; auditCursor?: number | null; loadingOlderAudit: boolean; hasOlderLedgerTrades: boolean; loadingOlderLedgerTrades: boolean }>({ rows: [], closedLedgerRows: [], learningSummary: {}, strategyLearning: {}, autoTraderEnabled: false, autoTraderStatusAvailable: false, enabledStrategies: [], strategyDiagnostics: [], strategyOrders: [], strictEntryGates: {}, strictBaseStrengthFloor: undefined, todayStrategyRealizedUsd: undefined, datedCarryDiagnostics: undefined, openStrategyPositions: [], loading: true, confirmingCloseSymbols: new Set(), closingSymbols: new Set(), auditCursor: null, loadingOlderAudit: false, hasOlderLedgerTrades: false, loadingOlderLedgerTrades: false });
   private timer?: ReturnType<typeof setInterval>;
   private stopPositionStream?: () => void;
   private stopAutoTraderStream?: () => void;
@@ -175,10 +177,11 @@ export class AutoTraderOutcomesModel {
       this.ledgerDayStart = todayStart;
       if (!this.historyCacheLoaded) { this.restoreLedgerHistory(todayStart); this.historyCacheLoaded = true; }
       const refreshRecentTrades = !this.recentLedgerLoaded || Date.now() - this.recentLedgerLoadedAt >= 30_000;
-      const [auditResponse, activityResponse, learningResponse, datedCarryResponse, positionsResponse, tradesResponse, gateAuditResponse, parametersResponse, ledgerRealizedResponse, todayLedgerRealizedResponse, usdRatesResponse] = await Promise.all([
+      const [auditResponse, activityResponse, learningResponse, learningSummaryResponse, datedCarryResponse, positionsResponse, tradesResponse, gateAuditResponse, parametersResponse, ledgerRealizedResponse, todayLedgerRealizedResponse, usdRatesResponse] = await Promise.all([
         autoSnapshot ? Promise.resolve(undefined) : fetch('/signals/auto-trader-execution-audit?limit=500'),
         autoSnapshot ? Promise.resolve(undefined) : fetch('/positions/auto-trader/activity'),
         autoSnapshot ? Promise.resolve(undefined) : fetch('/positions/auto-trader'),
+        fetch('/positions/auto-trader/learning-summary').catch(() => undefined),
         autoSnapshot ? Promise.resolve(undefined) : fetch('/positions/auto-trader/dated-carry'),
         streamSnapshot ? Promise.resolve(undefined) : fetch('/positions?source=auto'),
         refreshRecentTrades ? fetch('/positions/trades?source=auto&since_ms=' + todayStart + '&limit=500') : Promise.resolve(undefined),
@@ -226,6 +229,7 @@ export class AutoTraderOutcomesModel {
         ? streamSnapshot!.usd_rates!
         : (usdRatesResponse?.ok ? await usdRatesResponse.json() as UsdRatesResponse : {});
       const learningData = autoSnapshot?.status as AutoTraderLearningResponse ?? (learningResponse?.ok ? await learningResponse.json() as AutoTraderLearningResponse : {});
+      const learningSummary = learningSummaryResponse?.ok ? Object.fromEntries((await learningSummaryResponse.json() as LearningSummary[]).map((row) => [row.strategy, row])) : this.state$.value.learningSummary;
       const parametersData = autoSnapshot?.parameters as DecisionParametersResponse ?? (parametersResponse?.ok ? await parametersResponse.json() as DecisionParametersResponse : {});
       const strictBaseStrengthFloor = parametersData.thresholds?.find((parameter) => parameter.section === 'Signal qualification' && parameter.name === 'Base strict strength floor')?.value;
       const strictEntryGates: Record<string, StrictEntryGateSummary> = {};
@@ -301,7 +305,7 @@ export class AutoTraderOutcomesModel {
       for (const record of this.auditRows) {
         if (!record.decision_id) continue;
         const trade = trades.get(record.decision_id) ?? { exits: [] };
-        if (record.stage === 'entry') trade.entry = record;
+        if ((record.stage === 'entry' || record.stage === 'entry_fill') && (!trade.entry || (record.timestamp ?? 0) >= (trade.entry.timestamp ?? 0))) trade.entry = record;
         else if (record.stage?.startsWith('exit')) trade.exits.push(record);
         trades.set(record.decision_id, trade);
       }
@@ -537,6 +541,12 @@ export class AutoTraderOutcomesModel {
         const entryOrder = position.decision_id
           ? (activityData.orders ?? []).find((order) => order.decision_id === position.decision_id)
           : latestFilledOrder;
+        const pendingEntryOrder = position.decision_id ? (activityData.orders ?? []).find((order) => order.decision_id === position.decision_id
+          && order.symbol === position.symbol
+          && (order.purpose === 'signal' || order.purpose === 'scout')
+          && order.expires_at != null
+          && ['submitting', 'accepted', 'resting', 'partially_filled'].includes(order.status ?? '')
+          && (order.quantity === undefined || order.filled_quantity < order.quantity)) : undefined;
         const isScout = entryOrder?.purpose === 'scout' || latestFilledOrder?.purpose === 'scout' || entry?.scout === true;
         const decisionId = position.decision_id ?? latestFilledOrder?.decision_id ?? 'ledger:' + symbol + ':' + (position.strategy ?? 'unknown');
         const strategyLabel = position.strategy ?? entry?.strategy ?? entryOrder?.strategy ?? 'legacy-unknown';
@@ -551,6 +561,7 @@ export class AutoTraderOutcomesModel {
             ...(!position.entry_order_types?.length && position.entry_order_type ? [position.entry_order_type.split(' · ')[0]] : []),
             ...filledEntryOrderTypes,
           ])],
+          entryOrderExpiresAt: pendingEntryOrder?.expires_at ?? undefined,
           pnlQuoteCurrency: carryDetails ? 'USDT' : quoteCurrency(symbol), quoteUsdRate: carryDetails ? usdRates.USDT ?? 1 : quoteCurrency(symbol) === 'USD' ? 1 : usdRates[quoteCurrency(symbol)], strategy: strategyLabel, direction: carryDetails ? 'Spot long / future short' : entry?.direction ?? (side === 'buy' ? 'bullish' : 'bearish'),
           stopLossPercent: position.stop_loss_active === false ? undefined : position.stop_loss_percent ?? exitPolicy?.stop_loss_percent, takeProfitPercent: position.take_profit_active === false ? undefined : position.take_profit_percent ?? exitPolicy?.take_profit_percent,
           stopLossActive: position.stop_loss_active, takeProfitActive: position.take_profit_active,
@@ -560,7 +571,7 @@ export class AutoTraderOutcomesModel {
           components: entry?.signal_components ?? {} });
       }
       rows.sort((a, b) => (a.status === b.status ? b.openedAt - a.openedAt : a.status === 'Open' ? -1 : 1));
-      this.state$.next({ ...this.state$.value, rows, closedLedgerRows: this.ledgerRowsCache, strategyLearning, autoTraderEnabled: learningData.enabled ?? false, autoTraderStatusAvailable: Boolean(autoSnapshot || learningResponse?.ok), enabledStrategies: learningData.strategies ?? [], strategyDiagnostics: learningData.strategy_diagnostics ?? [], strategyOrders: activityData.orders ?? [], strictEntryGates, strictBaseStrengthFloor, todayStrategyRealizedUsd, datedCarryDiagnostics, openStrategyPositions: strategyLots.length ? strategyLots.map(({ symbol, strategy }) => ({ symbol, strategy })) : activityData.open_positions ?? [], loading: false, auditCursor: this.auditCursor, hasOlderLedgerTrades: this.state$.value.hasOlderLedgerTrades });
+      this.state$.next({ ...this.state$.value, rows, closedLedgerRows: this.ledgerRowsCache, learningSummary, strategyLearning, autoTraderEnabled: learningData.enabled ?? false, autoTraderStatusAvailable: Boolean(autoSnapshot || learningResponse?.ok), enabledStrategies: learningData.strategies ?? [], strategyDiagnostics: learningData.strategy_diagnostics ?? [], strategyOrders: activityData.orders ?? [], strictEntryGates, strictBaseStrengthFloor, todayStrategyRealizedUsd, datedCarryDiagnostics, openStrategyPositions: strategyLots.length ? strategyLots.map(({ symbol, strategy }) => ({ symbol, strategy })) : activityData.open_positions ?? [], loading: false, auditCursor: this.auditCursor, hasOlderLedgerTrades: this.state$.value.hasOlderLedgerTrades });
     } catch { this.state$.next({ ...this.state$.value, loading: false, error: 'AutoTrader positions or closed trade audit are unavailable.' }); }
     finally { this.refreshing = false; }
   }

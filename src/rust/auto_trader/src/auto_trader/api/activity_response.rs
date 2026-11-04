@@ -127,6 +127,15 @@ async fn get_activity(State(state): State<AutoTraderState>) -> Json<ActivityResp
             summarize_lock_wait(&values).map(|summary| (worker, summary))
         })
         .collect();
+    let cycle_lock_scope_ms = state
+        .cycle_lock_scope_ms
+        .lock()
+        .ok()
+        .map(|samples| samples.clone())
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|(scope, values)| summarize_lock_wait(&values).map(|summary| (scope, summary)))
+        .collect();
     let settings_persistence_ms = state
         .settings_persist_timings_ms
         .lock()
@@ -178,6 +187,7 @@ async fn get_activity(State(state): State<AutoTraderState>) -> Json<ActivityResp
         insight_processing_samples,
         cycle_lock_wait_ms,
         cycle_lock_hold_ms,
+        cycle_lock_scope_ms,
         settings_persistence_ms,
     })
 }

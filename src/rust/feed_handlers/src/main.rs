@@ -1,4 +1,5 @@
-mod alternative_market_data;
+#[path = "../../service_docs.rs"]
+mod service_docs;
 use axum::{
     Json, Router,
     body::Body,
@@ -211,7 +212,14 @@ fn json_response(body: Bytes) -> Response<Body> {
 
 async fn serve_http() -> anyhow::Result<()> {
     let app = Router::new()
-        .merge(alternative_market_data::router())
+        .merge(service_docs::routes(
+            "Feed Handlers",
+            &[
+                ("/health", &["get"]),
+                ("/instruments", &["get"]),
+                ("/market-data/daily-candles", &["get"]),
+            ],
+        ))
         .route("/health", get(|| async { "ok" }))
         .route("/internal/message-counts", get(message_counts))
         .route("/internal/queue-metrics", get(queue_metrics))

@@ -75,16 +75,6 @@ fn no_strategy_parameters() -> Vec<StrategyParameterSpec> {
     Vec::new()
 }
 
-#[derive(Serialize)]
-struct StrategyContract {
-    insight: &'static str,
-    entry: &'static str,
-    exit: &'static str,
-    entry_order: &'static str,
-    exit_order: &'static str,
-    behavior: &'static str,
-}
-
 pub(super) mod strategy_live_momentum {
     pub(super) mod evaluate {
         include!("strategy_live_momentum/evaluate.rs");
@@ -504,6 +494,7 @@ mod donchian_20_btc200_registry_tests {
         assert!(strategy.should_exit_when_disabled(false));
         let mut snapshot = DailyStrategySnapshot {
             as_of_ms: 0,
+            sweep_id: String::new(),
             active_strategy_symbols: BTreeSet::new(),
             generated_signals: Vec::new(),
             evaluated_strategy_symbols: BTreeSet::new(),

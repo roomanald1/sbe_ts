@@ -1,20 +1,20 @@
 :root {
   color-scheme: dark;
-  --paper: #101010;
-  --ink: #e7e7e7;
-  --muted: #969696;
-  --line: #343434;
-  --line-soft: #262626;
-  --soft: #1b1b1b;
+  --paper: #0b1020;
+  --ink: #e7edfb;
+  --muted: #91a5c6;
+  --line: #293754;
+  --line-soft: #202c45;
+  --soft: #151e32;
   --green: #48c49a;
   --green-dark: #75d9b4;
-  --green-wash: #252525;
-  --coral: #f08068;
-  --coral-wash: #292929;
-  --amber: #e7b957;
-  --blue: #69aefc;
-  --blue-wash: #172333;
-  --blue-bright: #8bc2ff;
+  --green-wash: #17342f;
+  --coral: #fb7185;
+  --coral-wash: #35202e;
+  --amber: #e8b85e;
+  --blue: #628bff;
+  --blue-wash: #1b2a4a;
+  --blue-bright: #9ab5ff;
   --view-body-height: 478px;
   --mono: 'IBM Plex Mono', 'SFMono-Regular', Consolas, monospace;
 
@@ -35,18 +35,12 @@ body {
   min-width: 320px;
   min-height: 100vh;
   margin: 0;
+  background-color: var(--paper);
   background-image:
-    radial-gradient(
-      ellipse at 50% -24rem,
-      rgb(76 139 207 / 11%),
-      transparent 44rem
-    ),
-    repeating-linear-gradient(
-      0deg,
-      transparent,
-      transparent 31px,
-      rgb(255 255 255 / 1.5%) 32px
-    );
+    radial-gradient(ellipse at 8% 0%, rgb(67 105 197 / 25%), transparent 42rem),
+    radial-gradient(ellipse at 92% 3%, rgb(22 105 100 / 17%), transparent 36rem),
+    linear-gradient(145deg, #141d39 0%, #0b1020 52%, #09131b 100%);
+  background-attachment: fixed;
 }
 
 button,
@@ -60,7 +54,7 @@ input {
 
 ::selection {
   color: var(--ink);
-  background: #454545;
+  background: #334875;
 }
 
 @media (prefers-reduced-motion: reduce) {

@@ -69,10 +69,7 @@ async fn sync_protective_stops(
                 .map(|position| position.average_entry_price)
                 .filter(|price| *price > 0.0)
                 .unwrap_or(fill_price);
-            let strategy_decision = settings.strategy_positions.get(&symbol)
-                .and_then(|lots| lots.get(&strategy))
-                .and_then(|position| position.strategy_decision.clone());
-            let (price_path, effective_stop_loss_percent, effective_take_profit_percent, entry_fees, entry_quantity, position_entry_timestamp_ms, prior_realized_pnl, initial_entry_notional, prior_total_fees, total_entry_fees_paid, entry_context, scout_entry) = settings
+            let (price_path, effective_stop_loss_percent, effective_take_profit_percent, entry_fees, entry_quantity, position_entry_timestamp_ms, prior_realized_pnl, initial_entry_notional, prior_total_fees, total_entry_fees_paid, entry_context, scout_entry, strategy_decision, trade_id) = settings
                 .strategy_positions.get(&symbol)
                 .and_then(|lots| lots.get(&strategy))
                 .map(|position| (
@@ -88,8 +85,13 @@ async fn sync_protective_stops(
                     position.total_entry_fees_paid,
                     position.entry_context.clone(),
                     position.scout_entry,
+                    position.strategy_decision.clone(),
+                    position.trade_id.clone(),
                 ))
-                .unwrap_or_default();
+                .unwrap_or((
+                    Vec::new(), settings.stop_loss_percent, settings.take_profit_percent,
+                    0.0, 0.0, 0, 0.0, 0.0, 0.0, 0.0, String::new(), false, None, None,
+                ));
             let (realized_delta, _learned_key) = apply_auto_fill(
                 &mut settings.positions, &symbol, side, delta_quantity, fill_price,
                 delta_fee, "StopMarket", "stop-loss", false, None,
@@ -137,14 +139,8 @@ async fn sync_protective_stops(
                     Some(&entry_context),
                     scout_entry,
                     strategy_realized_usd,
-                );
-                record_strategy_threshold_sample(
-                    &mut settings,
-                    &symbol,
-                    Some(&strategy),
-                    scout_entry,
                     strategy_decision.as_ref(),
-                    total_trade_pnl / entry_notional * 100.0,
+                    trade_id.as_deref(),
                 );
                 adapt_exit_policy(&mut settings);
             }

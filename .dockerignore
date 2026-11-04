@@ -1,0 +1,12 @@
+.git
+**/target
+**/node_modules
+**/.news-python-packages
+**/.news-model-cache
+logs
+monitoring/.env
+src/typescript/workspace/apps/react-app/public/coverage
+src/rust/position_management/positions.json
+**/*.msgpack
+src/rust/insights/signals*.jsonl
+src/rust/insights/*.sqlite*

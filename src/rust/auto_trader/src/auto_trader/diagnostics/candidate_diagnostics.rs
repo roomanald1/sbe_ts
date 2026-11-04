@@ -73,6 +73,11 @@ fn candidate_entry_audit_value(
             "minimum_exploration_evidence_samples": MIN_EXPLORATION_EVIDENCE_SAMPLES,
             "scout_minimum_walk_forward_samples": review.scout_minimum_samples,
             "scout_minimum_positive_net_rate": review.scout_minimum_positive_rate,
+            "scout_outcomes": {
+                "samples": review.scout_outcome_samples,
+                "positive_rate": review.scout_outcome_positive_rate,
+                "realized_pnl_usd": review.scout_outcome_realized_pnl,
+            },
             "minimum_side_direction_match_rate": MIN_SIDE_DIRECTION_MATCH_RATE,
             "minimum_side_positive_net_rate": MIN_SIDE_POSITIVE_NET_RATE,
             "minimum_side_positive_net_lower_95": MIN_SIDE_POSITIVE_NET_LOWER_95,
@@ -184,24 +189,7 @@ fn add_scout_failures(
             "scout |score| {:.2} < learned {:.2}",
             candidate.score.abs(), review.scout_score_floor
         ));
-    } else if review.scout_negative && active_scout_count > 0 {
-        failures.push(format_scout_wait_reason(review));
     }
-}
-
-fn format_scout_wait_reason(review: &CandidateEntryReview<'_>) -> String {
-    let samples = review.side.map_or(0, |metrics| metrics.sample_count);
-    let net_return = review
-        .side
-        .and_then(|metrics| metrics.average_net_return_percent)
-        .map_or_else(|| "n/a".into(), |net| format!("{net:+.3}%"));
-    let positive_rate = review
-        .side
-        .and_then(|metrics| metrics.positive_net_rate)
-        .map_or_else(|| "n/a".into(), |rate| format!("{:.1}%", rate * 100.0));
-    format!(
-        "measured negative-history scout probe waits for zero open scouts ({samples}; net {net_return}; positive {positive_rate})"
-    )
 }
 
 #[cfg(test)]

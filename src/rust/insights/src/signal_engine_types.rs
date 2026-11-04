@@ -80,4 +80,5 @@ pub struct SignalEngine {
     last_research_sample_at: Option<u64>,
     last_live_snapshot_at: Option<u64>,
     completed_scout_shadow_ids: std::collections::BTreeSet<String>,
+    completed_scout_shadow_order: VecDeque<String>,
 }

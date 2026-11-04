@@ -1,4 +1,5 @@
 const MAX_SCOUT_SHADOW_DURATION_MS: u64 = 7 * 86_400_000;
+const MAX_COMPLETED_SCOUT_IDS_PER_SYMBOL: usize = 1_024;
 
 fn scout_shadow_stop_or_target_hit(
     pending: &mut PendingOutcome,
@@ -42,6 +43,18 @@ fn scout_shadow_stop_or_target_hit(
 }
 
 impl SignalEngine {
+    fn remember_completed_scout_shadow(&mut self, sample_id: String) {
+        if !self.completed_scout_shadow_ids.insert(sample_id.clone()) {
+            return;
+        }
+        self.completed_scout_shadow_order.push_back(sample_id);
+        while self.completed_scout_shadow_order.len() > MAX_COMPLETED_SCOUT_IDS_PER_SYMBOL {
+            if let Some(expired) = self.completed_scout_shadow_order.pop_front() {
+                self.completed_scout_shadow_ids.remove(&expired);
+            }
+        }
+    }
+
     pub fn live_snapshot_due(&mut self, timestamp: u64) -> bool {
         let due = self.last_live_snapshot_at.map_or(true, |last| {
             timestamp < last || timestamp.saturating_sub(last) >= LIVE_SIGNAL_SNAPSHOT_INTERVAL_MS
@@ -322,7 +335,7 @@ impl SignalEngine {
                 };
                 let scout_shadow_id = pending.sample_id.clone();
                 if let Some(sample_id) = scout_shadow_id.as_ref() {
-                    self.completed_scout_shadow_ids.insert(sample_id.clone());
+                    self.remember_completed_scout_shadow(sample_id.clone());
                 }
                 outcomes.push(CompletedSignalOutcome { legacy, evaluation, scout_shadow_id, scout_exit_reason });
             } else {
@@ -344,5 +357,31 @@ impl SignalEngine {
             self.price_return(timestamp.saturating_sub(60_000)),
             self.price_return(timestamp.saturating_sub(300_000)),
         )
+    }
+}
+
+#[cfg(test)]
+mod completed_scout_id_tests {
+    use super::*;
+
+    #[test]
+    fn completed_scout_deduplication_history_is_bounded() {
+        let mut engine = SignalEngine::default();
+        for index in 0..=MAX_COMPLETED_SCOUT_IDS_PER_SYMBOL {
+            engine.remember_completed_scout_shadow(format!("sample-{index}"));
+        }
+
+        assert_eq!(
+            engine.completed_scout_shadow_order.len(),
+            MAX_COMPLETED_SCOUT_IDS_PER_SYMBOL
+        );
+        assert_eq!(
+            engine.completed_scout_shadow_ids.len(),
+            MAX_COMPLETED_SCOUT_IDS_PER_SYMBOL
+        );
+        assert!(!engine.completed_scout_shadow_ids.contains("sample-0"));
+        assert!(engine
+            .completed_scout_shadow_ids
+            .contains(&format!("sample-{MAX_COMPLETED_SCOUT_IDS_PER_SYMBOL}")));
     }
 }

@@ -6,7 +6,6 @@ async fn main() -> anyhow::Result<()> {
     tokio::spawn(poll_external_market_features(signal_store.clone()));
     tokio::spawn(run_dated_carry_signal_worker(signal_store.clone()));
     tokio::spawn(poll_daily_strategy_signals(signal_store.clone()));
-    tokio::spawn(run_alternative_strategy_worker(signal_store.clone()));
     let signal_push_cache = Arc::new(DashMap::new());
     let signal_push_notify = Arc::new(Notify::new());
     tokio::spawn(run_signal_push_worker(
@@ -42,9 +41,12 @@ async fn main() -> anyhow::Result<()> {
             ..NewsLearning::default()
         }),
         snapshot_diagnostic_at: DashMap::new(),
+        latest_prices: DashMap::new(),
+        scout_shadow_cache: Mutex::new(None),
     });
     tokio::spawn(run_feed_signal_consumer(Arc::clone(&signal_runtime)));
     let app = Router::new()
+        .merge(service_docs::routes("Insights", &[("/health", &["get"]), ("/signals/stream", &["get"]), ("/positions/insights", &["get"]), ("/signals/daily-summary", &["get"]), ("/signals/dashboard", &["get"]), ("/signals/history", &["get"])]))
         .merge(daily_summary::router())
         .route("/health", get(|| async { "ok" }))
         .route("/process-cpu-seconds", get(process_cpu_seconds)).route("/process-memory-bytes", get(process_memory_bytes))
@@ -58,7 +60,11 @@ async fn main() -> anyhow::Result<()> {
         )
         .route(
             "/internal/signals/scout-strategy-status",
-            axum::routing::post(update_scout_strategy_status).with_state(signal_runtime),
+            axum::routing::post(update_scout_strategy_status).with_state(Arc::clone(&signal_runtime)),
+        )
+        .route(
+            "/signals/scout-shadow-outcomes",
+            get(scout_shadow_api::get_scout_shadow_outcomes).with_state(Arc::clone(&signal_runtime)),
         )
         .merge(signal_store.router());
     let listener = tokio::net::TcpListener::bind(("0.0.0.0", 3004)).await?;
@@ -85,3 +91,5 @@ async fn process_cpu_seconds() -> String {
     let system = usage.ru_stime.tv_sec as f64 + usage.ru_stime.tv_usec as f64 / 1_000_000.0;
     (user + system).to_string()
 }
+#[path = "../../service_docs.rs"]
+mod service_docs;

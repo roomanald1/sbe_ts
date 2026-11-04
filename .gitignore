@@ -4,6 +4,8 @@ src/rust/execution/target/*
 src/rust/feed_handlers/target/*
 src/rust/insights/target/*
 src/rust/position_management/target/*
+src/rust/position_management/learning_state.json
+src/rust/position_management/learning_state.json.tmp
 src/rust/service_gateway/target/*
 logs/*
 src/rust/insights/signals.jsonl.sqlite

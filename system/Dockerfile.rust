@@ -1,0 +1,13 @@
+FROM rust:1.88-bookworm AS build
+ARG CRATE
+ARG BIN
+WORKDIR /workspace
+COPY src/rust ./src/rust
+RUN cargo build --release --manifest-path "src/rust/${CRATE}/Cargo.toml" --bin "${BIN}"
+
+FROM debian:bookworm-slim
+ARG CRATE
+ARG BIN
+RUN apt-get update && apt-get install -y --no-install-recommends bash ca-certificates && rm -rf /var/lib/apt/lists/*
+COPY --from=build /workspace/src/rust/${CRATE}/target/release/${BIN} /usr/local/bin/service
+ENTRYPOINT ["/usr/local/bin/service"]

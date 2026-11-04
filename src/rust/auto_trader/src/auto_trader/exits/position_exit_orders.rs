@@ -162,14 +162,8 @@ async fn submit_position_exit_order(
                 Some(&position.entry_context),
                 position.scout_entry,
                 strategy_realized_usd,
-            );
-            record_strategy_threshold_sample(
-                &mut settings,
-                &symbol,
-                position.strategy.as_deref(),
-                position.scout_entry,
                 position.strategy_decision.as_ref(),
-                total_trade_pnl / entry_notional * 100.0,
+                position.trade_id.as_deref(),
             );
             adapt_exit_policy(&mut settings);
         }

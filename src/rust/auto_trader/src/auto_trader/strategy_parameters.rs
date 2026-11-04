@@ -7,6 +7,46 @@ fn signal_strategy_parameters(signal: &Signal) -> BTreeMap<String, f64> {
         .collect()
 }
 
+fn inject_learned_parameters(settings: &Settings, signal: &mut Signal) {
+    let Some(strategy_name) = signal.strategy.as_deref() else { return; };
+    let Some(strategy) = Strategy::from_name(strategy_name) else { return; };
+    let profile_symbol = signal.strategy_decision.as_ref()
+        .and_then(|decision| decision.get("scout_parameter_profile_symbol"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or(&signal.symbol)
+        .to_owned();
+    let Some(profile) = settings.learned_profiles.get(&format!("{profile_symbol}:{strategy_name}")) else { return; };
+    let mut parameters = profile.parameters.clone();
+    for spec in strategy.parameter_specs() {
+        let override_key = strategy_parameter_key(&profile_symbol, strategy, spec.key.as_str());
+        let configured = settings.strategy_parameter_overrides.get(&override_key).copied()
+            .or_else(|| legacy_strategy_parameter_name(spec.key.as_str()).and_then(|legacy| {
+                settings.strategy_parameter_overrides.get(&strategy_parameter_key(&profile_symbol, strategy, legacy)).copied()
+            }));
+        if let Some(value) = configured.filter(|value| value.is_finite() && *value >= spec.min && *value <= spec.max) {
+            parameters.insert(spec.key.as_str().to_owned(), value);
+        }
+    }
+    if let Some(decision) = signal.strategy_decision.as_ref() {
+        if let (Some(key), Some(value)) = (
+            decision.get("scout_parameter_key").and_then(serde_json::Value::as_str),
+            decision.get("scout_parameter_value").and_then(serde_json::Value::as_f64),
+        ) {
+            if key.starts_with("combo:") {
+                if let Some(variant) = parse_scout_combination(key, strategy) {
+                    parameters.extend(variant);
+                }
+            } else {
+                parameters.insert(key.to_owned(), value);
+            }
+        }
+    }
+    let profile_id = strategy_core::profile_id(&profile_symbol, strategy_name, &parameters);
+    let Some(decision) = signal.strategy_decision.as_mut().and_then(serde_json::Value::as_object_mut) else { return; };
+    decision.insert("strategy_parameters".into(), serde_json::json!(parameters));
+    decision.insert("learning_profile_id".into(), serde_json::json!(profile_id));
+}
+
 fn strategy_parameter_key(symbol: &str, strategy: Strategy, parameter: &str) -> String {
     format!("{symbol}:{}:{parameter}", strategy.as_str())
 }
@@ -27,6 +67,11 @@ fn strategy_learning_stats(settings: &Settings, symbol: &str, strategy: Strategy
         .get(&strategy_trade_learning_key(symbol, strategy.as_str()))
         .cloned()
         .unwrap_or_default();
+    if let Some(profile) = settings.learned_profiles.get(&format!("{symbol}:{}", strategy.as_str())) {
+        stats.samples = stats.samples.saturating_add(profile.learning_samples);
+        stats.positive = stats.positive.saturating_add(profile.positive_samples);
+        stats.realized_pnl += profile.realized_pnl;
+    }
     decay_learning_stats(&mut stats, now_ms);
     stats
 }
@@ -44,117 +89,53 @@ fn minimum_scout_parameter_variant_samples(strategy: Strategy) -> usize {
     }
 }
 
+#[cfg(test)]
 fn next_scout_parameter_probe(
     symbol: &str,
     strategy: Strategy,
     parameters: &BTreeMap<String, f64>,
     day: u64,
 ) -> Option<(String, f64)> {
-    let candidates = all_strategy_parameter_specs(strategy).into_iter().filter_map(|spec| {
-        if matches!(
-            spec.key,
-            StrategyParameterKey::LearningRate
-                | StrategyParameterKey::ScoutMinimumWalkForwardSamples
-                | StrategyParameterKey::ScoutMinimumPositiveNetRate
-        ) || spec.min >= spec.max || spec.step <= 0.0 {
-            return None;
-        }
-        let current = parameters.get(spec.key.as_str()).copied().unwrap_or(spec.default);
-        if !current.is_finite() { return None; }
-        let direction = if day % 2 == 0 { 1.0 } else { -1.0 };
-        let preferred = current + direction * spec.step;
-        let value = if preferred >= spec.min && preferred <= spec.max {
-            preferred
-        } else {
-            current - direction * spec.step
-        };
-        (value >= spec.min && value <= spec.max && (value - current).abs() >= spec.step * 0.5)
-            .then_some((spec.key.as_str().to_owned(), value))
-    }).collect::<Vec<_>>();
-    if candidates.is_empty() { return None; }
-    let hash = symbol.bytes().chain(strategy.as_str().bytes()).fold(2_166_136_261_u64, |hash, byte| {
-        hash.wrapping_mul(16_777_619) ^ u64::from(byte)
-    });
-    candidates.get((day.wrapping_add(hash) % candidates.len() as u64) as usize).cloned()
+    scouts::next_parameter_probe(symbol, strategy.as_str(), parameters, &scout_parameter_specs(strategy), day)
 }
 
 // Pair scouts measure interactions while keeping exploration bounded to two
 // tunables at a time. The day selects a deterministic pair and direction so
 // retries generate the same variant.
+#[cfg(test)]
 fn next_scout_parameter_combination(
     symbol: &str,
     strategy: Strategy,
     parameters: &BTreeMap<String, f64>,
     day: u64,
 ) -> Option<BTreeMap<String, f64>> {
-    let candidates = all_strategy_parameter_specs(strategy).into_iter().filter_map(|spec| {
-        if matches!(spec.key, StrategyParameterKey::LearningRate
-            | StrategyParameterKey::ScoutMinimumWalkForwardSamples
-            | StrategyParameterKey::ScoutMinimumPositiveNetRate)
-            || spec.min >= spec.max || spec.step <= 0.0 { return None; }
-        let current = parameters.get(spec.key.as_str()).copied().unwrap_or(spec.default);
-        if !current.is_finite() { return None; }
-        let direction = if (day >> 1) & 1 == 0 { 1.0 } else { -1.0 };
-        let preferred = current + direction * spec.step;
-        let value = if preferred >= spec.min && preferred <= spec.max { preferred }
-            else { current - direction * spec.step };
-        (value >= spec.min && value <= spec.max && (value-current).abs() >= spec.step*0.5)
-            .then_some((spec.key.as_str().to_owned(), value))
-    }).collect::<Vec<_>>();
-    if candidates.len() < 2 { return None; }
-    let hash = symbol.bytes().chain(strategy.as_str().bytes()).fold(2_166_136_261_u64, |h,b| h.wrapping_mul(16_777_619) ^ u64::from(b));
-    let pair_count = candidates.len() * (candidates.len() - 1) / 2;
-    let wanted = (day.wrapping_add(hash) % pair_count as u64) as usize;
-    let mut index = 0;
-    for left in 0..candidates.len() {
-        for right in left + 1..candidates.len() {
-            if index == wanted {
-                return Some(BTreeMap::from([candidates[left].clone(), candidates[right].clone()]));
-            }
-            index += 1;
-        }
-    }
-    None
+    scouts::next_parameter_combination(symbol, strategy.as_str(), parameters, &scout_parameter_specs(strategy), day)
 }
 
 fn scout_context_hash(parameters: &BTreeMap<String, f64>, excluded: &BTreeMap<String, f64>) -> String {
-    let mut hash = 14_695_981_039_346_656_037_u64;
-    for (key, value) in parameters.iter().filter(|(key, _)| !excluded.contains_key(*key)) {
-        for byte in format!("{key}={value:.8};").bytes() {
-            hash = (hash ^ u64::from(byte)).wrapping_mul(1_099_511_628_211);
-        }
-    }
-    format!("{hash:016x}")
+    scouts::context_hash(parameters, excluded)
 }
 
 fn scout_combination_key(
     values: &BTreeMap<String, f64>, full_profile: &BTreeMap<String, f64>,
 ) -> Option<String> {
-    if values.len() != 2 || values.values().any(|value| !value.is_finite()) { return None; }
-    let pair = values.iter().map(|(key, value)| format!("{key}={value:.8}")).collect::<Vec<_>>().join(",");
-    Some(format!("combo:{pair}|ctx:{}", scout_context_hash(full_profile, values)))
+    scouts::combination_key(values, full_profile)
 }
 
 fn scout_combination_context(key: &str) -> Option<&str> {
-    let (_, context) = key.strip_prefix("combo:")?.rsplit_once("|ctx:")?;
-    (context.len() == 16 && context.bytes().all(|byte| byte.is_ascii_hexdigit())).then_some(context)
+    scouts::combination_context(key)
 }
 
 fn parse_scout_combination(key: &str, strategy: Strategy) -> Option<BTreeMap<String, f64>> {
-    let body = key.strip_prefix("combo:")?.split_once("|ctx:")?.0;
-    scout_combination_context(key)?;
-    let specs = all_strategy_parameter_specs(strategy);
-    let mut values = BTreeMap::new();
-    for item in body.split(',') {
-        let (name, raw) = item.split_once('=')?;
-        let value = raw.parse::<f64>().ok()?;
-        let spec = specs.iter().find(|spec| spec.key.as_str() == name)?;
-        if spec.key == StrategyParameterKey::LearningRate || !value.is_finite()
-            || value < spec.min || value > spec.max { return None; }
-        let step = (value - spec.min) / spec.step;
-        if (step - step.round()).abs() > 1e-6 || values.insert(name.to_owned(), value).is_some() { return None; }
-    }
-    (values.len() == 2).then_some(values)
+    scouts::parse_combination(key, &scout_parameter_specs(strategy))
+}
+
+fn scout_parameter_specs(strategy: Strategy) -> Vec<strategy_core::ParameterSpec> {
+    all_strategy_parameter_specs(strategy).into_iter().map(|spec| strategy_core::ParameterSpec {
+        key: spec.key.as_str().to_owned(), label: spec.label.to_owned(), default: spec.default,
+        min: spec.min, max: spec.max, step: spec.step, unit: spec.unit.to_owned(),
+        learning_direction: spec.learning_direction,
+    }).collect()
 }
 
 fn scout_parameter_learning_key(symbol: &str, strategy: Strategy, parameter: &str, value: f64) -> String {
@@ -255,6 +236,9 @@ fn strategy_parameter_profile(
     let pooled_threshold_samples = strategy.is_live_insight()
         .then(|| strategy_threshold_samples_across_symbols(settings, strategy))
         .unwrap_or_default();
+    let learned_profile = settings
+        .learned_profiles
+        .get(&format!("{symbol}:{}", strategy.as_str()));
     let specs = all_strategy_parameter_specs(strategy);
     let learning_key = strategy_parameter_key(symbol, strategy, "learning_rate");
     let learning_rate = settings
@@ -271,7 +255,17 @@ fn strategy_parameter_profile(
             })
         });
         let base = configured.unwrap_or(spec.default);
-        let value = best_scout_parameter_value(settings, symbol, strategy, spec).unwrap_or_else(|| {
+        let learned_value = if configured.is_none() {
+            learned_profile
+                .and_then(|profile| profile.parameters.get(spec.key.as_str()))
+                .copied()
+                .filter(|value| value.is_finite() && *value >= spec.min && *value <= spec.max)
+        } else {
+            None
+        };
+        let value = learned_value
+            .or_else(|| best_scout_parameter_value(settings, symbol, strategy, spec))
+            .unwrap_or_else(|| {
             if is_walk_forward_threshold(spec.key) {
                 let history = if strategy.is_live_insight() {
                     &pooled_threshold_samples
@@ -303,7 +297,11 @@ fn strategy_parameter_profile(
         });
         (spec.key.as_str().to_owned(), value)
     }).collect::<BTreeMap<_, _>>();
-    let learned_combination = best_scout_parameter_combination(settings, symbol, strategy, &baseline_values);
+    let learned_combination = if learned_profile.is_some() {
+        None
+    } else {
+        best_scout_parameter_combination(settings, symbol, strategy, &baseline_values)
+    };
     let parameters = specs
         .iter()
         .map(|spec| {
@@ -601,6 +599,41 @@ fn strategy_parameter_values(
         .collect()
 }
 
+fn queue_strategy_profile_registration(
+    settings: &mut Settings,
+    symbol: &str,
+    strategy: Strategy,
+    profile: &StrategyParameterProfile,
+) {
+    let parameters = profile.parameters.iter()
+        .map(|parameter| (parameter.key.clone(), parameter.value))
+        .collect::<BTreeMap<_, _>>();
+    let profile_id = strategy_core::profile_id(symbol, strategy.as_str(), &parameters);
+    if settings.registered_profile_ids.contains(&profile_id) { return; }
+    if settings.profile_registration_outbox.iter().any(|registration| {
+        registration.profile.profile_id == profile_id
+            && registration.profile.symbol == symbol
+            && registration.profile.strategy == strategy.as_str()
+    }) { return; }
+    let version = settings.learned_profiles
+        .get(&format!("{symbol}:{}", strategy.as_str()))
+        .map_or(0, |learned| learned.version);
+    let specs = strategy.parameter_specs().into_iter().map(|spec| strategy_core::ParameterSpec {
+        key: spec.key.as_str().to_owned(), label: spec.label.to_owned(), default: spec.default,
+        min: spec.min, max: spec.max, step: spec.step, unit: spec.unit.to_owned(),
+        learning_direction: spec.learning_direction,
+    }).filter(|spec| parameters.contains_key(&spec.key)).collect();
+    settings.profile_registration_outbox.push(strategy_core::StrategyProfileRegistration {
+        profile: strategy_core::StrategyProfile {
+            profile_id, version, symbol: symbol.to_owned(), strategy: strategy.as_str().to_owned(),
+            parameters, learning_samples: profile.learning_samples,
+            positive_samples: (profile.learning_samples as f64 * profile.positive_rate.unwrap_or(0.0)).round() as usize,
+            realized_pnl: profile.realized_pnl,
+        },
+        specs,
+    });
+}
+
 fn validate_strategy_parameter_overrides(values: &BTreeMap<String, f64>) -> Result<(), String> {
     for (key, value) in values {
         if !value.is_finite() {
@@ -677,6 +710,49 @@ fn strategy_profile_value(profile: &StrategyParameterProfile, key: &str) -> Opti
 #[cfg(test)]
 mod strategy_parameter_bounds_tests {
     use super::*;
+
+    #[test]
+    fn hot_path_overlays_the_latest_learning_profile_on_signal_parameters() {
+        let mut settings = Settings::default();
+        let parameters = BTreeMap::from([("minimum_momentum".to_owned(), 0.003)]);
+        let profile_id = strategy_core::profile_id("BTC-USDT", "live-momentum", &parameters);
+        settings.learned_profiles.insert("BTC-USDT:live-momentum".into(), strategy_core::StrategyProfile {
+            profile_id: profile_id.clone(), version: 5, symbol: "BTC-USDT".into(),
+            strategy: "live-momentum".into(), parameters,
+            learning_samples: 8, positive_samples: 6, realized_pnl: 4.0,
+        });
+        let mut signal = Signal {
+            symbol: "BTC-USDT".into(), direction: "bullish".into(), strength: 1.0,
+            timestamp: 1, stale: false, score: 1.0, ranging_probability: None,
+            components: SignalComponents::default(), strategy_candidate: true,
+            strategy: Some("live-momentum".into()),
+            strategy_decision: Some(serde_json::json!({ "strategy_parameters": { "minimum_momentum": 0.0 } })),
+            market_regime: None, news_attribution: None, entry_gate: None,
+        };
+        inject_learned_parameters(&settings, &mut signal);
+        assert_eq!(signal_strategy_parameters(&signal)["minimum_momentum"], 0.003);
+        assert_eq!(signal.strategy_decision.as_ref().unwrap()["learning_profile_id"], profile_id);
+        settings.strategy_parameter_overrides.insert(
+            "BTC-USDT:live-momentum:minimum_momentum".into(), 0.004,
+        );
+        inject_learned_parameters(&settings, &mut signal);
+        assert_eq!(signal_strategy_parameters(&signal)["minimum_momentum"], 0.004);
+    }
+
+    #[test]
+    fn profile_registration_outbox_deduplicates_exact_variants() {
+        let mut settings = Settings::default();
+        let strategy = Strategy::LiveMomentum;
+        let profile = strategy_parameter_profile(&settings, "BTC-USDT", strategy);
+        queue_strategy_profile_registration(&mut settings, "BTC-USDT", strategy, &profile);
+        queue_strategy_profile_registration(&mut settings, "BTC-USDT", strategy, &profile);
+        assert_eq!(settings.profile_registration_outbox.len(), 1);
+        let registration = &settings.profile_registration_outbox[0];
+        assert_eq!(registration.profile.profile_id, strategy_core::profile_id(
+            "BTC-USDT", strategy.as_str(), &registration.profile.parameters,
+        ));
+        assert!(!registration.specs.is_empty());
+    }
 
     #[test]
     fn daily_rule_inputs_are_registered_for_learning_profiles() {

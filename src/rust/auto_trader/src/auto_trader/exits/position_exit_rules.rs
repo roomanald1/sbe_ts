@@ -343,23 +343,35 @@ async fn evaluate_position_exit(
     // evaluation above may overlap with signal processing, so verify the
     // captured position is still current once the lock has been acquired.
     let _cycle = acquire_cycle_lock(state, "position_maintenance").await;
-    let position_is_current = {
-        let settings = state.settings.lock().await;
-        let already_exiting = settings.orders.iter().any(|order| {
-            order.symbol == symbol
-                && order.strategy.as_deref() == Some(strategy_key.as_str())
-                && order.order_type == "Ioc"
-                && matches!(order.status.as_str(), "submitting" | "accepted" | "resting" | "partially_filled")
+    let settings_lock_started = Instant::now();
+    let settings = state.settings.lock().await;
+    record_cycle_lock_scope(
+        state,
+        "position_exit_revalidation_settings_lock_wait",
+        settings_lock_started.elapsed(),
+    );
+    let revalidation_started = Instant::now();
+    let already_exiting = settings.orders.iter().any(|order| {
+        order.symbol == symbol
+            && order.strategy.as_deref() == Some(strategy_key.as_str())
+            && order.order_type == "Ioc"
+            && matches!(order.status.as_str(), "submitting" | "accepted" | "resting" | "partially_filled")
+    });
+    let position_is_current = !already_exiting && settings
+        .strategy_positions
+        .get(&symbol)
+        .and_then(|lots| lots.get(&strategy_key))
+        .is_some_and(|current| {
+            (current.quantity - position.quantity).abs() <= 1e-12
+                && (current.average_entry_price - position.average_entry_price).abs() <= 1e-12
         });
-        !already_exiting && settings
-            .strategy_positions
-            .get(&symbol)
-            .and_then(|lots| lots.get(&strategy_key))
-            .is_some_and(|current| {
-                (current.quantity - position.quantity).abs() <= 1e-12
-                    && (current.average_entry_price - position.average_entry_price).abs() <= 1e-12
-            })
-    };
+    let revalidation_elapsed = revalidation_started.elapsed();
+    drop(settings);
+    record_cycle_lock_scope(
+        state,
+        "position_exit_revalidation",
+        revalidation_elapsed,
+    );
     if !position_is_current {
         return Ok(None);
     }
@@ -372,22 +384,43 @@ async fn evaluate_position_exit(
     }
     // Reserve the exit while holding the cycle lock, then release it before
     // protective-stop cancellation and order submission perform network I/O.
-    let timestamp = SystemTime::now()
+    let reservation_prepare_started = Instant::now();
+    let now_timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64;
+    let timestamp = next_unique_order_timestamp(now_timestamp);
     let side = if position.quantity > 0.0 { "sell" } else { "buy" };
     let notional = position.quantity.abs() * (bid + (ask - bid) * 0.5);
+    record_cycle_lock_scope(
+        state,
+        "position_exit_reservation_prepare",
+        reservation_prepare_started.elapsed(),
+    );
+    let settings_lock_started = Instant::now();
+    let order_record_elapsed;
     {
         let mut settings = state.settings.lock().await;
+        record_cycle_lock_scope(
+            state,
+            "position_exit_reservation_settings_lock_wait",
+            settings_lock_started.elapsed(),
+        );
+        let order_record_started = Instant::now();
         reset_daily_budget(&mut settings);
         settings.used_notional_today = allocated_notional(&settings);
         settings.orders.push(new_position_exit_order(
             timestamp, &symbol, side, reason, &position,
             position.quantity.abs(), notional,
         ));
+        order_record_elapsed = order_record_started.elapsed();
     }
     drop(_cycle);
+    record_cycle_lock_scope(
+        state,
+        "position_exit_order_record",
+        order_record_elapsed,
+    );
     submit_position_exit_order(
         client,
         base,

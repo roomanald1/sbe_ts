@@ -158,6 +158,8 @@ struct ShadowLearningOutcomeRequest {
     taker_fee_rate: f64,
     symbol: String,
     strategy: String,
+    #[serde(default)]
+    strategy_parameters: BTreeMap<String, f64>,
     exit_scenario: String,
     #[serde(default)]
     sample_group_id: String,
@@ -184,6 +186,8 @@ struct ContextDecisionParameters {
     context: String,
     learning_samples: usize,
     positive_rate: Option<f64>,
+    scout_learning_samples: usize,
+    scout_positive_rate: Option<f64>,
     strength_floor: f64,
     exploration_score_floor: f64,
     exploration_allowed: bool,

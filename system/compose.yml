@@ -1,0 +1,70 @@
+name: sbe-system
+services:
+  feed-handlers:
+    build: { context: .., dockerfile: system/Dockerfile.rust, args: { CRATE: feed_handlers, BIN: feed_handlers } }
+    ports: ["3001:3001", "10001:10001"]
+    restart: unless-stopped
+    healthcheck: { test: ["CMD", "bash", "-c", "</dev/tcp/127.0.0.1/3001"], interval: 15s, timeout: 3s, retries: 5 }
+  position-management:
+    build: { context: .., dockerfile: system/Dockerfile.rust, args: { CRATE: position_management, BIN: position_management } }
+    environment: { FEED_HANDLERS_URL: http://feed-handlers:3001, FEED_HANDLERS_RSOCKET_URL: ws://feed-handlers:10001, POSITIONS_FILE: /data/positions.json }
+    volumes: ["${REPO_ROOT:-..}/src/rust/position_management:/data"]
+    ports: ["3002:3002"]
+    restart: unless-stopped
+    healthcheck: { test: ["CMD", "bash", "-c", "</dev/tcp/127.0.0.1/3002"], interval: 15s, timeout: 3s, retries: 5 }
+  execution:
+    build: { context: .., dockerfile: system/Dockerfile.rust, args: { CRATE: execution, BIN: execution } }
+    environment: { POSITION_MANAGEMENT_URL: http://position-management:3002, AUTO_TRADER_URL: http://auto-trader:3005 }
+    ports: ["3003:3003"]
+    restart: unless-stopped
+    healthcheck: { test: ["CMD", "bash", "-c", "</dev/tcp/127.0.0.1/3003"], interval: 15s, timeout: 3s, retries: 5 }
+  insights:
+    build: { context: .., dockerfile: system/Dockerfile.rust, args: { CRATE: insights, BIN: insights } }
+    environment: { FEED_HANDLERS_URL: http://feed-handlers:3001, FEED_HANDLERS_RSOCKET_URL: ws://feed-handlers:10001, POSITION_MANAGEMENT_URL: http://position-management:3002, AUTO_TRADER_URL: http://auto-trader:3005, NEWS_SENTIMENT_URL: http://news-sentiment:3006/classify, LEARNING_SERVICE_URL: http://learning:3010, SCOUTS_SERVICE_URL: http://scouts:3011, SIGNALS_FILE: /data/signals.jsonl }
+    volumes: ["${REPO_ROOT:-..}/src/rust/insights:/data"]
+    ports: ["3004:3004"]
+    restart: unless-stopped
+    healthcheck: { test: ["CMD", "bash", "-c", "</dev/tcp/127.0.0.1/3004"], interval: 15s, timeout: 3s, retries: 5 }
+  auto-trader:
+    build: { context: .., dockerfile: system/Dockerfile.rust, args: { CRATE: auto_trader, BIN: auto_trader } }
+    environment: { POSITION_MANAGEMENT_URL: http://position-management:3002, INSIGHTS_URL: http://insights:3004, LEARNING_SERVICE_URL: http://learning:3010, SCOUTS_SERVICE_URL: http://scouts:3011, AUTO_TRADER_STATE_FILE: /data/auto_trader_state.json }
+    volumes: ["${REPO_ROOT:-..}/src/rust/position_management:/data"]
+    depends_on: [position-management, insights]
+    ports: ["3005:3005"]
+    restart: unless-stopped
+    healthcheck: { test: ["CMD", "bash", "-c", "</dev/tcp/127.0.0.1/3005"], interval: 15s, timeout: 3s, retries: 5 }
+  news-sentiment:
+    build: { context: ../src/rust/insights, dockerfile: scripts/Dockerfile.news-sentiment }
+    environment: { NEWS_SENTIMENT_HOST: 0.0.0.0, NEWS_SENTIMENT_PORT: 3006, HF_HOME: /models }
+    volumes: ["news-models:/models"]
+    ports: ["3006:3006"]
+    restart: unless-stopped
+    healthcheck: { test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:3006/health')"], interval: 30s, timeout: 5s, retries: 5, start_period: 120s }
+  learning:
+    build: { context: .., dockerfile: system/Dockerfile.rust, args: { CRATE: learning, BIN: learning } }
+    environment: { LEARNING_LISTEN_ADDR: 0.0.0.0:3010, LEARNING_STATE_FILE: /data/learning_state.json }
+    volumes: ["${REPO_ROOT:-..}/src/rust/position_management:/data"]
+    ports: ["3010:3010"]
+    restart: unless-stopped
+    healthcheck: { test: ["CMD", "bash", "-c", "</dev/tcp/127.0.0.1/3010"], interval: 15s, timeout: 3s, retries: 5 }
+  scouts:
+    build: { context: .., dockerfile: system/Dockerfile.rust, args: { CRATE: scouts, BIN: scouts } }
+    environment: { SCOUTS_LISTEN_ADDR: 0.0.0.0:3011, LEARNING_SERVICE_URL: http://learning:3010 }
+    ports: ["3011:3011"]
+    restart: unless-stopped
+    healthcheck: { test: ["CMD", "bash", "-c", "</dev/tcp/127.0.0.1/3011"], interval: 15s, timeout: 3s, retries: 5 }
+  web:
+    build: { context: .., dockerfile: system/Dockerfile.web }
+    command: ["npm", "run", "dev", "--", "--host", "0.0.0.0", "--port", "5173", "--strictPort"]
+    volumes:
+      - "${REPO_ROOT:-..}/src/typescript/workspace/apps/react-app:/app/apps/react-app"
+    environment:
+      SBE_POSITION_MANAGEMENT_URL: http://position-management:3002
+      SBE_FEED_HANDLERS_URL: http://feed-handlers:3001
+      SBE_EXECUTION_URL: http://execution:3003
+      SBE_AUTO_TRADER_URL: http://auto-trader:3005
+      SBE_INSIGHTS_URL: http://insights:3004
+    ports: ["5173:5173"]
+    restart: unless-stopped
+volumes:
+  news-models:

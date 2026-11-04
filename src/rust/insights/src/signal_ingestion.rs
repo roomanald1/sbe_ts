@@ -174,6 +174,9 @@ async fn ingest_signal_event(
                     && price > 0.0
                     && latest_price == Some((timestamp, price))
                     && (price_count_after > price_count_before || previous_price != latest_price);
+                if accepted {
+                    runtime.latest_prices.insert(request.symbol.clone(), (timestamp, price));
+                }
                 if !accepted && signal_diagnostic_due(&runtime, &request.symbol, timestamp) {
                     let reason = if !price.is_finite() || price <= 0.0 {
                         "invalid_price"
@@ -239,8 +242,8 @@ async fn ingest_signal_event(
                     )
                 {
                     crate::service_log!(
-                        "WARN",
-                        "Signal snapshot unavailable: symbol={} timestamp={} diagnostics={}",
+                        "INFO",
+                        "Signal snapshot not ready: symbol={} timestamp={} diagnostics={}",
                         request.symbol,
                         timestamp,
                         engine.input_diagnostic(timestamp)
@@ -430,6 +433,11 @@ async fn ingest_signal_event(
 }
 
 async fn publish_shadow_learning_outcomes(store: &SignalStore, outcomes: Vec<SignalEvaluation>) {
+    let _permit = SHADOW_LEARNING_DELIVERY_LIMIT
+        .get_or_init(|| Semaphore::new(2))
+        .acquire()
+        .await
+        .expect("shadow learning delivery semaphore remains open");
     let client = POSITION_MANAGEMENT_CLIENT.get_or_init(reqwest::Client::new);
     let base =
         std::env::var("AUTO_TRADER_URL").unwrap_or_else(|_| "http://127.0.0.1:3005".to_owned());
@@ -498,6 +506,7 @@ async fn publish_shadow_learning_outcomes(store: &SignalStore, outcomes: Vec<Sig
                 "taker_fee_rate": evaluation.taker_fee_rate,
                 "symbol": evaluation.symbol.as_str(),
                 "strategy": decision["strategy"].as_str().unwrap_or(""),
+                "strategy_parameters": decision.get("strategy_parameters"),
                 "exit_scenario": decision["shadow_exit_scenario"].as_str().unwrap_or("strategy"),
                 "sample_group_id": decision["shadow_sample_group_id"].as_str().unwrap_or(""),
                 "scout_parameter_key": decision.get("scout_parameter_key"),

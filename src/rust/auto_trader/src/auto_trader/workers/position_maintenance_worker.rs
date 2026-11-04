@@ -118,7 +118,14 @@ async fn sync_auto_positions(
     // working; do not mirror its fill here or the response path would apply it
     // a second time.
     let _cycle = acquire_cycle_lock(state, "position_maintenance").await;
+    let settings_lock_started = Instant::now();
     let mut settings = state.settings.lock().await;
+    record_cycle_lock_scope(
+        state,
+        "position_maintenance_settings_lock_wait",
+        settings_lock_started.elapsed(),
+    );
+    let reconciliation_started = Instant::now();
     let pending_signal_symbols = settings
         .orders
         .iter()
@@ -242,8 +249,14 @@ async fn sync_auto_positions(
         settings.used_notional_today = allocated_notional(&settings);
         request_settings_persist(state)?;
     }
+    let reconciliation_elapsed = reconciliation_started.elapsed();
     drop(settings);
     drop(_cycle);
+    record_cycle_lock_scope(
+        state,
+        "position_maintenance_ledger_reconciliation",
+        reconciliation_elapsed,
+    );
     for (mut payload, realized_pnl, strategy_lots, closed_at_ms, known_exit_ids) in external_closes {
         let symbol = payload["symbol"].as_str().unwrap_or_default().to_owned();
         let entry_timestamp = payload["entry_timestamp_ms"].as_u64().unwrap_or_default();
@@ -311,8 +324,6 @@ async fn sync_auto_positions(
                     ) {
                         let mut settings = state.settings.lock().await;
                         let realized_usd = realized_usd(&settings, &symbol, realized);
-                        let entry_notional = audit["entry_context"]["initial_entry_notional"]
-                            .as_f64().unwrap_or_default();
                         record_strategy_trade_outcome(
                             &mut settings,
                             &symbol,
@@ -320,17 +331,9 @@ async fn sync_auto_positions(
                             audit["learning_context"].as_str(),
                             audit["scout"].as_bool().unwrap_or(false),
                             realized_usd,
+                            audit["strategy_decision"].as_object().map(|_| &audit["strategy_decision"]),
+                            audit["trade_id"].as_str(),
                         );
-                        if entry_notional > 0.0 {
-                            record_strategy_threshold_sample(
-                                &mut settings,
-                                &symbol,
-                                Some(strategy),
-                                audit["scout"].as_bool().unwrap_or(false),
-                                audit["strategy_decision"].as_object().map(|_| &audit["strategy_decision"]),
-                                audit["trade_realized_pnl"].as_f64().unwrap_or_default() / entry_notional * 100.0,
-                            );
-                        }
                         request_settings_persist(state)?;
                     }
                 }

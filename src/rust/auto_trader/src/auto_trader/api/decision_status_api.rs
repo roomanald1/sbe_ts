@@ -56,8 +56,11 @@ fn build_context_decision_parameters(
         .into_iter()
         .map(|context| {
             let stats = context_learning_stats(learning, &context);
+            let scout_stats = context_learning_stats(learning, &format!("scout:{context}"));
             let positive_rate =
                 (stats.samples > 0).then_some(stats.positive as f64 / stats.samples as f64);
+            let scout_positive_rate = (scout_stats.samples > 0)
+                .then_some(scout_stats.positive as f64 / scout_stats.samples as f64);
             let strength_floor = (adaptive_missed_opportunity_floor(
                 adaptive_strength_floor(learning, &context),
                 MissedOpportunityGate::Strength,
@@ -72,6 +75,8 @@ fn build_context_decision_parameters(
                 context,
                 learning_samples: stats.samples,
                 positive_rate,
+                scout_learning_samples: scout_stats.samples,
+                scout_positive_rate,
                 strength_floor,
                 exploration_score_floor,
             }
@@ -95,11 +100,7 @@ fn learning_context_prefix(key: &str) -> Option<String> {
         dimensions
     };
     let prefix = parts[offset..dimensions].join(":");
-    Some(if offset == 1 {
-        format!("scout:{prefix}")
-    } else {
-        prefix
-    })
+    Some(prefix)
 }
 
 fn build_decision_thresholds(
@@ -121,7 +122,7 @@ fn build_decision_thresholds(
 }
 
 fn strategy_parameter_profiles(settings: &Settings) -> Vec<StrategyParameterProfile> {
-    let symbols = [
+    let mut symbols = [
         "BTC-USDT",
         "ETH-USDT",
         "BNB-USDT",
@@ -129,14 +130,63 @@ fn strategy_parameter_profiles(settings: &Settings) -> Vec<StrategyParameterProf
         "SOL-USDT",
         "ADA-USDT",
         "DOGE-USDT",
-    ];
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect::<BTreeSet<_>>();
+    // Include symbols with actual profile/outcome state so the audit can show
+    // what the strategy used for long-tail assets and non-USDT quote pairs.
+    symbols.extend(settings.positions.keys().cloned());
+    symbols.extend(settings.strategy_positions.values().flat_map(|by_symbol| by_symbol.keys().cloned()));
+    symbols.extend(settings.learning.keys().filter_map(|key| {
+        let key = key.strip_prefix("trade:").or_else(|| key.strip_prefix("shadow:"))?;
+        key.split_once(':').map(|(symbol, _)| symbol.to_owned())
+    }));
+    symbols.extend(settings.strategy_parameter_overrides.keys().filter_map(|key| {
+        key.split_once(':').map(|(symbol, _)| symbol.to_owned())
+    }));
     let strategies = Strategy::all().filter(|strategy| !strategy.is_legacy_composite()).collect::<Vec<_>>();
     symbols
         .into_iter()
         .flat_map(|symbol| {
             strategies.iter().copied()
                 .into_iter()
-                .map(move |strategy| strategy_parameter_profile(settings, symbol, strategy))
+                .map(move |strategy| strategy_parameter_profile(settings, &symbol, strategy))
         })
         .collect()
+}
+
+#[cfg(test)]
+mod decision_profile_tests {
+    use super::*;
+
+    #[test]
+    fn profiles_include_symbols_with_learned_trade_history() {
+        let mut settings = Settings::default();
+        settings.learning.insert(
+            "trade:XRP-USDC:live-momentum".into(),
+            LearningStats {
+                samples: 3,
+                positive: 1,
+                realized_pnl: -0.2,
+                ..LearningStats::default()
+            },
+        );
+
+        let profiles = strategy_parameter_profiles(&settings);
+        let profile = profiles
+            .iter()
+            .find(|profile| profile.symbol == "XRP-USDC" && profile.strategy == "live-momentum")
+            .expect("learned non-default symbol profile");
+        assert_eq!(profile.learning_samples, 3);
+        assert_eq!(profile.positive_rate, Some(1.0 / 3.0));
+    }
+
+    #[test]
+    fn scout_and_trade_history_share_the_live_context_row() {
+        assert_eq!(
+            learning_context_prefix("scout:long:range:XRP-USDC:live-momentum:trade"),
+            Some("long:range:XRP-USDC:live-momentum".into())
+        );
+    }
 }

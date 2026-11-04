@@ -1674,3 +1674,271 @@ Same optimized Cargo benchmark target and WSL2 environment with local services a
 | Strategy parameter validation | 1.9 ns/operation | 1.9 ns/operation | No change |
 
 Same optimized Cargo benchmark target and WSL2 environment. Strategy evaluator ranges improved or stayed within the previous run's range; helper timings were lower in this single run. The Scout probe changes are outside the microbenchmarked paths. AutoTrader tests passed (189 tests), and React tests passed (88 tests). No benchmark targets were skipped or failed.
+
+## Follow-up run (2026-11-04 08:45 UTC, strategy/scout/learning crate contracts)
+
+### Auto-trader strategy evaluation
+
+| Workload | Previous run | Current run | Change |
+|---|---:|---:|---:|
+| Strategy entry evaluation range | 1.1–16.0 ns/evaluation | 1.1–16.9 ns/evaluation | Upper reading +5.6% |
+| Strategy position evaluation range | 1.1–1.7 ns/evaluation | 1.1–3.9 ns/evaluation | Upper reading +129.4% |
+| Signal serialization | 486.2 ns/operation | 523.7 ns/operation | +7.7% |
+| Market depth assessment | 549.0 ns/operation | 616.8 ns/operation | +12.3% |
+| Limit order request construction | 413.6 ns/operation | 431.5 ns/operation | +4.3% |
+| Strategy parameter validation | 1.9 ns/operation | 2.2 ns/operation | +15.8% |
+
+Same optimized `strategy_evaluation` target and WSL2 environment. This was a single run; the upper position-evaluation reading and small helper changes need a repeat before attributing them to code. The new contract, scout, and learning crate workloads are not included in this auto-trader benchmark. AutoTrader tests passed (189 tests); all new-crate tests passed. No benchmark target was skipped or failed.
+
+### Repeat run (2026-11-04 08:47 UTC)
+
+| Workload | Previous run | Repeat | Change vs 2026-11-04 08:45 |
+|---|---:|---:|---:|
+| Strategy entry evaluation range | 1.1–16.0 ns/evaluation | 1.2–19.0 ns/evaluation | Upper reading +18.8% |
+| Strategy position evaluation range | 1.1–1.7 ns/evaluation | 1.1–4.1 ns/evaluation | Upper reading +141.2% |
+| Signal serialization | 486.2 ns/operation | 522.7 ns/operation | +7.5% |
+| Market depth assessment | 549.0 ns/operation | 592.1 ns/operation | +7.8% |
+| Limit order request construction | 413.6 ns/operation | 429.9 ns/operation | +3.9% |
+| Strategy parameter validation | 1.9 ns/operation | 2.0 ns/operation | +5.3% |
+
+Same benchmark target and environment. Elevated strategy range maxima persisted across two runs, though the two new crates do not participate in these evaluator functions; treat this as an observed benchmark degradation requiring investigation before the split is considered performance-neutral. AutoTrader tests passed (189 tests). No benchmark target was skipped or failed.
+
+## Follow-up run (2026-11-04 10:38 UTC, external profiles and Scouts crate)
+
+### Auto-trader strategy evaluation
+
+| Workload | Previous recorded run | Current run | Change |
+|---|---:|---:|---:|
+| Strategy entry evaluation range | 1.2–19.0 ns/evaluation | 1.1–18.1 ns/evaluation | Upper reading -4.7% |
+| Strategy position evaluation range | 1.1–4.1 ns/evaluation | 1.1–2.1 ns/evaluation | Upper reading -48.8% |
+| Signal serialization | 522.7 ns/operation | 522.4 ns/operation | -0.1% |
+| Market depth assessment | 592.1 ns/operation | 599.0 ns/operation | +1.2% |
+| Limit order request construction | 429.9 ns/operation | 439.9 ns/operation | +2.3% |
+| Strategy parameter validation | 2.0 ns/operation | 2.3 ns/operation | +15.0% |
+
+Same optimized `strategy_evaluation` target and WSL2 environment. The decision-path max readings moved back toward the previous recorded range; the small helper timings remain noisy single-run measurements. Scouts' parameter-probe generation now runs through the shared Scouts crate API, but the benchmark measures only AutoTrader decision helpers. All Rust tests for strategy_core, scouts, learning, auto_trader (192 tests), and insights passed; one existing public-provider connectivity test was ignored. No benchmark target was skipped or failed.
+
+## Repeat run (2026-11-04 10:42 UTC, learner profile registration and strategy contract extraction)
+
+### Auto-trader strategy evaluation
+
+| Workload | Previous run | Repeat | Change |
+|---|---:|---:|---:|
+| Strategy entry evaluation range | 1.1–18.1 ns/evaluation | 1.2–17.6 ns/evaluation | Upper reading -2.8% |
+| Strategy position evaluation range | 1.1–2.1 ns/evaluation | 1.2–2.7 ns/evaluation | Upper reading +28.6% |
+| Signal serialization | 522.4 ns/operation | 548.0 ns/operation | +4.9% |
+| Market depth assessment | 599.0 ns/operation | 598.9 ns/operation | No change |
+| Limit order request construction | 439.9 ns/operation | 435.7 ns/operation | -1.0% |
+| Strategy parameter validation | 2.3 ns/operation | 2.0 ns/operation | -13.0% |
+
+Same optimized target and WSL2 environment. Evaluator range maxima vary across single runs; the position maximum rose on this pass while helper measurements stayed close. No measurable work was added to these benchmarked functions by profile registration or the Scouts library extraction. All Rust tests passed before the benchmark; the ignored provider test remains an explicit external-connectivity test. No benchmark target was skipped or failed.
+
+### New-crate benchmark targets
+
+`cargo bench` completed for `strategy_core`, `scouts`, and `learning`. These crates currently define no benchmark workloads, so their unit-test harnesses ran with all tests ignored in bench mode; no throughput or latency numbers were produced. The real tests for those crates passed in test mode.
+
+## Follow-up run (2026-11-04 10:47 UTC, final crate wiring)
+
+### Auto-trader strategy evaluation
+
+| Workload | Previous run | Current run | Change |
+|---|---:|---:|---:|
+| Strategy entry evaluation range | 1.2–17.6 ns/evaluation | 1.2–20.4 ns/evaluation | Upper reading +15.9% |
+| Strategy position evaluation range | 1.2–2.7 ns/evaluation | 1.1–3.5 ns/evaluation | Upper reading +29.6% |
+| Signal serialization | 548.0 ns/operation | 525.5 ns/operation | -4.1% |
+| Market depth assessment | 598.9 ns/operation | 581.9 ns/operation | -2.8% |
+| Limit order request construction | 435.7 ns/operation | 434.5 ns/operation | -0.3% |
+| Strategy parameter validation | 2.0 ns/operation | 2.0 ns/operation | No change |
+
+Same optimized target and WSL2 environment. Single-run evaluator maxima remain variable, while the helper workloads stayed level or improved. This benchmark does not exercise the new asynchronous feedback/profile exchange or probe generator. All affected Rust tests passed; the existing external-provider test was ignored. `cargo bench` also completed for each new crate, which has no dedicated benchmark workload yet; test harnesses ran with tests ignored in bench mode.
+
+## Follow-up run (2026-11-04 11:08 UTC, scout audit visibility and maker fill updates)
+
+### Auto-trader strategy evaluation
+
+| Workload | Latest prior run (10:47 UTC) | Current serial run | Change |
+|---|---:|---:|---:|
+| Strategy entry evaluation range | 1.2–20.4 ns/evaluation | 1.2–16.8 ns/evaluation | Upper reading -17.6% |
+| Strategy position evaluation range | 1.1–3.5 ns/evaluation | 1.1–2.2 ns/evaluation | Upper reading -37.1% |
+| Signal serialization | 525.5 ns/operation | 528.1 ns/operation | +0.5% |
+| Market depth assessment | 581.9 ns/operation | 573.0 ns/operation | -1.5% |
+| Limit order request construction | 434.5 ns/operation | 400.5 ns/operation | -7.8% |
+| Strategy parameter validation | 2.0 ns/operation | 1.9 ns/operation | -5.0% |
+
+### Insights calculations
+
+| Workload | Latest recorded run | Current serial run | Change |
+|---|---:|---:|---:|
+| Live insight snapshot | 11,671.6 ns/calculation | 11,647.7 ns/calculation | -0.2% |
+| Snapshot including explanations | 12,020.1 ns/calculation | 11,788.9 ns/calculation | -1.9% |
+| Research feature extraction | 243.2 ns/calculation | 249.3 ns/calculation | +2.5% |
+| Price return context | 17.6 ns/calculation | 17.0 ns/calculation | -3.4% |
+| Market input diagnostics | 368.2 ns/calculation | 326.2 ns/calculation | -11.4% |
+| Book snapshot | 46.2 ns/calculation | 43.8 ns/calculation | -5.2% |
+
+Both optimized benchmark targets completed serially under WSL2 (rustc 1.96.0, 32 reported logical CPUs). The first overlapping run was discarded because build/measurement contention made it unsuitable for comparison. The current serial results show no meaningful degradation against the latest recorded comparable run. These microbenchmarks do not measure the new maker-fill audit write or dynamic profile response construction. AutoTrader tests passed (194); Insights tests passed (25, one external-provider test intentionally ignored); React tests passed (88). No benchmark targets were skipped or failed, and no services were started or stopped.
+
+## Follow-up run (2026-11-04, unique auto-trader order IDs)
+
+### Auto-trader strategy evaluation
+
+| Workload | Latest recorded run | Current run | Change |
+|---|---:|---:|---:|
+| Strategy entry evaluation range | 1.2–16.8 ns/evaluation | 1.1–16.7 ns/evaluation | Within run variation |
+| Strategy position evaluation range | 1.1–2.2 ns/evaluation | 1.2–1.9 ns/evaluation | Within run variation |
+| Signal serialization | 528.1 ns/operation | 495.7 ns/operation | -6.1% |
+| Market depth assessment | 573.0 ns/operation | 555.4 ns/operation | -3.1% |
+| Limit-order request construction | 400.5 ns/operation | 396.7 ns/operation | -0.9% |
+| Strategy parameter validation | 1.9 ns/operation | 2.0 ns/operation | +0.1 ns; single-run variation |
+
+Same optimized auto-trader benchmark target, WSL2, rustc 1.96.0, and 32 reported logical CPUs. The change makes signal and position-exit order timestamps unique; it does not affect the measured evaluator paths. No meaningful performance degradation was observed. `cargo test` passed all 194 auto-trader tests. `cargo fmt` completed. No services were started or stopped.
+
+## Follow-up run (2026-11-04 11:30 UTC, Scout-to-entry learning gate)
+
+### Auto-trader strategy evaluation
+
+| Workload | Latest prior run (11:08 UTC) | Current run | Change |
+|---|---:|---:|---:|
+| Strategy entry evaluation range | 1.2–16.8 ns/evaluation | 1.1–16.8 ns/evaluation | Same upper reading |
+| Strategy position evaluation range | 1.1–2.2 ns/evaluation | 1.1–2.4 ns/evaluation | Upper reading +9.1% |
+| Signal serialization | 528.1 ns/operation | 521.1 ns/operation | -1.3% |
+| Market depth assessment | 573.0 ns/operation | 614.1 ns/operation | +7.2% |
+| Limit order request construction | 400.5 ns/operation | 408.5 ns/operation | +2.0% |
+| Strategy parameter validation | 1.9 ns/operation | 1.9 ns/operation | No change |
+
+Same optimized benchmark target and WSL2 environment. This single run shows a higher market-depth and position maximum; those paths were not changed by Scout-to-entry learning. Treat these small microbenchmark variations as unconfirmed timing noise. The benchmark does not exercise the adaptive entry-selection path changed here. AutoTrader tests passed (196); no benchmark targets were skipped or failed, and no services were started or stopped.
+
+## Repeat run (2026-11-04 11:33 UTC, Scout outcome entry gating)
+
+### Auto-trader strategy evaluation
+
+| Workload | Latest prior run (11:30 UTC) | First run (11:33 UTC) | Serial repeat (11:33 UTC) |
+|---|---:|---:|---:|
+| Strategy entry evaluation range | 1.1–16.8 ns/evaluation | 1.2–19.3 ns/evaluation | 1.1–16.2 ns/evaluation |
+| Strategy position evaluation range | 1.1–2.4 ns/evaluation | 1.2–2.5 ns/evaluation | 1.1–1.8 ns/evaluation |
+| Signal serialization | 521.1 ns/operation | 497.7 ns/operation | 512.4 ns/operation |
+| Market depth assessment | 614.1 ns/operation | 561.5 ns/operation | 550.3 ns/operation |
+| Limit order request construction | 408.5 ns/operation | 413.1 ns/operation | 397.3 ns/operation |
+| Strategy parameter validation | 1.9 ns/operation | 2.0 ns/operation | 1.9 ns/operation |
+
+The first run's higher evaluator maxima did not repeat; the serial repeat was within or below the prior evaluator range and showed no meaningful degradation. Helper timings varied between single runs. The benchmark does not exercise the adaptive entry-selection path changed here. AutoTrader tests passed (197); React tests passed (88). No benchmark targets were skipped or failed, and no services were started or stopped.
+
+## Follow-up run (2026-11-04 11:43 UTC, all Scout variants feed parameter learning)
+
+### Auto-trader strategy evaluation
+
+| Workload | Latest recorded repeat (11:33 UTC) | Current serial repeat | Change |
+|---|---:|---:|---:|
+| Strategy entry evaluation range | 1.1–16.2 ns/evaluation | 1.2–16.6 ns/evaluation | Upper reading +2.5% |
+| Strategy position evaluation range | 1.1–1.8 ns/evaluation | 1.2–2.6 ns/evaluation | Upper reading +44.4% (+0.8 ns) |
+| Signal serialization | 512.4 ns/operation | 507.4 ns/operation | -1.0% |
+| Market depth assessment | 550.3 ns/operation | 587.0 ns/operation | +6.7% |
+| Limit order request construction | 397.3 ns/operation | 395.5 ns/operation | -0.5% |
+| Strategy parameter validation | 1.9 ns/operation | 2.0 ns/operation | +0.1 ns |
+
+An earlier run in this repeat pair had larger maxima and did not persist on the serial repeat. The position maximum and market-depth helper are higher than the last saved repeat, but those functions were not changed; treat these single-run deltas as observed timing noise pending a quiet comparison. The benchmark does not measure the changed Scout feedback/entry-selection paths. AutoTrader tests passed (198); Learning tests passed (4). Both benchmark targets completed; no benchmark target was skipped or failed, and no services were started or stopped.
+
+### Learning crate benchmark status (2026-11-04 11:44 UTC)
+
+Cargo bench for the Learning crate completed successfully. No benchmark workload is defined, so Cargo ran its four test harness cases in bench mode with all four ignored; there are no performance figures to compare. The four Learning tests passed in test mode.
+
+## Follow-up run (2026-11-04 12:38 UTC, exhaustive one-step Scout subsets)
+
+### Auto-trader strategy evaluation
+
+| Workload | Latest recorded repeat (11:43 UTC) | First current run | Serial repeat |
+|---|---:|---:|---:|
+| Strategy entry evaluation range | 1.2–16.6 ns/evaluation | 1.2–21.6 ns/evaluation | 1.2–16.6 ns/evaluation |
+| Strategy position evaluation range | 1.2–2.6 ns/evaluation | 1.2–3.5 ns/evaluation | 1.1–2.0 ns/evaluation |
+| Signal serialization | 507.4 ns/operation | 523.5 ns/operation | 507.9 ns/operation |
+| Market depth assessment | 587.0 ns/operation | 561.4 ns/operation | 623.7 ns/operation |
+| Limit order request construction | 395.5 ns/operation | 404.9 ns/operation | 398.8 ns/operation |
+| Strategy parameter validation | 2.0 ns/operation | 1.9 ns/operation | 1.9 ns/operation |
+
+The larger evaluator maxima from the first run did not repeat; the serial repeat is within the previous entry range and below its position maximum. Market-depth timing was 6.3% higher than the last recorded repeat, while the other helpers were close. These microbenchmarks do not exercise the new subset generation or batch scheduling path.
+
+### Insights calculations
+
+| Workload | Latest comparable run (11:08 UTC) | Current serial run | Change |
+|---|---:|---:|---:|
+| Live insight snapshot | 11,647.7 ns/calculation | 11,178.8 ns/calculation | -4.0% |
+| Snapshot including explanations | 11,788.9 ns/calculation | 11,612.5 ns/calculation | -1.5% |
+| Research feature extraction | 249.3 ns/calculation | 244.1 ns/calculation | -2.1% |
+| Price return context | 17.0 ns/calculation | 17.1 ns/calculation | +0.6% |
+| Market input diagnostics | 326.2 ns/calculation | 321.4 ns/calculation | -1.5% |
+| Book snapshot | 43.8 ns/calculation | 43.7 ns/calculation | -0.2% |
+
+AutoTrader tests passed (199), Insights tests passed (19; one external-provider test intentionally ignored), and Scouts tests passed (5). Cargo bench completed for Scouts, which has no benchmark workload; its five test harness cases were ignored in bench mode. Both optimized benchmark targets completed, with no targets skipped or failed. The measurements ran serially under WSL2; no services were started or stopped.
+
+## Follow-up run (2026-11-04 13:08 UTC, feed drop and Insights warning fixes)
+
+### Feed handling and Insights calculations
+
+| Workload | Latest comparable baseline | Current run | Change |
+|---|---:|---:|---:|
+| OKX trade JSON decode, parse, SBE encode | 260.2 ns/message | 275.9 ns/message | +6.0% |
+| 7-level snapshot decode/load/top-seven/encode | 1.274 us/message | 1.388 us/message | +9.0% |
+| 50-level snapshot | 6.745 us/message | 6.991 us/message | +3.6% |
+| 400-level snapshot | 48.632 us/message | 50.908 us/message | +4.7% |
+| 5-level incremental update | 1.129 us/message | 1.241 us/message | +9.9% |
+| Live insight snapshot | 11,647.7 ns/calculation | 11,772.5 ns/calculation | +1.1% |
+| Snapshot including explanations | 11,788.9 ns/calculation | 12,602.8 ns/calculation | +6.9% |
+| Research feature extraction | 249.3 ns/calculation | 244.1 ns/calculation | -2.1% |
+| Price return context | 17.0 ns/calculation | 17.0 ns/calculation | No change |
+| Market input diagnostics | 326.2 ns/calculation | 317.8 ns/calculation | -2.6% |
+| Book snapshot | 43.8 ns/calculation | 43.5 ns/calculation | -0.7% |
+
+The Insights comparison is from a serial rerun; the first simultaneous run was slower (12,109.0 / 12,357.5 ns for the two snapshot workloads), consistent with CPU contention. The +6.9% explanation-enabled result is a single-run increase and does not exercise the changed delivery limiter or log level; treat it as unconfirmed timing variation. Feed benchmark targets ran concurrently with Insights and the local stack; observed feed decode results were 3.6–9.9% slower than the first baseline, while broadcast fanout stayed at 0.1/0.2 us per event for 1/16 subscribers. The slow-consumer synthetic benchmark still used capacity 64 (not the changed production capacity 512), so it does not directly measure production lag behavior. All benchmark targets completed; test harness cases in bench mode were ignored as configured. No services were started or stopped.
+
+## Follow-up run (2026-11-04, removal of alternative paper strategies)
+
+### Auto-trader strategy evaluation
+
+| Workload | Latest serial run (12:38 UTC) | Current serial run | Change |
+|---|---:|---:|---:|
+| Strategy entry evaluation range | 1.2–16.6 ns/evaluation | 1.1–17.7 ns/evaluation | Upper reading +6.6% |
+| Strategy position evaluation range | 1.1–2.0 ns/evaluation | 1.1–2.5 ns/evaluation | Upper reading +25.0% |
+| Signal serialization | 507.9 ns/operation | 532.8 ns/operation | +4.9% |
+| Market depth assessment | 623.7 ns/operation | 680.6 ns/operation | +9.1% |
+| Limit order request construction | 398.8 ns/operation | 424.3 ns/operation | +6.4% |
+| Strategy parameter validation | 1.9 ns/operation | 2.3 ns/operation | +21.1% |
+
+These single-run evaluator maxima and helper timings were not changed by deleting the separate alternative-paper subsystem. Treat the small deltas as unconfirmed timing variation; repeat a quiet comparison if performance attribution is needed.
+
+### Feed handling and Insights calculations
+
+| Workload | Latest comparable run (13:08 UTC) | Current serial run | Change |
+|---|---:|---:|---:|
+| OKX trade JSON decode, parse, SBE encode | 275.9 ns/message | 285.0 ns/message | +3.3% |
+| 7-level snapshot decode/load/top-seven/encode | 1.388 us/message | 1.395 us/message | +0.5% |
+| 50-level snapshot | 6.991 us/message | 7.278 us/message | +4.1% |
+| 400-level snapshot | 50.908 us/message | 52.915 us/message | +3.9% |
+| 5-level incremental update | 1.241 us/message | 1.194 us/message | -3.8% |
+| Live insight snapshot | 11,772.5 ns/calculation | 11,880.5 ns/calculation | +0.9% |
+| Snapshot including explanations | 12,602.8 ns/calculation | 12,175.3 ns/calculation | -3.4% |
+| Research feature extraction | 244.1 ns/calculation | 245.1 ns/calculation | +0.4% |
+| Price return context | 17.0 ns/calculation | 17.7 ns/calculation | +4.1% |
+| Market input diagnostics | 317.8 ns/calculation | 337.9 ns/calculation | +6.3% |
+| Book snapshot | 43.5 ns/calculation | 43.9 ns/calculation | +0.9% |
+
+The first benchmarks were run concurrently and were discarded; the figures above are serial reruns, although the React test process remained active during measurement. Feed, Insights, and AutoTrader tests passed. All optimized benchmark targets completed; no targets were skipped or failed. No services were started or stopped.
+
+
+
+## Auto-trader follow-up run (2026-11-04)
+
+The auto-trader Cargo benchmark completed successfully. Exact host load and workload equivalence to the 2026-11-02 run are unknown, so treat these single-run differences as signals for follow-up rather than regressions attributable to the Scout scheduling change.
+
+| Workload | 2026-11-02 baseline | 2026-11-04 run | Difference |
+|---|---:|---:|---:|
+| Strategy evaluation, entry/position range | 1.1–17.7 / 1.1–2.5 ns/evaluation | 2.2–24.6 / 1.5–5.7 ns/evaluation | Current maxima are higher |
+| Signal serialization | 532.8 ns/operation | 572.9 ns/operation | +7.5% |
+| Market depth assessment | 680.6 ns/operation | 837.2 ns/operation | +23.0% |
+| Limit-order request construction | 424.3 ns/operation | 434.5 ns/operation | +2.4% |
+| Strategy parameter validation | 2.3 ns/operation | 2.1 ns/operation | -8.7% |
+
+The benchmark-mode test binaries reported 174 ignored tests; the separate cargo test run passed all 174 tests.
+
+## Insights Scout record cap (2026-11-04)
+
+`cargo test --manifest-path src/rust/insights/Cargo.toml` passed (19 tests). The Insights `calculations` benchmark was attempted but failed to compile because `SignalEngine` in `src/signals.rs` is missing the `completed_scout_shadow_order` field in an initializer. No benchmark workloads ran, so there is no performance comparison for this change.

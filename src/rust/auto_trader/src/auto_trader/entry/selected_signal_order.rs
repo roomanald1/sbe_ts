@@ -180,10 +180,11 @@ async fn submit_selected_signal(
         }
         settings.last_risk_note.push_str(&note);
     }
-    let timestamp = SystemTime::now()
+    let now_timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64;
+    let timestamp = next_unique_order_timestamp(now_timestamp);
     let max_signal_age_ms = signal_max_age_seconds(signal) * 1_000;
     if timestamp.saturating_sub(signal.timestamp) > max_signal_age_ms {
         return Ok(skipped_for_signal(

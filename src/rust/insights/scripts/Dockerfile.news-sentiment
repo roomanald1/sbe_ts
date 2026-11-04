@@ -1,0 +1,9 @@
+FROM python:3.12-slim
+WORKDIR /app
+RUN pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu torch
+COPY scripts/requirements-news-sentiment.txt ./requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt
+COPY scripts/classify_news.py ./classify_news.py
+ENV NEWS_SENTIMENT_HOST=0.0.0.0 NEWS_SENTIMENT_PORT=3006
+EXPOSE 3006
+CMD ["python", "classify_news.py"]

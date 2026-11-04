@@ -19,6 +19,16 @@ async fn record_cycle_lock_wait(state: &AutoTraderState, worker: &str, elapsed: 
     }
 }
 
+fn record_cycle_lock_scope(state: &AutoTraderState, scope: &str, elapsed: Duration) {
+    if let Ok(mut samples) = state.cycle_lock_scope_ms.lock() {
+        let values = samples.entry(scope.to_owned()).or_default();
+        values.push(elapsed.as_secs_f64() * 1_000.0);
+        if values.len() > 500 {
+            values.remove(0);
+        }
+    }
+}
+
 fn summarize_lock_wait(values: &[f64]) -> Option<CycleLockWaitSummary> {
     if values.is_empty() {
         return None;

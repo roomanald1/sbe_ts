@@ -157,7 +157,7 @@ async fn run_feed_signal_consumer(runtime: Arc<SignalRuntime>) {
     }
 }
 
-const AUTO_TRADER_SIGNAL_PUSH_CONCURRENCY: usize = 32;
+const AUTO_TRADER_SIGNAL_PUSH_CONCURRENCY: usize = 8;
 const AUTO_TRADER_SIGNAL_PUSH_TIMEOUT: Duration = Duration::from_secs(2);
 
 fn drain_latest(map: &DashMap<String, serde_json::Value>) -> Vec<(String, serde_json::Value)> {
@@ -197,9 +197,8 @@ async fn deliver_signal_batch(
     dashboards: Vec<(String, serde_json::Value)>,
 ) -> (BTreeMap<String, serde_json::Value>, Option<String>) {
     // Bound load on AutoTrader while allowing unrelated symbols to progress
-    // together. Thirty-two is a conservative cap, not a benchmark-derived
-    // optimum; raise it only if delivery latency remains high and AutoTrader
-    // has spare capacity.
+    // together. Keep this below the old burst of 32 simultaneous requests,
+    // which competed with shadow-learning writes for AutoTrader's state lock.
     let results = futures_util::stream::iter(dashboards)
         .map(|(symbol, dashboard)| {
             deliver_signal_dashboard(

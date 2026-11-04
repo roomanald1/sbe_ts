@@ -95,6 +95,14 @@ struct Settings {
     #[serde(default)]
     learning: BTreeMap<String, LearningStats>,
     #[serde(default)]
+    feedback_outbox: Vec<strategy_core::FeedbackEvent>,
+    #[serde(default)]
+    profile_registration_outbox: Vec<strategy_core::StrategyProfileRegistration>,
+    #[serde(default)]
+    registered_profile_ids: BTreeSet<String>,
+    #[serde(default)]
+    learned_profiles: BTreeMap<String, strategy_core::StrategyProfile>,
+    #[serde(default)]
     execution_learning: BTreeMap<String, ExecutionLearningStats>,
     #[serde(default)]
     execution_learning_order_ids: BTreeSet<String>,
@@ -106,6 +114,8 @@ struct Settings {
     shadow_sample_at_ms: BTreeMap<String, u64>,
     #[serde(default)]
     shadow_sample_active_scenarios: BTreeMap<String, BTreeSet<String>>,
+    #[serde(default)]
+    scout_variant_rotation_cursor: usize,
     #[serde(default)]
     strategy_parameter_overrides: BTreeMap<String, f64>,
     #[serde(default)]
@@ -241,12 +251,17 @@ impl Default for Settings {
             positions: BTreeMap::new(),
             strategy_positions: BTreeMap::new(),
             learning: BTreeMap::new(),
+            feedback_outbox: Vec::new(),
+            profile_registration_outbox: Vec::new(),
+            registered_profile_ids: BTreeSet::new(),
+            learned_profiles: BTreeMap::new(),
             execution_learning: BTreeMap::new(),
             execution_learning_order_ids: BTreeSet::new(),
             shadow_learning_outcome_ids: BTreeSet::new(),
             scout_comparisons: BTreeMap::new(),
             shadow_sample_at_ms: BTreeMap::new(),
             shadow_sample_active_scenarios: BTreeMap::new(),
+            scout_variant_rotation_cursor: 0,
             strategy_parameter_overrides: BTreeMap::new(),
             last_hedge_at: BTreeMap::new(),
             last_decision: String::new(),

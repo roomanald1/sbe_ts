@@ -29,12 +29,8 @@ fn status(state: &AutoTraderState, settings: &Settings) -> StatusResponse {
         risk_appetite: settings.risk_appetite,
         max_open_positions: settings.max_open_positions,
         max_concurrent_shadow_samples: settings.max_concurrent_shadow_samples,
-        active_shadow_samples: settings.shadow_sample_active_scenarios.len(),
-        active_scout_shadow_samples: settings.shadow_sample_active_scenarios.keys().filter(|group| {
-            group.starts_with("daily-scout-level:")
-                || group.starts_with("live-scout:")
-                || group.starts_with("live-scout-parameter:")
-        }).count(),
+        active_shadow_samples: active_shadow_batch_count(settings),
+        active_scout_shadow_samples: active_scout_shadow_batch_count(settings),
         scout_max_active_positions: settings.scout_max_active_positions,
         max_intraday_open_positions: settings.max_intraday_open_positions,
         max_daily_open_positions: settings.max_daily_open_positions,

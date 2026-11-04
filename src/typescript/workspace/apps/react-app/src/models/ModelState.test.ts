@@ -2,7 +2,6 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { BehaviorSubject } from 'rxjs';
 import { AccountModel } from './AccountModel';
-import { AlternativeStrategiesModel, alternativeLabels } from './AlternativeStrategiesModel';
 import { AutoTraderModel } from './AutoTraderModel';
 import { AutoTraderOutcomesModel } from './AutoTraderOutcomesModel';
 import { AutoTraderShadowModel } from './AutoTraderShadowModel';
@@ -38,14 +37,6 @@ describe('model initial state and simple actions', () => {
     const model = new AccountModel();
     assert.equal(model.state$.value.loading, true);
     assert.equal(model.state$.value.max_leverage, 2);
-    model.stop();
-  });
-
-  it('edits AlternativeStrategiesModel drafts only when a config exists', () => {
-    const model = new AlternativeStrategiesModel();
-    model.edit('missing', { enabled: true });
-    assert.deepEqual(model.state$.value.drafts, {});
-    assert.equal(alternativeLabels['residual-momentum'], 'Market-adjusted momentum');
     model.stop();
   });
 

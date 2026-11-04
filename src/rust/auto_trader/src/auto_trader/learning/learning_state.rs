@@ -83,6 +83,13 @@ fn strategy_trade_learning_key(symbol: &str, strategy: &str) -> String {
     format!("trade:{symbol}:{strategy}")
 }
 
+fn scout_context_learning_key(learning_context: &str) -> Option<String> {
+    let context = learning_context.strip_prefix("scout:")?;
+    let context = context.split(":scenario:").next()?;
+    let context = context.strip_suffix(":trade")?;
+    (!context.is_empty()).then(|| format!("scout:{context}:trade"))
+}
+
 fn strategy_shadow_learning_key(symbol: &str, strategy: &str, scenario: &str) -> String {
     format!("shadow:{symbol}:{strategy}:{scenario}")
 }
@@ -113,6 +120,8 @@ fn record_strategy_trade_outcome(
     learning_context: Option<&str>,
     _scout: bool,
     realized_pnl_usd: f64,
+    entry_decision: Option<&serde_json::Value>,
+    trade_id: Option<&str>,
 ) {
     if !realized_pnl_usd.is_finite() {
         return;
@@ -120,52 +129,103 @@ fn record_strategy_trade_outcome(
     // Scout fills are deliberately small, but still provide strategy-specific
     // evidence for tuning the profile that produced them.
     if let Some(strategy) = strategy {
-        let key = strategy_trade_learning_key(symbol, strategy);
-        record_learning_outcome(settings.learning.entry(key).or_default(), realized_pnl_usd);
-    }
-    if let Some(context) = learning_context.filter(|context| !context.is_empty()) {
-        let base_context = context.split(":P").next().unwrap_or(context);
-        let key = format!("{base_context}:trade");
-        record_learning_outcome(settings.learning.entry(key).or_default(), realized_pnl_usd);
+        let profile_symbol = entry_decision
+            .and_then(|decision| decision.get("scout_parameter_profile_symbol"))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or(symbol);
+        let mut parameters = entry_decision
+            .and_then(|decision| decision.get("strategy_parameters"))
+            .and_then(serde_json::Value::as_object)
+            .into_iter()
+            .flatten()
+            .filter_map(|(key, value)| Some((key.clone(), value.as_f64()?)))
+            .collect::<BTreeMap<_, _>>();
+        if let Some(kind) = Strategy::from_name(strategy) {
+            let specs = kind.parameter_specs();
+            if specs.iter().any(|spec| !parameters.contains_key(spec.key.as_str())) {
+                let signal_parameters = parameters.clone();
+                parameters = strategy_parameter_profile(settings, profile_symbol, kind)
+                    .parameters.into_iter().map(|parameter| (parameter.key, parameter.value))
+                    .collect();
+                parameters.extend(signal_parameters);
+                if let Some(decision) = entry_decision {
+                    if let (Some(key), Some(value)) = (
+                        decision.get("scout_parameter_key").and_then(serde_json::Value::as_str),
+                        decision.get("scout_parameter_value").and_then(serde_json::Value::as_f64),
+                    ) {
+                        if !key.starts_with("combo:") { parameters.insert(key.to_owned(), value); }
+                        else if let Some(variant) = parse_scout_combination(key, kind) { parameters.extend(variant); }
+                    }
+                }
+            }
+        }
+        let parameter_specs = Strategy::from_name(strategy)
+            .map(Strategy::parameter_specs)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|spec| strategy_core::ParameterSpec {
+                key: spec.key.as_str().to_owned(),
+                label: spec.label.to_owned(),
+                default: spec.default,
+                min: spec.min,
+                max: spec.max,
+                step: spec.step,
+                unit: spec.unit.to_owned(),
+                learning_direction: spec.learning_direction,
+            })
+            .filter(|spec| parameters.contains_key(&spec.key))
+            .collect::<Vec<_>>();
+        let profile_id = strategy_core::profile_id(profile_symbol, strategy, &parameters);
+        let event_id = format!("trade:{}", trade_id.filter(|value| !value.is_empty()).unwrap_or(learning_context.unwrap_or(symbol)));
+        if !settings.feedback_outbox.iter().any(|event| matches!(event,
+            strategy_core::FeedbackEvent::TradeOutcome { event_id: pending, .. } if pending == &event_id
+        )) {
+            settings.feedback_outbox.push(strategy_core::FeedbackEvent::TradeOutcome {
+                event_id,
+                observed_at_ms: current_time_ms(),
+                symbol: profile_symbol.to_owned(),
+                strategy: strategy.to_owned(),
+                profile_id,
+                parameters,
+                specs: parameter_specs,
+                scout: _scout,
+                realized_pnl_usd,
+                net_return_percent: entry_decision
+                    .and_then(|decision| decision.get("initial_entry_notional_usd"))
+                    .and_then(serde_json::Value::as_f64)
+                    .filter(|notional| *notional > 0.0)
+                    .map(|notional| realized_pnl_usd / notional * 100.0)
+                    .unwrap_or(0.0),
+            });
+        }
     }
 }
 
-const MAX_STRATEGY_THRESHOLD_SAMPLES: usize = 64;
+#[cfg(test)]
+mod feedback_outbox_tests {
+    use super::*;
 
-fn record_strategy_threshold_sample(
-    settings: &mut Settings,
-    symbol: &str,
-    strategy: Option<&str>,
-    _scout: bool,
-    entry_decision: Option<&serde_json::Value>,
-    net_return_percent: f64,
-) {
-    let Some(strategy) = strategy else {
-        return;
-    };
-    let Some(entry_decision) = entry_decision else {
-        return;
-    };
-    if !net_return_percent.is_finite() {
-        return;
-    }
-    let Some((parameter_key, threshold, feature_value)) =
-        threshold_observation(strategy, entry_decision)
-    else {
-        return;
-    };
-    let key = strategy_trade_learning_key(symbol, strategy);
-    let samples = &mut settings.learning.entry(key).or_default().threshold_samples;
-    samples.push(StrategyThresholdSample {
-        timestamp_ms: current_time_ms(),
-        parameter_key,
-        threshold,
-        feature_value,
-        net_return_percent,
-    });
-    if samples.len() > MAX_STRATEGY_THRESHOLD_SAMPLES {
-        let excess = samples.len() - MAX_STRATEGY_THRESHOLD_SAMPLES;
-        samples.drain(..excess);
+    #[test]
+    fn completed_trade_is_queued_for_external_learning_with_its_exact_profile() {
+        let mut settings = Settings::default();
+        let decision = serde_json::json!({
+            "strategy_parameters": { "minimum_momentum": 0.003 },
+            "learning_profile_id": "ignored-stale-id"
+        });
+        record_strategy_trade_outcome(
+            &mut settings, "BTC-USDT", Some("live-momentum"), Some("scout:btc"), false,
+            1.25, Some(&decision), Some("trade-42"),
+        );
+        assert!(settings.learning.is_empty(), "the trader must not update learner state inline");
+        let Some(FeedbackEvent::TradeOutcome {
+            event_id, profile_id, parameters, realized_pnl_usd, ..
+        }) = settings.feedback_outbox.first() else {
+            panic!("trade outcome was not queued")
+        };
+        assert_eq!(event_id, "trade:trade-42");
+        assert_eq!(parameters["minimum_momentum"], 0.003);
+        assert_eq!(profile_id, &strategy_core::profile_id("BTC-USDT", "live-momentum", parameters));
+        assert_eq!(*realized_pnl_usd, 1.25);
     }
 }
 
@@ -205,4 +265,20 @@ fn record_learning_outcome(stats: &mut LearningStats, realized_pnl: f64) {
     }
     stats.realized_pnl += realized_pnl;
     stats.updated_at_ms = now_ms;
+}
+
+#[cfg(test)]
+mod scout_context_learning_tests {
+    use super::*;
+
+    #[test]
+    fn scout_scenario_context_maps_to_one_baseline_context_key() {
+        assert_eq!(
+            scout_context_learning_key(
+                "scout:long:range:XRP-USDC:live-momentum:trade:scenario:strategy"
+            ),
+            Some("scout:long:range:XRP-USDC:live-momentum:trade".into())
+        );
+        assert_eq!(scout_context_learning_key("ordinary-context"), None);
+    }
 }

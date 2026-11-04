@@ -1,4 +1,19 @@
 services:
+  service-control:
+    build: ../system/control
+    ports:
+      - "127.0.0.1:8080:8080"
+    environment:
+      WORKSPACE_ROOT: /workspace
+      DOCKER_WORKSPACE_ROOT: ${REPO_ROOT:-..}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ${REPO_ROOT:-..}:/workspace
+      - ${REPO_ROOT:-..}/system/control:/app
+      - ${REPO_ROOT:-..}/src/typescript/workspace/apps/react-app/public/coverage:/app/coverage:ro
+    command: ["node", "--watch", "server.mjs"]
+    restart: unless-stopped
+
   prometheus:
     image: prom/prometheus:v3.5.0
     command:
@@ -52,11 +67,13 @@ services:
       EXECUTION_URL: http://host.docker.internal:3003
       INSIGHTS_URL: http://host.docker.internal:3004
       NEWS_SENTIMENT_URL: http://host.docker.internal:3006
+      LEARNING_SERVICE_URL: http://host.docker.internal:3010
+      SCOUTS_SERVICE_URL: http://host.docker.internal:3011
       SQLITE_DB_PATH: /workspace/src/rust/insights/signals.sqlite
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
-      - ../:/workspace:ro
+      - ${REPO_ROOT:-..}:/workspace:ro
     restart: unless-stopped
 
   grafana:

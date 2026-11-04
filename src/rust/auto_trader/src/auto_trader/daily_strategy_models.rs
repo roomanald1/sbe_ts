@@ -47,6 +47,8 @@ struct TrendReturnWindow {
 #[derive(Clone, Deserialize)]
 struct DailyStrategySnapshot {
     as_of_ms: u64,
+    #[serde(default)]
+    sweep_id: String,
     active_strategy_symbols: BTreeSet<(String, String)>,
     generated_signals: Vec<Signal>,
     // A symbol is inactive only when the latest batch explicitly evaluated it.
@@ -385,16 +387,6 @@ impl<'a> StrategySignal<'a> {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum StrategyDecision {
-    Enter,
-    Scout,
-    Hold,
-    Exit,
-    Rebalance,
-    Reject,
-}
-
 #[cfg(test)]
 mod risk_adjusted_monthly_momentum_tests {
     use super::*;
@@ -433,6 +425,7 @@ mod risk_adjusted_monthly_momentum_tests {
     fn same_symbol_rebalances_only_when_month_anchor_advances() {
         let snapshot = DailyStrategySnapshot {
             as_of_ms: 10,
+            sweep_id: String::new(),
             active_strategy_symbols: BTreeSet::from([(
                 "risk-adjusted-monthly-momentum".into(),
                 "ETH-USDT".into(),

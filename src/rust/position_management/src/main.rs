@@ -1,4 +1,6 @@
 mod logging;
+#[path = "../../service_docs.rs"]
+mod service_docs;
 use axum::routing::get;
 mod feed_client;
 mod positions;
@@ -8,6 +10,31 @@ mod users;
 async fn main() -> anyhow::Result<()> {
     let app = positions::router()
         .await?
+        .merge(service_docs::routes(
+            "Position Management",
+            &[
+                ("/health", &["get"]),
+                ("/positions", &["get"]),
+                ("/positions/realized-pnl", &["get"]),
+                ("/positions/fee-summary", &["get"]),
+                ("/positions/account", &["get"]),
+                ("/positions/account/topups", &["post"]),
+                ("/positions/account/leverage", &["post"]),
+                ("/positions/usd-rates", &["get"]),
+                ("/positions/fee-rates", &["get"]),
+                ("/positions/hedge-candidates", &["get"]),
+                ("/positions/trades", &["get"]),
+                ("/positions/vwap", &["get", "post"]),
+                ("/positions/vwap/{id}", &["delete"]),
+                ("/positions/twap", &["post"]),
+                ("/positions/barriers", &["get"]),
+                ("/positions/barriers/profit-target", &["post"]),
+                ("/positions/close-profitable", &["post"]),
+                ("/users/{page}", &["get"]),
+                ("/account", &["get"]),
+                ("/account/topups", &["post"]),
+            ],
+        ))
         .merge(users::router())
         .route("/health", get(|| async { "ok" }))
         .route("/process-cpu-seconds", get(process_cpu_seconds))

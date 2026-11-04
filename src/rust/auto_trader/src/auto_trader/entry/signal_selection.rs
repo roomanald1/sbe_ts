@@ -86,27 +86,6 @@ fn select_cycle_signal<'a>(
         })
         .copied()
         .collect::<Vec<_>>();
-    let exploration_qualified = fresh_directional
-        .iter()
-        .filter(|signal| {
-            if is_live_scout_only_signal(signal) || !passes_pullback_confirmation(signal) {
-                return false;
-            }
-            let context = market_context(signal);
-            !is_mixed_market_context(&context)
-                && signal.strength.is_finite()
-                && signal.strength >= MIN_EXPLORATION_STRENGTH * risk_floor_scale(risk_appetite)
-                && signal.score.is_finite()
-                && signal.score.abs()
-                    >= (adaptive_exploration_score_floor(
-                        &learning,
-                        &context,
-                        &dashboard.missed_opportunity_bands,
-                    ) * risk_floor_scale(risk_appetite))
-                    .max(0.0)
-        })
-        .copied()
-        .collect::<Vec<_>>();
     let strict_candidate = strength_qualified
         .iter()
         .copied()
@@ -158,51 +137,8 @@ fn select_cycle_signal<'a>(
     let (signal, exploratory, scout) = if let Some(signal) = strict_candidate {
         (signal, false, false)
     } else {
-        let exploratory = exploration_qualified
+        let scout_candidate = fresh_directional
             .iter()
-            .copied()
-            .filter(|signal| {
-                if is_live_scout_only_signal(signal) {
-                    return false;
-                }
-                let walk_forward = dashboard.walk_forward.iter().find(|item| {
-                    item.symbol == signal.symbol && is_entry_evidence_horizon(item.horizon_seconds)
-                });
-                let side_evidence = walk_forward.map(|item| {
-                    if signal.direction == "bullish" {
-                        &item.all_signal_long
-                    } else {
-                        &item.all_signal_short
-                    }
-                });
-                let research_evidence = walk_forward.map(|item| {
-                    if signal.direction == "bullish" {
-                        &item.research_logistic_long
-                    } else {
-                        &item.research_logistic_short
-                    }
-                });
-                let research_supports = research_evidence.is_none_or(|evidence| {
-                    evidence.sample_count < MIN_SIDE_WALK_FORWARD_SAMPLES
-                        || evidence
-                            .average_net_return_percent
-                            .is_some_and(|net| net > 0.0)
-                });
-                research_supports
-                    && side_evidence.is_none_or(|evidence| {
-                        evidence.sample_count < MIN_EXPLORATION_EVIDENCE_SAMPLES
-                            || (evidence
-                                .average_net_return_percent
-                                .is_some_and(|net| net > 0.0)
-                                && evidence
-                                    .positive_net_rate
-                                    .is_some_and(|rate| rate >= NEGATIVE_EVIDENCE_FLOOR))
-                    })
-            })
-            .max_by(|a, b| a.strength.total_cmp(&b.strength));
-        let scout_candidate = if exploratory.is_none() {
-            fresh_directional
-                .iter()
                 .copied()
                 .chain(neutral_scout_candidates.iter())
                 .filter(|signal| {
@@ -244,20 +180,21 @@ fn select_cycle_signal<'a>(
                             &item.research_logistic_short
                         }
                     });
-                    let measured_negative = side
-                        .is_some_and(|metrics| has_negative_scout_evidence(signal, metrics, false))
-                        || research.is_some_and(|metrics| {
-                            has_negative_scout_evidence(signal, metrics, true)
-                        });
+                    let (minimum_samples, side_minimum_samples, positive_net_floor) =
+                        scout_walk_forward_thresholds(signal).unwrap_or((usize::MAX, usize::MAX, 1.0));
+                    let negative_at = |metrics: &SideWalkForwardMetrics, minimum_samples| {
+                        metrics.sample_count >= minimum_samples
+                            && (metrics.average_net_return_percent.is_none_or(|net| net <= 0.0)
+                                || metrics.positive_net_rate.is_none_or(|rate| rate < positive_net_floor))
+                    };
+                    let measured_negative = side.is_some_and(|metrics| negative_at(metrics, minimum_samples))
+                        || research.is_some_and(|metrics| negative_at(metrics, side_minimum_samples));
                     !measured_negative || active_scout_count == 0
                 })
-                .max_by(|a, b| a.strength.total_cmp(&b.strength))
-        } else {
-            None
-        };
-        let Some(signal) = exploratory.or(scout_candidate) else {
+            .max_by(|a, b| a.strength.total_cmp(&b.strength));
+        let Some(signal) = scout_candidate else {
             let reason =
-                format_no_tradeable_bias(&input, &exploration_qualified, &strength_qualified);
+                format_no_tradeable_bias(&input, &[], &strength_qualified);
             for candidate in fresh_directional
                 .iter()
                 .copied()
@@ -290,7 +227,7 @@ fn select_cycle_signal<'a>(
             }
             return Err(skipped(&reason));
         };
-        (signal, true, exploratory.is_none())
+        (signal, false, true)
     };
     Ok((signal, exploratory, scout))
 }
@@ -342,6 +279,7 @@ mod signal_selection_behavior_tests {
             insight_processing_ms: Arc::new(Mutex::new(Vec::new())),
             cycle_lock_wait_ms: Arc::new(Mutex::new(BTreeMap::new())),
             cycle_lock_hold_ms: Arc::new(std::sync::Mutex::new(BTreeMap::new())),
+            cycle_lock_scope_ms: Arc::new(std::sync::Mutex::new(BTreeMap::new())),
             settings_path: PathBuf::new(), dated_carry: Arc::new(Mutex::new(DatedCarryBook::default())),
             dated_carry_work_lock: Arc::new(Mutex::new(())), dated_carry_path: PathBuf::new(),
         }
@@ -415,11 +353,11 @@ mod signal_selection_behavior_tests {
         ))
         .unwrap_or_else(|_| panic!("a small scout should sample a qualified signal without pullback confirmation"));
         assert_eq!(selected.0.strategy.as_deref(), Some("live-order-book"));
-        assert!(selected.1 && selected.2);
+        assert!(!selected.1 && selected.2);
     }
 
     #[test]
-    fn selects_strict_evidence_before_exploration_and_marks_unvalidated_signals_exploratory() {
+    fn selects_strict_evidence_before_scouting_unvalidated_signals() {
         let state = state();
         let strict = signal(0.9, 0.9, None, false);
         let evidence = serde_json::from_value::<WalkForward>(serde_json::json!({
@@ -437,8 +375,8 @@ mod signal_selection_behavior_tests {
         let unvalidated_signals = vec![unvalidated.clone()]; let unvalidated_fresh = vec![&unvalidated];
         let empty_dashboard = dashboard(Vec::new());
         let selected = select_cycle_signal(input(&state, &empty_dashboard, &unvalidated_signals, &unvalidated_fresh, &[], 50.0, 0)).unwrap_or_else(|_| panic!("expected signal selection to succeed"));
-        assert!(selected.1);
-        assert!(!selected.2);
+        assert!(!selected.1);
+        assert!(selected.2);
     }
 
     #[test]
@@ -502,13 +440,13 @@ mod signal_selection_behavior_tests {
         let signals = vec![candidate.clone()]; let fresh = vec![&candidate];
         let empty_dashboard = dashboard(Vec::new());
         let selected = select_cycle_signal(input(&state, &empty_dashboard, &signals, &fresh, &[], 50.0, 0)).unwrap_or_else(|_| panic!("expected signal selection to succeed"));
-        assert!(selected.1 && !selected.2);
+        assert!(!selected.1 && selected.2);
 
         let neutral = signal(0.5, 0.5, None, false);
         let none_fresh: Vec<&Signal> = Vec::new();
         let neutral_candidates = vec![neutral.clone()];
         let selected = select_cycle_signal(input(&state, &empty_dashboard, &[], &none_fresh, &neutral_candidates, 50.0, 0)).unwrap_or_else(|_| panic!("expected signal selection to succeed"));
-        assert!(selected.1 && selected.2);
+        assert!(!selected.1 && selected.2);
         assert!(select_cycle_signal(input(&state, &empty_dashboard, &[], &none_fresh, &neutral_candidates, 50.0, DEFAULT_SCOUT_MAX_ACTIVE_POSITIONS)).is_err());
 
         let evidence = serde_json::from_value::<WalkForward>(serde_json::json!({

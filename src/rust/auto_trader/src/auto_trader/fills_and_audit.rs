@@ -215,6 +215,20 @@ fn signal_decision_id(signal: &Signal) -> String {
     )
 }
 
+fn next_unique_order_timestamp(now: u64) -> u64 {
+    static LAST_TIMESTAMP: AtomicU64 = AtomicU64::new(0);
+    loop {
+        let previous = LAST_TIMESTAMP.load(Ordering::Relaxed);
+        let next = now.max(previous.saturating_add(1));
+        if LAST_TIMESTAMP
+            .compare_exchange(previous, next, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
+        {
+            return next;
+        }
+    }
+}
+
 fn record_strategy_order_realized_pnl(order: &mut TraderOrder, realized_delta: f64) {
     order.strategy_realized_pnl = Some(order.strategy_realized_pnl.unwrap_or_default() + realized_delta);
     let today = utc_day();
@@ -282,7 +296,7 @@ fn queue_auto_trader_audit(state: &AutoTraderState, payload: serde_json::Value) 
         .get("stage")
         .and_then(serde_json::Value::as_str)
         .is_some_and(|stage| {
-            stage == "entry" || stage == "dated_carry_entry" || stage.starts_with("exit")
+            stage == "entry" || stage == "entry_fill" || stage == "dated_carry_entry" || stage.starts_with("exit")
         });
     let queue = if is_execution {
         &state.execution_audit_tx

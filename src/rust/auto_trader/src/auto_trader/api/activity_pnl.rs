@@ -36,7 +36,21 @@ async fn calculate_auto_unrealized_pnl(
             } else {
                 market["asks"][0]["price"].as_f64()
             };
-            let Some(mark) = mark.filter(|price| price.is_finite() && *price > 0.0) else {
+            let mark = mark.filter(|price| price.is_finite() && *price > 0.0)
+                .or_else(|| {
+                    let now_ms = SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .ok()?
+                        .as_millis() as u64;
+                    let sample = market["price_samples"].as_array()?.last()?;
+                    let timestamp = sample.get(0)?.as_u64()?;
+                    let price = sample.get(1)?.as_f64()?;
+                    (now_ms.saturating_sub(timestamp) <= 30_000
+                        && price.is_finite()
+                        && price > 0.0)
+                        .then_some(price)
+                });
+            let Some(mark) = mark else {
                 complete = false;
                 break;
             };

@@ -574,6 +574,7 @@ fn insight_evaluate_daily(
     }
 }
 
+#[cfg(test)]
 fn insight_parameter_probe(
     profiles: &serde_json::Value,
     symbol: &str,
@@ -705,6 +706,74 @@ fn insight_parameter_probe(
     }
     let probe_key = format!("combo:{pair}|ctx:{context_hash:016x}");
     Some((probe_key, 0.0, parameters, probe_profiles))
+}
+
+fn insight_parameter_probe_variants(
+    profiles: &serde_json::Value,
+    symbol: &str,
+    strategy: &str,
+    day: u64,
+) -> Option<Vec<(String, f64, BTreeMap<String, f64>, BTreeMap<String, f64>)>> {
+    let profile_symbol = if matches!(strategy, "risk-adjusted-trend-portfolio" | "risk-adjusted-monthly-momentum") {
+        "BTC-USDT"
+    } else {
+        symbol
+    };
+    let profile = profiles.as_array()?.iter().find(|profile| {
+        profile.get("symbol").and_then(serde_json::Value::as_str) == Some(profile_symbol)
+            && profile.get("strategy").and_then(serde_json::Value::as_str) == Some(strategy)
+    })?;
+    let parameter_values = profile.get("parameters")?.as_array()?;
+    let baseline = insight_profile_parameters(profiles, profile_symbol, strategy);
+    let specs = parameter_values.iter().filter_map(|parameter| {
+        let key = parameter.get("key")?.as_str()?.to_owned();
+        let current = parameter.get("value")?.as_f64()?;
+        let min = parameter.get("min")?.as_f64()?;
+        let max = parameter.get("max")?.as_f64()?;
+        let step = parameter.get("step")?.as_f64()?;
+        (key != "learning_rate" && current.is_finite() && min.is_finite()
+            && max.is_finite() && step.is_finite() && min < max && step > 0.0)
+            .then_some(scouts::ParameterSpec {
+                key,
+                label: parameter.get("label").and_then(serde_json::Value::as_str).unwrap_or_default().to_owned(),
+                default: current,
+                min,
+                max,
+                step,
+                unit: parameter.get("unit").and_then(serde_json::Value::as_str).unwrap_or_default().to_owned(),
+                learning_direction: 1.0,
+            })
+    }).collect::<Vec<_>>();
+    let variants = scouts::all_parameter_variants(&baseline, &specs, day)?;
+    Some(variants.into_iter().filter_map(|changes| {
+        let (key, value) = if changes.len() == 1 {
+            let (key, value) = changes.iter().next()?;
+            (key.clone(), *value)
+        } else {
+            (scouts::combination_key(&changes, &baseline)?, 0.0)
+        };
+        let mut parameters = baseline.clone();
+        parameters.extend(changes.iter().map(|(key, value)| (key.clone(), *value)));
+        Some((key, value, parameters, changes))
+    }).collect())
+}
+
+fn daily_probe_group_key(signal: &serde_json::Value) -> String {
+    let strategy = signal.get("strategy").and_then(serde_json::Value::as_str).unwrap_or_default();
+    let symbol = signal.get("symbol").and_then(serde_json::Value::as_str).unwrap_or_default();
+    let decision = signal.get("strategy_decision");
+    let anchor = decision
+        .and_then(|value| value.get("monthly_anchor_close_time_ms"))
+        .or_else(|| decision.and_then(|value| value.get("bar_close_timestamp")))
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or_else(|| signal.get("timestamp").and_then(serde_json::Value::as_u64).unwrap_or_default());
+    let baseline_parameters = decision
+        .and_then(|value| value.get("scout_parameter_baseline_decision"))
+        .and_then(|value| value.get("strategy_parameters"))
+        .or_else(|| decision.and_then(|value| value.get("strategy_parameters")))
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+    format!("{strategy}:{symbol}:{anchor}:{}", scouts::probe_id(&baseline_parameters.to_string()))
 }
 
 fn insight_profile_parameters(
@@ -924,9 +993,29 @@ fn insight_daily_batch(
                 } else { format!("btc-below-sma{}", regime.window_days) }),
             });
             signals.push(base_signal.clone());
-            if let Some((probe_key, probe_value, probe_parameters, probe_profiles)) =
-                insight_parameter_probe(profiles, symbol, strategy, now / INSIGHT_DAY_MS)
+            for (probe_key, probe_value, probe_parameters, changes) in
+                insight_parameter_probe_variants(profiles, symbol, strategy, now / INSIGHT_DAY_MS)
+                    .unwrap_or_default()
             {
+                let mut probe_profiles = profiles.clone();
+                let Some(profile_list) = probe_profiles.as_array_mut() else { continue; };
+                let Some(matching_profile) = profile_list.iter_mut().find(|profile| {
+                    profile.get("symbol").and_then(serde_json::Value::as_str) == Some(
+                        if matches!(strategy.as_str(), "risk-adjusted-trend-portfolio" | "risk-adjusted-monthly-momentum") { "BTC-USDT" } else { symbol }
+                    ) && profile.get("strategy").and_then(serde_json::Value::as_str) == Some(strategy)
+                }) else { continue; };
+                let Some(matching_parameters) = matching_profile.get_mut("parameters").and_then(serde_json::Value::as_array_mut) else { continue; };
+                let mut profile_valid = true;
+                for (key, value) in &changes {
+                    let Some(parameter) = matching_parameters.iter_mut().find(|parameter| {
+                        parameter.get("key").and_then(serde_json::Value::as_str) == Some(key)
+                    }) else {
+                        profile_valid = false;
+                        break;
+                    };
+                    parameter["value"] = serde_json::json!(value);
+                }
+                if !profile_valid { continue; }
                 let probe_evaluation = insight_evaluate_daily(
                     strategy, symbol, pair, candles, &probe_parameters, &probe_profiles, now,
                 )?;
@@ -960,7 +1049,7 @@ fn insight_daily_batch(
                     (Some(level), _) => Some(close > level),
                     _ => None,
                 };
-                let mut probe_signal = base_signal;
+                let mut probe_signal = base_signal.clone();
                 let mut probe_decision = decision.clone();
                 probe_decision["primary_rule"] = serde_json::json!(probe_evaluation.primary_rule);
                 probe_decision["primary_level"] = serde_json::json!(probe_evaluation.primary_level);
@@ -1027,11 +1116,14 @@ async fn poll_daily_strategy_signals(store: SignalStore) {
     let feed =
         std::env::var("FEED_HANDLERS_URL").unwrap_or_else(|_| "http://127.0.0.1:3001".into());
     let mut audited = std::collections::BTreeSet::<String>::new();
+    let mut last_sweep_signature: Option<String> = None;
+    let mut completed_sweep_groups = std::collections::BTreeSet::<String>::new();
+    let mut in_progress_sweep_groups = std::collections::BTreeSet::<String>::new();
     let mut ticker = tokio::time::interval(Duration::from_secs(30));
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         ticker.tick().await;
-        let result = async {
+        let result: anyhow::Result<(serde_json::Value, Vec<serde_json::Value>, String, usize, usize)> = async {
             let (status_result, parameters_result) = tokio::join!(
                 client.get(format!("{auto}/positions/auto-trader")).send(),
                 client.get(format!("{auto}/positions/auto-trader/parameters")).send(),
@@ -1056,29 +1148,84 @@ async fn poll_daily_strategy_signals(store: SignalStore) {
                 bars.sort_by_key(|bar| bar.close_time_ms);
             }
             let batch_as_of = now_ms();
-            insight_daily_batch(&strategies, &parameters["strategy_profiles"], &candles, batch_as_of)
+            let (batch, audits) = insight_daily_batch(
+                &strategies,
+                &parameters["strategy_profiles"],
+                &candles,
+                batch_as_of,
+            )?;
+            let candle_anchor = candles
+                .values()
+                .filter_map(|bars| bars.last().map(|bar| bar.close_time_ms))
+                .max()
+                .unwrap_or_default();
+            let sweep_signature = format!("{candle_anchor}:{}", strategies.join(","));
+            let active_samples = status.get("active_shadow_samples").and_then(serde_json::Value::as_u64).unwrap_or_default() as usize;
+            let sample_limit = status.get("max_concurrent_shadow_samples").and_then(serde_json::Value::as_u64).unwrap_or(5) as usize;
+            Ok((batch, audits, sweep_signature, active_samples, sample_limit))
         }.await;
-        let (batch, audits) = match result {
+        let (batch, audits, sweep_signature, active_samples, sample_limit) = match result {
             Ok(value) => value,
             Err(error) => {
                 crate::service_log!("WARN", "Insights daily strategy scan failed: {error}");
                 continue;
             }
         };
-        let delivery = client
-            .post(format!(
-                "{auto}/internal/auto-trader/daily-strategy-signals"
-            ))
-            .json(&batch)
-            .send()
-            .await
-            .and_then(reqwest::Response::error_for_status);
-        if let Err(error) = delivery {
-            crate::service_log!(
-                "WARN",
-                "Insights daily strategy signal delivery failed: {error}"
-            );
-            continue;
+        if last_sweep_signature.as_deref() != Some(sweep_signature.as_str()) {
+            last_sweep_signature = Some(sweep_signature.clone());
+            completed_sweep_groups.clear();
+            in_progress_sweep_groups.clear();
+        }
+        let snapshot = batch.get("snapshot").cloned().unwrap_or_else(|| serde_json::json!({}));
+        let generated = snapshot.get("generated_signals").and_then(serde_json::Value::as_array)
+            .cloned().unwrap_or_default();
+        let diagnostics = batch.get("diagnostics").cloned().unwrap_or_else(|| serde_json::json!([]));
+        let mut grouped = BTreeMap::<String, Vec<serde_json::Value>>::new();
+        for signal in generated {
+            grouped.entry(daily_probe_group_key(&signal)).or_default().push(signal);
+        }
+        let groups = grouped.into_iter().collect::<Vec<_>>();
+        let mut available_slots = sample_limit.saturating_sub(active_samples);
+        for (group_key, signals) in groups {
+            if completed_sweep_groups.contains(&group_key) {
+                continue;
+            }
+            let already_started = in_progress_sweep_groups.contains(&group_key);
+            if !already_started && available_slots == 0 {
+                break;
+            }
+            let mut group_failed = false;
+            for chunk in signals.chunks(128) {
+                let payload = serde_json::json!({
+                    "snapshot": {
+                        "as_of_ms": snapshot.get("as_of_ms"),
+                    "sweep_id": sweep_signature,
+                        "empty_signal_reasons": snapshot.get("empty_signal_reasons"),
+                        "active_strategy_symbols": snapshot.get("active_strategy_symbols"),
+                        "generated_signals": chunk,
+                    },
+                    "diagnostics": diagnostics.clone(),
+                });
+                let delivery = client
+                    .post(format!("{auto}/internal/auto-trader/daily-strategy-signals"))
+                    .json(&payload)
+                    .send()
+                    .await
+                    .and_then(reqwest::Response::error_for_status);
+                if let Err(error) = delivery {
+                    crate::service_log!("WARN", "Insights daily strategy sweep delivery failed: {error}");
+                    group_failed = true;
+                    break;
+                }
+                if !already_started && in_progress_sweep_groups.insert(group_key.clone()) {
+                    available_slots = available_slots.saturating_sub(1);
+                }
+            }
+            if group_failed {
+                break;
+            }
+            in_progress_sweep_groups.remove(&group_key);
+            completed_sweep_groups.insert(group_key);
         }
         for audit in audits {
             let Some(key) = audit.get("decision_id").and_then(serde_json::Value::as_str) else {
@@ -1164,15 +1311,67 @@ mod donchian_20_btc200_tests {
         assert_eq!(generated.len(), DAILY_PAIRS.len() + 1);
         let probe = generated.iter().find(|signal| signal["strategy_decision"]["scout_parameter_probe"] == true).unwrap();
         assert_eq!(probe["strategy_decision"]["scout_parameter_key"], "breakout_lookback_days");
-        assert_eq!(probe["strategy_decision"]["scout_parameter_value"], 14.0);
+        assert_eq!(probe["strategy_decision"]["scout_parameter_value"], 21.0);
         assert_eq!(probe["strategy_decision"]["scout_parameter_baseline_decision"]["strategy_parameters"]["breakout_lookback_days"], 20.0);
-        assert_eq!(probe["strategy_decision"]["primary_level"], 100.0);
+        assert_eq!(probe["strategy_decision"]["primary_level"], 110.0);
         assert!(generated.iter().all(|signal| signal["strategy_candidate"] == true));
         assert!(batch["snapshot"]["active_strategy_symbols"].as_array().unwrap().is_empty());
         assert!(generated.iter().any(|signal| signal["strategy"] == "donchian-20-btc200"
             && signal["symbol"] == "ETH-USDT"));
         assert!(audits.iter().any(|audit| audit["status"] == "signal-published"
             && audit["symbol"] == "ETH-USDT"));
+    }
+
+    #[test]
+    fn ten_parameter_profile_generates_all_subset_probe_signals() {
+        let parameters = (0..10)
+            .map(|index| {
+                serde_json::json!({
+                    "key": format!("parameter_{index}"),
+                    "value": 5.0,
+                    "default_value": 5.0,
+                    "min": 0.0,
+                    "max": 10.0,
+                    "step": 1.0,
+                    "unit": "units"
+                })
+            })
+            .collect::<Vec<_>>();
+        let profiles = serde_json::json!([{
+            "symbol": "BTC-USDT",
+            "strategy": "test-strategy",
+            "parameters": parameters,
+        }]);
+
+        let variants = insight_parameter_probe_variants(
+            &profiles,
+            "BTC-USDT",
+            "test-strategy",
+            0,
+        )
+        .unwrap();
+        assert_eq!(variants.len(), 1_023);
+        assert!(variants.iter().any(|(_, _, _, changes)| changes.len() == 1));
+        assert!(variants.iter().any(|(_, _, _, changes)| changes.len() == 10));
+    }
+
+    #[test]
+    fn all_parameter_variants_share_their_baseline_sweep_batch() {
+        let baseline_parameters = serde_json::json!({"threshold_a": 0.5, "threshold_b": 0.5});
+        let baseline = serde_json::json!({
+            "strategy": "test-strategy",
+            "symbol": "BTC-USDT",
+            "timestamp": 123,
+            "strategy_decision": {
+                "bar_close_timestamp": 100,
+                "strategy_parameters": baseline_parameters,
+            }
+        });
+        let mut variant = baseline.clone();
+        variant["strategy_decision"]["strategy_parameters"]["threshold_a"] = serde_json::json!(0.6);
+        variant["strategy_decision"]["scout_parameter_baseline_decision"] = baseline["strategy_decision"].clone();
+        variant["strategy_decision"]["scout_parameter_probe"] = serde_json::json!(true);
+        assert_eq!(daily_probe_group_key(&baseline), daily_probe_group_key(&variant));
     }
 }
 

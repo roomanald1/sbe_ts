@@ -3,10 +3,11 @@ impl SignalStore {
         &self,
         since: Option<u64>,
     ) -> Result<AutoTraderDecisionQualitySummary> {
-        let (records, decision_samples) = tokio::try_join!(
+        let (mut records, decision_samples) = tokio::try_join!(
             self.load_auto_trader_execution_audit(since, 50_000),
             self.count_auto_trader_decisions(since),
         )?;
+        records.sort_by_key(|record| record.get("timestamp").and_then(serde_json::Value::as_u64).unwrap_or_default());
         let mut summary = AutoTraderDecisionQualitySummary {
             decision_samples,
             ..Default::default()
@@ -25,7 +26,7 @@ impl SignalStore {
                 .and_then(serde_json::Value::as_str)
                 .unwrap_or_default();
             let trade = trades.entry(trade_id.to_owned()).or_default();
-            if stage == "entry" {
+            if stage == "entry" || stage == "entry_fill" {
                 let entry_quantity = record
                     .get("filled_quantity")
                     .and_then(serde_json::Value::as_f64)
@@ -35,11 +36,26 @@ impl SignalStore {
                     .get("average_price")
                     .and_then(serde_json::Value::as_f64)
                     .filter(|v| v.is_finite() && *v > 0.0);
-                trade.entry_quantity += entry_quantity;
-                if let Some(price) = entry_price {
-                    trade.entry_notional += entry_quantity * price;
-                    trade.entry_price = (trade.entry_quantity > 0.0)
-                        .then_some(trade.entry_notional / trade.entry_quantity);
+                if stage == "entry_fill" {
+                    // Fill updates carry cumulative quantities and price, so
+                    // replace the initial resting-order snapshot rather than
+                    // counting the same fill twice.
+                    trade.entry_quantity = entry_quantity;
+                    trade.entry_notional = entry_price.map_or(0.0, |price| entry_quantity * price);
+                    trade.entry_price = entry_price;
+                    trade.entry_fees = record
+                        .get("fees")
+                        .and_then(serde_json::Value::as_f64)
+                        .unwrap_or(0.0)
+                        .abs();
+                    trade.entry_timestamp = record.get("timestamp").and_then(serde_json::Value::as_u64);
+                } else {
+                    trade.entry_quantity += entry_quantity;
+                    if let Some(price) = entry_price {
+                        trade.entry_notional += entry_quantity * price;
+                        trade.entry_price = (trade.entry_quantity > 0.0)
+                            .then_some(trade.entry_notional / trade.entry_quantity);
+                    }
                 }
                 let first_entry = trade.entry_timestamp.is_none();
                 if first_entry {

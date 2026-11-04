@@ -87,26 +87,6 @@ fn scout_walk_forward_thresholds(candidate: &Signal) -> Option<(usize, usize, f6
     Some((minimum_samples.round() as usize, minimum_samples.round() as usize, minimum_positive_rate))
 }
 
-fn has_negative_scout_evidence(
-    candidate: &Signal,
-    metrics: &SideWalkForwardMetrics,
-    research: bool,
-) -> bool {
-    let Some((side_minimum, research_minimum, positive_rate_floor)) =
-        scout_walk_forward_thresholds(candidate)
-    else {
-        return true;
-    };
-    let minimum_samples = if research { research_minimum } else { side_minimum };
-    metrics.sample_count >= minimum_samples
-        && (metrics.average_net_return_percent.is_none_or(|net| net <= 0.0)
-            || (!research
-                && metrics
-                    .positive_net_rate
-                    .is_none_or(|rate| rate < positive_rate_floor)))
-}
-
-
 #[cfg(test)]
 mod candidate_evidence_tests {
     use super::*;

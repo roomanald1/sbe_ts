@@ -126,6 +126,7 @@ async fn reconcile_maker_fills(
             })
             .cloned()
             .collect::<Vec<_>>();
+        let mut fill_updated = false;
         for fill in pending_fills {
             if !fill.quantity.is_finite()
                 || fill.quantity <= 0.0
@@ -197,6 +198,7 @@ async fn reconcile_maker_fills(
             record_strategy_order_realized_pnl(order, strategy_realized);
             order.processed_fill_trade_ids.push(fill.id.clone());
             changed = true;
+            fill_updated = true;
         }
         let prior_status = order.status.clone();
         if order.filled_quantity + 1e-12 >= order.quantity {
@@ -229,6 +231,26 @@ async fn reconcile_maker_fills(
                     "removed_before_expiry".to_owned()
                 },
             );
+        }
+        if fill_updated && order.decision_id.is_some() {
+            queue_auto_trader_audit(state, serde_json::json!({
+                "decision_id": order.decision_id,
+                "trade_id": order.decision_id,
+                "stage": "entry_fill",
+                "timestamp": current_time_ms(),
+                "symbol": order.symbol,
+                "strategy": order.strategy,
+                "side": order.side,
+                "status": order.status,
+                "order_type": order.order_type,
+                "order_quantity": order.quantity,
+                "filled_quantity": order.filled_quantity,
+                "average_price": order.average_price,
+                "fees": order.fees_paid,
+                "realized_pnl": order.realized_pnl,
+                "fill_rate": order.fill_rate,
+                "learning_context": order.learning_context,
+            }));
         }
         changed |= order.status != prior_status;
         record_execution_order_quality(

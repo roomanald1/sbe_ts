@@ -23,7 +23,7 @@ export type AutoTraderOrder = {
   realized_pnl_usd?: number | null;
 };
 export type AutoTraderDecisionParameter = { section: string; name: string; value: number; unit: string };
-export type AutoTraderContextParameters = { context: string; learning_samples: number; positive_rate?: number; strength_floor: number; exploration_score_floor: number; exploration_allowed: boolean };
+export type AutoTraderContextParameters = { context: string; learning_samples: number; positive_rate?: number; scout_learning_samples: number; scout_positive_rate?: number; strength_floor: number; exploration_score_floor: number; exploration_allowed: boolean };
 export type AutoTraderLatestExecutionParameters = { timestamp: number; symbol: string; context: string; baseline_order_type: string; selected_order_type: string; profile: number; vwap_duration_minutes: number; vwap_participation_percent: number; schedule_depth_threshold: number; proposed_depth_ratio: number; schedule_threshold_samples: number; limit_offset_bps: number; trigger_offset_bps: number; trailing_distance_percent: number };
 export type AutoTraderStrategyParameter = { key: string; label: string; value: number; learned_value: number; configured_value?: number | null; default_value: number; min: number; max: number; step: number; unit: string; overridden: boolean };
 export type AutoTraderStrategyProfile = { symbol: string; strategy: Strategy; learning_samples: number; positive_rate?: number; realized_pnl: number; parameters: AutoTraderStrategyParameter[] };
@@ -164,7 +164,10 @@ export class AutoTraderModel {
     if (this.timer) return;
     this.usdRates = currentPositionSnapshot()?.usd_rates?.rates ?? {};
     this.stopPositionStream = subscribePositionStream((snapshot) => {
-      this.usdRates = snapshot.usd_rates?.rates ?? this.usdRates;
+      const streamedRates = snapshot.usd_rates?.rates;
+      if (streamedRates && Object.keys(streamedRates).length > 0) {
+        this.usdRates = { ...this.usdRates, ...streamedRates };
+      }
       if (this.autoTraderSnapshot) void this.refresh();
     });
     this.autoTraderSnapshot = currentAutoTraderSnapshot();
@@ -289,7 +292,21 @@ export class AutoTraderModel {
         liveScoutShadowSamples = liveScoutGroups.size;
         liveScoutShadowStrategies = [...new Set(liveScoutGroups.values())].sort();
       }
-      const usdRates = this.usdRates;
+      let usdRates = this.usdRates;
+      const quoteTotals = [activity.realized_pnl_by_quote, activity.unrealized_pnl_by_quote];
+      const hasMissingRate = quoteTotals.some((totals) => totals && Object.keys(totals).some((quote) => quote !== 'USD' && !(usdRates[quote] > 0)));
+      if (hasMissingRate) {
+        try {
+          const ratesResponse = await fetch('/positions/usd-rates');
+          if (ratesResponse.ok) {
+            const ratesPayload = await ratesResponse.json() as { rates?: Record<string, number> };
+            if (ratesPayload.rates) {
+              usdRates = { ...usdRates, ...ratesPayload.rates };
+              this.usdRates = usdRates;
+            }
+          }
+        } catch { /* Keep cached rates; missing currencies remain unavailable. */ }
+      }
       const savedStrategies = status.strategies ?? [status.strategy ?? 'donchian-55-btc200'];
       if (status.signal_strategies_enabled && savedStrategies.includes('live-insights')) { savedStrategies.splice(savedStrategies.indexOf('live-insights'), 1, 'live-momentum', 'live-trade-flow', 'live-order-book', 'live-vwap-dislocation', 'live-absorption-pressure'); }
       if (status.signal_strategies_enabled && !savedStrategies.some((strategy) => strategy.startsWith('live-'))) savedStrategies.push('live-momentum', 'live-trade-flow', 'live-order-book', 'live-vwap-dislocation', 'live-absorption-pressure');
@@ -314,7 +331,7 @@ export class AutoTraderModel {
       for (const row of auditRows) {
         if (!row.decision_id) continue;
         const trade = auditTrades.get(row.decision_id) ?? { exits: [] };
-        if (row.stage === 'entry') trade.entry = row;
+        if ((row.stage === 'entry' || row.stage === 'entry_fill') && (!trade.entry || (row.timestamp ?? 0) >= (trade.entry.timestamp ?? 0))) trade.entry = row;
         else if (row.stage?.startsWith('exit')) trade.exits.push(row);
         auditTrades.set(row.decision_id, trade);
       }

@@ -13,13 +13,12 @@ use std::{
     },
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
+use strategy_core::{FeedbackEvent, StrategyContract, StrategyDecision};
 use tokio::{
     sync::{Mutex, Notify, broadcast},
     task::JoinSet,
     time::{Duration, interval},
 };
-
-pub mod alternative_strategies;
 
 include!("auto_trader/constants.rs");
 include!("auto_trader/market_data.rs");
@@ -95,6 +94,7 @@ mod strategy_cleanup_integration_tests {
             insight_processing_ms: Arc::new(Mutex::new(Vec::new())),
             cycle_lock_wait_ms: Arc::new(Mutex::new(BTreeMap::new())),
             cycle_lock_hold_ms: Arc::new(std::sync::Mutex::new(BTreeMap::new())),
+            cycle_lock_scope_ms: Arc::new(std::sync::Mutex::new(BTreeMap::new())),
             settings_path: path.clone(),
             dated_carry: Arc::new(Mutex::new(DatedCarryBook::default())),
             dated_carry_work_lock: Arc::new(Mutex::new(())),
