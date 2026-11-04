@@ -1092,3 +1092,585 @@ Same optimized Insights benchmark target and serial WSL2 environment. Snapshot t
 | Signal serialization | 509.1 ns/operation | 509.1 ns/operation | No change |
 
 The same optimized strategy benchmark ran serially under WSL2. Live strategy evaluator results repeated within the prior run's range. Feature selection from the newly transmitted granular vectors is not isolated by this evaluator microbenchmark.
+
+## Follow-up run (2026-11-03)
+
+### Auto-trader and Insights after Scout exit boundary expansion
+
+| Workload | Previous recorded run | Current run | Change |
+|---|---:|---:|---:|
+| Auto-trader strategy entry evaluation | 1.2–5.2 ns/evaluation | 1.2–17.9 ns/evaluation | Higher upper range; noisy single-run result |
+| Auto-trader strategy position evaluation | 1.1–3.1 ns/evaluation | 1.1–3.0 ns/evaluation | Within baseline range |
+| Signal serialization | 497.4 ns/operation | 528.2 ns/operation | +6.2% |
+| Market depth assessment | 568.6 ns/operation | 652.6 ns/operation | +14.8% |
+| Limit-order request construction | 397.8 ns/operation | 404.3 ns/operation | +1.6% |
+| Strategy parameter validation | 1.9 ns/operation | 2.0 ns/operation | +5.3% |
+| Insights live signal snapshot | 1,753.6 ns/calculation | 11,744.7 ns/calculation | +570% |
+| Snapshot including explanations | 2,280.1 ns/calculation | 12,339.6 ns/calculation | +441% |
+| Research feature extraction | 141.2 ns/calculation | 266.2 ns/calculation | +89% |
+| Price return context | 17.4 ns/calculation | 17.3 ns/calculation | -0.6% |
+| Market input diagnostics | 221.8 ns/calculation | 338.2 ns/calculation | +52% |
+| Book snapshot | 47.8 ns/calculation | 48.4 ns/calculation | +1.3% |
+
+Same named benchmark targets and optimized Cargo bench profile. The measured code paths do not include the changed Scout exit-scenario selection. Insights calculation results are substantially slower than the latest recorded run and repeated at similar values on an immediate rerun (live snapshot 11,903.9 ns; snapshot with explanations 11,981.4 ns; research extraction 268.0 ns; diagnostics 332.8 ns). Treat these as a real environment/workload discrepancy requiring a comparable rerun before attributing them to code; no Scout computation was added to these benchmarked calculations. No services were started or stopped.
+
+
+## Follow-up run (2026-11-03, Scout isolation from real entry limits)
+
+### AutoTrader strategy evaluation
+
+| Workload | Latest comparable run | Current run | Change |
+|---|---:|---:|---:|
+| Strategy entry evaluation | 1.2–17.9 ns/evaluation | 1.1–16.3 ns/evaluation | Within latest range |
+| Strategy position evaluation | 1.1–3.0 ns/evaluation | 1.1–1.8 ns/evaluation | Within latest range |
+| Signal serialization | 528.2 ns/operation | 497.9 ns/operation | -5.7% |
+| Market depth assessment | 652.6 ns/operation | 553.2 ns/operation | -15.2% |
+| Limit-order request construction | 404.3 ns/operation | 394.5 ns/operation | -2.4% |
+| Strategy parameter validation | 2.0 ns/operation | 1.9 ns/operation | -5.0% |
+
+Same strategy_evaluation target and optimized Cargo profile under WSL2. The changed Scout-position filtering and entry reservation paths are not isolated by this benchmark. The first compile attempt was terminated by SIGTERM; the retry completed successfully. AutoTrader tests passed (179 tests). No benchmark target was skipped or left failed, and no services were started or stopped.
+
+
+## Follow-up run (2026-11-03)
+
+### Insights calculation benchmark
+
+| Workload | Latest baseline (2026-11-02) | Runs on 2026-11-03 |
+|---|---:|---:|
+| Live insight snapshot | 1,831.7 ns/calculation | 11,179.2 / 12,004.0 ns/calculation |
+| Snapshot including explanations | 2,319.3 ns/calculation | 12,110.2 / 11,923.0 ns/calculation |
+| Research feature extraction | 143.4 ns/calculation | 248.8 / 249.3 ns/calculation |
+| Price return context | 17.4 ns/calculation | 17.6 / 17.3 ns/calculation |
+| Market input diagnostics | 236.5 ns/calculation | 337.1 / 315.9 ns/calculation |
+| Book snapshot | 44.4 ns/calculation | 45.3 / 43.5 ns/calculation |
+
+The Insights service and other local trading services were already running during both benchmark runs, so CPU contention differs from the baseline environment. Snapshot and research extraction timings were substantially slower, while price-return and book-snapshot workloads were effectively unchanged. Treat the slower figures as a workload/environment difference, not as an attributed regression from the parameter-probe change; the benchmark does not exercise the daily strategy probe path. No services were started, stopped, or restarted.
+
+
+## Repeat run (2026-11-03, shadow-cap regression test)
+
+### AutoTrader strategy evaluation
+
+| Workload | Previous run | Current run | Change |
+|---|---:|---:|---:|
+| Strategy entry evaluation | 1.1–16.3 ns/evaluation | 1.4–16.5 ns/evaluation | Upper reading +1.2% |
+| Strategy position evaluation | 1.1–1.8 ns/evaluation | 1.1–1.8 ns/evaluation | No range change |
+| Signal serialization | 497.9 ns/operation | 550.9 ns/operation | +10.6% |
+| Market depth assessment | 553.2 ns/operation | 579.1 ns/operation | +4.7% |
+| Limit-order request construction | 394.5 ns/operation | 413.8 ns/operation | +4.9% |
+| Strategy parameter validation | 1.9 ns/operation | 2.2 ns/operation | +15.8% (+0.3 ns) |
+
+Same optimized strategy_evaluation target and WSL2 environment. The changed shadow-cap predicate is not exercised by these evaluator microbenchmarks. The small single-run increases in helper timings are not on the modified path and should be treated as measurement variation. AutoTrader tests passed (180 tests). No benchmark targets were skipped or failed, and no services were started or stopped.
+
+
+## Follow-up run (2026-11-03, protective-stop attribution)
+
+### Auto-trader strategy evaluation
+
+| Workload | Latest comparable run | Current run | Change |
+|---|---:|---:|---:|
+| Strategy entry evaluation | 1.2–17.9 ns/evaluation | 1.2–17.1 ns/evaluation | Within latest range |
+| Strategy position evaluation | 1.1–3.0 ns/evaluation | 1.2–2.0 ns/evaluation | Within latest range |
+| Signal serialization | 528.2 ns/operation | 506.2 ns/operation | -4.2% |
+| Market depth assessment | 652.6 ns/operation | 579.7 ns/operation | -11.2% |
+| Limit-order request construction | 404.3 ns/operation | 408.8 ns/operation | +1.1% |
+| Strategy parameter validation | 2.0 ns/operation | 1.9 ns/operation | -5.0% |
+
+Same optimized `strategy_evaluation` target and WSL2 environment. The protective-stop attribution changes do not affect these benchmarked paths. No benchmark target was skipped or failed; no services were started or stopped.
+
+
+## Follow-up run (2026-11-03, pooled learned entry thresholds)
+
+### AutoTrader strategy evaluation
+
+| Workload | Latest comparable run | Current runs |
+|---|---:|---:|
+| Strategy entry evaluation | 1.2–17.1 ns/evaluation | 1.2–19.2 / 1.2–16.9 ns/evaluation |
+| Strategy position evaluation | 1.1–2.0 ns/evaluation | 1.1–2.5 / 1.1–2.0 ns/evaluation |
+| Signal serialization | 506.2 ns/operation | 544.2 / 516.4 ns/operation |
+| Market depth assessment | 579.7 ns/operation | 577.0 / 662.0 ns/operation |
+| Limit-order request construction | 408.8 ns/operation | 430.1 / 413.1 ns/operation |
+| Strategy parameter validation | 1.9 ns/operation | 2.0 / 2.0 ns/operation |
+
+Same strategy_evaluation benchmark target and optimized Cargo profile. The strategy evaluator timings straddled the latest baseline on repeat; helper timings varied between repeat runs, including market depth (+14.2% on the second run). The modified pooled threshold-profile calculation is not exercised by these evaluator microbenchmarks. These measurements ran while local services were active, so attribute no regression from the parameter-learning change; use a quiet, comparable run for finer timing conclusions. All benchmark targets completed; no services were started or stopped.
+
+
+## Follow-up run (2026-11-03, learning history UI fields)
+
+### AutoTrader strategy evaluation
+
+| Workload | Latest comparable run | Current run | Change |
+|---|---:|---:|---:|
+| Strategy entry evaluation | 1.2–19.2 ns/evaluation | 1.1–17.3 ns/evaluation | Within previous range |
+| Strategy position evaluation | 1.1–2.5 ns/evaluation | 1.1–2.6 ns/evaluation | Within previous range |
+| Signal serialization | 516.4 ns/operation | 506.3 ns/operation | -2.0% |
+| Market depth assessment | 662.0 ns/operation | 560.1 ns/operation | -15.4% |
+| Limit order request construction | 413.1 ns/operation | 405.7 ns/operation | -1.8% |
+| Strategy parameter validation | 2.0 ns/operation | 1.9 ns/operation | -5.0% |
+
+Same optimized strategy_evaluation target and WSL2 environment. The added learning P&L profile field is not exercised by these evaluator microbenchmarks. All benchmark workloads completed; no services were started or stopped.
+
+
+## Follow-up run (2026-11-03, learning history UI fields)
+
+### AutoTrader strategy evaluation
+
+| Workload | Latest comparable run | Current run | Change |
+|---|---:|---:|---:|
+| Strategy entry evaluation | 1.2–19.2 ns/evaluation | 1.1–17.3 ns/evaluation | Within previous range |
+| Strategy position evaluation | 1.1–2.5 ns/evaluation | 1.1–2.6 ns/evaluation | Within previous range |
+| Signal serialization | 516.4 ns/operation | 506.3 ns/operation | -2.0% |
+| Market depth assessment | 662.0 ns/operation | 560.1 ns/operation | -15.4% |
+| Limit order request construction | 413.1 ns/operation | 405.7 ns/operation | -1.8% |
+| Strategy parameter validation | 2.0 ns/operation | 1.9 ns/operation | -5.0% |
+
+Same optimized strategy_evaluation target and WSL2 environment. The added learning P&L profile field is not exercised by these evaluator microbenchmarks. All benchmark workloads completed; no services were started or stopped.
+
+
+## Follow-up run (2026-11-03)
+
+### Strategy and auto-trader (auto_trader)
+
+| Workload | Result | 2026-11-02 baseline | Change |
+|---|---:|---:|---:|
+| Strategy entry evaluation range | 1.2–17.9 ns/evaluation | 1.2–19.2 ns/evaluation | Within latest range. |
+| Position evaluation range | 1.1–2.5 ns/evaluation | 1.1–2.5 ns/evaluation | Within latest range. |
+| Signal serialization | 521.4 ns/operation | 516.4 ns/operation | +1.0%. |
+| Market depth assessment | 596.2 ns/operation | 662.0 ns/operation | -9.9%. |
+| Limit order request construction | 409.7 ns/operation | 413.1 ns/operation | -0.8%. |
+| Strategy parameter validation | 2.1 ns/operation | 2.0 ns/operation | +5.0%; single-run variation. |
+
+All listed workloads completed. The live HTTP benchmark was skipped because BENCH_SERVICE_URL was unset. Compared with the latest prior auto_trader run. Entry and position evaluation remained within their prior ranges.
+
+
+## Follow-up run (2026-11-03, independent Scout evaluation)
+
+### Auto-trader strategy evaluation
+
+| Workload | Latest prior run | Current run | Change |
+|---|---:|---:|---:|
+| Strategy entry evaluation range | 1.2–19.2 ns/evaluation | 1.1–21.5 ns/evaluation | Upper reading +12.0% |
+| Strategy position evaluation range | 1.1–2.5 ns/evaluation | 1.1–2.6 ns/evaluation | Upper reading +4.0% |
+| Signal serialization | 521.4 ns/operation | 501.9 ns/operation | -3.7% |
+| Market depth assessment | 596.2 ns/operation | 551.0 ns/operation | -7.6% |
+| Limit order request construction | 409.7 ns/operation | 393.7 ns/operation | -3.9% |
+| Strategy parameter validation | 2.1 ns/operation | 1.9 ns/operation | -9.5% |
+
+Same optimized Cargo bench target and WSL2 environment. The Scout candidate generation and shadow registration added here are outside these evaluator microbenchmarks. The upper evaluator readings were slightly above the previous single run while the other measured operations were faster; local trading services were active, so treat the evaluator maxima as unconfirmed timing variation rather than an attributable regression. AutoTrader tests passed (183 tests). No benchmark targets were skipped or failed; no services were started or stopped during measurement.
+
+
+## Repeat run (2026-11-03, independent Scout evaluation)
+
+### Auto-trader strategy evaluation
+
+| Workload | Previous run | Current run | Change |
+|---|---:|---:|---:|
+| Strategy entry evaluation range | 1.1–21.5 ns/evaluation | 1.2–16.7 ns/evaluation | Within previous range |
+| Strategy position evaluation range | 1.1–2.6 ns/evaluation | 1.1–1.9 ns/evaluation | Within previous range |
+| Signal serialization | 501.9 ns/operation | 506.7 ns/operation | +1.0% |
+| Market depth assessment | 551.0 ns/operation | 579.3 ns/operation | +5.1% |
+| Limit order request construction | 393.7 ns/operation | 407.0 ns/operation | +3.4% |
+| Strategy parameter validation | 1.9 ns/operation | 1.9 ns/operation | No change |
+
+Same optimized Cargo bench target and WSL2 environment. Local services remained active. Evaluator maxima returned within the prior run's range on repeat; helper timings moved by 1–5%, consistent with single-run variation. The Scout candidate and shadow registration paths are outside the measured loops. AutoTrader tests passed (183 tests). No benchmark targets were skipped or failed; no services were started or stopped during measurement.
+
+
+## Follow-up run (2026-11-03, Insights Scout comparison metadata)
+
+### Insights calculation benchmark
+
+| Workload | Latest prior run | Current run | Change |
+|---|---:|---:|---:|
+| Live insight snapshot | 11,179.2 / 12,004.0 ns/calculation | 10,760.7 ns/calculation | Below prior readings |
+| Snapshot including explanations | 12,110.2 / 11,923.0 ns/calculation | 11,035.8 ns/calculation | Below prior readings |
+| Research feature extraction | 248.8 / 249.3 ns/calculation | 229.5 ns/calculation | Below prior readings |
+| Price return context | 17.6 / 17.3 ns/calculation | 16.7 ns/calculation | Within recent range |
+| Market input diagnostics | 337.1 / 315.9 ns/calculation | 312.5 ns/calculation | Within recent range |
+| Book snapshot | 45.3 / 43.5 ns/calculation | 42.1 ns/calculation | Within recent range |
+
+Same optimized Insights benchmark target and WSL2 environment with local services active. All workloads were within or below the most recent readings; no performance degradation was observed. Insights tests passed (25 passed, 1 intentionally ignored). No benchmark targets were skipped or failed.
+
+
+## Repeat run (2026-11-03, Scout market-book fallback)
+
+### Auto-trader strategy evaluation
+
+| Workload | Previous run | Current run | Change |
+|---|---:|---:|---:|
+| Strategy entry evaluation range | 1.2–16.7 ns/evaluation | 1.1–16.3 ns/evaluation | Within previous range |
+| Strategy position evaluation range | 1.1–1.9 ns/evaluation | 1.1–1.9 ns/evaluation | No range change |
+| Signal serialization | 506.7 ns/operation | 515.1 ns/operation | +1.7% |
+| Market depth assessment | 579.3 ns/operation | 578.5 ns/operation | -0.1% |
+| Limit order request construction | 407.0 ns/operation | 427.8 ns/operation | +5.1% |
+| Strategy parameter validation | 1.9 ns/operation | 2.1 ns/operation | +10.5% (+0.2 ns) |
+
+Same optimized Cargo bench target and WSL2 environment with local services active. Evaluator ranges were unchanged or slightly faster. Signal helper timings varied by 0–5%; these are single-run measurements outside the changed Scout market-fetch path. AutoTrader tests passed (184 tests). No benchmark targets were skipped or failed.
+
+
+## Follow-up run (2026-11-03, live Scout diagnostics)
+
+### Auto-trader strategy evaluation
+
+| Workload | Previous run | Current run | Change |
+|---|---:|---:|---:|
+| Strategy entry evaluation range | 1.1–16.3 ns/evaluation | 1.2–16.6 ns/evaluation | Within previous range |
+| Strategy position evaluation range | 1.1–1.9 ns/evaluation | 1.1–2.9 ns/evaluation | Upper reading +52.6% |
+| Signal serialization | 515.1 ns/operation | 505.4 ns/operation | -1.9% |
+| Market depth assessment | 578.5 ns/operation | 573.0 ns/operation | -1.0% |
+| Limit order request construction | 427.8 ns/operation | 423.3 ns/operation | -1.1% |
+| Strategy parameter validation | 2.1 ns/operation | 1.9 ns/operation | -9.5% |
+
+Same optimized Cargo bench target and WSL2 environment with local services active. The position evaluation maximum rose on one strategy while the other measurements were stable or faster; the new diagnostics are outside the evaluator benchmark. Treat this isolated maximum as unconfirmed single-run variation. AutoTrader tests passed (184 tests). No benchmark targets were skipped or failed.
+
+
+## Follow-up run (2026-11-03, active Scout API counters)
+
+### Auto-trader strategy evaluation
+
+| Workload | Previous run | Current run | Change |
+|---|---:|---:|---:|
+| Strategy entry evaluation range | 1.2–16.6 ns/evaluation | 1.2–16.2 ns/evaluation | Within previous range |
+| Strategy position evaluation range | 1.1–2.9 ns/evaluation | 1.1–1.9 ns/evaluation | Within previous range |
+| Signal serialization | 505.4 ns/operation | 526.8 ns/operation | +4.2% |
+| Market depth assessment | 573.0 ns/operation | 570.5 ns/operation | -0.4% |
+| Limit order request construction | 423.3 ns/operation | 431.9 ns/operation | +2.0% |
+| Strategy parameter validation | 1.9 ns/operation | 1.9 ns/operation | No change |
+
+Same optimized Cargo bench target and WSL2 environment with local services active. Entry and position evaluation ranges improved; helper timings varied by up to 4.2%. The API count and diagnostic changes are outside the measured evaluator paths. AutoTrader tests passed (184 tests). No benchmark targets were skipped or failed.
+
+
+## Follow-up run (2026-11-03, paired Scout parameter evaluation)
+
+### Auto-trader strategy evaluation
+
+| Workload | Latest prior run | Current run | Change |
+|---|---:|---:|---:|
+| Strategy entry evaluation range | 1.2–16.6 ns/evaluation | 1.5–17.0 ns/evaluation | Upper reading +2.4% |
+| Strategy position evaluation range | 1.2–2.9 ns/evaluation | 1.1–1.8 ns/evaluation | Within prior range |
+| Signal serialization | 505.4 ns/operation | 512.4 ns/operation | +1.4% |
+| Market depth assessment | 573.0 ns/operation | 571.8 ns/operation | -0.2% |
+| Limit order request construction | 423.3 ns/operation | 430.1 ns/operation | +1.6% |
+| Strategy parameter validation | 1.9 ns/operation | 2.0 ns/operation | +5.3% (+0.1 ns) |
+
+### Insights calculation benchmark
+
+| Workload | Latest prior run | Current repeat run | Change |
+|---|---:|---:|---:|
+| Live insight snapshot | 10,760.7 ns/calculation | 11,671.6 ns/calculation | +8.5% |
+| Snapshot including explanations | 11,035.8 ns/calculation | 12,020.1 ns/calculation | +8.9% |
+| Research feature extraction | 229.5 ns/calculation | 243.2 ns/calculation | +6.0% |
+| Price return context | 16.7 ns/calculation | 17.6 ns/calculation | +5.4% |
+| Market input diagnostics | 312.5 ns/calculation | 368.2 ns/calculation | +17.8% |
+| Book snapshot | 42.1 ns/calculation | 46.2 ns/calculation | +9.7% |
+
+AutoTrader timings remained close to the previous run. Insights snapshots were about 9% slower in both runs, while price-return context returned to its prior range after one noisy 32.3 ns reading. The Insights repeat ran with a Vite server left active by the React test process; benchmark results are environment-contaminated and should be repeated when the workspace is idle. AutoTrader tests passed (184); Insights tests passed (25, 1 intentionally ignored). Both benchmark targets completed; no benchmark targets were skipped. No services were started or stopped for measurement.
+
+
+## Follow-up run (2026-11-03, shared daily Scout cap)
+
+### Auto-trader strategy evaluation
+
+| Workload | Previous run | Current run | Change |
+|---|---:|---:|---:|
+| Strategy entry evaluation range | 1.2–16.2 ns/evaluation | 1.4–17.8 ns/evaluation | Upper reading +7.2% |
+| Strategy position evaluation range | 1.1–1.9 ns/evaluation | 1.1–2.4 ns/evaluation | Upper reading +26.3% |
+| Signal serialization | 526.8 ns/operation | 535.4 ns/operation | +1.6% |
+| Market depth assessment | 570.5 ns/operation | 624.5 ns/operation | +9.5% |
+| Limit order request construction | 431.9 ns/operation | 442.9 ns/operation | +2.5% |
+| Strategy parameter validation | 1.9 ns/operation | 2.1 ns/operation | +10.5% (+0.2 ns) |
+
+Same optimized Cargo bench target and WSL2 environment with local services active. The upper evaluator and helper readings increased in this single run; the shared-cap bookkeeping change is outside the evaluator microbenchmark. Treat these as unconfirmed local timing variation and compare again in a quiet run before attributing them to code. AutoTrader tests passed (184 tests). No benchmark targets were skipped or failed.
+
+
+## Repeat run (2026-11-03, paired Scout comparison with test server active)
+
+| AutoTrader workload | Latest recorded run | Current run | Change |
+|---|---:|---:|---:|
+| Strategy entry evaluation range | 1.2–16.6 ns/evaluation | 1.4–18.3 ns/evaluation | Upper reading +10.2% |
+| Strategy position evaluation range | 1.2–2.9 ns/evaluation | 1.2–4.5 ns/evaluation | Upper reading +55.2% |
+| Signal serialization | 505.4 ns/operation | 539.6 ns/operation | +6.8% |
+| Market depth assessment | 573.0 ns/operation | 597.4 ns/operation | +4.3% |
+| Limit order request construction | 423.3 ns/operation | 444.5 ns/operation | +5.0% |
+| Strategy parameter validation | 1.9 ns/operation | 2.0 ns/operation | +5.3% (+0.1 ns) |
+
+The npm test process was interrupted after its LiveModels test remained open for over ten minutes; its Vite child was still running during this benchmark and may have contended for CPU. Treat the evaluator maxima and helper timings as an environment-contaminated reading, not a code regression. The service was left running in accordance with the workspace instruction not to stop services. Re-run the benchmark when the workspace is idle before drawing a performance conclusion.
+
+
+## Follow-up run (2026-11-04, daily Scout resampling cooldown)
+
+### Auto-trader strategy evaluation
+
+| Workload | Previous run | Current run | Change |
+|---|---:|---:|---:|
+| Strategy entry evaluation range | 1.2–16.2 ns/evaluation | 1.4–17.3 ns/evaluation | Upper reading +6.8% |
+| Strategy position evaluation range | 1.1–2.4 ns/evaluation | 1.1–2.0 ns/evaluation | Within previous range |
+| Signal serialization | 535.4 ns/operation | 494.0 ns/operation | -7.7% |
+| Market depth assessment | 624.5 ns/operation | 574.8 ns/operation | -8.0% |
+| Limit order request construction | 442.9 ns/operation | 444.6 ns/operation | +0.4% |
+| Strategy parameter validation | 2.1 ns/operation | 2.0 ns/operation | -4.8% |
+
+Same optimized Cargo bench target and WSL2 environment with local services active. The upper strategy evaluator reading was slightly above the previous single run; all helper timings were unchanged or faster. The daily Scout cooldown adjustment is outside these microbenchmarks, so treat the evaluator maximum as unconfirmed timing variation. AutoTrader tests passed (185 tests). No benchmark targets were skipped or failed.
+
+
+## Follow-up run (2026-11-04)
+
+### Auto-trader strategy parameter and post-only expiry
+
+| Workload | Previous recorded result | Current run | Change |
+|---|---:|---:|---:|
+| Strategy entry evaluation range | 1.4–17.3 ns/evaluation | 1.1–16.7 ns/evaluation | Within prior range |
+| Strategy position evaluation range | 1.1–2.0 ns/evaluation | 1.1–2.1 ns/evaluation | +0.1 ns at upper end |
+| Signal serialization | 494.0 ns/operation | 518.6 ns/operation | +5.0% |
+| Market depth assessment | 574.8 ns/operation | 605.8 ns/operation | +5.4% |
+| Limit order request construction | 444.6 ns/operation | 439.6 ns/operation | -1.1% |
+| Strategy parameter validation | 2.0 ns/operation | 2.0 ns/operation | No change |
+
+Same auto-trader benchmark target and optimized Cargo bench profile. The change adds a bounded post-only timeout parameter to each strategy profile and uses that value to calculate order expiry. This is a single run; the measured changes are not necessarily caused by the parameter change. Tests: 189 passed. Auto-trader benchmark completed; bench-mode tests were ignored as expected. No services were started or stopped.
+running 187 tests
+test auto_trader::alternative_strategies::tests::default_accounts_disabled_and_independent ... ok
+test auto_trader::alternative_strategies::tests::covered_call_enforces_published_minimum_and_quantity_step ... ok
+test auto_trader::alternative_strategies::tests::covered_call_cash_equity_and_expiry_payoff ... ok
+test auto_trader::alternative_strategies::api::tests::api_rejects_historical_observations ... ok
+test auto_trader::alternative_strategies::tests::held_options_require_exact_contract_and_official_settlement ... ok
+test auto_trader::alternative_strategies::tests::disabled_paused_or_unsimulated_cannot_open ... ok
+test auto_trader::alternative_strategies::tests::delayed_redemption_does_not_realize_projected_profit ... ok
+test auto_trader::alternative_strategies::tests::liquidation_net_costs_and_duplicate_opportunity ... ok
+test auto_trader::alternative_strategies::api::tests::load_error_prevents_overwrite ... ok
+test auto_trader::alternative_strategies::tests::liquidity_fees_accrue_once_and_exit_preserves_costs ... ok
+test auto_trader::alternative_strategies::api::tests::invalid_observation_cannot_partially_reset_daily_ledger ... ok
+test auto_trader::alternative_strategies::api::tests::stale_or_duplicate_native_status_cannot_replace_current_book ... ok
+test auto_trader::alternative_strategies::tests::liquidity_rejects_fee_growth_from_another_range ... ok
+test auto_trader::alternative_strategies::tests::loss_limit_resets_only_on_next_utc_day ... ok
+test auto_trader::alternative_strategies::tests::lp_amounts_outside_range_are_one_sided ... ok
+test auto_trader::alternative_strategies::tests::liquidity_uses_exact_initialized_tick_bounds_and_rejects_inconsistent_ticks ... ok
+test auto_trader::alternative_strategies::tests::residual_rejects_scores_that_disagree_with_causal_history ... ok
+test auto_trader::alternative_strategies::tests::observation_wire_roundtrip ... ok
+test auto_trader::alternative_strategies::api::tests::failed_persistence_does_not_change_in_memory_settings ... ok
+test auto_trader::alternative_strategies::tests::residual_portfolio_balances_and_borrow_is_charged_without_rebalance ... ok
+test auto_trader::alternative_strategies::api::tests::native_batch_isolates_bad_strategy_and_persists_healthy_opportunity ... ok
+test auto_trader::alternative_strategies::tests::stale_quotes_and_out_of_order_events_are_rejected ... ok
+test auto_trader::alternative_strategies::api::tests::fresh_observation_is_idempotent_and_persists_across_restart ... ok
+test auto_trader::alternative_strategies::tests::residual_rejects_unsynchronized_or_future_history ... ok
+test auto_trader::alternative_strategies::api::tests::native_readiness_is_required_to_enable_and_disable_remains_available ... ok
+test auto_trader::dated_carry_tests::entry_rejects_prices_that_do_not_match_the_published_basis ... ok
+test auto_trader::candidate_diagnostic_tests::supported_candidate_passes_strict_and_scout_checks_and_audit_omits_rejections ... ok
+test auto_trader::dated_carry_tests::entry_requires_executable_spot_future_edge_above_cost_and_seven_days_to_expiry ... ok
+test auto_trader::dated_carry_tests::exit_requires_a_valid_settlement_signal_for_an_expired_contract ... ok
+test auto_trader::cycle_result_helper_tests::skipped_results_preserve_signal_identity_and_reason ... ok
+test auto_trader::deep_book_assessment_tests::deep_book_assessment_handles_buy_sell_capacity_impact_and_invalid_markets ... ok
+test auto_trader::closed_trade_metrics_migration_tests::clears_legacy_outcomes_without_changing_ledger_pnl ... ok
+test auto_trader::candidate_evidence_format_tests::renders_present_and_missing_walk_forward_metrics ... ok
+test auto_trader::dated_carry_tests::scout_shadow_markout_records_positive_and_negative_net_returns ... ok
+test auto_trader::deep_book_assessment_tests::filters_invalid_book_levels_and_computes_each_side_depth_inside_band ... ok
+test auto_trader::daily_strategy_allocator_tests::daily_budget_and_position_slots_are_split_across_selected_daily_strategies ... ok
+test auto_trader::candidate_diagnostic_tests::rejected_candidate_diagnostic_and_audit_explain_strength_score_and_scout_inventory ... ok
+test auto_trader::exit_policy_learning_tests::extended_hold_requires_enough_positive_outcomes_and_respects_reward_risk ... ok
+test auto_trader::dated_carry_tests::lower_expiry_probe_can_shadow_an_expiry_filtered_by_the_baseline ... ok
+test auto_trader::dated_carry_shadow_probe_learning_tests::promotion_uses_one_day_shadow_markouts_for_dated_carry_variants ... ok
+test auto_trader::donchian_20_btc200_registry_tests::selected_breakout_exits_only_on_daily_invalidation ... ok
+test auto_trader::execution_stage_timings_tests::extracts_valid_stage_times_and_clamps_transport_remainder ... ok
+test auto_trader::execution_stage_timings_tests::missing_handler_keeps_submit_and_response_timings_only ... ok
+test auto_trader::dated_carry_tests::shadow_probe_dedupes_maturities_for_one_asset_and_parameter_variant ... ok
+test auto_trader::candidate_evidence_tests::selects_matching_entry_horizon_and_checks_directional_evidence ... ok
+test auto_trader::external_close_audit_tests::close_quantity_detects_partial_full_and_reversing_closes_without_counting_adds ... ok
+test auto_trader::dated_carry_shadow_probe_learning_tests::dated_carry_shadow_markouts_promote_the_tested_pair_in_its_profile_context ... ok
+test auto_trader::external_close_audit_tests::external_close_payload_captures_entry_and_path_context ... ok
+test auto_trader::exit_policy_learning_tests::learned_exit_policy_requires_validated_positive_evidence_for_matching_side ... ok
+test auto_trader::gate_pass_distance_tests::computes_normalized_distance_for_signal_candidate_and_market_gates ... ok
+test auto_trader::external_close_audit_tests::legacy_manual_close_without_strategy_metadata_still_gets_an_audit_order ... ok
+test auto_trader::live_scout_direction_tests::learned_book_depth_parameter_selects_the_matching_insight ... ok
+test auto_trader::live_scout_direction_tests::live_parameter_probe_can_sample_a_direction_rejected_by_baseline ... ok
+test auto_trader::gap_reason_category_tests::summarizes_common_entry_gap_reasons ... ok
+test auto_trader::gate_pass_distance_tests::strict_sample_and_capacity_gaps_do_not_report_negative_distance ... ok
+test auto_trader::loss_limit_probability_tests::missing_fx_error_distinguishes_uncached_and_cached_quote_rates ... ok
+test auto_trader::loss_limit_probability_tests::normal_cdf_is_symmetric_and_has_expected_center_and_tails ... ok
+test auto_trader::inactive_execution_order_tests::removes_unfilled_and_partially_filled_orders_from_pending_state ... ok
+test auto_trader::inactive_execution_order_tests::scheduled_orders_are_not_checked_against_the_resting_order_ledger ... ok
+test auto_trader::live_scout_direction_tests::conflicting_live_momentum_inputs_do_not_create_two_opposing_scouts ... ok
+test auto_trader::exit_policy_learning_tests::risk_and_volatility_adjustments_stay_within_policy_bounds ... ok
+test auto_trader::external_close_audit_tests::partial_manual_close_is_allocated_to_the_strategy_and_persisted_as_an_order ... ok
+test auto_trader::live_scout_direction_tests::neutral_aggregate_signal_can_produce_independent_live_scout_directions ... ok
+test auto_trader::loss_limit_probability_tests::probability_fails_closed_for_missing_depth_invalid_levels_short_history_or_zero_variance ... ok
+test auto_trader::maker_reconciliation_tests::maker_fills_are_recovered_after_order_disappears ... ok
+test auto_trader::loss_limit_probability_tests::profitable_close_probability_uses_bid_for_longs_ask_for_shorts_and_price_history ... ok
+test auto_trader::missed_opportunity_learning_behavior_tests::adaptive_floor_uses_only_validated_short_horizon_stop_target_bands ... ok
+test auto_trader::order_request_tests::builds_basic_and_remaining_order_variants ... ok
+test auto_trader::missed_opportunity_learning_behavior_tests::longer_horizon_multiplier_requires_positive_stop_target_and_timely_profit_evidence ... ok
+test auto_trader::order_request_tests::builds_scheduled_order_variants ... ok
+test auto_trader::order_request_tests::builds_price_and_trigger_order_variants ... ok
+test auto_trader::order_request_tests::post_only_expiry_uses_configured_timeout ... ok
+test auto_trader::order_type_selection_behavior_tests::order_type_adaptation_requires_validated_fill_and_cost_advantage ... ok
+test auto_trader::order_type_selection_behavior_tests::exploration_assignment_is_stable_and_only_uses_parameterized_order_types ... ok
+test auto_trader::order_type_selection_behavior_tests::parameter_profiles_explore_unobserved_cohorts_then_select_lowest_validated_cost ... ok
+test auto_trader::paired_scout_parameter_tests::live_parameter_promotion_requires_positive_paired_improvement ... ok
+test auto_trader::parallel_daily_candidate_tests::daily_scouts_are_shadow_only ... ok
+test auto_trader::order_type_selection_behavior_tests::order_selection_uses_aggressive_rules_then_passive_fallback ... ok
+test auto_trader::parallel_daily_candidate_tests::same_side_daily_strategy_is_not_blocked_by_another_strategy_lot ... ok
+test auto_trader::parallel_daily_cycle_tests::daily_enter_candidates_are_shadowed_when_selected_as_scouts ... ok
+test auto_trader::parallel_daily_cycle_tests::daily_scout_can_be_sampled_again_after_five_minutes ... ok
+test auto_trader::parallel_daily_candidate_tests::live_signal_sources_remain_available_alongside_daily_candidates ... ok
+test auto_trader::alternative_strategies::tests::fixture_replays_all_five_accounts_without_starting_services ... ok
+test auto_trader::order_type_selection_behavior_tests::schedule_threshold_learning_requires_paired_samples_and_moves_by_cost_and_fill_quality ... ok
+test auto_trader::parallel_daily_cycle_tests::daily_strategy_candidates_outside_donchian_can_become_scouts ... ok
+test auto_trader::parallel_daily_cycle_tests::batch_selects_one_highest_priority_strategy_candidate_per_symbol ... ok
+test auto_trader::parallel_daily_cycle_tests::full_shadow_sample_limit_does_not_block_real_exploratory_entries ... ok
+test auto_trader::parallel_daily_cycle_tests::daily_strategy_scout_is_kept_in_the_candidate_batch ... ok
+test auto_trader::parallel_daily_candidate_tests::failed_rsi_daily_candidate_cannot_fall_back_to_strict_selection ... ok
+test auto_trader::pending_signal_queue_tests::daily_and_live_signals_use_independent_queues ... ok
+test auto_trader::parallel_daily_cycle_tests::parameter_probe_audit_preserves_the_exact_value_and_entry_result ... ok
+test auto_trader::parallel_daily_cycle_tests::live_parameter_probe_cooldown_remains_one_hour ... ok
+test auto_trader::persistence_allocation_tests::allocated_symbol_exposure_counts_open_lots_and_only_incremental_pending_risk ... ok
+test auto_trader::parallel_daily_cycle_tests::scout_shadow_sample_has_the_contract_required_for_learning_outcomes ... ok
+test auto_trader::persistence_allocation_tests::pending_entries_are_unique_and_existing_strategy_positions_are_excluded ... ok
+test auto_trader::parallel_daily_cycle_tests::selected_live_strategy_is_shadowed_even_when_enabled_for_trading ... ok
+test auto_trader::portfolio_hedge_order_tests::portfolio_hedge_order_has_expected_identity_and_reservation ... ok
+test auto_trader::position_exit_order_tests::position_exit_order_preserves_strategy_and_entry_decision ... ok
+test auto_trader::persistence_allocation_tests::category_limits_and_quote_conversion_use_safe_fallbacks ... ok
+test auto_trader::position_exit_order_tests::position_exit_order_uses_live_insights_fallback ... ok
+test auto_trader::pending_exit_tests::blocks_reentry_while_strategy_exit_is_pending ... ok
+test auto_trader::position_exit_profit_protection_tests::legacy_price_path_seeds_long_and_short_profit_peaks_and_ignores_bad_marks ... ok
+test auto_trader::persistence_allocation_tests::strategy_budgets_allocate_configured_remainder_and_exposure ... ok
+test auto_trader::persistence_allocation_tests::category_allocation_and_open_counts_support_strategy_lots_and_legacy_positions ... ok
+test auto_trader::protective_stop_audit_tests::audit_payload_records_barrier_fill_and_duration ... ok
+test auto_trader::protective_stop_order_tests::protective_stop_retains_entry_attribution_and_barrier_id ... ok
+test auto_trader::persistence_allocation_tests::scout_positions_do_not_consume_real_open_position_caps ... ok
+test auto_trader::position_exit_profit_protection_tests::peak_profit_is_raised_and_giveback_crosses_the_minimum_lock_floor ... ok
+test auto_trader::reason_gate_hits_tests::maps_strategy_and_position_failures_without_duplicate_gates ... ok
+test auto_trader::position_exit_profit_protection_tests::strategy_parameters_and_legacy_aliases_are_bounded ... ok
+test auto_trader::registered_strategy_contract_tests::every_registered_strategy_has_a_complete_contract ... ok
+test auto_trader::reason_symbol_gate_hits_tests::extracts_early_candidate_and_strategy_gate_details_with_distances ... ok
+test auto_trader::risk_adjusted_monthly_momentum_sizing_tests::strategy_uses_volatility_multiplier_and_fails_closed_when_missing ... ok
+test auto_trader::risk_adjusted_monthly_momentum_tests::same_symbol_rebalances_only_when_month_anchor_advances ... ok
+test auto_trader::scout_parameter_combination_tests::validated_pair_outcome_promotes_both_values_together ... ok
+test auto_trader::risk_adjusted_monthly_momentum_sizing_tests::recent_strategy_learning_includes_scout_shadow_outcomes_across_symbols ... ok
+test auto_trader::reason_gate_hits_tests::maps_combined_candidate_reasons_to_distinct_gates ... ok
+test auto_trader::scout_parameter_scheduling_tests::live_strategy_probe_rotates_one_bounded_parameter_value ... ok
+test auto_trader::scheduled_order_reconciliation_tests::recovers_scheduled_orders_misclassified_by_resting_order_reconciliation ... ok
+test auto_trader::scout_parameter_variant_tests::breakout_entry_distance_promotes_per_symbol_after_confident_probe_outcomes ... ok
+test auto_trader::scout_parameter_variant_tests::feedback_selects_the_best_probed_value_without_pooling_it_with_baseline_samples ... ok
+test auto_trader::risk_adjusted_monthly_momentum_registry_tests::strategy_is_registered_and_uses_signal_exit_without_fixed_stops ... ok
+test auto_trader::scout_parameter_variant_tests::probe_does_not_replace_the_profile_before_minimum_evidence ... ok
+test auto_trader::scout_parameter_combination_tests::pair_probes_change_two_bounded_parameters_and_have_stable_keys ... ok
+test auto_trader::scout_shadow_parameter_learning_tests::scout_outcomes_contribute_to_strategy_parameter_learning ... ok
+test auto_trader::signal_execution_budget_tests::configured_budgets_bypass_signal_weighting_and_order_multipliers_validate_contracts ... ok
+test auto_trader::signal_execution_budget_tests::recent_net_edge_and_learned_size_multiplier_handle_empty_profitable_and_losing_samples ... ok
+test auto_trader::stablecoin_pair_tests::recognizes_stablecoin_pairs_case_insensitively_and_rejects_other_symbols ... ok
+test auto_trader::signal_execution_budget_tests::signal_weighted_daily_budget_keeps_a_floor_and_rewards_eligible_signals ... ok
+test auto_trader::strategy_dated_futures_carry::evaluate::tests::settlement_exits_only_with_valid_expired_position_data ... ok
+test auto_trader::strategy_dated_futures_carry::evaluate::tests::entry_rejects_invalid_expiry_market_and_stale_metrics ... ok
+test auto_trader::strategy_donchian_10_btc200::evaluate::parameter_bounds_donchian_10_btc200::parameter_bounds_donchian_10_btc200 ... ok
+test auto_trader::strategy_donchian_10_btc200::evaluate::tests::accepts_only_its_own_published_candidate_signal ... ok
+test auto_trader::strategy_dated_futures_carry::evaluate::tests::entry_uses_profile_edge_gate_and_rejects_missing_parameters ... ok
+test auto_trader::strategy_donchian_55_btc200::evaluate::tests::accepts_only_its_own_published_candidate_signal ... ok
+test auto_trader::strategy_donchian_20_btc200_hold3::evaluate::parameter_bounds_donchian_20_btc200_hold3::parameter_bounds_donchian_20_btc200_hold3 ... ok
+test auto_trader::strategy_live_momentum::evaluate::tests::entry_requires_signal_aligned_momentum_or_trend ... ok
+test auto_trader::strategy_live_momentum::evaluate::parameter_bounds_live_momentum::parameter_bounds_live_momentum ... ok
+test auto_trader::strategy_dated_futures_carry::evaluate::tests::entry_requires_a_consistent_eligible_candidate ... ok
+test auto_trader::strategy_dated_futures_carry::evaluate::tests::lifecycle_context_holds_or_rejects_mismatched_signals ... ok
+test auto_trader::strategy_donchian_20_btc200::evaluate::tests::accepts_only_its_own_published_candidate_signal ... ok
+test auto_trader::strategy_donchian_20_btc200_hold3::evaluate::tests::accepts_only_its_own_published_candidate_signal ... ok
+test auto_trader::strategy_lot_pnl_tests::closing_return_uses_the_strategy_lot_basis ... ok
+test auto_trader::strategy_donchian_20_sma200::evaluate::tests::accepts_only_its_own_published_candidate_signal ... ok
+test auto_trader::strategy_lot_pnl_tests::real_fill_turns_scout_only_aggregate_into_real_position ... ok
+test auto_trader::strategy_parameter_bounds_tests::daily_rule_inputs_are_registered_for_learning_profiles ... ok
+test auto_trader::strategy_donchian_55_btc200::evaluate::parameter_bounds_donchian_55_btc200::parameter_bounds_donchian_55_btc200 ... ok
+test auto_trader::strategy_relative_strength_90_sma200::evaluate::tests::accepts_only_its_own_published_candidate_signal ... ok
+test auto_trader::strategy_donchian_20_sma200::evaluate::parameter_bounds_donchian_20_sma200::parameter_bounds_donchian_20_sma200 ... ok
+test auto_trader::strategy_donchian_20_btc200::evaluate::parameter_bounds_donchian_20_btc200::parameter_bounds_donchian_20_btc200 ... ok
+test auto_trader::strategy_risk_adjusted_monthly_momentum::evaluate::parameter_bounds_risk_adjusted_monthly_momentum::parameter_bounds_risk_adjusted_monthly_momentum ... ok
+test auto_trader::strategy_risk_adjusted_monthly_momentum::evaluate::tests::accepts_only_its_own_published_candidate_signal ... ok
+test auto_trader::strategy_relative_strength_90_sma200::evaluate::parameter_bounds_relative_strength_90_sma200::parameter_bounds_relative_strength_90_sma200 ... ok
+test auto_trader::strategy_risk_adjusted_trend_portfolio::evaluate::tests::accepts_only_its_own_published_candidate_signal ... ok
+test auto_trader::strategy_risk_adjusted_trend_portfolio::evaluate::parameter_bounds_risk_adjusted_trend_portfolio::parameter_bounds_risk_adjusted_trend_portfolio ... ok
+test auto_trader::strategy_rsi2_oversold_rebound::evaluate::tests::accepts_only_its_own_published_candidate_signal ... ok
+test auto_trader::strategy_rsi2_oversold_rebound::evaluate::parameter_bounds_rsi2_oversold_rebound::parameter_bounds_rsi2_oversold_rebound ... ok
+test auto_trader::strategy_live_trade_flow::evaluate::parameter_bounds_live_trade_flow::parameter_bounds_live_trade_flow ... ok
+test auto_trader::strategy_signal_contract_tests::every_live_strategy_evaluates_its_signal_and_rejects_missing_signal ... ok
+test auto_trader::strategy_signal_contract_tests::every_registered_strategy_returns_an_explicit_position_decision ... ok
+test auto_trader::strategy_signal_contract_tests::every_daily_strategy_enters_only_from_its_own_benchmark_signal ... ok
+test auto_trader::strategy_trend_50_200::evaluate::tests::accepts_only_its_own_published_candidate_signal ... ok
+test auto_trader::strategy_signal_contract_tests::legacy_live_insights_parameter_bounds_are_enforced ... ok
+test auto_trader::strategy_trend_sleeves_btc200::evaluate::tests::accepts_only_its_own_published_candidate_signal ... ok
+test auto_trader::strategy_trend_50_200::evaluate::parameter_bounds_trend_50_200::parameter_bounds_trend_50_200 ... ok
+test auto_trader::strategy_trend_sleeves_btc200::evaluate::parameter_bounds_trend_sleeves_btc200::parameter_bounds_trend_sleeves_btc200 ... ok
+test auto_trader::strategy_live_order_book::evaluate::parameter_bounds_live_order_book::parameter_bounds_live_order_book ... ok
+test auto_trader::tests::position_exit_audit_handles_zero_quantity_metrics ... ok
+test auto_trader::tests::position_exit_audit_includes_execution_and_entry_context ... ok
+test auto_trader::threshold_walk_forward_tests::extracts_the_signal_feature_for_each_learned_threshold ... ok
+test auto_trader::strategy_live_absorption_pressure::evaluate::parameter_bounds_live_absorption_pressure::parameter_bounds_live_absorption_pressure ... ok
+test auto_trader::strategy_live_vwap_dislocation::evaluate::parameter_bounds_live_vwap_dislocation::parameter_bounds_live_vwap_dislocation ... ok
+test auto_trader::threshold_walk_forward_tests::leaves_threshold_unchanged_without_enough_holdout_samples ... ok
+test auto_trader::threshold_walk_forward_tests::negative_pooled_live_results_tighten_parameter_when_no_threshold_validates ... ok
+test auto_trader::threshold_walk_forward_tests::parameter_profile_uses_validated_walk_forward_threshold ... ok
+test auto_trader::threshold_walk_forward_tests::profitable_scout_outcomes_relax_scout_walk_forward_thresholds_within_bounds ... ok
+test auto_trader::threshold_walk_forward_tests::rsi_entry_ceiling_uses_daily_rsi_feature_without_directional_wire_data ... ok
+test auto_trader::threshold_walk_forward_tests::tightens_a_threshold_only_when_later_holdout_edge_improves ... ok
+test auto_trader::strategy_parameter_bounds_tests::every_registered_strategy_accepts_bounds_and_rejects_values_outside_them ... ok
+test auto_trader::signal_selection_behavior_tests::selects_strict_evidence_before_exploration_and_marks_unvalidated_signals_exploratory ... ok
+test auto_trader::signal_selection_behavior_tests::scout_can_probe_pullback_strategy_without_pullback_confirmation ... ok
+test auto_trader::signal_selection_behavior_tests::live_scout_uses_its_own_entry_rule_without_aggregate_score_floors ... ok
+test auto_trader::signal_selection_behavior_tests::daily_strategy_candidates_take_priority_and_pullback_strategies_require_counter_momentum ... ok
+test auto_trader::signal_selection_behavior_tests::live_scout_walk_forward_thresholds_are_strategy_parameters ... ok
+test auto_trader::signal_selection_behavior_tests::scout_fallback_respects_inventory_and_measured_negative_history ... ok
+test auto_trader::maker_reconciliation_tests::recovers_true_strategy_without_double_counting_mirrored_inventory ... ok
+test auto_trader::strategy_cleanup_integration_tests::every_registered_strategy_cancels_its_protective_orders_on_exit ... ok
+
+test result: ok. 187 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s passed (189 tests). The benchmark target completed successfully; its test binaries ran in bench mode with tests ignored as expected. No services were started or stopped.
+
+
+## Follow-up run (2026-11-04, causal Scout parameter probes)
+
+### Auto-trader strategy evaluation
+
+| Workload | Previous run | Current run | Change |
+|---|---:|---:|---:|
+| Strategy entry evaluation range | 1.4–17.3 ns/evaluation | 1.2–16.8 ns/evaluation | Within previous range |
+| Strategy position evaluation range | 1.1–2.0 ns/evaluation | 1.1–1.8 ns/evaluation | Within previous range |
+| Signal serialization | 494.0 ns/operation | 520.1 ns/operation | +5.3% |
+| Market depth assessment | 574.8 ns/operation | 609.1 ns/operation | +6.0% |
+| Limit order request construction | 444.6 ns/operation | 427.4 ns/operation | -3.9% |
+| Strategy parameter validation | 2.0 ns/operation | 1.9 ns/operation | -5.0% |
+
+Same optimized Cargo bench target and WSL2 environment with local services active. Evaluator ranges improved; helper timings varied by up to 6%. The paired-probe and audit display changes are outside these microbenchmarks, so treat helper variation as single-run noise. AutoTrader tests passed (189 tests); React tests passed (88 tests). No benchmark targets were skipped or failed.
+
+
+## Follow-up run (2026-11-04, paired Scout probes and outcome deltas)
+
+### Auto-trader strategy evaluation
+
+| Workload | Previous run | Current run | Change |
+|---|---:|---:|---:|
+| Strategy entry evaluation range | 1.4–17.3 ns/evaluation | 1.2–16.6 ns/evaluation | Within previous range |
+| Strategy position evaluation range | 1.1–2.0 ns/evaluation | 1.1–2.2 ns/evaluation | Upper reading +10.0% |
+| Signal serialization | 520.1 ns/operation | 527.4 ns/operation | +1.4% |
+| Market depth assessment | 609.1 ns/operation | 614.3 ns/operation | +0.9% |
+| Limit order request construction | 427.4 ns/operation | 443.6 ns/operation | +3.8% |
+| Strategy parameter validation | 1.9 ns/operation | 1.9 ns/operation | No change |
+
+Same optimized Cargo benchmark target and WSL2 environment with local services active. Entry evaluation and helper measurements remained near the prior run; the position-evaluation maximum was slightly higher in this single run. The paired Scout changes are outside the microbenchmarked paths. AutoTrader tests passed (189 tests), and React tests passed (88 tests). No benchmark targets were skipped or failed.
+
+
+## Follow-up run (2026-11-04, Scout probe eligibility and paired delta display)
+
+### Auto-trader strategy evaluation
+
+| Workload | Previous run | Current run | Change |
+|---|---:|---:|---:|
+| Strategy entry evaluation range | 1.4–17.3 ns/evaluation | 1.1–16.0 ns/evaluation | Within previous range |
+| Strategy position evaluation range | 1.1–2.0 ns/evaluation | 1.1–1.7 ns/evaluation | Within previous range |
+| Signal serialization | 527.4 ns/operation | 486.2 ns/operation | -7.8% |
+| Market depth assessment | 614.3 ns/operation | 549.0 ns/operation | -10.6% |
+| Limit order request construction | 443.6 ns/operation | 413.6 ns/operation | -6.8% |
+| Strategy parameter validation | 1.9 ns/operation | 1.9 ns/operation | No change |
+
+Same optimized Cargo benchmark target and WSL2 environment. Strategy evaluator ranges improved or stayed within the previous run's range; helper timings were lower in this single run. The Scout probe changes are outside the microbenchmarked paths. AutoTrader tests passed (189 tests), and React tests passed (88 tests). No benchmark targets were skipped or failed.

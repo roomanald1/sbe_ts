@@ -9,7 +9,7 @@ const learningGridTheme = themeQuartz.withParams({
   accentColor: '#8296ad', backgroundColor: '#0d0f12', borderColor: '#242a31',
   foregroundColor: '#e7e7e7', headerBackgroundColor: '#11151a', headerTextColor: '#a0a6ad', rowHoverColor: '#141b24',
 });
-type LearningRow = { id: string; symbol: string; strategy: string; parameter: string; unit: string; base: number; learned: number; delta: number; samples: number; positiveRate: number | null };
+type LearningRow = { id: string; symbol: string; strategy: string; parameter: string; unit: string; base: number; learned: number; delta: number; samples: number; positiveRate: number | null; realizedPnl: number };
 const columns: ColDef<LearningRow>[] = [
   { field: 'symbol', headerName: 'Symbol', pinned: 'left', minWidth: 110 },
   { field: 'strategy', headerName: 'Strategy', minWidth: 190 },
@@ -17,8 +17,9 @@ const columns: ColDef<LearningRow>[] = [
   { field: 'base', headerName: 'Base', minWidth: 105, valueFormatter: ({ value, data }) => value == null ? '—' : value.toFixed(3) + ' ' + (data?.unit ?? '') },
   { field: 'learned', headerName: 'Learned', minWidth: 110, valueFormatter: ({ value, data }) => value == null ? '—' : value.toFixed(3) + ' ' + (data?.unit ?? '') },
   { field: 'delta', headerName: 'Change vs base', minWidth: 120, valueFormatter: ({ value, data }) => value == null ? '—' : (value === 0 ? '±' : value > 0 ? '+' : '−') + Math.abs(value).toFixed(3) + ' ' + (data?.unit ?? ''), cellClass: ({ value }) => Math.round(value * 1000) > 0 ? 'learning-increase' : Math.round(value * 1000) < 0 ? 'learning-decrease' : '' },
-  { field: 'samples', headerName: 'Closed trades', minWidth: 110 },
+  { field: 'samples', headerName: 'Learning n', headerTooltip: 'Effective strategy learning samples for this symbol and strategy. Counts decay with a seven-day half-life.', minWidth: 105 },
   { field: 'positiveRate', headerName: 'Positive', minWidth: 95, valueFormatter: ({ value }) => value == null ? '—' : (value * 100).toFixed(1) + '%' },
+  { field: 'realizedPnl', headerName: 'Learning P&L', headerTooltip: 'Decayed realized P&L evidence used by this strategy profile, in USD.', minWidth: 120, valueFormatter: ({ value }) => value == null ? '—' : '$' + value.toFixed(2), cellClass: ({ value }) => value > 0 ? 'learning-increase' : value < 0 ? 'learning-decrease' : '' },
 ];
 
 export function AutoTraderLearningWidget() {
@@ -38,13 +39,14 @@ export function AutoTraderLearningWidget() {
     delta: parameter.learned_value - (parameter.configured_value ?? parameter.default_value),
     samples: profile.learning_samples,
     positiveRate: profile.positive_rate ?? null,
+    realizedPnl: profile.realized_pnl,
   }))), [profiles]);
 
   const visibleRows = hideUnchanged ? rows.filter((row) => Math.round(row.delta * 1000) !== 0) : rows;
 
   return <section className="auto-trader-strategy-parameters" aria-label="AutoTrader learning impact">
     <strong>Strategy learning impact</strong>
-    <p>Base and learned parameter values for every symbol and strategy, with the signed change from base.</p>
+    <p>Effective parameter values and the decayed outcome history behind each symbol and strategy profile. These learned values are supplied to strategy decisions; the recent outcomes summary is shown separately.</p>
     {rows.length === 0 ? <p>{state.loading ? 'Loading learned strategy profiles…' : 'No strategy parameter profiles are available.'}</p> : <>
       <button className="auto-trader-learning-filter" type="button" aria-pressed={hideUnchanged} onClick={() => setHideUnchanged((hidden) => !hidden)}>{hideUnchanged ? 'Show unchanged' : 'Hide unchanged'}</button>
       <div className="data-grid-wrap auto-trader-learning-grid">

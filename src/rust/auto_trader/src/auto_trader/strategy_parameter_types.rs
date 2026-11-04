@@ -51,6 +51,7 @@ pub(crate) enum StrategyParameterKey {
     CarryMinimumDaysToExpiry,
     CarryCostGatePercent,
     TrendSmaDays,
+    PostOnlyTimeoutMinutes,
 }
 
 impl StrategyParameterKey {
@@ -106,6 +107,7 @@ impl StrategyParameterKey {
             Self::CarryMinimumDaysToExpiry => "carry_minimum_days_to_expiry",
             Self::CarryCostGatePercent => "carry_cost_gate_percent",
             Self::TrendSmaDays => "trend_sma_days",
+            Self::PostOnlyTimeoutMinutes => "post_only_timeout_minutes",
         }
     }
 }
@@ -144,5 +146,6 @@ struct StrategyParameterProfile {
     strategy: String,
     learning_samples: usize,
     positive_rate: Option<f64>,
+    realized_pnl: f64,
     parameters: Vec<StrategyParameterValue>,
 }

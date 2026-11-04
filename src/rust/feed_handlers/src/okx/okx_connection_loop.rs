@@ -87,6 +87,7 @@ async fn subscribe_once(
                                 volatility_5m,
                             )?;
                             let _ = price_updates.send(encoded);
+                            crate::metrics::record_queue_depth("price_updates", price_updates.len());
                         }
                     }
                 }

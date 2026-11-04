@@ -433,3 +433,7 @@
 .auto-trader-live-position-grid .auto-trader-pnl-bar-cell { gap: 3px; }
 .auto-trader-live-position-grid .auto-trader-pnl-bar-label { font-size: 8px; }
 .auto-trader-live-position-grid .auto-trader-exit-summary { flex-wrap: wrap; gap: 2px 8px; font-size: 7px; }
+
+.auto-trader-audit-alert { display: grid; gap: 4px; padding: 10px 12px; border: 1px solid #a94d4d; border-radius: 6px; background: #2a1719; color: #ffd4d4; font-size: 12px; }
+.auto-trader-audit-alert span { color: #e6baba; line-height: 1.45; }
+.auto-trader-audit-coalesced { color: #d0b887; font-size: 11px; }

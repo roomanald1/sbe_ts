@@ -12,6 +12,7 @@ ModuleRegistry.registerModules([ClientSideRowModelModule, PaginationModule]);
 const theme = themeQuartz.withParams({ accentColor: '#8296ad', backgroundColor: '#0d0f12', borderColor: '#242a31', foregroundColor: '#e7e7e7', headerBackgroundColor: '#11151a', headerTextColor: '#a0a6ad', rowHoverColor: '#141b24' });
 type ShadowGridRow = AutoTraderShadowPosition & { markPrice?: number; openNetReturnPercent?: number };
 const percent = (value: unknown) => typeof value === 'number' && Number.isFinite(value) ? (value > 0 ? '+' : '') + value.toFixed(3) + '%' : '—';
+const mean = (values: number[]) => values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : undefined;
 const winRateColor = (rate: number) => {
   const progress = Math.max(0, Math.min(100, rate)) / 100;
   const red = [240, 110, 114];
@@ -77,7 +78,7 @@ function AutoTraderShadowPositionsComponent({ ticks = [], histories = new Map() 
     return counts;
   }, [rows]);
   const scoutParameterSummaries = useMemo(() => {
-    const cohorts = new Map<string, { kind: 'Parameter probe'; symbol: string; strategy: string; parameter: string; value: number; entryEligible: boolean; scenario: 'strategy' | 'tight'; rows: AutoTraderShadowPosition[] }>();
+    const cohorts = new Map<string, { kind: 'Parameter probe'; symbol: string; strategy: string; parameter: string; value: number; entryEligible: boolean; scenario: 'strategy' | 'tight' | 'wide'; rows: AutoTraderShadowPosition[] }>();
     for (const row of rows) {
       if (row.source !== 'Scout' || !row.scoutParameterKey || typeof row.scoutParameterValue !== 'number') continue;
       const entryEligible = row.scoutParameterEntryEligible ?? false;
@@ -90,11 +91,12 @@ function AutoTraderShadowPositionsComponent({ ticks = [], histories = new Map() 
       const resolved = samples.filter((row) => ['Won', 'Lost', 'Flat'].includes(row.status));
       const wins = resolved.filter((row) => row.status === 'Won').length;
       const returns = resolved.flatMap((row) => typeof row.netReturnPercent === 'number' ? [row.netReturnPercent] : []);
-      return { kind, symbol, strategy, parameter, value, entryEligible, scenario, count: resolved.length, wins, average: returns.length ? returns.reduce((sum, current) => sum + current, 0) / returns.length : undefined };
+      const pairedDeltas = resolved.flatMap((row) => row.comparisonRole === 'variant' && typeof row.pairedDeltaPercent === 'number' ? [row.pairedDeltaPercent] : []);
+      return { kind, symbol, strategy, parameter, value, entryEligible, scenario, count: resolved.length, wins, average: mean(returns), pairedDeltaAverage: mean(pairedDeltas) };
     });
   }, [rows]);
   const scoutLevelSummaries = useMemo(() => {
-    const cohorts = new Map<string, { symbol: string; strategy: string; scenario: 'strategy' | 'tight'; level: number; rows: AutoTraderShadowPosition[] }>();
+    const cohorts = new Map<string, { symbol: string; strategy: string; scenario: 'strategy' | 'tight' | 'wide'; level: number; rows: AutoTraderShadowPosition[] }>();
     for (const row of rows) {
       if (row.source !== 'Scout' || typeof row.scoutLevelPercent !== 'number') continue;
       const key = [row.symbol, row.strategy, row.exitScenario, row.scoutLevelPercent].join('|');
@@ -106,13 +108,14 @@ function AutoTraderShadowPositionsComponent({ ticks = [], histories = new Map() 
       const resolved = samples.filter((row) => ['Won', 'Lost', 'Flat'].includes(row.status));
       const wins = resolved.filter((row) => row.status === 'Won').length;
       const returns = resolved.flatMap((row) => typeof row.netReturnPercent === 'number' ? [row.netReturnPercent] : []);
-      return { kind: 'Breakout distance' as const, symbol, strategy, scenario, level, count: resolved.length, wins, average: returns.length ? returns.reduce((sum, value) => sum + value, 0) / returns.length : undefined };
+      const pairedDeltas = resolved.flatMap((row) => row.comparisonRole === 'variant' && typeof row.pairedDeltaPercent === 'number' ? [row.pairedDeltaPercent] : []);
+      return { kind: 'Breakout distance' as const, symbol, strategy, scenario, level, count: resolved.length, wins, average: mean(returns), pairedDeltaAverage: mean(pairedDeltas) };
     });
   }, [rows]);
   const scoutOutcomeSummaries = useMemo(() => {
-    const cohorts = new Map<string, { symbol: string; strategy: string; scenario: 'strategy' | 'tight'; rows: AutoTraderShadowPosition[] }>();
+    const cohorts = new Map<string, { symbol: string; strategy: string; scenario: 'strategy' | 'tight' | 'wide'; rows: AutoTraderShadowPosition[] }>();
     for (const row of rows) {
-      if (row.source !== 'Scout') continue;
+      if (row.source !== 'Scout' || row.comparisonRole) continue;
       const key = [row.symbol, row.strategy, row.exitScenario].join('|');
       const cohort = cohorts.get(key) ?? { symbol: row.symbol, strategy: row.strategy, scenario: row.exitScenario, rows: [] };
       cohort.rows.push(row);
@@ -122,7 +125,7 @@ function AutoTraderShadowPositionsComponent({ ticks = [], histories = new Map() 
       const resolved = samples.filter((row) => ['Won', 'Lost', 'Flat'].includes(row.status));
       const wins = resolved.filter((row) => row.status === 'Won').length;
       const returns = resolved.flatMap((row) => typeof row.netReturnPercent === 'number' ? [row.netReturnPercent] : []);
-      return { kind: 'Scout summary' as const, symbol, strategy, scenario, count: resolved.length, wins, average: returns.length ? returns.reduce((sum, value) => sum + value, 0) / returns.length : undefined };
+      return { kind: 'Scout summary' as const, symbol, strategy, scenario, count: resolved.length, wins, average: mean(returns), pairedDeltaAverage: undefined };
     });
   }, [rows]);
   const scoutGridRows = useMemo(() => [...scoutOutcomeSummaries, ...scoutParameterSummaries, ...scoutLevelSummaries], [scoutOutcomeSummaries, scoutParameterSummaries, scoutLevelSummaries]);
@@ -140,6 +143,7 @@ function AutoTraderShadowPositionsComponent({ ticks = [], histories = new Map() 
     { field: 'count', headerName: 'Outcomes', width: 110, sortable: false },
     { headerName: 'Win rate', width: 110, sortable: false, valueGetter: ({ data }) => data && data.count ? data.wins / data.count * 100 : undefined, valueFormatter: ({ value }) => typeof value === 'number' ? Math.round(value) + '%' : '—', cellStyle: ({ value }) => ({ color: typeof value === 'number' ? winRateColor(value) : '#a0a6ad', fontWeight: 700 }) },
     { field: 'average', headerName: 'Avg net', width: 120, sortable: true, sort: 'desc', sortIndex: 0, valueFormatter: ({ value }) => percent(value), cellClassRules: { 'pnl-positive': ({ value }) => typeof value === 'number' && value > 1e-12, 'pnl-negative': ({ value }) => typeof value === 'number' && value < -1e-12 } },
+    { field: 'pairedDeltaAverage', headerName: 'Variant Δ', headerTooltip: 'Mean variant return minus its same-signal baseline. Positive means the variant improved, even when both raw outcomes are losses.', width: 120, sortable: true, valueFormatter: ({ value }) => percent(value), cellClassRules: { 'pnl-positive': ({ value }) => typeof value === 'number' && value > 1e-12, 'pnl-negative': ({ value }) => typeof value === 'number' && value < -1e-12 } },
   ], []);
   const columns = useMemo<ColDef<ShadowGridRow>[]>(() => [
     { field: 'symbol', headerName: 'Symbol', width: 85, minWidth: 75 },
@@ -176,13 +180,15 @@ function AutoTraderShadowPositionsComponent({ ticks = [], histories = new Map() 
       </div>;
     } },
     { headerName: 'Net', headerTooltip: 'Closed net return after configured taker fees and spread. Open positions show the estimated net return.', valueGetter: ({ data }) => data?.status === 'Open' ? data.openNetReturnPercent : data?.netReturnPercent, valueFormatter: ({ value }) => percent(value), cellClassRules: { 'is-positive': ({ value }) => typeof value === 'number' && value > 1e-12, 'is-negative': ({ value }) => typeof value === 'number' && value < -1e-12 }, minWidth: 75, maxWidth: 90 },
+    { field: 'comparisonRole', headerName: 'Probe', headerTooltip: 'Baseline and variant are evaluated on the same signal. Parameter promotion uses the paired delta, not the absolute Win/Loss label.', valueFormatter: ({ value }) => value === 'baseline' ? 'Baseline' : value === 'variant' ? 'Variant' : '—', minWidth: 78, maxWidth: 88 },
+    { field: 'pairedDeltaPercent', headerName: 'Δ vs base', headerTooltip: 'Variant net return minus same-signal baseline net return. Positive means the variant improved, even if both outcomes are losses.', valueFormatter: ({ value }) => percent(value), cellClassRules: { 'is-positive': ({ value }) => typeof value === 'number' && value > 1e-12, 'is-negative': ({ value }) => typeof value === 'number' && value < -1e-12 }, minWidth: 90, maxWidth: 105 },
     { field: 'strength', headerName: 'Signal strength', valueFormatter: ({ value }) => typeof value === 'number' ? `${(value * 100).toFixed(0)}%` : '—', minWidth: 115 },
   ], [now]);
   const visibleRows = useMemo(() => sourceRows.filter((row) => positionFilter === 'all' || (positionFilter === 'open' ? row.status === 'Open' : row.status !== 'Open')), [sourceRows, positionFilter]);
 
   return <section className="feed-section signal-info-panel" aria-label="AutoTrader shadow outcomes">
     <FeedToolbar title="Scout and exploratory shadow outcomes" />
-    <p className="signal-info-note">Simulated outcomes from the last 7 days; these do not represent filled trades. A signal can create multiple rows for exit scenarios and tested entry levels. Filled Scout trades are counted separately in the AutoTrader summary.</p>
+    <p className="signal-info-note">Simulated outcomes from the last 7 days; these do not represent filled trades. Paired baseline/variant rows show the variant return delta against the same signal. A variant can be a raw loss and still improve on its baseline. Parameter promotion uses that paired delta; unpaired Scout outcomes remain separate.</p>
     <div className="auto-trader-shadow-summary" aria-live="polite">
       <span>{openCount} open</span><span>{wins} wins</span><span>{losses} losses</span><span>{flats} flat</span>{unavailable > 0 && <span>{unavailable} outcome unavailable</span>}
     </div>
@@ -199,7 +205,7 @@ function AutoTraderShadowPositionsComponent({ ticks = [], histories = new Map() 
     </div>
     <details className="auto-trader-scout-details">
       <summary>Scout learning results</summary>
-      <p>Scout outcome summaries, parameter probes, and breakout entry distances share one grid, grouped by result type, symbol, and strategy. Rows are ordered by average net return; win rate is shown for context. The summary rows include each strategy with recorded Scout outcomes.</p>
+      <p>Scout outcome summaries, parameter probes, and breakout entry distances share one grid, grouped by result type, symbol, and strategy. Raw average net and paired variant delta are shown separately; win rate is context only. Paired baseline/variant outcomes are excluded from independent Scout summaries.</p>
       <label className="auto-trader-scout-symbol-filter">SYMBOL<select value={scoutSymbolFilter} onChange={(event) => setScoutSymbolFilter(event.target.value)}><option value="all">All symbols</option>{scoutSymbols.map((symbol) => <option key={symbol} value={symbol}>{symbol}</option>)}</select></label>
       {scoutGridRows.length > 0
         ? <div className="data-grid-wrap auto-trader-scout-summary-grid"><AgGridReact rowData={filteredScoutGridRows} columnDefs={scoutSummaryColumns} getRowId={({ data }) => [data.kind, data.symbol, data.strategy, data.scenario, 'parameter' in data ? data.parameter : '', 'value' in data ? data.value : '', 'entryEligible' in data ? data.entryEligible : '', 'level' in data ? data.level : ''].join(':')} defaultColDef={{ sortable: false, resizable: true }} pagination paginationPageSize={25} theme={theme} domLayout="normal" rowHeight={34} headerHeight={30} /></div>

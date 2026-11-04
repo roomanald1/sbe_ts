@@ -1,6 +1,12 @@
 #[derive(Serialize)]
 struct StatusResponse {
     enabled: bool,
+    audit_healthy: bool,
+    audit_failure_latched: bool,
+    decision_audit_queue_depth: usize,
+    execution_audit_queue_depth: usize,
+    audit_coalesced_decisions: u64,
+    audit_dropped_events: u64,
     strategy: String,
     strategies: Vec<String>,
     scout_strategies: Vec<String>,
@@ -12,6 +18,9 @@ struct StatusResponse {
     risk_appetite: f64,
     max_open_positions: usize,
     max_concurrent_shadow_samples: usize,
+    active_shadow_samples: usize,
+    active_scout_shadow_samples: usize,
+    scout_max_active_positions: usize,
     max_intraday_open_positions: usize,
     max_daily_open_positions: usize,
     intraday_notional_limit: f64,
@@ -95,6 +104,7 @@ struct SettingsRequest {
     max_open_positions: usize,
     #[serde(default)]
     max_concurrent_shadow_samples: Option<usize>,
+    scout_max_active_positions: Option<usize>,
     #[serde(default)]
     max_intraday_open_positions: Option<usize>,
     #[serde(default)]
@@ -157,6 +167,10 @@ struct ShadowLearningOutcomeRequest {
     scout_parameter_value: Option<f64>,
     #[serde(default)]
     scout_parameter_profile_symbol: Option<String>,
+    #[serde(default)]
+    scout_comparison_id: Option<String>,
+    #[serde(default)]
+    scout_comparison_role: Option<String>,
 }
 #[derive(Clone, Serialize)]
 struct DecisionParameter {

@@ -64,7 +64,8 @@ mod candidate_evidence_format_tests {
             ..SideWalkForwardMetrics::default()
         };
         let review = CandidateEntryReview {
-            context: "test".into(), strength_floor: 0.0, score_floor: 0.0,
+            context: "test".into(), scout_max_active_positions: DEFAULT_SCOUT_MAX_ACTIVE_POSITIONS,
+            strength_floor: 0.0, score_floor: 0.0,
             scout_strength_floor: 0.0, scout_score_floor: 0.0,
             scout_minimum_samples: MIN_EXPLORATION_EVIDENCE_SAMPLES,
             scout_minimum_positive_rate: NEGATIVE_EVIDENCE_FLOOR,

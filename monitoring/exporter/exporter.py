@@ -218,6 +218,13 @@ def metrics():
                 output.append(sample("app_feed_messages_total", "Cumulative accepted market feed updates by channel.", value, {"channel": feed}, kind="counter"))
     except (OSError, URLError, ValueError, TypeError):
         pass
+    try:
+        for queue in get_json(SERVICES["feed_handlers"][0], "/internal/queue-metrics"):
+            labels = {"queue": queue.get("queue", "unknown")}
+            output.append(sample("app_feed_queue_size", "Current number of retained messages in a feed handler queue.", queue.get("depth", 0), labels))
+            output.append(sample("app_feed_queue_dropped_messages_total", "Cumulative messages skipped by lagging feed handler queue receivers.", queue.get("dropped", 0), labels, kind="counter"))
+    except (OSError, URLError, ValueError, TypeError):
+        pass
     return "".join(output).encode()
 
 

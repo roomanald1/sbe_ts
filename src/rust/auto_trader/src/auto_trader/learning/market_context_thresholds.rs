@@ -70,11 +70,12 @@ fn adaptive_scout_thresholds(
     learning: &BTreeMap<String, LearningStats>,
     context: &str,
     active_scout_count: usize,
+    scout_max_active_positions: usize,
 ) -> (f64, f64) {
     let stats = context_learning_stats(learning, &format!("scout:{context}"));
     let win_rate = smoothed_win_rate(&stats);
     let losing_cohort = stats.realized_pnl < 0.0;
-    let density = active_scout_count.min(SCOUT_MAX_ACTIVE_POSITIONS) as f64;
+    let density = active_scout_count.min(scout_max_active_positions) as f64;
     let mut strength =
         (SCOUT_MIN_STRENGTH - 0.15 + density * 0.025).clamp(SCOUT_MIN_STRENGTH_FLOOR, 0.25);
     let mut score =

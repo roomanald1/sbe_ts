@@ -46,6 +46,7 @@ async fn apply_protection_order_failure_reasons(
 }
 
 async fn get_activity(State(state): State<AutoTraderState>) -> Json<ActivityResponse> {
+    let scout_max_active_positions = state.settings.lock().await.scout_max_active_positions;
     let today_start = utc_day_start_ms();
     let ActivityPositionSnapshot {
         mut orders,
@@ -167,7 +168,7 @@ async fn get_activity(State(state): State<AutoTraderState>) -> Json<ActivityResp
         preferred_order_type: learning.preferred_order_type,
         parameter_profile_samples: learning.parameter_profile_samples,
         scout_open_positions: learning.scout_open_positions,
-        scout_max_active_positions: SCOUT_MAX_ACTIVE_POSITIONS,
+        scout_max_active_positions,
         scout_learning_samples: learning.scout_learning_samples,
         scout_learning_win_rate: learning.scout_learning_win_rate,
         scout_learning_realized_pnl: learning.scout_learning_realized_pnl,

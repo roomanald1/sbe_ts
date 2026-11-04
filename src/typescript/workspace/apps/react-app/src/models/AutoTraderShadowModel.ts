@@ -9,7 +9,9 @@ export type AutoTraderShadowPosition = {
   scoutParameterKey?: string;
   scoutParameterValue?: number;
   scoutParameterEntryEligible?: boolean;
-  exitScenario: 'strategy' | 'tight';
+  comparisonRole?: 'baseline' | 'variant';
+  pairedDeltaPercent?: number;
+  exitScenario: 'strategy' | 'tight' | 'wide';
   direction: 'bullish' | 'bearish';
   strength: number;
   openedAt: number;
@@ -39,7 +41,10 @@ type AuditRecord = {
   scout_parameter_key?: string;
   scout_parameter_value?: number;
   scout_parameter_entry_eligible?: boolean;
-  shadow_exit_scenario?: 'strategy' | 'tight';
+  scout_comparison_id?: string;
+  scout_comparison_role?: 'baseline' | 'variant';
+  paired_delta_percent?: number;
+  shadow_exit_scenario?: 'strategy' | 'tight' | 'wide';
   exploratory?: boolean | null;
   shadow_entry_bid?: number;
   shadow_entry_ask?: number;
@@ -50,6 +55,37 @@ type AuditRecord = {
 };
 
 type AuditPage = { items: AuditRecord[]; next_cursor?: number | null };
+
+type ScoutComparisonOutcome = {
+  stage?: string;
+  scout_comparison_id?: string;
+  scout_comparison_role?: 'baseline' | 'variant';
+  shadow_net_return_percent?: number;
+  paired_delta_percent?: number;
+};
+
+export function pairedScoutDeltas(outcomes: ScoutComparisonOutcome[]): Map<string, number> {
+  const returns = new Map<string, { baseline?: number; variant?: number }>();
+  const deltas = new Map<string, number>();
+  for (const outcome of outcomes) {
+    const id = outcome.scout_comparison_id;
+    if (outcome.stage !== 'scout-outcome' || !id) continue;
+    if (typeof outcome.paired_delta_percent === 'number' && Number.isFinite(outcome.paired_delta_percent)) {
+      deltas.set(id, outcome.paired_delta_percent);
+    }
+    if ((outcome.scout_comparison_role !== 'baseline' && outcome.scout_comparison_role !== 'variant')
+      || typeof outcome.shadow_net_return_percent !== 'number' || !Number.isFinite(outcome.shadow_net_return_percent)) continue;
+    const pair = returns.get(id) ?? {};
+    pair[outcome.scout_comparison_role] = outcome.shadow_net_return_percent;
+    returns.set(id, pair);
+  }
+  for (const [id, pair] of returns) {
+    if (!deltas.has(id) && typeof pair.baseline === 'number' && typeof pair.variant === 'number') {
+      deltas.set(id, pair.variant - pair.baseline);
+    }
+  }
+  return deltas;
+}
 
 type SignalEvaluation = {
   symbol: string;
@@ -121,6 +157,7 @@ export class AutoTraderShadowModel {
           outcomesByDecision.set(audit.shadow_decision_id, audit);
         }
       }
+      const pairedDeltaByComparison = pairedScoutDeltas(auditRows);
       const shadowDecisions = auditRows
         .filter((audit) => audit.stage === 'decision' && audit.status === 'shadowed' && audit.decision_id)
         .sort((a, b) => (a.timestamp ?? 0) - (b.timestamp ?? 0));
@@ -128,7 +165,7 @@ export class AutoTraderShadowModel {
       const lastSampleAt = new Map<string, number>();
       for (const audit of shadowDecisions) {
         const timestamp = audit.timestamp ?? audit.signal_timestamp ?? 0;
-        const sampleKey = (audit.symbol ?? '') + '|' + (audit.strategy ?? '') + '|' + (audit.direction ?? '') + '|' + (audit.scout_level_percent ?? 'exploratory') + '|' + (audit.scout_parameter_key ?? '') + ':' + (audit.scout_parameter_value ?? '') + '|' + (audit.shadow_exit_scenario ?? 'strategy');
+        const sampleKey = (audit.symbol ?? '') + '|' + (audit.strategy ?? '') + '|' + (audit.direction ?? '') + '|' + (audit.scout_level_percent ?? 'exploratory') + '|' + (audit.scout_parameter_key ?? '') + ':' + (audit.scout_parameter_value ?? '') + '|' + (audit.shadow_exit_scenario ?? 'strategy') + '|' + (audit.scout_comparison_id ?? '');
         const priorSampleAt = lastSampleAt.get(sampleKey);
         if (priorSampleAt !== undefined && timestamp - priorSampleAt < repeatedScenarioCooldownMs) continue;
         latestShadowDecisions.set(audit.decision_id!, audit);
@@ -138,6 +175,8 @@ export class AutoTraderShadowModel {
         const { decision_id: decisionId, signal_timestamp: signalTimestamp, symbol, direction } = audit;
         if (!decisionId || !signalTimestamp || !symbol || (direction !== 'bullish' && direction !== 'bearish')) return [];
         const outcome = outcomesByDecision.get(decisionId);
+        const comparisonId = outcome?.scout_comparison_id ?? audit.scout_comparison_id;
+        const comparisonRole = outcome?.scout_comparison_role ?? audit.scout_comparison_role;
         const evaluation = evaluationsBySignal.get(symbol + '|' + signalTimestamp);
         const netReturn = typeof outcome?.shadow_net_return_percent === 'number'
           ? outcome.shadow_net_return_percent
@@ -162,6 +201,8 @@ export class AutoTraderShadowModel {
           scoutParameterKey: audit.scout_parameter_key,
           scoutParameterValue: typeof audit.scout_parameter_value === 'number' ? audit.scout_parameter_value : undefined,
           scoutParameterEntryEligible: typeof audit.scout_parameter_entry_eligible === 'boolean' ? audit.scout_parameter_entry_eligible : undefined,
+          comparisonRole,
+          pairedDeltaPercent: comparisonId ? pairedDeltaByComparison.get(comparisonId) : undefined,
           exitScenario: audit.shadow_exit_scenario ?? 'strategy',
           direction,
           strength: audit.strength ?? 0,
@@ -179,7 +220,7 @@ export class AutoTraderShadowModel {
         }];
       }).sort((a, b) => b.openedAt - a.openedAt);
       const learningOutcomes = auditRows.flatMap((audit) =>
-        audit.stage === 'scout-outcome' && typeof audit.strategy === 'string' &&
+        audit.stage === 'scout-outcome' && typeof audit.strategy === 'string' && !audit.scout_comparison_id &&
         typeof audit.shadow_net_return_percent === 'number' && Number.isFinite(audit.shadow_net_return_percent)
           ? [{
               strategy: audit.strategy,

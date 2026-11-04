@@ -179,19 +179,20 @@ fn allocated_notional_for_symbol(settings: &Settings, symbol: &str) -> f64 {
     let quote_rate = quote_usd_rate(settings, symbol);
     let open_exposure = if let Some(lots) = settings.strategy_positions.get(symbol) {
         lots.values()
+            .filter(|position| !position.scout_entry)
             .map(|position| position.quantity.abs() * position.average_entry_price.max(0.0) * quote_rate)
             .sum()
     } else {
-        settings.positions.get(symbol).map_or(0.0, |position| {
+        settings.positions.get(symbol).filter(|position| !position.scout_entry).map_or(0.0, |position| {
             position.quantity.abs() * position.average_entry_price.max(0.0) * quote_rate
         })
     };
     let mut pending_exposure = 0.0;
     let mut pending_quantity = 0.0;
-    let current_quantity = settings.positions.get(symbol).map_or(0.0, |position| position.quantity);
+    let current_quantity = settings.positions.get(symbol).filter(|position| !position.scout_entry).map_or(0.0, |position| position.quantity);
     for order in settings.orders.iter().filter(|order| {
         order.symbol == symbol
-            && matches!(order.purpose.as_str(), "signal" | "scout")
+            && order.purpose == "signal"
             && matches!(order.status.as_str(), "submitting" | "accepted" | "resting" | "partially_filled")
             && order.quantity > order.filled_quantity + 1e-12
     }) {
@@ -222,7 +223,7 @@ fn allocated_notional_for_category(settings: &Settings, category: Option<Strateg
         let mut lots_total = 0.0;
         for (symbol, lots) in &settings.strategy_positions {
             for (strategy, position) in lots {
-                if strategy_category(Some(strategy)) != category {
+                if strategy_category(Some(strategy)) != category || position.scout_entry {
                     continue;
                 }
                 let value = position.quantity.abs()
@@ -238,7 +239,7 @@ fn allocated_notional_for_category(settings: &Settings, category: Option<Strateg
             settings
                 .positions
                 .iter()
-                .filter(|(_, position)| strategy_category(position.strategy.as_deref()) == category)
+                .filter(|(_, position)| !position.scout_entry && strategy_category(position.strategy.as_deref()) == category)
                 .map(|(symbol, position)| {
                     position.quantity.abs()
                         * position.average_entry_price.max(0.0)
@@ -254,7 +255,7 @@ fn allocated_notional_for_category(settings: &Settings, category: Option<Strateg
         }
     } else if !settings.strategy_positions.is_empty() {
         settings.strategy_positions.iter().flat_map(|(symbol, lots)| {
-            lots.iter().map(move |(strategy, position)| {
+            lots.iter().filter(|(_, position)| !position.scout_entry).map(move |(strategy, position)| {
                 let value = position.quantity.abs()
                     * position.average_entry_price.max(0.0)
                     * quote_usd_rate(settings, symbol);
@@ -265,7 +266,7 @@ fn allocated_notional_for_category(settings: &Settings, category: Option<Strateg
             })
         }).sum()
     } else {
-        settings.positions.iter().map(|(symbol, position)| {
+        settings.positions.iter().filter(|(_, position)| !position.scout_entry).map(|(symbol, position)| {
             let value = position.quantity.abs()
                 * position.average_entry_price.max(0.0)
                 * quote_usd_rate(settings, symbol);
@@ -279,7 +280,7 @@ fn allocated_notional_for_category(settings: &Settings, category: Option<Strateg
     let mut pending_quantity = BTreeMap::<String, f64>::new();
     let mut pending_category_quantity = BTreeMap::<(String, String), f64>::new();
     for order in &settings.orders {
-        if order.purpose == "stop-loss"
+        if matches!(order.purpose.as_str(), "stop-loss" | "scout")
             || !matches!(
                 order.status.as_str(),
                 "submitting" | "accepted" | "resting" | "partially_filled"
@@ -299,8 +300,8 @@ fn allocated_notional_for_category(settings: &Settings, category: Option<Strateg
                 .get(&order.symbol)
                 .map(|lots| {
                     lots.iter()
-                        .filter(|(strategy, _)| {
-                            strategy_category(Some(strategy.as_str())) == category
+                        .filter(|(strategy, position)| {
+                            !position.scout_entry && strategy_category(Some(strategy.as_str())) == category
                         })
                         .map(|(_, position)| position.quantity)
                         .sum::<f64>()
@@ -310,8 +311,9 @@ fn allocated_notional_for_category(settings: &Settings, category: Option<Strateg
                         .positions
                         .get(&order.symbol)
                         .filter(|position| {
-                            strategy_category(position.strategy.as_deref()) == category
+                            !position.scout_entry && strategy_category(position.strategy.as_deref()) == category
                         })
+                        .filter(|position| !position.scout_entry)
                         .map(|position| position.quantity)
                         .unwrap_or(0.0)
                 })
@@ -323,6 +325,7 @@ fn allocated_notional_for_category(settings: &Settings, category: Option<Strateg
             settings
                 .positions
                 .get(&order.symbol)
+                .filter(|position| !position.scout_entry)
                 .map(|position| position.quantity)
                 .unwrap_or(0.0)
                 + pending_quantity.get(&order.symbol).copied().unwrap_or(0.0)
@@ -364,14 +367,14 @@ fn total_open_position_count(settings: &Settings) -> usize {
         return settings
             .positions
             .values()
-            .filter(|position| position.quantity.abs() > 1e-12)
+            .filter(|position| position.quantity.abs() > 1e-12 && !position.scout_entry)
             .count();
     }
     settings
         .strategy_positions
         .values()
         .flat_map(|lots| lots.values())
-        .filter(|position| position.quantity.abs() > 1e-12)
+        .filter(|position| position.quantity.abs() > 1e-12 && !position.scout_entry)
         .count()
 }
 
@@ -382,6 +385,7 @@ fn category_open_position_count(settings: &Settings, category: StrategyCategory)
             .values()
             .filter(|position| {
                 position.quantity.abs() > 1e-12
+                    && !position.scout_entry
                     && strategy_category(position.strategy.as_deref()) == category
             })
             .count();
@@ -393,6 +397,7 @@ fn category_open_position_count(settings: &Settings, category: StrategyCategory)
         .filter(|(strategy, position)| {
             strategy_category(Some(strategy.as_str())) == category
                 && position.quantity.abs() > 1e-12
+                && !position.scout_entry
         })
         .count()
 }
@@ -564,7 +569,7 @@ fn daily_strategy_open_position_count(settings: &Settings, strategy: &str) -> us
             .positions
             .values()
             .filter(|position| {
-                position.quantity.abs() > 1e-12 && position.strategy.as_deref() == Some(strategy)
+                position.quantity.abs() > 1e-12 && !position.scout_entry && position.strategy.as_deref() == Some(strategy)
             })
             .count();
     }
@@ -573,7 +578,7 @@ fn daily_strategy_open_position_count(settings: &Settings, strategy: &str) -> us
         .values()
         .filter(|lots| {
             lots.get(strategy)
-                .is_some_and(|position| position.quantity.abs() > 1e-12)
+                .is_some_and(|position| position.quantity.abs() > 1e-12 && !position.scout_entry)
         })
         .count()
 }
@@ -583,7 +588,7 @@ fn pending_entry_strategy_keys(settings: &Settings) -> BTreeSet<(String, String)
         .orders
         .iter()
         .filter(|order| {
-            matches!(order.purpose.as_str(), "signal" | "scout")
+            order.purpose == "signal"
                 && matches!(
                     order.status.as_str(),
                     "submitting" | "accepted" | "resting" | "partially_filled"
@@ -596,13 +601,14 @@ fn pending_entry_strategy_keys(settings: &Settings) -> BTreeSet<(String, String)
                 .strategy_positions
                 .get(&order.symbol)
                 .and_then(|lots| lots.get(strategy))
-                .is_some_and(|position| position.quantity.abs() > 1e-12)
+                .is_some_and(|position| position.quantity.abs() > 1e-12 && !position.scout_entry)
                 || (settings.strategy_positions.is_empty()
                     && settings
                         .positions
                         .get(&order.symbol)
                         .is_some_and(|position| {
                             position.quantity.abs() > 1e-12
+                                && !position.scout_entry
                                 && position.strategy.as_deref() == Some(strategy)
                         }));
             (!existing).then(|| (order.symbol.clone(), strategy.to_owned()))
@@ -799,6 +805,30 @@ mod persistence_allocation_tests {
     }
 
     #[test]
+    fn scout_positions_do_not_consume_real_open_position_caps() {
+        let mut settings = settings_with_rates();
+        let mut scout = position("live-momentum", 1.0, 10.0);
+        scout.scout_entry = true;
+        settings.strategy_positions.entry("ETH-USDT".into()).or_default()
+            .insert("live-momentum".into(), scout.clone());
+        settings.strategy_positions.entry("BTC-USDT".into()).or_default()
+            .insert("live-trade-flow".into(), position("live-trade-flow", 1.0, 50.0));
+        settings.strategy_positions.entry("SOL-USDT".into()).or_default()
+            .insert("trend-50-200".into(), scout);
+
+        assert_eq!(total_open_position_count(&settings), 1);
+        assert_eq!(category_open_position_count(&settings, StrategyCategory::Intraday), 1);
+        assert_eq!(category_open_position_count(&settings, StrategyCategory::Daily), 0);
+
+        settings.strategy_positions.clear();
+        let mut scout = position("live-momentum", 1.0, 10.0);
+        scout.scout_entry = true;
+        settings.positions.insert("ETH-USDT".into(), scout);
+        assert_eq!(total_open_position_count(&settings), 0);
+        assert_eq!(category_open_position_count(&settings, StrategyCategory::Intraday), 0);
+    }
+
+    #[test]
     fn strategy_budgets_allocate_configured_remainder_and_exposure() {
         let mut settings = settings_with_rates();
         settings.strategies = vec![
@@ -843,6 +873,9 @@ mod persistence_allocation_tests {
         assert_eq!(pending_entry_position_count_for_category(&settings, StrategyCategory::Intraday), 1);
         assert_eq!(pending_entry_position_count_for_category(&settings, StrategyCategory::Daily), 1);
         assert_eq!(pending_entry_position_count_for_strategy(&settings, "live-momentum"), 1);
+        settings.orders.push(pending_order("SOL-USDT", "live-order-book", "buy", 2.0));
+        settings.orders.last_mut().unwrap().purpose = "scout".into();
+        assert_eq!(pending_entry_position_count_for_category(&settings, StrategyCategory::Intraday), 1);
 
         settings.strategy_positions.entry("ETH-USDT".into()).or_default().insert(
             "live-momentum".into(), position("live-momentum", 1.0, 10.0));

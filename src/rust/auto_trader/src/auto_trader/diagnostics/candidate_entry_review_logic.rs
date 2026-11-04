@@ -1,5 +1,6 @@
 struct CandidateEntryReview<'a> {
     context: String,
+    scout_max_active_positions: usize,
     strength_floor: f64,
     score_floor: f64,
     scout_strength_floor: f64,
@@ -28,6 +29,7 @@ fn review_candidate_entry<'a>(
     learning: &BTreeMap<String, LearningStats>,
     risk_appetite: f64,
     active_scout_count: usize,
+    scout_max_active_positions: usize,
 ) -> CandidateEntryReview<'a> {
     let context = market_context(candidate);
     let risk_scale = risk_floor_scale(risk_appetite);
@@ -76,7 +78,7 @@ fn review_candidate_entry<'a>(
                     .is_none_or(|rate| rate < MIN_SIDE_POSITIVE_NET_LOWER_95))
     });
     let (scout_strength, scout_score) =
-        adaptive_scout_thresholds(learning, &context, active_scout_count);
+        adaptive_scout_thresholds(learning, &context, active_scout_count, scout_max_active_positions);
     let scout_strength_floor = (scout_strength * risk_scale).clamp(0.0, 1.0);
     let scout_score_floor = (scout_score * risk_scale).max(0.0);
     let scout_strength_pass = candidate.strength.is_finite()
@@ -97,6 +99,7 @@ fn review_candidate_entry<'a>(
 
     CandidateEntryReview {
         context,
+        scout_max_active_positions,
         strength_floor,
         score_floor,
         scout_strength_floor,

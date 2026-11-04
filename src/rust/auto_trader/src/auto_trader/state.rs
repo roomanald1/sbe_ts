@@ -16,8 +16,11 @@ struct AutoTraderState {
     pending_live_signals: Arc<Mutex<PendingSignalQueue>>,
     live_signal_notify: Arc<Notify>,
     signal_book_prewarms: Arc<Mutex<BTreeMap<String, Instant>>>,
-    audit_tx: mpsc::UnboundedSender<serde_json::Value>,
-    execution_audit_tx: mpsc::UnboundedSender<serde_json::Value>,
+    audit_tx: AuditQueue,
+    execution_audit_tx: AuditQueue,
+    // Bit 0 tracks decision audit persistence; bit 1 tracks execution audit persistence.
+    audit_health: Arc<AtomicU64>,
+    audit_failure_latched: Arc<AtomicBool>,
     gap_summary: Arc<std::sync::Mutex<GapSummary>>,
     insight_processing_ms: Arc<Mutex<Vec<f64>>>,
     cycle_lock_wait_ms: Arc<Mutex<BTreeMap<String, Vec<f64>>>>,
@@ -26,6 +29,104 @@ struct AutoTraderState {
     dated_carry: Arc<Mutex<DatedCarryBook>>,
     dated_carry_work_lock: Arc<Mutex<()>>,
     dated_carry_path: PathBuf,
+}
+
+const DECISION_AUDIT_QUEUE_CAPACITY: usize = 16_384;
+const EXECUTION_AUDIT_QUEUE_CAPACITY: usize = 4_096;
+
+#[derive(Clone)]
+struct AuditQueue {
+    messages: Arc<std::sync::Mutex<std::collections::VecDeque<serde_json::Value>>>,
+    notify: Arc<Notify>,
+    capacity: usize,
+    coalesced: Arc<AtomicU64>,
+    dropped: Arc<AtomicU64>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AuditEnqueueResult {
+    Queued,
+    Coalesced,
+    EvictedOld,
+    Dropped,
+}
+
+impl AuditQueue {
+    fn new(capacity: usize) -> Self {
+        Self {
+            messages: Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new())),
+            notify: Arc::new(Notify::new()),
+            capacity,
+            coalesced: Arc::new(AtomicU64::new(0)),
+            dropped: Arc::new(AtomicU64::new(0)),
+        }
+    }
+
+    fn enqueue(&self, payload: serde_json::Value) -> AuditEnqueueResult {
+        let replaceable = is_replaceable_audit(&payload);
+        let symbol = payload.get("symbol").and_then(serde_json::Value::as_str);
+        let mut messages = self.messages.lock().unwrap_or_else(|error| error.into_inner());
+
+        if replaceable {
+            if let Some(symbol) = symbol {
+                if let Some(existing) = messages.iter_mut().find(|existing| {
+                    is_replaceable_audit(existing)
+                        && existing.get("symbol").and_then(serde_json::Value::as_str) == Some(symbol)
+                }) {
+                    if audit_timestamp(&payload) >= audit_timestamp(existing) {
+                        *existing = payload;
+                    }
+                    self.coalesced.fetch_add(1, Ordering::Relaxed);
+                    self.notify.notify_one();
+                    return AuditEnqueueResult::Coalesced;
+                }
+            }
+        }
+
+        let mut result = AuditEnqueueResult::Queued;
+        if messages.len() >= self.capacity {
+            if let Some(index) = messages.iter().position(is_replaceable_audit) {
+                messages.remove(index);
+                self.dropped.fetch_add(1, Ordering::Relaxed);
+                result = AuditEnqueueResult::EvictedOld;
+            } else {
+                self.dropped.fetch_add(1, Ordering::Relaxed);
+                return AuditEnqueueResult::Dropped;
+            }
+        }
+        messages.push_back(payload);
+        self.notify.notify_one();
+        result
+    }
+
+    async fn recv(&self) -> serde_json::Value {
+        loop {
+            let notified = self.notify.notified();
+            tokio::pin!(notified);
+            if let Some(payload) = self.messages.lock()
+                .unwrap_or_else(|error| error.into_inner()).pop_front()
+            {
+                return payload;
+            }
+            notified.await;
+        }
+    }
+
+    fn depth(&self) -> usize {
+        self.messages.lock().unwrap_or_else(|error| error.into_inner()).len()
+    }
+}
+
+fn audit_timestamp(payload: &serde_json::Value) -> u64 {
+    payload.get("timestamp").and_then(serde_json::Value::as_u64).unwrap_or_default()
+}
+
+fn is_replaceable_audit(payload: &serde_json::Value) -> bool {
+    payload.get("stage").and_then(serde_json::Value::as_str) == Some("decision")
+        && matches!(
+            payload.get("status").and_then(serde_json::Value::as_str),
+            Some("rejected" | "skipped")
+        )
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -198,6 +299,18 @@ struct LearningStats {
     recent_trade_pnls: Vec<(u64, f64)>,
     #[serde(default)]
     threshold_samples: Vec<StrategyThresholdSample>,
+}
+
+#[derive(Clone, Default, Serialize, Deserialize)]
+struct PendingScoutComparison {
+    #[serde(default)]
+    baseline_return_percent: Option<f64>,
+    #[serde(default)]
+    variant_return_percent: Option<f64>,
+    #[serde(default)]
+    learning_key: String,
+    #[serde(default)]
+    updated_at_ms: u64,
 }
 
 #[derive(Clone, Default, Serialize, Deserialize)]

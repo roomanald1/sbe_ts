@@ -267,7 +267,7 @@
           "refId": "B"
         }
       ],
-      "title": "Closed trades \u00b7 today UTC",
+      "title": "Closed trades · today UTC",
       "type": "stat"
     },
     {
@@ -510,7 +510,7 @@
           "refId": "A"
         }
       ],
-      "title": "Closed-trade win rate \u00b7 today UTC",
+      "title": "Closed-trade win rate · today UTC",
       "type": "timeseries"
     },
     {
@@ -557,7 +557,7 @@
       },
       "fieldConfig": {
         "defaults": {
-          "unit": "\u00b5s",
+          "unit": "µs",
           "decimals": 1
         },
         "overrides": []
@@ -927,7 +927,7 @@
       "description": "Cycle-lock contention for workers outside the signal submission path; signal-worker wait is shown in the order hot-path chart.",
       "fieldConfig": {
         "defaults": {
-          "unit": "\u00b5s"
+          "unit": "µs"
         },
         "overrides": []
       },
@@ -950,7 +950,7 @@
       "targets": [
         {
           "expr": "app_autotrader_cycle_lock_duration_ms{worker!=\"signal\",stat=\"latest\"} * 1000",
-          "legendFormat": "{{worker}} \u00b7 {{phase}}",
+          "legendFormat": "{{worker}} · {{phase}}",
           "refId": "A"
         }
       ],
@@ -1031,7 +1031,7 @@
       "targets": [
         {
           "expr": "app_autotrader_stage_latency_samples{stage=~\"cycle_total|signal_selection|market_cache_lookup|market_http_fetch|deep_book_local|execution_plan_local|settings_lock_wait|reservation_lock_wait|cycle_to_order_record|order_reservation_record_local|order_record_persist_notify|order_request_prepare_local|client_request_to_headers|client_body_read|client_body_read_decode|client_transport_and_body_read|client_transport_and_decode|client_response_decode_local|order_submit_response|order_response_apply_local|position_manager_handler|position_manager_book_wait_active|position_manager_book_wait_cold|position_manager_capacity_rate_lookup|position_manager_ledger_lock_wait|position_manager_capacity_check|position_manager_capacity_account_snapshot|position_manager_capacity_reservation_scan|position_manager_matching|position_manager_persistence_enqueue\"}",
-          "legendFormat": "{{stage}} \u00b7 samples",
+          "legendFormat": "{{stage}} · samples",
           "refId": "A"
         }
       ],
@@ -1069,7 +1069,7 @@
       "targets": [
         {
           "expr": "app_autotrader_strategy_realized_pnl",
-          "legendFormat": "{{strategy}} \u00b7 {{quote}}",
+          "legendFormat": "{{strategy}} · {{quote}}",
           "refId": "A"
         }
       ],
@@ -1109,7 +1109,7 @@
       "targets": [
         {
           "expr": "app_autotrader_strategy_outcomes",
-          "legendFormat": "{{strategy}} \u00b7 {{quote}}",
+          "legendFormat": "{{strategy}} · {{quote}}",
           "refId": "A"
         }
       ],
@@ -1192,6 +1192,106 @@
       ],
       "title": "Market feed throughput",
       "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "pluginVersion": "12.1.1",
+      "type": "timeseries",
+      "id": 200,
+      "title": "Feed queue depth",
+      "description": "Current retained messages in each instrumented feed queue.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 104
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "editorMode": "code",
+          "expr": "app_feed_queue_size",
+          "legendFormat": "{{queue}}",
+          "range": true,
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "pluginVersion": "12.1.1",
+      "type": "timeseries",
+      "id": 201,
+      "title": "Feed messages dropped",
+      "description": "Messages skipped by lagging broadcast receivers, per queue.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 104
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "editorMode": "code",
+          "expr": "sum by (queue) (increase(app_feed_queue_dropped_messages_total[]))",
+          "legendFormat": "{{queue}}",
+          "range": true,
+          "refId": "A"
+        }
+      ]
     }
   ],
   "refresh": "15s",

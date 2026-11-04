@@ -233,7 +233,7 @@ async fn submit_selected_signal(
             (price - bid) / mid * 10_000.0
         }
     });
-    let expires_at = is_post_only.then_some(timestamp.saturating_add(300_000));
+    let expires_at = is_post_only.then_some(timestamp.saturating_add(execution_params.post_only_timeout_minutes * 60_000));
     let estimated_ioc_all_in_bps =
         deep_book.map(|assessment| assessment.impact_bps + configured_taker_fee_rate() * 10_000.0);
     let reservation_lock_started = Instant::now();

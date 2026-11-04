@@ -214,6 +214,7 @@ async fn serve_http() -> anyhow::Result<()> {
         .merge(alternative_market_data::router())
         .route("/health", get(|| async { "ok" }))
         .route("/internal/message-counts", get(message_counts))
+        .route("/internal/queue-metrics", get(queue_metrics))
         .route("/process-cpu-seconds", get(process_cpu_seconds))
         .route("/process-memory-bytes", get(process_memory_bytes))
         .route("/instruments", get(get_instruments))
@@ -276,4 +277,8 @@ async fn process_memory_bytes() -> String {
         })
         .map(|kilobytes| (kilobytes * 1024).to_string())
         .unwrap_or_else(|| "0".to_owned())
+}
+
+async fn queue_metrics() -> Json<Vec<serde_json::Value>> {
+    Json(feed_handlers::metrics::queue_snapshot().into_iter().map(|(queue, depth, dropped)| serde_json::json!({"queue": queue, "depth": depth, "dropped": dropped})).collect())
 }

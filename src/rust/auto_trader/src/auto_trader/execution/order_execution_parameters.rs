@@ -9,6 +9,7 @@ fn configured_fee_rates_maker_bps() -> f64 {
 
 #[derive(Clone, Copy)]
 struct ExecutionParameters {
+    post_only_timeout_minutes: u64,
     vwap_duration_minutes: u64,
     vwap_participation_rate: f64,
     limit_offset_bps: f64,
@@ -18,6 +19,7 @@ struct ExecutionParameters {
 impl Default for ExecutionParameters {
     fn default() -> Self {
         Self {
+            post_only_timeout_minutes: 5,
             vwap_duration_minutes: default_vwap_duration(),
             vwap_participation_rate: default_vwap_participation() / 100.0,
             limit_offset_bps: default_limit_offset(),
@@ -111,7 +113,7 @@ fn build_order_request(
                 }
                 AutoOrderType::PostOnlyLimit => {
                     body["limit_price"] = serde_json::json!(if side == "buy" { bid } else { ask });
-                    body["expires_at"] = serde_json::json!(now_ms + 300_000);
+                    body["expires_at"] = serde_json::json!(now_ms + params.post_only_timeout_minutes * 60_000);
                 }
                 AutoOrderType::Barrier | AutoOrderType::StopMarket => {
                     body["trigger_price"] = serde_json::json!(if side == "buy" {
@@ -228,6 +230,7 @@ mod order_request_tests {
 
     fn params() -> ExecutionParameters {
         ExecutionParameters {
+            post_only_timeout_minutes: 5,
             vwap_duration_minutes: 30,
             vwap_participation_rate: 0.2,
             limit_offset_bps: 5.0,
@@ -271,6 +274,17 @@ mod order_request_tests {
         let (_, sell_stop) = request(AutoOrderType::StopMarket, "sell");
         assert_eq!(sell_stop["trigger_direction"], "below");
         assert!((sell_stop["trigger_price"].as_f64().unwrap() - 98.901).abs() < 1e-10);
+    }
+
+    #[test]
+    fn post_only_expiry_uses_configured_timeout() {
+        let mut configured = params();
+        configured.post_only_timeout_minutes = 9;
+        let (_, body) = build_order_request(
+            "BTC-USDT", "buy", 2.0, 99.0, 101.0,
+            AutoOrderType::PostOnlyLimit, configured, "client-2", 1_000,
+        );
+        assert_eq!(body["expires_at"], 541_000);
     }
 
     #[test]

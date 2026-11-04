@@ -93,6 +93,16 @@ fn strategy_rule_parameter_specs(strategy: Strategy) -> Vec<StrategyParameterSpe
             specs.push(spec);
         }
     }
+    specs.push(param(
+        StrategyParameterKey::PostOnlyTimeoutMinutes,
+        "Post-only entry timeout",
+        5.0,
+        1.0,
+        15.0,
+        1.0,
+        "minutes",
+        0.0,
+    ));
     specs
 }
 

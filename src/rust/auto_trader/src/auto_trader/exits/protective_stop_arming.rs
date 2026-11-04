@@ -33,11 +33,14 @@ async fn arm_protective_stop(
     if quantity <= 0.0 || entry_price <= 0.0 {
         return Ok(());
     }
-    let (stop_loss_percent, is_enabled) = {
+    let (stop_loss_percent, is_enabled, decision_id) = {
         let settings = state.settings.lock().await;
         (
             stop_loss_override.unwrap_or(settings.stop_loss_percent),
             state.enabled.load(Ordering::Relaxed),
+            settings.strategy_positions.get(symbol)
+                .and_then(|lots| lots.get(strategy))
+                .and_then(|position| position.entry_decision_id.clone()),
         )
     };
     if !is_enabled {
@@ -127,8 +130,10 @@ async fn arm_protective_stop(
             symbol,
             side,
             strategy.to_owned(),
+            decision_id,
             quantity,
             trigger_price,
+            id,
         ));
         if settings.orders.len() > MAX_RETAINED_AUTO_TRADER_ORDERS {
             let excess = settings.orders.len() - MAX_RETAINED_AUTO_TRADER_ORDERS;
@@ -151,8 +156,10 @@ fn new_protective_stop_order(
     symbol: &str,
     side: &str,
     strategy: String,
+    decision_id: Option<String>,
     quantity: f64,
     trigger_price: f64,
+    barrier_id: String,
 ) -> TraderOrder {
     TraderOrder {
         timestamp,
@@ -162,14 +169,14 @@ fn new_protective_stop_order(
         order_type: "StopMarket".into(),
         purpose: "stop-loss".into(),
         strategy: Some(strategy),
-        decision_id: None,
+        decision_id,
         quantity,
         filled_quantity: 0.0,
         fill_rate: 0.0,
         average_price: None,
         fees_paid: 0.0,
         reserved_notional: 0.0,
-        execution_order_id: None,
+        execution_order_id: Some(barrier_id),
         processed_fill_trade_ids: Vec::new(),
         learning_context: None,
         book_bid_depth_10bps: None,
@@ -193,5 +200,17 @@ fn new_protective_stop_order(
         strategy_realized_pnl: None,
         strategy_realized_pnl_today: None,
         strategy_realized_pnl_day: None,
+    }
+}
+
+#[cfg(test)]
+mod protective_stop_order_tests {
+    use super::*;
+
+    #[test]
+    fn protective_stop_retains_entry_attribution_and_barrier_id() {
+        let order = new_protective_stop_order(200, "PEPE-USDT", "buy", "live-vwap-dislocation".into(), Some("entry-decision".into()), 1.0, 4.8e-6, "barrier-200-1".into());
+        assert_eq!(order.decision_id.as_deref(), Some("entry-decision"));
+        assert_eq!(order.execution_order_id.as_deref(), Some("barrier-200-1"));
     }
 }

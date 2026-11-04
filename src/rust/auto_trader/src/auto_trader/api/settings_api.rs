@@ -59,6 +59,7 @@ async fn update_settings(
         || request
             .max_concurrent_shadow_samples
             .is_some_and(|value| value > 5000)
+        || request.scout_max_active_positions.is_some_and(|value| value > 5000)
         || request
             .max_intraday_open_positions
             .is_some_and(|value| value > 20)
@@ -196,6 +197,9 @@ async fn update_settings(
     settings.max_open_positions = request.max_open_positions;
     if let Some(value) = request.max_concurrent_shadow_samples {
         settings.max_concurrent_shadow_samples = value;
+    }
+    if let Some(value) = request.scout_max_active_positions {
+        settings.scout_max_active_positions = value;
     }
     if let Some(value) = request.max_intraday_open_positions {
         settings.max_intraday_open_positions = value;

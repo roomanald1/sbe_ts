@@ -31,6 +31,24 @@ type StrategyLearning = { strategy: string; learning_multiplier: number; learnin
 type StrategySymbolDiagnostic = { symbol: string; close: number; trend_return_windows?: Array<{ days: number; reference_close: number; return_percent: number }>; eligible: boolean; primary_rule: string; primary_level: number; primary_distance_percent: number; primary_metric_value?: number | null; primary_metric_unit?: string | null; primary_passed: boolean; secondary_rule?: string | null; secondary_level?: number | null; secondary_distance_percent?: number | null; secondary_passed?: boolean | null; evaluated?: boolean; signal_active: boolean; leader_gap_percent?: number | null; relative_strength_gap_pp?: number | null; rsi_exit_level?: number | null; maximum_hold_days?: number | null };
 type StrategyDiagnostic = { strategy: string; as_of_ms: number; btc_close?: number | null; btc_sma?: number | null; btc_distance_percent: number | null; btc_window_days: number | null; btc_gate_required: boolean; btc_gate_passed: boolean | null; symbols: StrategySymbolDiagnostic[] };
 type StrategyOrder = { timestamp: number; symbol: string; side: string; execution_order_id?: string; purpose?: string; strategy?: string; decision_id?: string; filled_quantity: number; average_price?: number | null; status?: string; failure_reason?: string | null; order_type?: string };
+
+export function resolveLedgerOrder(trade: PositionTrade, orderByLedgerId: Map<string, StrategyOrder>, orders: StrategyOrder[]): StrategyOrder | undefined {
+  let order = trade.parent_order_id ? orderByLedgerId.get(trade.parent_order_id) : undefined;
+  if (!order && trade.parent_order_id) {
+    const barrierCreatedAt = /^barrier-(\d+)-/.exec(trade.parent_order_id)?.[1];
+    if (barrierCreatedAt) order = orderByLedgerId.get(barrierCreatedAt);
+  }
+  if (order?.decision_id || order?.purpose !== 'stop-loss' || !order.strategy) return order;
+  const entry = orders.filter((candidate) => candidate.symbol === trade.symbol
+    && candidate.strategy === order!.strategy
+    && (candidate.purpose === 'signal' || candidate.purpose === 'scout')
+    && candidate.filled_quantity > 1e-12
+    && candidate.timestamp <= order!.timestamp
+    && candidate.side !== order!.side
+    && Boolean(candidate.decision_id))
+    .sort((a, b) => b.timestamp - a.timestamp)[0];
+  return entry ? { ...order, decision_id: entry.decision_id } : order;
+}
 type DatedCarryPosition = { spot_symbol: string; future_symbol: string; expiry_ms: number; entry_ms: number; quantity: number; spot_entry_price: number; future_entry_price: number; entry_fees: number; status: string; spot_exit_twap?: number | null; settlement_price?: number | null; net_pnl_usdt?: number | null; settlement_source?: string | null; spot_mark_bid?: number | null; future_mark_ask?: number | null; spot_leg_pnl_usdt?: number | null; future_leg_pnl_usdt?: number | null; estimated_exit_fees_usdt?: number | null; estimated_exit_slippage_usdt?: number | null; marked_net_pnl_usdt?: number | null; mark_checked_at_ms?: number | null };
 type OpenStrategyPosition = { symbol: string; strategy: string; decision_id?: string | null; quantity: number; average_entry_price: number; entry_fees: number; entry_timestamp_ms: number; entry_order_type?: string; entry_order_types?: string[]; stop_loss_percent?: number | null; take_profit_percent?: number | null; horizon_take_profit_percent?: number | null; stop_loss_active?: boolean; take_profit_active?: boolean; carry_details?: DatedCarryPosition };
 type OpenPositionLot = { symbol: string; quantity: number; average_entry_price: number; entry_fees: number; estimated_exit_fee_rate: number; last_trade_timestamp: number; strategy?: string; decision_id?: string | null; entry_order_type?: string; entry_order_types?: string[]; stop_loss_percent?: number | null; take_profit_percent?: number | null; stop_loss_active?: boolean; take_profit_active?: boolean; carry_details?: DatedCarryPosition };
@@ -362,7 +380,7 @@ export class AutoTraderOutcomesModel {
       });
       const ledgerTrades = (tradesData.trades ?? []).filter((trade) => trade.timestamp >= todayStart);
       const ordersForLedger = activityData.orders ?? [];
-      const ledgerSignature = ledgerTrades.length + ':' + (ledgerTrades[0]?.id ?? '') + ':' + (ledgerTrades[ledgerTrades.length - 1]?.id ?? '') + ':' + this.auditRows.length + ':' + ordersForLedger.length + ':' + (ordersForLedger[0]?.timestamp ?? 0);
+      const ledgerSignature = ledgerTrades.map((trade) => trade.id + ':' + (trade.parent_order_id ?? '')).join('|') + ':' + this.auditRows.map((record) => record.barrier_order_id ?? record.decision_id ?? '').join('|') + ':' + ordersForLedger.map((order) => order.timestamp + ':' + (order.execution_order_id ?? '') + ':' + (order.decision_id ?? '') + ':' + (order.strategy ?? '') + ':' + (order.purpose ?? '') + ':' + order.filled_quantity).join('|');
       if (ledgerSignature !== this.ledgerTradeSignature && (!this.ledgerTradeSignature || Date.now() - this.ledgerRowsBuiltAt >= 15_000)) {
         // Build this large history once per ledger/order change.
       const orderByLedgerId = new Map<string, StrategyOrder>();
@@ -380,7 +398,7 @@ export class AutoTraderOutcomesModel {
       const legacyTradesBySymbol = new Map<string, PositionTrade[]>();
       for (const trade of ledgerTrades) {
         if (trade.source && trade.source !== 'auto') continue;
-        const order = trade.parent_order_id ? orderByLedgerId.get(trade.parent_order_id) : undefined;
+        const order = resolveLedgerOrder(trade, orderByLedgerId, ordersForLedger);
         if (!order?.decision_id) {
           const symbolTrades = legacyTradesBySymbol.get(trade.symbol) ?? [];
           symbolTrades.push(trade);

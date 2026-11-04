@@ -29,8 +29,12 @@ impl RSocket for ServerResponder {
                 |mut updates| async move {
                     loop {
                         match updates.recv().await {
-                            Ok(data) => break Some((Ok(Payload::new(Some(data), None)), updates)),
+                            Ok(data) => {
+                                crate::metrics::record_queue_depth("ticker_batches", updates.len());
+                                break Some((Ok(Payload::new(Some(data), None)), updates));
+                            },
                             Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                                crate::metrics::record_queue_lagged("ticker_batches", skipped);
                                 crate::service_log!("WARN", "RSocket ticker subscriber lagged; skipped {skipped} updates");
                                 continue;
                             }
@@ -76,8 +80,12 @@ impl RSocket for ServerResponder {
                 |mut events| async move {
                     loop {
                         match events.recv().await {
-                            Ok(data) => break Some((Ok(Payload::new(Some(data), None)), events)),
+                            Ok(data) => {
+                                crate::metrics::record_queue_depth("signal_events", events.len());
+                                break Some((Ok(Payload::new(Some(data), None)), events));
+                            },
                             Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                                crate::metrics::record_queue_lagged("signal_events", skipped);
                                 crate::service_log!("WARN", "Insights signal-event subscriber lagged; skipped {skipped} events");
                                 continue;
                             }
@@ -107,8 +115,14 @@ impl RSocket for ServerResponder {
                 futures_util::stream::unfold(sender.subscribe(), |mut receiver| async move {
                     loop {
                         match receiver.recv().await {
-                            Ok(data) => break Some((Ok(Payload::new(Some(data), None)), receiver)),
-                            Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                            Ok(data) => {
+                                crate::metrics::record_queue_depth("signal_feeds", receiver.len());
+                                break Some((Ok(Payload::new(Some(data), None)), receiver));
+                            },
+                            Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                                crate::metrics::record_queue_lagged("signal_feeds", skipped);
+                                continue;
+                            },
                             Err(broadcast::error::RecvError::Closed) => break None,
                         }
                     }
@@ -210,9 +224,11 @@ impl RSocket for ServerResponder {
                 loop {
                     match updates.recv().await {
                         Ok(data) => {
+                            crate::metrics::record_queue_depth("price_updates", updates.len());
                             break Some((Ok(Payload::new(Some(data), None)), updates));
                         }
                         Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                            crate::metrics::record_queue_lagged("price_updates", skipped);
                             crate::service_log!("ERROR", 
                                 "RSocket price stream recovered after skipping {skipped} updates"
                             );

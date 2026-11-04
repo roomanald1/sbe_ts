@@ -14,7 +14,7 @@ use std::{
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
 use tokio::{
-    sync::{Mutex, Notify, broadcast, mpsc},
+    sync::{Mutex, Notify, broadcast},
     task::JoinSet,
     time::{Duration, interval},
 };
@@ -65,8 +65,8 @@ mod strategy_cleanup_integration_tests {
     }
 
     pub(super) fn test_state(settings: Settings) -> AutoTraderState {
-        let (audit_tx, _) = mpsc::unbounded_channel();
-        let (execution_audit_tx, _) = mpsc::unbounded_channel();
+        let audit_tx = AuditQueue::new(DECISION_AUDIT_QUEUE_CAPACITY);
+        let execution_audit_tx = AuditQueue::new(EXECUTION_AUDIT_QUEUE_CAPACITY);
         let (state_updates, _) = tokio::sync::broadcast::channel(1);
         let path =
             std::env::temp_dir().join(format!("auto-trader-cleanup-{}.json", std::process::id()));
@@ -89,6 +89,8 @@ mod strategy_cleanup_integration_tests {
             signal_book_prewarms: Arc::new(Mutex::new(BTreeMap::new())),
             audit_tx,
             execution_audit_tx,
+            audit_health: Arc::new(AtomicU64::new(3)),
+            audit_failure_latched: Arc::new(AtomicBool::new(false)),
             gap_summary: Arc::new(std::sync::Mutex::new(GapSummary::default())),
             insight_processing_ms: Arc::new(Mutex::new(Vec::new())),
             cycle_lock_wait_ms: Arc::new(Mutex::new(BTreeMap::new())),

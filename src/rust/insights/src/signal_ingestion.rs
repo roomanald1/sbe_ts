@@ -49,6 +49,10 @@ struct ScoutShadowRegistration {
     scout_minimum_hold_days: Option<f64>,
     #[serde(default)]
     scout_maximum_hold_days: Option<f64>,
+    #[serde(default)]
+    scout_comparison_id: Option<String>,
+    #[serde(default)]
+    scout_comparison_role: Option<String>,
 }
 
 async fn register_scout_shadow(
@@ -66,10 +70,13 @@ async fn register_scout_shadow(
         || !sample.profit_protection_giveback_percent.is_finite() || sample.profit_protection_giveback_percent < 0.0
         || !sample.profit_protection_minimum_lock_percent.is_finite() || sample.profit_protection_minimum_lock_percent < 0.0
         || sample.strategy.is_empty()
-        || !matches!(sample.exit_scenario.as_str(), "strategy" | "tight")
+        || !matches!(sample.exit_scenario.as_str(), "strategy" | "tight" | "wide")
         || sample.scout_minimum_hold_days.is_some_and(|days| !days.is_finite() || !(1.0..=365.0).contains(&days))
         || sample.scout_maximum_hold_days.is_some_and(|days| !days.is_finite() || !(1.0..=365.0).contains(&days))
         || !matches!(sample.direction.as_str(), "bullish" | "bearish")
+        || sample.scout_comparison_id.as_ref().is_some_and(|id| id.is_empty() || id.len() > 240)
+        || sample.scout_comparison_role.as_deref().is_some_and(|role| !matches!(role, "baseline" | "variant"))
+        || sample.scout_comparison_id.is_some() != sample.scout_comparison_role.is_some()
     {
         return Err((StatusCode::BAD_REQUEST, "Invalid scout shadow sample".to_owned()));
     }
@@ -469,11 +476,7 @@ async fn publish_shadow_learning_outcomes(store: &SignalStore, outcomes: Vec<Sig
             let Some(notional_usd) = decision["shadow_notional_usd"].as_f64() else {
                 continue;
             };
-            let parameter_entry_rejected = decision.get("scout_parameter_key").is_some()
-                && decision.get("scout_parameter_entry_eligible").and_then(serde_json::Value::as_bool) == Some(false);
-            let net_return_percent = if parameter_entry_rejected {
-                Some(0.0)
-            } else if direction == "bullish" {
+            let net_return_percent = if direction == "bullish" {
                 evaluation.long_net_percent
             } else {
                 evaluation.short_net_percent
@@ -500,6 +503,8 @@ async fn publish_shadow_learning_outcomes(store: &SignalStore, outcomes: Vec<Sig
                 "scout_parameter_key": decision.get("scout_parameter_key"),
                 "scout_parameter_value": decision.get("scout_parameter_value"),
                 "scout_parameter_profile_symbol": decision.get("scout_parameter_profile_symbol"),
+                "scout_comparison_id": decision.get("scout_comparison_id"),
+                "scout_comparison_role": decision.get("scout_comparison_role"),
             });
             for attempt in 0..3 {
                 match client

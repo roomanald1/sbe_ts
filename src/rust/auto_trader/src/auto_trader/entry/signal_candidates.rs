@@ -100,7 +100,7 @@ fn live_strategy_feature_signal(
     Some(configured)
 }
 
-fn live_scout_direction_candidates(
+fn live_scout_direction_probes(
     signal: &Signal,
     strategy: Strategy,
     parameters: &BTreeMap<String, f64>,
@@ -132,12 +132,21 @@ fn live_scout_direction_candidates(
         .collect::<Vec<_>>();
     directions.sort_unstable();
     directions.dedup();
+    directions.into_iter().map(|direction| {
+        let mut candidate = signal.clone();
+        candidate.direction = direction.to_owned();
+        candidate
+    }).collect()
+}
 
-    let passing = directions
+fn live_scout_direction_candidates(
+    signal: &Signal,
+    strategy: Strategy,
+    parameters: &BTreeMap<String, f64>,
+) -> Vec<Signal> {
+    let passing = live_scout_direction_probes(signal, strategy, parameters)
         .into_iter()
-        .filter_map(|direction| {
-            let mut candidate = signal.clone();
-            candidate.direction = direction.to_owned();
+        .filter_map(|candidate| {
             let input = StrategySignal::entry(&candidate, parameters);
             matches!(strategy.evaluate(&input), Ok(StrategyDecision::Enter)).then_some(candidate)
         })
@@ -367,6 +376,7 @@ struct SignalSelectionInput<'a> {
     learning: &'a BTreeMap<String, LearningStats>,
     risk_appetite: f64,
     active_scout_count: usize,
+    scout_max_active_positions: usize,
     open_positions: &'a BTreeMap<String, TraderPosition>,
     max_entries_per_auto_position: u32,
     counterfactual_stop_loss_percent: f64,
@@ -472,6 +482,7 @@ fn format_no_tradeable_bias(
                 learning,
                 risk_appetite,
                 active_scout_count,
+                input.scout_max_active_positions,
             )
         })
         .collect::<Vec<_>>();
@@ -571,6 +582,22 @@ mod live_scout_direction_tests {
             assert_eq!(candidates.len(), 1, "{} should pass from its own input", strategy.as_str());
             assert_eq!(candidates[0].direction, expected_direction);
         }
+    }
+
+    #[test]
+    fn live_parameter_probe_can_sample_a_direction_rejected_by_baseline() {
+        let mut signal = source();
+        signal.components.trade_flow_by_window = vec![WindowedSignalValue {
+            window_seconds: 60, value: Some(0.1), ..Default::default()
+        }];
+        let parameters = parameters(Strategy::LiveTradeFlow);
+        let probes = live_scout_direction_probes(&signal, Strategy::LiveTradeFlow, &parameters);
+        assert_eq!(probes.len(), 1);
+        assert_eq!(probes[0].direction, "bullish");
+        assert!(!matches!(
+            Strategy::LiveTradeFlow.evaluate(&StrategySignal::entry(&probes[0], &parameters)),
+            Ok(StrategyDecision::Enter)
+        ));
     }
 
     #[test]

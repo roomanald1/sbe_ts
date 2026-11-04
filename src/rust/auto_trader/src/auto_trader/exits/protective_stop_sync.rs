@@ -112,7 +112,7 @@ async fn sync_protective_stops(
             } else {
                 delta_quantity * entry_price_before
             };
-            if fully_closed && settings.positions.get(&symbol).is_none_or(|position| position.quantity.abs() <= 1e-12) {
+            if fully_closed && !scout_entry && settings.positions.get(&symbol).is_none_or(|position| position.quantity.abs() <= 1e-12) {
                 mark_symbol_reentry_cooldown(&mut settings, &symbol);
             }
             if fully_closed && entry_notional > 0.0 {

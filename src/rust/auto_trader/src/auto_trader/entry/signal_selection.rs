@@ -55,6 +55,7 @@ fn select_cycle_signal<'a>(
         learning,
         risk_appetite,
         active_scout_count,
+        scout_max_active_positions,
         counterfactual_stop_loss_percent,
         counterfactual_take_profit_percent,
         ..
@@ -214,11 +215,11 @@ fn select_cycle_signal<'a>(
                     let live_scout_only = is_live_scout_only_signal(signal);
                     let context = market_context(signal);
                     let (strength_floor, score_floor) =
-                        adaptive_scout_thresholds(&learning, &context, active_scout_count);
+                        adaptive_scout_thresholds(&learning, &context, active_scout_count, scout_max_active_positions);
                     let strength_floor =
                         (strength_floor * risk_floor_scale(risk_appetite)).clamp(0.0, 1.0);
                     let score_floor = (score_floor * risk_floor_scale(risk_appetite)).max(0.0);
-                    if active_scout_count >= SCOUT_MAX_ACTIVE_POSITIONS
+                    if active_scout_count >= scout_max_active_positions
                         || !signal.strength.is_finite()
                         || !signal.score.is_finite()
                         || (!live_scout_only
@@ -282,6 +283,7 @@ fn select_cycle_signal<'a>(
                     learning,
                     risk_appetite,
                     active_scout_count,
+                    scout_max_active_positions,
                     "rejected",
                 );
                 queue_auto_trader_audit(state, payload);
@@ -320,8 +322,8 @@ mod signal_selection_behavior_tests {
 
     fn state() -> AutoTraderState {
         let (state_updates, _) = tokio::sync::broadcast::channel(8);
-        let (audit_tx, _) = tokio::sync::mpsc::unbounded_channel();
-        let (execution_audit_tx, _) = tokio::sync::mpsc::unbounded_channel();
+        let audit_tx = AuditQueue::new(DECISION_AUDIT_QUEUE_CAPACITY);
+        let execution_audit_tx = AuditQueue::new(EXECUTION_AUDIT_QUEUE_CAPACITY);
         AutoTraderState {
             client: reqwest::Client::new(),
             latest_daily_strategy_snapshot: Arc::new(Mutex::new(None)),
@@ -335,6 +337,7 @@ mod signal_selection_behavior_tests {
             pending_daily_signals: Arc::new(Mutex::new(BTreeMap::new())), daily_signal_notify: Arc::new(Notify::new()),
             pending_live_signals: Arc::new(Mutex::new(BTreeMap::new())), live_signal_notify: Arc::new(Notify::new()),
             signal_book_prewarms: Arc::new(Mutex::new(BTreeMap::new())), audit_tx, execution_audit_tx,
+            audit_health: Arc::new(AtomicU64::new(3)), audit_failure_latched: Arc::new(AtomicBool::new(false)),
             gap_summary: Arc::new(std::sync::Mutex::new(GapSummary::default())),
             insight_processing_ms: Arc::new(Mutex::new(Vec::new())),
             cycle_lock_wait_ms: Arc::new(Mutex::new(BTreeMap::new())),
@@ -354,6 +357,7 @@ mod signal_selection_behavior_tests {
             stale_signal_count: 0, stalest_signal_age_seconds: 0, stale_symbols: &[],
             non_directional_count: 0, position_blocked_count: 0, position_block_details: &[],
             learning: &EMPTY_LEARNING, risk_appetite: risk, active_scout_count: active_scouts,
+            scout_max_active_positions: DEFAULT_SCOUT_MAX_ACTIVE_POSITIONS,
             open_positions: &EMPTY_POSITIONS, max_entries_per_auto_position: 3,
             counterfactual_stop_loss_percent: 0.5, counterfactual_take_profit_percent: 0.8,
         }
@@ -505,7 +509,7 @@ mod signal_selection_behavior_tests {
         let neutral_candidates = vec![neutral.clone()];
         let selected = select_cycle_signal(input(&state, &empty_dashboard, &[], &none_fresh, &neutral_candidates, 50.0, 0)).unwrap_or_else(|_| panic!("expected signal selection to succeed"));
         assert!(selected.1 && selected.2);
-        assert!(select_cycle_signal(input(&state, &empty_dashboard, &[], &none_fresh, &neutral_candidates, 50.0, SCOUT_MAX_ACTIVE_POSITIONS)).is_err());
+        assert!(select_cycle_signal(input(&state, &empty_dashboard, &[], &none_fresh, &neutral_candidates, 50.0, DEFAULT_SCOUT_MAX_ACTIVE_POSITIONS)).is_err());
 
         let evidence = serde_json::from_value::<WalkForward>(serde_json::json!({
             "symbol":"BTC-USDT", "horizon_seconds":300,

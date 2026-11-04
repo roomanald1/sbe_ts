@@ -39,6 +39,10 @@ fn scout_shadow_audit_payload(
         payload["scout_level_percent"] = serde_json::json!(level_percent);
     }
     payload["shadow_exit_scenario"] = serde_json::json!(exit_scenario);
+    if let Some(decision) = signal.strategy_decision.as_ref() {
+        if let Some(id) = decision.get("scout_comparison_id") { payload["scout_comparison_id"] = id.clone(); }
+        if let Some(role) = decision.get("scout_comparison_role") { payload["scout_comparison_role"] = role.clone(); }
+    }
     let parameter_probe = signal.strategy_decision.as_ref().and_then(|decision| {
         Some((decision.get("scout_parameter_key")?.as_str()?, decision.get("scout_parameter_value")?.as_f64()?))
     });
@@ -101,8 +105,16 @@ fn scout_shadow_audit_payload(
     payload
 }
 
-const DAILY_SCOUT_SHADOW_COOLDOWN_MS: u64 = 3_600_000;
+const DAILY_SCOUT_SHADOW_COOLDOWN_MS: u64 = 300_000;
+const LIVE_SCOUT_PARAMETER_COOLDOWN_MS: u64 = 3_600_000;
 const SCOUT_TIGHT_EXIT_DISTANCE_MULTIPLIER: f64 = 0.5;
+const SCOUT_WIDE_EXIT_DISTANCE_MULTIPLIER: f64 = 1.5;
+
+fn shadow_entry_limit_blocks(scout: bool, active_group_exists: bool, previous_attempt_ms: Option<u64>, sampled_at_ms: u64, active_sample_count: usize, sample_limit: usize) -> bool {
+    scout && (active_group_exists
+        || previous_attempt_ms.is_some_and(|previous| sampled_at_ms.saturating_sub(previous) < 300_000)
+        || active_sample_count >= sample_limit)
+}
 
 async fn replay_recent_scout_shadows(state: &AutoTraderState) -> bool {
     let base = std::env::var("INSIGHTS_URL").unwrap_or_else(|_| "http://127.0.0.1:3004".into());
@@ -182,6 +194,8 @@ fn register_scout_shadow_for_learning(state: &AutoTraderState, payload: &serde_j
             .and_then(|decision| decision.get("scout_parameter_value")),
         "scout_parameter_profile_symbol": payload.get("strategy_decision")
             .and_then(|decision| decision.get("scout_parameter_profile_symbol")),
+        "scout_comparison_id": payload.get("scout_comparison_id"),
+        "scout_comparison_role": payload.get("scout_comparison_role"),
         "scout_minimum_hold_days": strategy_parameter("minimum_hold_days", f64::NAN).is_finite()
             .then(|| strategy_parameter("minimum_hold_days", f64::NAN)),
         "scout_maximum_hold_days": strategy_parameter("maximum_hold_days", f64::NAN).is_finite()
@@ -211,6 +225,21 @@ fn daily_scout_sample_cooldown_elapsed(now_ms: u64, previous_ms: u64) -> bool {
     now_ms.saturating_sub(previous_ms) >= DAILY_SCOUT_SHADOW_COOLDOWN_MS
 }
 
+fn live_parameter_probe_cooldown_elapsed(now_ms: u64, previous_ms: u64) -> bool {
+    now_ms.saturating_sub(previous_ms) >= LIVE_SCOUT_PARAMETER_COOLDOWN_MS
+}
+
+fn live_scout_strategies_enabled_for_trading(settings: &Settings) -> Vec<Strategy> {
+    settings.scout_strategies.iter().copied()
+        .filter(|strategy| strategy.is_live_insight() && settings.strategies.contains(strategy))
+        .collect()
+}
+
+fn should_record_daily_scout(decision: Result<StrategyDecision, String>, selected_scout: bool) -> bool {
+    decision == Ok(StrategyDecision::Scout)
+        || (selected_scout && decision == Ok(StrategyDecision::Enter))
+}
+
 async fn record_daily_scout_shadow_ladder(
     state: &AutoTraderState,
     candidates: &[Signal],
@@ -232,32 +261,18 @@ async fn record_daily_scout_shadow_ladder(
         };
         let parameters = signal_strategy_parameters(signal);
         let input = StrategySignal::entry(signal, &parameters);
-        let scout_only = !settings.strategies.contains(&strategy)
-            && settings.scout_strategies.contains(&strategy);
-        if !matches!(
-            evaluate_daily_strategy_signal(signal),
-            Ok(StrategyDecision::Scout) | Ok(StrategyDecision::Enter) if scout_only
-        ) && evaluate_daily_strategy_signal(signal) != Ok(StrategyDecision::Scout) {
-            continue;
-        }
+        let decision = evaluate_daily_strategy_signal(signal);
+        let selected_scout = settings.scout_strategies.contains(&strategy);
+        let direct_entry_scout = selected_scout && decision == Ok(StrategyDecision::Enter);
         let parameter_probe = signal.strategy_decision.as_ref().and_then(|decision| {
             Some((decision.get("scout_parameter_key")?.as_str()?, decision.get("scout_parameter_value")?.as_f64()?))
         });
-        if let Some((parameter_key, parameter_value)) = parameter_probe {
-            if !matches!(strategy.evaluate(&input), Ok(StrategyDecision::Enter)) {
-                let profile_symbol = signal.strategy_decision.as_ref()
-                    .and_then(|decision| decision.get("scout_parameter_profile_symbol"))
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or(&signal.symbol);
-                let outcome_id = format!("{}|{}|{}|probe:{parameter_key}:{parameter_value:.8}|rejected", signal.timestamp, signal.symbol, strategy.as_str());
-                if settings.shadow_learning_outcome_ids.insert(outcome_id) {
-                    let learning_key = strategy_parameter_probe_learning_key(profile_symbol, strategy.as_str(), parameter_key, parameter_value);
-                    record_learning_outcome(settings.learning.entry(learning_key).or_default(), 0.0);
-                    settings_changed = true;
-                }
-                continue;
-            }
+        if !should_record_daily_scout(decision.clone(), selected_scout) && parameter_probe.is_none() {
+            continue;
         }
+        // Keep rejected parameter variants in the shadow batch too. Their
+        // forward markout measures whether moving the entry boundary would
+        // have helped, instead of counting a synthetic zero as an outcome.
         // Breakout-distance ladders apply to Donchian. Other daily strategies
         // use a neutral shadow level and learn from the resulting simulated
         // trade outcome through their own strategy profile.
@@ -269,13 +284,19 @@ async fn record_daily_scout_shadow_ladder(
         } else {
             0.0
         };
-        let level_candidates = match parameter_probe {
-            Some(("breakout_entry_distance_percent", value)) => vec![value],
-            _ => DAILY_SCOUT_SHADOW_LEVELS_PERCENT.to_vec(),
+        let level_candidates = if direct_entry_scout {
+            vec![0.0]
+        } else if let Some(("breakout_entry_distance_percent", value)) = parameter_probe {
+            vec![value]
+        } else if parameter_probe.is_some() {
+            vec![0.0]
+        } else {
+            DAILY_SCOUT_SHADOW_LEVELS_PERCENT.to_vec()
         };
         let eligible_levels = level_candidates
             .into_iter()
-            .filter(|level| parameter_probe.is_some_and(|(key, _)| key == "breakout_entry_distance_percent")
+            .filter(|level| direct_entry_scout
+                || parameter_probe.is_some()
                 || (distance_percent <= 0.0 && distance_percent >= -*level))
             .filter(|level| {
         let probe_suffix = parameter_probe.map_or_else(String::new, |(key, value)| format!("|probe:{key}:{value:.8}"));
@@ -297,10 +318,8 @@ async fn record_daily_scout_shadow_ladder(
         if eligible_levels.is_empty() {
             continue;
         }
-        let active_samples = settings.shadow_sample_active_scenarios
-            .keys()
-            .filter(|group| group.starts_with("daily-scout-level:"))
-            .count();
+        // All Scout and exploratory groups share this global sample cap.
+        let active_samples = settings.shadow_sample_active_scenarios.len();
         let available_slots = settings
             .max_concurrent_shadow_samples
             .saturating_sub(active_samples);
@@ -320,10 +339,81 @@ async fn record_daily_scout_shadow_ladder(
                 "daily-scout-level:{level_percent:.2}|{}|{}|{}{probe_suffix}",
                 strategy.as_str(), signal.symbol, signal.direction
             );
+            let context = market_context(signal);
+            if let (Some((parameter_key, parameter_value)), Some(base_decision)) = (
+                parameter_probe,
+                signal.strategy_decision.as_ref()
+                    .and_then(|decision| decision.get("scout_parameter_baseline_decision"))
+                    .and_then(serde_json::Value::as_object),
+            ) {
+                let comparison_id = format!("{sample_key}|{}|baseline-vs-variant", signal.timestamp);
+                let mut baseline_signal = signal.clone();
+                baseline_signal.strategy_decision = Some(serde_json::Value::Object(base_decision.clone()));
+                let baseline_result = evaluate_daily_strategy_signal(&baseline_signal);
+                let baseline_enters = matches!(baseline_result, Ok(StrategyDecision::Enter | StrategyDecision::Scout));
+                let variant_enters = matches!(decision, Ok(StrategyDecision::Enter | StrategyDecision::Scout));
+                if !baseline_enters && !variant_enters { continue; }
+
+                settings.shadow_sample_at_ms.insert(sample_key.clone(), timestamp_ms);
+                settings.shadow_sample_active_scenarios.insert(
+                    sample_key.clone(), BTreeSet::from(["strategy".to_owned()]),
+                );
+                settings_changed = true;
+                let notional = settings.max_order_notional * SCOUT_MAX_ORDER_FRACTION;
+                let paired_key = scout_parameter_learning_key(&signal.symbol, strategy, parameter_key, parameter_value);
+                let pair = settings.scout_comparisons.entry(comparison_id.clone()).or_default();
+                pair.updated_at_ms = timestamp_ms;
+                pair.learning_key = paired_key;
+                if !baseline_enters { pair.baseline_return_percent = Some(0.0); }
+                if !variant_enters { pair.variant_return_percent = Some(0.0); }
+                let mut variant_signal = signal.clone();
+                if baseline_enters {
+                    let baseline_decision = baseline_signal.strategy_decision.as_mut().unwrap();
+                    baseline_decision["scout_comparison_id"] = serde_json::json!(comparison_id);
+                    baseline_decision["scout_comparison_role"] = serde_json::json!("baseline");
+                }
+                if variant_enters {
+                    let variant_decision = variant_signal.strategy_decision.as_mut().unwrap();
+                    variant_decision["scout_comparison_id"] = serde_json::json!(comparison_id);
+                    variant_decision["scout_comparison_role"] = serde_json::json!("variant");
+                }
+                for (selected, role) in [
+                    (baseline_enters.then_some(&baseline_signal), "baseline"),
+                    (variant_enters.then_some(&variant_signal), "variant"),
+                ] {
+                    let Some(selected) = selected else { continue; };
+                    let selected_parameters = signal_strategy_parameters(selected);
+                    let selected_stop = selected_parameters.get("stop_loss_percent").copied().unwrap_or(settings.stop_loss_percent);
+                    let selected_target = selected_parameters.get("take_profit_percent").copied().unwrap_or(settings.take_profit_percent);
+                    let selected_level_percent = if role == "baseline"
+                        && parameter_key == "breakout_entry_distance_percent"
+                    {
+                        signal.strategy_decision.as_ref()
+                            .and_then(|decision| decision.get("scout_parameter_baseline_decision"))
+                            .and_then(|decision| decision.get("strategy_parameters"))
+                            .and_then(|parameters| parameters.get("breakout_entry_distance_percent"))
+                            .and_then(serde_json::Value::as_f64)
+                            .unwrap_or(level_percent)
+                    } else {
+                        level_percent
+                    };
+                    let mut audit = scout_shadow_audit_payload(
+                        selected, timestamp_ms, notional,
+                        &format!("scout:{context}:level:{level_percent:.2}:scenario:strategy:{role}"),
+                        selected_stop, selected_target, None, selected_level_percent, "strategy",
+                    );
+                    audit["shadow_sample_group_id"] = serde_json::json!(sample_key);
+                    audit["decision_id"] = serde_json::json!(format!("{}|{role}", audit["decision_id"].as_str().unwrap_or("scout")));
+                    audit["scout_comparison_id"] = serde_json::json!(comparison_id);
+                    audit["scout_comparison_role"] = serde_json::json!(role);
+                    audits.push(audit);
+                }
+                continue;
+            }
             settings.shadow_sample_at_ms.insert(sample_key.clone(), timestamp_ms);
             settings.shadow_sample_active_scenarios.insert(
                 sample_key.clone(),
-                BTreeSet::from(["strategy".to_owned(), "tight".to_owned()]),
+                BTreeSet::from(["strategy".to_owned(), "tight".to_owned(), "wide".to_owned()]),
             );
             settings_changed = true;
             let strategy_size_multiplier = signal.strategy_decision.as_ref()
@@ -333,7 +423,6 @@ async fn record_daily_scout_shadow_ladder(
                 .unwrap_or(1.0)
                 .clamp(0.05, 1.0);
             let notional = settings.max_order_notional * SCOUT_MAX_ORDER_FRACTION * strategy_size_multiplier;
-            let context = market_context(signal);
             let strategy_parameters = signal.strategy_decision.as_ref()
                 .and_then(|decision| decision.get("strategy_parameters"));
             let stop_loss_percent = strategy_parameters
@@ -347,6 +436,7 @@ async fn record_daily_scout_shadow_ladder(
             for (scenario, multiplier) in [
                 ("strategy", 1.0),
                 ("tight", SCOUT_TIGHT_EXIT_DISTANCE_MULTIPLIER),
+                ("wide", SCOUT_WIDE_EXIT_DISTANCE_MULTIPLIER),
             ] {
                 let mut audit = scout_shadow_audit_payload(
                     signal,
@@ -360,6 +450,14 @@ async fn record_daily_scout_shadow_ladder(
                     scenario,
                 );
                 audit["shadow_sample_group_id"] = serde_json::json!(sample_key.clone());
+                if direct_entry_scout {
+                    if let Some(entry_price) = signal.strategy_decision.as_ref()
+                        .and_then(|decision| decision.get("observed_close"))
+                        .and_then(serde_json::Value::as_f64)
+                    {
+                        audit["shadow_entry_price"] = serde_json::json!(entry_price);
+                    }
+                }
                 audits.push(audit);
             }
         }
@@ -375,38 +473,258 @@ async fn record_daily_scout_shadow_ladder(
     Ok(())
 }
 
+async fn record_live_strategy_scout_shadows(
+    state: &AutoTraderState,
+    client: &reqwest::Client,
+    position_url: &str,
+    candidates: &[Signal],
+    markets: &BTreeMap<String, serde_json::Value>,
+    now: u64,
+) -> Result<(), (StatusCode, String)> {
+    if candidates.is_empty() { return Ok(()); }
+    let timestamp_ms = now.saturating_mul(1_000);
+    let mut fresh_markets = markets.clone();
+    let symbols = candidates.iter().map(|candidate| candidate.symbol.as_str()).collect::<BTreeSet<_>>();
+    for symbol in symbols {
+        let cached_is_fresh = fresh_markets.get(symbol).is_some_and(|market| {
+            let updated_at = market.get("updated_at_ms").and_then(serde_json::Value::as_u64).unwrap_or_default();
+            updated_at > 0 && timestamp_ms.saturating_sub(updated_at) <= 5_000
+        });
+        if !cached_is_fresh {
+            if let Some(market) = fresh_subscribed_market_book(client, position_url, symbol).await {
+                fresh_markets.insert(symbol.to_owned(), market);
+            }
+        }
+    }
+    let mut settings = state.settings.lock().await;
+    settings.shadow_sample_at_ms.retain(|_, timestamp| timestamp_ms.saturating_sub(*timestamp) < 86_400_000);
+    let mut audits = Vec::new();
+    let mut settings_changed = false;
+    let (mut unselected, mut missing_market, mut invalid_market) = (0usize, 0usize, 0usize);
+    let (mut active_group_blocked, mut cooldown_blocked, mut capacity_blocked) = (0usize, 0usize, 0usize);
+    for candidate in candidates {
+        let Some(strategy) = candidate.strategy.as_deref().and_then(Strategy::from_name) else { unselected += 1; continue; };
+        if !settings.scout_strategies.contains(&strategy) || !settings.strategies.contains(&strategy) { unselected += 1; continue; }
+        let Some(market) = fresh_markets.get(&candidate.symbol) else { missing_market += 1; continue; };
+        let updated_at = market.get("updated_at_ms").and_then(serde_json::Value::as_u64).unwrap_or_default();
+        if updated_at == 0 || timestamp_ms.saturating_sub(updated_at) > 5_000 { continue; }
+        let Some((bid, ask)) = market["bids"][0]["price"].as_f64()
+            .zip(market["asks"][0]["price"].as_f64())
+            .filter(|(bid, ask)| bid.is_finite() && ask.is_finite() && *bid > 0.0 && *ask >= *bid)
+        else { invalid_market += 1; continue; };
+        let sample_key = format!("{}|{}|{}", strategy.as_str(), candidate.symbol, candidate.direction);
+        let active_group_key = format!("live-scout:{sample_key}");
+        let active_group_exists = settings.shadow_sample_active_scenarios.contains_key(&active_group_key);
+        let previous_attempt_ms = settings.shadow_sample_at_ms.get(&sample_key).copied();
+        let active_sample_count = settings.shadow_sample_active_scenarios.len();
+        if active_group_exists {
+            active_group_blocked += 1;
+            continue;
+        }
+        if previous_attempt_ms.is_some_and(|previous| timestamp_ms.saturating_sub(previous) < 300_000) {
+            cooldown_blocked += 1;
+            continue;
+        }
+        if active_sample_count >= settings.max_concurrent_shadow_samples {
+            capacity_blocked += 1;
+            continue;
+        }
+
+        let mut signal = candidate.clone();
+        let decision = signal.strategy_decision.get_or_insert_with(|| serde_json::json!({}));
+        decision["observed_close"] = serde_json::json!(bid + (ask - bid) * 0.5);
+        let params = decision.get("strategy_parameters");
+        let stop_loss = params.and_then(|values| values.get("stop_loss_percent"))
+            .and_then(serde_json::Value::as_f64).unwrap_or(settings.stop_loss_percent);
+        let take_profit = params.and_then(|values| values.get("take_profit_percent"))
+            .and_then(serde_json::Value::as_f64).unwrap_or(settings.take_profit_percent);
+        let notional = settings.max_order_notional * SCOUT_MAX_ORDER_FRACTION;
+        let context = market_context(&signal);
+        settings.shadow_sample_at_ms.insert(sample_key, timestamp_ms);
+        settings.shadow_sample_active_scenarios.insert(
+            active_group_key.clone(),
+            BTreeSet::from(["strategy".to_owned(), "tight".to_owned(), "wide".to_owned()]),
+        );
+        settings_changed = true;
+        for (index, (scenario, multiplier)) in [
+            ("strategy", 1.0),
+            ("tight", SCOUT_TIGHT_EXIT_DISTANCE_MULTIPLIER),
+            ("wide", SCOUT_WIDE_EXIT_DISTANCE_MULTIPLIER),
+        ].into_iter().enumerate() {
+            let mut audit = scout_shadow_audit_payload(
+                &signal,
+                timestamp_ms.saturating_add(index as u64),
+                notional,
+                &format!("scout:{context}:trade:scenario:{scenario}"),
+                stop_loss * multiplier,
+                take_profit * multiplier,
+                None,
+                0.0,
+                scenario,
+            );
+            audit["shadow_sample_group_id"] = serde_json::json!(active_group_key);
+            audits.push(audit);
+        }
+    }
+    drop(settings);
+    if settings_changed { request_settings_persist(state)?; }
+    let registered = audits.len() / 3;
+    for audit in audits {
+        register_scout_shadow_for_learning(state, &audit);
+        queue_auto_trader_audit(state, audit);
+    }
+    static LAST_SCOUT_BATCH_DIAGNOSTIC_MS: AtomicU64 = AtomicU64::new(0);
+    if timestamp_ms.saturating_sub(LAST_SCOUT_BATCH_DIAGNOSTIC_MS.load(Ordering::Relaxed)) >= 30_000
+        && LAST_SCOUT_BATCH_DIAGNOSTIC_MS.compare_exchange(
+            LAST_SCOUT_BATCH_DIAGNOSTIC_MS.load(Ordering::Relaxed), timestamp_ms, Ordering::Relaxed, Ordering::Relaxed,
+        ).is_ok()
+    {
+        crate::service_log!("INFO", "Live Scout shadow batch: candidates={} registered_groups={} unselected={} missing_market={} invalid_market={} active_group_blocked={} cooldown_blocked={} capacity_blocked={}", candidates.len(), registered, unselected, missing_market, invalid_market, active_group_blocked, cooldown_blocked, capacity_blocked);
+    }
+    Ok(())
+}
+
+struct LiveScoutParameterProbe {
+    source_signal: Signal,
+    strategy: Strategy,
+    direction: String,
+    baseline_parameters: BTreeMap<String, f64>,
+}
+
+fn parameter_probe_signal(
+    source_signal: &Signal,
+    strategy: Strategy,
+    direction: &str,
+    parameters: &BTreeMap<String, f64>,
+    entry_price: f64,
+) -> Option<Signal> {
+    let mut signal = live_strategy_feature_signal(source_signal, strategy, parameters)?;
+    signal.direction = direction.to_owned();
+    signal.strategy = Some(strategy.as_str().to_owned());
+    signal.strategy_decision = Some(serde_json::json!({
+        "scout_only": false,
+        "strategy": strategy.as_str(),
+        "contract": strategy.contract(),
+        "strategy_parameters": parameters,
+        "observed_insight": signal.components,
+        "direction": signal.direction,
+        "strength": signal.strength,
+        "score": signal.score,
+        "direction_source": "strategy_insight",
+        "observed_close": entry_price,
+    }));
+    Some(signal)
+}
+
+fn live_parameter_probe_entry_eligible(
+    source_signal: &Signal,
+    strategy: Strategy,
+    direction: &str,
+    parameters: &BTreeMap<String, f64>,
+    entry_price: f64,
+) -> bool {
+    parameter_probe_signal(source_signal, strategy, direction, parameters, entry_price)
+        .is_some_and(|signal| {
+            matches!(
+                strategy.evaluate(&StrategySignal::entry(&signal, parameters)),
+                Ok(StrategyDecision::Enter),
+            ) && passes_pullback_confirmation(&signal)
+        })
+}
+
+fn parameter_probe_changes_exit_behavior(parameter_key: &str, strategy: Strategy) -> bool {
+    let keys = if parameter_key.starts_with("combo:") {
+        let Some(values) = parse_scout_combination(parameter_key, strategy) else { return false; };
+        values.keys().cloned().collect::<Vec<_>>()
+    } else {
+        vec![parameter_key.to_owned()]
+    };
+    keys.iter().any(|key| matches!(key.as_str(),
+        "stop_loss_percent"
+            | "take_profit_percent"
+            | "profit_protection_activation_percent"
+            | "profit_protection_giveback_percent"
+            | "profit_protection_minimum_lock_percent"
+            | "minimum_hold_days"
+            | "maximum_hold_days"
+    ))
+}
+
+async fn record_live_strategy_parameter_probes(
+    state: &AutoTraderState,
+    client: &reqwest::Client,
+    position_url: &str,
+    probes: &[LiveScoutParameterProbe],
+    markets: &BTreeMap<String, serde_json::Value>,
+    now: u64,
+) -> Result<(), (StatusCode, String)> {
+    if probes.is_empty() { return Ok(()); }
+    let timestamp_ms = now.saturating_mul(1_000);
+    let mut fresh_markets = markets.clone();
+    let symbols = probes.iter().map(|probe| probe.source_signal.symbol.as_str()).collect::<BTreeSet<_>>();
+    for symbol in symbols {
+        let cached_is_fresh = fresh_markets.get(symbol).is_some_and(|market| {
+            let updated_at = market.get("updated_at_ms").and_then(serde_json::Value::as_u64).unwrap_or_default();
+            updated_at > 0 && timestamp_ms.saturating_sub(updated_at) <= 5_000
+        });
+        if !cached_is_fresh {
+            if let Some(market) = fresh_subscribed_market_book(client, position_url, symbol).await {
+                fresh_markets.insert(symbol.to_owned(), market);
+            }
+        }
+    }
+    for probe in probes {
+        let Some(market) = fresh_markets.get(&probe.source_signal.symbol) else { continue; };
+        let updated_at = market.get("updated_at_ms").and_then(serde_json::Value::as_u64).unwrap_or_default();
+        if updated_at == 0 || timestamp_ms.saturating_sub(updated_at) > 5_000 { continue; }
+        let Some((bid, ask)) = market["bids"][0]["price"].as_f64()
+            .zip(market["asks"][0]["price"].as_f64())
+            .filter(|(bid, ask)| bid.is_finite() && ask.is_finite() && *bid > 0.0 && *ask >= *bid)
+        else { continue; };
+        let entry_price = bid + (ask - bid) * 0.5;
+        if let Err((status, error)) = record_live_parameter_probe(
+            state,
+            &probe.source_signal,
+            probe.strategy,
+            &probe.direction,
+            &probe.baseline_parameters,
+            entry_price,
+            now,
+        ).await {
+            crate::service_log!("WARN", "Could not record live Scout parameter comparison ({status}): {error}", status=status);
+        }
+    }
+    Ok(())
+}
+
 async fn record_live_parameter_probe(
     state: &AutoTraderState,
-    signal: &Signal,
+    source_signal: &Signal,
+    strategy: Strategy,
+    direction: &str,
+    baseline_parameters: &BTreeMap<String, f64>,
     entry_price: f64,
     now: u64,
 ) -> Result<(), (StatusCode, String)> {
-    let Some(strategy) = signal.strategy.as_deref().and_then(Strategy::from_name) else { return Ok(()); };
-    if !strategy.is_live_insight() || strategy == Strategy::LiveInsights {
-        return Ok(());
-    }
-    let mut parameters = signal.strategy_decision.as_ref()
-        .and_then(|decision| decision.get("strategy_parameters"))
-        .and_then(serde_json::Value::as_object)
-        .map(|values| values.iter().filter_map(|(key, value)| Some((key.clone(), value.as_f64()?))).collect::<BTreeMap<_, _>>())
-        .unwrap_or_default();
+    if !strategy.is_live_insight() || strategy == Strategy::LiveInsights { return Ok(()); }
+    let mut variant_parameters = baseline_parameters.clone();
     let pair = next_scout_parameter_combination(
-        &signal.symbol, strategy, &parameters, now / 86_400,
+        &source_signal.symbol, strategy, &variant_parameters, now / 86_400,
     );
     let (parameter_key, parameter_value) = if let Some(combination) = pair.as_ref() {
-        for (key, value) in combination { parameters.insert(key.clone(), *value); }
-        let Some(key) = scout_combination_key(combination, &parameters) else { return Ok(()); };
+        for (key, value) in combination { variant_parameters.insert(key.clone(), *value); }
+        let Some(key) = scout_combination_key(combination, &variant_parameters) else { return Ok(()); };
         (key, 0.0)
     } else {
         let Some((key, value)) = next_scout_parameter_probe(
-            &signal.symbol, strategy, &parameters, now / 86_400,
+            &source_signal.symbol, strategy, &variant_parameters, now / 86_400,
         ) else { return Ok(()); };
-        parameters.insert(key.clone(), value);
+        variant_parameters.insert(key.clone(), value);
         (key, value)
     };
     let sample_group_id = format!(
-        "live-scout-parameter:{}:{}:{}",
-        signal.symbol, strategy.as_str(), parameter_key,
+        "live-scout-parameter:{}:{}:{}:{}",
+        source_signal.symbol, strategy.as_str(), direction, parameter_key,
     );
     let sampled_at = now.saturating_mul(1_000);
     {
@@ -414,68 +732,148 @@ async fn record_live_parameter_probe(
         settings.shadow_sample_at_ms.retain(|_, timestamp| sampled_at.saturating_sub(*timestamp) < 86_400_000);
         if settings.shadow_sample_active_scenarios.contains_key(&sample_group_id)
             || settings.shadow_sample_at_ms.get(&sample_group_id)
-                .is_some_and(|previous| !daily_scout_sample_cooldown_elapsed(sampled_at, *previous))
+                .is_some_and(|previous| !live_parameter_probe_cooldown_elapsed(sampled_at, *previous))
             || settings.shadow_sample_active_scenarios.len() >= settings.max_concurrent_shadow_samples
         {
             return Ok(());
         }
         settings.shadow_sample_at_ms.insert(sample_group_id.clone(), sampled_at);
         settings.shadow_sample_active_scenarios.insert(
-            sample_group_id.clone(), BTreeSet::from(["strategy".to_owned(), "tight".to_owned()]),
+            sample_group_id.clone(), BTreeSet::from(["preparing".to_owned()]),
         );
         request_settings_persist(state)?;
     }
 
-    let mut probe_signal = signal.clone();
-    let mut decision = probe_signal.strategy_decision.clone().unwrap_or_else(|| serde_json::json!({}));
-    decision["strategy_parameters"] = serde_json::to_value(&parameters).unwrap_or_default();
-    decision["observed_close"] = serde_json::json!(entry_price);
-    decision["scout_parameter_probe"] = serde_json::json!(true);
-    decision["scout_parameter_key"] = serde_json::json!(parameter_key);
-    decision["scout_parameter_value"] = serde_json::json!(parameter_value);
-    decision["scout_parameter_profile_symbol"] = serde_json::json!(signal.symbol);
-    probe_signal.strategy_decision = Some(decision);
-    let input = StrategySignal::entry(&probe_signal, &parameters);
-    let entry_eligible = matches!(strategy.evaluate(&input), Ok(StrategyDecision::Enter))
-        && passes_pullback_confirmation(&probe_signal);
-    probe_signal.strategy_decision.as_mut().unwrap()["scout_parameter_entry_eligible"] =
-        serde_json::json!(entry_eligible);
-
-    if !entry_eligible {
+    let Some(mut baseline_signal) = parameter_probe_signal(
+        source_signal, strategy, direction, baseline_parameters, entry_price,
+    ) else {
         let mut settings = state.settings.lock().await;
-        let decision_id = format!("{}|{}|{}|probe:{parameter_key}:{parameter_value:.8}|rejected", signal.timestamp, signal.symbol, strategy.as_str());
-        if settings.shadow_learning_outcome_ids.insert(decision_id) {
-            let key = scout_parameter_learning_key(&signal.symbol, strategy, &parameter_key, parameter_value);
-            record_learning_outcome(settings.learning.entry(key).or_default(), 0.0);
-            request_settings_persist(state)?;
-        }
+        settings.shadow_sample_active_scenarios.remove(&sample_group_id);
+        request_settings_persist(state)?;
+        return Ok(());
+    };
+    let mut variant_signal = parameter_probe_signal(
+        source_signal, strategy, direction, &variant_parameters, entry_price,
+    );
+    let baseline_entry_eligible = live_parameter_probe_entry_eligible(
+        source_signal, strategy, direction, baseline_parameters, entry_price,
+    );
+    let variant_entry_eligible = live_parameter_probe_entry_eligible(
+        source_signal, strategy, direction, &variant_parameters, entry_price,
+    );
+    if !baseline_entry_eligible && !variant_entry_eligible {
+        let mut settings = state.settings.lock().await;
+        settings.shadow_sample_active_scenarios.remove(&sample_group_id);
+        request_settings_persist(state)?;
+        return Ok(());
+    }
+    if baseline_entry_eligible && variant_entry_eligible
+        && !parameter_probe_changes_exit_behavior(&parameter_key, strategy)
+    {
+        // Both entry rules accepted the same signal and the changed parameters
+        // don't affect exits, so the simulated trades would be identical.
+        let mut settings = state.settings.lock().await;
         settings.shadow_sample_active_scenarios.remove(&sample_group_id);
         request_settings_persist(state)?;
         return Ok(());
     }
 
-    let strategy_parameters = probe_signal.strategy_decision.as_ref()
-        .and_then(|decision| decision.get("strategy_parameters"));
-    let stop_loss = strategy_parameters.and_then(|values| values.get("stop_loss_percent"))
-        .and_then(serde_json::Value::as_f64).unwrap_or(DEFAULT_STOP_LOSS_PERCENT);
-    let take_profit = strategy_parameters.and_then(|values| values.get("take_profit_percent"))
-        .and_then(serde_json::Value::as_f64).unwrap_or(DEFAULT_TAKE_PROFIT_PERCENT);
+    let baseline_exit_parameters = baseline_parameters;
+    let variant_exit_parameters = &variant_parameters;
+    let stop_loss = |parameters: &BTreeMap<String, f64>| {
+        parameters.get("stop_loss_percent").copied().unwrap_or(DEFAULT_STOP_LOSS_PERCENT)
+    };
+    let take_profit = |parameters: &BTreeMap<String, f64>| {
+        parameters.get("take_profit_percent").copied().unwrap_or(DEFAULT_TAKE_PROFIT_PERCENT)
+    };
     let notional = state.settings.lock().await.max_order_notional * SCOUT_MAX_ORDER_FRACTION;
-    for (index, (scenario, multiplier)) in [
-        ("strategy", 1.0), ("tight", SCOUT_TIGHT_EXIT_DISTANCE_MULTIPLIER),
-    ].into_iter().enumerate() {
+    let comparison_id = format!("{}|{}|baseline-vs-variant", sample_group_id, source_signal.timestamp);
+    let baseline_group = format!("{sample_group_id}|baseline");
+    let variant_group = format!("{sample_group_id}|variant");
+    {
+        let mut settings = state.settings.lock().await;
+        settings.shadow_sample_active_scenarios.remove(&sample_group_id);
+        let needed = usize::from(baseline_entry_eligible) + usize::from(variant_entry_eligible);
+        if settings.shadow_sample_active_scenarios.len().saturating_add(needed) > settings.max_concurrent_shadow_samples {
+            request_settings_persist(state)?;
+            return Ok(());
+        }
+        if baseline_entry_eligible {
+            settings.shadow_sample_active_scenarios.insert(
+                baseline_group.clone(), BTreeSet::from(["strategy".to_owned()]),
+            );
+        }
+        if variant_entry_eligible {
+            settings.shadow_sample_active_scenarios.insert(
+                variant_group.clone(), BTreeSet::from(["strategy".to_owned()]),
+            );
+        }
+        let pair = settings.scout_comparisons.entry(comparison_id.clone()).or_default();
+        pair.updated_at_ms = sampled_at;
+        pair.learning_key = scout_parameter_learning_key(
+            &source_signal.symbol, strategy, &parameter_key, parameter_value,
+        );
+        if !baseline_entry_eligible { pair.baseline_return_percent = Some(0.0); }
+        if !variant_entry_eligible { pair.variant_return_percent = Some(0.0); }
+        request_settings_persist(state)?;
+    }
+
+    let mut audits = Vec::new();
+    if baseline_entry_eligible {
+        let mut decision = baseline_signal.strategy_decision.clone().unwrap_or_else(|| serde_json::json!({}));
+        decision["scout_comparison_id"] = serde_json::json!(comparison_id);
+        decision["scout_comparison_role"] = serde_json::json!("baseline");
+        baseline_signal.strategy_decision = Some(decision);
         let mut audit = scout_shadow_audit_payload(
-            &probe_signal,
-            sampled_at.saturating_add(index as u64),
+            &baseline_signal,
+            sampled_at,
             notional,
-            &format!("scout:live-parameter:{}:{}:{}:{parameter_value:.8}:{scenario}", signal.symbol, strategy.as_str(), parameter_key),
-            stop_loss * multiplier,
-            take_profit * multiplier,
+            &format!("scout:live-parameter:{}:{}:{}:baseline:trade", source_signal.symbol, strategy.as_str(), parameter_key),
+            stop_loss(baseline_exit_parameters),
+            take_profit(baseline_exit_parameters),
             None,
             0.0,
-            scenario,
+            "strategy",
         );
-        audit["shadow_sample_group_id"] = serde_json::json!(sample_group_id);
+        audit["shadow_sample_group_id"] = serde_json::json!(baseline_group);
+        audit["scout_comparison_id"] = serde_json::json!(comparison_id);
+        audit["scout_comparison_role"] = serde_json::json!("baseline");
+        let baseline_decision_id = audit["decision_id"].as_str().unwrap_or("scout").to_owned();
+        audit["decision_id"] = serde_json::json!(format!("{baseline_decision_id}|comparison:baseline"));
+        audit["trade_id"] = audit["decision_id"].clone();
+        audits.push(audit);
+    }
+    if variant_entry_eligible {
+        let mut variant_signal = variant_signal.take().expect("eligible variant signal exists");
+        let mut decision = variant_signal.strategy_decision.clone().unwrap_or_else(|| serde_json::json!({}));
+        decision["scout_parameter_probe"] = serde_json::json!(true);
+        decision["scout_parameter_key"] = serde_json::json!(parameter_key);
+        decision["scout_parameter_value"] = serde_json::json!(parameter_value);
+        decision["scout_parameter_profile_symbol"] = serde_json::json!(source_signal.symbol);
+        decision["scout_parameter_entry_eligible"] = serde_json::json!(true);
+        decision["scout_comparison_id"] = serde_json::json!(comparison_id);
+        decision["scout_comparison_role"] = serde_json::json!("variant");
+        variant_signal.strategy_decision = Some(decision);
+        let mut audit = scout_shadow_audit_payload(
+            &variant_signal,
+            sampled_at,
+            notional,
+            &format!("scout:live-parameter:{}:{}:{}:variant:trade", source_signal.symbol, strategy.as_str(), parameter_key),
+            stop_loss(variant_exit_parameters),
+            take_profit(variant_exit_parameters),
+            None,
+            0.0,
+            "strategy",
+        );
+        audit["shadow_sample_group_id"] = serde_json::json!(variant_group);
+        audit["scout_comparison_id"] = serde_json::json!(comparison_id);
+        audit["scout_comparison_role"] = serde_json::json!("variant");
+        let variant_decision_id = audit["decision_id"].as_str().unwrap_or("scout").to_owned();
+        audit["decision_id"] = serde_json::json!(format!("{variant_decision_id}|comparison:variant"));
+        audit["trade_id"] = audit["decision_id"].clone();
+        audits.push(audit);
+    }
+    for audit in audits {
         register_scout_shadow_for_learning(state, &audit);
         queue_auto_trader_audit(state, audit);
     }
@@ -495,6 +893,14 @@ async fn submit_cycle_signal(
     signal_selection_ms: f64,
     now: u64,
 ) -> Result<CycleResult, (StatusCode, String)> {
+    if state.audit_health.load(Ordering::Relaxed) != 3
+        || state.audit_failure_latched.load(Ordering::Relaxed)
+    {
+        return Ok(skipped_for_signal(
+            signal,
+            "Audit persistence unavailable; new entries paused until AutoTrader restart",
+        ));
+    }
     if should_shadow_daily_scout(scout, signal) {
         return Ok(CycleResult {
             status: "shadowed",
@@ -553,23 +959,22 @@ async fn submit_cycle_signal(
             .shadow_sample_at_ms
             .retain(|_, timestamp| sampled_at.saturating_sub(*timestamp) < 86_400_000);
         let active_group_key = format!("live-scout:{sample_key}");
-        if settings.shadow_sample_active_scenarios.contains_key(&active_group_key)
-            || settings
-                .shadow_sample_at_ms
-                .get(&sample_key)
-                .is_some_and(|previous| sampled_at.saturating_sub(*previous) < 300_000)
-        {
-            return Ok(skipped_for_signal(
-                signal,
-                "A capped exploration entry for this strategy, symbol, and direction was attempted in the last five minutes",
-            ));
-        }
         let recent_probe_count = settings.shadow_sample_active_scenarios.len();
-        if recent_probe_count >= settings.max_concurrent_shadow_samples {
-            return Ok(skipped_for_signal(
-                signal,
-                "The capped exploration-entry limit is already in use",
-            ));
+        let previous_attempt_ms = settings.shadow_sample_at_ms.get(&sample_key).copied();
+        if shadow_entry_limit_blocks(
+            scout,
+            settings.shadow_sample_active_scenarios.contains_key(&active_group_key),
+            previous_attempt_ms,
+            sampled_at,
+            recent_probe_count,
+            settings.max_concurrent_shadow_samples,
+        ) {
+            let reason = if recent_probe_count >= settings.max_concurrent_shadow_samples {
+                "The capped exploration-entry limit is already in use"
+            } else {
+                "A capped exploration entry for this strategy, symbol, and direction was attempted in the last five minutes"
+            };
+            return Ok(skipped_for_signal(signal, reason));
         }
         if scout {
             let notional = settings.max_order_notional * SCOUT_MAX_ORDER_FRACTION;
@@ -593,7 +998,7 @@ async fn submit_cycle_signal(
                         && order.quantity > order.filled_quantity + 1e-12
                 })
                 .count();
-            if open_scout_positions + pending_scout_orders >= SCOUT_MAX_ACTIVE_POSITIONS {
+            if open_scout_positions + pending_scout_orders >= settings.scout_max_active_positions {
                 return Ok(skipped_for_signal(
                     signal,
                     "Maximum number of active and pending scout positions is already in use",
@@ -603,7 +1008,7 @@ async fn submit_cycle_signal(
         if let Some((_, _, sample_group_id)) = scout_shadow_sample.as_ref() {
             settings.shadow_sample_active_scenarios.insert(
                 sample_group_id.clone(),
-                BTreeSet::from(["strategy".to_owned(), "tight".to_owned()]),
+                BTreeSet::from(["strategy".to_owned(), "tight".to_owned(), "wide".to_owned()]),
             );
         }
         settings.shadow_sample_at_ms.insert(sample_key, sampled_at);
@@ -614,6 +1019,7 @@ async fn submit_cycle_signal(
         for (scenario_index, (scenario, multiplier)) in [
             ("strategy", 1.0),
             ("tight", SCOUT_TIGHT_EXIT_DISTANCE_MULTIPLIER),
+                ("wide", SCOUT_WIDE_EXIT_DISTANCE_MULTIPLIER),
         ].into_iter().enumerate() {
             let mut shadow_payload = scout_shadow_audit_payload(
                 signal,
@@ -688,15 +1094,6 @@ async fn submit_cycle_signal(
         Ok(snapshot) => snapshot,
         Err(result) => return Ok(result),
     };
-    if signal.strategy.as_deref().and_then(Strategy::from_name).is_some_and(Strategy::is_live_insight) {
-        let probe_state = state.clone();
-        let probe_signal = signal.clone();
-        tokio::spawn(async move {
-            if let Err((status, error)) = record_live_parameter_probe(&probe_state, &probe_signal, mid, now).await {
-                crate::service_log!("WARN", "Could not record live strategy parameter probe ({status}): {error}");
-            }
-        });
-    }
     // Market snapshot retrieval above is read-only and can be slow. The selected
     // order path locks through the in-memory reservation, then releases before HTTP.
     submit_selected_signal(SelectedSignalOrderRequest {
@@ -1050,10 +1447,14 @@ async fn run_cycle_inner(
             };
             if !strategy_settings.strategies.contains(&strategy) {
                 if strategy_settings.scout_strategies.contains(&strategy) {
+                    let is_parameter_probe = signal.strategy_decision.as_ref()
+                        .and_then(|decision| decision.get("scout_parameter_probe"))
+                        .and_then(serde_json::Value::as_bool) == Some(true);
                     match evaluate_daily_strategy_signal(signal) {
                         Ok(StrategyDecision::Scout | StrategyDecision::Enter) => {
                             daily_scout_shadow_candidates.push(signal.clone());
                         }
+                        Ok(_) if is_parameter_probe => daily_scout_shadow_candidates.push(signal.clone()),
                         Ok(_) => {}
                         Err(error) if strategy_filter_details.len() < 20 => {
                             strategy_filter_details.push(format!(
@@ -1075,11 +1476,23 @@ async fn run_cycle_inner(
                 }
                 return false;
             }
+            let is_parameter_probe = signal.strategy_decision.as_ref()
+                .and_then(|decision| decision.get("scout_parameter_probe"))
+                .and_then(serde_json::Value::as_bool) == Some(true);
             match evaluate_daily_strategy_signal(signal) {
-                Ok(StrategyDecision::Enter) => true,
+                Ok(StrategyDecision::Enter) => {
+                    if strategy_settings.scout_strategies.contains(&strategy) {
+                        daily_scout_shadow_candidates.push(signal.clone());
+                    }
+                    true
+                }
                 Ok(StrategyDecision::Scout) => {
                     daily_scout_shadow_candidates.push(signal.clone());
                     true
+                }
+                Ok(_) if is_parameter_probe => {
+                    daily_scout_shadow_candidates.push(signal.clone());
+                    false
                 }
                 Ok(decision) => {
                     if strategy_filter_details.len() < 20 {
@@ -1153,6 +1566,95 @@ async fn run_cycle_inner(
     } else {
         Vec::new()
     };
+    let selected_live_scout_strategies = strategy_settings.scout_strategies.iter().copied()
+        .filter(|strategy| strategy.is_live_insight() && *strategy != Strategy::LiveInsights)
+        .collect::<Vec<_>>();
+    let live_parameter_probe_candidates = live_source_signals.iter().flat_map(|source_signal| {
+        let strategy_settings = &strategy_settings;
+        selected_live_scout_strategies.iter().copied().flat_map(move |strategy| {
+            let parameters = strategy_parameter_values(strategy_settings, &source_signal.symbol, strategy);
+            live_scout_direction_probes(source_signal, strategy, &parameters).into_iter()
+                .map(move |candidate| LiveScoutParameterProbe {
+                    source_signal: source_signal.clone(),
+                    strategy,
+                    direction: candidate.direction,
+                    baseline_parameters: parameters.clone(),
+                })
+        })
+    }).collect::<Vec<_>>();
+    if !live_parameter_probe_candidates.is_empty() {
+        let probe_state = state.clone();
+        let probe_client = client.clone();
+        let probe_position_url = position_url.clone();
+        let markets = dashboard.markets.clone();
+        tokio::spawn(async move {
+            if let Err((status, error)) = record_live_strategy_parameter_probes(
+                &probe_state,
+                &probe_client,
+                &probe_position_url,
+                &live_parameter_probe_candidates,
+                &markets,
+                now,
+            ).await {
+                crate::service_log!("WARN", "Could not record live Scout parameter comparisons ({status}): {error}");
+            }
+        });
+    }
+    let live_scout_strategies = live_scout_strategies_enabled_for_trading(&strategy_settings);
+    let mut live_scout_signals = live_strategy_signals.iter()
+        .filter(|signal| signal.strategy.as_deref().and_then(Strategy::from_name)
+            .is_some_and(|strategy| live_scout_strategies.contains(&strategy)))
+        .cloned()
+        .collect::<Vec<_>>();
+    live_scout_signals.extend(live_source_signals.iter().flat_map(|source_signal| {
+        let strategy_settings = &strategy_settings;
+        live_scout_strategies.iter().copied().flat_map(move |strategy| {
+            let parameters = strategy_parameter_values(strategy_settings, &source_signal.symbol, strategy);
+            live_scout_direction_candidates(source_signal, strategy, &parameters)
+                .into_iter()
+                .map(move |mut signal| {
+                    signal.strategy = Some(strategy.as_str().to_owned());
+                    signal.strategy_decision = Some(serde_json::json!({
+                        "scout_only": false,
+                        "strategy": strategy.as_str(),
+                        "contract": strategy.contract(),
+                        "strategy_parameters": parameters,
+                        "observed_insight": signal.components,
+                        "direction": signal.direction,
+                        "strength": signal.strength,
+                        "score": signal.score,
+                        "direction_source": "strategy_insight",
+                    }));
+                    signal
+                })
+        })
+    }));
+    static LAST_SCOUT_CANDIDATE_DIAGNOSTIC_MS: AtomicU64 = AtomicU64::new(0);
+    let diagnostic_ms = now.saturating_mul(1_000);
+    if diagnostic_ms.saturating_sub(LAST_SCOUT_CANDIDATE_DIAGNOSTIC_MS.load(Ordering::Relaxed)) >= 30_000
+        && LAST_SCOUT_CANDIDATE_DIAGNOSTIC_MS.compare_exchange(
+            LAST_SCOUT_CANDIDATE_DIAGNOSTIC_MS.load(Ordering::Relaxed), diagnostic_ms, Ordering::Relaxed, Ordering::Relaxed,
+        ).is_ok()
+    {
+        crate::service_log!("INFO", "Live Scout candidates prepared: selected_strategies={} shadow_candidates={} trade_candidates={}", live_scout_strategies.len(), live_scout_signals.len(), live_strategy_signals.len());
+    }
+    if !live_scout_signals.is_empty() {
+        let scout_state = state.clone();
+        let scout_position_url = position_url.clone();
+        let markets = dashboard.markets.clone();
+        tokio::spawn(async move {
+            if let Err((status, error)) = record_live_strategy_scout_shadows(
+                &scout_state,
+                &scout_state.client,
+                &scout_position_url,
+                &live_scout_signals,
+                &markets,
+                now,
+            ).await {
+                crate::service_log!("WARN", "Could not record live strategy Scout shadows ({status}): {error}");
+            }
+        });
+    }
     if has_daily_strategy_signals {
         dashboard.best.extend(live_strategy_signals);
     } else if has_live_signal_strategies {
@@ -1216,7 +1718,7 @@ async fn run_cycle_inner(
         counterfactual_stop_loss_percent,
         counterfactual_take_profit_percent,
     );
-    let (open_positions, active_scout_count, strategy_positions, max_entries_per_auto_position) = {
+    let (open_positions, active_scout_count, strategy_positions, max_entries_per_auto_position, scout_max_active_positions) = {
         let settings = state.settings.lock().await;
         let (open_positions, active_scout_count) = settings
             .positions
@@ -1225,15 +1727,25 @@ async fn run_cycle_inner(
             .fold(
                 (BTreeMap::new(), 0usize),
                 |(mut positions, scouts), (symbol, position)| {
-                    positions.insert(symbol.clone(), position.clone());
+                    if !position.scout_entry {
+                        positions.insert(symbol.clone(), position.clone());
+                    }
                     (positions, scouts + usize::from(position.scout_entry))
                 },
             );
+        let strategy_positions = settings.strategy_positions.iter().filter_map(|(symbol, lots)| {
+            let real_lots = lots.iter()
+                .filter(|(_, position)| position.quantity.abs() > 1e-12 && !position.scout_entry)
+                .map(|(strategy, position)| (strategy.clone(), position.clone()))
+                .collect::<BTreeMap<_, _>>();
+            (!real_lots.is_empty()).then(|| (symbol.clone(), real_lots))
+        }).collect();
         (
             open_positions,
             active_scout_count,
-            settings.strategy_positions.clone(),
+            strategy_positions,
             settings.max_entries_per_auto_position,
+            settings.scout_max_active_positions,
         )
     };
     let FreshSignalCandidates {
@@ -1408,6 +1920,7 @@ async fn run_cycle_inner(
         learning: &learning,
         risk_appetite,
         active_scout_count,
+        scout_max_active_positions,
         open_positions: &open_positions,
         max_entries_per_auto_position,
         counterfactual_stop_loss_percent,
@@ -1427,6 +1940,7 @@ async fn run_cycle_inner(
         &learning,
         risk_appetite,
         active_scout_count,
+        scout_max_active_positions,
         if scout {
             "scout"
         } else if exploratory {
@@ -1480,9 +1994,60 @@ mod parallel_daily_cycle_tests {
     }
 
     #[test]
-    fn daily_scout_can_be_sampled_again_after_its_one_hour_outcome_window() {
-        assert!(!daily_scout_sample_cooldown_elapsed(3_599_999, 0));
-        assert!(daily_scout_sample_cooldown_elapsed(3_600_000, 0));
+    fn full_shadow_sample_limit_does_not_block_real_exploratory_entries() {
+        assert!(!shadow_entry_limit_blocks(false, true, Some(900_000), 1_000_000, 1_000, 1_000));
+        assert!(shadow_entry_limit_blocks(true, false, None, 1_000_000, 1_000, 1_000));
+    }
+
+    #[test]
+    fn live_parameter_probe_records_a_signal_rejected_only_by_the_baseline() {
+        let mut source = signal("live-trade-flow");
+        source.components.trade_flow_by_window = vec![WindowedSignalValue {
+            window_seconds: 60,
+            value: Some(0.10),
+            ..Default::default()
+        }];
+        let baseline = BTreeMap::from([
+            ("minimum_flow_imbalance".into(), 0.15),
+            ("trade_flow_window_seconds".into(), 60.0),
+        ]);
+        let variant = BTreeMap::from([
+            ("minimum_flow_imbalance".into(), 0.05),
+            ("trade_flow_window_seconds".into(), 60.0),
+        ]);
+        assert!(!live_parameter_probe_entry_eligible(
+            &source, Strategy::LiveTradeFlow, "bullish", &baseline, 100.0,
+        ));
+        assert!(live_parameter_probe_entry_eligible(
+            &source, Strategy::LiveTradeFlow, "bullish", &variant, 100.0,
+        ));
+    }
+
+    #[test]
+    fn selected_live_strategy_is_shadowed_even_when_enabled_for_trading() {
+        let mut settings = Settings::default();
+        settings.strategies.push(Strategy::LiveMomentum);
+        settings.scout_strategies.push(Strategy::LiveMomentum);
+        assert_eq!(live_scout_strategies_enabled_for_trading(&settings), vec![Strategy::LiveMomentum]);
+    }
+
+    #[test]
+    fn daily_enter_candidates_are_shadowed_when_selected_as_scouts() {
+        assert!(should_record_daily_scout(Ok(StrategyDecision::Enter), true));
+        assert!(!should_record_daily_scout(Ok(StrategyDecision::Enter), false));
+        assert!(should_record_daily_scout(Ok(StrategyDecision::Scout), false));
+    }
+
+    #[test]
+    fn daily_scout_can_be_sampled_again_after_five_minutes() {
+        assert!(!daily_scout_sample_cooldown_elapsed(299_999, 0));
+        assert!(daily_scout_sample_cooldown_elapsed(300_000, 0));
+    }
+
+    #[test]
+    fn live_parameter_probe_cooldown_remains_one_hour() {
+        assert!(!live_parameter_probe_cooldown_elapsed(3_599_999, 0));
+        assert!(live_parameter_probe_cooldown_elapsed(3_600_000, 0));
     }
 
     #[test]
@@ -1551,6 +2116,21 @@ mod parallel_daily_cycle_tests {
         assert_eq!(tight_payload["shadow_exit_scenario"], "tight");
         assert_eq!(tight_payload["stop_loss_percent"], 0.25);
         assert_eq!(tight_payload["take_profit_percent"], 0.4);
+        let wide_payload = scout_shadow_audit_payload(
+            &live_signal,
+            20_002,
+            5.0,
+            "scout:long:trend:ETH-USDT:live-momentum:scenario:wide:trade",
+            0.75,
+            1.2,
+            None,
+            1.0,
+            "wide",
+        );
+        assert_ne!(payload["decision_id"], wide_payload["decision_id"]);
+        assert_eq!(wide_payload["shadow_exit_scenario"], "wide");
+        assert_eq!(wide_payload["stop_loss_percent"], 0.75);
+        assert_eq!(wide_payload["take_profit_percent"], 1.2);
         assert_eq!(
             payload["reason"],
             "Scout shadow sample recorded; no order submitted"

@@ -4,6 +4,7 @@ fn candidate_entry_diagnostic(
     learning: &BTreeMap<String, LearningStats>,
     risk_appetite: f64,
     active_scout_count: usize,
+    scout_max_active_positions: usize,
 ) -> String {
     let review = review_candidate_entry(
         candidate,
@@ -11,6 +12,7 @@ fn candidate_entry_diagnostic(
         learning,
         risk_appetite,
         active_scout_count,
+        scout_max_active_positions,
     );
     let failures = candidate_entry_failures(candidate, &review, active_scout_count);
     let (walk_forward, research) = format_candidate_evidence(&review);
@@ -38,6 +40,7 @@ fn candidate_entry_audit_value(
     learning: &BTreeMap<String, LearningStats>,
     risk_appetite: f64,
     active_scout_count: usize,
+    scout_max_active_positions: usize,
     selection_mode: &str,
 ) -> serde_json::Value {
     let review = review_candidate_entry(
@@ -46,6 +49,7 @@ fn candidate_entry_audit_value(
         learning,
         risk_appetite,
         active_scout_count,
+        scout_max_active_positions,
     );
     let failures = if selection_mode == "rejected" {
         candidate_entry_failures(candidate, &review, active_scout_count)
@@ -80,7 +84,7 @@ fn candidate_entry_audit_value(
             "strict_walk_forward_pass": !review.strict_evidence_bad && !review.evidence_missing && !review.research_bad,
             "scout_strength_pass": review.scout_strength_pass,
             "scout_score_pass": review.scout_score_pass,
-            "scout_inventory_available": active_scout_count < SCOUT_MAX_ACTIVE_POSITIONS,
+            "scout_inventory_available": active_scout_count < scout_max_active_positions,
             "scout_walk_forward_thresholds_valid": review.scout_thresholds_valid,
         },
         "rejection_reasons": failures,
@@ -165,9 +169,10 @@ fn add_scout_failures(
 ) {
     if !review.scout_thresholds_valid {
         failures.push("required learned Scout walk-forward thresholds are missing or invalid".into());
-    } else if active_scout_count >= SCOUT_MAX_ACTIVE_POSITIONS {
+    } else if active_scout_count >= review.scout_max_active_positions {
         failures.push(format!(
-            "scout inventory cap reached ({active_scout_count}/{SCOUT_MAX_ACTIVE_POSITIONS} open scout positions)"
+            "scout inventory cap reached ({active_scout_count}/{} open scout positions)",
+            review.scout_max_active_positions
         ));
     } else if !review.scout_strength_pass {
         failures.push(format!(
@@ -236,11 +241,11 @@ mod candidate_diagnostic_tests {
             queued_at: None, queue_wait_ms: None,
         };
         let learning = BTreeMap::new();
-        let diagnostic = candidate_entry_diagnostic(&candidate, &dashboard, &learning, 50.0, 0);
+        let diagnostic = candidate_entry_diagnostic(&candidate, &dashboard, &learning, 50.0, 0, DEFAULT_SCOUT_MAX_ACTIVE_POSITIONS);
         assert!(diagnostic.contains("BTC-USDT bullish"));
         assert!(diagnostic.contains("strength 0.00 <"));
         assert!(diagnostic.contains("score 0.00 <"));
-        let audit = candidate_entry_audit_value(&candidate, &dashboard, &learning, 50.0, SCOUT_MAX_ACTIVE_POSITIONS, "rejected");
+        let audit = candidate_entry_audit_value(&candidate, &dashboard, &learning, 50.0, DEFAULT_SCOUT_MAX_ACTIVE_POSITIONS, DEFAULT_SCOUT_MAX_ACTIVE_POSITIONS, "rejected");
         assert_eq!(audit["selection_mode"], "rejected");
         assert_eq!(audit["checks"]["scout_inventory_available"], false);
         assert!(audit["rejection_reasons"].as_array().unwrap().iter().any(|reason| reason.as_str().unwrap().contains("scout inventory cap")));
@@ -251,12 +256,12 @@ mod candidate_diagnostic_tests {
         let candidate = candidate(0.9, 0.9);
         let dashboard = dashboard_with_evidence();
         let learning = BTreeMap::new();
-        let failures = candidate_entry_failures(&candidate, &review_candidate_entry(&candidate, &dashboard, &learning, 50.0, 0), 0);
+        let failures = candidate_entry_failures(&candidate, &review_candidate_entry(&candidate, &dashboard, &learning, 50.0, 0, DEFAULT_SCOUT_MAX_ACTIVE_POSITIONS), 0);
         assert!(failures.is_empty(), "{failures:?}");
-        let audit = candidate_entry_audit_value(&candidate, &dashboard, &learning, 50.0, 0, "strict");
+        let audit = candidate_entry_audit_value(&candidate, &dashboard, &learning, 50.0, 0, DEFAULT_SCOUT_MAX_ACTIVE_POSITIONS, "strict");
         assert_eq!(audit["checks"]["strict_walk_forward_pass"], true);
         assert_eq!(audit["checks"]["scout_strength_pass"], true);
         assert!(audit["rejection_reasons"].as_array().unwrap().is_empty());
-        assert!(candidate_entry_diagnostic(&candidate, &dashboard, &learning, 50.0, 0).contains("did not pass combined entry checks"));
+        assert!(candidate_entry_diagnostic(&candidate, &dashboard, &learning, 50.0, 0, DEFAULT_SCOUT_MAX_ACTIVE_POSITIONS).contains("did not pass combined entry checks"));
     }
 }

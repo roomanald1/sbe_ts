@@ -603,6 +603,44 @@ fn insight_parameter_probe(
     if candidates.is_empty() {
         return None;
     }
+    // Give Donchian strategies a clean, meaningfully different lookback arm
+    // every other day. Their normal multi-parameter probes change two values
+    // together by one step, which cannot tell us whether a shorter breakout
+    // window alone would have caught a move.
+    if day % 2 == 0 {
+        if let Some((key, current, min, max, step)) = candidates
+            .iter()
+            .find(|(key, _, _, _, _)| key == "breakout_lookback_days")
+        {
+            let delta = (((max - min) / 10.0 / step).round().max(1.0)) * step;
+            let preferred = current - delta;
+            let value = if preferred >= *min && preferred <= *max {
+                preferred
+            } else {
+                current + delta
+            };
+            if value >= *min && value <= *max && (value - current).abs() >= step * 0.5 {
+                let mut probe_profiles = profiles.clone();
+                let matching_profile = probe_profiles.as_array_mut()?.iter_mut().find(|profile| {
+                    profile.get("symbol").and_then(serde_json::Value::as_str)
+                        == Some(profile_symbol)
+                        && profile.get("strategy").and_then(serde_json::Value::as_str)
+                            == Some(strategy)
+                })?;
+                let matching_parameter = matching_profile
+                    .get_mut("parameters")?
+                    .as_array_mut()?
+                    .iter_mut()
+                    .find(|parameter| {
+                        parameter.get("key").and_then(serde_json::Value::as_str)
+                            == Some(key.as_str())
+                    })?;
+                matching_parameter["value"] = serde_json::json!(value);
+                let parameters = insight_profile_parameters(&probe_profiles, profile_symbol, strategy);
+                return Some((key.clone(), value, parameters, probe_profiles));
+            }
+        }
+    }
     let stable_hash = profile_symbol.bytes().chain(strategy.bytes()).fold(2_166_136_261_u64, |hash, byte| {
         hash.wrapping_mul(16_777_619) ^ u64::from(byte)
     });
@@ -940,6 +978,9 @@ fn insight_daily_batch(
                 probe_decision["scout_parameter_profile_symbol"] = serde_json::json!(
                     if matches!(strategy.as_str(), "risk-adjusted-trend-portfolio" | "risk-adjusted-monthly-momentum") { "BTC-USDT" } else { symbol }
                 );
+                // Preserve the unmodified decision so AutoTrader can simulate
+                // this probe beside its baseline on the same candle snapshot.
+                probe_decision["scout_parameter_baseline_decision"] = decision.clone();
                 probe_decision["scout_parameter_key"] = serde_json::json!(probe_key);
                 probe_decision["scout_parameter_value"] = serde_json::json!(probe_value);
                 probe_decision["btc_close"] = serde_json::json!(probe_btc.map(|regime| regime.close));
@@ -1123,8 +1164,9 @@ mod donchian_20_btc200_tests {
         assert_eq!(generated.len(), DAILY_PAIRS.len() + 1);
         let probe = generated.iter().find(|signal| signal["strategy_decision"]["scout_parameter_probe"] == true).unwrap();
         assert_eq!(probe["strategy_decision"]["scout_parameter_key"], "breakout_lookback_days");
-        assert_eq!(probe["strategy_decision"]["scout_parameter_value"], 21.0);
-        assert_eq!(probe["strategy_decision"]["primary_level"], 110.0);
+        assert_eq!(probe["strategy_decision"]["scout_parameter_value"], 14.0);
+        assert_eq!(probe["strategy_decision"]["scout_parameter_baseline_decision"]["strategy_parameters"]["breakout_lookback_days"], 20.0);
+        assert_eq!(probe["strategy_decision"]["primary_level"], 100.0);
         assert!(generated.iter().all(|signal| signal["strategy_candidate"] == true));
         assert!(batch["snapshot"]["active_strategy_symbols"].as_array().unwrap().is_empty());
         assert!(generated.iter().any(|signal| signal["strategy"] == "donchian-20-btc200"
@@ -1209,7 +1251,7 @@ mod strategy_parameter_probe_tests {
     use super::*;
 
     #[test]
-    fn probes_two_parameters_as_a_single_profile_variant() {
+    fn probes_a_shorter_breakout_lookback_without_changing_other_parameters() {
         let profiles = serde_json::json!([{
             "symbol": "ETH-USDT",
             "strategy": "donchian-20-sma200",
@@ -1219,15 +1261,32 @@ mod strategy_parameter_probe_tests {
             ]
         }]);
         let probe = insight_parameter_probe(&profiles, "ETH-USDT", "donchian-20-sma200", 2).unwrap();
-        assert!(probe.0.starts_with("combo:"));
-        assert_eq!(probe.1, 0.0);
+        assert_eq!(probe.0, "breakout_lookback_days");
+        assert_eq!(probe.1, 17.0);
         let changed = probe.3[0]["parameters"].as_array().unwrap().iter()
             .filter(|parameter| parameter["value"] != profiles[0]["parameters"][
                 if parameter["key"] == "breakout_lookback_days" { 0 } else { 1 }
             ]["value"])
             .count();
-        assert_eq!(changed, 2);
-        assert_eq!(probe.2["breakout_lookback_days"], 19.0);
+        assert_eq!(changed, 1);
+        assert_eq!(probe.2["breakout_lookback_days"], 17.0);
+        assert_eq!(probe.2["breakout_entry_distance_percent"], 0.5);
+    }
+
+    #[test]
+    fn continues_testing_other_parameter_combinations_between_lookback_arms() {
+        let profiles = serde_json::json!([{
+            "symbol": "ETH-USDT",
+            "strategy": "donchian-20-sma200",
+            "parameters": [
+                {"key": "breakout_lookback_days", "value": 20.0, "min": 5.0, "max": 30.0, "step": 1.0},
+                {"key": "breakout_entry_distance_percent", "value": 0.5, "min": 0.0, "max": 2.0, "step": 0.1}
+            ]
+        }]);
+        let probe = insight_parameter_probe(&profiles, "ETH-USDT", "donchian-20-sma200", 3).unwrap();
+        assert!(probe.0.starts_with("combo:"));
+        assert_eq!(probe.1, 0.0);
+        assert_eq!(probe.2.len(), 2);
     }
 
     #[test]
@@ -1243,9 +1302,9 @@ mod strategy_parameter_probe_tests {
         let up = insight_parameter_probe(&profiles, "ETH-USDT", "donchian-20-sma200", 2).unwrap();
         let down = insight_parameter_probe(&profiles, "ETH-USDT", "donchian-20-sma200", 3).unwrap();
         assert_eq!(up.0, "breakout_lookback_days");
-        assert_eq!(up.1, 21.0);
+        assert_eq!(up.1, 17.0);
         assert_eq!(down.1, 19.0);
-        assert_eq!(up.2["breakout_lookback_days"], 21.0);
-        assert_eq!(up.3[0]["parameters"][0]["value"], 21.0);
+        assert_eq!(up.2["breakout_lookback_days"], 17.0);
+        assert_eq!(up.3[0]["parameters"][0]["value"], 17.0);
     }
 }

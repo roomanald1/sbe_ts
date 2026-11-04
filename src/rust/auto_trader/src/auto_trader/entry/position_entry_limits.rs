@@ -60,10 +60,11 @@ fn signal_position_block_reason(
         + pending_entry_position_count_for_category(settings, category);
     let strategy_position = settings.strategy_positions.get(signal_key)
         .and_then(|lots| lots.get(strategy_key))
-        .filter(|position| position.quantity.abs() > 1e-12)
+        .filter(|position| position.quantity.abs() > 1e-12 && !position.scout_entry)
         .or_else(|| settings.positions.get(signal_key)
             .filter(|position| settings.strategy_positions.is_empty()
                 && position.quantity.abs() > 1e-12
+                && !position.scout_entry
                 && position.strategy.as_deref() == Some(strategy_key)));
     let already_open = strategy_position.is_some();
     if !already_open && !portfolio_rebalance {
@@ -94,7 +95,7 @@ fn signal_position_block_reason(
     let signal_side = if signal.direction == "bullish" { "buy" } else { "sell" };
     let pending_entries = settings.orders.iter().filter(|order| {
         order.symbol == signal_key
-            && matches!(order.purpose.as_str(), "signal" | "scout")
+            && order.purpose == "signal"
             && matches!(
             order.status.as_str(),
             "submitting" | "accepted" | "resting" | "partially_filled"
@@ -110,7 +111,7 @@ fn signal_position_block_reason(
         }
     }
     if let Some(position) = settings.positions.get(signal_key)
-        .filter(|position| position.quantity.abs() > 1e-12)
+        .filter(|position| position.quantity.abs() > 1e-12 && !position.scout_entry)
     {
         let signal_quantity = if signal.direction == "bullish" { 1.0 } else { -1.0 };
         if position.quantity.signum() != signal_quantity && !portfolio_rebalance {

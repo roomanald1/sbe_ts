@@ -23,7 +23,11 @@ fn start_signal_feed(
 ) -> broadcast::Sender<Bytes> {
     let price_sender = price_feeds
         .entry(instrument.to_owned())
-        .or_insert_with(|| broadcast::channel(64).0)
+        .or_insert_with(|| {
+            let sender = broadcast::channel(64).0;
+            crate::metrics::record_queue_depth(&format!("signal_prices/{instrument}"), 0);
+            sender
+        })
         .value()
         .clone();
     let price_receiver = price_sender.subscribe();
@@ -34,6 +38,7 @@ fn start_signal_feed(
         dashmap::mapref::entry::Entry::Occupied(entry) => (entry.get().clone(), false),
         dashmap::mapref::entry::Entry::Vacant(entry) => {
             let (sender, _) = broadcast::channel(64);
+            crate::metrics::record_queue_depth("signal_feeds", 0);
             entry.insert(sender.clone());
             (sender, true)
         }
@@ -56,15 +61,18 @@ async fn run_signal_feed(
         tokio::select! {
             incoming = prices.recv() => match incoming {
                 Ok(bytes) if has_symbol(&bytes, &instrument) => {
+                    crate::metrics::record_queue_depth(&format!("signal_prices/{instrument}"), prices.len());
                     if bytes.len() >= 64 && read_f64(&bytes, 40).is_some() && read_f64(&bytes, 48).is_some() {
                         let mut message = BytesMut::with_capacity(bytes.len() + 8);
                         message.extend_from_slice(&bytes);
                         message.extend_from_slice(&now_ms().to_le_bytes());
                         let _ = events.send(message.freeze());
+                        crate::metrics::record_queue_depth("signal_events", events.len());
                     }
                 }
                 Ok(_) => {},
                 Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                    crate::metrics::record_queue_lagged(&format!("signal_prices/{instrument}"), skipped);
                     crate::service_log!("WARN", "Signal price feed for {instrument} lagged; skipped {skipped} ticker updates");
                 }
                 Err(broadcast::error::RecvError::Closed) => break,
@@ -75,6 +83,7 @@ async fn run_signal_feed(
                     if has_symbol(bytes, &instrument) {
                         if bytes.len() >= 97 {
                             let _ = events.send(Bytes::clone(payload.data().expect("checked payload data")));
+                            crate::metrics::record_queue_depth("signal_events", events.len());
                         }
                     }
                 }
@@ -84,6 +93,7 @@ async fn run_signal_feed(
                     let bytes = bytes.as_ref();
                     if has_symbol(bytes, &instrument) && bytes.len() >= 272 {
                         let _ = events.send(Bytes::clone(payload.data().expect("checked payload data")));
+                        crate::metrics::record_queue_depth("signal_events", events.len());
                     }
                 }
             },

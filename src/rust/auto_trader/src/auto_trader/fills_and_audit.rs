@@ -91,6 +91,9 @@ fn apply_auto_fill(
             position.entry_order_type = order_type.to_owned();
             position.entry_context = context.to_owned();
             position.scout_entry = context.starts_with("scout:");
+        } else if !context.starts_with("scout:") {
+            // The aggregate position is real as soon as any real strategy adds to it.
+            position.scout_entry = false;
         }
         return (0.0, None);
     }
@@ -278,72 +281,83 @@ fn queue_auto_trader_audit(state: &AutoTraderState, payload: serde_json::Value) 
     let is_execution = payload
         .get("stage")
         .and_then(serde_json::Value::as_str)
-        .is_some_and(|stage| stage == "entry" || stage.starts_with("exit"));
-    if is_execution {
-        // Keep execution events separate so decision bursts cannot crowd them out
-        // or delay position protection while the audit service is unavailable.
-        if state.execution_audit_tx.send(payload).is_err() {
-            crate::service_log!(
-                "ERROR",
-                "Auto-trader execution audit writer stopped; event could not be queued"
-            );
+        .is_some_and(|stage| {
+            stage == "entry" || stage == "dated_carry_entry" || stage.starts_with("exit")
+        });
+    let queue = if is_execution {
+        &state.execution_audit_tx
+    } else {
+        &state.audit_tx
+    };
+    match queue.enqueue(payload) {
+        AuditEnqueueResult::Queued | AuditEnqueueResult::Coalesced => {}
+        AuditEnqueueResult::EvictedOld | AuditEnqueueResult::Dropped => {
+            let bit = if is_execution { 2 } else { 1 };
+            state.audit_health.fetch_and(!bit, Ordering::Relaxed);
+            if !state.audit_failure_latched.swap(true, Ordering::Relaxed) {
+                crate::service_log!("ERROR", "Auto-trader audit queue reached capacity; an audit event was dropped and new signal entries are paused until restart");
+            }
         }
-    } else if state.audit_tx.send(payload).is_err() {
-        crate::service_log!(
-            "ERROR",
-            "Auto-trader decision audit writer stopped; event could not be queued"
-        );
     }
 }
 
 async fn store_auto_trader_audit(client: &reqwest::Client, payload: &serde_json::Value) -> bool {
     let base = std::env::var("INSIGHTS_URL").unwrap_or_else(|_| "http://127.0.0.1:3004".into());
     let url = format!("{base}/signals/auto-trader-audit");
-    for attempt in 0..3 {
-        match client
-            .post(&url)
-            .timeout(Duration::from_secs(2))
-            .json(payload)
-            .send()
-            .await
-        {
-            Ok(response) if response.status().is_success() => return true,
-            Ok(response) => {
-                let status = response.status();
-                if attempt == 2 {
-                    crate::service_log!(
-                        "ERROR",
-                        "Auto-trader audit write failed after 3 attempts with status {}",
-                        status
-                    );
-                }
-            }
-            Err(error) if attempt == 2 => {
-                crate::service_log!(
-                    "ERROR",
-                    "Auto-trader audit write failed after 3 attempts: {}",
-                    error
-                );
-            }
-            Err(_) => {}
+    match client
+        .post(&url)
+        .timeout(Duration::from_secs(2))
+        .json(payload)
+        .send()
+        .await
+    {
+        Ok(response) if response.status().is_success() => true,
+        Ok(response) => {
+            crate::service_log!("ERROR", "Auto-trader audit write failed with status {}", response.status());
+            false
         }
-        tokio::time::sleep(Duration::from_millis(150 * (attempt + 1))).await;
+        Err(error) => {
+            crate::service_log!("ERROR", "Auto-trader audit write failed: {error}");
+            false
+        }
     }
-    false
 }
 
-async fn store_execution_audit_until_saved(client: &reqwest::Client, payload: &serde_json::Value) {
+async fn store_execution_audit_until_saved(
+    client: &reqwest::Client,
+    payload: &serde_json::Value,
+    audit_health: &AtomicU64,
+    healthy_bit: u64,
+) {
     let mut retry_delay = Duration::from_secs(1);
     while !store_auto_trader_audit(client, payload).await {
+        if audit_health.fetch_and(!healthy_bit, Ordering::Relaxed) & healthy_bit != 0 {
+            crate::service_log!("ERROR", "Auto-trader audit persistence unavailable; new signal entries are paused while queued events retry");
+        }
         tokio::time::sleep(retry_delay).await;
         retry_delay = (retry_delay * 2).min(Duration::from_secs(30));
     }
 }
 
-
 #[cfg(test)]
 mod strategy_lot_pnl_tests {
     use super::*;
+
+    #[test]
+    fn real_fill_turns_scout_only_aggregate_into_real_position() {
+        let mut positions = BTreeMap::new();
+        apply_auto_fill(
+            &mut positions, "ETH-USDT", "buy", 1.0, 100.0, 0.0,
+            "Limit", "scout:shadow", true, None,
+        );
+        assert!(positions["ETH-USDT"].scout_entry);
+
+        apply_auto_fill(
+            &mut positions, "ETH-USDT", "buy", 1.0, 101.0, 0.0,
+            "Limit", "live-momentum:strict", true, None,
+        );
+        assert!(!positions["ETH-USDT"].scout_entry);
+    }
 
     #[test]
     fn closing_return_uses_the_strategy_lot_basis() {

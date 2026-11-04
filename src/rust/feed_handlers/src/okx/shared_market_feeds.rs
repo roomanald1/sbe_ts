@@ -39,7 +39,13 @@ pub(crate) struct MarketFeedSubscription {
 
 impl MarketFeedSubscription {
     pub(crate) async fn recv(&mut self) -> std::result::Result<Bytes, broadcast::error::RecvError> {
-        self.receiver.recv().await
+        let result = self.receiver.recv().await;
+        let queue = format!("shared_{}/{}", self.feed.kind.label(), self.instrument);
+        crate::metrics::record_queue_depth(&queue, self.receiver.len());
+        if let Err(broadcast::error::RecvError::Lagged(skipped)) = result {
+            crate::metrics::record_queue_lagged(&queue, skipped);
+        }
+        result
     }
 }
 
@@ -93,6 +99,10 @@ impl SharedMarketFeed {
                     MarketFeedKind::Books => SHARED_BOOK_UPDATE_CAPACITY,
                 });
                 let receiver = updates.subscribe();
+                crate::metrics::record_queue_depth(
+                    &format!("shared_{}/{}", self.kind.label(), instrument),
+                    updates.len(),
+                );
                 entry.insert(MarketFeedEntry {
                     updates,
                     subscribers: 1,
@@ -117,6 +127,7 @@ impl SharedMarketFeed {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         if let Some(entry) = entries.get(instrument) {
             let _ = entry.updates.send(update);
+            crate::metrics::record_queue_depth(&format!("shared_{}/{}", self.kind.label(), instrument), entry.updates.len());
         }
     }
 }

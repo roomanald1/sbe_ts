@@ -20,9 +20,11 @@ pub async fn serve() -> Result<()> {
             .collect::<HashSet<_>>(),
     );
     let (price_updates, _) = broadcast::channel::<Bytes>(PRICE_UPDATE_CAPACITY);
+    crate::metrics::record_queue_depth("price_updates", price_updates.len());
     let sub_sender = price_updates.clone();
     let sub = subscribe(&instrument_data, sub_sender);
     let (ticker_batches, _) = broadcast::channel::<Bytes>(256);
+    crate::metrics::record_queue_depth("ticker_batches", ticker_batches.len());
     let initial_usd_rates = Bytes::from_static(br#"{"rates":{"USD":1.0},"updated_at":0,"updated_at_by_currency":{"USD":0}}"#);
     let (usd_rate_snapshot, _) = watch::channel(initial_usd_rates);
     tokio::spawn(run_usd_rate_stream(usd_rate_snapshot.clone()));
@@ -31,6 +33,7 @@ pub async fn serve() -> Result<()> {
     let signal_feeds = SIGNAL_FEEDS.get_or_init(|| Arc::new(DashMap::new())).clone();
     let signal_price_feeds = SIGNAL_PRICE_FEEDS.get_or_init(|| Arc::new(DashMap::new())).clone();
     let (signal_events, _) = broadcast::channel::<Bytes>(65_536);
+    crate::metrics::record_queue_depth("signal_events", signal_events.len());
     let mut ticker_router = price_updates.subscribe();
     let routed_prices = Arc::clone(&signal_price_feeds);
     tokio::spawn(async move {
@@ -43,6 +46,7 @@ pub async fn serve() -> Result<()> {
                     }
                 }
                 Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                    crate::metrics::record_queue_lagged("price_updates", skipped);
                     crate::service_log!("WARN", "Signal price router lagged; skipped {skipped} ticker updates");
                 }
                 Err(broadcast::error::RecvError::Closed) => break,
@@ -65,9 +69,13 @@ pub async fn serve() -> Result<()> {
                                 &mut batch,
                                 Vec::with_capacity(TICKER_BATCH_CAPACITY),
                             )));
+                            crate::metrics::record_queue_depth("ticker_batches", ticker_batch_output.len());
                         }
                     }
-                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                        crate::metrics::record_queue_lagged("price_updates", skipped);
+                        continue;
+                    },
                     Err(broadcast::error::RecvError::Closed) => break,
                 },
                 _ = interval.tick() => {
@@ -76,6 +84,7 @@ pub async fn serve() -> Result<()> {
                             &mut batch,
                             Vec::with_capacity(TICKER_BATCH_CAPACITY),
                         )));
+                        crate::metrics::record_queue_depth("ticker_batches", ticker_batch_output.len());
                     }
                 }
             }

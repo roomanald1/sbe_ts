@@ -159,21 +159,35 @@ pub fn router() -> Router {
         .map(|value| value == "true")
         .unwrap_or(settings.enabled);
     settings.enabled = enabled;
-    let (audit_tx, mut audit_rx) = mpsc::unbounded_channel();
-    let (execution_audit_tx, mut execution_audit_rx) = mpsc::unbounded_channel();
+    let audit_tx = AuditQueue::new(DECISION_AUDIT_QUEUE_CAPACITY);
+    let execution_audit_tx = AuditQueue::new(EXECUTION_AUDIT_QUEUE_CAPACITY);
+    let audit_health = Arc::new(AtomicU64::new(3));
+    let audit_failure_latched = Arc::new(AtomicBool::new(false));
     let audit_client = reqwest::Client::builder()
         .timeout(Duration::from_secs(5))
         .build()
         .unwrap_or_else(|_| reqwest::Client::new());
     let execution_audit_client = audit_client.clone();
+    let execution_queue = execution_audit_tx.clone();
+    let execution_health = Arc::clone(&audit_health);
     tokio::spawn(async move {
-        while let Some(payload) = execution_audit_rx.recv().await {
-            store_execution_audit_until_saved(&execution_audit_client, &payload).await;
+        loop {
+            let payload = execution_queue.recv().await;
+            store_execution_audit_until_saved(&execution_audit_client, &payload, &execution_health, 2).await;
+            if execution_queue.depth() == 0 {
+                execution_health.fetch_or(2, Ordering::Relaxed);
+            }
         }
     });
+    let decision_queue = audit_tx.clone();
+    let decision_health = Arc::clone(&audit_health);
     tokio::spawn(async move {
-        while let Some(payload) = audit_rx.recv().await {
-            store_execution_audit_until_saved(&audit_client, &payload).await;
+        loop {
+            let payload = decision_queue.recv().await;
+            store_execution_audit_until_saved(&audit_client, &payload, &decision_health, 1).await;
+            if decision_queue.depth() == 0 {
+                decision_health.fetch_or(1, Ordering::Relaxed);
+            }
         }
     });
     let carry_path = dated_carry_path(&json_settings_path);
@@ -206,6 +220,8 @@ pub fn router() -> Router {
         signal_book_prewarms: Arc::new(Mutex::new(BTreeMap::new())),
         audit_tx,
         execution_audit_tx,
+        audit_health,
+        audit_failure_latched,
         gap_summary: Arc::new(std::sync::Mutex::new(GapSummary::default())),
         insight_processing_ms: Arc::new(Mutex::new(Vec::new())),
         cycle_lock_wait_ms: Arc::new(Mutex::new(BTreeMap::new())),
@@ -402,8 +418,13 @@ async fn receive_shadow_learning_outcome(
         || !outcome.learning_context.starts_with("scout:")
         || !outcome.simulated_net_pnl_usd.is_finite()
         || outcome.symbol.is_empty()
-        || !matches!(outcome.exit_scenario.as_str(), "strategy" | "tight")
+        || !matches!(outcome.exit_scenario.as_str(), "strategy" | "tight" | "wide")
         || outcome.scout_parameter_key.is_some() != outcome.scout_parameter_value.is_some()
+        || outcome.scout_comparison_id.is_some() != outcome.scout_comparison_role.is_some()
+        || outcome.scout_comparison_id.as_ref().is_some_and(|id| id.is_empty() || id.len() > 240)
+        || outcome.scout_comparison_role.as_deref().is_some_and(|role| !matches!(role, "baseline" | "variant"))
+        || (outcome.scout_comparison_role.as_deref() == Some("variant") && outcome.scout_parameter_key.is_none())
+        || (outcome.scout_comparison_role.as_deref() == Some("baseline") && outcome.scout_parameter_key.is_some())
         || outcome.signal_timestamp_ms > outcome.evaluated_timestamp_ms
         || outcome.evaluated_timestamp_ms > current_time_ms().saturating_add(5_000)
         || current_time_ms().saturating_sub(outcome.signal_timestamp_ms) > 7 * 86_400_000
@@ -458,7 +479,7 @@ async fn receive_shadow_learning_outcome(
     } else {
         "flat"
     };
-    let outcome_audit = serde_json::json!({
+    let mut outcome_audit = serde_json::json!({
         "record_schema_version": 1,
         "decision_id": format!("{}|outcome", outcome.decision_id),
         "shadow_decision_id": outcome.decision_id.clone(),
@@ -476,6 +497,8 @@ async fn receive_shadow_learning_outcome(
         "scout_parameter_key": outcome.scout_parameter_key,
         "scout_parameter_value": outcome.scout_parameter_value,
         "scout_parameter_profile_symbol": outcome.scout_parameter_profile_symbol,
+        "scout_comparison_id": outcome.scout_comparison_id,
+        "scout_comparison_role": outcome.scout_comparison_role,
     });
     let mut settings = state.settings.lock().await;
     if settings.shadow_learning_outcome_ids.contains(&outcome.decision_id) {
@@ -484,25 +507,67 @@ async fn receive_shadow_learning_outcome(
         queue_auto_trader_audit(&state, outcome_audit);
         return Ok(StatusCode::NO_CONTENT);
     }
-    if let Some(probe_key) = probe_key {
-        // Keep the exact probe cohort for parameter attribution.
+    let mut paired_delta_percent = None;
+    if let (Some(comparison_id), Some(role)) = (
+        outcome.scout_comparison_id.as_deref(), outcome.scout_comparison_role.as_deref(),
+    ) {
+        let pair = settings.scout_comparisons.entry(comparison_id.to_owned()).or_default();
+        pair.updated_at_ms = outcome.evaluated_timestamp_ms;
+        match role {
+            "baseline" => pair.baseline_return_percent = Some(outcome.net_return_percent),
+            "variant" => {
+                pair.variant_return_percent = Some(outcome.net_return_percent);
+                if let Some(key) = probe_key.as_ref() { pair.learning_key = key.clone(); }
+            }
+            _ => unreachable!("comparison role validated"),
+        }
+        if let (Some(baseline), Some(variant)) =
+            (pair.baseline_return_percent, pair.variant_return_percent)
+        {
+            let delta = variant - baseline;
+            paired_delta_percent = Some(delta);
+            if !pair.learning_key.is_empty() {
+                let paired_key = if pair.learning_key.starts_with("probe_combo:") {
+                    pair.learning_key.replacen("probe_combo:", "paired_probe_combo:", 1)
+                } else {
+                    pair.learning_key.replacen("probe:", "paired_probe:", 1)
+                };
+                record_learning_outcome(settings.learning.entry(paired_key).or_default(), delta);
+            }
+            settings.scout_comparisons.remove(comparison_id);
+        }
+        settings.scout_comparisons.retain(|_, pair| {
+            outcome.evaluated_timestamp_ms.saturating_sub(pair.updated_at_ms) <= 7 * 86_400_000
+        });
+        while settings.scout_comparisons.len() > 20_000 {
+            let Some(oldest) = settings.scout_comparisons.iter()
+                .min_by_key(|(_, pair)| pair.updated_at_ms).map(|(key, _)| key.clone()) else { break; };
+            settings.scout_comparisons.remove(&oldest);
+        }
+    } else if let Some(probe_key) = probe_key {
         record_learning_outcome(settings.learning.entry(probe_key).or_default(), outcome.simulated_net_pnl_usd);
     } else {
         let stats = settings.learning.entry(outcome.learning_context).or_default();
         record_learning_outcome(stats, outcome.simulated_net_pnl_usd);
     }
+    if let Some(delta) = paired_delta_percent {
+        outcome_audit["paired_delta_percent"] = serde_json::json!(delta);
+    }
     // Every scout exit also contributes to the strategy-level profile, including
     // parameter-probe samples, so shadow results can ease sparse trade learning.
+    let contributes_to_base_profile = outcome.scout_comparison_id.is_none();
     let strategy_profile_symbol = outcome.scout_parameter_profile_symbol.as_deref().unwrap_or(&outcome.symbol);
     let strategy_key = strategy_shadow_learning_key(
         strategy_profile_symbol,
         strategy.as_str(),
         &outcome.exit_scenario,
     );
-    record_learning_outcome(
-        settings.learning.entry(strategy_key).or_default(),
-        outcome.simulated_net_pnl_usd,
-    );
+    if contributes_to_base_profile {
+        record_learning_outcome(
+            settings.learning.entry(strategy_key).or_default(),
+            outcome.simulated_net_pnl_usd,
+        );
+    }
     if !outcome.sample_group_id.is_empty() {
         let group_finished = settings.shadow_sample_active_scenarios
             .get_mut(&outcome.sample_group_id)

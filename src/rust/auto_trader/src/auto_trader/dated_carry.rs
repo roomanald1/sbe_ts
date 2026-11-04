@@ -412,59 +412,68 @@ async fn receive_dated_carry_signal(
                     position.spot_symbol == candidate.spot_symbol && position.status == "open"
                 })
             {
-                let spot_entry = candidate.spot_ask * (1.0 + CARRY_ENTRY_SLIPPAGE);
-                let future_entry = candidate.future_bid * (1.0 - CARRY_ENTRY_SLIPPAGE);
-                if candidate.quantity * spot_entry > book.max_spot_notional_usdt + 0.01 {
-                    return Err((StatusCode::BAD_REQUEST, "Carry signal exceeds the paper size limit".into()));
-                }
-                let fees = candidate.quantity * (0.001 * spot_entry + 0.0005 * future_entry);
-                audit_payload = Some(serde_json::json!({
-                    "decision_id": format!("dated-carry:{}", candidate.future_symbol),
-                    "stage": "dated_carry_entry",
-                    "timestamp": now_ms,
-                    "symbol": candidate.spot_symbol,
-                    "future_symbol": candidate.future_symbol,
-                    "quantity": candidate.quantity,
-                    "spot_entry_price": spot_entry,
-                    "future_entry_price": future_entry,
-                    "entry_fees": fees,
-                    "signal_basis_percent": candidate.basis_percent,
-                }));
-                let mut position = DatedCarryPosition {
-                    spot_symbol: candidate.spot_symbol,
-                    future_symbol: candidate.future_symbol,
-                    expiry_ms: candidate.expiry_ms,
-                    entry_ms: now_ms,
-                    quantity: candidate.quantity,
-                    spot_entry_price: spot_entry,
-                    future_entry_price: future_entry,
-                    entry_fees: fees,
-                    status: "open".into(),
-                    scout_parameter_key: probe.as_ref().and_then(|(key, _, _)|
-                        (probe_entry_decision == StrategyDecision::Enter).then(|| key.clone())),
-                    scout_parameter_value: probe.as_ref().and_then(|(_, value, _)|
-                        (probe_entry_decision == StrategyDecision::Enter).then_some(*value)),
-                    spot_exit_twap: None,
-                    settlement_price: None,
-                    net_pnl_usdt: None,
-                    settlement_source: None,
-                    spot_mark_bid: None,
-                    future_mark_ask: None,
-                    spot_leg_pnl_usdt: None,
-                    future_leg_pnl_usdt: None,
-                    estimated_exit_fees_usdt: None,
-                    estimated_exit_slippage_usdt: None,
-                    marked_net_pnl_usdt: None,
-                    mark_checked_at_ms: None,
-                };
-                update_dated_carry_mark(&mut position, candidate.spot_bid, candidate.future_ask, emitted_at_ms);
-                book.positions.push(position);
-                if let Some((parameter, value, _)) = probe.as_ref()
-                    .filter(|_| probe_entry_decision != StrategyDecision::Enter)
+                if state.audit_health.load(Ordering::Relaxed) != 3
+                    || state.audit_failure_latched.load(Ordering::Relaxed)
                 {
-                    parameter_feedback.push((spot_profile_symbol.clone(), parameter.clone(), format!("{value:.8}"), 0.0));
+                    book.last_error = Some(
+                        "Audit persistence unavailable; new dated-carry entries are paused".into(),
+                    );
+                    changed = true;
+                } else {
+                    let spot_entry = candidate.spot_ask * (1.0 + CARRY_ENTRY_SLIPPAGE);
+                    let future_entry = candidate.future_bid * (1.0 - CARRY_ENTRY_SLIPPAGE);
+                    if candidate.quantity * spot_entry > book.max_spot_notional_usdt + 0.01 {
+                        return Err((StatusCode::BAD_REQUEST, "Carry signal exceeds the paper size limit".into()));
+                    }
+                    let fees = candidate.quantity * (0.001 * spot_entry + 0.0005 * future_entry);
+                    audit_payload = Some(serde_json::json!({
+                        "decision_id": format!("dated-carry:{}", candidate.future_symbol),
+                        "stage": "dated_carry_entry",
+                        "timestamp": now_ms,
+                        "symbol": candidate.spot_symbol,
+                        "future_symbol": candidate.future_symbol,
+                        "quantity": candidate.quantity,
+                        "spot_entry_price": spot_entry,
+                        "future_entry_price": future_entry,
+                        "entry_fees": fees,
+                        "signal_basis_percent": candidate.basis_percent,
+                    }));
+                    let mut position = DatedCarryPosition {
+                        spot_symbol: candidate.spot_symbol,
+                        future_symbol: candidate.future_symbol,
+                        expiry_ms: candidate.expiry_ms,
+                        entry_ms: now_ms,
+                        quantity: candidate.quantity,
+                        spot_entry_price: spot_entry,
+                        future_entry_price: future_entry,
+                        entry_fees: fees,
+                        status: "open".into(),
+                        scout_parameter_key: probe.as_ref().and_then(|(key, _, _)|
+                            (probe_entry_decision == StrategyDecision::Enter).then(|| key.clone())),
+                        scout_parameter_value: probe.as_ref().and_then(|(_, value, _)|
+                            (probe_entry_decision == StrategyDecision::Enter).then_some(*value)),
+                        spot_exit_twap: None,
+                        settlement_price: None,
+                        net_pnl_usdt: None,
+                        settlement_source: None,
+                        spot_mark_bid: None,
+                        future_mark_ask: None,
+                        spot_leg_pnl_usdt: None,
+                        future_leg_pnl_usdt: None,
+                        estimated_exit_fees_usdt: None,
+                        estimated_exit_slippage_usdt: None,
+                        marked_net_pnl_usdt: None,
+                        mark_checked_at_ms: None,
+                    };
+                    update_dated_carry_mark(&mut position, candidate.spot_bid, candidate.future_ask, emitted_at_ms);
+                    book.positions.push(position);
+                    if let Some((parameter, value, _)) = probe.as_ref()
+                        .filter(|_| probe_entry_decision != StrategyDecision::Enter)
+                    {
+                        parameter_feedback.push((spot_profile_symbol.clone(), parameter.clone(), format!("{value:.8}"), 0.0));
+                    }
+                    changed = true;
                 }
-                changed = true;
             }
         }
         DatedCarrySignal::Settlement {
@@ -565,9 +574,7 @@ async fn receive_dated_carry_signal(
         request_settings_persist(&state)?;
     }
     if let Some(payload) = audit_payload {
-        if let Err(error) = state.audit_tx.send(payload) {
-            crate::service_log!("ERROR", "Dated carry paper audit writer stopped: {error}");
-        }
+        queue_auto_trader_audit(&state, payload);
     }
     Ok(StatusCode::ACCEPTED)
 }

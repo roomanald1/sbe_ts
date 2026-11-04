@@ -1,10 +1,18 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { AutoTraderOutcomesModel } from './AutoTraderOutcomesModel';
+import { AutoTraderOutcomesModel, resolveLedgerOrder } from './AutoTraderOutcomesModel';
 import { buildLegacyLedgerOutcomes } from './legacy_ledger_outcomes';
 import type { PositionTrade } from './PositionTypes';
 
 describe('AutoTraderOutcomesModel', () => {
+  it('resolves a protective barrier fill to its strategy entry instance', () => {
+    const stop = { timestamp: 200, symbol: 'PEPE-USDT', side: 'buy', execution_order_id: 'barrier-200-1', purpose: 'stop-loss', strategy: 'live-vwap-dislocation', filled_quantity: 1 };
+    const entry = { timestamp: 100, symbol: 'PEPE-USDT', side: 'sell', purpose: 'signal', strategy: 'live-vwap-dislocation', decision_id: 'entry-decision', filled_quantity: 1 };
+    const trade: PositionTrade = { id: 'fill-1', symbol: 'PEPE-USDT', side: 'buy', quantity: 1, execution_price: 1, timestamp: 250, parent_order_id: 'barrier-200-1' };
+    const resolved = resolveLedgerOrder(trade, new Map([[String(stop.timestamp), stop]]), [entry, stop]);
+    assert.equal(resolved?.strategy, 'live-vwap-dislocation');
+    assert.equal(resolved?.decision_id, 'entry-decision');
+  });
   it('combines legacy entry and exit fills into realized position cycles', () => {
     const trades: PositionTrade[] = [
       { id: 'buy-win', symbol: 'BTC-USDT', side: 'buy', quantity: 1, execution_price: 100, timestamp: 1, parent_order_id: 'entry-win' },

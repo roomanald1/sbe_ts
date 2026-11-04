@@ -10,6 +10,14 @@ fn status(state: &AutoTraderState, settings: &Settings) -> StatusResponse {
     }
     StatusResponse {
         enabled: state.enabled.load(Ordering::Relaxed),
+        audit_healthy: state.audit_health.load(Ordering::Relaxed) == 3
+            && !state.audit_failure_latched.load(Ordering::Relaxed),
+        audit_failure_latched: state.audit_failure_latched.load(Ordering::Relaxed),
+        decision_audit_queue_depth: state.audit_tx.depth(),
+        execution_audit_queue_depth: state.execution_audit_tx.depth(),
+        audit_coalesced_decisions: state.audit_tx.coalesced.load(Ordering::Relaxed),
+        audit_dropped_events: state.audit_tx.dropped.load(Ordering::Relaxed)
+            + state.execution_audit_tx.dropped.load(Ordering::Relaxed),
         strategy: settings.strategies.first().copied().unwrap_or_default().as_str().to_owned(),
         strategies: settings.strategies.iter().map(|strategy| strategy.as_str().to_owned()).collect(),
         scout_strategies: settings.scout_strategies.iter().map(|strategy| strategy.as_str().to_owned()).collect(),
@@ -21,6 +29,13 @@ fn status(state: &AutoTraderState, settings: &Settings) -> StatusResponse {
         risk_appetite: settings.risk_appetite,
         max_open_positions: settings.max_open_positions,
         max_concurrent_shadow_samples: settings.max_concurrent_shadow_samples,
+        active_shadow_samples: settings.shadow_sample_active_scenarios.len(),
+        active_scout_shadow_samples: settings.shadow_sample_active_scenarios.keys().filter(|group| {
+            group.starts_with("daily-scout-level:")
+                || group.starts_with("live-scout:")
+                || group.starts_with("live-scout-parameter:")
+        }).count(),
+        scout_max_active_positions: settings.scout_max_active_positions,
         max_intraday_open_positions: settings.max_intraday_open_positions,
         max_daily_open_positions: settings.max_daily_open_positions,
         intraday_notional_limit: settings.intraday_notional_limit,

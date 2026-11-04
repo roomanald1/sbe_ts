@@ -413,6 +413,15 @@ async fn prepare_signal_execution_plan(
             });
     }
     let baseline_params = ExecutionParameters {
+        post_only_timeout_minutes: signal
+            .strategy_decision
+            .as_ref()
+            .and_then(|decision| decision.get("strategy_parameters"))
+            .and_then(|parameters| parameters.get("post_only_timeout_minutes"))
+            .and_then(serde_json::Value::as_f64)
+            .filter(|value| value.is_finite() && (1.0..=15.0).contains(value))
+            .or_else(|| strategy_profile.as_ref().and_then(|profile| strategy_profile_value(profile, "post_only_timeout_minutes")))
+            .unwrap_or(5.0) as u64,
         vwap_duration_minutes: settings.vwap_duration_minutes,
         vwap_participation_rate: settings.vwap_participation_percent / 100.0,
         limit_offset_bps: settings.limit_offset_bps,

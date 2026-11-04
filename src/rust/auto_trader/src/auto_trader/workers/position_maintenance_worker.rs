@@ -139,13 +139,14 @@ async fn sync_auto_positions(
         if pending_signal_symbols.contains(&source_position.symbol) {
             continue;
         }
-        let (realized_delta, learning_key, close_audit, closed_out) = {
+        let (realized_delta, learning_key, close_audit, closed_out, scout_entry) = {
             let position = settings
                 .positions
                 .entry(source_position.symbol.clone())
                 .or_default();
             let prior_quantity = position.quantity;
             let prior_average_entry_price = position.average_entry_price;
+            let scout_entry = position.scout_entry;
             let realized_delta = source_position.realized_pnl - position.realized_pnl;
             let learning_key = format!(
                 "{}:{}",
@@ -185,7 +186,7 @@ async fn sync_auto_positions(
                 changed = true;
             }
             position.realized_pnl = source_position.realized_pnl;
-            (realized_delta, learning_key, close_audit, closed_out)
+            (realized_delta, learning_key, close_audit, closed_out, scout_entry)
         };
         if let Some(audit) = close_audit {
             let strategy_lots = settings.strategy_positions
@@ -211,7 +212,7 @@ async fn sync_auto_positions(
             let realized_delta_usd =
                 realized_usd(&settings, &source_position.symbol, realized_delta);
             changed = true;
-            if closed_out {
+            if closed_out && !scout_entry {
                 mark_symbol_reentry_cooldown(&mut settings, &source_position.symbol);
                 // This is a symbol-level reconciliation delta, not one matched
                 // round trip. The old quantity may be a tiny residual and
@@ -291,7 +292,7 @@ async fn sync_auto_positions(
                 }
                 request_settings_persist(state)?;
             }
-            store_execution_audit_until_saved(&client, &payload).await;
+            queue_auto_trader_audit(state, payload);
         } else {
             let audits = external_strategy_close_audits(
                 &symbol,
@@ -347,7 +348,7 @@ async fn sync_auto_positions(
                         request_settings_persist(state)?;
                     }
                 }
-                store_execution_audit_until_saved(&client, &audit).await;
+                queue_auto_trader_audit(state, audit);
             }
         }
     }
