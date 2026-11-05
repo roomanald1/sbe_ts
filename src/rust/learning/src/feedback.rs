@@ -149,7 +149,7 @@ pub(super) async fn accept_feedback(
             parameters,
         );
     } else if matches!(event, FeedbackEvent::TradeOutcome { .. })
-        && should_promote_variant(
+        && should_publish_trade_profile(
             registered_samples,
             registered_positive,
             registered_realized_pnl,
@@ -359,7 +359,11 @@ fn one_sided_90_lower_bound(outcomes: &[f64]) -> Option<f64> {
     Some(mean - critical * (variance / sample_count as f64).sqrt())
 }
 
-pub(super) fn should_promote_variant(samples: usize, positive: usize, net_outcome: f64) -> bool {
+pub(super) fn should_publish_trade_profile(
+    samples: usize,
+    positive: usize,
+    net_outcome: f64,
+) -> bool {
     samples >= 5
         && positive.saturating_mul(2) > samples
         && net_outcome.is_finite()

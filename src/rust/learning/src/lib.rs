@@ -592,11 +592,11 @@ mod tests {
     }
 
     #[test]
-    fn a_parameter_variant_needs_more_positive_than_negative_scouts_to_promote() {
-        assert!(!should_promote_variant(5, 2, 1.0));
-        assert!(!should_promote_variant(5, 3, -0.1));
-        assert!(should_promote_variant(5, 3, 0.1));
-        assert!(!should_promote_variant(4, 4, 1.0));
+    fn trade_profile_statistics_publish_after_repeated_positive_outcomes() {
+        assert!(!should_publish_trade_profile(5, 2, 1.0));
+        assert!(!should_publish_trade_profile(5, 3, -0.1));
+        assert!(should_publish_trade_profile(5, 3, 0.1));
+        assert!(!should_publish_trade_profile(4, 4, 1.0));
     }
 
     #[test]
