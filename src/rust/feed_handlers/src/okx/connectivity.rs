@@ -63,3 +63,17 @@ include!("book_update_helpers.rs");
 include!("okx_connection_loop.rs");
 include!("reconnect_policy.rs");
 include!("shared_market_feeds.rs");
+
+#[cfg(test)]
+mod connection_slot_tests {
+    use super::wait_for_okx_connection_slot;
+    use std::time::{Duration, Instant};
+
+    #[tokio::test]
+    async fn spaces_connection_attempts_by_the_configured_minimum_interval() {
+        wait_for_okx_connection_slot().await;
+        let started = Instant::now();
+        wait_for_okx_connection_slot().await;
+        assert!(started.elapsed() >= Duration::from_millis(350));
+    }
+}

@@ -118,3 +118,42 @@ fn volatility_from_sum(squared_returns: f64, return_count: usize) -> f64 {
     }
 }
 
+#[cfg(test)]
+mod volatility_tracking_tests {
+    use super::{RollingVolatility, volatility_from_sum};
+
+    #[test]
+    fn volatility_is_nan_without_returns_and_uses_root_sum_of_squares() {
+        assert!(volatility_from_sum(0.0, 0).is_nan());
+        assert_eq!(volatility_from_sum(-1.0, 2), 0.0);
+        assert_eq!(volatility_from_sum(0.25, 1), 50.0);
+    }
+
+    #[test]
+    fn updates_replace_same_timestamp_and_ignore_older_samples() {
+        let mut volatility = RollingVolatility::default();
+        assert!(volatility.update(1_000, 100.0).0.is_nan());
+        let first = volatility.update(2_000, 110.0).0;
+        let replaced = volatility.update(2_000, 120.0).0;
+        assert!(replaced > first);
+        assert_eq!(volatility.samples.back(), Some(&(2_000, 120.0)));
+
+        let stale = volatility.update(1_500, 90.0);
+        assert_eq!(volatility.samples.len(), 2);
+        assert_eq!(volatility.samples.back(), Some(&(2_000, 120.0)));
+        assert_eq!(stale, volatility.values(1_500));
+    }
+
+    #[test]
+    fn prunes_returns_outside_their_windows() {
+        let mut volatility = RollingVolatility::default();
+        volatility.update(1_000, 100.0);
+        volatility.update(2_000, 101.0);
+        volatility.update(62_000, 102.0);
+        assert_eq!(volatility.minute_returns.len(), 1);
+        volatility.update(302_001, 103.0);
+        assert_eq!(volatility.window_returns.len(), 2);
+        assert_eq!(volatility.samples.front().unwrap().0, 2_000);
+    }
+}
+

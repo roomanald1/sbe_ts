@@ -220,20 +220,101 @@ async fn send_market_feed_request(
     operation: &str,
     instruments: &[String],
 ) -> Result<()> {
-    for batch in instruments.chunks(240) {
-        let args = batch
-            .iter()
-            .map(|instrument| json!({ "channel": kind.label(), "instId": instrument }))
-            .collect::<Vec<_>>();
-        let request = json!({ "op": operation, "args": args });
+    for request in market_feed_requests(kind, operation, instruments) {
         write
             .send(tokio_tungstenite::tungstenite::Message::Text(
-                Utf8Bytes::from(request.to_string()),
+                request,
             ))
             .await
             .map_err(|_| {
                 anyhow::anyhow!("failed to send OKX {} {operation} request", kind.label())
             })?;
+    }
+    Ok(())
+}
+
+fn market_feed_requests(
+    kind: MarketFeedKind,
+    operation: &str,
+    instruments: &[String],
+) -> Vec<Utf8Bytes> {
+    instruments
+        .chunks(240)
+        .map(|batch| {
+            let args = batch
+                .iter()
+                .map(|instrument| json!({ "channel": kind.label(), "instId": instrument }))
+                .collect::<Vec<_>>();
+            Utf8Bytes::from(json!({ "op": operation, "args": args }).to_string())
+        })
+        .collect()
+}
+
+
+fn process_shared_market_message(
+    kind: MarketFeedKind,
+    text: &str,
+    feed: &SharedMarketFeed,
+    book_state: &mut HashMap<String, (Vec<(f64, f64)>, Vec<(f64, f64)>)>,
+) -> Result<()> {
+    match kind {
+                MarketFeedKind::Trades => {
+                    let update = match serde_json::from_str::<TradeMessage<'_>>(text) {
+                        Ok(update) => update,
+                        Err(error) => {
+                            crate::service_log!("ERROR", "Ignoring invalid shared OKX trades JSON: {error}");
+                            return Ok(());
+                        }
+                    };
+                    if update.event == Some("error") {
+                        anyhow::bail!("OKX shared trades subscription error: {}", update.msg.unwrap_or("unknown error"));
+                    }
+                    for trade in update.data.unwrap_or_default() {
+                        let (Ok(price), Ok(size), Ok(timestamp)) = (
+                            trade.px.parse::<f64>(), trade.sz.parse::<f64>(), trade.ts.parse::<u64>()
+                        ) else { continue; };
+                        let encoded = encode_trade_tick(
+                            trade.instrument,
+                            trade.trade_id,
+                            timestamp,
+                            price,
+                            size,
+                            trade.side,
+                        )?;
+                        crate::metrics::record_trade();
+                        feed.publish(trade.instrument, encoded);
+                    }
+                }
+                MarketFeedKind::Books => {
+                    let update = match serde_json::from_str::<BookMessage<'_>>(text) {
+                        Ok(update) => update,
+                        Err(error) => {
+                            crate::service_log!("ERROR", "Ignoring invalid shared OKX books JSON: {error}");
+                            return Ok(());
+                        }
+                    };
+                    if update.event == Some("error") {
+                        anyhow::bail!("OKX shared books subscription error: {}", update.msg.unwrap_or("unknown error"));
+                    }
+                    let (Some(argument), Some(items)) = (update.arg, update.data) else { return Ok(()); };
+                    let state = book_state.entry(argument.instrument.to_owned()).or_default();
+                    for item in items {
+                        if update.action == Some("snapshot") {
+                            load_book_snapshot(&mut state.0, &item.bids)?;
+                            load_book_snapshot(&mut state.1, &item.asks)?;
+                        } else {
+                            apply_book_side(&mut state.0, &item.bids, true)?;
+                            apply_book_side(&mut state.1, &item.asks, false)?;
+                        }
+                        let bids = top_book_side(&state.0);
+                        let asks = top_book_side(&state.1);
+                        let timestamp = item.ts.parse::<u64>()
+                            .map_err(|error| anyhow::anyhow!("invalid OKX book timestamp: {error}"))?;
+                        let encoded = encode_book_depth(argument.instrument, timestamp, &bids, &asks)?;
+                        crate::metrics::record_book();
+                        feed.publish(argument.instrument, encoded);
+                    }
+                }
     }
     Ok(())
 }
@@ -312,66 +393,151 @@ async fn run_shared_market_feed_connection(
                     pong_timeout.as_mut().reset(Instant::now() + Duration::from_secs(60 * 60 * 24 * 365));
                     continue;
                 }
-                match kind {
-                    MarketFeedKind::Trades => {
-                        let update = match serde_json::from_str::<TradeMessage<'_>>(text) {
-                            Ok(update) => update,
-                            Err(error) => {
-                                crate::service_log!("ERROR", "Ignoring invalid shared OKX trades JSON: {error}");
-                                continue;
-                            }
-                        };
-                        if update.event == Some("error") {
-                            anyhow::bail!("OKX shared trades subscription error: {}", update.msg.unwrap_or("unknown error"));
-                        }
-                        for trade in update.data.unwrap_or_default() {
-                            let (Ok(price), Ok(size), Ok(timestamp)) = (
-                                trade.px.parse::<f64>(), trade.sz.parse::<f64>(), trade.ts.parse::<u64>()
-                            ) else { continue; };
-                            let encoded = encode_trade_tick(
-                                trade.instrument,
-                                trade.trade_id,
-                                timestamp,
-                                price,
-                                size,
-                                trade.side,
-                            )?;
-                            crate::metrics::record_trade();
-                            feed.publish(trade.instrument, encoded);
-                        }
-                    }
-                    MarketFeedKind::Books => {
-                        let update = match serde_json::from_str::<BookMessage<'_>>(text) {
-                            Ok(update) => update,
-                            Err(error) => {
-                                crate::service_log!("ERROR", "Ignoring invalid shared OKX books JSON: {error}");
-                                continue;
-                            }
-                        };
-                        if update.event == Some("error") {
-                            anyhow::bail!("OKX shared books subscription error: {}", update.msg.unwrap_or("unknown error"));
-                        }
-                        let (Some(argument), Some(items)) = (update.arg, update.data) else { continue; };
-                        let state = book_state.entry(argument.instrument.to_owned()).or_default();
-                        for item in items {
-                            if update.action == Some("snapshot") {
-                                load_book_snapshot(&mut state.0, &item.bids)?;
-                                load_book_snapshot(&mut state.1, &item.asks)?;
-                            } else {
-                                apply_book_side(&mut state.0, &item.bids, true)?;
-                                apply_book_side(&mut state.1, &item.asks, false)?;
-                            }
-                            let bids = top_book_side(&state.0);
-                            let asks = top_book_side(&state.1);
-                            let timestamp = item.ts.parse::<u64>()
-                                .map_err(|error| anyhow::anyhow!("invalid OKX book timestamp: {error}"))?;
-                            let encoded = encode_book_depth(argument.instrument, timestamp, &bids, &asks)?;
-                            crate::metrics::record_book();
-                            feed.publish(argument.instrument, encoded);
-                        }
-                    }
-                }
+                process_shared_market_message(kind, text, feed, &mut book_state)?;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod shared_market_feed_tests {
+    use super::{
+        MarketFeedCommand, MarketFeedKind, SharedMarketFeed, apply_market_feed_command,
+        market_feed_requests, process_shared_market_message, send_market_feed_request,
+    };
+    use bytes::Bytes;
+    use std::collections::{HashMap, HashSet};
+    use std::sync::{Arc, Mutex as StdMutex};
+    use tokio::sync::mpsc;
+
+    #[test]
+    fn feed_kinds_have_stable_channel_labels() {
+        assert_eq!(MarketFeedKind::Trades.label(), "trades");
+        assert_eq!(MarketFeedKind::Books.label(), "books");
+    }
+
+    #[test]
+    fn subscription_commands_add_and_remove_active_instruments() {
+        let mut active = HashSet::new();
+        apply_market_feed_command(MarketFeedCommand::Subscribe("BTC-USDT".into()), &mut active);
+        apply_market_feed_command(MarketFeedCommand::Subscribe("ETH-USDT".into()), &mut active);
+        apply_market_feed_command(MarketFeedCommand::Subscribe("BTC-USDT".into()), &mut active);
+        assert_eq!(active.len(), 2);
+        apply_market_feed_command(MarketFeedCommand::Unsubscribe("BTC-USDT".into()), &mut active);
+        assert_eq!(active, HashSet::from(["ETH-USDT".to_owned()]));
+        apply_market_feed_command(MarketFeedCommand::Unsubscribe("MISSING".into()), &mut active);
+        assert_eq!(active, HashSet::from(["ETH-USDT".to_owned()]));
+    }
+
+    #[tokio::test]
+    async fn subscriptions_share_updates_and_unsubscribe_after_the_last_drop() {
+        let (commands, mut command_receiver) = mpsc::unbounded_channel();
+        let feed = Arc::new(SharedMarketFeed {
+            kind: MarketFeedKind::Trades,
+            commands,
+            entries: StdMutex::new(HashMap::new()),
+        });
+        let mut first = feed.subscribe("BTC-USDT");
+        assert!(matches!(command_receiver.try_recv(), Ok(MarketFeedCommand::Subscribe(symbol)) if symbol == "BTC-USDT"));
+        let mut second = feed.subscribe("BTC-USDT");
+        assert!(command_receiver.try_recv().is_err());
+
+        feed.publish("BTC-USDT", Bytes::from_static(b"trade"));
+        assert_eq!(first.recv().await.unwrap(), Bytes::from_static(b"trade"));
+        assert_eq!(second.recv().await.unwrap(), Bytes::from_static(b"trade"));
+        feed.publish("UNKNOWN", Bytes::from_static(b"ignored"));
+
+        drop(first);
+        assert!(command_receiver.try_recv().is_err());
+        drop(second);
+        assert!(matches!(command_receiver.try_recv(), Ok(MarketFeedCommand::Unsubscribe(symbol)) if symbol == "BTC-USDT"));
+    }
+
+    #[tokio::test]
+    async fn processes_trade_and_book_messages_and_rejects_subscription_errors() {
+        let (commands, _command_receiver) = mpsc::unbounded_channel();
+        let feed = Arc::new(SharedMarketFeed {
+            kind: MarketFeedKind::Trades,
+            commands,
+            entries: StdMutex::new(HashMap::new()),
+        });
+        let mut trades = feed.subscribe("BTC-USDT");
+        let mut book_state = HashMap::new();
+        process_shared_market_message(
+            MarketFeedKind::Trades,
+            r#"{"data":[{"instId":"BTC-USDT","tradeId":"1","px":"100","sz":"2","side":"buy","ts":"1700000000000"}]}"#,
+            &feed,
+            &mut book_state,
+        )
+        .unwrap();
+        let trade = trades.recv().await.unwrap();
+        assert_eq!(trade.len(), 97);
+        assert!(process_shared_market_message(
+            MarketFeedKind::Trades,
+            r#"{"event":"error","msg":"denied"}"#,
+            &feed,
+            &mut book_state,
+        )
+        .is_err());
+        process_shared_market_message(MarketFeedKind::Trades, "invalid json", &feed, &mut book_state)
+            .unwrap();
+
+        let mut books = feed.subscribe("BTC-USDT");
+        process_shared_market_message(
+            MarketFeedKind::Books,
+            r#"{"arg":{"channel":"books","instId":"BTC-USDT"},"action":"snapshot","data":[{"asks":[["101","3"]],"bids":[["99","2"]],"ts":"1700000000001"}]}"#,
+            &feed,
+            &mut book_state,
+        )
+        .unwrap();
+        assert_eq!(books.recv().await.unwrap().len(), 272);
+        assert_eq!(book_state["BTC-USDT"].0, [(99.0, 2.0)]);
+        assert_eq!(book_state["BTC-USDT"].1, [(101.0, 3.0)]);
+        assert!(process_shared_market_message(
+            MarketFeedKind::Books,
+            r#"{"event":"error","msg":"denied"}"#,
+            &feed,
+            &mut book_state,
+        )
+        .is_err());
+    }
+
+    #[tokio::test]
+    async fn sends_subscription_and_unsubscription_requests_in_batches() {
+        use futures_util::SinkExt;
+        use std::{convert::Infallible, sync::Mutex};
+        use tokio_tungstenite::tungstenite::Message;
+
+        let captured = Arc::new(Mutex::new(Vec::<Message>::new()));
+        let captured_sink = Arc::clone(&captured);
+        let mut sink = Box::pin(futures_util::sink::unfold(
+            captured_sink,
+            |state, message| async move {
+                state.lock().unwrap().push(message);
+                Ok::<_, Infallible>(state)
+            },
+        ));
+        let instruments = (0..241)
+            .map(|index| format!("COIN{index}-USDT"))
+            .collect::<Vec<_>>();
+
+        send_market_feed_request(&mut sink, MarketFeedKind::Books, "subscribe", &instruments)
+            .await
+            .unwrap();
+        send_market_feed_request(&mut sink, MarketFeedKind::Books, "unsubscribe", &[])
+            .await
+            .unwrap();
+
+        let messages = captured.lock().unwrap();
+        assert_eq!(messages.len(), 2);
+        let Message::Text(first) = &messages[0] else { panic!("expected text request"); };
+        let Message::Text(second) = &messages[1] else { panic!("expected text request"); };
+        let first: serde_json::Value = serde_json::from_str(first).unwrap();
+        let second: serde_json::Value = serde_json::from_str(second).unwrap();
+        assert_eq!(first["op"], "subscribe");
+        assert_eq!(first["args"].as_array().unwrap().len(), 240);
+        assert_eq!(first["args"][0]["channel"], "books");
+        assert_eq!(second["args"][0]["instId"], "COIN240-USDT");
+        assert_eq!(market_feed_requests(MarketFeedKind::Trades, "subscribe", &[]).len(), 0);
     }
 }

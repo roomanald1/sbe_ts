@@ -17,7 +17,7 @@
       },
       "id": 18,
       "panels": [],
-      "title": "Service Status",
+      "title": "Service Health",
       "type": "row"
     },
     {
@@ -60,7 +60,7 @@
         "x": 0,
         "y": 1,
         "w": 24,
-        "h": 5
+        "h": 3
       },
       "id": 1,
       "options": {
@@ -96,13 +96,13 @@
       "collapsed": false,
       "gridPos": {
         "x": 0,
-        "y": 6,
+        "y": 31,
         "w": 24,
         "h": 1
       },
       "id": 19,
       "panels": [],
-      "title": "Logs",
+      "title": "Data Pipeline",
       "type": "row"
     },
     {
@@ -113,9 +113,9 @@
       "description": "Application service logs collected from the repository logs directory.",
       "gridPos": {
         "x": 0,
-        "y": 7,
+        "y": 81,
         "w": 24,
-        "h": 10
+        "h": 7
       },
       "id": 16,
       "options": {
@@ -147,13 +147,13 @@
       "collapsed": false,
       "gridPos": {
         "x": 0,
-        "y": 17,
+        "y": 7,
         "w": 24,
         "h": 1
       },
       "id": 22,
       "panels": [],
-      "title": "Account",
+      "title": "Account & Trading",
       "type": "row"
     },
     {
@@ -170,9 +170,9 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 18,
+        "y": 8,
         "w": 8,
-        "h": 5
+        "h": 3
       },
       "id": 7,
       "options": {
@@ -236,9 +236,9 @@
       },
       "gridPos": {
         "x": 8,
-        "y": 18,
+        "y": 8,
         "w": 8,
-        "h": 5
+        "h": 3
       },
       "id": 9,
       "options": {
@@ -267,7 +267,7 @@
           "refId": "B"
         }
       ],
-      "title": "Closed trades \u00b7 today UTC",
+      "title": "Closed trades · today UTC",
       "type": "stat"
     },
     {
@@ -283,9 +283,9 @@
       },
       "gridPos": {
         "x": 16,
-        "y": 18,
+        "y": 8,
         "w": 8,
-        "h": 5
+        "h": 3
       },
       "id": 10,
       "options": {
@@ -324,7 +324,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 23,
+        "y": 11,
         "w": 24,
         "h": 5
       },
@@ -357,13 +357,13 @@
       "collapsed": false,
       "gridPos": {
         "x": 0,
-        "y": 28,
+        "y": 16,
         "w": 24,
         "h": 1
       },
       "id": 20,
       "panels": [],
-      "title": "Autotrader",
+      "title": "Trading Detail",
       "type": "row"
     },
     {
@@ -404,9 +404,9 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 29,
+        "y": 17,
         "w": 8,
-        "h": 5
+        "h": 4
       },
       "id": 11,
       "options": {
@@ -445,9 +445,9 @@
       },
       "gridPos": {
         "x": 8,
-        "y": 29,
+        "y": 17,
         "w": 8,
-        "h": 5
+        "h": 4
       },
       "id": 12,
       "options": {
@@ -489,9 +489,9 @@
       },
       "gridPos": {
         "x": 16,
-        "y": 29,
+        "y": 17,
         "w": 8,
-        "h": 5
+        "h": 4
       },
       "id": 13,
       "options": {
@@ -510,7 +510,7 @@
           "refId": "A"
         }
       ],
-      "title": "Closed-trade win rate \u00b7 today UTC",
+      "title": "Closed-trade win rate · today UTC",
       "type": "timeseries"
     },
     {
@@ -526,7 +526,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 34,
+        "y": 21,
         "w": 12,
         "h": 5
       },
@@ -557,16 +557,16 @@
       },
       "fieldConfig": {
         "defaults": {
-          "unit": "\u00b5s",
+          "unit": "µs",
           "decimals": 1
         },
         "overrides": []
       },
       "gridPos": {
         "x": 12,
-        "y": 34,
+        "y": 21,
         "w": 12,
-        "h": 4
+        "h": 5
       },
       "id": 15,
       "options": {
@@ -598,13 +598,120 @@
       "collapsed": false,
       "gridPos": {
         "x": 0,
-        "y": 46,
+        "y": 47,
+        "w": 24,
+        "h": 1
+      },
+      "id": 212,
+      "panels": [],
+      "title": "Runtime Performance",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "description": "Approximate p50 and p95 durations from the Live Signals event pipeline. Values are in microseconds; percentiles are calculated by the service from cumulative latency buckets.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "µs",
+          "decimals": 0
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 48,
+        "w": 12,
+        "h": 6
+      },
+      "id": 213,
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "expr": "app_live_signals_latency_microseconds",
+          "legendFormat": "{{stage}} {{stat}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Live signal stages (µs)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "description": "Research records dropped when the bounded persistence queue is full. A nonzero value means research history was shed to keep live signal processing moving.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "x": 20,
+        "y": 32,
+        "w": 4,
+        "h": 3
+      },
+      "id": 214,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      },
+      "targets": [
+        {
+          "expr": "increase(app_insights_research_records_dropped_total[5m])",
+          "legendFormat": "Dropped records · last 5m",
+          "refId": "A"
+        }
+      ],
+      "title": "Research records dropped (5m)",
+      "type": "stat"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 66,
         "w": 24,
         "h": 1
       },
       "id": 21,
       "panels": [],
-      "title": "System",
+      "title": "Infrastructure",
       "type": "row"
     },
     {
@@ -622,9 +729,9 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 47,
+        "y": 67,
         "w": 8,
-        "h": 5
+        "h": 4
       },
       "id": 2,
       "options": {
@@ -661,9 +768,9 @@
       },
       "gridPos": {
         "x": 8,
-        "y": 47,
+        "y": 67,
         "w": 8,
-        "h": 5
+        "h": 4
       },
       "id": 3,
       "options": {
@@ -699,9 +806,9 @@
       },
       "gridPos": {
         "x": 16,
-        "y": 47,
+        "y": 67,
         "w": 8,
-        "h": 5
+        "h": 4
       },
       "id": 4,
       "options": {
@@ -738,9 +845,9 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 52,
+        "y": 71,
         "w": 8,
-        "h": 5
+        "h": 4
       },
       "id": 5,
       "options": {
@@ -776,9 +883,9 @@
       },
       "gridPos": {
         "x": 8,
-        "y": 52,
+        "y": 71,
         "w": 8,
-        "h": 5
+        "h": 4
       },
       "id": 6,
       "options": {
@@ -819,9 +926,9 @@
       },
       "gridPos": {
         "x": 16,
-        "y": 52,
+        "y": 71,
         "w": 8,
-        "h": 5
+        "h": 4
       },
       "id": 17,
       "options": {
@@ -857,7 +964,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 57,
+        "y": 75,
         "w": 12,
         "h": 5
       },
@@ -873,7 +980,7 @@
       },
       "targets": [
         {
-          "expr": "100 * rate(app_service_process_cpu_seconds_total{service=~\"feed_handlers|position_management|auto_trader|execution|insights|news_sentiment|learning|scouts\"}[1m])",
+          "expr": "100 * rate(app_service_process_cpu_seconds_total{service=~\"feed_handlers|position_management|auto_trader|execution|insights|live_signals|news_sentiment|learning|scouts\"}[1m])",
           "legendFormat": "{{service}}",
           "refId": "A"
         }
@@ -895,9 +1002,9 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 69,
+        "y": 54,
         "w": 24,
-        "h": 7
+        "h": 6
       },
       "id": 25,
       "options": {
@@ -933,9 +1040,9 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 62,
-        "w": 24,
-        "h": 7
+        "y": 60,
+        "w": 12,
+        "h": 6
       },
       "id": 26,
       "options": {
@@ -950,7 +1057,7 @@
       "targets": [
         {
           "expr": "app_autotrader_cycle_lock_duration_ms{stat=~\"latest|average|p95\"}",
-          "legendFormat": "{{worker}} \u00b7 {{phase}} \u00b7 {{stat}}",
+          "legendFormat": "{{worker}} · {{phase}} · {{stat}}",
           "refId": "A"
         }
       ],
@@ -970,10 +1077,10 @@
         "overrides": []
       },
       "gridPos": {
-        "x": 0,
-        "y": 69,
-        "w": 24,
-        "h": 7
+        "x": 12,
+        "y": 60,
+        "w": 12,
+        "h": 6
       },
       "id": 29,
       "options": {
@@ -1008,10 +1115,10 @@
         "overrides": []
       },
       "gridPos": {
-        "x": 0,
-        "y": 39,
-        "w": 24,
-        "h": 7
+        "x": 12,
+        "y": 48,
+        "w": 12,
+        "h": 6
       },
       "id": 27,
       "options": {
@@ -1046,9 +1153,9 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 82,
-        "w": 24,
-        "h": 7
+        "y": 26,
+        "w": 12,
+        "h": 5
       },
       "id": 42,
       "options": {
@@ -1064,7 +1171,7 @@
       "targets": [
         {
           "expr": "app_autotrader_strategy_realized_pnl",
-          "legendFormat": "{{strategy}} \u00b7 {{quote}}",
+          "legendFormat": "{{strategy}} · {{quote}}",
           "refId": "A"
         }
       ],
@@ -1085,10 +1192,10 @@
         "overrides": []
       },
       "gridPos": {
-        "x": 0,
-        "y": 89,
-        "w": 24,
-        "h": 7
+        "x": 12,
+        "y": 26,
+        "w": 12,
+        "h": 5
       },
       "id": 43,
       "options": {
@@ -1104,7 +1211,7 @@
       "targets": [
         {
           "expr": "app_autotrader_strategy_outcomes",
-          "legendFormat": "{{strategy}} \u00b7 {{quote}}",
+          "legendFormat": "{{strategy}} · {{quote}}",
           "refId": "A"
         }
       ],
@@ -1125,7 +1232,7 @@
       },
       "gridPos": {
         "x": 12,
-        "y": 57,
+        "y": 75,
         "w": 12,
         "h": 5
       },
@@ -1141,7 +1248,7 @@
       },
       "targets": [
         {
-          "expr": "app_service_process_resident_memory_bytes{service=~\"feed_handlers|position_management|auto_trader|execution|insights|news_sentiment|learning|scouts\"}",
+          "expr": "app_service_process_resident_memory_bytes{service=~\"feed_handlers|position_management|auto_trader|execution|insights|live_signals|news_sentiment|learning|scouts\"}",
           "legendFormat": "{{service}}",
           "refId": "A"
         }
@@ -1163,9 +1270,9 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 96,
-        "w": 24,
-        "h": 8
+        "y": 35,
+        "w": 12,
+        "h": 6
       },
       "id": 45,
       "options": {
@@ -1219,10 +1326,10 @@
       "title": "Feed queue depth",
       "description": "Current retained messages in each instrumented feed queue.",
       "gridPos": {
-        "h": 8,
-        "w": 12,
         "x": 0,
-        "y": 104
+        "y": 41,
+        "w": 12,
+        "h": 6
       },
       "targets": [
         {
@@ -1269,10 +1376,10 @@
       "title": "Feed messages dropped",
       "description": "Messages skipped by lagging broadcast receivers, per queue.",
       "gridPos": {
-        "h": 8,
-        "w": 12,
         "x": 12,
-        "y": 104
+        "y": 41,
+        "w": 12,
+        "h": 6
       },
       "targets": [
         {
@@ -1328,9 +1435,9 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 112,
-        "w": 12,
-        "h": 5
+        "y": 32,
+        "w": 8,
+        "h": 3
       },
       "id": 202,
       "options": {
@@ -1354,7 +1461,7 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "app_service_up{service=~\"insights|scouts|auto_trader\"}",
+          "expr": "app_service_up{service=~\"insights|live_signals|scouts|auto_trader\"}",
           "legendFormat": "{{service}}",
           "queryType": "instant",
           "refId": "A"
@@ -1390,10 +1497,10 @@
         "overrides": []
       },
       "gridPos": {
-        "x": 12,
-        "y": 112,
-        "w": 6,
-        "h": 5
+        "x": 8,
+        "y": 32,
+        "w": 8,
+        "h": 3
       },
       "id": 203,
       "options": {
@@ -1423,7 +1530,7 @@
           "refId": "A"
         }
       ],
-      "title": "Insight snapshots \u00b7 last 5m",
+      "title": "Insight snapshots · last 5m",
       "type": "stat"
     },
     {
@@ -1453,10 +1560,10 @@
         "overrides": []
       },
       "gridPos": {
-        "x": 18,
-        "y": 112,
-        "w": 6,
-        "h": 5
+        "x": 16,
+        "y": 32,
+        "w": 4,
+        "h": 3
       },
       "id": 204,
       "options": {
@@ -1486,7 +1593,7 @@
           "refId": "A"
         }
       ],
-      "title": "Insights warnings \u00b7 last 5m",
+      "title": "Insights warnings · last 5m",
       "type": "stat"
     },
     {
@@ -1505,10 +1612,10 @@
         "overrides": []
       },
       "gridPos": {
-        "x": 0,
-        "y": 117,
-        "w": 24,
-        "h": 8
+        "x": 12,
+        "y": 35,
+        "w": 12,
+        "h": 6
       },
       "id": 205,
       "options": {
@@ -1573,118 +1680,330 @@
     },
     {
       "collapsed": false,
-      "gridPos": { "x": 0, "y": 125, "w": 24, "h": 1 },
+      "gridPos": {
+        "x": 0,
+        "y": 80,
+        "w": 24,
+        "h": 1
+      },
       "id": 206,
       "panels": [],
-      "title": "Database Maintenance",
+      "title": "Logs",
       "type": "row"
     },
     {
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
       "fieldConfig": {
         "defaults": {
           "mappings": [
-            { "options": { "0": { "text": "DOWN" }, "1": { "text": "RUNNING" } }, "type": "value" }
+            {
+              "options": {
+                "0": {
+                  "text": "DOWN"
+                },
+                "1": {
+                  "text": "RUNNING"
+                }
+              },
+              "type": "value"
+            }
           ],
-          "thresholds": { "mode": "absolute", "steps": [{ "color": "red", "value": null }, { "color": "green", "value": 1 }] }
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          }
         },
         "overrides": []
       },
-      "gridPos": { "x": 0, "y": 126, "w": 6, "h": 5 },
+      "gridPos": {
+        "x": 0,
+        "y": 4,
+        "w": 4,
+        "h": 3
+      },
       "id": 207,
       "options": {
-        "colorMode": "background", "graphMode": "none", "justifyMode": "center", "orientation": "auto",
-        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "textMode": "value_and_name"
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "value_and_name"
       },
       "targets": [
-        { "expr": "app_service_up{service=\"insights_maintenance\"}", "legendFormat": "Maintenance process", "queryType": "instant", "refId": "A" }
+        {
+          "expr": "app_service_up{service=\"insights_maintenance\"}",
+          "legendFormat": "Maintenance process",
+          "queryType": "instant",
+          "refId": "A"
+        }
       ],
       "title": "Maintenance process",
       "type": "stat"
     },
     {
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
       "fieldConfig": {
         "defaults": {
           "mappings": [
-            { "options": { "-1": { "text": "NO RUN YET" }, "0": { "text": "FAILED" }, "1": { "text": "SUCCEEDED" } }, "type": "value" }
+            {
+              "options": {
+                "-1": {
+                  "text": "NO RUN YET"
+                },
+                "0": {
+                  "text": "FAILED"
+                },
+                "1": {
+                  "text": "SUCCEEDED"
+                }
+              },
+              "type": "value"
+            }
           ],
-          "thresholds": { "mode": "absolute", "steps": [{ "color": "red", "value": null }, { "color": "green", "value": 1 }] }
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          }
         },
         "overrides": []
       },
-      "gridPos": { "x": 6, "y": 126, "w": 6, "h": 5 },
+      "gridPos": {
+        "x": 4,
+        "y": 4,
+        "w": 4,
+        "h": 3
+      },
       "id": 208,
       "options": {
-        "colorMode": "background", "graphMode": "none", "justifyMode": "center", "orientation": "auto",
-        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "textMode": "value_and_name"
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "value_and_name"
       },
       "targets": [
-        { "expr": "app_insights_maintenance_last_run_success", "legendFormat": "Latest run", "queryType": "instant", "refId": "A" }
+        {
+          "expr": "app_insights_maintenance_last_run_success",
+          "legendFormat": "Latest run",
+          "queryType": "instant",
+          "refId": "A"
+        }
       ],
       "title": "Last run result",
       "type": "stat"
     },
     {
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
       "fieldConfig": {
-        "defaults": { "unit": "dateTimeAsIso" },
+        "defaults": {
+          "unit": "dateTimeAsIso"
+        },
         "overrides": []
       },
-      "gridPos": { "x": 12, "y": 126, "w": 12, "h": 5 },
+      "gridPos": {
+        "x": 8,
+        "y": 4,
+        "w": 4,
+        "h": 3
+      },
       "id": 209,
       "options": {
-        "colorMode": "value", "graphMode": "none", "justifyMode": "center", "orientation": "auto",
-        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "textMode": "value_and_name"
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "value_and_name"
       },
       "targets": [
-        { "expr": "app_insights_maintenance_last_success_timestamp_seconds * 1000", "legendFormat": "Last successful run", "queryType": "instant", "refId": "A" }
+        {
+          "expr": "app_insights_maintenance_last_success_timestamp_seconds * 1000",
+          "legendFormat": "Last successful run",
+          "queryType": "instant",
+          "refId": "A"
+        }
       ],
       "title": "Last successful maintenance run",
       "type": "stat"
     },
     {
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
       "fieldConfig": {
-        "defaults": { "decimals": 0, "min": 0, "unit": "short" },
+        "defaults": {
+          "decimals": 0,
+          "min": 0,
+          "unit": "short"
+        },
         "overrides": []
       },
-      "gridPos": { "x": 0, "y": 131, "w": 12, "h": 6 },
+      "gridPos": {
+        "x": 12,
+        "y": 4,
+        "w": 6,
+        "h": 3
+      },
       "id": 210,
       "options": {
-        "colorMode": "value", "graphMode": "none", "justifyMode": "center", "orientation": "auto",
-        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "textMode": "value_and_name"
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "value_and_name"
       },
       "targets": [
-        { "expr": "app_insights_maintenance_last_run_archived_records", "legendFormat": "Archived signal records", "queryType": "instant", "refId": "A" },
-        { "expr": "app_insights_maintenance_last_run_purged_signal_records", "legendFormat": "Purged raw signal records", "queryType": "instant", "refId": "B" },
-        { "expr": "app_insights_maintenance_last_run_compacted_audit_records", "legendFormat": "Compacted audit records", "queryType": "instant", "refId": "C" },
-        { "expr": "app_insights_maintenance_last_run_purged_audit_records", "legendFormat": "Purged audit records", "queryType": "instant", "refId": "D" },
-        { "expr": "app_insights_maintenance_last_run_expired_training_archives", "legendFormat": "Expired training archives", "queryType": "instant", "refId": "E" }
+        {
+          "expr": "app_insights_maintenance_last_run_archived_records",
+          "legendFormat": "Archived signal records",
+          "queryType": "instant",
+          "refId": "A"
+        },
+        {
+          "expr": "app_insights_maintenance_last_run_purged_signal_records",
+          "legendFormat": "Purged raw signal records",
+          "queryType": "instant",
+          "refId": "B"
+        },
+        {
+          "expr": "app_insights_maintenance_last_run_compacted_audit_records",
+          "legendFormat": "Compacted audit records",
+          "queryType": "instant",
+          "refId": "C"
+        },
+        {
+          "expr": "app_insights_maintenance_last_run_purged_audit_records",
+          "legendFormat": "Purged audit records",
+          "queryType": "instant",
+          "refId": "D"
+        },
+        {
+          "expr": "app_insights_maintenance_last_run_expired_training_archives",
+          "legendFormat": "Expired training archives",
+          "queryType": "instant",
+          "refId": "E"
+        }
       ],
       "title": "Records handled in last run",
       "type": "stat"
     },
     {
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
       "description": "No data means the latest run reported no error.",
       "fieldConfig": {
         "defaults": {
           "mappings": [
-            { "options": { "1": { "text": "ERROR" } }, "type": "value" }
+            {
+              "options": {
+                "1": {
+                  "text": "ERROR"
+                }
+              },
+              "type": "value"
+            }
           ],
-          "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "red", "value": 1 }] }
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          }
         },
         "overrides": []
       },
-      "gridPos": { "x": 12, "y": 131, "w": 12, "h": 6 },
+      "gridPos": {
+        "x": 18,
+        "y": 4,
+        "w": 6,
+        "h": 3
+      },
       "id": 211,
       "options": {
-        "colorMode": "background", "graphMode": "none", "justifyMode": "center", "orientation": "auto",
-        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "textMode": "value_and_name"
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "value_and_name"
       },
       "targets": [
-        { "expr": "app_insights_maintenance_last_error_info", "legendFormat": "{{error}}", "queryType": "instant", "refId": "A" }
+        {
+          "expr": "app_insights_maintenance_last_error_info",
+          "legendFormat": "{{error}}",
+          "queryType": "instant",
+          "refId": "A"
+        }
       ],
       "title": "Last maintenance error",
       "type": "stat"
@@ -1742,5 +2061,5 @@
   "timezone": "browser",
   "title": "SBE TS System and Trading",
   "uid": "sbe-ts-overview",
-  "version": 7
+  "version": 8
 }

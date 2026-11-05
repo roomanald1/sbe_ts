@@ -1,4 +1,4 @@
-//! Scout planning, shadow lifecycle, and service implementation.
+//! Scout planning, scout lifecycle, and service implementation.
 //!
 //! The files are grouped by responsibility. They are included in this shared
 //! implementation module so the existing tightly-coupled private lifecycle
@@ -7,15 +7,15 @@
 include!("contracts.rs");
 include!("candidate_planning.rs");
 include!("service.rs");
-include!("shadow_handlers.rs");
+include!("scout_handlers.rs");
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    include!("tests/shadow_outcome.rs");
-    include!("tests/shadow_audit_plan.rs");
-    include!("tests/shadow_plan.rs");
+    include!("tests/scout_outcome.rs");
+    include!("tests/scout_audit_plan.rs");
+    include!("tests/scout_plan.rs");
     include!("tests/dated_carry_lifecycle.rs");
     include!("tests/live_candidates.rs");
 
@@ -130,11 +130,11 @@ mod tests {
     }
 
     #[test]
-    fn shadow_persistence_round_trips_state_and_outbox_dedupes_learning_events() {
+    fn scout_persistence_round_trips_state_and_outbox_dedupes_learning_events() {
         let path = std::env::temp_dir().join(format!(
             "scouts-persistence-test-{}-{}.json",
             std::process::id(),
-            shadow_now_ms()
+            scout_now_ms()
         ));
         let event = FeedbackEvent::ScoutOutcome {
             event_id: "event-1".into(),
@@ -149,10 +149,10 @@ mod tests {
         };
         let state = PersistedState {
             seen: BTreeSet::from(["event-1".into()]),
-            outbox: vec![ShadowOutboxItem::Learning(event.clone())],
+            outbox: vec![ScoutOutboxItem::Learning(event.clone())],
             ..PersistedState::default()
         };
-        assert!(persist_shadow_state(&path, &state).is_ok());
+        assert!(persist_scout_state(&path, &state).is_ok());
         let loaded: PersistedState =
             serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         assert!(loaded.seen.contains("event-1"));

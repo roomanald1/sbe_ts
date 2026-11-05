@@ -215,7 +215,7 @@ mod scout_floor_tests {
 
     #[test]
     fn exploration_does_not_remove_minimum_strength_and_score_floors() {
-        let (strength, score) = adaptive_scout_thresholds(0, DEFAULT_SCOUT_MAX_ACTIVE_POSITIONS);
+        let (strength, score) = adaptive_scout_thresholds(0, scouts::ScoutConfiguration::default().max_active_positions);
         assert!(strength >= SCOUT_MIN_STRENGTH_FLOOR);
         assert!(score >= SCOUT_MIN_SCORE_FLOOR);
         assert_eq!(strength, 0.0);
@@ -238,7 +238,7 @@ mod scout_floor_tests {
 
         assert!(adaptive_strength_floor(&learning, context) > MIN_STRENGTH);
         assert!(adaptive_exploration_score_floor(&learning, context, &[]) > MIN_EXPLORATION_SCORE);
-        let (scout_strength, _) = adaptive_scout_thresholds(0, DEFAULT_SCOUT_MAX_ACTIVE_POSITIONS);
+        let (scout_strength, _) = adaptive_scout_thresholds(0, scouts::ScoutConfiguration::default().max_active_positions);
         assert_eq!(scout_strength, 0.0);
     }
 }

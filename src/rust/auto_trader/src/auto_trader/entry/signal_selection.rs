@@ -269,6 +269,7 @@ mod signal_selection_behavior_tests {
         let execution_audit_tx = AuditQueue::new(EXECUTION_AUDIT_QUEUE_CAPACITY);
         AutoTraderState {
             client: reqwest::Client::new(),
+            scout_configuration: Arc::new(std::sync::RwLock::new(scouts::ScoutConfiguration::default())),
             latest_daily_strategy_snapshot: Arc::new(Mutex::new(None)),
             strategy_diagnostic: Arc::new(std::sync::Mutex::new(Vec::new())),
             enabled: Arc::new(AtomicBool::new(true)),
@@ -277,7 +278,6 @@ mod signal_selection_behavior_tests {
             settings_persist_timings_ms: Arc::new(std::sync::Mutex::new(BTreeMap::new())),
             latest_missed_opportunity_bands: Arc::new(Mutex::new(Vec::new())),
             latest_execution_parameters: Arc::new(Mutex::new(None)), cycle_lock: Arc::new(Mutex::new(())),
-            scout_lifecycle_last_update_ms: Arc::new(AtomicU64::new(0)),
             pending_daily_signals: Arc::new(Mutex::new(BTreeMap::new())), daily_signal_notify: Arc::new(Notify::new()),
             pending_live_signals: Arc::new(Mutex::new(BTreeMap::new())), live_signal_notify: Arc::new(Notify::new()),
             signal_book_prewarms: Arc::new(Mutex::new(BTreeMap::new())), audit_tx, execution_audit_tx,
@@ -304,7 +304,7 @@ mod signal_selection_behavior_tests {
             risk_appetite: risk, active_scout_count: active_scouts,
             learning_thresholds: &EMPTY_LEARNING_THRESHOLDS,
             delegate_scout_fallback: false,
-            scout_max_active_positions: DEFAULT_SCOUT_MAX_ACTIVE_POSITIONS,
+            scout_max_active_positions: scouts::ScoutConfiguration::default().max_active_positions,
             open_positions: &EMPTY_POSITIONS, max_entries_per_auto_position: 3,
             counterfactual_stop_loss_percent: 0.5, counterfactual_take_profit_percent: 0.8,
         }
@@ -456,7 +456,7 @@ mod signal_selection_behavior_tests {
         let neutral_candidates = vec![neutral.clone()];
         let selected = select_cycle_signal(input(&state, &empty_dashboard, &[], &none_fresh, &neutral_candidates, 50.0, 0)).unwrap_or_else(|_| panic!("expected signal selection to succeed"));
         assert!(!selected.1 && selected.2);
-        assert!(select_cycle_signal(input(&state, &empty_dashboard, &[], &none_fresh, &neutral_candidates, 50.0, DEFAULT_SCOUT_MAX_ACTIVE_POSITIONS)).is_err());
+        assert!(select_cycle_signal(input(&state, &empty_dashboard, &[], &none_fresh, &neutral_candidates, 50.0, scouts::ScoutConfiguration::default().max_active_positions)).is_err());
 
         let evidence = serde_json::from_value::<WalkForward>(serde_json::json!({
             "symbol":"BTC-USDT", "horizon_seconds":300,

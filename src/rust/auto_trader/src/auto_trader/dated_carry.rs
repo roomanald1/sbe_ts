@@ -46,7 +46,7 @@ struct DatedCarryPosition {
 }
 
 #[derive(Clone, Serialize, Deserialize)]
-struct DatedCarryScoutShadow {
+struct DatedCarryScoutScout {
     candidate: DatedCarryCandidate,
     opened_at_ms: u64,
     parameter_key: String,
@@ -73,9 +73,9 @@ struct DatedCarryBook {
     // Read once to transfer pre-migration samples/cooldowns to Scouts. Empty
     // values are omitted from subsequent saves.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    scout_shadow_probes: Vec<DatedCarryScoutShadow>,
+    scout_probes: Vec<DatedCarryScoutScout>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    scout_shadow_last_started: BTreeMap<String, u64>,
+    scout_last_started: BTreeMap<String, u64>,
 }
 
 impl Default for DatedCarryBook {
@@ -87,19 +87,19 @@ impl Default for DatedCarryBook {
             positions: Vec::new(),
             checked_at_ms: 0,
             last_error: None,
-            scout_shadow_probes: Vec::new(),
-            scout_shadow_last_started: BTreeMap::new(),
+            scout_probes: Vec::new(),
+            scout_last_started: BTreeMap::new(),
         }
     }
 }
 
 
-fn dated_carry_shadow_key(candidate: &DatedCarryCandidate, key: &str, value: f64) -> String {
+fn dated_carry_scout_key(candidate: &DatedCarryCandidate, key: &str, value: f64) -> String {
     format!("{}:{key}:{value:.8}", candidate.spot_symbol)
 }
 
 #[cfg(test)]
-fn dated_carry_shadow_return_percent(
+fn dated_carry_scout_return_percent(
     entry: &DatedCarryCandidate,
     exit: &DatedCarryCandidate,
 ) -> Option<f64> {
@@ -150,7 +150,7 @@ fn dated_carry_probe_plan_candidate(
     parameters: &BTreeMap<String, f64>,
     tested_parameters: &BTreeMap<String, f64>,
     cooldown_ms: u64,
-) -> scouts::ShadowPlanCandidate {
+) -> scouts::ScoutPlanCandidate {
     let profile_symbol = candidate.spot_symbol.replace("USDT", "-USDT");
     let sample_id = format!(
         "dated-carry-scout:{}:{}:{parameter_key}:{parameter_value:.8}",
@@ -179,10 +179,10 @@ fn dated_carry_probe_plan_candidate(
         .filter(|spec| tested_parameters.contains_key(spec.key.as_str()))
         .collect();
 
-    scouts::ShadowPlanCandidate {
+    scouts::ScoutPlanCandidate {
         generate_group_id: false,
         sample_group_id: sample_id.clone(),
-        cooldown_key: dated_carry_shadow_key(candidate, parameter_key, parameter_value),
+        cooldown_key: dated_carry_scout_key(candidate, parameter_key, parameter_value),
         profile_key: format!("{profile_symbol}:{}", Strategy::DatedCarry.as_str()),
         eligible: true,
         parameter_variant: true,
@@ -191,7 +191,7 @@ fn dated_carry_probe_plan_candidate(
         audit_templates: Vec::new(),
         daily_policy: None,
         live_policy: None,
-        sample_payload: Some(scouts::ShadowSamplePayload::DatedCarryProbe(
+        sample_payload: Some(scouts::ScoutSamplePayload::DatedCarryProbe(
             scouts::DatedCarryProbe {
                 sample_id,
                 parameter_key: parameter_key.to_owned(),
@@ -246,15 +246,12 @@ fn update_dated_carry_mark(
     position.mark_checked_at_ms = Some(checked_at_ms);
 }
 
-fn dated_carry_path(settings_path: &PathBuf) -> PathBuf {
+fn dated_carry_legacy_path(settings_path: &PathBuf) -> PathBuf {
     settings_path.with_extension("dated_carry.json")
 }
 
 fn save_dated_carry(path: &PathBuf, book: &DatedCarryBook) -> Result<(), String> {
-    let bytes = serde_json::to_vec_pretty(book).map_err(|error| error.to_string())?;
-    let temporary = path.with_extension("dated_carry.tmp");
-    std::fs::write(&temporary, bytes).map_err(|error| error.to_string())?;
-    std::fs::rename(&temporary, path).map_err(|error| error.to_string())
+    persist_dated_carry_book(path, book)
 }
 
 async fn get_dated_carry(State(state): State<AutoTraderState>) -> Json<DatedCarryBook> {
@@ -351,22 +348,14 @@ async fn receive_dated_carry_signal(
 
                 let scouts_url = std::env::var("SCOUTS_SERVICE_URL")
                     .unwrap_or_else(|_| "http://127.0.0.1:3011".into());
-                let legacy_cooldowns = book.scout_shadow_last_started.clone();
+                let legacy_cooldowns = book.scout_last_started.clone();
                 if !legacy_cooldowns.is_empty() {
-                    {
-                        let mut settings = state.settings.lock().await;
-                        for (key, started_day) in &legacy_cooldowns {
-                            settings.shadow_sample_at_ms.entry(key.clone()).or_insert_with(|| {
-                                started_day.saturating_mul(CARRY_DAY_MS)
-                            });
-                        }
-                    }
                     let cooldowns = legacy_cooldowns.iter()
                         .map(|(key, started_day)| (key.clone(), started_day.saturating_mul(CARRY_DAY_MS)))
                         .collect::<BTreeMap<_, _>>();
                     let mut cooldown_ids = cooldowns.keys().cloned().collect::<Vec<_>>();
                     cooldown_ids.sort();
-                    let import_request = scouts::ShadowPlanRequest {
+                    let import_request = scouts::ScoutPlanRequest {
                         request_id: format!("dated-carry-cooldown-import:{}", scouts::probe_id(&cooldown_ids.join("|"))),
                         now_ms: emitted_at_ms,
                         max_active_batches: 5_000,
@@ -375,8 +364,8 @@ async fn receive_dated_carry_signal(
                         legacy_comparisons: Vec::new(),
                         candidates: Vec::new(),
                     };
-                    if scouts::request_shadow_plan(&scouts_url, &import_request).await.is_ok() {
-                        book.scout_shadow_last_started.clear();
+                    if scouts::request_scout_plan(&scouts_url, &import_request).await.is_ok() {
+                        book.scout_last_started.clear();
                         if let Err(error) = request_settings_persist(&state) {
                             crate::service_log!("WARN", "Could not persist imported dated-carry Scout cooldowns: {}", error.1);
                         }
@@ -386,42 +375,42 @@ async fn receive_dated_carry_signal(
                 }
 
                 let observed_candidates = candidates.iter().map(shared_dated_carry_candidate).collect::<Vec<_>>();
-                let observe_request = scouts::ShadowLifecycleObserveRequest {
+                let observe_request = scouts::ScoutLifecycleObserveRequest {
                     request_id: format!("dated-carry-mark:{emitted_at_ms}:{}", scouts::probe_id(
                         &serde_json::to_string(&observed_candidates).unwrap_or_default(),
                     )),
                     now_ms: emitted_at_ms,
                     candidates: observed_candidates,
                 };
-                if let Err(error) = scouts::request_shadow_lifecycle_observe(&scouts_url, &observe_request).await {
+                if let Err(error) = scouts::request_scout_lifecycle_observe(&scouts_url, &observe_request).await {
                     crate::service_log!("WARN", "Scout service unavailable for dated-carry markout updates: {error}");
                 }
 
                 // Transfer probes persisted by older AutoTrader versions before
                 // creating new ones. The stable request ID makes a retry safe if
                 // the process stops after Scout admission but before this book saves.
-                if !book.scout_shadow_probes.is_empty() {
+                if !book.scout_probes.is_empty() {
                     let mut legacy_candidates = Vec::new();
-                    for shadow in &book.scout_shadow_probes {
+                    for scout in &book.scout_probes {
                         let mut planned = dated_carry_probe_plan_candidate(
-                            &shadow.candidate,
-                            shadow.opened_at_ms,
-                            &shadow.parameter_key,
-                            shadow.parameter_value,
-                            &shadow.parameters,
-                            &shadow.tested_parameters,
+                            &scout.candidate,
+                            scout.opened_at_ms,
+                            &scout.parameter_key,
+                            scout.parameter_value,
+                            &scout.parameters,
+                            &scout.tested_parameters,
                             0,
                         );
-                        if let Some(scouts::ShadowSamplePayload::DatedCarryProbe(probe)) =
+                        if let Some(scouts::ScoutSamplePayload::DatedCarryProbe(probe)) =
                             planned.sample_payload.as_mut()
                         {
-                            probe.would_enter = shadow.would_enter;
+                            probe.would_enter = scout.would_enter;
                         }
                         legacy_candidates.push(planned);
                     }
                     let mut ids = legacy_candidates.iter().map(|candidate| candidate.sample_group_id.clone()).collect::<Vec<_>>();
                     ids.sort();
-                    let legacy_request = scouts::ShadowPlanRequest {
+                    let legacy_request = scouts::ScoutPlanRequest {
                         request_id: format!("dated-carry-legacy-import:{}", scouts::probe_id(&ids.join("|"))),
                         now_ms: emitted_at_ms,
                         max_active_batches: 5_000,
@@ -430,13 +419,13 @@ async fn receive_dated_carry_signal(
                         legacy_comparisons: Vec::new(),
                         candidates: legacy_candidates,
                     };
-                    match scouts::request_shadow_plan(&scouts_url, &legacy_request).await {
+                    match scouts::request_scout_plan(&scouts_url, &legacy_request).await {
                         Ok(response) => {
                             let accepted = response.selected_groups.into_iter().collect::<BTreeSet<_>>();
-                            book.scout_shadow_probes.retain(|shadow| {
+                            book.scout_probes.retain(|scout| {
                                 let id = format!("dated-carry-scout:{}:{}:{}:{:.8}",
-                                    shadow.candidate.future_symbol, shadow.opened_at_ms,
-                                    shadow.parameter_key, shadow.parameter_value);
+                                    scout.candidate.future_symbol, scout.opened_at_ms,
+                                    scout.parameter_key, scout.parameter_value);
                                 !accepted.contains(&id)
                             });
                         }
@@ -479,10 +468,10 @@ async fn receive_dated_carry_signal(
                             let parameter_key = variant.key;
                             let parameter_value = variant.value;
                             let changes = variant.changes;
-                            let cooldown_key = dated_carry_shadow_key(candidate, &parameter_key, parameter_value);
+                            let cooldown_key = dated_carry_scout_key(candidate, &parameter_key, parameter_value);
                             if legacy_cooldowns.get(&cooldown_key).is_some_and(|started_day| *started_day >= day)
-                                || book.scout_shadow_probes.iter().any(|shadow| {
-                                    dated_carry_shadow_key(&shadow.candidate, &shadow.parameter_key, shadow.parameter_value) == cooldown_key
+                                || book.scout_probes.iter().any(|scout| {
+                                    dated_carry_scout_key(&scout.candidate, &scout.parameter_key, scout.parameter_value) == cooldown_key
                                 })
                             {
                                 continue;
@@ -504,7 +493,7 @@ async fn receive_dated_carry_signal(
                         let request_hash = scouts::probe_id(
                             &serde_json::to_string(&plan_candidates).unwrap_or_default(),
                         );
-                        let request = scouts::ShadowPlanRequest {
+                        let request = scouts::ScoutPlanRequest {
                             request_id: format!("dated-carry-scan:{emitted_at_ms}:{request_hash}"),
                             now_ms: emitted_at_ms,
                             max_active_batches: 5_000,
@@ -513,7 +502,7 @@ async fn receive_dated_carry_signal(
                             legacy_comparisons: Vec::new(),
                             candidates: plan_candidates,
                         };
-                        if let Err(error) = scouts::request_shadow_plan(&scouts_url, &request).await {
+                        if let Err(error) = scouts::request_scout_plan(&scouts_url, &request).await {
                             crate::service_log!("WARN", "Could not schedule dated-carry Scout probes: {error}");
                         }
                     }
@@ -747,7 +736,7 @@ mod dated_carry_probe_contract_tests {
         );
         assert_eq!(planned.sample_group_id, "dated-carry-scout:BTCUSDT_Q1:1700000000000:carry_cost_gate_percent:0.40000000");
         assert!(planned.eligible);
-        let Some(scouts::ShadowSamplePayload::DatedCarryProbe(probe)) = planned.sample_payload.as_ref() else {
+        let Some(scouts::ScoutSamplePayload::DatedCarryProbe(probe)) = planned.sample_payload.as_ref() else {
             panic!("dated-carry plan should carry a typed pending sample");
         };
         assert_eq!(probe.parameter_key, "carry_cost_gate_percent");
@@ -756,8 +745,8 @@ mod dated_carry_probe_contract_tests {
         assert!(probe.would_enter);
 
         let encoded = serde_json::to_vec(&planned).unwrap();
-        let decoded: scouts::ShadowPlanCandidate = serde_json::from_slice(&encoded).unwrap();
-        let Some(scouts::ShadowSamplePayload::DatedCarryProbe(decoded_probe)) = decoded.sample_payload else {
+        let decoded: scouts::ScoutPlanCandidate = serde_json::from_slice(&encoded).unwrap();
+        let Some(scouts::ScoutSamplePayload::DatedCarryProbe(decoded_probe)) = decoded.sample_payload else {
             panic!("dated-carry payload should deserialize through the shared Scouts contract");
         };
         assert_eq!(decoded_probe.sample_id, probe.sample_id);
@@ -783,7 +772,7 @@ mod dated_carry_probe_contract_tests {
             CARRY_DAY_MS,
         );
         assert!(planned.eligible, "the probe should be admitted to record a zero return");
-        let Some(scouts::ShadowSamplePayload::DatedCarryProbe(probe)) = planned.sample_payload else {
+        let Some(scouts::ScoutSamplePayload::DatedCarryProbe(probe)) = planned.sample_payload else {
             panic!("dated-carry plan should carry a typed pending sample");
         };
         assert!(!probe.would_enter);
@@ -794,7 +783,7 @@ mod dated_carry_probe_contract_tests {
         let legacy = serde_json::json!({
             "enabled": false,
             "max_spot_notional_usdt": 1000.0,
-            "scout_shadow_probes": [{
+            "scout_probes": [{
                 "candidate": {
                     "spot_symbol": "BTCUSDT",
                     "future_symbol": "BTCUSDT_Q1",
@@ -817,16 +806,16 @@ mod dated_carry_probe_contract_tests {
                 "tested_parameters": {"carry_cost_gate_percent": 0.4},
                 "would_enter": true
             }],
-            "scout_shadow_last_started": {"BTCUSDT:carry_cost_gate_percent:0.40000000": 19675_u64}
+            "scout_last_started": {"BTCUSDT:carry_cost_gate_percent:0.40000000": 19675_u64}
         });
         let mut book: DatedCarryBook = serde_json::from_value(legacy).unwrap();
-        assert_eq!(book.scout_shadow_probes.len(), 1);
-        assert_eq!(book.scout_shadow_last_started.len(), 1);
+        assert_eq!(book.scout_probes.len(), 1);
+        assert_eq!(book.scout_last_started.len(), 1);
 
-        book.scout_shadow_probes.clear();
-        book.scout_shadow_last_started.clear();
+        book.scout_probes.clear();
+        book.scout_last_started.clear();
         let saved = serde_json::to_value(book).unwrap();
-        assert!(saved.get("scout_shadow_probes").is_none());
-        assert!(saved.get("scout_shadow_last_started").is_none());
+        assert!(saved.get("scout_probes").is_none());
+        assert!(saved.get("scout_last_started").is_none());
     }
 }

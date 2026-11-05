@@ -248,7 +248,7 @@ pub struct SignalWalkForward {
     pub contrarian_trend_logistic_selected_signals: usize,
     pub contrarian_trend_logistic_confidence_bands: Vec<ProbabilityConfidenceMetrics>,
     pub trend_logistic_confidence_bands: Vec<ProbabilityConfidenceMetrics>,
-    /// Shadow results for the live Auto Trader exploration gate, using historical score and fee-adjusted execution cost.
+    /// Scout results for the live Auto Trader exploration gate, using historical score and fee-adjusted execution cost.
     pub exploration_score_bands: Vec<ProbabilityConfidenceMetrics>,
     pub signal_long: SideWalkForwardMetrics,
     pub signal_short: SideWalkForwardMetrics,
@@ -357,6 +357,6 @@ pub struct SignalEvaluation {
 pub struct CompletedSignalOutcome {
     pub legacy: SignalOutcome,
     pub evaluation: SignalEvaluation,
-    pub scout_shadow_id: Option<String>,
+    pub scout_id: Option<String>,
     pub scout_exit_reason: Option<&'static str>,
 }

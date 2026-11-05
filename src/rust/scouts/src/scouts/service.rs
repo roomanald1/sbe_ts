@@ -4,7 +4,7 @@ struct ServiceState {
     learning_url: String,
     insights_url: String,
     seen: Arc<Mutex<BTreeSet<String>>>,
-    shadow: ShadowState,
+    scout: ScoutState,
 }
 
 pub fn router(learning_url: String) -> Router {
@@ -31,30 +31,30 @@ pub fn router(learning_url: String) -> Router {
     let client = reqwest::Client::new();
     let insights_url =
         std::env::var("INSIGHTS_URL").unwrap_or_else(|_| "http://127.0.0.1:3004".into());
-    let shadow = ShadowState {
+    let scout = ScoutState {
         data: Arc::new(Mutex::new(persisted)),
         path: state_path,
         flush_lock: Arc::new(Mutex::new(())),
     };
-    let replay_shadow = shadow.clone();
+    let replay_scout = scout.clone();
     let replay_client = client.clone();
     let replay_insights_url = insights_url.clone();
     tokio::spawn(async move {
         let mut ticker = tokio::time::interval(std::time::Duration::from_secs(60));
         loop {
             ticker.tick().await;
-            let audits = replay_shadow
+            let audits = replay_scout
                 .data
                 .lock()
                 .await
-                .shadow_active_audits
+                .scout_active_audits
                 .values()
-                .flat_map(|items| items.iter().filter_map(scout_shadow_registration))
+                .flat_map(|items| items.iter().filter_map(scout_registration))
                 .collect::<Vec<_>>();
             for registration in audits {
                 let _ = replay_client
                     .post(format!(
-                        "{}/internal/signals/scout-shadow",
+                        "{}/internal/scouts/register",
                         replay_insights_url.trim_end_matches('/')
                     ))
                     .timeout(std::time::Duration::from_secs(2))
@@ -66,16 +66,16 @@ pub fn router(learning_url: String) -> Router {
     });
     Router::new()
         .route("/health", get(|| async { "ok" }))
-        .route("/shadow-outcomes", get(get_shadow_outcomes))
+        .route("/configuration", get(get_scout_configuration).post(set_scout_configuration))
+        .route("/outcomes", get(get_scout_outcomes).post(forward_outcome))
         .route("/samples", post(finalize_sample))
-        .route("/shadow-outcome", post(receive_shadow_outcome))
-        .route("/shadow-plan", post(create_shadow_plan))
+        .route("/scout-outcome", post(receive_scout_outcome))
+        .route("/scout-plan", post(create_scout_plan))
         .route(
-            "/shadow-lifecycle/state",
-            get(get_shadow_lifecycle_state).post(set_shadow_lifecycle_state),
+            "/scout-lifecycle/state",
+            get(get_scout_lifecycle_state).post(set_scout_lifecycle_state),
         )
-        .route("/shadow-lifecycle/observe", post(observe_shadow_lifecycle))
-        .route("/outcomes", post(forward_outcome))
+        .route("/scout-lifecycle/observe", post(observe_scout_lifecycle))
         .route("/variants", post(generate_variants))
         .route("/variants/batch", post(generate_variants_batch))
         .route("/live-candidates", post(generate_live_candidates))
@@ -85,11 +85,40 @@ pub fn router(learning_url: String) -> Router {
             learning_url,
             insights_url,
             seen: Arc::new(Mutex::new(seen)),
-            shadow,
+            scout,
         })
 }
 
-async fn get_shadow_outcomes(
+async fn get_scout_configuration(
+    State(service): State<ServiceState>,
+) -> Json<ScoutConfiguration> {
+    Json(service.scout.data.lock().await.scout_configuration.clone())
+}
+
+async fn set_scout_configuration(
+    State(service): State<ServiceState>,
+    Json(configuration): Json<ScoutConfiguration>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    if configuration.strategies.len() > 128
+        || configuration.max_active_samples > 5_000
+        || configuration.max_active_positions > 5_000
+        || configuration.strategies.iter().collect::<BTreeSet<_>>().len()
+            != configuration.strategies.len()
+        || configuration.strategies.iter().any(|name| {
+            strategies::Strategy::from_name(name).is_none_or(|strategy| {
+                strategy.is_legacy_composite() || strategy.is_dated_carry()
+            })
+        })
+    {
+        return Err((StatusCode::BAD_REQUEST, "invalid Scout configuration".into()));
+    }
+    let mut state = service.scout.data.lock().await;
+    state.scout_configuration = configuration;
+    persist_scout_state(&service.scout.path, &state)?;
+    Ok(StatusCode::ACCEPTED)
+}
+
+async fn get_scout_outcomes(
     State(service): State<ServiceState>,
     OriginalUri(uri): OriginalUri,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
@@ -100,7 +129,7 @@ async fn get_shadow_outcomes(
     let response = service
         .client
         .get(format!(
-            "{}/internal/scout-shadow/outcomes{query}",
+            "{}/internal/scouts/outcomes{query}",
             service.insights_url.trim_end_matches('/'),
         ))
         .send()
@@ -144,21 +173,21 @@ async fn finalize_sample(
                 seen.remove(&oldest);
             }
         }
-        let mut persisted = service.shadow.data.lock().await;
+        let mut persisted = service.scout.data.lock().await;
         persisted.seen.insert(event_id);
         persisted.seen.extend(seen.iter().cloned());
-        persist_shadow_state(&service.shadow.path, &persisted)?;
+        persist_scout_state(&service.scout.path, &persisted)?;
     }
     Ok(StatusCode::NO_CONTENT)
 }
 
-fn shadow_context_learning_key(context: &str) -> Option<String> {
+fn scout_context_learning_key(context: &str) -> Option<String> {
     let context = context.strip_prefix("scout:")?.split(":scenario:").next()?;
     let context = context.strip_suffix(":trade")?;
     (!context.is_empty()).then(|| format!("scout:{context}:trade"))
 }
 
-fn shadow_outcome_idempotency_key(outcome: &ShadowOutcomeRequest) -> String {
+fn scout_outcome_idempotency_key(outcome: &ScoutOutcomeRequest) -> String {
     format!(
         "{}|{}|{}",
         outcome.decision_id,
@@ -167,14 +196,14 @@ fn shadow_outcome_idempotency_key(outcome: &ShadowOutcomeRequest) -> String {
     )
 }
 
-fn shadow_now_ms() -> u64 {
+fn scout_now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|duration| duration.as_millis().min(u128::from(u64::MAX)) as u64)
         .unwrap_or_default()
 }
 
-fn parameter_keys(outcome: &ShadowOutcomeRequest) -> Option<BTreeMap<String, f64>> {
+fn parameter_keys(outcome: &ScoutOutcomeRequest) -> Option<BTreeMap<String, f64>> {
     match (
         outcome.scout_parameter_key.as_deref(),
         outcome.scout_parameter_value,
@@ -203,8 +232,8 @@ fn parameter_keys(outcome: &ShadowOutcomeRequest) -> Option<BTreeMap<String, f64
     }
 }
 
-fn validate_shadow_outcome(
-    outcome: &ShadowOutcomeRequest,
+fn validate_scout_outcome(
+    outcome: &ScoutOutcomeRequest,
 ) -> Result<BTreeMap<String, f64>, (StatusCode, String)> {
     if outcome.decision_id.is_empty()
         || outcome.decision_id.len() > 240
@@ -246,8 +275,8 @@ fn validate_shadow_outcome(
         || (outcome.scout_comparison_role.as_deref() == Some("baseline")
             && outcome.scout_parameter_key.is_some())
         || outcome.signal_timestamp_ms > outcome.evaluated_timestamp_ms
-        || outcome.evaluated_timestamp_ms > shadow_now_ms().saturating_add(5_000)
-        || shadow_now_ms().saturating_sub(outcome.signal_timestamp_ms) > 7 * 86_400_000
+        || outcome.evaluated_timestamp_ms > scout_now_ms().saturating_add(5_000)
+        || scout_now_ms().saturating_sub(outcome.signal_timestamp_ms) > 7 * 86_400_000
         || !outcome.net_return_percent.is_finite()
         || !outcome.taker_fee_rate.is_finite()
         || outcome.taker_fee_rate < 0.0
@@ -264,7 +293,7 @@ fn validate_shadow_outcome(
     {
         return Err((
             StatusCode::BAD_REQUEST,
-            "Invalid shadow learning outcome".into(),
+            "Invalid scout learning outcome".into(),
         ));
     }
     let keys = parameter_keys(outcome).ok_or((
@@ -321,7 +350,7 @@ fn validate_shadow_outcome(
     Ok(keys)
 }
 
-fn outcome_event(outcome: &ShadowOutcomeRequest, tested: &BTreeMap<String, f64>) -> FeedbackEvent {
+fn outcome_event(outcome: &ScoutOutcomeRequest, tested: &BTreeMap<String, f64>) -> FeedbackEvent {
     let profile_symbol = outcome
         .scout_parameter_profile_symbol
         .as_deref()
@@ -339,7 +368,7 @@ fn outcome_event(outcome: &ShadowOutcomeRequest, tested: &BTreeMap<String, f64>)
         observed_at_ms: outcome.evaluated_timestamp_ms,
         learning_context: (outcome.exit_scenario == "strategy"
             && outcome.scout_comparison_role.as_deref() != Some("baseline"))
-        .then(|| shadow_context_learning_key(&outcome.learning_context))
+        .then(|| scout_context_learning_key(&outcome.learning_context))
         .flatten(),
         symbol: profile_symbol.to_owned(),
         strategy: outcome.strategy.clone(),
@@ -352,8 +381,8 @@ fn outcome_event(outcome: &ShadowOutcomeRequest, tested: &BTreeMap<String, f64>)
 
 fn paired_event(
     comparison_id: &str,
-    baseline: &ShadowOutcomeRequest,
-    variant: &ShadowOutcomeRequest,
+    baseline: &ScoutOutcomeRequest,
+    variant: &ScoutOutcomeRequest,
 ) -> Option<FeedbackEvent> {
     let tested = parameter_keys(variant)?;
     let mut parameters = baseline.strategy_parameters.clone();
@@ -412,8 +441,8 @@ fn parse_legacy_learning_key(key: &str) -> Option<(String, String, String, f64)>
 
 fn paired_event_with_legacy_side(
     comparison_id: &str,
-    pair: &ShadowPair,
-    latest: &ShadowOutcomeRequest,
+    pair: &ScoutPair,
+    latest: &ScoutOutcomeRequest,
 ) -> Option<FeedbackEvent> {
     let baseline_return = pair
         .baseline
@@ -448,8 +477,8 @@ fn paired_event_with_legacy_side(
     paired_event(comparison_id, &baseline, &variant)
 }
 
-fn shadow_outcome_audit(
-    outcome: &ShadowOutcomeRequest,
+fn scout_outcome_audit(
+    outcome: &ScoutOutcomeRequest,
     paired_delta: Option<f64>,
 ) -> serde_json::Value {
     let status = if outcome.net_return_percent > 1e-12 {
@@ -462,7 +491,7 @@ fn shadow_outcome_audit(
     let mut audit = serde_json::json!({
         "record_schema_version": 1,
         "decision_id": format!("{}|outcome", outcome.decision_id),
-        "shadow_decision_id": outcome.decision_id,
+        "scout_decision_id": outcome.decision_id,
         "stage": "scout-outcome",
         "status": status,
         "timestamp": outcome.evaluated_timestamp_ms,
@@ -471,9 +500,9 @@ fn shadow_outcome_audit(
         "symbol": outcome.symbol,
         "strategy": outcome.strategy,
         "scout": true,
-        "shadow_exit_scenario": outcome.exit_scenario,
-        "shadow_net_return_percent": outcome.net_return_percent,
-        "shadow_taker_fee_rate": outcome.taker_fee_rate,
+        "scout_exit_scenario": outcome.exit_scenario,
+        "scout_net_return_percent": outcome.net_return_percent,
+        "scout_taker_fee_rate": outcome.taker_fee_rate,
         "scout_parameter_key": outcome.scout_parameter_key,
         "scout_parameter_value": outcome.scout_parameter_value,
         "scout_parameter_profile_symbol": outcome.scout_parameter_profile_symbol,
@@ -490,14 +519,14 @@ fn shadow_outcome_audit(
     audit
 }
 
-fn scout_shadow_registration(audit: &serde_json::Value) -> Option<serde_json::Value> {
+fn scout_registration(audit: &serde_json::Value) -> Option<serde_json::Value> {
     let decision = audit.get("strategy_decision")?;
     let decision_id = audit.get("decision_id")?.as_str()?;
     let strategy = audit.get("strategy")?.as_str()?;
     let symbol = audit.get("symbol")?.as_str()?;
     let direction = audit.get("direction")?.as_str()?;
     let timestamp = audit.get("timestamp")?.as_u64()?;
-    let entry_price = audit.get("shadow_entry_price")?.as_f64()?;
+    let entry_price = audit.get("scout_entry_price")?.as_f64()?;
     let parameters = decision.get("strategy_parameters");
     let parameter = |key: &str, default: f64| {
         parameters
@@ -514,7 +543,7 @@ fn scout_shadow_registration(audit: &serde_json::Value) -> Option<serde_json::Va
         "direction": direction,
         "entry_price": entry_price,
         "strategy": strategy,
-        "exit_scenario": audit.get("shadow_exit_scenario").and_then(serde_json::Value::as_str).unwrap_or("strategy"),
+        "exit_scenario": audit.get("scout_exit_scenario").and_then(serde_json::Value::as_str).unwrap_or("strategy"),
         "strategy_exit_enabled": strategy_exit_enabled,
         "stop_loss_percent": audit.get("stop_loss_percent").and_then(serde_json::Value::as_f64).unwrap_or(0.5),
         "take_profit_percent": audit.get("take_profit_percent").and_then(serde_json::Value::as_f64).unwrap_or(0.8),
@@ -530,7 +559,7 @@ fn scout_shadow_registration(audit: &serde_json::Value) -> Option<serde_json::Va
     }))
 }
 
-fn build_shadow_audits(template: &ShadowAuditTemplate, group_id: &str) -> Vec<serde_json::Value> {
+fn build_scout_audits(template: &ScoutAuditTemplate, group_id: &str) -> Vec<serde_json::Value> {
     let mut base = template.base_audit.clone();
     let strategy = base
         .get("strategy")
@@ -555,9 +584,9 @@ fn build_shadow_audits(template: &ShadowAuditTemplate, group_id: &str) -> Vec<se
             .unwrap_or_default()
     );
     base["scout"] = serde_json::json!(true);
-    base["shadow_notional_usd"] = serde_json::json!(template.notional_usd);
+    base["scout_notional_usd"] = serde_json::json!(template.notional_usd);
     base["strategy_parameters"] = serde_json::json!(parameter_map);
-    base["shadow_sample_group_id"] = serde_json::json!(group_id);
+    base["scout_sample_group_id"] = serde_json::json!(group_id);
     base["strategy_parameter_specs"] =
         serde_json::to_value(&template.parameter_specs).unwrap_or_else(|_| serde_json::json!([]));
     base["learning_profile_id"] = serde_json::json!(strategies::profile_id(
@@ -619,13 +648,13 @@ fn build_shadow_audits(template: &ShadowAuditTemplate, group_id: &str) -> Vec<se
         .and_then(serde_json::Value::as_f64)
         .filter(|_| strategy.starts_with("donchian-"))
     {
-        base["shadow_entry_price"] =
+        base["scout_entry_price"] =
             serde_json::json!(level * (1.0 - template.level_percent / 100.0));
     } else if let Some(price) = decision
         .get("observed_close")
         .and_then(serde_json::Value::as_f64)
     {
-        base["shadow_entry_price"] = serde_json::json!(price);
+        base["scout_entry_price"] = serde_json::json!(price);
     }
     let scenarios: &[(&str, f64)] = if template.strategy_only {
         &[("strategy", 1.0)]
@@ -646,15 +675,15 @@ fn build_shadow_audits(template: &ShadowAuditTemplate, group_id: &str) -> Vec<se
             audit["stop_loss_percent"] = serde_json::json!(template.stop_loss_percent * multiplier);
             audit["take_profit_percent"] =
                 serde_json::json!(template.take_profit_percent * multiplier);
-            audit["shadow_exit_scenario"] = serde_json::json!(scenario);
-            audit["shadow_sample_group_id"] = serde_json::json!(group_id);
+            audit["scout_exit_scenario"] = serde_json::json!(scenario);
+            audit["scout_sample_group_id"] = serde_json::json!(group_id);
             audit["scout"] = serde_json::json!(true);
             let learning_context = if template.learning_context.ends_with(":scenario") {
                 format!("{}:{scenario}:trade", template.learning_context)
             } else {
                 template.learning_context.clone()
             };
-            audit["shadow_learning_context"] = serde_json::json!(learning_context);
+            audit["scout_learning_context"] = serde_json::json!(learning_context);
             let role = audit
                 .get("scout_comparison_role")
                 .and_then(serde_json::Value::as_str);
@@ -670,7 +699,7 @@ fn build_shadow_audits(template: &ShadowAuditTemplate, group_id: &str) -> Vec<se
         .collect()
 }
 
-fn persist_shadow_state(
+fn persist_scout_state(
     path: &std::path::Path,
     state: &PersistedState,
 ) -> Result<(), (StatusCode, String)> {
@@ -690,23 +719,23 @@ fn persist_shadow_state(
         .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))
 }
 
-async fn flush_shadow_outbox(
-    shadow: &ShadowState,
+async fn flush_scout_outbox(
+    scout: &ScoutState,
     client: &reqwest::Client,
     learning_url: &str,
 ) -> Result<(), (StatusCode, String)> {
-    let _flush = shadow.flush_lock.lock().await;
+    let _flush = scout.flush_lock.lock().await;
     loop {
-        let item = shadow.data.lock().await.outbox.first().cloned();
+        let item = scout.data.lock().await.outbox.first().cloned();
         let Some(item) = item else {
             return Ok(());
         };
         let (url, payload) = match &item {
-            ShadowOutboxItem::Learning(event) => (
+            ScoutOutboxItem::Learning(event) => (
                 format!("{}/feedback", learning_url.trim_end_matches('/')),
                 serde_json::to_value(event).unwrap_or_default(),
             ),
-            ShadowOutboxItem::Audit(audit) => {
+            ScoutOutboxItem::Audit(audit) => {
                 let base = std::env::var("INSIGHTS_URL")
                     .unwrap_or_else(|_| "http://127.0.0.1:3004".into());
                 (
@@ -714,12 +743,12 @@ async fn flush_shadow_outbox(
                     audit.clone(),
                 )
             }
-            ShadowOutboxItem::Registration(registration) => {
+            ScoutOutboxItem::Registration(registration) => {
                 let base = std::env::var("INSIGHTS_URL")
                     .unwrap_or_else(|_| "http://127.0.0.1:3004".into());
                 (
                     format!(
-                        "{}/internal/signals/scout-shadow",
+                        "{}/internal/scouts/register",
                         base.trim_end_matches('/')
                     ),
                     registration.clone(),
@@ -738,9 +767,9 @@ async fn flush_shadow_outbox(
                     format!("Scout outcome delivery failed: {error}"),
                 )
             })?;
-        let mut state = shadow.data.lock().await;
+        let mut state = scout.data.lock().await;
         state.outbox.remove(0);
-        persist_shadow_state(&shadow.path, &state)?;
+        persist_scout_state(&scout.path, &state)?;
     }
 }
 
@@ -753,6 +782,6 @@ fn feedback_event_id(event: &FeedbackEvent) -> &str {
 
 fn outbox_has_learning(state: &PersistedState, event: &FeedbackEvent) -> bool {
     state.outbox.iter().any(|item| matches!(item,
-        ShadowOutboxItem::Learning(pending) if feedback_event_id(pending) == feedback_event_id(event)))
+        ScoutOutboxItem::Learning(pending) if feedback_event_id(pending) == feedback_event_id(event)))
 }
 

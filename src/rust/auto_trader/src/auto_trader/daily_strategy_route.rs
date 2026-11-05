@@ -201,11 +201,12 @@ async fn receive_daily_strategy_signals(
         .filter(|strategy| !strategy.is_dated_carry())
         .map(|strategy| strategy.as_str().to_owned())
         .collect::<Vec<_>>();
-    let scout_strategies = settings
-        .scout_strategies
-        .iter()
-        .filter(|strategy| !strategy.is_dated_carry())
-        .map(|strategy| strategy.as_str().to_owned())
+    let scout_strategies = state.scout_configuration
+        .read()
+        .map(|configuration| configuration.strategies.clone())
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|strategy| !Strategy::from_name(strategy).is_some_and(Strategy::is_dated_carry))
         .collect::<Vec<_>>();
     let active_strategy_symbols = snapshot
         .active_strategy_symbols
@@ -255,7 +256,7 @@ async fn receive_daily_strategy_signals(
                 .get(&cursor_key)
                 .is_some_and(|previous| *previous >= candle_or_anchor);
             if already_processed {
-                // Parameter probes are always shadow-only and may share the
+                // Parameter probes are always scout-only and may share the
                 // same candle cursor as their baseline signal.
                 let parameter_probe = signal
                     .strategy_decision

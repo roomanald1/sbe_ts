@@ -1,5 +1,7 @@
 #[path = "network/feed_client.rs"]
 mod feed_client;
+#[path = "observability/latency.rs"]
+mod latency;
 #[path = "observability/logging.rs"]
 mod logging;
 use axum::{Json, Router, http::StatusCode, routing::get};
@@ -53,12 +55,15 @@ enum SignalFeedEvent {
 #[derive(Deserialize)]
 struct SignalEventRequest {
     symbol: String,
+    #[serde(skip)]
+    queued_at: Option<Instant>,
     #[serde(flatten)]
     event: SignalFeedEvent,
 }
 struct SignalRuntime {
     store: SignalStore,
-    engines: Mutex<HashMap<String, SignalEngine>>,
+    engines: DashMap<String, Arc<Mutex<SignalEngine>>>,
+    research_record_sender: tokio::sync::mpsc::Sender<Vec<StoredSignalRecord>>,
     signal_push_cache: Arc<DashMap<String, serde_json::Value>>,
     signal_push_notify: Arc<Notify>,
     market_cache: Arc<DashMap<String, (u64, serde_json::Value)>>,
@@ -69,11 +74,11 @@ struct SignalRuntime {
     news_learning: Mutex<NewsLearning>,
     snapshot_diagnostic_at: DashMap<String, u64>,
     latest_prices: DashMap<String, (u64, f64)>,
-    scout_shadow_cache: Mutex<Option<(Instant, serde_json::Value)>>,
+    scout_cache: Mutex<Option<(Instant, serde_json::Value)>>,
 }
 
 static POSITION_MANAGEMENT_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
-static SHADOW_LEARNING_DELIVERY_LIMIT: OnceLock<Semaphore> = OnceLock::new();
+static SCOUT_LEARNING_DELIVERY_LIMIT: OnceLock<Semaphore> = OnceLock::new();
 
 #[derive(Default)]
 struct NewsLearning {
@@ -115,6 +120,14 @@ fn now_ms() -> u64 {
         .as_millis() as u64
 }
 
+fn research_only() -> bool {
+    static RESEARCH_ONLY: OnceLock<bool> = OnceLock::new();
+    *RESEARCH_ONLY.get_or_init(|| {
+        std::env::var("INSIGHTS_RESEARCH_ONLY")
+            .is_ok_and(|value| matches!(value.to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
+    })
+}
+
 fn signal_diagnostic_due(runtime: &SignalRuntime, symbol: &str, timestamp: u64) -> bool {
     let mut last = runtime
         .snapshot_diagnostic_at
@@ -134,8 +147,8 @@ include!("feeds/dated_carry_signals.rs");
 include!("feeds/daily_strategy_signals.rs");
 include!("workers/signal_feed_workers.rs");
 
-#[path = "api/scout_shadow_report.rs"]
-mod scout_shadow_report;
+#[path = "api/scout_report.rs"]
+mod scout_report;
 
 include!("api/signal_ingestion.rs");
 

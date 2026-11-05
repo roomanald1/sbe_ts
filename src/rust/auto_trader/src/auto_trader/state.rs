@@ -1,6 +1,7 @@
 #[derive(Clone)]
 struct AutoTraderState {
     client: reqwest::Client,
+    scout_configuration: Arc<std::sync::RwLock<scouts::ScoutConfiguration>>,
     latest_daily_strategy_snapshot: Arc<Mutex<Option<DailyStrategySnapshot>>>,
     strategy_diagnostic: Arc<std::sync::Mutex<Vec<StrategyDiagnostic>>>,
     enabled: Arc<AtomicBool>,
@@ -11,7 +12,6 @@ struct AutoTraderState {
     latest_missed_opportunity_bands: Arc<Mutex<Vec<MissedOpportunityGateBand>>>,
     latest_execution_parameters: Arc<Mutex<Option<LatestExecutionParameters>>>,
     cycle_lock: Arc<Mutex<()>>,
-    scout_lifecycle_last_update_ms: Arc<AtomicU64>,
     pending_daily_signals: Arc<Mutex<PendingSignalQueue>>,
     daily_signal_notify: Arc<Notify>,
     pending_live_signals: Arc<Mutex<PendingSignalQueue>>,
@@ -31,6 +31,12 @@ struct AutoTraderState {
     dated_carry: Arc<Mutex<DatedCarryBook>>,
     dated_carry_work_lock: Arc<Mutex<()>>,
     dated_carry_path: PathBuf,
+}
+
+impl AutoTraderState {
+    fn scout_configuration(&self) -> scouts::ScoutConfiguration {
+        self.scout_configuration.read().map(|value| value.clone()).unwrap_or_default()
+    }
 }
 
 const DECISION_AUDIT_QUEUE_CAPACITY: usize = 16_384;
@@ -245,7 +251,7 @@ struct TraderPosition {
     take_profit_percent: Option<f64>,
     #[serde(default)]
     take_profit_deferred_at_ms: Option<u64>,
-    #[serde(default, alias = "shadow_profit_peak_return_percent")]
+    #[serde(default, alias = "scout_profit_peak_return_percent")]
     profit_protection_peak_return_percent: Option<f64>,
     #[serde(default)]
     protective_stops: Vec<ProtectiveStop>,

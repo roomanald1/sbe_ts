@@ -1,5 +1,5 @@
 #[cfg(test)]
-mod shadow_outcome_tests {
+mod scout_outcome_tests {
     use super::*;
 
     fn spec() -> ParameterSpec {
@@ -15,14 +15,14 @@ mod shadow_outcome_tests {
         }
     }
 
-    fn outcome(id: &str, net: f64) -> ShadowOutcomeRequest {
-        ShadowOutcomeRequest {
+    fn outcome(id: &str, net: f64) -> ScoutOutcomeRequest {
+        ScoutOutcomeRequest {
             decision_id: id.into(),
             learning_context: "scout:BTC:trade:scenario:strategy".into(),
             simulated_net_pnl_usd: net,
             net_return_percent: net,
-            signal_timestamp_ms: shadow_now_ms().saturating_sub(100),
-            evaluated_timestamp_ms: shadow_now_ms(),
+            signal_timestamp_ms: scout_now_ms().saturating_sub(100),
+            evaluated_timestamp_ms: scout_now_ms(),
             taker_fee_rate: 0.001,
             symbol: "BTC-USDT".into(),
             strategy: "live-momentum".into(),
@@ -47,7 +47,7 @@ mod shadow_outcome_tests {
         let mut sample = outcome("probe", 1.25);
         sample.scout_parameter_key = Some("minimum_momentum".into());
         sample.scout_parameter_value = Some(0.7);
-        let tested = validate_shadow_outcome(&sample).unwrap();
+        let tested = validate_scout_outcome(&sample).unwrap();
         let FeedbackEvent::ScoutOutcome {
             parameters,
             specs,
@@ -63,7 +63,7 @@ mod shadow_outcome_tests {
         assert_eq!(learning_context.as_deref(), Some("scout:BTC:trade"));
         assert_eq!(net_return_percent, 1.25);
         sample.scout_parameter_value = Some(0.75);
-        assert!(validate_shadow_outcome(&sample).is_err());
+        assert!(validate_scout_outcome(&sample).is_err());
     }
 
     #[test]
@@ -98,11 +98,11 @@ mod shadow_outcome_tests {
 
     #[test]
     fn legacy_pair_completes_with_new_variant_using_legacy_baseline_return() {
-        let mut pair = ShadowPair {
+        let mut pair = ScoutPair {
             legacy_baseline_return_percent: Some(0.4),
             legacy_learning_key: "paired_probe:BTC-USDT:live-momentum:minimum_momentum:0.70000000"
                 .into(),
-            ..ShadowPair::default()
+            ..ScoutPair::default()
         };
         let mut variant = outcome("new-variant", 1.1);
         variant.scout_parameter_key = Some("minimum_momentum".into());
@@ -166,7 +166,7 @@ mod shadow_outcome_tests {
         for scenario in ["strategy", "tight", "wide"] {
             let mut sample = outcome("shared-decision", 0.1);
             sample.exit_scenario = scenario.into();
-            let key = shadow_outcome_idempotency_key(&sample);
+            let key = scout_outcome_idempotency_key(&sample);
             assert!(
                 seen.insert(key.clone()),
                 "first delivery for {scenario} must be accepted"

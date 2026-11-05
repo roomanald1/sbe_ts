@@ -21,8 +21,8 @@ export const scoutableStrategies: Array<{ strategy: Strategy; label: string }> =
 ];
 
 export function AutoTraderScoutOptions({ scoutStrategies, saving, onChange }: { scoutStrategies: Strategy[]; saving: boolean; onChange: (strategies: Strategy[]) => void }) {
-  return <fieldset className="auto-trader-strategy-options" title="Scouts evaluate eligible signals in shadow mode. They cannot place trades, even when the strategy is disabled for trading.">
-    <legend>SCOUTS · SHADOW ONLY</legend>
+  return <fieldset className="auto-trader-strategy-options" title="Scouts evaluate eligible signals without submitting orders, even when the strategy is disabled for trading.">
+    <legend>SCOUTS ONLY</legend>
     {scoutableStrategies.map(({ strategy, label }) => <label key={strategy}><input type="checkbox" disabled={saving} checked={scoutStrategies.includes(strategy)} onChange={(event) => onChange(event.target.checked ? [...scoutStrategies, strategy] : scoutStrategies.filter((item) => item !== strategy))} />{label}</label>)}
     <small>Choose strategies to evaluate as Scouts. This works independently of the strategy trading checkboxes above.</small>
   </fieldset>;

@@ -15,30 +15,7 @@ fn compact_scout_probe_suffix(key: &str, value: f64) -> String {
     }
 }
 
-fn active_shadow_batch_count(settings: &Settings) -> usize {
-    settings
-        .shadow_sample_active_scenarios
-        .keys()
-        .map(|key| key.split("|probe:").next().unwrap_or(key))
-        .collect::<BTreeSet<_>>()
-        .len()
-}
-
-fn active_scout_shadow_batch_count(settings: &Settings) -> usize {
-    settings
-        .shadow_sample_active_scenarios
-        .keys()
-        .filter(|key| {
-            key.starts_with("daily-scout-level:")
-                || key.starts_with("live-scout:")
-                || key.starts_with("live-scout-parameter:")
-        })
-        .map(|key| key.split("|probe:").next().unwrap_or(key))
-        .collect::<BTreeSet<_>>()
-        .len()
-}
-
-fn scout_shadow_audit_payload(
+fn scout_audit_payload(
     signal: &Signal,
     timestamp: u64,
     notional: f64,
@@ -53,19 +30,19 @@ fn scout_shadow_audit_payload(
         signal,
         "decision",
         timestamp,
-        "shadowed",
-        Some("Scout shadow sample recorded; no order submitted"),
+        "scouted",
+        Some("Scout scout sample recorded; no order submitted"),
         Some(true),
         stop_loss_percent,
         take_profit_percent,
         evidence,
     );
-    // Daily signal timestamps are in seconds; shadow audit matching uses the
+    // Daily signal timestamps are in seconds; scout audit matching uses the
     // millisecond timestamp shared with outcome evaluations.
     payload["signal_timestamp"] = serde_json::json!(timestamp);
     payload["scout"] = serde_json::json!(true);
-    payload["shadow_learning_context"] = serde_json::json!(learning_context);
-    payload["shadow_notional_usd"] = serde_json::json!(notional);
+    payload["scout_learning_context"] = serde_json::json!(learning_context);
+    payload["scout_notional_usd"] = serde_json::json!(notional);
     let profile_parameters = signal_strategy_parameters(signal);
     if let Some(strategy) = signal.strategy.as_deref() {
         payload["learning_profile_id"] = serde_json::json!(strategies::profile_id(
@@ -80,7 +57,7 @@ fn scout_shadow_audit_payload(
     if signal.strategy.as_deref().is_some_and(|strategy| strategy.starts_with("donchian-")) {
         payload["scout_level_percent"] = serde_json::json!(level_percent);
     }
-    payload["shadow_exit_scenario"] = serde_json::json!(exit_scenario);
+    payload["scout_exit_scenario"] = serde_json::json!(exit_scenario);
     if let Some(decision) = signal.strategy_decision.as_ref() {
         if let Some(id) = decision.get("scout_comparison_id") { payload["scout_comparison_id"] = id.clone(); }
         if let Some(role) = decision.get("scout_comparison_role") { payload["scout_comparison_role"] = role.clone(); }
@@ -113,9 +90,9 @@ fn scout_shadow_audit_payload(
     } else {
         format!("daily-scout-level:{level_percent:.2}|{sample_group_id}|{}|{}{probe_suffix}", signal.symbol, signal.direction)
     };
-    payload["shadow_sample_group_id"] = serde_json::json!(sample_group_id);
+    payload["scout_sample_group_id"] = serde_json::json!(sample_group_id);
     let cooldown_probe = parameter_probe.map_or_else(String::new, |(key, value)| compact_scout_probe_suffix(key, value));
-    payload["scout_shadow_cooldown_key"] = if signal.strategy.as_deref().is_some_and(|strategy| strategy.starts_with("live-")) {
+    payload["scout_cooldown_key"] = if signal.strategy.as_deref().is_some_and(|strategy| strategy.starts_with("live-")) {
         serde_json::json!(format!("live|{}|{}|{}{cooldown_probe}", signal.strategy.as_deref().unwrap_or("unknown"), signal.symbol, signal.direction))
     } else {
         serde_json::json!(format!("daily|{}|{}|{}|level:{level_percent:.2}{cooldown_probe}",
@@ -134,7 +111,7 @@ fn scout_shadow_audit_payload(
             .and_then(serde_json::Value::as_f64)
     };
     if let Some(entry_price) = entry_price {
-        payload["shadow_entry_price"] = serde_json::json!(entry_price);
+        payload["scout_entry_price"] = serde_json::json!(entry_price);
     }
     let strategy = signal.strategy.as_deref().unwrap_or("unknown-strategy");
     let probe_suffix = scout_parameter_probe_suffix(signal);
@@ -154,17 +131,10 @@ fn scout_shadow_audit_payload(
     payload
 }
 
-const DAILY_SCOUT_SHADOW_COOLDOWN_MS: u64 = 300_000;
+const DAILY_SCOUT_SCOUT_COOLDOWN_MS: u64 = 300_000;
 const MAX_CONCURRENT_SCOUT_VARIANTS_PER_PROFILE: usize = 3;
 
-#[cfg(test)]
-fn live_scout_strategies_enabled_for_trading(settings: &Settings) -> Vec<Strategy> {
-    settings.scout_strategies.iter().copied()
-        .filter(|strategy| strategy.is_live_insight() && settings.strategies.contains(strategy))
-        .collect()
-}
-
-async fn submit_scout_shadow_plans(
+async fn submit_scout_plans(
     _state: &AutoTraderState,
     source: &str,
     now_ms: u64,
@@ -175,7 +145,7 @@ async fn submit_scout_shadow_plans(
     if audits.is_empty() { return Ok(Vec::new()); }
     let mut grouped = Vec::<(String, Vec<serde_json::Value>)>::new();
     for audit in audits {
-        let Some(group) = audit.get("shadow_sample_group_id").and_then(serde_json::Value::as_str) else { continue; };
+        let Some(group) = audit.get("scout_sample_group_id").and_then(serde_json::Value::as_str) else { continue; };
         if let Some((_, plans)) = grouped.iter_mut().find(|(key, _)| key == group) {
             plans.push(audit);
         } else {
@@ -198,9 +168,9 @@ async fn submit_scout_shadow_plans(
             let parameter_specs = audit.get("strategy_parameter_specs")
                 .and_then(|value| serde_json::from_value::<Vec<scouts::ParameterSpec>>(value.clone()).ok())
                 .unwrap_or_default();
-            scouts::ShadowAuditTemplate {
-                notional_usd: audit.get("shadow_notional_usd").and_then(serde_json::Value::as_f64).unwrap_or_default(),
-                learning_context: audit.get("shadow_learning_context").and_then(serde_json::Value::as_str).unwrap_or("scout:unknown:trade").to_owned(),
+            scouts::ScoutAuditTemplate {
+                notional_usd: audit.get("scout_notional_usd").and_then(serde_json::Value::as_f64).unwrap_or_default(),
+                learning_context: audit.get("scout_learning_context").and_then(serde_json::Value::as_str).unwrap_or("scout:unknown:trade").to_owned(),
                 stop_loss_percent: audit.get("stop_loss_percent").and_then(serde_json::Value::as_f64).unwrap_or(0.5),
                 take_profit_percent: audit.get("take_profit_percent").and_then(serde_json::Value::as_f64).unwrap_or(0.8),
                 level_percent: audit.get("scout_level_percent").and_then(serde_json::Value::as_f64).unwrap_or_default(),
@@ -210,7 +180,7 @@ async fn submit_scout_shadow_plans(
                 base_audit: audit.clone(),
             }
         }).collect();
-        scouts::ShadowPlanCandidate {
+        scouts::ScoutPlanCandidate {
             generate_group_id: true,
             sample_group_id: String::new(),
             cooldown_key: String::new(),
@@ -225,7 +195,7 @@ async fn submit_scout_shadow_plans(
             live_policy: None,
         }
     }).collect::<Vec<_>>();
-    let request = scouts::ShadowPlanRequest {
+    let request = scouts::ScoutPlanRequest {
         request_id: format!("{source}:{now_ms}:{}", scouts::probe_id(&candidate_fingerprint)),
         now_ms,
         max_active_batches,
@@ -235,12 +205,12 @@ async fn submit_scout_shadow_plans(
         candidates,
     };
     let base = std::env::var("SCOUTS_SERVICE_URL").unwrap_or_else(|_| "http://127.0.0.1:3011".into());
-    scouts::request_shadow_plan(&base, &request).await
+    scouts::request_scout_plan(&base, &request).await
         .map(|response| response.audits)
-        .map_err(|error| (StatusCode::BAD_GATEWAY, format!("Scout shadow plan request failed: {error}")))
+        .map_err(|error| (StatusCode::BAD_GATEWAY, format!("Scout scout plan request failed: {error}")))
 }
 
-async fn record_daily_scout_shadow_ladder(
+async fn record_daily_scout_ladder(
     state: &AutoTraderState,
     candidates: &[Signal],
     now: u64,
@@ -250,6 +220,7 @@ async fn record_daily_scout_shadow_ladder(
     }
     let timestamp_ms = now.saturating_mul(1_000);
     let settings = state.settings.lock().await.clone();
+    let scout_configuration = state.scout_configuration();
     let mut plans = Vec::new();
     for signal in candidates {
         let Some(strategy) = signal.strategy.as_deref().and_then(Strategy::from_name) else {
@@ -258,7 +229,7 @@ async fn record_daily_scout_shadow_ladder(
         let parameters = signal_strategy_parameters(signal);
         let daily_features_present = StrategySignal::entry(signal, &parameters).daily_features.is_some();
         let decision = evaluate_daily_strategy_signal(signal);
-        let selected_scout = settings.scout_strategies.contains(&strategy);
+        let selected_scout = scout_configuration.strategies.iter().any(|name| name == strategy.as_str());
         let parameter_probe = signal.strategy_decision.as_ref().and_then(|decision| {
             Some((decision.get("scout_parameter_key")?.as_str()?, decision.get("scout_parameter_value")?.as_f64()?))
         });
@@ -287,7 +258,7 @@ async fn record_daily_scout_shadow_ladder(
                 decision["scout_comparison_role"] = serde_json::json!(role);
                 let mut compared = selected.clone();
                 compared.strategy_decision = Some(decision);
-                let mut base_audit = signal_audit_payload(&compared, "decision", timestamp_ms, "shadowed", Some("Scout parameter comparison sample recorded"), Some(true), stop, target, None);
+                let mut base_audit = signal_audit_payload(&compared, "decision", timestamp_ms, "scouted", Some("Scout parameter comparison sample recorded"), Some(true), stop, target, None);
                 base_audit["scout_comparison_id"] = serde_json::json!(comparison_id);
                 base_audit["scout_comparison_role"] = serde_json::json!(role);
                 base_audit["scout_comparison_parameter_key"] = serde_json::json!(parameter_key);
@@ -297,7 +268,7 @@ async fn record_daily_scout_shadow_ladder(
                     base_audit["scout_comparison_zero_role"] = serde_json::json!(if !baseline_enters { "baseline" } else { "variant" });
                 }
                 let context = market_context(&compared);
-                templates.push(scouts::ShadowAuditTemplate {
+                templates.push(scouts::ScoutAuditTemplate {
                     base_audit,
                     notional_usd: settings.max_order_notional * SCOUT_MAX_ORDER_FRACTION,
                     learning_context: format!("scout:{context}:level:0.00:scenario:strategy:{role}"),
@@ -309,7 +280,7 @@ async fn record_daily_scout_shadow_ladder(
                     parameter_specs: scout_parameter_specs(strategy),
                 });
             }
-            plans.push(scouts::ShadowPlanCandidate {
+            plans.push(scouts::ScoutPlanCandidate {
                 generate_group_id: true,
                 sample_group_id: String::new(), cooldown_key: String::new(),
                 profile_key: format!("{}|{}", strategy.as_str(), signal.symbol), eligible: true,
@@ -328,9 +299,9 @@ async fn record_daily_scout_shadow_ladder(
             .and_then(serde_json::Value::as_f64).unwrap_or(settings.stop_loss_percent);
         let target = strategy_parameters.and_then(|parameters| parameters.get("take_profit_percent"))
             .and_then(serde_json::Value::as_f64).unwrap_or(settings.take_profit_percent);
-        let base_audit = signal_audit_payload(signal, "decision", timestamp_ms, "shadowed", Some("Scout shadow sample recorded; no order submitted"), Some(true), stop, target, None);
+        let base_audit = signal_audit_payload(signal, "decision", timestamp_ms, "scouted", Some("Scout scout sample recorded; no order submitted"), Some(true), stop, target, None);
         let parameter_entry_eligible = parameter_probe.map(|_| matches!(decision, Ok(StrategyDecision::Enter | StrategyDecision::Scout)));
-        let template = scouts::ShadowAuditTemplate {
+        let template = scouts::ScoutAuditTemplate {
             base_audit,
             notional_usd: settings.max_order_notional * SCOUT_MAX_ORDER_FRACTION * strategy_size_multiplier,
             learning_context: format!("scout:{}:level:0.00:scenario", market_context(signal)),
@@ -341,13 +312,13 @@ async fn record_daily_scout_shadow_ladder(
             parameter_entry_eligible,
             parameter_specs: scout_parameter_specs(strategy),
         };
-        plans.push(scouts::ShadowPlanCandidate {
+        plans.push(scouts::ScoutPlanCandidate {
             generate_group_id: true,
             sample_group_id: String::new(), cooldown_key: String::new(),
             profile_key: format!("{}|{}", strategy.as_str(), signal.symbol), eligible: true,
-            parameter_variant: parameter_probe.is_some(), cooldown_ms: if parameter_probe.is_some() { 86_400_000 } else { DAILY_SCOUT_SHADOW_COOLDOWN_MS },
+            parameter_variant: parameter_probe.is_some(), cooldown_ms: if parameter_probe.is_some() { 86_400_000 } else { DAILY_SCOUT_SCOUT_COOLDOWN_MS },
             audit_plans: Vec::new(), audit_templates: vec![template], sample_payload: None,
-            daily_policy: Some(scouts::DailyShadowPolicy {
+            daily_policy: Some(scouts::DailyScoutPolicy {
                 evaluator_decision: match decision {
                     Ok(StrategyDecision::Enter) => "enter",
                     Ok(StrategyDecision::Scout) => "scout",
@@ -364,13 +335,13 @@ async fn record_daily_scout_shadow_ladder(
             live_policy: None,
         });
     }
-    let max_active_batches = settings.max_concurrent_shadow_samples;
+    let max_active_batches = scout_configuration.max_active_samples;
     drop(settings);
     if plans.is_empty() { return Ok(()); }
     let request_key = plans.iter().flat_map(|candidate| candidate.audit_templates.iter())
         .filter_map(|template| template.base_audit.get("decision_id").and_then(serde_json::Value::as_str))
         .collect::<Vec<_>>().join("|");
-    let request = scouts::ShadowPlanRequest {
+    let request = scouts::ScoutPlanRequest {
         request_id: format!("daily:{timestamp_ms}:{}", scouts::probe_id(&request_key)),
         now_ms: timestamp_ms,
         max_active_batches,
@@ -380,13 +351,13 @@ async fn record_daily_scout_shadow_ladder(
         candidates: plans,
     };
     let scouts_url = std::env::var("SCOUTS_SERVICE_URL").unwrap_or_else(|_| "http://127.0.0.1:3011".into());
-    let response = scouts::request_shadow_plan(&scouts_url, &request).await
-        .map_err(|error| (StatusCode::BAD_GATEWAY, format!("Scout daily shadow plan failed: {error}")))?;
+    let response = scouts::request_scout_plan(&scouts_url, &request).await
+        .map_err(|error| (StatusCode::BAD_GATEWAY, format!("Scout daily scout plan failed: {error}")))?;
     for audit in response.audits { queue_auto_trader_audit(state, audit); }
     Ok(())
 }
 
-async fn record_live_strategy_scout_shadows(
+async fn record_live_strategy_scouts(
     state: &AutoTraderState,
     client: &reqwest::Client,
     position_url: &str,
@@ -410,6 +381,7 @@ async fn record_live_strategy_scout_shadows(
         }
     }
     let settings = state.settings.lock().await.clone();
+    let scout_configuration = state.scout_configuration();
     let mut plans = Vec::new();
     for candidate in candidates {
         let Some(strategy) = candidate.strategy.as_deref().and_then(Strategy::from_name) else { continue; };
@@ -420,8 +392,8 @@ async fn record_live_strategy_scout_shadows(
             .and_then(serde_json::Value::as_f64).unwrap_or(settings.take_profit_percent);
         let notional = settings.max_order_notional * SCOUT_MAX_ORDER_FRACTION;
         let base_audit = signal_audit_payload(
-            candidate, "decision", timestamp_ms, "shadowed",
-            Some("Scout shadow sample recorded; no order submitted"), Some(true), stop_loss, take_profit, None,
+            candidate, "decision", timestamp_ms, "scouted",
+            Some("Scout scout sample recorded; no order submitted"), Some(true), stop_loss, take_profit, None,
         );
         let market = fresh_markets.get(&candidate.symbol);
         let book_updated_at_ms = market.and_then(|value| value.get("updated_at_ms")).and_then(serde_json::Value::as_u64);
@@ -430,7 +402,7 @@ async fn record_live_strategy_scout_shadows(
         let best_ask = market.and_then(|value| value.get("asks")).and_then(|value| value.get(0))
             .and_then(|level| level.get("price")).and_then(serde_json::Value::as_f64);
         let context = market_context(candidate);
-        plans.push(scouts::ShadowPlanCandidate {
+        plans.push(scouts::ScoutPlanCandidate {
             generate_group_id: true,
             sample_group_id: String::new(), cooldown_key: String::new(),
             profile_key: format!("{}|{}", strategy.as_str(), candidate.symbol),
@@ -438,7 +410,7 @@ async fn record_live_strategy_scout_shadows(
             parameter_variant: false,
             cooldown_ms: 300_000,
             audit_plans: Vec::new(),
-            audit_templates: vec![scouts::ShadowAuditTemplate {
+            audit_templates: vec![scouts::ScoutAuditTemplate {
                 base_audit,
                 notional_usd: notional,
                 learning_context: format!("scout:{context}:trade:scenario"),
@@ -451,20 +423,20 @@ async fn record_live_strategy_scout_shadows(
             }],
             sample_payload: None,
             daily_policy: None,
-            live_policy: Some(scouts::LiveShadowPolicy {
+            live_policy: Some(scouts::LiveScoutPolicy {
                 now_ms: timestamp_ms,
-                strategy_enabled: settings.scout_strategies.contains(&strategy) && settings.strategies.contains(&strategy),
+                strategy_enabled: scout_configuration.strategies.iter().any(|name| name == strategy.as_str()) && settings.strategies.contains(&strategy),
                 book_updated_at_ms,
                 best_bid,
                 best_ask,
             }),
         });
     }
-    let max_active_batches = settings.max_concurrent_shadow_samples;
+    let max_active_batches = scout_configuration.max_active_samples;
     let fingerprint = plans.iter().flat_map(|plan| plan.audit_templates.iter())
         .filter_map(|template| template.base_audit.get("decision_id").and_then(serde_json::Value::as_str))
         .collect::<Vec<_>>().join("|");
-    let request = scouts::ShadowPlanRequest {
+    let request = scouts::ScoutPlanRequest {
         request_id: format!("live:{timestamp_ms}:{}", scouts::probe_id(&fingerprint)),
         now_ms: timestamp_ms,
         max_active_batches,
@@ -474,8 +446,8 @@ async fn record_live_strategy_scout_shadows(
         candidates: plans,
     };
     let base = std::env::var("SCOUTS_SERVICE_URL").unwrap_or_else(|_| "http://127.0.0.1:3011".into());
-    let audits = scouts::request_shadow_plan(&base, &request).await
-        .map_err(|error| (StatusCode::BAD_GATEWAY, format!("Scout live shadow plan failed: {error}")))?.audits;
+    let audits = scouts::request_scout_plan(&base, &request).await
+        .map_err(|error| (StatusCode::BAD_GATEWAY, format!("Scout live scout plan failed: {error}")))?.audits;
     for audit in audits {
         queue_auto_trader_audit(state, audit);
     }
@@ -648,8 +620,8 @@ async fn record_live_parameter_probe(
             Err(error) => crate::service_log!("WARN", "Could not record live Scout parameter variant: {}", error.1),
         }
     }
-    let max_active_batches = state.settings.lock().await.max_concurrent_shadow_samples;
-    let audits = submit_scout_shadow_plans(state, "live-parameter", sampled_at, 86_400_000, max_active_batches, audits).await?;
+    let max_active_batches = state.scout_configuration().max_active_samples;
+    let audits = submit_scout_plans(state, "live-parameter", sampled_at, 86_400_000, max_active_batches, audits).await?;
     for audit in audits {
         queue_auto_trader_audit(state, audit);
     }
@@ -706,7 +678,7 @@ async fn record_live_parameter_variant(
         decision["scout_comparison_id"] = serde_json::json!(comparison_id);
         decision["scout_comparison_role"] = serde_json::json!("baseline");
         baseline_signal.strategy_decision = Some(decision);
-        let mut audit = scout_shadow_audit_payload(
+        let mut audit = scout_audit_payload(
             &baseline_signal,
             sampled_at,
             notional,
@@ -717,8 +689,8 @@ async fn record_live_parameter_variant(
             0.0,
             "strategy",
         );
-        audit["shadow_sample_group_id"] = serde_json::json!(sample_group_id);
-        audit["scout_shadow_cooldown_key"] = serde_json::json!(format!("live-parameter|{}|{}|{}|{}",
+        audit["scout_sample_group_id"] = serde_json::json!(sample_group_id);
+        audit["scout_cooldown_key"] = serde_json::json!(format!("live-parameter|{}|{}|{}|{}",
             source_signal.symbol, strategy.as_str(), direction, compact_scout_probe_suffix(&parameter_key, parameter_value)));
         audit["scout_comparison_id"] = serde_json::json!(comparison_id);
         audit["scout_comparison_role"] = serde_json::json!("baseline");
@@ -745,7 +717,7 @@ async fn record_live_parameter_variant(
         decision["scout_comparison_id"] = serde_json::json!(comparison_id);
         decision["scout_comparison_role"] = serde_json::json!("variant");
         variant_signal.strategy_decision = Some(decision);
-        let mut audit = scout_shadow_audit_payload(
+        let mut audit = scout_audit_payload(
             &variant_signal,
             sampled_at,
             notional,
@@ -756,8 +728,8 @@ async fn record_live_parameter_variant(
             0.0,
             "strategy",
         );
-        audit["shadow_sample_group_id"] = serde_json::json!(sample_group_id);
-        audit["scout_shadow_cooldown_key"] = serde_json::json!(format!("live-parameter|{}|{}|{}|{}",
+        audit["scout_sample_group_id"] = serde_json::json!(sample_group_id);
+        audit["scout_cooldown_key"] = serde_json::json!(format!("live-parameter|{}|{}|{}|{}",
             source_signal.symbol, strategy.as_str(), direction, compact_scout_probe_suffix(&parameter_key, parameter_value)));
         audit["scout_comparison_id"] = serde_json::json!(comparison_id);
         audit["scout_comparison_role"] = serde_json::json!("variant");
@@ -797,10 +769,10 @@ async fn submit_cycle_signal(
             "Audit persistence unavailable; new entries paused until AutoTrader restart",
         ));
     }
-    if should_shadow_daily_scout(scout, signal) {
+    if should_scout_daily_scout(scout, signal) {
         return Ok(CycleResult {
-            status: "shadowed",
-            reason: Some("Daily scout candidate is shadow-only; no order submitted".into()),
+            status: "scouted",
+            reason: Some("Daily scout candidate is scout-only; no order submitted".into()),
             symbol: Some(signal.symbol.clone()),
             side: Some(
                 if signal.direction == "bullish" {
@@ -841,14 +813,15 @@ async fn submit_cycle_signal(
         item.symbol == signal.symbol && is_entry_evidence_horizon(item.horizon_seconds)
     });
     let capped_probe = scout || exploratory;
-    let mut scout_shadow_sample = None;
+    let mut scout_sample = None;
     if capped_probe {
         let settings = state.settings.lock().await;
+        let scout_configuration = state.scout_configuration();
         if scout {
             let notional = settings.max_order_notional * SCOUT_MAX_ORDER_FRACTION;
             let context = market_context(signal);
             let sample_group_id = format!("live-scout:{}|{}|{}", signal.strategy.as_deref().unwrap_or("live-insights"), signal.symbol, signal.direction);
-            scout_shadow_sample = Some((notional, format!("scout:{context}:trade"), sample_group_id));
+            scout_sample = Some((notional, format!("scout:{context}:trade"), sample_group_id));
             let open_scout_positions = settings
                 .positions
                 .values()
@@ -866,7 +839,7 @@ async fn submit_cycle_signal(
                         && order.quantity > order.filled_quantity + 1e-12
                 })
                 .count();
-            if open_scout_positions + pending_scout_orders >= settings.scout_max_active_positions {
+            if open_scout_positions + pending_scout_orders >= scout_configuration.max_active_positions {
                 return Ok(skipped_for_signal(
                     signal,
                     "Maximum number of active and pending scout positions is already in use",
@@ -875,26 +848,26 @@ async fn submit_cycle_signal(
         }
         drop(settings);
     }
-    if let Some((notional, learning_context, sample_group_id)) = scout_shadow_sample {
+    if let Some((notional, learning_context, sample_group_id)) = scout_sample {
         let sampled_at = now.saturating_mul(1_000);
         let mut plans = Vec::new();
-        let mut shadow_payload = scout_shadow_audit_payload(
+        let mut scout_payload = scout_audit_payload(
             signal, sampled_at, notional, &format!("{learning_context}:scenario"),
             counterfactual_stop_loss_percent, counterfactual_take_profit_percent, evidence, 0.0, "strategy",
         );
-        shadow_payload["shadow_sample_group_id"] = serde_json::json!(sample_group_id);
-        shadow_payload["scout_shadow_cooldown_key"] = serde_json::json!(format!("live|{}|{}|{}",
+        scout_payload["scout_sample_group_id"] = serde_json::json!(sample_group_id);
+        scout_payload["scout_cooldown_key"] = serde_json::json!(format!("live|{}|{}|{}",
             signal.strategy.as_deref().unwrap_or("live-insights"), signal.symbol, signal.direction));
-        plans.push(shadow_payload);
-        let max_active_batches = state.settings.lock().await.max_concurrent_shadow_samples;
-        let planned = submit_scout_shadow_plans(state, "live-entry", sampled_at, 300_000, max_active_batches, plans).await?;
+        plans.push(scout_payload);
+        let max_active_batches = state.scout_configuration().max_active_samples;
+        let planned = submit_scout_plans(state, "live-entry", sampled_at, 300_000, max_active_batches, plans).await?;
         if planned.is_empty() {
             return Ok(skipped_for_signal(signal, "The capped exploration-entry limit is already in use"));
         }
         for audit in planned { queue_auto_trader_audit(state, audit); }
         return Ok(CycleResult {
-            status: "shadowed",
-            reason: Some("Scout shadow sample recorded; no order submitted".into()),
+            status: "scouted",
+            reason: Some("Scout scout sample recorded; no order submitted".into()),
             symbol: Some(signal.symbol.clone()),
             side: Some(
                 if signal.direction == "bullish" {
@@ -1380,6 +1353,7 @@ async fn run_cycle_inner(
             settings.clone(),
         )
     };
+    let scout_configuration = state.scout_configuration();
     let mut live_source_signals = live_strategy_source_signals(&dashboard.best);
     for signal in &mut live_source_signals {
         inject_learned_parameters(&strategy_settings, signal);
@@ -1394,7 +1368,7 @@ async fn run_cycle_inner(
                 .is_some_and(|strategy| !strategy.is_live_insight() && !strategy.is_dated_carry())
     });
     let mut strategy_filter_details = Vec::new();
-    let mut daily_scout_shadow_candidates = Vec::new();
+    let mut daily_scout_candidates = Vec::new();
     if has_daily_strategy_signals {
         dashboard.best.retain(|signal| {
             if !signal.strategy_candidate {
@@ -1404,15 +1378,15 @@ async fn run_cycle_inner(
                 return false;
             };
             if !strategy_settings.strategies.contains(&strategy) {
-                if strategy_settings.scout_strategies.contains(&strategy) {
+                if scout_configuration.strategies.iter().any(|name| name == strategy.as_str()) {
                     let is_parameter_probe = signal.strategy_decision.as_ref()
                         .and_then(|decision| decision.get("scout_parameter_probe"))
                         .and_then(serde_json::Value::as_bool) == Some(true);
                     match evaluate_daily_strategy_signal(signal) {
                         Ok(_) => {
-                            daily_scout_shadow_candidates.push(signal.clone());
+                            daily_scout_candidates.push(signal.clone());
                         }
-                        Err(_) if is_parameter_probe => daily_scout_shadow_candidates.push(signal.clone()),
+                        Err(_) if is_parameter_probe => daily_scout_candidates.push(signal.clone()),
                         Err(error) if strategy_filter_details.len() < 20 => {
                             strategy_filter_details.push(format!(
                                 "{} {} [{}] · Scout evaluation error: {}",
@@ -1438,19 +1412,19 @@ async fn run_cycle_inner(
                 .and_then(serde_json::Value::as_bool) == Some(true);
             match evaluate_daily_strategy_signal(signal) {
                 Ok(StrategyDecision::Enter) => {
-                    daily_scout_shadow_candidates.push(signal.clone());
+                    daily_scout_candidates.push(signal.clone());
                     true
                 }
                 Ok(StrategyDecision::Scout) => {
-                    daily_scout_shadow_candidates.push(signal.clone());
+                    daily_scout_candidates.push(signal.clone());
                     true
                 }
                 Ok(_) if is_parameter_probe => {
-                    daily_scout_shadow_candidates.push(signal.clone());
+                    daily_scout_candidates.push(signal.clone());
                     false
                 }
                 Ok(decision) => {
-                    daily_scout_shadow_candidates.push(signal.clone());
+                    daily_scout_candidates.push(signal.clone());
                     if strategy_filter_details.len() < 20 {
                         strategy_filter_details.push(format!(
                             "{} {} [{}] · Strategy entry rule returned {:?}",
@@ -1464,7 +1438,7 @@ async fn run_cycle_inner(
                 }
                 Err(error) => {
                     if is_parameter_probe {
-                        daily_scout_shadow_candidates.push(signal.clone());
+                        daily_scout_candidates.push(signal.clone());
                     }
                     if strategy_filter_details.len() < 20 {
                         strategy_filter_details.push(format!(
@@ -1524,7 +1498,7 @@ async fn run_cycle_inner(
         .map(|signal| signal.symbol.clone())
         .collect::<BTreeSet<_>>();
     let mut scout_profiles = Vec::new();
-    for strategy in strategy_settings.scout_strategies.iter().copied().filter(|strategy| {
+    for strategy in scout_configuration.strategies.iter().filter_map(|name| Strategy::from_name(name)).filter(|strategy| {
         strategy.is_live_insight()
             && *strategy != Strategy::LiveInsights
             && !strategy_settings.strategies.contains(strategy)
@@ -1587,7 +1561,7 @@ async fn run_cycle_inner(
                     crate::service_log!("WARN", "Could not record Scout parameter comparisons ({status}): {error}");
                 }
             }
-            if let Err((status, error)) = record_live_strategy_scout_shadows(
+            if let Err((status, error)) = record_live_strategy_scouts(
                 &scout_state,
                 &scout_state.client,
                 &scout_position_url,
@@ -1595,7 +1569,7 @@ async fn run_cycle_inner(
                 &markets,
                 now,
             ).await {
-                crate::service_log!("WARN", "Could not record live Scout shadows ({status}): {error}");
+                crate::service_log!("WARN", "Could not record live Scout scouts ({status}): {error}");
             }
         });
     }
@@ -1614,19 +1588,19 @@ async fn run_cycle_inner(
             order_response: None,
         });
     }
-    if !daily_scout_shadow_candidates.is_empty() {
+    if !daily_scout_candidates.is_empty() {
         let scout_state = state.clone();
         tokio::spawn(async move {
-            if let Err((status, error)) = record_daily_scout_shadow_ladder(
+            if let Err((status, error)) = record_daily_scout_ladder(
                 &scout_state,
-                &daily_scout_shadow_candidates,
+                &daily_scout_candidates,
                 now,
             )
             .await
             {
                 crate::service_log!(
                     "WARN",
-                    "Could not record daily Scout shadow ladder ({status}): {error}"
+                    "Could not record daily Scout scout ladder ({status}): {error}"
                 );
             }
         });
@@ -1690,7 +1664,7 @@ async fn run_cycle_inner(
             active_scout_count,
             strategy_positions,
             settings.max_entries_per_auto_position,
-            settings.scout_max_active_positions,
+            state.scout_configuration().max_active_positions,
         )
     };
     let FreshSignalCandidates {
@@ -1960,23 +1934,6 @@ mod parallel_daily_cycle_tests {
     }
 
     #[test]
-    fn active_shadow_limit_counts_a_full_parameter_sweep_as_one_batch() {
-        let mut settings = Settings::default();
-        for index in 0..1_023 {
-            settings.shadow_sample_active_scenarios.insert(
-                format!("daily-scout-level:0|live-momentum|BTC-USDT|bullish|sweep:1|probe:{index}"),
-                BTreeSet::from([format!("variant-{index}|strategy")]),
-            );
-        }
-        assert_eq!(active_shadow_batch_count(&settings), 1);
-        settings.shadow_sample_active_scenarios.insert(
-            "daily-scout-level:0|live-momentum|ETH-USDT|bullish|sweep:1|probe:0".into(),
-            BTreeSet::from(["variant|strategy".into()]),
-        );
-        assert_eq!(active_shadow_batch_count(&settings), 2);
-    }
-
-    #[test]
     fn live_parameter_probe_records_a_signal_rejected_only_by_the_baseline() {
         let mut source = signal("live-trade-flow");
         source.components.trade_flow_by_window = vec![WindowedSignalValue {
@@ -2001,14 +1958,6 @@ mod parallel_daily_cycle_tests {
     }
 
     #[test]
-    fn selected_live_strategy_is_shadowed_even_when_enabled_for_trading() {
-        let mut settings = Settings::default();
-        settings.strategies.push(Strategy::LiveMomentum);
-        settings.scout_strategies.push(Strategy::LiveMomentum);
-        assert_eq!(live_scout_strategies_enabled_for_trading(&settings), vec![Strategy::LiveMomentum]);
-    }
-
-    #[test]
     fn parameter_probe_audit_preserves_the_exact_value_and_entry_result() {
         let mut probe = signal("live-momentum");
         probe.components.momentum_10s_percent = Some(0.1);
@@ -2021,7 +1970,7 @@ mod parallel_daily_cycle_tests {
             "scout_parameter_value": 0.05,
             "scout_parameter_profile_symbol": "ETH-USDT"
         }));
-        let payload = scout_shadow_audit_payload(
+        let payload = scout_audit_payload(
             &probe, 20_000, 5.0, "scout:probe", 0.5, 0.8, None, 0.0, "strategy",
         );
         assert_eq!(payload["scout_parameter_key"], "minimum_momentum");
@@ -2032,10 +1981,10 @@ mod parallel_daily_cycle_tests {
     }
 
     #[test]
-    fn scout_shadow_sample_has_the_contract_required_for_learning_outcomes() {
+    fn scout_sample_has_the_contract_required_for_learning_outcomes() {
         let mut live_signal = signal("live-momentum");
         live_signal.strategy_decision = Some(serde_json::json!({ "observed_close": 123.45 }));
-        let payload = scout_shadow_audit_payload(
+        let payload = scout_audit_payload(
             &live_signal,
             20_000,
             5.0,
@@ -2048,18 +1997,18 @@ mod parallel_daily_cycle_tests {
         );
 
         assert_eq!(payload["stage"], "decision");
-        assert_eq!(payload["status"], "shadowed");
+        assert_eq!(payload["status"], "scouted");
         assert_eq!(payload["scout"], true);
         assert_eq!(payload["signal_timestamp"], 20_000);
         assert_eq!(
-            payload["shadow_learning_context"],
+            payload["scout_learning_context"],
             "scout:long:trend:ETH-USDT:live-momentum:trade"
         );
-        assert_eq!(payload["shadow_notional_usd"], 5.0);
+        assert_eq!(payload["scout_notional_usd"], 5.0);
         assert!(payload.get("scout_level_percent").is_none());
-        assert_eq!(payload["shadow_entry_price"], 123.45);
-        assert_eq!(payload["shadow_exit_scenario"], "strategy");
-        let tight_payload = scout_shadow_audit_payload(
+        assert_eq!(payload["scout_entry_price"], 123.45);
+        assert_eq!(payload["scout_exit_scenario"], "strategy");
+        let tight_payload = scout_audit_payload(
             &live_signal,
             20_001,
             5.0,
@@ -2071,10 +2020,10 @@ mod parallel_daily_cycle_tests {
             "tight",
         );
         assert_ne!(payload["decision_id"], tight_payload["decision_id"]);
-        assert_eq!(tight_payload["shadow_exit_scenario"], "tight");
+        assert_eq!(tight_payload["scout_exit_scenario"], "tight");
         assert_eq!(tight_payload["stop_loss_percent"], 0.25);
         assert_eq!(tight_payload["take_profit_percent"], 0.4);
-        let wide_payload = scout_shadow_audit_payload(
+        let wide_payload = scout_audit_payload(
             &live_signal,
             20_002,
             5.0,
@@ -2086,12 +2035,12 @@ mod parallel_daily_cycle_tests {
             "wide",
         );
         assert_ne!(payload["decision_id"], wide_payload["decision_id"]);
-        assert_eq!(wide_payload["shadow_exit_scenario"], "wide");
+        assert_eq!(wide_payload["scout_exit_scenario"], "wide");
         assert_eq!(wide_payload["stop_loss_percent"], 0.75);
         assert_eq!(wide_payload["take_profit_percent"], 1.2);
         assert_eq!(
             payload["reason"],
-            "Scout shadow sample recorded; no order submitted"
+            "Scout scout sample recorded; no order submitted"
         );
     }
 

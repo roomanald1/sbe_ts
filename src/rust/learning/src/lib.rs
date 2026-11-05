@@ -13,12 +13,13 @@ use std::{
     path::{Path, PathBuf},
     sync::Arc,
 };
+#[cfg(test)]
+use strategies::StrategyThresholdObservation;
 use strategies::{
     ContextLearningStat, ContextMissedOpportunityBand, ContextThresholdInput,
     ContextThresholdRequest, ContextThresholdResponse, ContextThresholds, ExecutionLearningRequest,
     ExecutionLearningResponse, ExecutionLearningStat, ExecutionOutcomeEvent, FeedbackEvent,
     LearnedProfileSnapshot, ParameterSpec, StrategyProfile, StrategyProfileRegistration,
-    StrategyThresholdObservation,
 };
 use tokio::sync::Mutex;
 
@@ -134,21 +135,7 @@ fn event_parts(event: &FeedbackEvent) -> (&str, &str, &str, &BTreeMap<String, f6
 }
 
 pub fn router(path: PathBuf) -> Result<Router, String> {
-    let stored = match std::fs::read(&path) {
-        Ok(bytes) => serde_json::from_slice::<LearningState>(&bytes).map_err(|error| {
-            format!(
-                "could not decode learning state {}: {error}",
-                path.display()
-            )
-        })?,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => LearningState::default(),
-        Err(error) => {
-            return Err(format!(
-                "could not read learning state {}: {error}",
-                path.display()
-            ));
-        }
-    };
+    let stored = load_state(&path)?;
     let service = ServiceState {
         state: Arc::new(Mutex::new(stored)),
         path,
@@ -165,12 +152,343 @@ pub fn router(path: PathBuf) -> Result<Router, String> {
         .with_state(service))
 }
 
+fn open_state_db(path: &Path) -> Result<rusqlite::Connection, String> {
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        std::fs::create_dir_all(parent).map_err(|error| {
+            format!(
+                "could not create learning state directory {}: {error}",
+                parent.display()
+            )
+        })?;
+    }
+    let connection = rusqlite::Connection::open(path).map_err(|error| {
+        format!(
+            "could not open learning database {}: {error}",
+            path.display()
+        )
+    })?;
+    connection
+        .execute_batch(
+            "PRAGMA journal_mode=WAL;
+             CREATE TABLE IF NOT EXISTS learning_metadata (id INTEGER PRIMARY KEY CHECK (id = 1), accepted_events INTEGER NOT NULL);
+             CREATE TABLE IF NOT EXISTS learning_variants (id TEXT PRIMARY KEY, payload TEXT NOT NULL);
+             CREATE TABLE IF NOT EXISTS learning_active_profiles (id TEXT PRIMARY KEY, payload TEXT NOT NULL);
+             CREATE TABLE IF NOT EXISTS learning_context_stats (id TEXT PRIMARY KEY, payload TEXT NOT NULL);
+             CREATE TABLE IF NOT EXISTS learning_execution_stats (id TEXT PRIMARY KEY, payload TEXT NOT NULL);
+             CREATE TABLE IF NOT EXISTS learning_threshold_samples (id INTEGER PRIMARY KEY, payload TEXT NOT NULL);
+             CREATE TABLE IF NOT EXISTS learning_seen_event_ids (id TEXT PRIMARY KEY);
+             CREATE TABLE IF NOT EXISTS learning_seen_execution_event_ids (id TEXT PRIMARY KEY);",
+        )
+        .map_err(|error| {
+            format!(
+                "could not initialize learning database {}: {error}",
+                path.display()
+            )
+        })?;
+    Ok(connection)
+}
+
+fn load_state(path: &Path) -> Result<LearningState, String> {
+    use rusqlite::OptionalExtension;
+
+    let connection = open_state_db(path)?;
+    let legacy_payload = connection
+        .query_row(
+            "SELECT payload FROM learning_state WHERE id = 1",
+            [],
+            |row| row.get::<_, Vec<u8>>(0),
+        )
+        .optional();
+    if let Ok(Some(payload)) = legacy_payload {
+        let state: LearningState = serde_json::from_slice(&payload).map_err(|error| {
+            format!(
+                "could not decode learning database {}: {error}",
+                path.display()
+            )
+        })?;
+        persist_normalized(&connection, &state).map_err(|error| {
+            format!(
+                "could not normalize learning database {}: {error}",
+                path.display()
+            )
+        })?;
+        connection
+            .execute("DROP TABLE learning_state", [])
+            .map_err(|error| format!("could not remove legacy learning table: {error}"))?;
+        return Ok(state);
+    }
+
+    if let Some(accepted_events) = connection
+        .query_row(
+            "SELECT accepted_events FROM learning_metadata WHERE id = 1",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()
+        .map_err(|error| format!("could not read learning metadata: {error}"))?
+    {
+        let mut state = LearningState {
+            accepted_events: accepted_events.max(0) as u64,
+            ..LearningState::default()
+        };
+        load_map(&connection, "learning_variants", &mut state.variants)?;
+        load_map(
+            &connection,
+            "learning_active_profiles",
+            &mut state.active_profiles,
+        )?;
+        load_map(
+            &connection,
+            "learning_context_stats",
+            &mut state.context_learning,
+        )?;
+        load_map(
+            &connection,
+            "learning_execution_stats",
+            &mut state.execution_learning,
+        )?;
+        state.threshold_samples = load_rows(&connection, "learning_threshold_samples")?;
+        state.seen_event_ids = load_ids(&connection, "learning_seen_event_ids")?;
+        state.seen_execution_event_ids =
+            load_ids(&connection, "learning_seen_execution_event_ids")?;
+        return Ok(state);
+    }
+
+    let legacy_path = path.with_extension("json");
+    match std::fs::read(&legacy_path) {
+        Ok(bytes) => {
+            let state = serde_json::from_slice::<LearningState>(&bytes).map_err(|error| {
+                format!(
+                    "could not decode legacy learning state {}: {error}",
+                    legacy_path.display()
+                )
+            })?;
+            persist_normalized(&connection, &state)
+                .map_err(|error| format!("could not migrate learning state: {error}"))?;
+            Ok(state)
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(LearningState::default()),
+        Err(error) => Err(format!(
+            "could not read legacy learning state {}: {error}",
+            legacy_path.display()
+        )),
+    }
+}
+
+fn load_map<T: for<'de> Deserialize<'de>>(
+    connection: &rusqlite::Connection,
+    table: &str,
+    target: &mut BTreeMap<String, T>,
+) -> Result<(), String> {
+    let mut statement = connection
+        .prepare(&format!("SELECT id, payload FROM {table}"))
+        .map_err(|error| error.to_string())?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .map_err(|error| error.to_string())?;
+    for row in rows {
+        let (id, payload) = row.map_err(|error| error.to_string())?;
+        target.insert(
+            id,
+            serde_json::from_str(&payload).map_err(|error| error.to_string())?,
+        );
+    }
+    Ok(())
+}
+
+fn load_rows<T: for<'de> Deserialize<'de>>(
+    connection: &rusqlite::Connection,
+    table: &str,
+) -> Result<Vec<T>, String> {
+    let mut statement = connection
+        .prepare(&format!("SELECT payload FROM {table} ORDER BY id"))
+        .map_err(|error| error.to_string())?;
+    statement
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(|error| error.to_string())?
+        .map(|row| {
+            let payload = row.map_err(|error| error.to_string())?;
+            serde_json::from_str(&payload).map_err(|error| error.to_string())
+        })
+        .collect()
+}
+
+fn load_ids(connection: &rusqlite::Connection, table: &str) -> Result<BTreeSet<String>, String> {
+    let mut statement = connection
+        .prepare(&format!("SELECT id FROM {table}"))
+        .map_err(|error| error.to_string())?;
+    statement
+        .query_map([], |row| row.get(0))
+        .map_err(|error| error.to_string())?
+        .map(|row| row.map_err(|error| error.to_string()))
+        .collect()
+}
+
+pub(crate) fn persist_normalized(
+    connection: &rusqlite::Connection,
+    state: &LearningState,
+) -> rusqlite::Result<()> {
+    let transaction = connection.unchecked_transaction()?;
+    transaction.execute(
+        "INSERT INTO learning_metadata (id, accepted_events) VALUES (1, ?1)
+         ON CONFLICT(id) DO UPDATE SET accepted_events = excluded.accepted_events
+         WHERE accepted_events != excluded.accepted_events",
+        [state.accepted_events.min(i64::MAX as u64) as i64],
+    )?;
+    write_map(&transaction, "learning_variants", &state.variants)?;
+    write_map(
+        &transaction,
+        "learning_active_profiles",
+        &state.active_profiles,
+    )?;
+    write_map(
+        &transaction,
+        "learning_context_stats",
+        &state.context_learning,
+    )?;
+    write_map(
+        &transaction,
+        "learning_execution_stats",
+        &state.execution_learning,
+    )?;
+    {
+        let rows = state
+            .threshold_samples
+            .iter()
+            .enumerate()
+            .map(|(id, value)| (id as i64, value))
+            .collect::<Vec<_>>();
+        sync_rows(&transaction, "learning_threshold_samples", &rows)?;
+    }
+    sync_ids(
+        &transaction,
+        "learning_seen_event_ids",
+        &state.seen_event_ids,
+    )?;
+    sync_ids(
+        &transaction,
+        "learning_seen_execution_event_ids",
+        &state.seen_execution_event_ids,
+    )?;
+    transaction.commit()
+}
+
+fn write_map<T: Serialize>(
+    connection: &rusqlite::Connection,
+    table: &str,
+    values: &BTreeMap<String, T>,
+) -> rusqlite::Result<()> {
+    let mut statement = connection.prepare_cached(&format!(
+        "INSERT INTO {table} (id, payload) VALUES (?1, ?2)
+         ON CONFLICT(id) DO UPDATE SET payload = excluded.payload
+         WHERE payload != excluded.payload"
+    ))?;
+    for (id, value) in values {
+        statement.execute(rusqlite::params![
+            id,
+            serde_json::to_string(value)
+                .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?
+        ])?;
+    }
+    drop(statement);
+    let existing = {
+        let mut statement = connection.prepare_cached(&format!("SELECT id FROM {table}"))?;
+        statement
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    let mut delete = connection.prepare_cached(&format!("DELETE FROM {table} WHERE id = ?1"))?;
+    for id in existing {
+        if !values.contains_key(&id) {
+            delete.execute([id])?;
+        }
+    }
+    Ok(())
+}
+
+fn sync_rows<T: Serialize>(
+    connection: &rusqlite::Connection,
+    table: &str,
+    values: &[(i64, &T)],
+) -> rusqlite::Result<()> {
+    let mut statement = connection.prepare_cached(&format!(
+        "INSERT INTO {table} (id, payload) VALUES (?1, ?2)
+         ON CONFLICT(id) DO UPDATE SET payload = excluded.payload
+         WHERE payload != excluded.payload"
+    ))?;
+    for (id, value) in values {
+        statement.execute(rusqlite::params![
+            id,
+            serde_json::to_string(value)
+                .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?
+        ])?;
+    }
+    drop(statement);
+    let expected_len = values.len() as i64;
+    connection.execute(
+        &format!("DELETE FROM {table} WHERE id >= ?1"),
+        [expected_len],
+    )?;
+    Ok(())
+}
+
+fn sync_ids(
+    connection: &rusqlite::Connection,
+    table: &str,
+    values: &BTreeSet<String>,
+) -> rusqlite::Result<()> {
+    let mut statement =
+        connection.prepare_cached(&format!("INSERT OR IGNORE INTO {table} (id) VALUES (?1)"))?;
+    for id in values {
+        statement.execute([id])?;
+    }
+    drop(statement);
+    let existing = {
+        let mut statement = connection.prepare_cached(&format!("SELECT id FROM {table}"))?;
+        statement
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    let mut delete = connection.prepare_cached(&format!("DELETE FROM {table} WHERE id = ?1"))?;
+    for id in existing {
+        if !values.contains(&id) {
+            delete.execute([id])?;
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use axum::body::Body;
     use http_body_util::BodyExt;
     use tower::ServiceExt;
+
+    #[test]
+    fn migrates_legacy_json_state_into_sqlite() {
+        let base = std::env::temp_dir().join(format!("learning-migration-{}", std::process::id()));
+        std::fs::create_dir_all(&base).unwrap();
+        let database = base.join("learning_state.sqlite");
+        let legacy = base.join("learning_state.json");
+        let state = LearningState {
+            accepted_events: 17,
+            ..LearningState::default()
+        };
+        std::fs::write(&legacy, serde_json::to_vec(&state).unwrap()).unwrap();
+
+        let migrated = load_state(&database).unwrap();
+        assert_eq!(migrated.accepted_events, 17);
+        assert_eq!(load_state(&database).unwrap().accepted_events, 17);
+        assert!(legacy.exists(), "migration preserves the source file");
+
+        let _ = std::fs::remove_dir_all(base);
+    }
 
     async fn json_request(
         app: Router,
@@ -189,7 +507,8 @@ mod tests {
 
     #[tokio::test]
     async fn service_persists_profiles_deduplicates_feedback_and_publishes_bounded_updates() {
-        let path = std::env::temp_dir().join(format!("learning-test-{}.json", std::process::id()));
+        let path =
+            std::env::temp_dir().join(format!("learning-test-{}.sqlite", std::process::id()));
         let _ = std::fs::remove_file(&path);
         let app = router(path.clone()).unwrap();
         let profile = StrategyProfile {
@@ -302,8 +621,10 @@ mod tests {
 
     #[tokio::test]
     async fn paired_scout_promotion_pools_symbols_and_keeps_the_tested_value() {
-        let path =
-            std::env::temp_dir().join(format!("learning-paired-test-{}.json", std::process::id()));
+        let path = std::env::temp_dir().join(format!(
+            "learning-paired-test-{}.sqlite",
+            std::process::id()
+        ));
         let _ = std::fs::remove_file(&path);
         let app = router(path.clone()).unwrap();
         let spec = ParameterSpec {
@@ -409,7 +730,7 @@ mod tests {
     #[tokio::test]
     async fn trade_threshold_observations_train_and_validate_threshold_in_learning_service() {
         let path = std::env::temp_dir().join(format!(
-            "learning-threshold-test-{}.json",
+            "learning-threshold-test-{}.sqlite",
             std::process::id()
         ));
         let _ = std::fs::remove_file(&path);

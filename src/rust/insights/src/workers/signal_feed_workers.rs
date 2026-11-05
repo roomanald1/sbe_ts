@@ -58,10 +58,69 @@ fn decode_signal_event(bytes: &[u8]) -> Option<SignalEventRequest> {
         },
         _ => return None,
     };
-    Some(SignalEventRequest { symbol, event })
+    Some(SignalEventRequest { symbol, queued_at: None, event })
 }
 
-async fn run_feed_signal_consumer(runtime: Arc<SignalRuntime>) {
+const SIGNAL_EVENT_SHARD_COUNT: usize = 16;
+const SIGNAL_EVENT_SHARD_CAPACITY: usize = 1_024;
+
+async fn run_signal_event_workers(
+    runtime: Arc<SignalRuntime>,
+    mut receiver: tokio::sync::mpsc::Receiver<SignalEventRequest>,
+) {
+    use std::hash::{Hash, Hasher};
+
+    let mut senders: Vec<tokio::sync::mpsc::Sender<SignalEventRequest>> =
+        Vec::with_capacity(SIGNAL_EVENT_SHARD_COUNT);
+    for _ in 0..SIGNAL_EVENT_SHARD_COUNT {
+        let (sender, mut shard) = tokio::sync::mpsc::channel(SIGNAL_EVENT_SHARD_CAPACITY);
+        senders.push(sender);
+        let worker_runtime = Arc::clone(&runtime);
+        tokio::spawn(async move {
+            while let Some(request) = shard.recv().await {
+                if let Some(queued_at) = request.queued_at {
+                    crate::latency::record_event_queue_wait(queued_at.elapsed());
+                }
+                if let Err((status, error)) = ingest_signal_event(
+                    axum::extract::State(Arc::clone(&worker_runtime)),
+                    Json(request),
+                )
+                .await
+                {
+                    crate::service_log!("WARN", "Signal event rejected with {status}: {error}");
+                }
+            }
+        });
+    }
+
+    while let Some(request) = receiver.recv().await {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        request.symbol.hash(&mut hasher);
+        let shard = hasher.finish() as usize % senders.len();
+        if senders[shard].send(request).await.is_err() {
+            crate::service_log!("ERROR", "Signal event shard {shard} stopped");
+        }
+    }
+}
+
+async fn run_research_record_writer(
+    store: SignalStore,
+    mut receiver: tokio::sync::mpsc::Receiver<Vec<StoredSignalRecord>>,
+) {
+    while let Some(mut records) = receiver.recv().await {
+        for _ in 1..128 {
+            match receiver.try_recv() {
+                Ok(mut batch) => records.append(&mut batch),
+                Err(_) => break,
+            }
+        }
+        if let Err(error) = store.append_records(records).await {
+            crate::service_log!("ERROR", "Could not persist signal research batch: {error}");
+        }
+    }
+}
+
+async fn run_feed_signal_consumer(event_sender: tokio::sync::mpsc::Sender<SignalEventRequest>) {
     let mut retry_delay = Duration::from_secs(1);
     loop {
         let connection_started = Instant::now();
@@ -106,7 +165,7 @@ async fn run_feed_signal_consumer(runtime: Arc<SignalRuntime>) {
                         event = events.next() => {
                             match event {
                                 Some(Ok(bytes)) => match decode_signal_event(&bytes) {
-                                    Some(request) => {
+                                    Some(mut request) => {
                                         last_event_at = Some(Instant::now());
                                         match &request.event {
                                             SignalFeedEvent::Price { .. } => {
@@ -116,11 +175,10 @@ async fn run_feed_signal_consumer(runtime: Arc<SignalRuntime>) {
                                             SignalFeedEvent::Trade { .. } => trade_events += 1,
                                             SignalFeedEvent::Book { .. } => book_events += 1,
                                         }
-                                        if let Err((status, error)) = ingest_signal_event(
-                                            axum::extract::State(Arc::clone(&runtime)),
-                                            Json(request),
-                                        ).await {
-                                            crate::service_log!("WARN", "Signal event rejected with {status}: {error}");
+                                        request.queued_at = Some(Instant::now());
+                                        if event_sender.send(request).await.is_err() {
+                                            crate::service_log!("ERROR", "Signal event processing queue stopped");
+                                            break;
                                         }
                                     }
                                     None => {
@@ -179,6 +237,7 @@ async fn deliver_signal_dashboard(
     symbol: String,
     dashboard: serde_json::Value,
 ) -> (String, serde_json::Value, Result<(), reqwest::Error>) {
+    let started = Instant::now();
     let result = client
         .post(endpoint)
         .timeout(AUTO_TRADER_SIGNAL_PUSH_TIMEOUT)
@@ -187,6 +246,7 @@ async fn deliver_signal_dashboard(
         .await
         .and_then(reqwest::Response::error_for_status)
         .map(|_| ());
+    crate::latency::record_auto_trader_delivery(started.elapsed());
 
     (symbol, dashboard, result)
 }
@@ -198,7 +258,7 @@ async fn deliver_signal_batch(
 ) -> (BTreeMap<String, serde_json::Value>, Option<String>) {
     // Bound load on AutoTrader while allowing unrelated symbols to progress
     // together. Keep this below the old burst of 32 simultaneous requests,
-    // which competed with shadow-learning writes for AutoTrader's state lock.
+    // which competed with scout-learning writes for AutoTrader's state lock.
     let results = futures_util::stream::iter(dashboards)
         .map(|(symbol, dashboard)| {
             deliver_signal_dashboard(

@@ -60,8 +60,8 @@ impl Default for SignalEngine {
             volatility_1m: None,
             last_research_sample_at: None,
             last_live_snapshot_at: None,
-            completed_scout_shadow_ids: BTreeSet::new(),
-            completed_scout_shadow_order: VecDeque::new(),
+            completed_scout_ids: BTreeSet::new(),
+            completed_scout_order: VecDeque::new(),
         }
     }
 }

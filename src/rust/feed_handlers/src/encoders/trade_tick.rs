@@ -48,3 +48,55 @@ pub(crate) fn encode_trade_tick(
     drop(encoder.header(0));
     Ok(Bytes::from(buffer))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::encode_trade_tick;
+
+    #[test]
+    fn encodes_trade_fields_and_buy_side() {
+        let message = encode_trade_tick(
+            "BTC-USDT",
+            "trade-42",
+            1_700_000_000_000,
+            42_123.5,
+            0.25,
+            "buy",
+        )
+        .unwrap();
+
+        assert_eq!(message.len(), 97);
+        assert_eq!(u16::from_le_bytes([message[2], message[3]]), 3);
+        assert_eq!(&message[8..16], b"BTC-USDT");
+        assert_eq!(&message[40..48], b"trade-42");
+        assert_eq!(
+            u64::from_le_bytes(message[72..80].try_into().unwrap()),
+            1_700_000_000_000
+        );
+        assert_eq!(
+            f64::from_le_bytes(message[80..88].try_into().unwrap()),
+            42_123.5
+        );
+        assert_eq!(
+            f64::from_le_bytes(message[88..96].try_into().unwrap()),
+            0.25
+        );
+        assert_eq!(message[96], 1);
+    }
+
+    #[test]
+    fn encodes_sell_side() {
+        let message = encode_trade_tick("ETH-USDT", "7", 1, 2.0, 3.0, "sell").unwrap();
+
+        assert_eq!(message[96], 2);
+    }
+
+    #[test]
+    fn rejects_invalid_trade_inputs() {
+        assert!(encode_trade_tick("é", "1", 1, 2.0, 3.0, "buy").is_err());
+        assert!(encode_trade_tick("A", &"x".repeat(33), 1, 2.0, 3.0, "buy").is_err());
+        assert!(encode_trade_tick("A", "1", 1, f64::NAN, 3.0, "buy").is_err());
+        assert!(encode_trade_tick("A", "1", 1, 2.0, 0.0, "buy").is_err());
+        assert!(encode_trade_tick("A", "1", 1, 2.0, 3.0, "unknown").is_err());
+    }
+}

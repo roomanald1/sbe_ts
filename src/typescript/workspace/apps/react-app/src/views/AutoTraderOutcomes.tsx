@@ -2,7 +2,7 @@ import { memo, useEffect, useMemo, useRef, useState, type WheelEvent } from 'rea
 import { AgGridReact } from 'ag-grid-react';
 import { ClientSideRowModelModule, ModuleRegistry, themeQuartz, type ColDef, type ColGroupDef, type GridApi, type IRowNode } from 'ag-grid-community';
 import { AutoTraderOutcomesModel, type AutoTraderOutcome, type StrictEntryGateSummary } from '../models/AutoTraderOutcomesModel';
-import { autoTraderShadowModel } from '../models/AutoTraderShadowModel';
+import { autoTraderScoutModel } from '../models/AutoTraderScoutModel';
 import { AutoTraderModel, type Strategy } from '../models/AutoTraderModel';
 import type { SymbolPriceTick } from '../types/symbol_price';
 import { formatForSymbol } from '../instrument_precision';
@@ -124,7 +124,7 @@ function AutoTraderOutcomesComponent({ embedded = false, ticks = [], liveOnly = 
   const state = useBehaviorSnapshot(model.state$);
   const settingsModel = useMemo(() => new AutoTraderModel(), []);
   const settings = useBehaviorSnapshot(settingsModel.state$);
-  const scoutState = useBehaviorSnapshot(autoTraderShadowModel.state$);
+  const scoutState = useBehaviorSnapshot(autoTraderScoutModel.state$);
   const outcomesGridApi = useRef<GridApi<OutcomeGridRow> | null>(null);
   const [hideDisabledStrategies, setHideDisabledStrategies] = useState(() => {
     try { return localStorage.getItem(HIDE_DISABLED_STRATEGIES_KEY) === 'true'; }
@@ -138,7 +138,7 @@ function AutoTraderOutcomesComponent({ embedded = false, ticks = [], liveOnly = 
   const [expandedLedgerGroups, setExpandedLedgerGroups] = useState<Set<string>>(() => new Set());
   useEffect(() => { void model.start(); return () => model.stop(); }, [model]);
   useEffect(() => { settingsModel.start(); return () => settingsModel.stop(); }, [settingsModel]);
-  useEffect(() => { autoTraderShadowModel.start(); return () => autoTraderShadowModel.stop(); }, []);
+  useEffect(() => { autoTraderScoutModel.start(); return () => autoTraderScoutModel.stop(); }, []);
   useEffect(() => { outcomesGridApi.current?.resetRowHeights(); }, [state.confirmingCloseSymbols, state.closingSymbols]);
   const [now, setNow] = useState(Date.now);
   useEffect(() => { const timer = setInterval(() => setNow(Date.now()), 15_000); return () => clearInterval(timer); }, []);
@@ -342,7 +342,7 @@ function AutoTraderOutcomesComponent({ embedded = false, ticks = [], liveOnly = 
     ], 'sample') },
     { headerName: 'Strategy status', headerClass: 'strategy-group-status', children: colorStrategyColumns([
       { field: 'enabled', headerName: 'On', cellRenderer: ({ data }: { data?: StrategyWinRateRow }) => data ? <input type="checkbox" aria-label={'Enable ' + strategyLabel(data.strategy)} checked={data.enabled === true} disabled={settings.loading || settings.busy} onClick={(event) => event.stopPropagation()} onChange={(event) => { const strategies = event.target.checked ? [...settings.strategies, data.strategy as Strategy] : settings.strategies.filter((item) => item !== data.strategy); settingsModel.setStrategies(strategies); void settingsModel.saveLimits(); }} /> : null, width: 42, minWidth: 42, maxWidth: 48, flex: 0 },
-      { field: 'scoutEnabled', headerName: 'Scout', headerTooltip: 'Evaluate this strategy as a Scout in shadow mode. Scout selection is independent of trading enablement.', cellRenderer: ({ data }: { data?: StrategyWinRateRow }) => data ? <input type="checkbox" aria-label={'Enable Scout for ' + strategyLabel(data.strategy)} checked={data.scoutEnabled === true} disabled={!data.scoutable || settings.loading || settings.busy} onClick={(event) => event.stopPropagation()} onChange={(event) => { const strategies = event.target.checked ? [...settings.scoutStrategies, data.strategy as Strategy] : settings.scoutStrategies.filter((item) => item !== data.strategy); settingsModel.setScoutStrategies(strategies); void settingsModel.saveLimits(); }} /> : null, width: 52, minWidth: 52, maxWidth: 58, flex: 0 },
+      { field: 'scoutEnabled', headerName: 'Scout', headerTooltip: 'Evaluate this strategy through Scout samples. Scout selection is independent of trading enablement.', cellRenderer: ({ data }: { data?: StrategyWinRateRow }) => data ? <input type="checkbox" aria-label={'Enable Scout for ' + strategyLabel(data.strategy)} checked={data.scoutEnabled === true} disabled={!data.scoutable || settings.loading || settings.busy} onClick={(event) => event.stopPropagation()} onChange={(event) => { const strategies = event.target.checked ? [...settings.scoutStrategies, data.strategy as Strategy] : settings.scoutStrategies.filter((item) => item !== data.strategy); settingsModel.setScoutStrategies(strategies); void settingsModel.saveLimits(); }} /> : null, width: 52, minWidth: 52, maxWidth: 58, flex: 0 },
       { field: 'runStatus', headerName: 'Run state', tooltipField: 'runStatus', width: 148, minWidth: 148, maxWidth: 148, flex: 0 },
       { field: 'runReason', headerName: 'Latest reason', tooltipField: 'runReason', width: 300, minWidth: 240, flex: 0 },
     ], 'status') },

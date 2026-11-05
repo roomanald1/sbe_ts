@@ -9,7 +9,6 @@ struct StatusResponse {
     audit_dropped_events: u64,
     strategy: String,
     strategies: Vec<String>,
-    scout_strategies: Vec<String>,
     signal_strategies_enabled: bool,
     max_order_notional: f64,
     daily_notional_limit: f64,
@@ -17,10 +16,6 @@ struct StatusResponse {
     exploration_percent: f64,
     risk_appetite: f64,
     max_open_positions: usize,
-    max_concurrent_shadow_samples: usize,
-    active_shadow_samples: usize,
-    active_scout_shadow_samples: usize,
-    scout_max_active_positions: usize,
     max_intraday_open_positions: usize,
     max_daily_open_positions: usize,
     intraday_notional_limit: f64,
@@ -92,8 +87,6 @@ struct SettingsRequest {
     strategy: Option<Strategy>,
     #[serde(default, alias = "research_strategies")]
     strategies: Option<Vec<Strategy>>,
-    #[serde(default)]
-    scout_strategies: Option<Vec<Strategy>>,
     #[serde(default, alias = "generic_signals_enabled")]
     signal_strategies_enabled: Option<bool>,
     daily_notional_limit: f64,
@@ -102,9 +95,6 @@ struct SettingsRequest {
     #[serde(default)]
     risk_appetite: Option<f64>,
     max_open_positions: usize,
-    #[serde(default)]
-    max_concurrent_shadow_samples: Option<usize>,
-    scout_max_active_positions: Option<usize>,
     #[serde(default)]
     max_intraday_open_positions: Option<usize>,
     #[serde(default)]
@@ -146,43 +136,6 @@ struct StrategyProfileReset {
 #[derive(Clone, Deserialize)]
 struct EnabledRequest {
     enabled: bool,
-}
-#[derive(Deserialize, Serialize)]
-struct ShadowLearningOutcomeRequest {
-    decision_id: String,
-    learning_context: String,
-    simulated_net_pnl_usd: f64,
-    net_return_percent: f64,
-    signal_timestamp_ms: u64,
-    evaluated_timestamp_ms: u64,
-    taker_fee_rate: f64,
-    symbol: String,
-    strategy: String,
-    #[serde(default)]
-    strategy_parameters: BTreeMap<String, f64>,
-    exit_scenario: String,
-    #[serde(default)]
-    sample_group_id: String,
-    #[serde(default)]
-    scout_parameter_key: Option<String>,
-    #[serde(default)]
-    scout_parameter_value: Option<f64>,
-    #[serde(default)]
-    scout_parameter_profile_symbol: Option<String>,
-    #[serde(default)]
-    scout_comparison_id: Option<String>,
-    #[serde(default)]
-    scout_comparison_role: Option<String>,
-    #[serde(default)]
-    scout_comparison_zero_role: Option<String>,
-    #[serde(default)]
-    scout_comparison_parameter_key: Option<String>,
-    #[serde(default)]
-    scout_comparison_parameter_value: Option<f64>,
-    #[serde(default)]
-    scout_comparison_parameter_profile_symbol: Option<String>,
-    #[serde(default)]
-    strategy_parameter_specs: Vec<strategies::ParameterSpec>,
 }
 #[derive(Clone, Serialize)]
 struct DecisionParameter {

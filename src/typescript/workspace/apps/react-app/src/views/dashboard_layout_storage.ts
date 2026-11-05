@@ -13,16 +13,24 @@ import {
   overlaps,
 } from './dashboard_layout';
 
+function currentWidgetType(value: unknown): unknown {
+  return value === 'auto-trader-shadow-positions'
+    ? 'auto-trader-scout-positions'
+    : value;
+}
+
 export function normalizeWidgets(items: unknown[], scale = 1): DashboardWidget[] {
   const widgets: DashboardWidget[] = [];
   items.forEach((item, index) => {
+    const legacyType = typeof item === 'string' ? currentWidgetType(item) : undefined;
     if (
       typeof item === 'string' &&
-      DASHBOARD_WIDGET_TYPES.includes(item as DashboardWidgetType)
+      DASHBOARD_WIDGET_TYPES.includes(legacyType as DashboardWidgetType)
     ) {
+      const type = legacyType as DashboardWidgetType;
       widgets.push({
-        id: 'legacy-' + item + '-' + index,
-        type: item as DashboardWidgetType,
+        id: 'legacy-' + type + '-' + index,
+        type,
         symbol: '',
         x: (index % 2) * DEFAULT_WIDGET_WIDTH,
         y: Math.floor(index / 2) * DEFAULT_WIDGET_HEIGHT,
@@ -43,14 +51,15 @@ export function normalizeWidgets(items: unknown[], scale = 1): DashboardWidget[]
       h?: unknown;
       collapsed?: unknown;
     };
+    const type = currentWidgetType(stored.type);
     if (
       typeof stored.id !== 'string' ||
-      !DASHBOARD_WIDGET_TYPES.includes(stored.type as DashboardWidgetType)
+      !DASHBOARD_WIDGET_TYPES.includes(type as DashboardWidgetType)
     )
       return;
     widgets.push({
       id: stored.id,
-      type: stored.type as DashboardWidgetType,
+      type: type as DashboardWidgetType,
       symbol: typeof stored.symbol === 'string' ? stored.symbol : '',
       x:
         typeof stored.x === 'number'

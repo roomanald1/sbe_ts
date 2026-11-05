@@ -1,5 +1,5 @@
 pub async fn subscribe(instrument_data: &[Arc<str>], price_updates: Sender<Bytes>) -> Result<()> {
-    let instrument_lookup = Arc::new(instrument_data.iter().cloned().collect::<HashSet<_>>());
+    let instrument_lookup = instrument_lookup(instrument_data);
     let mut retry_delay = INITIAL_RECONNECT_DELAY;
 
     loop {
@@ -28,5 +28,28 @@ pub async fn subscribe(instrument_data: &[Arc<str>], price_updates: Sender<Bytes
 
         sleep(retry_delay).await;
         retry_delay = (retry_delay * 2).min(MAX_RECONNECT_DELAY);
+    }
+}
+
+fn instrument_lookup(instrument_data: &[Arc<str>]) -> Arc<HashSet<Arc<str>>> {
+    Arc::new(instrument_data.iter().cloned().collect())
+}
+
+#[cfg(test)]
+mod market_book_stream_tests {
+    use super::instrument_lookup;
+    use std::sync::Arc;
+
+    #[test]
+    fn lookup_deduplicates_instrument_ids() {
+        let instruments = [
+            Arc::<str>::from("BTC-USDT"),
+            Arc::<str>::from("ETH-USDT"),
+            Arc::<str>::from("BTC-USDT"),
+        ];
+        let lookup = instrument_lookup(&instruments);
+        assert_eq!(lookup.len(), 2);
+        assert!(lookup.contains("BTC-USDT"));
+        assert!(lookup.contains("ETH-USDT"));
     }
 }

@@ -60,7 +60,7 @@ impl SignalEngine {
     }
 
 
-    pub fn track_scout_shadow(
+    pub fn track_scout(
         &mut self,
         sample_id: String,
         symbol: String,
@@ -90,7 +90,7 @@ impl SignalEngine {
             || scout_parameter_value.is_some_and(|value| !value.is_finite())
             || scout_minimum_hold_days.is_some_and(|days| !days.is_finite() || days <= 0.0)
             || scout_maximum_hold_days.is_some_and(|days| !days.is_finite() || days <= 0.0)
-            || self.completed_scout_shadow_ids.contains(&sample_id)
+            || self.completed_scout_ids.contains(&sample_id)
             || self.pending.iter().any(|pending| pending.sample_id.as_deref() == Some(&sample_id))
         {
             return false;
@@ -281,16 +281,16 @@ impl SignalEngine {
 }
 
 #[cfg(test)]
-mod scout_shadow_tests {
+mod scout_tests {
     use super::*;
 
     #[test]
-    fn scout_shadow_uses_stop_target_and_strategy_invalidation_instead_of_one_hour() {
+    fn scout_uses_stop_target_and_strategy_invalidation_instead_of_one_hour() {
         let mut engine = SignalEngine::default();
         engine.on_book(1_000, 99.9, 100.1, &[1.0], &[1.0], &[(99.9, 1.0)], &[(100.1, 1.0)]);
         engine.on_price(1_000, 100.0, 0.0);
-        assert!(engine.track_scout_shadow(
-            "shadow-1".into(), "BTC-USDT".into(), "donchian-20-btc200".into(),
+        assert!(engine.track_scout(
+            "scout-1".into(), "BTC-USDT".into(), "donchian-20-btc200".into(),
             1_000, "bullish".into(), 100.0, 0.5, 0.8, 0.15, 0.1, 0.05, None, None, None, None,
         ));
         engine.on_book(3_602_000, 100.0, 100.2, &[1.0], &[1.0], &[(100.0, 1.0)], &[(100.2, 1.0)]);
@@ -305,8 +305,8 @@ mod scout_shadow_tests {
         assert_eq!(outcomes.len(), 1);
         assert_eq!(outcomes[0].evaluation.horizon_seconds, 3_602);
         assert_eq!(outcomes[0].evaluation.signal_timestamp, 1_000);
-        assert!(!engine.track_scout_shadow(
-            "shadow-1".into(), "BTC-USDT".into(), "donchian-20-btc200".into(),
+        assert!(!engine.track_scout(
+            "scout-1".into(), "BTC-USDT".into(), "donchian-20-btc200".into(),
             1_000, "bullish".into(), 100.0, 0.5, 0.8, 0.15, 0.1, 0.05, None, None, None, None,
         ));
     }
@@ -314,7 +314,7 @@ mod scout_shadow_tests {
     #[test]
     fn parameter_probe_exit_state_matches_the_exact_profile_variant() {
         let mut engine = SignalEngine::default();
-        assert!(engine.track_scout_shadow(
+        assert!(engine.track_scout(
             "probe-1".into(), "ETH-USDT".into(), "rsi2-oversold-rebound".into(),
             1_000, "bullish".into(), 100.0, 0.5, 0.8, 0.15, 0.1, 0.05,
             Some("rsi_exit_level".into()), Some(65.0), None, Some(5.0),
@@ -338,7 +338,7 @@ mod scout_shadow_tests {
         let mut engine = SignalEngine::default();
         engine.on_book(1_000, 99.9, 100.1, &[1.0], &[1.0], &[(99.9, 1.0)], &[(100.1, 1.0)]);
         engine.on_price(1_000, 100.0, 0.0);
-        assert!(engine.track_scout_shadow(
+        assert!(engine.track_scout(
             "minimum-hold".into(), "BTC-USDT".into(), "donchian-20-btc200-hold3".into(),
             1_000, "bullish".into(), 100.0, 0.5, 0.8, 0.15, 0.1, 0.05,
             Some("minimum_hold_days".into()), Some(1.0), Some(1.0), None,
@@ -361,7 +361,7 @@ mod scout_shadow_tests {
         let mut maximum_hold = SignalEngine::default();
         maximum_hold.on_book(1_000, 99.9, 100.1, &[1.0], &[1.0], &[(99.9, 1.0)], &[(100.1, 1.0)]);
         maximum_hold.on_price(1_000, 100.0, 0.0);
-        assert!(maximum_hold.track_scout_shadow(
+        assert!(maximum_hold.track_scout(
             "maximum-hold".into(), "ETH-USDT".into(), "rsi2-oversold-rebound".into(),
             1_000, "bullish".into(), 100.0, 0.5, 0.8, 0.15, 0.1, 0.05,
             Some("maximum_hold_days".into()), Some(1.0), None, Some(1.0),
@@ -373,7 +373,7 @@ mod scout_shadow_tests {
     #[test]
     fn live_scout_stop_and_target_exits_use_trade_price_when_book_quote_is_missing() {
         let mut engine = SignalEngine::default();
-        assert!(engine.track_scout_shadow(
+        assert!(engine.track_scout(
             "live-flow-target".into(),
             "ETH-USDT".into(),
             "live-trade-flow".into(),
@@ -413,8 +413,8 @@ mod scout_shadow_tests {
             profit_protection_giveback_percent: Some(0.1), profit_protection_minimum_lock_percent: Some(0.05),
             profit_protection_peak_return_percent: None, strategy_active_seen: false, strategy_exit_requested: false,
         };
-        assert!(scout_shadow_stop_or_target_hit(&mut pending, Some((2_000, 101.0, 101.2))));
+        assert!(scout_stop_or_target_hit(&mut pending, Some((2_000, 101.0, 101.2))));
         let mut standard = PendingOutcome { take_profit_percent: Some(0.8), ..pending };
-        assert!(!scout_shadow_stop_or_target_hit(&mut standard, Some((2_000, 101.0, 101.2))));
+        assert!(!scout_stop_or_target_hit(&mut standard, Some((2_000, 101.0, 101.2))));
     }
 }

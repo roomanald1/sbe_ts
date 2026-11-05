@@ -48,7 +48,7 @@ impl SignalStore {
         Ok(AuditPage { items, next_cursor })
     }
 
-    pub async fn load_shadow_decisions_near(
+    pub async fn load_scout_decisions_near(
         &self,
         symbol: String,
         since: u64,
@@ -76,7 +76,7 @@ impl SignalStore {
                 .collect()
         })
         .await
-        .map_err(|error| anyhow::anyhow!("shadow decision audit read task failed: {error}"))?
+        .map_err(|error| anyhow::anyhow!("scout decision audit read task failed: {error}"))?
     }
 
     pub async fn save_auto_trader_audit(&self, payload: serde_json::Value) -> Result<()> {

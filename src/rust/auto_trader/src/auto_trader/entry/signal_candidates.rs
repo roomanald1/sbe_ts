@@ -163,7 +163,7 @@ fn live_scout_direction_candidates(
     if distinct_directions.len() == 1 { passing } else { Vec::new() }
 }
 
-fn should_shadow_daily_scout(scout: bool, signal: &Signal) -> bool {
+fn should_scout_daily_scout(scout: bool, signal: &Signal) -> bool {
     scout && is_daily_strategy_signal(signal)
 }
 
@@ -691,11 +691,11 @@ mod parallel_daily_candidate_tests {
     }
 
     #[test]
-    fn daily_scouts_are_shadow_only() {
+    fn daily_scouts_are_scout_only() {
         let candidate = signal("trend-50-200", "bullish");
 
-        assert!(should_shadow_daily_scout(true, &candidate));
-        assert!(!should_shadow_daily_scout(false, &candidate));
+        assert!(should_scout_daily_scout(true, &candidate));
+        assert!(!should_scout_daily_scout(false, &candidate));
     }
 
     #[test]

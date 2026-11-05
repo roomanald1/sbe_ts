@@ -284,7 +284,7 @@ fn signal_audit_payload(
         "reason": reason,
     });
     if stage == "entry"
-        || (stage == "decision" && matches!(status, "selected" | "shadowed"))
+        || (stage == "decision" && matches!(status, "selected" | "scouted"))
     {
         payload["trade_id"] = serde_json::json!(decision_id);
     }
@@ -362,7 +362,7 @@ mod strategy_lot_pnl_tests {
         let mut positions = BTreeMap::new();
         apply_auto_fill(
             &mut positions, "ETH-USDT", "buy", 1.0, 100.0, 0.0,
-            "Limit", "scout:shadow", true, None,
+            "Limit", "scout:scout", true, None,
         );
         assert!(positions["ETH-USDT"].scout_entry);
 

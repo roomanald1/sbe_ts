@@ -1,12 +1,12 @@
 #[cfg(test)]
-mod shadow_audit_plan_tests {
+mod scout_audit_plan_tests {
     use super::*;
 
-    fn template(strategy_only: bool) -> ShadowAuditTemplate {
-        ShadowAuditTemplate {
+    fn template(strategy_only: bool) -> ScoutAuditTemplate {
+        ScoutAuditTemplate {
             base_audit: serde_json::json!({
                 "decision_id": "decision-base|exit:strategy",
-                "stage": "decision", "status": "shadowed", "timestamp": 1234,
+                "stage": "decision", "status": "scouted", "timestamp": 1234,
                 "symbol": "BTC-USDT", "direction": "bullish", "strategy": "trend-50-200",
                 "strategy_decision": {"observed_close": 100.0, "strategy_parameters": {"minimum_momentum": 0.5}}
             }),
@@ -32,19 +32,19 @@ mod shadow_audit_plan_tests {
 
     #[test]
     fn scouts_builds_scenarios_group_ids_and_preserves_profile_inputs() {
-        let audits = build_shadow_audits(&template(false), "daily-group");
+        let audits = build_scout_audits(&template(false), "daily-group");
         assert_eq!(audits.len(), 3);
-        assert_eq!(audits[0]["shadow_sample_group_id"], "daily-group");
-        assert_eq!(audits[0]["shadow_exit_scenario"], "strategy");
-        assert_eq!(audits[1]["shadow_exit_scenario"], "tight");
-        assert_eq!(audits[2]["shadow_exit_scenario"], "wide");
+        assert_eq!(audits[0]["scout_sample_group_id"], "daily-group");
+        assert_eq!(audits[0]["scout_exit_scenario"], "strategy");
+        assert_eq!(audits[1]["scout_exit_scenario"], "tight");
+        assert_eq!(audits[2]["scout_exit_scenario"], "wide");
         assert_eq!(audits[1]["stop_loss_percent"], 0.25);
         assert_ne!(audits[0]["decision_id"], audits[1]["decision_id"]);
         assert_eq!(
             audits[0]["strategy_parameter_specs"][0]["key"],
             "minimum_momentum"
         );
-        assert_eq!(audits[0]["shadow_entry_price"], 100.0);
+        assert_eq!(audits[0]["scout_entry_price"], 100.0);
     }
 
     #[test]
@@ -55,7 +55,7 @@ mod shadow_audit_plan_tests {
         template.base_audit["scout_comparison_parameter_key"] =
             serde_json::json!("minimum_momentum");
         template.base_audit["scout_comparison_parameter_value"] = serde_json::json!(0.7);
-        let audits = build_shadow_audits(&template, "pair-group");
+        let audits = build_scout_audits(&template, "pair-group");
         assert_eq!(audits.len(), 1);
         assert_eq!(
             audits[0]["scout_comparison_id"],

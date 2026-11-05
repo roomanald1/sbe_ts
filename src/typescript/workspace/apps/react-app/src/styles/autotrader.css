@@ -1,6 +1,6 @@
 .auto-trader-symbol-grid * { animation: none !important; transition: none !important; }
-.auto-trader-shadow-position-grid { height: min(60vh, 560px); min-height: 280px; }
-.auto-trader-shadow-summary { display: flex; flex-wrap: wrap; gap: 8px 18px; margin: 8px 0; color: #a0a6ad; font-size: 11px; font-variant-numeric: tabular-nums; }
+.auto-trader-scout-position-grid { height: min(60vh, 560px); min-height: 280px; }
+.auto-trader-scout-summary { display: flex; flex-wrap: wrap; gap: 8px 18px; margin: 8px 0; color: #a0a6ad; font-size: 11px; font-variant-numeric: tabular-nums; }
 
 
 .auto-trader-scout-details {
@@ -217,11 +217,11 @@
 
 .auto-trader-ledger-summary-row .ag-cell[col-id=netPnlUsd] { font-size: 12px; font-weight: 750; }
 
-.auto-trader-shadow-position-filters { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0 12px; }
-.auto-trader-shadow-position-filters button { appearance: none; border: 1px solid #3b4652; border-radius: 5px; background: #151a20; color: #b8c0c9; padding: 6px 11px; font: 600 11px/1.2 var(--mono); cursor: pointer; transition: background-color 120ms ease, border-color 120ms ease, color 120ms ease; }
-.auto-trader-shadow-position-filters button:hover { border-color: #718195; background: #1b232c; color: #e7e7e7; }
-.auto-trader-shadow-position-filters button[aria-pressed="true"] { border-color: #8296ad; background: #263747; color: #e3effa; box-shadow: inset 0 0 0 1px #8296ad33; }
-.auto-trader-shadow-position-filters button:focus-visible { outline: 2px solid #9db5ce; outline-offset: 2px; }
+.auto-trader-scout-position-filters { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0 12px; }
+.auto-trader-scout-position-filters button { appearance: none; border: 1px solid #3b4652; border-radius: 5px; background: #151a20; color: #b8c0c9; padding: 6px 11px; font: 600 11px/1.2 var(--mono); cursor: pointer; transition: background-color 120ms ease, border-color 120ms ease, color 120ms ease; }
+.auto-trader-scout-position-filters button:hover { border-color: #718195; background: #1b232c; color: #e7e7e7; }
+.auto-trader-scout-position-filters button[aria-pressed="true"] { border-color: #8296ad; background: #263747; color: #e3effa; box-shadow: inset 0 0 0 1px #8296ad33; }
+.auto-trader-scout-position-filters button:focus-visible { outline: 2px solid #9db5ce; outline-offset: 2px; }
 .auto-trader-learning-rows { display: grid; gap: 6px; margin-top: 9px; }
 .auto-trader-learning-row { display: grid; grid-template-columns: minmax(150px, 1.2fr) repeat(3, minmax(120px, 1fr)); gap: 10px; align-items: center; border-top: 1px solid #242a31; padding: 8px 0; color: var(--muted); font-size: 10px; }
 .auto-trader-learning-row strong, .auto-trader-learning-row b { color: var(--ink); }

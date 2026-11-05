@@ -1,49 +1,17 @@
 pub fn router() -> Router {
-    let json_settings_path = settings_path();
-    let settings_path = settings_binary_path(&json_settings_path);
-    let binary_state = std::fs::read(&settings_path)
-        .ok()
-        .and_then(|bytes| rmp_serde::from_slice::<Settings>(&bytes).ok());
-    let loaded_binary = binary_state.is_some();
-    let stored_state = if binary_state.is_none() {
-        std::fs::read(&json_settings_path)
-            .ok()
-            .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
-    } else {
-        None
-    };
-    let mut settings = binary_state
-        .or_else(|| {
-            stored_state
-                .as_ref()
-                .and_then(|value| serde_json::from_value::<Settings>(value.clone()).ok())
-        })
-        .unwrap_or_default();
+    let state_file_path = settings_path();
+    let settings_path = settings_database_path(&state_file_path);
+    let database_state = read_settings_database(&settings_path).unwrap_or_else(|error| {
+        panic!(
+            "Could not read AutoTrader SQLite state {}: {error}",
+            settings_path.display()
+        )
+    });
+    let mut settings = database_state.unwrap_or_default();
     migrate_closed_trade_metrics(&mut settings);
-    if stored_state.as_ref().is_some_and(|value| {
-        value.get("strategies").is_none() && value.get("research_strategies").is_none()
-    }) {
-        if let Some(strategy) = stored_state
-            .as_ref()
-            .and_then(|value| value.get("strategy"))
-            .and_then(|value| serde_json::from_value::<Strategy>(value.clone()).ok())
-        {
-            settings.strategies = vec![strategy];
-        }
-    }
     // The previous release defaulted this new cap to three, which can strand existing books above the cap.
     if settings.max_open_positions == 3 {
         settings.max_open_positions = default_max_open_positions();
-    }
-    if stored_state
-        .as_ref()
-        .is_some_and(|value| value.get("realized_pnl").is_none())
-    {
-        settings.realized_pnl = settings
-            .positions
-            .values()
-            .map(|position| position.realized_pnl)
-            .sum();
     }
     for (symbol, position) in settings.positions.iter_mut() {
         if position.trade_id.is_none() {
@@ -137,19 +105,9 @@ pub fn router() -> Router {
     if let Err(error) = persist_settings(&settings_path, &settings) {
         crate::service_log!(
             "ERROR",
-            "Could not persist AutoTrader state migrations: {}",
+            "Could not persist AutoTrader SQLite state: {}",
             error.1
         );
-    } else if !loaded_binary && stored_state.is_some() {
-        if let Err(error) = std::fs::remove_file(&json_settings_path) {
-            if error.kind() != std::io::ErrorKind::NotFound {
-                crate::service_log!(
-                    "WARN",
-                    "Could not remove migrated JSON AutoTrader state {}: {error}",
-                    json_settings_path.display()
-                );
-            }
-        }
     }
     settings.used_notional_today = allocated_notional(&settings);
     if settings.utc_day != utc_day() {
@@ -190,11 +148,35 @@ pub fn router() -> Router {
             }
         }
     });
-    let carry_path = dated_carry_path(&json_settings_path);
-    let carry_book = std::fs::read(&carry_path)
-        .ok()
-        .and_then(|bytes| serde_json::from_slice::<DatedCarryBook>(&bytes).ok())
-        .unwrap_or_default();
+    let carry_legacy_path = std::env::var_os("POSITIONS_FILE")
+        .map(PathBuf::from)
+        .and_then(|path| {
+            path.parent()
+                .map(|parent| parent.join("auto_trader_state.dated_carry.json"))
+        })
+        .filter(|path| path.exists())
+        .unwrap_or_else(|| dated_carry_legacy_path(&state_file_path));
+    let carry_database_book = read_dated_carry_database(&settings_path)
+        .unwrap_or_else(|error| panic!("Could not read AutoTrader dated-carry state: {error}"));
+    let carry_book = match carry_database_book {
+        Some(book) => book,
+        None => {
+            let legacy_bytes = std::fs::read(&carry_legacy_path).ok();
+            let legacy = legacy_bytes
+                .as_deref()
+                .and_then(|bytes| serde_json::from_slice::<DatedCarryBook>(&bytes).ok());
+            let was_migrated = legacy.is_some();
+            let book = legacy.unwrap_or_default();
+            if legacy_bytes.is_some() || !carry_legacy_path.exists() {
+                persist_dated_carry_book(&settings_path, &book)
+                    .unwrap_or_else(|error| panic!("Could not migrate dated-carry state to SQLite: {error}"));
+                if was_migrated {
+                    let _ = std::fs::remove_file(&carry_legacy_path);
+                }
+            }
+            book
+        }
+    };
     let (state_updates, _) = tokio::sync::broadcast::channel(64);
     let state = AutoTraderState {
         // Every worker shares the cycle lock. Bound upstream calls so an
@@ -203,6 +185,7 @@ pub fn router() -> Router {
             .timeout(Duration::from_secs(5))
             .build()
             .unwrap_or_else(|_| reqwest::Client::new()),
+        scout_configuration: Arc::new(std::sync::RwLock::new(scouts::ScoutConfiguration::default())),
         latest_daily_strategy_snapshot: Arc::new(Mutex::new(None)),
         strategy_diagnostic: Arc::new(std::sync::Mutex::new(Vec::new())),
         enabled: Arc::new(AtomicBool::new(enabled)),
@@ -213,7 +196,6 @@ pub fn router() -> Router {
         latest_missed_opportunity_bands: Arc::new(Mutex::new(Vec::new())),
         latest_execution_parameters: Arc::new(Mutex::new(None)),
         cycle_lock: Arc::new(Mutex::new(())),
-        scout_lifecycle_last_update_ms: Arc::new(AtomicU64::new(0)),
         pending_daily_signals: Arc::new(Mutex::new(BTreeMap::new())),
         daily_signal_notify: Arc::new(Notify::new()),
         pending_live_signals: Arc::new(Mutex::new(BTreeMap::new())),
@@ -228,14 +210,16 @@ pub fn router() -> Router {
         cycle_lock_wait_ms: Arc::new(Mutex::new(BTreeMap::new())),
         cycle_lock_hold_ms: Arc::new(std::sync::Mutex::new(BTreeMap::new())),
         cycle_lock_scope_ms: Arc::new(std::sync::Mutex::new(BTreeMap::new())),
-        settings_path,
+        settings_path: settings_path.clone(),
         dated_carry: Arc::new(Mutex::new(carry_book)),
         dated_carry_work_lock: Arc::new(Mutex::new(())),
-        dated_carry_path: carry_path,
+        dated_carry_path: settings_path.clone(),
     };
     start_settings_persistence_worker(&state);
     start_learning_feedback_worker(&state);
-    start_scout_lifecycle_sync_worker(&state);
+    start_scout_configuration_cache(&state);
+    let legacy_state = state.clone();
+    tokio::spawn(async move { import_legacy_scout_comparisons(&legacy_state).await; });
     let rates_worker_state = state.clone();
     tokio::spawn(async move {
         let mut ticker = interval(Duration::from_secs(30));
@@ -380,10 +364,6 @@ pub fn router() -> Router {
             axum::routing::post(receive_daily_strategy_signals),
         )
         .route(
-            "/internal/auto-trader/shadow-learning-outcome",
-            axum::routing::post(receive_shadow_learning_outcome),
-        )
-        .route(
             "/positions/auto-trader/parameters",
             get(get_decision_parameters),
         )
@@ -399,6 +379,7 @@ pub fn router() -> Router {
         .route("/positions/auto-trader/learning-summary", get(get_learning_summary))
         .with_state(state)
 }
+
 
 async fn get_learning_summary() -> Result<axum::Json<serde_json::Value>, (axum::http::StatusCode, String)> {
     let base = std::env::var("LEARNING_SERVICE_URL").map_err(|_| (axum::http::StatusCode::SERVICE_UNAVAILABLE, "Learning service is not configured".into()))?;
@@ -438,8 +419,7 @@ fn scout_feedback_parameter_keys(
 
 fn start_learning_feedback_worker(state: &AutoTraderState) {
     let learning_url = std::env::var("LEARNING_SERVICE_URL").ok();
-    let scouts_url = std::env::var("SCOUTS_SERVICE_URL").ok();
-    if learning_url.is_none() && scouts_url.is_none() { return; }
+    if learning_url.is_none() { return; }
     let profile_learning_url = learning_url.clone();
 
     let publisher_state = state.clone();
@@ -468,7 +448,7 @@ fn start_learning_feedback_worker(state: &AutoTraderState) {
             let event = publisher_state.settings.lock().await.feedback_outbox.first().cloned();
             if let Some(event) = event {
                 let (base, path) = match &event {
-                    FeedbackEvent::ScoutOutcome { .. } => (scouts_url.as_deref(), "/outcomes"),
+                    FeedbackEvent::ScoutOutcome { .. } => (learning_url.as_deref(), "/feedback"),
                     FeedbackEvent::TradeOutcome { .. } => (learning_url.as_deref(), "/feedback"),
                 };
                 let Some(base) = base else { continue };
@@ -552,26 +532,21 @@ fn start_learning_feedback_worker(state: &AutoTraderState) {
     }
 }
 
-async fn receive_shadow_learning_outcome(
-    State(state): State<AutoTraderState>,
-    Json(outcome): Json<ShadowLearningOutcomeRequest>,
-) -> Result<StatusCode, (StatusCode, String)> {
-    // Compatibility proxy for Insights instances that have not yet switched to
-    // the Scouts-owned outcome endpoint. Pairing, attribution, and feedback
-    // delivery are owned by the Scout service.
-    let base = std::env::var("SCOUTS_SERVICE_URL")
-        .unwrap_or_else(|_| "http://127.0.0.1:3011".into());
-    state
-        .client
-        .post(format!("{}/shadow-outcome", base.trim_end_matches('/')))
-        .timeout(Duration::from_secs(3))
-        .json(&outcome)
-        .send()
-        .await
-        .map_err(|error| (StatusCode::BAD_GATEWAY, error.to_string()))?
-        .error_for_status()
-        .map_err(|error| (StatusCode::BAD_GATEWAY, error.to_string()))?;
-    Ok(StatusCode::NO_CONTENT)
+fn start_scout_configuration_cache(state: &AutoTraderState) {
+    let client = state.client.clone();
+    let cache = Arc::clone(&state.scout_configuration);
+    tokio::spawn(async move {
+        let base = std::env::var("SCOUTS_SERVICE_URL").unwrap_or_else(|_| "http://127.0.0.1:3011".into());
+        let mut ticker = interval(Duration::from_secs(2));
+        loop {
+            ticker.tick().await;
+            let Ok(response) = client.get(format!("{}/configuration", base.trim_end_matches('/')))
+                .timeout(Duration::from_secs(2)).send().await else { continue };
+            let Ok(response) = response.error_for_status() else { continue };
+            let Ok(configuration) = response.json::<scouts::ScoutConfiguration>().await else { continue };
+            if let Ok(mut current) = cache.write() { *current = configuration; }
+        }
+    });
 }
 
 async fn auto_trader_stream(State(state): State<AutoTraderState>, websocket: axum::extract::ws::WebSocketUpgrade) -> axum::response::Response {
@@ -635,31 +610,28 @@ async fn signal_ready(
 
     let incoming_symbols = dashboard.best.len() as u64;
     let settings = state.settings.lock().await;
+    let scout_configuration = state.scout_configuration();
     let generic_enabled = state.enabled.load(Ordering::Relaxed)
         && (settings.signal_strategies_enabled
             || settings
                 .strategies
                 .iter()
                 .any(|strategy| strategy.is_live_insight())
-            || settings
-                .scout_strategies
-                .iter()
-                .any(|strategy| strategy.is_live_insight()));
+            || scout_configuration.strategies.iter().filter_map(|name| Strategy::from_name(name)).any(|strategy| strategy.is_live_insight()));
     if generic_enabled {
         let mut queue = state.pending_live_signals.lock().await;
         let mut prewarm_symbols = Vec::new();
         for signal in dashboard.best.iter().cloned() {
+            let scout_live = scout_configuration.strategies.iter()
+                .filter_map(|name| Strategy::from_name(name))
+                .filter(|strategy| strategy.is_live_insight())
+                .collect::<Vec<_>>();
             let mut selected_live = settings
                 .strategies
                 .iter()
                 .filter(|strategy| strategy.is_live_insight())
                 .collect::<Vec<_>>();
-            selected_live.extend(
-                settings
-                    .scout_strategies
-                    .iter()
-                    .filter(|strategy| strategy.is_live_insight()),
-            );
+            selected_live.extend(scout_live.iter());
             let has_subscription = if selected_live.is_empty() && settings.signal_strategies_enabled
             {
                 Strategy::any_live_strategy_receives(&signal)

@@ -28,18 +28,18 @@ fn candidate(evaluated_at_ms: u64, basis_percent: f64, expiry_days: f64) -> Date
 }
 
 #[test]
-fn shadow_probe_dedupes_maturities_for_one_asset_and_parameter_variant() {
+fn scout_probe_dedupes_maturities_for_one_asset_and_parameter_variant() {
     let first = candidate(1_000 * 86_400_000, 1.0, 12.0);
     let mut second = first.clone();
     second.future_symbol = "BTCUSDT_Q2".into();
     assert_eq!(
-        dated_carry_shadow_key(&first, "carry_minimum_days_to_expiry", 6.0),
-        dated_carry_shadow_key(&second, "carry_minimum_days_to_expiry", 6.0),
+        dated_carry_scout_key(&first, "carry_minimum_days_to_expiry", 6.0),
+        dated_carry_scout_key(&second, "carry_minimum_days_to_expiry", 6.0),
     );
 }
 
 #[test]
-fn lower_expiry_probe_can_shadow_an_expiry_filtered_by_the_baseline() {
+fn lower_expiry_probe_can_scout_an_expiry_filtered_by_the_baseline() {
     let now = 1_000 * 86_400_000;
     let candidate = candidate(now, 1.0, 6.0);
     let baseline_parameters = BTreeMap::from([
@@ -69,18 +69,18 @@ fn lower_expiry_probe_can_shadow_an_expiry_filtered_by_the_baseline() {
 }
 
 #[test]
-fn scout_shadow_markout_records_positive_and_negative_net_returns() {
+fn scout_markout_records_positive_and_negative_net_returns() {
     let entry = candidate(1_000 * 86_400_000, 1.0, 12.0);
     let mut favorable = entry.clone();
     favorable.spot_bid = 101.0;
     favorable.future_ask = 100.0;
-    let favorable_return = dated_carry_shadow_return_percent(&entry, &favorable).unwrap();
+    let favorable_return = dated_carry_scout_return_percent(&entry, &favorable).unwrap();
     assert!(favorable_return > 0.0);
 
     let mut adverse = entry.clone();
     adverse.spot_bid = 99.0;
     adverse.future_ask = 102.0;
-    let adverse_return = dated_carry_shadow_return_percent(&entry, &adverse).unwrap();
+    let adverse_return = dated_carry_scout_return_percent(&entry, &adverse).unwrap();
     assert!(adverse_return < 0.0);
 }
 

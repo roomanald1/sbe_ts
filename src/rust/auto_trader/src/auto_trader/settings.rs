@@ -9,8 +9,6 @@ struct Settings {
     enabled: bool,
     #[serde(default = "default_strategies", alias = "research_strategies")]
     strategies: Vec<Strategy>,
-    #[serde(default)]
-    scout_strategies: Vec<Strategy>,
     #[serde(
         default = "default_signal_strategies_enabled",
         alias = "generic_signals_enabled"
@@ -34,10 +32,6 @@ struct Settings {
     risk_appetite: f64,
     #[serde(default = "default_max_open_positions")]
     max_open_positions: usize,
-    #[serde(default = "default_max_concurrent_shadow_samples")]
-    max_concurrent_shadow_samples: usize,
-    #[serde(default = "default_scout_max_active_positions")]
-    scout_max_active_positions: usize,
     #[serde(default = "default_max_intraday_open_positions")]
     max_intraday_open_positions: usize,
     #[serde(default = "default_max_daily_open_positions")]
@@ -121,20 +115,10 @@ struct Settings {
     #[serde(default)]
     execution_feedback_outbox: Vec<strategies::ExecutionOutcomeEvent>,
     // Retained only long enough to import in-flight state created before
-    // Scouts became the owner of paired shadow outcomes.
-    #[serde(default)]
-    // Legacy dedupe IDs retained for deserialization; Scouts now owns dedupe.
-    shadow_learning_outcome_ids: BTreeSet<String>,
+    // Scouts became the owner of paired scout outcomes.
     #[serde(default)]
     // Legacy comparison returns imported once into the Scouts service.
     scout_comparisons: BTreeMap<String, PendingScoutComparison>,
-    // Replicated read cache of the Scouts lifecycle snapshot. Scouts is the source of truth.
-    #[serde(default)]
-    shadow_sample_at_ms: BTreeMap<String, u64>,
-    #[serde(default)]
-    shadow_sample_active_scenarios: BTreeMap<String, BTreeSet<String>>,
-    #[serde(default)]
-    scout_variant_rotation_cursor: usize,
     #[serde(default)]
     strategy_parameter_overrides: BTreeMap<String, f64>,
     #[serde(default)]
@@ -172,8 +156,6 @@ fn default_risk_appetite() -> f64 {
     50.0
 }
 fn default_max_open_positions() -> usize { 20 }
-fn default_max_concurrent_shadow_samples() -> usize { DEFAULT_MAX_CONCURRENT_SHADOW_SAMPLES }
-fn default_scout_max_active_positions() -> usize { DEFAULT_SCOUT_MAX_ACTIVE_POSITIONS }
 fn default_max_intraday_open_positions() -> usize { DEFAULT_MAX_INTRADAY_OPEN_POSITIONS }
 fn default_max_daily_open_positions() -> usize { DEFAULT_MAX_DAILY_OPEN_POSITIONS }
 fn default_intraday_notional_limit() -> f64 { DEFAULT_INTRADAY_NOTIONAL_LIMIT }
@@ -229,7 +211,6 @@ impl Default for Settings {
         Self {
             enabled: false,
             strategies: default_strategies(),
-            scout_strategies: Vec::new(),
             signal_strategies_enabled: default_signal_strategies_enabled(),
             max_order_notional: default_order_limit(),
             daily_notional_limit: default_daily_limit(),
@@ -240,8 +221,6 @@ impl Default for Settings {
             exploration_percent: default_exploration_percent(),
             risk_appetite: default_risk_appetite(),
             max_open_positions: default_max_open_positions(),
-            max_concurrent_shadow_samples: default_max_concurrent_shadow_samples(),
-            scout_max_active_positions: default_scout_max_active_positions(),
             max_intraday_open_positions: default_max_intraday_open_positions(),
             max_daily_open_positions: default_max_daily_open_positions(),
             intraday_notional_limit: default_intraday_notional_limit(),
@@ -283,11 +262,7 @@ impl Default for Settings {
             execution_learning_imported: false,
             execution_learning_order_ids: BTreeSet::new(),
             execution_feedback_outbox: Vec::new(),
-            shadow_learning_outcome_ids: BTreeSet::new(),
             scout_comparisons: BTreeMap::new(),
-            shadow_sample_at_ms: BTreeMap::new(),
-            shadow_sample_active_scenarios: BTreeMap::new(),
-            scout_variant_rotation_cursor: 0,
             strategy_parameter_overrides: BTreeMap::new(),
             last_hedge_at: BTreeMap::new(),
             last_decision: String::new(),

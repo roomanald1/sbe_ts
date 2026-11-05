@@ -12,6 +12,7 @@ SERVICES = {
     "auto_trader": (os.getenv("AUTO_TRADER_URL", "http://127.0.0.1:3005"), "/health"),
     "execution": (os.getenv("EXECUTION_URL", "http://127.0.0.1:3003"), "/health"),
     "insights": (os.getenv("INSIGHTS_URL", "http://127.0.0.1:3004"), "/health"),
+    "live_signals": (os.getenv("LIVE_SIGNALS_URL", "http://127.0.0.1:3007"), "/health"),
     "news_sentiment": (os.getenv("NEWS_SENTIMENT_URL", "http://127.0.0.1:3006"), "/health"),
     "learning": (os.getenv("LEARNING_SERVICE_URL", "http://127.0.0.1:3010"), "/health"),
     "scouts": (os.getenv("SCOUTS_SERVICE_URL", "http://127.0.0.1:3011"), "/health"),
@@ -85,6 +86,49 @@ def insights_maintenance_metrics(output):
         output.append(sample("app_insights_maintenance_last_error_info", "Current Insights maintenance error details.", 1, {"error": error}))
 
 
+def insights_signal_latency_metrics(output):
+    base = SERVICES["live_signals"][0]
+    try:
+        latency = get_json(base, "/internal/latency")
+    except (OSError, URLError, ValueError, TypeError):
+        latency = {}
+
+    for stage, summary in latency.items():
+        if not isinstance(summary, dict):
+            continue
+        for stat in ("p50_us", "p95_us"):
+            value = summary.get(stat)
+            if isinstance(value, (int, float)):
+                output.append(sample(
+                    "app_live_signals_latency_microseconds",
+                    "Approximate Live Signals pipeline latency percentile in microseconds.",
+                    value,
+                    {"stage": stage, "stat": stat.removesuffix("_us")},
+                ))
+        count = summary.get("count")
+        if isinstance(count, (int, float)):
+            output.append(sample(
+                "app_live_signals_latency_observations_total",
+                "Cumulative Live Signals latency observations.",
+                count,
+                {"stage": stage},
+                kind="counter",
+            ))
+
+    try:
+        research_latency = get_json(SERVICES["insights"][0], "/internal/latency")
+    except (OSError, URLError, ValueError, TypeError):
+        research_latency = {}
+    dropped = research_latency.get("dropped_research_records")
+    if isinstance(dropped, (int, float)):
+        output.append(sample(
+            "app_insights_research_records_dropped_total",
+            "Cumulative number of research records dropped because the bounded Insights writer queue was full.",
+            dropped,
+            kind="counter",
+        ))
+
+
 def metrics():
     METRIC_HEADERS.clear()
     output = []
@@ -111,6 +155,7 @@ def metrics():
             pass
 
     insights_maintenance_metrics(output)
+    insights_signal_latency_metrics(output)
 
     base = SERVICES["position_management"][0]
     try:

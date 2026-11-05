@@ -26,7 +26,7 @@ fn market_value(
     )
 }
 
-fn valid_scout_shadow_sample(sample: &ScoutShadowRegistration, now: u64) -> bool {
+fn valid_scout_sample(sample: &ScoutScoutRegistration, now: u64) -> bool {
     !(sample.decision_id.is_empty() || sample.decision_id.len() > 240
         || sample.symbol.is_empty() || sample.symbol.len() > 32
         || sample.timestamp > now.saturating_add(5_000) || now.saturating_sub(sample.timestamp) > 7 * 86_400_000
@@ -48,7 +48,7 @@ fn valid_scout_shadow_sample(sample: &ScoutShadowRegistration, now: u64) -> bool
 
 
 #[derive(serde::Deserialize)]
-struct ScoutShadowRegistration {
+struct ScoutScoutRegistration {
     decision_id: String,
     symbol: String,
     timestamp: u64,
@@ -75,22 +75,26 @@ struct ScoutShadowRegistration {
     scout_comparison_role: Option<String>,
 }
 
-async fn register_scout_shadow(
+async fn register_scout(
     axum::extract::State(runtime): axum::extract::State<Arc<SignalRuntime>>,
-    Json(sample): Json<ScoutShadowRegistration>,
+    Json(sample): Json<ScoutScoutRegistration>,
 ) -> Result<StatusCode, (StatusCode, String)> {
     let now = now_ms();
-    if !valid_scout_shadow_sample(&sample, now) {
-        return Err((StatusCode::BAD_REQUEST, "Invalid scout shadow sample".to_owned()));
+    if !valid_scout_sample(&sample, now) {
+        return Err((StatusCode::BAD_REQUEST, "Invalid scout scout sample".to_owned()));
     }
-    let mut engines = runtime.engines.lock().await;
-    let engine = engines.entry(sample.symbol.clone()).or_default();
+    let engine = runtime
+        .engines
+        .entry(sample.symbol.clone())
+        .or_insert_with(|| Arc::new(Mutex::new(SignalEngine::default())))
+        .clone();
+    let mut engine = engine.lock().await;
     let decision_id = sample.decision_id.clone();
     let symbol = sample.symbol.clone();
     let strategy = sample.strategy.clone();
     let exit_scenario = sample.exit_scenario.clone();
     let timestamp = sample.timestamp;
-    if !engine.track_scout_shadow(
+    if !engine.track_scout(
         sample.decision_id, sample.symbol, sample.strategy,
         sample.timestamp, sample.direction, sample.entry_price,
         sample.stop_loss_percent, sample.take_profit_percent,
@@ -102,10 +106,10 @@ async fn register_scout_shadow(
         sample.scout_minimum_hold_days,
         sample.scout_maximum_hold_days,
     ) {
-        crate::service_log!("INFO", "Scout shadow registration ignored as duplicate: sample_id={} symbol={}", decision_id, symbol);
+        crate::service_log!("INFO", "Scout scout registration ignored as duplicate: sample_id={} symbol={}", decision_id, symbol);
         return Ok(StatusCode::NO_CONTENT);
     }
-    crate::service_log!("INFO", "Scout shadow registered: sample_id={} symbol={} strategy={} exit_scenario={} age_ms={}", decision_id, symbol, strategy, exit_scenario, now.saturating_sub(timestamp));
+    crate::service_log!("INFO", "Scout scout registered: sample_id={} symbol={} strategy={} exit_scenario={} age_ms={}", decision_id, symbol, strategy, exit_scenario, now.saturating_sub(timestamp));
     Ok(StatusCode::ACCEPTED)
 }
 
@@ -124,9 +128,17 @@ async fn update_scout_strategy_status(
     let active = update.active_strategy_symbols.into_iter().collect::<BTreeSet<_>>();
     let active_parameter_profiles = update.active_parameter_profiles.into_iter().collect::<BTreeSet<_>>();
     let enabled = update.enabled_strategies.into_iter().collect::<BTreeSet<_>>();
-    let mut engines = runtime.engines.lock().await;
-    for engine in engines.values_mut() {
-        engine.update_scout_strategy_state(&active, &active_parameter_profiles, &enabled);
+    let engines = runtime
+        .engines
+        .iter()
+        .map(|entry| Arc::clone(entry.value()))
+        .collect::<Vec<_>>();
+    for engine in engines {
+        engine.lock().await.update_scout_strategy_state(
+            &active,
+            &active_parameter_profiles,
+            &enabled,
+        );
     }
     StatusCode::NO_CONTENT
 }
@@ -145,23 +157,37 @@ async fn ingest_signal_event(
         .try_lock()
         .map(|learning| learning.weight)
         .unwrap_or(0.0);
-    let mut shadow_learning_outcomes = Vec::new();
+    let mut scout_learning_outcomes = Vec::new();
     let (snapshot, records, market, event_timestamp) = {
         let event_timestamp = match &request.event {
             SignalFeedEvent::Price { timestamp, .. }
             | SignalFeedEvent::Trade { timestamp, .. }
             | SignalFeedEvent::Book { timestamp, .. } => *timestamp,
         };
-        // Preserve the original event ordering and atomic BTC/ETH context snapshot.
-        // The sharded caches below are independent of this stateful event sequence.
-        let mut engines = runtime.engines.lock().await;
-        let btc_context = engines.get("BTC-USDT").map_or((None, None), |reference| {
-            reference.return_context(event_timestamp)
-        });
-        let eth_context = engines.get("ETH-USDT").map_or((None, None), |reference| {
-            reference.return_context(event_timestamp)
-        });
-        let engine = engines.entry(request.symbol.clone()).or_default();
+        // Capture BTC/ETH context opportunistically without taking another symbol's
+        // engine lock. Research samples may omit context while a reference is busy.
+        let btc_engine = runtime
+            .engines
+            .get("BTC-USDT")
+            .map(|entry| Arc::clone(entry.value()));
+        let btc_context = btc_engine
+            .and_then(|engine| engine.try_lock().ok().map(|engine| engine.return_context(event_timestamp)))
+            .unwrap_or((None, None));
+        let eth_engine = runtime
+            .engines
+            .get("ETH-USDT")
+            .map(|entry| Arc::clone(entry.value()));
+        let eth_context = eth_engine
+            .and_then(|engine| engine.try_lock().ok().map(|engine| engine.return_context(event_timestamp)))
+            .unwrap_or((None, None));
+        let engine = runtime
+            .engines
+            .entry(request.symbol.clone())
+            .or_insert_with(|| Arc::new(Mutex::new(SignalEngine::default())))
+            .clone();
+        let engine_wait_started = Instant::now();
+        let mut engine = engine.lock().await;
+        crate::latency::record_engine_lock_wait(engine_wait_started.elapsed());
         let mut records = Vec::new();
         let mut market = None;
         let snapshot = match request.event {
@@ -198,9 +224,9 @@ async fn ingest_signal_event(
                     );
                 }
                 for outcome in outcomes {
-                    if outcome.scout_shadow_id.is_some() {
-                        crate::service_log!("INFO", "Scout shadow completed: sample_id={} symbol={} exit_reason={} age_seconds={}", outcome.scout_shadow_id.as_deref().unwrap_or("unknown"), outcome.evaluation.symbol, outcome.scout_exit_reason.unwrap_or("unknown"), outcome.evaluation.horizon_seconds);
-                        shadow_learning_outcomes.push(outcome.evaluation.clone());
+                    if outcome.scout_id.is_some() {
+                        crate::service_log!("INFO", "Scout scout completed: sample_id={} symbol={} exit_reason={} age_seconds={}", outcome.scout_id.as_deref().unwrap_or("unknown"), outcome.evaluation.symbol, outcome.scout_exit_reason.unwrap_or("unknown"), outcome.evaluation.horizon_seconds);
+                        scout_learning_outcomes.push(outcome.evaluation.clone());
                     }
                     if outcome.legacy.horizon_seconds == 60 {
                         if let Ok(mut learning) = runtime.news_learning.try_lock() {
@@ -224,9 +250,15 @@ async fn ingest_signal_event(
                     records.push(StoredSignalRecord::Outcome(outcome.legacy));
                     records.push(StoredSignalRecord::Evaluation(outcome.evaluation));
                 }
-                let should_compute_snapshot = accepted && engine.live_snapshot_due(timestamp);
+                let should_compute_snapshot = accepted
+                    && if crate::research_only() {
+                        engine.research_sample_is_due(timestamp)
+                    } else {
+                        engine.live_snapshot_due(timestamp)
+                    };
                 let should_capture_research =
                     should_compute_snapshot && engine.research_sample_is_due(timestamp);
+                let snapshot_started = Instant::now();
                 let mut snapshot = should_compute_snapshot
                     .then(|| {
                         engine.snapshot_with_reasons(
@@ -236,6 +268,9 @@ async fn ingest_signal_event(
                         )
                     })
                     .flatten();
+                if should_compute_snapshot {
+                    crate::latency::record_snapshot_compute(snapshot_started.elapsed());
+                }
                 if should_compute_snapshot
                     && snapshot.is_none()
                     && signal_diagnostic_due(
@@ -358,7 +393,7 @@ async fn ingest_signal_event(
         };
         (snapshot, records, market, event_timestamp)
     };
-    if snapshot.is_none() {
+    if snapshot.is_none() && !crate::research_only() {
         if let Some(markets) = market.as_ref() {
             if let Some(mut dashboard) = runtime.signal_push_cache.get_mut(&request.symbol) {
                 dashboard["markets"] = markets.clone();
@@ -387,38 +422,39 @@ async fn ingest_signal_event(
         }
     }
     if !records.is_empty() {
-        let store = runtime.store.clone();
-        tokio::spawn(async move {
-            if let Err(error) = store.append_records(records).await {
-                crate::service_log!(
-                    "ERROR",
-                    "Could not persist signal event off hot path: {error}"
-                );
-            }
-        });
+        if let Err(error) = runtime.research_record_sender.try_send(records) {
+            let dropped_records = error.into_inner().len();
+            crate::latency::record_dropped_research_records(dropped_records);
+            crate::service_log!(
+                "WARN",
+                "Research record queue is full; dropped a batch of {dropped_records} records"
+            );
+        }
     }
-    if !shadow_learning_outcomes.is_empty() {
+    if !scout_learning_outcomes.is_empty() {
         let store = runtime.store.clone();
         tokio::spawn(async move {
-            publish_shadow_learning_outcomes(&store, shadow_learning_outcomes).await;
+            publish_scout_learning_outcomes(&store, scout_learning_outcomes).await;
         });
     }
     if let Some(snapshot) = snapshot.as_ref() {
-        let markets = market.unwrap_or_else(|| serde_json::json!({}));
-        // Historical counterfactual analysis scans a large database. Signal
-        // ingestion only needs the latest completed result; dashboard reads
-        // schedule any refresh in the background.
-        let missed_opportunity_bands = runtime.store.cached_missed_opportunity_bands();
-        let dashboard = serde_json::json!({
-            "best": [snapshot],
-            "walkForward": runtime.store.cached_walk_forward(),
-            "missedOpportunityBands": missed_opportunity_bands,
-            "markets": markets
-        });
-        runtime
-            .signal_push_cache
-            .insert(snapshot.symbol.clone(), dashboard);
-        runtime.signal_push_notify.notify_one();
+        if !crate::research_only() {
+            let markets = market.unwrap_or_else(|| serde_json::json!({}));
+            // Historical counterfactual analysis scans a large database. Signal
+            // ingestion only needs the latest completed result; dashboard reads
+            // schedule any refresh in the background.
+            let missed_opportunity_bands = runtime.store.cached_missed_opportunity_bands();
+            let dashboard = serde_json::json!({
+                "best": [snapshot],
+                "walkForward": runtime.store.cached_walk_forward(),
+                "missedOpportunityBands": missed_opportunity_bands,
+                "markets": markets
+            });
+            runtime
+                .signal_push_cache
+                .insert(snapshot.symbol.clone(), dashboard);
+            runtime.signal_push_notify.notify_one();
+        }
         let mut ui_snapshot = snapshot.clone();
         ui_snapshot.components.momentum_by_window.clear();
         ui_snapshot.components.trend_volatility_units_by_window.clear();
@@ -435,16 +471,16 @@ async fn ingest_signal_event(
     Ok(Json(snapshot))
 }
 
-async fn publish_shadow_learning_outcomes(store: &SignalStore, outcomes: Vec<SignalEvaluation>) {
-    let _permit = SHADOW_LEARNING_DELIVERY_LIMIT
+async fn publish_scout_learning_outcomes(store: &SignalStore, outcomes: Vec<SignalEvaluation>) {
+    let _permit = SCOUT_LEARNING_DELIVERY_LIMIT
         .get_or_init(|| Semaphore::new(2))
         .acquire()
         .await
-        .expect("shadow learning delivery semaphore remains open");
+        .expect("scout learning delivery semaphore remains open");
     let client = POSITION_MANAGEMENT_CLIENT.get_or_init(reqwest::Client::new);
     for evaluation in outcomes {
         let decisions = match store
-            .load_shadow_decisions_near(
+            .load_scout_decisions_near(
                 evaluation.symbol.clone(),
                 evaluation.signal_timestamp,
                 evaluation.signal_timestamp.saturating_add(1),
@@ -455,7 +491,7 @@ async fn publish_shadow_learning_outcomes(store: &SignalStore, outcomes: Vec<Sig
             Err(error) => {
                 crate::service_log!(
                     "WARN",
-                    "Could not load shadow decisions for learning: {error}"
+                    "Could not load scout decisions for learning: {error}"
                 );
                 continue;
             }
@@ -464,7 +500,7 @@ async fn publish_shadow_learning_outcomes(store: &SignalStore, outcomes: Vec<Sig
             let Some(signal_timestamp) = decision["signal_timestamp"].as_u64() else {
                 continue;
             };
-            if decision["status"] != "shadowed"
+            if decision["status"] != "scouted"
                 || decision["scout"] != true
                 || signal_timestamp > evaluation.signal_timestamp
                 || evaluation.signal_timestamp.saturating_sub(signal_timestamp) > 10_000
@@ -479,10 +515,10 @@ async fn publish_shadow_learning_outcomes(store: &SignalStore, outcomes: Vec<Sig
             let Some(decision_id) = decision["decision_id"].as_str() else {
                 continue;
             };
-            let Some(learning_context) = decision["shadow_learning_context"].as_str() else {
+            let Some(learning_context) = decision["scout_learning_context"].as_str() else {
                 continue;
             };
-            let Some(notional_usd) = decision["shadow_notional_usd"].as_f64() else {
+            let Some(notional_usd) = decision["scout_notional_usd"].as_f64() else {
                 continue;
             };
             let net_return_percent = if direction == "bullish" {
@@ -508,8 +544,8 @@ async fn publish_shadow_learning_outcomes(store: &SignalStore, outcomes: Vec<Sig
                 "symbol": evaluation.symbol.as_str(),
                 "strategy": decision["strategy"].as_str().unwrap_or(""),
                 "strategy_parameters": decision.get("strategy_parameters"),
-                "exit_scenario": decision["shadow_exit_scenario"].as_str().unwrap_or("strategy"),
-                "sample_group_id": decision["shadow_sample_group_id"].as_str().unwrap_or(""),
+                "exit_scenario": decision["scout_exit_scenario"].as_str().unwrap_or("strategy"),
+                "sample_group_id": decision["scout_sample_group_id"].as_str().unwrap_or(""),
                 "scout_parameter_key": decision.get("scout_parameter_key"),
                 "scout_parameter_value": decision.get("scout_parameter_value"),
                 "scout_parameter_profile_symbol": decision.get("scout_parameter_profile_symbol"),
@@ -527,7 +563,7 @@ async fn publish_shadow_learning_outcomes(store: &SignalStore, outcomes: Vec<Sig
                 .unwrap_or_else(|_| "http://127.0.0.1:3011".to_owned());
             for attempt in 0..3 {
                 match client
-                    .post(format!("{}/shadow-outcome", scouts_base.trim_end_matches('/')))
+                    .post(format!("{}/scout-outcome", scouts_base.trim_end_matches('/')))
                     .timeout(Duration::from_secs(2))
                     .json(&payload)
                     .send()
@@ -535,12 +571,12 @@ async fn publish_shadow_learning_outcomes(store: &SignalStore, outcomes: Vec<Sig
                     .and_then(reqwest::Response::error_for_status)
                 {
                     Ok(response) => {
-                        crate::service_log!("INFO", "Scout learning outcome delivered: sample_id={} symbol={} scenario={} status={} attempt={}", decision_id, evaluation.symbol, decision["shadow_exit_scenario"].as_str().unwrap_or("strategy"), response.status(), attempt + 1);
+                        crate::service_log!("INFO", "Scout learning outcome delivered: sample_id={} symbol={} scenario={} status={} attempt={}", decision_id, evaluation.symbol, decision["scout_exit_scenario"].as_str().unwrap_or("strategy"), response.status(), attempt + 1);
                         break;
                     }
                     Err(error) if attempt == 2 => crate::service_log!(
                         "WARN",
-                        "Could not deliver fee-aware shadow Scout learning outcome sample_id={} symbol={}: {error}",
+                        "Could not deliver fee-aware scout Scout learning outcome sample_id={} symbol={}: {error}",
                         decision_id,
                         evaluation.symbol
                     ),
@@ -555,7 +591,7 @@ async fn publish_shadow_learning_outcomes(store: &SignalStore, outcomes: Vec<Sig
 mod signal_ingestion_tests {
     use super::*;
 
-    fn sample() -> ScoutShadowRegistration {
+    fn sample() -> ScoutScoutRegistration {
         serde_json::from_value(serde_json::json!({
             "decision_id":"decision-1", "symbol":"BTC-USDT", "timestamp":1000,
             "direction":"bullish", "entry_price":100.0, "strategy":"trend_following",
@@ -586,24 +622,24 @@ mod signal_ingestion_tests {
     }
 
     #[test]
-    fn scout_shadow_validation_accepts_valid_sample_and_rejects_field_boundaries() {
+    fn scout_validation_accepts_valid_sample_and_rejects_field_boundaries() {
         let mut value = sample();
-        assert!(valid_scout_shadow_sample(&value, 1_000));
+        assert!(valid_scout_sample(&value, 1_000));
         value.entry_price = f64::NAN;
-        assert!(!valid_scout_shadow_sample(&value, 1_000));
+        assert!(!valid_scout_sample(&value, 1_000));
 
         let mut value = sample();
         value.timestamp = 1_000 + 5_001;
-        assert!(!valid_scout_shadow_sample(&value, 1_000));
+        assert!(!valid_scout_sample(&value, 1_000));
         value.timestamp = 0;
-        assert!(!valid_scout_shadow_sample(&value, 7 * 86_400_000 + 1));
+        assert!(!valid_scout_sample(&value, 7 * 86_400_000 + 1));
 
         let mut value = sample();
         value.scout_comparison_id = Some("pair".into());
-        assert!(!valid_scout_shadow_sample(&value, 1_000));
+        assert!(!valid_scout_sample(&value, 1_000));
         value.scout_comparison_role = Some("baseline".into());
-        assert!(valid_scout_shadow_sample(&value, 1_000));
+        assert!(valid_scout_sample(&value, 1_000));
         value.scout_comparison_role = Some("unknown".into());
-        assert!(!valid_scout_shadow_sample(&value, 1_000));
+        assert!(!valid_scout_sample(&value, 1_000));
     }
 }

@@ -57,10 +57,6 @@ async fn update_settings(
             .is_some_and(|value| !(1..=5000).contains(&value))
         || !(1..=20).contains(&request.max_open_positions)
         || request
-            .max_concurrent_shadow_samples
-            .is_some_and(|value| value > 5000)
-        || request.scout_max_active_positions.is_some_and(|value| value > 5000)
-        || request
             .max_intraday_open_positions
             .is_some_and(|value| value > 20)
         || request
@@ -73,17 +69,7 @@ async fn update_settings(
             .daily_strategy_notional_limit
             .is_some_and(|value| !value.is_finite() || value < 0.0)
     {
-        return Err((StatusCode::BAD_REQUEST, "Order and total notional limits must be positive with total notional at least the per-order limit; daily loss cap must be positive, exploration must be between 0% and 100%, max open positions must be 1–20, shadow samples must be 0–5000, and entries per position must be 1–10".into()));
-    }
-    if request.strategies.as_ref().is_some_and(|strategies| {
-        strategies.iter().all(|strategy| strategy.is_live_insight())
-    }) && request.signal_strategies_enabled == Some(false)
-        && request.scout_strategies.as_ref().is_none_or(Vec::is_empty)
-    {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            "Enable the generic insight strategy or select at least one daily strategy".into(),
-        ));
+        return Err((StatusCode::BAD_REQUEST, "Order and total notional limits must be positive with total notional at least the per-order limit; daily loss cap must be positive, exploration must be between 0% and 100%, max open positions must be 1–20, and entries per position must be 1–10".into()));
     }
     if let Some(overrides) = request.strategy_parameter_overrides.as_ref() {
         validate_strategy_parameter_overrides(overrides)
@@ -160,13 +146,6 @@ async fn update_settings(
     } else if let Some(strategy) = request.strategy {
         settings.strategies = vec![strategy];
     }
-    if let Some(strategies) = request.scout_strategies {
-        let mut unique = Vec::new();
-        for strategy in strategies {
-            if !unique.contains(&strategy) { unique.push(strategy); }
-        }
-        settings.scout_strategies = unique;
-    }
     if let Some(enabled) = request.signal_strategies_enabled {
         settings.signal_strategies_enabled = enabled;
         if enabled {
@@ -195,12 +174,6 @@ async fn update_settings(
         settings.risk_appetite = value;
     }
     settings.max_open_positions = request.max_open_positions;
-    if let Some(value) = request.max_concurrent_shadow_samples {
-        settings.max_concurrent_shadow_samples = value;
-    }
-    if let Some(value) = request.scout_max_active_positions {
-        settings.scout_max_active_positions = value;
-    }
     if let Some(value) = request.max_intraday_open_positions {
         settings.max_intraday_open_positions = value;
     }

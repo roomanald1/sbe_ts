@@ -213,6 +213,16 @@ fn context_score_floor(
 mod tests {
     use super::*;
 
+    fn service(path: &str) -> ServiceState {
+        ServiceState {
+            state: std::sync::Arc::new(tokio::sync::Mutex::new(LearningState::default())),
+            path: std::env::temp_dir().join(format!(
+                "learning-context-{path}-{}.sqlite",
+                std::process::id()
+            )),
+        }
+    }
+
     fn stat(samples: usize, positive: usize, pnl: f64, updated_at_ms: u64) -> ContextLearningStat {
         ContextLearningStat {
             samples,
@@ -235,6 +245,91 @@ mod tests {
         assert_eq!(actual.samples, 8);
         assert_eq!(actual.positive, 5);
         assert_eq!(actual.realized_pnl, 12.0);
+    }
+
+    #[tokio::test]
+    async fn context_thresholds_import_stats_and_discover_trade_and_scout_contexts() {
+        let service = service("discovery");
+        let _ = std::fs::remove_file(&service.path);
+        let request = ContextThresholdRequest {
+            learning: BTreeMap::from([
+                ("trend:trade".into(), stat(12, 8, 4.0, 0)),
+                ("scout:trend:trade".into(), stat(6, 3, -1.0, 0)),
+                ("scout:orphan:trade".into(), stat(2, 1, 0.5, 0)),
+                ("not-a-trade".into(), stat(90, 90, 90.0, 0)),
+            ]),
+            contexts: Vec::new(),
+        };
+
+        let Json(response) = context_thresholds(State(service.clone()), Json(request))
+            .await
+            .unwrap();
+
+        assert_eq!(response.thresholds.len(), 2);
+        let trend = &response.thresholds["trend"];
+        assert_eq!(trend.learning_samples, 12);
+        assert_eq!(trend.positive_rate, Some(8.0 / 12.0));
+        assert_eq!(trend.scout_outcome_samples, 6);
+        assert_eq!(trend.scout_outcome_positive_rate, Some(0.5));
+        assert_eq!(trend.scout_outcome_realized_pnl, -1.0);
+        assert_eq!(response.thresholds["orphan"].learning_samples, 0);
+
+        let state = load_state(&service.path).unwrap();
+        assert_eq!(state.context_learning.len(), 4);
+        let _ = std::fs::remove_file(&service.path);
+    }
+
+    #[tokio::test]
+    async fn context_thresholds_reject_non_finite_stats_and_empty_contexts() {
+        let service = service("invalid");
+        let invalid_stats = ContextThresholdRequest {
+            learning: BTreeMap::from([("ctx:trade".into(), stat(1, 0, f64::NAN, 0))]),
+            contexts: Vec::new(),
+        };
+        let error = context_thresholds(State(service.clone()), Json(invalid_stats))
+            .await
+            .unwrap_err();
+        assert_eq!(error.0, StatusCode::BAD_REQUEST);
+
+        let invalid_context = ContextThresholdRequest {
+            learning: BTreeMap::new(),
+            contexts: vec![ContextThresholdInput {
+                context: String::new(),
+                missed_opportunity_bands: Vec::new(),
+            }],
+        };
+        let error = context_thresholds(State(service), Json(invalid_context))
+            .await
+            .unwrap_err();
+        assert_eq!(error.0, StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn long_horizon_missed_opportunity_requires_all_return_and_timing_evidence() {
+        let stats = AggregatedContextStats {
+            samples: 30,
+            positive: 2,
+            realized_pnl: -10.0,
+        };
+        let acceptable = ContextMissedOpportunityBand {
+            gate: "score".into(),
+            horizon_seconds: 900,
+            threshold: 0.25,
+            sample_count: 24,
+            average_net_return_percent: Some(0.4),
+            positive_net_rate: Some(0.6),
+            stop_target_sample_count: 24,
+            stop_target_average_net_return_percent: Some(0.2),
+            stop_target_positive_net_rate: Some(0.6),
+            time_to_profit_sample_count: 24,
+            time_to_profit_rate: Some(0.6),
+            average_time_to_profit_seconds: Some(600.0),
+        };
+        assert_eq!(context_score_floor(&stats, &[acceptable.clone()]), 0.25);
+
+        let mut too_slow = acceptable;
+        too_slow.average_time_to_profit_seconds = Some(901.0);
+        assert_eq!(context_score_floor(&stats, &[too_slow]), 0.60);
     }
 
     #[test]

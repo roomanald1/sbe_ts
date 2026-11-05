@@ -4,15 +4,15 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$ROOT"
 export POSITIONS_FILE="$ROOT/src/rust/position_management/positions.json"
-export AUTO_TRADER_STATE_FILE="$ROOT/src/rust/position_management/auto_trader_state.json"
+export AUTO_TRADER_STATE_FILE="$ROOT/src/rust/auto_trader/auto_trader_state.json"
 export SIGNALS_FILE="$ROOT/src/rust/insights/signals.jsonl"
+export INSIGHTS_RESEARCH_ONLY=true
 export NEWS_SENTIMENT_PYTHON="${NEWS_SENTIMENT_PYTHON:-python3}"
 export PYTHONPATH="$ROOT/src/rust/insights/.news-python-packages${PYTHONPATH:+:$PYTHONPATH}"
 export HF_HOME="${HF_HOME:-$ROOT/src/rust/insights/.news-model-cache}"
 export NEWS_SENTIMENT_URL="${NEWS_SENTIMENT_URL:-http://127.0.0.1:3006/classify}"
 export LEARNING_SERVICE_URL="${LEARNING_SERVICE_URL:-http://127.0.0.1:3010}"
-export SCOUTS_SERVICE_URL="${SCOUTS_SERVICE_URL:-http://127.0.0.1:3011}"
-export LEARNING_STATE_FILE="${LEARNING_STATE_FILE:-$ROOT/src/rust/position_management/learning_state.json}"
+export LEARNING_STATE_FILE="${LEARNING_STATE_FILE:-$ROOT/src/rust/learning/learning_state.sqlite}"
 children=()
 cleanup() {
   trap - INT TERM EXIT
@@ -81,6 +81,11 @@ cargo run --release --manifest-path src/rust/auto_trader/Cargo.toml &
 auto_trader_pid=$!
 children+=("$auto_trader_pid")
 wait_for_service "$auto_trader_pid" 3005 "AutoTrader"
+
+cargo run --release --manifest-path src/rust/live_signals/Cargo.toml --bin live_signals &
+live_signals_pid=$!
+children+=("$live_signals_pid")
+wait_for_service "$live_signals_pid" 3007 "Live Signals"
 
 cargo run --release --manifest-path src/rust/execution/Cargo.toml &
 execution_pid=$!

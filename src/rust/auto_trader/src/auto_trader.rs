@@ -81,6 +81,9 @@ mod strategy_cleanup_integration_tests {
             std::env::temp_dir().join(format!("auto-trader-cleanup-{}.json", std::process::id()));
         AutoTraderState {
             client: reqwest::Client::new(),
+            scout_configuration: Arc::new(std::sync::RwLock::new(
+                scouts::ScoutConfiguration::default(),
+            )),
             latest_daily_strategy_snapshot: Arc::new(Mutex::new(None)),
             strategy_diagnostic: Arc::new(std::sync::Mutex::new(Vec::new())),
             enabled: Arc::new(AtomicBool::new(true)),
@@ -91,7 +94,6 @@ mod strategy_cleanup_integration_tests {
             latest_missed_opportunity_bands: Arc::new(Mutex::new(Vec::new())),
             latest_execution_parameters: Arc::new(Mutex::new(None)),
             cycle_lock: Arc::new(Mutex::new(())),
-            scout_lifecycle_last_update_ms: Arc::new(AtomicU64::new(0)),
             pending_daily_signals: Arc::new(Mutex::new(BTreeMap::new())),
             daily_signal_notify: Arc::new(Notify::new()),
             pending_live_signals: Arc::new(Mutex::new(BTreeMap::new())),

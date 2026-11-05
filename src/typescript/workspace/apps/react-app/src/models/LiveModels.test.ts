@@ -1,7 +1,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { BehaviorSubject } from 'rxjs';
-import { AutoTraderShadowModel } from './AutoTraderShadowModel';
+import { AutoTraderScoutModel } from './AutoTraderScoutModel';
 import { CloseInsightsModel } from './CloseInsightsModel';
 import { OrderBookModel } from './OrderBookModel';
 import { OrderManagerBookFeeds } from './OrderManagerBookFeeds';
@@ -27,11 +27,11 @@ function scoutOutcomesResponse(rows: unknown[]) {
   };
 }
 
-describe('AutoTraderShadowModel', () => {
+describe('AutoTraderScoutModel', () => {
   it('loads unavailable Scout outcomes without an entry price from Insights', async () => {
     const timestamp = Date.now();
     await withFetch(async (url) => {
-      assert.match(String(url), /\/scouts\/shadow-outcomes/);
+      assert.match(String(url), /\/scouts\/outcomes/);
       return jsonResponse(scoutOutcomesResponse([{
         decisionId: 'missing-entry', symbol: 'ETH-USDT', direction: 'bearish',
         strategy: 'live-trade-flow', strength: 0.5, source: 'Scout',
@@ -39,7 +39,7 @@ describe('AutoTraderShadowModel', () => {
         status: 'Outcome unavailable',
       }]));
     }, async () => {
-      const model = new AutoTraderShadowModel();
+      const model = new AutoTraderScoutModel();
       model.start();
       await new Promise<void>((resolve) => setTimeout(resolve, 0));
       assert.equal(model.state$.value.rows[0].status, 'Outcome unavailable');
@@ -50,7 +50,7 @@ describe('AutoTraderShadowModel', () => {
   it('loads the fee-aware Scout outcomes computed by Insights', async () => {
     const timestamp = Date.now();
     await withFetch(async (url) => {
-      assert.match(String(url), /\/scouts\/shadow-outcomes/);
+      assert.match(String(url), /\/scouts\/outcomes/);
       return jsonResponse(scoutOutcomesResponse([{
         decisionId: 'd1', symbol: 'BTC-USDT', direction: 'bullish',
         strategy: 'live-momentum', strength: 0.8, source: 'Scout',
@@ -58,7 +58,7 @@ describe('AutoTraderShadowModel', () => {
         entryPrice: 100, takerFeeRate: 0.002, status: 'Won', netReturnPercent: 0.5,
       }]));
     }, async () => {
-      const model = new AutoTraderShadowModel();
+      const model = new AutoTraderScoutModel();
       model.start();
       await new Promise<void>((resolve) => setTimeout(resolve, 0));
       const row = model.state$.value.rows[0];

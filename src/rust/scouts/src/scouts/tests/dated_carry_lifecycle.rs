@@ -55,32 +55,32 @@ mod dated_carry_lifecycle_tests {
 
     #[test]
     fn zero_return_carry_variant_finalizes_after_one_day_and_retry_is_idempotent() {
-        let opened_at_ms = shadow_now_ms().saturating_sub(86_400_000);
+        let opened_at_ms = scout_now_ms().saturating_sub(86_400_000);
         let probe = carry_probe(opened_at_ms, false);
         let mut state = PersistedState::default();
-        state.shadow_pending_samples.insert(
+        state.scout_pending_samples.insert(
             probe.sample_id.clone(),
-            ShadowSamplePayload::DatedCarryProbe(probe),
+            ScoutSamplePayload::DatedCarryProbe(probe),
         );
-        state.shadow_sample_active_scenarios.insert(
+        state.scout_sample_active_scenarios.insert(
             "carry-probe-1".into(),
             BTreeSet::from(["carry-probe-1|carry".into()]),
         );
         state
-            .shadow_plan_profiles
+            .scout_plan_profiles
             .insert("carry-probe-1".into(), "dated-carry|BTC-USDT".into());
-        let request = ShadowLifecycleObserveRequest {
+        let request = ScoutLifecycleObserveRequest {
             request_id: "scan-1".into(),
-            now_ms: shadow_now_ms(),
+            now_ms: scout_now_ms(),
             candidates: vec![],
         };
-        let response = apply_shadow_lifecycle_observation(&mut state, &request);
+        let response = apply_scout_lifecycle_observation(&mut state, &request);
         assert_eq!(response.finalized_count, 1);
-        let retry = apply_shadow_lifecycle_observation(&mut state, &request);
+        let retry = apply_scout_lifecycle_observation(&mut state, &request);
         assert_eq!(retry.finalized_count, 1);
-        assert!(state.shadow_pending_samples.is_empty());
+        assert!(state.scout_pending_samples.is_empty());
         assert_eq!(state.outbox.len(), 1);
-        let ShadowOutboxItem::Learning(FeedbackEvent::ScoutOutcome {
+        let ScoutOutboxItem::Learning(FeedbackEvent::ScoutOutcome {
             net_return_percent,
             symbol,
             profile_id,
@@ -108,36 +108,36 @@ mod dated_carry_lifecycle_tests {
 
     #[test]
     fn profitable_carry_probe_waits_for_matching_mark_through_three_days_then_finalizes() {
-        let opened_at_ms = shadow_now_ms().saturating_sub(3 * 86_400_000 - 5_000);
+        let opened_at_ms = scout_now_ms().saturating_sub(3 * 86_400_000 - 5_000);
         let probe = carry_probe(opened_at_ms, true);
         let mut state = PersistedState::default();
-        state.shadow_pending_samples.insert(
+        state.scout_pending_samples.insert(
             probe.sample_id.clone(),
-            ShadowSamplePayload::DatedCarryProbe(probe),
+            ScoutSamplePayload::DatedCarryProbe(probe),
         );
-        let request = ShadowLifecycleObserveRequest {
+        let request = ScoutLifecycleObserveRequest {
             request_id: "scan-missing".into(),
-            now_ms: shadow_now_ms(),
+            now_ms: scout_now_ms(),
             candidates: vec![],
         };
         assert_eq!(
-            apply_shadow_lifecycle_observation(&mut state, &request).finalized_count,
+            apply_scout_lifecycle_observation(&mut state, &request).finalized_count,
             0
         );
-        assert_eq!(state.shadow_pending_samples.len(), 1);
+        assert_eq!(state.scout_pending_samples.len(), 1);
         let mut mark = carry_candidate(opened_at_ms);
         mark.spot_bid = 101.0;
         mark.future_ask = 100.2;
-        let request = ShadowLifecycleObserveRequest {
+        let request = ScoutLifecycleObserveRequest {
             request_id: "scan-arrived".into(),
-            now_ms: shadow_now_ms(),
+            now_ms: scout_now_ms(),
             candidates: vec![mark],
         };
         assert_eq!(
-            apply_shadow_lifecycle_observation(&mut state, &request).finalized_count,
+            apply_scout_lifecycle_observation(&mut state, &request).finalized_count,
             1
         );
-        let ShadowOutboxItem::Learning(FeedbackEvent::ScoutOutcome {
+        let ScoutOutboxItem::Learning(FeedbackEvent::ScoutOutcome {
             net_return_percent,
             event_id,
             ..

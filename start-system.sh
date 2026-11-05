@@ -9,6 +9,15 @@ for service in "${services[@]}"; do
     if [[ ! " ${services[*]} " == *" insights-maintenance "* ]]; then
       services+=(insights-maintenance)
     fi
+    if [[ ! " ${services[*]} " == *" live-signals "* ]]; then
+      services+=(live-signals)
+    fi
+    break
+  fi
+  if [[ "$service" == "auto-trader" ]]; then
+    if [[ ! " ${services[*]} " == *" live-signals "* ]]; then
+      services+=(live-signals)
+    fi
     break
   fi
 done

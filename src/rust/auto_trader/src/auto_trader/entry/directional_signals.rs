@@ -30,35 +30,35 @@ fn prepare_directional_signal_candidates(
             inferred_direction_count += 1;
         }
     }
-    // Record borderline neutral scores as directional shadow probes only. These
+    // Record borderline neutral scores as directional scout probes only. These
     // are evaluated on every scan and never feed the order-selection path.
     for candidate in signals.iter().filter(|candidate| {
         !candidate.stale
             && candidate.direction == "neutral"
             && now.saturating_sub(candidate.timestamp / 1000) <= MAX_SIGNAL_AGE_SECONDS
             && candidate.score.is_finite()
-            && candidate.score.abs() >= SHADOW_MIN_ABS_SCORE
+            && candidate.score.abs() >= SCOUT_PROBE_MIN_ABS_SCORE
             && candidate.score.abs() < neutral_direction_floor
             && candidate.ranging_probability.unwrap_or(0.0)
                 < NEUTRAL_INFERENCE_MAX_RANGE_PROBABILITY
     }) {
-        let mut shadow = candidate.clone();
-        shadow.direction = if shadow.score > 0.0 {
+        let mut scout = candidate.clone();
+        scout.direction = if scout.score > 0.0 {
             "bullish"
         } else {
             "bearish"
         }
         .into();
         let evidence = dashboard.walk_forward.iter().find(|item| {
-            item.symbol == shadow.symbol && is_entry_evidence_horizon(item.horizon_seconds)
+            item.symbol == scout.symbol && is_entry_evidence_horizon(item.horizon_seconds)
         });
         let payload = signal_audit_payload(
-            &shadow,
+            &scout,
             "decision",
             now.saturating_mul(1000),
             "skipped",
             Some(
-                "No tradeable bias: shadow-only neutral score probe below live direction floor; no order submitted",
+                "No tradeable bias: scout-only neutral score probe below live direction floor; no order submitted",
             ),
             Some(true),
             counterfactual_stop_loss_percent,

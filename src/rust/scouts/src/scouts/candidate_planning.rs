@@ -1,4 +1,4 @@
-fn expand_daily_shadow_candidates(candidates: &[ShadowPlanCandidate]) -> Vec<ShadowPlanCandidate> {
+fn expand_daily_scout_candidates(candidates: &[ScoutPlanCandidate]) -> Vec<ScoutPlanCandidate> {
     const LEVELS: &[f64] = &[0.25, 0.5, 1.0, 2.0, 3.0, 5.0, 7.5, 10.0];
     let mut expanded = Vec::new();
     for candidate in candidates {
@@ -20,7 +20,7 @@ fn expand_daily_shadow_candidates(candidates: &[ShadowPlanCandidate]) -> Vec<Sha
                     let mid = policy.best_bid.unwrap()
                         + (policy.best_ask.unwrap() - policy.best_bid.unwrap()) / 2.0;
                     if let Some(template) = candidate.audit_templates.first_mut() {
-                        template.base_audit["shadow_entry_price"] = serde_json::json!(mid);
+                        template.base_audit["scout_entry_price"] = serde_json::json!(mid);
                         if let Some(decision) = template.base_audit.get_mut("strategy_decision") {
                             decision["observed_close"] = serde_json::json!(mid);
                         }
@@ -123,8 +123,8 @@ fn expand_daily_shadow_candidates(candidates: &[ShadowPlanCandidate]) -> Vec<Sha
     expanded
 }
 
-fn generated_shadow_group_and_cooldown(
-    candidate: &ShadowPlanCandidate,
+fn generated_scout_group_and_cooldown(
+    candidate: &ScoutPlanCandidate,
 ) -> Option<(String, String)> {
     let template = candidate.audit_templates.first()?;
     let audit = &template.base_audit;
@@ -185,7 +185,7 @@ fn generated_shadow_group_and_cooldown(
     Some((group, cooldown))
 }
 
-fn shadow_comparison_changes_exit(candidate: &ShadowPlanCandidate) -> bool {
+fn scout_comparison_changes_exit(candidate: &ScoutPlanCandidate) -> bool {
     let Some(baseline) = candidate.audit_templates.iter().find(|template| {
         template
             .base_audit
@@ -240,7 +240,7 @@ fn shadow_comparison_changes_exit(candidate: &ShadowPlanCandidate) -> bool {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct ShadowAuditTemplate {
+pub struct ScoutAuditTemplate {
     pub base_audit: serde_json::Value,
     pub notional_usd: f64,
     pub learning_context: String,
@@ -256,7 +256,7 @@ pub struct ShadowAuditTemplate {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(tag = "kind", content = "payload", rename_all = "snake_case")]
-pub enum ShadowSamplePayload {
+pub enum ScoutSamplePayload {
     DatedCarryProbe(DatedCarryProbe),
 }
 
@@ -276,19 +276,19 @@ pub struct DatedCarryProbe {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct ShadowLifecycleObserveRequest {
+pub struct ScoutLifecycleObserveRequest {
     pub request_id: String,
     pub now_ms: u64,
     pub candidates: Vec<strategies::DatedCarryEntryCandidate>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
-pub struct ShadowLifecycleObserveResponse {
+pub struct ScoutLifecycleObserveResponse {
     pub finalized_count: usize,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct ShadowPlanRequest {
+pub struct ScoutPlanRequest {
     pub request_id: String,
     pub now_ms: u64,
     pub max_active_batches: usize,
@@ -296,12 +296,12 @@ pub struct ShadowPlanRequest {
     #[serde(default)]
     pub legacy_cooldowns: BTreeMap<String, u64>,
     #[serde(default)]
-    pub legacy_comparisons: Vec<LegacyShadowComparison>,
-    pub candidates: Vec<ShadowPlanCandidate>,
+    pub legacy_comparisons: Vec<LegacyScoutComparison>,
+    pub candidates: Vec<ScoutPlanCandidate>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct LegacyShadowComparison {
+pub struct LegacyScoutComparison {
     pub comparison_id: String,
     #[serde(default)]
     pub baseline_return_percent: Option<f64>,
@@ -314,17 +314,17 @@ pub struct LegacyShadowComparison {
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
-pub struct ShadowPlanResponse {
+pub struct ScoutPlanResponse {
     pub audits: Vec<serde_json::Value>,
     pub selected_groups: Vec<String>,
 }
 
-pub async fn request_shadow_plan(
+pub async fn request_scout_plan(
     base_url: &str,
-    request: &ShadowPlanRequest,
-) -> Result<ShadowPlanResponse, String> {
+    request: &ScoutPlanRequest,
+) -> Result<ScoutPlanResponse, String> {
     reqwest::Client::new()
-        .post(format!("{}/shadow-plan", base_url.trim_end_matches('/')))
+        .post(format!("{}/scout-plan", base_url.trim_end_matches('/')))
         .timeout(std::time::Duration::from_secs(5))
         .json(request)
         .send()
@@ -337,13 +337,13 @@ pub async fn request_shadow_plan(
         .map_err(|error| error.to_string())
 }
 
-pub async fn request_shadow_lifecycle_observe(
+pub async fn request_scout_lifecycle_observe(
     base_url: &str,
-    request: &ShadowLifecycleObserveRequest,
-) -> Result<ShadowLifecycleObserveResponse, String> {
+    request: &ScoutLifecycleObserveRequest,
+) -> Result<ScoutLifecycleObserveResponse, String> {
     reqwest::Client::new()
         .post(format!(
-            "{}/shadow-lifecycle/observe",
+            "{}/scout-lifecycle/observe",
             base_url.trim_end_matches('/')
         ))
         .timeout(std::time::Duration::from_secs(5))
@@ -359,7 +359,7 @@ pub async fn request_shadow_lifecycle_observe(
 }
 
 #[derive(Clone)]
-struct ShadowState {
+struct ScoutState {
     data: Arc<Mutex<PersistedState>>,
     path: PathBuf,
     flush_lock: Arc<Mutex<()>>,

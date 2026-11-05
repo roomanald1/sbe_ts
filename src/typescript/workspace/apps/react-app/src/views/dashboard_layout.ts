@@ -25,7 +25,7 @@ export type DashboardWidgetType =
   | 'auto-trader-outcomes'
   | 'auto-trader-completed-positions'
   | 'auto-trader-live-positions'
-  | 'auto-trader-shadow-positions'
+  | 'auto-trader-scout-positions'
   | 'execution-fees';
 export type DashboardWidget = {
   id: string;
@@ -70,7 +70,7 @@ export const DASHBOARD_WIDGET_TYPES: DashboardWidgetType[] = [
   'auto-trader-outcomes',
   'auto-trader-completed-positions',
   'auto-trader-live-positions',
-  'auto-trader-shadow-positions',
+  'auto-trader-scout-positions',
   'execution-fees',
 ];
 export const DEFAULT_WIDGET_TYPES: DashboardWidgetType[] = [
@@ -113,7 +113,7 @@ export const WIDGET_LABELS: Record<DashboardWidgetType, string> = {
   'auto-trader-outcomes': 'AutoTrader outcomes',
   'auto-trader-completed-positions': 'AutoTrader closed positions',
   'auto-trader-live-positions': 'AutoTrader live positions',
-  'auto-trader-shadow-positions': 'AutoTrader shadow positions',
+  'auto-trader-scout-positions': 'AutoTrader scout positions',
   'execution-fees': 'Execution fees',
 };
 

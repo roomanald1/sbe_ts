@@ -6,7 +6,7 @@ import { promisify } from 'node:util';
 
 const exec = promisify(execFile);
 const root = process.env.WORKSPACE_ROOT || '/workspace';
-const services = ['feed-handlers','position-management','execution','insights','insights-maintenance','auto-trader','news-sentiment','learning','scouts','web'];
+const services = ['feed-handlers','position-management','execution','insights','insights-maintenance','live-signals','auto-trader','news-sentiment','learning','scouts','web'];
 const send = (res, code, value, type='application/json') => { res.writeHead(code, {'content-type': `${type}; charset=utf-8`}); res.end(type.startsWith('application/json') ? JSON.stringify(value) : value); };
 const compose = async (project, file, args) => {
   const { stdout, stderr } = await exec('docker', ['compose','-p',project,'-f',file,'--progress=quiet',...args], {

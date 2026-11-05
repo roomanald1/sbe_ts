@@ -1,7 +1,7 @@
-const MAX_SCOUT_SHADOW_DURATION_MS: u64 = 7 * 86_400_000;
+const MAX_SCOUT_SCOUT_DURATION_MS: u64 = 7 * 86_400_000;
 const MAX_COMPLETED_SCOUT_IDS_PER_SYMBOL: usize = 1_024;
 
-fn scout_shadow_stop_or_target_hit(
+fn scout_stop_or_target_hit(
     pending: &mut PendingOutcome,
     quote: Option<(u64, f64, f64)>,
 ) -> bool {
@@ -43,14 +43,14 @@ fn scout_shadow_stop_or_target_hit(
 }
 
 impl SignalEngine {
-    fn remember_completed_scout_shadow(&mut self, sample_id: String) {
-        if !self.completed_scout_shadow_ids.insert(sample_id.clone()) {
+    fn remember_completed_scout(&mut self, sample_id: String) {
+        if !self.completed_scout_ids.insert(sample_id.clone()) {
             return;
         }
-        self.completed_scout_shadow_order.push_back(sample_id);
-        while self.completed_scout_shadow_order.len() > MAX_COMPLETED_SCOUT_IDS_PER_SYMBOL {
-            if let Some(expired) = self.completed_scout_shadow_order.pop_front() {
-                self.completed_scout_shadow_ids.remove(&expired);
+        self.completed_scout_order.push_back(sample_id);
+        while self.completed_scout_order.len() > MAX_COMPLETED_SCOUT_IDS_PER_SYMBOL {
+            if let Some(expired) = self.completed_scout_order.pop_front() {
+                self.completed_scout_ids.remove(&expired);
             }
         }
     }
@@ -143,42 +143,42 @@ impl SignalEngine {
                 *quote_time <= timestamp
                     && timestamp.saturating_sub(*quote_time) <= MAX_BOOK_AGE_MS
             });
-            let is_scout_shadow = pending.sample_id.is_some();
+            let is_scout = pending.sample_id.is_some();
             // Live scout feeds can carry trades without a synchronized book
-            // update. Use the current trade as a zero-spread mark for shadow
+            // update. Use the current trade as a zero-spread mark for scout
             // exits so these simulated positions do not remain open forever.
-            let shadow_mark_quote = current_quote
-                .or_else(|| is_scout_shadow.then_some((timestamp, price, price)));
-            let shadow_age_ms = timestamp.saturating_sub(pending.timestamp);
+            let scout_mark_quote = current_quote
+                .or_else(|| is_scout.then_some((timestamp, price, price)));
+            let scout_age_ms = timestamp.saturating_sub(pending.timestamp);
             let minimum_hold_active = pending.scout_minimum_hold_days
-                .is_some_and(|days| shadow_age_ms < (days * 86_400_000.0) as u64);
+                .is_some_and(|days| scout_age_ms < (days * 86_400_000.0) as u64);
             let maximum_hold_elapsed = pending.scout_maximum_hold_days
-                .is_some_and(|days| shadow_age_ms >= (days * 86_400_000.0) as u64);
-            let maximum_shadow_duration_elapsed =
-                is_scout_shadow && shadow_age_ms >= MAX_SCOUT_SHADOW_DURATION_MS;
-            let scout_exit_reason = if !is_scout_shadow {
+                .is_some_and(|days| scout_age_ms >= (days * 86_400_000.0) as u64);
+            let maximum_scout_duration_elapsed =
+                is_scout && scout_age_ms >= MAX_SCOUT_SCOUT_DURATION_MS;
+            let scout_exit_reason = if !is_scout {
                 None
             } else if pending.strategy_exit_requested && !minimum_hold_active {
                 Some("strategy")
             } else if maximum_hold_elapsed {
                 Some("maximum_hold")
-            } else if maximum_shadow_duration_elapsed {
-                Some("maximum_shadow_duration")
-            } else if shadow_mark_quote.is_some()
-                && scout_shadow_stop_or_target_hit(&mut pending, shadow_mark_quote)
+            } else if maximum_scout_duration_elapsed {
+                Some("maximum_scout_duration")
+            } else if scout_mark_quote.is_some()
+                && scout_stop_or_target_hit(&mut pending, scout_mark_quote)
             {
                 Some("stop_or_target")
             } else {
                 None
             };
-            let shadow_exit = is_scout_shadow && shadow_mark_quote.is_some() && scout_exit_reason.is_some();
-            let fixed_horizon_exit = !is_scout_shadow
+            let scout_exit = is_scout && scout_mark_quote.is_some() && scout_exit_reason.is_some();
+            let fixed_horizon_exit = !is_scout
                 && timestamp
                     >= pending
                         .timestamp
                         .saturating_add(pending.horizon_seconds * 1000);
-            if shadow_exit || fixed_horizon_exit {
-                let evaluation_horizon_seconds = if is_scout_shadow {
+            if scout_exit || fixed_horizon_exit {
+                let evaluation_horizon_seconds = if is_scout {
                     timestamp.saturating_sub(pending.timestamp).saturating_div(1000).max(1)
                 } else {
                     pending.horizon_seconds
@@ -189,8 +189,8 @@ impl SignalEngine {
                     "bearish" => change < 0.0,
                     _ => false,
                 };
-                let exit_quote = if is_scout_shadow {
-                    shadow_mark_quote
+                let exit_quote = if is_scout {
+                    scout_mark_quote
                 } else {
                     self.best_quote.filter(|(quote_time, _, _)| {
                         *quote_time <= timestamp
@@ -279,8 +279,8 @@ impl SignalEngine {
                         path_low_timestamp = *sample_time;
                     }
                 }
-                let exit_quote = if is_scout_shadow {
-                    shadow_mark_quote
+                let exit_quote = if is_scout {
+                    scout_mark_quote
                 } else {
                     self.best_quote.filter(|(quote_time, _, _)| {
                         *quote_time <= timestamp
@@ -333,11 +333,11 @@ impl SignalEngine {
                         .first_short_positive_net_timestamp
                         .map(|first| first.saturating_sub(pending.timestamp) / 1000),
                 };
-                let scout_shadow_id = pending.sample_id.clone();
-                if let Some(sample_id) = scout_shadow_id.as_ref() {
-                    self.remember_completed_scout_shadow(sample_id.clone());
+                let scout_id = pending.sample_id.clone();
+                if let Some(sample_id) = scout_id.as_ref() {
+                    self.remember_completed_scout(sample_id.clone());
                 }
-                outcomes.push(CompletedSignalOutcome { legacy, evaluation, scout_shadow_id, scout_exit_reason });
+                outcomes.push(CompletedSignalOutcome { legacy, evaluation, scout_id, scout_exit_reason });
             } else {
                 remaining.push_back(pending);
             }
@@ -368,20 +368,20 @@ mod completed_scout_id_tests {
     fn completed_scout_deduplication_history_is_bounded() {
         let mut engine = SignalEngine::default();
         for index in 0..=MAX_COMPLETED_SCOUT_IDS_PER_SYMBOL {
-            engine.remember_completed_scout_shadow(format!("sample-{index}"));
+            engine.remember_completed_scout(format!("sample-{index}"));
         }
 
         assert_eq!(
-            engine.completed_scout_shadow_order.len(),
+            engine.completed_scout_order.len(),
             MAX_COMPLETED_SCOUT_IDS_PER_SYMBOL
         );
         assert_eq!(
-            engine.completed_scout_shadow_ids.len(),
+            engine.completed_scout_ids.len(),
             MAX_COMPLETED_SCOUT_IDS_PER_SYMBOL
         );
-        assert!(!engine.completed_scout_shadow_ids.contains("sample-0"));
+        assert!(!engine.completed_scout_ids.contains("sample-0"));
         assert!(engine
-            .completed_scout_shadow_ids
+            .completed_scout_ids
             .contains(&format!("sample-{MAX_COMPLETED_SCOUT_IDS_PER_SYMBOL}")));
     }
 }

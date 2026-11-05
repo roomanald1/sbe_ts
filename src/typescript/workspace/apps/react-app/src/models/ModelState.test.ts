@@ -4,7 +4,7 @@ import { BehaviorSubject } from 'rxjs';
 import { AccountModel } from './AccountModel';
 import { AutoTraderModel } from './AutoTraderModel';
 import { AutoTraderOutcomesModel } from './AutoTraderOutcomesModel';
-import { AutoTraderShadowModel } from './AutoTraderShadowModel';
+import { AutoTraderScoutModel } from './AutoTraderScoutModel';
 import { CloseInsightsModel } from './CloseInsightsModel';
 import { DatedCarryModel } from './DatedCarryModel';
 import { ExecutionFeesModel } from './ExecutionFeesModel';
@@ -49,15 +49,15 @@ describe('model initial state and simple actions', () => {
     model.stop();
   });
 
-  it('initializes outcomes and shadow models in loading state', () => {
+  it('initializes outcomes and scout models in loading state', () => {
     const outcomes = new AutoTraderOutcomesModel();
     assert.equal(outcomes.state$.value.loading, true);
     assert.deepEqual(outcomes.state$.value.rows, []);
-    const shadow = new AutoTraderShadowModel();
-    assert.deepEqual(shadow.state$.value.rows, []);
-    assert.equal(shadow.state$.value.loading, true);
+    const scouts = new AutoTraderScoutModel();
+    assert.deepEqual(scouts.state$.value.rows, []);
+    assert.equal(scouts.state$.value.loading, true);
     outcomes.stop();
-    shadow.stop();
+    scouts.stop();
   });
 
   it('tracks close insight settings and resets confirmation on cancel', () => {

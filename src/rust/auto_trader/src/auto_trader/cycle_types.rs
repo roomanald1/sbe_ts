@@ -64,7 +64,6 @@ struct ActivityResponse {
     preferred_order_type: Option<String>,
     parameter_profile_samples: [usize; 3],
     scout_open_positions: usize,
-    scout_max_active_positions: usize,
     scout_learning_samples: usize,
     scout_learning_win_rate: Option<f64>,
     scout_learning_realized_pnl: f64,

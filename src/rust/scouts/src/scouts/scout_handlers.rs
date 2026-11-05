@@ -1,16 +1,16 @@
-async fn receive_shadow_outcome(
+async fn receive_scout_outcome(
     State(service): State<ServiceState>,
-    Json(outcome): Json<ShadowOutcomeRequest>,
+    Json(outcome): Json<ScoutOutcomeRequest>,
 ) -> Result<StatusCode, (StatusCode, String)> {
-    let tested = validate_shadow_outcome(&outcome)?;
+    let tested = validate_scout_outcome(&outcome)?;
     {
-        let mut state = service.shadow.data.lock().await;
-        let outcome_key = shadow_outcome_idempotency_key(&outcome);
+        let mut state = service.scout.data.lock().await;
+        let outcome_key = scout_outcome_idempotency_key(&outcome);
         if !state.seen.contains(&outcome_key) {
             let event = outcome_event(&outcome, &tested);
             let is_probe = outcome.scout_parameter_key.is_some();
             if !is_probe && !outbox_has_learning(&state, &event) {
-                state.outbox.push(ShadowOutboxItem::Learning(event));
+                state.outbox.push(ScoutOutboxItem::Learning(event));
             }
             let mut paired_delta = None;
             if let (Some(comparison_id), Some(role)) = (
@@ -51,7 +51,7 @@ async fn receive_shadow_outcome(
                         paired_delta = Some(*net_return_percent);
                     }
                     if !outbox_has_learning(&state, &event) {
-                        state.outbox.push(ShadowOutboxItem::Learning(event));
+                        state.outbox.push(ScoutOutboxItem::Learning(event));
                     }
                     state.pairs.remove(comparison_id);
                 }
@@ -81,7 +81,7 @@ async fn receive_shadow_outcome(
             }
             if !outcome.sample_group_id.is_empty() {
                 let finished = state
-                    .shadow_sample_active_scenarios
+                    .scout_sample_active_scenarios
                     .get_mut(&outcome.sample_group_id)
                     .is_some_and(|scenarios| {
                         let token = format!("{}|{}", outcome.decision_id, outcome.exit_scenario);
@@ -92,17 +92,17 @@ async fn receive_shadow_outcome(
                     });
                 if finished {
                     state
-                        .shadow_sample_active_scenarios
+                        .scout_sample_active_scenarios
                         .remove(&outcome.sample_group_id);
-                    state.shadow_plan_profiles.remove(&outcome.sample_group_id);
-                    state.shadow_active_audits.remove(&outcome.sample_group_id);
+                    state.scout_plan_profiles.remove(&outcome.sample_group_id);
+                    state.scout_active_audits.remove(&outcome.sample_group_id);
                 }
             }
-            state.shadow_lifecycle_updated_at_ms =
-                state.shadow_lifecycle_updated_at_ms.max(shadow_now_ms());
+            state.scout_lifecycle_updated_at_ms =
+                state.scout_lifecycle_updated_at_ms.max(scout_now_ms());
             state
                 .outbox
-                .push(ShadowOutboxItem::Audit(shadow_outcome_audit(
+                .push(ScoutOutboxItem::Audit(scout_outcome_audit(
                     &outcome,
                     paired_delta,
                 )));
@@ -112,38 +112,38 @@ async fn receive_shadow_outcome(
                     state.seen.remove(&oldest);
                 }
             }
-            persist_shadow_state(&service.shadow.path, &state)?;
+            persist_scout_state(&service.scout.path, &state)?;
         }
     }
-    flush_shadow_outbox(&service.shadow, &service.client, &service.learning_url).await?;
+    flush_scout_outbox(&service.scout, &service.client, &service.learning_url).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
-async fn get_shadow_lifecycle_state(
+async fn get_scout_lifecycle_state(
     State(service): State<ServiceState>,
-) -> Json<ShadowLifecycleSnapshot> {
-    let state = service.shadow.data.lock().await;
-    Json(ShadowLifecycleSnapshot {
-        updated_at_ms: state.shadow_lifecycle_updated_at_ms,
-        shadow_sample_at_ms: state.shadow_sample_at_ms.clone(),
-        shadow_sample_active_scenarios: state.shadow_sample_active_scenarios.clone(),
+) -> Json<ScoutLifecycleSnapshot> {
+    let state = service.scout.data.lock().await;
+    Json(ScoutLifecycleSnapshot {
+        updated_at_ms: state.scout_lifecycle_updated_at_ms,
+        scout_sample_at_ms: state.scout_sample_at_ms.clone(),
+        scout_sample_active_scenarios: state.scout_sample_active_scenarios.clone(),
         scout_variant_rotation_cursor: state.scout_variant_rotation_cursor,
     })
 }
 
-async fn set_shadow_lifecycle_state(
+async fn set_scout_lifecycle_state(
     State(service): State<ServiceState>,
-    Json(snapshot): Json<ShadowLifecycleSnapshot>,
+    Json(snapshot): Json<ScoutLifecycleSnapshot>,
 ) -> Result<StatusCode, (StatusCode, String)> {
-    if snapshot.shadow_sample_at_ms.len() > 100_000
-        || snapshot.shadow_sample_active_scenarios.len() > 10_000
+    if snapshot.scout_sample_at_ms.len() > 100_000
+        || snapshot.scout_sample_active_scenarios.len() > 10_000
         || snapshot.scout_variant_rotation_cursor > 1_000_000_000
         || snapshot
-            .shadow_sample_at_ms
+            .scout_sample_at_ms
             .keys()
             .any(|key| key.is_empty() || key.len() > 512)
         || snapshot
-            .shadow_sample_active_scenarios
+            .scout_sample_active_scenarios
             .iter()
             .any(|(group, scenarios)| {
                 group.is_empty()
@@ -159,15 +159,15 @@ async fn set_shadow_lifecycle_state(
             "Invalid Scout lifecycle state".into(),
         ));
     }
-    let mut state = service.shadow.data.lock().await;
-    if snapshot.updated_at_ms < state.shadow_lifecycle_updated_at_ms {
+    let mut state = service.scout.data.lock().await;
+    if snapshot.updated_at_ms < state.scout_lifecycle_updated_at_ms {
         return Ok(StatusCode::NO_CONTENT);
     }
-    state.shadow_sample_at_ms = snapshot.shadow_sample_at_ms;
-    state.shadow_sample_active_scenarios = snapshot.shadow_sample_active_scenarios;
+    state.scout_sample_at_ms = snapshot.scout_sample_at_ms;
+    state.scout_sample_active_scenarios = snapshot.scout_sample_active_scenarios;
     state.scout_variant_rotation_cursor = snapshot.scout_variant_rotation_cursor;
-    state.shadow_lifecycle_updated_at_ms = snapshot.updated_at_ms;
-    persist_shadow_state(&service.shadow.path, &state)?;
+    state.scout_lifecycle_updated_at_ms = snapshot.updated_at_ms;
+    persist_scout_state(&service.scout.path, &state)?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -195,30 +195,30 @@ fn dated_carry_markout(
     .then_some(net / notional * 100.0)
 }
 
-fn apply_shadow_lifecycle_observation(
+fn apply_scout_lifecycle_observation(
     state: &mut PersistedState,
-    request: &ShadowLifecycleObserveRequest,
-) -> ShadowLifecycleObserveResponse {
-    if let Some(response) = state.shadow_observation_results.get(&request.request_id) {
+    request: &ScoutLifecycleObserveRequest,
+) -> ScoutLifecycleObserveResponse {
+    if let Some(response) = state.scout_observation_results.get(&request.request_id) {
         return response.clone();
     }
     let mut finalized_count = 0usize;
     let ids = state
-        .shadow_pending_samples
+        .scout_pending_samples
         .keys()
         .cloned()
         .collect::<Vec<_>>();
     for id in ids {
-        let Some(ShadowSamplePayload::DatedCarryProbe(probe)) =
-            state.shadow_pending_samples.get(&id).cloned()
+        let Some(ScoutSamplePayload::DatedCarryProbe(probe)) =
+            state.scout_pending_samples.get(&id).cloned()
         else {
             continue;
         };
         let age = request.now_ms.saturating_sub(probe.opened_at_ms);
         if age > 3 * 86_400_000 {
-            state.shadow_pending_samples.remove(&id);
-            state.shadow_sample_active_scenarios.remove(&id);
-            state.shadow_plan_profiles.remove(&id);
+            state.scout_pending_samples.remove(&id);
+            state.scout_sample_active_scenarios.remove(&id);
+            state.scout_plan_profiles.remove(&id);
             continue;
         }
         if age < 86_400_000 {
@@ -263,34 +263,34 @@ fn apply_shadow_lifecycle_observation(
             net_return_percent,
         };
         if !outbox_has_learning(state, &event) {
-            state.outbox.push(ShadowOutboxItem::Learning(event));
+            state.outbox.push(ScoutOutboxItem::Learning(event));
         }
-        state.shadow_pending_samples.remove(&id);
-        state.shadow_sample_active_scenarios.remove(&id);
-        state.shadow_plan_profiles.remove(&id);
+        state.scout_pending_samples.remove(&id);
+        state.scout_sample_active_scenarios.remove(&id);
+        state.scout_plan_profiles.remove(&id);
         finalized_count += 1;
     }
-    let response = ShadowLifecycleObserveResponse { finalized_count };
+    let response = ScoutLifecycleObserveResponse { finalized_count };
     state
-        .shadow_observation_results
+        .scout_observation_results
         .insert(request.request_id.clone(), response.clone());
-    while state.shadow_observation_results.len() > 10_000 {
-        if let Some(oldest) = state.shadow_observation_results.keys().next().cloned() {
-            state.shadow_observation_results.remove(&oldest);
+    while state.scout_observation_results.len() > 10_000 {
+        if let Some(oldest) = state.scout_observation_results.keys().next().cloned() {
+            state.scout_observation_results.remove(&oldest);
         }
     }
-    state.shadow_lifecycle_updated_at_ms = state.shadow_lifecycle_updated_at_ms.max(request.now_ms);
+    state.scout_lifecycle_updated_at_ms = state.scout_lifecycle_updated_at_ms.max(request.now_ms);
     response
 }
 
-async fn observe_shadow_lifecycle(
+async fn observe_scout_lifecycle(
     State(service): State<ServiceState>,
-    Json(request): Json<ShadowLifecycleObserveRequest>,
-) -> Result<Json<ShadowLifecycleObserveResponse>, (StatusCode, String)> {
+    Json(request): Json<ScoutLifecycleObserveRequest>,
+) -> Result<Json<ScoutLifecycleObserveResponse>, (StatusCode, String)> {
     if request.request_id.is_empty()
         || request.request_id.len() > 240
         || request.candidates.len() > 10_000
-        || request.now_ms > shadow_now_ms().saturating_add(5_000)
+        || request.now_ms > scout_now_ms().saturating_add(5_000)
         || request.candidates.iter().any(|candidate| {
             candidate.spot_symbol.is_empty()
                 || candidate.future_symbol.is_empty()
@@ -310,24 +310,24 @@ async fn observe_shadow_lifecycle(
             "Invalid Scout lifecycle observation".into(),
         ));
     }
-    let mut state = service.shadow.data.lock().await;
-    if let Some(response) = state.shadow_observation_results.get(&request.request_id) {
+    let mut state = service.scout.data.lock().await;
+    if let Some(response) = state.scout_observation_results.get(&request.request_id) {
         let response = response.clone();
         drop(state);
-        flush_shadow_outbox(&service.shadow, &service.client, &service.learning_url).await?;
+        flush_scout_outbox(&service.scout, &service.client, &service.learning_url).await?;
         return Ok(Json(response));
     }
-    let response = apply_shadow_lifecycle_observation(&mut state, &request);
-    persist_shadow_state(&service.shadow.path, &state)?;
+    let response = apply_scout_lifecycle_observation(&mut state, &request);
+    persist_scout_state(&service.scout.path, &state)?;
     drop(state);
-    flush_shadow_outbox(&service.shadow, &service.client, &service.learning_url).await?;
+    flush_scout_outbox(&service.scout, &service.client, &service.learning_url).await?;
     Ok(Json(response))
 }
 
-async fn create_shadow_plan(
+async fn create_scout_plan(
     State(service): State<ServiceState>,
-    Json(request): Json<ShadowPlanRequest>,
-) -> Result<Json<ShadowPlanResponse>, (StatusCode, String)> {
+    Json(request): Json<ScoutPlanRequest>,
+) -> Result<Json<ScoutPlanResponse>, (StatusCode, String)> {
     if request.request_id.is_empty()
         || request.request_id.len() > 240
         || request.candidates.len() > 512
@@ -350,7 +350,7 @@ async fn create_shadow_plan(
         })
         || request.max_active_batches > 5_000
         || request.max_active_variants_per_profile > 1_000
-        || request.now_ms > shadow_now_ms().saturating_add(5_000)
+        || request.now_ms > scout_now_ms().saturating_add(5_000)
         || request.candidates.iter().any(|candidate| {
             (candidate.sample_group_id.is_empty() && !candidate.generate_group_id)
                 || candidate.sample_group_id.len() > 512
@@ -397,7 +397,7 @@ async fn create_shadow_plan(
                         .and_then(serde_json::Value::as_str)
                         .is_none_or(|id| id.is_empty() || id.len() > 240)
                         || audit
-                            .get("shadow_exit_scenario")
+                            .get("scout_exit_scenario")
                             .and_then(serde_json::Value::as_str)
                             .is_none_or(|scenario| {
                                 !matches!(scenario, "strategy" | "tight" | "wide")
@@ -407,13 +407,13 @@ async fn create_shadow_plan(
     {
         return Err((
             StatusCode::BAD_REQUEST,
-            "Invalid Scout shadow-plan request".into(),
+            "Invalid Scout scout-plan request".into(),
         ));
     }
-    let mut state = service.shadow.data.lock().await;
+    let mut state = service.scout.data.lock().await;
     for (key, timestamp) in &request.legacy_cooldowns {
         state
-            .shadow_sample_at_ms
+            .scout_sample_at_ms
             .entry(key.clone())
             .and_modify(|current| *current = (*current).max(*timestamp))
             .or_insert(*timestamp);
@@ -434,22 +434,22 @@ async fn create_shadow_plan(
             pair.legacy_learning_key = comparison.learning_key.clone();
         }
     }
-    if let Some(response) = state.shadow_plan_results.get(&request.request_id) {
+    if let Some(response) = state.scout_plan_results.get(&request.request_id) {
         let response = response.clone();
         if !request.legacy_cooldowns.is_empty() || !request.legacy_comparisons.is_empty() {
-            persist_shadow_state(&service.shadow.path, &state)?;
+            persist_scout_state(&service.scout.path, &state)?;
         }
         drop(state);
-        flush_shadow_outbox(&service.shadow, &service.client, &service.learning_url).await?;
+        flush_scout_outbox(&service.scout, &service.client, &service.learning_url).await?;
         return Ok(Json(response));
     }
     let mut active_batch_keys = state
-        .shadow_sample_active_scenarios
+        .scout_sample_active_scenarios
         .keys()
         .map(|key| key.split("|probe:").next().unwrap_or(key))
         .map(str::to_owned)
         .collect::<BTreeSet<_>>();
-    let cooldowns_at_request_start = state.shadow_sample_at_ms.clone();
+    let cooldowns_at_request_start = state.scout_sample_at_ms.clone();
     let start = if request.candidates.is_empty() {
         0
     } else {
@@ -458,13 +458,13 @@ async fn create_shadow_plan(
     if !request.candidates.is_empty() {
         state.scout_variant_rotation_cursor = (start + 1) % request.candidates.len();
     }
-    let expanded_candidates = expand_daily_shadow_candidates(&request.candidates);
-    let mut response = ShadowPlanResponse::default();
+    let expanded_candidates = expand_daily_scout_candidates(&request.candidates);
+    let mut response = ScoutPlanResponse::default();
     for offset in 0..expanded_candidates.len() {
         let mut candidate =
             expanded_candidates[(start + offset) % expanded_candidates.len()].clone();
         if candidate.generate_group_id {
-            let Some((group_id, cooldown_key)) = generated_shadow_group_and_cooldown(&candidate)
+            let Some((group_id, cooldown_key)) = generated_scout_group_and_cooldown(&candidate)
             else {
                 continue;
             };
@@ -476,7 +476,7 @@ async fn create_shadow_plan(
                 && candidate.audit_templates.is_empty()
                 && candidate.sample_payload.is_none())
             || state
-                .shadow_sample_active_scenarios
+                .scout_sample_active_scenarios
                 .contains_key(&candidate.sample_group_id)
             || cooldowns_at_request_start
                 .get(&candidate.cooldown_key)
@@ -490,7 +490,7 @@ async fn create_shadow_plan(
             .sample_payload
             .as_ref()
             .is_some_and(|payload| match payload {
-                ShadowSamplePayload::DatedCarryProbe(probe) => {
+                ScoutSamplePayload::DatedCarryProbe(probe) => {
                     probe.sample_id != candidate.sample_group_id
                         || probe.opened_at_ms > request.now_ms.saturating_add(5_000)
                         || probe.strategy.is_empty()
@@ -539,19 +539,19 @@ async fn create_shadow_plan(
             .sample_payload
             .as_ref()
             .is_some_and(|payload| match payload {
-                ShadowSamplePayload::DatedCarryProbe(probe) => {
-                    state.shadow_pending_samples.contains_key(&probe.sample_id)
+                ScoutSamplePayload::DatedCarryProbe(probe) => {
+                    state.scout_pending_samples.contains_key(&probe.sample_id)
                 }
             })
         {
             continue;
         }
-        if !shadow_comparison_changes_exit(&candidate) {
+        if !scout_comparison_changes_exit(&candidate) {
             continue;
         }
         if candidate.parameter_variant && !candidate.profile_key.is_empty() {
             let active_variants = state
-                .shadow_plan_profiles
+                .scout_plan_profiles
                 .values()
                 .filter(|profile| *profile == &candidate.profile_key)
                 .count();
@@ -575,7 +575,7 @@ async fn create_shadow_plan(
         let generated = candidate
             .audit_templates
             .iter()
-            .flat_map(|template| build_shadow_audits(template, &candidate.sample_group_id))
+            .flat_map(|template| build_scout_audits(template, &candidate.sample_group_id))
             .collect::<Vec<_>>();
         let plans = candidate
             .audit_plans
@@ -585,44 +585,44 @@ async fn create_shadow_plan(
             .collect::<Vec<_>>();
         for source in &plans {
             let mut audit = source.clone();
-            audit["shadow_sample_group_id"] = serde_json::json!(candidate.sample_group_id);
+            audit["scout_sample_group_id"] = serde_json::json!(candidate.sample_group_id);
             audit["scout"] = serde_json::json!(true);
             let decision_id = audit["decision_id"].as_str().unwrap_or_default();
-            let scenario = audit["shadow_exit_scenario"].as_str().unwrap_or_default();
-            if let Some(registration) = scout_shadow_registration(&audit) {
+            let scenario = audit["scout_exit_scenario"].as_str().unwrap_or_default();
+            if let Some(registration) = scout_registration(&audit) {
                 tokens.insert(format!("{decision_id}|{scenario}"));
                 active_audits.push(audit.clone());
-                state.outbox.push(ShadowOutboxItem::Audit(audit.clone()));
+                state.outbox.push(ScoutOutboxItem::Audit(audit.clone()));
                 state
                     .outbox
-                    .push(ShadowOutboxItem::Registration(registration));
+                    .push(ScoutOutboxItem::Registration(registration));
             }
             response.audits.push(audit);
         }
-        if let Some(ShadowSamplePayload::DatedCarryProbe(probe)) = &candidate.sample_payload {
-            state.shadow_pending_samples.insert(
+        if let Some(ScoutSamplePayload::DatedCarryProbe(probe)) = &candidate.sample_payload {
+            state.scout_pending_samples.insert(
                 probe.sample_id.clone(),
-                ShadowSamplePayload::DatedCarryProbe(probe.clone()),
+                ScoutSamplePayload::DatedCarryProbe(probe.clone()),
             );
             tokens.insert(format!("{}|carry", probe.sample_id));
         }
         state
-            .shadow_sample_at_ms
+            .scout_sample_at_ms
             .insert(candidate.cooldown_key.clone(), request.now_ms);
         if !tokens.is_empty() && candidate.parameter_variant && !candidate.profile_key.is_empty() {
-            state.shadow_plan_profiles.insert(
+            state.scout_plan_profiles.insert(
                 candidate.sample_group_id.clone(),
                 candidate.profile_key.clone(),
             );
         }
         if !active_audits.is_empty() {
             state
-                .shadow_active_audits
+                .scout_active_audits
                 .insert(candidate.sample_group_id.clone(), active_audits);
         }
         if !tokens.is_empty() {
             state
-                .shadow_sample_active_scenarios
+                .scout_sample_active_scenarios
                 .insert(candidate.sample_group_id.clone(), tokens);
         }
         response
@@ -630,18 +630,18 @@ async fn create_shadow_plan(
             .push(candidate.sample_group_id.clone());
         active_batch_keys.insert(batch_key);
     }
-    state.shadow_lifecycle_updated_at_ms = state.shadow_lifecycle_updated_at_ms.max(request.now_ms);
+    state.scout_lifecycle_updated_at_ms = state.scout_lifecycle_updated_at_ms.max(request.now_ms);
     state
-        .shadow_plan_results
+        .scout_plan_results
         .insert(request.request_id.clone(), response.clone());
-    while state.shadow_plan_results.len() > 10_000 {
-        if let Some(oldest) = state.shadow_plan_results.keys().next().cloned() {
-            state.shadow_plan_results.remove(&oldest);
+    while state.scout_plan_results.len() > 10_000 {
+        if let Some(oldest) = state.scout_plan_results.keys().next().cloned() {
+            state.scout_plan_results.remove(&oldest);
         }
     }
-    persist_shadow_state(&service.shadow.path, &state)?;
+    persist_scout_state(&service.scout.path, &state)?;
     drop(state);
-    flush_shadow_outbox(&service.shadow, &service.client, &service.learning_url).await?;
+    flush_scout_outbox(&service.scout, &service.client, &service.learning_url).await?;
     Ok(Json(response))
 }
 
@@ -685,7 +685,7 @@ struct FinalizeRequest {
 }
 
 impl ScoutSample {
-    /// Finalize a shadow sample using the observed exit price and round-trip costs.
+    /// Finalize a scout sample using the observed exit price and round-trip costs.
     pub fn finalize(
         self,
         closed_at_ms: u64,

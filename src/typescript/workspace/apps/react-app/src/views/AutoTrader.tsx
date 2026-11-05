@@ -7,7 +7,7 @@ import { AutoTraderOutcomes } from './AutoTraderOutcomes';
 import { useBehaviorSnapshot } from '../use_behavior_snapshot';
 import { FeedToolbar } from './FeedToolbar';
 import { explainAutoTraderReason, money, timestamp } from './AutoTraderOrderGrid';
-import { autoTraderShadowModel } from '../models/AutoTraderShadowModel';
+import { autoTraderScoutModel } from '../models/AutoTraderScoutModel';
 const finiteFixed = (value: unknown, digits: number) => typeof value === 'number' && Number.isFinite(value) ? value.toFixed(digits) : 'n/a';
 const intradayStrategyLabels: Array<{ strategy: Strategy; label: string }> = [
   { strategy: 'live-insights', label: 'Live insights' },
@@ -33,9 +33,9 @@ const dailyStrategyLabels: Array<{ strategy: Strategy; label: string }> = [
 export function AutoTrader() {
   const model = useMemo(() => new AutoTraderModel(), []);
   useEffect(() => { model.start(); return () => model.stop(); }, [model]);
-  useEffect(() => { autoTraderShadowModel.start(); return () => autoTraderShadowModel.stop(); }, []);
+  useEffect(() => { autoTraderScoutModel.start(); return () => autoTraderScoutModel.stop(); }, []);
   const state = useBehaviorSnapshot(model.state$);
-  const scoutState = useBehaviorSnapshot(autoTraderShadowModel.state$);
+  const scoutState = useBehaviorSnapshot(autoTraderScoutModel.state$);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [parametersOpen, setParametersOpen] = useState(false);
   const [decisionDetailsOpen, setDecisionDetailsOpen] = useState(false);
@@ -119,7 +119,7 @@ export function AutoTrader() {
               <label className="auto-trader-risk-slider" title="Shifts strength and score floors and adjusts take-profit. Riskier settings lower entry floors and move take-profit toward a 0.05% net win after fees; safer settings raise floors and preserve larger targets.">RISK APPETITE <span className="auto-trader-risk-value">{Number(state.riskAppetite)} · {Number(state.riskAppetite) < 34 ? 'Safe' : Number(state.riskAppetite) > 66 ? 'Risky' : 'Balanced'}</span><input aria-label="Auto Trader risk appetite" type="range" min="0" max="100" step="1" value={state.riskAppetite} onChange={(event) => model.setRiskAppetite(event.target.value)} /><span className="auto-trader-risk-scale"><span>Safe · higher floors</span><span>Risky · lower floors</span></span></label>
               <label title="Maximum number of distinct Auto Trader positions held at once.">MAX OPEN POSITIONS<input type="number" min="1" max="20" step="1" value={state.maxOpenPositions} onChange={(event) => model.setLimits(state.maxOrderNotional, state.dailyNotionalLimit, state.dailyRealizedLossLimit, state.explorationPercent, event.target.value)} /></label>
               <label title="Maximum number of active Scout positions or pending Scout orders.">MAX ACTIVE SCOUT POSITIONS<input type="number" min="0" max="5000" step="1" value={state.scoutMaxActivePositions} onChange={(event) => model.setScoutMaxActivePositions(event.target.value)} /></label>
-              <label title="Maximum number of fee-free Scout shadow samples being evaluated at once. This does not limit or create real positions.">MAX CONCURRENT SHADOW SAMPLES<input type="number" min="0" max="5000" step="1" value={state.maxConcurrentShadowSamples} onChange={(event) => model.setMaxConcurrentShadowSamples(event.target.value)} /></label>
+              <label title="Maximum number of fee-free Scout samples being evaluated at once. This does not limit or create real positions.">MAX CONCURRENT SCOUT SAMPLES<input type="number" min="0" max="5000" step="1" value={state.maxConcurrentScoutSamples} onChange={(event) => model.setMaxConcurrentScoutSamples(event.target.value)} /></label>
               <fieldset className="auto-trader-category-limits" title="Intraday signal and daily strategy budgets are separate; the overall position and exposure caps still apply."><legend>HORIZON BUDGETS</legend>
                 <label>INTRADAY POSITIONS<input type="number" min="0" max="20" step="1" value={state.maxIntradayOpenPositions} onChange={(event) => model.setCategoryLimits({ maxIntradayOpenPositions: event.target.value })} /></label>
                 <label>DAILY POSITIONS<input type="number" min="0" max="20" step="1" value={state.maxDailyOpenPositions} onChange={(event) => model.setCategoryLimits({ maxDailyOpenPositions: event.target.value })} /></label>

@@ -1,3 +1,96 @@
+fn ticker_subscription_requests(instrument_data: &[Arc<str>]) -> Vec<Utf8Bytes> {
+    instrument_data
+        .chunks(240)
+        .enumerate()
+        .map(|(batch_index, instruments)| {
+            let args = instruments
+                .iter()
+                .map(|instrument| json!({ "channel": "tickers", "instId": instrument.as_ref() }))
+                .collect::<Vec<_>>();
+            Utf8Bytes::from(
+                json!({
+                    "op": "subscribe",
+                    "id": (batch_index + 1).to_string(),
+                    "args": args
+                })
+                .to_string(),
+            )
+        })
+        .collect()
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum TickerHeartbeatAction {
+    Wait,
+    Ping,
+    Timeout,
+}
+
+fn ticker_heartbeat_action(now: u64, last_message: u64, ping_started: u64) -> TickerHeartbeatAction {
+    if ping_started != 0 && now.saturating_sub(ping_started) >= OKX_PONG_TIMEOUT.as_millis() as u64 {
+        TickerHeartbeatAction::Timeout
+    } else if ping_started == 0
+        && now.saturating_sub(last_message) >= OKX_IDLE_HEARTBEAT_INTERVAL.as_millis() as u64
+    {
+        TickerHeartbeatAction::Ping
+    } else {
+        TickerHeartbeatAction::Wait
+    }
+}
+
+fn encode_ticker_updates(
+    text: &str,
+    instrument_lookup: &HashSet<Arc<str>>,
+    volatility_by_instrument: &DashMap<Arc<str>, RollingVolatility>,
+) -> Result<Vec<Bytes>> {
+    let update = match serde_json::from_str::<TickerMessage<'_>>(text) {
+        Ok(update) => update,
+        Err(error) => {
+            crate::service_log!("ERROR", "Ignoring invalid OKX JSON message: {error}");
+            return Ok(Vec::new());
+        }
+    };
+    if update.event == Some("error") {
+        anyhow::bail!(
+            "OKX subscription error: {}",
+            update.msg.unwrap_or("unknown subscription error")
+        );
+    }
+    if update.event == Some("subscribe") {
+        crate::service_log!("INFO", "OKX tickers subscription batch acknowledged");
+        return Ok(Vec::new());
+    }
+
+    let mut encoded_updates = Vec::new();
+    for item in update.data.unwrap_or_default() {
+        let Some(instrument) = instrument_lookup.get(item.instrument) else {
+            continue;
+        };
+        let Ok(price) = item.last.parse::<f64>() else {
+            continue;
+        };
+        if !price.is_finite() || price <= 0.0 {
+            continue;
+        }
+        crate::metrics::record_ticker();
+        let timestamp_ms = item
+            .ts
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or_else(now_ms);
+        let Some(mut volatility) = volatility_by_instrument.get_mut(instrument) else {
+            continue;
+        };
+        let (volatility_1m, volatility_5m) = volatility.update(timestamp_ms, price);
+        encoded_updates.push(encode_symbol_price(
+            instrument,
+            price,
+            volatility_1m,
+            volatility_5m,
+        )?);
+    }
+    Ok(encoded_updates)
+}
+
 async fn subscribe_once(
     instrument_data: &[Arc<str>],
     instrument_lookup: Arc<HashSet<Arc<str>>>,
@@ -40,75 +133,21 @@ async fn subscribe_once(
                         return Ok(());
                     }
                 };
-                let update = match serde_json::from_str::<TickerMessage<'_>>(text) {
-                    Ok(update) => update,
-                    Err(error) => {
-                        crate::service_log!("ERROR", "Ignoring invalid OKX JSON message: {error}");
-                        return Ok(());
-                    }
-                };
-
-                if update.event == Some("error") {
-                    anyhow::bail!(
-                        "OKX subscription error: {}",
-                        update.msg.unwrap_or("unknown subscription error")
-                    );
-                }
-                if update.event == Some("subscribe") {
-                    crate::service_log!("INFO", "OKX tickers subscription batch acknowledged");
-                    return Ok(());
-                }
-
-                if let Some(items) = update.data {
-                    for item in items {
-                        let Some(instrument) = instrument_lookup.get(item.instrument) else {
-                            continue;
-                        };
-                        let Ok(price) = item.last.parse::<f64>() else {
-                            continue;
-                        };
-                        if price.is_finite() && price > 0.0 {
-                            crate::metrics::record_ticker();
-                            let timestamp_ms = item
-                                .ts
-                                .and_then(|value| value.parse::<u64>().ok())
-                                .unwrap_or_else(|| {
-                                    SystemTime::now()
-                                        .duration_since(UNIX_EPOCH)
-                                        .unwrap_or_default()
-                                        .as_millis() as u64
-                                });
-                            let Some(mut volatility) = volatility_by_instrument.get_mut(instrument) else { continue; };
-                            let (volatility_1m, volatility_5m) = volatility.update(timestamp_ms, price);
-                            let encoded = encode_symbol_price(
-                                instrument,
-                                price,
-                                volatility_1m,
-                                volatility_5m,
-                            )?;
-                            let _ = price_updates.send(encoded);
-                            crate::metrics::record_queue_depth("price_updates", price_updates.len());
-                        }
-                    }
+                for encoded in encode_ticker_updates(
+                    text,
+                    &instrument_lookup,
+                    &volatility_by_instrument,
+                )? {
+                    let _ = price_updates.send(encoded);
+                    crate::metrics::record_queue_depth("price_updates", price_updates.len());
                 }
                 Ok(())
             }
         })
     };
 
-    for (batch_index, instruments) in instrument_data.chunks(240).enumerate() {
-        let args = instruments
-            .iter()
-            .map(|instrument| json!({ "channel": "tickers", "instId": instrument.as_ref() }))
-            .collect::<Vec<_>>();
-        let request = json!({
-            "op": "subscribe",
-            "id": (batch_index + 1).to_string(),
-            "args": args
-        });
+    for request in ticker_subscription_requests(instrument_data) {
         crate::service_log!("INFO", "Subscribing to {}", request);
-        let request = Utf8Bytes::from(request.to_string());
-
         write
             .send(tokio_tungstenite::tungstenite::Message::Text(request))
             .await?;
@@ -126,15 +165,101 @@ async fn subscribe_once(
             _ = liveness_check.tick() => {
                 let now = now_ms();
                 let ping_started = monitor_ping_sent_at.load(Ordering::Relaxed);
-                if ping_started != 0 && now.saturating_sub(ping_started) >= OKX_PONG_TIMEOUT.as_millis() as u64 {
-                    anyhow::bail!("OKX ticker WebSocket did not answer ping within {}s", OKX_PONG_TIMEOUT.as_secs());
-                }
-                let last_message = monitor_last_message_at.load(Ordering::Relaxed);
-                if ping_started == 0 && now.saturating_sub(last_message) >= OKX_IDLE_HEARTBEAT_INTERVAL.as_millis() as u64 {
-                    monitor_ping_sent_at.store(now, Ordering::Relaxed);
-                    write.send(tokio_tungstenite::tungstenite::Message::Text(Utf8Bytes::from("ping"))).await?;
+                match ticker_heartbeat_action(
+                    now,
+                    monitor_last_message_at.load(Ordering::Relaxed),
+                    ping_started,
+                ) {
+                    TickerHeartbeatAction::Timeout => anyhow::bail!("OKX ticker WebSocket did not answer ping within {}s", OKX_PONG_TIMEOUT.as_secs()),
+                    TickerHeartbeatAction::Ping => {
+                        monitor_ping_sent_at.store(now, Ordering::Relaxed);
+                        write.send(tokio_tungstenite::tungstenite::Message::Text(Utf8Bytes::from("ping"))).await?;
+                    }
+                    TickerHeartbeatAction::Wait => {}
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod connection_loop_tests {
+    use super::{
+        TickerHeartbeatAction, encode_ticker_updates, ticker_heartbeat_action,
+        ticker_subscription_requests,
+    };
+    use crate::okx::connectivity::RollingVolatility;
+    use dashmap::DashMap;
+    use serde_json::Value;
+    use std::collections::HashSet;
+    use std::sync::Arc;
+
+    #[test]
+    fn builds_a_subscription_request_for_each_batch_of_240_instruments() {
+        let instruments = (0..241)
+            .map(|index| Arc::<str>::from(format!("COIN{index}-USDT")))
+            .collect::<Vec<_>>();
+
+        let requests = ticker_subscription_requests(&instruments);
+
+        assert_eq!(requests.len(), 2);
+        let first: Value = serde_json::from_str(requests[0].as_str()).unwrap();
+        let second: Value = serde_json::from_str(requests[1].as_str()).unwrap();
+        assert_eq!(first["op"], "subscribe");
+        assert_eq!(first["id"], "1");
+        assert_eq!(first["args"].as_array().unwrap().len(), 240);
+        assert_eq!(first["args"][0]["instId"], "COIN0-USDT");
+        assert_eq!(first["args"][239]["instId"], "COIN239-USDT");
+        assert_eq!(second["id"], "2");
+        assert_eq!(second["args"].as_array().unwrap().len(), 1);
+        assert_eq!(second["args"][0]["instId"], "COIN240-USDT");
+    }
+
+    #[test]
+    fn does_not_emit_empty_subscription_batches() {
+        assert!(ticker_subscription_requests(&[]).is_empty());
+    }
+
+    #[test]
+    fn encodes_only_valid_tickers_for_subscribed_instruments() {
+        let lookup = HashSet::from([Arc::<str>::from("BTC-USDT")]);
+        let volatility = DashMap::from_iter([(Arc::<str>::from("BTC-USDT"), RollingVolatility::default())]);
+        let text = r#"{"data":[
+            {"instId":"BTC-USDT","last":"65000.5","ts":"1700000000000"},
+            {"instId":"ETH-USDT","last":"3000","ts":"1700000000000"},
+            {"instId":"BTC-USDT","last":"NaN","ts":"1700000000001"}
+        ]}"#;
+
+        let encoded = encode_ticker_updates(text, &lookup, &volatility).unwrap();
+
+        assert_eq!(encoded.len(), 1);
+        assert_eq!(
+            f64::from_le_bytes(encoded[0][40..48].try_into().unwrap()),
+            65000.5
+        );
+        assert!(encode_ticker_updates("not-json", &lookup, &volatility)
+            .unwrap()
+            .is_empty());
+        assert!(encode_ticker_updates(
+            r#"{"event":"error","msg":"bad subscription"}"#,
+            &lookup,
+            &volatility
+        )
+        .is_err());
+        assert!(encode_ticker_updates(
+            r#"{"event":"subscribe"}"#,
+            &lookup,
+            &volatility
+        )
+        .unwrap()
+        .is_empty());
+    }
+
+    #[test]
+    fn selects_wait_ping_and_timeout_heartbeat_actions() {
+        assert_eq!(ticker_heartbeat_action(10_000, 9_000, 0), TickerHeartbeatAction::Wait);
+        assert_eq!(ticker_heartbeat_action(30_000, 9_000, 0), TickerHeartbeatAction::Ping);
+        assert_eq!(ticker_heartbeat_action(21_000, 0, 10_000), TickerHeartbeatAction::Timeout);
+        assert_eq!(ticker_heartbeat_action(10_000, 0, 9_000), TickerHeartbeatAction::Wait);
     }
 }

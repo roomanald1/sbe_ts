@@ -371,17 +371,15 @@ pub(super) fn should_publish_trade_profile(
 }
 
 pub(super) fn persist(path: &Path, state: &LearningState) -> Result<(), (StatusCode, String)> {
-    let bytes = serde_json::to_vec(state)
-        .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
-    let temporary = path.with_extension("json.tmp");
-    std::fs::write(&temporary, bytes)
-        .and_then(|()| std::fs::rename(&temporary, path))
-        .map_err(|error| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("could not persist learning state: {error}"),
-            )
-        })
+    let connection =
+        super::open_state_db(path).map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error))?;
+    super::persist_normalized(&connection, state).map_err(|error| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("could not persist learning state: {error}"),
+        )
+    })?;
+    Ok(())
 }
 
 pub(super) fn valid_spec(spec: &ParameterSpec) -> bool {
@@ -652,13 +650,23 @@ mod tests {
 
     #[test]
     fn persistence_round_trips_state_atomically() {
-        let path =
-            std::env::temp_dir().join(format!("learning-persist-test-{}.json", std::process::id()));
-        let state = LearningState::default();
+        let path = std::env::temp_dir().join(format!(
+            "learning-persist-test-{}.sqlite",
+            std::process::id()
+        ));
+        let mut state = LearningState {
+            accepted_events: 2,
+            seen_event_ids: ["keep".to_owned(), "remove".to_owned()].into(),
+            ..LearningState::default()
+        };
         persist(&path, &state).unwrap();
-        let decoded: LearningState =
-            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        state.accepted_events = 1;
+        state.seen_event_ids.remove("remove");
+        persist(&path, &state).unwrap();
+        let decoded = super::super::load_state(&path).unwrap();
         assert!(decoded.variants.is_empty());
+        assert_eq!(decoded.accepted_events, 1);
+        assert_eq!(decoded.seen_event_ids, ["keep".to_owned()].into());
         let _ = std::fs::remove_file(&path);
     }
 }

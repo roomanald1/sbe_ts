@@ -31,7 +31,7 @@ struct LearningGroup {
 }
 
 #[derive(Deserialize)]
-pub(super) struct ScoutShadowQuery {
+pub(super) struct ScoutScoutQuery {
     page: Option<usize>,
     page_size: Option<usize>,
     source: Option<String>,
@@ -60,13 +60,21 @@ struct ScoutLearningRow {
     paired_delta_tone: Option<String>,
 }
 
+fn field<'a>(record: &'a Value, key: &str) -> Option<&'a Value> {
+    record.get(key).or_else(|| {
+        key.strip_prefix("scout_")
+            .and_then(|suffix| record.get(&format!("shadow_{suffix}")))
+    })
+}
+
 fn string(record: &Value, key: &str) -> Option<String> {
-    record.get(key).and_then(Value::as_str).map(str::to_owned)
+    field(record, key)
+        .and_then(Value::as_str)
+        .map(str::to_owned)
 }
 
 fn number(record: &Value, key: &str) -> Option<f64> {
-    record
-        .get(key)
+    field(record, key)
         .and_then(Value::as_f64)
         .filter(|value| value.is_finite())
 }
@@ -77,12 +85,11 @@ fn positive_number(record: &Value, key: &str) -> Option<f64> {
 
 fn decision_sample_key(audit: &Value) -> String {
     let part = |key: &str, fallback: &str| {
-        audit
-            .get(key)
+        field(audit, key)
             .filter(|value| !value.is_null())
             .map(Value::to_string)
             .unwrap_or_else(|| {
-                if key == "shadow_exit_scenario" {
+                if key == "scout_exit_scenario" {
                     Value::String(fallback.to_owned()).to_string()
                 } else {
                     fallback.to_owned()
@@ -99,7 +106,7 @@ fn decision_sample_key(audit: &Value) -> String {
             part("scout_parameter_key", ""),
             part("scout_parameter_value", "")
         ),
-        part("shadow_exit_scenario", "strategy"),
+        part("scout_exit_scenario", "strategy"),
         part("scout_comparison_id", ""),
     ]
     .join("|")
@@ -301,7 +308,7 @@ fn counts_json(counts: ScoutCounts) -> Value {
     })
 }
 
-async fn build_scout_shadow_data(runtime: &SignalRuntime) -> Result<Value, String> {
+async fn build_scout_data(runtime: &SignalRuntime) -> Result<Value, String> {
     let now = now_ms();
     let since = now.saturating_sub(7 * 24 * 60 * 60_000);
     let mut audit_rows = Vec::new();
@@ -339,16 +346,19 @@ async fn build_scout_shadow_data(runtime: &SignalRuntime) -> Result<Value, Strin
     let mut paired_returns = HashMap::<String, (Option<f64>, Option<f64>)>::new();
     let mut paired_deltas = HashMap::<String, f64>::new();
     for audit in &audit_rows {
-        if string(audit, "stage").as_deref() != Some("scout-outcome") {
+        if !matches!(
+            string(audit, "stage").as_deref(),
+            Some("scout-outcome" | "shadow-outcome")
+        ) {
             continue;
         }
-        if let Some(decision_id) = string(audit, "shadow_decision_id") {
+        if let Some(decision_id) = string(audit, "scout_decision_id") {
             outcomes_by_decision.insert(decision_id, audit.clone());
             if let Some(id) = string(audit, "scout_comparison_id") {
                 if let Some(delta) = number(audit, "paired_delta_percent") {
                     paired_deltas.insert(id.clone(), delta);
                 }
-                if let Some(value) = number(audit, "shadow_net_return_percent") {
+                if let Some(value) = number(audit, "scout_net_return_percent") {
                     let pair = paired_returns.entry(id).or_default();
                     match string(audit, "scout_comparison_role").as_deref() {
                         Some("baseline") => pair.0 = Some(value),
@@ -371,7 +381,10 @@ async fn build_scout_shadow_data(runtime: &SignalRuntime) -> Result<Value, Strin
         .iter()
         .filter(|audit| {
             string(audit, "stage").as_deref() == Some("decision")
-                && string(audit, "status").as_deref() == Some("shadowed")
+                && matches!(
+                    string(audit, "status").as_deref(),
+                    Some("scouted" | "shadowed")
+                )
                 && audit.get("scout").and_then(Value::as_bool) == Some(true)
                 && string(audit, "decision_id").is_some()
         })
@@ -429,7 +442,7 @@ async fn build_scout_shadow_data(runtime: &SignalRuntime) -> Result<Value, Strin
             .or_else(|| string(&audit, "scout_comparison_role"));
         let evaluation = evaluations_by_signal.get(&(symbol.clone(), signal_timestamp));
         let net_return = outcome
-            .and_then(|row| number(row, "shadow_net_return_percent"))
+            .and_then(|row| number(row, "scout_net_return_percent"))
             .or_else(|| {
                 evaluation.and_then(|row| {
                     if direction == "bullish" {
@@ -439,12 +452,12 @@ async fn build_scout_shadow_data(runtime: &SignalRuntime) -> Result<Value, Strin
                     }
                 })
             });
-        let entry_bid = positive_number(&audit, "shadow_entry_bid");
-        let entry_ask = positive_number(&audit, "shadow_entry_ask");
+        let entry_bid = positive_number(&audit, "scout_entry_bid");
+        let entry_ask = positive_number(&audit, "scout_entry_ask");
         let entry_price = if direction == "bullish" {
-            entry_ask.or_else(|| positive_number(&audit, "shadow_entry_price"))
+            entry_ask.or_else(|| positive_number(&audit, "scout_entry_price"))
         } else {
-            entry_bid.or_else(|| positive_number(&audit, "shadow_entry_price"))
+            entry_bid.or_else(|| positive_number(&audit, "scout_entry_price"))
         };
         let missing_live_entry = strategy.starts_with("live-") && entry_price.is_none();
         let status = if let Some(value) = net_return {
@@ -468,9 +481,9 @@ async fn build_scout_shadow_data(runtime: &SignalRuntime) -> Result<Value, Strin
             .and_then(|row| row.get("evaluated_timestamp").and_then(Value::as_u64))
             .or_else(|| evaluation.map(|row| row.evaluated_timestamp));
         let taker_fee = outcome
-            .and_then(|row| number(row, "shadow_taker_fee_rate"))
+            .and_then(|row| number(row, "scout_taker_fee_rate"))
             .or_else(|| evaluation.map(|row| row.taker_fee_rate))
-            .or_else(|| number(&audit, "shadow_taker_fee_rate"))
+            .or_else(|| number(&audit, "scout_taker_fee_rate"))
             .unwrap_or(0.001);
         let mark_price = if status == "Open" {
             runtime.latest_prices.get(&symbol).and_then(|price| {
@@ -537,7 +550,7 @@ async fn build_scout_shadow_data(runtime: &SignalRuntime) -> Result<Value, Strin
             "scoutParameterValue": number(&audit,"scout_parameter_value"), "scoutParameterEntryEligible": audit.get("scout_parameter_entry_eligible").and_then(Value::as_bool),
             "comparisonRole": comparison_role, "pairedDeltaPercent": comparison_id.as_ref().and_then(|id| paired_deltas.get(id).copied()),
             "pairedDeltaTone": comparison_id.as_ref().and_then(|id| paired_deltas.get(id).copied()).map(return_tone),
-            "exitScenario": string(&audit,"shadow_exit_scenario").unwrap_or_else(|| "strategy".into()), "direction": direction,
+            "exitScenario": string(&audit,"scout_exit_scenario").unwrap_or_else(|| "strategy".into()), "direction": direction,
             "strength": number(&audit,"strength").unwrap_or(0.0), "openedAt": opened_at,
             "durationLabel": (status == "Open").then(|| duration_label(now.saturating_sub(opened_at))),
             "closedAt": evaluated_at, "entryPrice": entry_price, "entryBid": entry_bid, "entryAsk": entry_ask,
@@ -564,7 +577,7 @@ async fn build_scout_shadow_data(runtime: &SignalRuntime) -> Result<Value, Strin
                 && string(audit, "strategy").is_some()
                 && string(audit, "scout_comparison_id").is_none())
             .then(|| {
-                number(audit, "shadow_net_return_percent").map(|net_return| {
+                number(audit, "scout_net_return_percent").map(|net_return| {
                     json!({
                         "strategy": string(audit,"strategy").unwrap_or_default(),
                         "netReturnPercent": net_return,
@@ -587,7 +600,7 @@ async fn build_scout_shadow_data(runtime: &SignalRuntime) -> Result<Value, Strin
 }
 
 #[cfg(test)]
-mod scout_shadow_report_tests {
+mod scout_report_tests {
     use super::*;
 
     #[test]
@@ -647,24 +660,24 @@ mod scout_shadow_report_tests {
     }
 }
 
-pub(super) async fn get_scout_shadow_outcomes(
+pub(super) async fn get_scout_outcomes(
     State(runtime): State<std::sync::Arc<SignalRuntime>>,
-    Query(query): Query<ScoutShadowQuery>,
+    Query(query): Query<ScoutScoutQuery>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
     let core = {
-        let mut cache = runtime.scout_shadow_cache.lock().await;
+        let mut cache = runtime.scout_cache.lock().await;
         if let Some((created, data)) = cache.as_ref() {
             if created.elapsed() < std::time::Duration::from_secs(30) {
                 data.clone()
             } else {
-                let data = build_scout_shadow_data(&runtime)
+                let data = build_scout_data(&runtime)
                     .await
                     .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error))?;
                 *cache = Some((Instant::now(), data.clone()));
                 data
             }
         } else {
-            let data = build_scout_shadow_data(&runtime)
+            let data = build_scout_data(&runtime)
                 .await
                 .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error))?;
             *cache = Some((Instant::now(), data.clone()));

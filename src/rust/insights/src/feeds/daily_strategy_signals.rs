@@ -1206,9 +1206,22 @@ async fn poll_daily_strategy_signals(store: SignalStore) {
             );
             let status = status_result?.error_for_status()?.json::<serde_json::Value>().await?;
             let parameters = parameters_result?.error_for_status()?.json::<serde_json::Value>().await?;
-            let strategies = status.get("strategies").and_then(serde_json::Value::as_array)
+            let scouts_url = std::env::var("SCOUTS_SERVICE_URL")
+                .unwrap_or_else(|_| "http://127.0.0.1:3011".into());
+            let configuration = match client.get(format!("{scouts_url}/configuration")).send().await {
+                Ok(response) => match response.error_for_status() {
+                    Ok(response) => response.json::<serde_json::Value>().await.unwrap_or_default(),
+                    Err(_) => serde_json::Value::Null,
+                },
+                Err(_) => serde_json::Value::Null,
+            };
+            let mut strategies = status.get("strategies").and_then(serde_json::Value::as_array)
                 .into_iter().flatten().filter_map(|item| item.as_str().map(str::to_owned))
                 .collect::<Vec<_>>();
+            strategies.extend(configuration.get("strategies").and_then(serde_json::Value::as_array)
+                .into_iter().flatten().filter_map(|item| item.as_str().map(str::to_owned)));
+            strategies.sort();
+            strategies.dedup();
             let symbols = if strategies.iter().any(|strategy| strategy == "risk-adjusted-trend-portfolio") {
                 "BTCUSDT,ETHUSDT,BNBUSDT,XRPUSDT,ADAUSDT,SOLUSDT,DOGEUSDT,LTCUSDT,TRXUSDT,LINKUSDT,BCHUSDT,XLMUSDT,ETCUSDT,FILUSDT,AVAXUSDT,DOTUSDT"
             } else {
@@ -1224,8 +1237,6 @@ async fn poll_daily_strategy_signals(store: SignalStore) {
                 bars.sort_by_key(|bar| bar.close_time_ms);
             }
             let batch_as_of = now_ms();
-            let scouts_url = std::env::var("SCOUTS_SERVICE_URL")
-                .unwrap_or_else(|_| "http://127.0.0.1:3011".into());
             let mut scout_variant_jobs = Vec::new();
             for strategy in strategies.iter().filter(|strategy| DAILY_STRATEGIES.contains(&strategy.as_str())) {
                 let pairs = if strategy == "risk-adjusted-trend-portfolio" {
@@ -1267,8 +1278,21 @@ async fn poll_daily_strategy_signals(store: SignalStore) {
                 .max()
                 .unwrap_or_default();
             let sweep_signature = format!("{candle_anchor}:{}", strategies.join(","));
-            let active_samples = status.get("active_shadow_samples").and_then(serde_json::Value::as_u64).unwrap_or_default() as usize;
-            let sample_limit = status.get("max_concurrent_shadow_samples").and_then(serde_json::Value::as_u64).unwrap_or(5) as usize;
+            let lifecycle_response = client
+                .get(format!("{scouts_url}/scout-lifecycle/state"))
+                .send()
+                .await;
+            let lifecycle = match lifecycle_response {
+                Ok(response) => match response.error_for_status() {
+                    Ok(response) => response.json::<serde_json::Value>().await.unwrap_or_default(),
+                    Err(_) => serde_json::Value::Null,
+                },
+                Err(_) => serde_json::Value::Null,
+            };
+            let active_samples = lifecycle.get("scout_sample_active_scenarios")
+                .and_then(serde_json::Value::as_object).into_iter().flat_map(|items| items.keys())
+                .map(|key| key.split("|probe:").next().unwrap_or(key)).collect::<std::collections::BTreeSet<_>>().len();
+            let sample_limit = configuration.get("max_active_samples").and_then(serde_json::Value::as_u64).unwrap_or(5) as usize;
             Ok((batch, audits, sweep_signature, active_samples, sample_limit))
         }.await;
         let (batch, audits, sweep_signature, active_samples, sample_limit) = match result {

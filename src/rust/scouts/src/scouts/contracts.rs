@@ -1,4 +1,4 @@
-/// Scout shadow planning, markout feedback, and lifecycle coordination, separate from trade execution.
+/// Scout scout planning, markout feedback, and lifecycle coordination, separate from trade execution.
 
 use axum::{
     Json, Router,
@@ -47,6 +47,20 @@ pub struct LiveScoutCandidatesRequest {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(default)]
+pub struct ScoutConfiguration {
+    pub strategies: Vec<String>,
+    pub max_active_samples: usize,
+    pub max_active_positions: usize,
+}
+
+impl Default for ScoutConfiguration {
+    fn default() -> Self {
+        Self { strategies: Vec::new(), max_active_samples: 5, max_active_positions: 100 }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ScoutEntrySelectionRequest {
     pub candidates: Vec<serde_json::Value>,
     pub walk_forward: Vec<serde_json::Value>,
@@ -55,6 +69,7 @@ pub struct ScoutEntrySelectionRequest {
     pub scout_max_active_positions: usize,
     pub risk_appetite: f64,
 }
+
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 struct ScoutEntrySelectionResponse {
@@ -175,9 +190,9 @@ pub struct ScoutSample {
 }
 
 /// Fee-aware markout produced by Insights. This intentionally remains wire
-/// compatible with AutoTrader's shadow callback, with specs added optionally.
+/// compatible with AutoTrader's scout callback, with specs added optionally.
 #[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct ShadowOutcomeRequest {
+pub struct ScoutOutcomeRequest {
     pub decision_id: String,
     pub learning_context: String,
     pub simulated_net_pnl_usd: f64,
@@ -215,9 +230,9 @@ pub struct ShadowOutcomeRequest {
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
-struct ShadowPair {
-    baseline: Option<ShadowOutcomeRequest>,
-    variant: Option<ShadowOutcomeRequest>,
+struct ScoutPair {
+    baseline: Option<ScoutOutcomeRequest>,
+    variant: Option<ScoutOutcomeRequest>,
     updated_at_ms: u64,
     #[serde(default)]
     legacy_baseline_return_percent: Option<f64>,
@@ -230,55 +245,57 @@ struct ShadowPair {
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 struct PersistedState {
     #[serde(default)]
+    scout_configuration: ScoutConfiguration,
+    #[serde(default)]
     seen: BTreeSet<String>,
     #[serde(default)]
-    outcomes: BTreeMap<String, ShadowOutcomeRequest>,
+    outcomes: BTreeMap<String, ScoutOutcomeRequest>,
     #[serde(default)]
-    pairs: BTreeMap<String, ShadowPair>,
+    pairs: BTreeMap<String, ScoutPair>,
     #[serde(default)]
-    outbox: Vec<ShadowOutboxItem>,
-    #[serde(default)]
-    shadow_sample_at_ms: BTreeMap<String, u64>,
-    #[serde(default)]
-    shadow_sample_active_scenarios: BTreeMap<String, BTreeSet<String>>,
+    outbox: Vec<ScoutOutboxItem>,
+    #[serde(default, alias = "shadow_sample_at_ms")]
+    scout_sample_at_ms: BTreeMap<String, u64>,
+    #[serde(default, alias = "shadow_sample_active_scenarios")]
+    scout_sample_active_scenarios: BTreeMap<String, BTreeSet<String>>,
     #[serde(default)]
     scout_variant_rotation_cursor: usize,
-    #[serde(default)]
-    shadow_lifecycle_updated_at_ms: u64,
-    #[serde(default)]
-    shadow_plan_profiles: BTreeMap<String, String>,
-    #[serde(default)]
-    shadow_plan_results: BTreeMap<String, ShadowPlanResponse>,
-    #[serde(default)]
-    shadow_pending_samples: BTreeMap<String, ShadowSamplePayload>,
-    #[serde(default)]
-    shadow_observation_results: BTreeMap<String, ShadowLifecycleObserveResponse>,
-    #[serde(default)]
-    shadow_active_audits: BTreeMap<String, Vec<serde_json::Value>>,
+    #[serde(default, alias = "shadow_lifecycle_updated_at_ms")]
+    scout_lifecycle_updated_at_ms: u64,
+    #[serde(default, alias = "shadow_plan_profiles")]
+    scout_plan_profiles: BTreeMap<String, String>,
+    #[serde(default, alias = "shadow_plan_results")]
+    scout_plan_results: BTreeMap<String, ScoutPlanResponse>,
+    #[serde(default, alias = "shadow_pending_samples")]
+    scout_pending_samples: BTreeMap<String, ScoutSamplePayload>,
+    #[serde(default, alias = "shadow_observation_results")]
+    scout_observation_results: BTreeMap<String, ScoutLifecycleObserveResponse>,
+    #[serde(default, alias = "shadow_active_audits")]
+    scout_active_audits: BTreeMap<String, Vec<serde_json::Value>>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(tag = "kind", content = "payload", rename_all = "snake_case")]
-enum ShadowOutboxItem {
+enum ScoutOutboxItem {
     Learning(FeedbackEvent),
     Audit(serde_json::Value),
     Registration(serde_json::Value),
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
-pub struct ShadowLifecycleSnapshot {
+pub struct ScoutLifecycleSnapshot {
     #[serde(default)]
     pub updated_at_ms: u64,
-    #[serde(default)]
-    pub shadow_sample_at_ms: BTreeMap<String, u64>,
-    #[serde(default)]
-    pub shadow_sample_active_scenarios: BTreeMap<String, BTreeSet<String>>,
+    #[serde(default, alias = "shadow_sample_at_ms")]
+    pub scout_sample_at_ms: BTreeMap<String, u64>,
+    #[serde(default, alias = "shadow_sample_active_scenarios")]
+    pub scout_sample_active_scenarios: BTreeMap<String, BTreeSet<String>>,
     #[serde(default)]
     pub scout_variant_rotation_cursor: usize,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct ShadowPlanCandidate {
+pub struct ScoutPlanCandidate {
     #[serde(default)]
     pub generate_group_id: bool,
     pub sample_group_id: String,
@@ -291,17 +308,17 @@ pub struct ShadowPlanCandidate {
     pub cooldown_ms: u64,
     pub audit_plans: Vec<serde_json::Value>,
     #[serde(default)]
-    pub audit_templates: Vec<ShadowAuditTemplate>,
+    pub audit_templates: Vec<ScoutAuditTemplate>,
     #[serde(default)]
-    pub sample_payload: Option<ShadowSamplePayload>,
+    pub sample_payload: Option<ScoutSamplePayload>,
     #[serde(default)]
-    pub daily_policy: Option<DailyShadowPolicy>,
+    pub daily_policy: Option<DailyScoutPolicy>,
     #[serde(default)]
-    pub live_policy: Option<LiveShadowPolicy>,
+    pub live_policy: Option<LiveScoutPolicy>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct DailyShadowPolicy {
+pub struct DailyScoutPolicy {
     pub evaluator_decision: String,
     pub selected_scout: bool,
     pub strategy_candidate: bool,
@@ -314,7 +331,7 @@ pub struct DailyShadowPolicy {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct LiveShadowPolicy {
+pub struct LiveScoutPolicy {
     pub now_ms: u64,
     #[serde(default)]
     pub strategy_enabled: bool,

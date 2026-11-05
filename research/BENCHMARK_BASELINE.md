@@ -1,5 +1,34 @@
 # Rust benchmark baseline
 
+## Learning context-threshold unit tests (2026-11-05)
+
+`cargo test --manifest-path src/rust/learning/Cargo.toml --lib` passed all 27 tests. `cargo llvm-cov --manifest-path src/rust/learning/Cargo.toml --lib --summary-only` reported 86.76% line coverage (85.84% regions), up from 81.81% lines (81.01% regions) before the tests. Context coverage increased from 59.64% to 97.00% lines.
+
+`cargo bench --manifest-path src/rust/learning/Cargo.toml` completed successfully. The benchmark harness measured database load at 1.85 ms/iteration, decision snapshot at 0.09 ms/iteration, and state persistence at 6.64 ms/iteration. Compared with the latest recorded learning run, no directly comparable timings were recorded there; this run adds the first timing readings for these workloads. WSL2 Linux x86_64, optimized Cargo bench profile. No services were started or stopped.
+
+## Follow-up run (2026-11-05)
+
+### Auto-trader settings table persistence
+
+| Target | Result |
+|---|---|
+| `cargo test --manifest-path src/rust/auto_trader/Cargo.toml` | Passed: 138 tests, including normalized settings round-trip and legacy blob migration. |
+| `cargo bench --manifest-path src/rust/auto_trader/Cargo.toml` | Completed successfully. Strategy entry timings were 1.2–16.6 ns/evaluation and position timings 0.6–2.2 ns/evaluation across current strategies; signal serialization 524.0 ns, market depth 557.7 ns, limit request construction 397.5 ns, and parameter validation 1.8 ns. |
+
+Compared with the recorded evaluator range, several current strategy entry measurements exceed the old 1.2–5.2 ns range. The current run includes additional registered strategies and is not a like-for-like comparison; the persistence change is outside those evaluator workloads. This benchmark does not measure SQLite persistence throughput or database size.
+
+**Recorded:** 2026-11-05. All benchmark targets completed successfully; tests run in bench mode are ignored as expected.
+
+## Follow-up run (2026-11-05)
+
+### Learning persistence (learning)
+
+| Target | Result |
+|---|---|
+| `cargo bench --manifest-path src/rust/learning/Cargo.toml` | Completed successfully; the crate has no dedicated benchmark targets. Cargo ran the unit-test binaries in bench mode with all 24 tests ignored. |
+
+No comparable Learning benchmark was present in the prior baseline. The persistence change was validated with the 24-test debug test suite, including the legacy JSON migration test; no service was started or stopped.
+
 **Recorded:** 2026-11-02 14:27 UTC
 **Status:** All benchmark targets completed successfully. The optional live HTTP benchmark compiled and was skipped because BENCH_SERVICE_URL was unset.
 
@@ -1994,6 +2023,14 @@ AutoTrader and Insights optimized benchmark targets completed. Their benchmark-m
 
 The Insights calculations benchmark completed. Compared with the latest recorded Insights run above (11,263.9 / 11,635.1 / 246.1 / 17.5 / 320.6 / 56.3 ns), this run measured 11,174.0 / 11,534.7 / 247.4 / 17.2 / 323.7 / 43.6 ns for live snapshot, snapshot with explanations, feature extraction, return context, market input diagnostics, and book snapshot (-0.8%, -0.9%, +0.5%, -1.7%, +1.0%, and -22.6%). The Scout report route change does not alter these calculation paths; treat these single-run differences as environment variation. Insights tests passed (13 library and 27 binary tests). Scouts tests passed (22 tests). Scouts has no benchmark harness. No benchmark targets failed or were skipped. No services were started or stopped.
 
+## Learning SQLite normalization (2026-11-05)
+
+Learning tests passed (24 tests). Initial `learning_service` measurements were 1.82 ms to load 1,000 variants, 200 active profiles, and 5,000 event IDs; 0.09 ms to generate a decision snapshot from 1,000 variants and 200 profiles; and 18.02 ms to persist that state. After reusing prepared SQLite statements in the persistence path, three runs measured 14.09, 12.79, and 13.18 ms for persistence (-21.8%, -29.0%, and -26.9% against the initial run); load measured 1.82, 1.83, and 1.87 ms and snapshots 0.09, 0.08, and 0.08 ms. The save improvement held across the three samples, though these are single-process microbenchmark runs. No directly comparable prior workload exists. No benchmark targets failed or were skipped, and no services were started or stopped.
+
+## Learning incremental persistence (2026-11-05)
+
+Learning tests passed (24 tests), including a new regression check that removed deduplication IDs are deleted from SQLite. Persistence now uses conditional upserts and removes only stale records. Three runs measured 6.93, 6.15, and 6.09 ms for the same 1,000-variant, 5,000-event workload (about 46–57% below the prepared-statement-only results and 62–66% below the original full-rewrite run). Load measured 1.85–1.96 ms and decision snapshots 0.09 ms. No benchmark target failed or was skipped, and no services were started or stopped.
+
 ## Reusable strategy and crate organization (2026-11-04)
 
 The FeedHandlers benchmark targets completed serially. Compared with the latest recorded feed-processing run above, trade JSON decode/parse/SBE encode measured 257.0 vs 285.0 ns/message (-9.8%); 7-level snapshots 1,251.6 vs 1,395 ns (-10.3%); 50-level snapshots 6,807.5 vs 7,278 ns (-6.5%); 400-level snapshots 48,971.3 vs 52,915 ns (-7.4%); and 5-level incremental updates 1,157.9 vs 1,194 ns (-3.0%). The order-book, SBE encoding, and broadcast subscriber targets also completed; their detailed current readings are in the bench output and do not have matching entries in this baseline.
@@ -2025,3 +2062,75 @@ The AutoTrader strategy-evaluation benchmark completed. Compared with the latest
 ## Learning feedback observation wiring repeat (2026-11-05)
 
 AutoTrader's strategy-evaluation benchmark completed. Compared with the immediately previous reading (entry 1.3–16.4 ns; position 0.5–2.0 ns; serialization/depth/order/parameter helpers 505.7 / 568.1 / 426.7 / 2.0 ns), this run measured entry 1.3–16.5 ns, position 0.6–3.0 ns, and helpers 510.3 / 573.4 / 426.7 / 1.9 ns (+0.9%, +0.9%, no change, and -5.0%). These single-run variations do not exercise the new feedback/threshold sample path; treat them as normal workload variation. No benchmark target failed. No services were started or stopped.
+
+## AutoTrader SQLite state persistence (2026-11-05)
+
+AutoTrader's strategy-evaluation benchmark completed after moving saved state persistence to SQLite. Entry evaluations measured 1.2–16.5 ns and position evaluations 0.6–1.9 ns. Signal serialization, market-depth assessment, order-request construction, and parameter validation measured 503.0 / 618.3 / 443.2 / 2.0 ns versus 510.3 / 573.4 / 426.7 / 1.9 ns in the previous same-harness run (-1.4%, +7.8%, +3.9%, +5.3%). These workloads do not measure SQLite read/write latency; no comparison is available for persistence I/O. No benchmark target failed. WSL2 Linux x86_64, optimized Cargo bench profile. No services were started or stopped.
+
+After removing the runtime legacy-file fallback, a repeat measured entry evaluations at 1.3–17.3 ns and position evaluations at 0.6–4.3 ns. Signal serialization, market-depth assessment, order-request construction, and parameter validation measured 549.0 / 615.1 / 428.3 / 2.0 ns versus 503.0 / 618.3 / 443.2 / 2.0 ns in the preceding run (+9.1%, -0.5%, -3.4%, no change). Several position-evaluation readings were elevated (up to 4.3 ns versus 1.9 ns), while the benchmark still does not measure SQLite persistence. The same-harness run completed; no services were started or stopped.
+
+## Scout terminology consolidation (2026-11-05)
+
+AutoTrader's strategy-evaluation benchmark completed after renaming the Scout flow, API contracts, and audit fields. Compared with the latest SQLite persistence run (entry 1.2–16.5 ns, position 0.6–1.9 ns; helpers 503.0 / 618.3 / 443.2 / 2.0 ns), this run measured entry 1.2–16.4 ns and position 0.6–2.6 ns; helpers 502.5 / 568.4 / 430.0 / 1.9 ns (-0.1%, -8.1%, -3.0%, -5.0%). These workloads do not measure Scout API behavior. The Insights calculations benchmark measured 11,948.9 / 12,022.7 / 247.9 / 17.5 / 335.3 / 44.2 ns for live snapshot, snapshot with explanations, feature extraction, return context, input diagnostics, and book snapshot. Compared with the latest comparable recorded readings (11,308.8 / 11,654.3 / 244.1 / 17.5 / 327.1 / 44.6 ns), changes are +5.7%, +3.2%, +1.6%, no change, +2.5%, and -0.9%. These are single-run variations; the rename does not change these calculation paths. AutoTrader tests passed (136), Insights tests passed (18 library and 29 binary), Scouts tests passed (27), and React tests passed (84). WSL2 Linux x86_64, optimized Cargo bench profile. No services were started or stopped.
+
+## Scout outcome proxy removal repeat (2026-11-05)
+
+AutoTrader's strategy-evaluation benchmark completed after removing the obsolete AutoTrader-to-Scouts forwarding proxy. Compared with the immediately preceding Scout terminology run (entry 1.2–16.4 ns, position 0.6–2.6 ns; serialization/depth/order/parameter helpers 502.5 / 568.4 / 430.0 / 1.9 ns), this run measured entry 1.2–16.7 ns, position 0.6–4.2 ns, and helpers 514.0 / 586.6 / 411.9 / 2.0 ns (+2.3%, +3.2%, -4.2%, +5.3%). The position maximum widened in this single run; timing noise and per-strategy variation cannot be separated from this aggregate range. The proxy removal does not alter the evaluator or helper workloads. AutoTrader tests passed (136). No benchmark targets failed. WSL2 Linux x86_64, optimized Cargo bench profile. No services were started or stopped.
+
+## Live Signals service split (2026-11-05)
+
+The Insights calculations benchmark completed twice with the same optimized Cargo bench target. The second run measured 11,250.7 ns live snapshot, 11,536.4 ns with explanations, 247.1 ns research feature extraction, 17.6 ns return context, 321.9 ns market input diagnostics, and 44.2 ns book snapshot. Compared with the latest same-workload readings above (11,948.9 / 12,022.7 / 247.9 / 17.5 / 335.3 / 44.2 ns), changes were -5.8%, -4.0%, -0.3%, +0.6%, -4.0%, and no change. This split leaves the measured engine calculations unchanged; these results show no material regression. WSL2 Linux x86_64, 32 logical CPUs, optimized Cargo bench profile; load average was about 4.9 during the run. No benchmark target failed. Services were not started during benchmarking.
+
+The final Insights calculations repeat measured 11,091.4 ns live snapshot, 12,049.4 ns with explanations, 241.4 ns research feature extraction, 17.7 ns return context, 318.9 ns input diagnostics, and 44.5 ns book snapshot. Against the preceding same-harness run (11,250.7 / 11,536.4 / 247.1 / 17.6 / 321.9 / 44.2 ns), differences were -1.4%, +4.4%, -2.3%, +0.6%, -0.9%, and +0.7%. The explanation variant moved +4.4% in this single run; the other paths were within 2.3%. No benchmark target failed. WSL2 Linux x86_64, optimized Cargo bench profile. Services were not started during benchmarking.
+
+## Dated-carry normalized SQLite storage (2026-11-05)
+
+The AutoTrader `strategy_evaluation` benchmark completed with the optimized Cargo bench profile. Entry evaluation ranged from 1.3–16.8 ns (previous run: 2.2–24.6 ns), and position evaluation ranged from 0.6–2.6 ns (previous: 1.5–5.7 ns). Signal serialization measured 509.3 ns (previous 572.9 ns, -11.1%), market-depth assessment 574.3 ns (837.2 ns, -31.4%), limit-order request construction 406.4 ns (434.5 ns, -6.5%), and parameter validation 2.3 ns (2.1 ns, +9.5%). These single-run changes are unrelated to the persistence schema and remain within noisy microbenchmark variation; the strategy benchmark does not measure SQLite persistence. WSL2 Linux x86_64, optimized Cargo bench profile. No benchmark targets failed. Services were not started or stopped.
+
+## Follow-up run (2026-11-05 09:24 UTC)
+
+### Position management float round-trip verification and benchmarks
+
+Enabled `serde_json`'s `float_roundtrip` feature after comparison exposed tiny `f64` differences when SQLite JSON payloads were loaded. Regenerated SQLite from the original MessagePack file and verified exact equality across trades, topups, resting orders, barrier orders, scheduled runs, and account metadata. Temporary verification code was removed after the check.
+
+| Workload | 2026-11-02 baseline | Current run | Change |
+|---|---:|---:|---:|
+| 100-fill MessagePack decode | 121.7 us | 119.8 us | -1.6% |
+| 100-fill JSON decode | 133.7 us | 136.5 us | +2.1% |
+| 100-fill MessagePack encode | 19.6 us | 19.6 us | Within run variation |
+| 100-fill JSON encode | 32.0 us | 31.6 us | -1.4% |
+| 100,000-fill MessagePack decode | 175.0 ms | 192.4 ms | +9.9% |
+| 100,000-fill JSON decode | 189.0 ms | 181.3 ms | -4.1% |
+| 100,000-fill MessagePack encode | 64.5 ms | 59.7 ms | -7.4% |
+| 100,000-fill JSON encode | 102.3 ms | 92.3 ms | -9.8% |
+| Concurrent atomic file workload | 1,869 ms | 1,974 ms | +5.6% |
+| Position aggregation proxy | 4.385 ms | 3.772 ms | -14.0% |
+| Indexed lookup / count scan | 58.4 / 53.0 ns | 48.1 / 49.5 ns | -17.6% / -6.6% |
+
+The 100k MessagePack decode and concurrent file workload were slower in this single run; the file benchmark remains a JSON rename workload and does not represent SQLite persistence. No SQLite write benchmark exists yet, so these results do not measure production database save latency. All available crate benchmark targets completed; the optional HTTP benchmark was skipped because `BENCH_SERVICE_URL` was unset. Environment and workload match the recorded WSL2 baseline; single-run variance applies.
+
+## Live Signals function-level tests (2026-11-05)
+
+`cargo test --manifest-path src/rust/live_signals/Cargo.toml` passed all 23 tests covering market-event decoding, news filtering and weighting, context refresh, signal state/enqueue, sharded event processing, delivery success/failure and acknowledgement, and API handlers. The crate has no benchmark targets. `cargo bench --manifest-path src/rust/live_signals/Cargo.toml` completed successfully; Cargo ran the 23 test harness cases in bench mode with all ignored, so no performance workloads were available. No comparable Live Signals benchmark baseline exists.
+
+## Position-management function coverage tests (2026-11-05)
+
+`cargo bench` completed all four position-management benchmark targets. The optional `service_http` workload was skipped because `BENCH_SERVICE_URL` was unset; no services were started. The test and coverage additions do not change the measured hot paths.
+
+| Workload | Latest comparable run (2026-11-05) | Current | Change |
+|---|---:|---:|---:|
+| 100-fill MessagePack / JSON decode | 119.8 / 136.5 us | 122.3 / 140.4 us | +2.1% / +2.9% |
+| 100-fill MessagePack / JSON encode | 19.6 / 31.6 us | 18.5 / 32.4 us | -5.8% / +2.7% |
+| 100,000-fill MessagePack / JSON decode | 192.4 / 181.3 ms | 171.9 / 194.2 ms | -10.7% / +7.1% |
+| 100,000-fill MessagePack / JSON encode | 59.7 / 92.3 ms | 74.2 / 106.8 ms | +24.3% / +15.8% |
+| Concurrent atomic file workload | 1,974 ms | 1,958 ms | -0.8% |
+| Position aggregation proxy | 3.772 ms | 3.958 ms | +4.9% |
+| Indexed lookup / count scan | 48.1 / 49.5 ns | 49.3 / 52.7 ns | +2.5% / +6.5% |
+
+The 100k-fill JSON and MessagePack encode timings increased versus the immediately preceding single run, while 100k decode and the concurrent file workload improved. These are standalone serialization and filesystem workloads; no serialization or filesystem implementation changed in this task, so the variation does not indicate a measured effect from the coverage tests. Compared with the original persisted position-management baseline, the 100k MessagePack decode remained slightly faster (171.9 vs 175.0 ms) and the aggregation proxy improved (3.958 vs 4.385 ms); other observed differences remain single-run noise. Environment: WSL2 Linux x86_64, optimized Cargo bench profile, targets run serially. No benchmark target failed.
+
+## Scout configuration ownership (2026-11-05)
+
+AutoTrader and Insights benchmark targets completed serially after the settings ownership changes. AutoTrader entry evaluation ranged 1.2–16.1 ns and position evaluation 0.6–1.9 ns, versus the latest recorded 1.3–16.8 / 0.6–2.6 ns. Signal serialization measured 521.0 ns (+2.3% vs 509.3 ns), market-depth assessment 542.0 ns (-5.6% vs 574.3 ns), limit request construction 386.5 ns (-4.9% vs 406.4 ns), and parameter validation 1.8 ns (-21.7% vs 2.3 ns). No material degradation was observed.
+
+Insights measured 10,662.7 ns live snapshot, 11,024.3 ns with explanations, 240.9 ns feature extraction, 17.4 ns return context, 345.6 ns input diagnostics, and 44.2 ns book snapshot. Compared with the latest recorded 11,091.4 / 12,049.4 / 241.4 / 17.7 / 318.9 / 44.5 ns, changes were -3.9%, -8.5%, -0.2%, -1.7%, +8.4%, and -0.7%. Input diagnostics was the only higher measurement; its code path was not changed by this task, and this single run is not enough to attribute a regression. Scouts has no performance benchmark target; `cargo bench` ran its 28 tests in bench mode with all ignored. WSL2 Linux x86_64, optimized Cargo bench profile; no services were started or stopped.

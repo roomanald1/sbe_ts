@@ -59,10 +59,12 @@
 
 ## Build caches
 
+- Do not put one-off data migration or legacy import code in runtime application paths. Prefer explicit migration scripts, run them separately, verify the destination data, and remove temporary scripts when the migration is complete.
+
 - Run frontend targets from the repo root with ./nx <target> react-app. Nx caches build, lint, and typecheck; serve and preview are continuous.
 - Cargo reuses build artifacts in the crate's target directory. Avoid cleaning caches unless stale output is suspected.
 - After any TypeScript source or test changes, run the React app TypeScript test suite with npm test from src/typescript/workspace/apps/react-app, even when the change seems unrelated to the tests. Run any additional focused typecheck, lint, or build target when the change warrants it.
-- After any Rust source or test changes, run the relevant Rust tests and benchmarks for the affected crate(s). Before benchmarking, read research/BENCHMARK_BASELINE.md. Compare the same workloads with the latest recorded run, report any performance degradation along with meaningful changes and environment/workload differences, and append a dated run section with results. Preserve earlier entries. Mark skipped or failed targets explicitly; do not compare unlike workloads as regressions.
+- After any Rust source or test changes, run the relevant Rust tests and benchmarks for the affected crate(s). Before benchmarking, read research/BENCHMARK_BASELINE.md. Compare the same workloads with the latest recorded run, report any performance degradation along with meaningful changes and environment/workload differences, and append a dated run section with results. Keep runs from the most recent three days in full. When recording a new run, compact historical run details older than three days into concise dated summaries that preserve notable regressions/improvements, workload and environment differences, skipped or failed targets, and the latest comparable result for each workload. Keep the original first persisted baseline and its environment/methodology notes intact. Do not discard comparison context or treat unlike workloads as regressions.
 - After modifying Rust code, run `cargo fmt` for the affected crate(s) as the final Rust code maintenance step.
 
 ## Shell command hygiene

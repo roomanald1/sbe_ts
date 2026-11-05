@@ -629,7 +629,7 @@ mod risk_adjusted_monthly_momentum_sizing_tests {
     }
 
     #[test]
-    fn recent_strategy_learning_includes_scout_shadow_outcomes_across_symbols() {
+    fn recent_strategy_learning_includes_scout_outcomes_across_symbols() {
         let strategy = Strategy::Donchian55Btc200;
         let mut settings = Settings::default();
         for (symbol, samples, positive, realized_pnl) in [

@@ -2,3 +2,65 @@
 1793830493.920 INFO test stream ended
 1793830986.699 INFO test stream ended
 1793831141.579 INFO test stream ended
+1793871968.128 INFO test stream ended
+1793871976.418 INFO test stream ended
+1793872051.221 INFO test stream ended
+1793872186.553 INFO test stream ended
+1793872643.350 INFO test stream ended
+1793872706.245 INFO test stream ended
+1793872715.983 INFO test stream ended
+1793872824.665 INFO test stream ended
+1793872838.097 INFO test stream ended
+1793872880.410 INFO test stream ended
+1793872892.180 INFO test stream ended
+1793872954.916 INFO test stream ended
+1793872973.932 INFO test stream ended
+1793872984.407 INFO test stream ended
+1793873257.302 ERROR Ignoring invalid OKX JSON message: expected ident at line 1 column 2
+1793873257.302 INFO OKX tickers subscription batch acknowledged
+1793873257.303 ERROR Ignoring invalid shared OKX trades JSON: expected value at line 1 column 1
+1793873257.303 INFO test stream ended
+1793873268.156 ERROR Ignoring invalid OKX JSON message: expected ident at line 1 column 2
+1793873268.156 INFO OKX tickers subscription batch acknowledged
+1793873268.158 INFO test stream ended
+1793873268.159 ERROR Ignoring invalid shared OKX trades JSON: expected value at line 1 column 1
+1793873357.400 ERROR Ignoring invalid OKX JSON message: expected ident at line 1 column 2
+1793873357.400 INFO OKX tickers subscription batch acknowledged
+1793873357.401 ERROR Ignoring invalid OKX hedge ticker JSON: expected ident at line 1 column 2
+1793873357.402 INFO test stream ended
+1793873357.404 ERROR Ignoring invalid shared OKX trades JSON: expected value at line 1 column 1
+1793873367.232 ERROR Ignoring invalid OKX JSON message: expected ident at line 1 column 2
+1793873367.232 INFO OKX tickers subscription batch acknowledged
+1793873367.234 ERROR Ignoring invalid OKX hedge ticker JSON: expected ident at line 1 column 2
+1793873367.235 ERROR Ignoring invalid shared OKX trades JSON: expected value at line 1 column 1
+1793873367.235 INFO test stream ended
+1793873464.788 ERROR Ignoring invalid OKX JSON message: expected ident at line 1 column 2
+1793873464.788 INFO OKX tickers subscription batch acknowledged
+1793873464.789 ERROR Ignoring invalid OKX hedge ticker JSON: expected ident at line 1 column 2
+1793873464.791 INFO test stream ended
+1793873464.791 ERROR Ignoring invalid shared OKX trades JSON: expected value at line 1 column 1
+1793873474.858 ERROR Ignoring invalid OKX JSON message: expected ident at line 1 column 2
+1793873474.858 ERROR Ignoring invalid OKX hedge ticker JSON: expected ident at line 1 column 2
+1793873474.858 INFO OKX tickers subscription batch acknowledged
+1793873474.858 INFO test stream ended
+1793873474.859 ERROR Ignoring invalid shared OKX trades JSON: expected value at line 1 column 1
+1793873535.337 ERROR Ignoring invalid OKX JSON message: expected ident at line 1 column 2
+1793873535.338 INFO OKX tickers subscription batch acknowledged
+1793873535.339 ERROR Ignoring invalid OKX hedge ticker JSON: expected ident at line 1 column 2
+1793873535.340 INFO test stream ended
+1793873535.341 ERROR Ignoring invalid shared OKX trades JSON: expected value at line 1 column 1
+1793873545.884 ERROR Ignoring invalid OKX hedge ticker JSON: expected ident at line 1 column 2
+1793873545.885 ERROR Ignoring invalid OKX JSON message: expected ident at line 1 column 2
+1793873545.885 INFO OKX tickers subscription batch acknowledged
+1793873545.886 INFO test stream ended
+1793873545.887 ERROR Ignoring invalid shared OKX trades JSON: expected value at line 1 column 1
+1793873594.430 ERROR Ignoring invalid OKX JSON message: expected ident at line 1 column 2
+1793873594.430 INFO OKX tickers subscription batch acknowledged
+1793873594.432 ERROR Ignoring invalid OKX hedge ticker JSON: expected ident at line 1 column 2
+1793873594.434 INFO test stream ended
+1793873594.434 ERROR Ignoring invalid shared OKX trades JSON: expected value at line 1 column 1
+1793873603.159 ERROR Ignoring invalid OKX JSON message: expected ident at line 1 column 2
+1793873603.160 INFO OKX tickers subscription batch acknowledged
+1793873603.161 ERROR Ignoring invalid OKX hedge ticker JSON: expected ident at line 1 column 2
+1793873603.163 INFO test stream ended
+1793873603.163 ERROR Ignoring invalid shared OKX trades JSON: expected value at line 1 column 1

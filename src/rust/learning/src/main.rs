@@ -6,7 +6,7 @@ async fn main() -> anyhow::Result<()> {
     let address = std::env::var("LEARNING_LISTEN_ADDR").unwrap_or_else(|_| "127.0.0.1:3010".into());
     let path = std::env::var("LEARNING_STATE_FILE")
         .map(Into::into)
-        .unwrap_or_else(|_| "learning_state.json".into());
+        .unwrap_or_else(|_| "learning_state.sqlite".into());
     let listener = tokio::net::TcpListener::bind(&address).await?;
     println!("Learning service listening on http://{address}");
     let app = learning::router(path)

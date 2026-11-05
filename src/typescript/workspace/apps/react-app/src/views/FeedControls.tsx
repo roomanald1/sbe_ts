@@ -62,9 +62,9 @@ export function FeedControls({
   const priceChanges = useBehaviorSnapshot(priceChangesModel.state$);
   const latestPriceChanges = useRef(priceChanges);
   latestPriceChanges.current = priceChanges;
-  const [sampledPriceChanges, setShadowPriceChanges] = useState(priceChanges);
+  const [sampledPriceChanges, setSampledPriceChanges] = useState(priceChanges);
   useEffect(() => {
-    const timer = setInterval(() => setShadowPriceChanges(latestPriceChanges.current), 1_000);
+    const timer = setInterval(() => setSampledPriceChanges(latestPriceChanges.current), 1_000);
     return () => clearInterval(timer);
   }, []);
   const [dragPriceChanges, setDragPriceChanges] = useState<typeof priceChanges | null>(null);
@@ -106,7 +106,7 @@ export function FeedControls({
     const content = <DashboardWidgetContent
       widget={widget}
       symbol={symbol}
-      prices={['auto-trader-outcomes', 'auto-trader-live-positions', 'auto-trader-shadow-positions'].includes(widget.type) ? sampledPriceChanges : widgetPriceChanges}
+      prices={['auto-trader-outcomes', 'auto-trader-live-positions', 'auto-trader-scout-positions'].includes(widget.type) ? sampledPriceChanges : widgetPriceChanges}
       connection={connection}
       feedSource={feedSource}
       connectionState={connectionState}

@@ -79,8 +79,8 @@ fn strategy_trade_learning_key(symbol: &str, strategy: &str) -> String {
 }
 
 #[cfg(test)]
-fn strategy_shadow_learning_key(symbol: &str, strategy: &str, scenario: &str) -> String {
-    format!("shadow:{symbol}:{strategy}:{scenario}")
+fn strategy_scout_learning_key(symbol: &str, strategy: &str, scenario: &str) -> String {
+    format!("scout:{symbol}:{strategy}:{scenario}")
 }
 
 #[cfg(test)]
@@ -89,20 +89,20 @@ fn strategy_parameter_probe_learning_key(symbol: &str, strategy: &str, parameter
 }
 
 #[cfg(test)]
-fn strategy_parameter_shadow_combination_learning_key(
+fn strategy_parameter_scout_combination_learning_key(
     symbol: &str, strategy: &str, combination: &str,
 ) -> String {
-    format!("probe_combo_shadow:{symbol}:{strategy}:{combination}")
+    format!("probe_combo_scout:{symbol}:{strategy}:{combination}")
 }
 
 #[cfg(test)]
-fn strategy_parameter_shadow_probe_learning_key(
+fn strategy_parameter_scout_probe_learning_key(
     symbol: &str,
     strategy: &str,
     parameter: &str,
     value: f64,
 ) -> String {
-    format!("probe_shadow:{symbol}:{strategy}:{parameter}:{value:.8}")
+    format!("probe_scout:{symbol}:{strategy}:{parameter}:{value:.8}")
 }
 
 fn record_strategy_trade_outcome(

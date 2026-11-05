@@ -1,6 +1,6 @@
 import { BehaviorSubject } from 'rxjs';
 
-export type AutoTraderShadowPosition = {
+export type AutoTraderScoutPosition = {
   decisionId: string;
   symbol: string;
   strategy: string;
@@ -58,7 +58,7 @@ type ScoutCounts = { total: number; open: number; resolved: number; wins: number
 export type ScoutSourceFilter = 'live' | 'all';
 export type ScoutStatusFilter = 'all' | 'open' | 'closed';
 type ScoutOutcomesResponse = {
-  rows: AutoTraderShadowPosition[];
+  rows: AutoTraderScoutPosition[];
   summary: { all: ScoutCounts; live: ScoutCounts };
   learningRows: ScoutLearningSummary[];
   symbols: string[];
@@ -80,7 +80,7 @@ type ScoutComparisonOutcome = {
   stage?: string;
   scout_comparison_id?: string;
   scout_comparison_role?: 'baseline' | 'variant';
-  shadow_net_return_percent?: number;
+  scout_net_return_percent?: number;
   paired_delta_percent?: number;
 };
 
@@ -94,9 +94,9 @@ export function pairedScoutDeltas(outcomes: ScoutComparisonOutcome[]): Map<strin
       deltas.set(id, outcome.paired_delta_percent);
     }
     if ((outcome.scout_comparison_role !== 'baseline' && outcome.scout_comparison_role !== 'variant')
-      || typeof outcome.shadow_net_return_percent !== 'number' || !Number.isFinite(outcome.shadow_net_return_percent)) continue;
+      || typeof outcome.scout_net_return_percent !== 'number' || !Number.isFinite(outcome.scout_net_return_percent)) continue;
     const pair = returns.get(id) ?? {};
-    pair[outcome.scout_comparison_role] = outcome.shadow_net_return_percent;
+    pair[outcome.scout_comparison_role] = outcome.scout_net_return_percent;
     returns.set(id, pair);
   }
   for (const [id, pair] of returns) {
@@ -107,7 +107,7 @@ export function pairedScoutDeltas(outcomes: ScoutComparisonOutcome[]): Map<strin
   return deltas;
 }
 
-export class AutoTraderShadowModel {
+export class AutoTraderScoutModel {
   readonly state$ = new BehaviorSubject<ScoutOutcomesResponse & { loading: boolean; error?: string }>({ rows: [], summary: { all: { total: 0, open: 0, resolved: 0, wins: 0, losses: 0, flats: 0, unavailable: 0 }, live: { total: 0, open: 0, resolved: 0, wins: 0, losses: 0, flats: 0, unavailable: 0 } }, learningRows: [], symbols: [], learningSymbol: null, learningOutcomes: [], updatedAt: 0, source: 'live', status: 'all', page: 0, pageNumber: 1, pageSize: 50, pageCount: 0, totalRows: 0, hasPrevious: false, hasNext: false, loading: true });
   private timer?: ReturnType<typeof setTimeout>;
   private refreshing = false;
@@ -172,14 +172,14 @@ export class AutoTraderShadowModel {
     try {
       const filters = this.state$.value;
       const query = new URLSearchParams({ source: filters.source, status: filters.status, page: String(filters.page), page_size: String(filters.pageSize), learning_symbol: filters.learningSymbol ?? 'all' });
-      const response = await fetch('/scouts/shadow-outcomes?' + query.toString(), { signal: controller.signal });
+      const response = await fetch('/scouts/outcomes?' + query.toString(), { signal: controller.signal });
       if (!response.ok) throw new Error('Scout outcome data unavailable');
       const data = await response.json() as ScoutOutcomesResponse;
       if (requestId !== this.requestId) return;
       this.state$.next({ ...data, loading: false, error: undefined });
     } catch (error) {
       if (requestId === this.requestId) {
-        this.state$.next({ ...this.state$.value, loading: false, error: error instanceof Error ? error.message : 'Could not load shadow outcomes' });
+        this.state$.next({ ...this.state$.value, loading: false, error: error instanceof Error ? error.message : 'Could not load scout outcomes' });
       }
     } finally {
       if (requestId === this.requestId) {
@@ -190,4 +190,4 @@ export class AutoTraderShadowModel {
   }
 }
 
-export const autoTraderShadowModel = new AutoTraderShadowModel();
+export const autoTraderScoutModel = new AutoTraderScoutModel();

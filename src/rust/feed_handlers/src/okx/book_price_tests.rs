@@ -2,6 +2,44 @@
 mod book_price_tests {
     use super::{Book, Price, Snapshot, Update};
 
+    #[test]
+    fn price_units_and_book_accessors_report_configured_state() {
+        let price = Price::from_units(2 * Price::SCALE);
+        assert_eq!(price.units(), 2 * Price::SCALE);
+        assert_eq!(price.as_f64(), 2.0);
+
+        let book = Book::new(Price::from_decimal("0.25").unwrap(), price, 3).unwrap();
+        assert_eq!(book.tick_size(), Price::from_decimal("0.25").unwrap());
+        assert_eq!(book.max_array_size(), 9);
+        assert_eq!(book.sequence(), None);
+        assert_eq!(book.bid_sizes_by_tick(), &[0.0; 9]);
+        assert_eq!(book.ask_sizes_by_tick(), &[0.0; 9]);
+        assert_eq!(book.bid_size_at_tick(0), None);
+        assert_eq!(book.ask_size_at_tick(0), None);
+        assert_eq!(book.bid_size_at_tick(9), None);
+        assert_eq!(book.ask_size_at_tick(9), None);
+        assert_eq!(book.best_bid(), None);
+        assert_eq!(book.best_ask(), None);
+    }
+
+    #[test]
+    fn rejects_invalid_book_configuration_and_direct_sizes() {
+        let valid_tick = Price::from_decimal("0.5").unwrap();
+        let valid_max = Price::from_decimal("10").unwrap();
+        assert!(Book::new(Price::from_units(0), valid_max, 1).is_err());
+        assert!(Book::new(valid_tick, Price::from_units(0), 1).is_err());
+        assert!(Book::new(valid_tick, valid_max, 0).is_err());
+
+        let mut book = Book::new(valid_tick, valid_max, 2).unwrap();
+        for invalid_size in [-1.0, f64::NAN, f64::INFINITY] {
+            assert!(book.set_bid_size_at_tick(1, invalid_size).is_err());
+            assert!(book.set_ask_size_at_tick(1, invalid_size).is_err());
+        }
+        assert_eq!(book.bid_size_at_tick(1), None);
+        assert_eq!(book.ask_size_at_tick(1), None);
+    }
+
+    #[test]
     fn prices_outside_the_configured_array_are_rejected() {
         let mut book = Book::new(
             Price::from_decimal("0.5").unwrap(),

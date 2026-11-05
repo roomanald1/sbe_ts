@@ -17,11 +17,26 @@ fn retry_delay_after_failure(current_delay: Duration, connection_duration: Durat
 mod tests {
     use super::{
         BOOK_DEPTH, BookLevel, BookMessage, INITIAL_RECONNECT_DELAY, MAX_RECONNECT_DELAY,
-        STABLE_CONNECTION_DURATION, TickerMessage, apply_book_side, retry_delay_after_failure,
+        STABLE_CONNECTION_DURATION, TickerMessage, apply_book_side, now_ms,
+        retry_delay_after_failure,
         select_top_instruments, top_book_side, load_book_snapshot,
     };
     use serde_json::json;
     use std::time::Duration;
+
+    #[test]
+    fn now_ms_returns_a_current_unix_timestamp() {
+        let before = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        let actual = now_ms();
+        let after = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        assert!((before..=after).contains(&actual));
+    }
 
     #[test]
     fn reconnect_delay_resets_after_a_stable_connection() {

@@ -47,8 +47,8 @@
   </main>
   <div class="message" id="message" role="status" aria-live="polite"></div>
   <script>
-    const services={system:['feed-handlers','position-management','execution','insights','insights-maintenance','auto-trader','news-sentiment','learning','scouts','web'],infra:['prometheus','loki','alloy','node-exporter','app-exporter','grafana']};
-    const swaggerPorts={'feed-handlers':3001,'position-management':3002,execution:3003,insights:3004,'auto-trader':3005,learning:3010,scouts:3011};
+    const services={system:['feed-handlers','position-management','execution','insights','insights-maintenance','live-signals','auto-trader','news-sentiment','learning','scouts','web'],infra:['prometheus','loki','alloy','node-exporter','app-exporter','grafana']};
+    const swaggerPorts={'feed-handlers':3001,'position-management':3002,execution:3003,insights:3004,'live-signals':3007,'auto-trader':3005,learning:3010,scouts:3011};
     let messageTimer;
     function showMessage(text,error=false){const el=document.querySelector('#message');el.textContent=text;el.classList.toggle('error',error);el.classList.add('visible');clearTimeout(messageTimer);messageTimer=setTimeout(()=>el.classList.remove('visible'),4200)}
     async function action(project,verb,service){const target=service|| (project==='all'?'everything':project);showMessage(`${verb==='start'?'Starting':verb==='stop'?'Stopping':'Restarting'} ${target}…`);try{const response=await fetch('/api/action',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({project,action:verb,service})});const result=await response.json();if(!response.ok)throw Error(result.error||'Action failed');const scope=service|| (project==='all'?'All services':project);showMessage(`${scope} ${verb==='start'?'started':verb==='stop'?'stopped':'restarted'}`);await refresh()}catch(error){showMessage(error.message,true)}}

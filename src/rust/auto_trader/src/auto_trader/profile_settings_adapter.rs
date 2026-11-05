@@ -99,7 +99,7 @@ fn best_scout_parameter_combination(
     settings: &Settings, symbol: &str, strategy: Strategy, baseline: &BTreeMap<String, f64>,
 ) -> Option<BTreeMap<String, f64>> {
     let learning_prefix = if strategy == Strategy::DatedCarry {
-        "probe_combo_shadow"
+        "probe_combo_scout"
     } else {
         "paired_probe_combo"
     };
@@ -234,18 +234,18 @@ fn strategy_parameter_profile(
     strategy: Strategy,
 ) -> StrategyParameterProfile {
     let mut learning = strategy_learning_stats(settings, symbol, strategy);
-    let legacy_shadow_key = format!("shadow:{symbol}:{}", strategy.as_str());
-    let scenario_shadow_prefix = format!("{legacy_shadow_key}:");
-    for (key, stored_shadow) in &settings.learning {
-        if key != &legacy_shadow_key && !key.starts_with(&scenario_shadow_prefix) {
+    let legacy_scout_key = format!("scout:{symbol}:{}", strategy.as_str());
+    let scenario_scout_prefix = format!("{legacy_scout_key}:");
+    for (key, stored_scout) in &settings.learning {
+        if key != &legacy_scout_key && !key.starts_with(&scenario_scout_prefix) {
             continue;
         }
-        let mut shadow = stored_shadow.clone();
-        decay_learning_stats(&mut shadow, current_time_ms());
-        learning.samples += shadow.samples;
-        learning.positive += shadow.positive;
-        learning.realized_pnl += shadow.realized_pnl;
-        learning.recent_trade_pnls.extend(shadow.recent_trade_pnls);
+        let mut scout = stored_scout.clone();
+        decay_learning_stats(&mut scout, current_time_ms());
+        learning.samples += scout.samples;
+        learning.positive += scout.positive;
+        learning.realized_pnl += scout.realized_pnl;
+        learning.recent_trade_pnls.extend(scout.recent_trade_pnls);
     }
     learning.recent_trade_pnls.sort_unstable_by(|left, right| right.0.cmp(&left.0));
     learning.recent_trade_pnls.truncate(STRATEGY_SIZING_RECENT_TRADES);
@@ -421,7 +421,7 @@ fn strategy_threshold_samples_across_symbols(
             let parts = key.split(':').collect::<Vec<_>>();
             (parts.len() == 3 && parts[0] == "trade" && parts[2] == strategy.as_str())
                 || (matches!(parts.len(), 3 | 4)
-                    && parts[0] == "shadow"
+                    && parts[0] == "scout"
                     && parts[2] == strategy.as_str())
         })
         .flat_map(|(_, stats)| stats.threshold_samples.iter().cloned())
@@ -1114,7 +1114,7 @@ mod threshold_walk_forward_tests {
 }
 
 #[cfg(test)]
-mod scout_shadow_parameter_learning_tests {
+mod scout_parameter_learning_tests {
     use super::*;
 
     #[test]
@@ -1158,9 +1158,9 @@ mod scout_shadow_parameter_learning_tests {
     fn pooled_threshold_history_includes_same_strategy_scout_samples() {
         let mut settings = Settings::default();
         let strategy = Strategy::LiveTradeFlow;
-        let key = strategy_shadow_learning_key("ETH-USDT", strategy.as_str(), "strategy");
-        let shadow = settings.learning.entry(key).or_default();
-        shadow.threshold_samples.push(StrategyThresholdSample {
+        let key = strategy_scout_learning_key("ETH-USDT", strategy.as_str(), "strategy");
+        let scout = settings.learning.entry(key).or_default();
+        scout.threshold_samples.push(StrategyThresholdSample {
             timestamp_ms: 1,
             parameter_key: StrategyParameterKey::MinimumFlowImbalance,
             threshold: 0.15,
@@ -1177,15 +1177,15 @@ mod scout_shadow_parameter_learning_tests {
     fn scout_outcomes_contribute_to_strategy_parameter_learning() {
         let mut settings = Settings::default();
         let strategy = Strategy::Donchian55Btc200;
-        let key = strategy_shadow_learning_key("BTC-USDT", strategy.as_str(), "strategy");
-        let shadow = settings.learning.entry(key).or_default();
-        shadow.samples = 20;
-        shadow.positive = 15;
-        shadow.realized_pnl = 1.5;
-        shadow.recent_trade_pnls = (0..20)
+        let key = strategy_scout_learning_key("BTC-USDT", strategy.as_str(), "strategy");
+        let scout = settings.learning.entry(key).or_default();
+        scout.samples = 20;
+        scout.positive = 15;
+        scout.realized_pnl = 1.5;
+        scout.recent_trade_pnls = (0..20)
             .map(|index| (current_time_ms(), if index < 15 { 0.1 } else { -0.05 }))
             .collect();
-        let tight_key = strategy_shadow_learning_key("BTC-USDT", strategy.as_str(), "tight");
+        let tight_key = strategy_scout_learning_key("BTC-USDT", strategy.as_str(), "tight");
         let tight = settings.learning.entry(tight_key).or_default();
         tight.samples = 10;
         tight.positive = 8;
@@ -1282,18 +1282,18 @@ mod scout_parameter_variant_tests {
 }
 
 #[cfg(test)]
-mod dated_carry_shadow_probe_learning_tests {
+mod dated_carry_scout_probe_learning_tests {
     use super::*;
 
     #[test]
-    fn promotion_uses_one_day_shadow_markouts_for_dated_carry_variants() {
+    fn promotion_uses_one_day_scout_markouts_for_dated_carry_variants() {
         let mut settings = Settings::default();
         let strategy = Strategy::DatedCarry;
-        let shadow_key = strategy_parameter_shadow_probe_learning_key(
+        let scout_key = strategy_parameter_scout_probe_learning_key(
             "BTC-USDT", strategy.as_str(), "carry_minimum_days_to_expiry", 6.0,
         );
         for _ in 0..20 {
-            record_learning_outcome(settings.learning.entry(shadow_key.clone()).or_default(), 0.02);
+            record_learning_outcome(settings.learning.entry(scout_key.clone()).or_default(), 0.02);
         }
         let profile = strategy_parameter_profile(&settings, "BTC-USDT", strategy);
         let minimum_days = profile.parameters.iter()
@@ -1315,7 +1315,7 @@ mod dated_carry_shadow_probe_learning_tests {
     }
 
     #[test]
-    fn dated_carry_shadow_markouts_promote_the_tested_pair_in_its_profile_context() {
+    fn dated_carry_scout_markouts_promote_the_tested_pair_in_its_profile_context() {
         let mut settings = Settings::default();
         let strategy = Strategy::DatedCarry;
         let baseline = strategy.parameter_specs().into_iter()
@@ -1324,7 +1324,7 @@ mod dated_carry_shadow_probe_learning_tests {
         let mut probe_profile = baseline.clone();
         for (key, value) in &combination { probe_profile.insert(key.clone(), *value); }
         let combination_key = scout_combination_key(&combination, &probe_profile).unwrap();
-        let learning_key = strategy_parameter_shadow_combination_learning_key(
+        let learning_key = strategy_parameter_scout_combination_learning_key(
             "BTC-USDT", strategy.as_str(), &combination_key,
         );
         for _ in 0..MIN_SCOUT_PARAMETER_VARIANT_SAMPLES {

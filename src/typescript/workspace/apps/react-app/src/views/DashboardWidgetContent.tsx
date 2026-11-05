@@ -17,7 +17,7 @@ import { DatedCarry } from './DatedCarry';
 import { AutoTraderDiagnostics } from './AutoTraderDiagnostics';
 import { AutoTraderLearningWidget } from './AutoTraderLearningWidget';
 import { AutoTraderOutcomes } from './AutoTraderOutcomes';
-import { AutoTraderShadowPositions } from './AutoTraderShadowPositions';
+import { AutoTraderScouts } from './AutoTraderScouts';
 import { ExecutionFees } from './ExecutionFees';
 import { OrderBookPopup } from './OrderBookPopup';
 import { TradesView } from './TradesView';
@@ -60,7 +60,7 @@ function DashboardWidgetContentComponent(props: Props): ReactNode {
     case 'auto-trader-outcomes': return <AutoTraderOutcomes ticks={prices.ticks} />;
     case 'auto-trader-completed-positions': return <AutoTraderOutcomes closedOnly />;
     case 'auto-trader-live-positions': return <AutoTraderOutcomes ticks={prices.ticks} liveOnly />;
-    case 'auto-trader-shadow-positions': return <AutoTraderShadowPositions />;
+    case 'auto-trader-scout-positions': return <AutoTraderScouts />;
     case 'execution-fees': return <ExecutionFees />;
     case 'trades': return feedSource === 'okx' ? <TradesView streamKey={widget.id} symbol={symbol} symbols={selectionSymbols} onSymbolChange={updateSymbol} connection={connection} paused={paused} /> : <UnavailableFeed label="Recent trades" message="Recent trade data is available with the OKX feed." />;
     case 'liquidity': return feedSource === 'okx' ? <MarketLiquidity streamKey={widget.id} symbol={symbol} symbols={selectionSymbols} onSymbolChange={updateSymbol} connection={connection} paused={paused} /> : <UnavailableFeed label="Market liquidity" message="Market liquidity indicators are available with the OKX feed." />;
@@ -78,7 +78,7 @@ function UnavailableFeed({ label, message }: { label: string; message: string })
   return <section className="feed-section" aria-label={label}><div className="book-popup-message">{message}</div></section>;
 }
 
-const priceDrivenWidgets = new Set<DashboardWidget['type']>(['grid', 'table', 'chart', 'close-insights', 'auto-trader-outcomes', 'auto-trader-live-positions', 'auto-trader-shadow-positions']);
+const priceDrivenWidgets = new Set<DashboardWidget['type']>(['grid', 'table', 'chart', 'close-insights', 'auto-trader-outcomes', 'auto-trader-live-positions', 'auto-trader-scout-positions']);
 
 export const DashboardWidgetContent = memo(DashboardWidgetContentComponent, (previous, next) =>
   previous.widget === next.widget
