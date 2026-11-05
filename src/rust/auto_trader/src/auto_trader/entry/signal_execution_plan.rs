@@ -35,30 +35,14 @@ fn learned_strategy_size_multiplier(outcomes: &LearningStats) -> f64 {
 }
 
 fn strategy_learning_stats_across_symbols(settings: &Settings, strategy: Strategy) -> LearningStats {
-    let mut recent_outcomes = settings
-        .learning
-        .iter()
-        .filter(|(key, _)| {
-            let parts = key.split(':').collect::<Vec<_>>();
-            (parts.len() == 3 && parts[0] == "trade" && parts[2] == strategy.as_str())
-                || (matches!(parts.len(), 3 | 4)
-                    && parts[0] == "shadow"
-                    && parts[2] == strategy.as_str())
+    settings.learned_profiles.values()
+        .filter(|profile| profile.strategy == strategy.as_str())
+        .fold(LearningStats::default(), |mut total, profile| {
+            total.samples = total.samples.saturating_add(profile.learning_samples);
+            total.positive = total.positive.saturating_add(profile.positive_samples);
+            total.realized_pnl += profile.realized_pnl;
+            total
         })
-        .flat_map(|(_, stats)| stats.recent_trade_pnls.iter().copied())
-        .collect::<Vec<_>>();
-    recent_outcomes.sort_unstable_by(|left, right| right.0.cmp(&left.0));
-
-    let mut recent = LearningStats::default();
-    for (timestamp, pnl) in recent_outcomes.into_iter().take(STRATEGY_SIZING_RECENT_TRADES) {
-        recent.samples += 1;
-        recent.realized_pnl += pnl;
-        if pnl > 0.0 {
-            recent.positive += 1;
-        }
-        recent.recent_trade_pnls.push((timestamp, pnl));
-    }
-    recent
 }
 
 fn daily_strategy_effective_budget(settings: &Settings, strategy: &str) -> f64 {
@@ -68,12 +52,13 @@ fn daily_strategy_effective_budget(settings: &Settings, strategy: &str) -> f64 {
     else {
         return 0.0;
     };
-    base_budget * learned_strategy_size_multiplier(&strategy_learning_stats_across_symbols(settings, kind))
+    base_budget * settings.learned_strategy_size_multipliers
+        .get(kind.as_str()).copied().unwrap_or(1.0)
 }
 
 fn intraday_strategy_size_multiplier(settings: &Settings, strategy: Strategy) -> f64 {
-    learned_strategy_size_multiplier(&strategy_learning_stats_across_symbols(settings, strategy))
-        .min(1.0)
+    settings.learned_strategy_size_multipliers
+        .get(strategy.as_str()).copied().unwrap_or(1.0).min(1.0)
 }
 
 fn signal_weighted_strategy_budget(
@@ -120,7 +105,8 @@ fn signal_weighted_strategy_budget(
         let Some(kind) = signal.strategy.as_deref().and_then(Strategy::from_name)
             .filter(|kind| enabled.contains(kind)) else { continue; };
         let learning = match category {
-            StrategyCategory::Daily => learned_strategy_size_multiplier(&strategy_learning_stats_across_symbols(settings, kind)),
+            StrategyCategory::Daily => settings.learned_strategy_size_multipliers
+                .get(kind.as_str()).copied().unwrap_or(1.0),
             StrategyCategory::Intraday => intraday_strategy_size_multiplier(settings, kind),
         };
         let confidence = if signal.strength.is_finite() { signal.strength.clamp(0.0, 1.0) } else { 0.0 };
@@ -205,6 +191,67 @@ struct SignalExecutionPlan {
     learning_context: String,
 }
 
+async fn execution_learning_decision(
+    client: &reqwest::Client,
+    context: &str,
+    baseline: AutoOrderType,
+    signal: &Signal,
+    risk_appetite: f64,
+    allow_adaptation: bool,
+    exploratory: bool,
+    learning: &BTreeMap<String, ExecutionLearningStats>,
+    import_legacy_learning: bool,
+) -> (strategies::ExecutionLearningResponse, bool) {
+    let order_types = ALL_ORDER_TYPES.iter().filter_map(|kind| {
+        serde_json::to_value(kind).ok()?.as_str().map(str::to_owned)
+    }).collect::<Vec<_>>();
+    let explore_profile_order_types = ALL_ORDER_TYPES.iter().filter(|kind| {
+        exploratory || should_explore_execution_profile(signal, **kind)
+    }).filter_map(|kind| serde_json::to_value(kind).ok()?.as_str().map(str::to_owned)).collect();
+    let request = strategies::ExecutionLearningRequest {
+        context: context.to_owned(),
+        baseline_order_type: serde_json::to_value(baseline).ok()
+            .and_then(|value| value.as_str().map(str::to_owned)).unwrap_or_default(),
+        order_types,
+        profile_count: PARAMETER_PROFILE_COUNT,
+        risk_appetite,
+        allow_order_type_adaptation: allow_adaptation,
+        explore_profile_order_types,
+        learning: if import_legacy_learning {
+            learning.iter().map(|(key, stats)| (key.clone(), strategies::ExecutionLearningStat {
+                samples: stats.samples,
+                filled_samples: stats.filled_samples,
+                fill_rate_total: stats.fill_rate_total,
+                cost_notional: stats.cost_notional,
+                all_in_cost_notional_bps: stats.all_in_cost_notional_bps,
+                updated_at_ms: stats.updated_at_ms,
+            })).collect()
+        } else { BTreeMap::new() },
+    };
+    let base = std::env::var("LEARNING_SERVICE_URL")
+        .unwrap_or_else(|_| "http://127.0.0.1:3010".into());
+    let result = client.post(format!("{}/execution-decision", base.trim_end_matches('/')))
+        .timeout(std::time::Duration::from_millis(250))
+        .json(&request)
+        .send().await
+        .map_err(|error| error.to_string())
+        .and_then(|response| response.error_for_status().map_err(|error| error.to_string()));
+    let response = match result {
+        Ok(response) => response.json::<strategies::ExecutionLearningResponse>().await.ok(),
+        Err(error) => {
+            crate::service_log!("WARN", "Learning service unavailable for execution profile: {error}");
+            None
+        }
+    };
+    let imported = response.is_some() && import_legacy_learning;
+    (response.unwrap_or_else(|| strategies::ExecutionLearningResponse {
+        learned_order_type: Some(request.baseline_order_type),
+        schedule_depth_threshold: DEFAULT_SCHEDULE_DEPTH_RATIO,
+        schedule_threshold_samples: 0,
+        parameter_profiles: BTreeMap::new(),
+    }), imported)
+}
+
 async fn prepare_signal_execution_plan(
     state: &AutoTraderState,
     mut settings: tokio::sync::MutexGuard<'_, Settings>,
@@ -219,8 +266,8 @@ async fn prepare_signal_execution_plan(
     counterfactual_take_profit_percent: f64,
 ) -> Result<SignalExecutionPlan, String> {
     let strategy = signal.strategy.as_deref().and_then(Strategy::from_name);
-    let strategy_profile =
-        strategy.map(|strategy| strategy_parameter_profile(&settings, &signal.symbol, strategy));
+    let strategy_profile = strategy
+        .map(|strategy| learned_strategy_parameter_profile(&settings, &signal.symbol, strategy));
     if let (Some(strategy), Some(profile)) = (strategy, strategy_profile.as_ref()) {
         queue_strategy_profile_registration(&mut settings, &signal.symbol, strategy, profile);
     }
@@ -319,7 +366,18 @@ async fn prepare_signal_execution_plan(
     let risk_size_scale = risk_size_scale(settings.risk_appetite);
     let strategy_size_learning = strategy
         .filter(|kind| kind.is_dated_carry())
-        .map(|kind| strategy_learning_stats(&settings, &signal.symbol, kind));
+        .map(|kind| {
+            settings
+                .learned_profiles
+                .get(&format!("{}:{}", signal.symbol, kind.as_str()))
+                .map(|profile| LearningStats {
+                    samples: profile.learning_samples,
+                    positive: profile.positive_samples,
+                    realized_pnl: profile.realized_pnl,
+                    ..LearningStats::default()
+                })
+                .unwrap_or_default()
+        });
     let learned_size_multiplier = if !scout && !exploratory {
         if strategy.is_some_and(|kind| !kind.is_dated_carry()) {
             // Daily and intraday strategies apply pooled learning to their
@@ -461,21 +519,23 @@ async fn prepare_signal_execution_plan(
             (effective_take_profit_percent, horizon_take_profit_percent)
         };
     let context = market_context(&signal);
-    decay_learning_map(&mut settings.learning, now_ms);
-    let learned_type = if scout {
-        baseline_type
-    } else if let Some(order_type) = adapt_order_type(
-        baseline_type,
+    let (execution_learning, imported_execution_learning) = execution_learning_decision(
+        &state.client,
         &context,
-        &settings.execution_learning,
+        baseline_type,
+        signal,
         settings.risk_appetite,
-    ) {
-        order_type
-    } else {
-        return Err(
-            "Recent closed auto-trades show no profitable order type with enough samples".into(),
-        );
-    };
+        !scout,
+        exploratory,
+        &settings.execution_learning,
+        !settings.execution_learning_imported,
+    ).await;
+    if imported_execution_learning {
+        settings.execution_learning_imported = true;
+    }
+    let learned_type = execution_learning.learned_order_type.as_deref()
+        .and_then(|name| serde_json::from_value::<AutoOrderType>(serde_json::json!(name)).ok())
+        .unwrap_or(baseline_type);
     let side_depth = deep_book
         .map(|assessment| {
             if signal.direction == "bullish" {
@@ -490,8 +550,8 @@ async fn prepare_signal_execution_plan(
     } else {
         0.0
     };
-    let (schedule_depth_threshold, schedule_threshold_samples) =
-        learned_schedule_depth_threshold(&settings.execution_learning, &context);
+    let schedule_depth_threshold = execution_learning.schedule_depth_threshold;
+    let schedule_threshold_samples = execution_learning.schedule_threshold_samples;
     let depth_ratio_bucket = schedule_depth_ratio_bucket(depth_ratio);
     let order_type = score_execution_order_type(
         signal,
@@ -502,14 +562,9 @@ async fn prepare_signal_execution_plan(
         deep_book,
         schedule_depth_threshold,
     );
-    let explore_execution_profile =
-        exploratory || should_explore_execution_profile(signal, order_type);
-    let profile = choose_parameter_profile(
-        order_type,
-        &context,
-        &settings.execution_learning,
-        explore_execution_profile,
-    );
+    let order_type_name = serde_json::to_value(order_type).ok()
+        .and_then(|value| value.as_str().map(str::to_owned)).unwrap_or_default();
+    let profile = execution_learning.parameter_profiles.get(&order_type_name).copied().unwrap_or(0);
     let execution_params = parameter_profile(baseline_params, profile);
     *state.latest_execution_parameters.lock().await = Some(LatestExecutionParameters {
         timestamp: now_ms,
@@ -576,23 +631,28 @@ mod risk_adjusted_monthly_momentum_sizing_tests {
     #[test]
     fn recent_strategy_learning_includes_scout_shadow_outcomes_across_symbols() {
         let strategy = Strategy::Donchian55Btc200;
-        let timestamp = current_time_ms();
         let mut settings = Settings::default();
-        settings.learning.insert(
-            strategy_trade_learning_key("BTC-USDT", strategy.as_str()),
-            LearningStats { samples: 1, positive: 1, realized_pnl: 2.0,
-                recent_trade_pnls: vec![(timestamp, 2.0)], ..LearningStats::default() },
-        );
-        settings.learning.insert(
-            strategy_shadow_learning_key("ETH-USDT", strategy.as_str(), "strategy"),
-            LearningStats { samples: 1, positive: 0, realized_pnl: -1.0,
-                recent_trade_pnls: vec![(timestamp, -1.0)], ..LearningStats::default() },
-        );
-        settings.learning.insert(
-            strategy_shadow_learning_key("ETH-USDT", strategy.as_str(), "tight"),
-            LearningStats { samples: 1, positive: 1, realized_pnl: 0.5,
-                recent_trade_pnls: vec![(timestamp, 0.5)], ..LearningStats::default() },
-        );
+        for (symbol, samples, positive, realized_pnl) in [
+            ("BTC-USDT", 1, 1, 2.0),
+            ("ETH-USDT", 1, 0, -1.0),
+            ("SOL-USDT", 1, 1, 0.5),
+        ] {
+            let parameters = BTreeMap::new();
+            let profile_id = strategies::profile_id(symbol, strategy.as_str(), &parameters);
+            settings.learned_profiles.insert(
+                format!("{symbol}:{}", strategy.as_str()),
+                strategies::StrategyProfile {
+                    profile_id,
+                    version: 1,
+                    symbol: symbol.to_owned(),
+                    strategy: strategy.as_str().to_owned(),
+                    parameters,
+                    learning_samples: samples,
+                    positive_samples: positive,
+                    realized_pnl,
+                },
+            );
+        }
 
         let stats = strategy_learning_stats_across_symbols(&settings, strategy);
         assert_eq!(stats.samples, 3);

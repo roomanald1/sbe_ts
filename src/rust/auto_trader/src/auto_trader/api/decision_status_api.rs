@@ -7,26 +7,38 @@ async fn get_status(State(state): State<AutoTraderState>) -> Json<StatusResponse
 async fn get_decision_parameters(
     State(state): State<AutoTraderState>,
 ) -> Json<DecisionParametersResponse> {
-    let (
-        learning,
-        max_entries_per_auto_position,
-        risk_appetite,
-        settings_snapshot,
-    ) = {
+    let (max_entries_per_auto_position, risk_appetite, settings_snapshot) = {
         let settings = state.settings.lock().await;
         (
-            {
-                let mut learning = settings.learning.clone();
-                decay_learning_map(&mut learning, current_time_ms());
-                learning
-            },
             settings.max_entries_per_auto_position,
             settings.risk_appetite,
             settings.clone(),
         )
     };
     let bands = state.latest_missed_opportunity_bands.lock().await.clone();
-    let contexts = build_context_decision_parameters(&learning, &bands, risk_appetite);
+    let thresholds = request_learning_context_thresholds_for_contexts(
+        &state.client,
+        &state,
+        BTreeSet::new(),
+        &bands,
+    ).await;
+    let floor_scale = risk_floor_scale(risk_appetite);
+    let contexts = thresholds.into_iter().map(|(context, thresholds)| {
+        ContextDecisionParameters {
+            exploration_allowed: !is_mixed_market_context(&context),
+            context,
+            learning_samples: thresholds.learning_samples,
+            positive_rate: thresholds.positive_rate,
+            scout_learning_samples: thresholds.scout_outcome_samples,
+            scout_positive_rate: thresholds.scout_outcome_positive_rate,
+            strength_floor: (adaptive_missed_opportunity_floor(
+                thresholds.strength_floor,
+                MissedOpportunityGate::Strength,
+                &bands,
+            ) * floor_scale).clamp(0.0, 1.0),
+            exploration_score_floor: (thresholds.exploration_score_floor * floor_scale).max(0.0),
+        }
+    }).collect();
     let thresholds = build_decision_thresholds(risk_appetite, max_entries_per_auto_position);
     let latest_execution = state.latest_execution_parameters.lock().await.clone();
     let refreshed_at = SystemTime::now()
@@ -42,6 +54,7 @@ async fn get_decision_parameters(
     })
 }
 
+#[cfg(test)]
 fn build_context_decision_parameters(
     learning: &BTreeMap<String, LearningStats>,
     bands: &[MissedOpportunityGateBand],
@@ -84,6 +97,7 @@ fn build_context_decision_parameters(
         .collect()
 }
 
+#[cfg(test)]
 fn learning_context_prefix(key: &str) -> Option<String> {
     let context = key.split(":P").next()?;
     let parts = context.split(':').collect::<Vec<_>>();
@@ -138,9 +152,12 @@ fn strategy_parameter_profiles(settings: &Settings) -> Vec<StrategyParameterProf
     // what the strategy used for long-tail assets and non-USDT quote pairs.
     symbols.extend(settings.positions.keys().cloned());
     symbols.extend(settings.strategy_positions.values().flat_map(|by_symbol| by_symbol.keys().cloned()));
-    symbols.extend(settings.learning.keys().filter_map(|key| {
-        let key = key.strip_prefix("trade:").or_else(|| key.strip_prefix("shadow:"))?;
-        key.split_once(':').map(|(symbol, _)| symbol.to_owned())
+    symbols.extend(settings.learned_profiles.values().map(|profile| profile.symbol.clone()));
+    symbols.extend(settings.learned_context_stats.keys().filter_map(|key| {
+        let key = key.strip_prefix("scout:").unwrap_or(key);
+        let key = key.strip_suffix(":trade").unwrap_or(key);
+        let parts = key.split(':').collect::<Vec<_>>();
+        (parts.len() >= 3).then(|| parts[2].to_owned())
     }));
     symbols.extend(settings.strategy_parameter_overrides.keys().filter_map(|key| {
         key.split_once(':').map(|(symbol, _)| symbol.to_owned())
@@ -151,7 +168,7 @@ fn strategy_parameter_profiles(settings: &Settings) -> Vec<StrategyParameterProf
         .flat_map(|symbol| {
             strategies.iter().copied()
                 .into_iter()
-                .map(move |strategy| strategy_parameter_profile(settings, &symbol, strategy))
+                .map(move |strategy| learned_strategy_parameter_profile(settings, &symbol, strategy))
         })
         .collect()
 }
@@ -163,13 +180,18 @@ mod decision_profile_tests {
     #[test]
     fn profiles_include_symbols_with_learned_trade_history() {
         let mut settings = Settings::default();
-        settings.learning.insert(
-            "trade:XRP-USDC:live-momentum".into(),
-            LearningStats {
-                samples: 3,
-                positive: 1,
+        let parameters = BTreeMap::new();
+        settings.learned_profiles.insert(
+            "XRP-USDC:live-momentum".into(),
+            strategies::StrategyProfile {
+                profile_id: strategies::profile_id("XRP-USDC", "live-momentum", &parameters),
+                version: 1,
+                symbol: "XRP-USDC".into(),
+                strategy: "live-momentum".into(),
+                parameters,
+                learning_samples: 3,
+                positive_samples: 1,
                 realized_pnl: -0.2,
-                ..LearningStats::default()
             },
         );
 

@@ -1,6 +1,5 @@
 import { BehaviorSubject } from 'rxjs';
 import type { Position, PositionTrade } from './PositionTypes';
-import { buildLegacyLedgerOutcomes } from './legacy_ledger_outcomes';
 import { currentPositionSnapshot, subscribePositionStream, type PositionUiSnapshot } from '../position_stream';
 import { currentAutoTraderSnapshot, subscribeAutoTraderStream, type AutoTraderUiSnapshot } from '../auto_trader_stream';
 
@@ -25,7 +24,6 @@ export type StrictEntryGateSummary = { symbol: string; direction: string; streng
 type DecisionParametersResponse = { thresholds?: Array<{ section?: string; name?: string; value?: number }> };
 type PositionsResponse = { positions?: Position[] };
 type TradesResponse = { trades?: PositionTrade[]; total?: number; next_offset?: number | null; has_older?: boolean };
-type LedgerRealizedResponse = { realized_pnl_by_parent_order?: Record<string, number> };
 type UsdRatesResponse = { rates?: Record<string, number> };
 type LedgerHistoryCache = { dayStart?: number; trades?: PositionTrade[]; recentTrades?: PositionTrade[]; todayTradeOffset?: number; todayLoadedOffset?: number; olderTradeOffset?: number; olderHistoryExhausted?: boolean };
 type StrategyLearning = { strategy: string; learning_multiplier: number; learning_samples: number; positive_rate?: number | null; realized_pnl?: number };
@@ -56,6 +54,7 @@ type OpenStrategyPosition = { symbol: string; strategy: string; decision_id?: st
 type OpenPositionLot = { symbol: string; quantity: number; average_entry_price: number; entry_fees: number; estimated_exit_fee_rate: number; last_trade_timestamp: number; strategy?: string; decision_id?: string | null; entry_order_type?: string; entry_order_types?: string[]; stop_loss_percent?: number | null; take_profit_percent?: number | null; stop_loss_active?: boolean; take_profit_active?: boolean; carry_details?: DatedCarryPosition };
 type AutoTraderLearningResponse = { enabled?: boolean; strategies?: string[]; strategy_diagnostics?: StrategyDiagnostic[]; daily_strategy_budgets?: StrategyLearning[]; intraday_strategy_budgets?: StrategyLearning[] };
 type ActivityResponse = {
+  closed_ledger_rows?: AutoTraderOutcome[];
   orders?: StrategyOrder[];
   pnl_breakdown?: Array<{ symbol: string; strategy: string; decision_id?: string | null; direction: string; purpose: string; realized_pnl: number; outcomes: number }>;
   realized_pnl_by_quote?: Record<string, number> | null;
@@ -85,8 +84,6 @@ export class AutoTraderOutcomesModel {
   private gateAuditCache: { records: AuditRecord[]; refreshedAt: number } = { records: [], refreshedAt: 0 };
   private auditRows: AuditRecord[] = [];
   private ledgerRowsCache: AutoTraderOutcome[] = [];
-  private ledgerTradeSignature = '';
-  private ledgerRowsBuiltAt = 0;
   private slippageTradeSignature = '';
   private slippageBuiltAt = 0;
   private adverseSlippageBySymbol = new Map<string, number[]>();
@@ -177,18 +174,18 @@ export class AutoTraderOutcomesModel {
       this.ledgerDayStart = todayStart;
       if (!this.historyCacheLoaded) { this.restoreLedgerHistory(todayStart); this.historyCacheLoaded = true; }
       const refreshRecentTrades = !this.recentLedgerLoaded || Date.now() - this.recentLedgerLoadedAt >= 30_000;
-      const [auditResponse, activityResponse, learningResponse, learningSummaryResponse, datedCarryResponse, positionsResponse, tradesResponse, gateAuditResponse, parametersResponse, ledgerRealizedResponse, todayLedgerRealizedResponse, usdRatesResponse] = await Promise.all([
+      const [auditResponse, activityResponse, learningResponse, learningSummaryResponse, datedCarryResponse, positionsResponse, tradesResponse, gateAuditResponse, parametersResponse, usdRatesResponse] = await Promise.all([
         autoSnapshot ? Promise.resolve(undefined) : fetch('/signals/auto-trader-execution-audit?limit=500'),
         autoSnapshot ? Promise.resolve(undefined) : fetch('/positions/auto-trader/activity'),
         autoSnapshot ? Promise.resolve(undefined) : fetch('/positions/auto-trader'),
         fetch('/positions/auto-trader/learning-summary').catch(() => undefined),
         autoSnapshot ? Promise.resolve(undefined) : fetch('/positions/auto-trader/dated-carry'),
         streamSnapshot ? Promise.resolve(undefined) : fetch('/positions?source=auto'),
+        // Fills remain useful for open position slippage; closed rows come
+        // from the backend activity contract.
         refreshRecentTrades ? fetch('/positions/trades?source=auto&since_ms=' + todayStart + '&limit=500') : Promise.resolve(undefined),
         refreshGateAudit ? fetch('/signals/auto-trader-audit?limit=100').catch(() => undefined) : Promise.resolve(undefined),
         autoSnapshot ? Promise.resolve(undefined) : fetch('/positions/auto-trader/parameters').catch(() => undefined),
-        fetch('/positions/realized-pnl?source=auto&since_ms=0').catch(() => undefined),
-        fetch('/positions/realized-pnl?source=auto&since_ms=' + todayStart).catch(() => undefined),
         fetch('/positions/usd-rates').catch(() => undefined),
       ]);
       if (!autoSnapshot && !auditResponse?.ok) throw new Error('Audit unavailable');
@@ -209,8 +206,6 @@ export class AutoTraderOutcomesModel {
         } catch { /* Keep the most recent successful gate audit. */ }
       }
       const positionsData = streamSnapshot?.auto_positions ?? await positionsResponse!.json() as PositionsResponse;
-      const ledgerRealizedData = ledgerRealizedResponse?.ok ? await ledgerRealizedResponse.json() as LedgerRealizedResponse : undefined;
-      const todayLedgerRealizedData = todayLedgerRealizedResponse?.ok ? await todayLedgerRealizedResponse.json() as LedgerRealizedResponse : undefined;
       if (tradesResponse?.ok) {
         const page = await tradesResponse.json() as TradesResponse;
         this.recentLedgerTrades = page.trades ?? [];
@@ -382,106 +377,7 @@ export class AutoTraderOutcomesModel {
           source: scoutEntry || entry.scout ? 'scout' : entry.exploratory === true ? 'exploratory' : entry.exploratory === false ? 'strict' : 'unknown',
           components: entry.signal_components ?? {} }];
       });
-      const ledgerTrades = (tradesData.trades ?? []).filter((trade) => trade.timestamp >= todayStart);
-      const ordersForLedger = activityData.orders ?? [];
-      const ledgerSignature = ledgerTrades.map((trade) => trade.id + ':' + (trade.parent_order_id ?? '')).join('|') + ':' + this.auditRows.map((record) => record.barrier_order_id ?? record.decision_id ?? '').join('|') + ':' + ordersForLedger.map((order) => order.timestamp + ':' + (order.execution_order_id ?? '') + ':' + (order.decision_id ?? '') + ':' + (order.strategy ?? '') + ':' + (order.purpose ?? '') + ':' + order.filled_quantity).join('|');
-      if (ledgerSignature !== this.ledgerTradeSignature && (!this.ledgerTradeSignature || Date.now() - this.ledgerRowsBuiltAt >= 15_000)) {
-        // Build this large history once per ledger/order change.
-      const orderByLedgerId = new Map<string, StrategyOrder>();
-      for (const order of ordersForLedger) {
-        orderByLedgerId.set(String(order.timestamp), order);
-        if (order.execution_order_id) orderByLedgerId.set(order.execution_order_id, order);
-      }
-      for (const record of this.auditRows) {
-        if (!record.decision_id || !record.strategy) continue;
-        const auditOrder: StrategyOrder = { timestamp: record.timestamp ?? 0, symbol: record.symbol ?? '', side: '', order_type: record.exit_order_type, purpose: 'stop-loss', strategy: record.strategy, decision_id: record.decision_id, filled_quantity: 0 };
-        if (record.barrier_order_id && !orderByLedgerId.has(record.barrier_order_id)) orderByLedgerId.set(record.barrier_order_id, auditOrder);
-        for (const fill of record.exit_fills ?? []) if (fill.parent_order_id) orderByLedgerId.set(fill.parent_order_id, auditOrder);
-      }
-      const instanceGroups = new Map<string, { strategy: string; instanceId: string; symbol: string; trades: PositionTrade[]; quoteRate?: number }>();
-      const legacyTradesBySymbol = new Map<string, PositionTrade[]>();
-      for (const trade of ledgerTrades) {
-        if (trade.source && trade.source !== 'auto') continue;
-        const order = resolveLedgerOrder(trade, orderByLedgerId, ordersForLedger);
-        if (!order?.decision_id) {
-          const symbolTrades = legacyTradesBySymbol.get(trade.symbol) ?? [];
-          symbolTrades.push(trade);
-          legacyTradesBySymbol.set(trade.symbol, symbolTrades);
-          continue;
-        }
-        const strategy = order.strategy ?? 'legacy-unknown';
-        const instanceId = order?.decision_id ?? ('ledger:' + (trade.parent_order_id ?? trade.id));
-        const instanceKey = strategy + ':' + instanceId;
-        const groupKey = instanceKey + ':' + trade.symbol;
-        const group = instanceGroups.get(groupKey) ?? { strategy, instanceId, symbol: trade.symbol, trades: [], quoteRate: quoteCurrency(trade.symbol) === 'USD' ? 1 : usdRates[quoteCurrency(trade.symbol)] };
-        group.trades.push(trade);
-        instanceGroups.set(groupKey, group);
-      }
-      const openPositionKeys = new Set((activityData.strategy_positions ?? []).filter((position) => Math.abs(position.quantity) > 1e-12).map((position) => (position.strategy + ':' + (position.decision_id ?? '') + ':' + position.symbol)));
-      const ledgerOutcomeRows: AutoTraderOutcome[] = [];
-      for (const [symbol, symbolTrades] of legacyTradesBySymbol) {
-        const quote = quoteCurrency(symbol);
-        const rate = quote === 'USD' ? 1 : usdRates[quote];
-        ledgerOutcomeRows.push(...buildLegacyLedgerOutcomes(symbol, symbolTrades, quote, rate, ledgerRealizedData?.realized_pnl_by_parent_order ?? {}, todayLedgerRealizedData?.realized_pnl_by_parent_order ?? {}, new Map([...orderByLedgerId].map(([id, order]) => [id, order.order_type ?? '']))));
-      }
-      for (const [groupKey, group] of instanceGroups) {
-        const status = openPositionKeys.has(group.strategy + ':' + group.instanceId + ':' + group.symbol) ? 'Partially closed' : 'Closed';
-        const orderedTrades = [...group.trades].sort((a, b) => a.timestamp - b.timestamp);
-        const realizedParents = new Set<string>();
-        let realizedQuote = 0;
-        let todayRealizedQuote = 0;
-        for (const trade of orderedTrades) {
-          const parentId = trade.parent_order_id;
-          if (!parentId || realizedParents.has(parentId)) continue;
-          realizedParents.add(parentId);
-          realizedQuote += ledgerRealizedData?.realized_pnl_by_parent_order?.[parentId] ?? 0;
-          todayRealizedQuote += todayLedgerRealizedData?.realized_pnl_by_parent_order?.[parentId] ?? 0;
-        }
-        const firstTrade = orderedTrades[0];
-        const lastTrade = orderedTrades[orderedTrades.length - 1];
-        const netQuantity = orderedTrades.reduce((sum, trade) => sum + (trade.side === 'buy' ? trade.quantity : -trade.quantity), 0);
-        const tradedNotional = orderedTrades.reduce((sum, trade) => sum + Math.abs(trade.quantity * trade.execution_price), 0);
-        const feesPaid = orderedTrades.reduce((sum, trade) => sum + Math.abs(trade.fee ?? 0), 0);
-        const entryAudit = trades.get(group.instanceId)?.entry;
-        const positionSource = entryAudit?.scout ? 'scout' : entryAudit?.exploratory === true ? 'exploratory' : entryAudit?.exploratory === false ? 'strict' : 'unknown';
-        ledgerOutcomeRows.push({ rowId: 'ledger-summary:' + groupKey, status, decisionId: group.instanceId, strategyInstanceId: group.instanceId,
-          symbol: group.symbol, side: netQuantity >= 0 ? 'buy' : 'sell', openedAt: firstTrade?.timestamp ?? 0, closedAt: status === 'Closed' ? lastTrade?.timestamp : undefined,
-          quantity: Math.abs(netQuantity), remainingQuantity: status === 'Partially closed' ? Math.abs(netQuantity) : undefined, signedQuantity: netQuantity,
-          entryPrice: firstTrade?.execution_price ?? 0, pnl: 0, entryFees: 0, estimatedExitFeeRate: 0, estimatedExitSlippageBps: 0,
-          // A round trip has two traded legs; normalize the combined fees to
-          // one average leg's notional so maker + taker costs are both shown.
-          feePercent: tradedNotional > 0 ? feesPaid / (tradedNotional / 2) * 100 : undefined,
-          // This view is a UTC-day ledger: its instance total must reconcile
-          // with the same realized-today ledger used by the dashboard.
-          netPnlUsd: todayLedgerRealizedData && typeof group.quoteRate === 'number' ? todayRealizedQuote * group.quoteRate : undefined,
-          todayRealizedUsd: todayLedgerRealizedData && typeof group.quoteRate === 'number' ? todayRealizedQuote * group.quoteRate : undefined,
-          pnlQuoteCurrency: quoteCurrency(group.symbol), quoteUsdRate: group.quoteRate, strategy: group.strategy, direction: netQuantity >= 0 ? 'LONG' : 'SHORT', strength: null,
-          scout: positionSource === 'scout', source: positionSource, components: entryAudit?.signal_components ?? {} });
-        for (const trade of orderedTrades) {
-          const order = trade.parent_order_id ? orderByLedgerId.get(trade.parent_order_id) : undefined;
-          ledgerOutcomeRows.push({ rowId: 'ledger-trade:' + trade.id, status, decisionId: group.instanceId, strategyInstanceId: group.instanceId,
-            ledgerTrade: trade, ledgerSource: trade.source ?? 'auto', ledgerOrderType: order?.order_type, symbol: trade.symbol, side: trade.side, openedAt: trade.timestamp, closedAt: trade.timestamp,
-            quantity: trade.quantity, signedQuantity: trade.side === 'buy' ? trade.quantity : -trade.quantity, entryPrice: trade.execution_price,
-            pnl: 0, entryFees: trade.fee ?? 0, estimatedExitFeeRate: trade.fee_rate ?? 0, estimatedExitSlippageBps: 0,
-            feePercent: Math.abs(trade.quantity * trade.execution_price) > 0 ? Math.abs(trade.fee ?? 0) / Math.abs(trade.quantity * trade.execution_price) * 100 : trade.fee_rate !== undefined ? trade.fee_rate * 100 : undefined,
-            netPnlUsd: todayLedgerRealizedData && typeof group.quoteRate === 'number' && trade.parent_order_id
-              ? (todayLedgerRealizedData.realized_pnl_by_parent_order?.[trade.parent_order_id] ?? 0) * group.quoteRate
-              : undefined,
-            pnlQuoteCurrency: quoteCurrency(trade.symbol), quoteUsdRate: group.quoteRate, strategy: group.strategy, direction: trade.side.toUpperCase(), strength: null,
-            scout: order?.purpose === 'scout' || entryAudit?.scout === true, source: positionSource, components: entryAudit?.signal_components ?? {} });
-        }
-      }
-      const groupTimestamp = new Map([...instanceGroups].map(([key, group]) => [key, Math.min(...group.trades.map((trade) => trade.timestamp))]));
-      const ledgerGroupKey = (row: AutoTraderOutcome) => row.rowId.startsWith('ledger-summary:')
-        ? row.rowId.slice('ledger-summary:'.length)
-        : row.strategy + ':' + (row.strategyInstanceId ?? '') + ':' + row.symbol;
-      ledgerOutcomeRows.sort((a, b) => (groupTimestamp.get(ledgerGroupKey(b)) ?? b.openedAt) - (groupTimestamp.get(ledgerGroupKey(a)) ?? a.openedAt)
-        || Number(!a.rowId.startsWith('ledger-summary:')) - Number(!b.rowId.startsWith('ledger-summary:'))
-        || a.openedAt - b.openedAt);
-      this.ledgerRowsCache = ledgerOutcomeRows;
-      this.ledgerTradeSignature = ledgerSignature;
-      this.ledgerRowsBuiltAt = Date.now();
-      }
+      this.ledgerRowsCache = activityData.closed_ledger_rows ?? [];
       const aggregatePositions = new Map((positionsData.positions ?? []).map((position) => [position.symbol, position]));
       const strategyLots = (activityData.strategy_positions ?? []).filter((position) => Math.abs(position.quantity) > 1e-12);
       const strategyPositionSymbols = new Set(strategyLots.map((position) => position.symbol));
@@ -571,7 +467,7 @@ export class AutoTraderOutcomesModel {
           components: entry?.signal_components ?? {} });
       }
       rows.sort((a, b) => (a.status === b.status ? b.openedAt - a.openedAt : a.status === 'Open' ? -1 : 1));
-      this.state$.next({ ...this.state$.value, rows, closedLedgerRows: this.ledgerRowsCache, learningSummary, strategyLearning, autoTraderEnabled: learningData.enabled ?? false, autoTraderStatusAvailable: Boolean(autoSnapshot || learningResponse?.ok), enabledStrategies: learningData.strategies ?? [], strategyDiagnostics: learningData.strategy_diagnostics ?? [], strategyOrders: activityData.orders ?? [], strictEntryGates, strictBaseStrengthFloor, todayStrategyRealizedUsd, datedCarryDiagnostics, openStrategyPositions: strategyLots.length ? strategyLots.map(({ symbol, strategy }) => ({ symbol, strategy })) : activityData.open_positions ?? [], loading: false, auditCursor: this.auditCursor, hasOlderLedgerTrades: this.state$.value.hasOlderLedgerTrades });
+      this.state$.next({ ...this.state$.value, rows, closedLedgerRows: this.ledgerRowsCache, learningSummary, strategyLearning, autoTraderEnabled: learningData.enabled ?? false, autoTraderStatusAvailable: Boolean(autoSnapshot || learningResponse?.ok), enabledStrategies: learningData.strategies ?? [], strategyDiagnostics: learningData.strategy_diagnostics ?? [], strategyOrders: activityData.orders ?? [], strictEntryGates, strictBaseStrengthFloor, todayStrategyRealizedUsd, datedCarryDiagnostics, openStrategyPositions: strategyLots.length ? strategyLots.map(({ symbol, strategy }) => ({ symbol, strategy })) : activityData.open_positions ?? [], loading: false, auditCursor: this.auditCursor, hasOlderLedgerTrades: false });
     } catch { this.state$.next({ ...this.state$.value, loading: false, error: 'AutoTrader positions or closed trade audit are unavailable.' }); }
     finally { this.refreshing = false; }
   }
@@ -614,7 +510,6 @@ export class AutoTraderOutcomesModel {
       const hasMore = this.todayTradeOffset !== undefined;
       this.persistLedgerHistory();
       this.state$.next({ ...this.state$.value, loadingOlderLedgerTrades: false, hasOlderLedgerTrades: hasMore });
-      this.ledgerTradeSignature = '';
       this.slippageTradeSignature = '';
       this.scheduleRefresh();
     } catch (reason) {

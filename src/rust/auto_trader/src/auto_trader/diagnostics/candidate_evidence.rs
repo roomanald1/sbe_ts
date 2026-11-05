@@ -71,7 +71,7 @@ fn scout_walk_forward_thresholds(candidate: &Signal) -> Option<(usize, usize, f6
     let strategy = candidate.strategy.as_deref().and_then(Strategy::from_name)?;
     let parameters = decision?.get("strategy_parameters")?;
     let validated = |key: StrategyParameterKey| {
-        let spec = all_strategy_parameter_specs(strategy)
+        let spec = strategy.parameter_specs()
             .into_iter()
             .find(|spec| spec.key == key)?;
         let value = parameters.get(key.as_str())?.as_f64()?;

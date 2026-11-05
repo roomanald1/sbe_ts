@@ -13,7 +13,21 @@ use std::{
     },
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
-use strategy_core::{FeedbackEvent, StrategyContract, StrategyDecision};
+use strategies::StrategyDecision;
+pub use strategies::benchmark_strategy_evaluation;
+pub(crate) use strategies::daily::{
+    DailyStrategySignalBatch, DailyStrategySnapshot, StrategyDiagnostic, parse_scout_combination,
+};
+#[cfg(test)]
+use strategies::{AbsorptionPressureValue, DepthSignalValue, WindowedSignalValue};
+pub(crate) use strategies::{
+    DatedCarryCandidate, DatedCarrySettlementSource, FeedbackEvent, Strategy, StrategyParameterKey,
+    StrategyParameterProfile, StrategyParameterScoutVariant, StrategyParameterValue,
+    StrategySignal, confident_win_rate_edge, effective_parameter_values,
+    legacy_strategy_parameter_name, scout_parameter_specs, signal_strategy_parameters,
+    strategy_parameter_key, strategy_parameter_value, strategy_profile_value,
+    validate_strategy_parameter_overrides,
+};
 use tokio::{
     sync::{Mutex, Notify, broadcast},
     task::JoinSet,
@@ -22,18 +36,14 @@ use tokio::{
 
 include!("auto_trader/constants.rs");
 include!("auto_trader/market_data.rs");
-include!("auto_trader/daily_strategy_models.rs");
-include!("auto_trader/strategies/mod.rs");
 
 include!("auto_trader/settings.rs");
-include!("auto_trader/strategy_parameter_types.rs");
-include!("auto_trader/strategy_parameter_catalog.rs");
-include!("auto_trader/strategy_parameters.rs");
+include!("auto_trader/profile_settings_adapter.rs");
 include!("auto_trader/api_types.rs");
 include!("auto_trader/dated_carry.rs");
 include!("auto_trader/state.rs");
-include!("auto_trader/daily_strategy_receiver.rs");
-include!("auto_trader/learning/learning_state.rs");
+include!("auto_trader/daily_strategy_route.rs");
+include!("auto_trader/feedback/legacy_learning_compat.rs");
 include!("auto_trader/cycle_types.rs");
 include!("auto_trader/api/http_api.rs");
 include!("auto_trader/workers/mod.rs");
@@ -41,10 +51,10 @@ include!("auto_trader/entry/mod.rs");
 include!("auto_trader/exits/mod.rs");
 include!("auto_trader/hedging/mod.rs");
 include!("auto_trader/fills_and_audit.rs");
-include!("auto_trader/learning/mod.rs");
 include!("auto_trader/execution/mod.rs");
 include!("auto_trader/diagnostics/mod.rs");
 include!("auto_trader/persistence.rs");
+include!("auto_trader/execution_benchmarks.rs");
 
 #[cfg(test)]
 mod strategy_cleanup_integration_tests {
@@ -81,6 +91,7 @@ mod strategy_cleanup_integration_tests {
             latest_missed_opportunity_bands: Arc::new(Mutex::new(Vec::new())),
             latest_execution_parameters: Arc::new(Mutex::new(None)),
             cycle_lock: Arc::new(Mutex::new(())),
+            scout_lifecycle_last_update_ms: Arc::new(AtomicU64::new(0)),
             pending_daily_signals: Arc::new(Mutex::new(BTreeMap::new())),
             daily_signal_notify: Arc::new(Notify::new()),
             pending_live_signals: Arc::new(Mutex::new(BTreeMap::new())),

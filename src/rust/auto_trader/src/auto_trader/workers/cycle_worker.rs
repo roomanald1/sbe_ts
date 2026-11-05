@@ -1,3 +1,157 @@
+async fn scout_lifecycle_snapshot_from_settings(
+    state: &AutoTraderState,
+    updated_at_ms: u64,
+) -> scouts::ShadowLifecycleSnapshot {
+    let settings = state.settings.lock().await;
+    scouts::ShadowLifecycleSnapshot {
+        updated_at_ms,
+        shadow_sample_at_ms: settings.shadow_sample_at_ms.clone(),
+        shadow_sample_active_scenarios: settings.shadow_sample_active_scenarios.clone(),
+        scout_variant_rotation_cursor: settings.scout_variant_rotation_cursor,
+    }
+}
+
+async fn import_legacy_scout_comparisons(state: &AutoTraderState) {
+    let legacy = {
+        let settings = state.settings.lock().await;
+        settings.scout_comparisons.iter().map(|(comparison_id, pair)| {
+            scouts::LegacyShadowComparison {
+                comparison_id: comparison_id.clone(),
+                baseline_return_percent: pair.baseline_return_percent,
+                variant_return_percent: pair.variant_return_percent,
+                learning_key: pair.learning_key.clone(),
+                updated_at_ms: pair.updated_at_ms,
+            }
+        }).collect::<Vec<_>>()
+    };
+    if legacy.is_empty() {
+        return;
+    }
+    let fingerprint = serde_json::to_string(&legacy).unwrap_or_default();
+    let request = scouts::ShadowPlanRequest {
+        request_id: format!("legacy-scout-pairs:{}", scouts::probe_id(&fingerprint)),
+        now_ms: current_time_ms(),
+        max_active_batches: 5_000,
+        max_active_variants_per_profile: 1_000,
+        legacy_cooldowns: BTreeMap::new(),
+        legacy_comparisons: legacy,
+        candidates: Vec::new(),
+    };
+    let base = std::env::var("SCOUTS_SERVICE_URL")
+        .unwrap_or_else(|_| "http://127.0.0.1:3011".into());
+    match scouts::request_shadow_plan(&base, &request).await {
+        Ok(_) => {
+            let mut settings = state.settings.lock().await;
+            settings.scout_comparisons.clear();
+            drop(settings);
+            if let Err(error) = request_settings_persist(state) {
+                crate::service_log!("WARN", "Could not persist migrated Scout pair state: {}", error.1);
+            }
+        }
+        Err(error) => crate::service_log!("WARN", "Could not migrate pending Scout comparison state: {error}"),
+    }
+}
+
+async fn sync_scout_lifecycle_to_service(state: &AutoTraderState) {
+    let base = std::env::var("SCOUTS_SERVICE_URL")
+        .unwrap_or_else(|_| "http://127.0.0.1:3011".into());
+    let revision = current_time_ms().max(
+        state
+            .scout_lifecycle_last_update_ms
+            .load(Ordering::Relaxed)
+            .saturating_add(1),
+    );
+    let snapshot = scout_lifecycle_snapshot_from_settings(state, revision).await;
+    match state
+        .client
+        .post(format!("{}/shadow-lifecycle/state", base.trim_end_matches('/')))
+        .timeout(Duration::from_millis(500))
+        .json(&snapshot)
+        .send()
+        .await
+        .and_then(reqwest::Response::error_for_status)
+    {
+        Ok(_) => state
+            .scout_lifecycle_last_update_ms
+            .store(revision, Ordering::Relaxed),
+        Err(error) => crate::service_log!("WARN", "Could not sync Scout lifecycle state: {error}"),
+    }
+}
+
+async fn sync_scout_lifecycle_from_service(state: &AutoTraderState) {
+    import_legacy_scout_comparisons(state).await;
+    let base = std::env::var("SCOUTS_SERVICE_URL")
+        .unwrap_or_else(|_| "http://127.0.0.1:3011".into());
+    let snapshot = match state
+        .client
+        .get(format!("{}/shadow-lifecycle/state", base.trim_end_matches('/')))
+        .timeout(Duration::from_millis(500))
+        .send()
+        .await
+        .and_then(reqwest::Response::error_for_status)
+    {
+        Ok(response) => match response.json::<scouts::ShadowLifecycleSnapshot>().await {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                crate::service_log!("WARN", "Could not decode Scout lifecycle state: {error}");
+                return;
+            }
+        },
+        Err(error) => {
+            crate::service_log!("WARN", "Could not load Scout lifecycle state: {error}");
+            return;
+        }
+    };
+    let last_local_update = state
+        .scout_lifecycle_last_update_ms
+        .load(Ordering::Relaxed);
+    if snapshot.updated_at_ms == 0 && last_local_update == 0 {
+        let has_legacy_state = {
+            let settings = state.settings.lock().await;
+            !settings.shadow_sample_at_ms.is_empty()
+                || !settings.shadow_sample_active_scenarios.is_empty()
+                || settings.scout_variant_rotation_cursor != 0
+        };
+        if has_legacy_state {
+            sync_scout_lifecycle_to_service(state).await;
+            return;
+        }
+    }
+    if snapshot.updated_at_ms < last_local_update {
+        return;
+    }
+    let changed = {
+        let mut settings = state.settings.lock().await;
+        let changed = settings.shadow_sample_at_ms != snapshot.shadow_sample_at_ms
+            || settings.shadow_sample_active_scenarios != snapshot.shadow_sample_active_scenarios
+            || settings.scout_variant_rotation_cursor != snapshot.scout_variant_rotation_cursor;
+        settings.shadow_sample_at_ms = snapshot.shadow_sample_at_ms;
+        settings.shadow_sample_active_scenarios = snapshot.shadow_sample_active_scenarios;
+        settings.scout_variant_rotation_cursor = snapshot.scout_variant_rotation_cursor;
+        changed
+    };
+    state
+        .scout_lifecycle_last_update_ms
+        .store(snapshot.updated_at_ms, Ordering::Relaxed);
+    if changed {
+        if let Err(error) = request_settings_persist(state) {
+            crate::service_log!("WARN", "Could not persist Scout lifecycle snapshot: {}", error.1);
+        }
+    }
+}
+
+fn start_scout_lifecycle_sync_worker(state: &AutoTraderState) {
+    let state = state.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(2));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            interval.tick().await;
+            sync_scout_lifecycle_from_service(&state).await;
+        }
+    });
+}
+
 async fn acquire_cycle_lock(state: &AutoTraderState, worker: &str) -> CycleLockGuard {
     let wait_started = Instant::now();
     let guard = state.cycle_lock.clone().lock_owned().await;

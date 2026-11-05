@@ -40,6 +40,10 @@ pub async fn get_spot_instrument_precisions() -> Result<Vec<SpotInstrumentPrecis
         .get("data")
         .and_then(Value::as_array)
         .ok_or_else(|| anyhow::anyhow!("OKX spot instruments response is missing data"))?;
+    parse_spot_instrument_precisions(instruments)
+}
+
+fn parse_spot_instrument_precisions(instruments: &[Value]) -> Result<Vec<SpotInstrumentPrecision>> {
     let mut result = instruments
         .iter()
         .filter_map(|instrument| {
@@ -77,6 +81,10 @@ pub async fn get_all_spot_instruments() -> Result<Vec<String>> {
         .get("data")
         .and_then(Value::as_array)
         .ok_or_else(|| anyhow::anyhow!("OKX spot instruments response is missing data"))?;
+    parse_live_spot_instruments(instruments)
+}
+
+fn parse_live_spot_instruments(instruments: &[Value]) -> Result<Vec<String>> {
     let mut symbols = instruments
         .iter()
         .filter_map(|instrument| {
@@ -122,6 +130,45 @@ fn select_top_instruments(tickers: &[Value]) -> Result<Vec<String>> {
         .into_iter()
         .map(|(instrument, _)| instrument)
         .collect())
+}
+
+#[cfg(test)]
+mod instrument_catalog_tests {
+    use super::{parse_live_spot_instruments, parse_spot_instrument_precisions, select_top_instruments};
+    use serde_json::json;
+
+    #[test]
+    fn parses_only_live_ascii_instruments_and_sorts_deduplicated_symbols() {
+        let rows = vec![
+            json!({"instId":"ZED-USDT","state":"live"}),
+            json!({"instId":"ABC-USDT","state":"live"}),
+            json!({"instId":"ZED-USDT","state":"live"}),
+            json!({"instId":"OLD-USDT","state":"suspend"}),
+            json!({"instId":"币-USDT","state":"live"}),
+        ];
+        assert_eq!(parse_live_spot_instruments(&rows).unwrap(), ["ABC-USDT", "ZED-USDT"]);
+    }
+
+    #[test]
+    fn parses_sorted_precisions_for_live_symbols_only() {
+        let rows = vec![
+            json!({"instId":"ZED-USDT","state":"live","tickSz":"0.1","lotSz":"1"}),
+            json!({"instId":"OLD-USDT","state":"suspend","tickSz":"0.1","lotSz":"1"}),
+            json!({"instId":"ABC-USDT","state":"live","tickSz":"0.01","lotSz":"0.1"}),
+            json!({"instId":"BAD-USDT","state":"live","tickSz":"0.1"}),
+        ];
+        let parsed = parse_spot_instrument_precisions(&rows).unwrap();
+        assert_eq!(parsed.iter().map(|row| row.symbol.as_str()).collect::<Vec<_>>(), ["ABC-USDT", "ZED-USDT"]);
+        assert_eq!(parsed[0].tick_size, "0.01");
+        assert_eq!(parsed[0].lot_size, "0.1");
+    }
+
+    #[test]
+    fn rejects_empty_valid_instrument_sets() {
+        assert!(parse_live_spot_instruments(&[json!({"instId":"A","state":"suspend"})]).is_err());
+        assert!(parse_spot_instrument_precisions(&[]).is_err());
+        assert!(select_top_instruments(&[json!({"instId":"BTC-USDT","volCcy24h":"NaN"})]).is_err());
+    }
 }
 
 

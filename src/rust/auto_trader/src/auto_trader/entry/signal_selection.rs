@@ -9,7 +9,7 @@ fn needs_pullback_confirmation(signal: &Signal) -> bool {
 
 fn minimum_counter_momentum_percent(signal: &Signal) -> Option<f64> {
     let strategy = signal.strategy.as_deref().and_then(Strategy::from_name)?;
-    let spec = all_strategy_parameter_specs(strategy)
+    let spec = strategy.parameter_specs()
         .into_iter()
         .find(|spec| spec.key == StrategyParameterKey::MinimumCounterMomentumPercent)?;
     let value = signal
@@ -52,7 +52,7 @@ fn select_cycle_signal<'a>(
         fresh_directional,
         neutral_scout_candidates,
         now,
-        learning,
+        learning_thresholds,
         risk_appetite,
         active_scout_count,
         scout_max_active_positions,
@@ -68,6 +68,10 @@ fn select_cycle_signal<'a>(
     {
         return Ok((signal, false, false));
     }
+    if input.delegate_scout_fallback {
+        let reason = format_no_tradeable_bias(&input, &[], &[]);
+        return Err(skipped(&reason));
+    }
     let strength_qualified = fresh_directional
         .iter()
         .filter(|signal| {
@@ -75,7 +79,10 @@ fn select_cycle_signal<'a>(
                 return false;
             }
             let context = market_context(signal);
-            let learned_floor = adaptive_strength_floor(&learning, &context);
+            let learned_floor = learning_thresholds
+                .get(&context)
+                .map(|thresholds| thresholds.strength_floor)
+                .unwrap_or(MIN_STRENGTH);
             let floor = (adaptive_missed_opportunity_floor(
                 learned_floor,
                 MissedOpportunityGate::Strength,
@@ -149,9 +156,8 @@ fn select_cycle_signal<'a>(
                         return false;
                     }
                     let live_scout_only = is_live_scout_only_signal(signal);
-                    let context = market_context(signal);
                     let (strength_floor, score_floor) =
-                        adaptive_scout_thresholds(&learning, &context, active_scout_count, scout_max_active_positions);
+                        adaptive_scout_thresholds(active_scout_count, scout_max_active_positions);
                     let strength_floor =
                         (strength_floor * risk_floor_scale(risk_appetite)).clamp(0.0, 1.0);
                     let score_floor = (score_floor * risk_floor_scale(risk_appetite)).max(0.0);
@@ -217,7 +223,7 @@ fn select_cycle_signal<'a>(
                 payload["entry_gate"] = candidate_entry_audit_value(
                     candidate,
                     dashboard,
-                    learning,
+                    learning_thresholds,
                     risk_appetite,
                     active_scout_count,
                     scout_max_active_positions,
@@ -242,7 +248,7 @@ struct PreparedSignals {
 mod signal_selection_behavior_tests {
     use super::*;
 
-    static EMPTY_LEARNING: std::sync::LazyLock<BTreeMap<String, LearningStats>> =
+    static EMPTY_LEARNING_THRESHOLDS: std::sync::LazyLock<BTreeMap<String, strategies::ContextThresholds>> =
         std::sync::LazyLock::new(BTreeMap::new);
     static EMPTY_POSITIONS: std::sync::LazyLock<BTreeMap<String, TraderPosition>> =
         std::sync::LazyLock::new(BTreeMap::new);
@@ -271,6 +277,7 @@ mod signal_selection_behavior_tests {
             settings_persist_timings_ms: Arc::new(std::sync::Mutex::new(BTreeMap::new())),
             latest_missed_opportunity_bands: Arc::new(Mutex::new(Vec::new())),
             latest_execution_parameters: Arc::new(Mutex::new(None)), cycle_lock: Arc::new(Mutex::new(())),
+            scout_lifecycle_last_update_ms: Arc::new(AtomicU64::new(0)),
             pending_daily_signals: Arc::new(Mutex::new(BTreeMap::new())), daily_signal_notify: Arc::new(Notify::new()),
             pending_live_signals: Arc::new(Mutex::new(BTreeMap::new())), live_signal_notify: Arc::new(Notify::new()),
             signal_book_prewarms: Arc::new(Mutex::new(BTreeMap::new())), audit_tx, execution_audit_tx,
@@ -294,7 +301,9 @@ mod signal_selection_behavior_tests {
             now: 100, inferred_direction_count: 0, neutral_direction_floor: 0.15,
             stale_signal_count: 0, stalest_signal_age_seconds: 0, stale_symbols: &[],
             non_directional_count: 0, position_blocked_count: 0, position_block_details: &[],
-            learning: &EMPTY_LEARNING, risk_appetite: risk, active_scout_count: active_scouts,
+            risk_appetite: risk, active_scout_count: active_scouts,
+            learning_thresholds: &EMPTY_LEARNING_THRESHOLDS,
+            delegate_scout_fallback: false,
             scout_max_active_positions: DEFAULT_SCOUT_MAX_ACTIVE_POSITIONS,
             open_positions: &EMPTY_POSITIONS, max_entries_per_auto_position: 3,
             counterfactual_stop_loss_percent: 0.5, counterfactual_take_profit_percent: 0.8,

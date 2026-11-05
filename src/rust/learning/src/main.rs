@@ -16,8 +16,12 @@ async fn main() -> anyhow::Result<()> {
             &[
                 ("/health", &["get"]),
                 ("/profiles", &["get", "post"]),
+                ("/decision-snapshot", &["get"]),
                 ("/summary", &["get"]),
                 ("/feedback", &["post"]),
+                ("/context-thresholds", &["post"]),
+                ("/execution-decision", &["post"]),
+                ("/execution-outcomes", &["post"]),
             ],
         ));
     axum::serve(listener, app).await?;

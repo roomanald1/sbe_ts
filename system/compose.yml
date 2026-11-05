@@ -25,6 +25,12 @@ services:
     ports: ["3004:3004"]
     restart: unless-stopped
     healthcheck: { test: ["CMD", "bash", "-c", "</dev/tcp/127.0.0.1/3004"], interval: 15s, timeout: 3s, retries: 5 }
+  insights-maintenance:
+    build: { context: .., dockerfile: system/Dockerfile.rust, args: { CRATE: insights, BIN: insights-maintenance } }
+    environment: { SIGNALS_FILE: /data/signals.jsonl }
+    volumes: ["${REPO_ROOT:-..}/src/rust/insights:/data"]
+    depends_on: { insights: { condition: service_healthy } }
+    restart: unless-stopped
   auto-trader:
     build: { context: .., dockerfile: system/Dockerfile.rust, args: { CRATE: auto_trader, BIN: auto_trader } }
     environment: { POSITION_MANAGEMENT_URL: http://position-management:3002, INSIGHTS_URL: http://insights:3004, LEARNING_SERVICE_URL: http://learning:3010, SCOUTS_SERVICE_URL: http://scouts:3011, AUTO_TRADER_STATE_FILE: /data/auto_trader_state.json }
@@ -49,7 +55,9 @@ services:
     healthcheck: { test: ["CMD", "bash", "-c", "</dev/tcp/127.0.0.1/3010"], interval: 15s, timeout: 3s, retries: 5 }
   scouts:
     build: { context: .., dockerfile: system/Dockerfile.rust, args: { CRATE: scouts, BIN: scouts } }
-    environment: { SCOUTS_LISTEN_ADDR: 0.0.0.0:3011, LEARNING_SERVICE_URL: http://learning:3010 }
+    environment: { SCOUTS_LISTEN_ADDR: 0.0.0.0:3011, LEARNING_SERVICE_URL: http://learning:3010, SCOUTS_STATE_PATH: /data/scouts_state.json }
+    volumes: ["../src/rust/position_management:/data"]
+    depends_on: [learning]
     ports: ["3011:3011"]
     restart: unless-stopped
     healthcheck: { test: ["CMD", "bash", "-c", "</dev/tcp/127.0.0.1/3011"], interval: 15s, timeout: 3s, retries: 5 }

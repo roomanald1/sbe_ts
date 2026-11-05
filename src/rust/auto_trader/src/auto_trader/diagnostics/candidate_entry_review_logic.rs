@@ -28,24 +28,23 @@ struct CandidateEntryReview<'a> {
 fn review_candidate_entry<'a>(
     candidate: &Signal,
     dashboard: &'a Dashboard,
-    learning: &BTreeMap<String, LearningStats>,
+    learning_thresholds: &BTreeMap<String, strategies::ContextThresholds>,
     risk_appetite: f64,
     active_scout_count: usize,
     scout_max_active_positions: usize,
 ) -> CandidateEntryReview<'a> {
     let context = market_context(candidate);
     let risk_scale = risk_floor_scale(risk_appetite);
+    let learned = learning_thresholds.get(&context);
+    let learned_strength = learned.map(|thresholds| thresholds.strength_floor).unwrap_or(MIN_STRENGTH);
+    let learned_score = learned.map(|thresholds| thresholds.exploration_score_floor).unwrap_or(MIN_EXPLORATION_SCORE);
     let strength_floor = (adaptive_missed_opportunity_floor(
-        adaptive_strength_floor(learning, &context),
+        learned_strength,
         MissedOpportunityGate::Strength,
         &dashboard.missed_opportunity_bands,
     ) * risk_scale)
         .clamp(0.0, 1.0);
-    let score_floor = (adaptive_exploration_score_floor(
-        learning,
-        &context,
-        &dashboard.missed_opportunity_bands,
-    ) * risk_scale)
+    let score_floor = (learned_score * risk_scale)
         .max(0.0);
     let evidence = candidate_evidence(candidate, dashboard);
     let side = evidence.map(|item| side_metrics(candidate, item));
@@ -56,7 +55,7 @@ fn review_candidate_entry<'a>(
     let exploration_qualified = !mixed_context
         && candidate.strength.is_finite()
         && candidate.strength
-            >= adaptive_strength_floor(learning, &context).max(MIN_EXPLORATION_STRENGTH)
+            >= learned_strength.max(MIN_EXPLORATION_STRENGTH)
                 * risk_scale
         && candidate.score.is_finite()
         && candidate.score.abs() >= score_floor;
@@ -82,7 +81,7 @@ fn review_candidate_entry<'a>(
                     .is_none_or(|rate| rate < MIN_SIDE_POSITIVE_NET_LOWER_95))
     });
     let (scout_strength, scout_score) =
-        adaptive_scout_thresholds(learning, &context, active_scout_count, scout_max_active_positions);
+        adaptive_scout_thresholds(active_scout_count, scout_max_active_positions);
     let scout_strength_floor = (scout_strength * risk_scale).clamp(0.0, 1.0);
     let scout_score_floor = (scout_score * risk_scale).max(0.0);
     let scout_strength_pass = candidate.strength.is_finite()
@@ -90,9 +89,9 @@ fn review_candidate_entry<'a>(
     let scout_score_pass = candidate.score.is_finite()
         && candidate.score.abs() >= scout_score_floor;
     let scout_thresholds = scout_walk_forward_thresholds(candidate);
-    let scout_outcomes = context_learning_stats(learning, &format!("scout:{context}"));
-    let scout_outcome_positive_rate = (scout_outcomes.samples > 0)
-        .then_some(scout_outcomes.positive as f64 / scout_outcomes.samples as f64);
+    let scout_outcome_samples = learned.map_or(0, |thresholds| thresholds.scout_outcome_samples);
+    let scout_outcome_positive_rate = learned.and_then(|thresholds| thresholds.scout_outcome_positive_rate);
+    let scout_outcome_realized_pnl = learned.map_or(0.0, |thresholds| thresholds.scout_outcome_realized_pnl);
     let scout_thresholds_valid = scout_thresholds.is_some();
     let (scout_minimum_samples, _scout_research_minimum_samples, scout_minimum_positive_rate) =
         scout_thresholds.unwrap_or((
@@ -109,9 +108,9 @@ fn review_candidate_entry<'a>(
         scout_score_floor,
         scout_minimum_samples,
         scout_minimum_positive_rate,
-        scout_outcome_samples: scout_outcomes.samples,
+        scout_outcome_samples,
         scout_outcome_positive_rate,
-        scout_outcome_realized_pnl: scout_outcomes.realized_pnl,
+        scout_outcome_realized_pnl,
         scout_thresholds_valid,
         evidence,
         side,

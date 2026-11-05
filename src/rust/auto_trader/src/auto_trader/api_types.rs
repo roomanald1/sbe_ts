@@ -147,7 +147,7 @@ struct StrategyProfileReset {
 struct EnabledRequest {
     enabled: bool,
 }
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 struct ShadowLearningOutcomeRequest {
     decision_id: String,
     learning_context: String,
@@ -173,6 +173,16 @@ struct ShadowLearningOutcomeRequest {
     scout_comparison_id: Option<String>,
     #[serde(default)]
     scout_comparison_role: Option<String>,
+    #[serde(default)]
+    scout_comparison_zero_role: Option<String>,
+    #[serde(default)]
+    scout_comparison_parameter_key: Option<String>,
+    #[serde(default)]
+    scout_comparison_parameter_value: Option<f64>,
+    #[serde(default)]
+    scout_comparison_parameter_profile_symbol: Option<String>,
+    #[serde(default)]
+    strategy_parameter_specs: Vec<strategies::ParameterSpec>,
 }
 #[derive(Clone, Serialize)]
 struct DecisionParameter {

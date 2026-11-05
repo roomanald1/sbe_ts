@@ -106,7 +106,7 @@ async fn reconcile_scheduled_fills(
             orders,
             positions,
             strategy_positions,
-            execution_learning,
+            execution_feedback_outbox,
             execution_learning_order_ids,
             realized_pnl,
             daily_realized_pnl,
@@ -145,11 +145,7 @@ async fn reconcile_scheduled_fills(
                     order.status = "failed".into();
                     order.failure_reason =
                         Some("Scheduled run could not be found in the position manager".into());
-                    record_execution_order_quality(
-                        execution_learning,
-                        execution_learning_order_ids,
-                        order,
-                    );
+                    record_execution_order_quality(execution_feedback_outbox, execution_learning_order_ids, order);
                     changed = true;
                     continue;
                 }
@@ -331,11 +327,7 @@ async fn reconcile_scheduled_fills(
                     changed = true;
                 }
             }
-            record_execution_order_quality(
-                execution_learning,
-                execution_learning_order_ids,
-                order,
-            );
+            record_execution_order_quality(execution_feedback_outbox, execution_learning_order_ids, order);
         }
     }
     if changed {

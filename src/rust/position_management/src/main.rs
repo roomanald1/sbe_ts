@@ -1,9 +1,12 @@
+#[path = "observability/logging.rs"]
 mod logging;
 #[path = "../../service_docs.rs"]
 mod service_docs;
 use axum::routing::get;
+#[path = "feeds/feed_client.rs"]
 mod feed_client;
 mod positions;
+#[path = "users/users.rs"]
 mod users;
 
 #[tokio::main]

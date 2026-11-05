@@ -1,5 +1,6 @@
 import json
 import os
+import time
 from pathlib import Path
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.error import URLError
@@ -39,6 +40,51 @@ def sample(name, help_text, value, labels=None, kind="gauge", timestamp_ms=None)
     return header + name + labels_text + " " + str(value) + timestamp_text + chr(10)
 
 
+def insights_maintenance_metrics(output):
+    database_path = Path(os.getenv("SQLITE_DB_PATH", "/workspace/src/rust/insights/signals.sqlite"))
+    status_path = Path(os.getenv("INSIGHTS_MAINTENANCE_STATUS_FILE") or database_path.with_name("maintenance_status.json"))
+    try:
+        with status_path.open(encoding="utf-8") as status_file:
+            status = json.load(status_file)
+    except (OSError, ValueError) as error:
+        status = {}
+        status_error = f"Maintenance status unavailable: {error}"
+    else:
+        status_error = status.get("last_error")
+
+    heartbeat_ms = status.get("heartbeat_at_ms")
+    alive = isinstance(heartbeat_ms, (int, float)) and 0 <= (int(time.time() * 1000) - heartbeat_ms) <= 90_000
+    output.append(sample("app_service_up", "Whether an application service is available.", int(alive), {"service": "insights_maintenance"}))
+    metrics = (
+        ("last_attempt_at_ms", "app_insights_maintenance_last_attempt_timestamp_seconds", "Unix timestamp of the most recent Insights maintenance attempt."),
+        ("last_success_at_ms", "app_insights_maintenance_last_success_timestamp_seconds", "Unix timestamp of the most recent successful Insights maintenance run."),
+    )
+    for field, name, help_text in metrics:
+        value = status.get(field)
+        if isinstance(value, (int, float)) and value > 0:
+            output.append(sample(name, help_text, value / 1000))
+
+    last_run_success = status.get("last_run_success")
+    output.append(sample("app_insights_maintenance_last_run_success", "Whether the most recent Insights maintenance run succeeded; -1 means no run has completed.", int(last_run_success) if isinstance(last_run_success, bool) else -1))
+    last_attempt = status.get("last_attempt_at_ms")
+    output.append(sample("app_insights_maintenance_has_run", "Whether Insights maintenance has started at least one run.", int(isinstance(last_attempt, (int, float)) and last_attempt > 0)))
+    for field, name, help_text in (
+        ("last_run_archived_records", "app_insights_maintenance_last_run_archived_records", "Signal records included in training archives during the most recent maintenance run."),
+        ("last_run_purged_signal_records", "app_insights_maintenance_last_run_purged_signal_records", "Raw signal records purged during the most recent maintenance run."),
+        ("last_run_compacted_audit_records", "app_insights_maintenance_last_run_compacted_audit_records", "Audit records summarized during the most recent maintenance run."),
+        ("last_run_purged_audit_records", "app_insights_maintenance_last_run_purged_audit_records", "Detailed audit records purged during the most recent maintenance run."),
+        ("last_run_expired_training_archives", "app_insights_maintenance_last_run_expired_training_archives", "Training archives expired during the most recent maintenance run."),
+        ("consecutive_failures", "app_insights_maintenance_consecutive_failures", "Consecutive failed Insights maintenance runs."),
+    ):
+        value = status.get(field)
+        if isinstance(value, (int, float)):
+            output.append(sample(name, help_text, value))
+    error = str(status_error or "").replace("\n", " ").replace("\r", " ")[:300]
+    output.append(sample("app_insights_maintenance_last_error_present", "Whether Insights maintenance has a current error.", int(bool(error))))
+    if error:
+        output.append(sample("app_insights_maintenance_last_error_info", "Current Insights maintenance error details.", 1, {"error": error}))
+
+
 def metrics():
     METRIC_HEADERS.clear()
     output = []
@@ -63,6 +109,8 @@ def metrics():
             output.append(sample("app_service_process_resident_memory_bytes", "Current resident memory (RSS) used by an application service process in bytes.", memory_bytes, {"service": name}))
         except (OSError, URLError, ValueError):
             pass
+
+    insights_maintenance_metrics(output)
 
     base = SERVICES["position_management"][0]
     try:

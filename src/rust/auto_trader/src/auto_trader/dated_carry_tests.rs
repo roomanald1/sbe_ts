@@ -1,6 +1,9 @@
-use super::strategy_dated_futures_carry::evaluate::evaluate;
 use super::*;
 use std::collections::BTreeMap;
+
+fn evaluate(input: &StrategySignal<'_>) -> Result<StrategyDecision, String> {
+    Strategy::DatedCarry.evaluate(input)
+}
 
 fn candidate(evaluated_at_ms: u64, basis_percent: f64, expiry_days: f64) -> DatedCarryCandidate {
     let spot_ask = 100.0;

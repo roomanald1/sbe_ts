@@ -95,21 +95,40 @@ struct Settings {
     #[serde(default)]
     learning: BTreeMap<String, LearningStats>,
     #[serde(default)]
-    feedback_outbox: Vec<strategy_core::FeedbackEvent>,
+    context_learning_imported: bool,
     #[serde(default)]
-    profile_registration_outbox: Vec<strategy_core::StrategyProfileRegistration>,
+    feedback_outbox: Vec<strategies::FeedbackEvent>,
+    #[serde(default)]
+    profile_registration_outbox: Vec<strategies::StrategyProfileRegistration>,
     #[serde(default)]
     registered_profile_ids: BTreeSet<String>,
     #[serde(default)]
-    learned_profiles: BTreeMap<String, strategy_core::StrategyProfile>,
+    learned_profiles: BTreeMap<String, strategies::StrategyProfile>,
+    #[serde(default)]
+    learned_strategy_size_multipliers: BTreeMap<String, f64>,
+    #[serde(default)]
+    learned_context_stats: BTreeMap<String, strategies::ContextLearningStat>,
+    #[serde(default)]
+    learned_execution_stats: BTreeMap<String, strategies::ExecutionLearningStat>,
+    #[serde(default)]
+    learned_scout_parameter_variants: Vec<strategies::ScoutParameterVariant>,
     #[serde(default)]
     execution_learning: BTreeMap<String, ExecutionLearningStats>,
     #[serde(default)]
+    execution_learning_imported: bool,
+    #[serde(default)]
     execution_learning_order_ids: BTreeSet<String>,
     #[serde(default)]
+    execution_feedback_outbox: Vec<strategies::ExecutionOutcomeEvent>,
+    // Retained only long enough to import in-flight state created before
+    // Scouts became the owner of paired shadow outcomes.
+    #[serde(default)]
+    // Legacy dedupe IDs retained for deserialization; Scouts now owns dedupe.
     shadow_learning_outcome_ids: BTreeSet<String>,
     #[serde(default)]
+    // Legacy comparison returns imported once into the Scouts service.
     scout_comparisons: BTreeMap<String, PendingScoutComparison>,
+    // Replicated read cache of the Scouts lifecycle snapshot. Scouts is the source of truth.
     #[serde(default)]
     shadow_sample_at_ms: BTreeMap<String, u64>,
     #[serde(default)]
@@ -251,12 +270,19 @@ impl Default for Settings {
             positions: BTreeMap::new(),
             strategy_positions: BTreeMap::new(),
             learning: BTreeMap::new(),
+            context_learning_imported: false,
             feedback_outbox: Vec::new(),
             profile_registration_outbox: Vec::new(),
             registered_profile_ids: BTreeSet::new(),
             learned_profiles: BTreeMap::new(),
+            learned_strategy_size_multipliers: BTreeMap::new(),
+            learned_context_stats: BTreeMap::new(),
+            learned_execution_stats: BTreeMap::new(),
+            learned_scout_parameter_variants: Vec::new(),
             execution_learning: BTreeMap::new(),
+            execution_learning_imported: false,
             execution_learning_order_ids: BTreeSet::new(),
+            execution_feedback_outbox: Vec::new(),
             shadow_learning_outcome_ids: BTreeSet::new(),
             scout_comparisons: BTreeMap::new(),
             shadow_sample_at_ms: BTreeMap::new(),

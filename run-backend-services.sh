@@ -63,6 +63,9 @@ children+=("$insights_pid")
 wait_for_service "$insights_pid" 3004 "Insights"
 wait_for_service "$sentiment_pid" 3006 "News sentiment"
 
+cargo run --release --manifest-path src/rust/insights/Cargo.toml --bin insights-maintenance &
+insights_maintenance_pid=$!
+children+=("$insights_maintenance_pid")
 
 cargo run --release --manifest-path src/rust/feed_handlers/Cargo.toml &
 feed_pid=$!

@@ -2,6 +2,9 @@
 
 ## Command environment
 
+- If an agent gets stuck performing simple read or write tasks, it is okay to spawn a child agent to continue the work.
+- For larger pieces of work, agents may spawn child agents to handle independent, well-scoped parts in parallel. The parent agent coordinates the work and reviews the combined result; avoid delegation when shared files or dependencies would create unnecessary conflicts.
+
 - Use the Linux path /home/ronnie/dev/sbe_ts as the canonical workspace path for file reads, writes, and terminal working directories. Avoid passing the Windows UNC workspace spelling to edit/patch tools: they may reject a WSL reparse point even though the path works as a shell working directory.
 - Run all project commands in Linux under WSL, from /home/ronnie/dev/sbe_ts (or the relevant project directory). This includes nx, cargo, rg, Git, package managers, and build or test commands.
 - Do not invoke project commands through Windows PowerShell, Command Prompt, or Windows executables. In particular, run Nx as ./nx <target> react-app from the WSL repository root; do not launch nx or ./nx from Windows, which can trigger an app chooser.

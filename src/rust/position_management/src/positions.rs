@@ -37,46 +37,46 @@ static USD_RATE_ORDER_SNAPSHOT: OnceLock<ArcSwapOption<UsdRatesResponse>> = Once
 const USD_RATE_CACHE_TTL: Duration = Duration::from_secs(15);
 const USD_RATE_STREAM_MAX_AGE: Duration = Duration::from_secs(120);
 
-include!("positions_routes.rs");
+include!("positions/positions_routes.rs");
 
-include!("market_book_workers.rs");
+include!("market/market_book_workers.rs");
 
-include!("usd_rates.rs");
+include!("market/usd_rates.rs");
 
-include!("order_types.rs");
+include!("orders/order_types.rs");
 
-include!("book_matching.rs");
+include!("market/book_matching.rs");
 
-include!("position_store_load.rs");
+include!("ledger/position_store_load.rs");
 
-include!("position_store_subscriptions.rs");
+include!("ledger/position_store_subscriptions.rs");
 
-include!("scheduled_run_lifecycle.rs");
+include!("scheduling/scheduled_run_lifecycle.rs");
 
-include!("twap_execution.rs");
+include!("scheduling/twap_execution.rs");
 
-include!("vwap_execution.rs");
+include!("scheduling/vwap_execution.rs");
 
-include!("ledger_trade_index.rs");
+include!("ledger/ledger_trade_index.rs");
 
-include!("account_snapshot.rs");
+include!("account/account_snapshot.rs");
 
-include!("account_capacity.rs");
+include!("account/account_capacity.rs");
 
-include!("account_routes.rs");
+include!("account/account_routes.rs");
 
-include!("position_reporting.rs");
+include!("positions/position_reporting.rs");
 
-include!("hedge_candidates.rs");
+include!("positions/hedge_candidates.rs");
 
-include!("market_insights_inputs.rs");
+include!("market/market_insights_inputs.rs");
 
-include!("position_trade_history.rs");
+include!("positions/position_trade_history.rs");
 
-include!("order_queries_and_barriers.rs");
+include!("orders/order_queries_and_barriers.rs");
 
-include!("order_submission.rs");
+include!("orders/order_submission.rs");
 
-include!("order_cancellation.rs");
+include!("orders/order_cancellation.rs");
 
-include!("ledger_helpers.rs");
+include!("ledger/ledger_helpers.rs");

@@ -112,14 +112,25 @@ async fn execute_portfolio_hedge(
         .and_then(serde_json::Value::as_f64)
         .unwrap_or(0.0)
         .abs();
-    let execution_learning = settings
-        .learning
-        .entry("portfolio-hedge:execution".into())
-        .or_default();
-    record_learning_outcome(
-        execution_learning,
-        if filled >= quantity * 0.8 { 1.0 } else { 0.0 },
-    );
+    let fill_rate = if quantity > 0.0 { (filled / quantity).clamp(0.0, 1.0) } else { 0.0 };
+    let hedge_cost_bps = average_price.map_or(0.0, |execution| {
+        let slippage = if side == "buy" {
+            (execution / price - 1.0) * 10_000.0
+        } else {
+            (1.0 - execution / price) * 10_000.0
+        };
+        slippage * filled * execution
+    });
+    settings.execution_feedback_outbox.push(strategies::ExecutionOutcomeEvent {
+        event_id: format!("portfolio-hedge:{timestamp}"),
+        observed_at_ms: timestamp,
+        context: "portfolio-hedge".into(),
+        order_type: "Ioc".into(),
+        filled: filled > 0.0,
+        fill_rate,
+        cost_notional: filled * average_price.unwrap_or(price),
+        all_in_cost_notional_bps: hedge_cost_bps,
+    });
     let (realized_pnl, _) = if filled > 0.0 {
         average_price
             .map(|execution| {

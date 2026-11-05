@@ -14,8 +14,17 @@ async fn main() -> anyhow::Result<()> {
             "Scouts",
             &[
                 ("/health", &["get"]),
+                ("/shadow-outcomes", &["get"]),
                 ("/samples", &["post"]),
+                ("/shadow-outcome", &["post"]),
+                ("/shadow-plan", &["post"]),
+                ("/shadow-lifecycle/state", &["get", "post"]),
+                ("/shadow-lifecycle/observe", &["post"]),
                 ("/outcomes", &["post"]),
+                ("/variants", &["post"]),
+                ("/variants/batch", &["post"]),
+                ("/live-candidates", &["post"]),
+                ("/select-entry", &["post"]),
             ],
         )),
     )

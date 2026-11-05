@@ -1,13 +1,17 @@
-mod daily_summary;
+#[path = "network/feed_client.rs"]
 mod feed_client;
+#[path = "observability/logging.rs"]
 mod logging;
 use axum::{Json, Router, http::StatusCode, routing::get};
 use dashmap::DashMap;
 use futures_util::StreamExt;
-use insights::signals::{
-    ExternalMarketFeatures, LIVE_SIGNAL_SNAPSHOT_INTERVAL_MS, NewsAttribution,
-    NewsHeadlineAttribution, SignalEngine, SignalEvaluation, SignalSnapshot, SignalStore,
-    StoredSignalRecord,
+use insights::{
+    daily_summary,
+    signals::{
+        ExternalMarketFeatures, LIVE_SIGNAL_SNAPSHOT_INTERVAL_MS, NewsAttribution,
+        NewsHeadlineAttribution, SignalEngine, SignalEvaluation, SignalSnapshot, SignalStore,
+        StoredSignalRecord,
+    },
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -123,15 +127,16 @@ fn signal_diagnostic_due(runtime: &SignalRuntime, symbol: &str, timestamp: u64) 
     true
 }
 
-include!("news_classification.rs");
+include!("feeds/news_classification.rs");
 
-include!("external_market_feed.rs");
-include!("dated_carry_signals.rs");
-include!("daily_strategy_signals.rs");
-include!("signal_feed_workers.rs");
+include!("feeds/external_market_feed.rs");
+include!("feeds/dated_carry_signals.rs");
+include!("feeds/daily_strategy_signals.rs");
+include!("workers/signal_feed_workers.rs");
 
-mod scout_shadow_api;
+#[path = "api/scout_shadow_report.rs"]
+mod scout_shadow_report;
 
-include!("signal_ingestion.rs");
+include!("api/signal_ingestion.rs");
 
-include!("service_startup.rs");
+include!("workers/service_startup.rs");

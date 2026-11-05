@@ -146,7 +146,7 @@ async fn sync_auto_positions(
         if pending_signal_symbols.contains(&source_position.symbol) {
             continue;
         }
-        let (realized_delta, learning_key, close_audit, closed_out, scout_entry) = {
+        let (realized_delta, close_audit, closed_out, scout_entry, strategy, learning_context) = {
             let position = settings
                 .positions
                 .entry(source_position.symbol.clone())
@@ -155,19 +155,8 @@ async fn sync_auto_positions(
             let prior_average_entry_price = position.average_entry_price;
             let scout_entry = position.scout_entry;
             let realized_delta = source_position.realized_pnl - position.realized_pnl;
-            let learning_key = format!(
-                "{}:{}",
-                if position.entry_context.is_empty() {
-                    &source_position.symbol
-                } else {
-                    &position.entry_context
-                },
-                if position.entry_order_type.is_empty() {
-                    "ManualClose"
-                } else {
-                    &position.entry_order_type
-                },
-            );
+            let strategy = position.strategy.clone();
+            let learning_context = position.entry_context.clone();
             let closed_quantity = external_close_quantity(prior_quantity, source_position.quantity);
             let close_audit = (prior_quantity.abs() > 1e-12
                 && closed_quantity > 1e-12
@@ -193,7 +182,7 @@ async fn sync_auto_positions(
                 changed = true;
             }
             position.realized_pnl = source_position.realized_pnl;
-            (realized_delta, learning_key, close_audit, closed_out, scout_entry)
+            (realized_delta, close_audit, closed_out, scout_entry, strategy, learning_context)
         };
         if let Some(audit) = close_audit {
             let strategy_lots = settings.strategy_positions
@@ -224,8 +213,20 @@ async fn sync_auto_positions(
                 // This is a symbol-level reconciliation delta, not one matched
                 // round trip. The old quantity may be a tiny residual and
                 // source fees are cumulative, so do not write a trade return.
-                let stats = settings.learning.entry(learning_key).or_default();
-                record_learning_outcome(stats, realized_delta_usd);
+                if let Some(strategy) = strategy.as_deref() {
+                    let decision = serde_json::json!({});
+                    let trade_id = format!("manual-close:{}:{}", source_position.symbol, current_time_ms());
+                    record_strategy_trade_outcome(
+                        &mut settings,
+                        &source_position.symbol,
+                        Some(strategy),
+                        Some(&learning_context),
+                        false,
+                        realized_delta_usd,
+                        Some(&decision),
+                        Some(&trade_id),
+                    );
+                }
             }
         }
     }
@@ -410,12 +411,8 @@ async fn reconcile_inactive_execution_orders(
         completed_orders.push(order.clone());
     }
     for order in completed_orders {
-        let Settings {
-            execution_learning,
-            execution_learning_order_ids,
-            ..
-        } = &mut *settings;
-        record_execution_order_quality(execution_learning, execution_learning_order_ids, &order);
+        let Settings { execution_feedback_outbox, execution_learning_order_ids, .. } = &mut *settings;
+        record_execution_order_quality(execution_feedback_outbox, execution_learning_order_ids, &order);
     }
     if changed {
         request_settings_persist(state)?;

@@ -14,13 +14,31 @@ async function withFetch(impl: typeof fetch, run: () => Promise<void>) {
   try { await run(); } finally { globalThis.fetch = original; }
 }
 function jsonResponse(body: unknown) { return { ok: true, json: async () => body, text: async () => '' } as Response; }
+function scoutOutcomesResponse(rows: unknown[]) {
+  return {
+    rows,
+    summary: {
+      all: { total: rows.length, open: 0, resolved: rows.length, wins: 0, losses: 0, flats: 0, unavailable: 0 },
+      live: { total: rows.length, open: 0, resolved: rows.length, wins: 0, losses: 0, flats: 0, unavailable: 0 },
+    },
+    learningRows: [], symbols: ['BTC-USDT'], learningSymbol: null, learningOutcomes: [],
+    updatedAt: Date.now(), source: 'live', status: 'all', page: 0, pageNumber: 1,
+    pageSize: 50, pageCount: 1, totalRows: rows.length, hasPrevious: false, hasNext: false,
+  };
+}
 
 describe('AutoTraderShadowModel', () => {
-  it('marks legacy live scouts without an entry price as outcome unavailable', async () => {
+  it('loads unavailable Scout outcomes without an entry price from Insights', async () => {
     const timestamp = Date.now();
-    await withFetch(async (url) => String(url).includes('/auto-trader-audit')
-      ? jsonResponse({ items: [{ decision_id: 'missing-entry', stage: 'decision', status: 'shadowed', timestamp, signal_timestamp: timestamp, symbol: 'ETH-USDT', direction: 'bearish', strategy: 'live-trade-flow', strength: 0.5, scout: true }] })
-      : jsonResponse([]), async () => {
+    await withFetch(async (url) => {
+      assert.match(String(url), /\/scouts\/shadow-outcomes/);
+      return jsonResponse(scoutOutcomesResponse([{
+        decisionId: 'missing-entry', symbol: 'ETH-USDT', direction: 'bearish',
+        strategy: 'live-trade-flow', strength: 0.5, source: 'Scout',
+        exitScenario: 'strategy', openedAt: timestamp, takerFeeRate: 0,
+        status: 'Outcome unavailable',
+      }]));
+    }, async () => {
       const model = new AutoTraderShadowModel();
       model.start();
       await new Promise<void>((resolve) => setTimeout(resolve, 0));
@@ -29,11 +47,17 @@ describe('AutoTraderShadowModel', () => {
     });
   });
 
-  it('matches five-minute evaluations to shadow decisions and derives outcomes', async () => {
+  it('loads the fee-aware Scout outcomes computed by Insights', async () => {
     const timestamp = Date.now();
-    await withFetch(async (url) => String(url).includes('/auto-trader-audit')
-      ? jsonResponse({ items: [{ decision_id: 'd1', stage: 'decision', status: 'shadowed', timestamp, signal_timestamp: timestamp, symbol: 'BTC-USDT', direction: 'bullish', strategy: 'live-momentum', strength: 0.8, scout: true, shadow_entry_ask: 100, shadow_taker_fee_rate: 0.001 }] })
-      : jsonResponse([{ symbol: 'BTC-USDT', signal_timestamp: timestamp, evaluated_timestamp: timestamp + 300_000, horizon_seconds: 300, signal_direction: 'bullish', long_net_percent: 0.5, taker_fee_rate: 0.002 }]), async () => {
+    await withFetch(async (url) => {
+      assert.match(String(url), /\/scouts\/shadow-outcomes/);
+      return jsonResponse(scoutOutcomesResponse([{
+        decisionId: 'd1', symbol: 'BTC-USDT', direction: 'bullish',
+        strategy: 'live-momentum', strength: 0.8, source: 'Scout',
+        exitScenario: 'strategy', openedAt: timestamp, closedAt: timestamp + 300_000,
+        entryPrice: 100, takerFeeRate: 0.002, status: 'Won', netReturnPercent: 0.5,
+      }]));
+    }, async () => {
       const model = new AutoTraderShadowModel();
       model.start();
       await new Promise<void>((resolve) => setTimeout(resolve, 0));

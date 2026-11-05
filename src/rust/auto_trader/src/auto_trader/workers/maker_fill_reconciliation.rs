@@ -99,8 +99,8 @@ async fn reconcile_maker_fills(
     let mut settings = state.settings.lock().await;
     let mut changed = false;
     let Settings {
-        orders, positions, strategy_positions, execution_learning,
-        execution_learning_order_ids, ..
+        orders, positions, strategy_positions,
+        execution_feedback_outbox, execution_learning_order_ids, ..
     } = &mut *settings;
     for order in orders.iter_mut().filter(|order| {
         is_maker_order_reconcilable(&order.order_type, &order.status)
@@ -253,11 +253,7 @@ async fn reconcile_maker_fills(
             }));
         }
         changed |= order.status != prior_status;
-        record_execution_order_quality(
-            execution_learning,
-            execution_learning_order_ids,
-            order,
-        );
+        record_execution_order_quality(execution_feedback_outbox, execution_learning_order_ids, order);
     }
     if changed {
         request_settings_persist(state)?;

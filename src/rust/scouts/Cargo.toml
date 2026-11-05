@@ -9,6 +9,6 @@ axum = "0.8.9"
 reqwest = { version = "0.13.5", features = ["json"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
-strategy_core = { path = "../strategy_core" }
-tokio = { version = "1.53.1", features = ["macros", "net", "rt-multi-thread"] }
+strategies = { path = "../strategies" }
+tokio = { version = "1.53.1", features = ["macros", "net", "rt-multi-thread", "time"] }
 

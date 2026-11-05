@@ -1,26 +1,8 @@
 // Paper-only dated futures cash-and-carry. It never submits exchange orders.
-const CARRY_COST_GATE_PERCENT: f64 = 0.5;
+#[cfg(test)]
+const CARRY_COST_GATE_PERCENT: f64 = strategies::DATED_CARRY_COST_BUDGET_PERCENT;
 const CARRY_ENTRY_SLIPPAGE: f64 = 0.0005;
 const CARRY_DAY_MS: u64 = 86_400_000;
-
-#[derive(Clone, Serialize, Deserialize)]
-struct DatedCarryCandidate {
-    spot_symbol: String,
-    future_symbol: String,
-    expiry_ms: u64,
-    days_to_expiry: f64,
-    quantity: f64,
-    spot_ask: f64,
-    future_bid: f64,
-    #[serde(default)]
-    spot_bid: f64,
-    #[serde(default)]
-    future_ask: f64,
-    basis_percent: f64,
-    net_after_budget_percent: f64,
-    eligible: bool,
-    reason: String,
-}
 
 #[derive(Clone, Serialize, Deserialize)]
 struct DatedCarryPosition {
@@ -69,6 +51,10 @@ struct DatedCarryScoutShadow {
     opened_at_ms: u64,
     parameter_key: String,
     parameter_value: f64,
+    #[serde(default)]
+    parameters: BTreeMap<String, f64>,
+    #[serde(default)]
+    tested_parameters: BTreeMap<String, f64>,
     would_enter: bool,
 }
 
@@ -84,9 +70,11 @@ struct DatedCarryBook {
     checked_at_ms: u64,
     #[serde(default)]
     last_error: Option<String>,
-    #[serde(default)]
+    // Read once to transfer pre-migration samples/cooldowns to Scouts. Empty
+    // values are omitted from subsequent saves.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     scout_shadow_probes: Vec<DatedCarryScoutShadow>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     scout_shadow_last_started: BTreeMap<String, u64>,
 }
 
@@ -110,6 +98,7 @@ fn dated_carry_shadow_key(candidate: &DatedCarryCandidate, key: &str, value: f64
     format!("{}:{key}:{value:.8}", candidate.spot_symbol)
 }
 
+#[cfg(test)]
 fn dated_carry_shadow_return_percent(
     entry: &DatedCarryCandidate,
     exit: &DatedCarryCandidate,
@@ -132,6 +121,92 @@ fn dated_carry_shadow_return_percent(
             .all(|value| value.is_finite() && *value > 0.0)
         && net.is_finite())
     .then_some(net / entry_notional * 100.0)
+}
+
+fn shared_dated_carry_candidate(
+    candidate: &DatedCarryCandidate,
+) -> strategies::DatedCarryEntryCandidate {
+    strategies::DatedCarryEntryCandidate {
+        spot_symbol: candidate.spot_symbol.clone(),
+        future_symbol: candidate.future_symbol.clone(),
+        expiry_ms: candidate.expiry_ms,
+        days_to_expiry: candidate.days_to_expiry,
+        quantity: candidate.quantity,
+        spot_ask: candidate.spot_ask,
+        future_bid: candidate.future_bid,
+        spot_bid: candidate.spot_bid,
+        future_ask: candidate.future_ask,
+        basis_percent: candidate.basis_percent,
+        net_after_budget_percent: candidate.net_after_budget_percent,
+        eligible: candidate.eligible,
+    }
+}
+
+fn dated_carry_probe_plan_candidate(
+    candidate: &DatedCarryCandidate,
+    opened_at_ms: u64,
+    parameter_key: &str,
+    parameter_value: f64,
+    parameters: &BTreeMap<String, f64>,
+    tested_parameters: &BTreeMap<String, f64>,
+    cooldown_ms: u64,
+) -> scouts::ShadowPlanCandidate {
+    let profile_symbol = candidate.spot_symbol.replace("USDT", "-USDT");
+    let sample_id = format!(
+        "dated-carry-scout:{}:{}:{parameter_key}:{parameter_value:.8}",
+        candidate.future_symbol, opened_at_ms,
+    );
+    let shared_candidate = shared_dated_carry_candidate(candidate);
+    let minimum_days = strategy_parameter_value(
+        parameters,
+        StrategyParameterKey::CarryMinimumDaysToExpiry,
+    )
+    .unwrap_or(f64::NAN);
+    let cost_gate_percent = strategy_parameter_value(
+        parameters,
+        StrategyParameterKey::CarryCostGatePercent,
+    )
+    .unwrap_or(f64::NAN);
+    let would_enter = strategies::dated_carry_entry_is_eligible(
+        &shared_candidate,
+        opened_at_ms,
+        opened_at_ms,
+        minimum_days,
+        cost_gate_percent,
+    );
+    let parameter_specs = scout_parameter_specs(Strategy::DatedCarry)
+        .into_iter()
+        .filter(|spec| tested_parameters.contains_key(spec.key.as_str()))
+        .collect();
+
+    scouts::ShadowPlanCandidate {
+        generate_group_id: false,
+        sample_group_id: sample_id.clone(),
+        cooldown_key: dated_carry_shadow_key(candidate, parameter_key, parameter_value),
+        profile_key: format!("{profile_symbol}:{}", Strategy::DatedCarry.as_str()),
+        eligible: true,
+        parameter_variant: true,
+        cooldown_ms,
+        audit_plans: Vec::new(),
+        audit_templates: Vec::new(),
+        daily_policy: None,
+        live_policy: None,
+        sample_payload: Some(scouts::ShadowSamplePayload::DatedCarryProbe(
+            scouts::DatedCarryProbe {
+                sample_id,
+                parameter_key: parameter_key.to_owned(),
+                parameter_value,
+                opened_at_ms,
+                candidate: shared_candidate,
+                strategy: Strategy::DatedCarry.as_str().to_owned(),
+                profile_symbol,
+                parameters: parameters.clone(),
+                tested_parameters: tested_parameters.clone(),
+                parameter_specs,
+                would_enter,
+            },
+        )),
+    }
 }
 
 fn carry_now_ms() -> u64 {
@@ -250,7 +325,6 @@ async fn receive_dated_carry_signal(
     let mut book = state.dated_carry.lock().await;
     let mut changed = false;
     let mut audit_payload = None;
-    let mut parameter_feedback = Vec::<(String, String, String, f64)>::new();
     match signal {
         DatedCarrySignal::Scan { emitted_at_ms, candidates, last_error } => {
             if emitted_at_ms > now_ms + 5_000 || now_ms.saturating_sub(emitted_at_ms) > 120_000 {
@@ -268,88 +342,182 @@ async fn receive_dated_carry_signal(
                     }
                 }
 
-                let mut pending_shadows = Vec::new();
-                for shadow in std::mem::take(&mut book.scout_shadow_probes) {
-                    if emitted_at_ms.saturating_sub(shadow.opened_at_ms) >= CARRY_DAY_MS {
-                        let return_percent = if shadow.would_enter {
-                            candidates.iter().find(|candidate| {
-                                candidate.future_symbol == shadow.candidate.future_symbol
-                                    && candidate.spot_symbol == shadow.candidate.spot_symbol
-                            }).and_then(|exit| dated_carry_shadow_return_percent(&shadow.candidate, exit))
-                        } else {
-                            Some(0.0)
-                        };
-                        if let Some(return_percent) = return_percent {
-                            parameter_feedback.push((
-                                shadow.candidate.spot_symbol.replace("USDT", "-USDT"),
-                                shadow.parameter_key,
-                                format!("{:.8}", shadow.parameter_value),
-                                return_percent,
-                            ));
-                            continue;
+                let strategy_settings = {
+                    let settings = state.settings.lock().await;
+                    settings.clone()
+                };
+                let enabled = state.enabled.load(Ordering::Relaxed)
+                    && strategy_settings.strategies.contains(&Strategy::DatedCarry);
+
+                let scouts_url = std::env::var("SCOUTS_SERVICE_URL")
+                    .unwrap_or_else(|_| "http://127.0.0.1:3011".into());
+                let legacy_cooldowns = book.scout_shadow_last_started.clone();
+                if !legacy_cooldowns.is_empty() {
+                    {
+                        let mut settings = state.settings.lock().await;
+                        for (key, started_day) in &legacy_cooldowns {
+                            settings.shadow_sample_at_ms.entry(key.clone()).or_insert_with(|| {
+                                started_day.saturating_mul(CARRY_DAY_MS)
+                            });
                         }
                     }
-                    if emitted_at_ms.saturating_sub(shadow.opened_at_ms) <= 3 * CARRY_DAY_MS {
-                        pending_shadows.push(shadow);
+                    let cooldowns = legacy_cooldowns.iter()
+                        .map(|(key, started_day)| (key.clone(), started_day.saturating_mul(CARRY_DAY_MS)))
+                        .collect::<BTreeMap<_, _>>();
+                    let mut cooldown_ids = cooldowns.keys().cloned().collect::<Vec<_>>();
+                    cooldown_ids.sort();
+                    let import_request = scouts::ShadowPlanRequest {
+                        request_id: format!("dated-carry-cooldown-import:{}", scouts::probe_id(&cooldown_ids.join("|"))),
+                        now_ms: emitted_at_ms,
+                        max_active_batches: 5_000,
+                        max_active_variants_per_profile: 1_000,
+                        legacy_cooldowns: cooldowns,
+                        legacy_comparisons: Vec::new(),
+                        candidates: Vec::new(),
+                    };
+                    if scouts::request_shadow_plan(&scouts_url, &import_request).await.is_ok() {
+                        book.scout_shadow_last_started.clear();
+                        if let Err(error) = request_settings_persist(&state) {
+                            crate::service_log!("WARN", "Could not persist imported dated-carry Scout cooldowns: {}", error.1);
+                        }
+                    } else {
+                        crate::service_log!("WARN", "Could not import legacy dated-carry Scout cooldowns; retaining them for retry");
                     }
                 }
-                book.scout_shadow_probes = pending_shadows;
 
-                let settings = state.settings.lock().await;
-                let enabled = state.enabled.load(Ordering::Relaxed)
-                    && settings.strategies.contains(&Strategy::DatedCarry);
+                let observed_candidates = candidates.iter().map(shared_dated_carry_candidate).collect::<Vec<_>>();
+                let observe_request = scouts::ShadowLifecycleObserveRequest {
+                    request_id: format!("dated-carry-mark:{emitted_at_ms}:{}", scouts::probe_id(
+                        &serde_json::to_string(&observed_candidates).unwrap_or_default(),
+                    )),
+                    now_ms: emitted_at_ms,
+                    candidates: observed_candidates,
+                };
+                if let Err(error) = scouts::request_shadow_lifecycle_observe(&scouts_url, &observe_request).await {
+                    crate::service_log!("WARN", "Scout service unavailable for dated-carry markout updates: {error}");
+                }
+
+                // Transfer probes persisted by older AutoTrader versions before
+                // creating new ones. The stable request ID makes a retry safe if
+                // the process stops after Scout admission but before this book saves.
+                if !book.scout_shadow_probes.is_empty() {
+                    let mut legacy_candidates = Vec::new();
+                    for shadow in &book.scout_shadow_probes {
+                        let mut planned = dated_carry_probe_plan_candidate(
+                            &shadow.candidate,
+                            shadow.opened_at_ms,
+                            &shadow.parameter_key,
+                            shadow.parameter_value,
+                            &shadow.parameters,
+                            &shadow.tested_parameters,
+                            0,
+                        );
+                        if let Some(scouts::ShadowSamplePayload::DatedCarryProbe(probe)) =
+                            planned.sample_payload.as_mut()
+                        {
+                            probe.would_enter = shadow.would_enter;
+                        }
+                        legacy_candidates.push(planned);
+                    }
+                    let mut ids = legacy_candidates.iter().map(|candidate| candidate.sample_group_id.clone()).collect::<Vec<_>>();
+                    ids.sort();
+                    let legacy_request = scouts::ShadowPlanRequest {
+                        request_id: format!("dated-carry-legacy-import:{}", scouts::probe_id(&ids.join("|"))),
+                        now_ms: emitted_at_ms,
+                        max_active_batches: 5_000,
+                        max_active_variants_per_profile: 1_000,
+                        legacy_cooldowns: BTreeMap::new(),
+                        legacy_comparisons: Vec::new(),
+                        candidates: legacy_candidates,
+                    };
+                    match scouts::request_shadow_plan(&scouts_url, &legacy_request).await {
+                        Ok(response) => {
+                            let accepted = response.selected_groups.into_iter().collect::<BTreeSet<_>>();
+                            book.scout_shadow_probes.retain(|shadow| {
+                                let id = format!("dated-carry-scout:{}:{}:{}:{:.8}",
+                                    shadow.candidate.future_symbol, shadow.opened_at_ms,
+                                    shadow.parameter_key, shadow.parameter_value);
+                                !accepted.contains(&id)
+                            });
+                        }
+                        Err(error) => crate::service_log!("WARN", "Could not migrate legacy dated-carry Scout probes: {error}"),
+                    }
+                }
+
                 if enabled {
                     let day = emitted_at_ms / CARRY_DAY_MS;
+                    let mut plan_candidates = Vec::new();
                     for candidate in &candidates {
                         if !candidate.eligible {
                             continue;
                         }
                         let profile_symbol = candidate.spot_symbol.replace("USDT", "-USDT");
                         let strategy_parameters = strategy_parameter_values(
-                            &settings, &profile_symbol, Strategy::DatedCarry,
+                            &strategy_settings, &profile_symbol, Strategy::DatedCarry,
                         );
                         if candidate.expiry_ms <= emitted_at_ms.saturating_add(CARRY_DAY_MS) {
                             continue;
                         }
-                        let variants = scouts::all_parameter_variants(
-                            &strategy_parameters,
-                            &scout_parameter_specs(Strategy::DatedCarry),
-                            day,
-                        ).unwrap_or_default();
-                        for changes in variants {
-                            let (parameter_key, parameter_value) = if changes.len() == 1 {
-                                let (key, value) = changes.iter().next().expect("single carry parameter");
-                                (key.clone(), *value)
-                            } else {
-                                let Some(key) = scout_combination_key(&changes, &strategy_parameters) else { continue; };
-                                (key, 0.0)
-                            };
-                            let key = dated_carry_shadow_key(candidate, &parameter_key, parameter_value);
-                            if book.scout_shadow_last_started.get(&key).is_some_and(|started_day| *started_day >= day)
+                        let variants = match scouts::request_parameter_variants(
+                            &scouts_url,
+                            &scouts::ParameterVariantsRequest {
+                                parameters: strategy_parameters.clone(),
+                                specs: scout_parameter_specs(Strategy::DatedCarry),
+                                day,
+                            },
+                        )
+                        .await
+                        {
+                            Ok(Some(variants)) => variants,
+                            Ok(None) => Vec::new(),
+                            Err(error) => {
+                                crate::service_log!("WARN", "Scout service unavailable for dated-carry parameter sweep: {error}");
+                                Vec::new()
+                            }
+                        };
+                        for variant in variants {
+                            let parameter_key = variant.key;
+                            let parameter_value = variant.value;
+                            let changes = variant.changes;
+                            let cooldown_key = dated_carry_shadow_key(candidate, &parameter_key, parameter_value);
+                            if legacy_cooldowns.get(&cooldown_key).is_some_and(|started_day| *started_day >= day)
                                 || book.scout_shadow_probes.iter().any(|shadow| {
-                                    dated_carry_shadow_key(&shadow.candidate, &shadow.parameter_key, shadow.parameter_value) == key
+                                    dated_carry_shadow_key(&shadow.candidate, &shadow.parameter_key, shadow.parameter_value) == cooldown_key
                                 })
                             {
                                 continue;
                             }
                             let mut probe_parameters = strategy_parameters.clone();
-                            probe_parameters.extend(changes);
-                            let would_enter = Strategy::DatedCarry.evaluate(&StrategySignal::dated_carry_entry(
-                                candidate, emitted_at_ms, emitted_at_ms, &probe_parameters,
-                            )).unwrap_or(StrategyDecision::Reject) == StrategyDecision::Enter;
-                            book.scout_shadow_probes.push(DatedCarryScoutShadow {
-                                candidate: candidate.clone(),
-                                opened_at_ms: emitted_at_ms,
-                                parameter_key,
+                            probe_parameters.extend(changes.iter().map(|(key, value)| (key.clone(), *value)));
+                            plan_candidates.push(dated_carry_probe_plan_candidate(
+                                candidate,
+                                emitted_at_ms,
+                                &parameter_key,
                                 parameter_value,
-                                would_enter,
-                            });
-                            book.scout_shadow_last_started.insert(key, day);
+                                &probe_parameters,
+                                &changes,
+                                CARRY_DAY_MS,
+                            ));
                         }
                     }
-                    book.scout_shadow_last_started.retain(|_, started_day| day.saturating_sub(*started_day) <= 30);
+                    if !plan_candidates.is_empty() {
+                        let request_hash = scouts::probe_id(
+                            &serde_json::to_string(&plan_candidates).unwrap_or_default(),
+                        );
+                        let request = scouts::ShadowPlanRequest {
+                            request_id: format!("dated-carry-scan:{emitted_at_ms}:{request_hash}"),
+                            now_ms: emitted_at_ms,
+                            max_active_batches: 5_000,
+                            max_active_variants_per_profile: 1_000,
+                            legacy_cooldowns: BTreeMap::new(),
+                            legacy_comparisons: Vec::new(),
+                            candidates: plan_candidates,
+                        };
+                        if let Err(error) = scouts::request_shadow_plan(&scouts_url, &request).await {
+                            crate::service_log!("WARN", "Could not schedule dated-carry Scout probes: {error}");
+                        }
+                    }
                 }
-                drop(settings);
                 book.candidates = candidates;
             }
             changed = true;
@@ -509,20 +677,6 @@ async fn receive_dated_carry_signal(
                 position.settlement_price = Some(settlement_price);
                 position.settlement_source = Some(settlement_source.as_str().into());
                 position.net_pnl_usdt = Some(net);
-                if settlement_source == DatedCarrySettlementSource::Official {
-                    if let (Some(parameter), Some(value)) = (
-                        position.scout_parameter_key.as_ref(), position.scout_parameter_value,
-                    ) {
-                        let entry_notional = q * position.spot_entry_price;
-                        if entry_notional.is_finite() && entry_notional > 0.0 {
-                            parameter_feedback.push((
-                                position.spot_symbol.replace("USDT", "-USDT"),
-                                parameter.clone(), format!("{value:.8}"),
-                                net / entry_notional * 100.0,
-                            ));
-                        }
-                    }
-                }
                 audit_payload = Some(serde_json::json!({
                     "decision_id": format!("dated-carry:{}", position.future_symbol),
                     "stage": "dated_carry_exit",
@@ -546,26 +700,133 @@ async fn receive_dated_carry_signal(
             .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error))?;
     }
     drop(book);
-    if !parameter_feedback.is_empty() {
-        let mut settings = state.settings.lock().await;
-        for (symbol, parameter, value, return_percent) in parameter_feedback {
-            let Ok(value) = value.parse::<f64>() else { continue; };
-            let key = if parameter.starts_with("combo:") {
-                strategy_parameter_shadow_combination_learning_key(
-                    &symbol, Strategy::DatedCarry.as_str(), &parameter,
-                )
-            } else {
-                strategy_parameter_shadow_probe_learning_key(
-                    &symbol, Strategy::DatedCarry.as_str(), &parameter, value,
-                )
-            };
-            record_learning_outcome(settings.learning.entry(key).or_default(), return_percent);
-        }
-        drop(settings);
-        request_settings_persist(&state)?;
-    }
     if let Some(payload) = audit_payload {
         queue_auto_trader_audit(&state, payload);
     }
     Ok(StatusCode::ACCEPTED)
+}
+
+#[cfg(test)]
+mod dated_carry_probe_contract_tests {
+    use super::*;
+
+    fn candidate() -> DatedCarryCandidate {
+        DatedCarryCandidate {
+            spot_symbol: "BTCUSDT".into(),
+            future_symbol: "BTCUSDT_Q1".into(),
+            expiry_ms: 1_700_000_000_000 + 10 * CARRY_DAY_MS,
+            days_to_expiry: 10.0,
+            quantity: 0.01,
+            spot_ask: 100.0,
+            future_bid: 100.95,
+            spot_bid: 99.9,
+            future_ask: 101.05,
+            basis_percent: 0.95,
+            net_after_budget_percent: 0.95 - CARRY_COST_GATE_PERCENT,
+            eligible: true,
+            reason: "eligible".into(),
+        }
+    }
+
+    #[test]
+    fn dated_carry_probe_uses_shared_entry_rule_and_round_trips_through_scouts_contract() {
+        let candidate = candidate();
+        let parameters = BTreeMap::from([
+            ("carry_minimum_days_to_expiry".into(), 7.0),
+            ("carry_cost_gate_percent".into(), 0.4),
+        ]);
+        let tested = BTreeMap::from([("carry_cost_gate_percent".into(), 0.4)]);
+        let planned = dated_carry_probe_plan_candidate(
+            &candidate,
+            1_700_000_000_000,
+            "carry_cost_gate_percent",
+            0.4,
+            &parameters,
+            &tested,
+            CARRY_DAY_MS,
+        );
+        assert_eq!(planned.sample_group_id, "dated-carry-scout:BTCUSDT_Q1:1700000000000:carry_cost_gate_percent:0.40000000");
+        assert!(planned.eligible);
+        let Some(scouts::ShadowSamplePayload::DatedCarryProbe(probe)) = planned.sample_payload.as_ref() else {
+            panic!("dated-carry plan should carry a typed pending sample");
+        };
+        assert_eq!(probe.parameter_key, "carry_cost_gate_percent");
+        assert_eq!(probe.parameter_value, 0.4);
+        assert_eq!(probe.tested_parameters, tested);
+        assert!(probe.would_enter);
+
+        let encoded = serde_json::to_vec(&planned).unwrap();
+        let decoded: scouts::ShadowPlanCandidate = serde_json::from_slice(&encoded).unwrap();
+        let Some(scouts::ShadowSamplePayload::DatedCarryProbe(decoded_probe)) = decoded.sample_payload else {
+            panic!("dated-carry payload should deserialize through the shared Scouts contract");
+        };
+        assert_eq!(decoded_probe.sample_id, probe.sample_id);
+        assert_eq!(decoded_probe.parameters, parameters);
+        assert_eq!(decoded_probe.tested_parameters, tested);
+    }
+
+    #[test]
+    fn ineligible_parameter_variant_remains_a_zero_outcome_probe() {
+        let candidate = candidate();
+        let parameters = BTreeMap::from([
+            ("carry_minimum_days_to_expiry".into(), 7.0),
+            ("carry_cost_gate_percent".into(), 0.5),
+        ]);
+        let tested = BTreeMap::from([("carry_cost_gate_percent".into(), 0.5)]);
+        let planned = dated_carry_probe_plan_candidate(
+            &candidate,
+            1_700_000_000_000,
+            "carry_cost_gate_percent",
+            0.5,
+            &parameters,
+            &tested,
+            CARRY_DAY_MS,
+        );
+        assert!(planned.eligible, "the probe should be admitted to record a zero return");
+        let Some(scouts::ShadowSamplePayload::DatedCarryProbe(probe)) = planned.sample_payload else {
+            panic!("dated-carry plan should carry a typed pending sample");
+        };
+        assert!(!probe.would_enter);
+    }
+
+    #[test]
+    fn legacy_pending_probe_and_cooldown_fields_deserialize_then_disappear_when_cleared() {
+        let legacy = serde_json::json!({
+            "enabled": false,
+            "max_spot_notional_usdt": 1000.0,
+            "scout_shadow_probes": [{
+                "candidate": {
+                    "spot_symbol": "BTCUSDT",
+                    "future_symbol": "BTCUSDT_Q1",
+                    "expiry_ms": 1700864000000_u64,
+                    "days_to_expiry": 10.0,
+                    "quantity": 0.01,
+                    "spot_ask": 100.0,
+                    "future_bid": 101.0,
+                    "spot_bid": 99.9,
+                    "future_ask": 101.1,
+                    "basis_percent": 1.0,
+                    "net_after_budget_percent": 0.5,
+                    "eligible": true,
+                    "reason": "eligible"
+                },
+                "opened_at_ms": 1700000000000_u64,
+                "parameter_key": "carry_cost_gate_percent",
+                "parameter_value": 0.4,
+                "parameters": {"carry_minimum_days_to_expiry": 7.0, "carry_cost_gate_percent": 0.4},
+                "tested_parameters": {"carry_cost_gate_percent": 0.4},
+                "would_enter": true
+            }],
+            "scout_shadow_last_started": {"BTCUSDT:carry_cost_gate_percent:0.40000000": 19675_u64}
+        });
+        let mut book: DatedCarryBook = serde_json::from_value(legacy).unwrap();
+        assert_eq!(book.scout_shadow_probes.len(), 1);
+        assert_eq!(book.scout_shadow_last_started.len(), 1);
+
+        book.scout_shadow_probes.clear();
+        book.scout_shadow_last_started.clear();
+        let saved = serde_json::to_value(book).unwrap();
+        assert!(saved.get("scout_shadow_probes").is_none());
+        assert!(saved.get("scout_shadow_last_started").is_none());
+    }
 }

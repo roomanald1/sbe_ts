@@ -6,6 +6,49 @@ struct ActivityPositionSnapshot {
     position_exit_policies: Vec<PositionExitPolicy>,
 }
 
+async fn fetch_closed_ledger_rows(
+    client: &reqwest::Client,
+    position_url: &str,
+    today_start: u64,
+    orders: &[TraderOrder],
+    open_positions: &[OpenStrategyPosition],
+) -> Vec<serde_json::Value> {
+    let Ok(response) = client.get(format!("{position_url}/positions/trades?since_ms={today_start}"))
+        .send().await.and_then(reqwest::Response::error_for_status) else { return Vec::new(); };
+    let Ok(body) = response.json::<serde_json::Value>().await else { return Vec::new(); };
+    let mut order_by_id = BTreeMap::<String, &TraderOrder>::new();
+    for order in orders {
+        order_by_id.insert(order.timestamp.to_string(), order);
+        if let Some(id) = order.execution_order_id.as_ref() { order_by_id.insert(id.clone(), order); }
+    }
+    let mut groups = BTreeMap::<(String, String, String), Vec<serde_json::Value>>::new();
+    for trade in body["trades"].as_array().into_iter().flatten() {
+        let parent = trade["parent_order_id"].as_str().unwrap_or_default();
+        let order = order_by_id.get(parent).copied();
+        let trade_source = trade["source"].as_str().unwrap_or("auto");
+        let Some(order) = order else { continue; };
+        if trade_source != "auto" && (order.strategy.is_none() || order.decision_id.is_none()) { continue; }
+        let (Some(strategy), Some(decision_id), Some(symbol)) = (order.strategy.as_ref(), order.decision_id.as_ref(), trade["symbol"].as_str()) else { continue; };
+        groups.entry((strategy.clone(), decision_id.clone(), symbol.to_owned())).or_default().push(trade.clone());
+    }
+    let open = open_positions.iter().filter_map(|position| position.decision_id.as_ref().map(|id| (position.strategy.clone(), id.clone(), position.symbol.clone()))).collect::<std::collections::BTreeSet<_>>();
+    let mut rows = Vec::new();
+    for ((strategy, decision_id, symbol), mut trades) in groups {
+        trades.sort_by_key(|trade| trade["timestamp"].as_u64().unwrap_or_default());
+        let status = if open.contains(&(strategy.clone(), decision_id.clone(), symbol.clone())) { "Partially closed" } else { "Closed" };
+        let net = trades.iter().map(|trade| if trade["side"].as_str() == Some("buy") { trade["quantity"].as_f64().unwrap_or_default() } else { -trade["quantity"].as_f64().unwrap_or_default() }).sum::<f64>();
+        let first = trades.first().cloned().unwrap_or_default();
+        let last = trades.last().cloned().unwrap_or_default();
+        let key = format!("{strategy}:{decision_id}:{symbol}");
+        rows.push(serde_json::json!({"rowId":format!("ledger-summary:{key}"),"status":status,"decisionId":decision_id,"strategyInstanceId":decision_id,"symbol":symbol,"side":if net >= 0.0 {"buy"} else {"sell"},"openedAt":first["timestamp"],"closedAt":if status == "Closed" {last["timestamp"].clone()} else {serde_json::Value::Null},"quantity":net.abs(),"remainingQuantity":if status == "Partially closed" {Some(net.abs())} else {None::<f64>},"signedQuantity":net,"entryPrice":first["execution_price"],"pnl":0,"entryFees":0,"estimatedExitFeeRate":0,"estimatedExitSlippageBps":0,"pnlQuoteCurrency":symbol.split_once('-').map(|(_,q)|q).unwrap_or("USD"),"strategy":strategy,"direction":if net >= 0.0 {"LONG"} else {"SHORT"},"strength":null,"scout":false,"source":"unknown","components":{}}));
+        for trade in trades {
+            let trade_source = trade["source"].as_str().unwrap_or("auto");
+            rows.push(serde_json::json!({"rowId":format!("ledger-trade:{}",trade["id"].as_str().unwrap_or_default()),"status":status,"decisionId":decision_id,"strategyInstanceId":decision_id,"symbol":symbol,"side":trade["side"],"openedAt":trade["timestamp"],"closedAt":trade["timestamp"],"quantity":trade["quantity"],"signedQuantity":if trade["side"].as_str()==Some("buy"){trade["quantity"].as_f64().unwrap_or_default()}else{-trade["quantity"].as_f64().unwrap_or_default()},"entryPrice":trade["execution_price"],"pnl":0,"entryFees":trade["fee"],"estimatedExitFeeRate":trade["fee_rate"],"estimatedExitSlippageBps":0,"pnlQuoteCurrency":symbol.split_once('-').map(|(_,q)|q).unwrap_or("USD"),"strategy":strategy,"direction":trade["side"],"strength":null,"scout":false,"source":"unknown","components":{},"ledgerTrade":trade,"ledgerSource":trade_source}));
+        }
+    }
+    rows
+}
+
 fn snapshot_activity_positions(settings: &Settings, today_start: u64) -> ActivityPositionSnapshot {
     let today = utc_day();
     let orders = settings

@@ -1,3 +1,4 @@
+use strategies::{SignalComponents, StrategyMarketSignal as Signal};
 #[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct Dashboard {
@@ -23,78 +24,6 @@ fn is_stablecoin_pair(symbol: &str) -> bool {
     };
     STABLECOINS.contains(&base.to_ascii_uppercase().as_str())
         && STABLECOINS.contains(&quote.to_ascii_uppercase().as_str())
-}
-#[derive(Clone, Deserialize)]
-struct Signal {
-    symbol: String,
-    direction: String,
-    strength: f64,
-    timestamp: u64,
-    stale: bool,
-    #[serde(default)]
-    score: f64,
-    #[serde(default)]
-    ranging_probability: Option<f64>,
-    #[serde(default)]
-    components: SignalComponents,
-    #[serde(default, alias = "research_strategy_candidate")]
-    strategy_candidate: bool,
-    #[serde(default, alias = "research_strategy")]
-    strategy: Option<String>,
-    #[serde(default)]
-    strategy_decision: Option<serde_json::Value>,
-    #[serde(default)]
-    market_regime: Option<String>,
-    #[serde(default)]
-    news_attribution: Option<serde_json::Value>,
-    #[serde(default)]
-    entry_gate: Option<serde_json::Value>,
-}
-#[derive(Clone, Default, Deserialize, Serialize)]
-struct WindowedSignalValue {
-    window_seconds: u16,
-    value: Option<f64>,
-    #[serde(default)]
-    sample_count: u16,
-    #[serde(default)]
-    span_ms: u32,
-}
-#[derive(Clone, Default, Deserialize, Serialize)]
-struct DepthSignalValue {
-    depth_levels: u8,
-    value: Option<f64>,
-}
-#[derive(Clone, Default, Deserialize, Serialize)]
-struct AbsorptionPressureValue {
-    window_seconds: u16,
-    replenishment_window_ms: u32,
-    touch_tolerance_bps: f64,
-    value: Option<f64>,
-}
-#[derive(Clone, Default, Deserialize, Serialize)]
-struct SignalComponents {
-    momentum_10s_percent: Option<f64>,
-    trend_5m_volatility_units: Option<f64>,
-    #[serde(default)]
-    trade_flow_imbalance: Option<f64>,
-    #[serde(default)]
-    book_imbalance: Option<f64>,
-    volatility_1m_percent: Option<f64>,
-    mispricing_vs_vwap_bps: Option<f64>,
-    pressure_without_price_move: Option<f64>,
-    aggressor_cost_bps: Option<f64>,
-    #[serde(default)]
-    momentum_by_window: Vec<WindowedSignalValue>,
-    #[serde(default)]
-    trend_volatility_units_by_window: Vec<WindowedSignalValue>,
-    #[serde(default)]
-    trade_flow_by_window: Vec<WindowedSignalValue>,
-    #[serde(default)]
-    book_imbalance_by_depth: Vec<DepthSignalValue>,
-    #[serde(default)]
-    vwap_dislocation_by_window: Vec<WindowedSignalValue>,
-    #[serde(default)]
-    absorption_pressure_by_window: Vec<AbsorptionPressureValue>,
 }
 #[derive(Clone, Deserialize, Serialize)]
 struct LearnedExitPolicy {

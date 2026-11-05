@@ -20,7 +20,6 @@ fn calculate_activity_learning_metrics(
     settings: &Settings,
     today_start: u64,
 ) -> ActivityLearningMetrics {
-    let today = utc_day();
     // Ignore legacy/corrupt return samples. In a spot position, net return
     // cannot be materially below -100%; an invalid sample must not dominate
     // the daily average (or the win/loss counts).
@@ -86,64 +85,46 @@ fn calculate_activity_learning_metrics(
         .values()
         .filter(|position| position.quantity.abs() > 1e-12 && position.scout_entry)
         .count();
-    let scout_learning = settings
-        .learning
-        .iter()
-        .filter(|(key, _)| key.starts_with("scout:") && key.ends_with(":trade"))
-        .map(|(_, stats)| learning_stats_for_day(stats, &today))
-        .fold(LearningStats::default(), |mut total, stats| {
-            total.samples += stats.samples;
-            total.positive += stats.positive;
-            total.realized_pnl += stats.realized_pnl;
+    let scout_learning = settings.learned_context_stats.iter()
+        .filter(|(key, stats)| key.starts_with("scout:") && key.ends_with(":trade")
+            && stats.updated_at_ms >= today_start)
+        .map(|(_, stats)| (stats.samples, stats.positive, stats.realized_pnl))
+        .fold((0usize, 0usize, 0.0), |mut total, stats| {
+            total.0 = total.0.saturating_add(stats.0);
+            total.1 = total.1.saturating_add(stats.1);
+            total.2 += stats.2;
             total
         });
-    let scout_learning_win_rate = (scout_learning.samples > 0)
-        .then_some(scout_learning.positive as f64 / scout_learning.samples as f64);
-    let preferred_order_type = ALL_ORDER_TYPES
-        .iter()
-        .filter_map(|kind| {
-            let quality_suffix = format!(":exec:{kind:?}");
-            let stats = settings
-                .execution_learning
-                .iter()
-                .filter(|(key, _)| key.ends_with(&quality_suffix))
-                .map(|(_, stats)| {
-                    let mut recent = stats.clone();
-                    decay_execution_quality(&mut recent, current_time_ms());
-                    recent
-                })
-                .fold(ExecutionLearningStats::default(), |mut total, stats| {
-                    total.samples += stats.samples;
-                    total.filled_samples += stats.filled_samples;
-                    total.fill_rate_total += stats.fill_rate_total;
-                    total.cost_notional += stats.cost_notional;
-                    total.all_in_cost_notional_bps += stats.all_in_cost_notional_bps;
-                    total
-                });
-            (stats.samples >= MIN_EXECUTION_QUALITY_SAMPLES
-                && stats.filled_samples >= MIN_EXECUTION_QUALITY_FILLS
-                && stats.cost_notional > 0.0
-                && stats.fill_rate_total / stats.samples as f64 >= 0.60)
-                .then_some((format!("{kind:?}"), stats.all_in_cost_notional_bps / stats.cost_notional))
-        })
-        .min_by(|a, b| a.1.total_cmp(&b.1))
-        .map(|(kind, _)| kind);
-    let learning_win_rate = (learning_samples > 0)
-        .then_some(closed_trade_wins as f64 / learning_samples as f64);
-    let scout_learning_samples = scout_learning.samples;
-    let scout_learning_realized_pnl = scout_learning.realized_pnl;
+    let scout_learning_win_rate = (scout_learning.0 > 0)
+        .then_some(scout_learning.1 as f64 / scout_learning.0 as f64);
+    let preferred_order_type = ALL_ORDER_TYPES.iter().filter_map(|kind| {
+        let quality_suffix = format!(":exec:{kind:?}");
+        let stats = settings.learned_execution_stats.iter()
+            .filter(|(key, _)| key.ends_with(&quality_suffix))
+            .fold((0usize, 0usize, 0.0, 0.0, 0.0), |mut total, (_, stats)| {
+                total.0 += stats.samples;
+                total.1 += stats.filled_samples;
+                total.2 += stats.fill_rate_total;
+                total.3 += stats.cost_notional;
+                total.4 += stats.all_in_cost_notional_bps;
+                total
+            });
+        (stats.0 >= MIN_EXECUTION_QUALITY_SAMPLES
+            && stats.1 >= MIN_EXECUTION_QUALITY_FILLS
+            && stats.3 > 0.0
+            && stats.2 / stats.0 as f64 >= 0.60)
+            .then_some((format!("{kind:?}"), stats.4 / stats.3))
+    }).min_by(|a, b| a.1.total_cmp(&b.1)).map(|(kind, _)| kind);
+    let scout_learning_samples = scout_learning.0;
+    let scout_learning_realized_pnl = scout_learning.2;
     let parameter_profile_samples = std::array::from_fn(|profile| {
-        settings
-            .execution_learning
-            .iter()
-            .filter(|(key, _)| key.contains(&format!(":P{profile}:")))
-            .map(|(_, stats)| {
-                let mut recent = stats.clone();
-                decay_execution_quality(&mut recent, current_time_ms());
-                recent.samples
-            })
+        settings.learned_execution_stats.iter()
+            .filter(|(key, stats)| key.contains(&format!(":P{profile}:")) && stats.updated_at_ms >= today_start)
+            .map(|(_, stats)| stats.samples)
             .sum()
     });
+    let learning_win_rate = (learning_samples > 0)
+        .then_some(closed_trade_wins as f64 / learning_samples as f64);
     ActivityLearningMetrics {
         exit_learning_samples,
         closed_trade_average_return_percent,

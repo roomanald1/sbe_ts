@@ -1570,6 +1570,124 @@
       ],
       "title": "Insights feed input per minute",
       "type": "timeseries"
+    },
+    {
+      "collapsed": false,
+      "gridPos": { "x": 0, "y": 125, "w": 24, "h": 1 },
+      "id": 206,
+      "panels": [],
+      "title": "Database Maintenance",
+      "type": "row"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            { "options": { "0": { "text": "DOWN" }, "1": { "text": "RUNNING" } }, "type": "value" }
+          ],
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "red", "value": null }, { "color": "green", "value": 1 }] }
+        },
+        "overrides": []
+      },
+      "gridPos": { "x": 0, "y": 126, "w": 6, "h": 5 },
+      "id": 207,
+      "options": {
+        "colorMode": "background", "graphMode": "none", "justifyMode": "center", "orientation": "auto",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "textMode": "value_and_name"
+      },
+      "targets": [
+        { "expr": "app_service_up{service=\"insights_maintenance\"}", "legendFormat": "Maintenance process", "queryType": "instant", "refId": "A" }
+      ],
+      "title": "Maintenance process",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            { "options": { "-1": { "text": "NO RUN YET" }, "0": { "text": "FAILED" }, "1": { "text": "SUCCEEDED" } }, "type": "value" }
+          ],
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "red", "value": null }, { "color": "green", "value": 1 }] }
+        },
+        "overrides": []
+      },
+      "gridPos": { "x": 6, "y": 126, "w": 6, "h": 5 },
+      "id": 208,
+      "options": {
+        "colorMode": "background", "graphMode": "none", "justifyMode": "center", "orientation": "auto",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "textMode": "value_and_name"
+      },
+      "targets": [
+        { "expr": "app_insights_maintenance_last_run_success", "legendFormat": "Latest run", "queryType": "instant", "refId": "A" }
+      ],
+      "title": "Last run result",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": {
+        "defaults": { "unit": "dateTimeAsIso" },
+        "overrides": []
+      },
+      "gridPos": { "x": 12, "y": 126, "w": 12, "h": 5 },
+      "id": 209,
+      "options": {
+        "colorMode": "value", "graphMode": "none", "justifyMode": "center", "orientation": "auto",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "textMode": "value_and_name"
+      },
+      "targets": [
+        { "expr": "app_insights_maintenance_last_success_timestamp_seconds * 1000", "legendFormat": "Last successful run", "queryType": "instant", "refId": "A" }
+      ],
+      "title": "Last successful maintenance run",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": {
+        "defaults": { "decimals": 0, "min": 0, "unit": "short" },
+        "overrides": []
+      },
+      "gridPos": { "x": 0, "y": 131, "w": 12, "h": 6 },
+      "id": 210,
+      "options": {
+        "colorMode": "value", "graphMode": "none", "justifyMode": "center", "orientation": "auto",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "textMode": "value_and_name"
+      },
+      "targets": [
+        { "expr": "app_insights_maintenance_last_run_archived_records", "legendFormat": "Archived signal records", "queryType": "instant", "refId": "A" },
+        { "expr": "app_insights_maintenance_last_run_purged_signal_records", "legendFormat": "Purged raw signal records", "queryType": "instant", "refId": "B" },
+        { "expr": "app_insights_maintenance_last_run_compacted_audit_records", "legendFormat": "Compacted audit records", "queryType": "instant", "refId": "C" },
+        { "expr": "app_insights_maintenance_last_run_purged_audit_records", "legendFormat": "Purged audit records", "queryType": "instant", "refId": "D" },
+        { "expr": "app_insights_maintenance_last_run_expired_training_archives", "legendFormat": "Expired training archives", "queryType": "instant", "refId": "E" }
+      ],
+      "title": "Records handled in last run",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "description": "No data means the latest run reported no error.",
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            { "options": { "1": { "text": "ERROR" } }, "type": "value" }
+          ],
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "red", "value": 1 }] }
+        },
+        "overrides": []
+      },
+      "gridPos": { "x": 12, "y": 131, "w": 12, "h": 6 },
+      "id": 211,
+      "options": {
+        "colorMode": "background", "graphMode": "none", "justifyMode": "center", "orientation": "auto",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "textMode": "value_and_name"
+      },
+      "targets": [
+        { "expr": "app_insights_maintenance_last_error_info", "legendFormat": "{{error}}", "queryType": "instant", "refId": "A" }
+      ],
+      "title": "Last maintenance error",
+      "type": "stat"
     }
   ],
   "refresh": "15s",
@@ -1624,5 +1742,5 @@
   "timezone": "browser",
   "title": "SBE TS System and Trading",
   "uid": "sbe-ts-overview",
-  "version": 6
+  "version": 7
 }

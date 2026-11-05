@@ -1061,7 +1061,7 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
- "strategy_core",
+ "strategies",
  "tokio",
 ]
 
@@ -1211,10 +1211,11 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6ce2be8dc25455e1f91df71bfa12ad37d7af1092ae736f3a6cd0e37bc7810596"
 
 [[package]]
-name = "strategy_core"
+name = "strategies"
 version = "0.1.0"
 dependencies = [
  "serde",
+ "serde_json",
 ]
 
 [[package]]

@@ -55,8 +55,6 @@ fn is_entry_evidence_horizon(horizon_seconds: u64) -> bool {
 const SCOUT_MIN_STRENGTH: f64 = 0.15;
 const SCOUT_MIN_ABS_SCORE: f64 = 0.20;
 const SCOUT_MAX_ORDER_FRACTION: f64 = 0.05;
-const SCOUT_BREAKOUT_BUFFER_PERCENT: f64 = 10.0;
-const DAILY_SCOUT_SHADOW_LEVELS_PERCENT: [f64; 8] = [0.25, 0.5, 1.0, 2.0, 3.0, 5.0, 7.5, 10.0];
 const STRATEGY_BASE_ORDER_FRACTION: f64 = 0.80;
 const POOR_STRATEGY_SIZE_MULTIPLIER: f64 = 0.70;
 const MAX_LEARNED_STRATEGY_SIZE_MULTIPLIER: f64 = 2.50;
@@ -142,6 +140,7 @@ const ORDER_TRAILING_VOLATILITY_PERCENT: f64 = 0.70;
 const ORDER_FOK_STRENGTH: f64 = 0.50;
 const DEFAULT_SCHEDULE_DEPTH_RATIO: f64 = 0.25;
 const MIN_SCHEDULE_DEPTH_RATIO: f64 = 0.05;
+#[cfg(test)]
 const MAX_SCHEDULE_DEPTH_RATIO: f64 = 0.40;
 
 fn configured_taker_fee_rate() -> f64 {
@@ -152,4 +151,11 @@ fn configured_taker_fee_rate() -> f64 {
         .unwrap_or(0.001)
 }
 
+#[cfg(test)]
 const STRATEGY_SIZING_RECENT_TRADES: usize = 5_000;
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+enum AutoOrderType {
+    Market, Ioc, Fok, Limit, Gtd, PostOnlyLimit, Barrier, StopMarket, StopLimit,
+    TrailingStop, Vwap, Twap,
+}

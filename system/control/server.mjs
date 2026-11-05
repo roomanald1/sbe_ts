@@ -6,7 +6,7 @@ import { promisify } from 'node:util';
 
 const exec = promisify(execFile);
 const root = process.env.WORKSPACE_ROOT || '/workspace';
-const services = ['feed-handlers','position-management','execution','insights','auto-trader','news-sentiment','learning','scouts','web'];
+const services = ['feed-handlers','position-management','execution','insights','insights-maintenance','auto-trader','news-sentiment','learning','scouts','web'];
 const send = (res, code, value, type='application/json') => { res.writeHead(code, {'content-type': `${type}; charset=utf-8`}); res.end(type.startsWith('application/json') ? JSON.stringify(value) : value); };
 const compose = async (project, file, args) => {
   const { stdout, stderr } = await exec('docker', ['compose','-p',project,'-f',file,'--progress=quiet',...args], {
@@ -49,8 +49,17 @@ http.createServer(async (req,res) => {
     }
     if (req.method === 'GET' && url.pathname === '/') return send(res,200,await readFile('index.html','utf8'),'text/html');
     if (req.method === 'GET' && url.pathname.startsWith('/coverage/')) {
-      const file = resolve('/app/coverage', `.${decodeURIComponent(url.pathname.slice('/coverage'.length))}`);
+      const relativePath = decodeURIComponent(url.pathname.slice('/coverage'.length));
+      const file = resolve('/app/coverage', `.${relativePath}${relativePath.endsWith('/') ? 'index.html' : ''}`);
       if (!file.startsWith(`/app/coverage${sep}`)) return send(res,403,{error:'Forbidden'});
+      const content = await readFile(file);
+      const type = file.endsWith('.html') ? 'text/html' : file.endsWith('.css') ? 'text/css' : file.endsWith('.js') ? 'text/javascript' : 'application/octet-stream';
+      res.writeHead(200, {'content-type':type}); return res.end(content);
+    }
+    if (req.method === 'GET' && url.pathname.startsWith('/benchmarks/')) {
+      const relativePath = decodeURIComponent(url.pathname.slice('/benchmarks'.length));
+      const file = resolve('/app/benchmarks', `.${relativePath}${relativePath.endsWith('/') ? 'index.html' : ''}`);
+      if (!file.startsWith(`/app/benchmarks${sep}`)) return send(res,403,{error:'Forbidden'});
       const content = await readFile(file);
       const type = file.endsWith('.html') ? 'text/html' : file.endsWith('.css') ? 'text/css' : file.endsWith('.js') ? 'text/javascript' : 'application/octet-stream';
       res.writeHead(200, {'content-type':type}); return res.end(content);

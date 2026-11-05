@@ -11,6 +11,7 @@ services:
       - ${REPO_ROOT:-..}:/workspace
       - ${REPO_ROOT:-..}/system/control:/app
       - ${REPO_ROOT:-..}/src/typescript/workspace/apps/react-app/public/coverage:/app/coverage:ro
+      - ${REPO_ROOT:-..}/src/typescript/workspace/apps/react-app/public/benchmarks:/app/benchmarks:ro
     command: ["node", "--watch", "server.mjs"]
     restart: unless-stopped
 

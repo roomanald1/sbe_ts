@@ -91,6 +91,15 @@ async fn get_activity(State(state): State<AutoTraderState>) -> Json<ActivityResp
     .await;
     let (realized_pnl, realized_pnl_by_quote, pnl_breakdown) =
         await_activity_realized_pnl(&state.client, &position_url, &mut orders).await;
+    // Closed-position ledger rows are supplied by the backend activity contract
+    // so the client does not have to infer strategy ownership from fill history.
+    let closed_ledger_rows = fetch_closed_ledger_rows(
+        &state.client,
+        &position_url,
+        today_start,
+        &orders,
+        &strategy_positions,
+    ).await;
     let unrealized_pnl = calculate_auto_unrealized_pnl(&auto_positions).await;
     let learning = {
         let settings = state.settings.lock().await;
@@ -161,6 +170,7 @@ async fn get_activity(State(state): State<AutoTraderState>) -> Json<ActivityResp
         strategy_positions,
         position_exit_policies,
         pnl_breakdown,
+        closed_ledger_rows,
         realized_pnl,
         realized_pnl_by_quote,
         unrealized_pnl,

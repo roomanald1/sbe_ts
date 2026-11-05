@@ -100,6 +100,7 @@ fn live_strategy_feature_signal(
     Some(configured)
 }
 
+#[cfg(test)]
 fn live_scout_direction_probes(
     signal: &Signal,
     strategy: Strategy,
@@ -139,6 +140,7 @@ fn live_scout_direction_probes(
     }).collect()
 }
 
+#[cfg(test)]
 fn live_scout_direction_candidates(
     signal: &Signal,
     strategy: Strategy,
@@ -373,7 +375,8 @@ struct SignalSelectionInput<'a> {
     non_directional_count: usize,
     position_blocked_count: usize,
     position_block_details: &'a [String],
-    learning: &'a BTreeMap<String, LearningStats>,
+    learning_thresholds: &'a BTreeMap<String, strategies::ContextThresholds>,
+    delegate_scout_fallback: bool,
     risk_appetite: f64,
     active_scout_count: usize,
     scout_max_active_positions: usize,
@@ -402,7 +405,7 @@ fn format_no_tradeable_bias(
         non_directional_count,
         position_blocked_count,
         position_block_details,
-        learning,
+        learning_thresholds,
         risk_appetite,
         active_scout_count,
         open_positions,
@@ -479,7 +482,7 @@ fn format_no_tradeable_bias(
             candidate_entry_diagnostic(
                 candidate,
                 dashboard,
-                learning,
+                learning_thresholds,
                 risk_appetite,
                 active_scout_count,
                 input.scout_max_active_positions,
@@ -522,7 +525,7 @@ mod live_scout_direction_tests {
     }
 
     fn parameters(strategy: Strategy) -> BTreeMap<String, f64> {
-        all_strategy_parameter_specs(strategy)
+        strategy.parameter_specs()
             .into_iter()
             .map(|spec| (spec.key.as_str().to_owned(), spec.default))
             .collect()

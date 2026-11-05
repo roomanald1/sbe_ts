@@ -8,6 +8,7 @@ const feedHandlersUrl = serviceUrl('FEED_HANDLERS', 'http://localhost:3001');
 const executionUrl = serviceUrl('EXECUTION', 'http://localhost:3003');
 const autoTraderUrl = serviceUrl('AUTO_TRADER', 'http://localhost:3005');
 const insightsUrl = serviceUrl('INSIGHTS', 'http://localhost:3004');
+const scoutsUrl = serviceUrl('SCOUTS', 'http://localhost:3011');
 
 const apiProxy = {
   '/users': { target: positionManagementUrl, changeOrigin: true },
@@ -21,6 +22,7 @@ const apiProxy = {
   '/positions/insights': { target: insightsUrl, changeOrigin: true },
   '/signals/stream': { target: insightsUrl, changeOrigin: true, ws: true },
   '/signals': { target: insightsUrl, changeOrigin: true },
+  '/scouts': { target: scoutsUrl, changeOrigin: true },
   '/positions': { target: positionManagementUrl, changeOrigin: true },
   '/account': { target: positionManagementUrl, changeOrigin: true },
 };

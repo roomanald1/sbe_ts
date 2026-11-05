@@ -172,7 +172,7 @@ export class AutoTraderShadowModel {
     try {
       const filters = this.state$.value;
       const query = new URLSearchParams({ source: filters.source, status: filters.status, page: String(filters.page), page_size: String(filters.pageSize), learning_symbol: filters.learningSymbol ?? 'all' });
-      const response = await fetch('/signals/scout-shadow-outcomes?' + query.toString(), { signal: controller.signal });
+      const response = await fetch('/scouts/shadow-outcomes?' + query.toString(), { signal: controller.signal });
       if (!response.ok) throw new Error('Scout outcome data unavailable');
       const data = await response.json() as ScoutOutcomesResponse;
       if (requestId !== this.requestId) return;

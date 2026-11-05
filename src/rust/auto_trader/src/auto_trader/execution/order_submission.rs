@@ -89,16 +89,8 @@ async fn submit_and_record_selected_order(
                 .find(|order| order.timestamp == timestamp)
                 .cloned()
             {
-                let Settings {
-                    execution_learning,
-                    execution_learning_order_ids,
-                    ..
-                } = &mut *settings;
-                record_execution_order_quality(
-                    execution_learning,
-                    execution_learning_order_ids,
-                    &order,
-                );
+                let Settings { execution_feedback_outbox, execution_learning_order_ids, .. } = &mut *settings;
+                record_execution_order_quality(execution_feedback_outbox, execution_learning_order_ids, &order);
             }
             request_settings_persist(state)?;
             return Err(error);
@@ -297,12 +289,8 @@ async fn submit_and_record_selected_order(
         .find(|order| order.timestamp == timestamp)
         .cloned()
     {
-        let Settings {
-            execution_learning,
-            execution_learning_order_ids,
-            ..
-        } = &mut *settings;
-        record_execution_order_quality(execution_learning, execution_learning_order_ids, &order);
+        let Settings { execution_feedback_outbox, execution_learning_order_ids, .. } = &mut *settings;
+        record_execution_order_quality(execution_feedback_outbox, execution_learning_order_ids, &order);
     }
     request_settings_persist(state)?;
     drop(settings);

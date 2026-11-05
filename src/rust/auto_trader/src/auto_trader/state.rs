@@ -11,6 +11,7 @@ struct AutoTraderState {
     latest_missed_opportunity_bands: Arc<Mutex<Vec<MissedOpportunityGateBand>>>,
     latest_execution_parameters: Arc<Mutex<Option<LatestExecutionParameters>>>,
     cycle_lock: Arc<Mutex<()>>,
+    scout_lifecycle_last_update_ms: Arc<AtomicU64>,
     pending_daily_signals: Arc<Mutex<PendingSignalQueue>>,
     daily_signal_notify: Arc<Notify>,
     pending_live_signals: Arc<Mutex<PendingSignalQueue>>,
@@ -303,6 +304,17 @@ struct LearningStats {
 }
 
 #[derive(Clone, Default, Serialize, Deserialize)]
+struct ExecutionLearningStats {
+    samples: usize,
+    filled_samples: usize,
+    fill_rate_total: f64,
+    cost_notional: f64,
+    all_in_cost_notional_bps: f64,
+    #[serde(default)]
+    updated_at_ms: u64,
+}
+
+#[derive(Clone, Default, Serialize, Deserialize)]
 struct PendingScoutComparison {
     #[serde(default)]
     baseline_return_percent: Option<f64>,
@@ -310,17 +322,6 @@ struct PendingScoutComparison {
     variant_return_percent: Option<f64>,
     #[serde(default)]
     learning_key: String,
-    #[serde(default)]
-    updated_at_ms: u64,
-}
-
-#[derive(Clone, Default, Serialize, Deserialize)]
-struct ExecutionLearningStats {
-    samples: usize,
-    filled_samples: usize,
-    fill_rate_total: f64,
-    cost_notional: f64,
-    all_in_cost_notional_bps: f64,
     #[serde(default)]
     updated_at_ms: u64,
 }

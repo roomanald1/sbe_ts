@@ -47,6 +47,7 @@ struct ActivityResponse {
     open_positions: Vec<OpenPositionAttribution>,
     strategy_positions: Vec<OpenStrategyPosition>,
     pnl_breakdown: Vec<PnlBreakdown>,
+    closed_ledger_rows: Vec<serde_json::Value>,
     realized_pnl: Option<f64>,
     realized_pnl_by_quote: Option<BTreeMap<String, f64>>,
     unrealized_pnl: Option<f64>,

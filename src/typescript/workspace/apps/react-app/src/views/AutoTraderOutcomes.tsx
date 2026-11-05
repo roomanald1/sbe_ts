@@ -335,7 +335,7 @@ function AutoTraderOutcomesComponent({ embedded = false, ticks = [], liveOnly = 
       { field: 'averageReturn', headerName: 'Ret%', cellClassRules: signed, valueFormatter: ({ value }) => pct(value), width: 58, minWidth: 58, maxWidth: 65, flex: 0 },
     ], 'performance') },
     { headerName: 'Fully closed trades', headerClass: 'strategy-group-sample', children: colorStrategyColumns([
-      { field: 'trades', headerName: 'Trades', headerTooltip: 'Counts only fully closed, audited trades. Partial exits from positions that remain open do not count. Fewer than 30 trades is flagged as a low sample.', cellRenderer: ({ data }: { data?: StrategyWinRateRow }) => data ? <span>{data.trades}{data.lowSample && <small title="Fewer than 30 closed trades; treat the statistics as preliminary"> · low sample</small>}</span> : '—', width: 112, minWidth: 112, maxWidth: 128, flex: 0 },
+      { field: 'trades', headerName: 'Trades', headerTooltip: 'Counts only fully closed, audited trades. Partial exits from positions that remain open do not count.', width: 58, minWidth: 58, maxWidth: 64, flex: 0 },
       { field: 'wins', headerName: 'Wins', width: 46, minWidth: 46, maxWidth: 52, flex: 0 },
       { field: 'losses', headerName: 'Losses', width: 50, minWidth: 50, maxWidth: 56, flex: 0 },
       { field: 'periodStart', headerName: 'Period', headerTooltip: 'Date range from the oldest to newest fully closed trade in this strategy.', valueFormatter: ({ value, data }) => typeof value === 'number' && value > 0 && typeof data?.periodEnd === 'number' && data.periodEnd > 0 ? dateLabel(value) + (dateLabel(value) === dateLabel(data.periodEnd) ? '' : ' – ' + dateLabel(data.periodEnd)) : '—', width: 100, minWidth: 100, maxWidth: 130, flex: 0 },

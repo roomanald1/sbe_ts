@@ -13,8 +13,26 @@ use std::{
     path::{Path, PathBuf},
     sync::Arc,
 };
-use strategy_core::{FeedbackEvent, ParameterSpec, StrategyProfile, StrategyProfileRegistration};
+use strategies::{
+    ContextLearningStat, ContextMissedOpportunityBand, ContextThresholdInput,
+    ContextThresholdRequest, ContextThresholdResponse, ContextThresholds, ExecutionLearningRequest,
+    ExecutionLearningResponse, ExecutionLearningStat, ExecutionOutcomeEvent, FeedbackEvent,
+    LearnedProfileSnapshot, ParameterSpec, StrategyProfile, StrategyProfileRegistration,
+    StrategyThresholdObservation,
+};
 use tokio::sync::Mutex;
+
+mod context;
+mod execution;
+mod feedback;
+mod profiles;
+mod thresholds;
+
+use context::*;
+use execution::*;
+use feedback::*;
+use profiles::*;
+use thresholds::*;
 
 #[derive(Clone, Serialize, Deserialize)]
 struct RegisteredProfile {
@@ -31,6 +49,19 @@ struct RegisteredProfile {
 struct LearningOutcome {
     observed_at_ms: u64,
     net_return_percent: f64,
+    #[serde(default)]
+    tested_parameter_keys: Vec<String>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+struct ThresholdTrainingSample {
+    symbol: String,
+    strategy: String,
+    parameter_key: String,
+    observed_at_ms: u64,
+    threshold: f64,
+    feature_value: f64,
+    net_return_percent: f64,
 }
 
 #[derive(Serialize)]
@@ -45,6 +76,14 @@ struct StrategySummary {
 struct LearningState {
     variants: BTreeMap<String, RegisteredProfile>,
     active_profiles: BTreeMap<String, StrategyProfile>,
+    #[serde(default)]
+    context_learning: BTreeMap<String, ContextLearningStat>,
+    #[serde(default)]
+    execution_learning: BTreeMap<String, ExecutionLearningStat>,
+    #[serde(default)]
+    threshold_samples: Vec<ThresholdTrainingSample>,
+    #[serde(default)]
+    seen_execution_event_ids: BTreeSet<String>,
     seen_event_ids: BTreeSet<String>,
     accepted_events: u64,
 }
@@ -117,351 +156,13 @@ pub fn router(path: PathBuf) -> Result<Router, String> {
     Ok(Router::new()
         .route("/health", get(|| async { "ok" }))
         .route("/profiles", get(get_profiles).post(register_profile))
+        .route("/decision-snapshot", get(get_decision_snapshot))
         .route("/summary", get(get_summary))
         .route("/feedback", post(accept_feedback))
+        .route("/context-thresholds", post(context_thresholds))
+        .route("/execution-decision", post(execution_decision))
+        .route("/execution-outcomes", post(execution_outcome))
         .with_state(service))
-}
-
-async fn get_profiles(State(service): State<ServiceState>) -> Json<Vec<StrategyProfile>> {
-    let state = service.state.lock().await;
-    Json(state.active_profiles.values().cloned().collect())
-}
-
-async fn get_summary(State(service): State<ServiceState>) -> Json<Vec<StrategySummary>> {
-    let state = service.state.lock().await;
-    let cutoff = now_ms().saturating_sub(7 * 24 * 60 * 60 * 1000);
-    let mut summaries: BTreeMap<String, Vec<f64>> = BTreeMap::new();
-    for profile in state.variants.values() {
-        summaries
-            .entry(profile.profile.strategy.clone())
-            .or_default()
-            .extend(
-                profile
-                    .outcomes
-                    .iter()
-                    .filter(|outcome| outcome.observed_at_ms >= cutoff)
-                    .map(|outcome| outcome.net_return_percent),
-            );
-    }
-    Json(
-        summaries
-            .into_iter()
-            .map(|(strategy, returns)| {
-                let positive = returns.iter().filter(|value| **value > 0.0).count();
-                let count = returns.len();
-                StrategySummary {
-                    strategy,
-                    learning_samples: count,
-                    positive_rate: (count > 0).then_some(positive as f64 / count as f64),
-                    average_net_return_percent: (count > 0)
-                        .then_some(returns.iter().sum::<f64>() / count as f64),
-                }
-            })
-            .collect(),
-    )
-}
-
-fn now_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64
-}
-fn event_observed_at(event: &FeedbackEvent) -> u64 {
-    match event {
-        FeedbackEvent::ScoutOutcome { observed_at_ms, .. }
-        | FeedbackEvent::TradeOutcome { observed_at_ms, .. } => *observed_at_ms,
-    }
-}
-
-async fn register_profile(
-    State(service): State<ServiceState>,
-    Json(request): Json<StrategyProfileRegistration>,
-) -> Result<StatusCode, (StatusCode, String)> {
-    if request.profile.profile_id.is_empty()
-        || request
-            .profile
-            .parameters
-            .values()
-            .any(|value| !value.is_finite())
-        || request.specs.iter().any(|spec| !valid_spec(spec))
-        || request
-            .specs
-            .iter()
-            .any(|spec| !request.profile.parameters.contains_key(&spec.key))
-    {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            "invalid strategy profile registration".into(),
-        ));
-    }
-    let profile_key = key(&request.profile.symbol, &request.profile.strategy);
-    let mut state = service.state.lock().await;
-    let id = variant_key(&request.profile);
-    state.variants.entry(id).or_insert(RegisteredProfile {
-        profile: request.profile.clone(),
-        specs: request.specs,
-        samples: request.profile.learning_samples,
-        positive: request.profile.positive_samples,
-        realized_pnl: request.profile.realized_pnl,
-        outcomes: Vec::new(),
-    });
-    let current = state
-        .active_profiles
-        .entry(profile_key)
-        .or_insert(request.profile.clone());
-    if request.profile.version > current.version {
-        *current = request.profile;
-    }
-    persist(&service.path, &state)?;
-    Ok(StatusCode::ACCEPTED)
-}
-
-async fn accept_feedback(
-    State(service): State<ServiceState>,
-    Json(event): Json<FeedbackEvent>,
-) -> Result<Json<FeedbackResult>, (StatusCode, String)> {
-    let (event_id, symbol, strategy, parameters, profile_id) = event_parts(&event);
-    if event_id.is_empty() || parameters.values().any(|value| !value.is_finite()) {
-        return Err((StatusCode::BAD_REQUEST, "invalid feedback event".into()));
-    }
-    let mut state = service.state.lock().await;
-    if state.seen_event_ids.contains(event_id) {
-        return Ok(Json(FeedbackResult {
-            accepted: true,
-            duplicate: true,
-            profile: None,
-        }));
-    }
-    let profile_key = key(symbol, strategy);
-    let source_profile = StrategyProfile {
-        profile_id: profile_id.clone(),
-        version: 0,
-        symbol: symbol.to_owned(),
-        strategy: strategy.to_owned(),
-        parameters: parameters.clone(),
-        learning_samples: 0,
-        positive_samples: 0,
-        realized_pnl: 0.0,
-    };
-    let id = variant_key(&source_profile);
-    let LearningState {
-        variants,
-        active_profiles,
-        ..
-    } = &mut *state;
-    let registered = variants.entry(id).or_insert_with(|| RegisteredProfile {
-        profile: source_profile,
-        specs: event_specs(&event).to_vec(),
-        samples: 0,
-        positive: 0,
-        realized_pnl: 0.0,
-        outcomes: Vec::new(),
-    });
-    if registered
-        .specs
-        .iter()
-        .any(|spec| !valid_spec(spec) || !parameters.contains_key(&spec.key))
-    {
-        return Err((
-            StatusCode::CONFLICT,
-            "feedback does not include valid parameter bounds".into(),
-        ));
-    }
-    if event_specs(&event).iter().any(|spec| {
-        !valid_spec(spec) || !parameters.contains_key(&spec.key) || !registered.specs.contains(spec)
-    }) {
-        return Err((
-            StatusCode::CONFLICT,
-            "Scout feedback references an unregistered parameter probe".into(),
-        ));
-    }
-    if registered.profile.profile_id != profile_id || &registered.profile.parameters != parameters {
-        return Err((
-            StatusCode::CONFLICT,
-            "feedback profile does not match registered variant".into(),
-        ));
-    }
-    registered.samples = registered.samples.saturating_add(1);
-    if event_is_positive(&event) {
-        registered.positive = registered.positive.saturating_add(1);
-    }
-    registered.realized_pnl += event_value(&event);
-    let net_return = match &event {
-        FeedbackEvent::ScoutOutcome {
-            net_return_percent, ..
-        } => *net_return_percent,
-        FeedbackEvent::TradeOutcome {
-            net_return_percent, ..
-        } => *net_return_percent,
-    };
-    registered.outcomes.push(LearningOutcome {
-        observed_at_ms: event_observed_at(&event),
-        net_return_percent: net_return,
-    });
-    let cutoff = now_ms().saturating_sub(7 * 24 * 60 * 60 * 1000);
-    registered
-        .outcomes
-        .retain(|outcome| outcome.observed_at_ms >= cutoff);
-    let updated = update_profile(&registered.profile, event_specs(&event), &event).ok_or((
-        StatusCode::UNPROCESSABLE_ENTITY,
-        "feedback did not match profile".into(),
-    ))?;
-    let should_promote = should_promote_variant(
-        registered.samples,
-        registered.positive,
-        registered.realized_pnl,
-    );
-    if should_promote {
-        let active = active_profiles
-            .entry(profile_key)
-            .or_insert(updated.clone());
-        let mut promoted = updated.clone();
-        promoted.version = active.version.saturating_add(1);
-        promoted.profile_id =
-            strategy_core::profile_id(&promoted.symbol, &promoted.strategy, &promoted.parameters);
-        promoted.learning_samples = registered.samples;
-        promoted.positive_samples = registered.positive;
-        promoted.realized_pnl = registered.realized_pnl;
-        *active = promoted;
-    }
-    state.seen_event_ids.insert(event_id.to_owned());
-    while state.seen_event_ids.len() > 100_000 {
-        let Some(oldest) = state.seen_event_ids.iter().next().cloned() else {
-            break;
-        };
-        state.seen_event_ids.remove(&oldest);
-    }
-    state.accepted_events = state.accepted_events.saturating_add(1);
-    persist(&service.path, &state)?;
-    Ok(Json(FeedbackResult {
-        accepted: true,
-        duplicate: false,
-        profile: Some(updated),
-    }))
-}
-
-fn should_promote_variant(samples: usize, positive: usize, net_outcome: f64) -> bool {
-    samples >= 5
-        && positive.saturating_mul(2) > samples
-        && net_outcome.is_finite()
-        && net_outcome > 0.0
-}
-
-fn persist(path: &Path, state: &LearningState) -> Result<(), (StatusCode, String)> {
-    let bytes = serde_json::to_vec(state)
-        .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
-    let temporary = path.with_extension("json.tmp");
-    std::fs::write(&temporary, bytes)
-        .and_then(|()| std::fs::rename(&temporary, path))
-        .map_err(|error| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("could not persist learning state: {error}"),
-            )
-        })
-}
-
-fn valid_spec(spec: &ParameterSpec) -> bool {
-    spec.default.is_finite()
-        && spec.min.is_finite()
-        && spec.max.is_finite()
-        && spec.step.is_finite()
-        && spec.learning_direction.is_finite()
-        && spec.min <= spec.default
-        && spec.default <= spec.max
-        && spec.min < spec.max
-        && spec.step > 0.0
-}
-
-fn event_specs(event: &FeedbackEvent) -> &[ParameterSpec] {
-    match event {
-        FeedbackEvent::ScoutOutcome { specs, .. } | FeedbackEvent::TradeOutcome { specs, .. } => {
-            specs
-        }
-    }
-}
-
-fn event_is_positive(event: &FeedbackEvent) -> bool {
-    match event {
-        FeedbackEvent::ScoutOutcome {
-            net_return_percent, ..
-        } => *net_return_percent > 0.0,
-        FeedbackEvent::TradeOutcome {
-            realized_pnl_usd, ..
-        } => *realized_pnl_usd > 0.0,
-    }
-}
-
-fn event_value(event: &FeedbackEvent) -> f64 {
-    match event {
-        FeedbackEvent::ScoutOutcome {
-            net_return_percent, ..
-        } => *net_return_percent,
-        FeedbackEvent::TradeOutcome {
-            realized_pnl_usd, ..
-        } => *realized_pnl_usd,
-    }
-}
-
-/// Apply one event only to the exact profile variant that generated it.
-pub fn update_profile(
-    profile: &StrategyProfile,
-    specs: &[ParameterSpec],
-    event: &FeedbackEvent,
-) -> Option<StrategyProfile> {
-    let (event_profile, strategy, symbol, parameters, outcome) = match event {
-        FeedbackEvent::ScoutOutcome {
-            profile_id,
-            strategy,
-            symbol,
-            parameters,
-            net_return_percent,
-            ..
-        } => (
-            profile_id,
-            strategy,
-            symbol,
-            parameters,
-            *net_return_percent,
-        ),
-        FeedbackEvent::TradeOutcome {
-            profile_id,
-            strategy,
-            symbol,
-            parameters,
-            realized_pnl_usd,
-            ..
-        } => (profile_id, strategy, symbol, parameters, *realized_pnl_usd),
-    };
-    if event_profile != &profile.profile_id
-        || strategy != &profile.strategy
-        || symbol != &profile.symbol
-        || parameters != &profile.parameters
-        || !outcome.is_finite()
-    {
-        return None;
-    }
-    let mut updated = profile.clone();
-    let positive = outcome > 0.0;
-    for spec in specs {
-        if !valid_spec(spec) {
-            continue;
-        }
-        let Some(value) = updated.parameters.get_mut(&spec.key) else {
-            continue;
-        };
-        let direction = if positive {
-            spec.learning_direction.signum()
-        } else {
-            -spec.learning_direction.signum()
-        };
-        *value = (*value + direction * spec.step).clamp(spec.min, spec.max);
-    }
-    updated.version = updated.version.saturating_add(1);
-    updated.profile_id =
-        strategy_core::profile_id(&updated.symbol, &updated.strategy, &updated.parameters);
-    Some(updated)
 }
 
 #[cfg(test)]
@@ -542,6 +243,7 @@ mod tests {
             let event = FeedbackEvent::TradeOutcome {
                 event_id: format!("trade-{index}"),
                 observed_at_ms: now_ms(),
+                learning_context: None,
                 symbol: profile.symbol.clone(),
                 strategy: profile.strategy.clone(),
                 profile_id: profile.profile_id.clone(),
@@ -550,6 +252,7 @@ mod tests {
                 scout: false,
                 realized_pnl_usd: 1.0,
                 net_return_percent: 1.0,
+                threshold_observations: Vec::new(),
             };
             let response = json_request(
                 app.clone(),
@@ -563,6 +266,7 @@ mod tests {
         let duplicate = FeedbackEvent::TradeOutcome {
             event_id: "trade-4".into(),
             observed_at_ms: now_ms(),
+            learning_context: None,
             symbol: profile.symbol.clone(),
             strategy: profile.strategy.clone(),
             profile_id: profile.profile_id.clone(),
@@ -571,6 +275,7 @@ mod tests {
             scout: false,
             realized_pnl_usd: 1.0,
             net_return_percent: 1.0,
+            threshold_observations: Vec::new(),
         };
         let response = json_request(
             app.clone(),
@@ -584,14 +289,206 @@ mod tests {
                 .unwrap();
         assert!(result.duplicate);
 
-        let response = json_request(app, "GET", "/profiles", None).await;
+        let response = json_request(app.clone(), "GET", "/profiles", None).await;
         let profiles: Vec<StrategyProfile> =
             serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
                 .unwrap();
         assert_eq!(profiles.len(), 1);
-        assert_eq!(profiles[0].parameters["threshold"], 0.6);
+        assert_eq!(profiles[0].parameters["threshold"], 0.5);
         assert_eq!(profiles[0].parameters["take_profit_percent"], 0.8);
         assert_eq!(profiles[0].learning_samples, 5);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn paired_scout_promotion_pools_symbols_and_keeps_the_tested_value() {
+        let path =
+            std::env::temp_dir().join(format!("learning-paired-test-{}.json", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let app = router(path.clone()).unwrap();
+        let spec = ParameterSpec {
+            key: "threshold".into(),
+            label: "Threshold".into(),
+            default: 0.5,
+            min: 0.0,
+            max: 1.0,
+            step: 0.1,
+            unit: "ratio".into(),
+            learning_direction: 1.0,
+        };
+        for symbol in ["BTC-USDT", "ETH-USDT"] {
+            let baseline = StrategyProfile {
+                profile_id: format!("{symbol}-baseline"),
+                version: 0,
+                symbol: symbol.into(),
+                strategy: "live-momentum".into(),
+                parameters: BTreeMap::from([("threshold".into(), 0.5)]),
+                learning_samples: 0,
+                positive_samples: 0,
+                realized_pnl: 0.0,
+            };
+            let response = json_request(
+                app.clone(),
+                "POST",
+                "/profiles",
+                Some(
+                    serde_json::to_vec(&StrategyProfileRegistration {
+                        profile: baseline,
+                        specs: vec![spec.clone()],
+                    })
+                    .unwrap(),
+                ),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::ACCEPTED);
+        }
+
+        for (symbol_index, symbol) in ["BTC-USDT", "ETH-USDT"].into_iter().enumerate() {
+            let parameters = BTreeMap::from([("threshold".into(), 0.6)]);
+            let profile_id = format!("{symbol}-candidate");
+            for sample in 0..3 {
+                let event = FeedbackEvent::ScoutOutcome {
+                    event_id: format!("paired-{symbol}-{sample}"),
+                    observed_at_ms: now_ms() + symbol_index as u64 * 10 + sample,
+                    learning_context: None,
+                    symbol: symbol.into(),
+                    strategy: "live-momentum".into(),
+                    profile_id: profile_id.clone(),
+                    parameters: parameters.clone(),
+                    specs: vec![spec.clone()],
+                    net_return_percent: 0.02,
+                };
+                let response = json_request(
+                    app.clone(),
+                    "POST",
+                    "/feedback",
+                    Some(serde_json::to_vec(&event).unwrap()),
+                )
+                .await;
+                assert_eq!(response.status(), StatusCode::OK);
+                if symbol_index == 0 {
+                    let response = json_request(app.clone(), "GET", "/profiles", None).await;
+                    let profiles: Vec<StrategyProfile> = serde_json::from_slice(
+                        &response.into_body().collect().await.unwrap().to_bytes(),
+                    )
+                    .unwrap();
+                    assert!(
+                        profiles
+                            .iter()
+                            .all(|profile| profile.parameters["threshold"] == 0.5)
+                    );
+                }
+            }
+        }
+
+        let response = json_request(app.clone(), "GET", "/profiles", None).await;
+        let profiles: Vec<StrategyProfile> =
+            serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                .unwrap();
+        assert_eq!(profiles.len(), 2);
+        assert!(
+            profiles
+                .iter()
+                .all(|profile| profile.parameters["threshold"] == 0.6)
+        );
+
+        let response = json_request(app, "GET", "/decision-snapshot", None).await;
+        let snapshot: LearnedProfileSnapshot =
+            serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                .unwrap();
+        assert_eq!(snapshot.scout_parameter_variants.len(), 2);
+        assert!(snapshot.scout_parameter_variants.iter().all(|variant| {
+            variant.sample_count == 6
+                && variant.minimum_samples == 6
+                && variant.promoted
+                && variant.lower_90_one_sided_improvement_percent == Some(0.02)
+        }));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn trade_threshold_observations_train_and_validate_threshold_in_learning_service() {
+        let path = std::env::temp_dir().join(format!(
+            "learning-threshold-test-{}.json",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let app = router(path.clone()).unwrap();
+        let spec = ParameterSpec {
+            key: "minimum_flow_imbalance".into(),
+            label: "Minimum flow".into(),
+            default: 0.02,
+            min: 0.02,
+            max: 0.8,
+            step: 0.01,
+            unit: "ratio".into(),
+            learning_direction: -1.0,
+        };
+        let parameters = BTreeMap::from([(spec.key.clone(), 0.02)]);
+        let profile = StrategyProfile {
+            profile_id: "flow-profile".into(),
+            version: 0,
+            symbol: "BTC-USDT".into(),
+            strategy: "live-trade-flow".into(),
+            parameters: parameters.clone(),
+            learning_samples: 0,
+            positive_samples: 0,
+            realized_pnl: 0.0,
+        };
+        let response = json_request(
+            app.clone(),
+            "POST",
+            "/profiles",
+            Some(
+                serde_json::to_vec(&StrategyProfileRegistration {
+                    profile,
+                    specs: vec![spec.clone()],
+                })
+                .unwrap(),
+            ),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+
+        for index in 0..70_u64 {
+            let (feature_value, net_return_percent) = if index % 2 == 0 {
+                (0.025, -0.2)
+            } else {
+                (0.075, 1.0)
+            };
+            let event = FeedbackEvent::TradeOutcome {
+                event_id: format!("threshold-trade-{index}"),
+                observed_at_ms: now_ms() + index,
+                learning_context: None,
+                symbol: "BTC-USDT".into(),
+                strategy: "live-trade-flow".into(),
+                profile_id: "flow-profile".into(),
+                parameters: parameters.clone(),
+                specs: Vec::new(),
+                scout: false,
+                realized_pnl_usd: net_return_percent,
+                net_return_percent,
+                threshold_observations: vec![StrategyThresholdObservation {
+                    parameter_key: spec.key.clone(),
+                    threshold: 0.02,
+                    feature_value,
+                }],
+            };
+            let response = json_request(
+                app.clone(),
+                "POST",
+                "/feedback",
+                Some(serde_json::to_vec(&event).unwrap()),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::OK);
+        }
+
+        let response = json_request(app, "GET", "/profiles", None).await;
+        let profiles: Vec<StrategyProfile> =
+            serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                .unwrap();
+        assert_eq!(profiles[0].parameters[&spec.key], 0.03);
         let _ = std::fs::remove_file(path);
     }
 
@@ -624,6 +521,7 @@ mod tests {
         let event = FeedbackEvent::ScoutOutcome {
             event_id: "e1".into(),
             observed_at_ms: 1,
+            learning_context: None,
             symbol: "BTC-USDT".into(),
             strategy: "live-momentum".into(),
             profile_id: "p1".into(),
@@ -632,7 +530,7 @@ mod tests {
             net_return_percent: 2.0,
         };
         let updated = update_profile(&profile, &[spec.clone()], &event).unwrap();
-        assert_eq!(updated.parameters["threshold"], 1.0);
+        assert_eq!(updated.parameters["threshold"], 0.9);
         assert_eq!(updated.version, 4);
         let FeedbackEvent::ScoutOutcome { parameters, .. } = event else {
             unreachable!()
@@ -646,6 +544,7 @@ mod tests {
                 &FeedbackEvent::TradeOutcome {
                     event_id: "e2".into(),
                     observed_at_ms: 2,
+                    learning_context: None,
                     symbol: "BTC-USDT".into(),
                     strategy: "live-momentum".into(),
                     profile_id: "p1".into(),
@@ -654,6 +553,7 @@ mod tests {
                     scout: false,
                     realized_pnl_usd: 1.0,
                     net_return_percent: 1.0,
+                    threshold_observations: Vec::new(),
                 }
             )
             .is_none()
@@ -661,7 +561,7 @@ mod tests {
     }
 
     #[test]
-    fn scout_feedback_changes_only_the_parameter_that_was_probed() {
+    fn scout_feedback_keeps_the_exact_tested_candidate_value() {
         let mut profile = profile();
         profile.parameters.insert("take_profit_percent".into(), 0.8);
         let spec = ParameterSpec {
@@ -677,6 +577,7 @@ mod tests {
         let event = FeedbackEvent::ScoutOutcome {
             event_id: "scout-probe-loss".into(),
             observed_at_ms: 1,
+            learning_context: None,
             symbol: profile.symbol.clone(),
             strategy: profile.strategy.clone(),
             profile_id: profile.profile_id.clone(),
@@ -686,7 +587,7 @@ mod tests {
         };
 
         let updated = update_profile(&profile, &[spec], &event).unwrap();
-        assert_eq!(updated.parameters["threshold"], 0.7);
+        assert_eq!(updated.parameters["threshold"], 0.9);
         assert_eq!(updated.parameters["take_profit_percent"], 0.8);
     }
 
@@ -696,5 +597,55 @@ mod tests {
         assert!(!should_promote_variant(5, 3, -0.1));
         assert!(should_promote_variant(5, 3, 0.1));
         assert!(!should_promote_variant(4, 4, 1.0));
+    }
+
+    #[test]
+    fn profile_keys_include_identity_and_parameter_variant() {
+        let first = profile();
+        assert_eq!(key("BTC-USDT", "live-momentum"), "BTC-USDT:live-momentum");
+        assert!(variant_key(&first).contains("BTC-USDT:live-momentum:p1:"));
+        let mut second = first.clone();
+        second.parameters.insert("threshold".into(), 0.8);
+        assert_ne!(variant_key(&first), variant_key(&second));
+    }
+
+    #[test]
+    fn event_parts_extract_the_shared_feedback_identity_for_both_event_kinds() {
+        let scout = FeedbackEvent::ScoutOutcome {
+            event_id: "scout-id".into(),
+            observed_at_ms: 1,
+            learning_context: None,
+            symbol: "BTC-USDT".into(),
+            strategy: "momentum".into(),
+            profile_id: "p1".into(),
+            parameters: BTreeMap::from([("threshold".into(), 0.5)]),
+            specs: vec![],
+            net_return_percent: 1.0,
+        };
+        let parts = event_parts(&scout);
+        assert_eq!(
+            (&parts.0, parts.1, parts.2, parts.4.as_str()),
+            (&"scout-id", "BTC-USDT", "momentum", "p1")
+        );
+        assert_eq!(parts.3["threshold"], 0.5);
+        let trade = FeedbackEvent::TradeOutcome {
+            event_id: "trade-id".into(),
+            observed_at_ms: 2,
+            learning_context: None,
+            symbol: "ETH-USDT".into(),
+            strategy: "carry".into(),
+            profile_id: "p2".into(),
+            parameters: BTreeMap::new(),
+            specs: vec![],
+            scout: false,
+            realized_pnl_usd: 1.0,
+            net_return_percent: 0.5,
+            threshold_observations: Vec::new(),
+        };
+        let parts = event_parts(&trade);
+        assert_eq!(parts.0, "trade-id");
+        assert_eq!(parts.1, "ETH-USDT");
+        assert_eq!(parts.2, "carry");
+        assert_eq!(parts.4, "p2");
     }
 }

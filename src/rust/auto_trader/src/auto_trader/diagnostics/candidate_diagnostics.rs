@@ -1,7 +1,11 @@
+#[cfg(test)]
+static EMPTY_CONTEXT_THRESHOLDS: std::sync::LazyLock<BTreeMap<String, strategies::ContextThresholds>> =
+    std::sync::LazyLock::new(BTreeMap::new);
+
 fn candidate_entry_diagnostic(
     candidate: &Signal,
     dashboard: &Dashboard,
-    learning: &BTreeMap<String, LearningStats>,
+    learning_thresholds: &BTreeMap<String, strategies::ContextThresholds>,
     risk_appetite: f64,
     active_scout_count: usize,
     scout_max_active_positions: usize,
@@ -9,7 +13,7 @@ fn candidate_entry_diagnostic(
     let review = review_candidate_entry(
         candidate,
         dashboard,
-        learning,
+        learning_thresholds,
         risk_appetite,
         active_scout_count,
         scout_max_active_positions,
@@ -37,7 +41,7 @@ fn candidate_entry_diagnostic(
 fn candidate_entry_audit_value(
     candidate: &Signal,
     dashboard: &Dashboard,
-    learning: &BTreeMap<String, LearningStats>,
+    learning_thresholds: &BTreeMap<String, strategies::ContextThresholds>,
     risk_appetite: f64,
     active_scout_count: usize,
     scout_max_active_positions: usize,
@@ -46,7 +50,7 @@ fn candidate_entry_audit_value(
     let review = review_candidate_entry(
         candidate,
         dashboard,
-        learning,
+        learning_thresholds,
         risk_appetite,
         active_scout_count,
         scout_max_active_positions,
@@ -228,12 +232,11 @@ mod candidate_diagnostic_tests {
             missed_opportunity_bands: Vec::new(), markets: Arc::new(BTreeMap::new()),
             queued_at: None, queue_wait_ms: None,
         };
-        let learning = BTreeMap::new();
-        let diagnostic = candidate_entry_diagnostic(&candidate, &dashboard, &learning, 50.0, 0, DEFAULT_SCOUT_MAX_ACTIVE_POSITIONS);
+        let diagnostic = candidate_entry_diagnostic(&candidate, &dashboard, &EMPTY_CONTEXT_THRESHOLDS, 50.0, 0, DEFAULT_SCOUT_MAX_ACTIVE_POSITIONS);
         assert!(diagnostic.contains("BTC-USDT bullish"));
         assert!(diagnostic.contains("strength 0.00 <"));
         assert!(diagnostic.contains("score 0.00 <"));
-        let audit = candidate_entry_audit_value(&candidate, &dashboard, &learning, 50.0, DEFAULT_SCOUT_MAX_ACTIVE_POSITIONS, DEFAULT_SCOUT_MAX_ACTIVE_POSITIONS, "rejected");
+        let audit = candidate_entry_audit_value(&candidate, &dashboard, &EMPTY_CONTEXT_THRESHOLDS, 50.0, DEFAULT_SCOUT_MAX_ACTIVE_POSITIONS, DEFAULT_SCOUT_MAX_ACTIVE_POSITIONS, "rejected");
         assert_eq!(audit["selection_mode"], "rejected");
         assert_eq!(audit["checks"]["scout_inventory_available"], false);
         assert!(audit["rejection_reasons"].as_array().unwrap().iter().any(|reason| reason.as_str().unwrap().contains("scout inventory cap")));
@@ -243,13 +246,12 @@ mod candidate_diagnostic_tests {
     fn supported_candidate_passes_strict_and_scout_checks_and_audit_omits_rejections() {
         let candidate = candidate(0.9, 0.9);
         let dashboard = dashboard_with_evidence();
-        let learning = BTreeMap::new();
-        let failures = candidate_entry_failures(&candidate, &review_candidate_entry(&candidate, &dashboard, &learning, 50.0, 0, DEFAULT_SCOUT_MAX_ACTIVE_POSITIONS), 0);
+        let failures = candidate_entry_failures(&candidate, &review_candidate_entry(&candidate, &dashboard, &EMPTY_CONTEXT_THRESHOLDS, 50.0, 0, DEFAULT_SCOUT_MAX_ACTIVE_POSITIONS), 0);
         assert!(failures.is_empty(), "{failures:?}");
-        let audit = candidate_entry_audit_value(&candidate, &dashboard, &learning, 50.0, 0, DEFAULT_SCOUT_MAX_ACTIVE_POSITIONS, "strict");
+        let audit = candidate_entry_audit_value(&candidate, &dashboard, &EMPTY_CONTEXT_THRESHOLDS, 50.0, 0, DEFAULT_SCOUT_MAX_ACTIVE_POSITIONS, "strict");
         assert_eq!(audit["checks"]["strict_walk_forward_pass"], true);
         assert_eq!(audit["checks"]["scout_strength_pass"], true);
         assert!(audit["rejection_reasons"].as_array().unwrap().is_empty());
-        assert!(candidate_entry_diagnostic(&candidate, &dashboard, &learning, 50.0, 0, DEFAULT_SCOUT_MAX_ACTIVE_POSITIONS).contains("did not pass combined entry checks"));
+        assert!(candidate_entry_diagnostic(&candidate, &dashboard, &EMPTY_CONTEXT_THRESHOLDS, 50.0, 0, DEFAULT_SCOUT_MAX_ACTIVE_POSITIONS).contains("did not pass combined entry checks"));
     }
 }
