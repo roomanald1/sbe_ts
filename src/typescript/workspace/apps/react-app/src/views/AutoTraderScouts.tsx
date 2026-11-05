@@ -2,7 +2,7 @@ import { memo, useEffect, useMemo } from 'react';
 import { AgGridReact } from 'ag-grid-react';
 import { ClientSideRowModelModule, ModuleRegistry, PaginationModule, themeQuartz, type ColDef, type ICellRendererParams } from 'ag-grid-community';
 import { autoTraderScoutModel, type AutoTraderScoutPosition, type ScoutLearningSummary } from '../models/AutoTraderScoutModel';
-import { useBehaviorSnapshot } from '../use_behavior_snapshot';
+import { useBehaviorSnapshot } from '@workspace/ui-platform';
 import { FeedToolbar } from './FeedToolbar';
 import { strategyLabel } from './AutoTraderOrderGrid';
 

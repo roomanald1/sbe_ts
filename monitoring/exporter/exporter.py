@@ -132,9 +132,16 @@ def insights_signal_latency_metrics(output):
 def metrics():
     METRIC_HEADERS.clear()
     output = []
-    db_path = Path(os.getenv("SQLITE_DB_PATH", ""))
-    if db_path.is_file():
-        output.append(sample("app_sqlite_database_size_bytes", "SQLite database file size in bytes.", db_path.stat().st_size, {"database": db_path.name}))
+    db_paths = os.getenv("SQLITE_DB_PATHS", os.getenv("SQLITE_DB_PATH", "")).split(os.pathsep)
+    for configured_path in db_paths:
+        db_path = Path(configured_path)
+        if db_path.is_file():
+            output.append(sample("app_sqlite_database_size_bytes", "SQLite database file size in bytes.", db_path.stat().st_size, {"database": db_path.name}))
+    store_paths = os.getenv("PERSISTENT_STORE_PATHS", "").split(os.pathsep)
+    for configured_path in store_paths:
+        store_path = Path(configured_path)
+        if store_path.is_file():
+            output.append(sample("app_persistent_store_size_bytes", "Persistent application store file size in bytes.", store_path.stat().st_size, {"store": store_path.name}))
     service_up = {}
     for name, (base, health_path) in SERVICES.items():
         try:

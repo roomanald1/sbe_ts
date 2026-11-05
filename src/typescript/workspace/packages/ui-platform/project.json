@@ -1,0 +1,25 @@
+{
+  "$schema": "../../node_modules/nx/schemas/project-schema.json",
+  "name": "ui-platform",
+  "projectType": "library",
+  "sourceRoot": "packages/ui-platform/src",
+  "targets": {
+    "build": {
+      "executor": "nx:run-commands",
+      "cache": true,
+      "outputs": ["{projectRoot}/dist/types"],
+      "options": {
+        "cwd": "packages/ui-platform",
+        "command": "tsc -b tsconfig.lib.json"
+      }
+    },
+    "typecheck": {
+      "executor": "nx:run-commands",
+      "cache": true,
+      "options": {
+        "cwd": "packages/ui-platform",
+        "command": "tsc --noEmit -p tsconfig.json"
+      }
+    }
+  }
+}

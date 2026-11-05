@@ -1,0 +1,13 @@
+{
+  "$schema": "../../node_modules/nx/schemas/project-schema.json",
+  "name": "benchmarks",
+  "projectType": "application",
+  "sourceRoot": "apps/benchmarks/src",
+  "targets": {
+    "build": { "executor": "nx:run-commands", "cache": true, "outputs": ["{projectRoot}/dist"], "options": { "cwd": "apps/benchmarks", "command": "npm run build" } },
+    "serve": { "executor": "nx:run-commands", "continuous": true, "options": { "cwd": "apps/benchmarks", "command": "npm run dev" } },
+    "lint": { "executor": "nx:run-commands", "cache": true, "options": { "cwd": "apps/benchmarks", "command": "npm run lint" } },
+    "preview": { "executor": "nx:run-commands", "continuous": true, "options": { "cwd": "apps/benchmarks", "command": "npm run preview" } },
+    "typecheck": { "executor": "nx:run-commands", "cache": true, "options": { "cwd": "apps/benchmarks", "command": "tsc -b --pretty false" } }
+  }
+}

@@ -105,8 +105,6 @@ struct Settings {
     #[serde(default)]
     learned_execution_stats: BTreeMap<String, strategies::ExecutionLearningStat>,
     #[serde(default)]
-    learned_scout_parameter_variants: Vec<strategies::ScoutParameterVariant>,
-    #[serde(default)]
     execution_learning: BTreeMap<String, ExecutionLearningStats>,
     #[serde(default)]
     execution_learning_imported: bool,
@@ -116,9 +114,6 @@ struct Settings {
     execution_feedback_outbox: Vec<strategies::ExecutionOutcomeEvent>,
     // Retained only long enough to import in-flight state created before
     // Scouts became the owner of paired scout outcomes.
-    #[serde(default)]
-    // Legacy comparison returns imported once into the Scouts service.
-    scout_comparisons: BTreeMap<String, PendingScoutComparison>,
     #[serde(default)]
     strategy_parameter_overrides: BTreeMap<String, f64>,
     #[serde(default)]
@@ -257,12 +252,10 @@ impl Default for Settings {
             learned_strategy_size_multipliers: BTreeMap::new(),
             learned_context_stats: BTreeMap::new(),
             learned_execution_stats: BTreeMap::new(),
-            learned_scout_parameter_variants: Vec::new(),
             execution_learning: BTreeMap::new(),
             execution_learning_imported: false,
             execution_learning_order_ids: BTreeSet::new(),
             execution_feedback_outbox: Vec::new(),
-            scout_comparisons: BTreeMap::new(),
             strategy_parameter_overrides: BTreeMap::new(),
             last_hedge_at: BTreeMap::new(),
             last_decision: String::new(),

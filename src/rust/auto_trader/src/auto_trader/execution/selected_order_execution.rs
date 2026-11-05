@@ -4,7 +4,6 @@ struct SelectedOrderExecution {
     position_url: String,
     signal: Signal,
     exploratory: bool,
-    scout: bool,
     counterfactual_stop_loss_percent: f64,
     counterfactual_take_profit_percent: f64,
     effective_stop_loss_percent: f64,

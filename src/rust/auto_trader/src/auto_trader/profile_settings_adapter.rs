@@ -380,22 +380,7 @@ fn learned_strategy_parameter_profile(
             step: spec.step,
             unit: spec.unit.to_owned(),
             overridden: configured.is_some(),
-            scout_variants: settings.learned_scout_parameter_variants.iter()
-                .filter(|variant| {
-                    variant.symbol == symbol
-                        && variant.strategy == strategy.as_str()
-                        && variant.parameter == spec.key.as_str()
-                })
-                .map(|variant| StrategyParameterScoutVariant {
-                    candidate_value: variant.candidate_value,
-                    sample_count: variant.sample_count,
-                    minimum_samples: variant.minimum_samples,
-                    average_net_improvement_percent: variant.average_net_improvement_percent,
-                    lower_90_one_sided_improvement_percent:
-                        variant.lower_90_one_sided_improvement_percent,
-                    promoted: variant.promoted,
-                })
-                .collect(),
+            scout_variants: Vec::new(),
         }
     }).collect();
     StrategyParameterProfile {

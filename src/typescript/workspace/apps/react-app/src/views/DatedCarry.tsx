@@ -2,7 +2,7 @@ import { useEffect, useMemo } from 'react';
 import { AgGridReact } from 'ag-grid-react';
 import { ClientSideRowModelModule, ModuleRegistry, themeQuartz, type ColDef } from 'ag-grid-community';
 import { DatedCarryModel, type DatedCarryCandidate, type DatedCarryPosition } from '../models/DatedCarryModel';
-import { useBehaviorSnapshot } from '../use_behavior_snapshot';
+import { useBehaviorSnapshot } from '@workspace/ui-platform';
 import { FeedToolbar } from './FeedToolbar';
 
 ModuleRegistry.registerModules([ClientSideRowModelModule]);

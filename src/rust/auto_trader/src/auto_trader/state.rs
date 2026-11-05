@@ -1,7 +1,6 @@
 #[derive(Clone)]
 struct AutoTraderState {
     client: reqwest::Client,
-    scout_configuration: Arc<std::sync::RwLock<scouts::ScoutConfiguration>>,
     latest_daily_strategy_snapshot: Arc<Mutex<Option<DailyStrategySnapshot>>>,
     strategy_diagnostic: Arc<std::sync::Mutex<Vec<StrategyDiagnostic>>>,
     enabled: Arc<AtomicBool>,
@@ -33,11 +32,6 @@ struct AutoTraderState {
     dated_carry_path: PathBuf,
 }
 
-impl AutoTraderState {
-    fn scout_configuration(&self) -> scouts::ScoutConfiguration {
-        self.scout_configuration.read().map(|value| value.clone()).unwrap_or_default()
-    }
-}
 
 const DECISION_AUDIT_QUEUE_CAPACITY: usize = 16_384;
 const EXECUTION_AUDIT_QUEUE_CAPACITY: usize = 4_096;
@@ -316,18 +310,6 @@ struct ExecutionLearningStats {
     fill_rate_total: f64,
     cost_notional: f64,
     all_in_cost_notional_bps: f64,
-    #[serde(default)]
-    updated_at_ms: u64,
-}
-
-#[derive(Clone, Default, Serialize, Deserialize)]
-struct PendingScoutComparison {
-    #[serde(default)]
-    baseline_return_percent: Option<f64>,
-    #[serde(default)]
-    variant_return_percent: Option<f64>,
-    #[serde(default)]
-    learning_key: String,
     #[serde(default)]
     updated_at_ms: u64,
 }

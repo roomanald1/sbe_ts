@@ -8,6 +8,7 @@ include!("contracts.rs");
 include!("candidate_planning.rs");
 include!("service.rs");
 include!("scout_handlers.rs");
+include!("scout_report.rs");
 
 #[cfg(test)]
 mod tests {

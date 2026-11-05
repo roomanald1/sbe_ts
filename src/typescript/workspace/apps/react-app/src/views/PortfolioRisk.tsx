@@ -1,5 +1,5 @@
 import { memo, useEffect, useMemo, useState } from 'react';
-import { usePausedValue } from '../use_paused_value';
+import { usePausedValue } from '@workspace/ui-platform';
 import { AgGridReact } from 'ag-grid-react';
 import {
   ClientSideRowModelModule,
@@ -9,7 +9,7 @@ import {
 } from 'ag-grid-community';
 import type { Connection } from '../connection';
 import { PnlModel } from '../models/PnlModel';
-import { useBehaviorSnapshot } from '../use_behavior_snapshot';
+import { useBehaviorSnapshot } from '@workspace/ui-platform';
 import { FeedToolbar } from './FeedToolbar';
 import { currentPositionSnapshot, subscribePositionStream } from '../position_stream';
 

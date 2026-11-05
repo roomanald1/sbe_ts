@@ -7,16 +7,16 @@ import { TradeTicketPopup } from './TradeTicketPopup';
 import { RangeOrderPopup } from './RangeOrderPopup';
 import { PriceChangesModel } from '../price_change_data';
 import { DashboardWidgetContent } from './DashboardWidgetContent';
-import { DashboardWidgetFrame } from './DashboardWidgetFrame';
+import { DashboardWidgetFrame } from '@workspace/ui-platform';
 import { DashboardToolbar } from './DashboardToolbar';
-import { useDashboardLayout } from './useDashboardLayout';
-import { useBehaviorSnapshot } from '../use_behavior_snapshot';
+import { useDashboardLayout } from '@workspace/ui-platform';
+import { useBehaviorSnapshot } from '@workspace/ui-platform';
+import type { DashboardWidget } from '@workspace/ui-platform';
+import { WORKSPACE_LAYOUT_CONFIG, WIDGET_LABELS, type DashboardWidgetType } from '../dashboard/widget_catalog';
 import {
   DEFAULT_WIDGET_HEIGHT,
   DEFAULT_WIDGET_WIDTH,
-  type DashboardWidget,
-  WIDGET_LABELS,
-} from './dashboard_layout';
+} from '@workspace/ui-platform';
 type FeedControlsProps = {
   connection: Connection;
   feedSource: FeedSource;
@@ -87,7 +87,7 @@ export function FeedControls({
   );
   const selectedNewWidgetSymbol = bookSymbols[0] ?? selectionSymbols[0] ?? '';
 
-  const layout = useDashboardLayout(selectedNewWidgetSymbol);
+  const layout = useDashboardLayout(selectedNewWidgetSymbol, WORKSPACE_LAYOUT_CONFIG);
   const {
     savedLayouts, activeLayoutId, widgets: dashboardWidgets, setWidgets: setDashboardWidgets,
     widgetStoreOpen, setWidgetStoreOpen, draggingWidgetId, setDraggingWidgetId,
@@ -98,9 +98,9 @@ export function FeedControls({
   } = layout;
 
   const renderWidget = (
-    widget: DashboardWidget,
+    widget: DashboardWidget<DashboardWidgetType>,
     compact: boolean,
-    layoutWidget: DashboardWidget = widget,
+    layoutWidget: DashboardWidget<DashboardWidgetType> = widget,
   ): ReactNode => {
     const symbol = widget.symbol || selectedNewWidgetSymbol;
     const content = <DashboardWidgetContent

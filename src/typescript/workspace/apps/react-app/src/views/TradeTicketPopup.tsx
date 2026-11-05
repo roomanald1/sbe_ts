@@ -3,7 +3,7 @@ import { formatInstrumentValue, getInstrumentPrecision } from '../instrument_pre
 import { createPortal } from 'react-dom';
 import type { Connection } from '../connection';
 import { TradeTicketModel } from '../models/TradeTicketModel';
-import { useBehaviorSnapshot } from '../use_behavior_snapshot';
+import { useBehaviorSnapshot } from '@workspace/ui-platform';
 import { orderTypeDescriptions } from '../order_type_descriptions';
 
 export function TradeTicketPopup({

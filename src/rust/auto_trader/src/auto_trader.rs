@@ -14,17 +14,20 @@ use std::{
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
 use strategies::StrategyDecision;
+#[cfg(test)]
+pub(crate) use strategies::StrategyParameterScoutVariant;
 pub use strategies::benchmark_strategy_evaluation;
 pub(crate) use strategies::daily::{
     DailyStrategySignalBatch, DailyStrategySnapshot, StrategyDiagnostic, parse_scout_combination,
 };
 #[cfg(test)]
+pub(crate) use strategies::scout_parameter_specs;
+#[cfg(test)]
 use strategies::{AbsorptionPressureValue, DepthSignalValue, WindowedSignalValue};
 pub(crate) use strategies::{
     DatedCarryCandidate, DatedCarrySettlementSource, FeedbackEvent, Strategy, StrategyParameterKey,
-    StrategyParameterProfile, StrategyParameterScoutVariant, StrategyParameterValue,
-    StrategySignal, confident_win_rate_edge, effective_parameter_values,
-    legacy_strategy_parameter_name, scout_parameter_specs, signal_strategy_parameters,
+    StrategyParameterProfile, StrategyParameterValue, StrategySignal, confident_win_rate_edge,
+    effective_parameter_values, legacy_strategy_parameter_name, signal_strategy_parameters,
     strategy_parameter_key, strategy_parameter_value, strategy_profile_value,
     validate_strategy_parameter_overrides,
 };
@@ -81,9 +84,6 @@ mod strategy_cleanup_integration_tests {
             std::env::temp_dir().join(format!("auto-trader-cleanup-{}.json", std::process::id()));
         AutoTraderState {
             client: reqwest::Client::new(),
-            scout_configuration: Arc::new(std::sync::RwLock::new(
-                scouts::ScoutConfiguration::default(),
-            )),
             latest_daily_strategy_snapshot: Arc::new(Mutex::new(None)),
             strategy_diagnostic: Arc::new(std::sync::Mutex::new(Vec::new())),
             enabled: Arc::new(AtomicBool::new(true)),

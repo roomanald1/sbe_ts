@@ -26,13 +26,14 @@ async fn reconcile_auto_positions_with_ledger(
                 position["quantity"].as_f64()?,
                 position["average_entry_price"].as_f64()?,
                 position["entry_fees"].as_f64().unwrap_or_default(),
+                position["last_trade_timestamp"].as_u64().unwrap_or_default(),
             ))
         })
-        .filter(|(_, quantity, average_entry_price, entry_fees)| {
+        .filter(|(_, quantity, average_entry_price, entry_fees, _)| {
             quantity.is_finite() && average_entry_price.is_finite() && entry_fees.is_finite()
         })
-        .map(|(symbol, quantity, average_entry_price, entry_fees)| {
-            (symbol, (quantity, average_entry_price, entry_fees))
+        .map(|(symbol, quantity, average_entry_price, entry_fees, last_trade_timestamp)| {
+            (symbol, (quantity, average_entry_price, entry_fees, last_trade_timestamp))
         })
         .collect::<BTreeMap<_, _>>();
 
@@ -51,7 +52,7 @@ async fn reconcile_auto_positions_with_ledger(
         .filter(|symbol| {
             ledger_positions
                 .get(*symbol)
-                .is_none_or(|(quantity, _, _)| quantity.abs() <= 1e-12)
+                .is_none_or(|(quantity, _, _, _)| quantity.abs() <= 1e-12)
         })
         .cloned()
         .collect::<BTreeSet<_>>();
@@ -70,7 +71,7 @@ async fn reconcile_auto_positions_with_ledger(
             }
             continue;
         }
-        let Some((quantity, average_entry_price, entry_fees)) = ledger_positions.get(symbol) else {
+        let Some((quantity, average_entry_price, entry_fees, last_trade_timestamp)) = ledger_positions.get(symbol) else {
             continue;
         };
         let quantity_changed = (position.quantity - quantity).abs() > 1e-12;
@@ -91,6 +92,9 @@ async fn reconcile_auto_positions_with_ledger(
             position.average_entry_price = *average_entry_price;
             // Position manager stores signed cash flows; AutoTrader stores costs as positive values.
             position.entry_fees = normalized_entry_fees;
+            if position.entry_timestamp_ms == 0 {
+                position.entry_timestamp_ms = *last_trade_timestamp;
+            }
             if quantity_changed {
                 position.protective_stops.clear();
             }
@@ -103,8 +107,24 @@ async fn reconcile_auto_positions_with_ledger(
     }
 
     // Preserve independent strategy lots while matching their combined size to the authoritative ledger.
-    for (symbol, (ledger_quantity, ledger_average_price, ledger_fees)) in &ledger_positions {
-        let Some(aggregate) = settings.positions.get(symbol).cloned() else { continue; };
+    for (symbol, (ledger_quantity, ledger_average_price, ledger_fees, last_trade_timestamp)) in &ledger_positions {
+        // The position manager ledger is authoritative. AutoTrader settings may
+        // have been reset or may predate this position, so recreate the missing
+        // aggregate before rebuilding strategy lots.
+        let aggregate = settings.positions.entry(symbol.clone()).or_insert_with(|| {
+            changed = true;
+            let mut position = TraderPosition {
+                quantity: *ledger_quantity,
+                average_entry_price: *ledger_average_price,
+                entry_fees: ledger_fees.abs(),
+                entries: 1,
+                entry_timestamp_ms: *last_trade_timestamp,
+                strategy: Some("live-insights".into()),
+                ..TraderPosition::default()
+            };
+            position.trade_id = position.entry_decision_id.clone();
+            position
+        }).clone();
         let aggregate_quantity = aggregate.quantity;
         if aggregate_quantity.abs() <= 1e-12 { continue; }
         if let Some(lots) = settings.strategy_positions.get_mut(symbol) {
@@ -130,6 +150,14 @@ async fn reconcile_auto_positions_with_ledger(
                 lots.insert("live-insights".into(), replacement);
                 changed = true;
             }
+        } else {
+            let mut restored = aggregate;
+            restored.quantity = *ledger_quantity;
+            restored.average_entry_price = *ledger_average_price;
+            restored.entry_fees = ledger_fees.abs();
+            settings.strategy_positions.entry(symbol.clone()).or_default()
+                .insert(restored.strategy.clone().unwrap_or_else(|| "live-insights".into()), restored);
+            changed = true;
         }
     }
 

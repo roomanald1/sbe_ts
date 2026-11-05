@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { AccountModel } from '../models/AccountModel';
-import { useBehaviorSnapshot } from '../use_behavior_snapshot';
+import { useBehaviorSnapshot } from '@workspace/ui-platform';
 import { FeedToolbar } from './FeedToolbar';
 const money = new Intl.NumberFormat(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 export function Account() {

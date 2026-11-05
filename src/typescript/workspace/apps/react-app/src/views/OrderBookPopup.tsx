@@ -4,7 +4,7 @@ import { useEffect, useId, useMemo, useState } from 'react';
 import { FeedToolbar } from './FeedToolbar';
 import { Connection } from '../connection';
 import { OrderBookModel } from '../models/OrderBookModel';
-import { useBehaviorSnapshot } from '../use_behavior_snapshot';
+import { useBehaviorSnapshot } from '@workspace/ui-platform';
 
 import { DepthBalance, DepthRows, SweepSummary } from './OrderBookDepth';
 

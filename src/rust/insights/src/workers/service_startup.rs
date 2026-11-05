@@ -49,7 +49,6 @@ async fn main() -> anyhow::Result<()> {
         }),
         snapshot_diagnostic_at: DashMap::new(),
         latest_prices: DashMap::new(),
-        scout_cache: Mutex::new(None),
     });
     let (signal_event_sender, signal_event_receiver) = tokio::sync::mpsc::channel(8_192);
     tokio::spawn(run_signal_event_workers(
@@ -82,10 +81,6 @@ async fn main() -> anyhow::Result<()> {
         .route(
             "/internal/signals/scout-strategy-status",
             axum::routing::post(update_scout_strategy_status).with_state(Arc::clone(&signal_runtime)),
-        )
-        .route(
-            "/internal/scouts/outcomes",
-            get(scout_report::get_scout_outcomes).with_state(Arc::clone(&signal_runtime)),
         )
         .merge(signal_store.router());
     let listener = tokio::net::TcpListener::bind(("0.0.0.0", 3004)).await?;

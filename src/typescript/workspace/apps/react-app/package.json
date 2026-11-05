@@ -12,6 +12,7 @@
     "coverage": "c8 --all --include 'src/**/*.ts' --include 'src/**/*.tsx' --exclude 'src/**/*.test.ts' --reporter=text --reporter=html --report-dir=public/coverage/typescript node --import ./test-loader.mjs --test src/**/*.test.ts"
   },
   "dependencies": {
+    "@workspace/ui-platform": "*",
     "@tanstack/react-query": "^5.104.1",
     "@types/rsocket-core": "^0.0.11",
     "@types/rsocket-websocket-client": "^0.0.7",

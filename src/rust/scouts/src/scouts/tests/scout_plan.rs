@@ -14,7 +14,6 @@ mod scout_plan_tests {
         ServiceState {
             client: reqwest::Client::new(),
             learning_url: "http://127.0.0.1:1".into(),
-            insights_url: "http://127.0.0.1:2".into(),
             seen: Arc::new(Mutex::new(BTreeSet::new())),
             scout: ScoutState {
                 data: Arc::new(Mutex::new(PersistedState::default())),
@@ -51,6 +50,7 @@ mod scout_plan_tests {
             strategies: vec!["live-momentum".into()],
             max_active_samples: 12,
             max_active_positions: 30,
+            ..ScoutConfiguration::default()
         };
         set_scout_configuration(State(service.clone()), Json(configuration))
             .await

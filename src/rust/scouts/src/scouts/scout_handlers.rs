@@ -1,3 +1,78 @@
+async fn receive_scout_markout(
+    State(service): State<ServiceState>,
+    Json(markout): Json<ScoutMarkoutRequest>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    let instance = service
+        .scout
+        .data
+        .lock()
+        .await
+        .scout_instances
+        .get(&markout.decision_id)
+        .cloned();
+    let Some(instance) = instance else {
+        return Ok(StatusCode::NO_CONTENT);
+    };
+    let Some(outcome) = scout_outcome_from_markout(&instance, markout) else {
+        return Ok(StatusCode::NO_CONTENT);
+    };
+    receive_scout_outcome(State(service), Json(outcome)).await
+}
+
+fn scout_outcome_from_markout(
+    instance: &serde_json::Value,
+    markout: ScoutMarkoutRequest,
+) -> Option<ScoutOutcomeRequest> {
+    if instance["symbol"].as_str() != Some(markout.symbol.as_str())
+        || instance["decision_id"].as_str() != Some(markout.decision_id.as_str())
+        || instance["signal_timestamp"].as_u64().is_none_or(|timestamp| {
+            timestamp.abs_diff(markout.signal_timestamp_ms) > 10_000
+        })
+        || markout.evaluated_timestamp_ms < markout.signal_timestamp_ms
+        || instance["scout_net_return_percent"].is_number()
+        || !markout.taker_fee_rate.is_finite()
+        || markout.taker_fee_rate < 0.0
+    {
+        return None;
+    }
+    let direction = instance["direction"].as_str().unwrap_or_default();
+    let net_return_percent = match direction {
+        "bullish" => markout.long_net_percent,
+        "bearish" => markout.short_net_percent,
+        _ => None,
+    };
+    let net_return_percent = net_return_percent.filter(|value| value.is_finite())?;
+    let notional = instance["scout_notional_usd"].as_f64().unwrap_or_default();
+    let learning_context = instance["scout_learning_context"].as_str()?.to_owned();
+    if !notional.is_finite() || notional <= 0.0 {
+        return None;
+    }
+    Some(ScoutOutcomeRequest {
+        decision_id: markout.decision_id,
+        learning_context,
+        simulated_net_pnl_usd: notional * net_return_percent / 100.0,
+        net_return_percent,
+        signal_timestamp_ms: markout.signal_timestamp_ms,
+        evaluated_timestamp_ms: markout.evaluated_timestamp_ms,
+        taker_fee_rate: markout.taker_fee_rate,
+        symbol: markout.symbol,
+        strategy: instance["strategy"].as_str().unwrap_or_default().to_owned(),
+        strategy_parameters: serde_json::from_value(instance["strategy_parameters"].clone()).unwrap_or_default(),
+        exit_scenario: instance["scout_exit_scenario"].as_str().unwrap_or("strategy").to_owned(),
+        sample_group_id: instance["scout_sample_group_id"].as_str().unwrap_or_default().to_owned(),
+        scout_parameter_key: instance["scout_parameter_key"].as_str().map(str::to_owned),
+        scout_parameter_value: instance["scout_parameter_value"].as_f64(),
+        scout_parameter_profile_symbol: instance["scout_parameter_profile_symbol"].as_str().map(str::to_owned),
+        scout_comparison_id: instance["scout_comparison_id"].as_str().map(str::to_owned),
+        scout_comparison_role: instance["scout_comparison_role"].as_str().map(str::to_owned),
+        scout_comparison_zero_role: instance["scout_comparison_zero_role"].as_str().map(str::to_owned),
+        scout_comparison_parameter_key: instance["scout_comparison_parameter_key"].as_str().map(str::to_owned),
+        scout_comparison_parameter_value: instance["scout_comparison_parameter_value"].as_f64(),
+        scout_comparison_parameter_profile_symbol: instance["scout_comparison_parameter_profile_symbol"].as_str().map(str::to_owned),
+        strategy_parameter_specs: serde_json::from_value(instance["strategy_parameter_specs"].clone()).unwrap_or_default(),
+    })
+}
+
 async fn receive_scout_outcome(
     State(service): State<ServiceState>,
     Json(outcome): Json<ScoutOutcomeRequest>,
@@ -74,6 +149,14 @@ async fn receive_scout_outcome(
                 state.pairs.remove(&oldest);
             }
             state.outcomes.insert(outcome_key.clone(), outcome.clone());
+            if let Some(instance) = state.scout_instances.get_mut(&outcome.decision_id) {
+                instance["scout_net_return_percent"] = serde_json::json!(outcome.net_return_percent);
+                instance["scout_evaluated_timestamp_ms"] = serde_json::json!(outcome.evaluated_timestamp_ms);
+                instance["scout_taker_fee_rate"] = serde_json::json!(outcome.taker_fee_rate);
+                if let Some(delta) = paired_delta {
+                    instance["paired_delta_percent"] = serde_json::json!(delta);
+                }
+            }
             while state.outcomes.len() > 100_000 {
                 if let Some(oldest) = state.outcomes.keys().next().cloned() {
                     state.outcomes.remove(&oldest);
@@ -100,12 +183,6 @@ async fn receive_scout_outcome(
             }
             state.scout_lifecycle_updated_at_ms =
                 state.scout_lifecycle_updated_at_ms.max(scout_now_ms());
-            state
-                .outbox
-                .push(ScoutOutboxItem::Audit(scout_outcome_audit(
-                    &outcome,
-                    paired_delta,
-                )));
             state.seen.insert(outcome_key);
             while state.seen.len() > 100_000 {
                 if let Some(oldest) = state.seen.iter().next().cloned() {
@@ -278,6 +355,14 @@ fn apply_scout_lifecycle_observation(
         if let Some(oldest) = state.scout_observation_results.keys().next().cloned() {
             state.scout_observation_results.remove(&oldest);
         }
+    }
+    while state.scout_instances.len() > 100_000 {
+        let oldest = state.scout_instances
+            .iter()
+            .min_by_key(|(_, audit)| audit["timestamp"].as_u64().unwrap_or_default())
+            .map(|(id, _)| id.clone());
+        let Some(oldest) = oldest else { break; };
+        state.scout_instances.remove(&oldest);
     }
     state.scout_lifecycle_updated_at_ms = state.scout_lifecycle_updated_at_ms.max(request.now_ms);
     response
@@ -589,10 +674,12 @@ async fn create_scout_plan(
             audit["scout"] = serde_json::json!(true);
             let decision_id = audit["decision_id"].as_str().unwrap_or_default();
             let scenario = audit["scout_exit_scenario"].as_str().unwrap_or_default();
+            if !decision_id.is_empty() {
+                state.scout_instances.insert(decision_id.to_owned(), audit.clone());
+            }
             if let Some(registration) = scout_registration(&audit) {
                 tokens.insert(format!("{decision_id}|{scenario}"));
                 active_audits.push(audit.clone());
-                state.outbox.push(ScoutOutboxItem::Audit(audit.clone()));
                 state
                     .outbox
                     .push(ScoutOutboxItem::Registration(registration));
@@ -867,6 +954,9 @@ async fn generate_live_candidates(
                 );
                 if enters {
                     let mut candidate = configured.clone();
+                    // The input signal has no strategy attribution. The downstream plan
+                    // receiver needs the profile owner on the serialized candidate.
+                    candidate["strategy"] = serde_json::json!(profile.strategy);
                     candidate["direction"] = serde_json::json!(direction);
                     let source_score = number(source, "score").unwrap_or_default().abs();
                     candidate["score"] = serde_json::json!(source_score * side);
@@ -1225,5 +1315,31 @@ fn live_scout_feature_signal(
         components.insert(key.to_owned(), serde_json::Value::Array(Vec::new()));
     }
     Some(configured)
+}
+
+#[cfg(test)]
+mod scout_markout_instance_tests {
+    use super::*;
+
+    #[test]
+    fn markout_uses_the_scout_instance_stored_by_this_service() {
+        let instance = serde_json::json!({
+            "decision_id":"decision-1", "symbol":"BTC-USDT", "strategy":"live-trade-flow",
+            "direction":"bullish", "signal_timestamp":10, "scout_notional_usd":100.0, "scout_learning_context":"scout:live:test",
+            "strategy_parameters":{"stop_loss_percent":0.5}, "scout_exit_scenario":"strategy",
+            "scout_sample_group_id":"group-1", "strategy_parameter_specs":[]
+        });
+        let outcome = scout_outcome_from_markout(&instance, ScoutMarkoutRequest {
+            decision_id:"decision-1".into(), symbol:"BTC-USDT".into(), signal_timestamp_ms:10,
+            evaluated_timestamp_ms:20, taker_fee_rate:0.001, long_net_percent:Some(0.25), short_net_percent:Some(-0.3),
+        }).unwrap();
+        assert_eq!(outcome.net_return_percent, 0.25);
+        assert_eq!(outcome.simulated_net_pnl_usd, 0.25);
+        assert_eq!(outcome.strategy, "live-trade-flow");
+        assert!(scout_outcome_from_markout(&instance, ScoutMarkoutRequest {
+            decision_id:"other".into(), symbol:"ETH-USDT".into(), signal_timestamp_ms:10,
+            evaluated_timestamp_ms:20, taker_fee_rate:0.001, long_net_percent:Some(0.25), short_net_percent:None,
+        }).is_none());
+    }
 }
 

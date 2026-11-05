@@ -59,34 +59,6 @@ fn is_live_scout_only_signal(candidate: &Signal) -> bool {
             .is_some_and(|strategy| strategy.is_live_insight() && !strategy.is_legacy_composite())
 }
 
-fn scout_walk_forward_thresholds(candidate: &Signal) -> Option<(usize, usize, f64)> {
-    let decision = candidate.strategy_decision.as_ref();
-    if !is_live_scout_only_signal(candidate) {
-        return Some((
-            MIN_EXPLORATION_EVIDENCE_SAMPLES,
-            MIN_SIDE_WALK_FORWARD_SAMPLES,
-            NEGATIVE_EVIDENCE_FLOOR,
-        ));
-    }
-    let strategy = candidate.strategy.as_deref().and_then(Strategy::from_name)?;
-    let parameters = decision?.get("strategy_parameters")?;
-    let validated = |key: StrategyParameterKey| {
-        let spec = strategy.parameter_specs()
-            .into_iter()
-            .find(|spec| spec.key == key)?;
-        let value = parameters.get(key.as_str())?.as_f64()?;
-        let position = (value - spec.min) / spec.step;
-        (value.is_finite()
-            && value >= spec.min
-            && value <= spec.max
-            && (position - position.round()).abs() <= 1e-6)
-            .then_some(value)
-    };
-    let minimum_samples = validated(StrategyParameterKey::ScoutMinimumWalkForwardSamples)?;
-    let minimum_positive_rate = validated(StrategyParameterKey::ScoutMinimumPositiveNetRate)?;
-    Some((minimum_samples.round() as usize, minimum_samples.round() as usize, minimum_positive_rate))
-}
-
 #[cfg(test)]
 mod candidate_evidence_tests {
     use super::*;

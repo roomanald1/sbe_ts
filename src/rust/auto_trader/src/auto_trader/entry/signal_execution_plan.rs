@@ -261,7 +261,6 @@ async fn prepare_signal_execution_plan(
     now_ms: u64,
     quote_rate: f64,
     exploratory: bool,
-    scout: bool,
     counterfactual_stop_loss_percent: f64,
     counterfactual_take_profit_percent: f64,
 ) -> Result<SignalExecutionPlan, String> {
@@ -378,7 +377,7 @@ async fn prepare_signal_execution_plan(
                 })
                 .unwrap_or_default()
         });
-    let learned_size_multiplier = if !scout && !exploratory {
+    let learned_size_multiplier = if !exploratory {
         if strategy.is_some_and(|kind| !kind.is_dated_carry()) {
             // Daily and intraday strategies apply pooled learning to their
             // strategy-specific budget caps below.
@@ -392,14 +391,12 @@ async fn prepare_signal_execution_plan(
     } else {
         1.0
     };
-    let normal_order_cap = if strategy.is_some() && !scout && !exploratory {
+    let normal_order_cap = if strategy.is_some() && !exploratory {
         settings.max_order_notional * STRATEGY_BASE_ORDER_FRACTION
     } else {
         settings.max_order_notional
     };
-    let exploration_cap = if scout {
-        settings.max_order_notional * SCOUT_MAX_ORDER_FRACTION * risk_size_scale
-    } else if exploratory {
+    let exploration_cap = if exploratory {
         settings.max_order_notional * (settings.exploration_percent / 100.0) * risk_size_scale
     } else {
         normal_order_cap
@@ -467,11 +464,7 @@ async fn prepare_signal_execution_plan(
         }
         settings
             .last_risk_note
-            .push_str(if scout {
-                "scout order capped at 5% of max order; no sufficiently negative same-side walk-forward evidence"
-            } else {
-                "small paper-exploration size; no reliable same-side walk-forward edge yet"
-            });
+            .push_str("small paper-exploration size; no reliable same-side walk-forward edge yet");
     }
     let baseline_params = ExecutionParameters {
         post_only_timeout_minutes: signal
@@ -489,11 +482,7 @@ async fn prepare_signal_execution_plan(
         trigger_offset_bps: settings.trigger_offset_bps,
         trailing_distance_percent: settings.trailing_distance_percent,
     };
-    let minimum_book_order = if scout {
-        MIN_SCOUT_DEEP_BOOK_ORDER_NOTIONAL
-    } else {
-        MIN_DEEP_BOOK_ORDER_NOTIONAL
-    };
+    let minimum_book_order = MIN_DEEP_BOOK_ORDER_NOTIONAL;
     let deep_book_started = Instant::now();
     let deep_book = assess_deep_book(
         market,
@@ -525,7 +514,7 @@ async fn prepare_signal_execution_plan(
         baseline_type,
         signal,
         settings.risk_appetite,
-        !scout,
+        true,
         exploratory,
         &settings.execution_learning,
         !settings.execution_learning_imported,
@@ -582,11 +571,7 @@ async fn prepare_signal_execution_plan(
         trigger_offset_bps: execution_params.trigger_offset_bps,
         trailing_distance_percent: execution_params.trailing_distance_percent,
     });
-    let learning_context = if scout {
-        format!("scout:{context}:P{profile}:depth:{depth_ratio_bucket}")
-    } else {
-        format!("{context}:P{profile}:depth:{depth_ratio_bucket}")
-    };
+    let learning_context = format!("{context}:P{profile}:depth:{depth_ratio_bucket}");
     drop(settings);
     let side = if signal.direction == "bullish" {
         "buy"

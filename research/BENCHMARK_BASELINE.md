@@ -2134,3 +2134,39 @@ The 100k-fill JSON and MessagePack encode timings increased versus the immediate
 AutoTrader and Insights benchmark targets completed serially after the settings ownership changes. AutoTrader entry evaluation ranged 1.2–16.1 ns and position evaluation 0.6–1.9 ns, versus the latest recorded 1.3–16.8 / 0.6–2.6 ns. Signal serialization measured 521.0 ns (+2.3% vs 509.3 ns), market-depth assessment 542.0 ns (-5.6% vs 574.3 ns), limit request construction 386.5 ns (-4.9% vs 406.4 ns), and parameter validation 1.8 ns (-21.7% vs 2.3 ns). No material degradation was observed.
 
 Insights measured 10,662.7 ns live snapshot, 11,024.3 ns with explanations, 240.9 ns feature extraction, 17.4 ns return context, 345.6 ns input diagnostics, and 44.2 ns book snapshot. Compared with the latest recorded 11,091.4 / 12,049.4 / 241.4 / 17.7 / 318.9 / 44.5 ns, changes were -3.9%, -8.5%, -0.2%, -1.7%, +8.4%, and -0.7%. Input diagnostics was the only higher measurement; its code path was not changed by this task, and this single run is not enough to attribute a regression. Scouts has no performance benchmark target; `cargo bench` ran its 28 tests in bench mode with all ignored. WSL2 Linux x86_64, optimized Cargo bench profile; no services were started or stopped.
+
+## Scout execution ownership split (2026-11-05)
+
+AutoTrader tests passed (121), Scouts tests passed (28), Insights tests passed (29), and React tests passed (84). The AutoTrader strategy benchmark measured entry evaluation at 1.1–16.0 ns and position evaluation at 0.5–2.7 ns, compared with the latest 1.3–16.8 / 0.6–2.6 ns range. Signal serialization was 513.6 ns (+0.8% vs 509.3), market-depth assessment 544.6 ns (-5.2% vs 574.3), limit request construction 411.9 ns (+1.4% vs 406.4), and parameter validation 1.8 ns (-21.7% vs 2.3). The highest position timing increased by 0.1 ns in this single run; the benchmark does not exercise Scout processing.
+
+Insights measured 10,771.3 / 11,047.0 / 234.3 / 16.4 / 325.1 / 42.6 ns for live snapshot, explained snapshot, feature extraction, return context, input diagnostics, and book snapshot. Compared with the latest prior run (11,091.4 / 12,049.4 / 241.4 / 17.7 / 318.9 / 44.5 ns), changes were -2.9%, -8.3%, -2.9%, -7.3%, +1.9%, and -4.3%. Scouts has no dedicated benchmark target; `cargo bench` completed with its 28 unit tests ignored. WSL2 Linux x86_64, optimized Cargo bench profile; no services were started or stopped.
+
+## Independent Scout run pipeline (2026-11-05)
+
+AutoTrader benchmark entry timings were 1.1–16.1 ns and position timings 0.5–2.0 ns, compared with the preceding run's 1.1–16.0 / 0.5–2.7 ns. Signal serialization measured 524.5 ns (+2.1% vs 513.6), market depth 549.1 ns (+0.8% vs 544.6), limit request construction 415.0 ns (+0.8% vs 411.9), and parameter validation 1.8 ns (unchanged). These small helper differences are within single-run variation; no measured regression in the decision workload.
+
+Insights measured 10,687.7 / 11,169.7 / 238.0 / 16.8 / 315.5 / 43.3 ns for live snapshot, explained snapshot, feature extraction, return context, input diagnostics, and book snapshot. Against the preceding run (10,771.3 / 11,047.0 / 234.3 / 16.4 / 325.1 / 42.6 ns), changes were -0.8%, +1.1%, +1.6%, +2.4%, -3.0%, and +1.6%, within single-run variation. Scouts has no benchmark target; its 28 unit-test harness cases ran ignored in bench mode. WSL2 Linux x86_64, optimized Cargo bench profile; targets ran serially, with no services started or stopped.
+
+## Scout run ownership final repeat (2026-11-05)
+
+The same AutoTrader and Insights benchmark targets completed serially. AutoTrader entry timings were 1.1–16.1 ns; positions were 0.5–2.4 ns. Against the preceding run (1.1–16.1 / 0.5–2.0 ns), the high position timing increased 0.4 ns in the RSI2 evaluator; other entries and positions were within the recorded range. Signal serialization measured 521.3 ns (-0.6% vs 524.5), market depth 546.5 ns (-0.5% vs 549.1), limit request construction 416.8 ns (+0.4% vs 415.0), and parameter validation 1.8 ns (unchanged). These decision microbenchmarks do not exercise the moved Scout processing.
+
+Insights measured 10,687.7 / 11,169.7 / 238.0 / 16.8 / 315.5 / 43.3 ns for live snapshot, explained snapshot, feature extraction, return context, input diagnostics, and book snapshot, matching the previous single run within displayed precision. Scouts has no dedicated benchmark target; its 28 test harness cases ran ignored in bench mode. WSL2 Linux x86_64, optimized Cargo bench profile, serial runs; no services were started or stopped.
+
+## Scouts process decoupling repeat (2026-11-05)
+
+AutoTrader entry/position evaluation ranged 1.1–16.7 / 0.5–1.9 ns versus 1.1–16.1 / 0.5–2.4 ns in the prior run. The highest entry timing increased 0.6 ns (+3.7%) for live absorption pressure; other evaluator timings were within range. Signal serialization measured 522.7 ns (+0.3%), market-depth assessment 544.1 ns (-0.4%), limit request construction 416.4 ns (-0.1%), and parameter validation 1.8 ns (unchanged). These single-run helper differences are within timing variation.
+
+Insights measured 10,730.9 / 11,238.6 / 236.1 / 16.6 / 313.2 / 42.4 ns for live snapshot, explained snapshot, feature extraction, return context, input diagnostics, and book snapshot. Compared with the preceding run (10,687.7 / 11,169.7 / 238.0 / 16.8 / 315.5 / 43.3 ns), changes were +0.4%, +0.6%, -0.8%, -1.2%, -0.7%, and -2.1%. Scouts has no benchmark target; its 28 test harness cases ran ignored in bench mode. WSL2 Linux x86_64, optimized Cargo bench profile, serial execution; no services were started or stopped.
+
+## Scout state/report ownership in Scouts (2026-11-05)
+
+Scouts has no dedicated benchmark target; `cargo bench` completed with all 31 unit-test cases ignored. The Insights calculations benchmark was repeated twice. The final run measured 10,600.5 / 10,900.7 / 237.2 / 16.4 / 315.8 / 42.1 ns for live snapshot, explained snapshot, feature extraction, return context, input diagnostics, and book snapshot. Compared with the latest same-workload run (10,730.9 / 11,238.6 / 236.1 / 16.6 / 313.2 / 42.4 ns), changes were -1.2%, -3.0%, +0.5%, -1.2%, +0.8%, and -0.7%; no meaningful regression was observed. Tests passed: Scouts 31, Insights 18 library and 25 binary. WSL2 Linux x86_64, 32 logical CPUs, optimized Cargo bench profile, load average 1.86; services were stopped during benchmarks.
+
+## Live Signals to Scouts input delivery (2026-11-05)
+
+Live Signals has no dedicated benchmark target; `cargo bench` completed with all 24 unit-test cases ignored. The new Scout delivery runs alongside AutoTrader delivery, with a 300 ms Scout request timeout. Tests passed (24). No comparable Live Signals benchmark workload is recorded, so there is no timing regression comparison. WSL2 Linux x86_64, optimized Cargo bench profile; services were not running during the benchmark.
+
+## Live Scout candidate attribution fix (2026-11-05)
+
+Scouts tests passed (32). Scouts has no dedicated benchmark target; `cargo bench` completed with all 32 unit-test cases ignored. The fix adds the strategy identity to generated live candidates so plan registration can accept them; it does not change benchmarked strategy or market-data calculations. No comparable performance workload applies. WSL2 Linux x86_64, optimized Cargo bench profile.

@@ -13,7 +13,7 @@ import {
   SymbolPriceTableModel,
   type SymbolPriceTableProps,
 } from '../models/SymbolPriceTableModel';
-import { useBehaviorSnapshot } from '../use_behavior_snapshot';
+import { useBehaviorSnapshot } from '@workspace/ui-platform';
 import { FeedToolbar } from './FeedToolbar';
 import type { SymbolPriceTick } from '../types/symbol_price';
 import type { PriceHistorySample } from '../price_change_data';

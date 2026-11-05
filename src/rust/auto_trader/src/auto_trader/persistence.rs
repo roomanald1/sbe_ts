@@ -38,24 +38,7 @@ fn ensure_dated_carry_schema(connection: &rusqlite::Connection) -> rusqlite::Res
             estimated_exit_fees_usdt REAL, estimated_exit_slippage_usdt REAL,
             marked_net_pnl_usdt REAL, mark_checked_at_ms INTEGER
          );
-         CREATE TABLE IF NOT EXISTS dated_carry_scout_probes (
-            probe_id INTEGER PRIMARY KEY, opened_at_ms INTEGER NOT NULL, parameter_key TEXT NOT NULL,
-            parameter_value REAL NOT NULL, would_enter INTEGER NOT NULL,
-            spot_symbol TEXT NOT NULL, future_symbol TEXT NOT NULL, expiry_ms INTEGER NOT NULL,
-            days_to_expiry REAL NOT NULL, quantity REAL NOT NULL, spot_ask REAL NOT NULL,
-            future_bid REAL NOT NULL, spot_bid REAL NOT NULL, future_ask REAL NOT NULL,
-            basis_percent REAL NOT NULL, net_after_budget_percent REAL NOT NULL,
-            eligible INTEGER NOT NULL, reason TEXT NOT NULL
-         );
-         CREATE TABLE IF NOT EXISTS dated_carry_scout_probe_parameters (
-            probe_id INTEGER NOT NULL REFERENCES dated_carry_scout_probes(probe_id) ON DELETE CASCADE,
-            map_name TEXT NOT NULL CHECK (map_name IN ('parameters','tested_parameters')),
-            parameter_key TEXT NOT NULL, parameter_value REAL NOT NULL,
-            PRIMARY KEY(probe_id,map_name,parameter_key)
-         );
-         CREATE TABLE IF NOT EXISTS dated_carry_scout_cooldowns (
-            cooldown_key TEXT PRIMARY KEY, started_day INTEGER NOT NULL
-         );",
+         ",
     )
 }
 
@@ -67,7 +50,7 @@ fn replace_dated_carry_rows(transaction: &rusqlite::Transaction<'_>, book: &Date
          last_error=excluded.last_error",
         rusqlite::params![book.enabled as i64, book.max_spot_notional_usdt, book.checked_at_ms as i64, book.last_error],
     )?;
-    for table in ["dated_carry_scout_probe_parameters", "dated_carry_candidates", "dated_carry_positions", "dated_carry_scout_probes", "dated_carry_scout_cooldowns"] {
+    for table in ["dated_carry_candidates", "dated_carry_positions"] {
         transaction.execute(&format!("DELETE FROM {table}"), [])?;
     }
     for item in &book.candidates {
@@ -75,43 +58,14 @@ fn replace_dated_carry_rows(transaction: &rusqlite::Transaction<'_>, book: &Date
             rusqlite::params![item.future_symbol,item.spot_symbol,item.expiry_ms as i64,item.days_to_expiry,item.quantity,item.spot_ask,item.future_bid,item.spot_bid,item.future_ask,item.basis_percent,item.net_after_budget_percent,item.eligible as i64,item.reason])?;
     }
     for item in &book.positions {
-        transaction.execute("INSERT INTO dated_carry_positions(future_symbol,spot_symbol,expiry_ms,entry_ms,quantity,spot_entry_price,future_entry_price,entry_fees,status,scout_parameter_key,scout_parameter_value,spot_exit_twap,settlement_price,net_pnl_usdt,settlement_source,spot_mark_bid,future_mark_ask,spot_leg_pnl_usdt,future_leg_pnl_usdt,estimated_exit_fees_usdt,estimated_exit_slippage_usdt,marked_net_pnl_usdt,mark_checked_at_ms) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23)",
-            rusqlite::params![item.future_symbol,item.spot_symbol,item.expiry_ms as i64,item.entry_ms as i64,item.quantity,item.spot_entry_price,item.future_entry_price,item.entry_fees,item.status,item.scout_parameter_key,item.scout_parameter_value,item.spot_exit_twap,item.settlement_price,item.net_pnl_usdt,item.settlement_source,item.spot_mark_bid,item.future_mark_ask,item.spot_leg_pnl_usdt,item.future_leg_pnl_usdt,item.estimated_exit_fees_usdt,item.estimated_exit_slippage_usdt,item.marked_net_pnl_usdt,item.mark_checked_at_ms.map(|v|v as i64)])?;
-    }
-    for (i, item) in book.scout_probes.iter().enumerate() {
-        let c = &item.candidate;
-        transaction.execute("INSERT INTO dated_carry_scout_probes VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18)",
-            rusqlite::params![i as i64,item.opened_at_ms as i64,item.parameter_key,item.parameter_value,item.would_enter as i64,c.spot_symbol,c.future_symbol,c.expiry_ms as i64,c.days_to_expiry,c.quantity,c.spot_ask,c.future_bid,c.spot_bid,c.future_ask,c.basis_percent,c.net_after_budget_percent,c.eligible as i64,c.reason])?;
-        for (map_name, map) in [("parameters", &item.parameters), ("tested_parameters", &item.tested_parameters)] {
-            for (key,value) in map { transaction.execute("INSERT INTO dated_carry_scout_probe_parameters VALUES (?1,?2,?3,?4)",rusqlite::params![i as i64,map_name,key,value])?; }
-        }
-    }
-    for (key, day) in &book.scout_last_started {
-        transaction.execute("INSERT INTO dated_carry_scout_cooldowns(cooldown_key,started_day) VALUES (?1,?2)", rusqlite::params![key, *day as i64])?;
+        transaction.execute("INSERT INTO dated_carry_positions(future_symbol,spot_symbol,expiry_ms,entry_ms,quantity,spot_entry_price,future_entry_price,entry_fees,status,spot_exit_twap,settlement_price,net_pnl_usdt,settlement_source,spot_mark_bid,future_mark_ask,spot_leg_pnl_usdt,future_leg_pnl_usdt,estimated_exit_fees_usdt,estimated_exit_slippage_usdt,marked_net_pnl_usdt,mark_checked_at_ms) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21)",
+            rusqlite::params![item.future_symbol,item.spot_symbol,item.expiry_ms as i64,item.entry_ms as i64,item.quantity,item.spot_entry_price,item.future_entry_price,item.entry_fees,item.status,item.spot_exit_twap,item.settlement_price,item.net_pnl_usdt,item.settlement_source,item.spot_mark_bid,item.future_mark_ask,item.spot_leg_pnl_usdt,item.future_leg_pnl_usdt,item.estimated_exit_fees_usdt,item.estimated_exit_slippage_usdt,item.marked_net_pnl_usdt,item.mark_checked_at_ms.map(|v|v as i64)])?;
     }
     Ok(())
-}
+    }
 
 fn read_dated_carry_database(path: &PathBuf) -> rusqlite::Result<Option<DatedCarryBook>> {
-    if !path.exists() {
-        return Ok(None);
-    }
     let connection = rusqlite::Connection::open(path)?;
-    let has_old_table: bool = connection.query_row(
-        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='dated_carry_state')",
-        [], |row| row.get(0),
-    )?;
-    let old_payload: Option<Vec<u8>> = if has_old_table {
-        connection.query_row("SELECT payload FROM dated_carry_state WHERE id=1", [], |row| row.get(0)).optional()?
-    } else { None };
-    ensure_dated_carry_schema(&connection)?;
-    if let Some(payload) = old_payload {
-        let book: DatedCarryBook = rmp_serde::from_slice(&payload).map_err(|e| rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Blob, Box::new(e)))?;
-        let transaction = connection.unchecked_transaction()?;
-        replace_dated_carry_rows(&transaction, &book)?;
-        transaction.execute_batch("DROP TABLE dated_carry_state")?;
-        transaction.commit()?;
-    }
     let transaction = connection.unchecked_transaction()?;
     let settings: Option<(i64, f64, i64, Option<String>)> = transaction.query_row("SELECT enabled,max_spot_notional_usdt,checked_at_ms,last_error FROM dated_carry_settings WHERE id=1", [], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional()?;
     let Some((enabled, max_spot_notional_usdt, checked_at_ms, last_error)) = settings else { return Ok(None); };
@@ -121,22 +75,8 @@ fn read_dated_carry_database(path: &PathBuf) -> rusqlite::Result<Option<DatedCar
         stmt.query_map([], |r| Ok(DatedCarryCandidate {spot_symbol:r.get(0)?,future_symbol:r.get(1)?,expiry_ms:r.get::<_,i64>(2)? as u64,days_to_expiry:r.get(3)?,quantity:r.get(4)?,spot_ask:r.get(5)?,future_bid:r.get(6)?,spot_bid:r.get(7)?,future_ask:r.get(8)?,basis_percent:r.get(9)?,net_after_budget_percent:r.get(10)?,eligible:r.get::<_,i64>(11)?!=0,reason:r.get(12)?}))?.collect::<rusqlite::Result<Vec<_>>>()?
     };
     book.positions = {
-        let mut stmt = transaction.prepare("SELECT future_symbol,spot_symbol,expiry_ms,entry_ms,quantity,spot_entry_price,future_entry_price,entry_fees,status,scout_parameter_key,scout_parameter_value,spot_exit_twap,settlement_price,net_pnl_usdt,settlement_source,spot_mark_bid,future_mark_ask,spot_leg_pnl_usdt,future_leg_pnl_usdt,estimated_exit_fees_usdt,estimated_exit_slippage_usdt,marked_net_pnl_usdt,mark_checked_at_ms FROM dated_carry_positions ORDER BY id")?;
-        stmt.query_map([], |r| Ok(DatedCarryPosition {future_symbol:r.get(0)?,spot_symbol:r.get(1)?,expiry_ms:r.get::<_,i64>(2)? as u64,entry_ms:r.get::<_,i64>(3)? as u64,quantity:r.get(4)?,spot_entry_price:r.get(5)?,future_entry_price:r.get(6)?,entry_fees:r.get(7)?,status:r.get(8)?,scout_parameter_key:r.get(9)?,scout_parameter_value:r.get(10)?,spot_exit_twap:r.get(11)?,settlement_price:r.get(12)?,net_pnl_usdt:r.get(13)?,settlement_source:r.get(14)?,spot_mark_bid:r.get(15)?,future_mark_ask:r.get(16)?,spot_leg_pnl_usdt:r.get(17)?,future_leg_pnl_usdt:r.get(18)?,estimated_exit_fees_usdt:r.get(19)?,estimated_exit_slippage_usdt:r.get(20)?,marked_net_pnl_usdt:r.get(21)?,mark_checked_at_ms:r.get::<_,Option<i64>>(22)?.map(|v|v as u64)}))?.collect::<rusqlite::Result<Vec<_>>>()?
-    };
-    let probe_rows: Vec<(i64,u64,String,f64,bool,DatedCarryCandidate)> = {
-        let mut stmt=transaction.prepare("SELECT probe_id,opened_at_ms,parameter_key,parameter_value,would_enter,spot_symbol,future_symbol,expiry_ms,days_to_expiry,quantity,spot_ask,future_bid,spot_bid,future_ask,basis_percent,net_after_budget_percent,eligible,reason FROM dated_carry_scout_probes ORDER BY probe_id")?;
-        stmt.query_map([],|r| Ok((r.get(0)?,r.get::<_,i64>(1)? as u64,r.get(2)?,r.get(3)?,r.get::<_,i64>(4)?!=0,DatedCarryCandidate{spot_symbol:r.get(5)?,future_symbol:r.get(6)?,expiry_ms:r.get::<_,i64>(7)? as u64,days_to_expiry:r.get(8)?,quantity:r.get(9)?,spot_ask:r.get(10)?,future_bid:r.get(11)?,spot_bid:r.get(12)?,future_ask:r.get(13)?,basis_percent:r.get(14)?,net_after_budget_percent:r.get(15)?,eligible:r.get::<_,i64>(16)?!=0,reason:r.get(17)?})))?.collect::<rusqlite::Result<Vec<_>>>()?
-    };
-    for (id,opened_at_ms,parameter_key,parameter_value,would_enter,candidate) in probe_rows {
-        let mut parameters=BTreeMap::new(); let mut tested_parameters=BTreeMap::new();
-        let mut stmt=transaction.prepare("SELECT map_name,parameter_key,parameter_value FROM dated_carry_scout_probe_parameters WHERE probe_id=?1")?;
-        for row in stmt.query_map([id],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,f64>(2)?)))? { let (map,key,value)=row?; if map=="parameters" {parameters.insert(key,value);} else {tested_parameters.insert(key,value);} }
-        book.scout_probes.push(DatedCarryScoutScout{candidate,opened_at_ms,parameter_key,parameter_value,parameters,tested_parameters,would_enter});
-    }
-    book.scout_last_started = {
-        let mut stmt = transaction.prepare("SELECT cooldown_key,started_day FROM dated_carry_scout_cooldowns")?;
-        stmt.query_map([], |r| Ok((r.get(0)?, r.get::<_,i64>(1)? as u64)))?.collect::<rusqlite::Result<BTreeMap<_,_>>>()?
+        let mut stmt = transaction.prepare("SELECT future_symbol,spot_symbol,expiry_ms,entry_ms,quantity,spot_entry_price,future_entry_price,entry_fees,status,spot_exit_twap,settlement_price,net_pnl_usdt,settlement_source,spot_mark_bid,future_mark_ask,spot_leg_pnl_usdt,future_leg_pnl_usdt,estimated_exit_fees_usdt,estimated_exit_slippage_usdt,marked_net_pnl_usdt,mark_checked_at_ms FROM dated_carry_positions ORDER BY id")?;
+        stmt.query_map([], |r| Ok(DatedCarryPosition {future_symbol:r.get(0)?,spot_symbol:r.get(1)?,expiry_ms:r.get::<_,i64>(2)? as u64,entry_ms:r.get::<_,i64>(3)? as u64,quantity:r.get(4)?,spot_entry_price:r.get(5)?,future_entry_price:r.get(6)?,entry_fees:r.get(7)?,status:r.get(8)?,spot_exit_twap:r.get(9)?,settlement_price:r.get(10)?,net_pnl_usdt:r.get(11)?,settlement_source:r.get(12)?,spot_mark_bid:r.get(13)?,future_mark_ask:r.get(14)?,spot_leg_pnl_usdt:r.get(15)?,future_leg_pnl_usdt:r.get(16)?,estimated_exit_fees_usdt:r.get(17)?,estimated_exit_slippage_usdt:r.get(18)?,marked_net_pnl_usdt:r.get(19)?,mark_checked_at_ms:r.get::<_,Option<i64>>(20)?.map(|v|v as u64)}))?.collect::<rusqlite::Result<Vec<_>>>()?
     };
     transaction.commit()?;
     Ok(Some(book))
@@ -303,8 +243,6 @@ mod sqlite_state_tests {
                 future_entry_price: 100_950.0,
                 entry_fees: 1.5,
                 status: "open".into(),
-                scout_parameter_key: Some("carry_cost_gate_percent".into()),
-                scout_parameter_value: Some(0.5),
                 spot_exit_twap: None,
                 settlement_price: None,
                 net_pnl_usdt: None,
@@ -320,16 +258,6 @@ mod sqlite_state_tests {
             }],
             checked_at_ms: 1_700_000_100_000,
             last_error: Some("recoverable scan warning".into()),
-            scout_probes: vec![DatedCarryScoutScout {
-                candidate: candidate.clone(),
-                opened_at_ms: 1_700_000_000_000,
-                parameter_key: "carry_cost_gate_percent".into(),
-                parameter_value: 0.5,
-                parameters: BTreeMap::from([("minimum_days".into(), 5.0)]),
-                tested_parameters: BTreeMap::from([("carry_cost_gate_percent".into(), 0.5)]),
-                would_enter: true,
-            }],
-            scout_last_started: BTreeMap::from([("BTCUSDT:gate".into(), 20_000)]),
         };
 
         persist_dated_carry_book(&path, &book).unwrap();
@@ -341,11 +269,6 @@ mod sqlite_state_tests {
             .query_row("SELECT COUNT(*) FROM pragma_table_info('dated_carry_candidates')", [], |row| row.get(0))
             .unwrap();
         assert_eq!(candidate_columns, 13);
-        assert_eq!(
-            connection.query_row("SELECT COUNT(*) FROM dated_carry_scout_probe_parameters", [], |row| row.get::<_, i64>(0)).unwrap(),
-            2,
-        );
-
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(path.with_extension("sqlite-wal"));
         let _ = std::fs::remove_file(path.with_extension("sqlite-shm"));

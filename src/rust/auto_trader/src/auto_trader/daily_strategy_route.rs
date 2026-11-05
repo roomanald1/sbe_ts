@@ -24,7 +24,7 @@ fn publish_scout_strategy_status(
     });
 }
 
-use strategies::daily::{daily_strategy_signal_key, valid_scout_parameter_probe};
+use strategies::daily::daily_strategy_signal_key;
 
 async fn receive_daily_strategy_signals(
     State(state): State<AutoTraderState>,
@@ -49,59 +49,32 @@ async fn receive_daily_strategy_signals(
                 .strategy
                 .as_deref()
                 .and_then(Strategy::from_name)
-                .is_some_and(|strategy| {
-                    !strategy.is_live_insight()
-                        && !strategy.is_dated_carry()
-                        && valid_scout_parameter_probe(signal, strategy)
-                })
+                .is_some_and(|strategy| !strategy.is_live_insight() && !strategy.is_dated_carry())
     }) {
         return Err((
             StatusCode::BAD_REQUEST,
             "Daily strategy batch has an invalid signal".into(),
         ));
     }
-    let mut _active_parameter_profiles = BTreeSet::new();
+    let trading_strategies = state.settings.lock().await.strategies.clone();
     snapshot.active_strategy_symbols = snapshot
         .generated_signals
         .iter()
         .filter_map(|signal| {
             let strategy = signal.strategy.as_deref().and_then(Strategy::from_name)?;
+            if !trading_strategies.contains(&strategy)
+                || signal.strategy_decision.as_ref().and_then(|value| value.get("scout_parameter_probe"))
+                    .and_then(serde_json::Value::as_bool) == Some(true)
+            {
+                return None;
+            }
             let parameters = signal_strategy_parameters(signal);
             let input = StrategySignal::entry(signal, &parameters);
-            let probe = signal.strategy_decision.as_ref().and_then(|decision| {
-                Some((
-                    decision.get("scout_parameter_key")?.as_str()?,
-                    decision.get("scout_parameter_value")?.as_f64()?,
-                ))
-            });
-            let entered = if let Some(("rsi_exit_level", value)) = probe {
-                signal.strategy_decision.as_ref().is_some_and(|decision| {
-                    decision
-                        .get("primary_metric_value")
-                        .and_then(serde_json::Value::as_f64)
-                        .is_some_and(|rsi| rsi < value)
-                        && decision
-                            .get("secondary_passed")
-                            .and_then(serde_json::Value::as_bool)
-                            == Some(true)
-                })
-            } else {
-                matches!(strategy.evaluate(&input), Ok(StrategyDecision::Enter))
-            };
+            let entered = matches!(strategy.evaluate(&input), Ok(StrategyDecision::Enter));
             if !entered {
                 return None;
             }
-            if let Some((key, value)) = probe {
-                _active_parameter_profiles.insert((
-                    strategy.as_str().to_owned(),
-                    signal.symbol.clone(),
-                    key.to_owned(),
-                    format!("{value:.8}"),
-                ));
-                None
-            } else {
-                Some((strategy.as_str().to_owned(), signal.symbol.clone()))
-            }
+            Some((strategy.as_str().to_owned(), signal.symbol.clone()))
         })
         .collect();
     let active_symbols = snapshot.active_strategy_symbols.clone();
@@ -141,50 +114,26 @@ async fn receive_daily_strategy_signals(
     for signal in &mut snapshot.generated_signals {
         inject_learned_parameters(&settings, signal);
     }
-    let mut active_profiles = BTreeSet::new();
     snapshot.active_strategy_symbols = snapshot
         .generated_signals
         .iter()
         .filter_map(|signal| {
             let strategy = signal.strategy.as_deref().and_then(Strategy::from_name)?;
+            if !settings.strategies.contains(&strategy)
+                || signal.strategy_decision.as_ref().and_then(|value| value.get("scout_parameter_probe"))
+                    .and_then(serde_json::Value::as_bool) == Some(true)
+            {
+                return None;
+            }
             let parameters = signal_strategy_parameters(signal);
-            let probe = signal.strategy_decision.as_ref().and_then(|decision| {
-                Some((
-                    decision.get("scout_parameter_key")?.as_str()?,
-                    decision.get("scout_parameter_value")?.as_f64()?,
-                ))
-            });
-            let entered = if let Some(("rsi_exit_level", value)) = probe {
-                signal.strategy_decision.as_ref().is_some_and(|decision| {
-                    decision
-                        .get("primary_metric_value")
-                        .and_then(serde_json::Value::as_f64)
-                        .is_some_and(|rsi| rsi < value)
-                        && decision
-                            .get("secondary_passed")
-                            .and_then(serde_json::Value::as_bool)
-                            == Some(true)
-                })
-            } else {
-                matches!(
-                    strategy.evaluate(&StrategySignal::entry(signal, &parameters)),
-                    Ok(StrategyDecision::Enter)
-                )
-            };
+            let entered = matches!(
+                strategy.evaluate(&StrategySignal::entry(signal, &parameters)),
+                Ok(StrategyDecision::Enter)
+            );
             if !entered {
                 return None;
             }
-            if let Some((key, value)) = probe {
-                active_profiles.insert((
-                    strategy.as_str().to_owned(),
-                    signal.symbol.clone(),
-                    key.to_owned(),
-                    format!("{value:.8}"),
-                ));
-                None
-            } else {
-                Some((strategy.as_str().to_owned(), signal.symbol.clone()))
-            }
+            Some((strategy.as_str().to_owned(), signal.symbol.clone()))
         })
         .collect();
     let active_symbols = snapshot.active_strategy_symbols.clone();
@@ -201,52 +150,27 @@ async fn receive_daily_strategy_signals(
         .filter(|strategy| !strategy.is_dated_carry())
         .map(|strategy| strategy.as_str().to_owned())
         .collect::<Vec<_>>();
-    let scout_strategies = state.scout_configuration
-        .read()
-        .map(|configuration| configuration.strategies.clone())
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|strategy| !Strategy::from_name(strategy).is_some_and(Strategy::is_dated_carry))
-        .collect::<Vec<_>>();
     let active_strategy_symbols = snapshot
         .active_strategy_symbols
         .iter()
         .filter(|(strategy, _)| enabled_strategies.iter().any(|enabled| enabled == strategy))
         .cloned()
         .collect::<Vec<_>>();
-    let active_parameter_profiles = active_profiles
-        .into_iter()
-        .filter(|(strategy, _, _, _)| {
-            enabled_strategies.iter().any(|enabled| enabled == strategy)
-                || scout_strategies.iter().any(|scout| scout == strategy)
-        })
-        .collect::<Vec<_>>();
+    let active_parameter_profiles = Vec::new();
     let mut by_symbol = BTreeMap::<String, Vec<Signal>>::new();
     let mut cursors_changed = false;
     for signal in snapshot.generated_signals.iter().cloned() {
         let Some(strategy) = signal.strategy.as_deref().and_then(Strategy::from_name) else {
             continue;
         };
-        if !settings.strategies.contains(&strategy)
-            && !scout_strategies
-                .iter()
-                .any(|name| name == strategy.as_str())
-        {
+        if !settings.strategies.contains(&strategy) {
             continue;
         }
-        let scout_only = !settings.strategies.contains(&strategy);
-        if scout_only {
-            let parameters = signal_strategy_parameters(&signal);
-            let input = StrategySignal::entry(&signal, &parameters);
-            let is_probe = signal
-                .strategy_decision
-                .as_ref()
-                .and_then(|decision| decision.get("scout_parameter_probe"))
-                .and_then(serde_json::Value::as_bool)
-                == Some(true);
-            if !is_probe && !matches!(strategy.evaluate(&input), Ok(StrategyDecision::Scout)) {
-                continue;
-            }
+        if signal.strategy_decision.as_ref()
+            .and_then(|decision| decision.get("scout_parameter_probe"))
+            .and_then(serde_json::Value::as_bool) == Some(true)
+        {
+            continue;
         }
         if let Some((strategy_name, symbol, candle_or_anchor)) = daily_strategy_signal_key(&signal)
         {
@@ -256,23 +180,7 @@ async fn receive_daily_strategy_signals(
                 .get(&cursor_key)
                 .is_some_and(|previous| *previous >= candle_or_anchor);
             if already_processed {
-                // Parameter probes are always scout-only and may share the
-                // same candle cursor as their baseline signal.
-                let parameter_probe = signal
-                    .strategy_decision
-                    .as_ref()
-                    .and_then(|decision| decision.get("scout_parameter_probe"))
-                    .and_then(serde_json::Value::as_bool)
-                    == Some(true);
-                if !parameter_probe {
-                    // Revisit ordinary Scouts after a restart; per-level cooldowns
-                    // prevent duplicate samples.
-                    let parameters = signal_strategy_parameters(&signal);
-                    let input = StrategySignal::entry(&signal, &parameters);
-                    if !matches!(strategy.evaluate(&input), Ok(StrategyDecision::Scout)) {
-                        continue;
-                    }
-                }
+                continue;
             } else {
                 settings
                     .daily_strategy_signal_cursors
@@ -306,10 +214,7 @@ async fn receive_daily_strategy_signals(
     if let Ok(mut current) = state.strategy_diagnostic.lock() {
         *current = diagnostics.clone();
     }
-    let mut sampled_strategies = enabled_strategies;
-    sampled_strategies.extend(scout_strategies);
-    sampled_strategies.sort();
-    sampled_strategies.dedup();
+    let sampled_strategies = enabled_strategies;
     publish_scout_strategy_status(
         &state,
         active_strategy_symbols,

@@ -1199,7 +1199,7 @@ async fn poll_daily_strategy_signals(store: SignalStore) {
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         ticker.tick().await;
-        let result: anyhow::Result<(serde_json::Value, Vec<serde_json::Value>, String, usize, usize)> = async {
+        let result: anyhow::Result<(serde_json::Value, Vec<serde_json::Value>, String)> = async {
             let (status_result, parameters_result) = tokio::join!(
                 client.get(format!("{auto}/positions/auto-trader")).send(),
                 client.get(format!("{auto}/positions/auto-trader/parameters")).send(),
@@ -1278,24 +1278,9 @@ async fn poll_daily_strategy_signals(store: SignalStore) {
                 .max()
                 .unwrap_or_default();
             let sweep_signature = format!("{candle_anchor}:{}", strategies.join(","));
-            let lifecycle_response = client
-                .get(format!("{scouts_url}/scout-lifecycle/state"))
-                .send()
-                .await;
-            let lifecycle = match lifecycle_response {
-                Ok(response) => match response.error_for_status() {
-                    Ok(response) => response.json::<serde_json::Value>().await.unwrap_or_default(),
-                    Err(_) => serde_json::Value::Null,
-                },
-                Err(_) => serde_json::Value::Null,
-            };
-            let active_samples = lifecycle.get("scout_sample_active_scenarios")
-                .and_then(serde_json::Value::as_object).into_iter().flat_map(|items| items.keys())
-                .map(|key| key.split("|probe:").next().unwrap_or(key)).collect::<std::collections::BTreeSet<_>>().len();
-            let sample_limit = configuration.get("max_active_samples").and_then(serde_json::Value::as_u64).unwrap_or(5) as usize;
-            Ok((batch, audits, sweep_signature, active_samples, sample_limit))
+            Ok((batch, audits, sweep_signature))
         }.await;
-        let (batch, audits, sweep_signature, active_samples, sample_limit) = match result {
+        let (batch, audits, sweep_signature) = match result {
             Ok(value) => value,
             Err(error) => {
                 crate::service_log!("WARN", "Insights daily strategy scan failed: {error}");
@@ -1316,15 +1301,11 @@ async fn poll_daily_strategy_signals(store: SignalStore) {
             grouped.entry(daily_probe_group_key(&signal)).or_default().push(signal);
         }
         let groups = grouped.into_iter().collect::<Vec<_>>();
-        let mut available_slots = sample_limit.saturating_sub(active_samples);
         for (group_key, signals) in groups {
             if completed_sweep_groups.contains(&group_key) {
                 continue;
             }
             let already_started = in_progress_sweep_groups.contains(&group_key);
-            if !already_started && available_slots == 0 {
-                break;
-            }
             let mut group_failed = false;
             for chunk in signals.chunks(128) {
                 let payload = serde_json::json!({
@@ -1349,7 +1330,6 @@ async fn poll_daily_strategy_signals(store: SignalStore) {
                     break;
                 }
                 if !already_started && in_progress_sweep_groups.insert(group_key.clone()) {
-                    available_slots = available_slots.saturating_sub(1);
                 }
             }
             if group_failed {

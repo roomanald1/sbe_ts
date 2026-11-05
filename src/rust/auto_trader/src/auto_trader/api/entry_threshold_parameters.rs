@@ -117,30 +117,6 @@ fn signal_qualification_thresholds(risk_appetite: f64) -> Vec<DecisionParameter>
     ]
 }
 
-fn scout_qualification_thresholds(risk_appetite: f64) -> Vec<DecisionParameter> {
-    let risk_scale = risk_floor_scale(risk_appetite);
-    vec![
-        parameter(
-            "Scout qualification",
-            "Scout minimum strength floor",
-            SCOUT_MIN_STRENGTH_FLOOR * risk_scale,
-            "strength",
-        ),
-        parameter(
-            "Scout qualification",
-            "Scout minimum score floor",
-            SCOUT_MIN_SCORE_FLOOR * risk_scale,
-            "score",
-        ),
-        parameter(
-            "Scout qualification",
-            "Neutral scout score floor",
-            SCOUT_NEUTRAL_SCORE_FLOOR * risk_scale,
-            "score",
-        ),
-    ]
-}
-
 fn historical_evidence_thresholds() -> Vec<DecisionParameter> {
     vec![
         parameter(

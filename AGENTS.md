@@ -22,13 +22,14 @@
 - Use rg to find relevant symbols and read only the files needed for the task. Avoid lockfiles, build output, dependencies, and generated code unless relevant.
 - Root README has run commands; the Rust crate README describes service behavior and profiling.
 
-## Running the full stack
+## Running and restarting services
 
 - Do not start, stop, restart, or otherwise cycle running services unless the user explicitly instructs you to do so. This includes `./start-all.sh`, `./stop-all.sh`, Compose commands, and service-specific process commands. If a task appears to need a restart, explain that and leave the services running until explicitly asked.
-- Start the complete local stack from the repository root with `./start-all.sh`. It builds and starts the monitoring Compose services, backend services, and React app. Keep the terminal running to supervise the stack; use Ctrl+C or `./stop-all.sh` to stop it.
-- Stop the stack from the repository root with `./stop-all.sh`. This stops this repository backend and UI processes and tears down its monitoring Compose services.
-- Before starting, ensure `monitoring/.env` exists. Create it from `monitoring/.env.example` and set a unique Grafana password when needed.
-- Use these scripts for normal full-stack startup and shutdown instead of starting or stopping the backend, UI, and monitoring services separately. For focused frontend targets, the Nx guidance below still applies.
+- When the user authorizes a restart after a change, restart only the affected service or services and any services that depend on changed interfaces or runtime data. Do not restart the whole system for a focused change.
+- System services can be targeted by Compose service name from the repository root: `./stop-system.sh <service...>` followed by `./start-system.sh <service...>`. Infrastructure services can be targeted the same way with `./stop-infra.sh <service...>` and `./start-infra.sh <service...>`. Check `system/compose.yml` and `monitoring/docker-compose.yml` for service names and dependencies; include required dependent services when a change affects them.
+- Use `./start-all.sh` for initial complete-stack startup. Use `./stop-all.sh` only when the complete stack needs to be shut down, and only with explicit user authorization. These scripts operate on both system and infrastructure stacks.
+- Before starting infrastructure, ensure `monitoring/.env` exists. Create it from `monitoring/.env.example` and set a unique Grafana password when needed.
+- For focused frontend targets, use the Nx guidance below rather than restarting unrelated services.
 
 ## Execution-strategy map
 
@@ -62,6 +63,7 @@
 - Do not put one-off data migration or legacy import code in runtime application paths. Prefer explicit migration scripts, run them separately, verify the destination data, and remove temporary scripts when the migration is complete.
 
 - Run frontend targets from the repo root with ./nx <target> react-app. Nx caches build, lint, and typecheck; serve and preview are continuous.
+- After any TypeScript code changes, run the repository formatter on the changed TypeScript files.
 - Cargo reuses build artifacts in the crate's target directory. Avoid cleaning caches unless stale output is suspected.
 - After any TypeScript source or test changes, run the React app TypeScript test suite with npm test from src/typescript/workspace/apps/react-app, even when the change seems unrelated to the tests. Run any additional focused typecheck, lint, or build target when the change warrants it.
 - After any Rust source or test changes, run the relevant Rust tests and benchmarks for the affected crate(s). Before benchmarking, read research/BENCHMARK_BASELINE.md. Compare the same workloads with the latest recorded run, report any performance degradation along with meaningful changes and environment/workload differences, and append a dated run section with results. Keep runs from the most recent three days in full. When recording a new run, compact historical run details older than three days into concise dated summaries that preserve notable regressions/improvements, workload and environment differences, skipped or failed targets, and the latest comparable result for each workload. Keep the original first persisted baseline and its environment/methodology notes intact. Do not discard comparison context or treat unlike workloads as regressions.

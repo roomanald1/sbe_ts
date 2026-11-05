@@ -5,7 +5,6 @@ struct SelectedSignalOrderRequest<'a> {
     dashboard: &'a Dashboard,
     signal: &'a Signal,
     exploratory: bool,
-    scout: bool,
     counterfactual_stop_loss_percent: f64,
     counterfactual_take_profit_percent: f64,
     signal_selection_ms: f64,
@@ -24,7 +23,7 @@ async fn submit_selected_signal(
     if is_stablecoin_pair(&request.signal.symbol) {
         return Ok(skipped_for_signal(
             request.signal,
-            "Stablecoin-to-stablecoin pairs are excluded from directional and scout entries",
+            "Stablecoin-to-stablecoin pairs are excluded from directional entries",
         ));
     }
     let SelectedSignalOrderRequest {
@@ -34,7 +33,6 @@ async fn submit_selected_signal(
         dashboard,
         signal,
         exploratory,
-        scout,
         counterfactual_stop_loss_percent,
         counterfactual_take_profit_percent,
         signal_selection_ms,
@@ -75,7 +73,6 @@ async fn submit_selected_signal(
         now_ms,
         quote_rate,
         exploratory,
-        scout,
         counterfactual_stop_loss_percent,
         counterfactual_take_profit_percent,
     )
@@ -302,7 +299,7 @@ async fn submit_selected_signal(
             symbol: signal.symbol.clone(),
             side: side.to_owned(),
             order_type: format!("{order_type:?} · P{profile}"),
-            purpose: if scout { "scout" } else { "signal" }.into(),
+            purpose: "signal".into(),
             strategy: Some(
                 signal
                     .strategy
@@ -363,7 +360,6 @@ async fn submit_selected_signal(
         position_url: position_url.to_owned(),
         signal: signal.clone(),
         exploratory,
-        scout,
         counterfactual_stop_loss_percent,
         counterfactual_take_profit_percent,
         effective_stop_loss_percent,

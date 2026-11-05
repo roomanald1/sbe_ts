@@ -11,7 +11,7 @@ services:
       - ${REPO_ROOT:-..}:/workspace
       - ${REPO_ROOT:-..}/system/control:/app
       - ${REPO_ROOT:-..}/src/typescript/workspace/apps/react-app/public/coverage:/app/coverage:ro
-      - ${REPO_ROOT:-..}/src/typescript/workspace/apps/react-app/public/benchmarks:/app/benchmarks:ro
+      - ${REPO_ROOT:-..}/src/typescript/workspace/apps/benchmarks/dist:/app/benchmarks:ro
     command: ["node", "--watch", "server.mjs"]
     restart: unless-stopped
 
@@ -71,7 +71,8 @@ services:
       NEWS_SENTIMENT_URL: http://host.docker.internal:3006
       LEARNING_SERVICE_URL: http://host.docker.internal:3010
       SCOUTS_SERVICE_URL: http://host.docker.internal:3011
-      SQLITE_DB_PATH: /workspace/src/rust/insights/signals.sqlite
+      SQLITE_DB_PATHS: /workspace/src/rust/insights/signals.sqlite:/workspace/src/rust/auto_trader/auto_trader_state.sqlite:/workspace/src/rust/learning/learning_state.sqlite
+      PERSISTENT_STORE_PATHS: /workspace/src/rust/position_management/positions.json
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:

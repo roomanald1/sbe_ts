@@ -1,16 +1,7 @@
 struct CandidateEntryReview<'a> {
     context: String,
-    scout_max_active_positions: usize,
     strength_floor: f64,
     score_floor: f64,
-    scout_strength_floor: f64,
-    scout_score_floor: f64,
-    scout_minimum_samples: usize,
-    scout_minimum_positive_rate: f64,
-    scout_outcome_samples: usize,
-    scout_outcome_positive_rate: Option<f64>,
-    scout_outcome_realized_pnl: f64,
-    scout_thresholds_valid: bool,
     evidence: Option<&'a WalkForward>,
     side: Option<&'a SideWalkForwardMetrics>,
     research: Option<&'a SideWalkForwardMetrics>,
@@ -21,8 +12,6 @@ struct CandidateEntryReview<'a> {
     evidence_bad: bool,
     research_bad: bool,
     strict_evidence_bad: bool,
-    scout_strength_pass: bool,
-    scout_score_pass: bool,
 }
 
 fn review_candidate_entry<'a>(
@@ -30,8 +19,6 @@ fn review_candidate_entry<'a>(
     dashboard: &'a Dashboard,
     learning_thresholds: &BTreeMap<String, strategies::ContextThresholds>,
     risk_appetite: f64,
-    active_scout_count: usize,
-    scout_max_active_positions: usize,
 ) -> CandidateEntryReview<'a> {
     let context = market_context(candidate);
     let risk_scale = risk_floor_scale(risk_appetite);
@@ -80,38 +67,10 @@ fn review_candidate_entry<'a>(
                     .positive_net_rate_lower_95
                     .is_none_or(|rate| rate < MIN_SIDE_POSITIVE_NET_LOWER_95))
     });
-    let (scout_strength, scout_score) =
-        adaptive_scout_thresholds(active_scout_count, scout_max_active_positions);
-    let scout_strength_floor = (scout_strength * risk_scale).clamp(0.0, 1.0);
-    let scout_score_floor = (scout_score * risk_scale).max(0.0);
-    let scout_strength_pass = candidate.strength.is_finite()
-        && candidate.strength >= scout_strength_floor;
-    let scout_score_pass = candidate.score.is_finite()
-        && candidate.score.abs() >= scout_score_floor;
-    let scout_thresholds = scout_walk_forward_thresholds(candidate);
-    let scout_outcome_samples = learned.map_or(0, |thresholds| thresholds.scout_outcome_samples);
-    let scout_outcome_positive_rate = learned.and_then(|thresholds| thresholds.scout_outcome_positive_rate);
-    let scout_outcome_realized_pnl = learned.map_or(0.0, |thresholds| thresholds.scout_outcome_realized_pnl);
-    let scout_thresholds_valid = scout_thresholds.is_some();
-    let (scout_minimum_samples, _scout_research_minimum_samples, scout_minimum_positive_rate) =
-        scout_thresholds.unwrap_or((
-            MIN_EXPLORATION_EVIDENCE_SAMPLES,
-            MIN_SIDE_WALK_FORWARD_SAMPLES,
-            NEGATIVE_EVIDENCE_FLOOR,
-        ));
     CandidateEntryReview {
         context,
-        scout_max_active_positions,
         strength_floor,
         score_floor,
-        scout_strength_floor,
-        scout_score_floor,
-        scout_minimum_samples,
-        scout_minimum_positive_rate,
-        scout_outcome_samples,
-        scout_outcome_positive_rate,
-        scout_outcome_realized_pnl,
-        scout_thresholds_valid,
         evidence,
         side,
         research,
@@ -122,8 +81,6 @@ fn review_candidate_entry<'a>(
         evidence_bad,
         research_bad,
         strict_evidence_bad,
-        scout_strength_pass,
-        scout_score_pass,
     }
 }
 

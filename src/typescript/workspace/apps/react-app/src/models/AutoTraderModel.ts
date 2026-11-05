@@ -1,6 +1,13 @@
 import { BehaviorSubject } from 'rxjs';
-import { currentPositionSnapshot, subscribePositionStream } from '../position_stream';
-import { currentAutoTraderSnapshot, subscribeAutoTraderStream, type AutoTraderUiSnapshot } from '../auto_trader_stream';
+import {
+  currentPositionSnapshot,
+  subscribePositionStream,
+} from '../position_stream';
+import {
+  currentAutoTraderSnapshot,
+  subscribeAutoTraderStream,
+  type AutoTraderUiSnapshot,
+} from '../auto_trader_stream';
 import { subscribeInsightsStream } from '../insights_stream';
 
 export type AutoTraderOrder = {
@@ -22,20 +29,163 @@ export type AutoTraderOrder = {
   realized_pnl: number;
   realized_pnl_usd?: number | null;
 };
-export type AutoTraderDecisionParameter = { section: string; name: string; value: number; unit: string };
-export type AutoTraderContextParameters = { context: string; learning_samples: number; positive_rate?: number; scout_learning_samples: number; scout_positive_rate?: number; strength_floor: number; exploration_score_floor: number; exploration_allowed: boolean };
-export type AutoTraderLatestExecutionParameters = { timestamp: number; symbol: string; context: string; baseline_order_type: string; selected_order_type: string; profile: number; vwap_duration_minutes: number; vwap_participation_percent: number; schedule_depth_threshold: number; proposed_depth_ratio: number; schedule_threshold_samples: number; limit_offset_bps: number; trigger_offset_bps: number; trailing_distance_percent: number };
-export type AutoTraderStrategyScoutVariant = { candidate_value: number; sample_count: number; minimum_samples: number; average_net_improvement_percent: number; lower_90_one_sided_improvement_percent?: number | null; promoted: boolean };
-export type AutoTraderStrategyParameter = { key: string; label: string; value: number; learned_value: number; configured_value?: number | null; default_value: number; min: number; max: number; step: number; unit: string; overridden: boolean; scout_variants: AutoTraderStrategyScoutVariant[] };
-export type AutoTraderStrategyProfile = { symbol: string; strategy: Strategy; learning_samples: number; positive_rate?: number; realized_pnl: number; parameters: AutoTraderStrategyParameter[] };
-export type AutoTraderDecisionParameters = { refreshed_at: number; thresholds: AutoTraderDecisionParameter[]; contexts: AutoTraderContextParameters[]; strategy_profiles: AutoTraderStrategyProfile[]; active_exit_policy: { stop_loss_percent: number; take_profit_percent: number }; latest_execution?: AutoTraderLatestExecutionParameters };
-export type Strategy = 'live-insights' | 'live-momentum' | 'live-trade-flow' | 'live-order-book' | 'live-vwap-dislocation' | 'live-absorption-pressure' | 'donchian-55-btc200' | 'donchian-20-sma200' | 'donchian-20-btc200' | 'donchian-10-btc200' | 'donchian-20-btc200-hold3' | 'risk-adjusted-trend-portfolio' | 'trend-sleeves-btc200' | 'trend-50-200' | 'relative-strength-90-sma200' | 'risk-adjusted-monthly-momentum' | 'rsi2-oversold-rebound' | 'dated-futures-carry';
-export type StrategyBudget = { strategy: Strategy; base_budget: number; effective_budget: number; used_notional: number; learning_multiplier: number; learning_samples: number; positive_rate?: number | null; realized_pnl: number };
-export type ClosedStrategyOutcome = { trades: number; wins: number; losses: number; flat: number; winRate: number; averageReturn: number };
+const defaultScoutStrategies: Strategy[] = [
+  'live-momentum',
+  'live-trade-flow',
+  'live-order-book',
+  'live-vwap-dislocation',
+  'live-absorption-pressure',
+  'donchian-55-btc200',
+  'donchian-20-sma200',
+  'donchian-20-btc200',
+  'donchian-10-btc200',
+  'donchian-20-btc200-hold3',
+  'risk-adjusted-trend-portfolio',
+  'trend-sleeves-btc200',
+  'trend-50-200',
+  'relative-strength-90-sma200',
+  'risk-adjusted-monthly-momentum',
+  'rsi2-oversold-rebound',
+  'dated-futures-carry',
+];
+export type AutoTraderDecisionParameter = {
+  section: string;
+  name: string;
+  value: number;
+  unit: string;
+};
+export type AutoTraderContextParameters = {
+  context: string;
+  learning_samples: number;
+  positive_rate?: number;
+  scout_learning_samples: number;
+  scout_positive_rate?: number;
+  strength_floor: number;
+  exploration_score_floor: number;
+  exploration_allowed: boolean;
+};
+export type AutoTraderLatestExecutionParameters = {
+  timestamp: number;
+  symbol: string;
+  context: string;
+  baseline_order_type: string;
+  selected_order_type: string;
+  profile: number;
+  vwap_duration_minutes: number;
+  vwap_participation_percent: number;
+  schedule_depth_threshold: number;
+  proposed_depth_ratio: number;
+  schedule_threshold_samples: number;
+  limit_offset_bps: number;
+  trigger_offset_bps: number;
+  trailing_distance_percent: number;
+};
+export type AutoTraderStrategyScoutVariant = {
+  candidate_value: number;
+  sample_count: number;
+  minimum_samples: number;
+  average_net_improvement_percent: number;
+  lower_90_one_sided_improvement_percent?: number | null;
+  promoted: boolean;
+};
+export type AutoTraderStrategyParameter = {
+  key: string;
+  label: string;
+  value: number;
+  learned_value: number;
+  configured_value?: number | null;
+  default_value: number;
+  min: number;
+  max: number;
+  step: number;
+  unit: string;
+  overridden: boolean;
+  scout_variants: AutoTraderStrategyScoutVariant[];
+};
+export type AutoTraderStrategyProfile = {
+  symbol: string;
+  strategy: Strategy;
+  learning_samples: number;
+  positive_rate?: number;
+  realized_pnl: number;
+  parameters: AutoTraderStrategyParameter[];
+};
+export type AutoTraderDecisionParameters = {
+  refreshed_at: number;
+  thresholds: AutoTraderDecisionParameter[];
+  contexts: AutoTraderContextParameters[];
+  strategy_profiles: AutoTraderStrategyProfile[];
+  active_exit_policy: {
+    stop_loss_percent: number;
+    take_profit_percent: number;
+  };
+  latest_execution?: AutoTraderLatestExecutionParameters;
+};
+export type Strategy =
+  | 'live-insights'
+  | 'live-momentum'
+  | 'live-trade-flow'
+  | 'live-order-book'
+  | 'live-vwap-dislocation'
+  | 'live-absorption-pressure'
+  | 'donchian-55-btc200'
+  | 'donchian-20-sma200'
+  | 'donchian-20-btc200'
+  | 'donchian-10-btc200'
+  | 'donchian-20-btc200-hold3'
+  | 'risk-adjusted-trend-portfolio'
+  | 'trend-sleeves-btc200'
+  | 'trend-50-200'
+  | 'relative-strength-90-sma200'
+  | 'risk-adjusted-monthly-momentum'
+  | 'rsi2-oversold-rebound'
+  | 'dated-futures-carry';
+export type StrategyBudget = {
+  strategy: Strategy;
+  base_budget: number;
+  effective_budget: number;
+  used_notional: number;
+  learning_multiplier: number;
+  learning_samples: number;
+  positive_rate?: number | null;
+  realized_pnl: number;
+};
+export type ClosedStrategyOutcome = {
+  trades: number;
+  wins: number;
+  losses: number;
+  flat: number;
+  winRate: number;
+  averageReturn: number;
+};
 export type StrategyDiagnostic = {
-  strategy: Strategy; as_of_ms: number; btc_close: number | null; btc_sma: number | null;
-  btc_distance_percent: number | null; btc_window_days: number | null; btc_gate_required: boolean; btc_gate_passed: boolean | null;
-  symbols: Array<{ symbol: string; close: number; eligible: boolean; primary_rule: string; primary_level: number; primary_distance_percent: number; primary_metric_value?: number | null; primary_metric_unit?: string | null; primary_passed: boolean; secondary_rule?: string | null; secondary_level?: number | null; secondary_distance_percent?: number | null; secondary_passed?: boolean | null; evaluated?: boolean; signal_active: boolean; leader_gap_percent?: number | null; relative_strength_gap_pp?: number | null }>;
+  strategy: Strategy;
+  as_of_ms: number;
+  btc_close: number | null;
+  btc_sma: number | null;
+  btc_distance_percent: number | null;
+  btc_window_days: number | null;
+  btc_gate_required: boolean;
+  btc_gate_passed: boolean | null;
+  symbols: Array<{
+    symbol: string;
+    close: number;
+    eligible: boolean;
+    primary_rule: string;
+    primary_level: number;
+    primary_distance_percent: number;
+    primary_metric_value?: number | null;
+    primary_metric_unit?: string | null;
+    primary_passed: boolean;
+    secondary_rule?: string | null;
+    secondary_level?: number | null;
+    secondary_distance_percent?: number | null;
+    secondary_passed?: boolean | null;
+    evaluated?: boolean;
+    signal_active: boolean;
+    leader_gap_percent?: number | null;
+    relative_strength_gap_pp?: number | null;
+  }>;
 };
 export type AutoTraderState = {
   enabled: boolean;
@@ -61,25 +211,39 @@ export type AutoTraderState = {
   maxOpenPositions: string;
   maxConcurrentScoutSamples: string;
   scoutMaxActivePositions: string;
-  maxIntradayOpenPositions: string; maxDailyOpenPositions: string;
-  intradayNotionalLimit: string; dailyStrategyNotionalLimit: string;
+  maxIntradayOpenPositions: string;
+  maxDailyOpenPositions: string;
+  intradayNotionalLimit: string;
+  dailyStrategyNotionalLimit: string;
   dailyStrategyBudgets: Partial<Record<Strategy, string>>;
   dailyStrategyLearning: StrategyBudget[];
   closedStrategyOutcomes: Record<string, ClosedStrategyOutcome>;
   intradayStrategyBudgets: Partial<Record<Strategy, string>>;
   intradayStrategyLearning: StrategyBudget[];
-  intradayUsedNotional: number; dailyStrategyUsedNotional: number;
+  intradayUsedNotional: number;
+  dailyStrategyUsedNotional: number;
   maxEntriesPerPosition: string;
   stopLossPercent: number;
   takeProfitPercent: number;
-  vwapDurationMinutes: string; vwapParticipationPercent: string; limitOffsetBps: string; triggerOffsetBps: string; trailingDistancePercent: string;
+  vwapDurationMinutes: string;
+  vwapParticipationPercent: string;
+  limitOffsetBps: string;
+  triggerOffsetBps: string;
+  trailingDistancePercent: string;
   closedTradeWindow: string;
   lastDecision: string;
   lastDecisionAt: number;
   decisionsSinceTrade: number;
   gapReasons: Array<{ reason: string; count: number }>;
   gateHits: Array<{ gate: string; count: number }>;
-  symbolGateHits: Array<{ symbol: string; direction: string; gate: string; count: number; last_detail: string; distance_to_pass: number | null;}>;
+  symbolGateHits: Array<{
+    symbol: string;
+    direction: string;
+    gate: string;
+    count: number;
+    last_detail: string;
+    distance_to_pass: number | null;
+  }>;
   latestSignalDiagnostic: string;
   strategyDiagnostics: StrategyDiagnostic[];
   orders: AutoTraderOrder[];
@@ -123,7 +287,16 @@ export type AutoTraderDecisionQuality = {
   scout_unpriced_closed_trade_samples?: number;
   scout_completed_trade_samples?: number;
   history_truncated: boolean;
-  cohorts: Array<{ dimension: string; value: string; completed_trade_samples: number; average_net_return_percent: number; win_rate: number; total_net_pnl: number | null; pnl_quote_currency: string | null; preliminary: boolean }>;
+  cohorts: Array<{
+    dimension: string;
+    value: string;
+    completed_trade_samples: number;
+    average_net_return_percent: number;
+    win_rate: number;
+    total_net_pnl: number | null;
+    pnl_quote_currency: string | null;
+    preliminary: boolean;
+  }>;
 };
 export type AutoTraderExecutionQuality = {
   order_samples: number;
@@ -141,15 +314,179 @@ export type AutoTraderExecutionQuality = {
   history_truncated: boolean;
   last_updated_at?: number;
 };
-const emptyExecutionQuality: AutoTraderExecutionQuality = { order_samples: 0, filled_order_samples: 0, partial_fill_samples: 0, unfilled_order_samples: 0, measured_fill_samples: 0, response_latency_samples: 0, history_truncated: false };
-const emptyDecisionQuality: AutoTraderDecisionQuality = { decision_samples: 0, filled_entry_samples: 0, unresolved_trade_samples: 0, unpriced_closed_trade_samples: 0, completed_trade_samples: 0, history_truncated: false, cohorts: [] };
+const emptyExecutionQuality: AutoTraderExecutionQuality = {
+  order_samples: 0,
+  filled_order_samples: 0,
+  partial_fill_samples: 0,
+  unfilled_order_samples: 0,
+  measured_fill_samples: 0,
+  response_latency_samples: 0,
+  history_truncated: false,
+};
+const emptyDecisionQuality: AutoTraderDecisionQuality = {
+  decision_samples: 0,
+  filled_entry_samples: 0,
+  unresolved_trade_samples: 0,
+  unpriced_closed_trade_samples: 0,
+  completed_trade_samples: 0,
+  history_truncated: false,
+  cohorts: [],
+};
 
-type TraderStatus = { enabled: boolean; audit_healthy?: boolean; audit_failure_latched?: boolean; decision_audit_queue_depth?: number; execution_audit_queue_depth?: number; audit_coalesced_decisions?: number; audit_dropped_events?: number; strategy?: Strategy; strategies?: Strategy[]; signal_strategies_enabled?: boolean; max_order_notional: number; daily_notional_limit: number; daily_realized_loss_limit: number; exploration_percent: number; risk_appetite?: number; max_open_positions: number; max_intraday_open_positions: number; max_daily_open_positions: number; intraday_notional_limit: number; daily_strategy_notional_limit: number; daily_strategy_budgets?: StrategyBudget[]; intraday_strategy_budgets?: StrategyBudget[]; intraday_used_notional: number; daily_strategy_used_notional: number; max_entries_per_auto_position: number; stop_loss_percent: number; take_profit_percent: number; vwap_duration_minutes: number; vwap_participation_percent: number; limit_offset_bps: number; trigger_offset_bps: number; trailing_distance_percent: number; closed_trade_window?: number; used_notional_today: number; available_notional: number; last_decision?: string; last_decision_at?: number; decisions_since_trade?: number; gap_reasons?: Array<{ reason: string; count: number }>; gate_hits?: Array<{ gate: string; count: number }>; symbol_gate_hits?: Array<{ symbol: string; direction: string; gate: string; count: number; last_detail: string; distance_to_pass?: number | null;}>; latest_signal_diagnostic?: string; strategy_diagnostics?: StrategyDiagnostic[] };
-type TraderActivity = { orders: AutoTraderOrder[]; open_position_symbols?: string[]; scout_open_positions?: number; scout_learning_samples?: number; scout_learning_win_rate?: number; scout_learning_realized_pnl?: number; realized_pnl?: number | null; realized_pnl_by_quote?: Record<string, number> | null; unrealized_pnl?: number | null; unrealized_pnl_by_quote?: Record<string, number> | null; exit_learning_samples: number; closed_trade_average_return_percent?: number; closed_trade_wins?: number; closed_trade_losses?: number; closed_trade_flat?: number; closed_trade_realized_usd?: number; closed_trade_fees_usd?: number; learning_samples: number; learning_win_rate?: number; preferred_order_type?: string; parameter_profile_samples?: number[] };
+type TraderStatus = {
+  enabled: boolean;
+  audit_healthy?: boolean;
+  audit_failure_latched?: boolean;
+  decision_audit_queue_depth?: number;
+  execution_audit_queue_depth?: number;
+  audit_coalesced_decisions?: number;
+  audit_dropped_events?: number;
+  strategy?: Strategy;
+  strategies?: Strategy[];
+  signal_strategies_enabled?: boolean;
+  max_order_notional: number;
+  daily_notional_limit: number;
+  daily_realized_loss_limit: number;
+  exploration_percent: number;
+  risk_appetite?: number;
+  max_open_positions: number;
+  max_intraday_open_positions: number;
+  max_daily_open_positions: number;
+  intraday_notional_limit: number;
+  daily_strategy_notional_limit: number;
+  daily_strategy_budgets?: StrategyBudget[];
+  intraday_strategy_budgets?: StrategyBudget[];
+  intraday_used_notional: number;
+  daily_strategy_used_notional: number;
+  max_entries_per_auto_position: number;
+  stop_loss_percent: number;
+  take_profit_percent: number;
+  vwap_duration_minutes: number;
+  vwap_participation_percent: number;
+  limit_offset_bps: number;
+  trigger_offset_bps: number;
+  trailing_distance_percent: number;
+  closed_trade_window?: number;
+  used_notional_today: number;
+  available_notional: number;
+  last_decision?: string;
+  last_decision_at?: number;
+  decisions_since_trade?: number;
+  gap_reasons?: Array<{ reason: string; count: number }>;
+  gate_hits?: Array<{ gate: string; count: number }>;
+  symbol_gate_hits?: Array<{
+    symbol: string;
+    direction: string;
+    gate: string;
+    count: number;
+    last_detail: string;
+    distance_to_pass?: number | null;
+  }>;
+  latest_signal_diagnostic?: string;
+  strategy_diagnostics?: StrategyDiagnostic[];
+};
+type TraderActivity = {
+  orders: AutoTraderOrder[];
+  open_position_symbols?: string[];
+  realized_pnl?: number | null;
+  realized_pnl_by_quote?: Record<string, number> | null;
+  unrealized_pnl?: number | null;
+  unrealized_pnl_by_quote?: Record<string, number> | null;
+  exit_learning_samples: number;
+  closed_trade_average_return_percent?: number;
+  closed_trade_wins?: number;
+  closed_trade_losses?: number;
+  closed_trade_flat?: number;
+  closed_trade_realized_usd?: number;
+  closed_trade_fees_usd?: number;
+  learning_samples: number;
+  learning_win_rate?: number;
+  preferred_order_type?: string;
+  parameter_profile_samples?: number[];
+};
 
 export class AutoTraderModel {
-  readonly state$ = new BehaviorSubject<AutoTraderState>({ enabled: false, auditHealthy: true, auditFailureLatched: false, decisionAuditQueueDepth: 0, executionAuditQueueDepth: 0, auditCoalescedDecisions: 0, auditDroppedEvents: 0, strategies: ['donchian-55-btc200', 'live-momentum', 'live-trade-flow', 'live-order-book', 'live-vwap-dislocation', 'live-absorption-pressure'], scoutStrategies: [], loading: true, busy: false, maxOrderNotional: '100', dailyNotionalLimit: '1000', usedNotionalToday: 0, availableNotional: 1000, serverDailyNotionalLimit: 1000, serverExplorationPercent: 10, lastDecision: '', lastDecisionAt: 0, decisionsSinceTrade: 0, gapReasons: [], gateHits: [], symbolGateHits: [], latestSignalDiagnostic: '', strategyDiagnostics: [], orders: [], openPositionSymbols: [], ledgerOpenPositionSymbols: [], executionQuality: emptyExecutionQuality, decisionQuality: emptyDecisionQuality, scoutOpenPositions: 0, liveScoutSamples: 0, liveScoutStrategies: [],  scoutLearningSamples: 0, scoutLearningRealizedPnl: 0, realizedPnl: 0, unrealizedPnl: 0, exitLearningSamples: 0, closedTradeWins: 0, closedTradeLosses: 0, closedTradeFlat: 0, dailyRealizedLossLimit: '10', explorationPercent: '10', riskAppetite: '50', maxOpenPositions: '20', maxConcurrentScoutSamples: '5', scoutMaxActivePositions: '100', maxIntradayOpenPositions: '10', maxDailyOpenPositions: '10', intradayNotionalLimit: '500', dailyStrategyNotionalLimit: '500', dailyStrategyBudgets: {}, dailyStrategyLearning: [], closedStrategyOutcomes: {}, intradayStrategyBudgets: {}, intradayStrategyLearning: [], intradayUsedNotional: 0, dailyStrategyUsedNotional: 0, maxEntriesPerPosition: '1', stopLossPercent: 0.5, takeProfitPercent: 0.8, vwapDurationMinutes: '5', vwapParticipationPercent: '20', limitOffsetBps: '0', triggerOffsetBps: '20', trailingDistancePercent: '0.10', closedTradeWindow: '200', learningSamples: 0, parameterProfileSamples: [0, 0, 0], strategyParameterOverrides: {} });
+  readonly state$ = new BehaviorSubject<AutoTraderState>({
+    enabled: false,
+    auditHealthy: true,
+    auditFailureLatched: false,
+    decisionAuditQueueDepth: 0,
+    executionAuditQueueDepth: 0,
+    auditCoalescedDecisions: 0,
+    auditDroppedEvents: 0,
+    strategies: [
+      'donchian-55-btc200',
+      'live-momentum',
+      'live-trade-flow',
+      'live-order-book',
+      'live-vwap-dislocation',
+      'live-absorption-pressure',
+    ],
+    scoutStrategies: defaultScoutStrategies,
+    loading: true,
+    busy: false,
+    maxOrderNotional: '100',
+    dailyNotionalLimit: '1000',
+    usedNotionalToday: 0,
+    availableNotional: 1000,
+    serverDailyNotionalLimit: 1000,
+    serverExplorationPercent: 10,
+    lastDecision: '',
+    lastDecisionAt: 0,
+    decisionsSinceTrade: 0,
+    gapReasons: [],
+    gateHits: [],
+    symbolGateHits: [],
+    latestSignalDiagnostic: '',
+    strategyDiagnostics: [],
+    orders: [],
+    openPositionSymbols: [],
+    ledgerOpenPositionSymbols: [],
+    executionQuality: emptyExecutionQuality,
+    decisionQuality: emptyDecisionQuality,
+    scoutOpenPositions: 0,
+    liveScoutSamples: 0,
+    liveScoutStrategies: [],
+    scoutLearningSamples: 0,
+    scoutLearningRealizedPnl: 0,
+    realizedPnl: 0,
+    unrealizedPnl: 0,
+    exitLearningSamples: 0,
+    closedTradeWins: 0,
+    closedTradeLosses: 0,
+    closedTradeFlat: 0,
+    dailyRealizedLossLimit: '10',
+    explorationPercent: '10',
+    riskAppetite: '50',
+    maxOpenPositions: '20',
+    maxConcurrentScoutSamples: '5',
+    scoutMaxActivePositions: '100',
+    maxIntradayOpenPositions: '10',
+    maxDailyOpenPositions: '10',
+    intradayNotionalLimit: '500',
+    dailyStrategyNotionalLimit: '500',
+    dailyStrategyBudgets: {},
+    dailyStrategyLearning: [],
+    closedStrategyOutcomes: {},
+    intradayStrategyBudgets: {},
+    intradayStrategyLearning: [],
+    intradayUsedNotional: 0,
+    dailyStrategyUsedNotional: 0,
+    maxEntriesPerPosition: '1',
+    stopLossPercent: 0.5,
+    takeProfitPercent: 0.8,
+    vwapDurationMinutes: '5',
+    vwapParticipationPercent: '20',
+    limitOffsetBps: '0',
+    triggerOffsetBps: '20',
+    trailingDistancePercent: '0.10',
+    closedTradeWindow: '200',
+    learningSamples: 0,
+    parameterProfileSamples: [0, 0, 0],
+    strategyParameterOverrides: {},
+  });
   private timer?: ReturnType<typeof setInterval>;
+  private startUsers = 0;
   private limitsDirty = false;
   private categoryLimitsDirty = false;
   private executionParametersDirty = false;
@@ -162,6 +499,7 @@ export class AutoTraderModel {
   private autoTraderSnapshot?: AutoTraderUiSnapshot;
   private autoTraderSnapshotAt = 0;
   start() {
+    this.startUsers += 1;
     if (this.timer) return;
     this.usdRates = currentPositionSnapshot()?.usd_rates?.rates ?? {};
     this.stopPositionStream = subscribePositionStream((snapshot) => {
@@ -176,23 +514,60 @@ export class AutoTraderModel {
     this.stopAutoTraderStream = subscribeAutoTraderStream((snapshot) => {
       this.autoTraderSnapshot = snapshot;
       this.autoTraderSnapshotAt = Date.now();
-      const decisionParameters = snapshot.parameters as AutoTraderDecisionParameters;
-      const savedOverrides = Object.fromEntries(decisionParameters.strategy_profiles.flatMap((profile) => profile.parameters
-        .filter((parameter) => parameter.configured_value !== undefined && parameter.configured_value !== null)
-        .map((parameter) => [profile.symbol + ':' + profile.strategy + ':' + parameter.key, parameter.configured_value!] as const)));
-      this.state$.next({ ...this.state$.value, decisionParameters, strategyParameterOverrides: this.strategyParametersDirty ? this.state$.value.strategyParameterOverrides : savedOverrides, decisionParametersError: undefined });
+      const decisionParameters = snapshot.parameters as
+        | AutoTraderDecisionParameters
+        | undefined;
+      if (!decisionParameters) {
+        void this.refreshDecisionParameters();
+        void this.refresh();
+        return;
+      }
+      const savedOverrides = Object.fromEntries(
+        decisionParameters.strategy_profiles.flatMap((profile) =>
+          profile.parameters
+            .filter(
+              (parameter) =>
+                parameter.configured_value !== undefined &&
+                parameter.configured_value !== null,
+            )
+            .map(
+              (parameter) =>
+                [
+                  profile.symbol + ':' + profile.strategy + ':' + parameter.key,
+                  parameter.configured_value!,
+                ] as const,
+            ),
+        ),
+      );
+      this.state$.next({
+        ...this.state$.value,
+        decisionParameters,
+        strategyParameterOverrides: this.strategyParametersDirty
+          ? this.state$.value.strategyParameterOverrides
+          : savedOverrides,
+        decisionParametersError: undefined,
+      });
       void this.refresh();
     });
     this.stopInsightsStream = subscribeInsightsStream((snapshot) => {
-      this.state$.next({ ...this.state$.value,
-        executionQuality: snapshot.execution_quality as AutoTraderExecutionQuality ?? this.state$.value.executionQuality,
-        decisionQuality: snapshot.decision_quality as AutoTraderDecisionQuality ?? this.state$.value.decisionQuality,
+      this.state$.next({
+        ...this.state$.value,
+        executionQuality:
+          (snapshot.execution_quality as AutoTraderExecutionQuality) ??
+          this.state$.value.executionQuality,
+        decisionQuality:
+          (snapshot.decision_quality as AutoTraderDecisionQuality) ??
+          this.state$.value.decisionQuality,
       });
     });
     void this.refresh();
-    this.timer = setInterval(() => { if (Date.now() - this.autoTraderSnapshotAt > 45_000) void this.refresh(); }, 30_000);
+    this.timer = setInterval(() => {
+      if (Date.now() - this.autoTraderSnapshotAt > 45_000) void this.refresh();
+    }, 30_000);
   }
   stop() {
+    this.startUsers = Math.max(0, this.startUsers - 1);
+    if (this.startUsers > 0) return;
     if (this.timer) clearInterval(this.timer);
     this.timer = undefined;
     this.stopPositionStream?.();
@@ -202,25 +577,78 @@ export class AutoTraderModel {
     this.stopInsightsStream?.();
     this.stopInsightsStream = undefined;
   }
-  setLimits(maxOrderNotional: string, dailyNotionalLimit: string, dailyRealizedLossLimit: string, explorationPercent: string, maxOpenPositions: string) { this.limitsDirty = true; this.state$.next({ ...this.state$.value, maxOrderNotional, dailyNotionalLimit, dailyRealizedLossLimit, explorationPercent, maxOpenPositions }); }
-  setCategoryLimits(values: Partial<Pick<AutoTraderState, 'maxIntradayOpenPositions' | 'maxDailyOpenPositions' | 'intradayNotionalLimit' | 'dailyStrategyNotionalLimit'>>) { this.categoryLimitsDirty = true; this.state$.next({ ...this.state$.value, ...values }); }
+  setLimits(
+    maxOrderNotional: string,
+    dailyNotionalLimit: string,
+    dailyRealizedLossLimit: string,
+    explorationPercent: string,
+    maxOpenPositions: string,
+  ) {
+    this.limitsDirty = true;
+    this.state$.next({
+      ...this.state$.value,
+      maxOrderNotional,
+      dailyNotionalLimit,
+      dailyRealizedLossLimit,
+      explorationPercent,
+      maxOpenPositions,
+    });
+  }
+  setCategoryLimits(
+    values: Partial<
+      Pick<
+        AutoTraderState,
+        | 'maxIntradayOpenPositions'
+        | 'maxDailyOpenPositions'
+        | 'intradayNotionalLimit'
+        | 'dailyStrategyNotionalLimit'
+      >
+    >,
+  ) {
+    this.categoryLimitsDirty = true;
+    this.state$.next({ ...this.state$.value, ...values });
+  }
 
   setDailyStrategyBudget(strategy: Strategy, value: string) {
     this.categoryLimitsDirty = true;
-    this.state$.next({ ...this.state$.value, dailyStrategyBudgets: { ...this.state$.value.dailyStrategyBudgets, [strategy]: value } });
+    this.state$.next({
+      ...this.state$.value,
+      dailyStrategyBudgets: {
+        ...this.state$.value.dailyStrategyBudgets,
+        [strategy]: value,
+      },
+    });
   }
 
   setIntradayStrategyBudget(strategy: Strategy, value: string) {
     this.categoryLimitsDirty = true;
-    this.state$.next({ ...this.state$.value, intradayStrategyBudgets: { ...this.state$.value.intradayStrategyBudgets, [strategy]: value } });
+    this.state$.next({
+      ...this.state$.value,
+      intradayStrategyBudgets: {
+        ...this.state$.value.intradayStrategyBudgets,
+        [strategy]: value,
+      },
+    });
   }
 
-  setRiskAppetite(riskAppetite: string) { this.limitsDirty = true; this.state$.next({ ...this.state$.value, riskAppetite }); }
+  setRiskAppetite(riskAppetite: string) {
+    this.limitsDirty = true;
+    this.state$.next({ ...this.state$.value, riskAppetite });
+  }
 
-  setMaxConcurrentScoutSamples(maxConcurrentScoutSamples: string) { this.limitsDirty = true; this.state$.next({ ...this.state$.value, maxConcurrentScoutSamples }); }
-  setScoutMaxActivePositions(scoutMaxActivePositions: string) { this.limitsDirty = true; this.state$.next({ ...this.state$.value, scoutMaxActivePositions }); }
+  setMaxConcurrentScoutSamples(maxConcurrentScoutSamples: string) {
+    this.limitsDirty = true;
+    this.state$.next({ ...this.state$.value, maxConcurrentScoutSamples });
+  }
+  setScoutMaxActivePositions(scoutMaxActivePositions: string) {
+    this.limitsDirty = true;
+    this.state$.next({ ...this.state$.value, scoutMaxActivePositions });
+  }
 
-  setScoutStrategies(scoutStrategies: Strategy[]) { this.limitsDirty = true; this.state$.next({ ...this.state$.value, scoutStrategies }); }
+  setScoutStrategies(scoutStrategies: Strategy[]) {
+    this.limitsDirty = true;
+    this.state$.next({ ...this.state$.value, scoutStrategies });
+  }
 
   setStrategies(strategies: Strategy[]) {
     this.limitsDirty = true;
@@ -234,20 +662,48 @@ export class AutoTraderModel {
         dailyStrategyBudgets[strategy] ??= '0';
       }
     }
-    this.state$.next({ ...current, strategies, dailyStrategyBudgets, intradayStrategyBudgets });
+    this.state$.next({
+      ...current,
+      strategies,
+      dailyStrategyBudgets,
+      intradayStrategyBudgets,
+    });
   }
 
-  setClosedTradeWindow(closedTradeWindow: string) { this.limitsDirty = true; this.state$.next({ ...this.state$.value, closedTradeWindow }); }
-  setMaxEntriesPerPosition(maxEntriesPerPosition: string) { this.limitsDirty = true; this.state$.next({ ...this.state$.value, maxEntriesPerPosition }); }
+  setClosedTradeWindow(closedTradeWindow: string) {
+    this.limitsDirty = true;
+    this.state$.next({ ...this.state$.value, closedTradeWindow });
+  }
+  setMaxEntriesPerPosition(maxEntriesPerPosition: string) {
+    this.limitsDirty = true;
+    this.state$.next({ ...this.state$.value, maxEntriesPerPosition });
+  }
 
-  setExecutionParameters(values: Partial<Pick<AutoTraderState, 'vwapDurationMinutes' | 'vwapParticipationPercent' | 'limitOffsetBps' | 'triggerOffsetBps' | 'trailingDistancePercent'>>) { this.executionParametersDirty = true; this.state$.next({ ...this.state$.value, ...values }); }
+  setExecutionParameters(
+    values: Partial<
+      Pick<
+        AutoTraderState,
+        | 'vwapDurationMinutes'
+        | 'vwapParticipationPercent'
+        | 'limitOffsetBps'
+        | 'triggerOffsetBps'
+        | 'trailingDistancePercent'
+      >
+    >,
+  ) {
+    this.executionParametersDirty = true;
+    this.state$.next({ ...this.state$.value, ...values });
+  }
 
   setStrategyParameter(key: string, value?: number) {
     const overrides = { ...this.state$.value.strategyParameterOverrides };
     if (value === undefined) delete overrides[key];
     else overrides[key] = value;
     this.strategyParametersDirty = true;
-    this.state$.next({ ...this.state$.value, strategyParameterOverrides: overrides });
+    this.state$.next({
+      ...this.state$.value,
+      strategyParameterOverrides: overrides,
+    });
   }
 
   async refresh() {
@@ -257,64 +713,210 @@ export class AutoTraderModel {
       let status: TraderStatus;
       let activity: TraderActivity;
       let positions: { positions: Array<{ symbol: string; quantity: number }> };
-      let auditRows: Array<{ decision_id?: string; stage?: string; strategy?: string; symbol?: string; timestamp?: number; filled_quantity?: number; average_price?: number; exit_filled_quantity?: number; realized_pnl?: number; exit_order_type?: string; barrier_order_id?: string; exit_fills?: Array<{ parent_order_id?: string }>; entry_context?: { quantity?: number; average_price?: number } }>;
-      const scoutAuditRequest = fetch('/signals/auto-trader-audit?since=' + (Date.now() - 24 * 60 * 60 * 1_000) + '&limit=5000').catch(() => undefined);
+      let auditRows: Array<{
+        decision_id?: string;
+        stage?: string;
+        strategy?: string;
+        symbol?: string;
+        timestamp?: number;
+        filled_quantity?: number;
+        average_price?: number;
+        exit_filled_quantity?: number;
+        realized_pnl?: number;
+        exit_order_type?: string;
+        barrier_order_id?: string;
+        exit_fills?: Array<{ parent_order_id?: string }>;
+        entry_context?: { quantity?: number; average_price?: number };
+      }>;
+      const scoutAuditRequest = fetch(
+        '/signals/auto-trader-audit?since=' +
+          (Date.now() - 24 * 60 * 60 * 1_000) +
+          '&limit=5000',
+      ).catch(() => undefined);
       let liveScoutSamples = this.state$.value.liveScoutSamples;
       let liveScoutStrategies = this.state$.value.liveScoutStrategies;
       const autoSnapshot = this.autoTraderSnapshot;
-      const useStreamSnapshot = autoSnapshot && Date.now() - this.autoTraderSnapshotAt <= 45_000;
+      const useStreamSnapshot =
+        autoSnapshot && Date.now() - this.autoTraderSnapshotAt <= 45_000;
       if (useStreamSnapshot && autoSnapshot) {
         status = autoSnapshot.status as TraderStatus;
         activity = autoSnapshot.activity as TraderActivity;
-        const autoPositions = currentPositionSnapshot()?.auto_positions.positions ?? [];
-        positions = { positions: autoPositions.map(({ symbol, quantity }) => ({ symbol, quantity })) };
+        const autoPositions =
+          currentPositionSnapshot()?.auto_positions.positions ?? [];
+        positions = {
+          positions: autoPositions.map(({ symbol, quantity }) => ({
+            symbol,
+            quantity,
+          })),
+        };
         auditRows = autoSnapshot.execution_audit.items as typeof auditRows;
       } else {
-        const [statusResponse, activityResponse, positionsResponse, auditResponse] = await Promise.all([fetch('/positions/auto-trader'), fetch('/positions/auto-trader/activity'), fetch('/positions?source=auto'), fetch('/signals/auto-trader-execution-audit')]);
-        if (!statusResponse.ok) throw await this.responseError('status', statusResponse);
-        if (!activityResponse.ok) throw await this.responseError('activity', activityResponse);
-        if (!positionsResponse.ok) throw await this.responseError('positions', positionsResponse);
-        status = await statusResponse.json() as TraderStatus;
-        activity = await activityResponse.json() as TraderActivity;
-        positions = await positionsResponse.json() as { positions: Array<{ symbol: string; quantity: number }> };
-        const auditPage = auditResponse.ok ? await auditResponse.json() as { items?: typeof auditRows } : undefined;
+        const [
+          statusResponse,
+          activityResponse,
+          positionsResponse,
+          auditResponse,
+        ] = await Promise.all([
+          fetch('/positions/auto-trader'),
+          fetch('/positions/auto-trader/activity'),
+          fetch('/positions?source=auto'),
+          fetch('/signals/auto-trader-execution-audit'),
+        ]);
+        if (!statusResponse.ok)
+          throw await this.responseError('status', statusResponse);
+        if (!activityResponse.ok)
+          throw await this.responseError('activity', activityResponse);
+        if (!positionsResponse.ok)
+          throw await this.responseError('positions', positionsResponse);
+        status = (await statusResponse.json()) as TraderStatus;
+        activity = (await activityResponse.json()) as TraderActivity;
+        positions = (await positionsResponse.json()) as {
+          positions: Array<{ symbol: string; quantity: number }>;
+        };
+        const auditPage = auditResponse.ok
+          ? ((await auditResponse.json()) as { items?: typeof auditRows })
+          : undefined;
         auditRows = auditPage?.items ?? [];
       }
       const scoutAuditResponse = await scoutAuditRequest;
       if (scoutAuditResponse?.ok) {
-        const scoutAuditPayload = await scoutAuditResponse.json() as Array<{ stage?: string; status?: string; scout?: boolean; strategy?: string; scout_sample_group_id?: string; shadow_sample_group_id?: string; decision_id?: string }> | { items?: Array<{ stage?: string; status?: string; scout?: boolean; strategy?: string; scout_sample_group_id?: string; shadow_sample_group_id?: string; decision_id?: string }> };
-        const scoutAuditRows = Array.isArray(scoutAuditPayload) ? scoutAuditPayload : scoutAuditPayload.items ?? [];
+        const scoutAuditPayload = (await scoutAuditResponse.json()) as
+          | Array<{
+              stage?: string;
+              status?: string;
+              scout?: boolean;
+              strategy?: string;
+              scout_sample_group_id?: string;
+              shadow_sample_group_id?: string;
+              decision_id?: string;
+            }>
+          | {
+              items?: Array<{
+                stage?: string;
+                status?: string;
+                scout?: boolean;
+                strategy?: string;
+                scout_sample_group_id?: string;
+                shadow_sample_group_id?: string;
+                decision_id?: string;
+              }>;
+            };
+        const scoutAuditRows = Array.isArray(scoutAuditPayload)
+          ? scoutAuditPayload
+          : (scoutAuditPayload.items ?? []);
         const liveScoutGroups = new Map<string, string>();
         for (const row of scoutAuditRows) {
-          if (row.stage !== 'decision' || (row.status !== 'scouted' && row.status !== 'shadowed') || row.scout !== true || !row.strategy?.startsWith('live-')) continue;
-          const group = row.scout_sample_group_id ?? row.shadow_sample_group_id ?? row.decision_id;
+          if (
+            row.stage !== 'decision' ||
+            (row.status !== 'scouted' && row.status !== 'shadowed') ||
+            row.scout !== true ||
+            !row.strategy?.startsWith('live-')
+          )
+            continue;
+          const group =
+            row.scout_sample_group_id ??
+            row.shadow_sample_group_id ??
+            row.decision_id;
           if (group) liveScoutGroups.set(group, row.strategy);
         }
         liveScoutSamples = liveScoutGroups.size;
         liveScoutStrategies = [...new Set(liveScoutGroups.values())].sort();
       }
       let usdRates = this.usdRates;
-      const quoteTotals = [activity.realized_pnl_by_quote, activity.unrealized_pnl_by_quote];
-      const hasMissingRate = quoteTotals.some((totals) => totals && Object.keys(totals).some((quote) => quote !== 'USD' && !(usdRates[quote] > 0)));
+      const quoteTotals = [
+        activity.realized_pnl_by_quote,
+        activity.unrealized_pnl_by_quote,
+      ];
+      const hasMissingRate = quoteTotals.some(
+        (totals) =>
+          totals &&
+          Object.keys(totals).some(
+            (quote) => quote !== 'USD' && !(usdRates[quote] > 0),
+          ),
+      );
       if (hasMissingRate) {
         try {
           const ratesResponse = await fetch('/positions/usd-rates');
           if (ratesResponse.ok) {
-            const ratesPayload = await ratesResponse.json() as { rates?: Record<string, number> };
+            const ratesPayload = (await ratesResponse.json()) as {
+              rates?: Record<string, number>;
+            };
             if (ratesPayload.rates) {
               usdRates = { ...usdRates, ...ratesPayload.rates };
               this.usdRates = usdRates;
             }
           }
-        } catch { /* Keep cached rates; missing currencies remain unavailable. */ }
+        } catch {
+          /* Keep cached rates; missing currencies remain unavailable. */
+        }
       }
-      const scoutConfigResponse = await fetch('/scouts/configuration').catch(() => undefined);
-      const scoutConfiguration = scoutConfigResponse?.ok ? await scoutConfigResponse.json() as { strategies: Strategy[]; max_active_samples: number; max_active_positions: number } : { strategies: this.state$.value.scoutStrategies, max_active_samples: Number(this.state$.value.maxConcurrentScoutSamples), max_active_positions: Number(this.state$.value.scoutMaxActivePositions) };
-      const savedStrategies = status.strategies ?? [status.strategy ?? 'donchian-55-btc200'];
-      if (status.signal_strategies_enabled && savedStrategies.includes('live-insights')) { savedStrategies.splice(savedStrategies.indexOf('live-insights'), 1, 'live-momentum', 'live-trade-flow', 'live-order-book', 'live-vwap-dislocation', 'live-absorption-pressure'); }
-      if (status.signal_strategies_enabled && !savedStrategies.some((strategy) => strategy.startsWith('live-'))) savedStrategies.push('live-momentum', 'live-trade-flow', 'live-order-book', 'live-vwap-dislocation', 'live-absorption-pressure');
-      const ledgerOpenPositionSymbols = positions.positions.filter((position) => Math.abs(position.quantity) > 1e-12).map((position) => position.symbol);
-      const rateForQuote = (quote: string) => quote === 'USD' ? 1 : usdRates[quote];
+      const scoutConfigResponse = await fetch('/scouts/configuration').catch(
+        () => undefined,
+      );
+      const scoutConfiguration = scoutConfigResponse?.ok
+        ? ((await scoutConfigResponse.json()) as {
+            strategies: Strategy[];
+            max_active_samples: number;
+            max_active_positions: number;
+          })
+        : {
+            strategies: this.state$.value.scoutStrategies,
+            max_active_samples: Number(
+              this.state$.value.maxConcurrentScoutSamples,
+            ),
+            max_active_positions: Number(
+              this.state$.value.scoutMaxActivePositions,
+            ),
+          };
+      const scoutStatusResponse = await fetch('/scouts/status').catch(
+        () => undefined,
+      );
+      const scoutStatus = scoutStatusResponse?.ok
+        ? ((await scoutStatusResponse.json()) as {
+            active_samples: number;
+            learning_samples: number;
+            win_rate?: number;
+            realized_pnl_usd: number;
+          })
+        : {
+            active_samples: this.state$.value.scoutOpenPositions,
+            learning_samples: this.state$.value.scoutLearningSamples,
+            win_rate: this.state$.value.scoutLearningWinRate,
+            realized_pnl_usd: this.state$.value.scoutLearningRealizedPnl,
+          };
+      const savedStrategies = status.strategies ?? [
+        status.strategy ?? 'donchian-55-btc200',
+      ];
+      if (
+        status.signal_strategies_enabled &&
+        savedStrategies.includes('live-insights')
+      ) {
+        savedStrategies.splice(
+          savedStrategies.indexOf('live-insights'),
+          1,
+          'live-momentum',
+          'live-trade-flow',
+          'live-order-book',
+          'live-vwap-dislocation',
+          'live-absorption-pressure',
+        );
+      }
+      if (
+        status.signal_strategies_enabled &&
+        !savedStrategies.some((strategy) => strategy.startsWith('live-'))
+      )
+        savedStrategies.push(
+          'live-momentum',
+          'live-trade-flow',
+          'live-order-book',
+          'live-vwap-dislocation',
+          'live-absorption-pressure',
+        );
+      const ledgerOpenPositionSymbols = positions.positions
+        .filter((position) => Math.abs(position.quantity) > 1e-12)
+        .map((position) => position.symbol);
+      const rateForQuote = (quote: string) =>
+        quote === 'USD' ? 1 : usdRates[quote];
       const convertQuoteTotals = (totals?: Record<string, number> | null) => {
         if (!totals) return null;
         let converted = 0;
@@ -328,80 +930,441 @@ export class AutoTraderModel {
       const orders = activity.orders.map((order) => {
         const quote = order.symbol.split('-')[1];
         const rate = quote ? rateForQuote(quote) : undefined;
-        return { ...order, realized_pnl_usd: typeof rate === 'number' && Number.isFinite(rate) ? order.realized_pnl * rate : null };
+        return {
+          ...order,
+          realized_pnl_usd:
+            typeof rate === 'number' && Number.isFinite(rate)
+              ? order.realized_pnl * rate
+              : null,
+        };
       });
-      const auditTrades = new Map<string, { entry?: typeof auditRows[number]; exits: typeof auditRows }>();
+      const auditTrades = new Map<
+        string,
+        { entry?: (typeof auditRows)[number]; exits: typeof auditRows }
+      >();
       for (const row of auditRows) {
         if (!row.decision_id) continue;
         const trade = auditTrades.get(row.decision_id) ?? { exits: [] };
-        if ((row.stage === 'entry' || row.stage === 'entry_fill') && (!trade.entry || (row.timestamp ?? 0) >= (trade.entry.timestamp ?? 0))) trade.entry = row;
+        if (
+          (row.stage === 'entry' || row.stage === 'entry_fill') &&
+          (!trade.entry || (row.timestamp ?? 0) >= (trade.entry.timestamp ?? 0))
+        )
+          trade.entry = row;
         else if (row.stage?.startsWith('exit')) trade.exits.push(row);
         auditTrades.set(row.decision_id, trade);
       }
-      const closedStrategyGroups = new Map<string, Array<{ pnl: number; quantity: number; entryPrice: number }>>();
+      const closedStrategyGroups = new Map<
+        string,
+        Array<{ pnl: number; quantity: number; entryPrice: number }>
+      >();
       for (const trade of auditTrades.values()) {
         const entry = trade.entry;
-        const externalIds = new Set(trade.exits.filter((row) => row.exit_order_type === 'external-ledger-fill').flatMap((row) => row.exit_fills?.map((fill) => fill.parent_order_id).filter((id): id is string => Boolean(id)) ?? []));
-        const exits = trade.exits.filter((row) => !(row.exit_order_type === 'StopMarket' && row.barrier_order_id && externalIds.has(row.barrier_order_id)));
-        const exited = exits.reduce((sum, row) => sum + (row.exit_filled_quantity ?? 0), 0);
-        const quantity = Math.max(entry?.filled_quantity ?? 0, ...exits.map((row) => row.entry_context?.quantity ?? 0));
-        const entryPrice = entry?.average_price || exits.find((row) => row.entry_context?.average_price)?.entry_context?.average_price;
-        if (!entry || !(quantity > 0 && typeof entryPrice === 'number' && entryPrice > 0) || exited + 1e-12 < quantity) continue;
+        const externalIds = new Set(
+          trade.exits
+            .filter((row) => row.exit_order_type === 'external-ledger-fill')
+            .flatMap(
+              (row) =>
+                row.exit_fills
+                  ?.map((fill) => fill.parent_order_id)
+                  .filter((id): id is string => Boolean(id)) ?? [],
+            ),
+        );
+        const exits = trade.exits.filter(
+          (row) =>
+            !(
+              row.exit_order_type === 'StopMarket' &&
+              row.barrier_order_id &&
+              externalIds.has(row.barrier_order_id)
+            ),
+        );
+        const exited = exits.reduce(
+          (sum, row) => sum + (row.exit_filled_quantity ?? 0),
+          0,
+        );
+        const quantity = Math.max(
+          entry?.filled_quantity ?? 0,
+          ...exits.map((row) => row.entry_context?.quantity ?? 0),
+        );
+        const entryPrice =
+          entry?.average_price ||
+          exits.find((row) => row.entry_context?.average_price)?.entry_context
+            ?.average_price;
+        if (
+          !entry ||
+          !(quantity > 0 && typeof entryPrice === 'number' && entryPrice > 0) ||
+          exited + 1e-12 < quantity
+        )
+          continue;
         const strategy = entry.strategy ?? 'live-insights';
         const group = closedStrategyGroups.get(strategy) ?? [];
-        group.push({ pnl: exits.reduce((sum, row) => sum + (row.realized_pnl ?? 0), 0), quantity, entryPrice });
+        group.push({
+          pnl: exits.reduce((sum, row) => sum + (row.realized_pnl ?? 0), 0),
+          quantity,
+          entryPrice,
+        });
         closedStrategyGroups.set(strategy, group);
       }
-      const closedStrategyOutcomes = Object.fromEntries([...closedStrategyGroups].map(([strategy, trades]) => {
-        const wins = trades.filter((trade) => trade.pnl > 0).length;
-        const losses = trades.filter((trade) => trade.pnl < 0).length;
-        return [strategy, { trades: trades.length, wins, losses, flat: trades.length - wins - losses, winRate: wins / trades.length * 100,
-          averageReturn: trades.reduce((sum, trade) => sum + trade.pnl / (trade.quantity * trade.entryPrice) * 100, 0) / trades.length }];
-      }));
-      const savedDailyBudgets = Object.fromEntries((status.daily_strategy_budgets ?? []).map((budget) => [budget.strategy, String(budget.base_budget)])) as Partial<Record<Strategy, string>>;
-      const savedIntradayBudgets = Object.fromEntries((status.intraday_strategy_budgets ?? []).map((budget) => [budget.strategy, String(budget.base_budget)])) as Partial<Record<Strategy, string>>;
-      this.state$.next({ ...this.state$.value, enabled: status.enabled, auditHealthy: status.audit_healthy ?? true, auditFailureLatched: status.audit_failure_latched ?? false, decisionAuditQueueDepth: status.decision_audit_queue_depth ?? 0, executionAuditQueueDepth: status.execution_audit_queue_depth ?? 0, auditCoalescedDecisions: status.audit_coalesced_decisions ?? 0, auditDroppedEvents: status.audit_dropped_events ?? 0, strategies: this.limitsDirty ? this.state$.value.strategies : savedStrategies, scoutStrategies: this.limitsDirty ? this.state$.value.scoutStrategies : scoutConfiguration.strategies, maxOrderNotional: this.limitsDirty ? this.state$.value.maxOrderNotional : String(status.max_order_notional), dailyNotionalLimit: this.limitsDirty ? this.state$.value.dailyNotionalLimit : String(status.daily_notional_limit), usedNotionalToday: status.used_notional_today, availableNotional: status.available_notional, serverDailyNotionalLimit: status.daily_notional_limit, serverExplorationPercent: status.exploration_percent, dailyRealizedLossLimit: this.limitsDirty ? this.state$.value.dailyRealizedLossLimit : String(status.daily_realized_loss_limit), explorationPercent: this.limitsDirty ? this.state$.value.explorationPercent : String(status.exploration_percent), riskAppetite: this.limitsDirty ? this.state$.value.riskAppetite : String(status.risk_appetite ?? 50), maxOpenPositions: this.limitsDirty ? this.state$.value.maxOpenPositions : String(status.max_open_positions), maxConcurrentScoutSamples: this.limitsDirty ? this.state$.value.maxConcurrentScoutSamples : String(scoutConfiguration.max_active_samples), scoutMaxActivePositions: this.limitsDirty ? this.state$.value.scoutMaxActivePositions : String(scoutConfiguration.max_active_positions), maxIntradayOpenPositions: this.categoryLimitsDirty ? this.state$.value.maxIntradayOpenPositions : String(status.max_intraday_open_positions), maxDailyOpenPositions: this.categoryLimitsDirty ? this.state$.value.maxDailyOpenPositions : String(status.max_daily_open_positions), intradayNotionalLimit: this.categoryLimitsDirty ? this.state$.value.intradayNotionalLimit : String(status.intraday_notional_limit), dailyStrategyNotionalLimit: this.categoryLimitsDirty ? this.state$.value.dailyStrategyNotionalLimit : String(status.daily_strategy_notional_limit), dailyStrategyBudgets: this.categoryLimitsDirty ? this.state$.value.dailyStrategyBudgets : savedDailyBudgets, dailyStrategyLearning: status.daily_strategy_budgets ?? [], closedStrategyOutcomes, intradayStrategyBudgets: this.categoryLimitsDirty ? this.state$.value.intradayStrategyBudgets : savedIntradayBudgets, intradayStrategyLearning: status.intraday_strategy_budgets ?? [], intradayUsedNotional: status.intraday_used_notional, dailyStrategyUsedNotional: status.daily_strategy_used_notional, maxEntriesPerPosition: this.limitsDirty ? this.state$.value.maxEntriesPerPosition : String(status.max_entries_per_auto_position), stopLossPercent: status.stop_loss_percent, takeProfitPercent: status.take_profit_percent, vwapDurationMinutes: this.executionParametersDirty ? this.state$.value.vwapDurationMinutes : String(status.vwap_duration_minutes), vwapParticipationPercent: this.executionParametersDirty ? this.state$.value.vwapParticipationPercent : String(status.vwap_participation_percent), limitOffsetBps: this.executionParametersDirty ? this.state$.value.limitOffsetBps : String(status.limit_offset_bps), triggerOffsetBps: this.executionParametersDirty ? this.state$.value.triggerOffsetBps : String(status.trigger_offset_bps), trailingDistancePercent: this.executionParametersDirty ? this.state$.value.trailingDistancePercent : String(status.trailing_distance_percent), closedTradeWindow: this.limitsDirty ? this.state$.value.closedTradeWindow : String(status.closed_trade_window ?? 200), lastDecision: status.last_decision ?? '', lastDecisionAt: status.last_decision_at ?? 0, decisionsSinceTrade: status.decisions_since_trade ?? 0, gapReasons: status.gap_reasons ?? [], gateHits: status.gate_hits ?? [], symbolGateHits: status.symbol_gate_hits?.map((hit) => ({ ...hit, distance_to_pass: hit.distance_to_pass ?? null })) ?? [], latestSignalDiagnostic: status.latest_signal_diagnostic ?? '', strategyDiagnostics: status.strategy_diagnostics ?? [], orders, openPositionSymbols: activity.open_position_symbols ?? [], ledgerOpenPositionSymbols, scoutOpenPositions: activity.scout_open_positions ?? 0, liveScoutSamples, liveScoutStrategies, scoutLearningSamples: activity.scout_learning_samples ?? 0, scoutLearningWinRate: activity.scout_learning_win_rate, scoutLearningRealizedPnl: activity.scout_learning_realized_pnl ?? 0, realizedPnl: convertQuoteTotals(activity.realized_pnl_by_quote), unrealizedPnl: convertQuoteTotals(activity.unrealized_pnl_by_quote), exitLearningSamples: activity.exit_learning_samples, closedTradeAverageReturnPercent: activity.closed_trade_average_return_percent, closedTradeWins: activity.closed_trade_wins ?? 0, closedTradeLosses: activity.closed_trade_losses ?? 0, closedTradeFlat: activity.closed_trade_flat ?? 0, closedTradeRealizedUsd: activity.closed_trade_realized_usd, closedTradeFeesUsd: activity.closed_trade_fees_usd, learningSamples: activity.learning_samples, learningWinRate: activity.learning_win_rate, preferredOrderType: activity.preferred_order_type, parameterProfileSamples: activity.parameter_profile_samples ?? [0, 0, 0], loading: false, error: undefined });
+      const closedStrategyOutcomes = Object.fromEntries(
+        [...closedStrategyGroups].map(([strategy, trades]) => {
+          const wins = trades.filter((trade) => trade.pnl > 0).length;
+          const losses = trades.filter((trade) => trade.pnl < 0).length;
+          return [
+            strategy,
+            {
+              trades: trades.length,
+              wins,
+              losses,
+              flat: trades.length - wins - losses,
+              winRate: (wins / trades.length) * 100,
+              averageReturn:
+                trades.reduce(
+                  (sum, trade) =>
+                    sum +
+                    (trade.pnl / (trade.quantity * trade.entryPrice)) * 100,
+                  0,
+                ) / trades.length,
+            },
+          ];
+        }),
+      );
+      const savedDailyBudgets = Object.fromEntries(
+        (status.daily_strategy_budgets ?? []).map((budget) => [
+          budget.strategy,
+          String(budget.base_budget),
+        ]),
+      ) as Partial<Record<Strategy, string>>;
+      const savedIntradayBudgets = Object.fromEntries(
+        (status.intraday_strategy_budgets ?? []).map((budget) => [
+          budget.strategy,
+          String(budget.base_budget),
+        ]),
+      ) as Partial<Record<Strategy, string>>;
+      this.state$.next({
+        ...this.state$.value,
+        enabled: status.enabled,
+        auditHealthy: status.audit_healthy ?? true,
+        auditFailureLatched: status.audit_failure_latched ?? false,
+        decisionAuditQueueDepth: status.decision_audit_queue_depth ?? 0,
+        executionAuditQueueDepth: status.execution_audit_queue_depth ?? 0,
+        auditCoalescedDecisions: status.audit_coalesced_decisions ?? 0,
+        auditDroppedEvents: status.audit_dropped_events ?? 0,
+        strategies: this.limitsDirty
+          ? this.state$.value.strategies
+          : savedStrategies,
+        scoutStrategies: this.limitsDirty
+          ? this.state$.value.scoutStrategies
+          : scoutConfiguration.strategies,
+        maxOrderNotional: this.limitsDirty
+          ? this.state$.value.maxOrderNotional
+          : String(status.max_order_notional),
+        dailyNotionalLimit: this.limitsDirty
+          ? this.state$.value.dailyNotionalLimit
+          : String(status.daily_notional_limit),
+        usedNotionalToday: status.used_notional_today,
+        availableNotional: status.available_notional,
+        serverDailyNotionalLimit: status.daily_notional_limit,
+        serverExplorationPercent: status.exploration_percent,
+        dailyRealizedLossLimit: this.limitsDirty
+          ? this.state$.value.dailyRealizedLossLimit
+          : String(status.daily_realized_loss_limit),
+        explorationPercent: this.limitsDirty
+          ? this.state$.value.explorationPercent
+          : String(status.exploration_percent),
+        riskAppetite: this.limitsDirty
+          ? this.state$.value.riskAppetite
+          : String(status.risk_appetite ?? 50),
+        maxOpenPositions: this.limitsDirty
+          ? this.state$.value.maxOpenPositions
+          : String(status.max_open_positions),
+        maxConcurrentScoutSamples: this.limitsDirty
+          ? this.state$.value.maxConcurrentScoutSamples
+          : String(scoutConfiguration.max_active_samples),
+        scoutMaxActivePositions: this.limitsDirty
+          ? this.state$.value.scoutMaxActivePositions
+          : String(scoutConfiguration.max_active_positions),
+        maxIntradayOpenPositions: this.categoryLimitsDirty
+          ? this.state$.value.maxIntradayOpenPositions
+          : String(status.max_intraday_open_positions),
+        maxDailyOpenPositions: this.categoryLimitsDirty
+          ? this.state$.value.maxDailyOpenPositions
+          : String(status.max_daily_open_positions),
+        intradayNotionalLimit: this.categoryLimitsDirty
+          ? this.state$.value.intradayNotionalLimit
+          : String(status.intraday_notional_limit),
+        dailyStrategyNotionalLimit: this.categoryLimitsDirty
+          ? this.state$.value.dailyStrategyNotionalLimit
+          : String(status.daily_strategy_notional_limit),
+        dailyStrategyBudgets: this.categoryLimitsDirty
+          ? this.state$.value.dailyStrategyBudgets
+          : savedDailyBudgets,
+        dailyStrategyLearning: status.daily_strategy_budgets ?? [],
+        closedStrategyOutcomes,
+        intradayStrategyBudgets: this.categoryLimitsDirty
+          ? this.state$.value.intradayStrategyBudgets
+          : savedIntradayBudgets,
+        intradayStrategyLearning: status.intraday_strategy_budgets ?? [],
+        intradayUsedNotional: status.intraday_used_notional,
+        dailyStrategyUsedNotional: status.daily_strategy_used_notional,
+        maxEntriesPerPosition: this.limitsDirty
+          ? this.state$.value.maxEntriesPerPosition
+          : String(status.max_entries_per_auto_position),
+        stopLossPercent: status.stop_loss_percent,
+        takeProfitPercent: status.take_profit_percent,
+        vwapDurationMinutes: this.executionParametersDirty
+          ? this.state$.value.vwapDurationMinutes
+          : String(status.vwap_duration_minutes),
+        vwapParticipationPercent: this.executionParametersDirty
+          ? this.state$.value.vwapParticipationPercent
+          : String(status.vwap_participation_percent),
+        limitOffsetBps: this.executionParametersDirty
+          ? this.state$.value.limitOffsetBps
+          : String(status.limit_offset_bps),
+        triggerOffsetBps: this.executionParametersDirty
+          ? this.state$.value.triggerOffsetBps
+          : String(status.trigger_offset_bps),
+        trailingDistancePercent: this.executionParametersDirty
+          ? this.state$.value.trailingDistancePercent
+          : String(status.trailing_distance_percent),
+        closedTradeWindow: this.limitsDirty
+          ? this.state$.value.closedTradeWindow
+          : String(status.closed_trade_window ?? 200),
+        lastDecision: status.last_decision ?? '',
+        lastDecisionAt: status.last_decision_at ?? 0,
+        decisionsSinceTrade: status.decisions_since_trade ?? 0,
+        gapReasons: status.gap_reasons ?? [],
+        gateHits: status.gate_hits ?? [],
+        symbolGateHits:
+          status.symbol_gate_hits?.map((hit) => ({
+            ...hit,
+            distance_to_pass: hit.distance_to_pass ?? null,
+          })) ?? [],
+        latestSignalDiagnostic: status.latest_signal_diagnostic ?? '',
+        strategyDiagnostics: status.strategy_diagnostics ?? [],
+        orders,
+        openPositionSymbols: activity.open_position_symbols ?? [],
+        ledgerOpenPositionSymbols,
+        scoutOpenPositions: scoutStatus.active_samples,
+        liveScoutSamples,
+        liveScoutStrategies,
+        scoutLearningSamples: scoutStatus.learning_samples,
+        scoutLearningWinRate: scoutStatus.win_rate,
+        scoutLearningRealizedPnl: scoutStatus.realized_pnl_usd,
+        realizedPnl: convertQuoteTotals(activity.realized_pnl_by_quote),
+        unrealizedPnl: convertQuoteTotals(activity.unrealized_pnl_by_quote),
+        exitLearningSamples: activity.exit_learning_samples,
+        closedTradeAverageReturnPercent:
+          activity.closed_trade_average_return_percent,
+        closedTradeWins: activity.closed_trade_wins ?? 0,
+        closedTradeLosses: activity.closed_trade_losses ?? 0,
+        closedTradeFlat: activity.closed_trade_flat ?? 0,
+        closedTradeRealizedUsd: activity.closed_trade_realized_usd,
+        closedTradeFeesUsd: activity.closed_trade_fees_usd,
+        learningSamples: activity.learning_samples,
+        learningWinRate: activity.learning_win_rate,
+        preferredOrderType: activity.preferred_order_type,
+        parameterProfileSamples: activity.parameter_profile_samples ?? [
+          0, 0, 0,
+        ],
+        loading: false,
+        error: undefined,
+      });
     } catch (error) {
       console.error('Auto Trader status/activity refresh failed:', error);
-      this.state$.next({ ...this.state$.value, loading: false, error: error instanceof Error ? error.message : 'Could not load Auto Trader status and activity.' });
+      this.state$.next({
+        ...this.state$.value,
+        loading: false,
+        error:
+          error instanceof Error
+            ? error.message
+            : 'Could not load Auto Trader status and activity.',
+      });
     } finally {
       this.refreshInFlight = false;
     }
   }
 
-  private async responseError(endpoint: 'status' | 'activity' | 'positions' | 'execution quality' | 'decision quality' | 'decision parameters', response: Response) {
+  async refreshDecisionParameters() {
+    try {
+      const response = await fetch('/positions/auto-trader/parameters');
+      if (!response.ok)
+        throw await this.responseError('decision parameters', response);
+      const decisionParameters =
+        (await response.json()) as AutoTraderDecisionParameters;
+      const savedOverrides = Object.fromEntries(
+        decisionParameters.strategy_profiles.flatMap((profile) =>
+          profile.parameters
+            .filter(
+              (parameter) =>
+                parameter.configured_value !== undefined &&
+                parameter.configured_value !== null,
+            )
+            .map(
+              (parameter) =>
+                [
+                  profile.symbol + ':' + profile.strategy + ':' + parameter.key,
+                  parameter.configured_value!,
+                ] as const,
+            ),
+        ),
+      );
+      this.state$.next({
+        ...this.state$.value,
+        decisionParameters,
+        decisionParametersError: undefined,
+        strategyParameterOverrides: this.strategyParametersDirty
+          ? this.state$.value.strategyParameterOverrides
+          : savedOverrides,
+      });
+    } catch (error) {
+      this.state$.next({
+        ...this.state$.value,
+        decisionParametersError:
+          error instanceof Error
+            ? error.message
+            : 'Could not load Auto Trader decision parameters.',
+      });
+    }
+  }
+
+  private async responseError(
+    endpoint:
+      | 'status'
+      | 'activity'
+      | 'positions'
+      | 'execution quality'
+      | 'decision quality'
+      | 'decision parameters',
+    response: Response,
+  ) {
     const detail = (await response.text()).trim();
-    return new Error('Could not load Auto Trader ' + endpoint + ' (' + response.status + ')' + (detail ? ': ' + detail : '.'));
+    return new Error(
+      'Could not load Auto Trader ' +
+        endpoint +
+        ' (' +
+        response.status +
+        ')' +
+        (detail ? ': ' + detail : '.'),
+    );
   }
 
   async setEnabled(enabled: boolean) {
     this.state$.next({ ...this.state$.value, busy: true, error: undefined });
     try {
-      const response = await fetch('/positions/auto-trader', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ enabled }) });
+      const response = await fetch('/positions/auto-trader', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enabled }),
+      });
       if (!response.ok) throw new Error();
       await this.refresh();
       this.state$.next({ ...this.state$.value, busy: false });
-    } catch { this.state$.next({ ...this.state$.value, busy: false, error: 'Could not change Auto Trader state.' }); }
+    } catch {
+      this.state$.next({
+        ...this.state$.value,
+        busy: false,
+        error: 'Could not change Auto Trader state.',
+      });
+    }
   }
 
-  async saveLimits(resetLearning = false, resetStrategyProfile?: { symbol: string; strategy: Strategy }) {
+  async saveLimits(
+    resetLearning = false,
+    resetStrategyProfile?: { symbol: string; strategy: Strategy },
+  ) {
     const current = this.state$.value;
     this.state$.next({ ...current, busy: true, error: undefined });
     try {
-      const response = await fetch('/positions/auto-trader/settings', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ strategies: current.strategies, signal_strategies_enabled: current.strategies.some((strategy) => strategy.startsWith('live-')), max_order_notional: Number(current.maxOrderNotional), daily_notional_limit: Number(current.dailyNotionalLimit), daily_realized_loss_limit: Number(current.dailyRealizedLossLimit), exploration_percent: Number(current.explorationPercent), risk_appetite: Number(current.riskAppetite), max_open_positions: Number(current.maxOpenPositions), max_intraday_open_positions: Number(current.maxIntradayOpenPositions), max_daily_open_positions: Number(current.maxDailyOpenPositions), intraday_notional_limit: Number(current.intradayNotionalLimit), daily_strategy_notional_limit: Number(current.dailyStrategyNotionalLimit), daily_strategy_budgets: Object.fromEntries(current.strategies.filter((strategy) => !strategy.startsWith('live-') && strategy !== 'dated-futures-carry').map((strategy) => [strategy, Number(current.dailyStrategyBudgets[strategy] ?? 0)])), intraday_strategy_budgets: Object.fromEntries(current.strategies.filter((strategy) => strategy.startsWith('live-')).map((strategy) => [strategy, Number(current.intradayStrategyBudgets[strategy] ?? 0)])), max_entries_per_auto_position: Number(current.maxEntriesPerPosition), vwap_duration_minutes: Number(current.vwapDurationMinutes), vwap_participation_percent: Number(current.vwapParticipationPercent), limit_offset_bps: Number(current.limitOffsetBps), trigger_offset_bps: Number(current.triggerOffsetBps), trailing_distance_percent: Number(current.trailingDistancePercent), closed_trade_window: Number(current.closedTradeWindow), ...(this.strategyParametersDirty ? { strategy_parameter_overrides: current.strategyParameterOverrides } : {}), ...(resetStrategyProfile ? { reset_strategy_profile: resetStrategyProfile } : {}), reset_learning: resetLearning }) });
+      const response = await fetch('/positions/auto-trader/settings', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          strategies: current.strategies,
+          signal_strategies_enabled: current.strategies.some((strategy) =>
+            strategy.startsWith('live-'),
+          ),
+          max_order_notional: Number(current.maxOrderNotional),
+          daily_notional_limit: Number(current.dailyNotionalLimit),
+          daily_realized_loss_limit: Number(current.dailyRealizedLossLimit),
+          exploration_percent: Number(current.explorationPercent),
+          risk_appetite: Number(current.riskAppetite),
+          max_open_positions: Number(current.maxOpenPositions),
+          max_intraday_open_positions: Number(current.maxIntradayOpenPositions),
+          max_daily_open_positions: Number(current.maxDailyOpenPositions),
+          intraday_notional_limit: Number(current.intradayNotionalLimit),
+          daily_strategy_notional_limit: Number(
+            current.dailyStrategyNotionalLimit,
+          ),
+          daily_strategy_budgets: Object.fromEntries(
+            current.strategies
+              .filter(
+                (strategy) =>
+                  !strategy.startsWith('live-') &&
+                  strategy !== 'dated-futures-carry',
+              )
+              .map((strategy) => [
+                strategy,
+                Number(current.dailyStrategyBudgets[strategy] ?? 0),
+              ]),
+          ),
+          intraday_strategy_budgets: Object.fromEntries(
+            current.strategies
+              .filter((strategy) => strategy.startsWith('live-'))
+              .map((strategy) => [
+                strategy,
+                Number(current.intradayStrategyBudgets[strategy] ?? 0),
+              ]),
+          ),
+          max_entries_per_auto_position: Number(current.maxEntriesPerPosition),
+          vwap_duration_minutes: Number(current.vwapDurationMinutes),
+          vwap_participation_percent: Number(current.vwapParticipationPercent),
+          limit_offset_bps: Number(current.limitOffsetBps),
+          trigger_offset_bps: Number(current.triggerOffsetBps),
+          trailing_distance_percent: Number(current.trailingDistancePercent),
+          closed_trade_window: Number(current.closedTradeWindow),
+          ...(this.strategyParametersDirty
+            ? {
+                strategy_parameter_overrides:
+                  current.strategyParameterOverrides,
+              }
+            : {}),
+          ...(resetStrategyProfile
+            ? { reset_strategy_profile: resetStrategyProfile }
+            : {}),
+          reset_learning: resetLearning,
+        }),
+      });
       if (!response.ok) throw new Error(await response.text());
-      const scoutResponse = await fetch('/scouts/configuration', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ strategies: current.scoutStrategies, max_active_samples: Number(current.maxConcurrentScoutSamples), max_active_positions: Number(current.scoutMaxActivePositions) }) });
+      const scoutResponse = await fetch('/scouts/configuration', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          strategies: current.scoutStrategies,
+          max_active_samples: Number(current.maxConcurrentScoutSamples),
+          max_active_positions: Number(current.scoutMaxActivePositions),
+        }),
+      });
       if (!scoutResponse.ok) throw new Error(await scoutResponse.text());
       // A refresh may already be in flight with a snapshot from before this PUT.
       // Let it finish while the dirty flags still protect the user's edits, then
       // fetch again so the saved values are the ones applied to the form.
-      while (this.refreshInFlight) await new Promise((resolve) => setTimeout(resolve, 10));
+      while (this.refreshInFlight)
+        await new Promise((resolve) => setTimeout(resolve, 10));
       // The stream snapshot can predate the PUT, so force this refresh to read the server.
       this.autoTraderSnapshotAt = 0;
       await this.refresh();
-      this.limitsDirty = false; this.categoryLimitsDirty = false; this.executionParametersDirty = false; this.strategyParametersDirty = false;
+      this.limitsDirty = false;
+      this.categoryLimitsDirty = false;
+      this.executionParametersDirty = false;
+      this.strategyParametersDirty = false;
       this.state$.next({ ...this.state$.value, busy: false });
-    } catch (error) { this.state$.next({ ...this.state$.value, busy: false, error: error instanceof Error ? error.message : 'Could not save limits.' }); }
+    } catch (error) {
+      this.state$.next({
+        ...this.state$.value,
+        busy: false,
+        error:
+          error instanceof Error ? error.message : 'Could not save limits.',
+      });
+    }
   }
 
   async resetLearning() {
@@ -411,5 +1374,7 @@ export class AutoTraderModel {
   async resetStrategyProfile(symbol: string, strategy: Strategy) {
     await this.saveLimits(false, { symbol, strategy });
   }
-
 }
+
+// Settings controls and strategy status must share one live settings snapshot.
+export const sharedAutoTraderSettingsModel = new AutoTraderModel();

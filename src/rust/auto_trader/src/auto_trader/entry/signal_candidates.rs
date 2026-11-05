@@ -163,10 +163,6 @@ fn live_scout_direction_candidates(
     if distinct_directions.len() == 1 { passing } else { Vec::new() }
 }
 
-fn should_scout_daily_scout(scout: bool, signal: &Signal) -> bool {
-    scout && is_daily_strategy_signal(signal)
-}
-
 fn signal_max_age_seconds(signal: &Signal) -> u64 {
     if signal.strategy.as_deref().and_then(Strategy::from_name)
         .is_some_and(|strategy| !strategy.is_live_insight() && !strategy.is_dated_carry())
@@ -177,6 +173,8 @@ fn signal_max_age_seconds(signal: &Signal) -> u64 {
     }
 }
 
+#[cfg(test)]
+#[cfg(test)]
 fn signal_allowed_by_positions(
     signal: &Signal,
     open_positions: &BTreeMap<String, TraderPosition>,
@@ -267,7 +265,6 @@ fn signal_candidate_position_block_reason(
 fn collect_signal_candidates<'a>(
     signals: &'a [Signal],
     now: u64,
-    risk_appetite: f64,
     open_positions: &BTreeMap<String, TraderPosition>,
     strategy_positions: &BTreeMap<String, BTreeMap<String, TraderPosition>>,
     max_entries_per_auto_position: u32,
@@ -318,38 +315,8 @@ fn collect_signal_candidates<'a>(
             allowed_by_position
         })
         .collect::<Vec<_>>();
-    let neutral_scout_candidates = signals
-        .iter()
-        .filter_map(|signal| {
-            if is_stablecoin_pair(&signal.symbol)
-                || signal.direction != "neutral"
-                || signal.stale
-                || now.saturating_sub(signal.timestamp / 1000) > signal_max_age_seconds(signal)
-                || !signal.score.is_finite()
-                || signal.score.abs() < SCOUT_NEUTRAL_SCORE_FLOOR * risk_floor_scale(risk_appetite)
-                || signal.ranging_probability.unwrap_or(0.0)
-                    >= NEUTRAL_INFERENCE_MAX_RANGE_PROBABILITY
-            {
-                return None;
-            }
-            let mut candidate = signal.clone();
-            candidate.direction = if candidate.score > 0.0 {
-                "bullish".into()
-            } else {
-                "bearish".into()
-            };
-            let allowed_by_position = signal_allowed_by_positions(
-                &candidate,
-                open_positions,
-                strategy_positions,
-                max_entries_per_auto_position,
-            );
-            allowed_by_position.then_some(candidate)
-        })
-        .collect::<Vec<_>>();
     FreshSignalCandidates {
         fresh_directional,
-        neutral_scout_candidates,
         stale_signal_count,
         stalest_signal_age_seconds,
         stale_symbols,
@@ -361,11 +328,9 @@ fn collect_signal_candidates<'a>(
 
 #[derive(Clone, Copy)]
 struct SignalSelectionInput<'a> {
-    state: &'a AutoTraderState,
     dashboard: &'a Dashboard,
     signals: &'a [Signal],
     fresh_directional: &'a [&'a Signal],
-    neutral_scout_candidates: &'a [Signal],
     now: u64,
     inferred_direction_count: usize,
     neutral_direction_floor: f64,
@@ -376,14 +341,9 @@ struct SignalSelectionInput<'a> {
     position_blocked_count: usize,
     position_block_details: &'a [String],
     learning_thresholds: &'a BTreeMap<String, strategies::ContextThresholds>,
-    delegate_scout_fallback: bool,
     risk_appetite: f64,
-    active_scout_count: usize,
-    scout_max_active_positions: usize,
     open_positions: &'a BTreeMap<String, TraderPosition>,
     max_entries_per_auto_position: u32,
-    counterfactual_stop_loss_percent: f64,
-    counterfactual_take_profit_percent: f64,
 }
 
 fn format_no_tradeable_bias(
@@ -395,7 +355,6 @@ fn format_no_tradeable_bias(
         dashboard,
         signals,
         fresh_directional,
-        neutral_scout_candidates,
         now,
         inferred_direction_count,
         neutral_direction_floor,
@@ -407,7 +366,6 @@ fn format_no_tradeable_bias(
         position_block_details,
         learning_thresholds,
         risk_appetite,
-        active_scout_count,
         open_positions,
         max_entries_per_auto_position,
         ..
@@ -418,10 +376,9 @@ fn format_no_tradeable_bias(
         .filter(|signal| needs_pullback_confirmation(signal) && !passes_pullback_confirmation(signal))
         .count();
     let mut reason = format!(
-        "No tradeable bias: fresh directional {}/{} ({} inferred from neutral score; {} neutral scout probes; filtered: {} stale, {} non-directional, {} blocked by existing positions, {} awaiting 10s pullback); contextual learned strength floors passed {}; exploration strength floor {:.2}; contextual raw-score floors passed {}; {} candidate(s) blocked by negative walk-forward history",
+        "No tradeable bias: fresh directional {}/{} ({} inferred from neutral score; filtered: {} stale, {} non-directional, {} blocked by existing positions, {} awaiting 10s pullback); contextual learned strength floors passed {}; exploration strength floor {:.2}; contextual raw-score floors passed {}; {} candidate(s) blocked by negative walk-forward history",
         fresh_directional.len(),
         signals.len(),
-        neutral_scout_candidates.len(),
         inferred_direction_count,
         stale_signal_count,
         non_directional_count,
@@ -477,15 +434,12 @@ fn format_no_tradeable_bias(
     let candidate_details = fresh_directional
         .iter()
         .copied()
-        .chain(neutral_scout_candidates.iter())
         .map(|candidate| {
             candidate_entry_diagnostic(
                 candidate,
                 dashboard,
                 learning_thresholds,
                 risk_appetite,
-                active_scout_count,
-                input.scout_max_active_positions,
             )
         })
         .collect::<Vec<_>>();
@@ -688,14 +642,6 @@ mod parallel_daily_candidate_tests {
         let sources = live_strategy_source_signals(&[daily, live_source.clone()]);
         assert_eq!(sources.len(), 1);
         assert_eq!(sources[0].strategy.as_deref(), Some("live-insights"));
-    }
-
-    #[test]
-    fn daily_scouts_are_scout_only() {
-        let candidate = signal("trend-50-200", "bullish");
-
-        assert!(should_scout_daily_scout(true, &candidate));
-        assert!(!should_scout_daily_scout(false, &candidate));
     }
 
     #[test]

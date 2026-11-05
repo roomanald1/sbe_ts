@@ -74,7 +74,6 @@ struct SignalRuntime {
     news_learning: Mutex<NewsLearning>,
     snapshot_diagnostic_at: DashMap<String, u64>,
     latest_prices: DashMap<String, (u64, f64)>,
-    scout_cache: Mutex<Option<(Instant, serde_json::Value)>>,
 }
 
 static POSITION_MANAGEMENT_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
@@ -146,9 +145,6 @@ include!("feeds/external_market_feed.rs");
 include!("feeds/dated_carry_signals.rs");
 include!("feeds/daily_strategy_signals.rs");
 include!("workers/signal_feed_workers.rs");
-
-#[path = "api/scout_report.rs"]
-mod scout_report;
 
 include!("api/signal_ingestion.rs");
 

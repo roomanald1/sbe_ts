@@ -83,18 +83,6 @@ fn smoothed_win_rate(stats: &LearningStats) -> f64 {
     (stats.positive as f64 + 1.0) / (stats.samples as f64 + 2.0)
 }
 
-fn adaptive_scout_thresholds(
-    active_scout_count: usize,
-    scout_max_active_positions: usize,
-) -> (f64, f64) {
-    let density = active_scout_count.min(scout_max_active_positions) as f64;
-    let strength =
-        (SCOUT_MIN_STRENGTH - 0.15 + density * 0.025).clamp(SCOUT_MIN_STRENGTH_FLOOR, 0.25);
-    let score =
-        (SCOUT_MIN_ABS_SCORE - 0.15 + density * 0.05).clamp(SCOUT_MIN_SCORE_FLOOR, 0.40);
-    (strength, score)
-}
-
 fn risk_floor_scale(risk_appetite: f64) -> f64 {
     1.5 - risk_appetite.clamp(0.0, 100.0) / 100.0
 }
@@ -214,15 +202,6 @@ mod scout_floor_tests {
     use super::*;
 
     #[test]
-    fn exploration_does_not_remove_minimum_strength_and_score_floors() {
-        let (strength, score) = adaptive_scout_thresholds(0, scouts::ScoutConfiguration::default().max_active_positions);
-        assert!(strength >= SCOUT_MIN_STRENGTH_FLOOR);
-        assert!(score >= SCOUT_MIN_SCORE_FLOOR);
-        assert_eq!(strength, 0.0);
-        assert_eq!(score, SCOUT_MIN_ABS_SCORE - 0.15);
-    }
-
-    #[test]
     fn losing_scout_outcomes_raise_actual_entry_strength_floor() {
         let context = "long:range:XRP-USDC:live-momentum";
         let mut learning = BTreeMap::new();
@@ -238,7 +217,5 @@ mod scout_floor_tests {
 
         assert!(adaptive_strength_floor(&learning, context) > MIN_STRENGTH);
         assert!(adaptive_exploration_score_floor(&learning, context, &[]) > MIN_EXPLORATION_SCORE);
-        let (scout_strength, _) = adaptive_scout_thresholds(0, scouts::ScoutConfiguration::default().max_active_positions);
-        assert_eq!(scout_strength, 0.0);
     }
 }

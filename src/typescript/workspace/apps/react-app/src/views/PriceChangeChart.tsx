@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo } from 'react';
 import type { PriceChanges } from '../price_change_data';
 import { PriceChangeChartModel } from '../models/PriceChangeChartModel';
-import { useBehaviorSnapshot } from '../use_behavior_snapshot';
+import { useBehaviorSnapshot } from '@workspace/ui-platform';
 import { PriceChangeChartView } from './PriceChangeChartView';
 
 type PriceChangeChartProps = {

@@ -2,7 +2,7 @@ import { memo, useEffect, useMemo } from 'react';
 import { AgGridReact } from 'ag-grid-react';
 import { ClientSideRowModelModule, ModuleRegistry, themeQuartz, type ColDef } from 'ag-grid-community';
 import { ExecutionFeesModel, type ExecutionFeeRow } from '../models/ExecutionFeesModel';
-import { useBehaviorSnapshot } from '../use_behavior_snapshot';
+import { useBehaviorSnapshot } from '@workspace/ui-platform';
 
 ModuleRegistry.registerModules([ClientSideRowModelModule]);
 const model = new ExecutionFeesModel();

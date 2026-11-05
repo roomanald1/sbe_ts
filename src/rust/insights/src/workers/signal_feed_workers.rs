@@ -283,6 +283,40 @@ async fn deliver_signal_batch(
     (failed, first_error)
 }
 
+async fn deliver_scout_inputs(client: &reqwest::Client, dashboards: &[(String, serde_json::Value)]) {
+    let base = std::env::var("SCOUTS_SERVICE_URL")
+        .unwrap_or_else(|_| "http://127.0.0.1:3011".to_owned());
+    for (_symbol, dashboard) in dashboards {
+        let mut signals = dashboard.get("best").and_then(serde_json::Value::as_array)
+            .cloned().unwrap_or_default();
+        let markets = dashboard.get("markets");
+        for signal in &mut signals {
+            let Some(symbol) = signal.get("symbol").and_then(serde_json::Value::as_str) else { continue };
+            let Some(market) = markets.and_then(|markets| markets.get(symbol)) else { continue };
+            let bid = market.get("bids").and_then(serde_json::Value::as_array).and_then(|items| items.first())
+                .and_then(|level| level.get("price")).and_then(serde_json::Value::as_f64);
+            let ask = market.get("asks").and_then(serde_json::Value::as_array).and_then(|items| items.first())
+                .and_then(|level| level.get("price")).and_then(serde_json::Value::as_f64);
+            let updated_at = market.get("updated_at_ms").and_then(serde_json::Value::as_u64);
+            if let (Some(bid), Some(ask), Some(updated_at)) = (bid, ask, updated_at) {
+                if bid.is_finite() && ask.is_finite() && bid > 0.0 && ask >= bid {
+                    signal["best_bid"] = serde_json::json!(bid);
+                    signal["best_ask"] = serde_json::json!(ask);
+                    signal["price"] = serde_json::json!(bid + (ask - bid) / 2.0);
+                    signal["book_updated_at_ms"] = serde_json::json!(updated_at);
+                }
+            }
+        }
+        let result = client.post(format!("{}/live-inputs", base.trim_end_matches('/')))
+            .timeout(std::time::Duration::from_millis(300))
+            .json(&serde_json::json!({ "signals": signals }))
+            .send().await.and_then(reqwest::Response::error_for_status);
+        if let Err(error) = result {
+            crate::service_log!("WARN", "Live Scout input delivery failed: {error}");
+        }
+    }
+}
+
 async fn run_ui_snapshot_push_worker(
     pending_snapshots: Arc<DashMap<String, serde_json::Value>>,
     notify: Arc<Notify>,
@@ -334,6 +368,9 @@ async fn run_signal_push_worker(
             continue;
         };
         // Send symbols in parallel so one slow request cannot block the batch.
+        let scout_client = client.clone();
+        let scout_dashboards = dashboards.clone();
+        tokio::spawn(async move { deliver_scout_inputs(&scout_client, &scout_dashboards).await; });
         let (failed, first_error) = deliver_signal_batch(&client, &base, dashboards).await;
         if !failed.is_empty() {
             if endpoint_available {

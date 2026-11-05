@@ -1,6 +1,6 @@
 import { formatForSymbol } from '../instrument_precision';
 import { memo, useEffect, useMemo } from 'react';
-import { usePausedValue } from '../use_paused_value';
+import { usePausedValue } from '@workspace/ui-platform';
 import { AgGridReact } from 'ag-grid-react';
 import {
   ClientSideRowModelModule,
@@ -15,7 +15,7 @@ import {
 import { FeedToolbar } from './FeedToolbar';
 import type { Connection } from '../connection';
 import { OrderManagerModel } from '../models/OrderManagerModel';
-import { useBehaviorSnapshot } from '../use_behavior_snapshot';
+import { useBehaviorSnapshot } from '@workspace/ui-platform';
 import { getOrderTypeDescription } from '../order_type_descriptions';
 
 ModuleRegistry.registerModules([

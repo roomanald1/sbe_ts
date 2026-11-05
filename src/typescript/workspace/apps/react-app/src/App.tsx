@@ -2,7 +2,7 @@ import React from 'react';
 import './agGridRuntime';
 import './App.css';
 import { Connection, type FeedSource } from './connection';
-import { useObservable } from './use_observable';
+import { useObservable } from '@workspace/ui-platform';
 import { Header } from './views/Header';
 import { FeedControls } from './views/FeedControls';
 

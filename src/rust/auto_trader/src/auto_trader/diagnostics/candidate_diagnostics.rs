@@ -7,18 +7,14 @@ fn candidate_entry_diagnostic(
     dashboard: &Dashboard,
     learning_thresholds: &BTreeMap<String, strategies::ContextThresholds>,
     risk_appetite: f64,
-    active_scout_count: usize,
-    scout_max_active_positions: usize,
 ) -> String {
     let review = review_candidate_entry(
         candidate,
         dashboard,
         learning_thresholds,
         risk_appetite,
-        active_scout_count,
-        scout_max_active_positions,
     );
-    let failures = candidate_entry_failures(candidate, &review, active_scout_count);
+    let failures = candidate_entry_failures(candidate, &review);
     let (walk_forward, research) = format_candidate_evidence(&review);
     let outcome = if failures.is_empty() {
         "did not pass combined entry checks".to_owned()
@@ -43,8 +39,6 @@ fn candidate_entry_audit_value(
     dashboard: &Dashboard,
     learning_thresholds: &BTreeMap<String, strategies::ContextThresholds>,
     risk_appetite: f64,
-    active_scout_count: usize,
-    scout_max_active_positions: usize,
     selection_mode: &str,
 ) -> serde_json::Value {
     let review = review_candidate_entry(
@@ -52,11 +46,9 @@ fn candidate_entry_audit_value(
         dashboard,
         learning_thresholds,
         risk_appetite,
-        active_scout_count,
-        scout_max_active_positions,
     );
     let failures = if selection_mode == "rejected" {
-        candidate_entry_failures(candidate, &review, active_scout_count)
+        candidate_entry_failures(candidate, &review)
     } else {
         Vec::new()
     };
@@ -71,17 +63,8 @@ fn candidate_entry_audit_value(
         "thresholds": {
             "strength_floor": review.strength_floor,
             "exploration_score_absolute_floor": review.score_floor,
-            "scout_strength_floor": review.scout_strength_floor,
-            "scout_score_absolute_floor": review.scout_score_floor,
             "minimum_side_walk_forward_samples": MIN_SIDE_WALK_FORWARD_SAMPLES,
             "minimum_exploration_evidence_samples": MIN_EXPLORATION_EVIDENCE_SAMPLES,
-            "scout_minimum_walk_forward_samples": review.scout_minimum_samples,
-            "scout_minimum_positive_net_rate": review.scout_minimum_positive_rate,
-            "scout_outcomes": {
-                "samples": review.scout_outcome_samples,
-                "positive_rate": review.scout_outcome_positive_rate,
-                "realized_pnl_usd": review.scout_outcome_realized_pnl,
-            },
             "minimum_side_direction_match_rate": MIN_SIDE_DIRECTION_MATCH_RATE,
             "minimum_side_positive_net_rate": MIN_SIDE_POSITIVE_NET_RATE,
             "minimum_side_positive_net_lower_95": MIN_SIDE_POSITIVE_NET_LOWER_95,
@@ -91,10 +74,6 @@ fn candidate_entry_audit_value(
             "exploration_score_pass": !review.score_weak,
             "exploration_context_pass": !review.mixed_context,
             "strict_walk_forward_pass": !review.strict_evidence_bad && !review.evidence_missing && !review.research_bad,
-            "scout_strength_pass": review.scout_strength_pass,
-            "scout_score_pass": review.scout_score_pass,
-            "scout_inventory_available": active_scout_count < scout_max_active_positions,
-            "scout_walk_forward_thresholds_valid": review.scout_thresholds_valid,
         },
         "rejection_reasons": failures,
     })
@@ -103,13 +82,11 @@ fn candidate_entry_audit_value(
 fn candidate_entry_failures(
     candidate: &Signal,
     review: &CandidateEntryReview<'_>,
-    active_scout_count: usize,
 ) -> Vec<String> {
     let mut failures = Vec::new();
     add_strength_failure(candidate, review, &mut failures);
     add_score_failure(candidate, review, &mut failures);
     add_evidence_failures(review, &mut failures);
-    add_scout_failures(candidate, review, active_scout_count, &mut failures);
     failures
 }
 
@@ -170,32 +147,6 @@ fn add_evidence_failures(
     }
 }
 
-fn add_scout_failures(
-    candidate: &Signal,
-    review: &CandidateEntryReview<'_>,
-    active_scout_count: usize,
-    failures: &mut Vec<String>,
-) {
-    if !review.scout_thresholds_valid {
-        failures.push("required learned Scout walk-forward thresholds are missing or invalid".into());
-    } else if active_scout_count >= review.scout_max_active_positions {
-        failures.push(format!(
-            "scout inventory cap reached ({active_scout_count}/{} open scout positions)",
-            review.scout_max_active_positions
-        ));
-    } else if !review.scout_strength_pass {
-        failures.push(format!(
-            "scout strength {:.2} < learned {:.2}",
-            candidate.strength, review.scout_strength_floor
-        ));
-    } else if !review.scout_score_pass {
-        failures.push(format!(
-            "scout |score| {:.2} < learned {:.2}",
-            candidate.score.abs(), review.scout_score_floor
-        ));
-    }
-}
-
 #[cfg(test)]
 mod candidate_diagnostic_tests {
     use super::*;
@@ -225,33 +176,31 @@ mod candidate_diagnostic_tests {
     }
 
     #[test]
-    fn rejected_candidate_diagnostic_and_audit_explain_strength_score_and_scout_inventory() {
+    fn rejected_candidate_diagnostic_and_audit_explain_strength_and_score() {
         let candidate = candidate(0.0, 0.0);
         let dashboard = Dashboard {
             best: Vec::new(), walk_forward: Arc::new(Vec::new()),
             missed_opportunity_bands: Vec::new(), markets: Arc::new(BTreeMap::new()),
             queued_at: None, queue_wait_ms: None,
         };
-        let diagnostic = candidate_entry_diagnostic(&candidate, &dashboard, &EMPTY_CONTEXT_THRESHOLDS, 50.0, 0, scouts::ScoutConfiguration::default().max_active_positions);
+        let diagnostic = candidate_entry_diagnostic(&candidate, &dashboard, &EMPTY_CONTEXT_THRESHOLDS, 50.0);
         assert!(diagnostic.contains("BTC-USDT bullish"));
         assert!(diagnostic.contains("strength 0.00 <"));
         assert!(diagnostic.contains("score 0.00 <"));
-        let audit = candidate_entry_audit_value(&candidate, &dashboard, &EMPTY_CONTEXT_THRESHOLDS, 50.0, scouts::ScoutConfiguration::default().max_active_positions, scouts::ScoutConfiguration::default().max_active_positions, "rejected");
+        let audit = candidate_entry_audit_value(&candidate, &dashboard, &EMPTY_CONTEXT_THRESHOLDS, 50.0, "rejected");
         assert_eq!(audit["selection_mode"], "rejected");
-        assert_eq!(audit["checks"]["scout_inventory_available"], false);
-        assert!(audit["rejection_reasons"].as_array().unwrap().iter().any(|reason| reason.as_str().unwrap().contains("scout inventory cap")));
+        assert!(audit["rejection_reasons"].as_array().unwrap().iter().any(|reason| reason.as_str().unwrap().contains("strength")));
     }
 
     #[test]
-    fn supported_candidate_passes_strict_and_scout_checks_and_audit_omits_rejections() {
+    fn supported_candidate_passes_strict_checks_and_audit_omits_rejections() {
         let candidate = candidate(0.9, 0.9);
         let dashboard = dashboard_with_evidence();
-        let failures = candidate_entry_failures(&candidate, &review_candidate_entry(&candidate, &dashboard, &EMPTY_CONTEXT_THRESHOLDS, 50.0, 0, scouts::ScoutConfiguration::default().max_active_positions), 0);
+        let failures = candidate_entry_failures(&candidate, &review_candidate_entry(&candidate, &dashboard, &EMPTY_CONTEXT_THRESHOLDS, 50.0));
         assert!(failures.is_empty(), "{failures:?}");
-        let audit = candidate_entry_audit_value(&candidate, &dashboard, &EMPTY_CONTEXT_THRESHOLDS, 50.0, 0, scouts::ScoutConfiguration::default().max_active_positions, "strict");
+        let audit = candidate_entry_audit_value(&candidate, &dashboard, &EMPTY_CONTEXT_THRESHOLDS, 50.0, "strict");
         assert_eq!(audit["checks"]["strict_walk_forward_pass"], true);
-        assert_eq!(audit["checks"]["scout_strength_pass"], true);
         assert!(audit["rejection_reasons"].as_array().unwrap().is_empty());
-        assert!(candidate_entry_diagnostic(&candidate, &dashboard, &EMPTY_CONTEXT_THRESHOLDS, 50.0, 0, scouts::ScoutConfiguration::default().max_active_positions).contains("did not pass combined entry checks"));
+        assert!(candidate_entry_diagnostic(&candidate, &dashboard, &EMPTY_CONTEXT_THRESHOLDS, 50.0).contains("did not pass combined entry checks"));
     }
 }

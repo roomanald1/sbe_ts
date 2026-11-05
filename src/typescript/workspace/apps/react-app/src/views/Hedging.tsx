@@ -1,6 +1,6 @@
 import { formatForSymbol } from '../instrument_precision';
 import { memo, useEffect, useMemo, useRef, useState } from 'react';
-import { usePausedValue } from '../use_paused_value';
+import { usePausedValue } from '@workspace/ui-platform';
 import { AgGridReact } from 'ag-grid-react';
 import {
   ClientSideRowModelModule,

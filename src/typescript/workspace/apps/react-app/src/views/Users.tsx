@@ -4,7 +4,7 @@ import {
   type UserGridCell,
   type UserGridRow,
 } from '../models/UsersModel';
-import { useBehaviorSnapshot } from '../use_behavior_snapshot';
+import { useBehaviorSnapshot } from '@workspace/ui-platform';
 import React, { useEffect, useMemo } from 'react';
 import { AgGridReact } from 'ag-grid-react';
 import {

@@ -1,11 +1,11 @@
 import { memo, useEffect, useMemo } from 'react';
-import { usePausedValue } from '../use_paused_value';
+import { usePausedValue } from '@workspace/ui-platform';
 import { AgGridReact } from 'ag-grid-react';
 import { ClientSideRowModelModule, ModuleRegistry, themeQuartz, type ColDef } from 'ag-grid-community';
 import { FeedToolbar } from './FeedToolbar';
 import { SignalInfoModel, type MissedOpportunityBand, type SignalPerformanceRow, type SignalWalkForwardRow } from '../models/SignalInfoModel';
 import type { SignalSnapshot } from '../models/SignalsModel';
-import { useBehaviorSnapshot } from '../use_behavior_snapshot';
+import { useBehaviorSnapshot } from '@workspace/ui-platform';
 
 ModuleRegistry.registerModules([ClientSideRowModelModule]);
 const gridTheme = themeQuartz.withParams({

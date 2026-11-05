@@ -1,5 +1,5 @@
 import type { PointerEvent as ReactPointerEvent, ReactNode } from 'react';
-import { DASHBOARD_COLUMNS, type DashboardWidget } from './dashboard_layout';
+import { DASHBOARD_COLUMNS, type DashboardWidget } from './dashboard_layout.js';
 
 type Props = {
   widget: DashboardWidget;

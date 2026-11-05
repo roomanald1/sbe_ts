@@ -1,6 +1,6 @@
 import { formatForSymbol } from '../instrument_precision';
 import { memo, useEffect, useId, useMemo, useState } from 'react';
-import { usePausedValue } from '../use_paused_value';
+import { usePausedValue } from '@workspace/ui-platform';
 import { AgGridReact } from 'ag-grid-react';
 import {
   ClientSideRowModelModule,
@@ -13,7 +13,7 @@ import type { Connection } from '../connection';
 import { MarketLiquidityModel } from '../models/MarketLiquidityModel';
 import type { LiquidityBand } from '../market_liquidity';
 import { estimateSlippage, findLiquidityGaps } from '../market_liquidity';
-import { useBehaviorSnapshot } from '../use_behavior_snapshot';
+import { useBehaviorSnapshot } from '@workspace/ui-platform';
 
 type Props = {
   symbol: string;

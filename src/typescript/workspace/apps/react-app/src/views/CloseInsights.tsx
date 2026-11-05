@@ -1,7 +1,7 @@
 import { formatForSymbol } from '../instrument_precision';
 import { memo, useEffect, useMemo, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { usePausedValue } from '../use_paused_value';
+import { usePausedValue } from '@workspace/ui-platform';
 import { AgGridReact } from 'ag-grid-react';
 import {
   CellStyleModule,
@@ -15,7 +15,7 @@ import {
 } from 'ag-grid-community';
 import { FeedToolbar } from './FeedToolbar';
 import { CloseInsightsModel, type CloseInsight } from '../models/CloseInsightsModel';
-import { useBehaviorSnapshot } from '../use_behavior_snapshot';
+import { useBehaviorSnapshot } from '@workspace/ui-platform';
 import type { PriceHistorySample } from '../price_change_data';
 import { PriceHistoryPopup } from './PriceHistoryPopup';
 

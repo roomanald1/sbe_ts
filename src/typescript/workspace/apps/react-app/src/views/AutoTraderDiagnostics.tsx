@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { AgGridReact } from 'ag-grid-react';
 import { ClientSideRowModelModule, ModuleRegistry, themeQuartz, type ColDef, type ICellRendererParams } from 'ag-grid-community';
 import { AutoTraderModel, type StrategyDiagnostic } from '../models/AutoTraderModel';
-import { useBehaviorSnapshot } from '../use_behavior_snapshot';
+import { useBehaviorSnapshot } from '@workspace/ui-platform';
 import { FeedToolbar } from './FeedToolbar';
 
 ModuleRegistry.registerModules([ClientSideRowModelModule]);

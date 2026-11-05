@@ -2,7 +2,7 @@
 
 use axum::{
     Json, Router,
-    extract::{OriginalUri, State},
+    extract::State,
     http::StatusCode,
     routing::{get, post},
 };
@@ -52,12 +52,61 @@ pub struct ScoutConfiguration {
     pub strategies: Vec<String>,
     pub max_active_samples: usize,
     pub max_active_positions: usize,
+    pub max_sample_notional: f64,
+    pub stop_loss_percent: f64,
+    pub take_profit_percent: f64,
 }
 
 impl Default for ScoutConfiguration {
     fn default() -> Self {
-        Self { strategies: Vec::new(), max_active_samples: 5, max_active_positions: 100 }
+        Self {
+            strategies: vec![
+                "live-momentum".into(),
+                "live-trade-flow".into(),
+                "live-order-book".into(),
+                "live-vwap-dislocation".into(),
+                "live-absorption-pressure".into(),
+                "donchian-55-btc200".into(),
+                "donchian-20-sma200".into(),
+                "donchian-20-btc200".into(),
+                "donchian-10-btc200".into(),
+                "donchian-20-btc200-hold3".into(),
+                "risk-adjusted-trend-portfolio".into(),
+                "trend-sleeves-btc200".into(),
+                "trend-50-200".into(),
+                "relative-strength-90-sma200".into(),
+                "risk-adjusted-monthly-momentum".into(),
+                "rsi2-oversold-rebound".into(),
+                "dated-futures-carry".into(),
+            ],
+            max_active_samples: 5,
+            max_active_positions: 100,
+            max_sample_notional: 100.0,
+            stop_loss_percent: 0.5,
+            take_profit_percent: 0.8,
+        }
     }
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub struct ScoutStatus {
+    pub active_samples: usize,
+    pub learning_samples: usize,
+    pub positive_samples: usize,
+    pub win_rate: Option<f64>,
+    pub realized_pnl_usd: f64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct DailyScoutSignalsRequest {
+    pub request_id: String,
+    pub now_ms: u64,
+    pub signals: Vec<serde_json::Value>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct LiveScoutSignalsRequest {
+    pub signals: Vec<serde_json::Value>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -229,6 +278,17 @@ pub struct ScoutOutcomeRequest {
     pub strategy_parameter_specs: Vec<ParameterSpec>,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct ScoutMarkoutRequest {
+    pub decision_id: String,
+    pub symbol: String,
+    pub signal_timestamp_ms: u64,
+    pub evaluated_timestamp_ms: u64,
+    pub taker_fee_rate: f64,
+    pub long_net_percent: Option<f64>,
+    pub short_net_percent: Option<f64>,
+}
+
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 struct ScoutPair {
     baseline: Option<ScoutOutcomeRequest>,
@@ -250,6 +310,8 @@ struct PersistedState {
     seen: BTreeSet<String>,
     #[serde(default)]
     outcomes: BTreeMap<String, ScoutOutcomeRequest>,
+    #[serde(default)]
+    scout_instances: BTreeMap<String, serde_json::Value>,
     #[serde(default)]
     pairs: BTreeMap<String, ScoutPair>,
     #[serde(default)]

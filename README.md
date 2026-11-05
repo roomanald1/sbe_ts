@@ -11,6 +11,8 @@ Run Nx from the repository root with `./nx <target> <project>`, for example:
 ```sh
 ./nx build react-app
 ./nx lint react-app
+./nx serve homepage
+./nx build homepage
 ```
 
 ## Local backend services
@@ -34,7 +36,7 @@ To run only one side, use `./start-infra.sh` or `./start-system.sh`; stop them w
 
 Launch Compose through these scripts so bind mounts resolve to this repository's data directories. If services were previously launched from the control container, refresh the controller and recreate the stateful services with `./start-infra.sh service-control` followed by `./start-system.sh position-management auto-trader insights learning`.
 
-The web container runs Vite with the React app source mounted from the workspace, so frontend edits appear through hot reload without rebuilding its image. Service control mounts its source into the container and restarts its Node server when `server.mjs` changes, so its page and server edits also take effect without rebuilding. Stack startup does not rebuild images; after changing a backend service's source or Dockerfile, rebuild only that service with `docker compose -p sbe-system -f system/compose.yml up -d --build <service>`.
+The web container runs Vite with the React app source mounted from the workspace, so frontend edits appear through hot reload without rebuilding its image. The service-control homepage is the `homepage` Nx/Vite React app; `start-infra.sh` builds it before launching the server on port 8080. Use `./nx serve homepage` on port 5174 for homepage development. Stack startup does not rebuild images; after changing a backend service's source or Dockerfile, rebuild only that service with `docker compose -p sbe-system -f system/compose.yml up -d --build <service>`.
 
 Open the service control page at http://localhost:8080. It shows each container's state and can start, stop, or restart services independently, either project as a group, or everything together. The app system is defined in [system/compose.yml](system/compose.yml); monitoring infrastructure is defined in [monitoring/docker-compose.yml](monitoring/docker-compose.yml). Individual services restart automatically after process failure. Use `./stop-all.sh` to stop both projects while preserving their containers and data volumes. The React app remains available at http://localhost:5173, Grafana at http://localhost:3000, and generated coverage is linked from the control page when present.
 

@@ -123,7 +123,6 @@ fn build_decision_thresholds(
 ) -> Vec<DecisionParameter> {
     let mut thresholds = Vec::new();
     thresholds.extend(signal_qualification_thresholds(risk_appetite));
-    thresholds.extend(scout_qualification_thresholds(risk_appetite));
     thresholds.extend(historical_evidence_thresholds());
     thresholds.extend(counterfactual_relaxation_thresholds());
     thresholds.extend(order_selection_thresholds(risk_appetite));

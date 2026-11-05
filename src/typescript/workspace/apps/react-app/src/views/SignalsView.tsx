@@ -1,7 +1,7 @@
 import { useEffect, useMemo } from 'react';
 import type { Connection } from '../connection';
 import { SignalsModel } from '../models/SignalsModel';
-import { useBehaviorSnapshot } from '../use_behavior_snapshot';
+import { useBehaviorSnapshot } from '@workspace/ui-platform';
 import { FeedToolbar } from './FeedToolbar';
 
 type Props = { symbol: string; symbols: string[]; connection: Connection; streamKey: string; onSymbolChange: (symbol: string) => void };

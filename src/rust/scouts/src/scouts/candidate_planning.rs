@@ -282,6 +282,13 @@ pub struct ScoutLifecycleObserveRequest {
     pub candidates: Vec<strategies::DatedCarryEntryCandidate>,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct DatedCarryScoutInputsRequest {
+    pub request_id: String,
+    pub now_ms: u64,
+    pub candidates: Vec<serde_json::Value>,
+}
+
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct ScoutLifecycleObserveResponse {
     pub finalized_count: usize,

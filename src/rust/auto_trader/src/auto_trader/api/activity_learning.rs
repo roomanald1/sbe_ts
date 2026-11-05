@@ -10,10 +10,6 @@ struct ActivityLearningMetrics {
     learning_win_rate: Option<f64>,
     preferred_order_type: Option<String>,
     parameter_profile_samples: [usize; 3],
-    scout_open_positions: usize,
-    scout_learning_samples: usize,
-    scout_learning_win_rate: Option<f64>,
-    scout_learning_realized_pnl: f64,
 }
 
 fn calculate_activity_learning_metrics(
@@ -80,23 +76,6 @@ fn calculate_activity_learning_metrics(
     // trade count so a trade is counted once, and its return (including fees)
     // determines whether it was positive.
     let learning_samples = exit_learning_samples;
-    let scout_open_positions = settings
-        .positions
-        .values()
-        .filter(|position| position.quantity.abs() > 1e-12 && position.scout_entry)
-        .count();
-    let scout_learning = settings.learned_context_stats.iter()
-        .filter(|(key, stats)| key.starts_with("scout:") && key.ends_with(":trade")
-            && stats.updated_at_ms >= today_start)
-        .map(|(_, stats)| (stats.samples, stats.positive, stats.realized_pnl))
-        .fold((0usize, 0usize, 0.0), |mut total, stats| {
-            total.0 = total.0.saturating_add(stats.0);
-            total.1 = total.1.saturating_add(stats.1);
-            total.2 += stats.2;
-            total
-        });
-    let scout_learning_win_rate = (scout_learning.0 > 0)
-        .then_some(scout_learning.1 as f64 / scout_learning.0 as f64);
     let preferred_order_type = ALL_ORDER_TYPES.iter().filter_map(|kind| {
         let quality_suffix = format!(":exec:{kind:?}");
         let stats = settings.learned_execution_stats.iter()
@@ -115,8 +94,6 @@ fn calculate_activity_learning_metrics(
             && stats.2 / stats.0 as f64 >= 0.60)
             .then_some((format!("{kind:?}"), stats.4 / stats.3))
     }).min_by(|a, b| a.1.total_cmp(&b.1)).map(|(kind, _)| kind);
-    let scout_learning_samples = scout_learning.0;
-    let scout_learning_realized_pnl = scout_learning.2;
     let parameter_profile_samples = std::array::from_fn(|profile| {
         settings.learned_execution_stats.iter()
             .filter(|(key, stats)| key.contains(&format!(":P{profile}:")) && stats.updated_at_ms >= today_start)
@@ -137,9 +114,5 @@ fn calculate_activity_learning_metrics(
         learning_win_rate,
         preferred_order_type,
         parameter_profile_samples,
-        scout_open_positions,
-        scout_learning_samples,
-        scout_learning_win_rate,
-        scout_learning_realized_pnl,
     }
 }

@@ -925,10 +925,10 @@
         "overrides": []
       },
       "gridPos": {
-        "x": 16,
-        "y": 71,
-        "w": 8,
-        "h": 4
+        "x": 0,
+        "y": 88,
+        "w": 24,
+        "h": 5
       },
       "id": 17,
       "options": {
@@ -942,12 +942,12 @@
       },
       "targets": [
         {
-          "expr": "app_sqlite_database_size_bytes",
+          "expr": "app_sqlite_database_size_bytes{database=\"signals.sqlite\"}",
           "legendFormat": "{{database}}",
           "refId": "A"
         }
       ],
-      "title": "SQLite database size",
+      "title": "SQLite database size · signals.sqlite",
       "type": "timeseries"
     },
     {
@@ -2007,6 +2007,120 @@
       ],
       "title": "Last maintenance error",
       "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 93,
+        "w": 24,
+        "h": 5
+      },
+      "id": 215,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "single"
+        }
+      },
+      "targets": [
+        {
+          "expr": "app_sqlite_database_size_bytes{database=\"auto_trader_state.sqlite\"}",
+          "legendFormat": "{{database}}",
+          "refId": "A"
+        }
+      ],
+      "title": "SQLite database size · auto_trader_state.sqlite",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 98,
+        "w": 24,
+        "h": 5
+      },
+      "id": 216,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "single"
+        }
+      },
+      "targets": [
+        {
+          "expr": "app_sqlite_database_size_bytes{database=\"learning_state.sqlite\"}",
+          "legendFormat": "{{database}}",
+          "refId": "A"
+        }
+      ],
+      "title": "SQLite database size · learning_state.sqlite",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 103,
+        "w": 24,
+        "h": 5
+      },
+      "id": 217,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "single"
+        }
+      },
+      "targets": [
+        {
+          "expr": "app_persistent_store_size_bytes{store=\"positions.json\"}",
+          "legendFormat": "{{store}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Positions store size · positions.json",
+      "type": "timeseries"
     }
   ],
   "refresh": "15s",

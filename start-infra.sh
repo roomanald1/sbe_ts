@@ -7,5 +7,7 @@ if [[ ! -f monitoring/.env ]]; then
   echo "Missing monitoring/.env. Copy monitoring/.env.example to monitoring/.env and set a unique Grafana password." >&2
   exit 1
 fi
+./nx build homepage
+./nx build benchmarks
 docker compose -p sbe-infra -f monitoring/docker-compose.yml up -d "$@"
 echo "Infrastructure is running. Service control: http://localhost:8080"

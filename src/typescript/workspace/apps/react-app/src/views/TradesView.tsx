@@ -1,6 +1,6 @@
 import { formatForSymbol } from '../instrument_precision';
 import { memo, useEffect, useId, useMemo, useRef } from 'react';
-import { usePausedValue } from '../use_paused_value';
+import { usePausedValue } from '@workspace/ui-platform';
 import { AgGridReact } from 'ag-grid-react';
 import {
   CellStyleModule,
@@ -16,7 +16,7 @@ import { FeedToolbar } from './FeedToolbar';
 import type { Connection } from '../connection';
 import { TradesModel } from '../models/TradesModel';
 import type { RecentTrade } from '../models/TradesModel';
-import { useBehaviorSnapshot } from '../use_behavior_snapshot';
+import { useBehaviorSnapshot } from '@workspace/ui-platform';
 
 ModuleRegistry.registerModules([
   CellStyleModule,

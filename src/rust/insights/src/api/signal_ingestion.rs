@@ -79,6 +79,8 @@ async fn register_scout(
     axum::extract::State(runtime): axum::extract::State<Arc<SignalRuntime>>,
     Json(sample): Json<ScoutScoutRegistration>,
 ) -> Result<StatusCode, (StatusCode, String)> {
+    // Scouts owns the durable instance and outcome state. Insights keeps only
+    // this transient price-path tracker so market exits stay beside feed data.
     let now = now_ms();
     if !valid_scout_sample(&sample, now) {
         return Err((StatusCode::BAD_REQUEST, "Invalid scout scout sample".to_owned()));
@@ -157,7 +159,7 @@ async fn ingest_signal_event(
         .try_lock()
         .map(|learning| learning.weight)
         .unwrap_or(0.0);
-    let mut scout_learning_outcomes = Vec::new();
+    let mut scout_learning_outcomes = Vec::<(String, SignalEvaluation)>::new();
     let (snapshot, records, market, event_timestamp) = {
         let event_timestamp = match &request.event {
             SignalFeedEvent::Price { timestamp, .. }
@@ -226,7 +228,9 @@ async fn ingest_signal_event(
                 for outcome in outcomes {
                     if outcome.scout_id.is_some() {
                         crate::service_log!("INFO", "Scout scout completed: sample_id={} symbol={} exit_reason={} age_seconds={}", outcome.scout_id.as_deref().unwrap_or("unknown"), outcome.evaluation.symbol, outcome.scout_exit_reason.unwrap_or("unknown"), outcome.evaluation.horizon_seconds);
-                        scout_learning_outcomes.push(outcome.evaluation.clone());
+                        if let Some(sample_id) = outcome.scout_id.clone() {
+                            scout_learning_outcomes.push((sample_id, outcome.evaluation.clone()));
+                        }
                     }
                     if outcome.legacy.horizon_seconds == 60 {
                         if let Ok(mut learning) = runtime.news_learning.try_lock() {
@@ -432,9 +436,8 @@ async fn ingest_signal_event(
         }
     }
     if !scout_learning_outcomes.is_empty() {
-        let store = runtime.store.clone();
         tokio::spawn(async move {
-            publish_scout_learning_outcomes(&store, scout_learning_outcomes).await;
+            publish_scout_learning_outcomes(scout_learning_outcomes).await;
         });
     }
     if let Some(snapshot) = snapshot.as_ref() {
@@ -471,117 +474,45 @@ async fn ingest_signal_event(
     Ok(Json(snapshot))
 }
 
-async fn publish_scout_learning_outcomes(store: &SignalStore, outcomes: Vec<SignalEvaluation>) {
+async fn publish_scout_learning_outcomes(outcomes: Vec<(String, SignalEvaluation)>) {
     let _permit = SCOUT_LEARNING_DELIVERY_LIMIT
         .get_or_init(|| Semaphore::new(2))
         .acquire()
         .await
         .expect("scout learning delivery semaphore remains open");
     let client = POSITION_MANAGEMENT_CLIENT.get_or_init(reqwest::Client::new);
-    for evaluation in outcomes {
-        let decisions = match store
-            .load_scout_decisions_near(
-                evaluation.symbol.clone(),
-                evaluation.signal_timestamp,
-                evaluation.signal_timestamp.saturating_add(1),
-            )
-            .await
-        {
-            Ok(decisions) => decisions,
-            Err(error) => {
-                crate::service_log!(
-                    "WARN",
-                    "Could not load scout decisions for learning: {error}"
-                );
-                continue;
-            }
-        };
-        for decision in decisions {
-            let Some(signal_timestamp) = decision["signal_timestamp"].as_u64() else {
-                continue;
-            };
-            if decision["status"] != "scouted"
-                || decision["scout"] != true
-                || signal_timestamp > evaluation.signal_timestamp
-                || evaluation.signal_timestamp.saturating_sub(signal_timestamp) > 10_000
+    let scouts_base = std::env::var("SCOUTS_SERVICE_URL")
+        .unwrap_or_else(|_| "http://127.0.0.1:3011".to_owned());
+    for (decision_id, evaluation) in outcomes {
+        let payload = serde_json::json!({
+            "decision_id": decision_id,
+            "symbol": evaluation.symbol,
+            "signal_timestamp_ms": evaluation.signal_timestamp,
+            "evaluated_timestamp_ms": evaluation.evaluated_timestamp,
+            "taker_fee_rate": evaluation.taker_fee_rate,
+            "long_net_percent": evaluation.long_net_percent,
+            "short_net_percent": evaluation.short_net_percent,
+        });
+        for attempt in 0..3 {
+            match client
+                .post(format!("{}/scout-markout", scouts_base.trim_end_matches('/')))
+                .timeout(Duration::from_secs(2))
+                .json(&payload)
+                .send()
+                .await
+                .and_then(reqwest::Response::error_for_status)
             {
-                continue;
-            }
-            let direction = match decision["direction"].as_str() {
-                Some("bullish") => "bullish",
-                Some("bearish") => "bearish",
-                _ => continue,
-            };
-            let Some(decision_id) = decision["decision_id"].as_str() else {
-                continue;
-            };
-            let Some(learning_context) = decision["scout_learning_context"].as_str() else {
-                continue;
-            };
-            let Some(notional_usd) = decision["scout_notional_usd"].as_f64() else {
-                continue;
-            };
-            let net_return_percent = if direction == "bullish" {
-                evaluation.long_net_percent
-            } else {
-                evaluation.short_net_percent
-            };
-            let Some(net_return_percent) = net_return_percent else {
-                continue;
-            };
-            let simulated_net_pnl_usd = notional_usd * net_return_percent / 100.0;
-            if !simulated_net_pnl_usd.is_finite() {
-                continue;
-            }
-            let mut payload = serde_json::json!({
-                "decision_id": decision_id,
-                "learning_context": learning_context,
-                "simulated_net_pnl_usd": simulated_net_pnl_usd,
-                "net_return_percent": net_return_percent,
-                "signal_timestamp_ms": evaluation.signal_timestamp,
-                "evaluated_timestamp_ms": evaluation.evaluated_timestamp,
-                "taker_fee_rate": evaluation.taker_fee_rate,
-                "symbol": evaluation.symbol.as_str(),
-                "strategy": decision["strategy"].as_str().unwrap_or(""),
-                "strategy_parameters": decision.get("strategy_parameters"),
-                "exit_scenario": decision["scout_exit_scenario"].as_str().unwrap_or("strategy"),
-                "sample_group_id": decision["scout_sample_group_id"].as_str().unwrap_or(""),
-                "scout_parameter_key": decision.get("scout_parameter_key"),
-                "scout_parameter_value": decision.get("scout_parameter_value"),
-                "scout_parameter_profile_symbol": decision.get("scout_parameter_profile_symbol"),
-                "scout_comparison_id": decision.get("scout_comparison_id"),
-                "scout_comparison_role": decision.get("scout_comparison_role"),
-                "scout_comparison_zero_role": decision.get("scout_comparison_zero_role"),
-                "scout_comparison_parameter_key": decision.get("scout_comparison_parameter_key"),
-                "scout_comparison_parameter_value": decision.get("scout_comparison_parameter_value"),
-                "scout_comparison_parameter_profile_symbol": decision.get("scout_comparison_parameter_profile_symbol"),
-            });
-            if let Some(specs) = decision.get("strategy_parameter_specs") {
-                payload["strategy_parameter_specs"] = specs.clone();
-            }
-            let scouts_base = std::env::var("SCOUTS_SERVICE_URL")
-                .unwrap_or_else(|_| "http://127.0.0.1:3011".to_owned());
-            for attempt in 0..3 {
-                match client
-                    .post(format!("{}/scout-outcome", scouts_base.trim_end_matches('/')))
-                    .timeout(Duration::from_secs(2))
-                    .json(&payload)
-                    .send()
-                    .await
-                    .and_then(reqwest::Response::error_for_status)
-                {
-                    Ok(response) => {
-                        crate::service_log!("INFO", "Scout learning outcome delivered: sample_id={} symbol={} scenario={} status={} attempt={}", decision_id, evaluation.symbol, decision["scout_exit_scenario"].as_str().unwrap_or("strategy"), response.status(), attempt + 1);
-                        break;
-                    }
-                    Err(error) if attempt == 2 => crate::service_log!(
-                        "WARN",
-                        "Could not deliver fee-aware scout Scout learning outcome sample_id={} symbol={}: {error}",
-                        decision_id,
-                        evaluation.symbol
-                    ),
-                    Err(_) => tokio::time::sleep(Duration::from_millis(100 * (attempt + 1))).await,
+                Ok(response) => {
+                    crate::service_log!("INFO", "Scout markout delivered: sample_id={} symbol={} status={} attempt={}", decision_id, evaluation.symbol, response.status(), attempt + 1);
+                    break;
                 }
+                Err(error) if attempt == 2 => crate::service_log!(
+                    "WARN",
+                    "Could not deliver scout markout sample_id={} symbol={}: {error}",
+                    decision_id,
+                    evaluation.symbol
+                ),
+                Err(_) => tokio::time::sleep(Duration::from_millis(100 * (attempt + 1))).await,
             }
         }
     }

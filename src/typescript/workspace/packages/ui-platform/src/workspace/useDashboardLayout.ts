@@ -1,22 +1,25 @@
 import { useCallback, useEffect, useState } from 'react';
 import {
-  DASHBOARD_COLUMNS, DASHBOARD_LAYOUT_KEY, DASHBOARD_LAYOUTS_KEY,
-  DASHBOARD_ACTIVE_LAYOUT_KEY, type DashboardWidget, type DashboardWidgetType,
+  DASHBOARD_COLUMNS, type DashboardLayoutConfig, type DashboardWidget,
   type SavedDashboardLayout, defaultDashboardLayout, firstOpenPosition,
   findFreeLanding, makeWidget, packDashboardWidgets, shiftWidgetsForAnchor,
-} from './dashboard_layout';
-import { loadActiveLayoutId, loadSavedLayouts } from './dashboard_layout_storage';
+} from './dashboard_layout.js';
+import { loadActiveLayoutId, loadSavedLayouts } from './dashboard_layout_storage.js';
 
 type ResizePreview = { id: string; x: number; y: number; w: number; h: number };
 
-export function useDashboardLayout(selectedSymbol: string) {
-  const [savedLayouts, setSavedLayouts] = useState<SavedDashboardLayout[]>(loadSavedLayouts);
+export type WorkspaceLayoutConfig<TType extends string> = DashboardLayoutConfig<TType> & {
+  symbolWidgetTypes?: readonly TType[];
+};
+
+export function useDashboardLayout<TType extends string>(selectedSymbol: string, config: WorkspaceLayoutConfig<TType>) {
+  const [savedLayouts, setSavedLayouts] = useState<SavedDashboardLayout<TType>[]>(() => loadSavedLayouts(config));
   const [activeLayoutId, setActiveLayoutId] = useState(() => {
-    const savedId = loadActiveLayoutId();
+    const savedId = loadActiveLayoutId(config);
     return savedLayouts.some(({ id }) => id === savedId) ? savedId : savedLayouts[0]?.id ?? 'default';
   });
-  const [widgets, setWidgets] = useState<DashboardWidget[]>(() =>
-    savedLayouts.find(({ id }) => id === activeLayoutId)?.widgets ?? savedLayouts[0]?.widgets ?? defaultDashboardLayout());
+  const [widgets, setWidgets] = useState<DashboardWidget<TType>[]>(() =>
+    savedLayouts.find(({ id }) => id === activeLayoutId)?.widgets ?? savedLayouts[0]?.widgets ?? defaultDashboardLayout(config.defaultWidgetTypes));
   const [widgetStoreOpen, setWidgetStoreOpen] = useState(false);
   const [draggingWidgetId, setDraggingWidgetId] = useState<string | null>(null);
   const [resizePreview, setResizePreview] = useState<ResizePreview | null>(null);
@@ -26,20 +29,20 @@ export function useDashboardLayout(selectedSymbol: string) {
   useEffect(() => {
     setSavedLayouts((current) => current.map((layout) => layout.id === activeLayoutId ? { ...layout, widgets } : layout));
     try {
-      window.localStorage.setItem(DASHBOARD_LAYOUT_KEY, JSON.stringify({ version: 2, widgets }));
-      window.localStorage.setItem(DASHBOARD_ACTIVE_LAYOUT_KEY, activeLayoutId);
+      window.localStorage.setItem(config.storageKeys.layout, JSON.stringify({ version: 2, widgets }));
+      window.localStorage.setItem(config.storageKeys.activeLayout, activeLayoutId);
     } catch { /* Browser storage is optional. */ }
-  }, [widgets, activeLayoutId]);
+  }, [widgets, activeLayoutId, config]);
   useEffect(() => {
-    try { window.localStorage.setItem(DASHBOARD_LAYOUTS_KEY, JSON.stringify(savedLayouts)); }
+    try { window.localStorage.setItem(config.storageKeys.layouts, JSON.stringify(savedLayouts)); }
     catch { /* Browser storage is optional. */ }
-  }, [savedLayouts]);
+  }, [savedLayouts, config]);
   useEffect(() => {
     if (!selectedSymbol) return;
     setWidgets((current) => current.map((widget) =>
-      ['chart', 'book', 'trades'].includes(widget.type) && !widget.symbol
+      (config.symbolWidgetTypes ?? []).includes(widget.type) && !widget.symbol
         ? { ...widget, symbol: selectedSymbol } : widget));
-  }, [selectedSymbol]);
+  }, [selectedSymbol, config]);
 
   const chooseLayout = (id: string) => {
     const layout = savedLayouts.find((item) => item.id === id);
@@ -66,9 +69,9 @@ export function useDashboardLayout(selectedSymbol: string) {
     setLayoutNameInput('');
     setLayoutRenameOpen(false);
   };
-  const addWidget = (type: DashboardWidgetType) => setWidgets((current) => {
+  const addWidget = (type: TType) => setWidgets((current) => {
     const position = firstOpenPosition(current);
-    const symbol = ['chart', 'book', 'trades'].includes(type) ? selectedSymbol : '';
+    const symbol = (config.symbolWidgetTypes ?? []).includes(type) ? selectedSymbol : '';
     return [...current, makeWidget(type, symbol, position.x, position.y)];
   });
   const removeWidget = (id: string) => setWidgets((current) => current.filter((widget) => widget.id !== id));

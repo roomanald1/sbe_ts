@@ -185,7 +185,6 @@ pub fn router() -> Router {
             .timeout(Duration::from_secs(5))
             .build()
             .unwrap_or_else(|_| reqwest::Client::new()),
-        scout_configuration: Arc::new(std::sync::RwLock::new(scouts::ScoutConfiguration::default())),
         latest_daily_strategy_snapshot: Arc::new(Mutex::new(None)),
         strategy_diagnostic: Arc::new(std::sync::Mutex::new(Vec::new())),
         enabled: Arc::new(AtomicBool::new(enabled)),
@@ -217,9 +216,6 @@ pub fn router() -> Router {
     };
     start_settings_persistence_worker(&state);
     start_learning_feedback_worker(&state);
-    start_scout_configuration_cache(&state);
-    let legacy_state = state.clone();
-    tokio::spawn(async move { import_legacy_scout_comparisons(&legacy_state).await; });
     let rates_worker_state = state.clone();
     tokio::spawn(async move {
         let mut ticker = interval(Duration::from_secs(30));
@@ -517,10 +513,6 @@ fn start_learning_feedback_worker(state: &AutoTraderState) {
                     settings.learned_execution_stats = snapshot.execution_learning;
                     changed = true;
                 }
-                if settings.learned_scout_parameter_variants != snapshot.scout_parameter_variants {
-                    settings.learned_scout_parameter_variants = snapshot.scout_parameter_variants;
-                    changed = true;
-                }
                 drop(settings);
                 if changed {
                     if let Err(error) = request_settings_persist(&profile_state) {
@@ -530,23 +522,6 @@ fn start_learning_feedback_worker(state: &AutoTraderState) {
             }
         });
     }
-}
-
-fn start_scout_configuration_cache(state: &AutoTraderState) {
-    let client = state.client.clone();
-    let cache = Arc::clone(&state.scout_configuration);
-    tokio::spawn(async move {
-        let base = std::env::var("SCOUTS_SERVICE_URL").unwrap_or_else(|_| "http://127.0.0.1:3011".into());
-        let mut ticker = interval(Duration::from_secs(2));
-        loop {
-            ticker.tick().await;
-            let Ok(response) = client.get(format!("{}/configuration", base.trim_end_matches('/')))
-                .timeout(Duration::from_secs(2)).send().await else { continue };
-            let Ok(response) = response.error_for_status() else { continue };
-            let Ok(configuration) = response.json::<scouts::ScoutConfiguration>().await else { continue };
-            if let Ok(mut current) = cache.write() { *current = configuration; }
-        }
-    });
 }
 
 async fn auto_trader_stream(State(state): State<AutoTraderState>, websocket: axum::extract::ws::WebSocketUpgrade) -> axum::response::Response {
@@ -610,28 +585,21 @@ async fn signal_ready(
 
     let incoming_symbols = dashboard.best.len() as u64;
     let settings = state.settings.lock().await;
-    let scout_configuration = state.scout_configuration();
     let generic_enabled = state.enabled.load(Ordering::Relaxed)
         && (settings.signal_strategies_enabled
             || settings
                 .strategies
                 .iter()
-                .any(|strategy| strategy.is_live_insight())
-            || scout_configuration.strategies.iter().filter_map(|name| Strategy::from_name(name)).any(|strategy| strategy.is_live_insight()));
+                .any(|strategy| strategy.is_live_insight()));
     if generic_enabled {
         let mut queue = state.pending_live_signals.lock().await;
         let mut prewarm_symbols = Vec::new();
         for signal in dashboard.best.iter().cloned() {
-            let scout_live = scout_configuration.strategies.iter()
-                .filter_map(|name| Strategy::from_name(name))
-                .filter(|strategy| strategy.is_live_insight())
-                .collect::<Vec<_>>();
-            let mut selected_live = settings
+            let selected_live = settings
                 .strategies
                 .iter()
                 .filter(|strategy| strategy.is_live_insight())
                 .collect::<Vec<_>>();
-            selected_live.extend(scout_live.iter());
             let has_subscription = if selected_live.is_empty() && settings.signal_strategies_enabled
             {
                 Strategy::any_live_strategy_receives(&signal)

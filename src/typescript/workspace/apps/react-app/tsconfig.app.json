@@ -22,5 +22,6 @@
     "erasableSyntaxOnly": true,
     "noFallthroughCasesInSwitch": true
   },
+  "references": [{ "path": "../../packages/ui-platform/tsconfig.lib.json" }],
   "include": ["src"]
 }

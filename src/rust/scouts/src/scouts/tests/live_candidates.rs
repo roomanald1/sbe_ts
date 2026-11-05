@@ -29,6 +29,37 @@ mod tests {
         ));
     }
 
+    #[tokio::test]
+    async fn generated_live_candidates_keep_the_strategy_for_plan_registration() {
+        let strategy = strategies::Strategy::LiveMomentum;
+        let parameters = strategy
+            .parameter_specs()
+            .into_iter()
+            .map(|spec| (spec.key.as_str().to_owned(), spec.default))
+            .collect::<BTreeMap<_, _>>();
+        let source = serde_json::json!({
+            "symbol":"BTC-USDT", "direction":"neutral", "timestamp":1_000_000,
+            "score":0.5, "strength":0.5,
+            "components":{
+                "momentum_by_window":[{"window_seconds":10,"value":0.01}],
+                "trend_volatility_units_by_window":[{"window_seconds":300,"value":0.5}]
+            }
+        });
+        let Json(candidates) = generate_live_candidates(Json(LiveScoutCandidatesRequest {
+            signals: vec![source],
+            profiles: vec![LiveScoutProfile {
+                symbol: "BTC-USDT".into(),
+                strategy: "live-momentum".into(),
+                parameters,
+            }],
+        }))
+        .await
+        .unwrap();
+
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0]["strategy"], "live-momentum");
+    }
+
     fn specs() -> Vec<ParameterSpec> {
         vec![
             ParameterSpec {

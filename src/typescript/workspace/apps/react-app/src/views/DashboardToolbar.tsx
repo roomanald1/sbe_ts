@@ -1,12 +1,13 @@
 import type { FeedSource } from '../connection';
-import { DASHBOARD_WIDGET_TYPES, WIDGET_LABELS, type DashboardWidgetType, type SavedDashboardLayout } from './dashboard_layout';
+import { DASHBOARD_WIDGET_TYPES, WIDGET_LABELS, type DashboardWidgetType } from '../dashboard/widget_catalog';
+import type { SavedDashboardLayout } from '@workspace/ui-platform';
 
 type Props = {
   dataView: 'markets' | 'users';
   onDataViewChange: (view: 'markets' | 'users') => void;
   feedSource: FeedSource;
   onFeedSourceChange: (source: FeedSource) => void;
-  layouts: SavedDashboardLayout[];
+  layouts: SavedDashboardLayout<DashboardWidgetType>[];
   activeLayoutId: string;
   onChooseLayout: (id: string) => void;
   name: string;

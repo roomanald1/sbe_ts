@@ -242,6 +242,20 @@ async fn carry_settlement_price(
 }
 
 async fn carry_publish(client: &reqwest::Client, base: &str, signal: &serde_json::Value) -> anyhow::Result<()> {
+    if signal.get("kind").and_then(serde_json::Value::as_str) == Some("scan") {
+        let scouts = std::env::var("SCOUTS_SERVICE_URL")
+            .unwrap_or_else(|_| "http://127.0.0.1:3011".into());
+        let scout_request = serde_json::json!({
+            "request_id": format!("dated-carry:{}", signal.get("emitted_at_ms").and_then(serde_json::Value::as_u64).unwrap_or_default()),
+            "now_ms": signal.get("emitted_at_ms"),
+            "candidates": signal.get("candidates").cloned().unwrap_or_else(|| serde_json::json!([])),
+        });
+        if let Err(error) = client.post(format!("{}/dated-carry-inputs", scouts.trim_end_matches('/')))
+            .json(&scout_request).send().await.and_then(reqwest::Response::error_for_status)
+        {
+            crate::service_log!("WARN", "Dated carry Scout scan delivery failed: {error}");
+        }
+    }
     client.post(format!("{base}/internal/auto-trader/dated-carry-signal"))
         .json(signal).send().await?.error_for_status()?;
     Ok(())

@@ -15,6 +15,62 @@ async fn post_dashboard(
     Ok(())
 }
 
+fn scout_payload(dashboard: &Value) -> Option<Value> {
+    let mut signals = dashboard.get("best")?.as_array()?.clone();
+    let markets = dashboard.get("markets");
+    signals.retain_mut(|signal| {
+        let Some(symbol) = signal.get("symbol").and_then(Value::as_str) else {
+            return false;
+        };
+        let Some(market) = markets.and_then(|markets| markets.get(symbol)) else {
+            return false;
+        };
+        let bid = market
+            .get("bids")
+            .and_then(Value::as_array)
+            .and_then(|levels| levels.first())
+            .and_then(|level| level.get("price"))
+            .and_then(Value::as_f64);
+        let ask = market
+            .get("asks")
+            .and_then(Value::as_array)
+            .and_then(|levels| levels.first())
+            .and_then(|level| level.get("price"))
+            .and_then(Value::as_f64);
+        let updated = market.get("updated_at_ms").and_then(Value::as_u64);
+        let (Some(bid), Some(ask), Some(updated)) = (bid, ask, updated) else {
+            return false;
+        };
+        if !bid.is_finite() || !ask.is_finite() || bid <= 0.0 || ask < bid {
+            return false;
+        }
+        signal["best_bid"] = json!(bid);
+        signal["best_ask"] = json!(ask);
+        signal["book_updated_at_ms"] = json!(updated);
+        signal["price"] = json!(bid + (ask - bid) / 2.0);
+        true
+    });
+    (!signals.is_empty()).then(|| json!({"signals":signals}))
+}
+
+async fn post_scout_dashboard(
+    client: &reqwest::Client,
+    endpoint: &str,
+    dashboard: &Value,
+) -> Result<(), reqwest::Error> {
+    let Some(payload) = scout_payload(dashboard) else {
+        return Ok(());
+    };
+    client
+        .post(endpoint)
+        .timeout(Duration::from_millis(300))
+        .json(&payload)
+        .send()
+        .await?
+        .error_for_status()?;
+    Ok(())
+}
+
 fn acknowledge_delivery(state: &LiveState, symbol: &str, dashboard: &Value) -> bool {
     if state
         .pending_delivery
@@ -39,9 +95,22 @@ async fn deliver_pending_once(state: &LiveState, client: &reqwest::Client, base:
         .map(|(symbol, dashboard)| {
             let client = client.clone();
             let endpoint = format!("{base}/internal/auto-trader/signal");
+            let scout_client = client.clone();
+            let scouts_base = std::env::var("SCOUTS_SERVICE_URL")
+                .unwrap_or_else(|_| "http://127.0.0.1:3011".into());
+            let scout_endpoint = format!("{}/live-inputs", scouts_base.trim_end_matches('/'));
             async move {
                 let started = Instant::now();
-                let result = post_dashboard(&client, &endpoint, &dashboard).await;
+                let (scout_result, result) = tokio::join!(
+                    post_scout_dashboard(&scout_client, &scout_endpoint, &dashboard),
+                    post_dashboard(&client, &endpoint, &dashboard),
+                );
+                if let Err(error) = scout_result {
+                    crate::service_log!(
+                        "WARN",
+                        "Live Scout input delivery failed for {symbol}: {error}"
+                    );
+                }
                 crate::latency::record_auto_trader_delivery(started.elapsed());
                 (symbol, dashboard, result)
             }
@@ -94,6 +163,19 @@ mod tests {
     fn state() -> LiveState {
         let (_, news) = watch::channel(Arc::new(NewsContext::default()));
         LiveState::new(news)
+    }
+
+    #[test]
+    fn scout_payload_adds_fresh_top_of_book_to_live_signals() {
+        let dashboard = json!({
+            "best":[{"symbol":"BTC-USDT","direction":"bullish"}],
+            "markets":{"BTC-USDT":{"bids":[{"price":99.0}],"asks":[{"price":101.0}],"updated_at_ms":1234}}
+        });
+        let payload = scout_payload(&dashboard).unwrap();
+        assert_eq!(payload["signals"][0]["best_bid"], 99.0);
+        assert_eq!(payload["signals"][0]["best_ask"], 101.0);
+        assert_eq!(payload["signals"][0]["book_updated_at_ms"], 1234);
+        assert_eq!(payload["signals"][0]["price"], 100.0);
     }
 
     #[tokio::test]

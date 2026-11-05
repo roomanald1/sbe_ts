@@ -7,7 +7,6 @@ async fn submit_and_record_selected_order(
         position_url,
         signal,
         exploratory,
-        scout,
         counterfactual_stop_loss_percent,
         counterfactual_take_profit_percent,
         effective_stop_loss_percent,
@@ -306,7 +305,6 @@ async fn submit_and_record_selected_order(
         counterfactual_take_profit_percent,
         evidence,
     );
-    audit_payload["scout"] = serde_json::json!(scout);
     audit_payload["trade_id"] = serde_json::json!(position_trade_id);
     audit_payload["effective_stop_loss_percent"] = serde_json::json!(effective_stop_loss_percent);
     audit_payload["effective_take_profit_percent"] =

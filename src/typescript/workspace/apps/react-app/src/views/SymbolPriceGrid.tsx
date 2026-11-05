@@ -7,7 +7,7 @@ import {
   type SymbolGridRow,
 } from '../models/SymbolPriceGridModel';
 import { FeedToolbar } from './FeedToolbar';
-import { useBehaviorSnapshot } from '../use_behavior_snapshot';
+import { useBehaviorSnapshot } from '@workspace/ui-platform';
 import { AgGridReact } from 'ag-grid-react';
 import {
   ClientSideRowModelModule,
