@@ -106,6 +106,7 @@ fn instance_row(audit: &Value, now: u64) -> Option<Value> {
         "scoutParameterEntryEligible": audit.get("scout_parameter_entry_eligible").and_then(Value::as_bool),
         "comparisonRole": string(audit,"scout_comparison_role"), "pairedDeltaPercent": paired_delta,
         "scoutComparisonId": comparison_id,
+        "scoutComparisonIds": audit.get("scout_comparison_ids").cloned().unwrap_or_else(|| json!([])),
         "scoutComparisonZeroRole": string(audit,"scout_comparison_zero_role"),
         "scoutComparisonParameterKey": string(audit,"scout_comparison_parameter_key"),
         "scoutComparisonParameterValue": number(audit,"scout_comparison_parameter_value"),
@@ -214,7 +215,6 @@ async fn get_scout_outcomes(
     let sort_by = query.sort_by.as_deref().filter(|field| matches!(*field, "symbol" | "strategy" | "status" | "exitScenario" | "scoutLevelPercent" | "openedAt" | "durationLabel" | "entryPrice" | "markPrice" | "netReturnLabel" | "displayNetReturnPercent" | "comparisonRole" | "pairedDeltaPercent" | "strength")).unwrap_or("openedAt");
     let descending = query.sort_direction.as_deref() != Some("asc");
     sort_rows(&mut rows, sort_by, descending);
-    rows.truncate(5_000);
     let all_summary=count_json(count_rows(&rows,false));
     let live_summary=count_json(count_rows(&rows,true));
     let mut pending_parameters = BTreeMap::<
@@ -316,5 +316,19 @@ mod scout_report_tests {
         assert_eq!(rows.iter().map(|row| row["decisionId"].as_str().unwrap()).collect::<Vec<_>>(), vec!["older", "middle", "newer"]);
         sort_rows(&mut rows, "openedAt", false);
         assert_eq!(rows.iter().map(|row| row["decisionId"].as_str().unwrap()).collect::<Vec<_>>(), vec!["older", "middle", "newer"]);
+    }
+
+    #[test]
+    fn scout_history_can_exceed_five_thousand_rows() {
+        let rows = (0..5_002)
+            .map(|index| {
+                let mut row = audit();
+                row["decision_id"] = json!(format!("live-{index}"));
+                row["strategy"] = json!("live-trade-flow");
+                instance_row(&row, 2_000).unwrap()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(rows.len(), 5_002);
+        assert_eq!(count_rows(&rows, true).total, 5_002);
     }
 }

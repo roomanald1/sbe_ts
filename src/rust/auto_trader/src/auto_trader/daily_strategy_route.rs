@@ -39,6 +39,26 @@ async fn receive_daily_strategy_signals(
             "Daily strategy signal batch is stale".into(),
         ));
     }
+    if batch.refresh_only {
+        let mut latest = state.latest_daily_strategy_snapshot.lock().await;
+        if let Some(current) = latest.as_mut() {
+            current.as_of_ms = batch.snapshot.as_of_ms;
+        } else {
+            let mut initial = batch.snapshot;
+            initial.diagnostics = batch.diagnostics.clone();
+            for diagnostic in &batch.diagnostics {
+                for item in &diagnostic.symbols {
+                    initial.evaluated_strategy_symbols
+                        .insert((diagnostic.strategy.clone(), item.symbol.clone()));
+                }
+            }
+            *latest = Some(initial);
+            if let Ok(mut current) = state.strategy_diagnostic.lock() {
+                *current = batch.diagnostics;
+            }
+        }
+        return Ok(StatusCode::ACCEPTED);
+    }
     let mut snapshot = batch.snapshot;
     if snapshot.generated_signals.iter().any(|signal| {
         !signal.strategy_candidate

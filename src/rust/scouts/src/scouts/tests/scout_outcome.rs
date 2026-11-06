@@ -33,6 +33,7 @@ mod scout_outcome_tests {
             scout_parameter_value: None,
             scout_parameter_profile_symbol: None,
             scout_comparison_id: None,
+            scout_comparison_ids: Vec::new(),
             scout_comparison_role: None,
             scout_comparison_zero_role: None,
             scout_comparison_parameter_key: None,

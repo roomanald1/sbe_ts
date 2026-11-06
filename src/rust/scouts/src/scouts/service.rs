@@ -12,6 +12,17 @@ struct ServiceState {
     scout: ScoutState,
 }
 
+fn schedule_scout_outbox_flush(service: &ServiceState) {
+    let scout = service.scout.clone();
+    let client = service.client.clone();
+    let learning_url = service.learning_url.clone();
+    tokio::spawn(async move {
+        if let Err((_, error)) = flush_scout_outbox(&scout, &client, &learning_url).await {
+            eprintln!("WARN Scout outbox delivery deferred: {error}");
+        }
+    });
+}
+
 pub fn router(learning_url: String, auto_trader_url: String) -> Router {
     let configured_path = std::env::var_os("SCOUTS_STATE_PATH").map(PathBuf::from);
     let state_path = configured_path
@@ -169,6 +180,74 @@ async fn set_scout_configuration(
     Ok(StatusCode::ACCEPTED)
 }
 
+const MAX_DAILY_PAIRED_VARIANTS: usize = 3;
+
+fn daily_parameter_batch_key(signal: &serde_json::Value) -> String {
+    let decision = &signal["strategy_decision"];
+    let baseline = decision
+        .get("scout_parameter_baseline_decision")
+        .unwrap_or(decision);
+    format!(
+        "{}|{}|{}|{}|{}",
+        signal["strategy"].as_str().unwrap_or_default(),
+        signal["symbol"].as_str().unwrap_or_default(),
+        signal["direction"].as_str().unwrap_or_default(),
+        baseline["bar_close_timestamp"]
+            .as_u64()
+            .or_else(|| baseline["monthly_anchor_close_time_ms"].as_u64())
+            .or_else(|| signal["timestamp"].as_u64())
+            .unwrap_or_default(),
+        baseline["strategy_parameters"]
+    )
+}
+
+fn group_daily_parameter_variants(
+    signals: Vec<serde_json::Value>,
+) -> Vec<(usize, serde_json::Value, Vec<serde_json::Value>, String)> {
+    let mut groups = BTreeMap::<String, (usize, Vec<serde_json::Value>)>::new();
+    for (index, signal) in signals.into_iter().enumerate() {
+        let is_probe = signal
+            .get("strategy_decision")
+            .and_then(|decision| decision.get("scout_parameter_probe"))
+            .and_then(serde_json::Value::as_bool)
+            == Some(true);
+        let key = if is_probe {
+            format!("probe:{}", daily_parameter_batch_key(&signal))
+        } else {
+            format!("single:{index}")
+        };
+        let entry = groups.entry(key).or_insert_with(|| (index, Vec::new()));
+        entry.0 = entry.0.min(index);
+        entry.1.push(signal);
+    }
+    let mut batches = groups
+        .into_iter()
+        .map(|(key, (index, mut signals))| {
+            signals.sort_by(|left, right| {
+                left["strategy_decision"]["scout_parameter_key"]
+                    .as_str()
+                    .cmp(&right["strategy_decision"]["scout_parameter_key"].as_str())
+                    .then_with(|| {
+                        left["strategy_decision"]["scout_parameter_value"]
+                            .as_f64()
+                            .partial_cmp(&right["strategy_decision"]["scout_parameter_value"].as_f64())
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    })
+            });
+            if key.starts_with("probe:") && signals.len() > MAX_DAILY_PAIRED_VARIANTS {
+                let day = signals[0]["timestamp"].as_u64().unwrap_or_default() / 86_400_000;
+                let offset = day as usize % signals.len();
+                signals.rotate_left(offset);
+                signals.truncate(MAX_DAILY_PAIRED_VARIANTS);
+            }
+            let batch_id = probe_id(&key);
+            (index, signals[0].clone(), signals, batch_id)
+        })
+        .collect::<Vec<_>>();
+    batches.sort_by_key(|batch| batch.0);
+    batches
+}
+
 async fn receive_daily_scout_inputs(
     State(service): State<ServiceState>,
     Json(request): Json<DailyScoutSignalsRequest>,
@@ -179,7 +258,8 @@ async fn receive_daily_scout_inputs(
     let configuration = service.scout.data.lock().await.scout_configuration.clone();
     let mut candidates = Vec::new();
     let mut portfolio_templates = Vec::new();
-    for (index, signal) in request.signals.into_iter().enumerate() {
+    let signal_batches = group_daily_parameter_variants(request.signals);
+    for (index, signal, probe_signals, batch_id) in signal_batches {
         let Some(strategy_name) = signal.get("strategy").and_then(serde_json::Value::as_str) else { continue };
         if !configuration.strategies.iter().any(|selected| selected == strategy_name) { continue; }
         let Some(strategy) = strategies::Strategy::from_name(strategy_name) else { continue };
@@ -243,7 +323,7 @@ async fn receive_daily_scout_inputs(
             portfolio_templates.push(template);
             continue;
         }
-        let (audit_templates, entry_eligible) = if let Some((key, value)) = probe {
+        let (audit_templates, entry_eligible, sample_group_id) = if let Some((_key, _value)) = probe {
             let Some(baseline_decision) = signal
                 .get("strategy_decision")
                 .and_then(|decision| decision.get("scout_parameter_baseline_decision"))
@@ -270,14 +350,43 @@ async fn receive_daily_scout_inputs(
                 baseline_decision_result,
                 strategies::StrategyDecision::Enter | strategies::StrategyDecision::Scout
             );
-            let variant_eligible = matches!(
-                decision,
-                strategies::StrategyDecision::Enter | strategies::StrategyDecision::Scout
-            );
+            let mut eligible_variants = Vec::new();
+            for probe_signal in &probe_signals {
+                let variant_decision = probe_signal
+                    .get("strategy_decision")
+                    .cloned()
+                    .unwrap_or_default();
+                let variant_parameters = variant_decision
+                    .get("strategy_parameters")
+                    .cloned()
+                    .and_then(|value| serde_json::from_value::<BTreeMap<String, f64>>(value).ok())
+                    .unwrap_or_default();
+                let variant_input = strategies::StrategyInput::from_candidate_json(
+                    probe_signal.clone(),
+                    variant_parameters.clone(),
+                )
+                .map_err(|error| (StatusCode::BAD_REQUEST, error))?;
+                let variant_result = strategy
+                    .evaluate(&variant_input)
+                    .unwrap_or(strategies::StrategyDecision::Reject);
+                if matches!(variant_result, strategies::StrategyDecision::Enter | strategies::StrategyDecision::Scout) {
+                    let Some((variant_key, variant_value)) = variant_decision
+                        .get("scout_parameter_key").and_then(serde_json::Value::as_str)
+                        .zip(variant_decision.get("scout_parameter_value").and_then(serde_json::Value::as_f64))
+                    else { continue; };
+                    let variant_key = variant_key.to_owned();
+                    eligible_variants.push((
+                        variant_decision,
+                        variant_parameters,
+                        variant_key,
+                        variant_value,
+                    ));
+                }
+            }
             // Only compare realized positions that both started from this
             // signal. A rejected side is not a zero-return observation: it
             // would compare different entry opportunities, not parameters.
-            if !paired_probe_eligible(baseline_eligible, variant_eligible) {
+            if !paired_probe_eligible(baseline_eligible, !eligible_variants.is_empty()) {
                 continue;
             }
             let profile_symbol = signal
@@ -285,63 +394,58 @@ async fn receive_daily_scout_inputs(
                 .and_then(|decision| decision.get("scout_parameter_profile_symbol"))
                 .and_then(serde_json::Value::as_str)
                 .unwrap_or(symbol);
-            let mut templates = Vec::with_capacity(2);
-            if baseline_eligible {
-                let mut baseline_template = template.clone();
-                baseline_template.strategy_only = true;
-                baseline_template.parameter_entry_eligible = Some(true);
-                baseline_template.base_audit["strategy_decision"] = baseline_decision;
-                baseline_template.base_audit["strategy_parameters"] =
-                    serde_json::to_value(&baseline_parameters).unwrap_or_default();
-                baseline_template.base_audit["stop_loss_percent"] = serde_json::json!(
-                    baseline_parameters
-                        .get("stop_loss_percent")
-                        .copied()
-                        .unwrap_or(configuration.stop_loss_percent)
-                );
-                baseline_template.base_audit["take_profit_percent"] = serde_json::json!(
-                    baseline_parameters
-                        .get("take_profit_percent")
-                        .copied()
-                        .unwrap_or(configuration.take_profit_percent)
-                );
-                baseline_template.base_audit["scout_comparison_role"] =
-                    serde_json::json!("baseline");
-                baseline_template.base_audit["scout_comparison_parameter_key"] =
-                    serde_json::json!(key);
-                baseline_template.base_audit["scout_comparison_parameter_value"] =
-                    serde_json::json!(value);
-                baseline_template.base_audit["scout_comparison_parameter_profile_symbol"] =
-                    serde_json::json!(profile_symbol);
-                baseline_template.base_audit.as_object_mut().map(|audit| {
-                    audit.remove("scout_parameter_key");
-                    audit.remove("scout_parameter_value");
-                    audit.remove("scout_parameter_profile_symbol");
-                    audit.remove("scout_parameter_entry_eligible");
-                });
-                templates.push(baseline_template);
-            }
-            if variant_eligible {
-                let mut variant_template = template;
+            let mut templates = Vec::with_capacity(eligible_variants.len() + 1);
+            let comparison_ids = eligible_variants.iter().map(|(_, _, variant_key, variant_value)| {
+                format!("scout-pair:{}", probe_id(&format!("{batch_id}|{variant_key}|{variant_value:.8}")))
+            }).collect::<Vec<_>>();
+            let mut baseline_template = template.clone();
+            baseline_template.strategy_only = true;
+            baseline_template.parameter_entry_eligible = Some(true);
+            baseline_template.base_audit["strategy_decision"] = baseline_decision;
+            baseline_template.base_audit["strategy_parameters"] =
+                serde_json::to_value(&baseline_parameters).unwrap_or_default();
+            baseline_template.base_audit["stop_loss_percent"] = serde_json::json!(
+                baseline_parameters.get("stop_loss_percent").copied().unwrap_or(configuration.stop_loss_percent)
+            );
+            baseline_template.base_audit["take_profit_percent"] = serde_json::json!(
+                baseline_parameters.get("take_profit_percent").copied().unwrap_or(configuration.take_profit_percent)
+            );
+            baseline_template.base_audit["scout_comparison_role"] = serde_json::json!("baseline");
+            baseline_template.base_audit["scout_comparison_ids"] = serde_json::json!(comparison_ids);
+            baseline_template.base_audit["scout_comparison_parameter_profile_symbol"] = serde_json::json!(profile_symbol);
+            baseline_template.base_audit.as_object_mut().map(|audit| {
+                audit.remove("scout_parameter_key");
+                audit.remove("scout_parameter_value");
+                audit.remove("scout_parameter_profile_symbol");
+                audit.remove("scout_parameter_entry_eligible");
+            });
+            templates.push(baseline_template);
+            for (variant_decision, variant_parameters, variant_key, variant_value) in eligible_variants {
+                let comparison_id = format!("scout-pair:{}", probe_id(&format!("{batch_id}|{variant_key}|{variant_value:.8}")));
+                let mut variant_template = template.clone();
                 variant_template.strategy_only = true;
                 variant_template.parameter_entry_eligible = Some(true);
-                variant_template.base_audit["scout_comparison_role"] =
-                    serde_json::json!("variant");
-                variant_template.base_audit["scout_comparison_parameter_key"] =
-                    serde_json::json!(key);
-                variant_template.base_audit["scout_comparison_parameter_value"] =
-                    serde_json::json!(value);
-                variant_template.base_audit["scout_comparison_parameter_profile_symbol"] =
-                    serde_json::json!(profile_symbol);
+                variant_template.base_audit["strategy_decision"] = variant_decision;
+                variant_template.base_audit["strategy_parameters"] = serde_json::to_value(&variant_parameters).unwrap_or_default();
+                variant_template.base_audit["stop_loss_percent"] = serde_json::json!(variant_parameters.get("stop_loss_percent").copied().unwrap_or(configuration.stop_loss_percent));
+                variant_template.base_audit["take_profit_percent"] = serde_json::json!(variant_parameters.get("take_profit_percent").copied().unwrap_or(configuration.take_profit_percent));
+                variant_template.base_audit["scout_parameter_key"] = serde_json::json!(variant_key);
+                variant_template.base_audit["scout_parameter_value"] = serde_json::json!(variant_value);
+                variant_template.base_audit["scout_parameter_profile_symbol"] = serde_json::json!(profile_symbol);
+                variant_template.base_audit["scout_comparison_role"] = serde_json::json!("variant");
+                variant_template.base_audit["scout_comparison_id"] = serde_json::json!(comparison_id);
+                variant_template.base_audit["scout_comparison_parameter_key"] = serde_json::json!(variant_key);
+                variant_template.base_audit["scout_comparison_parameter_value"] = serde_json::json!(variant_value);
+                variant_template.base_audit["scout_comparison_parameter_profile_symbol"] = serde_json::json!(profile_symbol);
                 templates.push(variant_template);
             }
-            (templates, true)
+            (templates, true, format!("daily-parameter-batch:{batch_id}"))
         } else {
-            (vec![template], true)
+            (vec![template], true, String::new())
         };
         candidates.push(ScoutPlanCandidate {
-            generate_group_id: true,
-            sample_group_id: String::new(),
+            generate_group_id: sample_group_id.is_empty(),
+            sample_group_id,
             cooldown_key: String::new(),
             profile_key: format!("{strategy_name}|{symbol}"),
             eligible: entry_eligible,
@@ -401,7 +505,11 @@ fn paired_probe_eligible(baseline_eligible: bool, variant_eligible: bool) -> boo
 
 #[cfg(test)]
 mod paired_probe_tests {
-    use super::paired_probe_eligible;
+    use super::{
+        daily_parameter_batch_key, group_daily_parameter_variants, paired_probe_eligible,
+        MAX_DAILY_PAIRED_VARIANTS,
+    };
+    use crate::scouts::probe_id;
 
     #[test]
     fn parameter_probe_requires_both_positions_from_the_same_signal() {
@@ -409,6 +517,32 @@ mod paired_probe_tests {
         assert!(!paired_probe_eligible(true, false));
         assert!(!paired_probe_eligible(false, true));
         assert!(!paired_probe_eligible(false, false));
+    }
+
+    #[test]
+    fn same_signal_variants_form_one_bounded_batch() {
+        let baseline = serde_json::json!({
+            "strategy_parameters": {"threshold": 0.5},
+            "bar_close_timestamp": 100,
+        });
+        let signals = (0..5)
+            .map(|index| serde_json::json!({
+                "strategy": "test-strategy",
+                "symbol": "BTC-USDT",
+                "direction": "bullish",
+                "timestamp": 100,
+                "strategy_decision": {
+                    "scout_parameter_probe": true,
+                    "scout_parameter_key": format!("parameter_{index}"),
+                    "scout_parameter_value": index as f64,
+                    "scout_parameter_baseline_decision": baseline,
+                }
+            }))
+            .collect();
+        let batches = group_daily_parameter_variants(signals);
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].2.len(), MAX_DAILY_PAIRED_VARIANTS);
+        assert_eq!(batches[0].3, probe_id(&format!("probe:{}", daily_parameter_batch_key(&batches[0].1))));
     }
 }
 
@@ -616,7 +750,7 @@ async fn receive_dated_carry_scout_inputs(
         let _ = apply_scout_lifecycle_observation(&mut state, &observation);
         persist_scout_state(&service.scout.path, &state, &["outbox", "outcomes", "scout_pending_samples", "scout_sample_active_scenarios", "scout_plan_profiles", "scout_observation_results", "scout_instances"])?;
     }
-    flush_scout_outbox(&service.scout, &service.client, &service.learning_url).await?;
+    schedule_scout_outbox_flush(&service);
 
     let snapshot = service.client.get(format!("{}/decision-snapshot", service.learning_url.trim_end_matches('/')))
         .timeout(std::time::Duration::from_secs(2)).send().await
@@ -793,7 +927,13 @@ fn validate_scout_outcome(
             outcome.exit_scenario.as_str(),
             "strategy" | "tight" | "wide"
         )
-        || outcome.scout_comparison_id.is_some() != outcome.scout_comparison_role.is_some()
+        || (outcome.scout_comparison_role.is_none()
+            != (outcome.scout_comparison_id.is_none() && outcome.scout_comparison_ids.is_empty()))
+        || (!outcome.scout_comparison_ids.is_empty()
+            && (outcome.scout_comparison_role.as_deref() != Some("baseline")
+                || outcome.scout_comparison_ids.len() > MAX_DAILY_PAIRED_VARIANTS
+                || outcome.scout_comparison_id.is_some()
+                || outcome.scout_comparison_ids.iter().any(|id| id.is_empty() || id.len() > 240)))
         || outcome
             .scout_comparison_id
             .as_ref()
@@ -1116,6 +1256,7 @@ fn build_scout_audits(template: &ScoutAuditTemplate, group_id: &str) -> Vec<serd
     }
     for field in [
         "scout_comparison_id",
+        "scout_comparison_ids",
         "scout_comparison_role",
         "scout_comparison_zero_role",
         "scout_comparison_parameter_key",
@@ -1129,7 +1270,10 @@ fn build_scout_audits(template: &ScoutAuditTemplate, group_id: &str) -> Vec<serd
             base[field] = value.clone();
         }
     }
-    if base.get("scout_comparison_role").is_some() {
+    if base.get("scout_comparison_role").is_some()
+        && base.get("scout_comparison_id").is_none()
+        && base.get("scout_comparison_ids").is_none()
+    {
         let comparison_id = format!("scout-pair:{}", probe_id(group_id));
         base["scout_comparison_id"] = serde_json::json!(comparison_id);
         if let Some(decision) = base.get_mut("strategy_decision") {
@@ -1187,8 +1331,15 @@ fn build_scout_audits(template: &ScoutAuditTemplate, group_id: &str) -> Vec<serd
             let role = audit
                 .get("scout_comparison_role")
                 .and_then(serde_json::Value::as_str);
-            let comparison_suffix =
-                role.map_or_else(String::new, |role| format!("|comparison:{role}"));
+            let comparison_suffix = role.map_or_else(String::new, |role| {
+                let comparison_id = audit
+                    .get("scout_comparison_id")
+                    .and_then(serde_json::Value::as_str);
+                comparison_id.map_or_else(
+                    || format!("|comparison:{role}"),
+                    |id| format!("|comparison:{role}:{}", probe_id(id)),
+                )
+            });
             let decision_id = format!(
                 "{id_prefix}|sample:{group_fingerprint}|exit:{scenario}{comparison_suffix}"
             );
@@ -1329,13 +1480,28 @@ fn sync_record_map(
     collection: &str,
     current: &serde_json::Value,
 ) -> Result<(), (StatusCode, String)> {
-    tx.execute("DELETE FROM scout_records WHERE collection=?1", [collection])
-        .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
-    let Some(entries) = current.as_object() else { return Ok(()); };
-    let mut insert = tx.prepare("INSERT INTO scout_records(collection,record_key,payload) VALUES(?1,?2,?3)")
-        .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
+    let entries = current.as_object();
+    let existing = {
+        let mut statement = tx.prepare("SELECT record_key FROM scout_records WHERE collection=?1")
+            .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
+        statement.query_map([collection], |row| row.get::<_, String>(0))
+            .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?
+            .collect::<Result<BTreeSet<_>, _>>()
+            .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?
+    };
+    if let Some(entries) = entries {
     for (key, payload) in entries {
-        insert.execute(rusqlite::params![collection, key, payload.to_string()])
+        tx.execute("INSERT INTO scout_records(collection,record_key,payload) VALUES(?1,?2,?3) ON CONFLICT(collection,record_key) DO UPDATE SET payload=excluded.payload WHERE scout_records.payload IS NOT excluded.payload", rusqlite::params![collection, key, payload.to_string()])
+            .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
+    }
+    }
+    if let Some(entries) = entries {
+        for key in existing.iter().filter(|key| !entries.contains_key(*key)) {
+            tx.execute("DELETE FROM scout_records WHERE collection=?1 AND record_key=?2", rusqlite::params![collection, key])
+                .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
+        }
+    } else {
+        tx.execute("DELETE FROM scout_records WHERE collection=?1", [collection])
             .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
     }
     Ok(())
@@ -1429,7 +1595,8 @@ async fn flush_scout_outbox(
             }
         };
         client
-            .post(url)
+        .post(url)
+        .timeout(std::time::Duration::from_secs(2))
             .json(&payload)
             .send()
             .await

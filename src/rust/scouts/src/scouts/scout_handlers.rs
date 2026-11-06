@@ -99,11 +99,7 @@ async fn receive_scout_outcome(
             }
             let mut paired_updates = Vec::new();
             if let Some(role) = outcome.scout_comparison_role.as_deref() {
-                let comparison_ids = if role == "baseline" && !outcome.scout_comparison_ids.is_empty() {
-                    outcome.scout_comparison_ids.clone()
-                } else {
-                    outcome.scout_comparison_id.iter().cloned().collect()
-                };
+                let comparison_ids = outcome_comparison_ids(&outcome);
                 for comparison_id in comparison_ids {
                     let pair = state.pairs.entry(comparison_id.clone()).or_default();
                     pair.updated_at_ms = outcome.evaluated_timestamp_ms;
@@ -215,8 +211,18 @@ async fn receive_scout_outcome(
             persist_scout_state(&service.scout.path, &state, &["outbox", "pairs", "outcomes", "scout_instances", "scout_sample_active_scenarios", "scout_plan_profiles", "scout_active_audits", "seen"])?;
         }
     }
-    flush_scout_outbox(&service.scout, &service.client, &service.learning_url).await?;
+    schedule_scout_outbox_flush(&service);
     Ok(StatusCode::NO_CONTENT)
+}
+
+fn outcome_comparison_ids(outcome: &ScoutOutcomeRequest) -> Vec<String> {
+    if outcome.scout_comparison_role.as_deref() == Some("baseline")
+        && !outcome.scout_comparison_ids.is_empty()
+    {
+        outcome.scout_comparison_ids.clone()
+    } else {
+        outcome.scout_comparison_id.iter().cloned().collect()
+    }
 }
 
 async fn get_scout_lifecycle_state(
@@ -386,6 +392,7 @@ fn apply_scout_lifecycle_observation(
                 scout_parameter_value: Some(probe.parameter_value),
                 scout_parameter_profile_symbol: Some(probe.profile_symbol.clone()),
                 scout_comparison_id: None,
+                scout_comparison_ids: Vec::new(),
                 scout_comparison_role: None,
                 scout_comparison_zero_role: None,
                 scout_comparison_parameter_key: None,
@@ -459,13 +466,13 @@ async fn observe_scout_lifecycle(
     if let Some(response) = state.scout_observation_results.get(&request.request_id) {
         let response = response.clone();
         drop(state);
-        flush_scout_outbox(&service.scout, &service.client, &service.learning_url).await?;
+        schedule_scout_outbox_flush(&service);
         return Ok(Json(response));
     }
     let response = apply_scout_lifecycle_observation(&mut state, &request);
     persist_scout_state(&service.scout.path, &state, &["outbox", "outcomes", "scout_pending_samples", "scout_sample_active_scenarios", "scout_plan_profiles", "scout_observation_results", "scout_instances"])?;
     drop(state);
-    flush_scout_outbox(&service.scout, &service.client, &service.learning_url).await?;
+    schedule_scout_outbox_flush(&service);
     Ok(Json(response))
 }
 
@@ -585,7 +592,7 @@ async fn create_scout_plan(
             persist_scout_state(&service.scout.path, &state, &["scout_sample_at_ms", "pairs"])?;
         }
         drop(state);
-        flush_scout_outbox(&service.scout, &service.client, &service.learning_url).await?;
+        schedule_scout_outbox_flush(&service);
         return Ok(Json(response));
     }
     let mut active_batch_keys = state
@@ -790,7 +797,7 @@ async fn create_scout_plan(
     }
     persist_scout_state(&service.scout.path, &state, &["outbox", "scout_instances", "scout_pending_samples", "scout_sample_at_ms", "scout_plan_profiles", "scout_active_audits", "scout_sample_active_scenarios", &format!("scout_plan_results@{}", request.request_id)])?;
     drop(state);
-    flush_scout_outbox(&service.scout, &service.client, &service.learning_url).await?;
+    schedule_scout_outbox_flush(&service);
     Ok(Json(response))
 }
 
@@ -1651,6 +1658,7 @@ mod strategy_walk_forward_tests {
             scout_parameter_value: None,
             scout_parameter_profile_symbol: None,
             scout_comparison_id: None,
+            scout_comparison_ids: Vec::new(),
             scout_comparison_role: None,
             scout_comparison_zero_role: None,
             scout_comparison_parameter_key: None,

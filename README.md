@@ -61,4 +61,4 @@ Run ./coverage.sh from the repository root to generate HTML coverage reports. Th
 
 Install the Rust coverage tool once with cargo install cargo-llvm-cov if it is missing.
 
-Commits run the combined coverage suite through the repository's pre-commit hook. To enable it in a checkout, run `git config core.hooksPath .githooks` from the repository root. Coverage failures prevent the commit.
+Coverage reports are generated on demand with `./coverage.sh`; coverage is not part of the commit hook.

@@ -235,4 +235,6 @@ mod risk_adjusted_monthly_momentum_tests {
 pub struct DailyStrategySignalBatch {
     pub snapshot: DailyStrategySnapshot,
     pub diagnostics: Vec<StrategyDiagnostic>,
+    #[serde(default)]
+    pub refresh_only: bool,
 }
