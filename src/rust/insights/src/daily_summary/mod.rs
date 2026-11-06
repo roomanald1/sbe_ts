@@ -386,7 +386,7 @@ fn write_training_archive(
             let compressed = row?;
             let mut payload = Vec::new();
             MultiGzDecoder::new(compressed.as_slice()).read_to_end(&mut payload)?;
-            let record: StoredSignalRecord = bincode::deserialize(&payload)?;
+            let record = crate::signals::deserialize_record(kind, &payload)?;
             bincode::serialize_into(&mut encoder, &record)?;
         }
         let file = encoder.finish()?;

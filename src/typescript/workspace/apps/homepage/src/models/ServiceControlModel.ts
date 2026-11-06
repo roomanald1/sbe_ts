@@ -23,7 +23,7 @@ export type ServiceSnapshot = {
   updated: string;
   available: boolean;
 };
-export type ServiceAction = 'start' | 'stop' | 'restart';
+export type ServiceAction = 'start' | 'stop' | 'restart' | 'rebuild-restart';
 export type ServiceTotals = {
   running: number;
   pending: number;
@@ -171,7 +171,7 @@ export class ServiceControlModel {
   ): Promise<void> {
     const target = service || (project === 'all' ? 'everything' : project);
     this.showNotice({
-      text: `${verb === 'start' ? 'Starting' : verb === 'stop' ? 'Stopping' : 'Restarting'} ${target}…`,
+      text: `${verb === 'start' ? 'Starting' : verb === 'stop' ? 'Stopping' : verb === 'rebuild-restart' ? 'Rebuilding and restarting' : 'Restarting'} ${target}…`,
       error: false,
     });
     try {
@@ -183,7 +183,7 @@ export class ServiceControlModel {
       const result = (await response.json()) as { error?: string };
       if (!response.ok) throw new Error(result.error || 'Action failed');
       this.showNotice({
-        text: `${service || (project === 'all' ? 'All services' : project)} ${verb === 'start' ? 'started' : verb === 'stop' ? 'stopped' : 'restarted'}`,
+        text: `${service || (project === 'all' ? 'All services' : project)} ${verb === 'start' ? 'started' : verb === 'stop' ? 'stopped' : verb === 'rebuild-restart' ? 'rebuilt and restarted' : 'restarted'}`,
         error: false,
       });
       this.refresh();

@@ -99,6 +99,8 @@ struct Settings {
     #[serde(default)]
     learned_profiles: BTreeMap<String, strategies::StrategyProfile>,
     #[serde(default)]
+    learned_scout_parameter_variants: Vec<strategies::ScoutParameterVariant>,
+    #[serde(default)]
     learned_strategy_size_multipliers: BTreeMap<String, f64>,
     #[serde(default)]
     learned_context_stats: BTreeMap<String, strategies::ContextLearningStat>,
@@ -249,6 +251,7 @@ impl Default for Settings {
             profile_registration_outbox: Vec::new(),
             registered_profile_ids: BTreeSet::new(),
             learned_profiles: BTreeMap::new(),
+            learned_scout_parameter_variants: Vec::new(),
             learned_strategy_size_multipliers: BTreeMap::new(),
             learned_context_stats: BTreeMap::new(),
             learned_execution_stats: BTreeMap::new(),

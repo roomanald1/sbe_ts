@@ -133,7 +133,7 @@ mod tests {
     #[test]
     fn scout_persistence_round_trips_state_and_outbox_dedupes_learning_events() {
         let path = std::env::temp_dir().join(format!(
-            "scouts-persistence-test-{}-{}.json",
+            "scouts-persistence-test-{}-{}.sqlite",
             std::process::id(),
             scout_now_ms()
         ));
@@ -153,9 +153,8 @@ mod tests {
             outbox: vec![ScoutOutboxItem::Learning(event.clone())],
             ..PersistedState::default()
         };
-        assert!(persist_scout_state(&path, &state).is_ok());
-        let loaded: PersistedState =
-            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert!(persist_scout_state(&path, &state, &["seen", "outbox"]).is_ok());
+        let loaded = load_scout_state(&path).unwrap();
         assert!(loaded.seen.contains("event-1"));
         assert_eq!(loaded.outbox.len(), 1);
         assert_eq!(feedback_event_id(&event), "event-1");
@@ -167,5 +166,43 @@ mod tests {
         }
         assert!(!outbox_has_learning(&loaded, &other));
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn scout_persistence_updates_one_plan_result_without_dropping_siblings() {
+        let path = std::env::temp_dir().join(format!(
+            "scouts-incremental-persistence-{}-{}.sqlite",
+            std::process::id(),
+            scout_now_ms()
+        ));
+        let mut state = PersistedState::default();
+        state.scout_plan_results.insert(
+            "request-a".into(),
+            ScoutPlanResponse {
+                audits: Vec::new(),
+                selected_groups: vec!["group-a".into()],
+            },
+        );
+        assert!(persist_scout_state(&path, &state, &["scout_plan_results@request-a"]).is_ok());
+        state.scout_plan_results.insert(
+            "request-b".into(),
+            ScoutPlanResponse {
+                audits: Vec::new(),
+                selected_groups: vec!["group-b".into()],
+            },
+        );
+        assert!(persist_scout_state(&path, &state, &["scout_plan_results@request-b"]).is_ok());
+        let loaded = load_scout_state(&path).unwrap();
+        assert_eq!(
+            loaded.scout_plan_results["request-a"].selected_groups,
+            ["group-a"]
+        );
+        assert_eq!(
+            loaded.scout_plan_results["request-b"].selected_groups,
+            ["group-b"]
+        );
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("sqlite-wal"));
+        let _ = std::fs::remove_file(path.with_extension("sqlite-shm"));
     }
 }

@@ -62,7 +62,7 @@ services:
     healthcheck: { test: ["CMD", "bash", "-c", "</dev/tcp/127.0.0.1/3010"], interval: 15s, timeout: 3s, retries: 5 }
   scouts:
     build: { context: .., dockerfile: system/Dockerfile.rust, args: { CRATE: scouts, BIN: scouts } }
-    environment: { SCOUTS_LISTEN_ADDR: 0.0.0.0:3011, LEARNING_SERVICE_URL: http://learning:3010, INSIGHTS_URL: http://insights:3004, SCOUTS_STATE_PATH: /data/scouts_state.json }
+    environment: { SCOUTS_LISTEN_ADDR: 0.0.0.0:3011, LEARNING_SERVICE_URL: http://learning:3010, INSIGHTS_URL: http://insights:3004, SCOUTS_STATE_PATH: /data/scouts_state.sqlite }
     volumes: ["../src/rust/position_management:/data"]
     depends_on: [learning]
     ports: ["3011:3011"]

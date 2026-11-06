@@ -47,7 +47,7 @@ impl SignalStore {
         let mut result = Vec::new();
         for ((symbol, horizon_seconds), samples) in grouped {
             let non_overlapping = non_overlapping_samples(samples, horizon_seconds);
-            if non_overlapping.len() <= WALK_FORWARD_MIN_TRAINING_SAMPLES {
+            if !has_walk_forward_test_samples(non_overlapping.len()) {
                 continue;
             }
 

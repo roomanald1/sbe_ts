@@ -12,7 +12,20 @@ services:
       - ${REPO_ROOT:-..}/system/control:/app
       - ${REPO_ROOT:-..}/src/typescript/workspace/apps/react-app/public/coverage:/app/coverage:ro
       - ${REPO_ROOT:-..}/src/typescript/workspace/apps/benchmarks/dist:/app/benchmarks:ro
+    depends_on:
+      - benchmarks-ui
     command: ["node", "--watch", "server.mjs"]
+    restart: unless-stopped
+
+  benchmarks-ui:
+    build: { context: .., dockerfile: system/Dockerfile.web }
+    working_dir: /app/apps/benchmarks
+    command: ["npm", "run", "dev", "--", "--host", "0.0.0.0", "--port", "5175", "--strictPort"]
+    volumes:
+      - ${REPO_ROOT:-..}/src/typescript/workspace/apps/benchmarks:/app/apps/benchmarks
+      - ${REPO_ROOT:-..}/research/BENCHMARK_BASELINE.md:/research/BENCHMARK_BASELINE.md:ro
+    ports:
+      - "127.0.0.1:5175:5175"
     restart: unless-stopped
 
   prometheus:
@@ -71,8 +84,8 @@ services:
       NEWS_SENTIMENT_URL: http://host.docker.internal:3006
       LEARNING_SERVICE_URL: http://host.docker.internal:3010
       SCOUTS_SERVICE_URL: http://host.docker.internal:3011
-      SQLITE_DB_PATHS: /workspace/src/rust/insights/signals.sqlite:/workspace/src/rust/auto_trader/auto_trader_state.sqlite:/workspace/src/rust/learning/learning_state.sqlite
-      PERSISTENT_STORE_PATHS: /workspace/src/rust/position_management/positions.json
+      SQLITE_DB_PATHS: /workspace/src/rust/insights/signals.sqlite:/workspace/src/rust/position_management/auto_trader_state.sqlite:/workspace/src/rust/learning/learning_state.sqlite
+      PERSISTENT_STORE_PATHS: /workspace/src/rust/position_management/positions.sqlite
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:

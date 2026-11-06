@@ -710,6 +710,7 @@ dependencies = [
  "anyhow",
  "axum",
  "http-body-util",
+ "libc",
  "reqwest",
  "rusqlite",
  "serde",

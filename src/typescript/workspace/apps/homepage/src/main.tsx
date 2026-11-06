@@ -73,6 +73,14 @@ function App() {
                       >
                         Restart
                       </button>
+                      <button
+                        className="start"
+                        onClick={() =>
+                          void model.action(project, 'rebuild-restart', name)
+                        }
+                      >
+                        Rebuild + restart
+                      </button>
                       {port && (
                         <a
                           href={`http://localhost:${port}/docs`}

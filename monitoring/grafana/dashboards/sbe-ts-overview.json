@@ -171,7 +171,7 @@
       "gridPos": {
         "x": 0,
         "y": 8,
-        "w": 8,
+        "w": 6,
         "h": 3
       },
       "id": 7,
@@ -235,9 +235,9 @@
         ]
       },
       "gridPos": {
-        "x": 8,
+        "x": 6,
         "y": 8,
-        "w": 8,
+        "w": 6,
         "h": 3
       },
       "id": 9,
@@ -282,9 +282,9 @@
         "overrides": []
       },
       "gridPos": {
-        "x": 16,
+        "x": 12,
         "y": 8,
-        "w": 8,
+        "w": 4,
         "h": 3
       },
       "id": 10,
@@ -2114,13 +2114,125 @@
       },
       "targets": [
         {
-          "expr": "app_persistent_store_size_bytes{store=\"positions.json\"}",
+          "expr": "app_persistent_store_size_bytes{store=\"positions.sqlite\"}",
           "legendFormat": "{{store}}",
           "refId": "A"
         }
       ],
-      "title": "Positions store size · positions.json",
+      "title": "Positions store size · positions.sqlite",
       "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "x": 16,
+        "y": 8,
+        "w": 4,
+        "h": 3
+      },
+      "id": 218,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "value_and_name"
+      },
+      "targets": [
+        {
+          "expr": "sum(app_scout_instances{status=\"open\"})",
+          "legendFormat": "Open Scouts",
+          "refId": "A"
+        }
+      ],
+      "title": "Open Scouts",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "x": 20,
+        "y": 8,
+        "w": 4,
+        "h": 3
+      },
+      "id": 219,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "value_and_name"
+      },
+      "targets": [
+        {
+          "expr": "sum(app_scout_instances{status=\"closed\"})",
+          "legendFormat": "Closed Scouts",
+          "refId": "A"
+        }
+      ],
+      "title": "Closed Scouts",
+      "type": "stat"
     }
   ],
   "refresh": "15s",

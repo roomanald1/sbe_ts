@@ -18,17 +18,20 @@ npx nx serve react-app
 
 ## Live homepage and benchmark development
 
-Run both Vite development servers from the workspace directory:
+The infrastructure stack runs the Benchmarks Vite server with the report
+source mounted from the repository. Open `http://localhost:8080/benchmarks/`
+to use the live page alongside the main app; edits to benchmark source files
+and `research/BENCHMARK_BASELINE.md` appear without rebuilding.
+
+For standalone homepage development, run its Vite server from the workspace
+directory:
 
 ```sh
-npx nx run-many -t serve -p homepage benchmarks --parallel=2
+npx nx serve homepage
 ```
 
 Open `http://localhost:5174` for the service-control homepage. Its Benchmarks
-link is proxied to the hot-reloading report at `http://localhost:5175`. Edits
-to either app's source are picked up by Vite, and edits to
-`research/BENCHMARK_BASELINE.md` reload the Benchmarks report. These dev servers
-are separate from the production files served at `http://localhost:8080`.
+link reaches the live report through the local service-control route.
 
 ## Nx targets
 

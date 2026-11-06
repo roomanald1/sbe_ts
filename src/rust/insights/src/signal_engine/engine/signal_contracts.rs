@@ -45,6 +45,23 @@ pub struct SignalSnapshot {
     pub range_lower_bound: Option<f64>,
     #[serde(default)]
     pub range_upper_bound: Option<f64>,
+    /// Fraction of the engine's directional inputs that were available.
+    #[serde(default)]
+    pub evidence_coverage: Option<f64>,
+    /// Outcome-calibrated hit-rate estimate. `strength` remains raw conviction.
+    #[serde(default)]
+    pub estimated_accuracy: Option<f64>,
+}
+
+impl SignalSnapshot {
+    pub fn refresh_raw_strength(&mut self) {
+        if let Some(coverage) = self
+            .evidence_coverage
+            .filter(|coverage| coverage.is_finite() && (0.0..=1.0).contains(coverage))
+        {
+            self.strength = (self.score.abs() * coverage).clamp(0.0, 1.0);
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]

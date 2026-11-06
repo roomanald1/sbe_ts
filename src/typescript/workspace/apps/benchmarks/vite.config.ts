@@ -55,6 +55,9 @@ export default defineConfig({
   server: {
     port: 5175,
     strictPort: true,
+    // The app is proxied through the local service-control page, while HMR
+    // connects directly to the published Vite port.
+    hmr: { clientPort: 5175 },
     watch: {
       // Source files live on the WSL-mounted workspace; polling catches edits
       // made by Windows editors when filesystem events do not cross the mount.

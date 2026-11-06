@@ -39,12 +39,16 @@ http.createServer(async (req,res) => {
         const second = await compose('sbe-infra','monitoring/docker-compose.yml',[verb,...flags]);
         return send(res,200,{output:`${first}\n${second}`});
       }
-      if (!['system','infra'].includes(project) || !['start','stop','restart'].includes(action)) return send(res,400,{error:'Invalid action'});
+      if (!['system','infra'].includes(project) || !['start','stop','restart','rebuild-restart'].includes(action)) return send(res,400,{error:'Invalid action'});
       if (project === 'infra' && service && !['prometheus','loki','alloy','node-exporter','app-exporter','grafana'].includes(service)) return send(res,400,{error:'Unknown infra service'});
       if (project === 'system' && service && !services.includes(service)) return send(res,400,{error:'Unknown system service'});
       const file = project === 'system' ? 'system/compose.yml' : 'monitoring/docker-compose.yml';
       let args;
-      if (action === 'start') args = ['up','-d',...(service ? [service] : [])];
+      if (action === 'rebuild-restart') {
+        if (!service) return send(res,400,{error:'Rebuild and restart requires a single service'});
+        args = ['up','-d','--build','--no-deps',service];
+      }
+      else if (action === 'start') args = ['up','-d',...(service ? [service] : [])];
       else if (action === 'stop') args = ['stop',...(service ? [service] : [])];
       else args = ['restart',...(service ? [service] : [])];
       return send(res,200,{output:await compose(project === 'system' ? 'sbe-system' : 'sbe-infra',file,args)});
@@ -66,13 +70,30 @@ http.createServer(async (req,res) => {
       const type = file.endsWith('.html') ? 'text/html' : file.endsWith('.css') ? 'text/css' : file.endsWith('.js') ? 'text/javascript' : 'application/octet-stream';
       res.writeHead(200, {'content-type':type}); return res.end(content);
     }
-    if (req.method === 'GET' && url.pathname.startsWith('/benchmarks/')) {
-      const relativePath = decodeURIComponent(url.pathname.slice('/benchmarks'.length));
-      const file = resolve('/app/benchmarks', `.${relativePath}${relativePath.endsWith('/') ? 'index.html' : ''}`);
-      if (!file.startsWith(`/app/benchmarks${sep}`)) return send(res,403,{error:'Forbidden'});
-      const content = await readFile(file);
-      const type = file.endsWith('.html') ? 'text/html' : file.endsWith('.css') ? 'text/css' : file.endsWith('.js') ? 'text/javascript' : 'application/octet-stream';
-      res.writeHead(200, {'content-type':type}); return res.end(content);
+    if (req.method === 'GET' && (url.pathname === '/benchmarks' || url.pathname.startsWith('/benchmarks/'))) {
+      const upstream = http.request({
+        hostname: 'benchmarks-ui',
+        port: 5175,
+        path: `${url.pathname}${url.search}`,
+        method: req.method,
+        headers: { ...req.headers, host: 'localhost:5175' },
+      }, (response) => {
+        res.writeHead(response.statusCode || 502, response.headers);
+        response.pipe(res);
+      });
+      upstream.on('error', (error) => {
+        if (res.headersSent) return res.destroy(error);
+        const relativePath = decodeURIComponent(url.pathname.slice('/benchmarks'.length));
+        const file = resolve('/app/benchmarks', `.${relativePath}${relativePath.endsWith('/') ? 'index.html' : ''}`);
+        if (!file.startsWith(`/app/benchmarks${sep}`)) return send(res,403,{error:'Forbidden'});
+        readFile(file).then((content) => {
+          const type = file.endsWith('.html') ? 'text/html' : file.endsWith('.css') ? 'text/css' : file.endsWith('.js') ? 'text/javascript' : 'application/octet-stream';
+          res.writeHead(200, {'content-type':type});
+          res.end(content);
+        }).catch(() => send(res,502,{error:`Benchmarks dev server unavailable: ${error.message}`}));
+      });
+      req.pipe(upstream);
+      return;
     }
     if (req.method === 'GET' && !url.pathname.startsWith('/api/')) {
       const index = resolve(homepageDist, 'index.html');

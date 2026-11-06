@@ -1,4 +1,4 @@
-fn deserialize_record(kind: i64, payload: &[u8]) -> Result<StoredSignalRecord> {
+pub(crate) fn deserialize_record(kind: i64, payload: &[u8]) -> Result<StoredSignalRecord> {
     if let Ok(record) = bincode::deserialize(payload) {
         return Ok(record);
     }
@@ -10,6 +10,8 @@ fn deserialize_record(kind: i64, payload: &[u8]) -> Result<StoredSignalRecord> {
             direction: snapshot.direction,
             score: snapshot.score,
             strength: snapshot.strength,
+            evidence_coverage: None,
+            estimated_accuracy: None,
             components: SignalComponents {
                 trend_1m_percent: snapshot.components.trend_1m_percent,
                 momentum_10s_percent: snapshot.components.momentum_10s_percent,
@@ -62,6 +64,78 @@ fn record_timestamp(record: &StoredSignalRecord) -> u64 {
         StoredSignalRecord::BookSnapshot(snapshot) => snapshot.timestamp,
         StoredSignalRecord::ResearchFeatures(features) => features.timestamp,
         StoredSignalRecord::ExternalMarket(features) => features.timestamp,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn calibration_keeps_raw_strength_separate_from_estimated_accuracy() {
+        let mut snapshot = SignalSnapshot {
+            symbol: "BTC-USDT".into(),
+            timestamp: 10_000,
+            direction: "bullish".into(),
+            score: 0.75,
+            strength: 0.75 * 4.0 / 9.0,
+            evidence_coverage: Some(4.0 / 9.0),
+            estimated_accuracy: None,
+            components: SignalComponents::default(),
+            reasons: Vec::new(),
+            news_attribution: None,
+            stale: false,
+            ranging_probability: None,
+            range_lower_bound: None,
+            range_upper_bound: None,
+        };
+        let records = vec![StoredSignalRecord::Snapshot(snapshot.clone())];
+
+        calibrate_signal_scores(std::slice::from_mut(&mut snapshot), &records);
+
+        assert!((snapshot.strength - 0.75 * 4.0 / 9.0).abs() < 1e-12);
+        assert_eq!(snapshot.estimated_accuracy, Some(0.5));
+    }
+
+    #[test]
+    fn legacy_bincode_snapshots_default_new_grading_fields() {
+        let payload = bincode::serialize(&ExtendedSnapshotRecord::Snapshot(
+            ExtendedSignalSnapshot {
+                symbol: "BTC-USDT".into(),
+                timestamp: 10_000,
+                direction: "bullish".into(),
+                score: 0.75,
+                strength: 0.4,
+                components: ExtendedSignalComponents {
+                    trend_1m_percent: None,
+                    momentum_10s_percent: None,
+                    trade_flow_imbalance: None,
+                    book_imbalance: None,
+                    volatility_1m_percent: None,
+                    trend_5m_percent: None,
+                    trend_5m_volatility_units: None,
+                    mispricing_vs_vwap_bps: None,
+                    pressure_without_price_move: None,
+                    aggressor_cost_bps: None,
+                    absorption_imbalance: None,
+                },
+                reasons: Vec::new(),
+                stale: false,
+                ranging_probability: None,
+                range_lower_bound: None,
+                range_upper_bound: None,
+            },
+        ))
+        .unwrap();
+
+        let StoredSignalRecord::Snapshot(snapshot) = deserialize_record(0, &payload).unwrap()
+        else {
+            panic!("legacy payload should decode as a signal snapshot");
+        };
+
+        assert_eq!(snapshot.strength, 0.4);
+        assert_eq!(snapshot.evidence_coverage, None);
+        assert_eq!(snapshot.estimated_accuracy, None);
     }
 }
 
@@ -223,11 +297,11 @@ fn calibrate_signal_scores(snapshots: &mut [SignalSnapshot], records: &[StoredSi
 
     // The beta prior keeps small samples near 50% until enough resolved forecasts exist.
     for snapshot in snapshots {
-        snapshot.strength = if snapshot.direction == "ranging" {
+        snapshot.estimated_accuracy = Some(if snapshot.direction == "ranging" {
             estimate(&accuracies, snapshot)
         } else {
             estimate_point_in_time(&outcomes_by_key, snapshot)
-        };
+        });
 
         let edge_direction = match snapshot.direction.as_str() {
             "bullish" => "bullish",
@@ -282,5 +356,6 @@ fn calibrate_signal_scores(snapshots: &mut [SignalSnapshot], records: &[StoredSi
                 snapshot.direction = "neutral".to_owned();
             }
         }
+        snapshot.refresh_raw_strength();
     }
 }

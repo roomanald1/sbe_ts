@@ -1,5 +1,47 @@
 # Rust benchmark baseline
 
+## Live Signals Scout batch delivery (2026-11-05)
+
+`cargo test --manifest-path src/rust/live_signals/Cargo.toml` passed all 26 tests, including regression coverage for combining symbol updates into batches of at most 20 and for a Scout handler taking longer than the previous 300 ms timeout. `cargo bench --manifest-path src/rust/live_signals/Cargo.toml` completed; the crate has no dedicated benchmark targets, so Cargo ran the 26 unit tests in bench mode with all ignored. No comparable Live Signals benchmark is recorded. WSL2 Linux x86_64, optimized Cargo bench profile. The change reduces Scout requests from one per eligible symbol to one per 20 symbols while leaving AutoTrader delivery per symbol.
+
+## Signal strength and accuracy separation (2026-11-06)
+
+`cargo test --manifest-path src/rust/insights/Cargo.toml` passed 46 tests across the Insights library and service binaries, including regressions that keep raw strength separate from estimated accuracy and decode legacy bincode snapshots. `cargo test --manifest-path src/rust/live_signals/Cargo.toml` passed all 26 tests, including news-adjusted strength coverage. `cargo bench` completed for both crates; Live Signals has no dedicated benchmark targets, so its 26 tests were ignored in bench mode.
+
+Insights benchmark results: live snapshot 11,841.4 ns (previous 1,831.7 ns, +546%); snapshot with explanations 11,642.7 ns (2,319.3 ns, +402%); research feature extraction 237.9 ns (143.4 ns, +66%); price-return context 17.5 ns (17.4 ns, +1%); market-input diagnostics 321.8 ns (236.5 ns, +36%); book snapshot 44.1 ns (44.4 ns, -1%). Immediately after the run, Docker reported Insights at 110% CPU and Scouts at 52% CPU; the prior run has no comparable load readings. The change adds coverage/accuracy fields and moves the stored historical estimate out of `strength`; it does not add work to the live snapshot calculation other than storing the input-coverage fraction. Treat the live snapshot and explanation timing regressions as load-contaminated; no direct benchmark exercises historical calibration or serialization of the new fields. Environment: WSL2 Linux x86_64, 32 logical CPUs, optimized Cargo bench profile.
+
+## Auto-trader paired scout variants in decision profiles (2026-11-05)
+
+`cargo test --manifest-path src/rust/auto_trader/Cargo.toml` passed all 122 tests, including the regression test for forwarding Learning's paired scout variants into strategy parameter profiles. `cargo bench --manifest-path src/rust/auto_trader/Cargo.toml` completed. Strategy entry measurements ranged from 1.2–23.5 ns/evaluation, position measurements from 0.8–2.7 ns/evaluation, signal serialization was 556.9 ns, market depth assessment 576.6 ns, limit request construction 427.5 ns, and parameter validation 1.8 ns. Compared with the prior auto-trader benchmark (entry 1.2–16.6 ns, position 0.6–2.2 ns, serialization 524.0 ns, depth 557.7 ns, request construction 397.5 ns, validation 1.8 ns), these unrelated existing workloads varied upward in this run; the profile forwarding change is outside the measured hot paths, so this is not evidence of a regression. WSL2 Linux x86_64.
+
+## Scout targeted SQLite writes (2026-11-05)
+
+After changing persistence to write only caller-selected sections (and a single row for a new plan result), a three-run optimized Rust measurement on WSL2 Linux x86_64 averaged **22.31 ms per SQLite row update** versus **232.50 ms to serialize and write the full JSON state**. The SQLite write opens the 77 MB database, ensures WAL mode with full synchronous durability, and commits one plan-result row; the JSON path rewrites the 74.5 MB state file. This is a targeted-update comparison, not a full-state save comparison. The first SQLite write on a process may take longer when it switches the existing database into WAL mode.
+
+## Auto-trader sampled price-path checkpointing (2026-11-05)
+
+`cargo test --manifest-path src/rust/auto_trader/Cargo.toml` passed all 121 tests. `cargo bench --manifest-path src/rust/auto_trader/Cargo.toml` could not complete because the existing Scouts dependency has eight `E0061` call-site errors: callers pass a third `persisted_snapshot` argument to the two-argument `persist_scout_state` function. This is outside the auto-trader change. No comparable persistence-throughput benchmark exists; the auto-trader benchmark target does not measure settings snapshot writes.
+
+The change caps price-path-triggered settings snapshot requests at one per minute while retaining five-second in-memory samples. Other state changes still request immediate snapshots. This caps the price-path-only request rate at 1/12 its prior rate; actual write reduction depends on other state changes that also trigger saves. WSL2 Linux x86_64.
+
+## Scout normalized SQLite full-state storage (2026-11-05)
+
+Three-run average against the same 74.5 MB state snapshot, using the optimized Rust test profile on WSL2 Linux x86_64:
+
+| Operation | JSON | Normalized SQLite | Change |
+|---|---:|---:|---:|
+| Full-state load | 486.62 ms | 642.30 ms | +32.0% |
+| Full-state write | 212.35 ms | 1,171.91 ms | 5.5x slower |
+| Stored file size | 74,475,890 bytes | 77,115,392 bytes | +3.5% |
+
+The read comparison includes reading and deserializing JSON versus opening SQLite and reconstructing all records. The write comparison serializes/writes JSON versus transactionally replacing all 13,148 normalized SQLite rows. No existing Scout persistence benchmark was available for historical comparison. The SQLite writer currently rewrites every row for every state save, which is the main source of the write cost; this workload measures full-snapshot saves rather than targeted record updates.
+
+## Process metrics endpoints (2026-11-05)
+
+`cargo test --manifest-path src/rust/learning/Cargo.toml --lib` passed all 27 tests. `cargo check --manifest-path src/rust/scouts/Cargo.toml --lib` passed. The Scouts library test suite and benchmark could not compile because the existing `src/scouts/tests/scout_plan.rs` test initializer omits the `legacy_path` field from `ScoutState`.
+
+`cargo bench --manifest-path src/rust/learning/Cargo.toml` completed successfully: database load was 2.19 ms/iteration, decision snapshot 0.09 ms/iteration, and state persistence 9.61 ms/iteration. Against the latest comparable Learning run (1.85 ms, 0.09 ms, and 6.64 ms), load increased 18.4% and persistence 44.7%, while decision snapshot was unchanged. These endpoint additions are outside those benchmark workloads; this is a single-run difference and not evidence of a performance regression. WSL2 Linux x86_64, optimized Cargo bench profile. No services were started or stopped.
+
 ## Learning context-threshold unit tests (2026-11-05)
 
 `cargo test --manifest-path src/rust/learning/Cargo.toml --lib` passed all 27 tests. `cargo llvm-cov --manifest-path src/rust/learning/Cargo.toml --lib --summary-only` reported 86.76% line coverage (85.84% regions), up from 81.81% lines (81.01% regions) before the tests. Context coverage increased from 59.64% to 97.00% lines.
@@ -2170,3 +2212,11 @@ Live Signals has no dedicated benchmark target; `cargo bench` completed with all
 ## Live Scout candidate attribution fix (2026-11-05)
 
 Scouts tests passed (32). Scouts has no dedicated benchmark target; `cargo bench` completed with all 32 unit-test cases ignored. The fix adds the strategy identity to generated live candidates so plan registration can accept them; it does not change benchmarked strategy or market-data calculations. No comparable performance workload applies. WSL2 Linux x86_64, optimized Cargo bench profile.
+
+## Walk-forward history coverage (2026-11-05)
+
+Insights tests passed (44 across library and binary). The calculations benchmark completed. Against the previous recorded run, live snapshot measured 11,200.0 ns (+5.7%), explained snapshot 11,602.5 ns (+6.4%), research feature extraction 242.2 ns (+2.1%), price return 17.2 ns (+4.9%), market input diagnostics 342.8 ns (+8.5%), and book snapshot 44.6 ns (+5.9%). These single-run changes are within expected variation; the benchmark does not exercise walk-forward database scanning, which is the changed workload. No walk-forward benchmark fixture exists. WSL2 Linux x86_64, optimized Cargo bench profile.
+
+## Scout settings persistence and limits (2026-11-05)
+
+Scouts tests passed (33). Scouts has no dedicated benchmark target; `cargo bench` completed with all 33 test harness cases ignored. This change expands the configured Scout position limit and updates settings validation; it does not alter a benchmarked calculation. No comparable performance workload applies. WSL2 Linux x86_64, optimized Cargo bench profile.

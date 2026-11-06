@@ -4,19 +4,151 @@ import {
   BenchmarkReportModel,
   formatDate,
   plainText,
+  readTables,
   type Table,
 } from '../models/BenchmarkReportModel';
+
+type ComparisonRow = {
+  operation: string;
+  baseline: string;
+  previous: string;
+  current: string;
+  previousChange: string;
+  baselineChange: string;
+};
+
+function comparisonRows(
+  history: { report: { title: string }; tables: Table[] }[],
+  baselineTables: Table[],
+): ComparisonRow[] {
+  const baselineValues = new Map<string, string>();
+  for (const table of baselineTables) {
+    const operationIndex = table.headers.findIndex((header) =>
+      /workload|operation/i.test(header),
+    );
+    const valueIndex = table.headers.findIndex((header) =>
+      /^(result|baseline)$/i.test(header.trim()),
+    );
+    if (operationIndex < 0 || valueIndex < 0) continue;
+    for (const row of table.rows) {
+      if (row[operationIndex] && row[valueIndex])
+        baselineValues.set(row[operationIndex], row[valueIndex]);
+    }
+  }
+
+  const latest = new Map<string, ComparisonRow>();
+  const priorValues = new Map<string, string>();
+  for (const run of [...history].reverse()) {
+    for (const table of run.tables) {
+      const operationIndex = table.headers.findIndex((header) =>
+        /workload|operation/i.test(header),
+      );
+      const currentIndex = table.headers.findIndex((header) =>
+        /current|repeat|final run/i.test(header),
+      );
+      const previousIndex = table.headers.findIndex((header) =>
+        /previous run|latest comparable|prior run/i.test(header),
+      );
+      const baselineIndex = table.headers.findIndex((header) =>
+        /baseline/i.test(header),
+      );
+      const changeIndex = table.headers.findIndex((header) =>
+        /^(change|difference)$/i.test(header.trim()),
+      );
+      if (operationIndex < 0 || currentIndex < 0) continue;
+      for (const row of table.rows) {
+        const operation = row[operationIndex]?.replace(/`/g, '').trim();
+        const current = row[currentIndex]?.replace(/`/g, '').trim();
+        if (!operation || !current) continue;
+        const previous =
+          (previousIndex >= 0 ? row[previousIndex] : priorValues.get(operation))
+            ?.replace(/`/g, '')
+            .trim() ?? '';
+        const baseline =
+          (baselineIndex >= 0
+            ? row[baselineIndex]
+            : baselineValues.get(operation)
+          )
+            ?.replace(/`/g, '')
+            .trim() ?? '';
+        const change = changeIndex >= 0 ? (row[changeIndex]?.trim() ?? '') : '';
+        latest.set(operation, {
+          operation,
+          baseline,
+          previous,
+          current,
+          previousChange: previousIndex >= 0 ? change : '',
+          baselineChange: baselineIndex >= 0 ? change : '',
+        });
+        priorValues.set(operation, current);
+      }
+    }
+  }
+  return [...latest.values()];
+}
+
+function ComparisonTable({ rows }: { rows: ComparisonRow[] }) {
+  if (!rows.length) return null;
+  return (
+    <div className="table-scroll comparison-table">
+      <table>
+        <thead>
+          <tr>
+            <th>Operation</th>
+            <th>Baseline</th>
+            <th>Previous</th>
+            <th>Current</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((row) => (
+            <tr key={row.operation}>
+              <td>{row.operation}</td>
+              <td>{row.baseline || '—'}</td>
+              <td>{row.previous || '—'}</td>
+              <td>
+                {row.current}
+                {row.baselineChange && (
+                  <>
+                    {' '}
+                    <ChangeValue
+                      value={row.baselineChange}
+                      reference="baseline"
+                    />
+                  </>
+                )}
+                {row.previousChange && (
+                  <>
+                    {' '}
+                    <ChangeValue
+                      value={row.previousChange}
+                      reference="previous run"
+                    />
+                  </>
+                )}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
 
 function MetricTable({ table }: { table: Table }) {
   const changeIndex = table.headers.findIndex((header) =>
     /^(change|difference)$/i.test(header.trim()),
   );
   const reference = table.headers.find((header) =>
-    /baseline|previous|latest comparable|prior/i.test(header),
+    /baseline|previous|latest comparable|prior|recorded run/i.test(header),
   );
+  const referenceLabel = reference
+    ? /baseline/i.test(reference)
+      ? 'baseline'
+      : 'previous run'
+    : 'comparison reference';
   const headers = table.headers.map((header, index) => {
-    if (index === changeIndex)
-      return reference ? `Change vs ${reference}` : 'Change';
+    if (index === changeIndex) return `Change vs ${referenceLabel}`;
     if (/^current(?: run)?$/i.test(header.trim())) return 'Current run';
     return header;
   });
@@ -40,7 +172,7 @@ function MetricTable({ table }: { table: Table }) {
                   className={index === changeIndex ? 'change-cell' : undefined}
                 >
                   {index === changeIndex ? (
-                    <ChangeValue value={cell} />
+                    <ChangeValue value={cell} reference={referenceLabel} />
                   ) : (
                     cell.replace(/`/g, '')
                   )}
@@ -54,18 +186,28 @@ function MetricTable({ table }: { table: Table }) {
   );
 }
 
-function ChangeValue({ value }: { value: string }) {
+function ChangeValue({
+  value,
+  reference,
+}: {
+  value: string;
+  reference: string;
+}) {
   const change = /^([+-])\s*(\d+(?:\.\d+)?%.*)$/.exec(value.trim());
   if (!change) return <>{value.replace(/`/g, '')}</>;
 
-  const direction = change[1] === '+' ? 'slower' : 'faster';
+  const timingDirection = /\b(slower|faster)\b/i.exec(change[2])?.[1];
+  const tone = timingDirection ? timingDirection.toLowerCase() : 'change';
+  const description = timingDirection
+    ? `${timingDirection} vs ${reference}`
+    : `${change[1] === '+' ? 'increase' : 'decrease'} vs ${reference}`;
   return (
     <span
-      className={`change-value ${direction}`}
-      aria-label={`${change[1] === '+' ? 'Increase' : 'Decrease'} of ${change[2]}, ${direction} for timing`}
-      title={`${change[1]} means the current timing is ${direction} than its comparison reference`}
+      className={`change-value ${tone}`}
+      aria-label={`${change[1] === '+' ? 'Increase' : 'Decrease'} of ${change[2]}, ${description}`}
+      title={`${change[1]} change vs ${reference}`}
     >
-      <b>{change[1]}</b> {change[2]} <small>{direction}</small>
+      <b>{change[1]}</b> {change[2]} <small>{description}</small>
     </span>
   );
 }
@@ -73,6 +215,10 @@ function ChangeValue({ value }: { value: string }) {
 export default function App() {
   const model = useMemo(() => new BenchmarkReportModel(), []);
   const state = useObservable(model.state$, model.state$.value, [model]);
+  const baselineTables = readTables(
+    state.reports.find((report) => report.title === 'Results')?.content ?? [],
+  );
+  const comparisons = comparisonRows(state.runHistory, baselineTables);
 
   useEffect(() => {
     model.start();
@@ -163,16 +309,33 @@ export default function App() {
           <div className="comparison-key">
             <strong>Reading the change</strong>
             <span>
-              Each change is measured against the reference named in its column
-              header.
+              Change columns name their reference. Timing changes show faster or
+              slower; other changes show increase or decrease.
             </span>
             <span>
-              <b className="key-slower">+</b> current timing is slower
+              <b className="key-slower">+</b> timing is slower
             </span>
             <span>
-              <b className="key-faster">−</b> current timing is faster
+              <b className="key-faster">−</b> timing is faster
             </span>
           </div>
+
+          <section className="section">
+            <div className="section-heading">
+              <div>
+                <div className="eyebrow">WORKLOAD COMPARISON</div>
+                <h2>Baseline · previous · current</h2>
+              </div>
+              <span className="count">{comparisons.length} workloads</span>
+            </div>
+            <ComparisonTable rows={comparisons} />
+            {!comparisons.length && (
+              <p className="context">
+                No run yet contains structured timing results with a current
+                value.
+              </p>
+            )}
+          </section>
 
           {state.currentTables.length > 0 && (
             <section className="section">

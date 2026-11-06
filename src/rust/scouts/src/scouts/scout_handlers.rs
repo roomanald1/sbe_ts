@@ -189,7 +189,7 @@ async fn receive_scout_outcome(
                     state.seen.remove(&oldest);
                 }
             }
-            persist_scout_state(&service.scout.path, &state)?;
+            persist_scout_state(&service.scout.path, &state, &["outbox", "pairs", "outcomes", "scout_instances", "scout_sample_active_scenarios", "scout_plan_profiles", "scout_active_audits", "seen"])?;
         }
     }
     flush_scout_outbox(&service.scout, &service.client, &service.learning_url).await?;
@@ -244,7 +244,7 @@ async fn set_scout_lifecycle_state(
     state.scout_sample_active_scenarios = snapshot.scout_sample_active_scenarios;
     state.scout_variant_rotation_cursor = snapshot.scout_variant_rotation_cursor;
     state.scout_lifecycle_updated_at_ms = snapshot.updated_at_ms;
-    persist_scout_state(&service.scout.path, &state)?;
+    persist_scout_state(&service.scout.path, &state, &["scout_sample_at_ms", "scout_sample_active_scenarios"])?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -403,7 +403,7 @@ async fn observe_scout_lifecycle(
         return Ok(Json(response));
     }
     let response = apply_scout_lifecycle_observation(&mut state, &request);
-    persist_scout_state(&service.scout.path, &state)?;
+    persist_scout_state(&service.scout.path, &state, &["outbox", "scout_pending_samples", "scout_sample_active_scenarios", "scout_plan_profiles", "scout_observation_results", "scout_instances"])?;
     drop(state);
     flush_scout_outbox(&service.scout, &service.client, &service.learning_url).await?;
     Ok(Json(response))
@@ -522,7 +522,7 @@ async fn create_scout_plan(
     if let Some(response) = state.scout_plan_results.get(&request.request_id) {
         let response = response.clone();
         if !request.legacy_cooldowns.is_empty() || !request.legacy_comparisons.is_empty() {
-            persist_scout_state(&service.scout.path, &state)?;
+            persist_scout_state(&service.scout.path, &state, &["scout_sample_at_ms", "pairs"])?;
         }
         drop(state);
         flush_scout_outbox(&service.scout, &service.client, &service.learning_url).await?;
@@ -726,7 +726,7 @@ async fn create_scout_plan(
             state.scout_plan_results.remove(&oldest);
         }
     }
-    persist_scout_state(&service.scout.path, &state)?;
+    persist_scout_state(&service.scout.path, &state, &["outbox", "scout_instances", "scout_pending_samples", "scout_sample_at_ms", "scout_plan_profiles", "scout_active_audits", "scout_sample_active_scenarios", &format!("scout_plan_results@{}", request.request_id)])?;
     drop(state);
     flush_scout_outbox(&service.scout, &service.client, &service.learning_url).await?;
     Ok(Json(response))
@@ -1012,7 +1012,7 @@ async fn select_scout_entry(
 ) -> Result<Json<ScoutEntrySelectionResponse>, (StatusCode, String)> {
     if request.candidates.len() > 10_000
         || request.walk_forward.len() > 100_000
-        || request.scout_max_active_positions > 5_000
+        || request.scout_max_active_positions > 10_000
         || !request.risk_appetite.is_finite()
         || request.candidates.iter().any(|candidate| {
             number(candidate, "strength").is_some_and(|value| !value.is_finite())

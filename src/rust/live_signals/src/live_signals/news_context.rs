@@ -61,6 +61,7 @@ pub(super) fn apply_news(snapshot: &mut SignalSnapshot, context: &NewsContext, n
     let pre_news_score = snapshot.score;
     let weight = context.weight.clamp(0.0, 0.20);
     snapshot.score = (snapshot.score * (1.0 - weight) + news_score * weight).clamp(-1.0, 1.0);
+    snapshot.refresh_raw_strength();
     snapshot.direction = if snapshot.score > 0.2 {
         "bullish"
     } else if snapshot.score < -0.2 {
@@ -174,6 +175,8 @@ mod tests {
             ranging_probability: None,
             range_lower_bound: None,
             range_upper_bound: None,
+            evidence_coverage: Some(1.0),
+            estimated_accuracy: None,
         }
     }
 
@@ -198,6 +201,7 @@ mod tests {
         apply_news(&mut signal, &context, 2_000_000);
 
         assert!((signal.score - 0.6).abs() < 1e-12);
+        assert!((signal.strength - 0.6).abs() < 1e-12);
         assert_eq!(signal.direction, "bullish");
         let attribution = signal.news_attribution.unwrap();
         assert_eq!(attribution.article_count, 1);
@@ -225,6 +229,7 @@ mod tests {
 
         apply_news(&mut signal, &context, 2_000_000);
         assert!((signal.score - 0.6).abs() < 1e-12);
+        assert!((signal.strength - 0.6).abs() < 1e-12);
         assert_eq!(signal.news_attribution.unwrap().weight, 0.2);
 
         let mut unmatched = snapshot("ETH-USDT", 0.5);
@@ -237,6 +242,7 @@ mod tests {
         };
         apply_news(&mut unmatched, &unrelated, 2_000_000);
         assert_eq!(unmatched.score, 0.5);
+        assert_eq!(unmatched.strength, 0.5);
         assert!(unmatched.news_attribution.is_none());
     }
 

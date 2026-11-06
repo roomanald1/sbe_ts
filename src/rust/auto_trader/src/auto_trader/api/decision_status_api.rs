@@ -204,6 +204,32 @@ mod decision_profile_tests {
     }
 
     #[test]
+    fn decision_profiles_include_paired_scout_variants_from_learning_snapshot() {
+        let mut settings = Settings::default();
+        let spec = Strategy::LiveMomentum.parameter_specs()[0];
+        settings.learned_scout_parameter_variants.push(strategies::ScoutParameterVariant {
+            symbol: "BTC-USDT".into(),
+            strategy: Strategy::LiveMomentum.as_str().into(),
+            parameter: spec.key.as_str().into(),
+            candidate_value: spec.default,
+            sample_count: 3,
+            minimum_samples: 6,
+            average_net_improvement_percent: 0.12,
+            lower_90_one_sided_improvement_percent: None,
+            promoted: false,
+        });
+
+        let profiles = strategy_parameter_profiles(&settings);
+        let profile = profiles.iter().find(|profile| {
+            profile.symbol == "BTC-USDT" && profile.strategy == Strategy::LiveMomentum.as_str()
+        }).expect("live momentum profile");
+        let parameter = profile.parameters.iter().find(|parameter| parameter.key == spec.key.as_str())
+            .expect("tested parameter");
+        assert_eq!(parameter.scout_variants.len(), 1);
+        assert_eq!(parameter.scout_variants[0].sample_count, 3);
+    }
+
+    #[test]
     fn scout_and_trade_history_share_the_live_context_row() {
         assert_eq!(
             learning_context_prefix("scout:long:range:XRP-USDC:live-momentum:trade"),

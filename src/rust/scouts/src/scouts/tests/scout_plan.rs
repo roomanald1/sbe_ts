@@ -48,8 +48,8 @@ mod scout_plan_tests {
         let service = service();
         let configuration = ScoutConfiguration {
             strategies: vec!["live-momentum".into()],
-            max_active_samples: 12,
-            max_active_positions: 30,
+            max_active_samples: 5_000,
+            max_active_positions: 10_000,
             ..ScoutConfiguration::default()
         };
         set_scout_configuration(State(service.clone()), Json(configuration))
@@ -57,10 +57,9 @@ mod scout_plan_tests {
             .unwrap();
         let returned = get_scout_configuration(State(service.clone())).await.0;
         assert_eq!(returned.strategies, vec!["live-momentum"]);
-        assert_eq!(returned.max_active_samples, 12);
-        assert_eq!(returned.max_active_positions, 30);
-        let stored = std::fs::read(&service.scout.path).unwrap();
-        let persisted: PersistedState = serde_json::from_slice(&stored).unwrap();
+        assert_eq!(returned.max_active_samples, 5_000);
+        assert_eq!(returned.max_active_positions, 10_000);
+        let persisted = load_scout_state(&service.scout.path).unwrap();
         assert_eq!(persisted.scout_configuration.strategies, returned.strategies);
         let _ = std::fs::remove_file(&service.scout.path);
     }

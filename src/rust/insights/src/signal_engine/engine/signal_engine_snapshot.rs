@@ -475,6 +475,8 @@ impl SignalEngine {
             direction: direction.to_owned(),
             score,
             strength: (score.abs() * count as f64 / 9.0).clamp(0.0, 1.0),
+            evidence_coverage: Some(count as f64 / 9.0),
+            estimated_accuracy: None,
             components,
             reasons,
             news_attribution: None,

@@ -6,6 +6,7 @@ struct AutoTraderState {
     enabled: Arc<AtomicBool>,
     settings: Arc<Mutex<Settings>>,
     settings_persist_notify: Arc<Notify>,
+    price_path_last_checkpoint_requested_at: Arc<std::sync::Mutex<Option<Instant>>>,
     state_updates: broadcast::Sender<()>,
     settings_persist_timings_ms: Arc<std::sync::Mutex<BTreeMap<String, Vec<f64>>>>,
     latest_missed_opportunity_bands: Arc<Mutex<Vec<MissedOpportunityGateBand>>>,

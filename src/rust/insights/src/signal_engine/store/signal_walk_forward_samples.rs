@@ -17,6 +17,10 @@ fn non_overlapping_samples(
     accepted
 }
 
+fn has_walk_forward_test_samples(sample_count: usize) -> bool {
+    sample_count > WALK_FORWARD_MIN_TRAINING_SAMPLES
+}
+
 #[cfg(test)]
 mod walk_forward_sample_tests {
     use super::*;
@@ -43,5 +47,15 @@ mod walk_forward_sample_tests {
         ], 0);
         assert_eq!(selected.len(), 1);
         assert_eq!(selected[0].signal_timestamp, 400);
+    }
+
+    #[test]
+    fn walk_forward_requires_training_samples_and_at_least_one_test_sample() {
+        assert!(!has_walk_forward_test_samples(
+            WALK_FORWARD_MIN_TRAINING_SAMPLES
+        ));
+        assert!(has_walk_forward_test_samples(
+            WALK_FORWARD_MIN_TRAINING_SAMPLES + 1
+        ));
     }
 }

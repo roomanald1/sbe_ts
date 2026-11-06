@@ -190,6 +190,7 @@ pub fn router() -> Router {
         enabled: Arc::new(AtomicBool::new(enabled)),
         settings: Arc::new(Mutex::new(settings)),
         settings_persist_notify: Arc::new(Notify::new()),
+        price_path_last_checkpoint_requested_at: Arc::new(std::sync::Mutex::new(None)),
         state_updates,
         settings_persist_timings_ms: Arc::new(std::sync::Mutex::new(BTreeMap::new())),
         latest_missed_opportunity_bands: Arc::new(Mutex::new(Vec::new())),
@@ -493,6 +494,10 @@ fn start_learning_feedback_worker(state: &AutoTraderState) {
                 let Ok(snapshot) = response.json::<strategies::LearnedProfileSnapshot>().await else { continue };
                 let mut settings = profile_state.settings.lock().await;
                 let mut changed = false;
+                if settings.learned_scout_parameter_variants != snapshot.scout_parameter_variants {
+                    settings.learned_scout_parameter_variants = snapshot.scout_parameter_variants;
+                    changed = true;
+                }
                 for profile in snapshot.profiles {
                     let key = format!("{}:{}", profile.symbol, profile.strategy);
                     settings.registered_profile_ids.insert(profile.profile_id.clone());

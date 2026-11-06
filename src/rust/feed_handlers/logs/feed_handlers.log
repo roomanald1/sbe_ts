@@ -64,3 +64,8 @@
 1793873603.161 ERROR Ignoring invalid OKX hedge ticker JSON: expected ident at line 1 column 2
 1793873603.163 INFO test stream ended
 1793873603.163 ERROR Ignoring invalid shared OKX trades JSON: expected value at line 1 column 1
+1793954658.743 ERROR Ignoring invalid OKX JSON message: expected ident at line 1 column 2
+1793954658.743 INFO OKX tickers subscription batch acknowledged
+1793954658.744 ERROR Ignoring invalid OKX hedge ticker JSON: expected ident at line 1 column 2
+1793954658.746 INFO test stream ended
+1793954658.747 ERROR Ignoring invalid shared OKX trades JSON: expected value at line 1 column 1

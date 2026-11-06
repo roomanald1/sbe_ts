@@ -164,6 +164,17 @@ def metrics():
     insights_maintenance_metrics(output)
     insights_signal_latency_metrics(output)
 
+    try:
+        scouts = get_json(SERVICES["scouts"][0], "/outcomes?source=all&page_size=1")
+        summary = scouts.get("summary", {}).get("all", {})
+        total = summary.get("total")
+        open_count = summary.get("open")
+        if isinstance(total, (int, float)) and isinstance(open_count, (int, float)):
+            output.append(sample("app_scout_instances", "Scout instances in the recent seven-day report, by lifecycle status.", open_count, {"status": "open"}))
+            output.append(sample("app_scout_instances", "Scout instances in the recent seven-day report, by lifecycle status.", max(0, total - open_count), {"status": "closed"}))
+    except (OSError, URLError, ValueError, TypeError, AttributeError):
+        pass
+
     base = SERVICES["position_management"][0]
     try:
         persistence = get_json(base, "/internal/persistence-timing")

@@ -149,26 +149,24 @@ impl SignalStore {
         skip_corrupt_rows: bool,
     ) -> Result<Vec<StoredSignalRecord>> {
         let connection = Self::open_database_path(path)?;
-        let mut statement = connection.prepare(
-            "SELECT payload FROM signal_records WHERE kind = ?1 ORDER BY timestamp DESC, id DESC LIMIT ?2",
-        )?;
-        let rows = statement
-            .query_map(params![kind, limit.min(i64::MAX as usize) as i64], |row| {
-                row.get::<_, Vec<u8>>(0)
-            })?;
-        let compressed_records = rows.collect::<rusqlite::Result<Vec<_>>>()?;
-        drop(statement);
         let mut records = Vec::new();
-        for compressed in compressed_records {
-            let mut payload = Vec::new();
-            let decoded = MultiGzDecoder::new(compressed.as_slice())
-                .read_to_end(&mut payload)
-                .map_err(anyhow::Error::from)
-                .and_then(|_| deserialize_record(kind, &payload));
-            match decoded {
-                Ok(record) => records.push(record),
-                Err(_) if skip_corrupt_rows => continue,
-                Err(error) => return Err(error),
+        {
+            let mut statement = connection.prepare(
+                "SELECT payload FROM signal_records WHERE kind = ?1 ORDER BY timestamp DESC, id DESC LIMIT ?2",
+            )?;
+            let mut rows = statement.query(params![kind, limit.min(i64::MAX as usize) as i64])?;
+            while let Some(row) = rows.next()? {
+                let compressed = row.get::<_, Vec<u8>>(0)?;
+                let mut payload = Vec::new();
+                let decoded = MultiGzDecoder::new(compressed.as_slice())
+                    .read_to_end(&mut payload)
+                    .map_err(anyhow::Error::from)
+                    .and_then(|_| deserialize_record(kind, &payload));
+                match decoded {
+                    Ok(record) => records.push(record),
+                    Err(_) if skip_corrupt_rows => continue,
+                    Err(error) => return Err(error),
+                }
             }
         }
         if records.len() < limit && (0..=5).contains(&kind) {

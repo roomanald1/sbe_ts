@@ -7,25 +7,11 @@ struct ServiceState {
 }
 
 pub fn router(learning_url: String) -> Router {
-    let state_path = std::env::var_os("SCOUTS_STATE_PATH")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("scouts_state.json"));
-    let persisted = std::fs::read(&state_path)
-        .ok()
-        .and_then(|bytes| {
-            let value = serde_json::from_slice::<serde_json::Value>(&bytes).ok()?;
-            serde_json::from_value::<PersistedState>(value.clone())
-                .ok()
-                .or_else(|| {
-                    serde_json::from_value::<BTreeSet<String>>(value)
-                        .ok()
-                        .map(|seen| PersistedState {
-                            seen,
-                            ..PersistedState::default()
-                        })
-                })
-        })
-        .unwrap_or_default();
+    let configured_path = std::env::var_os("SCOUTS_STATE_PATH").map(PathBuf::from);
+    let state_path = configured_path
+        .clone()
+        .unwrap_or_else(|| PathBuf::from("../position_management/scouts_state.sqlite"));
+    let persisted = load_scout_state(&state_path).unwrap_or_default();
     let seen = persisted.seen.clone();
     let client = reqwest::Client::new();
     let insights_url =
@@ -65,6 +51,8 @@ pub fn router(learning_url: String) -> Router {
     });
     Router::new()
         .route("/health", get(|| async { "ok" }))
+        .route("/process-cpu-seconds", get(process_cpu_seconds))
+        .route("/process-memory-bytes", get(process_memory_bytes))
         .route("/configuration", get(get_scout_configuration).post(set_scout_configuration))
         .route("/status", get(get_scout_status))
         .route("/outcomes", get(get_scout_outcomes).post(forward_outcome))
@@ -90,6 +78,25 @@ pub fn router(learning_url: String) -> Router {
             seen: Arc::new(Mutex::new(seen)),
             scout,
         })
+}
+
+async fn process_cpu_seconds() -> String {
+    let mut usage = std::mem::MaybeUninit::<libc::rusage>::zeroed();
+    if unsafe { libc::getrusage(libc::RUSAGE_SELF, usage.as_mut_ptr()) } != 0 {
+        return "0".to_owned();
+    }
+    let usage = unsafe { usage.assume_init() };
+    let user = usage.ru_utime.tv_sec as f64 + usage.ru_utime.tv_usec as f64 / 1_000_000.0;
+    let system = usage.ru_stime.tv_sec as f64 + usage.ru_stime.tv_usec as f64 / 1_000_000.0;
+    (user + system).to_string()
+}
+
+async fn process_memory_bytes() -> String {
+    std::fs::read_to_string("/proc/self/status")
+        .ok()
+        .and_then(|status| status.lines().find_map(|line| line.strip_prefix("VmRSS:")?.split_whitespace().next()?.parse::<u64>().ok()))
+        .map(|kilobytes| (kilobytes * 1024).to_string())
+        .unwrap_or_else(|| "0".to_owned())
 }
 
 async fn get_scout_configuration(
@@ -123,7 +130,7 @@ async fn set_scout_configuration(
 ) -> Result<StatusCode, (StatusCode, String)> {
     if configuration.strategies.len() > 128
         || configuration.max_active_samples > 5_000
-        || configuration.max_active_positions > 5_000
+        || configuration.max_active_positions > 10_000
         || !configuration.max_sample_notional.is_finite()
         || configuration.max_sample_notional <= 0.0
         || !configuration.stop_loss_percent.is_finite()
@@ -142,7 +149,7 @@ async fn set_scout_configuration(
     }
     let mut state = service.scout.data.lock().await;
     state.scout_configuration = configuration;
-    persist_scout_state(&service.scout.path, &state)?;
+    persist_scout_state(&service.scout.path, &state, &["scout_configuration"])?;
     Ok(StatusCode::ACCEPTED)
 }
 
@@ -393,7 +400,7 @@ async fn receive_dated_carry_scout_inputs(
     {
         let mut state = service.scout.data.lock().await;
         let _ = apply_scout_lifecycle_observation(&mut state, &observation);
-        persist_scout_state(&service.scout.path, &state)?;
+        persist_scout_state(&service.scout.path, &state, &["outbox", "scout_pending_samples", "scout_sample_active_scenarios", "scout_plan_profiles", "scout_observation_results", "scout_instances"])?;
     }
     flush_scout_outbox(&service.scout, &service.client, &service.learning_url).await?;
 
@@ -497,7 +504,7 @@ async fn finalize_sample(
         let mut persisted = service.scout.data.lock().await;
         persisted.seen.insert(event_id);
         persisted.seen.extend(seen.iter().cloned());
-        persist_scout_state(&service.scout.path, &persisted)?;
+        persist_scout_state(&service.scout.path, &persisted, &["seen"])?;
     }
     Ok(StatusCode::NO_CONTENT)
 }
@@ -981,9 +988,20 @@ fn build_scout_audits(template: &ScoutAuditTemplate, group_id: &str) -> Vec<serd
 fn persist_scout_state(
     path: &std::path::Path,
     state: &PersistedState,
+    changed_sections: &[&str],
 ) -> Result<(), (StatusCode, String)> {
-    let bytes = serde_json::to_vec(state)
-        .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
+    let mut changes = serde_json::Map::new();
+    for section in changed_sections {
+        if let Some((collection, key)) = section.split_once('@') {
+            let value = state.scout_plan_results.get(key)
+                .map(serde_json::to_value).transpose()
+                .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?
+                .unwrap_or(serde_json::Value::Null);
+            changes.insert(format!("{collection}@{key}"), value);
+        } else {
+            changes.insert((*section).to_owned(), scout_state_section(state, section)?);
+        }
+    }
     if let Some(parent) = path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
@@ -991,11 +1009,174 @@ fn persist_scout_state(
         std::fs::create_dir_all(parent)
             .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
     }
-    let temporary = path.with_extension("tmp");
-    std::fs::write(&temporary, bytes)
+    let mut connection = rusqlite::Connection::open(path)
         .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
-    std::fs::rename(temporary, path)
-        .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))
+    connection.execute_batch(
+        "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;\
+         CREATE TABLE IF NOT EXISTS scout_records (collection TEXT NOT NULL, record_key TEXT NOT NULL, payload TEXT NOT NULL, PRIMARY KEY(collection, record_key));\
+         CREATE TABLE IF NOT EXISTS scout_configuration (id INTEGER PRIMARY KEY CHECK(id=1), strategies TEXT NOT NULL, max_active_samples INTEGER NOT NULL, max_active_positions INTEGER NOT NULL, max_sample_notional REAL NOT NULL, stop_loss_percent REAL NOT NULL, take_profit_percent REAL NOT NULL);\
+         CREATE TABLE IF NOT EXISTS scout_metadata (id INTEGER PRIMARY KEY CHECK(id=1), variant_rotation_cursor INTEGER NOT NULL, lifecycle_updated_at_ms INTEGER NOT NULL);",
+    ).map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
+    let tx = connection.transaction()
+        .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
+    let configuration = scout_state_section(state, "scout_configuration")?;
+    sync_configuration(&tx, &configuration)?;
+    sync_metadata(&tx, state)?;
+    for (section, current) in &changes {
+        if let Some((collection, key)) = section.split_once('@') {
+            sync_record(&tx, collection, key, current)?;
+        } else if matches!(section.as_str(), "scout_variant_rotation_cursor" | "scout_lifecycle_updated_at_ms" | "scout_configuration") {
+            continue;
+        } else if matches!(section.as_str(), "seen" | "outbox") {
+            sync_record_array(&tx, section, current, section == "seen")?;
+        } else if section != "scout_configuration" {
+            sync_record_map(&tx, section, current)?;
+        }
+    }
+    tx.commit().map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
+    Ok(())
+}
+
+fn scout_state_section(
+    state: &PersistedState,
+    section: &str,
+) -> Result<serde_json::Value, (StatusCode, String)> {
+    let value = match section {
+        "scout_configuration" => serde_json::to_value(&state.scout_configuration),
+        "scout_variant_rotation_cursor" => serde_json::to_value(state.scout_variant_rotation_cursor),
+        "scout_lifecycle_updated_at_ms" => serde_json::to_value(state.scout_lifecycle_updated_at_ms),
+        "seen" => serde_json::to_value(&state.seen),
+        "outcomes" => serde_json::to_value(&state.outcomes),
+        "scout_instances" => serde_json::to_value(&state.scout_instances),
+        "pairs" => serde_json::to_value(&state.pairs),
+        "outbox" => serde_json::to_value(&state.outbox),
+        "scout_sample_at_ms" => serde_json::to_value(&state.scout_sample_at_ms),
+        "scout_sample_active_scenarios" => serde_json::to_value(&state.scout_sample_active_scenarios),
+        "scout_plan_profiles" => serde_json::to_value(&state.scout_plan_profiles),
+        "scout_plan_results" => serde_json::to_value(&state.scout_plan_results),
+        "scout_pending_samples" => serde_json::to_value(&state.scout_pending_samples),
+        "scout_observation_results" => serde_json::to_value(&state.scout_observation_results),
+        "scout_active_audits" => serde_json::to_value(&state.scout_active_audits),
+        _ if section.starts_with("scout_plan_results@") => {
+            let key = section.split_once('@').map(|(_, key)| key).unwrap_or_default();
+            state.scout_plan_results.get(key).map(serde_json::to_value)
+                .transpose().map(|value| value.unwrap_or(serde_json::Value::Null))
+        }
+        _ => return Err((StatusCode::INTERNAL_SERVER_ERROR, format!("unknown Scout persistence section {section}"))),
+    };
+    value.map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))
+}
+
+fn sync_configuration(
+    tx: &rusqlite::Transaction<'_>,
+    current: &serde_json::Value,
+) -> Result<(), (StatusCode, String)> {
+    let config = current;
+    let strategies = serde_json::to_string(&config["strategies"])
+        .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
+    tx.execute(
+        "INSERT INTO scout_configuration VALUES(1, ?1, ?2, ?3, ?4, ?5, ?6) ON CONFLICT(id) DO UPDATE SET strategies=excluded.strategies, max_active_samples=excluded.max_active_samples, max_active_positions=excluded.max_active_positions, max_sample_notional=excluded.max_sample_notional, stop_loss_percent=excluded.stop_loss_percent, take_profit_percent=excluded.take_profit_percent WHERE scout_configuration.strategies IS NOT excluded.strategies OR scout_configuration.max_active_samples IS NOT excluded.max_active_samples OR scout_configuration.max_active_positions IS NOT excluded.max_active_positions OR scout_configuration.max_sample_notional IS NOT excluded.max_sample_notional OR scout_configuration.stop_loss_percent IS NOT excluded.stop_loss_percent OR scout_configuration.take_profit_percent IS NOT excluded.take_profit_percent",
+        rusqlite::params![strategies, config["max_active_samples"].as_u64().unwrap_or_default() as i64, config["max_active_positions"].as_u64().unwrap_or_default() as i64, config["max_sample_notional"].as_f64().unwrap_or_default(), config["stop_loss_percent"].as_f64().unwrap_or_default(), config["take_profit_percent"].as_f64().unwrap_or_default()],
+    ).map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
+    Ok(())
+}
+
+fn sync_metadata(
+    tx: &rusqlite::Transaction<'_>,
+    state: &PersistedState,
+) -> Result<(), (StatusCode, String)> {
+    let cursor = state.scout_variant_rotation_cursor;
+    let lifecycle = state.scout_lifecycle_updated_at_ms;
+    tx.execute(
+        "INSERT INTO scout_metadata VALUES(1, ?1, ?2) ON CONFLICT(id) DO UPDATE SET variant_rotation_cursor=excluded.variant_rotation_cursor, lifecycle_updated_at_ms=excluded.lifecycle_updated_at_ms WHERE scout_metadata.variant_rotation_cursor IS NOT excluded.variant_rotation_cursor OR scout_metadata.lifecycle_updated_at_ms IS NOT excluded.lifecycle_updated_at_ms",
+        rusqlite::params![cursor as i64, lifecycle as i64],
+    ).map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
+    Ok(())
+}
+
+fn sync_record(
+    tx: &rusqlite::Transaction<'_>,
+    collection: &str,
+    key: &str,
+    current: &serde_json::Value,
+) -> Result<(), (StatusCode, String)> {
+    if current.is_null() {
+        tx.execute("DELETE FROM scout_records WHERE collection=?1 AND record_key=?2", rusqlite::params![collection, key])
+            .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
+    } else {
+        tx.execute("INSERT INTO scout_records(collection,record_key,payload) VALUES(?1,?2,?3) ON CONFLICT(collection,record_key) DO UPDATE SET payload=excluded.payload", rusqlite::params![collection, key, current.to_string()])
+            .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
+    }
+    Ok(())
+}
+
+fn sync_record_map(
+    tx: &rusqlite::Transaction<'_>,
+    collection: &str,
+    current: &serde_json::Value,
+) -> Result<(), (StatusCode, String)> {
+    tx.execute("DELETE FROM scout_records WHERE collection=?1", [collection])
+        .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
+    let Some(entries) = current.as_object() else { return Ok(()); };
+    let mut insert = tx.prepare("INSERT INTO scout_records(collection,record_key,payload) VALUES(?1,?2,?3)")
+        .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
+    for (key, payload) in entries {
+        insert.execute(rusqlite::params![collection, key, payload.to_string()])
+            .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
+    }
+    Ok(())
+}
+
+fn sync_record_array(
+    tx: &rusqlite::Transaction<'_>,
+    collection: &str,
+    current: &serde_json::Value,
+    keyed_by_value: bool,
+) -> Result<(), (StatusCode, String)> {
+    tx.execute("DELETE FROM scout_records WHERE collection=?1", [collection])
+        .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
+    if let Some(items) = current.as_array() {
+        for (index, payload) in items.iter().enumerate() {
+            let key = if keyed_by_value { payload.as_str().unwrap_or_default().to_owned() } else { format!("{index:020}") };
+            let serialized = if keyed_by_value { "null".to_owned() } else { payload.to_string() };
+            tx.execute("INSERT INTO scout_records(collection,record_key,payload) VALUES(?1,?2,?3)", rusqlite::params![collection, key, serialized])
+                .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
+        }
+    }
+    Ok(())
+}
+
+fn load_scout_state(path: &std::path::Path) -> anyhow::Result<PersistedState> {
+    let connection = rusqlite::Connection::open(path)?;
+    let mut state = serde_json::Map::new();
+    let configuration = connection.query_row(
+        "SELECT strategies, max_active_samples, max_active_positions, max_sample_notional, stop_loss_percent, take_profit_percent FROM scout_configuration WHERE id=1", [],
+        |row| Ok(serde_json::json!({"strategies": serde_json::from_str::<Vec<String>>(&row.get::<_, String>(0)?).unwrap_or_default(), "max_active_samples": row.get::<_, i64>(1)?, "max_active_positions": row.get::<_, i64>(2)?, "max_sample_notional": row.get::<_, f64>(3)?, "stop_loss_percent": row.get::<_, f64>(4)?, "take_profit_percent": row.get::<_, f64>(5)?})),
+    )?;
+    state.insert("scout_configuration".into(), configuration);
+    let (cursor, lifecycle): (i64, i64) = connection.query_row("SELECT variant_rotation_cursor, lifecycle_updated_at_ms FROM scout_metadata WHERE id=1", [], |row| Ok((row.get(0)?, row.get(1)?)))?;
+    state.insert("scout_variant_rotation_cursor".into(), serde_json::json!(cursor));
+    state.insert("scout_lifecycle_updated_at_ms".into(), serde_json::json!(lifecycle));
+    for collection in ["seen", "outcomes", "scout_instances", "pairs", "outbox", "scout_sample_at_ms", "scout_sample_active_scenarios", "scout_plan_profiles", "scout_plan_results", "scout_pending_samples", "scout_observation_results", "scout_active_audits"] {
+        let mut statement = connection.prepare("SELECT record_key, payload FROM scout_records WHERE collection=?1 ORDER BY record_key")?;
+        let rows = statement.query_map([collection], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?;
+        if collection == "seen" || collection == "outbox" {
+            let mut values = Vec::new();
+            for row in rows {
+                let (key, payload) = row?;
+                values.push(if collection == "seen" { serde_json::Value::String(key) } else { serde_json::from_str(&payload)? });
+            }
+            state.insert(collection.into(), serde_json::Value::Array(values));
+        } else {
+            let mut values = serde_json::Map::new();
+            for row in rows {
+                let (key, payload) = row?;
+                values.insert(key, serde_json::from_str(&payload)?);
+            }
+            state.insert(collection.into(), serde_json::Value::Object(values));
+        }
+    }
+    Ok(serde_json::from_value(serde_json::Value::Object(state))?)
 }
 
 async fn flush_scout_outbox(
@@ -1012,7 +1193,7 @@ async fn flush_scout_outbox(
         if matches!(item, ScoutOutboxItem::Audit(_)) {
             let mut state = scout.data.lock().await;
             state.outbox.remove(0);
-            persist_scout_state(&scout.path, &state)?;
+            persist_scout_state(&scout.path, &state, &["outbox"])?;
             continue;
         }
         let (url, payload) = match &item {
@@ -1047,7 +1228,7 @@ async fn flush_scout_outbox(
             })?;
         let mut state = scout.data.lock().await;
         state.outbox.remove(0);
-        persist_scout_state(&scout.path, &state)?;
+        persist_scout_state(&scout.path, &state, &["outbox"])?;
     }
 }
 

@@ -31,8 +31,15 @@ pub const RESEARCH_SAMPLE_INTERVAL_MS: u64 = 10_000;
 pub const LIVE_SIGNAL_SNAPSHOT_INTERVAL_MS: u64 = 2_000;
 const WALK_FORWARD_MIN_THRESHOLD_SAMPLES: usize = 10;
 const WALK_FORWARD_TRAINING_WINDOW: usize = 200;
-/// Bound the historical records held together by walk-forward analysis.
+/// Keep supporting signal records bounded; outcomes have a separate broader
+/// limit because the analysis needs 31 non-overlapping directional outcomes
+/// per symbol and horizon after scanning the shared market universe.
 pub const WALK_FORWARD_RECORD_LIMIT: usize = 2_000;
+/// At the current sampling rate, 1-minute and 5-minute cohorts need hundreds
+/// to thousands of raw outcomes each to produce 31 non-overlapping costed
+/// directional samples. Keep the scan bounded, but large enough for the
+/// current ~100-symbol universe.
+pub const WALK_FORWARD_OUTCOME_LIMIT: usize = 1_250_000;
 const CALIBRATION_SNAPSHOT_LIMIT: usize = 2_000;
 const CALIBRATION_OUTCOME_LIMIT: usize = 20_000;
 const WALK_FORWARD_LOGISTIC_REFRESH_INTERVAL: usize = 100;

@@ -13,6 +13,10 @@ src/rust/position_management/auto_trader_state.msgpack
 src/rust/position_management/positions.sqlite
 src/rust/position_management/positions.sqlite-shm
 src/rust/position_management/positions.sqlite-wal
+src/rust/position_management/scouts_state.json
+src/rust/position_management/scouts_state.sqlite
+src/rust/position_management/scouts_state.sqlite-shm
+src/rust/position_management/scouts_state.sqlite-wal
 src/rust/service_gateway/target/*
 logs/*
 src/rust/insights/signals.jsonl.sqlite
@@ -35,3 +39,4 @@ research/autotrader/runtime/
 
 # Generated coverage reports
 coverage/
+src/rust/position_management/auto_trader_state.sqlite

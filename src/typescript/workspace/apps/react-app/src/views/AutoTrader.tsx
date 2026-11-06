@@ -665,7 +665,7 @@ export function AutoTrader() {
                       <input
                         type="number"
                         min="0"
-                        max="5000"
+                        max="10000"
                         step="1"
                         value={state.scoutMaxActivePositions}
                         onChange={(event) =>

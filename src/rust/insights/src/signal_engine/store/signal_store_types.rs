@@ -163,7 +163,7 @@ pub enum StoredSignalRecord {
 // A short-lived development build added this trailing component before it was
 // removed for bincode compatibility. Accept those rows too so the dashboard
 // can read data written during that build.
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 struct ExtendedSignalComponents {
     trend_1m_percent: Option<f64>,
     momentum_10s_percent: Option<f64>,
@@ -177,7 +177,7 @@ struct ExtendedSignalComponents {
     aggressor_cost_bps: Option<f64>,
     absorption_imbalance: Option<f64>,
 }
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 struct ExtendedSignalSnapshot {
     symbol: String,
     timestamp: u64,
@@ -191,7 +191,7 @@ struct ExtendedSignalSnapshot {
     range_lower_bound: Option<f64>,
     range_upper_bound: Option<f64>,
 }
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 enum ExtendedSnapshotRecord {
     Snapshot(ExtendedSignalSnapshot),
 }

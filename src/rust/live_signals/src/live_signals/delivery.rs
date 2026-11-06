@@ -1,5 +1,8 @@
 use super::*;
 
+const SCOUT_SIGNALS_PER_BATCH: usize = 20;
+const SCOUT_DELIVERY_TIMEOUT: Duration = Duration::from_secs(5);
+
 async fn post_dashboard(
     client: &reqwest::Client,
     endpoint: &str,
@@ -53,18 +56,28 @@ fn scout_payload(dashboard: &Value) -> Option<Value> {
     (!signals.is_empty()).then(|| json!({"signals":signals}))
 }
 
+fn scout_payload_batches<'a>(dashboards: impl Iterator<Item = &'a Value>) -> Vec<Value> {
+    let signals = dashboards
+        .filter_map(scout_payload)
+        .filter_map(|payload| payload.get("signals").and_then(Value::as_array).cloned())
+        .flatten()
+        .collect::<Vec<_>>();
+
+    signals
+        .chunks(SCOUT_SIGNALS_PER_BATCH)
+        .map(|signals| json!({"signals": signals}))
+        .collect()
+}
+
 async fn post_scout_dashboard(
     client: &reqwest::Client,
     endpoint: &str,
-    dashboard: &Value,
+    payload: &Value,
 ) -> Result<(), reqwest::Error> {
-    let Some(payload) = scout_payload(dashboard) else {
-        return Ok(());
-    };
     client
         .post(endpoint)
-        .timeout(Duration::from_millis(300))
-        .json(&payload)
+        .timeout(SCOUT_DELIVERY_TIMEOUT)
+        .json(payload)
         .send()
         .await?
         .error_for_status()?;
@@ -91,38 +104,43 @@ async fn deliver_pending_once(state: &LiveState, client: &reqwest::Client, base:
         .map(|entry| (entry.key().clone(), entry.value().clone()))
         .collect::<Vec<_>>();
     values.sort_by(|a, b| a.0.cmp(&b.0));
-    let results = futures_util::stream::iter(values)
+
+    let scouts_base =
+        std::env::var("SCOUTS_SERVICE_URL").unwrap_or_else(|_| "http://127.0.0.1:3011".into());
+    let scout_endpoint = format!("{}/live-inputs", scouts_base.trim_end_matches('/'));
+    let scout_batches = scout_payload_batches(values.iter().map(|(_, dashboard)| dashboard));
+    let scout_delivery = async {
+        let mut failed = false;
+        for payload in &scout_batches {
+            if let Err(error) = post_scout_dashboard(client, &scout_endpoint, payload).await {
+                failed = true;
+                crate::service_log!("WARN", "Live Scout batch input delivery failed: {error}");
+            }
+        }
+        failed
+    };
+
+    let auto_trader_delivery = futures_util::stream::iter(values)
         .map(|(symbol, dashboard)| {
             let client = client.clone();
             let endpoint = format!("{base}/internal/auto-trader/signal");
-            let scout_client = client.clone();
-            let scouts_base = std::env::var("SCOUTS_SERVICE_URL")
-                .unwrap_or_else(|_| "http://127.0.0.1:3011".into());
-            let scout_endpoint = format!("{}/live-inputs", scouts_base.trim_end_matches('/'));
             async move {
                 let started = Instant::now();
-                let (scout_result, result) = tokio::join!(
-                    post_scout_dashboard(&scout_client, &scout_endpoint, &dashboard),
-                    post_dashboard(&client, &endpoint, &dashboard),
-                );
-                if let Err(error) = scout_result {
-                    crate::service_log!(
-                        "WARN",
-                        "Live Scout input delivery failed for {symbol}: {error}"
-                    );
-                }
+                let result = post_dashboard(&client, &endpoint, &dashboard).await;
                 crate::latency::record_auto_trader_delivery(started.elapsed());
                 (symbol, dashboard, result)
             }
         })
         .buffer_unordered(PUBLISH_CONCURRENCY)
-        .collect::<Vec<_>>()
-        .await;
-    let mut failed = false;
+        .collect::<Vec<_>>();
+    let (scout_failed, results) = tokio::join!(scout_delivery, auto_trader_delivery);
+    let mut failed = scout_failed;
     for (symbol, dashboard, result) in results {
         match result {
             Ok(()) => {
-                acknowledge_delivery(state, &symbol, &dashboard);
+                if !scout_failed {
+                    acknowledge_delivery(state, &symbol, &dashboard);
+                }
             }
             Err(error) => {
                 failed = true;
@@ -176,6 +194,63 @@ mod tests {
         assert_eq!(payload["signals"][0]["best_ask"], 101.0);
         assert_eq!(payload["signals"][0]["book_updated_at_ms"], 1234);
         assert_eq!(payload["signals"][0]["price"], 100.0);
+    }
+
+    #[test]
+    fn scout_payload_batches_combine_symbols_and_respect_scout_plan_limit() {
+        let dashboards = (0..SCOUT_SIGNALS_PER_BATCH + 1)
+            .map(|index| {
+                let symbol = format!("TEST-{index}");
+                let mut markets = serde_json::Map::new();
+                markets.insert(
+                    symbol.clone(),
+                    json!({
+                        "bids": [{"price": 99.0}],
+                        "asks": [{"price": 101.0}],
+                        "updated_at_ms": 1234,
+                    }),
+                );
+                json!({
+                    "best": [{"symbol": symbol}],
+                    "markets": markets
+                })
+            })
+            .collect::<Vec<_>>();
+
+        let batches = scout_payload_batches(dashboards.iter());
+
+        assert_eq!(batches.len(), 2);
+        assert_eq!(
+            batches[0]["signals"].as_array().unwrap().len(),
+            SCOUT_SIGNALS_PER_BATCH
+        );
+        assert_eq!(batches[1]["signals"].as_array().unwrap().len(), 1);
+        assert_eq!(batches[0]["signals"][0]["symbol"], "TEST-0");
+        assert_eq!(batches[1]["signals"][0]["symbol"], "TEST-20");
+    }
+
+    #[tokio::test]
+    async fn scout_delivery_allows_handler_to_complete_past_previous_timeout() {
+        let app = Router::new().route(
+            "/live-inputs",
+            post(|| async {
+                tokio::time::sleep(Duration::from_millis(350)).await;
+                axum::http::StatusCode::ACCEPTED
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        post_scout_dashboard(
+            &reqwest::Client::new(),
+            &format!("http://{address}/live-inputs"),
+            &json!({"signals": [{"symbol": "BTC-USDT"}]}),
+        )
+        .await
+        .unwrap();
     }
 
     #[tokio::test]

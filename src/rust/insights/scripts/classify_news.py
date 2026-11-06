@@ -2,6 +2,7 @@
 """Local HTTP service for crypto financial-news sentiment."""
 import json
 import os
+import resource
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 MODEL_ID = "burakutf/finetuned-finbert-crypto"
@@ -36,6 +37,28 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self):
+        if self.path == "/process-cpu-seconds":
+            usage = resource.getrusage(resource.RUSAGE_SELF)
+            body = str(usage.ru_utime + usage.ru_stime).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        if self.path == "/process-memory-bytes":
+            try:
+                with open("/proc/self/status", encoding="utf-8") as status_file:
+                    resident_kb = next(int(line.split()[1]) for line in status_file if line.startswith("VmRSS:"))
+                body = str(resident_kb * 1024).encode("utf-8")
+            except (OSError, StopIteration, ValueError):
+                body = b"0"
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         if self.path != "/health":
             self.respond(404, {"error": "not found"})
             return

@@ -164,7 +164,7 @@ async fn evaluate_position_exit(
                     current.price_path.drain(..current.price_path.len() - 4096);
                 }
                 position.price_path = current.price_path.clone();
-                request_settings_persist(state)?;
+                request_price_path_persist_if_due(state)?;
             } else {
                 position.price_path = current.price_path.clone();
             }

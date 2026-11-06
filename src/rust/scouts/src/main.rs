@@ -14,6 +14,8 @@ async fn main() -> anyhow::Result<()> {
             "Scouts",
             &[
                 ("/health", &["get"]),
+                ("/process-cpu-seconds", &["get"]),
+                ("/process-memory-bytes", &["get"]),
                 ("/configuration", &["get", "post"]),
                 ("/status", &["get"]),
                 ("/outcomes", &["get", "post"]),

@@ -142,6 +142,8 @@ pub fn router(path: PathBuf) -> Result<Router, String> {
     };
     Ok(Router::new()
         .route("/health", get(|| async { "ok" }))
+        .route("/process-cpu-seconds", get(process_cpu_seconds))
+        .route("/process-memory-bytes", get(process_memory_bytes))
         .route("/profiles", get(get_profiles).post(register_profile))
         .route("/decision-snapshot", get(get_decision_snapshot))
         .route("/summary", get(get_summary))
@@ -150,6 +152,33 @@ pub fn router(path: PathBuf) -> Result<Router, String> {
         .route("/execution-decision", post(execution_decision))
         .route("/execution-outcomes", post(execution_outcome))
         .with_state(service))
+}
+
+async fn process_cpu_seconds() -> String {
+    let mut usage = std::mem::MaybeUninit::<libc::rusage>::zeroed();
+    if unsafe { libc::getrusage(libc::RUSAGE_SELF, usage.as_mut_ptr()) } != 0 {
+        return "0".to_owned();
+    }
+    let usage = unsafe { usage.assume_init() };
+    let user = usage.ru_utime.tv_sec as f64 + usage.ru_utime.tv_usec as f64 / 1_000_000.0;
+    let system = usage.ru_stime.tv_sec as f64 + usage.ru_stime.tv_usec as f64 / 1_000_000.0;
+    (user + system).to_string()
+}
+
+async fn process_memory_bytes() -> String {
+    std::fs::read_to_string("/proc/self/status")
+        .ok()
+        .and_then(|status| {
+            status.lines().find_map(|line| {
+                line.strip_prefix("VmRSS:")?
+                    .split_whitespace()
+                    .next()?
+                    .parse::<u64>()
+                    .ok()
+            })
+        })
+        .map(|kilobytes| (kilobytes * 1024).to_string())
+        .unwrap_or_else(|| "0".to_owned())
 }
 
 fn open_state_db(path: &Path) -> Result<rusqlite::Connection, String> {

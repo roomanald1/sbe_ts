@@ -295,6 +295,23 @@ fn request_settings_persist(state: &AutoTraderState) -> Result<(), (StatusCode, 
     Ok(())
 }
 
+const PRICE_PATH_PERSIST_INTERVAL: Duration = Duration::from_secs(60);
+
+fn request_price_path_persist_if_due(
+    state: &AutoTraderState,
+) -> Result<(), (StatusCode, String)> {
+    let now = Instant::now();
+    let mut last_persisted = state
+        .price_path_last_checkpoint_requested_at
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    if last_persisted.is_none_or(|last| now.duration_since(last) >= PRICE_PATH_PERSIST_INTERVAL) {
+        *last_persisted = Some(now);
+        request_settings_persist(state)?;
+    }
+    Ok(())
+}
+
 fn start_settings_persistence_worker(state: &AutoTraderState) {
     let settings = Arc::clone(&state.settings);
     let path = state.settings_path.clone();

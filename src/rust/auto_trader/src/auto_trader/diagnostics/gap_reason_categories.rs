@@ -12,7 +12,7 @@ fn gap_reason_category(reason: &str) -> String {
         let usable = counts.next().unwrap_or_default();
         let total = counts.next().unwrap_or_default();
         if total == 0 {
-            return "No insights available".into();
+            return "No directional candidates".into();
         }
         if usable == 0 {
             let filtered_count = |marker: &str| {
@@ -105,7 +105,7 @@ mod gap_reason_category_tests {
             ("No tradeable bias: fresh directional 0/8 filtered: 4 non-directional, 0", "Signals were stale"),
             ("No tradeable bias: fresh directional 0/8 non-directional, 4", "No directional signal"),
             ("No tradeable bias: fresh directional 0/8 blocked by existing positions 2", "Existing position blocked signals"),
-            ("No tradeable bias: fresh directional 0/0", "No insights available"),
+            ("No tradeable bias: fresh directional 0/0", "No directional candidates"),
             ("No tradeable bias: fresh directional 2/8 contextual learned strength floors passed 0 contextual raw-score floors passed 0", "Signal too weak for entry"),
             ("No tradeable bias: fresh directional 2/8 contextual learned strength floors passed 1 contextual raw-score floors passed 0 2 candidate(s) blocked by negative walk-forward history", "Walk-forward history blocked candidates"),
             ("No tradeable bias: fresh directional 2/8 contextual learned strength floors passed 1 contextual raw-score floors passed 1", "No candidate passed all entry checks"),

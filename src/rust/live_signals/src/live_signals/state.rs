@@ -63,6 +63,8 @@ mod tests {
             ranging_probability: None,
             range_lower_bound: None,
             range_upper_bound: None,
+            evidence_coverage: Some(1.0),
+            estimated_accuracy: None,
         }
     }
 

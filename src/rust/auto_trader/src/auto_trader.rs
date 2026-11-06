@@ -89,6 +89,7 @@ mod strategy_cleanup_integration_tests {
             enabled: Arc::new(AtomicBool::new(true)),
             settings: Arc::new(Mutex::new(settings)),
             settings_persist_notify: Arc::new(Notify::new()),
+            price_path_last_checkpoint_requested_at: Arc::new(std::sync::Mutex::new(None)),
             state_updates,
             settings_persist_timings_ms: Arc::new(std::sync::Mutex::new(BTreeMap::new())),
             latest_missed_opportunity_bands: Arc::new(Mutex::new(Vec::new())),
