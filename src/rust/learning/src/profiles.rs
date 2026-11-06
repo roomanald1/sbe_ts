@@ -90,20 +90,24 @@ fn scout_parameter_variant_snapshots(
             continue;
         }
         let sample_count = returns.len();
-        let minimum_samples = minimum_scout_parameter_samples(&strategy);
+        let minimum_samples = state.minimum_live_scout_parameter_samples;
         let mean = returns.iter().sum::<f64>() / sample_count as f64;
-        let lower_bound = if sample_count >= minimum_samples && sample_count > 1 {
+        let (lower_bound, upper_bound) = if sample_count >= minimum_samples && sample_count > 1 {
             let variance = returns
                 .iter()
                 .map(|value| (value - mean).powi(2))
                 .sum::<f64>()
                 / (sample_count - 1) as f64;
-            one_sided_90_t_critical(sample_count)
-                .map(|critical| mean - critical * (variance / sample_count as f64).sqrt())
+            let interval = one_sided_90_t_critical(sample_count).map(|critical| {
+                let margin = critical * (variance / sample_count as f64).sqrt();
+                (mean - margin, mean + margin)
+            });
+            interval.map_or((None, None), |(lower, upper)| (Some(lower), Some(upper)))
         } else {
-            None
+            (None, None)
         };
         let positive_evidence = lower_bound.is_some_and(|bound| bound > 0.0);
+        let negative_evidence = upper_bound.is_some_and(|bound| bound < 0.0);
         for symbol in symbols.remove(&key).unwrap_or_default() {
             let active_value = state
                 .active_profiles
@@ -119,8 +123,10 @@ fn scout_parameter_variant_snapshots(
                 minimum_samples,
                 average_net_improvement_percent: mean,
                 lower_90_one_sided_improvement_percent: lower_bound,
+                upper_90_one_sided_improvement_percent: upper_bound,
                 promoted: positive_evidence
                     && active_value.is_some_and(|value| (value - candidate_value).abs() <= 1e-8),
+                rejected: negative_evidence,
             });
         }
     }
@@ -130,6 +136,26 @@ fn scout_parameter_variant_snapshots(
             .then_with(|| left.candidate_value.total_cmp(&right.candidate_value))
     });
     snapshots
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn negative_upper_bound_marks_a_well_sampled_candidate_to_avoid() {
+        let returns = vec![-0.2; 9];
+        let sample_count = returns.len();
+        let mean = returns.iter().sum::<f64>() / sample_count as f64;
+        let variance = returns
+            .iter()
+            .map(|value| (value - mean).powi(2))
+            .sum::<f64>()
+            / (sample_count - 1) as f64;
+        let margin = one_sided_90_t_critical(sample_count).unwrap()
+            * (variance / sample_count as f64).sqrt();
+        assert!(mean + margin < 0.0);
+    }
 }
 
 pub(super) async fn get_summary(State(service): State<ServiceState>) -> Json<Vec<StrategySummary>> {

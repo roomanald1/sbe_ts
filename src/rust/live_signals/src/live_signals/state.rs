@@ -4,7 +4,9 @@ pub(super) struct LiveState {
     pub(super) latest: DashMap<String, Value>,
     pub(super) markets: DashMap<String, Value>,
     pub(super) pending_delivery: DashMap<String, Value>,
+    pub(super) pending_scout_delivery: DashMap<String, Value>,
     pub(super) delivery_notify: Notify,
+    pub(super) scout_delivery_notify: Notify,
     pub(super) news_context: watch::Receiver<Arc<NewsContext>>,
 }
 
@@ -14,7 +16,9 @@ impl LiveState {
             latest: DashMap::new(),
             markets: DashMap::new(),
             pending_delivery: DashMap::new(),
+            pending_scout_delivery: DashMap::new(),
             delivery_notify: Notify::new(),
+            scout_delivery_notify: Notify::new(),
             news_context,
         }
     }
@@ -40,8 +44,14 @@ pub(super) fn enqueue_snapshot(state: &LiveState, symbol: &str, snapshot: &Signa
         symbol.to_owned(),
         serde_json::to_value(&snapshot).unwrap_or(Value::Null),
     );
-    state.pending_delivery.insert(symbol.to_owned(), dashboard);
+    state
+        .pending_delivery
+        .insert(symbol.to_owned(), dashboard.clone());
+    state
+        .pending_scout_delivery
+        .insert(symbol.to_owned(), dashboard);
     state.delivery_notify.notify_one();
+    state.scout_delivery_notify.notify_one();
 }
 
 #[cfg(test)]
@@ -77,6 +87,7 @@ mod tests {
         assert!(state.latest.is_empty());
         assert!(state.markets.is_empty());
         assert!(state.pending_delivery.is_empty());
+        assert!(state.pending_scout_delivery.is_empty());
         assert!(state.news_context.has_changed().is_ok());
     }
 
@@ -97,6 +108,7 @@ mod tests {
 
         assert_eq!(state.latest.get("BTC-USDT").unwrap()["score"], 0.7);
         let payload = state.pending_delivery.get("BTC-USDT").unwrap();
+        assert_eq!(state.pending_scout_delivery.len(), 1);
         assert_eq!(payload["best"][0]["symbol"], "BTC-USDT");
         assert_eq!(payload["walkForward"][0]["symbol"], "BTC-USDT");
         assert_eq!(payload["missedOpportunityBands"][0]["gate"], "score");

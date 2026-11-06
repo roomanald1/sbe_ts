@@ -138,8 +138,7 @@ fn age_adjusted_take_profit_percent(
     if entry_timestamp_ms == 0
         || !matches!(
             strategy,
-            Strategy::LiveInsights
-                | Strategy::LiveMomentum
+            Strategy::LiveMomentum
                 | Strategy::LiveTradeFlow
                 | Strategy::LiveOrderBook
                 | Strategy::LiveVwapDislocation

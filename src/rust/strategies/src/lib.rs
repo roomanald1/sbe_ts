@@ -16,7 +16,7 @@ pub use input::{
     AbsorptionPressureValue, DailyStrategySignalFeatures, DatedCarryCandidate,
     DatedCarrySettlementSource, DepthSignalValue, Signal, SignalComponents, SignalDirection,
     StrategyInput, StrategyInputLike, StrategyMarketSignal, StrategySignal, StrategySpecificSignal,
-    WindowedSignalValue, strategy_parameter_value,
+    StrategyWalkForwardEvidence, WindowedSignalValue, strategy_parameter_value,
 };
 pub use parameter_profiles::{
     confident_win_rate_edge, effective_parameter_values, legacy_strategy_parameter_name,
@@ -85,8 +85,6 @@ impl LiveInsightField {
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Strategy {
-    #[serde(rename = "live-insights")]
-    LiveInsights,
     #[serde(rename = "live-momentum")]
     LiveMomentum,
     #[serde(rename = "live-trade-flow")]
@@ -425,7 +423,46 @@ impl Strategy {
                     return Ok(decision);
                 }
             }
-            (self.definition().evaluate)(input)
+            let decision = (self.definition().evaluate)(input)?;
+            if decision != StrategyDecision::Enter {
+                return Ok(decision);
+            }
+            let Some(evidence) = input.walk_forward_evidence else {
+                return Ok(decision);
+            };
+            let specs = self.parameter_specs();
+            let bounded_parameter = |key: StrategyParameterKey| {
+                let spec = specs.iter().find(|spec| spec.key == key)?;
+                let value = input.parameters.get(key.as_str()).copied()?;
+                let step_position = (value - spec.min) / spec.step;
+                (value.is_finite()
+                    && value >= spec.min
+                    && value <= spec.max
+                    && spec.step > 0.0
+                    && (step_position - step_position.round()).abs() <= 1e-6)
+                    .then_some(value)
+            };
+            let Some(minimum_samples) =
+                bounded_parameter(StrategyParameterKey::ScoutMinimumWalkForwardSamples)
+            else {
+                return Ok(StrategyDecision::Reject);
+            };
+            let Some(minimum_positive_rate) =
+                bounded_parameter(StrategyParameterKey::ScoutMinimumPositiveNetRate)
+            else {
+                return Ok(StrategyDecision::Reject);
+            };
+            if evidence.sample_count >= minimum_samples.round() as usize
+                && (evidence
+                    .average_net_return_percent
+                    .is_none_or(|average| average <= 0.0)
+                    || evidence
+                        .positive_net_rate
+                        .is_none_or(|rate| rate < minimum_positive_rate))
+            {
+                return Ok(StrategyDecision::Reject);
+            }
+            Ok(decision)
         })
     }
     pub fn contract(self) -> StrategyContract {
@@ -474,85 +511,7 @@ impl Strategy {
     }
 }
 
-fn legacy_live_insights_contract() -> StrategyContract {
-    StrategyContract {
-        insight: "legacy live composite market insight",
-        entry: "legacy stored selection; migrates to the enabled live component strategies",
-        exit: "shared StopMarket protective stop and IOC stop/target exits; disabling this strategy closes its attributed positions",
-        entry_order: "passive PostOnlyLimit by default; IOC is reserved for high urgency; VWAP/TWAP use configured duration and participation",
-        exit_order: "StopMarket protective order; IOC close order for strategy and take-profit exits",
-        behavior: "legacy configuration compatibility",
-    }
-}
-fn legacy_live_insights_entry(input: &StrategySignal<'_>) -> Result<StrategyDecision, String> {
-    if let Some(decision) = input.position_decision(
-        legacy_live_insights_exit_when_disabled(input.strategy_enabled),
-        false,
-    ) {
-        return Ok(decision);
-    }
-    if input.signal.is_some() {
-        Ok(StrategyDecision::Enter)
-    } else {
-        Ok(StrategyDecision::Reject)
-    }
-}
-fn legacy_live_insights_exit_when_disabled(enabled: bool) -> bool {
-    !enabled
-}
-fn legacy_live_insights_parameters() -> Vec<StrategyParameterSpec> {
-    vec![
-        param(
-            StrategyParameterKey::StopLossPercent,
-            "Protective stop distance",
-            0.50,
-            0.10,
-            1.50,
-            0.05,
-            "%",
-            -1.0,
-        ),
-        param(
-            StrategyParameterKey::TakeProfitPercent,
-            "Protective target distance",
-            0.80,
-            0.20,
-            3.00,
-            0.05,
-            "%",
-            1.0,
-        ),
-    ]
-}
-static LEGACY_LIVE_INSIGHTS_DEFINITION: StrategyDefinition = StrategyDefinition {
-    strategy: Strategy::LiveInsights,
-    name: "live-insights",
-    live_insight: true,
-    live_insight_fields: &[
-        LiveInsightField::Momentum10s,
-        LiveInsightField::Trend5m,
-        LiveInsightField::TradeFlow,
-        LiveInsightField::OrderBook,
-        LiveInsightField::VwapDislocation,
-        LiveInsightField::AbsorptionPressure,
-    ],
-    legacy_composite: true,
-    expands_to: &[
-        Strategy::LiveMomentum,
-        Strategy::LiveTradeFlow,
-        Strategy::LiveOrderBook,
-        Strategy::LiveVwapDislocation,
-        Strategy::LiveAbsorptionPressure,
-    ],
-    evaluate: legacy_live_insights_entry,
-    contract: legacy_live_insights_contract,
-    should_exit_when_disabled: legacy_live_insights_exit_when_disabled,
-    should_exit_when_insight_inactive: None,
-    parameter_specs: legacy_live_insights_parameters,
-};
-
-static STRATEGY_DEFINITIONS: [&StrategyDefinition; 18] = [
-    &LEGACY_LIVE_INSIGHTS_DEFINITION,
+static STRATEGY_DEFINITIONS: [&StrategyDefinition; 17] = [
     &strategy_live_momentum::definition::DEFINITION,
     &strategy_live_trade_flow::definition::DEFINITION,
     &strategy_live_order_book::definition::DEFINITION,
@@ -610,6 +569,12 @@ mod registered_strategy_contract_tests {
             );
             assert_eq!(definition.strategy.as_str(), definition.name);
         }
+    }
+
+    #[test]
+    fn removed_live_insights_alias_is_not_a_registered_strategy() {
+        assert!(Strategy::from_name("live-insights").is_none());
+        assert!(Strategy::all().all(|strategy| strategy.as_str() != "live-insights"));
     }
 
     #[test]
@@ -729,7 +694,6 @@ mod strategy_signal_contract_tests {
                 .collect::<BTreeMap<_, _>>();
             let mut components = SignalComponents::default();
             match strategy {
-                Strategy::LiveInsights => components.momentum_10s_percent = Some(0.1),
                 Strategy::LiveMomentum => components.momentum_10s_percent = Some(0.1),
                 Strategy::LiveTradeFlow => components.trade_flow_imbalance = Some(0.5),
                 Strategy::LiveOrderBook => components.book_imbalance = Some(0.5),
@@ -773,29 +737,24 @@ mod strategy_signal_contract_tests {
                 Strategy::LiveAbsorptionPressure => {
                     opposing.components.pressure_without_price_move = Some(0.5)
                 }
-                Strategy::LiveInsights => {}
                 _ => continue,
             }
-            if strategy != Strategy::LiveInsights {
-                assert_eq!(
-                    strategy
-                        .evaluate(&StrategySignal::entry(&opposing, &parameters))
-                        .unwrap(),
-                    StrategyDecision::Reject,
-                    "{} accepted an opposing feature signal",
-                    strategy.as_str()
-                );
-            }
-            if strategy != Strategy::LiveInsights {
-                let empty_parameters = BTreeMap::new();
-                let missing_thresholds = StrategySignal::entry(&signal, &empty_parameters);
-                assert_eq!(
-                    strategy.evaluate(&missing_thresholds).unwrap(),
-                    StrategyDecision::Reject,
-                    "{} must fail closed when its parameter profile is missing",
-                    strategy.as_str()
-                );
-            }
+            assert_eq!(
+                strategy
+                    .evaluate(&StrategySignal::entry(&opposing, &parameters))
+                    .unwrap(),
+                StrategyDecision::Reject,
+                "{} accepted an opposing feature signal",
+                strategy.as_str()
+            );
+            let empty_parameters = BTreeMap::new();
+            let missing_thresholds = StrategySignal::entry(&signal, &empty_parameters);
+            assert_eq!(
+                strategy.evaluate(&missing_thresholds).unwrap(),
+                StrategyDecision::Reject,
+                "{} must fail closed when its parameter profile is missing",
+                strategy.as_str()
+            );
             let missing = StrategySignal::position(&parameters, true, None, false);
             assert_eq!(
                 strategy.evaluate(&missing).unwrap(),
@@ -807,8 +766,10 @@ mod strategy_signal_contract_tests {
     }
 
     #[test]
-    fn legacy_live_insights_parameter_bounds_are_enforced() {
-        assert_parameter_bounds_for_strategy(Strategy::LiveInsights);
+    fn every_registered_strategy_has_bounded_parameters() {
+        for strategy in Strategy::all() {
+            assert_parameter_bounds_for_strategy(strategy);
+        }
     }
 
     fn assert_parameter_bounds_for_strategy(strategy: Strategy) {

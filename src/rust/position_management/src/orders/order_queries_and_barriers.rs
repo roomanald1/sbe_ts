@@ -134,6 +134,8 @@ async fn create_profit_barrier(
 #[derive(Deserialize)]
 struct CloseProfitableRequest {
     symbol: String,
+    #[serde(default)]
+    strategy_instance_id: Option<String>,
 }
 
 async fn close_profitable(
@@ -174,6 +176,13 @@ async fn close_profitable(
         TradeSide::Buy
     };
     let quantity = position.quantity.abs();
+    let client_order_id = match request.strategy_instance_id {
+        Some(instance_id) if !instance_id.trim().is_empty() => Some(format!(
+            "auto-manual-close:{instance_id}:{}",
+            now_ms().map_err(internal_error)?
+        )),
+        _ => None,
+    };
     submit_order(
         State(store),
         Json(NewOrder {
@@ -190,7 +199,7 @@ async fn close_profitable(
             expires_at: None,
             time_in_force: None,
             source,
-            client_order_id: None,
+            client_order_id,
             // A manual close must not reserve buying power or open/reverse a
             // position if inventory changed after the close quantity was read.
             reduce_only: true,

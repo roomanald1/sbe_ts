@@ -225,6 +225,10 @@ fn external_close_order(payload: &serde_json::Value) -> Option<TraderOrder> {
     let realized_pnl = payload["realized_pnl"].as_f64()?;
     let strategy = payload["strategy"].as_str().unwrap_or("manual").to_owned();
     let decision_id = payload["decision_id"].as_str().map(str::to_owned);
+    let execution_order_id = payload["exit_fills"]
+        .as_array()
+        .and_then(|fills| fills.iter().find_map(|fill| fill["parent_order_id"].as_str()))
+        .map(str::to_owned);
     let timestamp = payload["timestamp"].as_u64()?;
     Some(TraderOrder {
         timestamp,
@@ -241,7 +245,7 @@ fn external_close_order(payload: &serde_json::Value) -> Option<TraderOrder> {
         average_price: Some(average_price),
         fees_paid: payload["exit_fees"].as_f64().unwrap_or_default(),
         reserved_notional: quantity * average_price,
-        execution_order_id: None,
+        execution_order_id,
         processed_fill_trade_ids: Vec::new(),
         learning_context: None,
         book_bid_depth_10bps: None,
@@ -330,6 +334,7 @@ mod external_close_audit_tests {
         assert_eq!(audits[0]["realized_pnl"], 5.0);
         let order = external_close_order(&audits[0]).expect("partial close order");
         assert_eq!(order.purpose, "external-close");
+        assert_eq!(order.execution_order_id.as_deref(), Some("manual-order-1"));
         assert_eq!(order.strategy_realized_pnl, Some(5.0));
 
         let mut positions = BTreeMap::new();

@@ -7,7 +7,11 @@ impl Default for AutoOrderType {
 struct Settings {
     #[serde(default)]
     enabled: bool,
-    #[serde(default = "default_strategies", alias = "research_strategies")]
+    #[serde(
+        default = "default_strategies",
+        alias = "research_strategies",
+        deserialize_with = "deserialize_strategies"
+    )]
     strategies: Vec<Strategy>,
     #[serde(
         default = "default_signal_strategies_enabled",
@@ -64,6 +68,8 @@ struct Settings {
     trailing_distance_percent: f64,
     #[serde(default = "default_closed_trade_window")]
     closed_trade_window: usize,
+    #[serde(default = "default_live_scout_parameter_samples")]
+    minimum_live_scout_parameter_samples: usize,
     #[serde(default)]
     closed_trade_returns_percent: Vec<f64>,
     #[serde(default)]
@@ -140,6 +146,30 @@ struct Settings {
     #[serde(default)]
     daily_strategy_signal_cursors: BTreeMap<String, u64>,
 }
+
+fn deserialize_strategies<'de, D>(deserializer: D) -> Result<Vec<Strategy>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::Error;
+
+    let values = Vec::<serde_json::Value>::deserialize(deserializer)?;
+    let mut strategies = Vec::new();
+    for value in values {
+        if value.as_str() == Some("live-insights") {
+            strategies.extend([
+                Strategy::LiveMomentum,
+                Strategy::LiveTradeFlow,
+                Strategy::LiveOrderBook,
+                Strategy::LiveVwapDislocation,
+                Strategy::LiveAbsorptionPressure,
+            ]);
+        } else {
+            strategies.push(serde_json::from_value(value).map_err(D::Error::custom)?);
+        }
+    }
+    Ok(strategies)
+}
 fn default_order_limit() -> f64 {
     DEFAULT_MAX_ORDER_NOTIONAL
 }
@@ -202,6 +232,7 @@ fn default_strategies() -> Vec<Strategy> {
 fn default_signal_strategies_enabled() -> bool {
     true
 }
+fn default_live_scout_parameter_samples() -> usize { 6 }
 
 impl Default for Settings {
     fn default() -> Self {
@@ -234,6 +265,7 @@ impl Default for Settings {
             trigger_offset_bps: default_trigger_offset(),
             trailing_distance_percent: default_trailing_distance(),
             closed_trade_window: default_closed_trade_window(),
+            minimum_live_scout_parameter_samples: default_live_scout_parameter_samples(),
             closed_trade_returns_percent: Vec::new(),
             closed_trade_timestamps_ms: Vec::new(),
             closed_trade_realized_usd: Vec::new(),
@@ -271,5 +303,27 @@ impl Default for Settings {
             reentry_cooldown_until_ms: BTreeMap::new(),
             daily_strategy_signal_cursors: BTreeMap::new(),
         }
+    }
+}
+
+#[cfg(test)]
+mod strategy_settings_migration_tests {
+    use super::*;
+
+    #[test]
+    fn expands_removed_live_insights_setting_into_component_strategies() {
+        let mut value = serde_json::to_value(Settings::default()).unwrap();
+        value["strategies"] = serde_json::json!(["live-insights"]);
+        let settings: Settings = serde_json::from_value(value).unwrap();
+        assert_eq!(
+            settings.strategies,
+            vec![
+                Strategy::LiveMomentum,
+                Strategy::LiveTradeFlow,
+                Strategy::LiveOrderBook,
+                Strategy::LiveVwapDislocation,
+                Strategy::LiveAbsorptionPressure,
+            ]
+        );
     }
 }

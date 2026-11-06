@@ -54,7 +54,15 @@ export type ScoutLearningSummary = {
   pairedDeltaTone?: 'is-positive' | 'is-negative' | 'is-flat';
 };
 
-type ScoutCounts = { total: number; open: number; resolved: number; wins: number; losses: number; flats: number; unavailable: number };
+type ScoutCounts = {
+  total: number;
+  open: number;
+  resolved: number;
+  wins: number;
+  losses: number;
+  flats: number;
+  unavailable: number;
+};
 export type ScoutSourceFilter = 'live' | 'all';
 export type ScoutStatusFilter = 'all' | 'open' | 'closed';
 type ScoutOutcomesResponse = {
@@ -63,7 +71,12 @@ type ScoutOutcomesResponse = {
   learningRows: ScoutLearningSummary[];
   symbols: string[];
   learningSymbol: string | null;
-  learningOutcomes: Array<{ strategy: string; netReturnPercent: number; parameterKey?: string; parameterValue?: number }>;
+  learningOutcomes: Array<{
+    strategy: string;
+    netReturnPercent: number;
+    parameterKey?: string;
+    parameterValue?: number;
+  }>;
   updatedAt: number;
   source: ScoutSourceFilter;
   status: ScoutStatusFilter;
@@ -74,6 +87,8 @@ type ScoutOutcomesResponse = {
   totalRows: number;
   hasPrevious: boolean;
   hasNext: boolean;
+  sortBy: string;
+  sortDirection: 'asc' | 'desc';
 };
 
 type ScoutComparisonOutcome = {
@@ -84,23 +99,37 @@ type ScoutComparisonOutcome = {
   paired_delta_percent?: number;
 };
 
-export function pairedScoutDeltas(outcomes: ScoutComparisonOutcome[]): Map<string, number> {
+export function pairedScoutDeltas(
+  outcomes: ScoutComparisonOutcome[],
+): Map<string, number> {
   const returns = new Map<string, { baseline?: number; variant?: number }>();
   const deltas = new Map<string, number>();
   for (const outcome of outcomes) {
     const id = outcome.scout_comparison_id;
     if (outcome.stage !== 'scout-outcome' || !id) continue;
-    if (typeof outcome.paired_delta_percent === 'number' && Number.isFinite(outcome.paired_delta_percent)) {
+    if (
+      typeof outcome.paired_delta_percent === 'number' &&
+      Number.isFinite(outcome.paired_delta_percent)
+    ) {
       deltas.set(id, outcome.paired_delta_percent);
     }
-    if ((outcome.scout_comparison_role !== 'baseline' && outcome.scout_comparison_role !== 'variant')
-      || typeof outcome.scout_net_return_percent !== 'number' || !Number.isFinite(outcome.scout_net_return_percent)) continue;
+    if (
+      (outcome.scout_comparison_role !== 'baseline' &&
+        outcome.scout_comparison_role !== 'variant') ||
+      typeof outcome.scout_net_return_percent !== 'number' ||
+      !Number.isFinite(outcome.scout_net_return_percent)
+    )
+      continue;
     const pair = returns.get(id) ?? {};
     pair[outcome.scout_comparison_role] = outcome.scout_net_return_percent;
     returns.set(id, pair);
   }
   for (const [id, pair] of returns) {
-    if (!deltas.has(id) && typeof pair.baseline === 'number' && typeof pair.variant === 'number') {
+    if (
+      !deltas.has(id) &&
+      typeof pair.baseline === 'number' &&
+      typeof pair.variant === 'number'
+    ) {
       deltas.set(id, pair.variant - pair.baseline);
     }
   }
@@ -108,7 +137,48 @@ export function pairedScoutDeltas(outcomes: ScoutComparisonOutcome[]): Map<strin
 }
 
 export class AutoTraderScoutModel {
-  readonly state$ = new BehaviorSubject<ScoutOutcomesResponse & { loading: boolean; error?: string }>({ rows: [], summary: { all: { total: 0, open: 0, resolved: 0, wins: 0, losses: 0, flats: 0, unavailable: 0 }, live: { total: 0, open: 0, resolved: 0, wins: 0, losses: 0, flats: 0, unavailable: 0 } }, learningRows: [], symbols: [], learningSymbol: null, learningOutcomes: [], updatedAt: 0, source: 'live', status: 'all', page: 0, pageNumber: 1, pageSize: 50, pageCount: 0, totalRows: 0, hasPrevious: false, hasNext: false, loading: true });
+  readonly state$ = new BehaviorSubject<
+    ScoutOutcomesResponse & { loading: boolean; error?: string }
+  >({
+    rows: [],
+    summary: {
+      all: {
+        total: 0,
+        open: 0,
+        resolved: 0,
+        wins: 0,
+        losses: 0,
+        flats: 0,
+        unavailable: 0,
+      },
+      live: {
+        total: 0,
+        open: 0,
+        resolved: 0,
+        wins: 0,
+        losses: 0,
+        flats: 0,
+        unavailable: 0,
+      },
+    },
+    learningRows: [],
+    symbols: [],
+    learningSymbol: null,
+    learningOutcomes: [],
+    updatedAt: 0,
+    source: 'live',
+    status: 'all',
+    page: 0,
+    pageNumber: 1,
+    pageSize: 50,
+    pageCount: 0,
+    totalRows: 0,
+    hasPrevious: false,
+    hasNext: false,
+    sortBy: 'openedAt',
+    sortDirection: 'desc',
+    loading: true,
+  });
   private timer?: ReturnType<typeof setTimeout>;
   private refreshing = false;
   private consumers = 0;
@@ -138,18 +208,46 @@ export class AutoTraderScoutModel {
     void this.refreshAndSchedule();
   }
 
-  setFilters(filters: { source?: ScoutSourceFilter; status?: ScoutStatusFilter; page?: number; learningSymbol?: string }) {
+  setFilters(filters: {
+    source?: ScoutSourceFilter;
+    status?: ScoutStatusFilter;
+    page?: number;
+    learningSymbol?: string;
+    sortBy?: string;
+    sortDirection?: 'asc' | 'desc';
+  }) {
     const current = this.state$.value;
     const next = {
       source: filters.source ?? current.source,
       status: filters.status ?? current.status,
       page: filters.page ?? 0,
       learningSymbol: filters.learningSymbol ?? current.learningSymbol ?? 'all',
+      sortBy: filters.sortBy ?? current.sortBy,
+      sortDirection: filters.sortDirection ?? current.sortDirection,
     };
-    if (next.source === current.source && next.status === current.status && next.page === current.page && next.learningSymbol === (current.learningSymbol ?? 'all')) return;
+    if (
+      next.source === current.source &&
+      next.status === current.status &&
+      next.page === current.page &&
+      next.learningSymbol === (current.learningSymbol ?? 'all') &&
+      next.sortBy === current.sortBy &&
+      next.sortDirection === current.sortDirection
+    )
+      return;
     if (this.timer) clearTimeout(this.timer);
     this.timer = undefined;
-    this.state$.next({ ...current, ...next, rows: [], loading: true, error: undefined });
+    if (
+      next.sortBy !== current.sortBy ||
+      next.sortDirection !== current.sortDirection
+    )
+      next.page = 0;
+    this.state$.next({
+      ...current,
+      ...next,
+      rows: [],
+      loading: true,
+      error: undefined,
+    });
     void this.refreshAndSchedule();
   }
 
@@ -158,7 +256,9 @@ export class AutoTraderScoutModel {
     if (this.consumers === 0) return;
     const failed = Boolean(this.state$.value.error);
     const delay = failed ? this.retryDelayMs : 60_000;
-    this.retryDelayMs = failed ? Math.min(30_000, this.retryDelayMs * 2) : 2_000;
+    this.retryDelayMs = failed
+      ? Math.min(30_000, this.retryDelayMs * 2)
+      : 2_000;
     if (this.timer) clearTimeout(this.timer);
     this.timer = setTimeout(() => void this.refreshAndSchedule(), delay);
   }
@@ -171,15 +271,32 @@ export class AutoTraderScoutModel {
     this.refreshing = true;
     try {
       const filters = this.state$.value;
-      const query = new URLSearchParams({ source: filters.source, status: filters.status, page: String(filters.page), page_size: String(filters.pageSize), learning_symbol: filters.learningSymbol ?? 'all' });
-      const response = await fetch('/scouts/outcomes?' + query.toString(), { signal: controller.signal });
+      const query = new URLSearchParams({
+        source: filters.source,
+        status: filters.status,
+        page: String(filters.page),
+        page_size: String(filters.pageSize),
+        learning_symbol: filters.learningSymbol ?? 'all',
+        sort_by: filters.sortBy,
+        sort_direction: filters.sortDirection,
+      });
+      const response = await fetch('/scouts/outcomes?' + query.toString(), {
+        signal: controller.signal,
+      });
       if (!response.ok) throw new Error('Scout outcome data unavailable');
-      const data = await response.json() as ScoutOutcomesResponse;
+      const data = (await response.json()) as ScoutOutcomesResponse;
       if (requestId !== this.requestId) return;
       this.state$.next({ ...data, loading: false, error: undefined });
     } catch (error) {
       if (requestId === this.requestId) {
-        this.state$.next({ ...this.state$.value, loading: false, error: error instanceof Error ? error.message : 'Could not load scout outcomes' });
+        this.state$.next({
+          ...this.state$.value,
+          loading: false,
+          error:
+            error instanceof Error
+              ? error.message
+              : 'Could not load scout outcomes',
+        });
       }
     } finally {
       if (requestId === this.requestId) {

@@ -98,6 +98,8 @@ function ComparisonTable({ rows }: { rows: ComparisonRow[] }) {
             <th>Baseline</th>
             <th>Previous</th>
             <th>Current</th>
+            <th>Change vs baseline</th>
+            <th>Change vs previous</th>
           </tr>
         </thead>
         <tbody>
@@ -106,25 +108,19 @@ function ComparisonTable({ rows }: { rows: ComparisonRow[] }) {
               <td>{row.operation}</td>
               <td>{row.baseline || '—'}</td>
               <td>{row.previous || '—'}</td>
+              <td>{row.current}</td>
               <td>
-                {row.current}
-                {row.baselineChange && (
-                  <>
-                    {' '}
-                    <ChangeValue
-                      value={row.baselineChange}
-                      reference="baseline"
-                    />
-                  </>
+                {row.baselineChange ? (
+                  <ChangePercent value={row.baselineChange} />
+                ) : (
+                  '—'
                 )}
-                {row.previousChange && (
-                  <>
-                    {' '}
-                    <ChangeValue
-                      value={row.previousChange}
-                      reference="previous run"
-                    />
-                  </>
+              </td>
+              <td>
+                {row.previousChange ? (
+                  <ChangePercent value={row.previousChange} />
+                ) : (
+                  '—'
                 )}
               </td>
             </tr>
@@ -197,17 +193,44 @@ function ChangeValue({
   if (!change) return <>{value.replace(/`/g, '')}</>;
 
   const timingDirection = /\b(slower|faster)\b/i.exec(change[2])?.[1];
-  const tone = timingDirection ? timingDirection.toLowerCase() : 'change';
+  const magnitude = Math.abs(
+    Number(change[2].match(/[+-]?\d+(?:\.\d+)?/)?.[0] ?? 0),
+  );
+  const tone = timingDirection
+    ? timingDirection.toLowerCase()
+    : change[1] === '+'
+      ? 'increase'
+      : 'decrease';
+  const strength = Math.min(magnitude / 20, 1);
+  const changePercent = `${Math.round(strength * 100)}%`;
   const description = timingDirection
     ? `${timingDirection} vs ${reference}`
     : `${change[1] === '+' ? 'increase' : 'decrease'} vs ${reference}`;
   return (
     <span
       className={`change-value ${tone}`}
+      style={{ '--change-percent': changePercent } as React.CSSProperties}
       aria-label={`${change[1] === '+' ? 'Increase' : 'Decrease'} of ${change[2]}, ${description}`}
       title={`${change[1]} change vs ${reference}`}
     >
       <b>{change[1]}</b> {change[2]} <small>{description}</small>
+    </span>
+  );
+}
+
+function ChangePercent({ value }: { value: string }) {
+  const match = /^([+-])\s*(\d+(?:\.\d+)?%)/.exec(value.trim());
+  if (!match) return <>{value.replace(/`/g, '')}</>;
+  const direction = /\b(slower|faster)\b/i.exec(value)?.[1]?.toLowerCase();
+  const tone = direction ?? (match[1] === '+' ? 'increase' : 'decrease');
+  const magnitude = Math.abs(Number(match[2].slice(0, -1)));
+  const strength = `${Math.round(Math.min(magnitude / 20, 1) * 100)}%`;
+  return (
+    <span
+      className={`change-value percent-only ${tone}`}
+      style={{ '--change-percent': strength } as React.CSSProperties}
+    >
+      {match[1]} {match[2]}
     </span>
   );
 }

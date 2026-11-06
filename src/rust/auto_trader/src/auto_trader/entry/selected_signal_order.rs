@@ -57,7 +57,7 @@ async fn submit_selected_signal(
     let settings_lock_wait_ms = settings_lock_started.elapsed().as_secs_f64() * 1_000.0;
     reset_daily_budget(&mut settings);
     let quote_rate = quote_usd_rate(&settings, &signal.symbol);
-    let strategy_key = signal.strategy.as_deref().unwrap_or("live-insights");
+    let strategy_key = signal.strategy.as_deref().unwrap_or("unattributed");
     if let Some(reason) =
         signal_position_block_reason(&settings, signal, &signal_key, strategy_key, now_ms)
     {
@@ -304,7 +304,7 @@ async fn submit_selected_signal(
                 signal
                     .strategy
                     .clone()
-                    .unwrap_or_else(|| "live-insights".into()),
+                    .unwrap_or_else(|| "unattributed".into()),
             ),
             decision_id: Some(decision_id.clone()),
             quantity,

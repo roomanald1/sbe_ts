@@ -7,6 +7,8 @@ struct ScoutOutcomesQuery {
     source: Option<String>,
     status: Option<String>,
     learning_symbol: Option<String>,
+    sort_by: Option<String>,
+    sort_direction: Option<String>,
 }
 
 #[derive(Default)]
@@ -64,7 +66,7 @@ fn duration_label(milliseconds: u64) -> String {
 fn instance_row(audit: &Value, now: u64) -> Option<Value> {
     let decision_id = string(audit, "decision_id")?;
     let symbol = string(audit, "symbol")?;
-    let strategy = string(audit, "strategy").unwrap_or_else(|| "live-insights".into());
+    let strategy = string(audit, "strategy").unwrap_or_else(|| "unattributed".into());
     let direction = string(audit, "direction")?;
     if !matches!(direction.as_str(), "bullish" | "bearish") { return None; }
     let opened_at = audit["timestamp"].as_u64().or_else(|| audit["signal_timestamp"].as_u64()).unwrap_or_default();
@@ -103,17 +105,22 @@ fn instance_row(audit: &Value, now: u64) -> Option<Value> {
         "scoutParameterValue": number(audit,"scout_parameter_value"),
         "scoutParameterEntryEligible": audit.get("scout_parameter_entry_eligible").and_then(Value::as_bool),
         "comparisonRole": string(audit,"scout_comparison_role"), "pairedDeltaPercent": paired_delta,
+        "scoutComparisonId": comparison_id,
+        "scoutComparisonZeroRole": string(audit,"scout_comparison_zero_role"),
+        "scoutComparisonParameterKey": string(audit,"scout_comparison_parameter_key"),
+        "scoutComparisonParameterValue": number(audit,"scout_comparison_parameter_value"),
+        "scoutComparisonParameterProfileSymbol": string(audit,"scout_comparison_parameter_profile_symbol"),
         "pairedDeltaTone": paired_delta.map(tone),
         "exitScenario": string(audit,"scout_exit_scenario").unwrap_or_else(|| "strategy".into()),
         "direction": direction, "strength": number(audit,"strength").unwrap_or(0.0), "openedAt": opened_at,
         "durationLabel": (status == "Open").then(|| duration_label(now.saturating_sub(opened_at))),
+        "durationMs": (status == "Open").then(|| now.saturating_sub(opened_at)),
         "closedAt": evaluated_at, "entryPrice": entry_price, "entryBid": entry_bid, "entryAsk": entry_ask,
         "markPrice": null, "takerFeeRate": taker_fee_rate, "status": status, "netReturnPercent": net_return,
         "openNetReturnPercent": open_net_return, "returnBasis": return_basis,
         "displayNetReturnPercent": display_return, "netReturnLabel": net_return_label,
         "netReturnEstimated": status == "Open", "netVsBreakevenLeft": bar_left,
-        "netVsBreakevenWidth": bar_width, "netVsBreakevenTone": bar_tone,
-        "scoutComparisonId": comparison_id
+        "netVsBreakevenWidth": bar_width, "netVsBreakevenTone": bar_tone
     }))
 }
 
@@ -132,6 +139,24 @@ fn count_rows(rows: &[Value], live_only: bool) -> ScoutCounts {
         }
     }
     counts
+}
+
+fn sort_rows(rows: &mut [Value], sort_by: &str, descending: bool) {
+    let sort_key = match sort_by {
+        "durationLabel" => "durationMs",
+        "netReturnLabel" => "displayNetReturnPercent",
+        _ => sort_by,
+    };
+    rows.sort_by(|left, right| {
+        let ordering = match sort_by {
+            "symbol" | "strategy" | "status" | "exitScenario" | "comparisonRole" => left[sort_key].as_str().cmp(&right[sort_key].as_str()),
+            "durationLabel" => left[sort_key].as_u64().cmp(&right[sort_key].as_u64()),
+            "scoutLevelPercent" | "displayNetReturnPercent" | "netReturnLabel" | "pairedDeltaPercent" | "strength" | "entryPrice" | "markPrice" => left[sort_key].as_f64().partial_cmp(&right[sort_key].as_f64()).unwrap_or(std::cmp::Ordering::Equal),
+            _ => left["openedAt"].as_u64().cmp(&right["openedAt"].as_u64()),
+        };
+        let ordering = if descending { ordering.reverse() } else { ordering };
+        ordering.then_with(|| left["decisionId"].as_str().cmp(&right["decisionId"].as_str()))
+    });
 }
 
 fn count_json(counts: ScoutCounts) -> Value {
@@ -186,10 +211,51 @@ async fn get_scout_outcomes(
         .filter(|audit| audit["timestamp"].as_u64().unwrap_or_default() >= since)
         .filter_map(|audit| instance_row(audit, now))
         .collect::<Vec<_>>();
-    rows.sort_by(|left,right| right["openedAt"].as_u64().cmp(&left["openedAt"].as_u64()));
+    let sort_by = query.sort_by.as_deref().filter(|field| matches!(*field, "symbol" | "strategy" | "status" | "exitScenario" | "scoutLevelPercent" | "openedAt" | "durationLabel" | "entryPrice" | "markPrice" | "netReturnLabel" | "displayNetReturnPercent" | "comparisonRole" | "pairedDeltaPercent" | "strength")).unwrap_or("openedAt");
+    let descending = query.sort_direction.as_deref() != Some("asc");
+    sort_rows(&mut rows, sort_by, descending);
     rows.truncate(5_000);
     let all_summary=count_json(count_rows(&rows,false));
     let live_summary=count_json(count_rows(&rows,true));
+    let mut pending_parameters = BTreeMap::<
+        (String, String, String, String),
+        BTreeSet<String>,
+    >::new();
+    for row in rows.iter().filter(|row| row["status"] == "Open") {
+        let Some(strategy) = row["strategy"].as_str().filter(|strategy| !strategy.starts_with("live-")) else { continue; };
+        let Some(comparison_id) = row["scoutComparisonId"].as_str() else { continue; };
+        if row["comparisonRole"] != "variant" && row["scoutComparisonZeroRole"] != "variant" {
+            continue;
+        }
+        let parameter = row["scoutParameterKey"]
+            .as_str()
+            .or_else(|| row["scoutComparisonParameterKey"].as_str());
+        let candidate = row["scoutParameterValue"]
+            .as_f64()
+            .or_else(|| row["scoutComparisonParameterValue"].as_f64());
+        let (Some(parameter), Some(candidate)) = (parameter, candidate) else { continue; };
+        let symbol = row["scoutParameterProfileSymbol"]
+            .as_str()
+            .or_else(|| row["scoutComparisonParameterProfileSymbol"].as_str())
+            .or_else(|| row["symbol"].as_str())
+            .unwrap_or_default();
+        pending_parameters
+            .entry((symbol.to_owned(), strategy.to_owned(), parameter.to_owned(), format!("{candidate:.8}")))
+            .or_default()
+            .insert(comparison_id.to_owned());
+    }
+    let pending_parameter_probes = pending_parameters
+        .into_iter()
+        .filter_map(|((symbol, strategy, parameter, value), comparisons)| {
+            Some(json!({
+                "symbol": symbol,
+                "strategy": strategy,
+                "parameter": parameter,
+                "candidateValue": value.parse::<f64>().ok()?,
+                "openSamples": comparisons.len(),
+            }))
+        })
+        .collect::<Vec<_>>();
     let all_learning_rows=learning_rows(&rows);
     let symbols=all_learning_rows.iter().filter_map(|row| row["symbol"].as_str().map(str::to_owned)).collect::<BTreeSet<_>>();
     let requested_symbol=query.learning_symbol.as_deref().filter(|symbol| symbols.contains(*symbol));
@@ -206,7 +272,7 @@ async fn get_scout_outcomes(
     let page_count=total.div_ceil(page_size);
     let page=query.page.unwrap_or(0).min(page_count.saturating_sub(1));
     let page_rows=filtered.drain(page.saturating_mul(page_size)..).take(page_size).collect::<Vec<_>>();
-    Json(json!({"rows":page_rows,"summary":{"all":all_summary,"live":live_summary},"learningRows":visible_learning_rows,"learningOutcomes":learning_outcomes,"symbols":symbols,"learningSymbol":requested_symbol,"updatedAt":now,"source":source,"status":status.unwrap_or("all"),"page":page,"pageSize":page_size,"pageCount":page_count,"totalRows":total,"pageNumber":page+1,"hasPrevious":page>0,"hasNext":page+1<page_count}))
+    Json(json!({"rows":page_rows,"summary":{"all":all_summary,"live":live_summary},"learningRows":visible_learning_rows,"learningOutcomes":learning_outcomes,"pendingParameterProbes":pending_parameter_probes,"symbols":symbols,"learningSymbol":requested_symbol,"updatedAt":now,"source":source,"status":status.unwrap_or("all"),"sortBy":sort_by,"sortDirection":if descending {"desc"} else {"asc"},"page":page,"pageSize":page_size,"pageCount":page_count,"totalRows":total,"pageNumber":page+1,"hasPrevious":page>0,"hasNext":page+1<page_count}))
 }
 
 #[cfg(test)]
@@ -237,5 +303,18 @@ mod scout_report_tests {
     fn reports_expire_unresolved_instances_after_seven_days() {
         let row = instance_row(&audit(), 8 * 86_400_000).unwrap();
         assert_eq!(row["status"], "Outcome unavailable");
+    }
+
+    #[test]
+    fn sorts_before_pagination_using_requested_backend_field_and_direction() {
+        let mut rows = vec![
+            json!({"decisionId":"older","openedAt":10,"displayNetReturnPercent":2.0}),
+            json!({"decisionId":"newer","openedAt":20,"displayNetReturnPercent":-1.0}),
+            json!({"decisionId":"middle","openedAt":15,"displayNetReturnPercent":0.5}),
+        ];
+        sort_rows(&mut rows, "displayNetReturnPercent", true);
+        assert_eq!(rows.iter().map(|row| row["decisionId"].as_str().unwrap()).collect::<Vec<_>>(), vec!["older", "middle", "newer"]);
+        sort_rows(&mut rows, "openedAt", false);
+        assert_eq!(rows.iter().map(|row| row["decisionId"].as_str().unwrap()).collect::<Vec<_>>(), vec!["older", "middle", "newer"]);
     }
 }

@@ -35,7 +35,7 @@ pub fn router() -> Router {
                 .filter(|order| match expected_strategy {
                     Some(strategy) => order.strategy.as_deref() == Some(strategy),
                     None => order.strategy.as_deref().is_none_or(|strategy| {
-                        strategy == "generic-insight-signals" || strategy == "live-insights"
+                        strategy == "generic-insight-signals" || strategy == "unattributed"
                     }),
                 })
                 .filter_map(|order| order.decision_id.as_ref())
@@ -59,7 +59,7 @@ pub fn router() -> Router {
         let strategy = position
             .strategy
             .clone()
-            .unwrap_or_else(|| "live-insights".into());
+            .unwrap_or_else(|| "unattributed".into());
         let lots = settings
             .strategy_positions
             .entry(symbol.clone())
@@ -206,6 +206,8 @@ pub fn router() -> Router {
         audit_health,
         audit_failure_latched,
         gap_summary: Arc::new(std::sync::Mutex::new(GapSummary::default())),
+        stale_signal_candidates_total: Arc::new(AtomicU64::new(0)),
+        stale_signal_cycles_total: Arc::new(AtomicU64::new(0)),
         insight_processing_ms: Arc::new(Mutex::new(Vec::new())),
         cycle_lock_wait_ms: Arc::new(Mutex::new(BTreeMap::new())),
         cycle_lock_hold_ms: Arc::new(std::sync::Mutex::new(BTreeMap::new())),
@@ -252,14 +254,20 @@ pub fn router() -> Router {
                 } else {
                     let live = {
                         let mut queue = signal_worker_state.pending_live_signals.lock().await;
-                        take_next_pending_signal(&mut queue)
+                        take_next_pending_signal_batch(
+                            &mut queue,
+                            MAX_LIVE_SIGNALS_PER_CYCLE,
+                        )
                     };
                     live.map(|dashboard| (PendingSignalKind::Live, dashboard))
                 }
             } else {
                 let live = {
                     let mut queue = signal_worker_state.pending_live_signals.lock().await;
-                    take_next_pending_signal(&mut queue)
+                    take_next_pending_signal_batch(
+                        &mut queue,
+                        MAX_LIVE_SIGNALS_PER_CYCLE,
+                    )
                 };
                 if let Some(dashboard) = live {
                     Some((PendingSignalKind::Live, dashboard))

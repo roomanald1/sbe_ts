@@ -131,7 +131,7 @@ async fn submit_and_record_selected_order(
         let incoming_sign = if side == "buy" { 1.0_f64 } else { -1.0_f64 };
         let is_new_position_direction =
             prior_quantity == 0.0 || incoming_sign != prior_quantity.signum();
-        let strategy_key = signal.strategy.as_deref().unwrap_or("live-insights");
+        let strategy_key = signal.strategy.as_deref().unwrap_or("unattributed");
         let prior_strategy_position = settings
             .strategy_positions
             .get(&signal.symbol)
@@ -163,7 +163,7 @@ async fn submit_and_record_selected_order(
                 strategy_positions,
                 positions,
                 &signal.symbol,
-                signal.strategy.as_deref().unwrap_or("live-insights"),
+                signal.strategy.as_deref().unwrap_or("unattributed"),
                 side,
                 filled,
                 price,

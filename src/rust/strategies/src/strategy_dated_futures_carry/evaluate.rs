@@ -175,6 +175,7 @@ mod tests {
             signal: None,
             specific_signal: Some(specific_signal),
             daily_features: None,
+            walk_forward_evidence: None,
             direction: None,
             strategy: Some(Strategy::DatedCarry),
             parameters,

@@ -156,7 +156,18 @@ async fn receive_daily_strategy_signals(
         .filter(|(strategy, _)| enabled_strategies.iter().any(|enabled| enabled == strategy))
         .cloned()
         .collect::<Vec<_>>();
-    let active_parameter_profiles = Vec::new();
+    // Daily parameter probes are evaluated as paired scouts by Insights. Keep
+    // their exact tested profiles active so the signal engine continues each
+    // pending probe until its outcome window completes.
+    let active_parameter_profiles = snapshot.generated_signals.iter().filter_map(|signal| {
+        let decision = signal.strategy_decision.as_ref()?;
+        (decision.get("scout_parameter_probe")?.as_bool()? ).then_some((
+            signal.strategy.as_deref()?.to_owned(),
+            signal.symbol.clone(),
+            decision.get("scout_parameter_key")?.as_str()?.to_owned(),
+            format!("{:.8}", decision.get("scout_parameter_value")?.as_f64()?),
+        ))
+    }).collect::<Vec<_>>();
     let mut by_symbol = BTreeMap::<String, Vec<Signal>>::new();
     let mut cursors_changed = false;
     for signal in snapshot.generated_signals.iter().cloned() {

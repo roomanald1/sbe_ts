@@ -56,6 +56,7 @@ fn scout_payload(dashboard: &Value) -> Option<Value> {
     (!signals.is_empty()).then(|| json!({"signals":signals}))
 }
 
+#[cfg(test)]
 fn scout_payload_batches<'a>(dashboards: impl Iterator<Item = &'a Value>) -> Vec<Value> {
     let signals = dashboards
         .filter_map(scout_payload)
@@ -97,6 +98,19 @@ fn acknowledge_delivery(state: &LiveState, symbol: &str, dashboard: &Value) -> b
     }
 }
 
+fn acknowledge_scout_delivery(state: &LiveState, symbol: &str, dashboard: &Value) -> bool {
+    if state
+        .pending_scout_delivery
+        .get(symbol)
+        .is_some_and(|latest| *latest == *dashboard)
+    {
+        state.pending_scout_delivery.remove(symbol);
+        true
+    } else {
+        false
+    }
+}
+
 async fn deliver_pending_once(state: &LiveState, client: &reqwest::Client, base: &str) -> bool {
     let mut values = state
         .pending_delivery
@@ -104,21 +118,6 @@ async fn deliver_pending_once(state: &LiveState, client: &reqwest::Client, base:
         .map(|entry| (entry.key().clone(), entry.value().clone()))
         .collect::<Vec<_>>();
     values.sort_by(|a, b| a.0.cmp(&b.0));
-
-    let scouts_base =
-        std::env::var("SCOUTS_SERVICE_URL").unwrap_or_else(|_| "http://127.0.0.1:3011".into());
-    let scout_endpoint = format!("{}/live-inputs", scouts_base.trim_end_matches('/'));
-    let scout_batches = scout_payload_batches(values.iter().map(|(_, dashboard)| dashboard));
-    let scout_delivery = async {
-        let mut failed = false;
-        for payload in &scout_batches {
-            if let Err(error) = post_scout_dashboard(client, &scout_endpoint, payload).await {
-                failed = true;
-                crate::service_log!("WARN", "Live Scout batch input delivery failed: {error}");
-            }
-        }
-        failed
-    };
 
     let auto_trader_delivery = futures_util::stream::iter(values)
         .map(|(symbol, dashboard)| {
@@ -133,14 +132,12 @@ async fn deliver_pending_once(state: &LiveState, client: &reqwest::Client, base:
         })
         .buffer_unordered(PUBLISH_CONCURRENCY)
         .collect::<Vec<_>>();
-    let (scout_failed, results) = tokio::join!(scout_delivery, auto_trader_delivery);
-    let mut failed = scout_failed;
+    let results = auto_trader_delivery.await;
+    let mut failed = false;
     for (symbol, dashboard, result) in results {
         match result {
             Ok(()) => {
-                if !scout_failed {
-                    acknowledge_delivery(state, &symbol, &dashboard);
-                }
+                acknowledge_delivery(state, &symbol, &dashboard);
             }
             Err(error) => {
                 failed = true;
@@ -151,25 +148,94 @@ async fn deliver_pending_once(state: &LiveState, client: &reqwest::Client, base:
     failed
 }
 
-pub(super) async fn run_delivery_worker(state: Arc<LiveState>) {
-    let client = HTTP_CLIENT.get_or_init(reqwest::Client::new).clone();
-    let base = std::env::var("AUTO_TRADER_URL").unwrap_or_else(|_| "http://127.0.0.1:3005".into());
-    let mut retry = Duration::from_millis(250);
-    loop {
-        let notified = state.delivery_notify.notified();
-        tokio::pin!(notified);
-        if state.pending_delivery.is_empty() {
-            notified.await;
-            continue;
-        }
-        let failed = deliver_pending_once(&state, &client, &base).await;
-        if failed {
-            tokio::time::sleep(retry).await;
-            retry = (retry * 2).min(Duration::from_secs(5));
-        } else {
-            retry = Duration::from_millis(250);
+async fn deliver_scout_pending_once(
+    state: &LiveState,
+    client: &reqwest::Client,
+    endpoint: &str,
+) -> bool {
+    let mut values = state
+        .pending_scout_delivery
+        .iter()
+        .map(|entry| (entry.key().clone(), entry.value().clone()))
+        .collect::<Vec<_>>();
+    values.sort_by(|left, right| left.0.cmp(&right.0));
+
+    let signals = values
+        .into_iter()
+        .filter_map(|(symbol, dashboard)| {
+            let signal = scout_payload(&dashboard)?
+                .get("signals")?
+                .as_array()?
+                .first()?
+                .clone();
+            Some((symbol, dashboard, signal))
+        })
+        .collect::<Vec<_>>();
+
+    let mut failed = false;
+    for batch in signals.chunks(SCOUT_SIGNALS_PER_BATCH) {
+        let payload = json!({
+            "signals": batch.iter().map(|(_, _, signal)| signal.clone()).collect::<Vec<_>>()
+        });
+        match post_scout_dashboard(client, endpoint, &payload).await {
+            Ok(()) => {
+                for (symbol, dashboard, _) in batch {
+                    acknowledge_scout_delivery(state, symbol, dashboard);
+                }
+            }
+            Err(error) => {
+                failed = true;
+                crate::service_log!("WARN", "Live Scout batch input delivery failed: {error}");
+            }
         }
     }
+    failed
+}
+
+pub(super) async fn run_delivery_worker(state: Arc<LiveState>) {
+    let client = HTTP_CLIENT.get_or_init(reqwest::Client::new).clone();
+    let auto_trader_state = Arc::clone(&state);
+    let auto_trader_client = client.clone();
+    tokio::spawn(async move {
+        let base =
+            std::env::var("AUTO_TRADER_URL").unwrap_or_else(|_| "http://127.0.0.1:3005".into());
+        let mut retry = Duration::from_millis(250);
+        loop {
+            let notified = auto_trader_state.delivery_notify.notified();
+            tokio::pin!(notified);
+            if auto_trader_state.pending_delivery.is_empty() {
+                notified.await;
+                continue;
+            }
+            if deliver_pending_once(&auto_trader_state, &auto_trader_client, &base).await {
+                tokio::time::sleep(retry).await;
+                retry = (retry * 2).min(Duration::from_secs(5));
+            } else {
+                retry = Duration::from_millis(250);
+            }
+        }
+    });
+
+    tokio::spawn(async move {
+        let base =
+            std::env::var("SCOUTS_SERVICE_URL").unwrap_or_else(|_| "http://127.0.0.1:3011".into());
+        let endpoint = format!("{}/live-inputs", base.trim_end_matches('/'));
+        let mut retry = Duration::from_millis(250);
+        loop {
+            let notified = state.scout_delivery_notify.notified();
+            tokio::pin!(notified);
+            if state.pending_scout_delivery.is_empty() {
+                notified.await;
+                continue;
+            }
+            if deliver_scout_pending_once(&state, &client, &endpoint).await {
+                tokio::time::sleep(retry).await;
+                retry = (retry * 2).min(Duration::from_secs(5));
+            } else {
+                retry = Duration::from_millis(250);
+            }
+        }
+    });
 }
 
 #[cfg(test)]
@@ -323,6 +389,9 @@ mod tests {
         state
             .pending_delivery
             .insert("BTC-USDT".into(), json!({"best": []}));
+        state
+            .pending_scout_delivery
+            .insert("BTC-USDT".into(), json!({"best": []}));
         assert!(
             !deliver_pending_once(
                 &state,
@@ -332,6 +401,7 @@ mod tests {
             .await
         );
         assert!(state.pending_delivery.is_empty());
+        assert!(state.pending_scout_delivery.contains_key("BTC-USDT"));
 
         let fail_app = Router::new().route(
             "/internal/auto-trader/signal",
@@ -372,5 +442,22 @@ mod tests {
         assert!(!state.pending_delivery.contains_key("BTC-USDT"));
         assert!(!acknowledge_delivery(&state, "ETH-USDT", &sent));
         assert!(state.pending_delivery.contains_key("ETH-USDT"));
+    }
+
+    #[test]
+    fn acknowledges_only_the_scout_dashboard_that_was_sent() {
+        let state = state();
+        let sent = json!({"best": [{"timestamp": 1}]});
+        state
+            .pending_scout_delivery
+            .insert("BTC-USDT".into(), sent.clone());
+        state
+            .pending_scout_delivery
+            .insert("ETH-USDT".into(), json!({"best": [{"timestamp": 2}]}));
+
+        assert!(acknowledge_scout_delivery(&state, "BTC-USDT", &sent));
+        assert!(!state.pending_scout_delivery.contains_key("BTC-USDT"));
+        assert!(!acknowledge_scout_delivery(&state, "ETH-USDT", &sent));
+        assert!(state.pending_scout_delivery.contains_key("ETH-USDT"));
     }
 }

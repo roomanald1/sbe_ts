@@ -9,12 +9,11 @@ services:
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - ${REPO_ROOT:-..}:/workspace
-      - ${REPO_ROOT:-..}/system/control:/app
       - ${REPO_ROOT:-..}/src/typescript/workspace/apps/react-app/public/coverage:/app/coverage:ro
       - ${REPO_ROOT:-..}/src/typescript/workspace/apps/benchmarks/dist:/app/benchmarks:ro
     depends_on:
       - benchmarks-ui
-    command: ["node", "--watch", "server.mjs"]
+    command: ["node", "--watch", "/workspace/system/control/server.mjs"]
     restart: unless-stopped
 
   benchmarks-ui:
@@ -23,7 +22,7 @@ services:
     command: ["npm", "run", "dev", "--", "--host", "0.0.0.0", "--port", "5175", "--strictPort"]
     volumes:
       - ${REPO_ROOT:-..}/src/typescript/workspace/apps/benchmarks:/app/apps/benchmarks
-      - ${REPO_ROOT:-..}/research/BENCHMARK_BASELINE.md:/research/BENCHMARK_BASELINE.md:ro
+      - ${REPO_ROOT:-..}/research:/research:ro
     ports:
       - "127.0.0.1:5175:5175"
     restart: unless-stopped
@@ -31,14 +30,14 @@ services:
   prometheus:
     image: prom/prometheus:v3.5.0
     command:
-      - --config.file=/etc/prometheus/prometheus.yml
+      - --config.file=/etc/prometheus-config/prometheus.yml
       - --storage.tsdb.retention.time=15d
     ports:
       - "127.0.0.1:9090:9090"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
-      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./prometheus-config:/etc/prometheus-config:ro
       - prometheus-data:/prometheus
     restart: unless-stopped
 
@@ -53,11 +52,11 @@ services:
 
   alloy:
     image: grafana/alloy:v1.10.2
-    command: run --server.http.listen-addr=0.0.0.0:12345 /etc/alloy/config.alloy
+    command: run --server.http.listen-addr=0.0.0.0:12345 /etc/alloy-config/config.alloy
     depends_on:
       - loki
     volumes:
-      - ./alloy/config.alloy:/etc/alloy/config.alloy:ro
+      - ./alloy:/etc/alloy-config:ro
       - ../logs:/var/log/app:ro
       - alloy-data:/var/lib/alloy/data
     restart: unless-stopped
@@ -84,12 +83,14 @@ services:
       NEWS_SENTIMENT_URL: http://host.docker.internal:3006
       LEARNING_SERVICE_URL: http://host.docker.internal:3010
       SCOUTS_SERVICE_URL: http://host.docker.internal:3011
-      SQLITE_DB_PATHS: /workspace/src/rust/insights/signals.sqlite:/workspace/src/rust/position_management/auto_trader_state.sqlite:/workspace/src/rust/learning/learning_state.sqlite
-      PERSISTENT_STORE_PATHS: /workspace/src/rust/position_management/positions.sqlite
+      SQLITE_DB_PATHS: /data/insights/signals.sqlite:/data/position_management/auto_trader_state.sqlite:/data/learning/learning_state.sqlite
+      PERSISTENT_STORE_PATHS: /data/position_management/positions.sqlite
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
-      - ${REPO_ROOT:-..}:/workspace:ro
+      - insights-data:/data/insights:ro
+      - position-management-data:/data/position_management:ro
+      - learning-data:/data/learning:ro
     restart: unless-stopped
 
   grafana:
@@ -111,6 +112,15 @@ services:
     restart: unless-stopped
 
 volumes:
+  insights-data:
+    external: true
+    name: sbe-insights-data
+  position-management-data:
+    external: true
+    name: sbe-position-management-data
+  learning-data:
+    external: true
+    name: sbe-learning-data
   grafana-data:
   prometheus-data:
   loki-data:

@@ -272,8 +272,6 @@ export function strategyProfile(strategy?: string): string {
       'Entry: fresh aligned VWAP-dislocation signal passing configured gates. Exit: protective stop, take-profit, or strategy signal/position-management rules. Data freshness, order type, fees, and slippage affect realized results.',
     'live-absorption-pressure':
       'Entry: fresh aligned absorption/pressure signal passing configured gates. Exit: protective stop, take-profit, or strategy signal/position-management rules. Signal expiry and execution quality can affect entry and exit timing.',
-    'live-insights':
-      'Entry: fresh directional Insights signal that passes configured risk and strength gates. Exit: protective stop, take-profit, or signal/position-management rules. Fees and execution slippage mean net P&L can differ from the price threshold.',
     'generic-insight-signals':
       'Legacy Insights-driven entry. Exit behavior depends on the stored position policy and available signal state; verify the position row for active stop/target values.',
     'portfolio-hedge':
@@ -304,8 +302,7 @@ export function strategyLabel(strategy?: string): string {
     'live-order-book': 'Live order book',
     'live-vwap-dislocation': 'Live VWAP dislocation',
     'live-absorption-pressure': 'Live absorption',
-    'live-insights': 'Live Insights',
-    'generic-insight-signals': 'Legacy Live Insights',
+    'generic-insight-signals': 'Unattributed Insights order',
     'portfolio-hedge': 'Portfolio hedge',
   };
   return strategy ? (labels[strategy] ?? strategy) : 'Legacy / unknown';

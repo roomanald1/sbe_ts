@@ -233,6 +233,7 @@ mod coverage_tests {
                 State(Arc::clone(&store)),
                 Json(CloseProfitableRequest {
                     symbol: "invalid".into(),
+                    strategy_instance_id: None,
                 }),
             )
             .await,

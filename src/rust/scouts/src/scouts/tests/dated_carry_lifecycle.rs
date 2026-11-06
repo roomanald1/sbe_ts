@@ -80,6 +80,7 @@ mod dated_carry_lifecycle_tests {
         assert_eq!(retry.finalized_count, 1);
         assert!(state.scout_pending_samples.is_empty());
         assert_eq!(state.outbox.len(), 1);
+        assert!(state.outcomes.is_empty(), "rejected carry candidates are not performance samples");
         let ScoutOutboxItem::Learning(FeedbackEvent::ScoutOutcome {
             net_return_percent,
             symbol,
@@ -147,6 +148,12 @@ mod dated_carry_lifecycle_tests {
         };
         assert!(net_return_percent.is_finite());
         assert!(event_id.ends_with("carry_minimum_days_to_expiry"));
+        assert_eq!(state.outcomes.len(), 1);
+        let completed = state.outcomes.values().next().unwrap();
+        assert_eq!(completed.strategy, "dated-futures-carry");
+        assert_eq!(completed.symbol, "BTC-USDT");
+        assert_eq!(completed.exit_scenario, "strategy");
+        assert_eq!(completed.strategy_parameters["carry_minimum_days_to_expiry"], 6.0);
     }
 }
 

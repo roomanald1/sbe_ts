@@ -23,6 +23,8 @@ struct AutoTraderState {
     audit_health: Arc<AtomicU64>,
     audit_failure_latched: Arc<AtomicBool>,
     gap_summary: Arc<std::sync::Mutex<GapSummary>>,
+    stale_signal_candidates_total: Arc<AtomicU64>,
+    stale_signal_cycles_total: Arc<AtomicU64>,
     insight_processing_ms: Arc<Mutex<Vec<f64>>>,
     cycle_lock_wait_ms: Arc<Mutex<BTreeMap<String, Vec<f64>>>>,
     cycle_lock_hold_ms: Arc<std::sync::Mutex<BTreeMap<String, Vec<f64>>>>,
@@ -361,6 +363,65 @@ fn take_next_pending_signal(queue: &mut PendingSignalQueue) -> Option<Dashboard>
     Some(dashboard)
 }
 
+const MAX_LIVE_SIGNALS_PER_CYCLE: usize = 32;
+
+fn take_next_pending_signal_batch(
+    queue: &mut PendingSignalQueue,
+    max_signals: usize,
+) -> Option<Dashboard> {
+    let mut keys = queue
+        .iter()
+        .map(|(key, dashboard)| {
+            let timestamp = dashboard
+                .best
+                .iter()
+                .map(|signal| signal.timestamp)
+                .max()
+                .unwrap_or_default();
+            (key.clone(), timestamp)
+        })
+        .collect::<Vec<_>>();
+    keys.sort_by(|(left_key, left_timestamp), (right_key, right_timestamp)| {
+        right_timestamp
+            .cmp(left_timestamp)
+            .then_with(|| left_key.cmp(right_key))
+    });
+    keys.truncate(max_signals.max(1));
+
+    let mut dashboards = keys
+        .into_iter()
+        .filter_map(|(key, _)| queue.remove(&key))
+        .collect::<Vec<_>>();
+    if dashboards.is_empty() {
+        return None;
+    }
+
+    let mut batch = dashboards.remove(0);
+    let mut markets = batch.markets.as_ref().clone();
+    let mut oldest_queued_at = batch.queued_at.take();
+    for dashboard in dashboards {
+        batch.best.extend(dashboard.best);
+        for (symbol, market) in dashboard.markets.iter() {
+            markets
+                .entry(symbol.clone())
+                .or_insert_with(|| market.clone());
+        }
+        if let Some(queued_at) = dashboard.queued_at {
+            oldest_queued_at = Some(
+                oldest_queued_at
+                    .map_or(queued_at, |oldest| oldest.min(queued_at)),
+            );
+        }
+    }
+    batch.markets = Arc::new(markets);
+    batch.queued_at = oldest_queued_at;
+    batch.queue_wait_ms = batch
+        .queued_at
+        .take()
+        .map(|queued_at| queued_at.elapsed().as_secs_f64() * 1_000.0);
+    Some(batch)
+}
+
 #[cfg(test)]
 mod pending_signal_queue_tests {
     use super::*;
@@ -418,5 +479,39 @@ mod pending_signal_queue_tests {
         assert_eq!(live_queue.len(), 1);
         assert!(!take_next_pending_signal(&mut live_queue).unwrap().best[0].strategy_candidate);
         assert!(take_next_pending_signal(&mut daily_queue).unwrap().best[0].strategy_candidate);
+    }
+
+    #[test]
+    fn live_signal_batch_takes_freshest_symbols_and_merges_their_market_books() {
+        let mut queue = PendingSignalQueue::new();
+        for (symbol, timestamp) in [("BTC-USDT", 10), ("ETH-USDT", 30), ("SOL-USDT", 20)] {
+            let mut dashboard = dashboard(false);
+            dashboard.best[0].symbol = symbol.into();
+            dashboard.best[0].timestamp = timestamp;
+            dashboard.markets = Arc::new(BTreeMap::from([(
+                symbol.into(),
+                serde_json::json!({ "updated_at_ms": timestamp }),
+            )]));
+            queue_pending_signal(
+                &mut queue,
+                PendingSignalKind::Live,
+                symbol.into(),
+                dashboard,
+            );
+        }
+
+        let batch = take_next_pending_signal_batch(&mut queue, 2).unwrap();
+        assert_eq!(
+            batch
+                .best
+                .iter()
+                .map(|signal| signal.symbol.as_str())
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from(["ETH-USDT", "SOL-USDT"])
+        );
+        assert!(batch.markets.contains_key("ETH-USDT"));
+        assert!(batch.markets.contains_key("SOL-USDT"));
+        assert_eq!(queue.len(), 1);
+        assert!(queue.contains_key(&(PendingSignalKind::Live, "BTC-USDT".into())));
     }
 }

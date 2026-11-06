@@ -261,11 +261,11 @@ fn strategy_rule_parameter_specs(strategy: Strategy) -> Vec<StrategyParameterSpe
         ],
         _ => Vec::new(),
     };
-    if strategy.is_live_insight() && !strategy.is_legacy_composite() {
+    if !strategy.is_legacy_composite() {
         specs.extend([
             catalog_param(
                 K::ScoutMinimumWalkForwardSamples,
-                "Scout minimum negative-evidence samples",
+                "Minimum strategy walk-forward samples",
                 10.0,
                 3.0,
                 30.0,
@@ -275,7 +275,7 @@ fn strategy_rule_parameter_specs(strategy: Strategy) -> Vec<StrategyParameterSpe
             ),
             catalog_param(
                 K::ScoutMinimumPositiveNetRate,
-                "Scout minimum positive net rate",
+                "Minimum strategy walk-forward positive rate",
                 0.45,
                 0.20,
                 0.65,

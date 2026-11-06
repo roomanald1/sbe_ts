@@ -1,10 +1,4 @@
-import {
-  memo,
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-} from 'react';
+import { memo, useEffect, useMemo, useRef, useState } from 'react';
 import { AgGridReact } from 'ag-grid-react';
 import {
   ClientSideRowModelModule,
@@ -108,7 +102,8 @@ function persistClosedGridSort(api: GridApi<OutcomeGridRow>) {
 function scrollPageFromStrategyGrid(event: globalThis.WheelEvent) {
   if (!event.deltaY) return;
 
-  let pageScroller: HTMLElement | null = (event.currentTarget as HTMLElement).parentElement;
+  let pageScroller: HTMLElement | null = (event.currentTarget as HTMLElement)
+    .parentElement;
   while (pageScroller) {
     const { overflowY } = window.getComputedStyle(pageScroller);
     if (
@@ -317,8 +312,11 @@ function AutoTraderOutcomesComponent({
   useEffect(() => {
     const wrapper = strategyGridWrapper.current;
     if (!wrapper) return;
-    wrapper.addEventListener('wheel', scrollPageFromStrategyGrid, { passive: false });
-    return () => wrapper.removeEventListener('wheel', scrollPageFromStrategyGrid);
+    wrapper.addEventListener('wheel', scrollPageFromStrategyGrid, {
+      passive: false,
+    });
+    return () =>
+      wrapper.removeEventListener('wheel', scrollPageFromStrategyGrid);
   }, []);
   const [hideDisabledStrategies, setHideDisabledStrategies] = useState(() => {
     try {
@@ -354,6 +352,7 @@ function AutoTraderOutcomesComponent({
     outcomesGridApi.current?.resetRowHeights();
   }, [state.confirmingCloseSymbols, state.closingSymbols]);
   const [now, setNow] = useState(Date.now);
+  const [gatePosition, setGatePosition] = useState<OutcomeGridRow | null>(null);
   useEffect(() => {
     const timer = setInterval(() => setNow(Date.now()), 15_000);
     return () => clearInterval(timer);
@@ -454,7 +453,6 @@ function AutoTraderOutcomesComponent({
   const strategyWinRates = useMemo<StrategyWinRateRow[]>(() => {
     const grouped = new Map<string, AutoTraderOutcome[]>();
     for (const row of closedRows) {
-      if (row.strategy === 'live-insights') continue;
       grouped.set(row.strategy, [...(grouped.get(row.strategy) ?? []), row]);
     }
     const strategyNames = [
@@ -510,7 +508,9 @@ function AutoTraderOutcomesComponent({
         let runStatus = 'No diagnostic';
         let runReason = diagnostic
           ? 'No current signal reported'
-          : 'No strategy-specific run or block detail is available';
+          : state.latestSignalDiagnostic
+            ? state.latestSignalDiagnostic
+            : 'No strategy-specific run or block detail is available';
         if (strategy === 'unattributed') {
           runStatus = 'Ledger adjustment';
           runReason =
@@ -824,8 +824,7 @@ function AutoTraderOutcomesComponent({
           learningAverageNet: learning?.average_net_return_percent,
           strictEntryGate: state.strictEntryGates[strategy],
           strictBaseStrengthFloor: state.strictBaseStrengthFloor,
-          strictGateApplies:
-            strategy.startsWith('live-') && strategy !== 'live-insights',
+          strictGateApplies: strategy.startsWith('live-'),
           scoutEnabled,
           scoutable,
         };
@@ -1941,6 +1940,25 @@ function AutoTraderOutcomesComponent({
       },
       { field: 'symbol', headerName: 'Symbol', minWidth: 100 },
       {
+        headerName: 'Live gates',
+        colId: 'live-gates',
+        sortable: false,
+        filter: false,
+        minWidth: 84,
+        maxWidth: 84,
+        cellRenderer: ({ data }: { data?: OutcomeGridRow }) =>
+          (liveOnly && data?.status === 'Open') ||
+          (closedOnly && data?.rowId.startsWith('ledger-summary:')) ? (
+            <button
+              type="button"
+              className="auto-trader-parameters-button"
+              onClick={() => setGatePosition(data)}
+            >
+              Gates
+            </button>
+          ) : null,
+      },
+      {
         headerName: 'Carry contract',
         valueGetter: ({ data }) =>
           data?.carryDetails
@@ -2060,11 +2078,13 @@ function AutoTraderOutcomesComponent({
         field: 'ledgerOrderType',
         headerName: 'Trade type',
         headerTooltip:
-          'Execution order type used for this ledger fill, taken from its parent order.',
-        valueFormatter: ({ value }) =>
-          typeof value === 'string' && value
-            ? entryOrderTypeLabel(value) || '—'
-            : '—',
+          'Shows whether AutoTrader or an operator closed the strategy instance; otherwise shows the execution order type.',
+        valueFormatter: ({ value, data }) =>
+          data?.manuallyClosed
+            ? 'Manual close'
+            : typeof value === 'string' && value
+              ? entryOrderTypeLabel(value) || '—'
+              : '—',
         minWidth: 88,
       },
       {
@@ -2437,6 +2457,7 @@ function AutoTraderOutcomesComponent({
   const visibleColumns = liveOnly
     ? [
         'Symbol',
+        'Live gates',
         'Carry contract',
         'Strategy',
         'Side',
@@ -2452,6 +2473,7 @@ function AutoTraderOutcomesComponent({
           .map((column) => {
             const widths: Record<string, number> = {
               Symbol: 92,
+              'Live gates': 84,
               'Carry contract': 150,
               Strategy: 146,
               Side: 112,
@@ -2520,6 +2542,7 @@ function AutoTraderOutcomesComponent({
             .filter((column) =>
               [
                 'Symbol',
+                'Live gates',
                 'Strategy',
                 'Strategy instance ID',
                 'Trade type',
@@ -2534,6 +2557,7 @@ function AutoTraderOutcomesComponent({
             .map((column) => {
               const widths: Record<string, number> = {
                 Symbol: 90,
+                'Live gates': 84,
                 Strategy: 170,
                 'Strategy instance ID': 230,
                 'Trade type': 95,
@@ -2785,6 +2809,341 @@ function AutoTraderOutcomesComponent({
                 : 'No open AutoTrader positions or fully closed audited trades are available yet.'}
           </p>
         )}
+      {gatePosition &&
+        (() => {
+          const entryDecision = gatePosition.entryStrategyDecision;
+          const exitDecision = gatePosition.latestStrategyEvaluation;
+          const gateNumber = (value: number | null | undefined, digits = 4) =>
+            typeof value === 'number' && Number.isFinite(value)
+              ? value.toLocaleString(undefined, {
+                  maximumFractionDigits: digits,
+                })
+              : '—';
+          const componentLabel = (name: string) =>
+            name
+              .split('_')
+              .map((part) =>
+                part ? part[0].toUpperCase() + part.slice(1) : part,
+              )
+              .join(' ');
+          const floorKeyByComponent: Record<string, string> = {
+            momentum_10s_percent: 'minimum_momentum_floor',
+            trend_5m_volatility_units: 'minimum_momentum_floor',
+            trade_flow_imbalance: 'minimum_flow_imbalance_floor',
+            book_imbalance: 'minimum_book_imbalance_floor',
+            mispricing_vs_vwap_bps: 'minimum_vwap_dislocation_bps_floor',
+            pressure_without_price_move: 'minimum_absorption_pressure_floor',
+          };
+          const directionAdjusted = (name: string, value: number) => {
+            const short = ['SHORT', 'SELL', 'BEARISH'].includes(
+              (
+                gatePosition.signalDirection ?? gatePosition.direction
+              ).toUpperCase(),
+            );
+            return name === 'pressure_without_price_move'
+              ? (short ? 1 : -1) * value
+              : (short ? -1 : 1) * value;
+          };
+          const componentMargin = (orientedValue: number, floor: number) => {
+            const excess = orientedValue - floor;
+            if (floor === 0)
+              return ` · ${excess >= 0 ? '+' : ''}${gateNumber(excess)} above floor`;
+            return ` · ${excess >= 0 ? '+' : ''}${gateNumber((excess / Math.abs(floor)) * 100, 1)}% above floor`;
+          };
+          const strategyGateComponents: Record<string, string[]> = {
+            'live-momentum': [
+              'momentum_10s_percent',
+              'trend_5m_volatility_units',
+            ],
+            'live-trade-flow': ['trade_flow_imbalance'],
+            'live-order-book': ['book_imbalance'],
+            'live-vwap-dislocation': ['mispricing_vs_vwap_bps'],
+            'live-absorption-pressure': ['pressure_without_price_move'],
+          };
+          const gateComponents =
+            strategyGateComponents[gatePosition.strategy] ?? [];
+          const liveGateRows = gateComponents.flatMap((name) => {
+            const value = gatePosition.components[name];
+            const floorKey = floorKeyByComponent[name];
+            const floor = floorKey
+              ? gatePosition.components[floorKey]
+              : undefined;
+            if (typeof value !== 'number' || typeof floor !== 'number')
+              return [];
+            const orientedValue = directionAdjusted(name, value);
+            const passed =
+              name === 'momentum_10s_percent' ||
+              name === 'trend_5m_volatility_units'
+                ? orientedValue > floor
+                : orientedValue >= floor;
+            return [
+              {
+                label: componentLabel(name),
+                passed,
+                detail: `Entry value: ${gateNumber(value)} · direction-adjusted: ${gateNumber(orientedValue)} ${orientedValue >= floor ? '≥' : '<'} floor ${gateNumber(floor)}${componentMargin(orientedValue, floor)}`,
+              },
+            ];
+          });
+          const gateRows = [
+            ...liveGateRows,
+            ...(entryDecision?.btc_gate_required
+              ? [
+                  {
+                    label: `BTC ${entryDecision.btc_window_days ?? ''}-day SMA trend`,
+                    passed: entryDecision.btc_gate_passed,
+                    detail: `BTC close ${gateNumber(entryDecision.btc_close, 2)} · required floor (SMA): ${gateNumber(entryDecision.btc_sma, 2)}`,
+                  },
+                ]
+              : []),
+            ...(entryDecision?.primary_rule
+              ? [
+                  {
+                    label: `Primary: ${entryDecision.primary_rule}`,
+                    passed: entryDecision.primary_passed,
+                    detail: `Floor: ${gateNumber(entryDecision.primary_level)} ${entryDecision.primary_metric_unit ?? ''} · measured: ${gateNumber(entryDecision.primary_metric_value)} ${entryDecision.primary_metric_unit ?? ''} · distance ${gateNumber(entryDecision.primary_distance_percent, 2)}%`,
+                  },
+                  ...(entryDecision.secondary_rule
+                    ? [
+                        {
+                          label: `Secondary: ${entryDecision.secondary_rule}`,
+                          passed: entryDecision.secondary_passed,
+                          detail: `Floor: ${gateNumber(entryDecision.secondary_level)} · distance ${gateNumber(entryDecision.secondary_distance_percent, 2)}%`,
+                        },
+                      ]
+                    : []),
+                  {
+                    label: 'Entry decision',
+                    passed: true,
+                    detail:
+                      'Strategy entry was accepted with this recorded gate evidence',
+                  },
+                ]
+              : []),
+          ];
+          const positionStillOpen =
+            gatePosition.status === 'Open' ||
+            gatePosition.status === 'Partially closed';
+          const carry = gatePosition.carryDetails;
+          const exitStatus = (reason: string, active?: boolean) => {
+            if (positionStillOpen)
+              return active === false ? 'Inactive' : 'Armed';
+            if (gatePosition.exitReason === reason) return 'Triggered · closed';
+            return gatePosition.exitReason
+              ? 'Not triggered'
+              : 'Exit reason unavailable';
+          };
+          const exitRows = carry
+            ? [
+                {
+                  label: 'Expiry settlement',
+                  status:
+                    carry.settlement_price != null
+                      ? 'Settled'
+                      : positionStillOpen
+                        ? 'Pending'
+                        : 'Settlement details unavailable',
+                  detail:
+                    carry.settlement_price != null
+                      ? `Settlement ${gateNumber(carry.settlement_price, 6)} · source ${carry.settlement_source ?? 'unavailable'}${carry.spot_exit_twap != null ? ` · spot exit TWAP ${gateNumber(carry.spot_exit_twap, 6)}` : ''}`
+                      : `Contract expiry: ${new Date(carry.expiry_ms).toLocaleString()}`,
+                },
+              ]
+            : [
+                ...(gatePosition.stopLossPercent !== undefined ||
+                gatePosition.exitReason === 'stop-loss'
+                  ? [
+                      {
+                        label: 'Stop loss',
+                        status: exitStatus(
+                          'stop-loss',
+                          gatePosition.stopLossActive,
+                        ),
+                        detail:
+                          gatePosition.stopLossPercent === undefined
+                            ? 'Loss threshold unavailable'
+                            : `Net return trigger: −${gateNumber(gatePosition.stopLossPercent, 2)}%`,
+                      },
+                    ]
+                  : []),
+                ...(gatePosition.takeProfitPercent !== undefined ||
+                gatePosition.exitReason === 'take-profit'
+                  ? [
+                      {
+                        label: 'Take profit',
+                        status: exitStatus(
+                          'take-profit',
+                          gatePosition.takeProfitActive,
+                        ),
+                        detail:
+                          gatePosition.takeProfitPercent === undefined
+                            ? 'Profit threshold unavailable'
+                            : `Net return trigger: +${gateNumber(gatePosition.takeProfitPercent, 2)}%`,
+                      },
+                    ]
+                  : []),
+                ...(gatePosition.exitReason &&
+                !['stop-loss', 'take-profit'].includes(gatePosition.exitReason)
+                  ? [
+                      {
+                        label: 'Other exit',
+                        status: `Triggered · ${gatePosition.exitReason}`,
+                        detail: 'Recorded exit reason',
+                      },
+                    ]
+                  : []),
+              ];
+          const exitTrendWindows = exitDecision?.trend_return_windows ?? [];
+          const exitTrendMeanReturn = exitTrendWindows.length
+            ? exitTrendWindows.reduce(
+                (sum, window) => sum + window.return_percent,
+                0,
+              ) / exitTrendWindows.length
+            : undefined;
+          const trendExitRows =
+            gatePosition.strategy === 'risk-adjusted-trend-portfolio'
+              ? [
+                  {
+                    label: 'BTC trend floor',
+                    status:
+                      typeof exitDecision?.btc_close === 'number' &&
+                      typeof exitDecision.btc_sma === 'number'
+                        ? exitDecision.btc_close <= exitDecision.btc_sma
+                          ? 'Triggered · next daily check'
+                          : 'Not triggered'
+                        : 'Unavailable',
+                    detail:
+                      typeof exitDecision?.btc_close === 'number' &&
+                      typeof exitDecision.btc_sma === 'number'
+                        ? `Exit if BTC closes below its ${exitDecision.btc_window_days ?? 200}-day SMA · latest closed close ${gateNumber(exitDecision.btc_close, 2)} · SMA ${gateNumber(exitDecision.btc_sma, 2)} · ${gateNumber((exitDecision.btc_close / exitDecision.btc_sma) * 100 - 100, 2)}% from floor`
+                        : 'BTC close or SMA is unavailable',
+                  },
+                  {
+                    label: 'Asset trend mean',
+                    status:
+                      exitTrendWindows.length > 0 &&
+                      exitTrendMeanReturn !== undefined
+                        ? exitTrendMeanReturn <= 0
+                          ? 'Triggered · next daily check'
+                          : 'Not triggered'
+                        : 'Unavailable',
+                    detail:
+                      exitTrendWindows.length > 0 &&
+                      exitTrendMeanReturn !== undefined
+                        ? `Exit if mean return across ${exitTrendWindows.map((window) => window.days).join('/')}-day windows is 0% or less · current mean ${exitTrendMeanReturn >= 0 ? '+' : ''}${exitTrendMeanReturn.toFixed(2)}% · ${Math.abs(exitTrendMeanReturn).toFixed(2)} percentage points ${exitTrendMeanReturn > 0 ? 'above' : 'below'} trigger`
+                        : 'Daily trend return windows are unavailable',
+                  },
+                ]
+              : [];
+          return (
+            <div
+              className="auto-trader-gates-backdrop"
+              role="presentation"
+              onMouseDown={(event) => {
+                if (event.target === event.currentTarget) setGatePosition(null);
+              }}
+            >
+              <section
+                className="auto-trader-gates-popup"
+                role="dialog"
+                aria-modal="true"
+                aria-label={`${gatePosition.strategy} live gates`}
+              >
+                <header>
+                  <h2>
+                    {strategyLabel(gatePosition.strategy)} ·{' '}
+                    {gatePosition.symbol}
+                  </h2>
+                  <button
+                    type="button"
+                    aria-label="Close"
+                    onClick={() => setGatePosition(null)}
+                  >
+                    ×
+                  </button>
+                </header>
+                <p>
+                  {carry
+                    ? 'Dated carry entry details'
+                    : 'Strategy gate evidence recorded at entry'}
+                </p>
+                {carry ? (
+                  <ul>
+                    <li>
+                      <strong>Paired</strong>
+                      <span>Spot long / futures short</span>
+                      <small>
+                        {carry.spot_symbol} · spot entry{' '}
+                        {gateNumber(carry.spot_entry_price, 6)}
+                      </small>
+                    </li>
+                    <li>
+                      <strong>Paired</strong>
+                      <span>Futures leg</span>
+                      <small>
+                        {carry.future_symbol} · futures entry{' '}
+                        {gateNumber(carry.future_entry_price, 6)}
+                      </small>
+                    </li>
+                    <li>
+                      <strong>Recorded</strong>
+                      <span>Entry basis</span>
+                      <small>
+                        {gateNumber(
+                          (carry.future_entry_price / carry.spot_entry_price -
+                            1) *
+                            100,
+                          3,
+                        )}
+                        % · expires {new Date(carry.expiry_ms).toLocaleString()}
+                      </small>
+                    </li>
+                  </ul>
+                ) : gateRows.length ? (
+                  <ul>
+                    {gateRows.map((gate) => (
+                      <li key={gate.label}>
+                        <strong>
+                          {gate.passed ? '✓ Passed' : '○ Not passed'}
+                        </strong>
+                        <span>{gate.label}</span>
+                        <small>{gate.detail}</small>
+                      </li>
+                    ))}
+                  </ul>
+                ) : (
+                  <p>
+                    Gate diagnostics are not available for this strategy and
+                    symbol.
+                  </p>
+                )}
+                {(trendExitRows.length > 0 || exitRows.length > 0) && (
+                  <>
+                    <h3>Exit gates</h3>
+                    <ul>
+                      {[...trendExitRows, ...exitRows].map((gate) => (
+                        <li key={gate.label}>
+                          <strong
+                            className={
+                              gate.status.startsWith('Triggered')
+                                ? 'is-triggered'
+                                : gate.status === 'Armed'
+                                  ? 'is-armed'
+                                  : 'is-pending'
+                            }
+                          >
+                            {gate.status}
+                          </strong>
+                          <span>{gate.label}</span>
+                          <small>{gate.detail}</small>
+                        </li>
+                      ))}
+                    </ul>
+                  </>
+                )}
+              </section>
+            </div>
+          );
+        })()}
     </section>
   );
 }

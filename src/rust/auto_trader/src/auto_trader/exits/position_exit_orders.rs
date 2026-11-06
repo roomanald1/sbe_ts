@@ -261,7 +261,7 @@ mod position_exit_order_tests {
             7, "ETH-USD", "buy", "stop-loss", &position, 2.0, 6_000.0,
         );
 
-        assert_eq!(order.strategy.as_deref(), Some("live-insights"));
+        assert_eq!(order.strategy.as_deref(), Some("unattributed"));
         assert_eq!(order.decision_id, None);
     }
 }

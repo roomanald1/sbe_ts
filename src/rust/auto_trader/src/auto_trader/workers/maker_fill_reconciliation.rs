@@ -164,7 +164,7 @@ async fn reconcile_maker_fills(
                 strategy_positions,
                 positions,
                 &order.symbol,
-                order.strategy.as_deref().unwrap_or("live-insights"),
+                order.strategy.as_deref().unwrap_or("unattributed"),
                 &order.side,
                 fill.quantity,
                 fill.execution_price,

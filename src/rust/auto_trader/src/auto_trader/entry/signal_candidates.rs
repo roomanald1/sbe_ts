@@ -173,6 +173,10 @@ fn signal_max_age_seconds(signal: &Signal) -> u64 {
     }
 }
 
+fn signal_is_fresh(signal: &Signal, now: u64) -> bool {
+    !signal.stale && now.saturating_sub(signal.timestamp / 1_000) <= signal_max_age_seconds(signal)
+}
+
 #[cfg(test)]
 #[cfg(test)]
 fn signal_allowed_by_positions(
@@ -281,9 +285,7 @@ fn collect_signal_candidates<'a>(
             if is_stablecoin_pair(&signal.symbol) {
                 return false;
             }
-            let max_age = signal_max_age_seconds(signal);
-            if signal.stale || now.saturating_sub(signal.timestamp / 1000) > max_age
-            {
+            if !signal_is_fresh(signal, now) {
                 stale_signal_count += 1;
                 let age = now.saturating_sub(signal.timestamp / 1000);
                 stalest_signal_age_seconds = stalest_signal_age_seconds.max(age);
@@ -636,12 +638,12 @@ mod parallel_daily_candidate_tests {
     #[test]
     fn live_signal_sources_remain_available_alongside_daily_candidates() {
         let daily = signal("trend-50-200", "bullish");
-        let mut live_source = signal("live-insights", "bullish");
+        let mut live_source = signal("unattributed", "bullish");
         live_source.strategy_candidate = false;
 
         let sources = live_strategy_source_signals(&[daily, live_source.clone()]);
         assert_eq!(sources.len(), 1);
-        assert_eq!(sources[0].strategy.as_deref(), Some("live-insights"));
+        assert_eq!(sources[0].strategy.as_deref(), Some("unattributed"));
     }
 
     #[test]
@@ -667,5 +669,45 @@ mod parallel_daily_candidate_tests {
         assert!(!signal_allowed_by_positions(
             &signal("trend-50-200", "bearish"), &open, &lots, 1,
         ));
+    }
+}
+
+#[cfg(test)]
+mod signal_freshness_tests {
+    use super::*;
+
+    fn signal(strategy: Option<&str>, timestamp: u64, stale: bool) -> Signal {
+        Signal {
+            symbol: "ETH-USDT".into(),
+            direction: "bullish".into(),
+            strength: 1.0,
+            timestamp,
+            stale,
+            score: 1.0,
+            ranging_probability: None,
+            components: SignalComponents::default(),
+            strategy_candidate: strategy.is_some(),
+            strategy: strategy.map(str::to_owned),
+            strategy_decision: None,
+            market_regime: None,
+            news_attribution: None,
+            entry_gate: None,
+        }
+    }
+
+    #[test]
+    fn live_signals_expire_at_five_seconds_and_daily_signals_at_ten_minutes() {
+        let now = 10_000;
+        assert!(signal_is_fresh(&signal(None, 9_995_000, false), now));
+        assert!(!signal_is_fresh(&signal(None, 9_994_000, false), now));
+        assert!(signal_is_fresh(
+            &signal(Some("donchian-20-btc200"), 9_400_000, false),
+            now,
+        ));
+        assert!(!signal_is_fresh(
+            &signal(Some("donchian-20-btc200"), 9_399_000, false),
+            now,
+        ));
+        assert!(!signal_is_fresh(&signal(None, 9_999_000, true), now));
     }
 }

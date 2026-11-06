@@ -55,6 +55,8 @@ async fn update_settings(
         || request
             .closed_trade_window
             .is_some_and(|value| !(1..=5000).contains(&value))
+        || request.minimum_scout_parameter_samples
+            .is_some_and(|value| !(2..=100).contains(&value))
         || !(1..=20).contains(&request.max_open_positions)
         || request
             .max_intraday_open_positions
@@ -69,7 +71,7 @@ async fn update_settings(
             .daily_strategy_notional_limit
             .is_some_and(|value| !value.is_finite() || value < 0.0)
     {
-        return Err((StatusCode::BAD_REQUEST, "Order and total notional limits must be positive with total notional at least the per-order limit; daily loss cap must be positive, exploration must be between 0% and 100%, max open positions must be 1–20, and entries per position must be 1–10".into()));
+        return Err((StatusCode::BAD_REQUEST, "Order and total notional limits must be positive with total notional at least the per-order limit; daily loss cap must be positive, exploration must be between 0% and 100%, max open positions must be 1–20, entries per position must be 1–10, and scout samples must be 2–100".into()));
     }
     if let Some(overrides) = request.strategy_parameter_overrides.as_ref() {
         validate_strategy_parameter_overrides(overrides)
@@ -229,6 +231,9 @@ async fn update_settings(
                 .drain(0..timestamp_excess);
         }
     }
+    if let Some(value) = request.minimum_scout_parameter_samples {
+        settings.minimum_live_scout_parameter_samples = value;
+    }
     if let Some(overrides) = request.strategy_parameter_overrides {
         settings.strategy_parameter_overrides = overrides;
     }
@@ -249,7 +254,20 @@ async fn update_settings(
         settings.closed_trade_fees_usd.clear();
     }
     request_settings_persist(&state)?;
+    let minimum_scout_parameter_samples = settings.minimum_live_scout_parameter_samples;
     drop(settings);
+
+    if let Ok(base) = std::env::var("LEARNING_SERVICE_URL") {
+        match state.client
+            .put(format!("{}/config/scout-parameter-samples", base.trim_end_matches('/')))
+            .json(&serde_json::json!({ "minimum_samples": minimum_scout_parameter_samples }))
+            .send().await
+        {
+            Ok(response) if response.status().is_success() => {}
+            Ok(response) => crate::service_log!("ERROR", "Could not sync scout sample minimum to Learning service: {}", response.status()),
+            Err(error) => crate::service_log!("ERROR", "Could not sync scout sample minimum to Learning service: {}", error),
+        }
+    }
 
     if request.reset_learning {
         *state.latest_execution_parameters.lock().await = None;

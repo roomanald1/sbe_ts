@@ -119,7 +119,7 @@ async fn reconcile_auto_positions_with_ledger(
                 entry_fees: ledger_fees.abs(),
                 entries: 1,
                 entry_timestamp_ms: *last_trade_timestamp,
-                strategy: Some("live-insights".into()),
+                strategy: Some("unattributed".into()),
                 ..TraderPosition::default()
             };
             position.trade_id = position.entry_decision_id.clone();
@@ -146,8 +146,8 @@ async fn reconcile_auto_positions_with_ledger(
                 replacement.quantity = *ledger_quantity;
                 replacement.average_entry_price = *ledger_average_price;
                 replacement.entry_fees = *ledger_fees;
-                replacement.strategy = Some("live-insights".into());
-                lots.insert("live-insights".into(), replacement);
+                replacement.strategy = Some("unattributed".into());
+                lots.insert("unattributed".into(), replacement);
                 changed = true;
             }
         } else {
@@ -156,7 +156,7 @@ async fn reconcile_auto_positions_with_ledger(
             restored.average_entry_price = *ledger_average_price;
             restored.entry_fees = ledger_fees.abs();
             settings.strategy_positions.entry(symbol.clone()).or_default()
-                .insert(restored.strategy.clone().unwrap_or_else(|| "live-insights".into()), restored);
+                .insert(restored.strategy.clone().unwrap_or_else(|| "unattributed".into()), restored);
             changed = true;
         }
     }

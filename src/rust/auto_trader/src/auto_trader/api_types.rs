@@ -33,6 +33,7 @@ struct StatusResponse {
     trigger_offset_bps: f64,
     trailing_distance_percent: f64,
     closed_trade_window: usize,
+    minimum_scout_parameter_samples: usize,
     used_notional_today: f64,
     available_notional: f64,
     last_decision: String,
@@ -40,6 +41,8 @@ struct StatusResponse {
     decisions_since_trade: u64,
     gap_reasons: Vec<GapReason>,
     gate_hits: Vec<GateHit>,
+    stale_signal_candidates_total: u64,
+    stale_signal_cycles_total: u64,
     symbol_gate_hits: Vec<SymbolGateHit>,
     latest_signal_diagnostic: String,
     strategy_diagnostics: Vec<StrategyDiagnostic>,
@@ -121,6 +124,8 @@ struct SettingsRequest {
     trailing_distance_percent: Option<f64>,
     #[serde(default)]
     closed_trade_window: Option<usize>,
+    #[serde(default, alias = "minimum_live_scout_parameter_samples")]
+    minimum_scout_parameter_samples: Option<usize>,
     #[serde(default)]
     reset_learning: bool,
     #[serde(default)]

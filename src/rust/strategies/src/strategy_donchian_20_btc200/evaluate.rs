@@ -116,6 +116,30 @@ mod tests {
         assert_eq!(evaluate(&still_active).unwrap(), StrategyDecision::Hold);
         assert_eq!(evaluate(&disabled).unwrap(), StrategyDecision::Exit);
     }
+
+    #[test]
+    fn mature_profile_specific_forward_losses_reject_a_daily_entry() {
+        let parameters = BTreeMap::from([
+            ("breakout_entry_distance_percent".to_owned(), 0.0),
+            ("scout_minimum_walk_forward_samples".to_owned(), 10.0),
+            ("scout_minimum_positive_net_rate".to_owned(), 0.45),
+        ]);
+        let mut candidate = signal("donchian-20-btc200", true);
+        candidate.strategy_decision.as_mut().unwrap()["strategy_walk_forward"] =
+            serde_json::json!({
+                "sampleCount": 10,
+                "positiveNetRate": 0.2,
+                "averageNetReturnPercent": -0.1,
+                "lastSampleTimestampMs": 2
+            });
+
+        assert_eq!(
+            Strategy::Donchian20Btc200
+                .evaluate(&StrategySignal::entry(&candidate, &parameters))
+                .unwrap(),
+            StrategyDecision::Reject
+        );
+    }
 }
 
 pub(super) fn should_exit_when_insight_inactive(entry_insight_active: bool) -> bool {

@@ -177,9 +177,14 @@ fn generated_scout_group_and_cooldown(
         } else {
             String::new()
         };
+        let cooldown_namespace = if probe_key.is_some() {
+            "daily|paired-v2"
+        } else {
+            "daily"
+        };
         (
             format!("daily-scout-level:{level:.2}|{strategy}|{symbol}|{direction}{sweep}{probe}"),
-            format!("daily|{strategy}|{symbol}|{direction}|level:{level:.2}{probe}"),
+            format!("{cooldown_namespace}|{strategy}|{symbol}|{direction}|level:{level:.2}{probe}"),
         )
     };
     Some((group, cooldown))
@@ -396,6 +401,26 @@ fn candidate_value(spec: &ParameterSpec, current: f64, direction: f64) -> Option
     };
     (value >= spec.min && value <= spec.max && (value - current).abs() >= spec.step * 0.5)
         .then_some(value)
+}
+
+/// Generate one bounded probe per tunable parameter without expanding the
+/// profile into a combinatorial power set. Daily parameter evidence is learned
+/// per parameter, so combinations do not contribute to its promotion results.
+pub fn single_parameter_variants(
+    parameters: &BTreeMap<String, f64>,
+    specs: &[ParameterSpec],
+    day: u64,
+) -> Option<Vec<BTreeMap<String, f64>>> {
+    const MAX_SWEEP_PARAMETERS: usize = 32;
+    let direction = if day % 2 == 0 { 1.0 } else { -1.0 };
+    let candidates = scoutable_specs(specs)
+        .filter_map(|spec| {
+            let current = parameters.get(&spec.key).copied().unwrap_or(spec.default);
+            candidate_value(spec, current, direction)
+                .map(|value| BTreeMap::from([(spec.key.clone(), value)]))
+        })
+        .collect::<Vec<_>>();
+    (!candidates.is_empty() && candidates.len() <= MAX_SWEEP_PARAMETERS).then_some(candidates)
 }
 
 fn probe_hash(symbol: &str, strategy: &str) -> u64 {

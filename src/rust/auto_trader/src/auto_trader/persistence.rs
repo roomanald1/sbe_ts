@@ -66,6 +66,10 @@ fn replace_dated_carry_rows(transaction: &rusqlite::Transaction<'_>, book: &Date
 
 fn read_dated_carry_database(path: &PathBuf) -> rusqlite::Result<Option<DatedCarryBook>> {
     let connection = rusqlite::Connection::open(path)?;
+    // The database may already exist from an older auto-trader version that
+    // did not create the dated-carry tables. Make reads safe across upgrades,
+    // including the first startup after deploying a new binary.
+    ensure_dated_carry_schema(&connection)?;
     let transaction = connection.unchecked_transaction()?;
     let settings: Option<(i64, f64, i64, Option<String>)> = transaction.query_row("SELECT enabled,max_spot_notional_usdt,checked_at_ms,last_error FROM dated_carry_settings WHERE id=1", [], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional()?;
     let Some((enabled, max_spot_notional_usdt, checked_at_ms, last_error)) = settings else { return Ok(None); };

@@ -86,7 +86,9 @@ export type AutoTraderStrategyScoutVariant = {
   minimum_samples: number;
   average_net_improvement_percent: number;
   lower_90_one_sided_improvement_percent?: number | null;
+  upper_90_one_sided_improvement_percent?: number | null;
   promoted: boolean;
+  rejected: boolean;
 };
 export type AutoTraderStrategyParameter = {
   key: string;
@@ -110,6 +112,13 @@ export type AutoTraderStrategyProfile = {
   realized_pnl: number;
   parameters: AutoTraderStrategyParameter[];
 };
+export type AutoTraderPendingScoutParameter = {
+  symbol: string;
+  strategy: Strategy;
+  parameter: string;
+  candidateValue: number;
+  openSamples: number;
+};
 export type AutoTraderDecisionParameters = {
   refreshed_at: number;
   thresholds: AutoTraderDecisionParameter[];
@@ -122,7 +131,6 @@ export type AutoTraderDecisionParameters = {
   latest_execution?: AutoTraderLatestExecutionParameters;
 };
 export type Strategy =
-  | 'live-insights'
   | 'live-momentum'
   | 'live-trade-flow'
   | 'live-order-book'
@@ -231,6 +239,7 @@ export type AutoTraderState = {
   triggerOffsetBps: string;
   trailingDistancePercent: string;
   closedTradeWindow: string;
+  minimumScoutParameterSamples: string;
   lastDecision: string;
   lastDecisionAt: number;
   decisionsSinceTrade: number;
@@ -252,6 +261,7 @@ export type AutoTraderState = {
   executionQuality: AutoTraderExecutionQuality;
   decisionQuality: AutoTraderDecisionQuality;
   scoutOpenPositions: number;
+  pendingScoutParameters: AutoTraderPendingScoutParameter[];
   liveScoutSamples: number;
   liveScoutStrategies: string[];
 
@@ -367,6 +377,8 @@ type TraderStatus = {
   trigger_offset_bps: number;
   trailing_distance_percent: number;
   closed_trade_window?: number;
+  minimum_scout_parameter_samples?: number;
+  minimum_live_scout_parameter_samples?: number;
   used_notional_today: number;
   available_notional: number;
   last_decision?: string;
@@ -445,6 +457,7 @@ export class AutoTraderModel {
     executionQuality: emptyExecutionQuality,
     decisionQuality: emptyDecisionQuality,
     scoutOpenPositions: 0,
+    pendingScoutParameters: [],
     liveScoutSamples: 0,
     liveScoutStrategies: [],
     scoutLearningSamples: 0,
@@ -459,8 +472,8 @@ export class AutoTraderModel {
     explorationPercent: '10',
     riskAppetite: '50',
     maxOpenPositions: '20',
-    maxConcurrentScoutSamples: '5',
-    scoutMaxActivePositions: '100',
+    maxConcurrentScoutSamples: '5000',
+    scoutMaxActivePositions: '5000',
     maxIntradayOpenPositions: '10',
     maxDailyOpenPositions: '10',
     intradayNotionalLimit: '500',
@@ -481,6 +494,7 @@ export class AutoTraderModel {
     triggerOffsetBps: '20',
     trailingDistancePercent: '0.10',
     closedTradeWindow: '200',
+    minimumScoutParameterSamples: '6',
     learningSamples: 0,
     parameterProfileSamples: [0, 0, 0],
     strategyParameterOverrides: {},
@@ -515,8 +529,7 @@ export class AutoTraderModel {
       this.autoTraderSnapshot = snapshot;
       this.autoTraderSnapshotAt = Date.now();
       const decisionParameters = snapshot.parameters as
-        | AutoTraderDecisionParameters
-        | undefined;
+        AutoTraderDecisionParameters | undefined;
       if (!decisionParameters) {
         void this.refreshDecisionParameters();
         void this.refresh();
@@ -560,9 +573,11 @@ export class AutoTraderModel {
           this.state$.value.decisionQuality,
       });
     });
+    void this.refreshDecisionParameters();
     void this.refresh();
     this.timer = setInterval(() => {
       if (Date.now() - this.autoTraderSnapshotAt > 45_000) void this.refresh();
+      void this.refreshDecisionParameters();
     }, 30_000);
   }
   stop() {
@@ -673,6 +688,14 @@ export class AutoTraderModel {
   setClosedTradeWindow(closedTradeWindow: string) {
     this.limitsDirty = true;
     this.state$.next({ ...this.state$.value, closedTradeWindow });
+  }
+
+  setMinimumScoutParameterSamples(minimumScoutParameterSamples: string) {
+    this.limitsDirty = true;
+    this.state$.next({
+      ...this.state$.value,
+      minimumScoutParameterSamples,
+    });
   }
   setMaxEntriesPerPosition(maxEntriesPerPosition: string) {
     this.limitsDirty = true;
@@ -889,20 +912,6 @@ export class AutoTraderModel {
       ];
       if (
         status.signal_strategies_enabled &&
-        savedStrategies.includes('live-insights')
-      ) {
-        savedStrategies.splice(
-          savedStrategies.indexOf('live-insights'),
-          1,
-          'live-momentum',
-          'live-trade-flow',
-          'live-order-book',
-          'live-vwap-dislocation',
-          'live-absorption-pressure',
-        );
-      }
-      if (
-        status.signal_strategies_enabled &&
         !savedStrategies.some((strategy) => strategy.startsWith('live-'))
       )
         savedStrategies.push(
@@ -995,7 +1004,7 @@ export class AutoTraderModel {
           exited + 1e-12 < quantity
         )
           continue;
-        const strategy = entry.strategy ?? 'live-insights';
+        const strategy = entry.strategy ?? 'unattributed';
         const group = closedStrategyGroups.get(strategy) ?? [];
         group.push({
           pnl: exits.reduce((sum, row) => sum + (row.realized_pnl ?? 0), 0),
@@ -1128,6 +1137,13 @@ export class AutoTraderModel {
         closedTradeWindow: this.limitsDirty
           ? this.state$.value.closedTradeWindow
           : String(status.closed_trade_window ?? 200),
+        minimumScoutParameterSamples: this.limitsDirty
+          ? this.state$.value.minimumScoutParameterSamples
+          : String(
+              status.minimum_scout_parameter_samples ??
+                status.minimum_live_scout_parameter_samples ??
+                6,
+            ),
         lastDecision: status.last_decision ?? '',
         lastDecisionAt: status.last_decision_at ?? 0,
         decisionsSinceTrade: status.decisions_since_trade ?? 0,
@@ -1185,11 +1201,23 @@ export class AutoTraderModel {
 
   async refreshDecisionParameters() {
     try {
-      const response = await fetch('/positions/auto-trader/parameters');
+      const [response, scoutResponse] = await Promise.all([
+        fetch('/positions/auto-trader/parameters'),
+        fetch(
+          '/scouts/outcomes?source=all&status=open&page=0&page_size=1',
+        ).catch(() => undefined),
+      ]);
       if (!response.ok)
         throw await this.responseError('decision parameters', response);
       const decisionParameters =
         (await response.json()) as AutoTraderDecisionParameters;
+      let pendingScoutParameters = this.state$.value.pendingScoutParameters;
+      if (scoutResponse?.ok) {
+        const scoutSnapshot = (await scoutResponse.json()) as {
+          pendingParameterProbes?: AutoTraderPendingScoutParameter[];
+        };
+        pendingScoutParameters = scoutSnapshot.pendingParameterProbes ?? [];
+      }
       const savedOverrides = Object.fromEntries(
         decisionParameters.strategy_profiles.flatMap((profile) =>
           profile.parameters
@@ -1210,6 +1238,7 @@ export class AutoTraderModel {
       this.state$.next({
         ...this.state$.value,
         decisionParameters,
+        pendingScoutParameters,
         decisionParametersError: undefined,
         strategyParameterOverrides: this.strategyParametersDirty
           ? this.state$.value.strategyParameterOverrides
@@ -1321,6 +1350,9 @@ export class AutoTraderModel {
           trigger_offset_bps: Number(current.triggerOffsetBps),
           trailing_distance_percent: Number(current.trailingDistancePercent),
           closed_trade_window: Number(current.closedTradeWindow),
+          minimum_scout_parameter_samples: Number(
+            current.minimumScoutParameterSamples,
+          ),
           ...(this.strategyParametersDirty
             ? {
                 strategy_parameter_overrides:

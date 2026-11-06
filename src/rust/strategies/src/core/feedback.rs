@@ -24,7 +24,11 @@ pub struct ScoutParameterVariant {
     pub minimum_samples: usize,
     pub average_net_improvement_percent: f64,
     pub lower_90_one_sided_improvement_percent: Option<f64>,
+    #[serde(default)]
+    pub upper_90_one_sided_improvement_percent: Option<f64>,
     pub promoted: bool,
+    #[serde(default)]
+    pub rejected: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]

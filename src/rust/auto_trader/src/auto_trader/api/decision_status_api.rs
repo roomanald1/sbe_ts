@@ -216,7 +216,9 @@ mod decision_profile_tests {
             minimum_samples: 6,
             average_net_improvement_percent: 0.12,
             lower_90_one_sided_improvement_percent: None,
+            upper_90_one_sided_improvement_percent: None,
             promoted: false,
+            rejected: false,
         });
 
         let profiles = strategy_parameter_profiles(&settings);

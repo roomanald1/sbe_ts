@@ -81,16 +81,17 @@ impl SignalStore {
         since: Option<u64>,
         before_id: Option<i64>,
         limit: usize,
+        stage: Option<String>,
     ) -> Result<AuditPage> {
         let path = self.path.clone();
         tokio::task::spawn_blocking(move || {
             let limit = limit.clamp(1, 10_000);
             let connection = Self::open_database_path(&path)?;
             let mut statement = connection.prepare(
-                "SELECT rowid, payload FROM auto_trader_audit WHERE (?1 IS NULL OR timestamp >= ?1) AND (?2 IS NULL OR rowid < ?2) ORDER BY rowid DESC LIMIT ?3",
+                "SELECT rowid, payload FROM auto_trader_audit WHERE (?1 IS NULL OR timestamp >= ?1) AND (?2 IS NULL OR rowid < ?2) AND (?3 IS NULL OR stage = ?3) ORDER BY rowid DESC LIMIT ?4",
             )?;
             let rows = statement.query_map(
-                params![since.map(|value| value as i64), before_id, (limit + 1) as i64],
+                params![since.map(|value| value as i64), before_id, stage, (limit + 1) as i64],
                 |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?)),
             )?;
             let mut rows = rows.collect::<rusqlite::Result<Vec<_>>>()?;

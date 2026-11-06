@@ -17,6 +17,7 @@ pub(super) async fn accept_feedback(
         }));
     }
     let profile_key = key(symbol, strategy);
+    let minimum_parameter_samples = state.minimum_live_scout_parameter_samples;
     let source_profile = StrategyProfile {
         profile_id: profile_id.clone(),
         version: 0,
@@ -134,7 +135,6 @@ pub(super) async fn accept_feedback(
     } else {
         paired_parameter_outcomes(variants, strategy, parameters, parameter_specs)
     };
-    let minimum_parameter_samples = minimum_scout_parameter_samples(strategy);
     let paired_lower_bound = one_sided_90_lower_bound(&paired_outcomes);
     let promote_tested_parameters = matches!(event, FeedbackEvent::ScoutOutcome { .. })
         && !parameter_specs.is_empty()
@@ -247,8 +247,25 @@ pub(super) async fn accept_feedback(
     }))
 }
 
-pub(super) fn minimum_scout_parameter_samples(strategy: &str) -> usize {
-    if strategy.starts_with("live-") { 6 } else { 20 }
+#[derive(Deserialize)]
+pub(super) struct ScoutParameterSamplesRequest {
+    minimum_samples: usize,
+}
+
+pub(super) async fn update_scout_parameter_samples(
+    State(service): State<ServiceState>,
+    Json(request): Json<ScoutParameterSamplesRequest>,
+) -> Result<Json<usize>, (StatusCode, String)> {
+    if !(2..=100).contains(&request.minimum_samples) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "minimum_samples must be between 2 and 100".into(),
+        ));
+    }
+    let mut state = service.state.lock().await;
+    state.minimum_live_scout_parameter_samples = request.minimum_samples;
+    persist(&service.path, &state)?;
+    Ok(Json(state.minimum_live_scout_parameter_samples))
 }
 
 fn paired_parameter_outcomes(
@@ -329,8 +346,15 @@ fn promote_paired_parameters(
 
 pub(super) fn one_sided_90_t_critical(sample_count: usize) -> Option<f64> {
     let degrees = sample_count.checked_sub(1)? as f64;
-    if degrees < 5.0 {
+    if degrees < 1.0 {
         return None;
+    }
+    match degrees as usize {
+        1 => return Some(3.077_683_537),
+        2 => return Some(1.885_618_083),
+        3 => return Some(1.637_744_354),
+        4 => return Some(1.533_206_275),
+        _ => {}
     }
     let z = 1.281_551_565_544_600_4;
     let z2 = z * z;
@@ -345,7 +369,7 @@ pub(super) fn one_sided_90_t_critical(sample_count: usize) -> Option<f64> {
 }
 
 fn one_sided_90_lower_bound(outcomes: &[f64]) -> Option<f64> {
-    if outcomes.len() < 6 || outcomes.iter().any(|value| !value.is_finite()) {
+    if outcomes.len() < 2 || outcomes.iter().any(|value| !value.is_finite()) {
         return None;
     }
     let sample_count = outcomes.len();
@@ -531,7 +555,9 @@ mod tests {
     fn one_sided_90_student_t_bounds_match_small_and_mature_samples() {
         assert!((one_sided_90_t_critical(6).unwrap() - 1.4759).abs() < 0.002);
         assert!((one_sided_90_t_critical(20).unwrap() - 1.3277).abs() < 0.002);
-        assert!(one_sided_90_t_critical(5).is_none());
+        assert!((one_sided_90_t_critical(2).unwrap() - 3.0777).abs() < 0.002);
+        assert!((one_sided_90_t_critical(5).unwrap() - 1.5332).abs() < 0.002);
+        assert!(one_sided_90_t_critical(1).is_none());
         assert!((one_sided_90_lower_bound(&[0.02; 6]).unwrap() - 0.02).abs() < 1e-12);
     }
 
@@ -656,6 +682,7 @@ mod tests {
         ));
         let mut state = LearningState {
             accepted_events: 2,
+            minimum_live_scout_parameter_samples: 9,
             seen_event_ids: ["keep".to_owned(), "remove".to_owned()].into(),
             ..LearningState::default()
         };
@@ -666,6 +693,7 @@ mod tests {
         let decoded = super::super::load_state(&path).unwrap();
         assert!(decoded.variants.is_empty());
         assert_eq!(decoded.accepted_events, 1);
+        assert_eq!(decoded.minimum_live_scout_parameter_samples, 9);
         assert_eq!(decoded.seen_event_ids, ["keep".to_owned()].into());
         let _ = std::fs::remove_file(&path);
     }

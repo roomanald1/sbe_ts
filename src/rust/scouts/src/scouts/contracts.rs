@@ -19,6 +19,8 @@ pub struct ParameterVariantsRequest {
     pub parameters: BTreeMap<String, f64>,
     pub specs: Vec<ParameterSpec>,
     pub day: u64,
+    #[serde(default)]
+    pub rejected_values: BTreeMap<String, Vec<f64>>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -79,8 +81,8 @@ impl Default for ScoutConfiguration {
                 "rsi2-oversold-rebound".into(),
                 "dated-futures-carry".into(),
             ],
-            max_active_samples: 5,
-            max_active_positions: 100,
+            max_active_samples: 5_000,
+            max_active_positions: 5_000,
             max_sample_notional: 100.0,
             stop_loss_percent: 0.5,
             take_profit_percent: 0.8,
@@ -117,6 +119,57 @@ pub struct ScoutEntrySelectionRequest {
     pub active_scout_count: usize,
     pub scout_max_active_positions: usize,
     pub risk_appetite: f64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct StrategyEvidenceCandidate {
+    pub symbol: String,
+    pub strategy: String,
+    pub signal_timestamp_ms: u64,
+    pub parameters: BTreeMap<String, f64>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct StrategyEvidenceRequest {
+    pub candidates: Vec<StrategyEvidenceCandidate>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct StrategyWalkForwardEvidence {
+    pub symbol: String,
+    pub strategy: String,
+    pub sample_count: usize,
+    pub positive_net_rate: f64,
+    pub average_net_return_percent: f64,
+    pub last_sample_timestamp_ms: u64,
+}
+
+pub async fn request_strategy_walk_forward(
+    client: &reqwest::Client,
+    base_url: &str,
+    request: &StrategyEvidenceRequest,
+) -> Result<Vec<Option<StrategyWalkForwardEvidence>>, String> {
+    let timeout = if request
+        .candidates
+        .iter()
+        .any(|candidate| candidate.strategy == "risk-adjusted-trend-portfolio")
+    {
+        std::time::Duration::from_secs(3)
+    } else {
+        std::time::Duration::from_millis(1_500)
+    };
+    client
+        .post(format!("{}/strategy-walk-forward", base_url.trim_end_matches('/')))
+        .timeout(timeout)
+        .json(request)
+        .send()
+        .await
+        .map_err(|error| error.to_string())?
+        .error_for_status()
+        .map_err(|error| error.to_string())?
+        .json()
+        .await
+        .map_err(|error| error.to_string())
 }
 
 
@@ -265,6 +318,8 @@ pub struct ScoutOutcomeRequest {
     #[serde(default)]
     pub scout_comparison_id: Option<String>,
     #[serde(default)]
+    pub scout_comparison_ids: Vec<String>,
+    #[serde(default)]
     pub scout_comparison_role: Option<String>,
     #[serde(default)]
     pub scout_comparison_zero_role: Option<String>,
@@ -310,6 +365,12 @@ struct PersistedState {
     seen: BTreeSet<String>,
     #[serde(default)]
     outcomes: BTreeMap<String, ScoutOutcomeRequest>,
+    #[serde(skip)]
+    strategy_outcomes_by_profile:
+        Arc<std::sync::RwLock<BTreeMap<String, Vec<StrategyOutcomeProfileIndexEntry>>>>,
+    #[serde(skip)]
+    portfolio_instances_by_group:
+        Arc<std::sync::RwLock<BTreeMap<String, Vec<PortfolioInstanceEvidence>>>>,
     #[serde(default)]
     scout_instances: BTreeMap<String, serde_json::Value>,
     #[serde(default)]

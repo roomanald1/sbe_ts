@@ -17,7 +17,6 @@ const finiteFixed = (value: unknown, digits: number) =>
     ? value.toFixed(digits)
     : 'n/a';
 const intradayStrategyLabels: Array<{ strategy: Strategy; label: string }> = [
-  { strategy: 'live-insights', label: 'Live insights' },
   { strategy: 'live-momentum', label: 'Live momentum' },
   { strategy: 'live-trade-flow', label: 'Live trade flow' },
   { strategy: 'live-order-book', label: 'Live order book' },
@@ -1034,6 +1033,21 @@ export function AutoTrader() {
                         value={state.closedTradeWindow}
                         onChange={(event) =>
                           model.setClosedTradeWindow(event.target.value)
+                        }
+                      />
+                    </label>
+                    <label title="Paired scout comparisons required before a strategy parameter can be promoted. Applies to live and daily strategies. Range: 2–100.">
+                      SCOUT SAMPLES TO PROMOTE
+                      <input
+                        type="number"
+                        min="2"
+                        max="100"
+                        step="1"
+                        value={state.minimumScoutParameterSamples}
+                        onChange={(event) =>
+                          model.setMinimumScoutParameterSamples(
+                            event.target.value,
+                          )
                         }
                       />
                     </label>

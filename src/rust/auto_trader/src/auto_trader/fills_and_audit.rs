@@ -13,7 +13,6 @@ fn tag_position_strategy(
 
 fn strategy_from_entry_context(context: &str) -> Option<String> {
     [
-        "live-insights",
         "donchian-55-btc200",
         "donchian-20-sma200",
         "donchian-20-btc200",
@@ -257,6 +256,17 @@ fn signal_audit_payload(
         "horizon_seconds": item.horizon_seconds,
         "metrics": if signal.direction == "bullish" { &item.all_signal_long } else { &item.all_signal_short },
     }));
+    let mut audited_components = serde_json::to_value(&signal.components).unwrap_or_default();
+    if let (Some(component_values), Some(parameters)) = (
+        audited_components.as_object_mut(),
+        signal.strategy_decision.as_ref().and_then(|decision| decision.get("strategy_parameters")).and_then(serde_json::Value::as_object),
+    ) {
+        for key in ["minimum_momentum", "minimum_flow_imbalance", "minimum_book_imbalance", "minimum_vwap_dislocation_bps", "minimum_absorption_pressure"] {
+            if let Some(value) = parameters.get(key).and_then(serde_json::Value::as_f64) {
+                component_values.insert(format!("{key}_floor"), serde_json::json!(value));
+            }
+        }
+    }
     let mut payload = serde_json::json!({
         "record_schema_version": 2,
         "decision_id": decision_id,
@@ -270,12 +280,12 @@ fn signal_audit_payload(
         "ranging_probability": signal.ranging_probability,
         "market_context": market_context(signal),
         // Keep execution audit strategy aligned with the entry order fallback.
-        "strategy": signal.strategy.as_deref().unwrap_or("live-insights"),
+        "strategy": signal.strategy.as_deref().unwrap_or("unattributed"),
         "strategy_decision": signal.strategy_decision,
         "market_regime": signal.market_regime,
         "news_attribution": signal.news_attribution,
         "entry_gate": signal.entry_gate,
-        "signal_components": signal.components,
+        "signal_components": audited_components,
         "exploratory": exploratory,
         "stop_loss_percent": stop_loss_percent,
         "take_profit_percent": take_profit_percent,

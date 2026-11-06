@@ -1003,7 +1003,7 @@
       "gridPos": {
         "x": 0,
         "y": 54,
-        "w": 24,
+        "w": 16,
         "h": 6
       },
       "id": 25,
@@ -1024,6 +1024,82 @@
         }
       ],
       "title": "Queue, signal age and background persistence (ms)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "description": "Raw stale signal candidates and decision cycles with at least one freshness rejection over the previous five minutes, plus the stale count from the latest decision.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "red", "value": 1 }
+            ]
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byFrameRefID",
+              "options": "A"
+            },
+            "properties": [
+              {
+                "id": "custom.axisPlacement",
+                "value": "right"
+              },
+              {
+                "id": "custom.axisSoftMin",
+                "value": 0
+              },
+              {
+                "id": "custom.axisSoftMax",
+                "value": 1
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "x": 16,
+        "y": 54,
+        "w": 8,
+        "h": 6
+      },
+      "id": 220,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "expr": "app_autotrader_latest_stale_signals",
+          "legendFormat": "Stale in latest decision",
+          "refId": "A"
+        },
+        {
+          "expr": "increase(app_autotrader_stale_signal_candidates_total[5m])",
+          "legendFormat": "Stale candidates · last 5m",
+          "refId": "B"
+        },
+        {
+          "expr": "increase(app_autotrader_stale_signal_cycles_total[5m])",
+          "legendFormat": "Cycles with stale candidates · last 5m",
+          "refId": "C"
+        }
+      ],
+      "title": "Signal staleness",
       "type": "timeseries"
     },
     {
@@ -2287,5 +2363,5 @@
   "timezone": "browser",
   "title": "SBE TS System and Trading",
   "uid": "sbe-ts-overview",
-  "version": 8
+  "version": 12
 }

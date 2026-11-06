@@ -6,11 +6,13 @@ async fn main() -> anyhow::Result<()> {
     let address = std::env::var("SCOUTS_LISTEN_ADDR").unwrap_or_else(|_| "127.0.0.1:3011".into());
     let learning_url =
         std::env::var("LEARNING_SERVICE_URL").unwrap_or_else(|_| "http://127.0.0.1:3010".into());
+    let auto_trader_url =
+        std::env::var("AUTO_TRADER_URL").unwrap_or_else(|_| "http://127.0.0.1:3005".into());
     let listener = tokio::net::TcpListener::bind(&address).await?;
     println!("Scouts service listening on http://{address}");
     axum::serve(
         listener,
-        scouts::router(learning_url).merge(service_docs::routes(
+        scouts::router(learning_url, auto_trader_url).merge(service_docs::routes(
             "Scouts",
             &[
                 ("/health", &["get"]),
@@ -32,6 +34,7 @@ async fn main() -> anyhow::Result<()> {
                 ("/variants/batch", &["post"]),
                 ("/live-candidates", &["post"]),
                 ("/select-entry", &["post"]),
+                ("/strategy-walk-forward", &["post"]),
             ],
         )),
     )

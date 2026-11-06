@@ -217,10 +217,37 @@ async fn receive_dated_carry_signal(
             ) else {
                 return Err((StatusCode::BAD_REQUEST, "Missing learned carry expiry parameter".into()));
             };
+            let mut strategy_input = StrategySignal::dated_carry_entry(
+                &candidate, emitted_at_ms, now_ms, &strategy_parameters,
+            );
+            let scouts_url = std::env::var("SCOUTS_SERVICE_URL")
+                .unwrap_or_else(|_| "http://127.0.0.1:3011".into());
+            let evidence_request = scouts::StrategyEvidenceRequest {
+                candidates: vec![scouts::StrategyEvidenceCandidate {
+                    symbol: spot_profile_symbol.clone(),
+                    strategy: Strategy::DatedCarry.as_str().into(),
+                    signal_timestamp_ms: emitted_at_ms,
+                    parameters: strategy_parameters.clone(),
+                }],
+            };
+            if let Ok(mut evidence) = scouts::request_strategy_walk_forward(
+                &state.client,
+                &scouts_url,
+                &evidence_request,
+            )
+            .await
+            {
+                if let Some(Some(evidence)) = evidence.pop() {
+                    strategy_input.walk_forward_evidence = Some(strategies::StrategyWalkForwardEvidence {
+                        sample_count: evidence.sample_count,
+                        positive_net_rate: Some(evidence.positive_net_rate),
+                        average_net_return_percent: Some(evidence.average_net_return_percent),
+                        last_sample_timestamp_ms: evidence.last_sample_timestamp_ms,
+                    });
+                }
+            }
             let entry_decision = Strategy::DatedCarry
-                .evaluate(&StrategySignal::dated_carry_entry(
-                    &candidate, emitted_at_ms, now_ms, &strategy_parameters,
-                ))
+                .evaluate(&strategy_input)
                 .unwrap_or(StrategyDecision::Reject);
             if !candidate.quantity.is_finite()
                 || !candidate.spot_ask.is_finite()

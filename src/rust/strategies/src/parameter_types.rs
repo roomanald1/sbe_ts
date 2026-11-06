@@ -25,7 +25,9 @@ pub struct StrategyParameterScoutVariant {
     pub minimum_samples: usize,
     pub average_net_improvement_percent: f64,
     pub lower_90_one_sided_improvement_percent: Option<f64>,
+    pub upper_90_one_sided_improvement_percent: Option<f64>,
     pub promoted: bool,
+    pub rejected: bool,
 }
 
 /// API view of the parameter profile selected for a symbol and strategy.

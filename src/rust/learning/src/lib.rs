@@ -73,8 +73,10 @@ struct StrategySummary {
     average_net_return_percent: Option<f64>,
 }
 
-#[derive(Clone, Default, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 struct LearningState {
+    #[serde(default = "default_live_scout_parameter_samples")]
+    minimum_live_scout_parameter_samples: usize,
     variants: BTreeMap<String, RegisteredProfile>,
     active_profiles: BTreeMap<String, StrategyProfile>,
     #[serde(default)]
@@ -87,6 +89,26 @@ struct LearningState {
     seen_execution_event_ids: BTreeSet<String>,
     seen_event_ids: BTreeSet<String>,
     accepted_events: u64,
+}
+
+fn default_live_scout_parameter_samples() -> usize {
+    6
+}
+
+impl Default for LearningState {
+    fn default() -> Self {
+        Self {
+            minimum_live_scout_parameter_samples: default_live_scout_parameter_samples(),
+            variants: BTreeMap::new(),
+            active_profiles: BTreeMap::new(),
+            context_learning: BTreeMap::new(),
+            execution_learning: BTreeMap::new(),
+            threshold_samples: Vec::new(),
+            seen_execution_event_ids: BTreeSet::new(),
+            seen_event_ids: BTreeSet::new(),
+            accepted_events: 0,
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -148,6 +170,10 @@ pub fn router(path: PathBuf) -> Result<Router, String> {
         .route("/decision-snapshot", get(get_decision_snapshot))
         .route("/summary", get(get_summary))
         .route("/feedback", post(accept_feedback))
+        .route(
+            "/config/scout-parameter-samples",
+            axum::routing::put(update_scout_parameter_samples),
+        )
         .route("/context-thresholds", post(context_thresholds))
         .route("/execution-decision", post(execution_decision))
         .route("/execution-outcomes", post(execution_outcome))
@@ -203,6 +229,7 @@ fn open_state_db(path: &Path) -> Result<rusqlite::Connection, String> {
         .execute_batch(
             "PRAGMA journal_mode=WAL;
              CREATE TABLE IF NOT EXISTS learning_metadata (id INTEGER PRIMARY KEY CHECK (id = 1), accepted_events INTEGER NOT NULL);
+             CREATE TABLE IF NOT EXISTS learning_config (key TEXT PRIMARY KEY, value INTEGER NOT NULL);
              CREATE TABLE IF NOT EXISTS learning_variants (id TEXT PRIMARY KEY, payload TEXT NOT NULL);
              CREATE TABLE IF NOT EXISTS learning_active_profiles (id TEXT PRIMARY KEY, payload TEXT NOT NULL);
              CREATE TABLE IF NOT EXISTS learning_context_stats (id TEXT PRIMARY KEY, payload TEXT NOT NULL);
@@ -263,6 +290,13 @@ fn load_state(path: &Path) -> Result<LearningState, String> {
             accepted_events: accepted_events.max(0) as u64,
             ..LearningState::default()
         };
+        state.minimum_live_scout_parameter_samples = connection.query_row(
+            "SELECT value FROM learning_config WHERE key = 'minimum_live_scout_parameter_samples'",
+            [], |row| row.get::<_, i64>(0),
+        ).optional().map_err(|error| format!("could not read learning configuration: {error}"))?
+            .and_then(|value| usize::try_from(value).ok())
+            .filter(|value| (2..=100).contains(value))
+            .unwrap_or_else(default_live_scout_parameter_samples);
         load_map(&connection, "learning_variants", &mut state.variants)?;
         load_map(
             &connection,
@@ -368,6 +402,11 @@ pub(crate) fn persist_normalized(
          ON CONFLICT(id) DO UPDATE SET accepted_events = excluded.accepted_events
          WHERE accepted_events != excluded.accepted_events",
         [state.accepted_events.min(i64::MAX as u64) as i64],
+    )?;
+    transaction.execute(
+        "INSERT INTO learning_config (key, value) VALUES ('minimum_live_scout_parameter_samples', ?1)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        [state.minimum_live_scout_parameter_samples as i64],
     )?;
     write_map(&transaction, "learning_variants", &state.variants)?;
     write_map(
@@ -742,17 +781,40 @@ mod tests {
                 .all(|profile| profile.parameters["threshold"] == 0.6)
         );
 
-        let response = json_request(app, "GET", "/decision-snapshot", None).await;
+        let response = json_request(app.clone(), "GET", "/decision-snapshot", None).await;
         let snapshot: LearnedProfileSnapshot =
             serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
                 .unwrap();
         assert_eq!(snapshot.scout_parameter_variants.len(), 2);
-        assert!(snapshot.scout_parameter_variants.iter().all(|variant| {
-            variant.sample_count == 6
-                && variant.minimum_samples == 6
-                && variant.promoted
-                && variant.lower_90_one_sided_improvement_percent == Some(0.02)
-        }));
+        assert!(
+            snapshot.scout_parameter_variants.iter().all(|variant| {
+                variant.sample_count == 6
+                    && variant.minimum_samples == 6
+                    && variant.promoted
+                    && variant.lower_90_one_sided_improvement_percent == Some(0.02)
+            }),
+            "{:#?}",
+            snapshot.scout_parameter_variants
+        );
+        let response = json_request(
+            app.clone(),
+            "PUT",
+            "/config/scout-parameter-samples",
+            Some(br#"{"minimum_samples":3}"#.to_vec()),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let restarted_app = router(path.clone()).unwrap();
+        let response = json_request(restarted_app, "GET", "/decision-snapshot", None).await;
+        let restarted_snapshot: LearnedProfileSnapshot =
+            serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                .unwrap();
+        assert!(
+            restarted_snapshot
+                .scout_parameter_variants
+                .iter()
+                .all(|variant| variant.minimum_samples == 3)
+        );
         let _ = std::fs::remove_file(path);
     }
 

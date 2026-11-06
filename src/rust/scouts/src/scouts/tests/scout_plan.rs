@@ -11,12 +11,19 @@ mod scout_plan_tests {
                 .unwrap()
                 .as_nanos()
         ));
+        let persisted = PersistedState::default();
+        let strategy_outcomes_by_profile = Arc::clone(&persisted.strategy_outcomes_by_profile);
+        let portfolio_instances_by_group = Arc::clone(&persisted.portfolio_instances_by_group);
         ServiceState {
             client: reqwest::Client::new(),
             learning_url: "http://127.0.0.1:1".into(),
+            auto_trader_url: "http://127.0.0.1:1".into(),
             seen: Arc::new(Mutex::new(BTreeSet::new())),
+            strategy_outcomes_by_profile,
+            portfolio_instances_by_group,
+            strategy_outcome_profile_index_ready: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             scout: ScoutState {
-                data: Arc::new(Mutex::new(PersistedState::default())),
+                data: Arc::new(Mutex::new(persisted)),
                 path,
                 flush_lock: Arc::new(Mutex::new(())),
             },

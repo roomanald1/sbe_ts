@@ -21,6 +21,7 @@ async fn main() -> anyhow::Result<()> {
                 ("/decision-snapshot", &["get"]),
                 ("/summary", &["get"]),
                 ("/feedback", &["post"]),
+                ("/config/scout-parameter-samples", &["put"]),
                 ("/context-thresholds", &["post"]),
                 ("/execution-decision", &["post"]),
                 ("/execution-outcomes", &["post"]),

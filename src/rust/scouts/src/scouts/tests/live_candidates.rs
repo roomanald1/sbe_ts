@@ -3,6 +3,40 @@ mod tests {
     use super::*;
 
     #[test]
+    fn auto_trader_profiles_fill_missing_live_learning_profiles() {
+        let snapshot = serde_json::json!({
+            "strategy_profiles": [
+                {
+                    "symbol": "BTC-USDT", "strategy": "live-momentum",
+                    "parameters": [{"key": "minimum_momentum", "value": 0.01}]
+                },
+                {
+                    "symbol": "BTC-USDT", "strategy": "live-order-book",
+                    "parameters": [{"key": "minimum_book_imbalance", "value": 0.2}]
+                },
+                {
+                    "symbol": "ETH-USDT", "strategy": "live-momentum",
+                    "parameters": [{"key": "minimum_momentum", "value": 0.01}]
+                },
+                {
+                    "symbol": "BTC-USDT", "strategy": "trend-50-200",
+                    "parameters": [{"key": "minimum_momentum", "value": 0.01}]
+                }
+            ]
+        });
+        let profiles = auto_trader_live_profiles(
+            &snapshot,
+            &BTreeSet::from(["BTC-USDT"]),
+            &["live-momentum".into()],
+        );
+
+        assert_eq!(profiles.len(), 1);
+        assert_eq!(profiles[0].symbol, "BTC-USDT");
+        assert_eq!(profiles[0].strategy, "live-momentum");
+        assert_eq!(profiles[0].parameters["minimum_momentum"], 0.01);
+    }
+
+    #[test]
     fn live_candidate_entry_uses_shared_strategy_evaluator_and_requires_profile_parameters() {
         let candidate = serde_json::json!({
             "symbol": "BTC-USDT",

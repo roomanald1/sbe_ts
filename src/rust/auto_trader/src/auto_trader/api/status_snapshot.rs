@@ -83,6 +83,7 @@ fn status(state: &AutoTraderState, settings: &Settings) -> StatusResponse {
         trigger_offset_bps: settings.trigger_offset_bps,
         trailing_distance_percent: settings.trailing_distance_percent,
         closed_trade_window: settings.closed_trade_window,
+        minimum_scout_parameter_samples: settings.minimum_live_scout_parameter_samples,
         used_notional_today: settings.used_notional_today,
         available_notional: (settings.daily_notional_limit - settings.used_notional_today).max(0.0),
         last_decision: settings.last_decision.clone(),
@@ -120,6 +121,12 @@ fn status(state: &AutoTraderState, settings: &Settings) -> StatusResponse {
                     .collect()
             })
             .unwrap_or_default(),
+        stale_signal_candidates_total: state
+            .stale_signal_candidates_total
+            .load(Ordering::Relaxed),
+        stale_signal_cycles_total: state
+            .stale_signal_cycles_total
+            .load(Ordering::Relaxed),
         symbol_gate_hits: state
             .gap_summary
             .lock()

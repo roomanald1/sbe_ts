@@ -49,7 +49,7 @@
 - Strategy evaluators receive StrategySignal only; convert serialized text to enums before evaluation. Keep market-data calculations upstream and price-triggered protective order execution in position management.
 - Tunable evaluator thresholds must come from StrategySignal parameters produced by the bounded learned profile. Keep defaults and bounds in the strategy parameter specs; do not duplicate fallback numbers in evaluate.rs. Reject entry if a required learned parameter is missing.
 - Put per-strategy entry, exit, and parameter-bound tests in that strategy's evaluate.rs. Add a folder, evaluate.rs, contract.rs, and parameter definitions for every new strategy, and register it in strategies/mod.rs.
-- LiveInsights is a legacy compatibility alias for old saved settings and remains inline in the registry; do not recreate its removed strategy folder unless that compatibility design changes.
+- `live-insights` is not a strategy. Migrate old saved selections by expanding them into the five separate live strategies, and keep their evidence and outcomes attributed separately.
 
 ## Project conventions
 

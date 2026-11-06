@@ -191,15 +191,20 @@ fn scout_parameter_variants(
             } else {
                 None
             };
+            let upper_90 = lower_90.map(|lower| 2.0 * mean - lower);
             let promoted = sample_count >= minimum_samples
                 && lower_90.is_some_and(|bound| bound > 0.0);
+            let rejected = sample_count >= minimum_samples
+                && upper_90.is_some_and(|bound| bound < 0.0);
             Some(StrategyParameterScoutVariant {
                 candidate_value,
                 sample_count,
                 minimum_samples,
                 average_net_improvement_percent: mean,
                 lower_90_one_sided_improvement_percent: lower_90,
+                upper_90_one_sided_improvement_percent: upper_90,
                 promoted,
+                rejected,
             })
         })
         .collect()
@@ -390,7 +395,9 @@ fn learned_strategy_parameter_profile(
                     minimum_samples: variant.minimum_samples,
                     average_net_improvement_percent: variant.average_net_improvement_percent,
                     lower_90_one_sided_improvement_percent: variant.lower_90_one_sided_improvement_percent,
+                    upper_90_one_sided_improvement_percent: variant.upper_90_one_sided_improvement_percent,
                     promoted: variant.promoted && (variant.candidate_value - value).abs() < spec.step * 1e-6,
+                    rejected: variant.rejected,
                 }).collect(),
         }
     }).collect();

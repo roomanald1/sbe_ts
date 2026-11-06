@@ -83,6 +83,15 @@ pub struct DailyStrategySignalFeatures {
     pub cross_sectional_metric_value: Option<f64>,
     pub cross_sectional_threshold: Option<f64>,
 }
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, serde::Serialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct StrategyWalkForwardEvidence {
+    pub sample_count: usize,
+    pub positive_net_rate: Option<f64>,
+    pub average_net_return_percent: Option<f64>,
+    pub last_sample_timestamp_ms: u64,
+}
 impl DailyStrategySignalFeatures {
     pub fn close_above(&self, level: Option<f64>) -> bool {
         self.observed_close
@@ -162,6 +171,7 @@ pub struct StrategyInput {
     pub signal: Option<StrategyMarketSignal>,
     pub specific_signal: Option<StrategySpecificSignal>,
     pub daily_features: Option<DailyStrategySignalFeatures>,
+    pub walk_forward_evidence: Option<StrategyWalkForwardEvidence>,
     pub direction: Option<SignalDirection>,
     pub strategy: Option<crate::Strategy>,
     pub parameters: BTreeMap<String, f64>,
@@ -186,6 +196,12 @@ impl StrategyInput {
             .strategy_decision
             .clone()
             .and_then(|value| serde_json::from_value(value).ok());
+        let walk_forward_evidence = signal
+            .strategy_decision
+            .as_ref()
+            .and_then(|decision| decision.get("strategy_walk_forward"))
+            .cloned()
+            .and_then(|value| serde_json::from_value(value).ok());
         let strategy = signal
             .strategy
             .as_deref()
@@ -194,6 +210,7 @@ impl StrategyInput {
             signal: Some(signal.clone()),
             specific_signal: None,
             daily_features,
+            walk_forward_evidence,
             direction: SignalDirection::from_wire(&signal.direction),
             strategy,
             parameters: parameters.clone(),
@@ -213,6 +230,7 @@ impl StrategyInput {
             signal: None,
             specific_signal: None,
             daily_features: None,
+            walk_forward_evidence: None,
             direction: None,
             strategy: None,
             parameters: parameters.clone(),
@@ -236,6 +254,7 @@ impl StrategyInput {
                 candidate: candidate.clone(),
             }),
             daily_features: None,
+            walk_forward_evidence: None,
             direction: None,
             strategy: Some(crate::Strategy::DatedCarry),
             parameters: parameters.clone(),
@@ -269,6 +288,7 @@ impl StrategyInput {
                 settlement_source,
             }),
             daily_features: None,
+            walk_forward_evidence: None,
             direction: None,
             strategy: Some(crate::Strategy::DatedCarry),
             parameters: parameters.clone(),
@@ -297,6 +317,7 @@ pub struct StrategySignal<'a> {
     pub signal: Option<&'a StrategyMarketSignal>,
     pub specific_signal: Option<StrategySpecificSignal>,
     pub daily_features: Option<DailyStrategySignalFeatures>,
+    pub walk_forward_evidence: Option<StrategyWalkForwardEvidence>,
     pub direction: Option<SignalDirection>,
     pub strategy: Option<crate::Strategy>,
     pub parameters: &'a BTreeMap<String, f64>,
@@ -317,10 +338,17 @@ impl<'a> StrategySignal<'a> {
             .strategy_decision
             .clone()
             .and_then(|value| serde_json::from_value(value).ok());
+        let walk_forward_evidence = signal
+            .strategy_decision
+            .as_ref()
+            .and_then(|decision| decision.get("strategy_walk_forward"))
+            .cloned()
+            .and_then(|value| serde_json::from_value(value).ok());
         Self {
             signal: Some(signal),
             specific_signal: None,
             daily_features,
+            walk_forward_evidence,
             direction: SignalDirection::from_wire(&signal.direction),
             strategy: signal
                 .strategy
@@ -343,6 +371,7 @@ impl<'a> StrategySignal<'a> {
             signal: None,
             specific_signal: None,
             daily_features: None,
+            walk_forward_evidence: None,
             direction: None,
             strategy: None,
             parameters,
@@ -366,6 +395,7 @@ impl<'a> StrategySignal<'a> {
                 candidate: candidate.clone(),
             }),
             daily_features: None,
+            walk_forward_evidence: None,
             direction: None,
             strategy: Some(crate::Strategy::DatedCarry),
             parameters,
@@ -399,6 +429,7 @@ impl<'a> StrategySignal<'a> {
                 settlement_source,
             }),
             daily_features: None,
+            walk_forward_evidence: None,
             direction: None,
             strategy: Some(crate::Strategy::DatedCarry),
             parameters,
@@ -467,6 +498,7 @@ impl StrategyInputLike for StrategyInput {
             signal: self.signal.as_ref(),
             specific_signal: self.specific_signal.clone(),
             daily_features: self.daily_features,
+            walk_forward_evidence: self.walk_forward_evidence,
             direction: self.direction,
             strategy: self.strategy,
             parameters: &self.parameters,

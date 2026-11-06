@@ -2,17 +2,28 @@
 struct ServiceState {
     client: reqwest::Client,
     learning_url: String,
+    auto_trader_url: String,
     seen: Arc<Mutex<BTreeSet<String>>>,
+    strategy_outcomes_by_profile:
+        Arc<std::sync::RwLock<BTreeMap<String, Vec<StrategyOutcomeProfileIndexEntry>>>>,
+    portfolio_instances_by_group:
+        Arc<std::sync::RwLock<BTreeMap<String, Vec<PortfolioInstanceEvidence>>>>,
+    strategy_outcome_profile_index_ready: Arc<std::sync::atomic::AtomicBool>,
     scout: ScoutState,
 }
 
-pub fn router(learning_url: String) -> Router {
+pub fn router(learning_url: String, auto_trader_url: String) -> Router {
     let configured_path = std::env::var_os("SCOUTS_STATE_PATH").map(PathBuf::from);
     let state_path = configured_path
         .clone()
         .unwrap_or_else(|| PathBuf::from("../position_management/scouts_state.sqlite"));
-    let persisted = load_scout_state(&state_path).unwrap_or_default();
+    let mut persisted = load_scout_state(&state_path).unwrap_or_default();
+    rebuild_strategy_outcome_profile_index(&mut persisted);
+    rebuild_portfolio_instance_index(&mut persisted);
     let seen = persisted.seen.clone();
+    let strategy_outcomes_by_profile = Arc::clone(&persisted.strategy_outcomes_by_profile);
+    let portfolio_instances_by_group = Arc::clone(&persisted.portfolio_instances_by_group);
+    let strategy_outcome_profile_index_ready = Arc::new(std::sync::atomic::AtomicBool::new(true));
     let client = reqwest::Client::new();
     let insights_url =
         std::env::var("INSIGHTS_URL").unwrap_or_else(|_| "http://127.0.0.1:3004".into());
@@ -72,10 +83,15 @@ pub fn router(learning_url: String) -> Router {
         .route("/variants/batch", post(generate_variants_batch))
         .route("/live-candidates", post(generate_live_candidates))
         .route("/select-entry", post(select_scout_entry))
+        .route("/strategy-walk-forward", post(get_strategy_walk_forward))
         .with_state(ServiceState {
             client,
             learning_url,
+            auto_trader_url,
             seen: Arc::new(Mutex::new(seen)),
+            strategy_outcomes_by_profile,
+            portfolio_instances_by_group,
+            strategy_outcome_profile_index_ready,
             scout,
         })
 }
@@ -162,6 +178,7 @@ async fn receive_daily_scout_inputs(
     }
     let configuration = service.scout.data.lock().await.scout_configuration.clone();
     let mut candidates = Vec::new();
+    let mut portfolio_templates = Vec::new();
     for (index, signal) in request.signals.into_iter().enumerate() {
         let Some(strategy_name) = signal.get("strategy").and_then(serde_json::Value::as_str) else { continue };
         if !configuration.strategies.iter().any(|selected| selected == strategy_name) { continue; }
@@ -208,26 +225,130 @@ async fn receive_daily_scout_inputs(
         audit["stop_loss_percent"] = serde_json::json!(stop);
         audit["take_profit_percent"] = serde_json::json!(target);
         let daily_features_present = input.daily_features.is_some();
+        let template = ScoutAuditTemplate {
+            base_audit: audit,
+            notional_usd: configuration.max_sample_notional,
+            learning_context: format!("scout:daily:{strategy_name}:{symbol}:{direction}:scenario"),
+            stop_loss_percent: stop,
+            take_profit_percent: target,
+            level_percent: 0.0,
+            strategy_only: false,
+            parameter_entry_eligible: probe.map(|_| matches!(decision, strategies::StrategyDecision::Enter | strategies::StrategyDecision::Scout)),
+            parameter_specs: strategies::scout_parameter_specs(strategy),
+        };
+        if strategy == strategies::Strategy::RiskAdjustedTrendPortfolio
+            && decision == strategies::StrategyDecision::Enter
+            && probe.is_none()
+        {
+            portfolio_templates.push(template);
+            continue;
+        }
+        let (audit_templates, entry_eligible) = if let Some((key, value)) = probe {
+            let Some(baseline_decision) = signal
+                .get("strategy_decision")
+                .and_then(|decision| decision.get("scout_parameter_baseline_decision"))
+                .cloned()
+            else {
+                continue;
+            };
+            let baseline_parameters = baseline_decision
+                .get("strategy_parameters")
+                .cloned()
+                .and_then(|value| serde_json::from_value::<BTreeMap<String, f64>>(value).ok())
+                .unwrap_or_default();
+            let mut baseline_signal = signal.clone();
+            baseline_signal["strategy_decision"] = baseline_decision.clone();
+            let baseline_input = strategies::StrategyInput::from_candidate_json(
+                baseline_signal,
+                baseline_parameters.clone(),
+            )
+            .map_err(|error| (StatusCode::BAD_REQUEST, error))?;
+            let baseline_decision_result = strategy
+                .evaluate(&baseline_input)
+                .unwrap_or(strategies::StrategyDecision::Reject);
+            let baseline_eligible = matches!(
+                baseline_decision_result,
+                strategies::StrategyDecision::Enter | strategies::StrategyDecision::Scout
+            );
+            let variant_eligible = matches!(
+                decision,
+                strategies::StrategyDecision::Enter | strategies::StrategyDecision::Scout
+            );
+            // Only compare realized positions that both started from this
+            // signal. A rejected side is not a zero-return observation: it
+            // would compare different entry opportunities, not parameters.
+            if !paired_probe_eligible(baseline_eligible, variant_eligible) {
+                continue;
+            }
+            let profile_symbol = signal
+                .get("strategy_decision")
+                .and_then(|decision| decision.get("scout_parameter_profile_symbol"))
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or(symbol);
+            let mut templates = Vec::with_capacity(2);
+            if baseline_eligible {
+                let mut baseline_template = template.clone();
+                baseline_template.strategy_only = true;
+                baseline_template.parameter_entry_eligible = Some(true);
+                baseline_template.base_audit["strategy_decision"] = baseline_decision;
+                baseline_template.base_audit["strategy_parameters"] =
+                    serde_json::to_value(&baseline_parameters).unwrap_or_default();
+                baseline_template.base_audit["stop_loss_percent"] = serde_json::json!(
+                    baseline_parameters
+                        .get("stop_loss_percent")
+                        .copied()
+                        .unwrap_or(configuration.stop_loss_percent)
+                );
+                baseline_template.base_audit["take_profit_percent"] = serde_json::json!(
+                    baseline_parameters
+                        .get("take_profit_percent")
+                        .copied()
+                        .unwrap_or(configuration.take_profit_percent)
+                );
+                baseline_template.base_audit["scout_comparison_role"] =
+                    serde_json::json!("baseline");
+                baseline_template.base_audit["scout_comparison_parameter_key"] =
+                    serde_json::json!(key);
+                baseline_template.base_audit["scout_comparison_parameter_value"] =
+                    serde_json::json!(value);
+                baseline_template.base_audit["scout_comparison_parameter_profile_symbol"] =
+                    serde_json::json!(profile_symbol);
+                baseline_template.base_audit.as_object_mut().map(|audit| {
+                    audit.remove("scout_parameter_key");
+                    audit.remove("scout_parameter_value");
+                    audit.remove("scout_parameter_profile_symbol");
+                    audit.remove("scout_parameter_entry_eligible");
+                });
+                templates.push(baseline_template);
+            }
+            if variant_eligible {
+                let mut variant_template = template;
+                variant_template.strategy_only = true;
+                variant_template.parameter_entry_eligible = Some(true);
+                variant_template.base_audit["scout_comparison_role"] =
+                    serde_json::json!("variant");
+                variant_template.base_audit["scout_comparison_parameter_key"] =
+                    serde_json::json!(key);
+                variant_template.base_audit["scout_comparison_parameter_value"] =
+                    serde_json::json!(value);
+                variant_template.base_audit["scout_comparison_parameter_profile_symbol"] =
+                    serde_json::json!(profile_symbol);
+                templates.push(variant_template);
+            }
+            (templates, true)
+        } else {
+            (vec![template], true)
+        };
         candidates.push(ScoutPlanCandidate {
             generate_group_id: true,
             sample_group_id: String::new(),
             cooldown_key: String::new(),
             profile_key: format!("{strategy_name}|{symbol}"),
-            eligible: true,
+            eligible: entry_eligible,
             parameter_variant: probe.is_some(),
             cooldown_ms: if probe.is_some() { 86_400_000 } else { 300_000 },
             audit_plans: Vec::new(),
-            audit_templates: vec![ScoutAuditTemplate {
-                base_audit: audit,
-                notional_usd: configuration.max_sample_notional,
-                learning_context: format!("scout:daily:{strategy_name}:{symbol}:{direction}:scenario"),
-                stop_loss_percent: stop,
-                take_profit_percent: target,
-                level_percent: 0.0,
-                strategy_only: false,
-                parameter_entry_eligible: probe.map(|_| matches!(decision, strategies::StrategyDecision::Enter | strategies::StrategyDecision::Scout)),
-                parameter_specs: strategies::scout_parameter_specs(strategy),
-            }],
+            audit_templates,
             sample_payload: None,
             daily_policy: Some(DailyScoutPolicy {
                 evaluator_decision: decision_name.into(),
@@ -241,18 +362,54 @@ async fn receive_daily_scout_inputs(
             live_policy: None,
         });
     }
+    if !portfolio_templates.is_empty()
+        && portfolio_templates.len() <= configuration.max_active_positions
+    {
+        let sample_group_id = format!("risk-adjusted-trend-portfolio:{}", request.now_ms);
+        candidates.insert(0, ScoutPlanCandidate {
+            generate_group_id: false,
+            sample_group_id,
+            cooldown_key: "risk-adjusted-trend-portfolio".into(),
+            profile_key: "risk-adjusted-trend-portfolio".into(),
+            eligible: true,
+            parameter_variant: false,
+            cooldown_ms: 86_400_000,
+            audit_plans: Vec::new(),
+            audit_templates: portfolio_templates,
+            sample_payload: None,
+            daily_policy: None,
+            live_policy: None,
+        });
+    }
     if candidates.is_empty() { return Ok(StatusCode::NO_CONTENT); }
     let plan = ScoutPlanRequest {
         request_id: request.request_id,
         now_ms: request.now_ms,
         max_active_batches: configuration.max_active_samples,
-        max_active_variants_per_profile: 3,
+        max_active_variants_per_profile: 6,
         legacy_cooldowns: BTreeMap::new(),
         legacy_comparisons: Vec::new(),
         candidates,
     };
     let _ = create_scout_plan(State(service), Json(plan)).await?;
     Ok(StatusCode::ACCEPTED)
+}
+
+fn paired_probe_eligible(baseline_eligible: bool, variant_eligible: bool) -> bool {
+    baseline_eligible && variant_eligible
+}
+
+#[cfg(test)]
+mod paired_probe_tests {
+    use super::paired_probe_eligible;
+
+    #[test]
+    fn parameter_probe_requires_both_positions_from_the_same_signal() {
+        assert!(paired_probe_eligible(true, true));
+        assert!(!paired_probe_eligible(true, false));
+        assert!(!paired_probe_eligible(false, true));
+        assert!(!paired_probe_eligible(false, false));
+    }
 }
 
 async fn receive_live_scout_inputs(
@@ -296,11 +453,35 @@ async fn receive_live_scout_inputs(
             .and_then(|value| serde_json::from_value::<BTreeMap<String, f64>>(value).ok()).unwrap_or_default();
         profiles.push(LiveScoutProfile { symbol: symbol.to_owned(), strategy: strategy.to_owned(), parameters });
     }
+    let live_strategies = configuration.strategies.iter().filter(|strategy| {
+        matches!(strategy.as_str(), "live-momentum" | "live-trade-flow" | "live-order-book" | "live-vwap-dislocation" | "live-absorption-pressure")
+    }).map(String::as_str).collect::<Vec<_>>();
+    let has_missing_profiles = symbols.iter().any(|symbol| live_strategies.iter().any(|strategy| {
+        !profiles.iter().any(|profile| profile.symbol == *symbol && profile.strategy == *strategy)
+    }));
+    if has_missing_profiles {
+        let response = service.client
+            .get(format!("{}/positions/auto-trader/parameters", service.auto_trader_url.trim_end_matches('/')))
+            .timeout(std::time::Duration::from_secs(2)).send().await
+            .map_err(|error| (StatusCode::BAD_GATEWAY, error.to_string()))?
+            .error_for_status().map_err(|error| (StatusCode::BAD_GATEWAY, error.to_string()))?
+            .json::<serde_json::Value>().await
+            .map_err(|error| (StatusCode::BAD_GATEWAY, error.to_string()))?;
+        let fallback_profiles = auto_trader_live_profiles(&response, &symbols, &configuration.strategies);
+        for profile in fallback_profiles {
+            if !profiles.iter().any(|existing| existing.symbol == profile.symbol && existing.strategy == profile.strategy) {
+                profiles.push(profile);
+            }
+        }
+    }
     if profiles.is_empty() { return Ok(StatusCode::NO_CONTENT); }
-    let generated = generate_live_candidates(Json(LiveScoutCandidatesRequest {
-        signals,
-        profiles,
-    })).await?.0;
+    let mut generated = Vec::new();
+    for profile_batch in profiles.chunks(100) {
+        generated.extend(generate_live_candidates(Json(LiveScoutCandidatesRequest {
+            signals: signals.clone(),
+            profiles: profile_batch.to_vec(),
+        })).await?.0);
+    }
     let mut candidates = Vec::new();
     for (index, mut signal) in generated.into_iter().enumerate() {
         let (Some(strategy), Some(symbol), Some(direction)) = (
@@ -376,6 +557,39 @@ async fn receive_live_scout_inputs(
     Ok(StatusCode::ACCEPTED)
 }
 
+fn auto_trader_live_profiles(
+    response: &serde_json::Value,
+    symbols: &BTreeSet<&str>,
+    enabled_strategies: &[String],
+) -> Vec<LiveScoutProfile> {
+    response.get("strategy_profiles")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|profile| {
+            let symbol = profile.get("symbol")?.as_str()?;
+            let strategy = profile.get("strategy")?.as_str()?;
+            if !symbols.contains(symbol)
+                || !enabled_strategies.iter().any(|enabled| enabled == strategy)
+                || !matches!(strategy, "live-momentum" | "live-trade-flow" | "live-order-book" | "live-vwap-dislocation" | "live-absorption-pressure")
+            {
+                return None;
+            }
+            let parameters = profile.get("parameters")?.as_array()?.iter().filter_map(|parameter| {
+                Some((
+                    parameter.get("key")?.as_str()?.to_owned(),
+                    parameter.get("value")?.as_f64()?,
+                ))
+            }).collect::<BTreeMap<_, _>>();
+            (!parameters.is_empty() && parameters.values().all(|value| value.is_finite())).then(|| LiveScoutProfile {
+                symbol: symbol.to_owned(),
+                strategy: strategy.to_owned(),
+                parameters,
+            })
+        })
+        .collect()
+}
+
 async fn receive_dated_carry_scout_inputs(
     State(service): State<ServiceState>,
     Json(request): Json<DatedCarryScoutInputsRequest>,
@@ -400,7 +614,7 @@ async fn receive_dated_carry_scout_inputs(
     {
         let mut state = service.scout.data.lock().await;
         let _ = apply_scout_lifecycle_observation(&mut state, &observation);
-        persist_scout_state(&service.scout.path, &state, &["outbox", "scout_pending_samples", "scout_sample_active_scenarios", "scout_plan_profiles", "scout_observation_results", "scout_instances"])?;
+        persist_scout_state(&service.scout.path, &state, &["outbox", "outcomes", "scout_pending_samples", "scout_sample_active_scenarios", "scout_plan_profiles", "scout_observation_results", "scout_instances"])?;
     }
     flush_scout_outbox(&service.scout, &service.client, &service.learning_url).await?;
 
@@ -423,7 +637,7 @@ async fn receive_dated_carry_scout_inputs(
             .and_then(|value| serde_json::from_value::<BTreeMap<String, f64>>(value).ok()).unwrap_or_default();
         if baseline.is_empty() { continue; }
         let specs = strategies::scout_parameter_specs(strategies::Strategy::DatedCarry);
-        let variants = build_parameter_variants(&ParameterVariantsRequest { parameters: baseline.clone(), specs: specs.clone(), day })
+        let variants = build_parameter_variants(&ParameterVariantsRequest { parameters: baseline.clone(), specs: specs.clone(), day, rejected_values: BTreeMap::new() })
             .unwrap_or_default();
         for variant in variants {
             let mut parameters = baseline.clone();
@@ -821,7 +1035,7 @@ fn scout_registration(audit: &serde_json::Value) -> Option<serde_json::Value> {
             .unwrap_or(default)
     };
     let strategy_exit_enabled =
-        !strategy.starts_with("live-") && strategy != "dated-carry" && strategy != "live-insights";
+        !strategy.starts_with("live-") && strategy != "dated-carry" && strategy != "unattributed";
     Some(serde_json::json!({
         "decision_id": decision_id,
         "symbol": symbol,

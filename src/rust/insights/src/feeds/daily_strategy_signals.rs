@@ -744,7 +744,7 @@ fn insight_parameter_probe_variants(
                 learning_direction: 1.0,
             })
     }).collect::<Vec<_>>();
-    let variants = scouts::all_parameter_variants(&baseline, &specs, day)?;
+    let variants = scouts::single_parameter_variants(&baseline, &specs, day)?;
     Some(variants.into_iter().filter_map(|changes| {
         let (key, value) = if changes.len() == 1 {
             let (key, value) = changes.iter().next()?;
@@ -774,6 +774,7 @@ fn insight_parameter_variant_request(
             && profile.get("strategy").and_then(serde_json::Value::as_str) == Some(strategy)
     })?;
     let baseline = insight_profile_parameters(profiles, profile_symbol, strategy);
+    let mut rejected_values = BTreeMap::new();
     let specs = profile.get("parameters").and_then(serde_json::Value::as_array)
         .into_iter().flatten().filter_map(|parameter| {
             let key = parameter.get("key")?.as_str()?.to_owned();
@@ -781,6 +782,10 @@ fn insight_parameter_variant_request(
             let min = parameter.get("min")?.as_f64()?;
             let max = parameter.get("max")?.as_f64()?;
             let step = parameter.get("step")?.as_f64()?;
+            let rejected = parameter.get("scout_variants").and_then(serde_json::Value::as_array)
+                .into_iter().flatten().filter(|variant| variant.get("rejected").and_then(serde_json::Value::as_bool) == Some(true))
+                .filter_map(|variant| variant.get("candidate_value").and_then(serde_json::Value::as_f64)).collect::<Vec<_>>();
+            if !rejected.is_empty() { rejected_values.insert(key.clone(), rejected); }
             (key != "learning_rate" && current.is_finite() && min.is_finite()
                 && max.is_finite() && step.is_finite() && min < max && step > 0.0)
                 .then_some(scouts::ParameterSpec {
@@ -794,26 +799,25 @@ fn insight_parameter_variant_request(
                     learning_direction: 1.0,
                 })
         }).collect::<Vec<_>>();
-    Some((scouts::ParameterVariantsRequest { parameters: baseline.clone(), specs, day }, baseline))
+    Some((scouts::ParameterVariantsRequest { parameters: baseline.clone(), specs, day, rejected_values }, baseline))
 }
 
-async fn request_insight_parameter_probe_variant_batch(
-    scouts_url: &str,
+fn request_insight_parameter_probe_variant_batch(
     jobs: Vec<((String, String), scouts::ParameterVariantsRequest, BTreeMap<String, f64>)>,
 ) -> Result<BTreeMap<(String, String), Vec<(String, f64, BTreeMap<String, f64>, BTreeMap<String, f64>)>>, String> {
     if jobs.is_empty() { return Ok(BTreeMap::new()); }
-    let request = scouts::ParameterVariantsBatchRequest {
-        requests: jobs.iter().map(|(_, request, _)| request.clone()).collect(),
-    };
-    let responses = scouts::request_parameter_variants_batch(scouts_url, &request).await?;
-    if responses.len() != jobs.len() {
-        return Err("Scout service returned a mismatched batch response".into());
-    }
-    Ok(jobs.into_iter().zip(responses).filter_map(|((key, _, baseline), response)| {
-        let variants = response.unwrap_or_default().into_iter().map(|variant| {
+    Ok(jobs.into_iter().filter_map(|(key, request, baseline)| {
+        let variants = scouts::single_parameter_variants(
+            &request.parameters,
+            &request.specs,
+            request.day,
+        )?.into_iter().filter(|changes| changes.iter().all(|(parameter, value)| {
+            !request.rejected_values.get(parameter).is_some_and(|rejected| rejected.iter().any(|candidate| (candidate - value).abs() <= 1e-8))
+        })).filter_map(|changes| {
+            let (parameter, value) = changes.iter().next()?;
             let mut parameters = baseline.clone();
-            parameters.extend(variant.changes.iter().map(|(key, value)| (key.clone(), *value)));
-            (variant.key, variant.value, parameters, variant.changes)
+            parameters.extend(changes.iter().map(|(key, value)| (key.clone(), *value)));
+            Some((parameter.clone(), *value, parameters, changes))
         }).collect::<Vec<_>>();
         (!variants.is_empty()).then_some((key, variants))
     }).collect())
@@ -998,6 +1002,7 @@ fn insight_daily_batch(
                 "btc_window_days": btc.map(|regime| regime.window_days),
                 "btc_gate_required": btc.is_some(),
                 "btc_gate_passed": btc.map(|regime| regime.risk_on),
+                "trend_return_windows": if trend_return_windows.is_empty() { None } else { Some(trend_return_windows.clone()) },
                 "strategy_parameters": parameters,
                 "strategy_order_size_multiplier": evaluation.strategy_order_size_multiplier,
                 "monthly_anchor_close_time_ms": evaluation.monthly_anchor_close_time_ms,
@@ -1255,16 +1260,8 @@ async fn poll_daily_strategy_signals(store: SignalStore) {
                     }
                 }
             }
-            let remote_scout_variants = match request_insight_parameter_probe_variant_batch(
-                &scouts_url,
-                scout_variant_jobs,
-            ).await {
-                Ok(variants) => variants,
-                Err(error) => {
-                    crate::service_log!("WARN", "Scout service unavailable for daily parameter sweeps: {error}");
-                    BTreeMap::new()
-                }
-            };
+            let remote_scout_variants = request_insight_parameter_probe_variant_batch(scout_variant_jobs)
+                .unwrap_or_default();
             let (batch, audits) = insight_daily_batch(
                 &strategies,
                 &parameters["strategy_profiles"],
@@ -1296,6 +1293,31 @@ async fn poll_daily_strategy_signals(store: SignalStore) {
         let generated = snapshot.get("generated_signals").and_then(serde_json::Value::as_array)
             .cloned().unwrap_or_default();
         let diagnostics = batch.get("diagnostics").cloned().unwrap_or_else(|| serde_json::json!([]));
+        if !generated.is_empty() {
+            let scouts_url = std::env::var("SCOUTS_SERVICE_URL")
+                .unwrap_or_else(|_| "http://127.0.0.1:3011".into());
+            let scouts_url = format!("{}/daily-inputs", scouts_url.trim_end_matches('/'));
+            let now = snapshot.get("as_of_ms").and_then(serde_json::Value::as_u64).unwrap_or_else(now_ms);
+            let sweep_id = scouts::probe_id(&sweep_signature);
+            for (chunk_index, chunk) in generated.chunks(128).enumerate() {
+                let scout_request = serde_json::json!({
+                    "request_id": format!("daily-sweep-paired-v2:{sweep_id}:{chunk_index}"),
+                    "now_ms": now,
+                    "signals": chunk,
+                });
+                match client.post(&scouts_url).json(&scout_request).send().await {
+                    Ok(response) if response.status().is_success() => {}
+                    Ok(response) => {
+                        let status = response.status();
+                        let body = response.text().await.unwrap_or_default();
+                        crate::service_log!("WARN", "Insights daily Scout delivery failed: status={status} body={body}");
+                    }
+                    Err(error) => {
+                        crate::service_log!("WARN", "Insights daily Scout delivery failed: {error}");
+                    }
+                }
+            }
+        }
         let mut grouped = BTreeMap::<String, Vec<serde_json::Value>>::new();
         for signal in generated {
             grouped.entry(daily_probe_group_key(&signal)).or_default().push(signal);
@@ -1322,12 +1344,21 @@ async fn poll_daily_strategy_signals(store: SignalStore) {
                     .post(format!("{auto}/internal/auto-trader/daily-strategy-signals"))
                     .json(&payload)
                     .send()
-                    .await
-                    .and_then(reqwest::Response::error_for_status);
-                if let Err(error) = delivery {
-                    crate::service_log!("WARN", "Insights daily strategy sweep delivery failed: {error}");
-                    group_failed = true;
-                    break;
+                    .await;
+                match delivery {
+                    Ok(response) if response.status().is_success() => {}
+                    Ok(response) => {
+                        let status = response.status();
+                        let body = response.text().await.unwrap_or_default();
+                        crate::service_log!("WARN", "Insights daily strategy sweep delivery failed: status={status} body={body}");
+                        group_failed = true;
+                        break;
+                    }
+                    Err(error) => {
+                        crate::service_log!("WARN", "Insights daily strategy sweep delivery failed: {error}");
+                        group_failed = true;
+                        break;
+                    }
                 }
                 if !already_started && in_progress_sweep_groups.insert(group_key.clone()) {
                 }

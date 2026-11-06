@@ -105,6 +105,8 @@ mod strategy_cleanup_integration_tests {
             audit_health: Arc::new(AtomicU64::new(3)),
             audit_failure_latched: Arc::new(AtomicBool::new(false)),
             gap_summary: Arc::new(std::sync::Mutex::new(GapSummary::default())),
+            stale_signal_candidates_total: Arc::new(AtomicU64::new(0)),
+            stale_signal_cycles_total: Arc::new(AtomicU64::new(0)),
             insight_processing_ms: Arc::new(Mutex::new(Vec::new())),
             cycle_lock_wait_ms: Arc::new(Mutex::new(BTreeMap::new())),
             cycle_lock_hold_ms: Arc::new(std::sync::Mutex::new(BTreeMap::new())),

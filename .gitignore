@@ -19,6 +19,8 @@ src/rust/position_management/scouts_state.sqlite-shm
 src/rust/position_management/scouts_state.sqlite-wal
 src/rust/service_gateway/target/*
 logs/*
+**/logs/**
+*.log
 src/rust/insights/signals.jsonl.sqlite
 src/rust/insights/signals.sqlite
 src/rust/insights/signals.sqlite-shm

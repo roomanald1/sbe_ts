@@ -13,7 +13,7 @@ async fn ensure_protective_stops(
         let settings = state.settings.lock().await;
         let lots = if settings.strategy_positions.is_empty() {
             settings.positions.iter().filter(|(_, position)| position.quantity.abs() > 1e-12)
-                .map(|(symbol, position)| (symbol.clone(), position.strategy.clone().unwrap_or_else(|| "live-insights".into()), position.clone()))
+                .map(|(symbol, position)| (symbol.clone(), position.strategy.clone().unwrap_or_else(|| "unattributed".into()), position.clone()))
                 .collect::<Vec<_>>()
         } else {
             settings.strategy_positions.iter().flat_map(|(symbol, strategies)| strategies.iter()
@@ -25,7 +25,7 @@ async fn ensure_protective_stops(
             settings.positions.iter().flat_map(|(symbol, position)| {
                 position.protective_stops.iter().map(move |stop| (
                     (symbol.clone(), stop.barrier_id.clone()),
-                    position.strategy.clone().unwrap_or_else(|| "live-insights".into()),
+                    position.strategy.clone().unwrap_or_else(|| "unattributed".into()),
                 ))
             }).collect::<BTreeMap<_, _>>()
         } else {
@@ -71,8 +71,10 @@ async fn ensure_protective_stops(
         if blocked_symbols.contains(&symbol) {
             continue;
         }
-        let strategy_kind = Strategy::from_name(&strategy).unwrap_or(Strategy::LiveInsights);
-        if !strategy_kind.uses_protective_stops() {
+        let uses_protective_stops = Strategy::from_name(&strategy)
+            .map(Strategy::uses_protective_stops)
+            .unwrap_or(true);
+        if !uses_protective_stops {
             for stop in &position.protective_stops {
                 if !cancel_protective_barrier(
                     client, base, state, &symbol, &stop.barrier_id,

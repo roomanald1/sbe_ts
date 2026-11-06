@@ -125,7 +125,7 @@ fn new_position_exit_order(
             position
                 .strategy
                 .clone()
-                .unwrap_or_else(|| "live-insights".into()),
+                .unwrap_or_else(|| "unattributed".into()),
         ),
         // Link the protective exit to the decision that opened this position.
         decision_id: position.entry_decision_id.clone(),

@@ -1,4 +1,3 @@
-
 fn needs_pullback_confirmation(signal: &Signal) -> bool {
     !signal.strategy_candidate
         && matches!(
@@ -9,7 +8,8 @@ fn needs_pullback_confirmation(signal: &Signal) -> bool {
 
 fn minimum_counter_momentum_percent(signal: &Signal) -> Option<f64> {
     let strategy = signal.strategy.as_deref().and_then(Strategy::from_name)?;
-    let spec = strategy.parameter_specs()
+    let spec = strategy
+        .parameter_specs()
         .into_iter()
         .find(|spec| spec.key == StrategyParameterKey::MinimumCounterMomentumPercent)?;
     let value = signal
@@ -38,9 +38,12 @@ fn passes_pullback_confirmation(signal: &Signal) -> bool {
     let Some(minimum_counter_momentum_percent) = minimum_counter_momentum_percent(signal) else {
         return false;
     };
-    signal.components.momentum_10s_percent.is_some_and(|momentum| {
-        momentum.is_finite() && side * momentum < -minimum_counter_momentum_percent
-    })
+    signal
+        .components
+        .momentum_10s_percent
+        .is_some_and(|momentum| {
+            momentum.is_finite() && side * momentum < -minimum_counter_momentum_percent
+        })
 }
 
 fn select_cycle_signal<'a>(
@@ -59,9 +62,12 @@ fn select_cycle_signal<'a>(
         .filter(|signal| {
             signal.strategy_candidate
                 && !is_live_scout_only_signal(signal)
-                && signal.strategy_decision.as_ref()
+                && signal
+                    .strategy_decision
+                    .as_ref()
                     .and_then(|decision| decision.get("scout_parameter_probe"))
-                    .and_then(serde_json::Value::as_bool) != Some(true)
+                    .and_then(serde_json::Value::as_bool)
+                    != Some(true)
         })
         .max_by(|a, b| a.strength.total_cmp(&b.strength))
     {
@@ -94,6 +100,13 @@ fn select_cycle_signal<'a>(
         .filter(|signal| {
             if is_live_scout_only_signal(signal) {
                 return false;
+            }
+            // Insights' walk-forward rows use generic directional outcomes
+            // grouped by symbol and horizon. They do not replay a named
+            // strategy or its parameter profile, so they cannot validate or
+            // reject strategy-attributed signals.
+            if signal.strategy.is_some() || signal.strategy_candidate {
+                return true;
             }
             let walk_forward = dashboard.walk_forward.iter().find(|item| {
                 item.symbol == signal.symbol && is_entry_evidence_horizon(item.horizon_seconds)
@@ -139,10 +152,30 @@ fn select_cycle_signal<'a>(
     if let Some(signal) = strict_candidate {
         return Ok((signal, false));
     }
+    let exploration_strength_floor = MIN_EXPLORATION_STRENGTH * risk_floor_scale(risk_appetite);
+    let exploration_score_floor = MIN_EXPLORATION_SCORE * risk_floor_scale(risk_appetite);
+    if let Some(signal) = fresh_directional
+        .iter()
+        .copied()
+        .filter(|signal| {
+            signal.strategy.is_none()
+                && !signal.strategy_candidate
+                && !is_live_scout_only_signal(signal)
+                && passes_pullback_confirmation(signal)
+                && signal.strength.is_finite()
+                && signal.strength >= exploration_strength_floor
+                && signal.score.is_finite()
+                && signal.score.abs() >= exploration_score_floor
+        })
+        .max_by(|a, b| {
+            (a.strength * a.score.abs()).total_cmp(&(b.strength * b.score.abs()))
+        })
+    {
+        return Ok((signal, true));
+    }
     let reason = format_no_tradeable_bias(&input, &[], &strength_qualified);
     Err(skipped(&reason))
 }
-
 
 struct PreparedSignals {
     signals: Vec<Signal>,
@@ -154,39 +187,69 @@ struct PreparedSignals {
 mod signal_selection_behavior_tests {
     use super::*;
 
-    static EMPTY_LEARNING_THRESHOLDS: std::sync::LazyLock<BTreeMap<String, strategies::ContextThresholds>> =
-        std::sync::LazyLock::new(BTreeMap::new);
+    static EMPTY_LEARNING_THRESHOLDS: std::sync::LazyLock<
+        BTreeMap<String, strategies::ContextThresholds>,
+    > = std::sync::LazyLock::new(BTreeMap::new);
     static EMPTY_POSITIONS: std::sync::LazyLock<BTreeMap<String, TraderPosition>> =
         std::sync::LazyLock::new(BTreeMap::new);
 
     fn signal(strength: f64, score: f64, strategy: Option<&str>, candidate: bool) -> Signal {
         Signal {
-            symbol: "BTC-USDT".into(), direction: "bullish".into(), strength,
-            timestamp: 100, stale: false, score, ranging_probability: None,
-            components: SignalComponents { trend_5m_volatility_units: Some(2.0), ..SignalComponents::default() },
-            strategy_candidate: candidate, strategy: strategy.map(str::to_owned),
-            strategy_decision: None, market_regime: None, news_attribution: None, entry_gate: None,
+            symbol: "BTC-USDT".into(),
+            direction: "bullish".into(),
+            strength,
+            timestamp: 100,
+            stale: false,
+            score,
+            ranging_probability: None,
+            components: SignalComponents {
+                trend_5m_volatility_units: Some(2.0),
+                ..SignalComponents::default()
+            },
+            strategy_candidate: candidate,
+            strategy: strategy.map(str::to_owned),
+            strategy_decision: None,
+            market_regime: None,
+            news_attribution: None,
+            entry_gate: None,
         }
     }
 
     fn input<'a>(
-        dashboard: &'a Dashboard, signals: &'a [Signal],
-        fresh: &'a [&'a Signal], risk: f64,
+        dashboard: &'a Dashboard,
+        signals: &'a [Signal],
+        fresh: &'a [&'a Signal],
+        risk: f64,
     ) -> SignalSelectionInput<'a> {
         SignalSelectionInput {
-            dashboard, signals, fresh_directional: fresh,
-            now: 100, inferred_direction_count: 0, neutral_direction_floor: 0.15,
-            stale_signal_count: 0, stalest_signal_age_seconds: 0, stale_symbols: &[],
-            non_directional_count: 0, position_blocked_count: 0, position_block_details: &[],
-            risk_appetite: risk, learning_thresholds: &EMPTY_LEARNING_THRESHOLDS,
-            open_positions: &EMPTY_POSITIONS, max_entries_per_auto_position: 3,
+            dashboard,
+            signals,
+            fresh_directional: fresh,
+            now: 100,
+            inferred_direction_count: 0,
+            neutral_direction_floor: 0.15,
+            stale_signal_count: 0,
+            stalest_signal_age_seconds: 0,
+            stale_symbols: &[],
+            non_directional_count: 0,
+            position_blocked_count: 0,
+            position_block_details: &[],
+            risk_appetite: risk,
+            learning_thresholds: &EMPTY_LEARNING_THRESHOLDS,
+            open_positions: &EMPTY_POSITIONS,
+            max_entries_per_auto_position: 3,
         }
     }
 
     fn dashboard(walk_forward: Vec<WalkForward>) -> Dashboard {
-        Dashboard { best: Vec::new(), walk_forward: Arc::new(walk_forward),
-            missed_opportunity_bands: Vec::new(), markets: Arc::new(BTreeMap::new()),
-            queued_at: None, queue_wait_ms: None }
+        Dashboard {
+            best: Vec::new(),
+            walk_forward: Arc::new(walk_forward),
+            missed_opportunity_bands: Vec::new(),
+            markets: Arc::new(BTreeMap::new()),
+            queued_at: None,
+            queue_wait_ms: None,
+        }
     }
 
     #[test]
@@ -196,7 +259,8 @@ mod signal_selection_behavior_tests {
         let signals = vec![daily.clone(), live.clone()];
         let fresh = vec![&daily, &live];
         let empty_dashboard = dashboard(Vec::new());
-        let selected = select_cycle_signal(input(&empty_dashboard, &signals, &fresh, 50.0)).unwrap_or_else(|_| panic!("expected signal selection to succeed"));
+        let selected = select_cycle_signal(input(&empty_dashboard, &signals, &fresh, 50.0))
+            .unwrap_or_else(|_| panic!("expected signal selection to succeed"));
         assert_eq!(selected.0.symbol, "BTC-USDT");
         assert!(selected.0.strategy_candidate);
         assert!(!selected.1);
@@ -221,24 +285,58 @@ mod signal_selection_behavior_tests {
     }
 
     #[test]
-    fn selects_strict_evidence_before_scouting_unvalidated_signals() {
+    fn selects_strict_evidence_before_capped_exploration_without_history() {
         let strict = signal(0.9, 0.9, None, false);
         let evidence = serde_json::from_value::<WalkForward>(serde_json::json!({
             "symbol":"BTC-USDT", "horizon_seconds":300,
             "all_signal_long":{"sample_count":40,"direction_match_rate":0.8,"average_net_return_percent":0.5,"positive_net_rate":0.8,"positive_net_rate_lower_95":0.6},
             "research_logistic_long":{"sample_count":40,"average_net_return_percent":0.3}
         })).unwrap_or_else(|_| panic!("expected signal selection to succeed"));
-        let signals = vec![strict.clone()]; let fresh = vec![&strict];
+        let signals = vec![strict.clone()];
+        let fresh = vec![&strict];
         let strict_dashboard = dashboard(vec![evidence]);
-        let selected = select_cycle_signal(input(&strict_dashboard, &signals, &fresh, 50.0)).unwrap_or_else(|_| panic!("expected signal selection to succeed"));
+        let selected = select_cycle_signal(input(&strict_dashboard, &signals, &fresh, 50.0))
+            .unwrap_or_else(|_| panic!("expected signal selection to succeed"));
         assert_eq!(selected.0.symbol, strict.symbol);
         assert!(!selected.1);
 
         let unvalidated = signal(0.9, 0.9, None, false);
-        let unvalidated_signals = vec![unvalidated.clone()]; let unvalidated_fresh = vec![&unvalidated];
+        let unvalidated_signals = vec![unvalidated.clone()];
+        let unvalidated_fresh = vec![&unvalidated];
         let empty_dashboard = dashboard(Vec::new());
-        assert!(select_cycle_signal(input(&empty_dashboard, &unvalidated_signals, &unvalidated_fresh, 50.0)).is_err());
+        let (selected, exploratory) = select_cycle_signal(input(
+            &empty_dashboard,
+            &unvalidated_signals,
+            &unvalidated_fresh,
+            50.0,
+        ))
+        .unwrap_or_else(|_| panic!("eligible paper exploration should be selected"));
+        assert_eq!(selected.symbol, unvalidated.symbol);
+        assert!(exploratory);
+
+        let weak = signal(0.9, 0.29, None, false);
+        let weak_signals = vec![weak.clone()];
+        let weak_fresh = vec![&weak];
+        assert!(select_cycle_signal(input(
+            &empty_dashboard,
+            &weak_signals,
+            &weak_fresh,
+            50.0,
+        ))
+        .is_err());
     }
 
+    #[test]
+    fn generic_signal_walk_forward_does_not_veto_strategy_attributed_signals() {
+        let strategy_signal = signal(0.9, 0.9, Some("live-momentum"), false);
+        let signals = vec![strategy_signal.clone()];
+        let fresh = vec![&strategy_signal];
+        let no_strategy_evidence = dashboard(Vec::new());
 
+        let selected = select_cycle_signal(input(&no_strategy_evidence, &signals, &fresh, 50.0));
+
+        let selected = selected
+            .unwrap_or_else(|_| panic!("generic signal evidence must not veto a named strategy"));
+        assert_eq!(selected.0.strategy.as_deref(), Some("live-momentum"));
+    }
 }

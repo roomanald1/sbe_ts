@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import time
 from pathlib import Path
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -214,6 +215,31 @@ def metrics():
         status = get_json(auto_trader_base, "/positions/auto-trader")
         enabled = bool(status.get("enabled"))
         output.append(sample("app_autotrader_enabled", "Whether AutoTrader is enabled according to its status endpoint.", int(enabled)))
+        latest_diagnostic = status.get("latest_signal_diagnostic", "")
+        if isinstance(latest_diagnostic, str):
+            stale_match = re.search(r"filtered:\s*(\d+)\s+stale\b", latest_diagnostic)
+            if stale_match:
+                output.append(sample(
+                    "app_autotrader_latest_stale_signals",
+                    "Number of signals rejected as stale in the latest AutoTrader decision.",
+                    int(stale_match.group(1)),
+                ))
+        stale_candidates_total = status.get("stale_signal_candidates_total")
+        if isinstance(stale_candidates_total, (int, float)):
+            output.append(sample(
+                "app_autotrader_stale_signal_candidates_total",
+                "Cumulative live and strategy signal candidates rejected for stale timestamps or stale flags.",
+                stale_candidates_total,
+                kind="counter",
+            ))
+        stale_signal_cycles_total = status.get("stale_signal_cycles_total")
+        if isinstance(stale_signal_cycles_total, (int, float)):
+            output.append(sample(
+                "app_autotrader_stale_signal_cycles_total",
+                "Cumulative decision cycles that contained at least one stale signal candidate.",
+                stale_signal_cycles_total,
+                kind="counter",
+            ))
         for key, metric, help_text in [
             ("used_notional_today", "app_autotrader_used_notional_today_usd", "Autotrader notional used today in USD."),
             ("daily_notional_limit", "app_autotrader_daily_notional_limit_usd", "Autotrader daily notional limit in USD."),
