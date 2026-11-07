@@ -956,8 +956,8 @@ fn daily_probe_group_key(signal: &serde_json::Value) -> String {
     let symbol = signal.get("symbol").and_then(serde_json::Value::as_str).unwrap_or_default();
     let decision = signal.get("strategy_decision");
     let anchor = decision
-        .and_then(|value| value.get("monthly_anchor_close_time_ms"))
-        .or_else(|| decision.and_then(|value| value.get("bar_close_timestamp")))
+        .and_then(|value| value.get("bar_close_timestamp"))
+        .or_else(|| decision.and_then(|value| value.get("monthly_anchor_close_time_ms")))
         .and_then(serde_json::Value::as_u64)
         .unwrap_or_else(|| signal.get("timestamp").and_then(serde_json::Value::as_u64).unwrap_or_default());
     let baseline_parameters = decision

@@ -66,6 +66,10 @@ async fn main() -> anyhow::Result<()> {
             get(|| async { axum::Json(crate::latency::snapshot()) }),
         )
         .route(
+            "/internal/signal-feed-status",
+            get(|| async { axum::Json(crate::latency::signal_feed_status()) }),
+        )
+        .route(
             "/internal/live-context",
             get(live_context).with_state(Arc::clone(&signal_runtime)),
         )

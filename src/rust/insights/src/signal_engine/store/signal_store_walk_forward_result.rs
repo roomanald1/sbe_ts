@@ -106,6 +106,7 @@ impl WalkForwardMetrics {
 fn build_walk_forward_result(
     symbol: String,
     horizon_seconds: u64,
+    evidence_generated_at_ms: u64,
     metrics: WalkForwardMetrics,
     samples: &[SignalOutcome],
     evaluations: &HashMap<(String, u64, u64), SignalEvaluation>,
@@ -161,6 +162,7 @@ fn build_walk_forward_result(
     SignalWalkForward {
                 symbol,
                 horizon_seconds,
+                evidence_generated_at_ms,
                 training_samples: max_training_samples,
                 evaluated_signals,
                 selected_signals,

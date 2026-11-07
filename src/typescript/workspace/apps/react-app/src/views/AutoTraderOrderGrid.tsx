@@ -58,7 +58,7 @@ export function explainAutoTraderReason(reason: string): string {
     const blocked = history ? Number(history[1]) : 0;
     if (blocked > 0)
       return (
-        'Past-performance check blocked ' +
+        'Negative walk-forward history rejected ' +
         blocked +
         ' candidate' +
         (blocked === 1 ? '' : 's')
@@ -90,7 +90,7 @@ export function explainAutoTraderReason(reason: string): string {
   if (lower.includes('budget') || lower.includes('capacity'))
     return 'Not enough budget or position capacity';
   if (lower.includes('walk-forward') || lower.includes('historical'))
-    return 'Past-performance check blocked the trade';
+    return 'Historical walk-forward evidence did not qualify';
   if (lower.includes('stale local order book'))
     return 'Market data was out of date';
   if (lower.includes('no cached local order book'))

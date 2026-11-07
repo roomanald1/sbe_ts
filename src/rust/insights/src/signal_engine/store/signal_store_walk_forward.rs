@@ -1,5 +1,8 @@
 impl SignalStore {
     async fn compute_walk_forward(&self) -> Result<Vec<SignalWalkForward>> {
+        let generated_at_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_millis() as u64;
         let outcomes = self.read_outcomes().await?;
         let evaluations = self
             .read_recent_records_with_corrupt_rows(2, WALK_FORWARD_RECORD_LIMIT, true)
@@ -278,6 +281,7 @@ impl SignalStore {
             result.push(build_walk_forward_result(
                 symbol,
                 horizon_seconds,
+                generated_at_ms,
                 metrics,
                 &non_overlapping,
                 &evaluations,

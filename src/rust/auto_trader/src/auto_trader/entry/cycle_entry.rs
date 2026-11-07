@@ -18,9 +18,11 @@ async fn submit_cycle_signal(
             "Audit persistence unavailable; new entries paused until AutoTrader restart",
         ));
     }
-    let evidence = dashboard.walk_forward.iter().find(|item| {
-        item.symbol == signal.symbol && is_entry_evidence_horizon(item.horizon_seconds)
-    });
+    let evidence = entry_walk_forward(
+        &dashboard.walk_forward,
+        &signal.symbol,
+        now.saturating_mul(1000),
+    );
     let selected_payload = signal_audit_payload(
         signal,
         "decision",
@@ -619,12 +621,23 @@ async fn run_cycle_inner(
                 let Some(mut signal) = live_strategy_feature_signal(source_signal, strategy, &parameters) else {
                     continue;
                 };
+                let learning_profile_id = strategies::profile_id(
+                    &signal.symbol,
+                    strategy.as_str(),
+                    &parameters,
+                );
+                let learned_profile = strategy_settings
+                    .learned_profiles
+                    .get(&format!("{}:{}", signal.symbol, strategy.as_str()));
                 signal.strategy = Some(strategy.as_str().to_owned());
                 signal.strategy_decision = Some(serde_json::json!({
                     "scout_only": false,
                     "strategy": strategy.as_str(),
                     "contract": strategy.contract(),
                     "strategy_parameters": parameters,
+                    "learning_profile_id": learning_profile_id,
+                    "learning_profile_version": learned_profile.map_or(0, |profile| profile.version),
+                    "learning_profile_samples": learned_profile.map_or(0, |profile| profile.learning_samples),
                     "observed_insight": signal.components,
                     "direction": signal.direction,
                     "strength": signal.strength,
@@ -916,6 +929,7 @@ async fn run_cycle_inner(
         } else {
             "strict"
         },
+        now.saturating_mul(1000),
     ));
     let signal_result = submit_cycle_signal(
         state,

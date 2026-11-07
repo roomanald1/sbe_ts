@@ -71,6 +71,10 @@ fn scout_outcome_from_markout(
             .filter_map(serde_json::Value::as_str)
             .map(str::to_owned)
             .collect(),
+        scout_comparison_zero_sides: serde_json::from_value(
+            instance["scout_comparison_zero_sides"].clone(),
+        )
+        .unwrap_or_default(),
         scout_comparison_role: instance["scout_comparison_role"].as_str().map(str::to_owned),
         scout_comparison_zero_role: instance["scout_comparison_zero_role"].as_str().map(str::to_owned),
         scout_comparison_parameter_key: instance["scout_comparison_parameter_key"].as_str().map(str::to_owned),
@@ -89,6 +93,11 @@ async fn receive_scout_outcome(
         let mut state = service.scout.data.lock().await;
         let outcome_key = scout_outcome_idempotency_key(&outcome);
         if !state.seen.contains(&outcome_key) {
+            let mut changed_records = BTreeSet::from([
+                format!("outcomes@{outcome_key}"),
+                format!("scout_instances@{}", outcome.decision_id),
+                format!("seen@{outcome_key}"),
+            ]);
             let event = outcome_event(&outcome, &tested);
             let is_probe = outcome.scout_parameter_key.is_some();
             if !is_probe
@@ -97,73 +106,9 @@ async fn receive_scout_outcome(
             {
                 state.outbox.push(ScoutOutboxItem::Learning(event));
             }
-            let mut paired_updates = Vec::new();
-            if let Some(role) = outcome.scout_comparison_role.as_deref() {
-                let comparison_ids = outcome_comparison_ids(&outcome);
-                for comparison_id in comparison_ids {
-                    let pair = state.pairs.entry(comparison_id.clone()).or_default();
-                    pair.updated_at_ms = outcome.evaluated_timestamp_ms;
-                    match role {
-                        "baseline" => {
-                            let mut baseline = outcome.clone();
-                            baseline.scout_comparison_id = Some(comparison_id.clone());
-                            baseline.scout_comparison_ids.clear();
-                            pair.baseline = Some(baseline);
-                        }
-                        "variant" => pair.variant = Some(outcome.clone()),
-                        _ => unreachable!(),
-                    }
-                    if let Some(zero_role) = outcome.scout_comparison_zero_role.as_deref() {
-                        let mut zero = outcome.clone();
-                        zero.scout_comparison_role = Some(zero_role.to_owned());
-                        zero.scout_comparison_zero_role = None;
-                        zero.net_return_percent = 0.0;
-                        if zero_role == "variant" && zero.scout_parameter_key.is_none() {
-                            zero.scout_parameter_key = zero.scout_comparison_parameter_key.clone();
-                            zero.scout_parameter_value = zero.scout_comparison_parameter_value;
-                            zero.scout_parameter_profile_symbol = zero
-                                .scout_comparison_parameter_profile_symbol
-                                .clone()
-                                .or_else(|| zero.scout_parameter_profile_symbol.clone());
-                        }
-                        if zero_role == "baseline" {
-                            pair.baseline = Some(zero);
-                        } else {
-                            pair.variant = Some(zero);
-                        }
-                    }
-                    if let Some(event) = paired_event_with_legacy_side(&comparison_id, pair, &outcome) {
-                        if let FeedbackEvent::ScoutOutcome {
-                            net_return_percent, ..
-                        } = &event
-                        {
-                            if let Some(variant) = pair.variant.as_ref() {
-                                paired_updates.push((variant.decision_id.clone(), *net_return_percent));
-                            }
-                        }
-                        if !outbox_has_learning(&state, &event) {
-                            state.outbox.push(ScoutOutboxItem::Learning(event));
-                        }
-                        state.pairs.remove(&comparison_id);
-                    }
-                }
-            }
-            state.pairs.retain(|_, pair| {
-                outcome
-                    .evaluated_timestamp_ms
-                    .saturating_sub(pair.updated_at_ms)
-                    <= 7 * 86_400_000
-            });
-            while state.pairs.len() > 20_000 {
-                let Some(oldest) = state
-                    .pairs
-                    .iter()
-                    .min_by_key(|(_, pair)| pair.updated_at_ms)
-                    .map(|(key, _)| key.clone())
-                else {
-                    break;
-                };
-                state.pairs.remove(&oldest);
+            let (paired_updates, paired_ids) = record_paired_scout_outcome(&mut state, &outcome);
+            for comparison_id in paired_ids {
+                changed_records.insert(format!("pairs@{comparison_id}"));
             }
             insert_scout_outcome(&mut state, outcome_key.clone(), outcome.clone());
             if let Some(instance) = state.scout_instances.get_mut(&outcome.decision_id) {
@@ -172,6 +117,7 @@ async fn receive_scout_outcome(
                 instance["scout_taker_fee_rate"] = serde_json::json!(outcome.taker_fee_rate);
             }
             for (variant_id, delta) in paired_updates {
+                changed_records.insert(format!("scout_instances@{variant_id}"));
                 if let Some(instance) = state.scout_instances.get_mut(&variant_id) {
                     instance["paired_delta_percent"] = serde_json::json!(delta);
                 }
@@ -179,9 +125,13 @@ async fn receive_scout_outcome(
             while state.outcomes.len() > 100_000 {
                 if let Some(oldest) = state.outcomes.keys().next().cloned() {
                     remove_scout_outcome(&mut state, &oldest);
+                    changed_records.insert(format!("outcomes@{oldest}"));
                 }
             }
             if !outcome.sample_group_id.is_empty() {
+                changed_records.insert(format!("scout_sample_active_scenarios@{}", outcome.sample_group_id));
+                changed_records.insert(format!("scout_plan_profiles@{}", outcome.sample_group_id));
+                changed_records.insert(format!("scout_active_audits@{}", outcome.sample_group_id));
                 let finished = state
                     .scout_sample_active_scenarios
                     .get_mut(&outcome.sample_group_id)
@@ -202,13 +152,17 @@ async fn receive_scout_outcome(
             }
             state.scout_lifecycle_updated_at_ms =
                 state.scout_lifecycle_updated_at_ms.max(scout_now_ms());
-            state.seen.insert(outcome_key);
+            state.seen.insert(outcome_key.clone());
             while state.seen.len() > 100_000 {
                 if let Some(oldest) = state.seen.iter().next().cloned() {
                     state.seen.remove(&oldest);
+                    changed_records.insert(format!("seen@{oldest}"));
                 }
             }
-            persist_scout_state(&service.scout.path, &state, &["outbox", "pairs", "outcomes", "scout_instances", "scout_sample_active_scenarios", "scout_plan_profiles", "scout_active_audits", "seen"])?;
+            let mut changed_sections = vec!["outbox".to_owned()];
+            changed_sections.extend(changed_records);
+            let changed_sections = changed_sections.iter().map(String::as_str).collect::<Vec<_>>();
+            persist_scout_state(&service.scout.path, &state, &changed_sections)?;
         }
     }
     schedule_scout_outbox_flush(&service);
@@ -350,28 +304,31 @@ fn apply_scout_lifecycle_observation(
             .filter(|spec| probe.tested_parameters.contains_key(&spec.key))
             .cloned()
             .collect::<Vec<_>>();
-        let event = FeedbackEvent::ScoutOutcome {
-            event_id: format!(
-                "dated-carry-scout:{}:{}:{}",
-                probe.candidate.future_symbol, probe.opened_at_ms, probe.parameter_key
-            ),
-            observed_at_ms: request.now_ms,
-            learning_context: None,
-            symbol: probe.profile_symbol.clone(),
-            strategy: probe.strategy.clone(),
-            profile_id: strategies::profile_id(
-                &probe.profile_symbol,
-                &probe.strategy,
-                &probe.parameters,
-            ),
-            parameters: probe.parameters.clone(),
-            specs,
-            net_return_percent,
-        };
-        if !outbox_has_learning(state, &event) {
-            state.outbox.push(ScoutOutboxItem::Learning(event));
+        let paired = probe.comparison_role.is_some();
+        if !paired {
+            let event = FeedbackEvent::ScoutOutcome {
+                event_id: format!(
+                    "dated-carry-scout:{}:{}:{}",
+                    probe.candidate.future_symbol, probe.opened_at_ms, probe.parameter_key
+                ),
+                observed_at_ms: request.now_ms,
+                learning_context: None,
+                symbol: probe.profile_symbol.clone(),
+                strategy: probe.strategy.clone(),
+                profile_id: strategies::profile_id(
+                    &probe.profile_symbol,
+                    &probe.strategy,
+                    &probe.parameters,
+                ),
+                parameters: probe.parameters.clone(),
+                specs: specs.clone(),
+                net_return_percent,
+            };
+            if !outbox_has_learning(state, &event) {
+                state.outbox.push(ScoutOutboxItem::Learning(event));
+            }
         }
-        if probe.would_enter {
+        if probe.would_enter || paired {
             let mut tested_profile = probe.parameters.clone();
             tested_profile.extend(probe.tested_parameters.clone());
             let notional = probe.candidate.quantity * probe.candidate.spot_ask;
@@ -388,20 +345,30 @@ fn apply_scout_lifecycle_observation(
                 strategy_parameters: tested_profile,
                 exit_scenario: "strategy".into(),
                 sample_group_id: probe.sample_id.clone(),
-                scout_parameter_key: Some(probe.parameter_key.clone()),
-                scout_parameter_value: Some(probe.parameter_value),
-                scout_parameter_profile_symbol: Some(probe.profile_symbol.clone()),
-                scout_comparison_id: None,
-                scout_comparison_ids: Vec::new(),
-                scout_comparison_role: None,
+                scout_parameter_key: (probe.comparison_role.as_deref() == Some("variant"))
+                    .then(|| probe.parameter_key.clone()),
+                scout_parameter_value: (probe.comparison_role.as_deref() == Some("variant"))
+                    .then_some(probe.parameter_value),
+                scout_parameter_profile_symbol: (probe.comparison_role.as_deref() == Some("variant"))
+                    .then(|| probe.profile_symbol.clone()),
+                scout_comparison_id: probe.comparison_id.clone(),
+                scout_comparison_ids: probe.comparison_ids.clone(),
+                scout_comparison_zero_sides: Vec::new(),
+                scout_comparison_role: probe.comparison_role.clone(),
                 scout_comparison_zero_role: None,
-                scout_comparison_parameter_key: None,
-                scout_comparison_parameter_value: None,
-                scout_comparison_parameter_profile_symbol: None,
+                scout_comparison_parameter_key: (probe.comparison_role.as_deref() == Some("variant"))
+                    .then(|| probe.parameter_key.clone()),
+                scout_comparison_parameter_value: (probe.comparison_role.as_deref() == Some("variant"))
+                    .then_some(probe.parameter_value),
+                scout_comparison_parameter_profile_symbol: (probe.comparison_role.as_deref() == Some("variant"))
+                    .then(|| probe.profile_symbol.clone()),
                 strategy_parameter_specs: probe.parameter_specs.clone(),
             };
             let key = scout_outcome_idempotency_key(&outcome);
-            insert_scout_outcome(state, key, outcome);
+            insert_scout_outcome(state, key, outcome.clone());
+            if paired {
+                let _ = record_paired_scout_outcome(state, &outcome);
+            }
             while state.outcomes.len() > 100_000 {
                 let Some(oldest) = state.outcomes.keys().next().cloned() else {
                     break;
@@ -433,6 +400,42 @@ fn apply_scout_lifecycle_observation(
     }
     state.scout_lifecycle_updated_at_ms = state.scout_lifecycle_updated_at_ms.max(request.now_ms);
     response
+}
+
+// Active audits are duplicated in `scout_instances` for markout lookup and can
+// otherwise accumulate indefinitely when a sample never receives a terminal
+// outcome. Keep the replay state bounded as well as the instance map.
+const MAX_ACTIVE_SCOUT_AUDIT_GROUPS: usize = 10_000;
+const MAX_ACTIVE_SCOUT_AUDITS: usize = 50_000;
+
+fn trim_active_scout_audits(state: &mut PersistedState) -> Vec<String> {
+    let mut active_audit_count = state
+        .scout_active_audits
+        .values()
+        .map(Vec::len)
+        .sum::<usize>();
+    let mut evicted = Vec::new();
+    while state.scout_active_audits.len() > MAX_ACTIVE_SCOUT_AUDIT_GROUPS
+        || active_audit_count > MAX_ACTIVE_SCOUT_AUDITS
+    {
+        let oldest = state
+            .scout_active_audits
+            .iter()
+            .min_by_key(|(_, audits)| {
+                audits
+                    .iter()
+                    .filter_map(|audit| audit["timestamp"].as_u64())
+                    .min()
+                    .unwrap_or_default()
+            })
+            .map(|(group, _)| group.clone());
+        let Some(oldest) = oldest else { break };
+        if let Some(audits) = state.scout_active_audits.remove(&oldest) {
+            active_audit_count = active_audit_count.saturating_sub(audits.len());
+        }
+        evicted.push(oldest);
+    }
+    evicted
 }
 
 async fn observe_scout_lifecycle(
@@ -470,10 +473,91 @@ async fn observe_scout_lifecycle(
         return Ok(Json(response));
     }
     let response = apply_scout_lifecycle_observation(&mut state, &request);
-    persist_scout_state(&service.scout.path, &state, &["outbox", "outcomes", "scout_pending_samples", "scout_sample_active_scenarios", "scout_plan_profiles", "scout_observation_results", "scout_instances"])?;
+    persist_scout_state(&service.scout.path, &state, &["outbox", "outcomes", "pairs", "scout_pending_samples", "scout_sample_active_scenarios", "scout_plan_profiles", "scout_observation_results", "scout_instances"])?;
     drop(state);
     schedule_scout_outbox_flush(&service);
     Ok(Json(response))
+}
+
+fn valid_dated_carry_probe(
+    probe: &DatedCarryProbe,
+    sample_group_id: &str,
+    now_ms: u64,
+) -> bool {
+    if probe.sample_id != sample_group_id
+        || probe.opened_at_ms > now_ms.saturating_add(5_000)
+        || probe.strategy.is_empty()
+        || probe.profile_symbol.is_empty()
+        || probe
+            .parameters
+            .values()
+            .chain(probe.tested_parameters.values())
+            .any(|value| !value.is_finite())
+        || !probe.parameter_value.is_finite()
+        || probe.tested_parameters.iter().any(|(key, value)| {
+            let Some(spec) = probe.parameter_specs.iter().find(|spec| spec.key == *key) else {
+                return true;
+            };
+            let position = (*value - spec.min) / spec.step;
+            *value < spec.min
+                || *value > spec.max
+                || spec.step <= 0.0
+                || (position - position.round()).abs() > 1e-6
+        })
+        || !strategies::dated_carry_entry_is_eligible(
+            &probe.candidate,
+            probe.opened_at_ms,
+            probe.opened_at_ms,
+            1.0,
+            0.0,
+        )
+    {
+        return false;
+    }
+    match probe.comparison_role.as_deref() {
+        Some("baseline") => {
+            probe.parameter_key.is_empty()
+                && probe.parameter_value == 0.0
+                && probe.tested_parameters.is_empty()
+                && probe.comparison_id.is_none()
+                && !probe.comparison_ids.is_empty()
+                && probe.comparison_ids.len() <= MAX_PARAMETER_VARIANTS_PER_BATCH
+                && probe.comparison_ids.iter().all(|id| !id.is_empty() && id.len() <= 240)
+                && probe.comparison_ids.iter().collect::<BTreeSet<_>>().len()
+                    == probe.comparison_ids.len()
+        }
+        Some("variant") => {
+            probe.parameter_key.starts_with("combo:")
+                .then(|| {
+                    probe.parameter_value == 0.0
+                        && parse_combination(&probe.parameter_key, &probe.parameter_specs)
+                            .as_ref()
+                            == Some(&probe.tested_parameters)
+                })
+                .unwrap_or_else(|| {
+                    probe.tested_parameters.len() == 1
+                        && probe.tested_parameters.get(&probe.parameter_key)
+                            == Some(&probe.parameter_value)
+                })
+                && probe.comparison_id.as_ref().is_some_and(|id| !id.is_empty() && id.len() <= 240)
+                && probe.comparison_ids.is_empty()
+        }
+        None => {
+            probe.comparison_id.is_none()
+                && probe.comparison_ids.is_empty()
+                && if probe.parameter_key.starts_with("combo:") {
+                    probe.parameter_value == 0.0
+                        && parse_combination(&probe.parameter_key, &probe.parameter_specs)
+                            .as_ref()
+                            == Some(&probe.tested_parameters)
+                } else {
+                    probe.tested_parameters.len() == 1
+                        && probe.tested_parameters.get(&probe.parameter_key)
+                            == Some(&probe.parameter_value)
+                }
+        }
+        Some(_) => false,
+    }
 }
 
 async fn create_scout_plan(
@@ -612,6 +696,10 @@ async fn create_scout_plan(
     }
     let expanded_candidates = expand_daily_scout_candidates(&request.candidates);
     let mut response = ScoutPlanResponse::default();
+    let mut changed_instance_ids = BTreeSet::new();
+    let mut changed_group_ids = BTreeSet::new();
+    let mut changed_cooldown_keys = BTreeSet::new();
+    let mut changed_pending_sample_ids = BTreeSet::new();
     for offset in 0..expanded_candidates.len() {
         let mut candidate =
             expanded_candidates[(start + offset) % expanded_candidates.len()].clone();
@@ -643,45 +731,7 @@ async fn create_scout_plan(
             .as_ref()
             .is_some_and(|payload| match payload {
                 ScoutSamplePayload::DatedCarryProbe(probe) => {
-                    probe.sample_id != candidate.sample_group_id
-                        || probe.opened_at_ms > request.now_ms.saturating_add(5_000)
-                        || probe.strategy.is_empty()
-                        || probe.profile_symbol.is_empty()
-                        || probe
-                            .parameters
-                            .values()
-                            .chain(probe.tested_parameters.values())
-                            .any(|v| !v.is_finite())
-                        || !probe.parameter_value.is_finite()
-                        || if probe.parameter_key.starts_with("combo:") {
-                            probe.parameter_value != 0.0
-                                || parse_combination(&probe.parameter_key, &probe.parameter_specs)
-                                    .as_ref()
-                                    != Some(&probe.tested_parameters)
-                        } else {
-                            probe.tested_parameters.len() != 1
-                                || probe.tested_parameters.get(&probe.parameter_key)
-                                    != Some(&probe.parameter_value)
-                        }
-                        || probe.tested_parameters.iter().any(|(key, value)| {
-                            let Some(spec) =
-                                probe.parameter_specs.iter().find(|spec| spec.key == *key)
-                            else {
-                                return true;
-                            };
-                            let position = (*value - spec.min) / spec.step;
-                            *value < spec.min
-                                || *value > spec.max
-                                || spec.step <= 0.0
-                                || (position - position.round()).abs() > 1e-6
-                        })
-                        || !strategies::dated_carry_entry_is_eligible(
-                            &probe.candidate,
-                            probe.opened_at_ms,
-                            probe.opened_at_ms,
-                            1.0,
-                            0.0,
-                        )
+                    !valid_dated_carry_probe(probe, &candidate.sample_group_id, request.now_ms)
                 }
             })
         {
@@ -698,7 +748,8 @@ async fn create_scout_plan(
         {
             continue;
         }
-        if !candidate.cooldown_key.starts_with("daily|")
+        if !candidate.parameter_variant
+            && !candidate.cooldown_key.starts_with("daily|")
             && !scout_comparison_changes_exit(&candidate)
         {
             continue;
@@ -745,6 +796,7 @@ async fn create_scout_plan(
             let scenario = audit["scout_exit_scenario"].as_str().unwrap_or_default();
             if !decision_id.is_empty() {
                 insert_scout_instance(&mut state, decision_id, audit.clone());
+                changed_instance_ids.insert(decision_id.to_owned());
             }
             if let Some(registration) = scout_registration(&audit) {
                 tokens.insert(format!("{decision_id}|{scenario}"));
@@ -760,6 +812,7 @@ async fn create_scout_plan(
                 probe.sample_id.clone(),
                 ScoutSamplePayload::DatedCarryProbe(probe.clone()),
             );
+            changed_pending_sample_ids.insert(probe.sample_id.clone());
             tokens.insert(format!("{}|carry", probe.sample_id));
         }
         state
@@ -784,6 +837,8 @@ async fn create_scout_plan(
         response
             .selected_groups
             .push(candidate.sample_group_id.clone());
+        changed_group_ids.insert(candidate.sample_group_id.clone());
+        changed_cooldown_keys.insert(candidate.cooldown_key.clone());
         active_batch_keys.insert(batch_key);
     }
     state.scout_lifecycle_updated_at_ms = state.scout_lifecycle_updated_at_ms.max(request.now_ms);
@@ -795,7 +850,19 @@ async fn create_scout_plan(
             state.scout_plan_results.remove(&oldest);
         }
     }
-    persist_scout_state(&service.scout.path, &state, &["outbox", "scout_instances", "scout_pending_samples", "scout_sample_at_ms", "scout_plan_profiles", "scout_active_audits", "scout_sample_active_scenarios", &format!("scout_plan_results@{}", request.request_id)])?;
+    let _evicted_audit_cache_groups = trim_active_scout_audits(&mut state);
+    let mut changed_sections = vec!["outbox".to_owned()];
+    changed_sections.extend(changed_instance_ids.into_iter().map(|key| format!("scout_instances@{key}")));
+    changed_sections.extend(changed_group_ids.iter().flat_map(|key| [
+        format!("scout_sample_active_scenarios@{key}"),
+        format!("scout_plan_profiles@{key}"),
+        format!("scout_active_audits@{key}"),
+    ]));
+    changed_sections.extend(changed_cooldown_keys.into_iter().map(|key| format!("scout_sample_at_ms@{key}")));
+    changed_sections.extend(changed_pending_sample_ids.into_iter().map(|key| format!("scout_pending_samples@{key}")));
+    changed_sections.push(format!("scout_plan_results@{}", request.request_id));
+    let changed_sections = changed_sections.iter().map(String::as_str).collect::<Vec<_>>();
+    persist_scout_state(&service.scout.path, &state, &changed_sections)?;
     drop(state);
     schedule_scout_outbox_flush(&service);
     Ok(Json(response))
@@ -1640,6 +1707,26 @@ fn portfolio_strategy_walk_forward(
 mod strategy_walk_forward_tests {
     use super::*;
 
+    #[test]
+    fn active_scout_audit_cache_evicts_payload_but_preserves_lifecycle_state() {
+        let mut state = PersistedState::default();
+        state.scout_active_audits.insert(
+            "old-group".into(),
+            vec![serde_json::json!({"timestamp": 1}); MAX_ACTIVE_SCOUT_AUDITS + 1],
+        );
+        state
+            .scout_sample_active_scenarios
+            .insert("old-group".into(), BTreeSet::from(["decision|strategy".into()]));
+        state
+            .scout_plan_profiles
+            .insert("old-group".into(), "profile".into());
+
+        assert_eq!(trim_active_scout_audits(&mut state), vec!["old-group"]);
+        assert!(state.scout_active_audits.is_empty());
+        assert!(state.scout_sample_active_scenarios.contains_key("old-group"));
+        assert!(state.scout_plan_profiles.contains_key("old-group"));
+    }
+
     fn outcome(id: &str, profile: BTreeMap<String, f64>, signal_ms: u64, evaluated_ms: u64, net: f64) -> ScoutOutcomeRequest {
         ScoutOutcomeRequest {
             decision_id: id.into(),
@@ -1659,6 +1746,7 @@ mod strategy_walk_forward_tests {
             scout_parameter_profile_symbol: None,
             scout_comparison_id: None,
             scout_comparison_ids: Vec::new(),
+            scout_comparison_zero_sides: Vec::new(),
             scout_comparison_role: None,
             scout_comparison_zero_role: None,
             scout_comparison_parameter_key: None,
@@ -2336,6 +2424,22 @@ mod scout_markout_instance_tests {
             decision_id:"other".into(), symbol:"ETH-USDT".into(), signal_timestamp_ms:10,
             evaluated_timestamp_ms:20, taker_fee_rate:0.001, long_net_percent:Some(0.25), short_net_percent:None,
         }).is_none());
+    }
+
+    #[test]
+    fn one_baseline_markout_fans_out_to_each_variant_comparison() {
+        let instance = serde_json::json!({
+            "decision_id":"baseline-1", "symbol":"BTC-USDT", "strategy":"test-strategy",
+            "direction":"bullish", "signal_timestamp":10, "scout_notional_usd":100.0,
+            "scout_learning_context":"scout:daily:test", "strategy_parameters":{"threshold":0.5},
+            "scout_exit_scenario":"strategy", "scout_comparison_role":"baseline",
+            "scout_comparison_ids":["pair-a", "pair-b", "pair-c"]
+        });
+        let outcome = scout_outcome_from_markout(&instance, ScoutMarkoutRequest {
+            decision_id:"baseline-1".into(), symbol:"BTC-USDT".into(), signal_timestamp_ms:10,
+            evaluated_timestamp_ms:20, taker_fee_rate:0.001, long_net_percent:Some(0.25), short_net_percent:None,
+        }).unwrap();
+        assert_eq!(outcome_comparison_ids(&outcome), ["pair-a", "pair-b", "pair-c"]);
     }
 }
 

@@ -239,6 +239,7 @@ pub struct LearnedExitPolicy {
 pub struct SignalWalkForward {
     pub symbol: String,
     pub horizon_seconds: u64,
+    pub evidence_generated_at_ms: u64,
     pub training_samples: usize,
     pub evaluated_signals: usize,
     pub selected_signals: usize,

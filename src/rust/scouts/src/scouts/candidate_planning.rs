@@ -90,9 +90,14 @@ fn expand_daily_scout_candidates(candidates: &[ScoutPlanCandidate]) -> Vec<Scout
         }) {
             let mut selected = candidate.clone();
             selected.daily_policy = None;
-            selected.generate_group_id = true;
-            selected.sample_group_id.clear();
-            selected.cooldown_key.clear();
+            let preserve_parameter_batch = selected.parameter_variant
+                && !selected.sample_group_id.is_empty()
+                && !selected.cooldown_key.is_empty();
+            selected.generate_group_id = !preserve_parameter_batch;
+            if !preserve_parameter_batch {
+                selected.sample_group_id.clear();
+                selected.cooldown_key.clear();
+            }
             selected.cooldown_ms = if has_probe { 86_400_000 } else { 300_000 };
             selected.profile_key = format!(
                 "{}|{}",
@@ -270,6 +275,12 @@ pub struct DatedCarryProbe {
     pub sample_id: String,
     pub parameter_key: String,
     pub parameter_value: f64,
+    #[serde(default)]
+    pub comparison_role: Option<String>,
+    #[serde(default)]
+    pub comparison_id: Option<String>,
+    #[serde(default)]
+    pub comparison_ids: Vec<String>,
     pub opened_at_ms: u64,
     pub candidate: strategies::DatedCarryEntryCandidate,
     pub strategy: String,

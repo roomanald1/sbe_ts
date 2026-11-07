@@ -143,6 +143,10 @@ type StrategyGateDecision = {
     reference_close: number;
     return_percent: number;
   }> | null;
+  observed_close?: number | null;
+  cross_sectional_metric_value?: number | null;
+  cross_sectional_threshold?: number | null;
+  strategy_order_size_multiplier?: number | null;
   primary_rule?: string;
   primary_level?: number | null;
   primary_metric_value?: number | null;

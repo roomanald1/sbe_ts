@@ -3,6 +3,7 @@ struct CandidateEntryReview<'a> {
     strength_floor: f64,
     score_floor: f64,
     evidence: Option<&'a WalkForward>,
+    stale_evidence_age_ms: Option<u64>,
     side: Option<&'a SideWalkForwardMetrics>,
     research: Option<&'a SideWalkForwardMetrics>,
     strength_weak: bool,
@@ -19,6 +20,7 @@ fn review_candidate_entry<'a>(
     dashboard: &'a Dashboard,
     learning_thresholds: &BTreeMap<String, strategies::ContextThresholds>,
     risk_appetite: f64,
+    now_ms: u64,
 ) -> CandidateEntryReview<'a> {
     let context = market_context(candidate);
     let risk_scale = risk_floor_scale(risk_appetite);
@@ -33,7 +35,19 @@ fn review_candidate_entry<'a>(
         .clamp(0.0, 1.0);
     let score_floor = (learned_score * risk_scale)
         .max(0.0);
-    let evidence = candidate_evidence(candidate, dashboard);
+    let evidence = candidate_evidence(candidate, dashboard, now_ms);
+    let stale_evidence_age_ms = dashboard
+        .walk_forward
+        .iter()
+        .filter(|item| {
+            item.symbol == candidate.symbol
+                && is_entry_evidence_horizon(item.horizon_seconds)
+                && item.evidence_generated_at_ms > 0
+                && item.evidence_generated_at_ms <= now_ms
+        })
+        .map(|item| now_ms - item.evidence_generated_at_ms)
+        .filter(|age| *age > MAX_WALK_FORWARD_EVIDENCE_AGE_MS)
+        .min();
     let side = evidence.map(|item| side_metrics(candidate, item));
     let research = evidence.map(|item| research_metrics(candidate, item));
     let strength_weak = candidate.strength < strength_floor;
@@ -72,6 +86,7 @@ fn review_candidate_entry<'a>(
         strength_floor,
         score_floor,
         evidence,
+        stale_evidence_age_ms,
         side,
         research,
         strength_weak,

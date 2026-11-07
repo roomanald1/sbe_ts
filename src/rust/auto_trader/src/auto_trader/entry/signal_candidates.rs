@@ -372,7 +372,11 @@ fn format_no_tradeable_bias(
         max_entries_per_auto_position,
         ..
     } = *input;
-    let blocked_by_negative = count_negative_evidence_candidates(exploration_qualified, dashboard);
+    let blocked_by_negative = count_negative_evidence_candidates(
+        exploration_qualified,
+        dashboard,
+        now.saturating_mul(1000),
+    );
     let waiting_for_pullback = fresh_directional
         .iter()
         .filter(|signal| needs_pullback_confirmation(signal) && !passes_pullback_confirmation(signal))
@@ -442,6 +446,7 @@ fn format_no_tradeable_bias(
                 dashboard,
                 learning_thresholds,
                 risk_appetite,
+                now.saturating_mul(1000),
             )
         })
         .collect::<Vec<_>>();

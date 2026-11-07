@@ -2920,6 +2920,62 @@ function AutoTraderOutcomesComponent({
                 ]
               : []),
           ];
+          const entryContextRows = [
+            ...Object.entries(gatePosition.components)
+              .filter(
+                ([name, value]) =>
+                  typeof value === 'number' &&
+                  Number.isFinite(value) &&
+                  !name.startsWith('minimum_') &&
+                  !name.endsWith('_floor'),
+              )
+              .map(([name, value]) => ({
+                label: componentLabel(name),
+                detail: `Recorded signal value: ${gateNumber(value)}`,
+              })),
+            ...(typeof entryDecision?.observed_close === 'number'
+              ? [
+                  {
+                    label: 'Asset close at evaluation',
+                    detail: formatForSymbol(
+                      entryDecision.observed_close,
+                      gatePosition.symbol,
+                      'price',
+                    ),
+                  },
+                ]
+              : []),
+            ...(entryDecision?.trend_return_windows ?? []).map((window) => ({
+              label: `${window.days}-day asset return`,
+              detail: `${window.return_percent >= 0 ? '+' : ''}${gateNumber(window.return_percent, 2)}% · reference close ${formatForSymbol(window.reference_close, gatePosition.symbol, 'price')}`,
+            })),
+            ...(typeof entryDecision?.primary_metric_value === 'number' &&
+            entryDecision.primary_metric_unit
+              ? [
+                  {
+                    label: `Entry metric (${entryDecision.primary_metric_unit})`,
+                    detail: `Recorded value: ${gateNumber(entryDecision.primary_metric_value)}`,
+                  },
+                ]
+              : []),
+            ...(typeof entryDecision?.cross_sectional_metric_value === 'number'
+              ? [
+                  {
+                    label: 'Cross-sectional ranking metric',
+                    detail: `Recorded value ${gateNumber(entryDecision.cross_sectional_metric_value)}${typeof entryDecision.cross_sectional_threshold === 'number' ? ` · threshold ${gateNumber(entryDecision.cross_sectional_threshold)}` : ''}`,
+                  },
+                ]
+              : []),
+            ...(typeof entryDecision?.strategy_order_size_multiplier ===
+            'number'
+              ? [
+                  {
+                    label: 'Target allocation weight',
+                    detail: `${gateNumber(entryDecision.strategy_order_size_multiplier * 100, 2)}% at entry evaluation`,
+                  },
+                ]
+              : []),
+          ];
           const positionStillOpen =
             gatePosition.status === 'Open' ||
             gatePosition.status === 'Partially closed';
@@ -3066,6 +3122,31 @@ function AutoTraderOutcomesComponent({
                     ? 'Dated carry entry details'
                     : 'Strategy gate evidence recorded at entry'}
                 </p>
+                {!carry && (
+                  <>
+                    <h3>Entry signal context</h3>
+                    <p>
+                      Recorded signal values available when this position was
+                      opened; these provide context and are not additional
+                      gates.
+                    </p>
+                    {entryContextRows.length ? (
+                      <ul>
+                        {entryContextRows.map((row) => (
+                          <li key={row.label}>
+                            <strong>Recorded</strong>
+                            <span>{row.label}</span>
+                            <small>{row.detail}</small>
+                          </li>
+                        ))}
+                      </ul>
+                    ) : (
+                      <p>
+                        Entry signal context was not retained for this position.
+                      </p>
+                    )}
+                  </>
+                )}
                 {carry ? (
                   <ul>
                     <li>

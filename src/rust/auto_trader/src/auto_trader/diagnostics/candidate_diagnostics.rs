@@ -7,12 +7,14 @@ fn candidate_entry_diagnostic(
     dashboard: &Dashboard,
     learning_thresholds: &BTreeMap<String, strategies::ContextThresholds>,
     risk_appetite: f64,
+    now_ms: u64,
 ) -> String {
     let review = review_candidate_entry(
         candidate,
         dashboard,
         learning_thresholds,
         risk_appetite,
+        now_ms,
     );
     let failures = candidate_entry_failures(candidate, &review);
     let (walk_forward, research) = format_candidate_evidence(&review);
@@ -40,12 +42,14 @@ fn candidate_entry_audit_value(
     learning_thresholds: &BTreeMap<String, strategies::ContextThresholds>,
     risk_appetite: f64,
     selection_mode: &str,
+    now_ms: u64,
 ) -> serde_json::Value {
     let review = review_candidate_entry(
         candidate,
         dashboard,
         learning_thresholds,
         risk_appetite,
+        now_ms,
     );
     let failures = if selection_mode == "rejected" {
         candidate_entry_failures(candidate, &review)
@@ -70,6 +74,8 @@ fn candidate_entry_audit_value(
             "minimum_side_positive_net_lower_95": MIN_SIDE_POSITIVE_NET_LOWER_95,
         },
         "checks": {
+            "walk_forward_evidence_fresh": review.evidence.is_some(),
+            "walk_forward_evidence_age_ms": review.stale_evidence_age_ms,
             "strength_pass": !review.strength_weak,
             "exploration_score_pass": !review.score_weak,
             "exploration_context_pass": !review.mixed_context,
@@ -162,7 +168,7 @@ mod candidate_diagnostic_tests {
         serde_json::from_value(serde_json::json!({
             "best": [],
             "walkForward": [{
-                "symbol": "BTC-USDT", "horizon_seconds": 300,
+                "symbol": "BTC-USDT", "horizon_seconds": 300, "evidence_generated_at_ms": 1000,
                 "all_signal_long": {
                     "sample_count": 40, "direction_match_rate": 0.8,
                     "average_net_return_percent": 0.4, "positive_net_rate": 0.7,
@@ -183,11 +189,11 @@ mod candidate_diagnostic_tests {
             missed_opportunity_bands: Vec::new(), markets: Arc::new(BTreeMap::new()),
             queued_at: None, queue_wait_ms: None,
         };
-        let diagnostic = candidate_entry_diagnostic(&candidate, &dashboard, &EMPTY_CONTEXT_THRESHOLDS, 50.0);
+        let diagnostic = candidate_entry_diagnostic(&candidate, &dashboard, &EMPTY_CONTEXT_THRESHOLDS, 50.0, 1_000);
         assert!(diagnostic.contains("BTC-USDT bullish"));
         assert!(diagnostic.contains("strength 0.00 <"));
         assert!(diagnostic.contains("score 0.00 <"));
-        let audit = candidate_entry_audit_value(&candidate, &dashboard, &EMPTY_CONTEXT_THRESHOLDS, 50.0, "rejected");
+        let audit = candidate_entry_audit_value(&candidate, &dashboard, &EMPTY_CONTEXT_THRESHOLDS, 50.0, "rejected", 1_000);
         assert_eq!(audit["selection_mode"], "rejected");
         assert!(audit["rejection_reasons"].as_array().unwrap().iter().any(|reason| reason.as_str().unwrap().contains("strength")));
     }
@@ -196,11 +202,11 @@ mod candidate_diagnostic_tests {
     fn supported_candidate_passes_strict_checks_and_audit_omits_rejections() {
         let candidate = candidate(0.9, 0.9);
         let dashboard = dashboard_with_evidence();
-        let failures = candidate_entry_failures(&candidate, &review_candidate_entry(&candidate, &dashboard, &EMPTY_CONTEXT_THRESHOLDS, 50.0));
+        let failures = candidate_entry_failures(&candidate, &review_candidate_entry(&candidate, &dashboard, &EMPTY_CONTEXT_THRESHOLDS, 50.0, 1_000));
         assert!(failures.is_empty(), "{failures:?}");
-        let audit = candidate_entry_audit_value(&candidate, &dashboard, &EMPTY_CONTEXT_THRESHOLDS, 50.0, "strict");
+        let audit = candidate_entry_audit_value(&candidate, &dashboard, &EMPTY_CONTEXT_THRESHOLDS, 50.0, "strict", 1_000);
         assert_eq!(audit["checks"]["strict_walk_forward_pass"], true);
         assert!(audit["rejection_reasons"].as_array().unwrap().is_empty());
-        assert!(candidate_entry_diagnostic(&candidate, &dashboard, &EMPTY_CONTEXT_THRESHOLDS, 50.0).contains("did not pass combined entry checks"));
+        assert!(candidate_entry_diagnostic(&candidate, &dashboard, &EMPTY_CONTEXT_THRESHOLDS, 50.0, 1_000).contains("did not pass combined entry checks"));
     }
 }

@@ -1,7 +1,11 @@
 fn format_candidate_evidence(review: &CandidateEntryReview<'_>) -> (String, String) {
     let Some(evidence) = review.evidence else {
+        let walk_forward = review.stale_evidence_age_ms.map_or_else(
+            || "walk-forward evidence unavailable".into(),
+            |age| format!("walk-forward evidence stale (age {}m)", age / 60_000),
+        );
         return (
-            "walk-forward evidence unavailable".into(),
+            walk_forward,
             "research-model evidence unavailable".into(),
         );
     };
@@ -66,7 +70,7 @@ mod candidate_evidence_format_tests {
         let review = CandidateEntryReview {
             context: "test".into(),
             strength_floor: 0.0, score_floor: 0.0,
-            evidence: Some(&evidence), side: Some(&side), research: Some(&research),
+            evidence: Some(&evidence), stale_evidence_age_ms: None, side: Some(&side), research: Some(&research),
             strength_weak: false, score_weak: false, mixed_context: false,
             evidence_missing: false, evidence_bad: false, research_bad: false,
             strict_evidence_bad: false,

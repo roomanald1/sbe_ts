@@ -294,6 +294,14 @@ pub struct ScoutSample {
 /// Fee-aware markout produced by Insights. This intentionally remains wire
 /// compatible with AutoTrader's scout callback, with specs added optionally.
 #[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct ScoutComparisonZeroSide {
+    pub comparison_id: String,
+    pub parameter_key: String,
+    pub parameter_value: f64,
+    pub profile_symbol: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ScoutOutcomeRequest {
     pub decision_id: String,
     pub learning_context: String,
@@ -319,6 +327,8 @@ pub struct ScoutOutcomeRequest {
     pub scout_comparison_id: Option<String>,
     #[serde(default)]
     pub scout_comparison_ids: Vec<String>,
+    #[serde(default)]
+    pub scout_comparison_zero_sides: Vec<ScoutComparisonZeroSide>,
     #[serde(default)]
     pub scout_comparison_role: Option<String>,
     #[serde(default)]

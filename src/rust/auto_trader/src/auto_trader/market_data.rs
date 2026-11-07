@@ -1,4 +1,24 @@
 use strategies::{SignalComponents, StrategyMarketSignal as Signal};
+
+const MAX_WALK_FORWARD_EVIDENCE_AGE_MS: u64 = 30 * 60 * 1_000;
+
+fn entry_walk_forward<'a>(
+    walk_forward: &'a [WalkForward],
+    symbol: &str,
+    now_ms: u64,
+) -> Option<&'a WalkForward> {
+    walk_forward
+        .iter()
+        .filter(|item| {
+            item.symbol == symbol
+                && is_entry_evidence_horizon(item.horizon_seconds)
+                && item.evidence_generated_at_ms > 0
+                && item.evidence_generated_at_ms <= now_ms
+                && now_ms - item.evidence_generated_at_ms <= MAX_WALK_FORWARD_EVIDENCE_AGE_MS
+        })
+        .max_by_key(|item| item.horizon_seconds)
+}
+
 #[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct Dashboard {
@@ -37,6 +57,8 @@ struct LearnedExitPolicy {
 struct WalkForward {
     symbol: String,
     horizon_seconds: u64,
+    #[serde(default)]
+    evidence_generated_at_ms: u64,
     #[serde(default)]
     learned_long_exit_policy: Option<LearnedExitPolicy>,
     #[serde(default)]

@@ -1,4 +1,4 @@
-import React, { useMemo } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { useObservable } from '@workspace/ui-platform';
 import '@workspace/ui-platform/styles/theme.css';
@@ -13,6 +13,13 @@ import {
   type Project,
 } from './models/ServiceControlModel';
 
+type LivenessResult = {
+  ok: boolean;
+  checkedAt: string | null;
+  summary: string;
+  checks: Array<{ name: string; ok: boolean; detail: string }>;
+};
+
 function App() {
   const model = useMemo(() => new ServiceControlModel(), []);
   const { state, updated, available } = useObservable(
@@ -22,6 +29,62 @@ function App() {
   );
   const notice = useObservable(model.notice$, null, [model]);
   const totals = useObservable(model.totals$, initialServiceTotals, [model]);
+  const [liveness, setLiveness] = useState<LivenessResult | null>(null);
+  const [livenessBusy, setLivenessBusy] = useState(false);
+  const autoRunStarted = useRef(false);
+
+  async function refreshLiveness() {
+    try {
+      const response = await fetch('/api/liveness');
+      setLiveness((await response.json()) as LivenessResult);
+    } catch {
+      setLiveness({
+        ok: false,
+        checkedAt: null,
+        summary: 'Liveness status unavailable',
+        checks: [],
+      });
+    }
+  }
+
+  async function runLiveness() {
+    setLivenessBusy(true);
+    try {
+      const response = await fetch('/api/liveness/run', { method: 'POST' });
+      setLiveness((await response.json()) as LivenessResult);
+    } catch {
+      setLiveness({
+        ok: false,
+        checkedAt: null,
+        summary: 'Could not run liveness checks',
+        checks: [],
+      });
+    } finally {
+      setLivenessBusy(false);
+    }
+  }
+
+  useEffect(() => {
+    void refreshLiveness();
+    const interval = window.setInterval(() => void refreshLiveness(), 10000);
+    return () => window.clearInterval(interval);
+  }, []);
+
+  useEffect(() => {
+    const ready =
+      available &&
+      services.system.every(
+        (name) => statusFor(state.system.get(name)).kind === 'running',
+      );
+    if (!ready) {
+      autoRunStarted.current = false;
+      return;
+    }
+    if (!autoRunStarted.current) {
+      autoRunStarted.current = true;
+      void runLiveness();
+    }
+  }, [available, state]);
 
   function ServiceTable({ project }: { project: Project }) {
     return (
@@ -115,6 +178,7 @@ function App() {
           <a href="#code">Code</a>
           <a href="#system-title">System</a>
           <a href="#infra-title">Infrastructure</a>
+          <a href="#liveness-title">Liveness</a>
         </nav>
       </header>
       <section className="hero">
@@ -235,6 +299,46 @@ function App() {
           </div>
         </div>
         <ServiceTable project="infra" />
+      </section>
+      <section className="liveness" aria-labelledby="liveness-title">
+        <div className="liveness-heading">
+          <div>
+            <div className="eyebrow">POST-STARTUP CHECKS</div>
+            <h2 id="liveness-title">System liveness</h2>
+            <p>
+              {liveness?.summary ?? 'Checks have not been run yet'}
+              {liveness?.checkedAt
+                ? ` · ${new Date(liveness.checkedAt).toLocaleTimeString()}`
+                : ''}
+            </p>
+          </div>
+          <button
+            className="button primary"
+            disabled={livenessBusy}
+            onClick={() => void runLiveness()}
+          >
+            {livenessBusy ? 'Checking…' : 'Run liveness checks'}
+          </button>
+        </div>
+        {liveness?.checks.length ? (
+          <ul className="liveness-checks" aria-label="Liveness test results">
+            {liveness.checks.map((item) => (
+              <li className={item.ok ? 'pass' : 'fail'} key={item.name}>
+                <span className="liveness-dot" aria-hidden="true" />
+                <strong>{item.name}</strong>
+                <span>{item.detail}</span>
+                <span className="liveness-result">
+                  {item.ok ? 'PASS' : 'FAIL'}
+                </span>
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <p className="liveness-empty">
+            Run checks after startup to verify service health, AutoTrader,
+            Scouts, and position management.
+          </p>
+        )}
       </section>
       <footer>
         <span>Service status refreshes every 10 seconds</span>

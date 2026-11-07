@@ -54,6 +54,7 @@ fn select_cycle_signal<'a>(
         fresh_directional,
         learning_thresholds,
         risk_appetite,
+        now,
         ..
     } = input;
     if let Some(signal) = fresh_directional
@@ -108,9 +109,11 @@ fn select_cycle_signal<'a>(
             if signal.strategy.is_some() || signal.strategy_candidate {
                 return true;
             }
-            let walk_forward = dashboard.walk_forward.iter().find(|item| {
-                item.symbol == signal.symbol && is_entry_evidence_horizon(item.horizon_seconds)
-            });
+            let walk_forward = entry_walk_forward(
+                &dashboard.walk_forward,
+                &signal.symbol,
+                now.saturating_mul(1000),
+            );
             let side_evidence = walk_forward.map(|item| {
                 if signal.direction == "bullish" {
                     &item.all_signal_long
@@ -288,7 +291,7 @@ mod signal_selection_behavior_tests {
     fn selects_strict_evidence_before_capped_exploration_without_history() {
         let strict = signal(0.9, 0.9, None, false);
         let evidence = serde_json::from_value::<WalkForward>(serde_json::json!({
-            "symbol":"BTC-USDT", "horizon_seconds":300,
+            "symbol":"BTC-USDT", "horizon_seconds":300, "evidence_generated_at_ms":100000,
             "all_signal_long":{"sample_count":40,"direction_match_rate":0.8,"average_net_return_percent":0.5,"positive_net_rate":0.8,"positive_net_rate_lower_95":0.6},
             "research_logistic_long":{"sample_count":40,"average_net_return_percent":0.3}
         })).unwrap_or_else(|_| panic!("expected signal selection to succeed"));

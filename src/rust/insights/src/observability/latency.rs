@@ -1,7 +1,7 @@
 use serde_json::{Value, json};
 use std::{
     sync::atomic::{AtomicU64, Ordering},
-    time::Duration,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 const BUCKETS_US: [u64; 10] = [
@@ -61,6 +61,57 @@ static ENGINE_LOCK_WAIT: Histogram = Histogram::new();
 static SNAPSHOT_COMPUTE: Histogram = Histogram::new();
 static AUTO_TRADER_DELIVERY: Histogram = Histogram::new();
 static DROPPED_RESEARCH_RECORDS: AtomicU64 = AtomicU64::new(0);
+static SIGNAL_FEED_CONNECTED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+static SIGNAL_FEED_LAST_EVENT_AT_MS: AtomicU64 = AtomicU64::new(0);
+static SIGNAL_FEED_LAST_PRICE_AT_MS: AtomicU64 = AtomicU64::new(0);
+static SIGNAL_FEED_PRICE_EVENTS: AtomicU64 = AtomicU64::new(0);
+static SIGNAL_FEED_TRADE_EVENTS: AtomicU64 = AtomicU64::new(0);
+static SIGNAL_FEED_BOOK_EVENTS: AtomicU64 = AtomicU64::new(0);
+
+pub fn set_signal_feed_connected(connected: bool) {
+    SIGNAL_FEED_CONNECTED.store(connected, Ordering::Relaxed);
+}
+
+pub fn record_signal_feed_event(kind: &str) {
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+    SIGNAL_FEED_LAST_EVENT_AT_MS.store(now_ms, Ordering::Relaxed);
+    match kind {
+        "price" => {
+            SIGNAL_FEED_LAST_PRICE_AT_MS.store(now_ms, Ordering::Relaxed);
+            SIGNAL_FEED_PRICE_EVENTS.fetch_add(1, Ordering::Relaxed);
+        }
+        "trade" => {
+            SIGNAL_FEED_TRADE_EVENTS.fetch_add(1, Ordering::Relaxed);
+        }
+        "book" => {
+            SIGNAL_FEED_BOOK_EVENTS.fetch_add(1, Ordering::Relaxed);
+        }
+        _ => {}
+    }
+}
+
+pub fn signal_feed_status() -> Value {
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+    let last_event_at_ms = SIGNAL_FEED_LAST_EVENT_AT_MS.load(Ordering::Relaxed);
+    let last_price_at_ms = SIGNAL_FEED_LAST_PRICE_AT_MS.load(Ordering::Relaxed);
+    json!({
+        "connected": SIGNAL_FEED_CONNECTED.load(Ordering::Relaxed),
+        "last_event_at_ms": (last_event_at_ms > 0).then_some(last_event_at_ms),
+        "last_event_age_ms": (last_event_at_ms > 0).then(|| now_ms.saturating_sub(last_event_at_ms)),
+        "last_price_at_ms": (last_price_at_ms > 0).then_some(last_price_at_ms),
+        "last_price_age_ms": (last_price_at_ms > 0).then(|| now_ms.saturating_sub(last_price_at_ms)),
+        "price_events": SIGNAL_FEED_PRICE_EVENTS.load(Ordering::Relaxed),
+        "trade_events": SIGNAL_FEED_TRADE_EVENTS.load(Ordering::Relaxed),
+        "book_events": SIGNAL_FEED_BOOK_EVENTS.load(Ordering::Relaxed),
+    })
+}
 
 pub fn record_event_queue_wait(duration: Duration) {
     EVENT_QUEUE_WAIT.record(duration);

@@ -126,6 +126,7 @@ async fn run_feed_signal_consumer(event_sender: tokio::sync::mpsc::Sender<Signal
         let connection_started = Instant::now();
         match feed_client::signal_events().await {
             Ok(mut events) => {
+                crate::latency::set_signal_feed_connected(true);
                 crate::service_log!(
                     "INFO",
                     "Connected to FeedHandlers RSocket signal-event stream"
@@ -169,11 +170,18 @@ async fn run_feed_signal_consumer(event_sender: tokio::sync::mpsc::Sender<Signal
                                         last_event_at = Some(Instant::now());
                                         match &request.event {
                                             SignalFeedEvent::Price { .. } => {
+                                                crate::latency::record_signal_feed_event("price");
                                                 price_events += 1;
                                                 last_price_event_at.insert(request.symbol.clone(), Instant::now());
                                             }
-                                            SignalFeedEvent::Trade { .. } => trade_events += 1,
-                                            SignalFeedEvent::Book { .. } => book_events += 1,
+                                            SignalFeedEvent::Trade { .. } => {
+                                                crate::latency::record_signal_feed_event("trade");
+                                                trade_events += 1;
+                                            }
+                                            SignalFeedEvent::Book { .. } => {
+                                                crate::latency::record_signal_feed_event("book");
+                                                book_events += 1;
+                                            }
                                         }
                                         request.queued_at = Some(Instant::now());
                                         if event_sender.send(request).await.is_err() {
@@ -195,6 +203,7 @@ async fn run_feed_signal_consumer(event_sender: tokio::sync::mpsc::Sender<Signal
                         }
                     }
                 }
+                crate::latency::set_signal_feed_connected(false);
                 if connection_started.elapsed() >= Duration::from_secs(60) {
                     retry_delay = Duration::from_secs(1);
                 }
@@ -204,11 +213,14 @@ async fn run_feed_signal_consumer(event_sender: tokio::sync::mpsc::Sender<Signal
                     retry_delay.as_secs()
                 );
             }
-            Err(error) => crate::service_log!(
-                "WARN",
-                "Could not connect to FeedHandlers signal-event stream: {error:#}; retrying in {}s",
-                retry_delay.as_secs()
-            ),
+            Err(error) => {
+                crate::latency::set_signal_feed_connected(false);
+                crate::service_log!(
+                    "WARN",
+                    "Could not connect to FeedHandlers signal-event stream: {error:#}; retrying in {}s",
+                    retry_delay.as_secs()
+                );
+            }
         }
         tokio::time::sleep(retry_delay).await;
         retry_delay = (retry_delay * 2).min(Duration::from_secs(30));

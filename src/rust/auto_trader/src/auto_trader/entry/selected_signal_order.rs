@@ -46,9 +46,11 @@ async fn submit_selected_signal(
     } = request;
     let cycle_guard = acquire_cycle_lock(state, "signal").await;
     let cycle_started = Instant::now();
-    let evidence = dashboard.walk_forward.iter().find(|item| {
-        item.symbol == signal.symbol && is_entry_evidence_horizon(item.horizon_seconds)
-    });
+    let evidence = entry_walk_forward(
+        &dashboard.walk_forward,
+        &signal.symbol,
+        request.now.saturating_mul(1000),
+    );
     let decision_id = signal_decision_id(signal);
     let signal_key = signal.symbol.clone();
     let now_ms = now.saturating_mul(1000);

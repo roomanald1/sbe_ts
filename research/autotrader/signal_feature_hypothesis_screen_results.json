@@ -1,0 +1,210 @@
+{
+  "overall": {
+    "directional_signal_baseline": {
+      "samples": 4484,
+      "mean_net_percent": -0.25105322491289794,
+      "median_net_percent": -0.2239952040683508,
+      "positive_net_rate": 0.026984834968777877,
+      "positive_net_wilson_95": [
+        0.022631692031194053,
+        0.03214775173402662
+      ]
+    },
+    "btc_5m_confirms_signal": {
+      "samples": 2327,
+      "mean_net_percent": -0.25073496593571043,
+      "median_net_percent": -0.22731965433449003,
+      "positive_net_rate": 0.03094112591319295,
+      "positive_net_wilson_95": [
+        0.024642133981770342,
+        0.03878622930789567
+      ]
+    },
+    "btc_5m_disagrees_with_signal_control": {
+      "samples": 1979,
+      "mean_net_percent": -0.252149677636373,
+      "median_net_percent": -0.21978092624187467,
+      "positive_net_rate": 0.020717534108135423,
+      "positive_net_wilson_95": [
+        0.015308267777700536,
+        0.02798387665413358
+      ]
+    },
+    "perp_crowding_squeeze_btc_eth": {
+      "samples": 28,
+      "mean_net_percent": -0.19241170633794816,
+      "median_net_percent": -0.19684712600743764,
+      "positive_net_rate": 0.0,
+      "positive_net_wilson_95": [
+        1.3877787807814457e-17,
+        0.12064330476584563
+      ]
+    }
+  },
+  "by_horizon_seconds": {
+    "60": {
+      "directional_signal_baseline": {
+        "samples": 3024,
+        "mean_net_percent": -0.255469156070978,
+        "median_net_percent": -0.22394492881383202,
+        "positive_net_rate": 0.011574074074074073,
+        "positive_net_wilson_95": [
+          0.008333926702971985,
+          0.016053565120808785
+        ]
+      },
+      "btc_5m_confirms_signal": {
+        "samples": 1574,
+        "mean_net_percent": -0.2549948035358113,
+        "median_net_percent": -0.22690250771291437,
+        "positive_net_rate": 0.013341804320203304,
+        "positive_net_wilson_95": [
+          0.008742796987126362,
+          0.020310476118624597
+        ]
+      },
+      "btc_5m_disagrees_with_signal_control": {
+        "samples": 1324,
+        "mean_net_percent": -0.2554623106937854,
+        "median_net_percent": -0.22125594074783955,
+        "positive_net_rate": 0.00906344410876133,
+        "positive_net_wilson_95": [
+          0.005192207553725579,
+          0.015775249544218304
+        ]
+      },
+      "perp_crowding_squeeze_btc_eth": {
+        "samples": 18,
+        "mean_net_percent": -0.1950273649776215,
+        "median_net_percent": -0.19763533769243652,
+        "positive_net_rate": 0.0,
+        "positive_net_wilson_95": [
+          0.0,
+          0.17587922364665765
+        ]
+      },
+      "feature_joined_samples": 3024,
+      "btc_eth_external_joined_samples": 97
+    },
+    "300": {
+      "directional_signal_baseline": {
+        "samples": 1046,
+        "mean_net_percent": -0.24639088855683097,
+        "median_net_percent": -0.2239952040683508,
+        "positive_net_rate": 0.040152963671128104,
+        "positive_net_wilson_95": [
+          0.029841630077907102,
+          0.05382953577542851
+        ]
+      },
+      "btc_5m_confirms_signal": {
+        "samples": 549,
+        "mean_net_percent": -0.2566744444396261,
+        "median_net_percent": -0.2332704890761907,
+        "positive_net_rate": 0.04735883424408015,
+        "positive_net_wilson_95": [
+          0.03252116452433623,
+          0.06848692365308368
+        ]
+      },
+      "btc_5m_disagrees_with_signal_control": {
+        "samples": 459,
+        "mean_net_percent": -0.23442987571460158,
+        "median_net_percent": -0.21216915120169896,
+        "positive_net_rate": 0.02832244008714597,
+        "positive_net_wilson_95": [
+          0.01662517356321482,
+          0.04784929874687005
+        ]
+      },
+      "perp_crowding_squeeze_btc_eth": {
+        "samples": 7,
+        "mean_net_percent": -0.19177128469212934,
+        "median_net_percent": -0.19855491519324958,
+        "positive_net_rate": 0.0,
+        "positive_net_wilson_95": [
+          5.551115123125783e-17,
+          0.35433043506668743
+        ]
+      },
+      "feature_joined_samples": 1046,
+      "btc_eth_external_joined_samples": 29
+    },
+    "900": {
+      "directional_signal_baseline": {
+        "samples": 414,
+        "mean_net_percent": -0.23057744715060804,
+        "median_net_percent": -0.2273604146826567,
+        "positive_net_rate": 0.10628019323671498,
+        "positive_net_wilson_95": [
+          0.08012822771416539,
+          0.13967154773153906
+        ]
+      },
+      "btc_5m_confirms_signal": {
+        "samples": 204,
+        "mean_net_percent": -0.20188321063566916,
+        "median_net_percent": -0.2198658322280443,
+        "positive_net_rate": 0.12254901960784313,
+        "positive_net_wilson_95": [
+          0.08440191390016036,
+          0.174648706347571
+        ]
+      },
+      "btc_5m_disagrees_with_signal_control": {
+        "samples": 196,
+        "mean_net_percent": -0.2712693863816746,
+        "median_net_percent": -0.23878144572006482,
+        "positive_net_rate": 0.08163265306122448,
+        "positive_net_wilson_95": [
+          0.050870551452464705,
+          0.12847891402983314
+        ]
+      },
+      "perp_crowding_squeeze_btc_eth": {
+        "samples": 3,
+        "mean_net_percent": -0.17821207167348532,
+        "median_net_percent": -0.16896051935888484,
+        "positive_net_rate": 0.0,
+        "positive_net_wilson_95": [
+          5.551115123125783e-17,
+          0.5614970317550454
+        ]
+      },
+      "feature_joined_samples": 414,
+      "btc_eth_external_joined_samples": 10
+    }
+  },
+  "metadata": {
+    "generated_at_utc": "2026-11-07T08:56:32.911541+00:00",
+    "api_base": "http://127.0.0.1:3004",
+    "query_limits": {
+      "evaluations": 150000,
+      "research_features": 50000,
+      "external_market": 50000
+    },
+    "evaluation_records_fetched": 134576,
+    "research_feature_records_fetched": 50000,
+    "external_market_records_fetched": 34742,
+    "evaluation_window_utc": {
+      "first_signal": "2026-11-07T07:32:36.976000+00:00",
+      "last_signal": "2026-11-07T08:55:19.307000+00:00"
+    },
+    "non_overlapping_directional_evaluation_samples": 4484,
+    "point_in_time_join_rules": {
+      "research_features_max_age_seconds": 30,
+      "external_market_max_age_seconds": 120,
+      "feature_timestamp_must_not_exceed_signal_timestamp": true
+    },
+    "candidate_rules": {
+      "btc_confirmation": "Trade the evaluation signal direction only when the most recent prior BTC 5m return has the same sign.",
+      "perp_squeeze": "BTC-USDT and ETH-USDT only; when funding and perp basis have the same nonzero sign and open-interest change is positive, trade opposite that crowded side."
+    },
+    "limitations": [
+      "Outcomes overlap across symbols and market regimes even after horizon-spaced sampling per symbol.",
+      "The endpoint returns only its newest bounded sample; results describe this window, not a full-market cycle.",
+      "Net outcome labels use the database's recorded entry/exit quote and taker-fee assumptions; actual live fill quality may differ.",
+      "The perp squeeze screen covers only BTC-USDT and ETH-USDT because external-market features are available only for BTC and ETH."
+    ]
+  }
+}

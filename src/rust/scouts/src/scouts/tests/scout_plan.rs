@@ -267,6 +267,61 @@ mod scout_plan_tests {
     }
 
     #[test]
+    fn paired_daily_parameter_batch_keeps_its_signal_scoped_group_and_cooldown() {
+        let mut candidate = candidate("daily-parameter-batch:signal-42", "trend-50-200|BTC-USDT");
+        candidate.parameter_variant = true;
+        candidate.cooldown_ms = 86_400_000;
+        candidate.audit_plans.clear();
+        candidate.audit_templates = vec![
+            ScoutAuditTemplate {
+                base_audit: serde_json::json!({
+                    "decision_id":"base", "strategy":"trend-50-200", "symbol":"BTC-USDT",
+                    "direction":"bullish", "timestamp":1000, "signal_timestamp":1000,
+                    "strategy_decision":{"observed_close":101.0,"strategy_parameters":{"threshold":0.5}}
+                }),
+                notional_usd: 10.0,
+                learning_context: "scout:test:scenario".into(),
+                stop_loss_percent: 0.5,
+                take_profit_percent: 0.8,
+                level_percent: 0.0,
+                strategy_only: true,
+                parameter_entry_eligible: Some(true),
+                parameter_specs: vec![],
+            },
+            ScoutAuditTemplate {
+                base_audit: serde_json::json!({
+                    "decision_id":"variant", "strategy":"trend-50-200", "symbol":"BTC-USDT",
+                    "direction":"bullish", "timestamp":1000, "signal_timestamp":1000,
+                    "scout_parameter_key":"threshold", "scout_parameter_value":0.6,
+                    "strategy_decision":{"observed_close":101.0,"strategy_parameters":{"threshold":0.6}}
+                }),
+                notional_usd: 10.0,
+                learning_context: "scout:test:scenario".into(),
+                stop_loss_percent: 0.5,
+                take_profit_percent: 0.8,
+                level_percent: 0.0,
+                strategy_only: true,
+                parameter_entry_eligible: Some(true),
+                parameter_specs: vec![],
+            },
+        ];
+        candidate.daily_policy = Some(DailyScoutPolicy {
+            evaluator_decision: "scout".into(),
+            selected_scout: true,
+            strategy_candidate: true,
+            daily_features_present: true,
+            independent_non_donchian_strategy: true,
+            parameter_key: Some("threshold".into()),
+            parameter_value: Some(0.6),
+        });
+        let selected = expand_daily_scout_candidates(&[candidate]);
+        assert_eq!(selected.len(), 1);
+        assert!(!selected[0].generate_group_id);
+        assert_eq!(selected[0].sample_group_id, "daily-parameter-batch:signal-42");
+        assert_eq!(selected[0].cooldown_key, "daily-parameter-batch:signal-42");
+    }
+
+    #[test]
     fn daily_policy_promotes_only_eligible_independent_rejects_to_scout_samples() {
         let mut candidate = candidate("", "");
         candidate.generate_group_id = true;

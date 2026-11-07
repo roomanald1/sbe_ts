@@ -205,4 +205,34 @@ mod tests {
         let _ = std::fs::remove_file(path.with_extension("sqlite-wal"));
         let _ = std::fs::remove_file(path.with_extension("sqlite-shm"));
     }
+
+    #[test]
+    fn active_audit_replay_reads_durable_records_from_sqlite() {
+        let path = std::env::temp_dir().join(format!(
+            "scouts-audit-replay-{}-{}.sqlite",
+            std::process::id(),
+            scout_now_ms()
+        ));
+        let audit = serde_json::json!({
+            "decision_id": "durable-decision",
+            "strategy": "live-momentum",
+            "symbol": "BTC-USDT",
+            "direction": "bullish",
+            "timestamp": 10,
+            "scout_entry_price": 100.0,
+            "strategy_decision": {"strategy_parameters": {}}
+        });
+        let mut state = PersistedState::default();
+        state
+            .scout_active_audits
+            .insert("durable-group".into(), vec![audit]);
+        assert!(persist_scout_state(&path, &state, &["scout_active_audits@durable-group"]).is_ok());
+
+        let registrations = load_active_scout_audits(&path).unwrap();
+        assert_eq!(registrations.len(), 1);
+        assert_eq!(registrations[0]["decision_id"], "durable-decision");
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("sqlite-wal"));
+        let _ = std::fs::remove_file(path.with_extension("sqlite-shm"));
+    }
 }

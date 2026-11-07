@@ -64,7 +64,7 @@ impl SignalStore {
         }
         let mut cache = self.best_cache.lock().await;
         if let Some((created, items)) = cache.as_ref() {
-            if created.elapsed() < Duration::from_secs(60) {
+            if created.elapsed() < Duration::from_secs(10) {
                 return Ok(items.iter().take(limit).cloned().collect());
             }
         }

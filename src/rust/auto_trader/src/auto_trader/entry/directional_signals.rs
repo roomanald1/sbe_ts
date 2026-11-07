@@ -49,9 +49,11 @@ fn prepare_directional_signal_candidates(
             "bearish"
         }
         .into();
-        let evidence = dashboard.walk_forward.iter().find(|item| {
-            item.symbol == scout.symbol && is_entry_evidence_horizon(item.horizon_seconds)
-        });
+        let evidence = entry_walk_forward(
+            &dashboard.walk_forward,
+            &scout.symbol,
+            now.saturating_mul(1000),
+        );
         let payload = signal_audit_payload(
             &scout,
             "decision",

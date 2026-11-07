@@ -39,6 +39,9 @@ mod dated_carry_lifecycle_tests {
             sample_id: "carry-probe-1".into(),
             parameter_key: "carry_minimum_days_to_expiry".into(),
             parameter_value: 6.0,
+            comparison_role: None,
+            comparison_id: None,
+            comparison_ids: Vec::new(),
             opened_at_ms,
             candidate: carry_candidate(opened_at_ms),
             strategy: "dated-carry".into(),
@@ -154,6 +157,62 @@ mod dated_carry_lifecycle_tests {
         assert_eq!(completed.symbol, "BTC-USDT");
         assert_eq!(completed.exit_scenario, "strategy");
         assert_eq!(completed.strategy_parameters["carry_minimum_days_to_expiry"], 6.0);
+    }
+
+    #[test]
+    fn one_carry_baseline_pairs_with_multiple_variants_and_zero_trade_sides() {
+        let opened_at_ms = scout_now_ms().saturating_sub(86_400_000);
+        let mut baseline = carry_probe(opened_at_ms, true);
+        baseline.sample_id = "carry-batch|baseline".into();
+        baseline.parameter_key.clear();
+        baseline.parameter_value = 0.0;
+        baseline.comparison_role = Some("baseline".into());
+        baseline.comparison_ids = vec!["carry-pair-a".into(), "carry-pair-b".into()];
+        baseline.parameters.insert("carry_minimum_days_to_expiry".into(), 7.0);
+        baseline.tested_parameters.clear();
+
+        let mut variant_a = carry_probe(opened_at_ms, true);
+        variant_a.sample_id = "carry-batch|variant-a".into();
+        variant_a.comparison_role = Some("variant".into());
+        variant_a.comparison_id = Some("carry-pair-a".into());
+        variant_a.comparison_ids.clear();
+
+        let mut variant_b = carry_probe(opened_at_ms, false);
+        variant_b.sample_id = "carry-batch|variant-b".into();
+        variant_b.comparison_role = Some("variant".into());
+        variant_b.comparison_id = Some("carry-pair-b".into());
+        variant_b.comparison_ids.clear();
+
+        let mut state = PersistedState::default();
+        for probe in [baseline, variant_a, variant_b] {
+            state.scout_pending_samples.insert(
+                probe.sample_id.clone(),
+                ScoutSamplePayload::DatedCarryProbe(probe),
+            );
+        }
+        let mut exit = carry_candidate(opened_at_ms);
+        exit.spot_bid = 101.0;
+        exit.future_ask = 100.2;
+        let response = apply_scout_lifecycle_observation(
+            &mut state,
+            &ScoutLifecycleObserveRequest {
+                request_id: "carry-pair-observe".into(),
+                now_ms: scout_now_ms(),
+                candidates: vec![exit],
+            },
+        );
+        assert_eq!(response.finalized_count, 3);
+        let paired = state.outbox.iter().filter_map(|item| match item {
+            ScoutOutboxItem::Learning(FeedbackEvent::ScoutOutcome {
+                event_id,
+                net_return_percent,
+                ..
+            }) if event_id.starts_with("paired-scout:") => Some((event_id.clone(), *net_return_percent)),
+            _ => None,
+        }).collect::<BTreeMap<_, _>>();
+        assert_eq!(paired.len(), 2);
+        assert!(paired["paired-scout:carry-pair-a"].abs() < 1e-8);
+        assert!(paired["paired-scout:carry-pair-b"] < 0.0);
     }
 }
 

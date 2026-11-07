@@ -34,6 +34,7 @@ mod scout_outcome_tests {
             scout_parameter_profile_symbol: None,
             scout_comparison_id: None,
             scout_comparison_ids: Vec::new(),
+            scout_comparison_zero_sides: Vec::new(),
             scout_comparison_role: None,
             scout_comparison_zero_role: None,
             scout_comparison_parameter_key: None,
@@ -159,6 +160,34 @@ mod scout_outcome_tests {
         };
         assert_eq!(parameters["minimum_momentum"], 0.7);
         assert!((net_return_percent + 0.8).abs() < 1e-9);
+    }
+
+    #[test]
+    fn one_baseline_outcome_emits_zero_side_feedback_for_a_rejected_variant() {
+        let mut baseline = outcome("baseline", 0.8);
+        baseline.scout_comparison_role = Some("baseline".into());
+        baseline.scout_comparison_ids = vec!["cmp-zero-side".into()];
+        baseline.scout_comparison_zero_sides = vec![ScoutComparisonZeroSide {
+            comparison_id: "cmp-zero-side".into(),
+            parameter_key: "minimum_momentum".into(),
+            parameter_value: 0.7,
+            profile_symbol: "BTC-USDT".into(),
+        }];
+        let tested = validate_scout_outcome(&baseline).unwrap();
+        assert!(tested.is_empty());
+        let mut state = PersistedState::default();
+        let (_, pairs) = record_paired_scout_outcome(&mut state, &baseline);
+        assert_eq!(pairs, vec!["cmp-zero-side"]);
+        let ScoutOutboxItem::Learning(FeedbackEvent::ScoutOutcome {
+            net_return_percent,
+            parameters,
+            ..
+        }) = &state.outbox[0]
+        else {
+            panic!()
+        };
+        assert!((net_return_percent + 0.8).abs() < 1e-9);
+        assert_eq!(parameters["minimum_momentum"], 0.7);
     }
 
     #[test]

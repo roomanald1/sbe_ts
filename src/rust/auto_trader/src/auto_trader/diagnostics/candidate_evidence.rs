@@ -1,11 +1,12 @@
 fn count_negative_evidence_candidates(
     candidates: &[&Signal],
     dashboard: &Dashboard,
+    now_ms: u64,
 ) -> usize {
     candidates
         .iter()
         .filter(|candidate| {
-            candidate_evidence(candidate, dashboard)
+            candidate_evidence(candidate, dashboard, now_ms)
                 .map(|evidence| side_metrics(candidate, evidence))
                 .is_some_and(has_negative_exploration_evidence)
         })
@@ -15,10 +16,9 @@ fn count_negative_evidence_candidates(
 fn candidate_evidence<'a>(
     candidate: &Signal,
     dashboard: &'a Dashboard,
+    now_ms: u64,
 ) -> Option<&'a WalkForward> {
-    dashboard.walk_forward.iter().find(|item| {
-        item.symbol == candidate.symbol && is_entry_evidence_horizon(item.horizon_seconds)
-    })
+    entry_walk_forward(&dashboard.walk_forward, &candidate.symbol, now_ms)
 }
 
 fn side_metrics<'a>(candidate: &Signal, evidence: &'a WalkForward) -> &'a SideWalkForwardMetrics {
@@ -81,6 +81,7 @@ mod candidate_evidence_tests {
             "walkForward": [{
                 "symbol": "BTC-USDT",
                 "horizon_seconds": 300,
+                "evidence_generated_at_ms": 1,
                 "all_signal_long": {
                     "sample_count": MIN_EXPLORATION_EVIDENCE_SAMPLES,
                     "average_net_return_percent": 0.0,
@@ -94,21 +95,54 @@ mod candidate_evidence_tests {
         }))
         .unwrap();
         let bullish = candidate("bullish");
-        let evidence = candidate_evidence(&bullish, &dashboard).unwrap();
+        let evidence = candidate_evidence(&bullish, &dashboard, 1_000).unwrap();
         assert_eq!(evidence.horizon_seconds, 300);
         assert_eq!(side_metrics(&bullish, evidence).sample_count, MIN_EXPLORATION_EVIDENCE_SAMPLES);
         assert_eq!(research_metrics(&bullish, evidence).sample_count, 10);
         assert!(has_negative_exploration_evidence(side_metrics(&bullish, evidence)));
-        assert_eq!(count_negative_evidence_candidates(&[&bullish], &dashboard), 1);
+        assert_eq!(count_negative_evidence_candidates(&[&bullish], &dashboard, 1_000), 1);
 
         let bearish = candidate("bearish");
         assert_eq!(side_metrics(&bearish, evidence).sample_count, 0);
-        assert_eq!(count_negative_evidence_candidates(&[&bearish], &dashboard), 0);
+        assert_eq!(count_negative_evidence_candidates(&[&bearish], &dashboard, 1_000), 0);
         let unrelated = candidate("bullish");
         assert_eq!(count_negative_evidence_candidates(&[&unrelated], &Dashboard {
             best: Vec::new(), walk_forward: Arc::new(Vec::new()),
             missed_opportunity_bands: Vec::new(), markets: Arc::new(BTreeMap::new()),
             queued_at: None, queue_wait_ms: None,
-        }), 0);
+        }, 1_000), 0);
+    }
+
+    #[test]
+    fn entry_evidence_selection_prefers_the_longest_supported_horizon() {
+        let dashboard: Dashboard = serde_json::from_value(serde_json::json!({
+            "best": [],
+            "walkForward": [
+                { "symbol": "BTC-USDT", "horizon_seconds": 60, "evidence_generated_at_ms": 1000 },
+                { "symbol": "BTC-USDT", "horizon_seconds": 300, "evidence_generated_at_ms": 1000 },
+                { "symbol": "BTC-USDT", "horizon_seconds": 900, "evidence_generated_at_ms": 1000 }
+            ]
+        }))
+        .unwrap();
+        assert_eq!(
+            entry_walk_forward(&dashboard.walk_forward, "BTC-USDT", 1000)
+                .unwrap()
+                .horizon_seconds,
+            300
+        );
+    }
+
+    #[test]
+    fn entry_evidence_rejects_stale_and_future_dated_snapshots() {
+        let dashboard: Dashboard = serde_json::from_value(serde_json::json!({
+            "best": [],
+            "walkForward": [
+                { "symbol": "BTC-USDT", "horizon_seconds": 300, "evidence_generated_at_ms": 1 },
+                { "symbol": "ETH-USDT", "horizon_seconds": 300, "evidence_generated_at_ms": 2_000_000 }
+            ]
+        }))
+        .unwrap();
+        assert!(entry_walk_forward(&dashboard.walk_forward, "BTC-USDT", 1_800_002).is_none());
+        assert!(entry_walk_forward(&dashboard.walk_forward, "ETH-USDT", 1_000_000).is_none());
     }
 }
