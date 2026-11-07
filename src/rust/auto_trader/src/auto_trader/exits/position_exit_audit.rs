@@ -65,6 +65,7 @@ fn position_exit_audit_payload(
         "initial_entry_notional": position.initial_entry_notional,
         "total_entry_fees_paid": position.total_entry_fees_paid,
         "total_fees_paid": position.total_fees_paid + fee,
+        "learning_context": position.entry_context,
         "timestamp_ms": position.entry_timestamp_ms,
         "duration_ms": (position.entry_timestamp_ms > 0).then_some(observed_at.saturating_sub(position.entry_timestamp_ms)),
         "quantity": position.quantity.abs(),
@@ -92,6 +93,43 @@ fn position_exit_audit_payload(
     });
     payload
 
+}
+
+fn queue_post_exit_observation(settings: &mut Settings, payload: &serde_json::Value) {
+    let reason = payload["reason"].as_str().unwrap_or_default();
+    if !matches!(reason, "take-profit" | "stop-loss" | "profit-protection")
+        || payload["trade_closed"].as_bool() != Some(true)
+    {
+        return;
+    }
+    let Some(exit_price) = payload["exit_average_price"].as_f64().filter(|value| *value > 0.0) else {
+        return;
+    };
+    let direction = if payload["side"].as_str() == Some("sell") { 1.0 } else { -1.0 };
+    let now = current_time_ms();
+    let event_id = format!("exit-timing:{}", payload["trade_id"].as_str().unwrap_or_default());
+    if settings.post_exit_observations.iter().any(|item| item["event_id"] == event_id) {
+        return;
+    }
+    settings.post_exit_observations.push(serde_json::json!({
+        "event_id": event_id,
+        "decision_id": payload["decision_id"],
+        "trade_id": payload["trade_id"],
+        "symbol": payload["symbol"],
+        "strategy": payload["strategy"],
+        "reason": reason,
+        "side": payload["side"],
+        "direction": direction,
+        "exit_price": exit_price,
+        "exit_return_percent": payload["net_return_percent"],
+        "exit_timestamp_ms": now,
+        "observe_at_ms": now.saturating_add(POST_EXIT_OBSERVATION_HORIZON_MS),
+        "next_sample_at_ms": now,
+        "price_path": [],
+        "entry_context": payload["entry_context"],
+        "strategy_decision": payload["entry_context"]["strategy_decision"],
+        "learning_context": payload["entry_context"]["learning_context"]
+    }));
 }
 
 fn exit_fill_status(filled: f64, quantity: f64) -> &'static str {

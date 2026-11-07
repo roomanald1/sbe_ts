@@ -3,11 +3,24 @@ import type { Connection } from '../connection';
 import { deriveOrderManagerState } from './OrderManagerDerived';
 import { OrderManagerBookFeeds } from './OrderManagerBookFeeds';
 import type {
-  BarrierDirection, BarrierOrder, OrderManagerProps, OrderManagerState,
-  OrderType, OrdersResponse, TradeSide, VwapRun,
+  BarrierDirection,
+  BarrierOrder,
+  OrderManagerProps,
+  OrderManagerState,
+  OrderType,
+  OrdersResponse,
+  TradeSide,
+  VwapRun,
 } from './OrderManagerTypes';
-import { orderSubmissionBody, validateOrderSubmission } from './OrderManagerSubmission';
-import { currentPositionSnapshot, subscribePositionStream } from '../position_stream';
+import {
+  orderSubmissionBody,
+  validateOrderSubmission,
+} from './OrderManagerSubmission';
+import {
+  currentPositionSnapshot,
+  subscribePositionStream,
+} from '../position_stream';
+import { sharedGet } from '../shared_get';
 
 export class OrderManagerModel {
   readonly props$: BehaviorSubject<OrderManagerProps>;
@@ -87,13 +100,34 @@ export class OrderManagerModel {
     this.stopPositionStream = subscribePositionStream((snapshot) => {
       this.lastPositionStreamAt = Date.now();
       const vwapRuns = (snapshot.vwap_runs?.runs ?? []) as VwapRun[];
-      const selectedRun = vwapRuns.find((run) => run.id === this.state$.value.vwapRunId)
-        ?? [...vwapRuns].reverse().find((run) => run.symbol === this.state$.value.selectedSymbol && run.status === 'running');
+      const selectedRun =
+        vwapRuns.find((run) => run.id === this.state$.value.vwapRunId) ??
+        [...vwapRuns]
+          .reverse()
+          .find(
+            (run) =>
+              run.symbol === this.state$.value.selectedSymbol &&
+              run.status === 'running',
+          );
       this.patch({
-        orders: snapshot.orders.orders, barrierOrders: snapshot.orders.barrier_orders ?? [],
-        vwapRuns, ...(snapshot.fee_rates ? { makerFeeRate: snapshot.fee_rates.maker, takerFeeRate: snapshot.fee_rates.taker } : {}),
-        ...(selectedRun ? { vwapRunId: selectedRun.id, vwapStatus: selectedRun.status, vwapExecutedQuantity: selectedRun.executed_quantity } : {}),
-        loading: false, error: undefined,
+        orders: snapshot.orders.orders,
+        barrierOrders: snapshot.orders.barrier_orders ?? [],
+        vwapRuns,
+        ...(snapshot.fee_rates
+          ? {
+              makerFeeRate: snapshot.fee_rates.maker,
+              takerFeeRate: snapshot.fee_rates.taker,
+            }
+          : {}),
+        ...(selectedRun
+          ? {
+              vwapRunId: selectedRun.id,
+              vwapStatus: selectedRun.status,
+              vwapExecutedQuantity: selectedRun.executed_quantity,
+            }
+          : {}),
+        loading: false,
+        error: undefined,
       });
       this.syncFeeds();
     });
@@ -101,7 +135,8 @@ export class OrderManagerModel {
     if (!currentPositionSnapshot()) void this.refreshOrders();
     void this.loadActiveVwap(this.state$.value.selectedSymbol);
     this.timer = setInterval(() => {
-      if (Date.now() - this.lastPositionStreamAt > 45_000) void this.refreshOrders();
+      if (Date.now() - this.lastPositionStreamAt > 45_000)
+        void this.refreshOrders();
     }, 30_000);
   }
   stop(): void {
@@ -131,7 +166,11 @@ export class OrderManagerModel {
     this.patch({ participationRate });
   }
   setLimitPrice(limitPrice: string): void {
-    this.patch({ limitPrice, confirmedLimitPrice: undefined, error: undefined });
+    this.patch({
+      limitPrice,
+      confirmedLimitPrice: undefined,
+      error: undefined,
+    });
   }
   setBarrierPrice(barrierPrice: string): void {
     this.patch({ barrierPrice, error: undefined });
@@ -141,13 +180,14 @@ export class OrderManagerModel {
   }
   private async loadFeeRates(): Promise<void> {
     const rates = currentPositionSnapshot()?.fee_rates;
-    if (rates && Number.isFinite(rates.maker) && Number.isFinite(rates.taker)) this.patch({ makerFeeRate: rates.maker, takerFeeRate: rates.taker });
+    if (rates && Number.isFinite(rates.maker) && Number.isFinite(rates.taker))
+      this.patch({ makerFeeRate: rates.maker, takerFeeRate: rates.taker });
   }
   async refreshOrders(): Promise<void> {
     if (this.refreshingOrders) return;
     this.refreshingOrders = true;
     try {
-      const response = await fetch('/positions/orders');
+      const response = await sharedGet('/positions/orders');
       if (!response.ok)
         throw new Error(
           'Could not load resting orders (' + response.status + ')',
@@ -155,7 +195,12 @@ export class OrderManagerModel {
       const data = (await response.json()) as OrdersResponse;
       if (!Array.isArray(data.orders))
         throw new Error('The orders API returned invalid data');
-      this.patch({ orders: data.orders, barrierOrders: data.barrier_orders ?? [], loading: false, error: undefined });
+      this.patch({
+        orders: data.orders,
+        barrierOrders: data.barrier_orders ?? [],
+        loading: false,
+        error: undefined,
+      });
       this.syncFeeds();
     } catch (reason) {
       this.patch({
@@ -191,17 +236,24 @@ export class OrderManagerModel {
     this.patch({ submitting: true, error: undefined });
     try {
       const isVwap = state.orderType === 'vwap';
-      const response = await fetch(isVwap ? '/positions/vwap' : '/positions/orders', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(orderSubmissionBody(state, validation.values)),
-      });
+      const response = await fetch(
+        isVwap ? '/positions/vwap' : '/positions/orders',
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(orderSubmissionBody(state, validation.values)),
+        },
+      );
       if (!response.ok) {
         const detail = await response.text();
         throw new Error(detail || 'Order rejected (' + response.status + ')');
       }
       const result = (await response.json()) as {
-        filled_quantity?: number; remaining_quantity?: number; id?: string; status?: string; executed_quantity?: number;
+        filled_quantity?: number;
+        remaining_quantity?: number;
+        id?: string;
+        status?: string;
+        executed_quantity?: number;
         barrier_order?: BarrierOrder;
       };
       if (result.barrier_order) {
@@ -210,7 +262,18 @@ export class OrderManagerModel {
         return;
       }
       if (isVwap && result.id) {
-        this.patch({ vwapRunId: result.id, vwapStatus: result.status ?? 'running', vwapExecutedQuantity: result.executed_quantity ?? 0, vwapRuns: [...this.state$.value.vwapRuns.filter((run) => run.id !== result.id), result as VwapRun], error: undefined, quantity: '', orderType: 'ioc' });
+        this.patch({
+          vwapRunId: result.id,
+          vwapStatus: result.status ?? 'running',
+          vwapExecutedQuantity: result.executed_quantity ?? 0,
+          vwapRuns: [
+            ...this.state$.value.vwapRuns.filter((run) => run.id !== result.id),
+            result as VwapRun,
+          ],
+          error: undefined,
+          quantity: '',
+          orderType: 'ioc',
+        });
         this.syncVwapFromStream(result.id);
         return;
       }
@@ -230,25 +293,53 @@ export class OrderManagerModel {
   }
   private async loadActiveVwap(symbol: string): Promise<void> {
     if (!symbol || this.state$.value.selectedSymbol !== symbol) return;
-    const runs = currentPositionSnapshot()?.vwap_runs?.runs as VwapRun[] | undefined;
+    const runs = currentPositionSnapshot()?.vwap_runs?.runs as
+      | VwapRun[]
+      | undefined;
     if (!runs) return;
     this.patch({ vwapRuns: runs });
-    const run = [...runs].reverse().find((item) => item.symbol === symbol && item.status === 'running');
-    if (run) this.patch({ vwapRunId: run.id, vwapStatus: run.status, vwapExecutedQuantity: run.executed_quantity });
+    const run = [...runs]
+      .reverse()
+      .find((item) => item.symbol === symbol && item.status === 'running');
+    if (run)
+      this.patch({
+        vwapRunId: run.id,
+        vwapStatus: run.status,
+        vwapExecutedQuantity: run.executed_quantity,
+      });
   }
   private syncVwapFromStream(runId: string): void {
-    const run = (currentPositionSnapshot()?.vwap_runs?.runs as VwapRun[] | undefined)?.find((item) => item.id === runId);
-    if (run) this.patch({ vwapStatus: run.status, vwapExecutedQuantity: run.executed_quantity });
+    const run = (
+      currentPositionSnapshot()?.vwap_runs?.runs as VwapRun[] | undefined
+    )?.find((item) => item.id === runId);
+    if (run)
+      this.patch({
+        vwapStatus: run.status,
+        vwapExecutedQuantity: run.executed_quantity,
+      });
   }
   async cancelVwap(runId = this.state$.value.vwapRunId): Promise<void> {
     if (!runId) return;
     try {
-      const response = await fetch('/positions/vwap/' + encodeURIComponent(runId), { method: 'DELETE' });
-      if (!response.ok) throw new Error((await response.text()) || 'Could not cancel VWAP execution');
-      const vwapRuns = this.state$.value.vwapRuns.map((run) => run.id === runId ? { ...run, status: 'cancelled' } : run);
+      const response = await fetch(
+        '/positions/vwap/' + encodeURIComponent(runId),
+        { method: 'DELETE' },
+      );
+      if (!response.ok)
+        throw new Error(
+          (await response.text()) || 'Could not cancel VWAP execution',
+        );
+      const vwapRuns = this.state$.value.vwapRuns.map((run) =>
+        run.id === runId ? { ...run, status: 'cancelled' } : run,
+      );
       this.patch({ vwapRuns, vwapStatus: 'cancelled', error: undefined });
     } catch (reason) {
-      this.patch({ error: reason instanceof Error ? reason.message : 'Could not cancel VWAP execution' });
+      this.patch({
+        error:
+          reason instanceof Error
+            ? reason.message
+            : 'Could not cancel VWAP execution',
+      });
     }
   }
   async cancelOrder(id: string): Promise<void> {
@@ -260,7 +351,9 @@ export class OrderManagerModel {
       if (!response.ok) throw new Error(await response.text());
       this.patch({
         orders: this.state$.value.orders.filter((order) => order.id !== id),
-        barrierOrders: this.state$.value.barrierOrders.filter((order) => order.id !== id),
+        barrierOrders: this.state$.value.barrierOrders.filter(
+          (order) => order.id !== id,
+        ),
       });
       this.syncFeeds();
     } catch (reason) {
@@ -278,16 +371,19 @@ export class OrderManagerModel {
   }
   private syncFeeds(): void {
     const state = this.state$.value;
-    const symbols = new Set([
-      state.selectedSymbol,
-      ...state.orders.map((order) => order.symbol),
-      ...state.barrierOrders.filter((order) => order.status === 'armed').map((order) => order.symbol),
-    ].filter(Boolean));
+    const symbols = new Set(
+      [
+        state.selectedSymbol,
+        ...state.orders.map((order) => order.symbol),
+        ...state.barrierOrders
+          .filter((order) => order.status === 'armed')
+          .map((order) => order.symbol),
+      ].filter(Boolean),
+    );
     this.bookFeeds.sync(symbols);
   }
 
   private closeFeeds(): void {
     this.bookFeeds.close();
   }
-
 }

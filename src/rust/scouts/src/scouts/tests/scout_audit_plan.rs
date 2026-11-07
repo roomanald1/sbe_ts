@@ -65,5 +65,75 @@ mod scout_audit_plan_tests {
         assert_eq!(audits[0]["scout_comparison_zero_role"], "variant");
         assert_eq!(audits[0]["scout_comparison_parameter_value"], 0.7);
     }
+
+    #[test]
+    fn scout_registration_skips_historical_samples_outside_insights_retention() {
+        let now = scout_now_ms();
+        let fresh = serde_json::json!({
+            "decision_id": "decision-fresh",
+            "symbol": "BTC-USDT",
+            "timestamp": now,
+            "direction": "bullish",
+            "strategy": "trend-50-200",
+            "scout_entry_price": 100.0,
+            "strategy_decision": {"strategy_parameters": {}},
+            "stop_loss_percent": 0.5,
+            "take_profit_percent": 0.8,
+            "scout_exit_scenario": "strategy",
+            "scout_comparison_role": "baseline",
+            "scout_comparison_ids": ["pair-a", "pair-b"]
+        });
+        let registration = scout_registration(&fresh).unwrap();
+        assert_eq!(registration["scout_comparison_role"], "baseline");
+        assert_eq!(registration["scout_comparison_ids"], serde_json::json!(["pair-a", "pair-b"]));
+
+        let mut stale = fresh;
+        stale["timestamp"] = serde_json::json!(now.saturating_sub(7 * 86_400_000 + 1));
+        assert!(scout_registration(&stale).is_none());
+    }
+
+    #[test]
+    fn stored_scout_instances_drop_large_signal_payloads_but_keep_markout_fields() {
+        let full = serde_json::json!({
+            "decision_id": "decision-1",
+            "symbol": "BTC-USDT",
+            "timestamp": 1_000,
+            "signal_timestamp": 1_000,
+            "direction": "bullish",
+            "strategy": "live-momentum",
+            "scout_entry_price": 100.0,
+            "scout_notional_usd": 5.0,
+            "scout_learning_context": "context",
+            "strategy_parameters": {"stop_loss_percent": 0.5},
+            "strategy_parameter_specs": [],
+            "strategy_decision": {
+                "observed_close": 100.0,
+                "strategy_order_size_multiplier": 0.5,
+                "strategy_parameters": {"stop_loss_percent": 0.5},
+                "market_snapshot": {"depth": [1, 2, 3]}
+            },
+            "feature_history": ["large", "signal", "payload"]
+        });
+        let compact = compact_scout_instance(&full);
+        assert_eq!(compact["decision_id"], "decision-1");
+        assert_eq!(compact["strategy_decision"]["observed_close"], 100.0);
+        assert_eq!(compact["strategy_decision"]["strategy_order_size_multiplier"], 0.5);
+        assert!(compact["strategy_decision"].get("market_snapshot").is_none());
+        assert!(compact.get("feature_history").is_none());
+
+        let mut state = PersistedState::default();
+        state.scout_plan_results.insert(
+            "request-1".into(),
+            ScoutPlanResponse {
+                audits: vec![full],
+                selected_groups: vec!["group-1".into()],
+            },
+        );
+        let (_, _, changed_plans) = compact_persisted_scout_payloads(&mut state);
+        assert_eq!(changed_plans, vec!["request-1"]);
+        assert!(state.scout_plan_results["request-1"].audits[0]
+            .get("feature_history")
+            .is_none());
+    }
 }
 

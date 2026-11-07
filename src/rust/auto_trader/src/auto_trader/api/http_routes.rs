@@ -195,6 +195,7 @@ pub fn router() -> Router {
         settings_persist_timings_ms: Arc::new(std::sync::Mutex::new(BTreeMap::new())),
         latest_missed_opportunity_bands: Arc::new(Mutex::new(Vec::new())),
         latest_execution_parameters: Arc::new(Mutex::new(None)),
+        learning_response_cache: Arc::new(Mutex::new(LearningResponseCache::default())),
         cycle_lock: Arc::new(Mutex::new(())),
         pending_daily_signals: Arc::new(Mutex::new(BTreeMap::new())),
         daily_signal_notify: Arc::new(Notify::new()),
@@ -219,6 +220,7 @@ pub fn router() -> Router {
     };
     start_settings_persistence_worker(&state);
     start_learning_feedback_worker(&state);
+    start_post_exit_observation_worker(&state);
     let rates_worker_state = state.clone();
     tokio::spawn(async move {
         let mut ticker = interval(Duration::from_secs(30));

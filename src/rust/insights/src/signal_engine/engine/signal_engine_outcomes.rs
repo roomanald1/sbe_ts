@@ -155,7 +155,11 @@ impl SignalEngine {
             let maximum_hold_elapsed = pending.scout_maximum_hold_days
                 .is_some_and(|days| scout_age_ms >= (days * 86_400_000.0) as u64);
             let maximum_scout_duration_elapsed =
-                is_scout && scout_age_ms >= MAX_SCOUT_SCOUT_DURATION_MS;
+                is_scout
+                    && scout_age_ms
+                        >= pending
+                            .scout_maximum_duration_ms
+                            .unwrap_or(MAX_SCOUT_SCOUT_DURATION_MS);
             let scout_exit_reason = if !is_scout {
                 None
             } else if pending.strategy_exit_requested && !minimum_hold_active {

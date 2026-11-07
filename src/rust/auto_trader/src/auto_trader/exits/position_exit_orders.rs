@@ -206,6 +206,11 @@ async fn submit_position_exit_order(
             take_profit_percent,
             &exit_decision_context,
         );
+        if payload["trade_closed"].as_bool() == Some(true) {
+            let mut settings = state.settings.lock().await;
+            queue_post_exit_observation(&mut settings, &payload);
+            request_settings_persist(state)?;
+        }
         queue_auto_trader_audit(state, payload);
     }
     Ok(Some(CycleResult {

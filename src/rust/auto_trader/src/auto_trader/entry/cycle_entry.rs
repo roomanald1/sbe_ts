@@ -8,6 +8,8 @@ async fn submit_cycle_signal(
     counterfactual_stop_loss_percent: f64,
     counterfactual_take_profit_percent: f64,
     signal_selection_ms: f64,
+    context_threshold_refresh_ms: f64,
+    cycle_started_at: Instant,
     now: u64,
 ) -> Result<CycleResult, (StatusCode, String)> {
     if state.audit_health.load(Ordering::Relaxed) != 3
@@ -72,6 +74,8 @@ async fn submit_cycle_signal(
         counterfactual_stop_loss_percent,
         counterfactual_take_profit_percent,
         signal_selection_ms,
+        context_threshold_refresh_ms,
+        cycle_started_at,
         now,
         market,
         bid,
@@ -450,40 +454,37 @@ async fn request_learning_context_thresholds_for_contexts(
     };
     let base = std::env::var("LEARNING_SERVICE_URL")
         .unwrap_or_else(|_| "http://127.0.0.1:3010".into());
-    let response = client.post(format!("{}/context-thresholds", base.trim_end_matches('/')))
-        .timeout(Duration::from_millis(250))
-        .json(&request)
-        .send()
-        .await
-        .map_err(|error| error.to_string())
-        .and_then(|response| response.error_for_status().map_err(|error| error.to_string()));
-    match response {
-        Ok(response) => match response.json::<strategies::ContextThresholdResponse>().await {
-            Ok(response) => {
-                if import_legacy_learning {
-                    let mut settings = state.settings.lock().await;
-                    settings.context_learning_imported = true;
-                    drop(settings);
-                    let _ = request_settings_persist(state);
-                }
-                response.thresholds
-            },
-            Err(error) => {
-                crate::service_log!("WARN", "Learning service returned invalid entry thresholds; using neutral defaults: {error}");
-                BTreeMap::new()
-            }
-        },
-        Err(error) => {
-            crate::service_log!("WARN", "Learning service unavailable for entry thresholds; using neutral defaults: {error}");
-            BTreeMap::new()
-        }
+    let cache_key = format!(
+        "context-thresholds:{}",
+        request
+            .contexts
+            .iter()
+            .map(|input| input.context.as_str())
+            .collect::<Vec<_>>()
+            .join("|")
+    );
+    let response = cached_learning_response::<strategies::ContextThresholdResponse>(
+        &state.learning_response_cache,
+        cache_key,
+        client,
+        format!("{}/context-thresholds", base.trim_end_matches('/')),
+        serde_json::to_value(request).unwrap_or(serde_json::Value::Null),
+    )
+    .await;
+    if response.is_some() && import_legacy_learning {
+        let mut settings = state.settings.lock().await;
+        settings.context_learning_imported = true;
+        drop(settings);
+        let _ = request_settings_persist(state);
     }
+    response.map_or_else(BTreeMap::new, |response| response.thresholds)
 }
 
 async fn run_cycle_inner(
     state: &AutoTraderState,
     mut dashboard: Dashboard,
 ) -> Result<CycleResult, (StatusCode, String)> {
+    let cycle_started_at = Instant::now();
     {
         let mut settings = state.settings.lock().await;
         settings.last_risk_note.clear();
@@ -717,6 +718,7 @@ async fn run_cycle_inner(
         .filter(|signal| signal_is_fresh(signal, now))
         .cloned()
         .collect::<Vec<_>>();
+    let threshold_refresh_started = Instant::now();
     let learning_thresholds = request_learning_context_thresholds(
         &client,
         state,
@@ -724,6 +726,7 @@ async fn run_cycle_inner(
         &dashboard.missed_opportunity_bands,
     )
     .await;
+    let context_threshold_refresh_ms = threshold_refresh_started.elapsed().as_secs_f64() * 1_000.0;
     let (open_positions, strategy_positions, max_entries_per_auto_position) = {
         let settings = state.settings.lock().await;
         let open_positions = settings
@@ -844,6 +847,8 @@ async fn run_cycle_inner(
                     counterfactual_stop_loss_percent,
                     counterfactual_take_profit_percent,
                     signal_selection_ms,
+                    context_threshold_refresh_ms,
+                    cycle_started_at,
                     now,
                 )
                 .await
@@ -941,6 +946,8 @@ async fn run_cycle_inner(
         counterfactual_stop_loss_percent,
         counterfactual_take_profit_percent,
         signal_selection_ms,
+        context_threshold_refresh_ms,
+        cycle_started_at,
         now,
     )
     .await?;

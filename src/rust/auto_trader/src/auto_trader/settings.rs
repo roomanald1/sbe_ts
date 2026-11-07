@@ -99,6 +99,10 @@ struct Settings {
     #[serde(default)]
     feedback_outbox: Vec<strategies::FeedbackEvent>,
     #[serde(default)]
+    post_exit_observations: Vec<serde_json::Value>,
+    #[serde(default)]
+    exit_timing_feedback_outbox: Vec<serde_json::Value>,
+    #[serde(default)]
     profile_registration_outbox: Vec<strategies::StrategyProfileRegistration>,
     #[serde(default)]
     registered_profile_ids: BTreeSet<String>,
@@ -232,7 +236,7 @@ fn default_strategies() -> Vec<Strategy> {
 fn default_signal_strategies_enabled() -> bool {
     true
 }
-fn default_live_scout_parameter_samples() -> usize { 6 }
+fn default_live_scout_parameter_samples() -> usize { 3 }
 
 impl Default for Settings {
     fn default() -> Self {
@@ -280,6 +284,8 @@ impl Default for Settings {
             learning: BTreeMap::new(),
             context_learning_imported: false,
             feedback_outbox: Vec::new(),
+            post_exit_observations: Vec::new(),
+            exit_timing_feedback_outbox: Vec::new(),
             profile_registration_outbox: Vec::new(),
             registered_profile_ids: BTreeSet::new(),
             learned_profiles: BTreeMap::new(),

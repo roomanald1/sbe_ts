@@ -9,6 +9,7 @@ import {
   type AutoTraderUiSnapshot,
 } from '../auto_trader_stream';
 import { subscribeInsightsStream } from '../insights_stream';
+import { sharedGet } from '../shared_get';
 
 export type AutoTraderOrder = {
   timestamp: number;
@@ -262,8 +263,6 @@ export type AutoTraderState = {
   decisionQuality: AutoTraderDecisionQuality;
   scoutOpenPositions: number;
   pendingScoutParameters: AutoTraderPendingScoutParameter[];
-  liveScoutSamples: number;
-  liveScoutStrategies: string[];
 
   scoutLearningSamples: number;
   scoutLearningWinRate?: number;
@@ -458,8 +457,6 @@ export class AutoTraderModel {
     decisionQuality: emptyDecisionQuality,
     scoutOpenPositions: 0,
     pendingScoutParameters: [],
-    liveScoutSamples: 0,
-    liveScoutStrategies: [],
     scoutLearningSamples: 0,
     scoutLearningRealizedPnl: 0,
     realizedPnl: 0,
@@ -510,6 +507,10 @@ export class AutoTraderModel {
   private stopPositionStream?: () => void;
   private stopAutoTraderStream?: () => void;
   private stopInsightsStream?: () => void;
+  private streamRefreshTimer?: ReturnType<typeof setTimeout>;
+  private lastStreamRefreshAt = 0;
+  private decisionParametersRefreshInFlight = false;
+  private decisionParametersAttemptAt = 0;
   private autoTraderSnapshot?: AutoTraderUiSnapshot;
   private autoTraderSnapshotAt = 0;
   start() {
@@ -521,7 +522,7 @@ export class AutoTraderModel {
       if (streamedRates && Object.keys(streamedRates).length > 0) {
         this.usdRates = { ...this.usdRates, ...streamedRates };
       }
-      if (this.autoTraderSnapshot) void this.refresh();
+      if (this.autoTraderSnapshot) this.scheduleStreamRefresh();
     });
     this.autoTraderSnapshot = currentAutoTraderSnapshot();
     if (this.autoTraderSnapshot) this.autoTraderSnapshotAt = Date.now();
@@ -529,10 +530,11 @@ export class AutoTraderModel {
       this.autoTraderSnapshot = snapshot;
       this.autoTraderSnapshotAt = Date.now();
       const decisionParameters = snapshot.parameters as
-        AutoTraderDecisionParameters | undefined;
+        | AutoTraderDecisionParameters
+        | undefined;
       if (!decisionParameters) {
         void this.refreshDecisionParameters();
-        void this.refresh();
+        this.scheduleStreamRefresh();
         return;
       }
       const savedOverrides = Object.fromEntries(
@@ -560,7 +562,7 @@ export class AutoTraderModel {
           : savedOverrides,
         decisionParametersError: undefined,
       });
-      void this.refresh();
+      this.scheduleStreamRefresh();
     });
     this.stopInsightsStream = subscribeInsightsStream((snapshot) => {
       this.state$.next({
@@ -585,6 +587,8 @@ export class AutoTraderModel {
     if (this.startUsers > 0) return;
     if (this.timer) clearInterval(this.timer);
     this.timer = undefined;
+    if (this.streamRefreshTimer) clearTimeout(this.streamRefreshTimer);
+    this.streamRefreshTimer = undefined;
     this.stopPositionStream?.();
     this.stopPositionStream = undefined;
     this.stopAutoTraderStream?.();
@@ -751,13 +755,6 @@ export class AutoTraderModel {
         exit_fills?: Array<{ parent_order_id?: string }>;
         entry_context?: { quantity?: number; average_price?: number };
       }>;
-      const scoutAuditRequest = fetch(
-        '/signals/auto-trader-audit?since=' +
-          (Date.now() - 24 * 60 * 60 * 1_000) +
-          '&limit=5000',
-      ).catch(() => undefined);
-      let liveScoutSamples = this.state$.value.liveScoutSamples;
-      let liveScoutStrategies = this.state$.value.liveScoutStrategies;
       const autoSnapshot = this.autoTraderSnapshot;
       const useStreamSnapshot =
         autoSnapshot && Date.now() - this.autoTraderSnapshotAt <= 45_000;
@@ -780,10 +777,10 @@ export class AutoTraderModel {
           positionsResponse,
           auditResponse,
         ] = await Promise.all([
-          fetch('/positions/auto-trader'),
-          fetch('/positions/auto-trader/activity'),
-          fetch('/positions?source=auto'),
-          fetch('/signals/auto-trader-execution-audit'),
+          sharedGet('/positions/auto-trader'),
+          sharedGet('/positions/auto-trader/activity'),
+          sharedGet('/positions?source=auto'),
+          sharedGet('/signals/auto-trader-execution-audit'),
         ]);
         if (!statusResponse.ok)
           throw await this.responseError('status', statusResponse);
@@ -801,50 +798,6 @@ export class AutoTraderModel {
           : undefined;
         auditRows = auditPage?.items ?? [];
       }
-      const scoutAuditResponse = await scoutAuditRequest;
-      if (scoutAuditResponse?.ok) {
-        const scoutAuditPayload = (await scoutAuditResponse.json()) as
-          | Array<{
-              stage?: string;
-              status?: string;
-              scout?: boolean;
-              strategy?: string;
-              scout_sample_group_id?: string;
-              shadow_sample_group_id?: string;
-              decision_id?: string;
-            }>
-          | {
-              items?: Array<{
-                stage?: string;
-                status?: string;
-                scout?: boolean;
-                strategy?: string;
-                scout_sample_group_id?: string;
-                shadow_sample_group_id?: string;
-                decision_id?: string;
-              }>;
-            };
-        const scoutAuditRows = Array.isArray(scoutAuditPayload)
-          ? scoutAuditPayload
-          : (scoutAuditPayload.items ?? []);
-        const liveScoutGroups = new Map<string, string>();
-        for (const row of scoutAuditRows) {
-          if (
-            row.stage !== 'decision' ||
-            (row.status !== 'scouted' && row.status !== 'shadowed') ||
-            row.scout !== true ||
-            !row.strategy?.startsWith('live-')
-          )
-            continue;
-          const group =
-            row.scout_sample_group_id ??
-            row.shadow_sample_group_id ??
-            row.decision_id;
-          if (group) liveScoutGroups.set(group, row.strategy);
-        }
-        liveScoutSamples = liveScoutGroups.size;
-        liveScoutStrategies = [...new Set(liveScoutGroups.values())].sort();
-      }
       let usdRates = this.usdRates;
       const quoteTotals = [
         activity.realized_pnl_by_quote,
@@ -859,7 +812,7 @@ export class AutoTraderModel {
       );
       if (hasMissingRate) {
         try {
-          const ratesResponse = await fetch('/positions/usd-rates');
+          const ratesResponse = await sharedGet('/positions/usd-rates', 30_000);
           if (ratesResponse.ok) {
             const ratesPayload = (await ratesResponse.json()) as {
               rates?: Record<string, number>;
@@ -873,9 +826,10 @@ export class AutoTraderModel {
           /* Keep cached rates; missing currencies remain unavailable. */
         }
       }
-      const scoutConfigResponse = await fetch('/scouts/configuration').catch(
-        () => undefined,
-      );
+      const scoutConfigResponse = await sharedGet(
+        '/scouts/configuration',
+        30_000,
+      ).catch(() => undefined);
       const scoutConfiguration = scoutConfigResponse?.ok
         ? ((await scoutConfigResponse.json()) as {
             strategies: Strategy[];
@@ -891,9 +845,10 @@ export class AutoTraderModel {
               this.state$.value.scoutMaxActivePositions,
             ),
           };
-      const scoutStatusResponse = await fetch('/scouts/status').catch(
-        () => undefined,
-      );
+      const scoutStatusResponse = await sharedGet(
+        '/scouts/status',
+        30_000,
+      ).catch(() => undefined);
       const scoutStatus = scoutStatusResponse?.ok
         ? ((await scoutStatusResponse.json()) as {
             active_samples: number;
@@ -1160,8 +1115,6 @@ export class AutoTraderModel {
         openPositionSymbols: activity.open_position_symbols ?? [],
         ledgerOpenPositionSymbols,
         scoutOpenPositions: scoutStatus.active_samples,
-        liveScoutSamples,
-        liveScoutStrategies,
         scoutLearningSamples: scoutStatus.learning_samples,
         scoutLearningWinRate: scoutStatus.win_rate,
         scoutLearningRealizedPnl: scoutStatus.realized_pnl_usd,
@@ -1200,17 +1153,30 @@ export class AutoTraderModel {
   }
 
   async refreshDecisionParameters() {
+    if (this.decisionParametersRefreshInFlight) return;
+    if (Date.now() - this.decisionParametersAttemptAt < 30_000) return;
+    this.decisionParametersAttemptAt = Date.now();
+    this.decisionParametersRefreshInFlight = true;
     try {
+      const streamedParameters = this.autoTraderSnapshot?.parameters as
+        | AutoTraderDecisionParameters
+        | undefined;
       const [response, scoutResponse] = await Promise.all([
-        fetch('/positions/auto-trader/parameters'),
-        fetch(
+        streamedParameters
+          ? Promise.resolve(undefined)
+          : sharedGet('/positions/auto-trader/parameters'),
+        sharedGet(
           '/scouts/outcomes?source=all&status=open&page=0&page_size=1',
         ).catch(() => undefined),
       ]);
-      if (!response.ok)
-        throw await this.responseError('decision parameters', response);
+      if (!streamedParameters && !response?.ok) {
+        if (response)
+          throw await this.responseError('decision parameters', response);
+        throw new Error('Could not load Auto Trader decision parameters.');
+      }
       const decisionParameters =
-        (await response.json()) as AutoTraderDecisionParameters;
+        streamedParameters ??
+        ((await response!.json()) as AutoTraderDecisionParameters);
       let pendingScoutParameters = this.state$.value.pendingScoutParameters;
       if (scoutResponse?.ok) {
         const scoutSnapshot = (await scoutResponse.json()) as {
@@ -1252,7 +1218,22 @@ export class AutoTraderModel {
             ? error.message
             : 'Could not load Auto Trader decision parameters.',
       });
+    } finally {
+      this.decisionParametersRefreshInFlight = false;
     }
+  }
+
+  private scheduleStreamRefresh() {
+    if (this.streamRefreshTimer) return;
+    const delay = Math.max(
+      250,
+      10_000 - (Date.now() - this.lastStreamRefreshAt),
+    );
+    this.streamRefreshTimer = setTimeout(() => {
+      this.streamRefreshTimer = undefined;
+      this.lastStreamRefreshAt = Date.now();
+      void this.refresh();
+    }, delay);
   }
 
   private async responseError(

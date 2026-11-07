@@ -189,9 +189,12 @@ struct SignalExecutionPlan {
     profile: usize,
     execution_params: ExecutionParameters,
     learning_context: String,
+    execution_learning_ms: f64,
+    imported_execution_learning: bool,
 }
 
 async fn execution_learning_decision(
+    state: &AutoTraderState,
     client: &reqwest::Client,
     context: &str,
     baseline: AutoOrderType,
@@ -230,22 +233,23 @@ async fn execution_learning_decision(
     };
     let base = std::env::var("LEARNING_SERVICE_URL")
         .unwrap_or_else(|_| "http://127.0.0.1:3010".into());
-    let result = client.post(format!("{}/execution-decision", base.trim_end_matches('/')))
-        .timeout(std::time::Duration::from_millis(250))
-        .json(&request)
-        .send().await
-        .map_err(|error| error.to_string())
-        .and_then(|response| response.error_for_status().map_err(|error| error.to_string()));
-    let response = match result {
-        Ok(response) => response.json::<strategies::ExecutionLearningResponse>().await.ok(),
-        Err(error) => {
-            crate::service_log!("WARN", "Learning service unavailable for execution profile: {error}");
-            None
-        }
-    };
+    let baseline_order_type = request.baseline_order_type.clone();
+    let cache_key = format!(
+        "execution-decision:{context}:{baseline_order_type}:{risk_appetite:.4}:{}:{}",
+        request.allow_order_type_adaptation,
+        request.explore_profile_order_types.join("|")
+    );
+    let response = cached_learning_response::<strategies::ExecutionLearningResponse>(
+        &state.learning_response_cache,
+        cache_key,
+        client,
+        format!("{}/execution-decision", base.trim_end_matches('/')),
+        serde_json::to_value(request).unwrap_or(serde_json::Value::Null),
+    )
+    .await;
     let imported = response.is_some() && import_legacy_learning;
     (response.unwrap_or_else(|| strategies::ExecutionLearningResponse {
-        learned_order_type: Some(request.baseline_order_type),
+        learned_order_type: Some(baseline_order_type),
         schedule_depth_threshold: DEFAULT_SCHEDULE_DEPTH_RATIO,
         schedule_threshold_samples: 0,
         parameter_profiles: BTreeMap::new(),
@@ -254,7 +258,7 @@ async fn execution_learning_decision(
 
 async fn prepare_signal_execution_plan(
     state: &AutoTraderState,
-    mut settings: tokio::sync::MutexGuard<'_, Settings>,
+    mut settings: Settings,
     signal: &Signal,
     dashboard: &Dashboard,
     market: &serde_json::Value,
@@ -267,9 +271,6 @@ async fn prepare_signal_execution_plan(
     let strategy = signal.strategy.as_deref().and_then(Strategy::from_name);
     let strategy_profile = strategy
         .map(|strategy| learned_strategy_parameter_profile(&settings, &signal.symbol, strategy));
-    if let (Some(strategy), Some(profile)) = (strategy, strategy_profile.as_ref()) {
-        queue_strategy_profile_registration(&mut settings, &signal.symbol, strategy, profile);
-    }
     let is_portfolio_rebalance = strategy == Some(Strategy::RiskAdjustedTrendPortfolio)
         && signal.strategy_decision.as_ref()
         .and_then(|decision| decision.get("portfolio_rebalance_delta_usd"))
@@ -458,14 +459,6 @@ async fn prepare_signal_execution_plan(
     if notional <= 0.0 {
         return Err("Strategy category or total notional capacity is fully allocated".into());
     }
-    if exploratory {
-        if !settings.last_risk_note.is_empty() {
-            settings.last_risk_note.push_str(" · ");
-        }
-        settings
-            .last_risk_note
-            .push_str("small paper-exploration size; no reliable same-side walk-forward edge yet");
-    }
     let baseline_params = ExecutionParameters {
         post_only_timeout_minutes: signal
             .strategy_decision
@@ -508,7 +501,9 @@ async fn prepare_signal_execution_plan(
             (effective_take_profit_percent, horizon_take_profit_percent)
         };
     let context = market_context(&signal);
+    let execution_learning_started = Instant::now();
     let (execution_learning, imported_execution_learning) = execution_learning_decision(
+        state,
         &state.client,
         &context,
         baseline_type,
@@ -519,6 +514,7 @@ async fn prepare_signal_execution_plan(
         &settings.execution_learning,
         !settings.execution_learning_imported,
     ).await;
+    let execution_learning_ms = execution_learning_started.elapsed().as_secs_f64() * 1_000.0;
     if imported_execution_learning {
         settings.execution_learning_imported = true;
     }
@@ -592,6 +588,8 @@ async fn prepare_signal_execution_plan(
         profile,
         execution_params,
         learning_context,
+        execution_learning_ms,
+        imported_execution_learning,
     })
 }
 

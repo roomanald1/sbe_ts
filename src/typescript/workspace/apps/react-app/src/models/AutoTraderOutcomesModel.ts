@@ -10,6 +10,7 @@ import {
   subscribeAutoTraderStream,
   type AutoTraderUiSnapshot,
 } from '../auto_trader_stream';
+import { sharedGet } from '../shared_get';
 
 export type AutoTraderOutcome = {
   rowId: string;
@@ -48,6 +49,20 @@ export type AutoTraderOutcome = {
   stopLossActive?: boolean;
   takeProfitActive?: boolean;
   exitReason?: string;
+  profitProtection?: {
+    activationPercent?: number;
+    givebackPercent?: number;
+    minimumLockPercent?: number;
+    peakReturnPercent?: number;
+    exitReturnPercent?: number;
+    triggered?: boolean;
+  };
+  postExitMissedReturnPercent?: number;
+  postExitMissedPnlQuote?: number;
+  postExitBestReturnPercent?: number;
+  postExitWorstReturnPercent?: number;
+  postExitObservedAt?: number;
+  postExitHorizonMs?: number;
   entryStrategyDecision?: StrategyGateDecision;
   latestStrategyEvaluation?: StrategyGateDecision;
   carryDetails?: DatedCarryPosition;
@@ -97,6 +112,16 @@ type AuditRecord = {
   reason?: string;
   effective_stop_loss_percent?: number;
   effective_take_profit_percent?: number;
+  net_return_percent?: number;
+  exit_rule_trace?: {
+    profit_protection?: {
+      activation_percent?: number;
+      giveback_percent?: number;
+      minimum_lock_percent?: number;
+      peak_return_percent?: number | null;
+      triggered?: boolean;
+    };
+  };
   barrier_order_id?: string;
   exit_fills?: Array<{ parent_order_id?: string }>;
   filled_quantity?: number;
@@ -113,6 +138,14 @@ type AuditRecord = {
     initial_entry_notional?: number;
     total_entry_fees_paid?: number;
     total_fees_paid?: number;
+  };
+  post_exit_observation?: {
+    missed_return_percent?: number;
+    missed_pnl_quote?: number;
+    best_post_exit_return_percent?: number;
+    worst_post_exit_return_percent?: number;
+    observed_at_ms?: number;
+    horizon_ms?: number;
   };
   strength?: number;
   score?: number;
@@ -445,6 +478,7 @@ export class AutoTraderOutcomesModel {
   private stopPositionStream?: () => void;
   private stopAutoTraderStream?: () => void;
   private refreshTimer?: ReturnType<typeof setTimeout>;
+  private lastStreamRefreshAt = 0;
   private positionSnapshot?: PositionUiSnapshot;
   private autoTraderSnapshot?: AutoTraderUiSnapshot;
   private refreshing = false;
@@ -502,11 +536,16 @@ export class AutoTraderOutcomesModel {
     this.refreshTimer = undefined;
   }
   private scheduleRefresh() {
-    if (this.refreshTimer) clearTimeout(this.refreshTimer);
+    if (this.refreshTimer) return;
+    const delay = Math.max(
+      100,
+      10_000 - (Date.now() - this.lastStreamRefreshAt),
+    );
     this.refreshTimer = setTimeout(() => {
       this.refreshTimer = undefined;
+      this.lastStreamRefreshAt = Date.now();
       void this.refresh();
-    }, 100);
+    }, delay);
   }
   requestClose(symbol: string) {
     const current = this.state$.value;
@@ -628,41 +667,47 @@ export class AutoTraderOutcomesModel {
       ] = await Promise.all([
         autoSnapshot
           ? Promise.resolve(undefined)
-          : fetch('/signals/auto-trader-execution-audit?limit=500'),
+          : sharedGet('/signals/auto-trader-execution-audit?limit=500'),
         autoSnapshot
           ? Promise.resolve(undefined)
-          : fetch('/positions/auto-trader/activity'),
+          : sharedGet('/positions/auto-trader/activity'),
         autoSnapshot
           ? Promise.resolve(undefined)
-          : fetch('/positions/auto-trader'),
-        fetch('/positions/auto-trader/learning-summary').catch(() => undefined),
+          : sharedGet('/positions/auto-trader'),
+        sharedGet('/positions/auto-trader/learning-summary', 30_000).catch(
+          () => undefined,
+        ),
         autoSnapshot
           ? Promise.resolve(undefined)
-          : fetch('/positions/auto-trader/dated-carry'),
+          : sharedGet('/positions/auto-trader/dated-carry'),
         streamSnapshot
           ? Promise.resolve(undefined)
-          : fetch('/positions?source=auto'),
+          : sharedGet('/positions?source=auto'),
         // Fills remain useful for open position slippage; closed rows come
         // from the backend activity contract.
         refreshRecentTrades
-          ? fetch(
+          ? sharedGet(
               '/positions/trades?source=auto&since_ms=' +
                 todayStart +
                 '&limit=500',
             )
           : Promise.resolve(undefined),
         refreshGateAudit
-          ? fetch('/signals/auto-trader-audit?limit=100').catch(() => undefined)
+          ? sharedGet('/signals/auto-trader-audit?limit=100').catch(
+              () => undefined,
+            )
           : Promise.resolve(undefined),
         refreshStrategyEvaluationAudit
-          ? fetch(
+          ? sharedGet(
               '/signals/auto-trader-audit?stage=strategy%3Aevaluation&limit=1000',
             ).catch(() => undefined)
           : Promise.resolve(undefined),
         autoSnapshot
           ? Promise.resolve(undefined)
-          : fetch('/positions/auto-trader/parameters').catch(() => undefined),
-        fetch('/positions/usd-rates').catch(() => undefined),
+          : sharedGet('/positions/auto-trader/parameters').catch(
+              () => undefined,
+            ),
+        sharedGet('/positions/usd-rates', 30_000).catch(() => undefined),
       ]);
       if (!autoSnapshot && !auditResponse?.ok)
         throw new Error('Audit unavailable');
@@ -1182,11 +1227,21 @@ export class AutoTraderOutcomesModel {
               .filter(
                 (record) =>
                   record.decision_id === row.decisionId &&
-                  record.stage?.startsWith('exit'),
+                  record.stage?.startsWith('exit') &&
+                  !record.stage.startsWith('exit:post:'),
               )
               .sort(
                 (left, right) => (right.timestamp ?? 0) - (left.timestamp ?? 0),
               )[0];
+            const postExit = this.auditRows
+              .filter(
+                (record) =>
+                  record.decision_id === row.decisionId &&
+                  record.stage?.startsWith('exit:post:'),
+              )
+              .sort(
+                (left, right) => (right.timestamp ?? 0) - (left.timestamp ?? 0),
+              )[0]?.post_exit_observation;
             return {
               ...row,
               components,
@@ -1200,6 +1255,33 @@ export class AutoTraderOutcomesModel {
               stopLossPercent: latestExit?.effective_stop_loss_percent,
               takeProfitPercent: latestExit?.effective_take_profit_percent,
               exitReason: latestExit?.reason,
+              profitProtection: latestExit?.exit_rule_trace?.profit_protection
+                ? {
+                    activationPercent:
+                      latestExit.exit_rule_trace.profit_protection
+                        .activation_percent,
+                    givebackPercent:
+                      latestExit.exit_rule_trace.profit_protection
+                        .giveback_percent,
+                    minimumLockPercent:
+                      latestExit.exit_rule_trace.profit_protection
+                        .minimum_lock_percent,
+                    peakReturnPercent:
+                      latestExit.exit_rule_trace.profit_protection
+                        .peak_return_percent ?? undefined,
+                    exitReturnPercent: latestExit.net_return_percent,
+                    triggered:
+                      latestExit.exit_rule_trace.profit_protection.triggered,
+                  }
+                : undefined,
+              postExitMissedReturnPercent: postExit?.missed_return_percent,
+              postExitMissedPnlQuote: postExit?.missed_pnl_quote,
+              postExitBestReturnPercent:
+                postExit?.best_post_exit_return_percent,
+              postExitWorstReturnPercent:
+                postExit?.worst_post_exit_return_percent,
+              postExitObservedAt: postExit?.observed_at_ms,
+              postExitHorizonMs: postExit?.horizon_ms,
             };
           }
           return row;
@@ -1481,10 +1563,10 @@ export class AutoTraderOutcomesModel {
         '&limit=500&offset=' +
         this.todayTradeOffset;
       const [response, auditResponse] = await Promise.all([
-        fetch(url),
+        sharedGet(url),
         this.auditCursor == null
           ? Promise.resolve(undefined)
-          : fetch(
+          : sharedGet(
               '/signals/auto-trader-execution-audit?cursor=' +
                 this.auditCursor +
                 '&limit=500',
@@ -1597,7 +1679,7 @@ export class AutoTraderOutcomesModel {
     if (cursor == null || this.state$.value.loadingOlderAudit) return;
     this.state$.next({ ...this.state$.value, loadingOlderAudit: true });
     try {
-      const response = await fetch(
+      const response = await sharedGet(
         `/signals/auto-trader-execution-audit?cursor=${cursor}&limit=500`,
       );
       if (!response.ok)

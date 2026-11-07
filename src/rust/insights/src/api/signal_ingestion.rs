@@ -27,6 +27,14 @@ fn market_value(
 }
 
 fn valid_scout_sample(sample: &ScoutScoutRegistration, now: u64) -> bool {
+    let has_single_comparison = sample.scout_comparison_id.is_some();
+    let has_comparison_list = !sample.scout_comparison_ids.is_empty();
+    let valid_comparison_shape = match sample.scout_comparison_role.as_deref() {
+        None => !has_single_comparison && !has_comparison_list,
+        Some("baseline") => has_single_comparison ^ has_comparison_list,
+        Some("variant") => has_single_comparison && !has_comparison_list,
+        Some(_) => false,
+    };
     !(sample.decision_id.is_empty() || sample.decision_id.len() > 240
         || sample.symbol.is_empty() || sample.symbol.len() > 32
         || sample.timestamp > now.saturating_add(5_000) || now.saturating_sub(sample.timestamp) > 7 * 86_400_000
@@ -40,10 +48,13 @@ fn valid_scout_sample(sample: &ScoutScoutRegistration, now: u64) -> bool {
         || !matches!(sample.exit_scenario.as_str(), "strategy" | "tight" | "wide")
         || sample.scout_minimum_hold_days.is_some_and(|days| !days.is_finite() || !(1.0..=365.0).contains(&days))
         || sample.scout_maximum_hold_days.is_some_and(|days| !days.is_finite() || !(1.0..=365.0).contains(&days))
+        || sample.scout_maximum_duration_ms.is_some_and(|duration| duration == 0 || duration > 7 * 86_400_000)
         || !matches!(sample.direction.as_str(), "bullish" | "bearish")
         || sample.scout_comparison_id.as_ref().is_some_and(|id| id.is_empty() || id.len() > 240)
-        || sample.scout_comparison_role.as_deref().is_some_and(|role| !matches!(role, "baseline" | "variant"))
-        || sample.scout_comparison_id.is_some() != sample.scout_comparison_role.is_some())
+        || sample.scout_comparison_ids.len() > 128
+        || sample.scout_comparison_ids.iter().any(|id| id.is_empty() || id.len() > 240)
+        || sample.scout_comparison_ids.iter().collect::<std::collections::BTreeSet<_>>().len() != sample.scout_comparison_ids.len()
+        || !valid_comparison_shape)
 }
 
 
@@ -70,7 +81,11 @@ struct ScoutScoutRegistration {
     #[serde(default)]
     scout_maximum_hold_days: Option<f64>,
     #[serde(default)]
+    scout_maximum_duration_ms: Option<u64>,
+    #[serde(default)]
     scout_comparison_id: Option<String>,
+    #[serde(default)]
+    scout_comparison_ids: Vec<String>,
     #[serde(default)]
     scout_comparison_role: Option<String>,
 }
@@ -96,7 +111,7 @@ async fn register_scout(
     let strategy = sample.strategy.clone();
     let exit_scenario = sample.exit_scenario.clone();
     let timestamp = sample.timestamp;
-    if !engine.track_scout(
+    if !engine.track_scout_with_maximum_duration(
         sample.decision_id, sample.symbol, sample.strategy,
         sample.timestamp, sample.direction, sample.entry_price,
         sample.stop_loss_percent, sample.take_profit_percent,
@@ -107,6 +122,7 @@ async fn register_scout(
         sample.scout_parameter_value,
         sample.scout_minimum_hold_days,
         sample.scout_maximum_hold_days,
+        sample.scout_maximum_duration_ms,
     ) {
         crate::service_log!("INFO", "Scout scout registration ignored as duplicate: sample_id={} symbol={}", decision_id, symbol);
         return Ok(StatusCode::NO_CONTENT);
@@ -571,6 +587,16 @@ mod signal_ingestion_tests {
         value.scout_comparison_role = Some("baseline".into());
         assert!(valid_scout_sample(&value, 1_000));
         value.scout_comparison_role = Some("unknown".into());
+        assert!(!valid_scout_sample(&value, 1_000));
+
+        let mut value = sample();
+        value.scout_comparison_ids = vec!["pair-a".into(), "pair-b".into()];
+        value.scout_comparison_role = Some("baseline".into());
+        assert!(valid_scout_sample(&value, 1_000));
+        value.scout_comparison_role = Some("variant".into());
+        assert!(!valid_scout_sample(&value, 1_000));
+        value.scout_comparison_role = Some("baseline".into());
+        value.scout_comparison_ids.push("pair-a".into());
         assert!(!valid_scout_sample(&value, 1_000));
     }
 }

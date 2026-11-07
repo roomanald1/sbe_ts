@@ -24,3 +24,7 @@ scouts = { path = "../scouts" }
 [[bench]]
 name = "calculations"
 harness = false
+
+[[bench]]
+name = "book_history_memory"
+harness = false

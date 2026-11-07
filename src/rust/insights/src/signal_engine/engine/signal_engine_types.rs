@@ -7,6 +7,9 @@ struct BookHistorySample {
     ask_levels: [(f64, f64); 7],
 }
 
+const BOOK_HISTORY_SAMPLE_INTERVAL_MS: u64 = 100;
+const BOOK_HISTORY_SAMPLE_LIMIT: usize = 601;
+
 struct PendingOutcome {
     symbol: String,
     timestamp: u64,
@@ -30,6 +33,7 @@ struct PendingOutcome {
     scout_parameter_value: Option<f64>,
     scout_minimum_hold_days: Option<f64>,
     scout_maximum_hold_days: Option<f64>,
+    scout_maximum_duration_ms: Option<u64>,
     stop_loss_percent: Option<f64>,
     take_profit_percent: Option<f64>,
     profit_protection_activation_percent: Option<f64>,

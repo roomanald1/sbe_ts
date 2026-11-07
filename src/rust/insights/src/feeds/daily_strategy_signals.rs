@@ -127,6 +127,7 @@ fn insight_btc_regime(
 }
 
 const INSIGHT_DAY_MS: u64 = 86_400_000;
+const SCOUT_PARAMETER_SAMPLE_INTERVAL_MS: u64 = 4 * 60 * 60 * 1_000;
 
 fn insight_utc_month_id(timestamp_ms: u64) -> i64 {
     let days = (timestamp_ms / INSIGHT_DAY_MS) as i64;
@@ -1437,8 +1438,9 @@ async fn poll_daily_strategy_signals(store: SignalStore) {
             let scouts_url = format!("{}/daily-inputs", scouts_url.trim_end_matches('/'));
             let now = snapshot.get("as_of_ms").and_then(serde_json::Value::as_u64).unwrap_or_else(now_ms);
             let sweep_id = scouts::probe_id(&sweep_signature);
+            let probe_window = now / SCOUT_PARAMETER_SAMPLE_INTERVAL_MS;
             let scout_request = serde_json::json!({
-                "request_id": format!("daily-sweep-paired-v2:{sweep_id}"),
+                "request_id": format!("daily-sweep-paired-v2:{sweep_id}:{probe_window}"),
                 "now_ms": now,
                 "signals": generated.clone(),
             });

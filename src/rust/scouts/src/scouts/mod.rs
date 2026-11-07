@@ -148,23 +148,35 @@ mod tests {
             specs: Vec::new(),
             net_return_percent: 0.5,
         };
-        let state = PersistedState {
+        let mut second_event = event.clone();
+        if let FeedbackEvent::ScoutOutcome { event_id, .. } = &mut second_event {
+            *event_id = "event-2".into();
+        }
+        let mut state = PersistedState {
             seen: BTreeSet::from(["event-1".into()]),
-            outbox: vec![ScoutOutboxItem::Learning(event.clone())],
+            outbox: vec![
+                ScoutOutboxItem::Learning(event.clone()),
+                ScoutOutboxItem::Learning(second_event.clone()),
+            ],
             ..PersistedState::default()
         };
         assert!(persist_scout_state(&path, &state, &["seen", "outbox"]).is_ok());
         let loaded = load_scout_state(&path).unwrap();
         assert!(loaded.seen.contains("event-1"));
-        assert_eq!(loaded.outbox.len(), 1);
+        assert_eq!(loaded.outbox.len(), 2);
         assert_eq!(feedback_event_id(&event), "event-1");
         assert!(outbox_has_learning(&loaded, &event));
 
         let mut other = event.clone();
         if let FeedbackEvent::ScoutOutcome { event_id, .. } = &mut other {
-            *event_id = "event-2".into();
+            *event_id = "event-3".into();
         }
         assert!(!outbox_has_learning(&loaded, &other));
+        state.outbox.remove(0);
+        assert!(persist_scout_state(&path, &state, &["outbox"]).is_ok());
+        let loaded = load_scout_state(&path).unwrap();
+        assert_eq!(loaded.outbox.len(), 1);
+        assert!(outbox_has_learning(&loaded, &second_event));
         let _ = std::fs::remove_file(path);
     }
 
@@ -207,7 +219,7 @@ mod tests {
     }
 
     #[test]
-    fn active_audit_replay_reads_durable_records_from_sqlite() {
+    fn active_audit_replay_builds_registrations_from_loaded_state() {
         let path = std::env::temp_dir().join(format!(
             "scouts-audit-replay-{}-{}.sqlite",
             std::process::id(),
@@ -218,7 +230,7 @@ mod tests {
             "strategy": "live-momentum",
             "symbol": "BTC-USDT",
             "direction": "bullish",
-            "timestamp": 10,
+            "timestamp": scout_now_ms(),
             "scout_entry_price": 100.0,
             "strategy_decision": {"strategy_parameters": {}}
         });
@@ -228,7 +240,8 @@ mod tests {
             .insert("durable-group".into(), vec![audit]);
         assert!(persist_scout_state(&path, &state, &["scout_active_audits@durable-group"]).is_ok());
 
-        let registrations = load_active_scout_audits(&path).unwrap();
+        let loaded = load_scout_state(&path).unwrap();
+        let registrations = active_scout_registrations(&loaded);
         assert_eq!(registrations.len(), 1);
         assert_eq!(registrations[0]["decision_id"], "durable-decision");
         let _ = std::fs::remove_file(&path);

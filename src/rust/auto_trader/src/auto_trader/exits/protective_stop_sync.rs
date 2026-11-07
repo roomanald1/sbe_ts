@@ -209,6 +209,11 @@ async fn sync_protective_stops(
                     &price_path,
                     fully_closed,
                 );
+                if fully_closed {
+                    let mut settings = state.settings.lock().await;
+                    queue_post_exit_observation(&mut settings, &payload);
+                    request_settings_persist(state)?;
+                }
                 queue_auto_trader_audit(state, payload);
             }
         }

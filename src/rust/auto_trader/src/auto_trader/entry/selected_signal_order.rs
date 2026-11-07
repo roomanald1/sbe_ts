@@ -8,6 +8,8 @@ struct SelectedSignalOrderRequest<'a> {
     counterfactual_stop_loss_percent: f64,
     counterfactual_take_profit_percent: f64,
     signal_selection_ms: f64,
+    context_threshold_refresh_ms: f64,
+    cycle_started_at: Instant,
     now: u64,
     market: serde_json::Value,
     bid: f64,
@@ -36,6 +38,8 @@ async fn submit_selected_signal(
         counterfactual_stop_loss_percent,
         counterfactual_take_profit_percent,
         signal_selection_ms,
+        context_threshold_refresh_ms,
+        cycle_started_at,
         now,
         market,
         bid,
@@ -45,11 +49,11 @@ async fn submit_selected_signal(
         market_http_fetch_ms,
     } = request;
     let cycle_guard = acquire_cycle_lock(state, "signal").await;
-    let cycle_started = Instant::now();
+    let snapshot_started = Instant::now();
     let evidence = entry_walk_forward(
         &dashboard.walk_forward,
         &signal.symbol,
-        request.now.saturating_mul(1000),
+        now.saturating_mul(1000),
     );
     let decision_id = signal_decision_id(signal);
     let signal_key = signal.symbol.clone();
@@ -57,6 +61,11 @@ async fn submit_selected_signal(
     let settings_lock_started = Instant::now();
     let mut settings = state.settings.lock().await;
     let settings_lock_wait_ms = settings_lock_started.elapsed().as_secs_f64() * 1_000.0;
+    record_cycle_lock_scope(
+        state,
+        "signal_settings_lock_wait",
+        settings_lock_started.elapsed(),
+    );
     reset_daily_budget(&mut settings);
     let quote_rate = quote_usd_rate(&settings, &signal.symbol);
     let strategy_key = signal.strategy.as_deref().unwrap_or("unattributed");
@@ -65,10 +74,22 @@ async fn submit_selected_signal(
     {
         return Ok(skipped_for_signal(signal, &reason));
     }
+    if let Some(strategy) = signal.strategy.as_deref().and_then(Strategy::from_name) {
+        let profile = learned_strategy_parameter_profile(&settings, &signal.symbol, strategy);
+        queue_strategy_profile_registration(&mut settings, &signal.symbol, strategy, &profile);
+    }
+    let settings_snapshot = settings.clone();
+    drop(settings);
+    drop(cycle_guard);
+    record_cycle_lock_scope(
+        state,
+        "signal_snapshot_and_gate",
+        snapshot_started.elapsed(),
+    );
     let execution_plan_started = Instant::now();
     let plan = match prepare_signal_execution_plan(
         state,
-        settings,
+        settings_snapshot,
         signal,
         dashboard,
         &market,
@@ -98,7 +119,23 @@ async fn submit_selected_signal(
         profile,
         execution_params,
         learning_context,
+        execution_learning_ms,
+        imported_execution_learning,
     } = plan;
+    if exploratory || imported_execution_learning {
+        let mut settings = state.settings.lock().await;
+        if exploratory {
+            if !settings.last_risk_note.is_empty() {
+                settings.last_risk_note.push_str(" · ");
+            }
+            settings.last_risk_note.push_str(
+                "small paper-exploration size; no reliable same-side walk-forward edge yet",
+            );
+        }
+        if imported_execution_learning {
+            settings.execution_learning_imported = true;
+        }
+    }
     // Apply the live spread and estimated sweep cost to every strategy before
     // submitting. Walk-forward returns are already net of taker fees; when no
     // same-side evidence exists, use the configured strategy target and include
@@ -199,9 +236,18 @@ async fn submit_selected_signal(
     stage_timings_ms.insert("settings_lock_wait".to_owned(), settings_lock_wait_ms);
     stage_timings_ms.insert(
         "execution_plan_local".to_owned(),
-        (execution_plan_ms - deep_book_ms).max(0.0),
+        (execution_plan_ms - deep_book_ms - execution_learning_ms).max(0.0),
     );
-    stage_timings_ms.insert("signal_selection".to_owned(), signal_selection_ms);
+    stage_timings_ms.insert("execution_learning_lookup".to_owned(), execution_learning_ms);
+    stage_timings_ms.insert("signal_selection_total".to_owned(), signal_selection_ms);
+    stage_timings_ms.insert(
+        "signal_selection_local".to_owned(),
+        (signal_selection_ms - context_threshold_refresh_ms).max(0.0),
+    );
+    stage_timings_ms.insert(
+        "context_threshold_refresh".to_owned(),
+        context_threshold_refresh_ms,
+    );
     stage_timings_ms.insert("market_cache_lookup".to_owned(), market_cache_lookup_ms);
     stage_timings_ms.insert("market_http_fetch".to_owned(), market_http_fetch_ms);
     stage_timings_ms.insert("deep_book_local".to_owned(), deep_book_ms);
@@ -211,7 +257,7 @@ async fn submit_selected_signal(
     );
     stage_timings_ms.insert(
         "cycle_to_order_record".to_owned(),
-        cycle_started.elapsed().as_secs_f64() * 1000.0,
+        cycle_started_at.elapsed().as_secs_f64() * 1000.0,
     );
     stage_timings_ms.insert(
         "signal_age_at_order_record".to_owned(),
@@ -236,15 +282,27 @@ async fn submit_selected_signal(
     let expires_at = is_post_only.then_some(timestamp.saturating_add(execution_params.post_only_timeout_minutes * 60_000));
     let estimated_ioc_all_in_bps =
         deep_book.map(|assessment| assessment.impact_bps + configured_taker_fee_rate() * 10_000.0);
-    let reservation_lock_started = Instant::now();
+    let cycle_guard = acquire_cycle_lock(state, "signal").await;
+    let reservation_cycle_lock_started = Instant::now();
     let quantity = {
+        let reservation_lock_started = Instant::now();
         let mut settings = state.settings.lock().await;
         stage_timings_ms.insert(
             "reservation_lock_wait".to_owned(),
             reservation_lock_started.elapsed().as_secs_f64() * 1_000.0,
         );
+        record_cycle_lock_scope(
+            state,
+            "signal_reservation_settings_lock_wait",
+            reservation_lock_started.elapsed(),
+        );
         let order_reservation_started = Instant::now();
         reset_daily_budget(&mut settings);
+        if let Some(reason) =
+            signal_position_block_reason(&settings, signal, &signal.symbol, strategy_key, now_ms)
+        {
+            return Ok(skipped_for_signal(signal, &reason));
+        }
         let allocated = allocated_notional(&settings);
         let category = strategy_category(signal.strategy.as_deref());
         let category_allocated = allocated_notional_for_category(&settings, Some(category));
@@ -353,6 +411,11 @@ async fn submit_selected_signal(
         );
         quantity
     };
+    record_cycle_lock_scope(
+        state,
+        "signal_order_reservation",
+        reservation_cycle_lock_started.elapsed(),
+    );
     // The pending order and notional reservation are durable-in-memory now.
     // Other cycles can proceed while Position Manager handles the request.
     drop(cycle_guard);

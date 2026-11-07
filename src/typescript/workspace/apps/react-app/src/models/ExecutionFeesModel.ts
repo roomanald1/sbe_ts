@@ -1,4 +1,5 @@
 import { BehaviorSubject } from 'rxjs';
+import { sharedGet } from '../shared_get';
 
 export type ExecutionFeeRow = {
   source: string;
@@ -20,10 +21,17 @@ export type ExecutionFeesState = {
   updatedAt?: number;
   error?: string;
 };
-type FeeSummaryResponse = Pick<ExecutionFeesState, 'fills' | 'rows' | 'first_fill_ms' | 'last_fill_ms'>;
+type FeeSummaryResponse = Pick<
+  ExecutionFeesState,
+  'fills' | 'rows' | 'first_fill_ms' | 'last_fill_ms'
+>;
 
 export class ExecutionFeesModel {
-  readonly state$ = new BehaviorSubject<ExecutionFeesState>({ fills: 0, rows: [], loading: true });
+  readonly state$ = new BehaviorSubject<ExecutionFeesState>({
+    fills: 0,
+    rows: [],
+    loading: true,
+  });
   private timer?: ReturnType<typeof setInterval>;
   private inFlight = false;
 
@@ -42,9 +50,12 @@ export class ExecutionFeesModel {
     if (this.inFlight) return;
     this.inFlight = true;
     try {
-      const response = await fetch('/positions/fee-summary');
-      if (!response.ok) throw new Error('Could not load ledger fee summary (' + response.status + ')');
-      const summary = await response.json() as FeeSummaryResponse;
+      const response = await sharedGet('/positions/fee-summary');
+      if (!response.ok)
+        throw new Error(
+          'Could not load ledger fee summary (' + response.status + ')',
+        );
+      const summary = (await response.json()) as FeeSummaryResponse;
       if (!Array.isArray(summary.rows) || typeof summary.fills !== 'number') {
         throw new Error('The ledger fee summary returned invalid data');
       }
@@ -53,7 +64,10 @@ export class ExecutionFeesModel {
       this.state$.next({
         ...this.state$.value,
         loading: false,
-        error: reason instanceof Error ? reason.message : 'Could not load ledger fee summary',
+        error:
+          reason instanceof Error
+            ? reason.message
+            : 'Could not load ledger fee summary',
       });
     } finally {
       this.inFlight = false;

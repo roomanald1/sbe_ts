@@ -2350,6 +2350,37 @@ function AutoTraderOutcomesComponent({
         minWidth: 135,
       },
       {
+        headerName: 'Post-exit move',
+        headerTooltip:
+          'Signed price movement 30 minutes after a take-profit, stop-loss, or profit-protection exit. Positive values mean price continued in the original trade direction; negative values mean it reversed. Read this with the exit reason to judge the timing.',
+        valueGetter: ({ data }) =>
+          data?.status === 'Closed'
+            ? data.postExitMissedReturnPercent
+            : undefined,
+        valueFormatter: ({ value, data }) => {
+          if (typeof value !== 'number' || !Number.isFinite(value))
+            return 'Pending';
+          const quote = data?.pnlQuoteCurrency ?? '';
+          const pnl = data?.postExitMissedPnlQuote;
+          const amount =
+            typeof pnl === 'number' && Number.isFinite(pnl)
+              ? ` · ${quote} ${pnl >= 0 ? '+' : ''}${pnl.toFixed(4)}`
+              : '';
+          const best = data?.postExitBestReturnPercent;
+          const worst = data?.postExitWorstReturnPercent;
+          const range =
+            typeof best === 'number' &&
+            Number.isFinite(best) &&
+            typeof worst === 'number' &&
+            Number.isFinite(worst)
+              ? ` · ${worst.toFixed(2)}…${best >= 0 ? '+' : ''}${best.toFixed(2)}% range`
+              : '';
+          return `${value >= 0 ? '+' : ''}${value.toFixed(2)}%${amount}${range}`;
+        },
+        cellClassRules: signed,
+        minWidth: 190,
+      },
+      {
         field: 'netPnlUsd',
         headerName: 'Net today (USD)',
         headerTooltip:
@@ -3038,7 +3069,9 @@ function AutoTraderOutcomesComponent({
                     ]
                   : []),
                 ...(gatePosition.exitReason &&
-                !['stop-loss', 'take-profit'].includes(gatePosition.exitReason)
+                !['stop-loss', 'take-profit', 'profit-protection'].includes(
+                  gatePosition.exitReason,
+                )
                   ? [
                       {
                         label: 'Other exit',
@@ -3046,6 +3079,33 @@ function AutoTraderOutcomesComponent({
                         detail: 'Recorded exit reason',
                       },
                     ]
+                  : []),
+                ...(gatePosition.exitReason === 'profit-protection'
+                  ? (() => {
+                      const protection = gatePosition.profitProtection;
+                      const activation = protection?.activationPercent;
+                      const peak = protection?.peakReturnPercent;
+                      const giveback = protection?.givebackPercent;
+                      const minimumLock = protection?.minimumLockPercent;
+                      const exitReturn = protection?.exitReturnPercent;
+                      const floor =
+                        typeof peak === 'number' &&
+                        typeof giveback === 'number' &&
+                        typeof minimumLock === 'number'
+                          ? Math.max(peak - giveback, minimumLock)
+                          : undefined;
+                      return [
+                        {
+                          label: 'Profit protection',
+                          status: 'Triggered · profit protected',
+                          detail:
+                            typeof peak === 'number' &&
+                            typeof floor === 'number'
+                              ? `Activated at +${gateNumber(activation, 3)}% · peak +${gateNumber(peak, 3)}% · lock floor +${gateNumber(floor, 3)}% (peak minus ${gateNumber(giveback!, 3)} pp, minimum lock +${gateNumber(minimumLock!, 3)}%)${typeof exitReturn === 'number' ? ` · exit return ${exitReturn >= 0 ? '+' : ''}${gateNumber(exitReturn, 3)}%` : ''}`
+                              : 'Trailing net-return rule triggered after a peak profit; detailed threshold values were not retained.',
+                        },
+                      ];
+                    })()
                   : []),
               ];
           const exitTrendWindows = exitDecision?.trend_return_windows ?? [];
@@ -3200,6 +3260,15 @@ function AutoTraderOutcomesComponent({
                 {(trendExitRows.length > 0 || exitRows.length > 0) && (
                   <>
                     <h3>Exit gates</h3>
+                    {gatePosition.exitReason === 'profit-protection' && (
+                      <p>
+                        Profit protection follows net return after it reaches
+                        its activation level. It exits when return gives back
+                        the configured amount from its peak, while preserving
+                        the minimum locked profit. Volatility or a strategy
+                        signal reversal did not trigger this rule.
+                      </p>
+                    )}
                     <ul>
                       {[...trendExitRows, ...exitRows].map((gate) => (
                         <li key={gate.label}>

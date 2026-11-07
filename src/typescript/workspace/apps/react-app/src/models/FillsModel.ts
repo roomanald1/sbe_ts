@@ -1,6 +1,10 @@
 import { BehaviorSubject } from 'rxjs';
 import type { PositionTrade } from './PositionTypes';
-import { currentPositionSnapshot, subscribePositionStream } from '../position_stream';
+import {
+  currentPositionSnapshot,
+  subscribePositionStream,
+} from '../position_stream';
+import { sharedGet } from '../shared_get';
 
 type FillsResponse = { trades: PositionTrade[] };
 export type FillsState = {
@@ -25,10 +29,15 @@ export class FillsModel {
     if (this.timer) return;
     this.stopPositionStream = subscribePositionStream((snapshot) => {
       this.lastStreamAt = Date.now();
-      this.state$.next({ fills: [...snapshot.trades.trades].reverse(), loading: false });
+      this.state$.next({
+        fills: [...snapshot.trades.trades].reverse(),
+        loading: false,
+      });
     });
     if (!currentPositionSnapshot()) void this.refresh();
-    this.timer = setInterval(() => { if (Date.now() - this.lastStreamAt > 45_000) void this.refresh(); }, 30_000);
+    this.timer = setInterval(() => {
+      if (Date.now() - this.lastStreamAt > 45_000) void this.refresh();
+    }, 30_000);
   }
   stop(): void {
     if (this.timer) clearInterval(this.timer);
@@ -38,7 +47,7 @@ export class FillsModel {
   }
   async refresh(): Promise<void> {
     try {
-      const response = await fetch('/positions/trades');
+      const response = await sharedGet('/positions/trades');
       if (!response.ok)
         throw new Error('Could not load fills (' + response.status + ')');
       const payload = (await response.json()) as FillsResponse;

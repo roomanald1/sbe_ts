@@ -1,5 +1,25 @@
 # Rust benchmark baseline
 
+## Multi-comparison baseline Scout registrations (2026-11-07)
+
+Insights tests passed in the library (21); the main binary had 25 of 26 passing, with the existing ten-parameter subset-sweep mismatch (10 generated versus 1,023 expected). The focused Scout validation test passed. Scouts reported 51 passed and 2 existing pair-ID expectation failures. Both crate bench commands completed; Scouts has no dedicated benchmark target, and Insights' book-history and calculation benches ran. Insights measured 11,682.0 ns live snapshot, 11,880.2 ns with explanations, 264.7 ns feature extraction, 17.9 ns return context, 333.0 ns diagnostics, and 47.6 ns book snapshot. Against the latest comparable run (11,240.5 / 11,212.5 / 242.8 / 17.6 / 321.4 / 44.4 ns), changes were +3.9%, +6.0%, +9.0%, +1.7%, +3.6%, and +7.2%. This change only extends registration metadata and validation; the benchmarked calculations do not exercise it, so these differences are run variation rather than a measured impact. The book-history reproduction retained 6,000,000 rows (~1,419 MiB payload), with RSS 1→19 MiB in 0.23 s. WSL2 Linux x86_64, optimized Cargo bench profile.
+
+## AutoTrader signal cycle lock scope (2026-11-07)
+
+AutoTrader tests passed (131). `cargo bench --manifest-path src/rust/auto_trader/Cargo.toml` completed; tests were ignored in bench mode and the strategy-evaluation benchmark ran. Entry/position evaluations ranged from 3.6–18.9 / 2.1–5.2 ns; signal serialization, market-depth assessment, limit-order request construction, and parameter validation measured 593.6 / 726.4 / 449.3 / 1.9 ns. Compared with the latest comparable run (3.3–18.1 / 1.7–4.2 ns; 542.3 / 574.4 / 420.7 / 1.8 ns), some helper timings rose 10.6–26.5%; these microbenchmarks do not exercise signal lock hold duration or planning concurrency, so the differences are workload variation rather than evidence of a lock-path regression. The signal path now prepares from a settings snapshot outside the shared cycle lock, then reacquires it for the final position gate and reservation; the new scope metrics separate snapshot/gating from reservation. WSL2 Linux x86_64, optimized Cargo bench profile.
+
+## AutoTrader asynchronous learning lookups (2026-11-07)
+
+AutoTrader tests passed all 131 tests, including coverage that a recent cached Learning response is returned without a service request. `cargo bench --manifest-path src/rust/auto_trader/Cargo.toml` completed; the crate's unit tests were ignored in bench mode and its strategy-evaluation benchmark ran. Strategy entry/position measurements ranged from 3.3–18.1 / 1.7–4.2 ns; signal serialization, market-depth assessment, limit-order request construction, and parameter validation measured 542.3 / 574.4 / 420.7 / 1.8 ns. Compared with the latest comparable AutoTrader run (3.2–23.6 / 1.8–5.3 ns; 572.0 / 615.0 / 430.1 / 1.9 ns), the helper workloads were 0.5–11.8% lower, with parameter validation effectively unchanged; these microbenchmarks do not exercise the changed HTTP Learning lookups or their in-memory cache. No direct benchmark measures order-path latency. WSL2 Linux x86_64, optimized Cargo bench profile.
+
+## Compact persisted Scout instances (2026-11-07)
+
+The focused compaction regression passed. The full Scouts suite reported 51 passed and 2 failures: pair outcome expectations assume unsuffixed comparison IDs while current pairing code emits scenario-suffixed IDs. `cargo bench --manifest-path src/rust/scouts/Cargo.toml` completed; the crate has no dedicated benchmark target, so all 53 tests were ignored in bench mode. No comparable Scouts timing workload exists. This change strips unused signal and market-data payloads from stored instances and idempotency plan caches, and migrates persisted records on startup, reducing duplicate in-memory JSON expansion. WSL2 Linux x86_64, optimized Cargo bench profile.
+
+## Prevent stale Scout registrations from blocking the outbox (2026-11-07)
+
+Scouts tests passed (52), including regression coverage for stale registration filtering, replay from loaded state, and incremental outbox persistence. `cargo bench --manifest-path src/rust/scouts/Cargo.toml` completed; all 52 tests were ignored in bench mode and the crate has no dedicated benchmark target. No comparable Scouts timing workload exists. The changes replay active registrations at startup or after Insights recovery instead of every minute, batch outbox acknowledgements, persist outbox appends/removals incrementally, skip stale registrations, and discard permanently rejected HTTP 4xx items. These paths are not measured by the crate's microbenchmarks. WSL2 Linux x86_64, optimized Cargo bench profile.
+
 ## Insights signal-feed freshness status (2026-11-07)
 
 Insights tests: all 21 library tests passed; 25 of 26 main-binary tests passed. The existing `ten_parameter_profile_generates_all_subset_probe_signals` test still fails with 10 generated versus 1,023 expected. `cargo bench --manifest-path src/rust/insights/Cargo.toml` completed. Calculations measured live snapshot 11,399.8 ns, snapshot with explanations 11,833.6 ns, research feature extraction 244.2 ns, price return context 17.7 ns, market input diagnostics 324.3 ns, and book snapshot 43.5 ns. Compared with the latest comparable run (10,984.1 / 11,253.8 / 243.2 / 17.3 / 318.9 / 44.0 ns), changes were +3.8%, +5.2%, +0.4%, +2.3%, +1.7%, and -1.1%. These calculations do not measure the new event-status endpoint or dashboard cache lifetime; the observed differences are small single-run variation. WSL2 Linux x86_64, optimized Cargo bench profile.
@@ -2349,3 +2369,91 @@ AutoTrader strategy benchmarks completed after removing the composite registry e
 ## Paired Scout batches across strategy cadences (2026-11-07)
 
 Scouts tests passed (51), including daily signal-scoped baseline and variant grouping, bounded cross-path variant ranking with an exploration slot, same-signal zero-return handling when one arm rejects entry, live paired variant generation, and dated-carry shared-baseline pairing. Scouts has no dedicated performance benchmark targets; cargo bench completed with all 51 test harness cases ignored. No comparable timing workload applies. WSL2 Linux x86_64, optimized Cargo bench profile; no services were started or stopped.
+
+
+## Sampled live book history (2026-11-07)
+
+Insights tests: all 22 library tests passed; 25 of 26 main-binary tests passed. The existing  test still fails with 10 generated versus 1,023 expected. The high-frequency book-history sampling regression test passed.
+running 22 tests
+test daily_summary::training_archive_tests::archives_records_as_a_bincode_vector_without_materializing_the_day ... ignored
+test daily_summary::training_archive_tests::retention_drops_expired_training_payloads_and_compacts_audit_rows ... ignored
+test daily_summary::training_archive_tests::revisits_summarized_days_when_raw_rows_were_not_removed ... ignored
+test signals::archive_reader_tests::archive_reader_keeps_only_the_newest_records ... ignored
+test signals::completed_scout_id_tests::completed_scout_deduplication_history_is_bounded ... ignored
+test signals::coverage_tests::breakout_watch_requires_confidence_range_and_directional_pressure ... ignored
+test signals::coverage_tests::strength_threshold_uses_only_available_positive_training_cohorts ... ignored
+test signals::granular_live_feature_tests::snapshots_publish_window_and_depth_variants_for_live_scouts ... ignored
+test signals::logistic_model_tests::feature_vectors_require_complete_inputs_and_apply_bounds ... ignored
+test signals::logistic_model_tests::logistic_models_train_only_with_minimum_samples_and_return_probabilities ... ignored
+test signals::outcome_model_tests::microprice_and_directional_returns_handle_size_direction_and_invalid_inputs ... ignored
+test signals::outcome_model_tests::stop_target_counterfactual_is_conservative_when_both_barriers_were_hit ... ignored
+test signals::scout_tests::book_history_is_sampled_and_bounded_under_high_frequency_updates ... ignored
+test signals::scout_tests::live_scout_stop_and_target_exits_use_trade_price_when_book_quote_is_missing ... ignored
+test signals::scout_tests::parameter_probe_exit_state_matches_the_exact_profile_variant ... ignored
+test signals::scout_tests::probe_hold_parameters_control_simulated_exit_timing ... ignored
+test signals::scout_tests::scout_uses_stop_target_and_strategy_invalidation_instead_of_one_hour ... ignored
+test signals::scout_tests::tight_stop_target_scenario_exits_before_standard_scenario ... ignored
+test signals::tests::calibration_keeps_raw_strength_separate_from_estimated_accuracy ... ignored
+test signals::tests::legacy_bincode_snapshots_default_new_grading_fields ... ignored
+test signals::walk_forward_sample_tests::non_overlapping_samples_sort_filter_direction_and_advance_the_time_window ... ignored
+test signals::walk_forward_sample_tests::walk_forward_requires_training_samples_and_at_least_one_test_sample ... ignored
+
+test result: ok. 0 passed; 0 failed; 22 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 26 tests
+test daily_probe_batch_tests::batch_ranks_paired_average_lift_and_keeps_one_exploration_slot ... ignored
+test dated_carry_helper_tests::civil_calendar_helpers_handle_epoch_leap_days_and_month_lengths ... ignored
+test dated_carry_helper_tests::futures_step_uses_positive_lot_size_and_safe_default ... ignored
+test dated_carry_helper_tests::parses_book_levels_and_rejects_malformed_or_nonpositive_rows ... ignored
+test dated_carry_helper_tests::recent_expiries_are_sorted_and_return_spot_future_pairs ... ignored
+test dated_carry_helper_tests::walks_book_for_requested_quantity_or_returns_none_when_depth_is_short ... ignored
+test donchian_20_btc200_tests::all_parameter_variants_share_their_baseline_sweep_batch ... ignored
+test donchian_20_btc200_tests::fixed_twenty_day_breakout_requires_btc_regime ... ignored
+test donchian_20_btc200_tests::ten_parameter_profile_generates_all_subset_probe_signals ... ignored
+test external_market_helper_tests::json_number_accepts_only_finite_numeric_strings ... ignored
+test external_market_helper_tests::option_summary_filters_expiry_and_calculates_atm_volatility_and_skew ... ignored
+test news_classification_tests::asset_matching_requires_token_boundaries_or_crypto_context ... ignored
+test news_classification_tests::classification_prioritizes_adverse_risk_and_excludes_general_news ... ignored
+test news_classification_tests::rss_parser_deduplicates_articles_and_preserves_description ... ignored
+test news_classification_tests::xml_decoding_and_field_extraction_handle_cdata_entities_and_missing_fields ... ignored
+test risk_adjusted_monthly_momentum_tests::monthly_selection_uses_previous_month_close_not_future_bars ... ignored
+test risk_adjusted_monthly_momentum_tests::realized_volatility_requires_non_constant_returns ... ignored
+test risk_adjusted_monthly_momentum_tests::utc_month_id_changes_at_month_boundary ... ignored
+test signal_feed_worker_tests::decoder_reads_price_and_trade_contract_fields_and_rejects_truncated_events ... ignored
+test signal_feed_worker_tests::draining_latest_cache_returns_each_symbol_value_and_empties_cache ... ignored
+test signal_ingestion_tests::market_levels_filters_invalid_prices_and_sizes ... ignored
+test signal_ingestion_tests::market_value_requires_a_valid_ordered_quote_and_keeps_valid_levels ... ignored
+test signal_ingestion_tests::scout_validation_accepts_valid_sample_and_rejects_field_boundaries ... ignored
+test strategy_parameter_probe_tests::continues_testing_other_parameter_combinations_between_lookback_arms ... ignored
+test strategy_parameter_probe_tests::probes_a_shorter_breakout_lookback_without_changing_other_parameters ... ignored
+test strategy_parameter_probe_tests::rotates_parameter_values_within_profile_bounds ... ignored
+
+test result: ok. 0 passed; 0 failed; 26 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+live insight snapshot: 11240.5 ns/calculation
+live snapshot including explanations: 11212.5 ns/calculation
+research feature extraction: 242.8 ns/calculation
+price return context: 17.6 ns/calculation
+market input diagnostics: 321.4 ns/calculation
+book snapshot: 44.4 ns/calculation
+
+## Sampled live book history (2026-11-07)
+
+Insights tests: all 22 library tests passed; 25 of 26 main-binary tests passed. The existing main-binary test for generating all subset probe signals still fails with 10 generated versus 1,023 expected. The high-frequency book-history sampling regression test passed. The Insights benchmark completed: live snapshot 11,445.0 ns, snapshot with explanations 11,659.2 ns, research feature extraction 269.6 ns, price return context 17.3 ns, market input diagnostics 326.6 ns, and book snapshot 47.3 ns. Compared with the latest comparable run (11,399.8 / 11,833.6 / 244.2 / 17.7 / 324.3 / 43.5 ns), changes were +0.4%, -1.5%, +10.4%, -2.3%, +0.7%, and +8.7%. These microbenchmarks do not measure memory reduction or high-rate book ingestion; no comparable allocation benchmark is available. Book history now samples at 100 ms, retaining its 60-second analysis window with about 601 entries per symbol under continuous updates and a hard 1,024-entry limit. WSL2 Linux x86_64, optimized Cargo bench profile.
+
+## Book history memory reproduction (2026-11-07)
+
+The standalone `book_history_memory` benchmark reproduced high RSS with per-update book-history retention: 100 symbols × 1,000 book updates/second × 60 seconds retained 6,000,000 rows (about 1,419 MiB row payload) and process RSS rose from 1 MiB to 1,443 MiB in 2.72 seconds. The run used the current unsampled history implementation. No comparable sampled implementation was present in the checkout during this run, so this is the reproduced baseline, not a before/after comparison. WSL2 Linux x86_64, optimized Cargo bench profile.
+
+The 100 ms sampled implementation passed its high-frequency history regression test. Repeating the identical standalone scenario retained no more than 60,100 rows (about 14 MiB row payload); process RSS rose from 1 MiB to 20 MiB in 0.24 seconds. Against the unsampled run immediately above, RSS ended 1,423 MiB lower. The test preserves 60 seconds of sampled depth, sufficient for the five-second book-replenishment lookups. WSL2 Linux x86_64, optimized Cargo bench profile.

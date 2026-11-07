@@ -9,7 +9,80 @@ struct ServiceState {
     portfolio_instances_by_group:
         Arc<std::sync::RwLock<BTreeMap<String, Vec<PortfolioInstanceEvidence>>>>,
     strategy_outcome_profile_index_ready: Arc<std::sync::atomic::AtomicBool>,
+    live_scout_maximum_duration_ms: Arc<std::sync::RwLock<BTreeMap<String, u64>>>,
     scout: ScoutState,
+}
+
+const LIVE_SCOUT_HOLD_PRIOR_SAMPLES: usize = 10;
+const LIVE_SCOUT_DEFAULT_HOLD_MS: u64 = 30 * 60 * 1_000;
+const LIVE_SCOUT_MIN_DURATION_MS: u64 = 15 * 60 * 1_000;
+const LIVE_SCOUT_MAX_DURATION_MS: u64 = 6 * 60 * 60 * 1_000;
+
+fn estimate_live_scout_maximum_durations(
+    activity: &serde_json::Value,
+) -> BTreeMap<String, u64> {
+    let mut by_strategy = BTreeMap::<String, Vec<u64>>::new();
+    for row in activity["closed_ledger_rows"].as_array().into_iter().flatten() {
+        let strategy = row["strategy"].as_str().unwrap_or_default();
+        if !strategy.starts_with("live-")
+            || row["scout"].as_bool().unwrap_or(false)
+            || !row["rowId"].as_str().unwrap_or_default().starts_with("ledger-summary:")
+        {
+            continue;
+        }
+        let (Some(opened), Some(closed)) = (
+            row["openedAt"].as_u64(),
+            row["closedAt"].as_u64(),
+        ) else {
+            continue;
+        };
+        let duration = closed.saturating_sub(opened);
+        if duration > 0 && duration <= 7 * 86_400_000 {
+            by_strategy
+                .entry(strategy.to_owned())
+                .or_default()
+                .push(duration);
+        }
+    }
+    let mut all_durations = by_strategy
+        .values()
+        .flat_map(|durations| durations.iter().copied())
+        .collect::<Vec<_>>();
+    all_durations.sort_unstable();
+    let pooled_median = all_durations
+        .get(all_durations.len().saturating_sub(1) / 2)
+        .copied()
+        .unwrap_or(LIVE_SCOUT_DEFAULT_HOLD_MS);
+    let winsor_limit = pooled_median
+        .saturating_mul(3)
+        .clamp(LIVE_SCOUT_MIN_DURATION_MS, LIVE_SCOUT_MAX_DURATION_MS);
+    let pooled_mean = if all_durations.is_empty() {
+        LIVE_SCOUT_DEFAULT_HOLD_MS
+    } else {
+        all_durations
+            .iter()
+            .map(|duration| (*duration).min(winsor_limit))
+            .sum::<u64>()
+            / all_durations.len() as u64
+    };
+    by_strategy
+        .into_iter()
+        .map(|(strategy, durations)| {
+            let sample_count = durations.len();
+            let observed_total = durations
+                .iter()
+                .map(|duration| (*duration).min(winsor_limit))
+                .sum::<u64>();
+            let shrinkage_weight = LIVE_SCOUT_HOLD_PRIOR_SAMPLES as u64;
+            let shrunk_mean = observed_total
+                .saturating_add(pooled_mean.saturating_mul(shrinkage_weight))
+                / (sample_count as u64 + shrinkage_weight);
+            let maximum_duration = shrunk_mean
+                .saturating_mul(2)
+                .clamp(LIVE_SCOUT_MIN_DURATION_MS, LIVE_SCOUT_MAX_DURATION_MS);
+            (strategy, maximum_duration)
+        })
+        .collect()
 }
 
 fn schedule_scout_outbox_flush(service: &ServiceState) {
@@ -29,6 +102,19 @@ pub fn router(learning_url: String, auto_trader_url: String) -> Router {
         .clone()
         .unwrap_or_else(|| PathBuf::from("../position_management/scouts_state.sqlite"));
     let mut persisted = load_scout_state(&state_path).unwrap_or_default();
+    let evicted_instances = trim_scout_instances(&mut persisted);
+    let (changed_instances, changed_audit_groups, changed_plan_results) =
+        compact_persisted_scout_payloads(&mut persisted);
+    if let Err(error) = persist_compacted_scout_payloads(
+        &state_path,
+        &persisted,
+        &changed_instances,
+        &changed_audit_groups,
+        &changed_plan_results,
+        &evicted_instances,
+    ) {
+        eprintln!("WARN Could not compact persisted Scout payloads: {error}");
+    }
     rebuild_strategy_outcome_profile_index(&mut persisted);
     rebuild_portfolio_instance_index(&mut persisted);
     let seen = persisted.seen.clone();
@@ -43,31 +129,63 @@ pub fn router(learning_url: String, auto_trader_url: String) -> Router {
         path: state_path,
         flush_lock: Arc::new(Mutex::new(())),
     };
-    let replay_client = client.clone();
-    let replay_insights_url = insights_url.clone();
-    let replay_state_path = scout.path.clone();
+    let live_scout_maximum_duration_ms =
+        Arc::new(std::sync::RwLock::new(BTreeMap::new()));
+    let hold_refresh_cache = Arc::clone(&live_scout_maximum_duration_ms);
+    let hold_refresh_client = client.clone();
+    let hold_refresh_url = auto_trader_url.clone();
     tokio::spawn(async move {
-        let mut ticker = tokio::time::interval(std::time::Duration::from_secs(60));
+        let mut ticker = tokio::time::interval(std::time::Duration::from_secs(300));
         loop {
             ticker.tick().await;
-            let replay_path = replay_state_path.clone();
-            let audits = match tokio::task::spawn_blocking(move || {
-                load_active_scout_audits(&replay_path)
-            })
-            .await
-            {
-                Ok(Ok(audits)) => audits,
-                Ok(Err(error)) => {
-                    eprintln!("WARN Scout audit replay read failed: {error}");
-                    continue;
-                }
-                Err(error) => {
-                    eprintln!("WARN Scout audit replay task failed: {error}");
-                    continue;
-                }
+            let response = hold_refresh_client
+                .get(format!(
+                    "{}/positions/auto-trader/activity",
+                    hold_refresh_url.trim_end_matches('/')
+                ))
+                .timeout(std::time::Duration::from_secs(5))
+                .send()
+                .await;
+            let Ok(response) = response.and_then(reqwest::Response::error_for_status) else {
+                continue;
             };
-            for registration in audits {
-                let _ = replay_client
+            let Ok(activity) = response.json::<serde_json::Value>().await else {
+                continue;
+            };
+            let estimates = estimate_live_scout_maximum_durations(&activity);
+            if !estimates.is_empty() {
+                *hold_refresh_cache
+                    .write()
+                    .unwrap_or_else(|error| error.into_inner()) = estimates;
+            }
+        }
+    });
+    let replay_client = client.clone();
+    let replay_insights_url = insights_url.clone();
+    let replay_scout = scout.clone();
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(std::time::Duration::from_secs(60));
+        let mut previous_healthy = None;
+        loop {
+            ticker.tick().await;
+            let healthy = replay_client
+                .get(format!("{}/health", replay_insights_url.trim_end_matches('/')))
+                .timeout(std::time::Duration::from_secs(2))
+                .send()
+                .await
+                .is_ok_and(|response| response.status().is_success());
+            let should_replay = healthy && previous_healthy != Some(true);
+            previous_healthy = Some(healthy);
+            if !should_replay {
+                continue;
+            }
+            let registrations = {
+                let state = replay_scout.data.lock().await;
+                active_scout_registrations(&state)
+            };
+            let mut retry_replay = false;
+            for registration in registrations {
+                match replay_client
                     .post(format!(
                         "{}/internal/scouts/register",
                         replay_insights_url.trim_end_matches('/')
@@ -75,7 +193,32 @@ pub fn router(learning_url: String, auto_trader_url: String) -> Router {
                     .timeout(std::time::Duration::from_secs(2))
                     .json(&registration)
                     .send()
-                    .await;
+                    .await
+                {
+                    Ok(response) if response.status().is_success() => {}
+                    Ok(response) if response.status().is_client_error() => {
+                        let status = response.status();
+                        let detail = response.text().await.unwrap_or_default();
+                        eprintln!(
+                            "WARN Insights rejected a replayed Scout registration: status={status} detail={}",
+                            detail.chars().take(512).collect::<String>()
+                        );
+                    }
+                    Ok(response) => {
+                        eprintln!(
+                            "WARN Scout registration replay deferred: Insights returned {}",
+                            response.status()
+                        );
+                        retry_replay = true;
+                    }
+                    Err(error) => {
+                        eprintln!("WARN Scout registration replay deferred: {error}");
+                        retry_replay = true;
+                    }
+                }
+            }
+            if retry_replay {
+                previous_healthy = Some(false);
             }
         }
     });
@@ -111,6 +254,7 @@ pub fn router(learning_url: String, auto_trader_url: String) -> Router {
             strategy_outcomes_by_profile,
             portfolio_instances_by_group,
             strategy_outcome_profile_index_ready,
+            live_scout_maximum_duration_ms,
             scout,
         })
 }
@@ -189,6 +333,7 @@ async fn set_scout_configuration(
 }
 
 const MAX_PARAMETER_VARIANTS_PER_BATCH: usize = 3;
+const SCOUT_PARAMETER_SAMPLE_INTERVAL_MS: u64 = 4 * 60 * 60 * 1_000;
 
 fn ranked_parameter_variants(
     snapshot: &serde_json::Value,
@@ -285,7 +430,7 @@ fn daily_parameter_batch_key(signal: &serde_json::Value) -> String {
         .get("scout_parameter_baseline_decision")
         .unwrap_or(decision);
     format!(
-        "{}|{}|{}|{}|{}",
+        "{}|{}|{}|{}|{}|window:{}",
         signal["strategy"].as_str().unwrap_or_default(),
         signal["symbol"].as_str().unwrap_or_default(),
         signal["direction"].as_str().unwrap_or_default(),
@@ -294,7 +439,8 @@ fn daily_parameter_batch_key(signal: &serde_json::Value) -> String {
             .or_else(|| baseline["monthly_anchor_close_time_ms"].as_u64())
             .or_else(|| signal["timestamp"].as_u64())
             .unwrap_or_default(),
-        baseline["strategy_parameters"]
+        baseline["strategy_parameters"],
+        signal["_scout_probe_window"].as_u64().unwrap_or_default()
     )
 }
 
@@ -355,7 +501,17 @@ async fn receive_daily_scout_inputs(
     let configuration = service.scout.data.lock().await.scout_configuration.clone();
     let mut candidates = Vec::new();
     let mut portfolio_templates = Vec::new();
-    let signal_batches = group_daily_parameter_variants(request.signals);
+    let probe_window = request.now_ms / SCOUT_PARAMETER_SAMPLE_INTERVAL_MS;
+    let signal_batches = group_daily_parameter_variants(
+        request
+            .signals
+            .into_iter()
+            .map(|mut signal| {
+                signal["_scout_probe_window"] = serde_json::json!(probe_window);
+                signal
+            })
+            .collect(),
+    );
     for (index, signal, probe_signals, batch_id) in signal_batches {
         let Some(strategy_name) = signal.get("strategy").and_then(serde_json::Value::as_str) else { continue };
         if !configuration.strategies.iter().any(|selected| selected == strategy_name) { continue; }
@@ -379,8 +535,11 @@ async fn receive_daily_scout_inputs(
         let Some(symbol) = signal.get("symbol").and_then(serde_json::Value::as_str) else { continue };
         let Some(direction) = signal.get("direction").and_then(serde_json::Value::as_str) else { continue };
         let timestamp = signal.get("timestamp").and_then(serde_json::Value::as_u64).unwrap_or(request.now_ms);
-        let decision_id = format!("{}|{}|{}|{}|scout:daily:{index}", timestamp, symbol, direction, strategy_name);
+        let decision_id = format!("{}|{}|{}|{}|scout:daily:{}:{index}", timestamp, symbol, direction, strategy_name, probe_window);
         let mut audit = signal.clone();
+        audit
+            .as_object_mut()
+            .map(|object| object.remove("_scout_probe_window"));
         audit["decision_id"] = serde_json::json!(decision_id);
         audit["trade_id"] = serde_json::json!(decision_id);
         audit["timestamp"] = serde_json::json!(request.now_ms);
@@ -565,7 +724,7 @@ async fn receive_daily_scout_inputs(
             profile_key: format!("{strategy_name}|{symbol}"),
             eligible: entry_eligible,
             parameter_variant: probe.is_some(),
-            cooldown_ms: if probe.is_some() { 86_400_000 } else { 300_000 },
+            cooldown_ms: if probe.is_some() { SCOUT_PARAMETER_SAMPLE_INTERVAL_MS } else { 300_000 },
             audit_plans: Vec::new(),
             audit_templates,
             sample_payload: None,
@@ -945,6 +1104,13 @@ async fn receive_live_scout_inputs(
         let learning_context = format!("scout:live:{}:{}:{}:scenario", batch.strategy, batch.symbol, batch.direction);
         let base_stop = batch.baseline_parameters.get("stop_loss_percent").copied().unwrap_or(configuration.stop_loss_percent);
         let base_target = batch.baseline_parameters.get("take_profit_percent").copied().unwrap_or(configuration.take_profit_percent);
+        let maximum_scout_duration_ms = service
+            .live_scout_maximum_duration_ms
+            .read()
+            .unwrap_or_else(|error| error.into_inner())
+            .get(&batch.strategy)
+            .copied()
+            .unwrap_or(LIVE_SCOUT_DEFAULT_HOLD_MS.saturating_mul(2));
         let entry_price = baseline_signal.get("price").cloned()
             .or_else(|| baseline_signal.get("observed_close").cloned())
             .or_else(|| baseline_signal.get("strategy_decision").and_then(|decision| decision.get("observed_close")).cloned())
@@ -963,6 +1129,7 @@ async fn receive_live_scout_inputs(
         baseline_signal["scout_entry_price"] = entry_price.clone();
         baseline_signal["scout_learning_context"] = serde_json::json!(format!("scout:live:{}:{}:{}:trade", batch.strategy, batch.symbol, batch.direction));
         baseline_signal["scout_sample_group_id"] = serde_json::json!(sample_group_id);
+        baseline_signal["scout_maximum_duration_ms"] = serde_json::json!(maximum_scout_duration_ms);
         baseline_signal["scout_cooldown_key"] = serde_json::json!(cooldown_key);
         baseline_signal["strategy_parameters"] = serde_json::to_value(&batch.baseline_parameters).unwrap_or_default();
         baseline_signal["strategy_parameter_specs"] = serde_json::to_value(&specs).unwrap_or_default();
@@ -1018,6 +1185,7 @@ async fn receive_live_scout_inputs(
             variant_signal["scout_entry_price"] = entry_price.clone();
             variant_signal["scout_learning_context"] = serde_json::json!(format!("scout:live:{}:{}:{}:trade", batch.strategy, batch.symbol, batch.direction));
             variant_signal["scout_sample_group_id"] = serde_json::json!(sample_group_id);
+            variant_signal["scout_maximum_duration_ms"] = serde_json::json!(maximum_scout_duration_ms);
             variant_signal["scout_cooldown_key"] = serde_json::json!(cooldown_key);
             variant_signal["strategy_parameters"] = serde_json::to_value(&variant_parameters).unwrap_or_default();
             variant_signal["strategy_parameter_specs"] = serde_json::to_value(&specs).unwrap_or_default();
@@ -1072,6 +1240,13 @@ async fn receive_live_scout_inputs(
         let symbol = profile.symbol;
         let direction = signal.get("direction").and_then(serde_json::Value::as_str).unwrap_or("bullish").to_owned();
         let parameters = profile.parameters;
+        let maximum_scout_duration_ms = service
+            .live_scout_maximum_duration_ms
+            .read()
+            .unwrap_or_else(|error| error.into_inner())
+            .get(&strategy)
+            .copied()
+            .unwrap_or(LIVE_SCOUT_DEFAULT_HOLD_MS.saturating_mul(2));
         let stop = parameters.get("stop_loss_percent").copied().unwrap_or(configuration.stop_loss_percent);
         let target = parameters.get("take_profit_percent").copied().unwrap_or(configuration.take_profit_percent);
         let decision_id = format!("live-scout:{}:{}:{}:{}", strategy, symbol, direction, now_ms.saturating_add(index as u64));
@@ -1089,6 +1264,7 @@ async fn receive_live_scout_inputs(
             .unwrap_or(serde_json::Value::Null);
         let group = format!("live-scout:{strategy}|{symbol}|{direction}");
         signal["scout_sample_group_id"] = serde_json::json!(group);
+        signal["scout_maximum_duration_ms"] = serde_json::json!(maximum_scout_duration_ms);
         signal["scout_cooldown_key"] = serde_json::json!(group);
         signal["scout_exit_scenario"] = serde_json::json!("strategy");
         signal["strategy_parameters"] = serde_json::to_value(&parameters).unwrap_or_default();
@@ -1127,7 +1303,7 @@ async fn receive_live_scout_inputs(
         request_id,
         now_ms,
         max_active_batches: configuration.max_active_samples,
-        max_active_variants_per_profile: 3,
+        max_active_variants_per_profile: 6,
         legacy_cooldowns: BTreeMap::new(),
         legacy_comparisons: Vec::new(),
         candidates,
@@ -1701,7 +1877,12 @@ fn record_paired_scout_outcome(
     let mut paired_updates = Vec::new();
     let mut touched_ids = comparison_ids.clone();
     for comparison_id in comparison_ids {
-        let pair = state.pairs.entry(comparison_id.clone()).or_default();
+        // A parameter comparison can produce more than one exit-scenario
+        // outcome. Keep each scenario's baseline and variant together; sharing
+        // one pair slot lets whichever side closes last overwrite a different
+        // scenario and silently loses (or misattributes) the other result.
+        let pair_key = format!("{comparison_id}|scenario:{}", outcome.exit_scenario);
+        let pair = state.pairs.entry(pair_key.clone()).or_default();
         pair.updated_at_ms = outcome.evaluated_timestamp_ms;
         match role {
             "baseline" => {
@@ -1757,7 +1938,7 @@ fn record_paired_scout_outcome(
             zero_variant.simulated_net_pnl_usd = 0.0;
             pair.variant = Some(zero_variant);
         }
-        if let Some(event) = paired_event_with_legacy_side(&comparison_id, pair, outcome) {
+        if let Some(event) = paired_event_with_legacy_side(&pair_key, pair, outcome) {
             if let FeedbackEvent::ScoutOutcome { net_return_percent, .. } = &event {
                 if let Some(variant) = pair.variant.as_ref() {
                     paired_updates.push((variant.decision_id.clone(), *net_return_percent));
@@ -1766,7 +1947,8 @@ fn record_paired_scout_outcome(
             if !outbox_has_learning(state, &event) {
                 state.outbox.push(ScoutOutboxItem::Learning(event));
             }
-            state.pairs.remove(&comparison_id);
+            state.pairs.remove(&pair_key);
+            touched_ids.push(pair_key);
         }
     }
     let expired = state
@@ -1805,6 +1987,14 @@ fn scout_registration(audit: &serde_json::Value) -> Option<serde_json::Value> {
     let symbol = audit.get("symbol")?.as_str()?;
     let direction = audit.get("direction")?.as_str()?;
     let timestamp = audit.get("timestamp")?.as_u64()?;
+    // Insights only tracks price paths for the last seven days. Historical
+    // strategy samples are useful for learning but cannot be registered there.
+    let now = scout_now_ms();
+    if timestamp > now.saturating_add(5_000)
+        || now.saturating_sub(timestamp) > 7 * 86_400_000
+    {
+        return None;
+    }
     let entry_price = audit.get("scout_entry_price")?.as_f64()?;
     let parameters = decision.get("strategy_parameters");
     let parameter = |key: &str, default: f64| {
@@ -1833,7 +2023,12 @@ fn scout_registration(audit: &serde_json::Value) -> Option<serde_json::Value> {
         "scout_parameter_value": decision.get("scout_parameter_value"),
         "scout_minimum_hold_days": parameters.and_then(|p| p.get("minimum_hold_days")),
         "scout_maximum_hold_days": parameters.and_then(|p| p.get("maximum_hold_days")),
+        "scout_maximum_duration_ms": audit.get("scout_maximum_duration_ms"),
         "scout_comparison_id": audit.get("scout_comparison_id"),
+        "scout_comparison_ids": audit.get("scout_comparison_ids")
+            .and_then(serde_json::Value::as_array)
+            .cloned()
+            .unwrap_or_default(),
         "scout_comparison_role": audit.get("scout_comparison_role"),
     }))
 }
@@ -1996,7 +2191,12 @@ fn persist_scout_state(
     changed_sections: &[&str],
 ) -> Result<(), (StatusCode, String)> {
     let mut changes = serde_json::Map::new();
+    let mut sync_outbox = false;
     for section in changed_sections {
+        if *section == "outbox" {
+            sync_outbox = true;
+            continue;
+        }
         if let Some((collection, key)) = section.split_once('@') {
             let value = scout_state_record(state, collection, key)?;
             changes.insert(format!("{collection}@{key}"), value);
@@ -2029,13 +2229,69 @@ fn persist_scout_state(
             sync_record(&tx, collection, key, current)?;
         } else if matches!(section.as_str(), "scout_variant_rotation_cursor" | "scout_lifecycle_updated_at_ms" | "scout_configuration") {
             continue;
-        } else if matches!(section.as_str(), "seen" | "outbox") {
-            sync_record_array(&tx, section, current, section == "seen")?;
+        } else if section == "seen" {
+            sync_record_array(&tx, section, current, true)?;
         } else if section != "scout_configuration" {
             sync_record_map(&tx, section, current)?;
         }
     }
+    if sync_outbox {
+        sync_outbox_delta(&tx, &state.outbox)?;
+    }
     tx.commit().map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
+    Ok(())
+}
+
+fn sync_outbox_delta(
+    tx: &rusqlite::Transaction<'_>,
+    outbox: &[ScoutOutboxItem],
+) -> Result<(), (StatusCode, String)> {
+    let existing_count: i64 = tx
+        .query_row(
+            "SELECT COUNT(*) FROM scout_records WHERE collection='outbox'",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
+    let existing_count = existing_count.max(0) as usize;
+    if outbox.len() < existing_count {
+        let remove_count = existing_count - outbox.len();
+        let oldest_keys = {
+            let mut statement = tx
+                .prepare("SELECT record_key FROM scout_records WHERE collection='outbox' ORDER BY record_key LIMIT ?1")
+                .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
+            statement
+                .query_map([remove_count as i64], |row| row.get::<_, String>(0))
+                .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?
+        };
+        for key in oldest_keys {
+            tx.execute(
+                "DELETE FROM scout_records WHERE collection='outbox' AND record_key=?1",
+                [key],
+            )
+            .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
+        }
+    } else if outbox.len() > existing_count {
+        let mut next_key: i64 = tx
+            .query_row(
+                "SELECT COALESCE(MAX(CAST(record_key AS INTEGER)), -1) + 1 FROM scout_records WHERE collection='outbox'",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
+        for item in &outbox[existing_count..] {
+            let payload = serde_json::to_string(item)
+                .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
+            tx.execute(
+                "INSERT INTO scout_records(collection,record_key,payload) VALUES('outbox',?1,?2)",
+                rusqlite::params![format!("{next_key:020}"), payload],
+            )
+            .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
+            next_key += 1;
+        }
+    }
     Ok(())
 }
 
@@ -2220,19 +2476,13 @@ fn load_scout_state(path: &std::path::Path) -> anyhow::Result<PersistedState> {
     Ok(serde_json::from_value(serde_json::Value::Object(state))?)
 }
 
-fn load_active_scout_audits(path: &std::path::Path) -> anyhow::Result<Vec<serde_json::Value>> {
-    let connection = rusqlite::Connection::open(path)?;
-    let mut statement = connection.prepare(
-        "SELECT payload FROM scout_records WHERE collection='scout_active_audits' ORDER BY record_key",
-    )?;
-    let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
-    let mut registrations = Vec::new();
-    for row in rows {
-        let payload = row?;
-        let audits = serde_json::from_str::<Vec<serde_json::Value>>(&payload)?;
-        registrations.extend(audits.iter().filter_map(scout_registration));
-    }
-    Ok(registrations)
+fn active_scout_registrations(state: &PersistedState) -> Vec<serde_json::Value> {
+    state
+        .scout_active_audits
+        .values()
+        .flatten()
+        .filter_map(scout_registration)
+        .collect()
 }
 
 async fn flush_scout_outbox(
@@ -2241,15 +2491,15 @@ async fn flush_scout_outbox(
     learning_url: &str,
 ) -> Result<(), (StatusCode, String)> {
     let _flush = scout.flush_lock.lock().await;
+    let mut acknowledged = 0usize;
     loop {
-        let item = scout.data.lock().await.outbox.first().cloned();
+        let item = scout.data.lock().await.outbox.get(acknowledged).cloned();
         let Some(item) = item else {
+            acknowledge_scout_outbox(scout, acknowledged).await?;
             return Ok(());
         };
         if matches!(item, ScoutOutboxItem::Audit(_)) {
-            let mut state = scout.data.lock().await;
-            state.outbox.remove(0);
-            persist_scout_state(&scout.path, &state, &["outbox"])?;
+            acknowledged += 1;
             continue;
         }
         let (url, payload) = match &item {
@@ -2270,23 +2520,61 @@ async fn flush_scout_outbox(
                 )
             }
         };
-        client
-        .post(url)
-        .timeout(std::time::Duration::from_secs(2))
+        let response = match client
+            .post(url)
+            .timeout(std::time::Duration::from_secs(2))
             .json(&payload)
             .send()
             .await
-            .and_then(reqwest::Response::error_for_status)
-            .map_err(|error| {
-                (
+        {
+            Ok(response) => response,
+            Err(error) => {
+                acknowledge_scout_outbox(scout, acknowledged).await?;
+                return Err((
                     StatusCode::BAD_GATEWAY,
-                    format!("Scout outcome delivery failed: {error}"),
-                )
-            })?;
-        let mut state = scout.data.lock().await;
-        state.outbox.remove(0);
-        persist_scout_state(&scout.path, &state, &["outbox"])?;
+                    format!("Scout outbox delivery failed: {error}"),
+                ));
+            }
+        };
+        let status = response.status();
+        if status.is_client_error()
+            && status != StatusCode::REQUEST_TIMEOUT
+            && status != StatusCode::TOO_MANY_REQUESTS
+        {
+            let body = response.text().await.unwrap_or_default();
+            eprintln!(
+                "ERROR Discarding permanently rejected Scout outbox item: status={status} kind={} detail={}",
+                match item {
+                    ScoutOutboxItem::Learning(_) => "learning",
+                    ScoutOutboxItem::Registration(_) => "registration",
+                    ScoutOutboxItem::Audit(_) => "audit",
+                },
+                body.chars().take(512).collect::<String>(),
+            );
+        } else if !status.is_success() {
+            return Err((
+                StatusCode::BAD_GATEWAY,
+                format!("Scout outbox delivery failed with {status}"),
+            ));
+        }
+        acknowledged += 1;
     }
+}
+
+async fn acknowledge_scout_outbox(
+    scout: &ScoutState,
+    acknowledged: usize,
+) -> Result<(), (StatusCode, String)> {
+    if acknowledged == 0 {
+        return Ok(());
+    }
+    let mut state = scout.data.lock().await;
+    let acknowledged = acknowledged.min(state.outbox.len());
+    state.outbox.drain(..acknowledged);
+    if state.outbox.is_empty() {
+        state.outbox.shrink_to_fit();
+    }
+    persist_scout_state(&scout.path, &state, &["outbox"])
 }
 
 fn feedback_event_id(event: &FeedbackEvent) -> &str {

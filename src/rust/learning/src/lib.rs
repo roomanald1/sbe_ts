@@ -87,12 +87,14 @@ struct LearningState {
     threshold_samples: Vec<ThresholdTrainingSample>,
     #[serde(default)]
     seen_execution_event_ids: BTreeSet<String>,
+    #[serde(default)]
+    exit_timing_observations: BTreeMap<String, serde_json::Value>,
     seen_event_ids: BTreeSet<String>,
     accepted_events: u64,
 }
 
 fn default_live_scout_parameter_samples() -> usize {
-    6
+    3
 }
 
 impl Default for LearningState {
@@ -105,6 +107,7 @@ impl Default for LearningState {
             execution_learning: BTreeMap::new(),
             threshold_samples: Vec::new(),
             seen_execution_event_ids: BTreeSet::new(),
+            exit_timing_observations: BTreeMap::new(),
             seen_event_ids: BTreeSet::new(),
             accepted_events: 0,
         }
@@ -170,6 +173,7 @@ pub fn router(path: PathBuf) -> Result<Router, String> {
         .route("/decision-snapshot", get(get_decision_snapshot))
         .route("/summary", get(get_summary))
         .route("/feedback", post(accept_feedback))
+        .route("/exit-timing", post(accept_exit_timing_observation))
         .route(
             "/config/scout-parameter-samples",
             axum::routing::put(update_scout_parameter_samples),
@@ -236,7 +240,8 @@ fn open_state_db(path: &Path) -> Result<rusqlite::Connection, String> {
              CREATE TABLE IF NOT EXISTS learning_execution_stats (id TEXT PRIMARY KEY, payload TEXT NOT NULL);
              CREATE TABLE IF NOT EXISTS learning_threshold_samples (id INTEGER PRIMARY KEY, payload TEXT NOT NULL);
              CREATE TABLE IF NOT EXISTS learning_seen_event_ids (id TEXT PRIMARY KEY);
-             CREATE TABLE IF NOT EXISTS learning_seen_execution_event_ids (id TEXT PRIMARY KEY);",
+             CREATE TABLE IF NOT EXISTS learning_seen_execution_event_ids (id TEXT PRIMARY KEY);
+             CREATE TABLE IF NOT EXISTS learning_exit_timing_observations (id TEXT PRIMARY KEY, payload TEXT NOT NULL);",
         )
         .map_err(|error| {
             format!(
@@ -245,6 +250,43 @@ fn open_state_db(path: &Path) -> Result<rusqlite::Connection, String> {
             )
         })?;
     Ok(connection)
+}
+
+async fn accept_exit_timing_observation(
+    State(service): State<ServiceState>,
+    Json(observation): Json<serde_json::Value>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let event_id = observation["event_id"].as_str().unwrap_or_default();
+    let valid_number = |key: &str| observation[key].as_f64().is_some_and(f64::is_finite);
+    if event_id.is_empty()
+        || event_id.len() > 256
+        || observation["symbol"].as_str().is_none()
+        || observation["strategy"].as_str().is_none()
+        || !valid_number("exit_return_percent")
+        || !valid_number("post_exit_return_percent")
+        || !valid_number("missed_return_percent")
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "invalid exit-timing observation".into(),
+        ));
+    }
+    let mut state = service.state.lock().await;
+    let duplicate = state.exit_timing_observations.contains_key(event_id);
+    if !duplicate {
+        state
+            .exit_timing_observations
+            .insert(event_id.to_owned(), observation);
+        while state.exit_timing_observations.len() > 10_000 {
+            if let Some(oldest) = state.exit_timing_observations.keys().next().cloned() {
+                state.exit_timing_observations.remove(&oldest);
+            }
+        }
+        persist(&service.path, &state)?;
+    }
+    Ok(Json(
+        serde_json::json!({"accepted": true, "duplicate": duplicate}),
+    ))
 }
 
 fn load_state(path: &Path) -> Result<LearningState, String> {
@@ -317,6 +359,11 @@ fn load_state(path: &Path) -> Result<LearningState, String> {
         state.seen_event_ids = load_ids(&connection, "learning_seen_event_ids")?;
         state.seen_execution_event_ids =
             load_ids(&connection, "learning_seen_execution_event_ids")?;
+        load_map(
+            &connection,
+            "learning_exit_timing_observations",
+            &mut state.exit_timing_observations,
+        )?;
         return Ok(state);
     }
 
@@ -437,6 +484,11 @@ pub(crate) fn persist_normalized(
         &transaction,
         "learning_seen_event_ids",
         &state.seen_event_ids,
+    )?;
+    write_map(
+        &transaction,
+        "learning_exit_timing_observations",
+        &state.exit_timing_observations,
     )?;
     sync_ids(
         &transaction,

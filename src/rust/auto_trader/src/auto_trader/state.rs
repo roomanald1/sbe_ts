@@ -11,6 +11,7 @@ struct AutoTraderState {
     settings_persist_timings_ms: Arc<std::sync::Mutex<BTreeMap<String, Vec<f64>>>>,
     latest_missed_opportunity_bands: Arc<Mutex<Vec<MissedOpportunityGateBand>>>,
     latest_execution_parameters: Arc<Mutex<Option<LatestExecutionParameters>>>,
+    learning_response_cache: Arc<Mutex<LearningResponseCache>>,
     cycle_lock: Arc<Mutex<()>>,
     pending_daily_signals: Arc<Mutex<PendingSignalQueue>>,
     daily_signal_notify: Arc<Notify>,
@@ -33,6 +34,115 @@ struct AutoTraderState {
     dated_carry: Arc<Mutex<DatedCarryBook>>,
     dated_carry_work_lock: Arc<Mutex<()>>,
     dated_carry_path: PathBuf,
+}
+
+#[derive(Default)]
+struct LearningResponseCache {
+    responses: BTreeMap<String, (Instant, serde_json::Value)>,
+    refreshing: BTreeSet<String>,
+}
+
+const LEARNING_RESPONSE_REFRESH_AFTER: Duration = Duration::from_secs(1);
+const LEARNING_RESPONSE_MAX_STALE: Duration = Duration::from_secs(30);
+
+async fn cached_learning_response<T>(
+    response_cache: &Arc<Mutex<LearningResponseCache>>,
+    cache_key: String,
+    client: &reqwest::Client,
+    url: String,
+    request: serde_json::Value,
+) -> Option<T>
+where
+    T: serde::de::DeserializeOwned + Send + 'static,
+{
+    let (cached, refresh) = {
+        let mut cache = response_cache.lock().await;
+        let cached = cache.responses.get(&cache_key).and_then(|(updated_at, value)| {
+            (updated_at.elapsed() <= LEARNING_RESPONSE_MAX_STALE).then(|| value.clone())
+        });
+        let should_refresh = cache
+            .responses
+            .get(&cache_key)
+            .is_none_or(|(updated_at, _)| updated_at.elapsed() >= LEARNING_RESPONSE_REFRESH_AFTER);
+        let refresh = should_refresh && cache.refreshing.insert(cache_key.clone());
+        (cached, refresh)
+    };
+
+    if refresh {
+        let response_cache = response_cache.clone();
+        let client = client.clone();
+        let key = cache_key.clone();
+        tokio::spawn(async move {
+            let response = client
+                .post(url)
+                .timeout(Duration::from_millis(250))
+                .json(&request)
+                .send()
+                .await
+                .and_then(reqwest::Response::error_for_status);
+            let value = match response {
+                Ok(response) => response.json::<serde_json::Value>().await.ok(),
+                Err(error) => {
+                    crate::service_log!("WARN", "Learning service refresh failed: {error}");
+                    None
+                }
+            };
+            let mut cache = response_cache.lock().await;
+            cache.refreshing.remove(&key);
+            if let Some(value) = value {
+                cache.responses.insert(key, (Instant::now(), value));
+                if cache.responses.len() > 512 {
+                    cache.responses.retain(|_, (updated_at, _)| {
+                        updated_at.elapsed() <= LEARNING_RESPONSE_MAX_STALE
+                    });
+                    while cache.responses.len() > 512 {
+                        let oldest = cache
+                            .responses
+                            .iter()
+                            .min_by_key(|(_, (updated_at, _))| *updated_at)
+                            .map(|(key, _)| key.clone());
+                        let Some(oldest) = oldest else { break };
+                        cache.responses.remove(&oldest);
+                    }
+                }
+            } else if !cache.responses.contains_key(&key) {
+                // Back off failed cold misses so a busy signal stream cannot
+                // turn an unavailable Learning service into an HTTP storm.
+                cache
+                    .responses
+                    .insert(key, (Instant::now(), serde_json::Value::Null));
+            }
+        });
+    }
+
+    cached.and_then(|value| serde_json::from_value(value).ok())
+}
+
+#[cfg(test)]
+mod learning_response_cache_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn returns_recent_cached_response_without_a_service_request() {
+        let response_cache = Arc::new(Mutex::new(LearningResponseCache::default()));
+        let cache_key = "execution-decision:BTC-USDT".to_owned();
+        let expected = serde_json::json!({ "learned_order_type": "PostOnlyLimit" });
+        response_cache.lock().await.responses.insert(
+            cache_key.clone(),
+            (Instant::now(), expected.clone()),
+        );
+
+        let response = cached_learning_response::<serde_json::Value>(
+            &response_cache,
+            cache_key,
+            &reqwest::Client::new(),
+            "http://127.0.0.1:1/execution-decision".to_owned(),
+            serde_json::Value::Null,
+        )
+        .await;
+
+        assert_eq!(response, Some(expected));
+    }
 }
 
 

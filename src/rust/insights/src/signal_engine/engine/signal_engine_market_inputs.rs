@@ -46,6 +46,7 @@ impl SignalEngine {
                     scout_parameter_value: None,
                     scout_minimum_hold_days: None,
                     scout_maximum_hold_days: None,
+                    scout_maximum_duration_ms: None,
                     stop_loss_percent: None,
                     take_profit_percent: None,
                     profit_protection_activation_percent: None,
@@ -78,6 +79,46 @@ impl SignalEngine {
         scout_minimum_hold_days: Option<f64>,
         scout_maximum_hold_days: Option<f64>,
     ) -> bool {
+        self.track_scout_with_maximum_duration(
+            sample_id,
+            symbol,
+            strategy,
+            timestamp,
+            direction,
+            entry_price,
+            stop_loss_percent,
+            take_profit_percent,
+            profit_protection_activation_percent,
+            profit_protection_giveback_percent,
+            profit_protection_minimum_lock_percent,
+            scout_parameter_key,
+            scout_parameter_value,
+            scout_minimum_hold_days,
+            scout_maximum_hold_days,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn track_scout_with_maximum_duration(
+        &mut self,
+        sample_id: String,
+        symbol: String,
+        strategy: String,
+        timestamp: u64,
+        direction: String,
+        entry_price: f64,
+        stop_loss_percent: f64,
+        take_profit_percent: f64,
+        profit_protection_activation_percent: f64,
+        profit_protection_giveback_percent: f64,
+        profit_protection_minimum_lock_percent: f64,
+        scout_parameter_key: Option<String>,
+        scout_parameter_value: Option<f64>,
+        scout_minimum_hold_days: Option<f64>,
+        scout_maximum_hold_days: Option<f64>,
+        scout_maximum_duration_ms: Option<u64>,
+    ) -> bool {
         if sample_id.is_empty() || strategy.is_empty()
             || !entry_price.is_finite() || entry_price <= 0.0
             || !stop_loss_percent.is_finite() || stop_loss_percent <= 0.0
@@ -90,6 +131,7 @@ impl SignalEngine {
             || scout_parameter_value.is_some_and(|value| !value.is_finite())
             || scout_minimum_hold_days.is_some_and(|days| !days.is_finite() || days <= 0.0)
             || scout_maximum_hold_days.is_some_and(|days| !days.is_finite() || days <= 0.0)
+            || scout_maximum_duration_ms.is_some_and(|duration| duration == 0 || duration > 7 * 86_400_000)
             || self.completed_scout_ids.contains(&sample_id)
             || self.pending.iter().any(|pending| pending.sample_id.as_deref() == Some(&sample_id))
         {
@@ -124,6 +166,7 @@ impl SignalEngine {
             scout_parameter_value,
             scout_minimum_hold_days,
             scout_maximum_hold_days,
+            scout_maximum_duration_ms,
             stop_loss_percent: Some(stop_loss_percent),
             take_profit_percent: Some(take_profit_percent),
             profit_protection_activation_percent: Some(profit_protection_activation_percent),
@@ -249,17 +292,36 @@ impl SignalEngine {
             for (target, source) in ask_levels.iter_mut().zip(self.book_ask_levels.iter()) {
                 *target = *source;
             }
-            self.book_history.push_back(BookHistorySample {
+            let sample = BookHistorySample {
                 timestamp,
                 bid: best_bid,
                 ask: best_ask,
                 bid_levels,
                 ask_levels,
+            };
+            let should_record = self.book_history.back().is_none_or(|previous| {
+                timestamp == previous.timestamp
+                    || timestamp.saturating_sub(previous.timestamp)
+                        >= BOOK_HISTORY_SAMPLE_INTERVAL_MS
             });
+            if should_record {
+                if self
+                    .book_history
+                    .back()
+                    .is_some_and(|previous| timestamp == previous.timestamp)
+                {
+                    *self.book_history.back_mut().expect("history has a back") = sample;
+                } else {
+                    self.book_history.push_back(sample);
+                }
+            }
             while self
                 .book_history
                 .front()
-                .is_some_and(|sample| sample.timestamp < timestamp.saturating_sub(60_000))
+                .is_some_and(|sample| {
+                    sample.timestamp < timestamp.saturating_sub(60_000)
+                        || self.book_history.len() > BOOK_HISTORY_SAMPLE_LIMIT
+                })
             {
                 self.book_history.pop_front();
             }
@@ -283,6 +345,25 @@ impl SignalEngine {
 #[cfg(test)]
 mod scout_tests {
     use super::*;
+
+    #[test]
+    fn book_history_is_sampled_and_bounded_under_high_frequency_updates() {
+        let mut engine = SignalEngine::default();
+        for timestamp in 0..120_000 {
+            engine.on_book(
+                timestamp,
+                99.9,
+                100.1,
+                &[1.0],
+                &[1.0],
+                &[(99.9, 1.0)],
+                &[(100.1, 1.0)],
+            );
+        }
+        assert!(engine.book_history.len() <= BOOK_HISTORY_SAMPLE_LIMIT);
+        assert!(engine.book_history.len() <= 601);
+        assert_eq!(engine.book_history.back().unwrap().timestamp, 119_900);
+    }
 
     #[test]
     fn scout_uses_stop_target_and_strategy_invalidation_instead_of_one_hour() {
@@ -408,6 +489,7 @@ mod scout_tests {
             first_short_positive_net_timestamp: None, sample_id: Some("tight".into()),
             strategy: Some("donchian-20-btc200".into()), scout_parameter_key: None, scout_parameter_value: None,
             scout_minimum_hold_days: None, scout_maximum_hold_days: None,
+            scout_maximum_duration_ms: None,
             stop_loss_percent: Some(0.25),
             take_profit_percent: Some(0.4), profit_protection_activation_percent: Some(0.15),
             profit_protection_giveback_percent: Some(0.1), profit_protection_minimum_lock_percent: Some(0.05),

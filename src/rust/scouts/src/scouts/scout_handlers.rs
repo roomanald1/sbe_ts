@@ -390,14 +390,7 @@ fn apply_scout_lifecycle_observation(
             state.scout_observation_results.remove(&oldest);
         }
     }
-    while state.scout_instances.len() > 100_000 {
-        let oldest = state.scout_instances
-            .iter()
-            .min_by_key(|(_, audit)| audit["timestamp"].as_u64().unwrap_or_default())
-            .map(|(id, _)| id.clone());
-        let Some(oldest) = oldest else { break; };
-        remove_scout_instance(state, &oldest);
-    }
+    trim_scout_instances(state);
     state.scout_lifecycle_updated_at_ms = state.scout_lifecycle_updated_at_ms.max(request.now_ms);
     response
 }
@@ -407,6 +400,34 @@ fn apply_scout_lifecycle_observation(
 // outcome. Keep the replay state bounded as well as the instance map.
 const MAX_ACTIVE_SCOUT_AUDIT_GROUPS: usize = 10_000;
 const MAX_ACTIVE_SCOUT_AUDITS: usize = 50_000;
+const MAX_SCOUT_INSTANCES: usize = 100_000;
+
+fn trim_scout_instances(state: &mut PersistedState) -> Vec<String> {
+    let excess = state.scout_instances.len().saturating_sub(MAX_SCOUT_INSTANCES);
+    if excess == 0 {
+        return Vec::new();
+    }
+    let mut oldest = state
+        .scout_instances
+        .iter()
+        .map(|(id, audit)| {
+            (
+                audit["timestamp"].as_u64().unwrap_or_default(),
+                id.clone(),
+            )
+        })
+        .collect::<Vec<_>>();
+    oldest.sort();
+    let evicted = oldest
+        .into_iter()
+        .take(excess)
+        .map(|(_, id)| id)
+        .collect::<Vec<_>>();
+    for id in &evicted {
+        remove_scout_instance(state, id);
+    }
+    evicted
+}
 
 fn trim_active_scout_audits(state: &mut PersistedState) -> Vec<String> {
     let mut active_audit_count = state
@@ -800,7 +821,7 @@ async fn create_scout_plan(
             }
             if let Some(registration) = scout_registration(&audit) {
                 tokens.insert(format!("{decision_id}|{scenario}"));
-                active_audits.push(audit.clone());
+                active_audits.push(compact_scout_instance(&audit));
                 state
                     .outbox
                     .push(ScoutOutboxItem::Registration(registration));
@@ -841,10 +862,17 @@ async fn create_scout_plan(
         changed_cooldown_keys.insert(candidate.cooldown_key.clone());
         active_batch_keys.insert(batch_key);
     }
+    changed_instance_ids.extend(trim_scout_instances(&mut state));
     state.scout_lifecycle_updated_at_ms = state.scout_lifecycle_updated_at_ms.max(request.now_ms);
+    let mut cached_response = response.clone();
+    cached_response.audits = cached_response
+        .audits
+        .iter()
+        .map(compact_scout_instance)
+        .collect();
     state
         .scout_plan_results
-        .insert(request.request_id.clone(), response.clone());
+        .insert(request.request_id.clone(), cached_response);
     while state.scout_plan_results.len() > 10_000 {
         if let Some(oldest) = state.scout_plan_results.keys().next().cloned() {
             state.scout_plan_results.remove(&oldest);
@@ -1484,6 +1512,7 @@ fn insert_scout_instance(
     decision_id: &str,
     instance: serde_json::Value,
 ) {
+    let instance = compact_scout_instance(&instance);
     if let Some(previous) = state.scout_instances.insert(decision_id.to_owned(), instance.clone()) {
         remove_portfolio_instance_index_entry(state, decision_id, &previous);
     }
@@ -1498,6 +1527,135 @@ fn insert_scout_instance(
             .unwrap_or_else(|position| position);
         instances.insert(position, evidence);
     }
+}
+
+fn compact_scout_instance(instance: &serde_json::Value) -> serde_json::Value {
+    const FIELDS: &[&str] = &[
+        "decision_id", "symbol", "direction", "timestamp", "signal_timestamp",
+        "strategy", "scout_entry_price", "scout_entry_bid", "scout_entry_ask",
+        "scout_notional_usd", "scout_learning_context", "scout_sample_group_id",
+        "scout_exit_scenario", "scout_parameter_key", "scout_parameter_value",
+        "scout_parameter_profile_symbol", "scout_parameter_entry_eligible",
+        "scout_comparison_id", "scout_comparison_ids", "scout_comparison_zero_sides",
+        "scout_comparison_role", "scout_comparison_zero_role",
+        "scout_comparison_parameter_key", "scout_comparison_parameter_value",
+        "scout_comparison_parameter_profile_symbol", "strategy_parameters",
+        "strategy_parameter_specs", "stop_loss_percent", "take_profit_percent",
+        "scout_level_percent", "scout_net_return_percent",
+        "scout_evaluated_timestamp_ms", "scout_taker_fee_rate", "paired_delta_percent",
+        "strength",
+    ];
+    let mut compact = serde_json::Map::new();
+    for key in FIELDS {
+        if let Some(value) = instance.get(*key) {
+            compact.insert((*key).to_owned(), value.clone());
+        }
+    }
+    let mut decision = serde_json::Map::new();
+    if let Some(source) = instance.get("strategy_decision") {
+        for key in ["observed_close", "strategy_order_size_multiplier", "strategy_parameters"] {
+            if let Some(value) = source.get(key) {
+                decision.insert(key.to_owned(), value.clone());
+            }
+        }
+    }
+    if !decision.is_empty() {
+        compact.insert("strategy_decision".to_owned(), decision.into());
+    }
+    compact.into()
+}
+
+fn compact_persisted_scout_payloads(
+    state: &mut PersistedState,
+) -> (Vec<String>, Vec<String>, Vec<String>) {
+    let mut changed_instances = Vec::new();
+    for (decision_id, instance) in &mut state.scout_instances {
+        let compact = compact_scout_instance(instance);
+        if *instance != compact {
+            *instance = compact;
+            changed_instances.push(decision_id.clone());
+        }
+    }
+    let mut changed_audit_groups = Vec::new();
+    for (group_id, audits) in &mut state.scout_active_audits {
+        let mut changed = false;
+        for audit in audits {
+            let compact = compact_scout_instance(audit);
+            if *audit != compact {
+                *audit = compact;
+                changed = true;
+            }
+        }
+        if changed {
+            changed_audit_groups.push(group_id.clone());
+        }
+    }
+    let mut changed_plan_results = Vec::new();
+    for (request_id, response) in &mut state.scout_plan_results {
+        let mut changed = false;
+        for audit in &mut response.audits {
+            let compact = compact_scout_instance(audit);
+            if *audit != compact {
+                *audit = compact;
+                changed = true;
+            }
+        }
+        if changed {
+            changed_plan_results.push(request_id.clone());
+        }
+    }
+    (changed_instances, changed_audit_groups, changed_plan_results)
+}
+
+fn persist_compacted_scout_payloads(
+    path: &std::path::Path,
+    state: &PersistedState,
+    changed_instances: &[String],
+    changed_audit_groups: &[String],
+    changed_plan_results: &[String],
+    evicted_instances: &[String],
+) -> anyhow::Result<()> {
+    if changed_instances.is_empty()
+        && changed_audit_groups.is_empty()
+        && changed_plan_results.is_empty()
+        && evicted_instances.is_empty()
+    {
+        return Ok(());
+    }
+    let mut connection = rusqlite::Connection::open(path)?;
+    let tx = connection.transaction()?;
+    for decision_id in changed_instances {
+        if let Some(instance) = state.scout_instances.get(decision_id) {
+            tx.execute(
+                "UPDATE scout_records SET payload=?1 WHERE collection='scout_instances' AND record_key=?2",
+                rusqlite::params![serde_json::to_string(instance)?, decision_id],
+            )?;
+        }
+    }
+    for decision_id in evicted_instances {
+        tx.execute(
+            "DELETE FROM scout_records WHERE collection='scout_instances' AND record_key=?1",
+            [decision_id],
+        )?;
+    }
+    for group_id in changed_audit_groups {
+        if let Some(audits) = state.scout_active_audits.get(group_id) {
+            tx.execute(
+                "UPDATE scout_records SET payload=?1 WHERE collection='scout_active_audits' AND record_key=?2",
+                rusqlite::params![serde_json::to_string(audits)?, group_id],
+            )?;
+        }
+    }
+    for request_id in changed_plan_results {
+        if let Some(response) = state.scout_plan_results.get(request_id) {
+            tx.execute(
+                "UPDATE scout_records SET payload=?1 WHERE collection='scout_plan_results' AND record_key=?2",
+                rusqlite::params![serde_json::to_string(response)?, request_id],
+            )?;
+        }
+    }
+    tx.commit()?;
+    Ok(())
 }
 
 fn remove_scout_instance(state: &mut PersistedState, decision_id: &str) {
