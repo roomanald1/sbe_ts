@@ -2080,11 +2080,13 @@ function AutoTraderOutcomesComponent({
         headerTooltip:
           'Shows whether AutoTrader or an operator closed the strategy instance; otherwise shows the execution order type.',
         valueFormatter: ({ value, data }) =>
-          data?.manuallyClosed
-            ? 'Manual close'
-            : typeof value === 'string' && value
-              ? entryOrderTypeLabel(value) || '—'
-              : '—',
+          data?.status === 'Closed' && !data.ledgerTrade
+            ? '—'
+            : data?.manuallyClosed
+              ? 'Manual close'
+              : typeof value === 'string' && value
+                ? entryOrderTypeLabel(value) || '—'
+                : '—',
         minWidth: 88,
       },
       {
@@ -3184,6 +3186,44 @@ function AutoTraderOutcomesComponent({
                 </p>
                 {!carry && (
                   <>
+                    <details className="auto-trader-gate-parameters">
+                      <summary>Strategy parameters used</summary>
+                      {entryDecision?.strategy_parameters &&
+                      Object.keys(entryDecision.strategy_parameters).length ? (
+                        <ul>
+                          {Object.entries(entryDecision.strategy_parameters)
+                            .sort(([left], [right]) =>
+                              left.localeCompare(right),
+                            )
+                            .map(([key, value]) => (
+                              <li key={key}>
+                                <strong>Used</strong>
+                                <span>{componentLabel(key)}</span>
+                                <small>{gateNumber(value, 6)}</small>
+                                <strong>Base</strong>
+                                <span>Default · Δ vs base</span>
+                                <small>
+                                  {(() => {
+                                    const base =
+                                      state.strategyParameterDefaults[
+                                        gatePosition.strategy
+                                      ]?.[key];
+                                    return typeof base === 'number' &&
+                                      typeof value === 'number'
+                                      ? `${gateNumber(base, 6)} · ${value - base >= 0 ? '+' : ''}${gateNumber(value - base, 6)}`
+                                      : 'Base unavailable';
+                                  })()}
+                                </small>
+                              </li>
+                            ))}
+                        </ul>
+                      ) : (
+                        <p>
+                          Parameters used at entry were not retained for this
+                          position.
+                        </p>
+                      )}
+                    </details>
                     <h3>Entry signal context</h3>
                     <p>
                       Recorded signal values available when this position was

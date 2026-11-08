@@ -50,9 +50,10 @@ pub(super) async fn get_decision_snapshot(
 fn scout_parameter_variant_snapshots(
     state: &LearningState,
 ) -> Vec<strategies::ScoutParameterVariant> {
-    type CandidateKey = (String, String, String);
+    type CandidateKey = (String, String, String, String);
     let mut outcomes = BTreeMap::<CandidateKey, Vec<f64>>::new();
-    let mut symbols = BTreeMap::<CandidateKey, BTreeSet<String>>::new();
+    let mut baseline_directions = BTreeMap::<CandidateKey, [usize; 4]>::new();
+    let mut baseline_deltas = BTreeMap::<CandidateKey, (f64, usize)>::new();
     for variant in state.variants.values() {
         for outcome in &variant.outcomes {
             // Multi-parameter comparisons are promoted as a tested group, so
@@ -65,6 +66,7 @@ fn scout_parameter_variant_snapshots(
                 continue;
             };
             let key = (
+                variant.profile.symbol.clone(),
                 variant.profile.strategy.clone(),
                 parameter.clone(),
                 format!("{value:.8}"),
@@ -73,16 +75,30 @@ fn scout_parameter_variant_snapshots(
                 .entry(key.clone())
                 .or_default()
                 .push(outcome.net_return_percent);
-            symbols
-                .entry(key)
-                .or_default()
-                .insert(variant.profile.symbol.clone());
+            let direction_counts = baseline_directions.entry(key.clone()).or_default();
+            let baseline = outcome.baseline_parameters.get(parameter).copied();
+            let step = variant
+                .specs
+                .iter()
+                .find(|spec| spec.key == *parameter)
+                .map_or(1e-8, |spec| spec.step * 1e-6);
+            match baseline {
+                Some(baseline) if *value > baseline + step => direction_counts[0] += 1,
+                Some(baseline) if *value < baseline - step => direction_counts[1] += 1,
+                Some(_) => direction_counts[2] += 1,
+                None => direction_counts[3] += 1,
+            }
+            if let Some(baseline) = baseline {
+                let delta = baseline_deltas.entry(key.clone()).or_default();
+                delta.0 += *value - baseline;
+                delta.1 += 1;
+            }
         }
     }
 
     let mut snapshots = Vec::new();
     for (key, returns) in outcomes {
-        let (strategy, parameter, value_string) = key.clone();
+        let (symbol, strategy, parameter, value_string) = key.clone();
         let Ok(candidate_value) = value_string.parse::<f64>() else {
             continue;
         };
@@ -90,6 +106,11 @@ fn scout_parameter_variant_snapshots(
             continue;
         }
         let sample_count = returns.len();
+        let direction_counts = baseline_directions.get(&key).copied().unwrap_or_default();
+        let (paired_delta_sum, paired_delta_samples) =
+            baseline_deltas.get(&key).copied().unwrap_or_default();
+        let paired_delta_mean =
+            (paired_delta_samples > 0).then_some(paired_delta_sum / paired_delta_samples as f64);
         let minimum_samples = state.minimum_live_scout_parameter_samples;
         let mean = returns.iter().sum::<f64>() / sample_count as f64;
         let (lower_bound, upper_bound) = if sample_count >= minimum_samples && sample_count > 1 {
@@ -108,27 +129,31 @@ fn scout_parameter_variant_snapshots(
         };
         let positive_evidence = lower_bound.is_some_and(|bound| bound > 0.0);
         let negative_evidence = upper_bound.is_some_and(|bound| bound < 0.0);
-        for symbol in symbols.remove(&key).unwrap_or_default() {
-            let active_value = state
-                .active_profiles
-                .get(&format!("{symbol}:{strategy}"))
-                .and_then(|profile| profile.parameters.get(&parameter))
-                .copied();
-            snapshots.push(strategies::ScoutParameterVariant {
-                symbol,
-                strategy: strategy.clone(),
-                parameter: parameter.clone(),
-                candidate_value,
-                sample_count,
-                minimum_samples,
-                average_net_improvement_percent: mean,
-                lower_90_one_sided_improvement_percent: lower_bound,
-                upper_90_one_sided_improvement_percent: upper_bound,
-                promoted: positive_evidence
-                    && active_value.is_some_and(|value| (value - candidate_value).abs() <= 1e-8),
-                rejected: negative_evidence,
-            });
-        }
+        let active_value = state
+            .active_profiles
+            .get(&format!("{symbol}:{strategy}"))
+            .and_then(|profile| profile.parameters.get(&parameter))
+            .copied();
+        snapshots.push(strategies::ScoutParameterVariant {
+            symbol,
+            strategy,
+            parameter,
+            candidate_value,
+            sample_count,
+            minimum_samples,
+            average_net_improvement_percent: mean,
+            lower_90_one_sided_improvement_percent: lower_bound,
+            upper_90_one_sided_improvement_percent: upper_bound,
+            paired_baseline_increase_samples: direction_counts[0],
+            paired_baseline_decrease_samples: direction_counts[1],
+            paired_baseline_same_samples: direction_counts[2],
+            paired_baseline_unknown_samples: direction_counts[3],
+            paired_baseline_delta_mean: paired_delta_mean,
+            paired_baseline_delta_samples: paired_delta_samples,
+            promoted: positive_evidence
+                && active_value.is_some_and(|value| (value - candidate_value).abs() <= 1e-8),
+            rejected: negative_evidence,
+        });
     }
     snapshots.sort_by(|left, right| {
         (&left.symbol, &left.strategy, &left.parameter)
@@ -141,6 +166,44 @@ fn scout_parameter_variant_snapshots(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn scout_variant(symbol: &str, returns: &[f64]) -> RegisteredProfile {
+        RegisteredProfile {
+            profile: StrategyProfile {
+                profile_id: format!("{symbol}-profile"),
+                version: 0,
+                symbol: symbol.into(),
+                strategy: "example-strategy".into(),
+                parameters: BTreeMap::from([("threshold".into(), 0.7)]),
+                learning_samples: 0,
+                positive_samples: 0,
+                realized_pnl: 0.0,
+            },
+            specs: vec![ParameterSpec {
+                key: "threshold".into(),
+                label: "Threshold".into(),
+                default: 0.5,
+                min: 0.0,
+                max: 1.0,
+                step: 0.1,
+                unit: "".into(),
+                learning_direction: 1.0,
+            }],
+            samples: returns.len(),
+            positive: 0,
+            realized_pnl: 0.0,
+            outcomes: returns
+                .iter()
+                .enumerate()
+                .map(|(index, value)| LearningOutcome {
+                    observed_at_ms: index as u64,
+                    net_return_percent: *value,
+                    tested_parameter_keys: vec!["threshold".into()],
+                    baseline_parameters: BTreeMap::from([("threshold".into(), 0.5)]),
+                })
+                .collect(),
+        }
+    }
 
     #[test]
     fn negative_upper_bound_marks_a_well_sampled_candidate_to_avoid() {
@@ -155,6 +218,30 @@ mod tests {
         let margin = one_sided_90_t_critical(sample_count).unwrap()
             * (variance / sample_count as f64).sqrt();
         assert!(mean + margin < 0.0);
+    }
+
+    #[test]
+    fn scout_parameter_evidence_is_aggregated_per_symbol() {
+        let mut state = LearningState::default();
+        state.minimum_live_scout_parameter_samples = 2;
+        state
+            .variants
+            .insert("a".into(), scout_variant("A", &[0.2, 0.4]));
+        state
+            .variants
+            .insert("b".into(), scout_variant("B", &[-0.3]));
+
+        let snapshots = scout_parameter_variant_snapshots(&state);
+        let a = snapshots.iter().find(|row| row.symbol == "A").unwrap();
+        let b = snapshots.iter().find(|row| row.symbol == "B").unwrap();
+
+        assert_eq!(a.sample_count, 2);
+        assert!((a.average_net_improvement_percent - 0.3).abs() < 1e-10);
+        assert_eq!(a.paired_baseline_increase_samples, 2);
+        assert_eq!(b.sample_count, 1);
+        assert_eq!(b.average_net_improvement_percent, -0.3);
+        assert_eq!(b.paired_baseline_increase_samples, 1);
+        assert_eq!(b.lower_90_one_sided_improvement_percent, None);
     }
 }
 

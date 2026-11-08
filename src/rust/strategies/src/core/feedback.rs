@@ -26,6 +26,18 @@ pub struct ScoutParameterVariant {
     pub lower_90_one_sided_improvement_percent: Option<f64>,
     #[serde(default)]
     pub upper_90_one_sided_improvement_percent: Option<f64>,
+    #[serde(default)]
+    pub paired_baseline_increase_samples: usize,
+    #[serde(default)]
+    pub paired_baseline_decrease_samples: usize,
+    #[serde(default)]
+    pub paired_baseline_same_samples: usize,
+    #[serde(default)]
+    pub paired_baseline_unknown_samples: usize,
+    #[serde(default)]
+    pub paired_baseline_delta_mean: Option<f64>,
+    #[serde(default)]
+    pub paired_baseline_delta_samples: usize,
     pub promoted: bool,
     #[serde(default)]
     pub rejected: bool,
@@ -51,6 +63,8 @@ pub enum FeedbackEvent {
         strategy: String,
         profile_id: String,
         parameters: BTreeMap<String, f64>,
+        #[serde(default)]
+        baseline_parameters: BTreeMap<String, f64>,
         specs: Vec<ParameterSpec>,
         net_return_percent: f64,
     },

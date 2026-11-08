@@ -88,6 +88,12 @@ export type AutoTraderStrategyScoutVariant = {
   average_net_improvement_percent: number;
   lower_90_one_sided_improvement_percent?: number | null;
   upper_90_one_sided_improvement_percent?: number | null;
+  paired_baseline_increase_samples?: number;
+  paired_baseline_decrease_samples?: number;
+  paired_baseline_same_samples?: number;
+  paired_baseline_unknown_samples?: number;
+  paired_baseline_delta_mean?: number | null;
+  paired_baseline_delta_samples?: number;
   promoted: boolean;
   rejected: boolean;
 };

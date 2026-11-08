@@ -52,6 +52,8 @@ struct LearningOutcome {
     net_return_percent: f64,
     #[serde(default)]
     tested_parameter_keys: Vec<String>,
+    #[serde(default)]
+    baseline_parameters: BTreeMap<String, f64>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -740,7 +742,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn paired_scout_promotion_pools_symbols_and_keeps_the_tested_value() {
+    async fn paired_scout_promotion_requires_symbol_specific_evidence() {
         let path = std::env::temp_dir().join(format!(
             "learning-paired-test-{}.sqlite",
             std::process::id()
@@ -784,8 +786,17 @@ mod tests {
             assert_eq!(response.status(), StatusCode::ACCEPTED);
         }
 
+        let response = json_request(
+            app.clone(),
+            "PUT",
+            "/config/scout-parameter-samples",
+            Some(br#"{"minimum_samples":6}"#.to_vec()),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+
         for (symbol_index, symbol) in ["BTC-USDT", "ETH-USDT"].into_iter().enumerate() {
-            let parameters = BTreeMap::from([("threshold".into(), 0.6)]);
+            let parameters = BTreeMap::from([("threshold".into(), 0.4)]);
             let profile_id = format!("{symbol}-candidate");
             for sample in 0..3 {
                 let event = FeedbackEvent::ScoutOutcome {
@@ -796,6 +807,7 @@ mod tests {
                     strategy: "live-momentum".into(),
                     profile_id: profile_id.clone(),
                     parameters: parameters.clone(),
+                    baseline_parameters: BTreeMap::from([("threshold".into(), 0.5)]),
                     specs: vec![spec.clone()],
                     net_return_percent: 0.02,
                 };
@@ -830,24 +842,67 @@ mod tests {
         assert!(
             profiles
                 .iter()
-                .all(|profile| profile.parameters["threshold"] == 0.6)
+                .all(|profile| profile.parameters["threshold"] == 0.5)
         );
+
+        // BTC now has enough paired outcomes on its own. ETH's samples must
+        // not contribute to BTC's promotion decision or be changed with it.
+        for sample in 3..6 {
+            let event = FeedbackEvent::ScoutOutcome {
+                event_id: format!("paired-BTC-USDT-extra-{sample}"),
+                observed_at_ms: now_ms() + 100 + sample,
+                learning_context: None,
+                symbol: "BTC-USDT".into(),
+                strategy: "live-momentum".into(),
+                profile_id: "BTC-USDT-candidate".into(),
+                parameters: BTreeMap::from([("threshold".into(), 0.4)]),
+                baseline_parameters: BTreeMap::from([("threshold".into(), 0.5)]),
+                specs: vec![spec.clone()],
+                net_return_percent: 0.02,
+            };
+            let response = json_request(
+                app.clone(),
+                "POST",
+                "/feedback",
+                Some(serde_json::to_vec(&event).unwrap()),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::OK);
+        }
+
+        let response = json_request(app.clone(), "GET", "/profiles", None).await;
+        let profiles: Vec<StrategyProfile> =
+            serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                .unwrap();
+        assert_eq!(profiles.len(), 2);
+        assert_eq!(profiles[0].parameters["threshold"], 0.4);
+        assert_eq!(profiles[1].parameters["threshold"], 0.5);
 
         let response = json_request(app.clone(), "GET", "/decision-snapshot", None).await;
         let snapshot: LearnedProfileSnapshot =
             serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
                 .unwrap();
         assert_eq!(snapshot.scout_parameter_variants.len(), 2);
-        assert!(
-            snapshot.scout_parameter_variants.iter().all(|variant| {
-                variant.sample_count == 6
-                    && variant.minimum_samples == 6
-                    && variant.promoted
-                    && variant.lower_90_one_sided_improvement_percent == Some(0.02)
-            }),
-            "{:#?}",
-            snapshot.scout_parameter_variants
-        );
+        let btc = snapshot
+            .scout_parameter_variants
+            .iter()
+            .find(|variant| variant.symbol == "BTC-USDT")
+            .unwrap();
+        assert_eq!(btc.sample_count, 6);
+        assert!(btc.promoted);
+        assert_eq!(btc.paired_baseline_decrease_samples, 6);
+        assert_eq!(btc.paired_baseline_delta_samples, 6);
+        assert_eq!(btc.lower_90_one_sided_improvement_percent, Some(0.02));
+        let eth = snapshot
+            .scout_parameter_variants
+            .iter()
+            .find(|variant| variant.symbol == "ETH-USDT")
+            .unwrap();
+        assert_eq!(eth.sample_count, 3);
+        assert!(!eth.promoted);
+        assert_eq!(eth.paired_baseline_decrease_samples, 3);
+        assert_eq!(eth.paired_baseline_delta_samples, 3);
+        assert_eq!(eth.lower_90_one_sided_improvement_percent, None);
         let response = json_request(
             app.clone(),
             "PUT",
@@ -861,12 +916,20 @@ mod tests {
         let restarted_snapshot: LearnedProfileSnapshot =
             serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
                 .unwrap();
-        assert!(
-            restarted_snapshot
-                .scout_parameter_variants
-                .iter()
-                .all(|variant| variant.minimum_samples == 3)
-        );
+        let btc = restarted_snapshot
+            .scout_parameter_variants
+            .iter()
+            .find(|variant| variant.symbol == "BTC-USDT")
+            .unwrap();
+        assert_eq!(btc.minimum_samples, 3);
+        assert_eq!(btc.paired_baseline_decrease_samples, 6);
+        let eth = restarted_snapshot
+            .scout_parameter_variants
+            .iter()
+            .find(|variant| variant.symbol == "ETH-USDT")
+            .unwrap();
+        assert_eq!(eth.minimum_samples, 3);
+        assert_eq!(eth.paired_baseline_decrease_samples, 3);
         let _ = std::fs::remove_file(path);
     }
 
@@ -990,6 +1053,7 @@ mod tests {
             strategy: "live-momentum".into(),
             profile_id: "p1".into(),
             parameters: profile.parameters.clone(),
+            baseline_parameters: BTreeMap::new(),
             specs: vec![spec.clone()],
             net_return_percent: 2.0,
         };
@@ -1046,6 +1110,7 @@ mod tests {
             strategy: profile.strategy.clone(),
             profile_id: profile.profile_id.clone(),
             parameters: profile.parameters.clone(),
+            baseline_parameters: BTreeMap::new(),
             specs: vec![spec.clone()],
             net_return_percent: -1.0,
         };
@@ -1083,6 +1148,7 @@ mod tests {
             strategy: "momentum".into(),
             profile_id: "p1".into(),
             parameters: BTreeMap::from([("threshold".into(), 0.5)]),
+            baseline_parameters: BTreeMap::new(),
             specs: vec![],
             net_return_percent: 1.0,
         };

@@ -57,6 +57,39 @@ mod dated_carry_lifecycle_tests {
     }
 
     #[test]
+    fn lifecycle_persistence_reports_only_changed_record_keys() {
+        let opened_at_ms = scout_now_ms().saturating_sub(4 * 86_400_000);
+        let probe = carry_probe(opened_at_ms, false);
+        let mut state = PersistedState::default();
+        state.scout_pending_samples.insert(
+            probe.sample_id.clone(),
+            ScoutSamplePayload::DatedCarryProbe(probe),
+        );
+        state.scout_sample_active_scenarios.insert(
+            "carry-probe-1".into(),
+            BTreeSet::from(["carry-probe-1|carry".into()]),
+        );
+        state
+            .scout_plan_profiles
+            .insert("carry-probe-1".into(), "dated-carry|BTC-USDT".into());
+        let request = ScoutLifecycleObserveRequest {
+            request_id: "expired-carry-probe".into(),
+            now_ms: scout_now_ms(),
+            candidates: Vec::new(),
+        };
+
+        let (_, changed_records) =
+            apply_scout_lifecycle_observation_with_changes(&mut state, &request);
+
+        assert!(changed_records.contains("scout_pending_samples@carry-probe-1"));
+        assert!(changed_records.contains("scout_sample_active_scenarios@carry-probe-1"));
+        assert!(changed_records.contains("scout_plan_profiles@carry-probe-1"));
+        assert!(changed_records.contains("scout_observation_results@expired-carry-probe"));
+        assert!(!changed_records.contains("outcomes"));
+        assert!(!changed_records.contains("scout_instances"));
+    }
+
+    #[test]
     fn zero_return_carry_variant_finalizes_after_one_day_and_retry_is_idempotent() {
         let opened_at_ms = scout_now_ms().saturating_sub(86_400_000);
         let probe = carry_probe(opened_at_ms, false);

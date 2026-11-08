@@ -12,10 +12,18 @@ async fn main() -> anyhow::Result<()> {
     ));
     let signal_push_cache = Arc::new(DashMap::new());
     let signal_push_notify = Arc::new(Notify::new());
+    let scout_push_cache = Arc::new(DashMap::new());
+    let scout_push_notify = Arc::new(Notify::new());
     if !research_only() {
         tokio::spawn(run_signal_push_worker(
             Arc::clone(&signal_push_cache),
             Arc::clone(&signal_push_notify),
+            Arc::clone(&scout_push_cache),
+            Arc::clone(&scout_push_notify),
+        ));
+        tokio::spawn(run_scout_input_push_worker(
+            Arc::clone(&scout_push_cache),
+            Arc::clone(&scout_push_notify),
         ));
     }
     let market_cache = Arc::new(DashMap::new());

@@ -145,6 +145,7 @@ mod tests {
             strategy: "momentum".into(),
             profile_id: "profile".into(),
             parameters: BTreeMap::new(),
+            baseline_parameters: BTreeMap::new(),
             specs: Vec::new(),
             net_return_percent: 0.5,
         };
@@ -247,5 +248,50 @@ mod tests {
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(path.with_extension("sqlite-wal"));
         let _ = std::fs::remove_file(path.with_extension("sqlite-shm"));
+    }
+
+    #[tokio::test]
+    async fn repeated_outbox_flush_triggers_coalesce_while_flush_is_locked() {
+        let persisted = PersistedState::default();
+        let service = ServiceState {
+            client: reqwest::Client::new(),
+            learning_url: String::new(),
+            auto_trader_url: String::new(),
+            seen: Arc::new(Mutex::new(BTreeSet::new())),
+            strategy_outcomes_by_profile: Arc::clone(&persisted.strategy_outcomes_by_profile),
+            portfolio_instances_by_group: Arc::clone(&persisted.portfolio_instances_by_group),
+            strategy_outcome_profile_index_ready: Arc::new(std::sync::atomic::AtomicBool::new(
+                false,
+            )),
+            live_scout_maximum_duration_ms: Arc::new(std::sync::RwLock::new(BTreeMap::new())),
+            scout: ScoutState {
+                data: Arc::new(Mutex::new(persisted)),
+                path: std::path::PathBuf::new(),
+                flush_lock: Arc::new(Mutex::new(())),
+                flush_scheduled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            },
+        };
+        let flush_guard = service.scout.flush_lock.lock().await;
+        for _ in 0..50_000 {
+            schedule_scout_outbox_flush(&service);
+        }
+        assert!(
+            service
+                .scout
+                .flush_scheduled
+                .load(std::sync::atomic::Ordering::Acquire)
+        );
+        drop(flush_guard);
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while service
+                .scout
+                .flush_scheduled
+                .load(std::sync::atomic::Ordering::Acquire)
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("coalesced Scout flush should complete after the lock is released");
     }
 }

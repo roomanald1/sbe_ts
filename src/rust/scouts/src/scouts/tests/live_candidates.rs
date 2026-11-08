@@ -157,6 +157,28 @@ mod tests {
     }
 
     #[test]
+    fn single_parameter_sweep_includes_both_bounded_directions() {
+        let parameters = BTreeMap::from([
+            ("minimum_momentum".into(), 0.5),
+            ("lookback_days".into(), 20.0),
+            ("learning_rate".into(), 0.05),
+        ]);
+        let variants = single_parameter_variants(&parameters, &specs(), 2).unwrap();
+        for key in ["minimum_momentum", "lookback_days"] {
+            let values = variants
+                .iter()
+                .filter_map(|variant| variant.get(key).copied())
+                .collect::<Vec<_>>();
+            assert_eq!(values.len(), 2, "{key} should be tested up and down");
+            assert!(values.iter().any(|value| value < &parameters[key]));
+            assert!(values.iter().any(|value| value > &parameters[key]));
+            let spec = specs().into_iter().find(|spec| spec.key == key).unwrap();
+            assert!(values.iter().all(|value| *value >= spec.min && *value <= spec.max));
+        }
+        assert!(variants.iter().all(|variant| !variant.contains_key("learning_rate")));
+    }
+
+    #[test]
     fn subset_sweep_includes_every_arity_without_waiting_for_later_days() {
         let mut parameter_specs = specs();
         parameter_specs.push(ParameterSpec {

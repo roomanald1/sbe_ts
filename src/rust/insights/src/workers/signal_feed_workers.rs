@@ -295,37 +295,85 @@ async fn deliver_signal_batch(
     (failed, first_error)
 }
 
+fn scout_dashboard_for_delivery(dashboard: &serde_json::Value) -> serde_json::Value {
+    serde_json::json!({
+        "best": dashboard.get("best").cloned().unwrap_or_default(),
+        "markets": dashboard.get("markets").cloned().unwrap_or_default(),
+    })
+}
+
+fn scout_delivery_signals(dashboard: &serde_json::Value) -> Vec<serde_json::Value> {
+    let mut signals = Vec::new();
+    let Some(best) = dashboard.get("best").and_then(serde_json::Value::as_array) else {
+        return signals;
+    };
+    let markets = dashboard.get("markets");
+    for source_signal in best {
+        let mut signal = source_signal.clone();
+        let Some(symbol) = signal.get("symbol").and_then(serde_json::Value::as_str) else {
+            continue;
+        };
+        let Some(market) = markets.and_then(|markets| markets.get(symbol)) else {
+            continue;
+        };
+        let bid = market.get("bids").and_then(serde_json::Value::as_array).and_then(|items| items.first())
+            .and_then(|level| level.get("price")).and_then(serde_json::Value::as_f64);
+        let ask = market.get("asks").and_then(serde_json::Value::as_array).and_then(|items| items.first())
+            .and_then(|level| level.get("price")).and_then(serde_json::Value::as_f64);
+        let updated_at = market.get("updated_at_ms").and_then(serde_json::Value::as_u64);
+        let (Some(bid), Some(ask), Some(updated_at)) = (bid, ask, updated_at) else {
+            continue;
+        };
+        if now_ms().saturating_sub(updated_at) > 5_000
+            || !bid.is_finite()
+            || !ask.is_finite()
+            || bid <= 0.0
+            || ask < bid
+        {
+            continue;
+        }
+        signal["best_bid"] = serde_json::json!(bid);
+        signal["best_ask"] = serde_json::json!(ask);
+        signal["price"] = serde_json::json!(bid + (ask - bid) / 2.0);
+        signal["book_updated_at_ms"] = serde_json::json!(updated_at);
+        signals.push(signal);
+    }
+    signals
+}
+
 async fn deliver_scout_inputs(client: &reqwest::Client, dashboards: &[(String, serde_json::Value)]) {
     let base = std::env::var("SCOUTS_SERVICE_URL")
         .unwrap_or_else(|_| "http://127.0.0.1:3011".to_owned());
     for (_symbol, dashboard) in dashboards {
-        let mut signals = dashboard.get("best").and_then(serde_json::Value::as_array)
-            .cloned().unwrap_or_default();
-        let markets = dashboard.get("markets");
-        for signal in &mut signals {
-            let Some(symbol) = signal.get("symbol").and_then(serde_json::Value::as_str) else { continue };
-            let Some(market) = markets.and_then(|markets| markets.get(symbol)) else { continue };
-            let bid = market.get("bids").and_then(serde_json::Value::as_array).and_then(|items| items.first())
-                .and_then(|level| level.get("price")).and_then(serde_json::Value::as_f64);
-            let ask = market.get("asks").and_then(serde_json::Value::as_array).and_then(|items| items.first())
-                .and_then(|level| level.get("price")).and_then(serde_json::Value::as_f64);
-            let updated_at = market.get("updated_at_ms").and_then(serde_json::Value::as_u64);
-            if let (Some(bid), Some(ask), Some(updated_at)) = (bid, ask, updated_at) {
-                if bid.is_finite() && ask.is_finite() && bid > 0.0 && ask >= bid {
-                    signal["best_bid"] = serde_json::json!(bid);
-                    signal["best_ask"] = serde_json::json!(ask);
-                    signal["price"] = serde_json::json!(bid + (ask - bid) / 2.0);
-                    signal["book_updated_at_ms"] = serde_json::json!(updated_at);
-                }
-            }
+        let signals = scout_delivery_signals(dashboard);
+        if signals.is_empty() {
+            continue;
         }
-        let result = client.post(format!("{}/live-inputs", base.trim_end_matches('/')))
-            .timeout(std::time::Duration::from_millis(300))
+        let result = client
+            .post(format!("{}/live-inputs", base.trim_end_matches('/')))
+            .timeout(std::time::Duration::from_secs(10))
             .json(&serde_json::json!({ "signals": signals }))
             .send().await.and_then(reqwest::Response::error_for_status);
         if let Err(error) = result {
             crate::service_log!("WARN", "Live Scout input delivery failed: {error}");
         }
+    }
+}
+
+async fn run_scout_input_push_worker(
+    pending_scout_inputs: Arc<DashMap<String, serde_json::Value>>,
+    scout_notify: Arc<Notify>,
+) {
+    let client = POSITION_MANAGEMENT_CLIENT.get_or_init(reqwest::Client::new);
+    loop {
+        let notified = scout_notify.notified();
+        tokio::pin!(notified);
+        let dashboards = drain_latest(&pending_scout_inputs);
+        if dashboards.is_empty() {
+            notified.await;
+            continue;
+        }
+        deliver_scout_inputs(client, &dashboards).await;
     }
 }
 
@@ -365,6 +413,8 @@ async fn run_ui_snapshot_push_worker(
 async fn run_signal_push_worker(
     pending_signals: Arc<DashMap<String, serde_json::Value>>,
     notify: Arc<Notify>,
+    pending_scout_inputs: Arc<DashMap<String, serde_json::Value>>,
+    scout_notify: Arc<Notify>,
 ) {
     let client = POSITION_MANAGEMENT_CLIENT.get_or_init(reqwest::Client::new);
     let base =
@@ -380,9 +430,13 @@ async fn run_signal_push_worker(
             continue;
         };
         // Send symbols in parallel so one slow request cannot block the batch.
-        let scout_client = client.clone();
-        let scout_dashboards = dashboards.clone();
-        tokio::spawn(async move { deliver_scout_inputs(&scout_client, &scout_dashboards).await; });
+        for (symbol, dashboard) in &dashboards {
+            pending_scout_inputs.insert(
+                symbol.clone(),
+                scout_dashboard_for_delivery(dashboard),
+            );
+        }
+        scout_notify.notify_one();
         let (failed, first_error) = deliver_signal_batch(&client, &base, dashboards).await;
         if !failed.is_empty() {
             if endpoint_available {
@@ -451,6 +505,73 @@ mod signal_feed_worker_tests {
         assert!(drained.iter().any(|(symbol, value)| symbol == "BTC" && value["n"] == 1));
         assert!(drained.iter().any(|(symbol, value)| symbol == "ETH" && value["n"] == 2));
         assert!(cache.is_empty());
+    }
+
+    #[test]
+    fn scout_delivery_queue_keeps_only_latest_slim_dashboard_per_symbol() {
+        fn rss_kib() -> u64 {
+            std::fs::read_to_string("/proc/self/status")
+                .unwrap()
+                .lines()
+                .find_map(|line| {
+                    line.strip_prefix("VmRSS:")?
+                        .split_whitespace()
+                        .next()?
+                        .parse::<u64>()
+                        .ok()
+                })
+                .unwrap()
+        }
+
+        let cache = DashMap::new();
+        let rss_before = rss_kib();
+        let bulky_dashboard = serde_json::json!({
+            "best": [{"symbol":"BTC-USDT", "sequence":0}],
+            "markets": {"BTC-USDT": {"updated_at_ms":now_ms(), "bids":[{"price":100.0}], "asks":[{"price":101.0}]}},
+            "walkForward": vec!["x".repeat(1024); 10_000],
+            "missedOpportunityBands": vec!["y".repeat(1024); 10_000],
+        });
+        cache.insert(
+            "BTC-USDT".to_owned(),
+            scout_dashboard_for_delivery(&bulky_dashboard),
+        );
+        drop(bulky_dashboard);
+        for index in 0..50_000 {
+            let updated_at = now_ms();
+            let dashboard = serde_json::json!({
+                "best": [{"symbol":"BTC-USDT", "sequence":index}],
+                "markets": {"BTC-USDT": {"updated_at_ms":updated_at, "bids":[{"price":100.0}], "asks":[{"price":101.0}]}},
+            });
+            cache.insert(
+                "BTC-USDT".to_owned(),
+                scout_dashboard_for_delivery(&dashboard),
+            );
+        }
+        assert_eq!(cache.len(), 1);
+        let queued = drain_latest(&cache);
+        assert_eq!(queued.len(), 1);
+        assert_eq!(queued[0].1["best"][0]["sequence"], 49_999);
+        assert!(queued[0].1.get("walkForward").is_none());
+        assert!(queued[0].1.get("missedOpportunityBands").is_none());
+
+        let signals = scout_delivery_signals(&queued[0].1);
+        assert_eq!(signals.len(), 1);
+        assert_eq!(signals[0]["best_bid"], 100.0);
+        assert_eq!(signals[0]["best_ask"], 101.0);
+        assert_eq!(signals[0]["price"], 100.5);
+        assert!(signals[0]["book_updated_at_ms"].as_u64().unwrap() <= now_ms());
+        assert!(serde_json::to_vec(&queued[0].1).unwrap().len() < 1_024);
+        let stale_dashboard = serde_json::json!({
+            "best": [{"symbol":"BTC-USDT"}],
+            "markets": {"BTC-USDT": {"updated_at_ms":now_ms().saturating_sub(6_000), "bids":[{"price":100.0}], "asks":[{"price":101.0}]}},
+        });
+        assert!(scout_delivery_signals(&stale_dashboard).is_empty());
+        eprintln!(
+            "SCOUT_INPUT_BENCH updates=50000 queued_symbols={} final_payload_bytes={} rss_before_kib={rss_before} rss_after_kib={}",
+            queued.len(),
+            serde_json::to_vec(&queued[0].1).unwrap().len(),
+            rss_kib()
+        );
     }
 }
 

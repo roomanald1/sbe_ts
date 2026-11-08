@@ -19,15 +19,21 @@ const learningGridTheme = themeQuartz.withParams({
   headerTextColor: '#a0a6ad',
   rowHoverColor: '#141b24',
 });
+
 type LearningRow = {
   id: string;
   symbol: string;
   strategy: string;
   parameter: string;
   unit: string;
+  step: number;
   base: number;
   candidate: number;
   effective: number;
+  pairedDelta: number | null;
+  pairedDeltaSamples: number;
+  pairedUnknownSamples: number;
+  pairedDeltaEstimated: boolean;
   samples: number;
   minimumSamples: number;
   averageLift: number | null;
@@ -43,7 +49,9 @@ const columns: ColDef<LearningRow>[] = [
   { field: 'parameter', headerName: 'Parameter', width: 145 },
   {
     field: 'base',
-    headerName: 'Base',
+    headerName: 'Configured/default',
+    headerTooltip:
+      'Configured override or strategy default. Paired tests compare against the baseline arm used for each scout, which is not necessarily this value.',
     width: 95,
     valueFormatter: ({ value, data }) =>
       value == null ? '—' : value.toFixed(3) + ' ' + (data?.unit ?? ''),
@@ -56,10 +64,34 @@ const columns: ColDef<LearningRow>[] = [
       value == null ? '—' : value.toFixed(3) + ' ' + (data?.unit ?? ''),
   },
   {
-    field: 'averageLift',
-    headerName: 'Avg net lift',
+    field: 'pairedDelta',
+    colId: 'pairedDelta',
+    headerName: 'Δ change',
     headerTooltip:
-      'Mean paired variant-minus-baseline net return, in percentage points.',
+      'Mean tested value minus paired-control value. Green is an increase; red is a decrease. If the control was not retained, the asterisk marks an estimate against Configured/default.',
+    width: 185,
+    valueFormatter: ({ value, data }) => {
+      if (!Number.isFinite(value) || !data) return '—';
+      const amount = `${value > 0 ? '+' : ''}${value.toFixed(3)} ${data.unit}`;
+      if (data.pairedDeltaEstimated)
+        return `${amount}* · est n=${data.pairedDeltaSamples}`;
+      const legacy = data.pairedUnknownSamples
+        ? ` · ${data.pairedUnknownSamples} unknown`
+        : '';
+      return `${amount} · n=${data.pairedDeltaSamples}${legacy}`;
+    },
+    cellClass: ({ value }) =>
+      value > 0
+        ? 'learning-paired-up'
+        : value < 0
+          ? 'learning-paired-down'
+          : 'learning-paired-neutral',
+  },
+  {
+    field: 'averageLift',
+    headerName: 'Avg paired lift',
+    headerTooltip:
+      'Mean paired variant-minus-baseline net return, in percentage points. A plus means better paired return, regardless of parameter direction.',
     width: 110,
     valueFormatter: ({ value }) =>
       Number.isFinite(value)
@@ -104,7 +136,9 @@ const columns: ColDef<LearningRow>[] = [
   { field: 'minimumSamples', headerName: 'Required n', width: 85 },
   {
     field: 'effective',
-    headerName: 'Effective value',
+    headerName: 'Current active value',
+    headerTooltip:
+      'Current parameter value used by this strategy profile. Historical scout baselines can differ.',
     width: 110,
     valueFormatter: ({ value, data }) =>
       value == null ? '—' : value.toFixed(3) + ' ' + (data?.unit ?? ''),
@@ -134,32 +168,56 @@ export function AutoTraderLearningWidget() {
   const rows = useMemo(() => {
     const results = profiles.flatMap((profile) =>
       profile.parameters.flatMap((parameter) =>
-        (parameter.scout_variants ?? []).map((variant): LearningRow => ({
-          id: `${profile.symbol}:${profile.strategy}:${parameter.key}:${variant.candidate_value.toFixed(8)}`,
-          symbol: profile.symbol,
-          strategy: profile.strategy,
-          parameter: parameter.label,
-          unit: parameter.unit,
-          base: parameter.configured_value ?? parameter.default_value,
-          candidate: variant.candidate_value,
-          effective: parameter.learned_value,
-          samples: variant.sample_count,
-          minimumSamples: variant.minimum_samples,
-          averageLift: variant.average_net_improvement_percent,
-          lower95: variant.lower_90_one_sided_improvement_percent ?? null,
-          upper95: variant.upper_90_one_sided_improvement_percent ?? null,
-          promoted: variant.promoted,
-          rejected: variant.rejected,
-          status: variant.promoted
-            ? 'Promoted'
-            : variant.rejected
-              ? 'Avoid'
-              : variant.sample_count < variant.minimum_samples
-                ? 'Collecting'
-                : (variant.lower_90_one_sided_improvement_percent ?? 0) > 0
-                  ? 'Qualified'
-                  : 'Not promoted',
-        })),
+        (parameter.scout_variants ?? []).map(
+          (variant): LearningRow => ({
+            id: `${profile.symbol}:${profile.strategy}:${parameter.key}:${variant.candidate_value.toFixed(8)}`,
+            symbol: profile.symbol,
+            strategy: profile.strategy,
+            parameter: parameter.label,
+            unit: parameter.unit,
+            step: parameter.step,
+            base: parameter.configured_value ?? parameter.default_value,
+            candidate: variant.candidate_value,
+            effective: parameter.value,
+            pairedDelta:
+              variant.paired_baseline_delta_samples &&
+              variant.paired_baseline_delta_samples > 0
+                ? (variant.paired_baseline_delta_mean ?? null)
+                : (variant.paired_baseline_unknown_samples ?? 0) > 0
+                  ? variant.candidate_value -
+                    (parameter.configured_value ?? parameter.default_value)
+                  : null,
+            pairedDeltaSamples:
+              variant.paired_baseline_delta_samples &&
+              variant.paired_baseline_delta_samples > 0
+                ? variant.paired_baseline_delta_samples
+                : (variant.paired_baseline_unknown_samples ?? 0),
+            pairedUnknownSamples:
+              variant.paired_baseline_delta_samples &&
+              variant.paired_baseline_delta_samples > 0
+                ? (variant.paired_baseline_unknown_samples ?? 0)
+                : 0,
+            pairedDeltaEstimated:
+              !(variant.paired_baseline_delta_samples ?? 0) &&
+              (variant.paired_baseline_unknown_samples ?? 0) > 0,
+            samples: variant.sample_count,
+            minimumSamples: variant.minimum_samples,
+            averageLift: variant.average_net_improvement_percent,
+            lower95: variant.lower_90_one_sided_improvement_percent ?? null,
+            upper95: variant.upper_90_one_sided_improvement_percent ?? null,
+            promoted: variant.promoted,
+            rejected: variant.rejected,
+            status: variant.promoted
+              ? 'Active'
+              : variant.rejected
+                ? 'Avoid'
+                : variant.sample_count < variant.minimum_samples
+                  ? 'Collecting'
+                  : (variant.lower_90_one_sided_improvement_percent ?? 0) > 0
+                    ? 'Qualified · not active'
+                    : 'Not qualified',
+          }),
+        ),
       ),
     );
     const rowsById = new Map(results.map((row) => [row.id, row]));
@@ -187,9 +245,14 @@ export function AutoTraderLearningWidget() {
         strategy: profile.strategy,
         parameter: parameter.label,
         unit: parameter.unit,
+        step: parameter.step,
         base: parameter.configured_value ?? parameter.default_value,
         candidate: pending.candidateValue,
-        effective: parameter.learned_value,
+        effective: parameter.value,
+        pairedDelta: null,
+        pairedDeltaSamples: 0,
+        pairedUnknownSamples: 0,
+        pairedDeltaEstimated: false,
         samples: 0,
         minimumSamples: Number(state.minimumScoutParameterSamples),
         averageLift: null,
@@ -215,10 +278,16 @@ export function AutoTraderLearningWidget() {
       <strong>Scout parameter tests</strong>
       <p>
         Paired scout results show whether each tested parameter value beat its
-        baseline. Results pool by strategy, parameter, and candidate value;
-        promotion requires the configured sample minimum and a positive
-        one-sided 90% Student-t approximation lower bound. “Avoid” means the
-        upper bound is below zero, so the candidate is consistently worse.
+        baseline. A positive paired lift means better returns, not a higher
+        parameter value. Results pool by strategy, parameter, and candidate
+        value. “Qualified” means the configured sample minimum and positive
+        one-sided 90% Student-t lower bound are met; “Active” means the current
+        profile uses that candidate. The configured/default column is a
+        reference, not necessarily the paired control value used by each test.
+        Delta is candidate minus control; legacy estimates use
+        Configured/default and carry an asterisk. Both upward and downward
+        candidates are sampled when within parameter bounds. “Avoid” means the
+        upper bound is below zero.
       </p>
       {rows.length === 0 ? (
         <p>
@@ -234,10 +303,10 @@ export function AutoTraderLearningWidget() {
             aria-pressed={promotedOnly}
             onClick={() => setPromotedOnly((value) => !value)}
           >
-            {promotedOnly ? 'Show all tests' : 'Promoted only'}
+            {promotedOnly ? 'Show all tests' : 'Active only'}
           </button>
           {visibleRows.length === 0 ? (
-            <p>No parameter variants have been promoted yet.</p>
+            <p>No parameter variants are active yet.</p>
           ) : (
             <div className="data-grid-wrap auto-trader-learning-grid">
               <AgGridReact<LearningRow>

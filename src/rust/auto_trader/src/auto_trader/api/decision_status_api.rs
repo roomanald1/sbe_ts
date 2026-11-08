@@ -217,6 +217,12 @@ mod decision_profile_tests {
             average_net_improvement_percent: 0.12,
             lower_90_one_sided_improvement_percent: None,
             upper_90_one_sided_improvement_percent: None,
+            paired_baseline_increase_samples: 0,
+            paired_baseline_decrease_samples: 2,
+            paired_baseline_same_samples: 0,
+            paired_baseline_unknown_samples: 0,
+            paired_baseline_delta_mean: Some(-0.1),
+            paired_baseline_delta_samples: 3,
             promoted: false,
             rejected: false,
         });
@@ -229,6 +235,8 @@ mod decision_profile_tests {
             .expect("tested parameter");
         assert_eq!(parameter.scout_variants.len(), 1);
         assert_eq!(parameter.scout_variants[0].sample_count, 3);
+        assert_eq!(parameter.scout_variants[0].paired_baseline_decrease_samples, 2);
+        assert_eq!(parameter.scout_variants[0].paired_baseline_delta_mean, Some(-0.1));
     }
 
     #[test]

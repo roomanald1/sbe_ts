@@ -86,12 +86,37 @@ fn estimate_live_scout_maximum_durations(
 }
 
 fn schedule_scout_outbox_flush(service: &ServiceState) {
-    let scout = service.scout.clone();
-    let client = service.client.clone();
-    let learning_url = service.learning_url.clone();
+    schedule_scout_outbox_flush_with(
+        service.scout.clone(),
+        service.client.clone(),
+        service.learning_url.clone(),
+    );
+}
+
+fn schedule_scout_outbox_flush_with(
+    scout: ScoutState,
+    client: reqwest::Client,
+    learning_url: String,
+) {
+    if scout
+        .flush_scheduled
+        .compare_exchange(false, true, std::sync::atomic::Ordering::AcqRel, std::sync::atomic::Ordering::Acquire)
+        .is_err()
+    {
+        return;
+    }
     tokio::spawn(async move {
-        if let Err((_, error)) = flush_scout_outbox(&scout, &client, &learning_url).await {
+        let result = flush_scout_outbox(&scout, &client, &learning_url).await;
+        scout
+            .flush_scheduled
+            .store(false, std::sync::atomic::Ordering::Release);
+        if let Err((_, error)) = result {
             eprintln!("WARN Scout outbox delivery deferred: {error}");
+            return;
+        }
+        let pending = !scout.data.lock().await.outbox.is_empty();
+        if pending {
+            schedule_scout_outbox_flush_with(scout, client, learning_url);
         }
     });
 }
@@ -128,6 +153,7 @@ pub fn router(learning_url: String, auto_trader_url: String) -> Router {
         data: Arc::new(Mutex::new(persisted)),
         path: state_path,
         flush_lock: Arc::new(Mutex::new(())),
+        flush_scheduled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
     };
     let live_scout_maximum_duration_ms =
         Arc::new(std::sync::RwLock::new(BTreeMap::new()));
@@ -257,6 +283,33 @@ pub fn router(learning_url: String, auto_trader_url: String) -> Router {
             live_scout_maximum_duration_ms,
             scout,
         })
+        .layer(axum::middleware::from_fn(scout_memory_probe))
+}
+
+async fn scout_memory_probe(
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let route = request.uri().path().to_owned();
+    let before = process_memory_bytes()
+        .await
+        .parse::<u64>()
+        .unwrap_or_default();
+    let started = std::time::Instant::now();
+    let response = next.run(request).await;
+    let after = process_memory_bytes()
+        .await
+        .parse::<u64>()
+        .unwrap_or_default();
+    let delta = after as i128 - before as i128;
+    let elapsed = started.elapsed().as_millis();
+    if delta.unsigned_abs() >= 128 * 1024 * 1024 || elapsed >= 1_000 {
+        eprintln!(
+            "MEMORY_PROBE route={route} rss_before={before} rss_after={after} delta={delta} duration_ms={elapsed} status={}",
+            response.status()
+        );
+    }
+    response
 }
 
 async fn process_cpu_seconds() -> String {
@@ -400,26 +453,57 @@ fn ranked_parameter_variants(
         let offset = day as usize % unexplored.len();
         unexplored.rotate_left(offset);
     }
-    let known_count = known.len().min(MAX_PARAMETER_VARIANTS_PER_BATCH.saturating_sub(1));
-    let mut selected = known
-        .iter()
-        .take(known_count)
-        .map(|(_, candidate)| candidate.clone())
-        .collect::<Vec<_>>();
-    selected.extend(
-        unexplored
+    let direction_of = |candidate: &ParameterVariant| {
+        candidate.changes.iter().next().and_then(|(key, value)| {
+            parameters
+                .get(key)
+                .copied()
+                .or_else(|| specs.iter().find(|spec| spec.key == *key).map(|spec| spec.default))
+                .map(|baseline| if *value < baseline { -1_i8 } else { 1_i8 })
+        })
+    };
+    let candidate_id = |candidate: &ParameterVariant| {
+        (candidate.key.clone(), format!("{:.8}", candidate.value))
+    };
+    let mut selected = Vec::new();
+    let mut selected_ids = BTreeSet::new();
+
+    // Keep both sides represented in every live batch whenever each side has
+    // an available candidate. Prefer an unexplored value on each side; use
+    // the best known result only when that side has no unexplored value.
+    for direction in [1_i8, -1_i8] {
+        let unexplored_index = unexplored
             .iter()
-            .take(MAX_PARAMETER_VARIANTS_PER_BATCH - selected.len())
-            .cloned(),
-    );
-    if selected.len() < MAX_PARAMETER_VARIANTS_PER_BATCH {
-        selected.extend(
-            known
-                .iter()
-                .skip(known_count)
-                .take(MAX_PARAMETER_VARIANTS_PER_BATCH - selected.len())
-                .map(|(_, candidate)| candidate.clone()),
-        );
+            .position(|candidate| direction_of(candidate) == Some(direction));
+        let candidate = unexplored_index
+            .map(|index| unexplored.remove(index))
+            .or_else(|| {
+                let known_index = known
+                    .iter()
+                    .position(|(_, candidate)| direction_of(candidate) == Some(direction))?;
+                Some(known.remove(known_index).1)
+            });
+        if let Some(candidate) = candidate {
+            selected_ids.insert(candidate_id(&candidate));
+            selected.push(candidate);
+        }
+    }
+
+    for (_, candidate) in known {
+        if selected.len() >= MAX_PARAMETER_VARIANTS_PER_BATCH {
+            break;
+        }
+        if selected_ids.insert(candidate_id(&candidate)) {
+            selected.push(candidate);
+        }
+    }
+    for candidate in unexplored {
+        if selected.len() >= MAX_PARAMETER_VARIANTS_PER_BATCH {
+            break;
+        }
+        if selected_ids.insert(candidate_id(&candidate)) {
+            selected.push(candidate);
+        }
     }
     selected
 }
@@ -802,7 +886,7 @@ fn live_profile_arm_key(profile: &LiveScoutProfile) -> String {
 mod paired_probe_tests {
     use super::{
         daily_parameter_batch_key, group_daily_parameter_variants, paired_probe_has_entering_side,
-        ranked_parameter_variants, BTreeMap, ParameterSpec,
+        ranked_parameter_variants, BTreeMap, BTreeSet, ParameterSpec,
         MAX_PARAMETER_VARIANTS_PER_BATCH,
     };
     use crate::scouts::probe_id;
@@ -850,10 +934,15 @@ mod paired_probe_tests {
             0,
         );
         assert_eq!(selected.len(), 3);
-        assert_eq!(
-            selected.iter().map(|variant| variant.key.as_str()).collect::<Vec<_>>(),
-            vec!["a", "b", "d"]
-        );
+        let directions = selected
+            .iter()
+            .map(|variant| {
+                let value = variant.changes.values().next().unwrap();
+                if value < &5.0 { -1_i8 } else { 1_i8 }
+            })
+            .collect::<BTreeSet<_>>();
+        assert_eq!(directions, BTreeSet::from([-1, 1]));
+        assert!(selected.iter().any(|variant| variant.key == "a"));
     }
 
     #[test]
@@ -1368,8 +1457,14 @@ async fn receive_dated_carry_scout_inputs(
     };
     {
         let mut state = service.scout.data.lock().await;
-        let _ = apply_scout_lifecycle_observation(&mut state, &observation);
-        persist_scout_state(&service.scout.path, &state, &["outbox", "outcomes", "pairs", "scout_pending_samples", "scout_sample_active_scenarios", "scout_plan_profiles", "scout_observation_results", "scout_instances"])?;
+        let (_, changed_records) =
+            apply_scout_lifecycle_observation_with_changes(&mut state, &observation);
+        if !changed_records.is_empty() {
+            let mut changed_sections = vec!["outbox".to_owned()];
+            changed_sections.extend(changed_records);
+            let changed_sections = changed_sections.iter().map(String::as_str).collect::<Vec<_>>();
+            persist_scout_state(&service.scout.path, &state, &changed_sections)?;
+        }
     }
     schedule_scout_outbox_flush(&service);
 
@@ -1763,6 +1858,7 @@ fn outcome_event(outcome: &ScoutOutcomeRequest, tested: &BTreeMap<String, f64>) 
         strategy: outcome.strategy.clone(),
         profile_id: strategies::profile_id(profile_symbol, &outcome.strategy, &parameters),
         parameters,
+        baseline_parameters: BTreeMap::new(),
         specs,
         net_return_percent: outcome.net_return_percent,
     }
@@ -1776,6 +1872,16 @@ fn paired_event(
     let tested = parameter_keys(variant)?;
     let mut parameters = baseline.strategy_parameters.clone();
     parameters.extend(tested.clone());
+    let baseline_parameters = tested
+        .keys()
+        .filter_map(|key| {
+            baseline
+                .strategy_parameters
+                .get(key)
+                .copied()
+                .map(|value| (key.clone(), value))
+        })
+        .collect();
     let profile_symbol = variant
         .scout_parameter_profile_symbol
         .as_deref()
@@ -1796,6 +1902,7 @@ fn paired_event(
         strategy: variant.strategy.clone(),
         profile_id: strategies::profile_id(profile_symbol, &variant.strategy, &parameters),
         parameters,
+        baseline_parameters,
         specs,
         net_return_percent: variant.net_return_percent - baseline.net_return_percent,
     })
@@ -1863,7 +1970,19 @@ fn paired_event_with_legacy_side(
         baseline.scout_parameter_value = None;
         baseline.scout_comparison_role = Some("baseline".into());
     }
-    paired_event(comparison_id, &baseline, &variant)
+    let mut event = paired_event(comparison_id, &baseline, &variant)?;
+    if pair.baseline.is_none() {
+        // A legacy pair can retain its return but not the original control
+        // profile parameters. Don't fabricate direction from the variant.
+        if let FeedbackEvent::ScoutOutcome {
+            baseline_parameters,
+            ..
+        } = &mut event
+        {
+            baseline_parameters.clear();
+        }
+    }
+    Some(event)
 }
 
 fn record_paired_scout_outcome(

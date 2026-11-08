@@ -108,10 +108,18 @@ pub(super) async fn accept_feedback(
         }
         FeedbackEvent::TradeOutcome { .. } => Vec::new(),
     };
+    let baseline_parameters = match &event {
+        FeedbackEvent::ScoutOutcome {
+            baseline_parameters,
+            ..
+        } => baseline_parameters.clone(),
+        FeedbackEvent::TradeOutcome { .. } => BTreeMap::new(),
+    };
     registered.outcomes.push(LearningOutcome {
         observed_at_ms: event_observed_at(&event),
         net_return_percent: net_return,
         tested_parameter_keys,
+        baseline_parameters,
     });
     let cutoff = now_ms().saturating_sub(7 * 24 * 60 * 60 * 1000);
     registered
@@ -133,7 +141,7 @@ pub(super) async fn accept_feedback(
     let paired_outcomes = if parameter_specs.is_empty() {
         Vec::new()
     } else {
-        paired_parameter_outcomes(variants, strategy, parameters, parameter_specs)
+        paired_parameter_outcomes(variants, symbol, strategy, parameters, parameter_specs)
     };
     let paired_lower_bound = one_sided_90_lower_bound(&paired_outcomes);
     let promote_tested_parameters = matches!(event, FeedbackEvent::ScoutOutcome { .. })
@@ -144,6 +152,7 @@ pub(super) async fn accept_feedback(
         promote_paired_parameters(
             variants,
             active_profiles,
+            symbol,
             strategy,
             parameter_specs,
             parameters,
@@ -270,6 +279,7 @@ pub(super) async fn update_scout_parameter_samples(
 
 fn paired_parameter_outcomes(
     variants: &BTreeMap<String, RegisteredProfile>,
+    symbol: &str,
     strategy: &str,
     candidate_parameters: &BTreeMap<String, f64>,
     specs: &[ParameterSpec],
@@ -277,7 +287,7 @@ fn paired_parameter_outcomes(
     let mut outcomes = Vec::new();
     for variant in variants
         .values()
-        .filter(|variant| variant.profile.strategy == strategy)
+        .filter(|variant| variant.profile.symbol == symbol && variant.profile.strategy == strategy)
     {
         let matches_candidate = specs.iter().all(|spec| {
             variant.profile.parameters.get(&spec.key) == candidate_parameters.get(&spec.key)
@@ -298,6 +308,7 @@ fn paired_parameter_outcomes(
 fn promote_paired_parameters(
     variants: &BTreeMap<String, RegisteredProfile>,
     active_profiles: &mut BTreeMap<String, StrategyProfile>,
+    symbol: &str,
     strategy: &str,
     specs: &[ParameterSpec],
     candidate_parameters: &BTreeMap<String, f64>,
@@ -306,6 +317,7 @@ fn promote_paired_parameters(
         .values()
         .filter(|variant| {
             variant.profile.strategy == strategy
+                && variant.profile.symbol == symbol
                 && specs.iter().all(|spec| {
                     variant.profile.parameters.get(&spec.key) == candidate_parameters.get(&spec.key)
                 })
@@ -583,6 +595,7 @@ mod tests {
             strategy: "momentum".into(),
             profile_id: "p".into(),
             parameters: BTreeMap::from([("threshold".into(), 0.5)]),
+            baseline_parameters: BTreeMap::new(),
             specs: vec![spec()],
             net_return_percent: 1.0,
         }

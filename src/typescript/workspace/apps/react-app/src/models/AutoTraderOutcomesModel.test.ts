@@ -38,6 +38,42 @@ describe('AutoTraderOutcomesModel', () => {
     assert.equal(updated.todayRealizedUsd, 4.25);
   });
 
+  it('keeps per-fill net P&L when applying the instance total to closed rows', () => {
+    const row = {
+      rowId: 'ledger-trade:fill-1',
+      status: 'Closed' as const,
+      decisionId: 'instance-1',
+      symbol: 'CC-USDT',
+      side: 'sell',
+      openedAt: 1,
+      quantity: 2,
+      signedQuantity: -2,
+      entryPrice: 1,
+      pnl: 0,
+      entryFees: 0,
+      estimatedExitFeeRate: 0,
+      estimatedExitSlippageBps: 0,
+      pnlQuoteCurrency: 'USDT',
+      strategy: 'live-momentum',
+      direction: 'BEARISH',
+      strength: null,
+      scout: false,
+      source: 'unknown' as const,
+      components: {},
+      netPnlUsd: -0.12,
+      ledgerTrade: {
+        id: 'fill-1',
+        symbol: 'CC-USDT',
+        side: 'sell' as const,
+        quantity: 2,
+        execution_price: 1,
+        timestamp: 1,
+      },
+    };
+    const [updated] = applyInstanceTodayPnl([row], { 'instance-1': -0.4 });
+    assert.equal(updated.netPnlUsd, -0.12);
+  });
+
   it('resolves a protective barrier fill to its strategy entry instance', () => {
     const stop = {
       timestamp: 200,

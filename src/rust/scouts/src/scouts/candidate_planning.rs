@@ -386,6 +386,7 @@ struct ScoutState {
     data: Arc<Mutex<PersistedState>>,
     path: PathBuf,
     flush_lock: Arc<Mutex<()>>,
+    flush_scheduled: Arc<std::sync::atomic::AtomicBool>,
 }
 
 fn scoutable_specs(specs: &[ParameterSpec]) -> impl Iterator<Item = &ParameterSpec> {
@@ -414,24 +415,29 @@ fn candidate_value(spec: &ParameterSpec, current: f64, direction: f64) -> Option
         .then_some(value)
 }
 
-/// Generate one bounded probe per tunable parameter without expanding the
-/// profile into a combinatorial power set. Daily parameter evidence is learned
-/// per parameter, so combinations do not contribute to its promotion results.
+/// Generate bounded probes in both directions for each tunable parameter
+/// without expanding the profile into a combinatorial power set. Daily
+/// parameter evidence is learned per parameter, so combinations do not
+/// contribute to its promotion results.
 pub fn single_parameter_variants(
     parameters: &BTreeMap<String, f64>,
     specs: &[ParameterSpec],
     day: u64,
 ) -> Option<Vec<BTreeMap<String, f64>>> {
-    const MAX_SWEEP_PARAMETERS: usize = 32;
-    let direction = if day % 2 == 0 { 1.0 } else { -1.0 };
+    const MAX_SWEEP_VARIANTS: usize = 64;
+    let first_direction = if day % 2 == 0 { 1.0 } else { -1.0 };
     let candidates = scoutable_specs(specs)
-        .filter_map(|spec| {
+        .flat_map(|spec| {
             let current = parameters.get(&spec.key).copied().unwrap_or(spec.default);
-            candidate_value(spec, current, direction)
-                .map(|value| BTreeMap::from([(spec.key.clone(), value)]))
+            [first_direction, -first_direction]
+                .into_iter()
+                .filter_map(move |direction| {
+                    candidate_value(spec, current, direction)
+                        .map(|value| BTreeMap::from([(spec.key.clone(), value)]))
+                })
         })
         .collect::<Vec<_>>();
-    (!candidates.is_empty() && candidates.len() <= MAX_SWEEP_PARAMETERS).then_some(candidates)
+    (!candidates.is_empty() && candidates.len() <= MAX_SWEEP_VARIANTS).then_some(candidates)
 }
 
 fn probe_hash(symbol: &str, strategy: &str) -> u64 {

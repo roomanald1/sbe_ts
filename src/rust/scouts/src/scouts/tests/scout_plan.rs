@@ -22,10 +22,12 @@ mod scout_plan_tests {
             strategy_outcomes_by_profile,
             portfolio_instances_by_group,
             strategy_outcome_profile_index_ready: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            live_scout_maximum_duration_ms: Arc::new(std::sync::RwLock::new(BTreeMap::new())),
             scout: ScoutState {
                 data: Arc::new(Mutex::new(persisted)),
                 path,
                 flush_lock: Arc::new(Mutex::new(())),
+                flush_scheduled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             },
         }
     }

@@ -83,6 +83,7 @@ mod scout_outcome_tests {
         let FeedbackEvent::ScoutOutcome {
             event_id,
             parameters,
+            baseline_parameters,
             specs,
             learning_context,
             net_return_percent,
@@ -93,6 +94,7 @@ mod scout_outcome_tests {
         };
         assert_eq!(event_id, "paired-scout:cmp");
         assert_eq!(parameters["minimum_momentum"], 0.7);
+        assert_eq!(baseline_parameters["minimum_momentum"], 0.5);
         assert_eq!(specs.len(), 1);
         assert!(learning_context.is_none());
         assert!((net_return_percent - 0.7).abs() < 1e-9);

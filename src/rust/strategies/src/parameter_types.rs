@@ -26,6 +26,12 @@ pub struct StrategyParameterScoutVariant {
     pub average_net_improvement_percent: f64,
     pub lower_90_one_sided_improvement_percent: Option<f64>,
     pub upper_90_one_sided_improvement_percent: Option<f64>,
+    pub paired_baseline_increase_samples: usize,
+    pub paired_baseline_decrease_samples: usize,
+    pub paired_baseline_same_samples: usize,
+    pub paired_baseline_unknown_samples: usize,
+    pub paired_baseline_delta_mean: Option<f64>,
+    pub paired_baseline_delta_samples: usize,
     pub promoted: bool,
     pub rejected: bool,
 }

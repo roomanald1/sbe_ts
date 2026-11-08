@@ -255,13 +255,22 @@ fn dated_carry_markout(
     .then_some(net / notional * 100.0)
 }
 
+#[cfg(test)]
 fn apply_scout_lifecycle_observation(
     state: &mut PersistedState,
     request: &ScoutLifecycleObserveRequest,
 ) -> ScoutLifecycleObserveResponse {
+    apply_scout_lifecycle_observation_with_changes(state, request).0
+}
+
+fn apply_scout_lifecycle_observation_with_changes(
+    state: &mut PersistedState,
+    request: &ScoutLifecycleObserveRequest,
+) -> (ScoutLifecycleObserveResponse, BTreeSet<String>) {
     if let Some(response) = state.scout_observation_results.get(&request.request_id) {
-        return response.clone();
+        return (response.clone(), BTreeSet::new());
     }
+    let mut changed_records = BTreeSet::new();
     let mut finalized_count = 0usize;
     let ids = state
         .scout_pending_samples
@@ -276,9 +285,15 @@ fn apply_scout_lifecycle_observation(
         };
         let age = request.now_ms.saturating_sub(probe.opened_at_ms);
         if age > 3 * 86_400_000 {
-            state.scout_pending_samples.remove(&id);
-            state.scout_sample_active_scenarios.remove(&id);
-            state.scout_plan_profiles.remove(&id);
+            if state.scout_pending_samples.remove(&id).is_some() {
+                changed_records.insert(format!("scout_pending_samples@{id}"));
+            }
+            if state.scout_sample_active_scenarios.remove(&id).is_some() {
+                changed_records.insert(format!("scout_sample_active_scenarios@{id}"));
+            }
+            if state.scout_plan_profiles.remove(&id).is_some() {
+                changed_records.insert(format!("scout_plan_profiles@{id}"));
+            }
             continue;
         }
         if age < 86_400_000 {
@@ -321,6 +336,7 @@ fn apply_scout_lifecycle_observation(
                     &probe.parameters,
                 ),
                 parameters: probe.parameters.clone(),
+                baseline_parameters: BTreeMap::new(),
                 specs: specs.clone(),
                 net_return_percent,
             };
@@ -365,34 +381,59 @@ fn apply_scout_lifecycle_observation(
                 strategy_parameter_specs: probe.parameter_specs.clone(),
             };
             let key = scout_outcome_idempotency_key(&outcome);
-            insert_scout_outcome(state, key, outcome.clone());
+            insert_scout_outcome(state, key.clone(), outcome.clone());
+            changed_records.insert(format!("outcomes@{key}"));
             if paired {
-                let _ = record_paired_scout_outcome(state, &outcome);
+                let (paired_updates, paired_ids) = record_paired_scout_outcome(state, &outcome);
+                changed_records.extend(
+                    paired_ids.into_iter().map(|id| format!("pairs@{id}")),
+                );
+                changed_records.extend(
+                    paired_updates
+                        .into_iter()
+                        .map(|(id, _)| format!("scout_instances@{id}")),
+                );
             }
             while state.outcomes.len() > 100_000 {
                 let Some(oldest) = state.outcomes.keys().next().cloned() else {
                     break;
                 };
                 remove_scout_outcome(state, &oldest);
+                changed_records.insert(format!("outcomes@{oldest}"));
             }
         }
-        state.scout_pending_samples.remove(&id);
-        state.scout_sample_active_scenarios.remove(&id);
-        state.scout_plan_profiles.remove(&id);
+        if state.scout_pending_samples.remove(&id).is_some() {
+            changed_records.insert(format!("scout_pending_samples@{id}"));
+        }
+        if state.scout_sample_active_scenarios.remove(&id).is_some() {
+            changed_records.insert(format!("scout_sample_active_scenarios@{id}"));
+        }
+        if state.scout_plan_profiles.remove(&id).is_some() {
+            changed_records.insert(format!("scout_plan_profiles@{id}"));
+        }
         finalized_count += 1;
     }
     let response = ScoutLifecycleObserveResponse { finalized_count };
     state
         .scout_observation_results
         .insert(request.request_id.clone(), response.clone());
+    changed_records.insert(format!(
+        "scout_observation_results@{}",
+        request.request_id
+    ));
     while state.scout_observation_results.len() > 10_000 {
         if let Some(oldest) = state.scout_observation_results.keys().next().cloned() {
             state.scout_observation_results.remove(&oldest);
+            changed_records.insert(format!("scout_observation_results@{oldest}"));
         }
     }
-    trim_scout_instances(state);
+    changed_records.extend(
+        trim_scout_instances(state)
+            .into_iter()
+            .map(|id| format!("scout_instances@{id}")),
+    );
     state.scout_lifecycle_updated_at_ms = state.scout_lifecycle_updated_at_ms.max(request.now_ms);
-    response
+    (response, changed_records)
 }
 
 // Active audits are duplicated in `scout_instances` for markout lookup and can
@@ -493,8 +534,14 @@ async fn observe_scout_lifecycle(
         schedule_scout_outbox_flush(&service);
         return Ok(Json(response));
     }
-    let response = apply_scout_lifecycle_observation(&mut state, &request);
-    persist_scout_state(&service.scout.path, &state, &["outbox", "outcomes", "pairs", "scout_pending_samples", "scout_sample_active_scenarios", "scout_plan_profiles", "scout_observation_results", "scout_instances"])?;
+    let (response, changed_records) =
+        apply_scout_lifecycle_observation_with_changes(&mut state, &request);
+    if !changed_records.is_empty() {
+        let mut changed_sections = vec!["outbox".to_owned()];
+        changed_sections.extend(changed_records);
+        let changed_sections = changed_sections.iter().map(String::as_str).collect::<Vec<_>>();
+        persist_scout_state(&service.scout.path, &state, &changed_sections)?;
+    }
     drop(state);
     schedule_scout_outbox_flush(&service);
     Ok(Json(response))
@@ -963,6 +1010,7 @@ impl ScoutSample {
             strategy: self.strategy,
             profile_id: self.profile_id,
             parameters: self.parameters,
+            baseline_parameters: BTreeMap::new(),
             specs: self.specs,
             net_return_percent,
         })
@@ -2038,10 +2086,12 @@ mod strategy_walk_forward_tests {
             strategy_outcomes_by_profile,
             portfolio_instances_by_group,
             strategy_outcome_profile_index_ready: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            live_scout_maximum_duration_ms: Arc::new(std::sync::RwLock::new(BTreeMap::new())),
             scout: ScoutState {
                 data: Arc::new(Mutex::new(persisted)),
                 path: PathBuf::from("unused"),
                 flush_lock: Arc::new(Mutex::new(())),
+                flush_scheduled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             },
         };
         let response = get_strategy_walk_forward(
@@ -2163,10 +2213,12 @@ mod strategy_walk_forward_tests {
             strategy_outcomes_by_profile,
             portfolio_instances_by_group,
             strategy_outcome_profile_index_ready: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            live_scout_maximum_duration_ms: Arc::new(std::sync::RwLock::new(BTreeMap::new())),
             scout: ScoutState {
                 data: Arc::new(Mutex::new(persisted)),
                 path: PathBuf::from("unused"),
                 flush_lock: Arc::new(Mutex::new(())),
+                flush_scheduled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             },
         };
         let response = select_scout_entry(
