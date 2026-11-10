@@ -60,6 +60,7 @@ pub(super) async fn execution_decision(
     }))
 }
 
+//TODO remove all hardcoded values. 
 pub(super) async fn execution_outcome(
     State(service): State<ServiceState>,
     Json(event): Json<ExecutionOutcomeEvent>,
@@ -151,7 +152,9 @@ pub(super) fn aggregate_execution_stats(
     let now = now_ms();
     request
         .learning
-        .iter()
+        .iter() 
+        //TODO do not iterate every time we add something new. 
+        //Need a way to have the data structure determine the bucket and simply append this learning outcome to that bucket of information i.e. strategy + symbol = Bucket[outcome1, outcome2]. 
         .filter(|(key, _)| key.starts_with(prefix) && key.ends_with(suffix))
         .map(|(_, stats)| decayed_execution_stat(stats.clone(), now))
         .fold(
@@ -200,7 +203,7 @@ pub(super) fn learned_order_type(request: &ExecutionLearningRequest) -> Option<S
         .filter_map(|kind| {
             let stats = aggregate_execution_stats(
                 request,
-                &format!("{}:P", request.context),
+                &format!("{}:P", request.context), //TODO remove prefix, postfix - lets instead have a composite key and multiple different maps to look up the items by different ids 
                 &format!(":exec:{kind}"),
             );
             if stats.samples < MIN_SAMPLES
@@ -266,6 +269,7 @@ pub(super) fn learned_schedule_threshold(request: &ExecutionLearningRequest) -> 
     const MIN_FILLS: usize = 5;
     let mut threshold: f64 = 0.25;
     let mut paired_samples = 0;
+    //TODO remove hardcoding
     for (bucket, lower, upper) in [
         ("05_10", 0.05_f64, 0.10_f64),
         ("10_15", 0.10, 0.15),

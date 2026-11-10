@@ -1,3 +1,5 @@
+//TODO Should be moved to live insights not part of feedhandlers
+
 impl RollingVolatility {
     pub(crate) fn update(&mut self, timestamp_ms: u64, price: f64) -> (f64, f64) {
         if let Some(&(last_timestamp, _)) = self.samples.back() {

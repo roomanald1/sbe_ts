@@ -179,3 +179,10 @@ mod tests {
         ));
     }
 }
+
+
+///
+/// Execution Module
+/// 
+/// This module is responsible for taking execution requests and performing them against the exchanges.
+/// 

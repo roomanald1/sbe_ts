@@ -269,6 +269,7 @@ fn open_state_db(path: &Path) -> Result<rusqlite::Connection, String> {
             path.display()
         )
     })?;
+    //TODO - do we really need to do then whenever we open the db
     connection
         .execute_batch(
             "PRAGMA journal_mode=WAL;
@@ -299,7 +300,7 @@ async fn accept_exit_timing_observation(
     let event_id = observation["event_id"].as_str().unwrap_or_default();
     let valid_number = |key: &str| observation[key].as_f64().is_some_and(f64::is_finite);
     if event_id.is_empty()
-        || event_id.len() > 256
+        || event_id.len() > 256 //TODO remove hardcoding
         || observation["symbol"].as_str().is_none()
         || observation["strategy"].as_str().is_none()
         || !valid_number("exit_return_percent")
@@ -317,7 +318,7 @@ async fn accept_exit_timing_observation(
         state
             .exit_timing_observations
             .insert(event_id.to_owned(), observation);
-        while state.exit_timing_observations.len() > 10_000 {
+        while state.exit_timing_observations.len() > 10_000 { //TODO remove hardcoding
             if let Some(oldest) = state.exit_timing_observations.keys().next().cloned() {
                 state.exit_timing_observations.remove(&oldest);
             }
@@ -340,6 +341,7 @@ fn load_state(path: &Path) -> Result<LearningState, String> {
             |row| row.get::<_, Vec<u8>>(0),
         )
         .optional();
+    //TODO remove legacy handling - we should do a one off purge of that data instead
     if let Ok(Some(payload)) = legacy_payload {
         let state: LearningState = serde_json::from_slice(&payload).map_err(|error| {
             format!(
@@ -372,6 +374,7 @@ fn load_state(path: &Path) -> Result<LearningState, String> {
             accepted_events: accepted_events.max(0) as u64,
             ..LearningState::default()
         };
+        //TODO we need to remove direct DB queries in the code. Should be behind a set of helper functions. Dont like it in the code like this
         state.minimum_live_scout_parameter_samples = connection.query_row(
             "SELECT value FROM learning_config WHERE key = 'minimum_live_scout_parameter_samples'",
             [], |row| row.get::<_, i64>(0),
@@ -406,7 +409,7 @@ fn load_state(path: &Path) -> Result<LearningState, String> {
         )?;
         return Ok(state);
     }
-
+    //TODO remove any legacy BS
     let legacy_path = path.with_extension("json");
     match std::fs::read(&legacy_path) {
         Ok(bytes) => {

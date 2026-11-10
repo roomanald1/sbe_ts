@@ -69,6 +69,7 @@ async fn process_cpu_seconds() -> String {
         .to_string()
 }
 
+//TODO put this in and the cpu func above in a lib crate and reuse in all services 
 async fn process_memory_bytes() -> String {
     std::fs::read_to_string("/proc/self/status")
         .ok()

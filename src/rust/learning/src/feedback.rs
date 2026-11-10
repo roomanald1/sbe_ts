@@ -1,5 +1,6 @@
 use super::*;
 
+//TODO split up function - too hard to read
 pub(super) async fn accept_feedback(
     State(service): State<ServiceState>,
     Json(event): Json<FeedbackEvent>,
@@ -41,7 +42,7 @@ pub(super) async fn accept_feedback(
         samples: 0,
         positive: 0,
         realized_pnl: 0.0,
-        outcomes: Vec::new(),
+        outcomes: Vec::new(),//TODO make optional so that we dont allocate unnneccesarily 
     });
     if registered
         .specs
@@ -53,6 +54,7 @@ pub(super) async fn accept_feedback(
             "feedback does not include valid parameter bounds".into(),
         ));
     }
+    
     if event_specs(&event).iter().any(|spec| {
         !valid_spec(spec) || !parameters.contains_key(&spec.key) || !registered.specs.contains(spec)
     }) {
@@ -85,7 +87,7 @@ pub(super) async fn accept_feedback(
                         .iter()
                         .any(|spec| spec.key == observation.parameter_key)
             })
-            .cloned()
+            .cloned()//TODO avoid clone
             .collect::<Vec<_>>(),
         FeedbackEvent::ScoutOutcome { .. } => Vec::new(),
     };
@@ -99,7 +101,7 @@ pub(super) async fn accept_feedback(
     };
     let tested_parameter_keys = match &event {
         FeedbackEvent::ScoutOutcome { specs, .. } => {
-            specs.iter().map(|spec| spec.key.clone()).collect()
+            specs.iter().map(|spec| spec.key.clone()).collect()//TODO avoid clone
         }
         FeedbackEvent::TradeOutcome { .. } => Vec::new(),
     };
@@ -123,7 +125,7 @@ pub(super) async fn accept_feedback(
         source: match &event {
             FeedbackEvent::ScoutOutcome { .. } => LearningOutcomeSource::Scout,
             FeedbackEvent::TradeOutcome { scout: true, .. } => {
-                LearningOutcomeSource::PaperScoutTrade
+                LearningOutcomeSource::PaperScoutTrade//TODO this looks wrong - surely we have scouts or trades - nothing in between
             }
             FeedbackEvent::TradeOutcome { scout: false, .. } => LearningOutcomeSource::Trade,
         },
@@ -135,7 +137,7 @@ pub(super) async fn accept_feedback(
         },
         tested_parameter_keys,
         baseline_parameters,
-        paired_comparison: matches!(&event, FeedbackEvent::ScoutOutcome { event_id, .. } if event_id.starts_with("paired-scout:")),
+        paired_comparison: matches!(&event, FeedbackEvent::ScoutOutcome { event_id, .. } if event_id.starts_with("paired-scout:")),//TODO - yuk remove string ids partial lookups. Make id a composite key ? and store the composites separately
     });
     let cutoff = now_ms().saturating_sub(7 * 24 * 60 * 60 * 1000);
     registered
@@ -259,7 +261,7 @@ pub(super) async fn accept_feedback(
                     net_return_percent,
                 });
             }
-            if threshold_samples.len() > 100_000 {
+            if threshold_samples.len() > 100_000 {//TODO remove hardcoding
                 threshold_samples.sort_by_key(|sample| sample.observed_at_ms);
                 threshold_samples.drain(..threshold_samples.len() - 100_000);
             }
@@ -282,7 +284,7 @@ pub(super) async fn accept_feedback(
                 else {
                     continue;
                 };
-                if (tuned - base).abs() < spec.step * 1e-6 {
+                if (tuned - base).abs() < spec.step * 1e-6 { //TODO remove hardcoding
                     continue;
                 }
                 let active = active_profiles
@@ -313,6 +315,7 @@ pub(super) async fn accept_feedback(
         );
     }
     persist(&service.path, &state)?;
+    //TODO replace in service comms with websockets. HTTP is too slow
     Ok(Json(FeedbackResult {
         accepted: true,
         duplicate: false,
@@ -329,6 +332,7 @@ pub(super) async fn update_scout_parameter_samples(
     State(service): State<ServiceState>,
     Json(request): Json<ScoutParameterSamplesRequest>,
 ) -> Result<Json<usize>, (StatusCode, String)> {
+    //TODO remove hardcoding
     if !(2..=100).contains(&request.minimum_samples) {
         return Err((
             StatusCode::BAD_REQUEST,
@@ -431,6 +435,7 @@ fn promote_paired_parameters(
     }
 }
 
+//TODO comment this - lots of random numbers!!
 pub(super) fn one_sided_90_t_critical(sample_count: usize) -> Option<f64> {
     let degrees = sample_count.checked_sub(1)? as f64;
     if degrees < 1.0 {
@@ -455,6 +460,7 @@ pub(super) fn one_sided_90_t_critical(sample_count: usize) -> Option<f64> {
     )
 }
 
+//TODO comment this - what is it really doing
 fn one_sided_90_lower_bound(outcomes: &[f64]) -> Option<f64> {
     if outcomes.len() < 2 || outcomes.iter().any(|value| !value.is_finite()) {
         return None;
@@ -479,6 +485,7 @@ pub(super) fn should_publish_trade_profile(
 }
 
 pub(super) fn persist(path: &Path, state: &LearningState) -> Result<(), (StatusCode, String)> {
+    //TODO - could we just keep the db open ? 
     let connection =
         super::open_state_db(path).map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error))?;
     super::persist_normalized(&connection, state).map_err(|error| {
@@ -510,6 +517,7 @@ pub(super) fn event_specs(event: &FeedbackEvent) -> &[ParameterSpec] {
     }
 }
 
+//TODO rename - is positive is vague. 
 pub(super) fn event_is_positive(event: &FeedbackEvent) -> bool {
     match event {
         FeedbackEvent::ScoutOutcome {
@@ -583,6 +591,7 @@ pub(super) fn record_context_outcome(
         });
     if stats.updated_at_ms != 0 {
         let elapsed = observed_at_ms.saturating_sub(stats.updated_at_ms);
+        //TODO remove hardcoding
         let weight = 0.5_f64.powf(elapsed as f64 / (7.0 * 24.0 * 60.0 * 60.0 * 1_000.0));
         stats.samples = (stats.samples as f64 * weight).round() as usize;
         stats.positive = ((stats.positive as f64 * weight).round() as usize).min(stats.samples);

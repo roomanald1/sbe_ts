@@ -101,6 +101,7 @@ export function AutoTraderDiagnostics() {
         }>;
       }
     >();
+    /* TODO push this logic into the model */
     state.symbolGateHits.forEach((item) => {
       const key = item.symbol + ':' + item.direction;
       const group = grouped.get(key) ?? {

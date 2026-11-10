@@ -64,3 +64,20 @@ async fn process_cpu_seconds() -> String {
         .unwrap_or(0.0)
         .to_string()
 }
+
+
+///
+/// Autotrader module 
+/// 
+/// 
+/// This module is responsible for taking learning outcomes (parameter profiles) and live signals in order to execute trade strategies. 
+/// 
+/// Learning profiles and live signals are communicated via SBE messages over websockets (RSocket) - TODO 
+/// 
+/// Each live signal will evaluate against the strategies evaluate() function. The evaluate function will decide whether to enter, exit or hold the positions. It will also determine the nature of the execution IoC, Limit, VWAP etc based on its learning parameters.
+/// 
+/// Actual execution is done via the Execution module. Also this module does not hold any ledger, it is the responsiblity of the postion manager to hold position statuses. This module is simply a trade creator. 
+/// 
+/// All trades created via this module will communicate via SBE over RSocket to the learning module to inform it of the creation and exit of any trades. This will help inform the future trade runs. 
+/// 
+

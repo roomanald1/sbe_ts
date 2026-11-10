@@ -72,6 +72,7 @@ pub(super) async fn get_decision_snapshot(
 
 const MIN_CONTEXTUAL_STOP_REPLAYS: usize = 5;
 
+//TODO comment this fucntion
 fn contextual_stop_loss_percents(state: &LearningState, cutoff: u64) -> BTreeMap<String, f64> {
     let mut candidates = BTreeMap::<String, BTreeMap<String, Vec<f64>>>::new();
     for observation in state.exit_timing_observations.values() {

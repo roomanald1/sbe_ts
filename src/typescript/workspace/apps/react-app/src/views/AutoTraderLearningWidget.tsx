@@ -232,6 +232,7 @@ export function AutoTraderLearningWidget() {
     model.start();
     return () => model.stop();
   }, [model]);
+  /* TODO put into model */
   useEffect(() => {
     let active = true;
     const refreshSummary = async () => {
