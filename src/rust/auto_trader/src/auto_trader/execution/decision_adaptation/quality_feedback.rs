@@ -193,7 +193,37 @@ fn score_execution_order_type(
 }
 
 
-fn strategy_post_stop_cooldown_ms(strategy: &str, symbol: &str, settings: &Settings) -> u64 {
+const LOSS_CLUSTER_SIZE: usize = 3;
+const LOSS_CLUSTER_WINDOW_MS: u64 = 6 * 60 * 60 * 1_000;
+const LOSS_CLUSTER_SIZE_MULTIPLIER: f64 = 0.5;
+
+fn has_recent_profile_loss_cluster(signal: &Signal, settings: &Settings, now_ms: u64) -> bool {
+    let Some(strategy) = signal.strategy.as_deref().and_then(Strategy::from_name) else { return false; };
+    let parameters = signal_strategy_parameters(signal);
+    let profile = strategies::profile_id(&signal.symbol, strategy.as_str(), &parameters);
+    let key = format!("{profile}|{}", market_context(signal));
+    let Some(returns) = settings.recent_profile_context_returns.get(&key) else { return false; };
+    returns.len() >= LOSS_CLUSTER_SIZE && returns.iter().take(LOSS_CLUSTER_SIZE).all(|(timestamp, value)| {
+        *timestamp <= now_ms && now_ms.saturating_sub(*timestamp) <= LOSS_CLUSTER_WINDOW_MS
+            && value.is_finite() && *value < 0.0
+    })
+}
+
+fn strategy_post_stop_cooldown_ms(signal: &Signal, strategy: &str, symbol: &str, settings: &Settings, now_ms: u64) -> u64 {
+    // This is a learned strategy parameter. Its value is carried by the
+    // entering Signal and therefore remains attributable to the Scout arm
+    // which tested it. A manual profile override is already injected there.
+    let profile_cooldown = signal_strategy_parameters(signal)
+        .get("post_stop_cooldown_minutes")
+        .copied()
+        .filter(|value| value.is_finite() && (0.5..=10.0).contains(value))
+        .map(|value| (value * 60_000.0) as u64);
+    if has_recent_profile_loss_cluster(signal, settings, now_ms) {
+        return MAX_POST_STOP_REENTRY_COOLDOWN_MS;
+    }
+    if let Some(cooldown) = profile_cooldown {
+        return cooldown;
+    }
     let Some(outcomes) = settings
         .learning
         .get(&strategy_trade_learning_key(symbol, strategy))
@@ -208,4 +238,23 @@ fn strategy_post_stop_cooldown_ms(strategy: &str, symbol: &str, settings: &Setti
     MIN_POST_STOP_REENTRY_COOLDOWN_MS
         + ((MAX_POST_STOP_REENTRY_COOLDOWN_MS - MIN_POST_STOP_REENTRY_COOLDOWN_MS) as f64
             * loss_pressure) as u64
+}
+
+#[cfg(test)]
+mod cooldown_profile_tests {
+    use super::*;
+
+    #[test]
+    fn learned_profile_cooldown_is_used_before_aggregate_history() {
+        let signal = Signal {
+            symbol: "BTC-USDT".into(), direction: "bullish".into(), strength: 1.0,
+            timestamp: 1, stale: false, score: 1.0, ranging_probability: None,
+            components: SignalComponents::default(), strategy_candidate: true,
+            strategy: Some("live-momentum".into()),
+            strategy_decision: Some(serde_json::json!({"strategy_parameters": {
+                "post_stop_cooldown_minutes": 4.5
+            }})), market_regime: None, news_attribution: None, entry_gate: None,
+        };
+        assert_eq!(strategy_post_stop_cooldown_ms(&signal, "live-momentum", "BTC-USDT", &Settings::default(), 1), 270_000);
+    }
 }

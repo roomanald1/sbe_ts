@@ -5,6 +5,85 @@ struct ProfitProtectionParameters {
     minimum_lock_percent: f64,
 }
 
+fn thesis_failure_parameters(position: &TraderPosition) -> Option<(f64, u32, f64)> {
+    let strategy = position.strategy.as_deref().and_then(Strategy::from_name)?;
+    if !strategy.is_live_insight() {
+        return None;
+    }
+    let specs = strategy.parameter_specs();
+    let value = |key: StrategyParameterKey| {
+        let spec = specs.iter().find(|spec| spec.key == key)?;
+        let configured = position
+            .strategy_decision
+            .as_ref()
+            .and_then(|decision| decision.get("strategy_parameters"))
+            .and_then(|parameters| parameters.get(key.as_str()))
+            .and_then(serde_json::Value::as_f64)
+            .unwrap_or(spec.default);
+        configured.is_finite().then_some(configured.clamp(spec.min, spec.max))
+    };
+    let loss_activation = value(StrategyParameterKey::ThesisFailureLossActivationPercent)?;
+    let confirmations = value(StrategyParameterKey::ThesisFailureConfirmationSamples)?
+        .round() as u32;
+    let minimum_signal_strength = value(StrategyParameterKey::ThesisFailureMinimumSignalStrength)?;
+    Some((loss_activation, confirmations.max(1), minimum_signal_strength))
+}
+
+fn opposing_strategy_signal_strength(
+    signals: &[Signal],
+    strategy: &str,
+    symbol: &str,
+    position_quantity: f64,
+    now_ms: u64,
+) -> Option<(f64, u64)> {
+    let signal = signals
+        .iter()
+        .filter(|signal| {
+            signal.strategy.as_deref() == Some(strategy)
+                && signal.symbol == symbol
+                && signal.strategy_candidate
+                && !signal.stale
+                && signal.strength.is_finite()
+                && signal.timestamp <= now_ms
+                && now_ms.saturating_sub(signal.timestamp) <= MAX_SIGNAL_AGE_SECONDS * 1_000
+        })
+        .max_by(|left, right| {
+            left.timestamp
+                .cmp(&right.timestamp)
+                .then_with(|| left.strength.total_cmp(&right.strength))
+        })?;
+    let opposes_position = if position_quantity > 0.0 {
+        signal.direction == "bearish"
+    } else if position_quantity < 0.0 {
+        signal.direction == "bullish"
+    } else {
+        false
+    };
+    let strength = signal.strength;
+    (opposes_position && strength.is_finite())
+        .then_some((strength.clamp(0.0, 1.0), signal.timestamp))
+}
+
+fn next_thesis_failure_confirmation(
+    current_count: u32,
+    last_signal_timestamp_ms: u64,
+    signal_timestamp_ms: Option<u64>,
+    invalidated: bool,
+    loss_activation_reached: bool,
+    required: u32,
+) -> (u32, u64) {
+    let Some(signal_timestamp_ms) = signal_timestamp_ms.filter(|timestamp| *timestamp > 0) else {
+        return (0, 0);
+    };
+    if !invalidated || !loss_activation_reached {
+        return (0, 0);
+    }
+    if signal_timestamp_ms <= last_signal_timestamp_ms {
+        return (current_count.min(required), last_signal_timestamp_ms);
+    }
+    (current_count.saturating_add(1).min(required), signal_timestamp_ms)
+}
+
 fn profit_protection_parameters(position: &TraderPosition) -> ProfitProtectionParameters {
     let strategy_parameters = position
         .strategy_decision
@@ -267,6 +346,67 @@ async fn evaluate_position_exit(
     let strategy_disabled = strategy_decision == StrategyDecision::Exit && !strategy_enabled;
     let research_signal_active = research_regime
         .and_then(|snapshot| snapshot.signal_active(&strategy_key, &symbol));
+    let thesis_failure_parameters = thesis_failure_parameters(&position);
+    let loss_activation_reached = thesis_failure_parameters
+        .is_some_and(|(activation, _, _)| net_return_percent <= -activation);
+    let latest_live_signals = state
+        .latest_live_strategy_signals
+        .lock()
+        .await
+        .get(&(symbol.clone(), strategy_key.clone()))
+        .cloned()
+        .unwrap_or_default();
+    let opposing_signal = opposing_strategy_signal_strength(
+        &latest_live_signals,
+        &strategy_key,
+        &symbol,
+        position.quantity,
+        observed_at,
+    );
+    let thesis_invalidation = strategy_enabled
+        && !minimum_hold_active
+        && thesis_failure_parameters.is_some_and(|(_, _, minimum_strength)| {
+            opposing_signal.is_some_and(|(strength, _)| strength >= minimum_strength)
+        });
+    let signal_timestamp_ms = opposing_signal.map(|(_, timestamp)| timestamp);
+    if let Some((_, required, _)) = thesis_failure_parameters {
+        let (next_count, next_signal_timestamp_ms) = next_thesis_failure_confirmation(
+            position.thesis_failure_confirmation_count,
+            position.thesis_failure_last_signal_timestamp_ms,
+            signal_timestamp_ms,
+            thesis_invalidation,
+            loss_activation_reached,
+            required,
+        );
+        if next_count != position.thesis_failure_confirmation_count
+            || next_signal_timestamp_ms != position.thesis_failure_last_signal_timestamp_ms
+        {
+            let mut settings = state.settings.lock().await;
+            if let Some(current) = settings
+                .strategy_positions
+                .get_mut(&symbol)
+                .and_then(|lots| lots.get_mut(&strategy_key))
+            {
+                if (current.quantity - position.quantity).abs() <= 1e-12
+                    && (current.average_entry_price - position.average_entry_price).abs() <= 1e-12
+                {
+                    current.thesis_failure_confirmation_count = next_count;
+                    current.thesis_failure_last_signal_timestamp_ms = next_signal_timestamp_ms;
+                    position.thesis_failure_confirmation_count = next_count;
+                    position.thesis_failure_last_signal_timestamp_ms = next_signal_timestamp_ms;
+                    request_settings_persist(state)?;
+                }
+            }
+        }
+    }
+    let thesis_failure_confirmed = loss_activation_reached
+        && thesis_invalidation
+        && thesis_failure_parameters.is_some_and(|(_, required, _)| {
+            position.thesis_failure_confirmation_count >= required
+        });
+    // Existing strategy invalidation remains immediate. A confirmed opposing
+    // signal can also exit a losing position while the strategy remains active.
+    let research_exit = strategy_decision == StrategyDecision::Exit && strategy_enabled;
     let exit_decision_context = serde_json::json!({
         "strategy_decision": format!("{strategy_decision:?}"),
         "minimum_hold_active": minimum_hold_active,
@@ -274,10 +414,17 @@ async fn evaluate_position_exit(
         "research_snapshot_as_of_ms": research_regime.map(|snapshot| snapshot.as_of_ms),
         "symbol_evaluated": research_signal_active.is_some(),
         "signal_active": research_signal_active,
+        "opposing_signal_strength": opposing_signal.map(|(strength, _)| strength),
+        "opposing_signal_timestamp_ms": opposing_signal.map(|(_, timestamp)| timestamp),
+        "thesis_failure_loss_activation_percent": thesis_failure_parameters.map(|(activation, _, _)| activation),
+        "thesis_failure_required_confirmations": thesis_failure_parameters.map(|(_, count, _)| count),
+        "thesis_failure_minimum_signal_strength": thesis_failure_parameters.map(|(_, _, strength)| strength),
+        "thesis_failure_confirmation_count": position.thesis_failure_confirmation_count,
+        "thesis_failure_last_signal_timestamp_ms": position.thesis_failure_last_signal_timestamp_ms,
+        "thesis_failure_confirmed": thesis_failure_confirmed,
         "symbol_diagnostic": research_regime
             .and_then(|snapshot| snapshot.symbol_diagnostic(&strategy_key, &symbol)),
     });
-    let research_exit = strategy_decision == StrategyDecision::Exit && strategy_enabled;
     let strategy_rebalance = strategy_decision == StrategyDecision::Rebalance;
     let signal_managed_strategy = strategy_no_longer_eligible
         .as_deref()
@@ -285,6 +432,8 @@ async fn evaluate_position_exit(
         .is_some_and(|strategy| !strategy.uses_fixed_take_profit());
     let reason = if strategy_disabled {
         Some("strategy-disabled")
+    } else if thesis_failure_confirmed {
+        Some("thesis-failure")
     } else if research_exit {
         Some("research-regime-exit")
     } else if strategy_rebalance {
@@ -528,5 +677,104 @@ mod position_exit_profit_protection_tests {
         let (short_peak, short_crossed) = profit_protection_state(&short, 0.0, parameters);
         assert!(short_peak.is_some_and(|peak| (0.90..1.0).contains(&peak)));
         assert!(short_crossed);
+    }
+
+    #[test]
+    fn thesis_failure_requires_distinct_invalidated_snapshots_inside_the_loss_zone() {
+        let first = next_thesis_failure_confirmation(0, 0, Some(100), true, true, 2);
+        assert_eq!(first, (1, 100));
+        assert_eq!(
+            next_thesis_failure_confirmation(first.0, first.1, Some(100), true, true, 2),
+            first,
+            "reprocessing one snapshot must not count twice"
+        );
+        let second = next_thesis_failure_confirmation(first.0, first.1, Some(200), true, true, 2);
+        assert_eq!(second, (2, 200));
+        assert_eq!(
+            next_thesis_failure_confirmation(second.0, second.1, Some(300), false, true, 2),
+            (0, 0),
+            "an active signal resets invalidation evidence"
+        );
+        assert_eq!(
+            next_thesis_failure_confirmation(first.0, first.1, Some(200), true, false, 2),
+            (0, 0),
+            "losses below activation do not accumulate early-exit evidence"
+        );
+    }
+
+    #[test]
+    fn thesis_failure_defaults_come_from_each_strategy_parameter_spec() {
+        let mut position = position(
+            1.0,
+            serde_json::json!({
+                "strategy": "live-momentum",
+                "strategy_parameters": {}
+            }),
+            None,
+        );
+        position.strategy = Some("live-momentum".into());
+        let parameters = thesis_failure_parameters(&position).unwrap();
+        let specs = Strategy::LiveMomentum.parameter_specs();
+        let activation = specs
+            .iter()
+            .find(|spec| spec.key == StrategyParameterKey::ThesisFailureLossActivationPercent)
+            .unwrap();
+        let confirmations = specs
+            .iter()
+            .find(|spec| spec.key == StrategyParameterKey::ThesisFailureConfirmationSamples)
+            .unwrap();
+        let minimum_strength = specs
+            .iter()
+            .find(|spec| spec.key == StrategyParameterKey::ThesisFailureMinimumSignalStrength)
+            .unwrap();
+        assert_eq!(
+            parameters,
+            (
+                activation.default,
+                confirmations.default as u32,
+                minimum_strength.default
+            )
+        );
+    }
+
+    #[test]
+    fn thesis_failure_uses_only_fresh_opposing_strategy_signals() {
+        let signal = |strategy: &str, direction: &str, timestamp, stale| {
+            Signal {
+                symbol: "BTC-USDT".into(),
+                direction: direction.into(),
+                strength: 0.8,
+                timestamp,
+                stale,
+                score: 0.8,
+                ranging_probability: None,
+                components: Default::default(),
+                strategy_candidate: true,
+                strategy: Some(strategy.into()),
+                strategy_decision: None,
+                market_regime: None,
+                news_attribution: None,
+                entry_gate: None,
+            }
+        };
+        let bearish = vec![signal("live-momentum", "bearish", 9_500, false)];
+        assert_eq!(
+            opposing_strategy_signal_strength(&bearish, "live-momentum", "BTC-USDT", 1.0, 10_000),
+            Some((0.8, 9_500))
+        );
+        assert_eq!(
+            opposing_strategy_signal_strength(&bearish, "live-momentum", "BTC-USDT", -1.0, 10_000),
+            None
+        );
+        let wrong_strategy = vec![signal("live-trade-flow", "bearish", 9_500, false)];
+        assert_eq!(
+            opposing_strategy_signal_strength(&wrong_strategy, "live-momentum", "BTC-USDT", 1.0, 10_000),
+            None
+        );
+        let stale = vec![signal("live-momentum", "bearish", 9_000, true)];
+        assert_eq!(
+            opposing_strategy_signal_strength(&stale, "live-momentum", "BTC-USDT", 1.0, 10_000),
+            None
+        );
     }
 }

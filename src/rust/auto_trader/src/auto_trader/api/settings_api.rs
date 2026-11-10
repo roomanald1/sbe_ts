@@ -247,6 +247,8 @@ async fn update_settings(
     }
     if request.reset_learning {
         settings.learning.clear();
+        settings.learned_strategy_size_multipliers.clear();
+        settings.recent_profile_context_returns.clear();
         settings.strategy_parameter_overrides.clear();
         settings.closed_trade_returns_percent.clear();
         settings.closed_trade_timestamps_ms.clear();

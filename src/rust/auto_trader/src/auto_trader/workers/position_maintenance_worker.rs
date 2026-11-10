@@ -146,7 +146,7 @@ async fn sync_auto_positions(
         if pending_signal_symbols.contains(&source_position.symbol) {
             continue;
         }
-        let (realized_delta, close_audit, closed_out, scout_entry, strategy, learning_context) = {
+        let (realized_delta, close_audit, closed_out, scout_entry) = {
             let position = settings
                 .positions
                 .entry(source_position.symbol.clone())
@@ -155,8 +155,6 @@ async fn sync_auto_positions(
             let prior_average_entry_price = position.average_entry_price;
             let scout_entry = position.scout_entry;
             let realized_delta = source_position.realized_pnl - position.realized_pnl;
-            let strategy = position.strategy.clone();
-            let learning_context = position.entry_context.clone();
             let closed_quantity = external_close_quantity(prior_quantity, source_position.quantity);
             let close_audit = (prior_quantity.abs() > 1e-12
                 && closed_quantity > 1e-12
@@ -182,7 +180,7 @@ async fn sync_auto_positions(
                 changed = true;
             }
             position.realized_pnl = source_position.realized_pnl;
-            (realized_delta, close_audit, closed_out, scout_entry, strategy, learning_context)
+            (realized_delta, close_audit, closed_out, scout_entry)
         };
         if let Some(audit) = close_audit {
             let strategy_lots = settings.strategy_positions
@@ -203,30 +201,11 @@ async fn sync_auto_positions(
             external_closes.push((audit, realized_delta, strategy_lots, current_time_ms(), known_exit_ids));
         }
         if realized_delta.is_finite() && realized_delta.abs() > 1e-12 {
-            // Manual position-manager fills bypass apply_auto_fill. Use the
-            // ledger delta for close-out learning; account totals are mirrored below.
-            let realized_delta_usd =
-                realized_usd(&settings, &source_position.symbol, realized_delta);
+            // Manual position-manager fills bypass apply_auto_fill; matched
+            // strategy-lot audits below provide attributable trade outcomes.
             changed = true;
             if closed_out && !scout_entry {
                 mark_symbol_reentry_cooldown(&mut settings, &source_position.symbol);
-                // This is a symbol-level reconciliation delta, not one matched
-                // round trip. The old quantity may be a tiny residual and
-                // source fees are cumulative, so do not write a trade return.
-                if let Some(strategy) = strategy.as_deref() {
-                    let decision = serde_json::json!({});
-                    let trade_id = format!("manual-close:{}:{}", source_position.symbol, current_time_ms());
-                    record_strategy_trade_outcome(
-                        &mut settings,
-                        &source_position.symbol,
-                        Some(strategy),
-                        Some(&learning_context),
-                        false,
-                        realized_delta_usd,
-                        Some(&decision),
-                        Some(&trade_id),
-                    );
-                }
             }
         }
     }
@@ -319,9 +298,15 @@ async fn sync_auto_positions(
             );
             for audit in audits {
                 if audit["trade_closed"].as_bool() == Some(true) {
-                    if let (Some(strategy), Some(realized)) = (
+                    let net_return_percent = audit["trade_realized_pnl"]
+                        .as_f64()
+                        .zip(audit["entry_context"]["initial_entry_notional"].as_f64())
+                        .filter(|(_, notional)| *notional > 0.0)
+                        .map(|(realized, notional)| realized / notional * 100.0);
+                    if let (Some(strategy), Some(realized), Some(net_return_percent)) = (
                         audit["strategy"].as_str(),
                         audit["trade_realized_pnl"].as_f64(),
+                        net_return_percent,
                     ) {
                         let mut settings = state.settings.lock().await;
                         let realized_usd = realized_usd(&settings, &symbol, realized);
@@ -332,6 +317,7 @@ async fn sync_auto_positions(
                             audit["learning_context"].as_str(),
                             audit["scout"].as_bool().unwrap_or(false),
                             realized_usd,
+                            Some(net_return_percent),
                             audit["strategy_decision"].as_object().map(|_| &audit["strategy_decision"]),
                             audit["trade_id"].as_str(),
                         );

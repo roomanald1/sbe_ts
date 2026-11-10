@@ -19,6 +19,15 @@ struct SelectedSignalOrderRequest<'a> {
     market_http_fetch_ms: f64,
 }
 
+fn portfolio_reduction_quantity(settings: &Settings, symbol: &str, strategy: &str) -> f64 {
+    settings.strategy_positions.get(symbol).and_then(|lots| lots.get(strategy))
+        .or_else(|| settings.positions.get(symbol).filter(|position| {
+            settings.strategy_positions.is_empty() && position.strategy.as_deref() == Some(strategy)
+        }))
+        .map(|position| position.quantity.max(0.0))
+        .unwrap_or(0.0)
+}
+
 async fn submit_selected_signal(
     request: SelectedSignalOrderRequest<'_>,
 ) -> Result<CycleResult, (StatusCode, String)> {
@@ -50,9 +59,10 @@ async fn submit_selected_signal(
     } = request;
     let cycle_guard = acquire_cycle_lock(state, "signal").await;
     let snapshot_started = Instant::now();
-    let evidence = entry_walk_forward(
+    let evidence = entry_walk_forward_for_strategy(
         &dashboard.walk_forward,
         &signal.symbol,
+        signal.strategy.as_deref(),
         now.saturating_mul(1000),
     );
     let decision_id = signal_decision_id(signal);
@@ -136,10 +146,8 @@ async fn submit_selected_signal(
             settings.execution_learning_imported = true;
         }
     }
-    // Apply the live spread and estimated sweep cost to every strategy before
-    // submitting. Walk-forward returns are already net of taker fees; when no
-    // same-side evidence exists, use the configured strategy target and include
-    // the estimated taker fee in the cost floor.
+    // Apply the live spread and estimated sweep cost before submitting.
+    // Strategy-specific Scout returns already include their modeled fees.
     let Some(assessment) = deep_book else {
         return Ok(skipped_for_signal(
             signal,
@@ -154,8 +162,15 @@ async fn submit_selected_signal(
             item.all_signal_short.average_net_return_percent
         }
     });
+    let strategy_edge = signal.strategy.as_deref().and_then(Strategy::from_name)
+        .filter(|kind| !kind.is_dated_carry())
+        .and_then(|kind| validated_strategy_entry_edge(signal, kind).ok());
+    let reducing_rebalance = signal.direction == "bearish"
+        && is_portfolio_rebalance_signal(signal, signal.strategy.as_deref().and_then(Strategy::from_name));
     let (edge_percent, edge_source, fee_bps) =
-        if let Some(edge) = side_edge.filter(|v| v.is_finite()) {
+        if let Some(edge) = strategy_edge {
+            (edge, "measured strategy Scout net edge", 0.0)
+        } else if let Some(edge) = side_edge.filter(|v| v.is_finite()) {
             (edge, "measured walk-forward edge", 0.0)
         } else {
             (
@@ -167,9 +182,9 @@ async fn submit_selected_signal(
     let incremental_cost_percent = (spread_bps + 2.0 * assessment.impact_bps + fee_bps) / 100.0;
     let execution_cost_cushion =
         time_adjusted_edge_cost_cushion(now, MIN_EDGE_TO_INCREMENTAL_COST_MULTIPLIER);
-    if !edge_percent.is_finite()
+    if !reducing_rebalance && (!edge_percent.is_finite()
         || !incremental_cost_percent.is_finite()
-        || edge_percent < incremental_cost_percent * execution_cost_cushion
+        || edge_percent < incremental_cost_percent * execution_cost_cushion)
     {
         return Ok(skipped_for_signal(
             signal,
@@ -298,6 +313,10 @@ async fn submit_selected_signal(
         );
         let order_reservation_started = Instant::now();
         reset_daily_budget(&mut settings);
+        let strategy = signal.strategy.as_deref().and_then(Strategy::from_name);
+        if learned_pause_blocks_signal(&settings, strategy, reducing_rebalance, &signal.direction) {
+            return Ok(skipped_for_signal(signal, "Strategy entry paused by negative net trade evidence"));
+        }
         if let Some(reason) =
             signal_position_block_reason(&settings, signal, &signal.symbol, strategy_key, now_ms)
         {
@@ -322,12 +341,15 @@ async fn submit_selected_signal(
                 _ => f64::INFINITY,
             })
             .unwrap_or(f64::INFINITY);
-        let remaining_budget = (settings.daily_notional_limit - allocated)
+        let remaining_budget = if reducing_rebalance { f64::INFINITY } else { (settings.daily_notional_limit - allocated)
             .min(category_notional_limit(&settings, category) - category_allocated)
             .min(strategy_remaining_budget)
             .min(symbol_remaining_budget)
-            .max(0.0);
+            .max(0.0) };
         notional = notional.min(remaining_budget / stop_headroom_multiplier);
+        if reducing_rebalance {
+            notional = notional.min(portfolio_reduction_quantity(&settings, &signal.symbol, strategy_key) * mid * quote_rate);
+        }
         if notional < minimum_book_order {
             return Ok(skipped_for_signal(
                 signal,

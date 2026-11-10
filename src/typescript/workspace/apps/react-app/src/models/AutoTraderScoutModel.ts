@@ -33,6 +33,20 @@ export type AutoTraderScoutPosition = {
   netVsBreakevenTone?: 'is-positive' | 'is-negative' | 'is-flat';
   netReturnEstimated?: boolean;
   returnBasis?: 'strategy exit' | 'ticker estimate';
+  horizonMarkouts?: Record<
+    string,
+    {
+      netReturnPercent: number;
+      grossReturnPercent?: number;
+      executionCostPercent?: number;
+      bestFavorablePercent?: number;
+      worstAdversePercent?: number;
+      timeToPositiveNetSeconds?: number;
+      postExitNetReturnPercent?: number;
+      observedAt?: number;
+      takerFeeRate?: number;
+    }
+  >;
 };
 
 export type ScoutLearningSummary = {

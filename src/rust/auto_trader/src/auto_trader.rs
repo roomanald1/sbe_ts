@@ -85,7 +85,9 @@ mod strategy_cleanup_integration_tests {
         AutoTraderState {
             client: reqwest::Client::new(),
             latest_daily_strategy_snapshot: Arc::new(Mutex::new(None)),
+            latest_live_strategy_signals: Arc::new(Mutex::new(BTreeMap::new())),
             strategy_diagnostic: Arc::new(std::sync::Mutex::new(Vec::new())),
+            latest_strategy_blockers: Arc::new(std::sync::Mutex::new(BTreeMap::new())),
             enabled: Arc::new(AtomicBool::new(true)),
             settings: Arc::new(Mutex::new(settings)),
             settings_persist_notify: Arc::new(Notify::new()),

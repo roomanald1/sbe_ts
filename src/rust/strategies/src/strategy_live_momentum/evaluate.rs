@@ -11,25 +11,67 @@ pub(crate) fn evaluate(insight: &StrategySignal<'_>) -> Result<StrategyDecision,
     let Some(signal) = insight.signal.as_ref() else {
         return Ok(StrategyDecision::Reject);
     };
-    let parameters = &insight.parameters;
     let side = match insight.direction {
         Some(SignalDirection::Long) => 1.0,
         Some(SignalDirection::Short) => -1.0,
         None => return Ok(StrategyDecision::Reject),
     };
-    let Some(minimum) = strategy_parameter_value(&parameters, StrategyParameterKey::MinimumMomentum)
+    let Some(minimum) =
+        strategy_parameter_value(&insight.parameters, StrategyParameterKey::MinimumMomentum)
     else {
         return Ok(StrategyDecision::Reject);
     };
     let entry_condition =
         |value: Option<f64>| value.is_some_and(|value| value.is_finite() && side * value > minimum);
-    if entry_condition(signal.components.momentum_10s_percent)
+    Ok(if entry_condition(signal.components.momentum_10s_percent)
         || entry_condition(signal.components.trend_5m_volatility_units)
     {
-        Ok(StrategyDecision::Enter)
+        StrategyDecision::Enter
     } else {
-        Ok(StrategyDecision::Reject)
+        StrategyDecision::Reject
+    })
+}
+
+pub(crate) fn entry_rejection_reason(insight: &StrategySignal<'_>) -> Option<String> {
+    let Some(signal) = insight.signal.as_ref() else {
+        return Some("No live insight signal was provided".to_owned());
+    };
+    let side = match insight.direction {
+        Some(SignalDirection::Long) => 1.0,
+        Some(SignalDirection::Short) => -1.0,
+        None => return Some("Signal direction is neutral or unavailable".to_owned()),
+    };
+    let Some(minimum) =
+        strategy_parameter_value(&insight.parameters, StrategyParameterKey::MinimumMomentum)
+    else {
+        return Some("Learned parameter minimum_momentum is unavailable".to_owned());
+    };
+    let momentum = signal.components.momentum_10s_percent.map(|value| side * value);
+    let trend = signal.components.trend_5m_volatility_units.map(|value| side * value);
+    let passes = |value: Option<f64>| {
+        value.is_some_and(|value| value.is_finite() && value > minimum)
+    };
+    if passes(momentum) || passes(trend) {
+        return None;
     }
+    let describe = |value: Option<f64>| match value {
+        Some(value) if value.is_finite() => format!("{value:.4}%"),
+        Some(_) => "non-finite".to_owned(),
+        None => "unavailable".to_owned(),
+    };
+    Some(format!(
+        "Directional momentum {} (threshold > {:.4}%) and trend strength {} volatility units (threshold > {:.4}); neither met its threshold",
+        describe(momentum),
+        minimum,
+        trend.map(|value| {
+            if value.is_finite() {
+                format!("{value:.4}")
+            } else {
+                "non-finite".to_owned()
+            }
+        }).unwrap_or_else(|| "unavailable".to_owned()),
+        minimum
+    ))
 }
 
 #[cfg(test)]

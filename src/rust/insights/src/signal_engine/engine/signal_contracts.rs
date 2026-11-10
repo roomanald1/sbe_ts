@@ -364,11 +364,28 @@ pub struct SignalEvaluation {
     pub path_high_timestamp: u64,
     pub path_low: f64,
     pub path_low_timestamp: u64,
+    #[serde(skip)]
+    pub counterfactual_quote_path: Vec<CounterfactualQuoteSample>,
     /// Directional time to positive net after spread and configured taker fees.
     #[serde(default)]
     pub long_time_to_positive_net_seconds: Option<u64>,
     #[serde(default)]
     pub short_time_to_positive_net_seconds: Option<u64>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct CounterfactualQuoteSample {
+    pub timestamp: u64,
+    pub bid_execution_price: Option<f64>,
+    pub ask_execution_price: Option<f64>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CounterfactualQuotePath {
+    pub symbol: String,
+    pub signal_timestamp: u64,
+    pub horizon_seconds: u64,
+    pub samples: Vec<CounterfactualQuoteSample>,
 }
 
 #[derive(Clone, Debug)]
@@ -377,4 +394,5 @@ pub struct CompletedSignalOutcome {
     pub evaluation: SignalEvaluation,
     pub scout_id: Option<String>,
     pub scout_exit_reason: Option<&'static str>,
+    pub scout_observation_only: bool,
 }

@@ -8,7 +8,11 @@ fn recent_net_pnl_edge(outcomes: &LearningStats) -> Option<f64> {
         |(net, gross, samples), (timestamp, pnl)| {
             let age_ms = now_ms.saturating_sub(*timestamp);
             let weight = 0.5_f64.powf(age_ms as f64 / LEARNING_HALF_LIFE_MS as f64);
-            (net + pnl * weight, gross + pnl.abs() * weight, samples + weight)
+            (
+                net + pnl * weight,
+                gross + pnl.abs() * weight,
+                samples + weight,
+            )
         },
     );
     if gross <= 1e-12 {
@@ -16,6 +20,14 @@ fn recent_net_pnl_edge(outcomes: &LearningStats) -> Option<f64> {
     }
     let confidence = effective_samples / (effective_samples + 2.0);
     Some((net / gross * confidence).clamp(-1.0, 1.0))
+}
+
+fn effective_entry_stop(strategy: Option<Strategy>, stop: f64, volatility: Option<f64>) -> f64 {
+    if strategy.is_some() {
+        stop.clamp(MIN_STOP_LOSS_PERCENT, MAX_STOP_LOSS_PERCENT)
+    } else {
+        volatility_adjusted_stop_loss_percent(stop, volatility)
+    }
 }
 
 fn learned_strategy_size_multiplier(outcomes: &LearningStats) -> f64 {
@@ -31,11 +43,19 @@ fn learned_strategy_size_multiplier(outcomes: &LearningStats) -> f64 {
     } else {
         1.0 + edge * (MAX_LEARNED_STRATEGY_SIZE_MULTIPLIER - 1.0)
     };
-    target.clamp(POOR_STRATEGY_SIZE_MULTIPLIER, MAX_LEARNED_STRATEGY_SIZE_MULTIPLIER)
+    target.clamp(
+        POOR_STRATEGY_SIZE_MULTIPLIER,
+        MAX_LEARNED_STRATEGY_SIZE_MULTIPLIER,
+    )
 }
 
-fn strategy_learning_stats_across_symbols(settings: &Settings, strategy: Strategy) -> LearningStats {
-    settings.learned_profiles.values()
+fn strategy_learning_stats_across_symbols(
+    settings: &Settings,
+    strategy: Strategy,
+) -> LearningStats {
+    settings
+        .learned_profiles
+        .values()
         .filter(|profile| profile.strategy == strategy.as_str())
         .fold(LearningStats::default(), |mut total, profile| {
             total.samples = total.samples.saturating_add(profile.learning_samples);
@@ -52,13 +72,94 @@ fn daily_strategy_effective_budget(settings: &Settings, strategy: &str) -> f64 {
     else {
         return 0.0;
     };
-    base_budget * settings.learned_strategy_size_multipliers
-        .get(kind.as_str()).copied().unwrap_or(1.0)
+    base_budget
+        * settings
+            .learned_strategy_size_multipliers
+            .get(kind.as_str())
+            .copied()
+            .unwrap_or(1.0)
 }
 
 fn intraday_strategy_size_multiplier(settings: &Settings, strategy: Strategy) -> f64 {
-    settings.learned_strategy_size_multipliers
-        .get(strategy.as_str()).copied().unwrap_or(1.0).min(1.0)
+    settings
+        .learned_strategy_size_multipliers
+        .get(strategy.as_str())
+        .copied()
+        .unwrap_or(1.0)
+        .min(1.0)
+}
+
+fn learned_strategy_entry_paused(settings: &Settings, strategy: Strategy) -> bool {
+    settings
+        .learned_strategy_size_multipliers
+        .get(strategy.as_str())
+        .is_some_and(|multiplier| multiplier.is_finite() && *multiplier <= 0.0)
+}
+
+fn is_portfolio_rebalance_signal(signal: &Signal, strategy: Option<Strategy>) -> bool {
+    strategy == Some(Strategy::RiskAdjustedTrendPortfolio)
+        && signal
+            .strategy_decision
+            .as_ref()
+            .and_then(|decision| decision.get("portfolio_rebalance_delta_usd"))
+            .and_then(serde_json::Value::as_f64)
+            .is_some_and(|delta| delta.is_finite() && delta > 0.0)
+}
+
+fn learned_pause_blocks_signal(
+    settings: &Settings,
+    strategy: Option<Strategy>,
+    is_portfolio_rebalance: bool,
+    direction: &str,
+) -> bool {
+    strategy.is_some_and(|kind| learned_strategy_entry_paused(settings, kind))
+        && !(is_portfolio_rebalance && direction == "bearish")
+}
+
+fn validated_strategy_entry_edge(signal: &Signal, strategy: Strategy) -> Result<f64, String> {
+    let parameters = signal_strategy_parameters(signal);
+    let input = StrategySignal::entry(signal, &parameters);
+    let evidence = input
+        .walk_forward_evidence
+        .ok_or_else(|| "Strategy entry awaits matching Scout outcome evidence".to_owned())?;
+    let specs = strategy.parameter_specs();
+    let bounded = |key: StrategyParameterKey| {
+        let spec = specs.iter().find(|spec| spec.key == key)?;
+        let value = strategy_parameter_value(&parameters, key)?;
+        let position = (value - spec.min) / spec.step;
+        (spec.step > 0.0
+            && value >= spec.min
+            && value <= spec.max
+            && (position - position.round()).abs() <= 1e-6)
+            .then_some(value)
+    };
+    let minimum =
+        bounded(StrategyParameterKey::ScoutMinimumWalkForwardSamples).ok_or_else(|| {
+            "Strategy entry is missing its bounded minimum Scout sample count".to_owned()
+        })?;
+    let minimum_rate =
+        bounded(StrategyParameterKey::ScoutMinimumPositiveNetRate).ok_or_else(|| {
+            "Strategy entry is missing its bounded minimum Scout positive rate".to_owned()
+        })?;
+    let edge = evidence
+        .average_net_return_percent
+        .filter(|value| value.is_finite())
+        .ok_or_else(|| "Strategy Scout evidence has no valid net return".to_owned())?;
+    let rate = evidence
+        .positive_net_rate
+        .filter(|value| value.is_finite() && (0.0..=1.0).contains(value))
+        .ok_or_else(|| "Strategy Scout evidence has no valid positive rate".to_owned())?;
+    if evidence.sample_count < minimum.round() as usize
+        || evidence.last_sample_timestamp_ms >= signal.timestamp
+        || edge <= 0.0
+        || rate < minimum_rate
+    {
+        return Err(
+            "Strategy entry awaits sufficient prior positive net Scout evidence for this profile"
+                .into(),
+        );
+    }
+    Ok(edge)
 }
 
 fn signal_weighted_strategy_budget(
@@ -68,16 +169,25 @@ fn signal_weighted_strategy_budget(
     category: StrategyCategory,
     now_ms: u64,
 ) -> f64 {
+    if learned_strategy_entry_paused(settings, strategy) {
+        return 0.0;
+    }
     let (enabled, pool, configured) = match category {
         StrategyCategory::Daily => (
-            settings.strategies.iter().copied()
+            settings
+                .strategies
+                .iter()
+                .copied()
                 .filter(|kind| !kind.is_live_insight() && !kind.is_dated_carry())
                 .collect::<Vec<_>>(),
             settings.daily_strategy_notional_limit,
             !settings.daily_strategy_budgets.is_empty(),
         ),
         StrategyCategory::Intraday => (
-            settings.strategies.iter().copied()
+            settings
+                .strategies
+                .iter()
+                .copied()
                 .filter(|kind| kind.is_live_insight() && !kind.is_legacy_composite())
                 .collect::<Vec<_>>(),
             settings.intraday_notional_limit,
@@ -87,7 +197,9 @@ fn signal_weighted_strategy_budget(
     if configured || enabled.is_empty() || !enabled.contains(&strategy) {
         return match category {
             StrategyCategory::Daily => daily_strategy_effective_budget(settings, strategy.as_str()),
-            StrategyCategory::Intraday => intraday_strategy_effective_budget(settings, strategy.as_str()),
+            StrategyCategory::Intraday => {
+                intraday_strategy_effective_budget(settings, strategy.as_str())
+            }
         };
     }
 
@@ -102,31 +214,58 @@ fn signal_weighted_strategy_budget(
             && matches!(signal.direction.as_str(), "bullish" | "bearish")
             && now_ms.saturating_sub(signal.timestamp) <= signal_max_age_seconds(signal) * 1_000
     }) {
-        let Some(kind) = signal.strategy.as_deref().and_then(Strategy::from_name)
-            .filter(|kind| enabled.contains(kind)) else { continue; };
+        let Some(kind) = signal
+            .strategy
+            .as_deref()
+            .and_then(Strategy::from_name)
+            .filter(|kind| enabled.contains(kind))
+        else {
+            continue;
+        };
         let learning = match category {
-            StrategyCategory::Daily => settings.learned_strategy_size_multipliers
-                .get(kind.as_str()).copied().unwrap_or(1.0),
+            StrategyCategory::Daily => settings
+                .learned_strategy_size_multipliers
+                .get(kind.as_str())
+                .copied()
+                .unwrap_or(1.0),
             StrategyCategory::Intraday => intraday_strategy_size_multiplier(settings, kind),
         };
-        let confidence = if signal.strength.is_finite() { signal.strength.clamp(0.0, 1.0) } else { 0.0 };
+        let confidence = if signal.strength.is_finite() {
+            signal.strength.clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
         *weights.entry(kind.as_str().to_owned()).or_default() += confidence * learning;
     }
     // sqrt(count) in the aggregate gives genuinely frequent strategies more
     // room while keeping a broad signal universe from overwhelming the floor.
-    let weights = weights.into_iter().map(|(kind, sum)| {
-        let count = dashboard.best.iter().filter(|signal| {
-            signal.strategy.as_deref() == Some(kind.as_str())
-                && signal.strategy_candidate && !signal.stale
-                && matches!(signal.direction.as_str(), "bullish" | "bearish")
-                && now_ms.saturating_sub(signal.timestamp) <= signal_max_age_seconds(signal) * 1_000
-        }).count().max(1) as f64;
-        (kind, sum / count.sqrt())
-    }).collect::<BTreeMap<_, _>>();
+    let weights = weights
+        .into_iter()
+        .map(|(kind, sum)| {
+            let count = dashboard
+                .best
+                .iter()
+                .filter(|signal| {
+                    signal.strategy.as_deref() == Some(kind.as_str())
+                        && signal.strategy_candidate
+                        && !signal.stale
+                        && matches!(signal.direction.as_str(), "bullish" | "bearish")
+                        && now_ms.saturating_sub(signal.timestamp)
+                            <= signal_max_age_seconds(signal) * 1_000
+                })
+                .count()
+                .max(1) as f64;
+            (kind, sum / count.sqrt())
+        })
+        .collect::<BTreeMap<_, _>>();
     let total_weight = weights.values().sum::<f64>();
     let variable = if total_weight > 0.0 {
-        (pool - floor * enabled.len() as f64) * weights.get(strategy.as_str()).copied().unwrap_or(0.0) / total_weight
-    } else { 0.0 };
+        (pool - floor * enabled.len() as f64)
+            * weights.get(strategy.as_str()).copied().unwrap_or(0.0)
+            / total_weight
+    } else {
+        0.0
+    };
     (floor + variable).max(0.0)
 }
 
@@ -143,11 +282,17 @@ fn signal_strategy_order_size_multiplier(
     decision: Option<&serde_json::Value>,
 ) -> Result<f64, String> {
     match strategy {
-        Some(Strategy::RiskAdjustedMonthlyMomentum | Strategy::Donchian20Btc200Hold3 | Strategy::RiskAdjustedTrendPortfolio) => decision
+        Some(
+            Strategy::RiskAdjustedMonthlyMomentum
+            | Strategy::Donchian20Btc200Hold3
+            | Strategy::RiskAdjustedTrendPortfolio,
+        ) => decision
             .and_then(|decision| decision.get("strategy_order_size_multiplier"))
             .and_then(serde_json::Value::as_f64)
             .filter(|value| value.is_finite() && *value > 0.0 && *value <= 1.0)
-            .ok_or_else(|| "Research strategy signal is missing a valid size multiplier".to_owned()),
+            .ok_or_else(|| {
+                "Research strategy signal is missing a valid size multiplier".to_owned()
+            }),
         _ => Ok(1.0),
     }
 }
@@ -156,8 +301,8 @@ fn signal_agreement_size_multiplier(
     strategy: Option<Strategy>,
     decision: Option<&serde_json::Value>,
 ) -> Result<f64, String> {
-    let Some(strategy) = strategy
-        .filter(|strategy| !strategy.is_live_insight() && !strategy.is_dated_carry())
+    let Some(strategy) =
+        strategy.filter(|strategy| !strategy.is_live_insight() && !strategy.is_dated_carry())
     else {
         return Ok(1.0);
     };
@@ -205,34 +350,49 @@ async fn execution_learning_decision(
     learning: &BTreeMap<String, ExecutionLearningStats>,
     import_legacy_learning: bool,
 ) -> (strategies::ExecutionLearningResponse, bool) {
-    let order_types = ALL_ORDER_TYPES.iter().filter_map(|kind| {
-        serde_json::to_value(kind).ok()?.as_str().map(str::to_owned)
-    }).collect::<Vec<_>>();
-    let explore_profile_order_types = ALL_ORDER_TYPES.iter().filter(|kind| {
-        exploratory || should_explore_execution_profile(signal, **kind)
-    }).filter_map(|kind| serde_json::to_value(kind).ok()?.as_str().map(str::to_owned)).collect();
+    let order_types = ALL_ORDER_TYPES
+        .iter()
+        .filter_map(|kind| serde_json::to_value(kind).ok()?.as_str().map(str::to_owned))
+        .collect::<Vec<_>>();
+    let explore_profile_order_types = ALL_ORDER_TYPES
+        .iter()
+        .filter(|kind| exploratory || should_explore_execution_profile(signal, **kind))
+        .filter_map(|kind| serde_json::to_value(kind).ok()?.as_str().map(str::to_owned))
+        .collect();
     let request = strategies::ExecutionLearningRequest {
         context: context.to_owned(),
-        baseline_order_type: serde_json::to_value(baseline).ok()
-            .and_then(|value| value.as_str().map(str::to_owned)).unwrap_or_default(),
+        baseline_order_type: serde_json::to_value(baseline)
+            .ok()
+            .and_then(|value| value.as_str().map(str::to_owned))
+            .unwrap_or_default(),
         order_types,
         profile_count: PARAMETER_PROFILE_COUNT,
         risk_appetite,
         allow_order_type_adaptation: allow_adaptation,
         explore_profile_order_types,
         learning: if import_legacy_learning {
-            learning.iter().map(|(key, stats)| (key.clone(), strategies::ExecutionLearningStat {
-                samples: stats.samples,
-                filled_samples: stats.filled_samples,
-                fill_rate_total: stats.fill_rate_total,
-                cost_notional: stats.cost_notional,
-                all_in_cost_notional_bps: stats.all_in_cost_notional_bps,
-                updated_at_ms: stats.updated_at_ms,
-            })).collect()
-        } else { BTreeMap::new() },
+            learning
+                .iter()
+                .map(|(key, stats)| {
+                    (
+                        key.clone(),
+                        strategies::ExecutionLearningStat {
+                            samples: stats.samples,
+                            filled_samples: stats.filled_samples,
+                            fill_rate_total: stats.fill_rate_total,
+                            cost_notional: stats.cost_notional,
+                            all_in_cost_notional_bps: stats.all_in_cost_notional_bps,
+                            updated_at_ms: stats.updated_at_ms,
+                        },
+                    )
+                })
+                .collect()
+        } else {
+            BTreeMap::new()
+        },
     };
-    let base = std::env::var("LEARNING_SERVICE_URL")
-        .unwrap_or_else(|_| "http://127.0.0.1:3010".into());
+    let base =
+        std::env::var("LEARNING_SERVICE_URL").unwrap_or_else(|_| "http://127.0.0.1:3010".into());
     let baseline_order_type = request.baseline_order_type.clone();
     let cache_key = format!(
         "execution-decision:{context}:{baseline_order_type}:{risk_appetite:.4}:{}:{}",
@@ -248,12 +408,15 @@ async fn execution_learning_decision(
     )
     .await;
     let imported = response.is_some() && import_legacy_learning;
-    (response.unwrap_or_else(|| strategies::ExecutionLearningResponse {
-        learned_order_type: Some(baseline_order_type),
-        schedule_depth_threshold: DEFAULT_SCHEDULE_DEPTH_RATIO,
-        schedule_threshold_samples: 0,
-        parameter_profiles: BTreeMap::new(),
-    }), imported)
+    (
+        response.unwrap_or_else(|| strategies::ExecutionLearningResponse {
+            learned_order_type: Some(baseline_order_type),
+            schedule_depth_threshold: DEFAULT_SCHEDULE_DEPTH_RATIO,
+            schedule_threshold_samples: 0,
+            parameter_profiles: BTreeMap::new(),
+        }),
+        imported,
+    )
 }
 
 async fn prepare_signal_execution_plan(
@@ -271,12 +434,32 @@ async fn prepare_signal_execution_plan(
     let strategy = signal.strategy.as_deref().and_then(Strategy::from_name);
     let strategy_profile = strategy
         .map(|strategy| learned_strategy_parameter_profile(&settings, &signal.symbol, strategy));
-    let is_portfolio_rebalance = strategy == Some(Strategy::RiskAdjustedTrendPortfolio)
-        && signal.strategy_decision.as_ref()
-        .and_then(|decision| decision.get("portfolio_rebalance_delta_usd"))
-        .and_then(serde_json::Value::as_f64)
-        .is_some_and(|delta| delta.is_finite() && delta > 0.0);
-    let strategy_order_size_multiplier = if is_portfolio_rebalance { 1.0 } else {
+    let is_portfolio_rebalance = is_portfolio_rebalance_signal(signal, strategy);
+    if learned_pause_blocks_signal(
+        &settings,
+        strategy,
+        is_portfolio_rebalance,
+        &signal.direction,
+    ) {
+        return Err("Strategy entry paused by negative net trade evidence".into());
+    }
+    if let Some(kind) = strategy.filter(|kind| !kind.is_dated_carry()) {
+        if !(is_portfolio_rebalance && signal.direction == "bearish") {
+            validated_strategy_entry_edge(signal, kind)?;
+        }
+    }
+    let (post_exit_target_increase, post_exit_trailing_increase, post_exit_sample_count) = strategy
+        .map_or((0.0, 0.0, 0), |kind| {
+            post_exit_policy_adjustments(
+                &settings.post_exit_adaptation_history,
+                &signal.symbol,
+                kind.as_str(),
+                &signal.direction,
+            )
+        });
+    let strategy_order_size_multiplier = if is_portfolio_rebalance {
+        1.0
+    } else {
         signal_strategy_order_size_multiplier(strategy, signal.strategy_decision.as_ref())?
     };
     let agreement_size_multiplier =
@@ -305,15 +488,19 @@ async fn prepare_signal_execution_plan(
                 "take_profit_percent",
             ))
     });
-    let learned_exit_policy = learned_exit_policy(signal, &dashboard.walk_forward);
+    let learned_exit_policy = if strategy.is_none() {
+        learned_exit_policy(signal, &dashboard.walk_forward)
+    } else {
+        None
+    };
     let per_strategy_history_is_mature = strategy_profile
         .as_ref()
         .is_some_and(|profile| profile.learning_samples >= WALK_FORWARD_POLICY_MIN_SAMPLES);
     let baseline_stop = stop_parameter.unwrap_or(counterfactual_stop_loss_percent);
     let baseline_target = target_parameter.unwrap_or(counterfactual_take_profit_percent);
     let bounded_learned_policy = learned_exit_policy.map(|(stop, target, samples)| {
-        let widening_tiers = (samples / MIN_VALIDATED_EXIT_POLICY_SAMPLES)
-            .clamp(1, MAX_STOP_WIDENING_TIERS) as f64;
+        let widening_tiers =
+            (samples / MIN_VALIDATED_EXIT_POLICY_SAMPLES).clamp(1, MAX_STOP_WIDENING_TIERS) as f64;
         let max_widening = STOP_WIDENING_PER_VALIDATION_TIER_PERCENT * widening_tiers;
         let stop = if stop > baseline_stop {
             stop.min(baseline_stop + max_widening)
@@ -341,7 +528,7 @@ async fn prepare_signal_execution_plan(
             .map(|(stop, _)| stop)
             .unwrap_or(baseline_stop)
     };
-    let configured_target = if explicit_exit_override {
+    let mut configured_target = if explicit_exit_override {
         baseline_target
     } else if let Some((_, target)) = validated_wider_policy {
         target
@@ -352,8 +539,39 @@ async fn prepare_signal_execution_plan(
             .map(|(_, target)| target)
             .unwrap_or(baseline_target)
     };
-    let learned_or_configured_stop = configured_stop;
-    let effective_stop_loss_percent = volatility_adjusted_stop_loss_percent(
+    if !explicit_target && post_exit_sample_count >= MIN_POST_EXIT_ADAPTATION_SAMPLES {
+        let strategy_target_max = strategy
+            .and_then(|kind| {
+                kind.parameter_specs()
+                    .iter()
+                    .find(|spec| spec.key.as_str() == "take_profit_percent")
+                    .map(|spec| spec.max)
+            })
+            .unwrap_or(MAX_TAKE_PROFIT_PERCENT);
+        configured_target =
+            (configured_target + post_exit_target_increase).min(strategy_target_max);
+    }
+    let contextual_stop = (!explicit_stop)
+        .then(|| {
+            let kind = strategy?;
+            let parameters = signal_strategy_parameters(signal);
+            let profile_id = strategies::profile_id(&signal.symbol, kind.as_str(), &parameters);
+            settings
+                .contextual_stop_loss_percents
+                .get(&format!("{profile_id}|{}", market_context(signal)))
+                .copied()
+                .filter(|value| value.is_finite())
+                .filter(|value| {
+                    kind.parameter_specs()
+                        .iter()
+                        .find(|spec| spec.key.as_str() == "stop_loss_percent")
+                        .is_some_and(|spec| *value >= spec.min && *value <= spec.max)
+                })
+        })
+        .flatten();
+    let learned_or_configured_stop = contextual_stop.unwrap_or(configured_stop);
+    let effective_stop_loss_percent = effective_entry_stop(
+        strategy,
         learned_or_configured_stop,
         signal.components.volatility_1m_percent,
     );
@@ -364,20 +582,18 @@ async fn prepare_signal_execution_plan(
         1.0
     };
     let risk_size_scale = risk_size_scale(settings.risk_appetite);
-    let strategy_size_learning = strategy
-        .filter(|kind| kind.is_dated_carry())
-        .map(|kind| {
-            settings
-                .learned_profiles
-                .get(&format!("{}:{}", signal.symbol, kind.as_str()))
-                .map(|profile| LearningStats {
-                    samples: profile.learning_samples,
-                    positive: profile.positive_samples,
-                    realized_pnl: profile.realized_pnl,
-                    ..LearningStats::default()
-                })
-                .unwrap_or_default()
-        });
+    let strategy_size_learning = strategy.filter(|kind| kind.is_dated_carry()).map(|kind| {
+        settings
+            .learned_profiles
+            .get(&format!("{}:{}", signal.symbol, kind.as_str()))
+            .map(|profile| LearningStats {
+                samples: profile.learning_samples,
+                positive: profile.positive_samples,
+                realized_pnl: profile.realized_pnl,
+                ..LearningStats::default()
+            })
+            .unwrap_or_default()
+    });
     let learned_size_multiplier = if !exploratory {
         if strategy.is_some_and(|kind| !kind.is_dated_carry()) {
             // Daily and intraday strategies apply pooled learning to their
@@ -412,10 +628,21 @@ async fn prepare_signal_execution_plan(
         .min(settings.max_order_notional)
         .min(settings.max_order_notional * risk_fraction)
         * learned_size_multiplier
+        * if !(is_portfolio_rebalance && signal.direction == "bearish")
+            && has_recent_profile_loss_cluster(signal, &settings, now_ms)
+        {
+            LOSS_CLUSTER_SIZE_MULTIPLIER
+        } else {
+            1.0
+        }
         * strategy_order_size_multiplier
-        * if rebalance_delta.is_some() { 1.0 } else { agreement_size_multiplier })
-        .min(rebalance_delta.unwrap_or(f64::INFINITY))
-        .min(settings.max_order_notional);
+        * if rebalance_delta.is_some() {
+            1.0
+        } else {
+            agreement_size_multiplier
+        })
+    .min(rebalance_delta.unwrap_or(f64::INFINITY))
+    .min(settings.max_order_notional);
     let stop_headroom_multiplier = if strategy.is_some_and(|kind| !kind.uses_protective_stops()) {
         1.0
     } else if matches!(baseline_type, AutoOrderType::Vwap | AutoOrderType::Twap) {
@@ -426,22 +653,36 @@ async fn prepare_signal_execution_plan(
     let category = strategy_category(signal.strategy.as_deref());
     let total_allocated = allocated_notional(&settings);
     let category_allocated = allocated_notional_for_category(&settings, Some(category));
-    let strategy_remaining_budget = if rebalance_delta.is_some() { f64::INFINITY } else { signal
-        .strategy
-        .as_deref()
-        .and_then(Strategy::from_name)
-        .map(|kind| match strategy_category(Some(kind.as_str())) {
-            StrategyCategory::Daily if !kind.is_live_insight() && !kind.is_dated_carry() => {
-                signal_weighted_strategy_budget(&settings, dashboard, kind, StrategyCategory::Daily, now_ms)
-                    - allocated_notional_for_strategy(&settings, kind.as_str())
-            }
-            StrategyCategory::Intraday if kind.is_live_insight() => {
-                signal_weighted_strategy_budget(&settings, dashboard, kind, StrategyCategory::Intraday, now_ms)
-                    - allocated_notional_for_strategy(&settings, kind.as_str())
-            }
-            _ => f64::INFINITY,
-        })
-        .unwrap_or(f64::INFINITY) };
+    let strategy_remaining_budget = if rebalance_delta.is_some() {
+        f64::INFINITY
+    } else {
+        signal
+            .strategy
+            .as_deref()
+            .and_then(Strategy::from_name)
+            .map(|kind| match strategy_category(Some(kind.as_str())) {
+                StrategyCategory::Daily if !kind.is_live_insight() && !kind.is_dated_carry() => {
+                    signal_weighted_strategy_budget(
+                        &settings,
+                        dashboard,
+                        kind,
+                        StrategyCategory::Daily,
+                        now_ms,
+                    ) - allocated_notional_for_strategy(&settings, kind.as_str())
+                }
+                StrategyCategory::Intraday if kind.is_live_insight() => {
+                    signal_weighted_strategy_budget(
+                        &settings,
+                        dashboard,
+                        kind,
+                        StrategyCategory::Intraday,
+                        now_ms,
+                    ) - allocated_notional_for_strategy(&settings, kind.as_str())
+                }
+                _ => f64::INFINITY,
+            })
+            .unwrap_or(f64::INFINITY)
+    };
     let remaining_budget = if rebalance_delta.is_some() && signal.direction == "bearish" {
         f64::INFINITY
     } else {
@@ -467,13 +708,21 @@ async fn prepare_signal_execution_plan(
             .and_then(|parameters| parameters.get("post_only_timeout_minutes"))
             .and_then(serde_json::Value::as_f64)
             .filter(|value| value.is_finite() && (1.0..=15.0).contains(value))
-            .or_else(|| strategy_profile.as_ref().and_then(|profile| strategy_profile_value(profile, "post_only_timeout_minutes")))
+            .or_else(|| {
+                strategy_profile.as_ref().and_then(|profile| {
+                    strategy_profile_value(profile, "post_only_timeout_minutes")
+                })
+            })
             .unwrap_or(5.0) as u64,
         vwap_duration_minutes: settings.vwap_duration_minutes,
         vwap_participation_rate: settings.vwap_participation_percent / 100.0,
         limit_offset_bps: settings.limit_offset_bps,
         trigger_offset_bps: settings.trigger_offset_bps,
-        trailing_distance_percent: settings.trailing_distance_percent,
+        trailing_distance_percent: if post_exit_trailing_increase > 0.0 {
+            (settings.trailing_distance_percent + post_exit_trailing_increase).clamp(0.05, 1.0)
+        } else {
+            settings.trailing_distance_percent
+        },
     };
     let minimum_book_order = MIN_DEEP_BOOK_ORDER_NOTIONAL;
     let deep_book_started = Instant::now();
@@ -491,8 +740,11 @@ async fn prepare_signal_execution_plan(
             // validation; unrelated target heuristics would invalidate that result.
             (configured_target, None)
         } else {
-            let horizon_take_profit_percent =
-                horizon_adjusted_take_profit_percent(signal, &dashboard.walk_forward, configured_target);
+            let horizon_take_profit_percent = horizon_adjusted_take_profit_percent(
+                signal,
+                &dashboard.walk_forward,
+                configured_target,
+            );
             let effective_take_profit_percent = confidence_adjusted_take_profit_percent(
                 &settings.closed_trade_returns_percent,
                 horizon_take_profit_percent.unwrap_or(configured_target),
@@ -513,12 +765,15 @@ async fn prepare_signal_execution_plan(
         exploratory,
         &settings.execution_learning,
         !settings.execution_learning_imported,
-    ).await;
+    )
+    .await;
     let execution_learning_ms = execution_learning_started.elapsed().as_secs_f64() * 1_000.0;
     if imported_execution_learning {
         settings.execution_learning_imported = true;
     }
-    let learned_type = execution_learning.learned_order_type.as_deref()
+    let learned_type = execution_learning
+        .learned_order_type
+        .as_deref()
         .and_then(|name| serde_json::from_value::<AutoOrderType>(serde_json::json!(name)).ok())
         .unwrap_or(baseline_type);
     let side_depth = deep_book
@@ -547,9 +802,15 @@ async fn prepare_signal_execution_plan(
         deep_book,
         schedule_depth_threshold,
     );
-    let order_type_name = serde_json::to_value(order_type).ok()
-        .and_then(|value| value.as_str().map(str::to_owned)).unwrap_or_default();
-    let profile = execution_learning.parameter_profiles.get(&order_type_name).copied().unwrap_or(0);
+    let order_type_name = serde_json::to_value(order_type)
+        .ok()
+        .and_then(|value| value.as_str().map(str::to_owned))
+        .unwrap_or_default();
+    let profile = execution_learning
+        .parameter_profiles
+        .get(&order_type_name)
+        .copied()
+        .unwrap_or(0);
     let execution_params = parameter_profile(baseline_params, profile);
     *state.latest_execution_parameters.lock().await = Some(LatestExecutionParameters {
         timestamp: now_ms,
@@ -593,7 +854,6 @@ async fn prepare_signal_execution_plan(
     })
 }
 
-
 #[cfg(test)]
 mod risk_adjusted_monthly_momentum_sizing_tests {
     use super::*;
@@ -601,14 +861,28 @@ mod risk_adjusted_monthly_momentum_sizing_tests {
     #[test]
     fn strategy_uses_volatility_multiplier_and_fails_closed_when_missing() {
         let strategy = Some(Strategy::RiskAdjustedMonthlyMomentum);
-        assert_eq!(signal_strategy_order_size_multiplier(strategy, Some(&serde_json::json!({
-            "strategy_order_size_multiplier": 0.4
-        }))).unwrap(), 0.4);
+        assert_eq!(
+            signal_strategy_order_size_multiplier(
+                strategy,
+                Some(&serde_json::json!({
+                    "strategy_order_size_multiplier": 0.4
+                }))
+            )
+            .unwrap(),
+            0.4
+        );
         assert!(signal_strategy_order_size_multiplier(strategy, None).is_err());
-        assert!(signal_strategy_order_size_multiplier(strategy, Some(&serde_json::json!({
-            "strategy_order_size_multiplier": 2.0
-        }))).is_err());
-        assert_eq!(signal_strategy_order_size_multiplier(Some(Strategy::Donchian55Btc200), None).unwrap(), 1.0);
+        assert!(signal_strategy_order_size_multiplier(
+            strategy,
+            Some(&serde_json::json!({
+                "strategy_order_size_multiplier": 2.0
+            }))
+        )
+        .is_err());
+        assert_eq!(
+            signal_strategy_order_size_multiplier(Some(Strategy::Donchian55Btc200), None).unwrap(),
+            1.0
+        );
     }
 
     #[test]
@@ -650,34 +924,70 @@ mod signal_execution_budget_tests {
 
     fn signal(strategy: &str, strength: f64, timestamp: u64) -> Signal {
         Signal {
-            symbol: "ETH-USDT".into(), direction: "bullish".into(), strength,
-            timestamp, stale: false, score: strength, ranging_probability: None,
-            components: SignalComponents::default(), strategy_candidate: true,
-            strategy: Some(strategy.into()), strategy_decision: None,
-            market_regime: None, news_attribution: None, entry_gate: None,
+            symbol: "ETH-USDT".into(),
+            direction: "bullish".into(),
+            strength,
+            timestamp,
+            stale: false,
+            score: strength,
+            ranging_probability: None,
+            components: SignalComponents::default(),
+            strategy_candidate: true,
+            strategy: Some(strategy.into()),
+            strategy_decision: None,
+            market_regime: None,
+            news_attribution: None,
+            entry_gate: None,
         }
     }
 
     fn dashboard(best: Vec<Signal>) -> Dashboard {
         Dashboard {
-            best, walk_forward: Arc::new(Vec::new()), missed_opportunity_bands: Vec::new(),
-            markets: Arc::new(BTreeMap::new()), queued_at: None, queue_wait_ms: None,
+            best,
+            walk_forward: Arc::new(Vec::new()),
+            missed_opportunity_bands: Vec::new(),
+            markets: Arc::new(BTreeMap::new()),
+            queued_at: None,
+            queue_wait_ms: None,
         }
     }
 
     #[test]
     fn recent_net_edge_and_learned_size_multiplier_handle_empty_profitable_and_losing_samples() {
         assert_eq!(recent_net_pnl_edge(&LearningStats::default()), None);
-        let zero = LearningStats { recent_trade_pnls: vec![(current_time_ms(), 0.0)], ..LearningStats::default() };
+        let zero = LearningStats {
+            recent_trade_pnls: vec![(current_time_ms(), 0.0)],
+            ..LearningStats::default()
+        };
         assert_eq!(recent_net_pnl_edge(&zero), Some(0.0));
-        let wins = LearningStats { samples: 10, positive: 8, recent_trade_pnls: vec![(current_time_ms(), 5.0), (current_time_ms(), 3.0)], ..LearningStats::default() };
-        let losses = LearningStats { samples: 10, positive: 2, recent_trade_pnls: vec![(current_time_ms(), -8.0), (current_time_ms(), 1.0)], ..LearningStats::default() };
+        let wins = LearningStats {
+            samples: 10,
+            positive: 8,
+            recent_trade_pnls: vec![(current_time_ms(), 5.0), (current_time_ms(), 3.0)],
+            ..LearningStats::default()
+        };
+        let losses = LearningStats {
+            samples: 10,
+            positive: 2,
+            recent_trade_pnls: vec![(current_time_ms(), -8.0), (current_time_ms(), 1.0)],
+            ..LearningStats::default()
+        };
         assert!(recent_net_pnl_edge(&wins).unwrap() > 0.0);
         assert!(learned_strategy_size_multiplier(&wins) > 1.0);
         assert!(recent_net_pnl_edge(&losses).unwrap() < 0.0);
         assert!(learned_strategy_size_multiplier(&losses) < 1.0);
-        assert_eq!(learned_strategy_size_multiplier(&LearningStats::default()), 1.0);
-        assert_eq!(learned_strategy_size_multiplier(&LearningStats { samples: 2, positive: 3, ..LearningStats::default() }), 1.0);
+        assert_eq!(
+            learned_strategy_size_multiplier(&LearningStats::default()),
+            1.0
+        );
+        assert_eq!(
+            learned_strategy_size_multiplier(&LearningStats {
+                samples: 2,
+                positive: 3,
+                ..LearningStats::default()
+            }),
+            1.0
+        );
     }
 
     #[test]
@@ -687,34 +997,278 @@ mod signal_execution_budget_tests {
         settings.daily_notional_limit = 500.0;
         settings.daily_strategy_notional_limit = 500.0;
         let no_signals = dashboard(Vec::new());
-        assert_eq!(signal_weighted_strategy_budget(&settings, &no_signals, Strategy::Donchian20Btc200, StrategyCategory::Daily, 100_000), 125.0);
-        let signals = dashboard(vec![signal("donchian-20-btc200", 1.0, 100_000), signal("donchian-20-btc200", 1.0, 100_000)]);
-        let favored = signal_weighted_strategy_budget(&settings, &signals, Strategy::Donchian20Btc200, StrategyCategory::Daily, 100_000);
-        let other = signal_weighted_strategy_budget(&settings, &signals, Strategy::Donchian55Btc200, StrategyCategory::Daily, 100_000);
+        assert_eq!(
+            signal_weighted_strategy_budget(
+                &settings,
+                &no_signals,
+                Strategy::Donchian20Btc200,
+                StrategyCategory::Daily,
+                100_000
+            ),
+            125.0
+        );
+        let signals = dashboard(vec![
+            signal("donchian-20-btc200", 1.0, 100_000),
+            signal("donchian-20-btc200", 1.0, 100_000),
+        ]);
+        let favored = signal_weighted_strategy_budget(
+            &settings,
+            &signals,
+            Strategy::Donchian20Btc200,
+            StrategyCategory::Daily,
+            100_000,
+        );
+        let other = signal_weighted_strategy_budget(
+            &settings,
+            &signals,
+            Strategy::Donchian55Btc200,
+            StrategyCategory::Daily,
+            100_000,
+        );
         assert!(favored > other);
         assert!(other >= 125.0);
         assert!((favored + other - 500.0).abs() < 1e-9);
 
         let stale = dashboard(vec![signal("donchian-20-btc200", 1.0, 1)]);
-        assert_eq!(signal_weighted_strategy_budget(&settings, &stale, Strategy::Donchian20Btc200, StrategyCategory::Daily, 100_000_000), 125.0);
+        assert_eq!(
+            signal_weighted_strategy_budget(
+                &settings,
+                &stale,
+                Strategy::Donchian20Btc200,
+                StrategyCategory::Daily,
+                100_000_000
+            ),
+            125.0
+        );
     }
 
     #[test]
     fn configured_budgets_bypass_signal_weighting_and_order_multipliers_validate_contracts() {
         let mut settings = Settings::default();
         settings.strategies = vec![Strategy::Donchian20Btc200, Strategy::Donchian55Btc200];
-        settings.daily_strategy_budgets.insert("donchian-20-btc200".into(), 200.0);
+        settings
+            .daily_strategy_budgets
+            .insert("donchian-20-btc200".into(), 200.0);
         let signals = dashboard(vec![signal("donchian-55-btc200", 1.0, 100_000)]);
-        assert_eq!(signal_weighted_strategy_budget(&settings, &signals, Strategy::Donchian20Btc200, StrategyCategory::Daily, 100_000), 200.0);
-        assert_eq!(daily_strategy_effective_budget(&settings, "live-momentum"), 0.0);
-        assert_eq!(intraday_strategy_effective_budget(&settings, "donchian-20-btc200"), 0.0);
+        assert_eq!(
+            signal_weighted_strategy_budget(
+                &settings,
+                &signals,
+                Strategy::Donchian20Btc200,
+                StrategyCategory::Daily,
+                100_000
+            ),
+            200.0
+        );
+        assert_eq!(
+            daily_strategy_effective_budget(&settings, "live-momentum"),
+            0.0
+        );
+        assert_eq!(
+            intraday_strategy_effective_budget(&settings, "donchian-20-btc200"),
+            0.0
+        );
 
         let strategy = Some(Strategy::RiskAdjustedMonthlyMomentum);
-        assert_eq!(signal_strategy_order_size_multiplier(strategy, Some(&serde_json::json!({"strategy_order_size_multiplier":0.5}))).unwrap(), 0.5);
-        assert!(signal_strategy_order_size_multiplier(strategy, Some(&serde_json::json!({"strategy_order_size_multiplier":0.0}))).is_err());
-        assert_eq!(signal_strategy_order_size_multiplier(None, None).unwrap(), 1.0);
-        assert_eq!(signal_agreement_size_multiplier(Some(Strategy::Donchian20Btc200), None).unwrap(), 1.0);
-        assert_eq!(signal_agreement_size_multiplier(Some(Strategy::Donchian20Btc200), Some(&serde_json::json!({"strategy_agreement_size_multiplier":1.1}))).unwrap(), 1.1);
-        assert!(signal_agreement_size_multiplier(Some(Strategy::Donchian20Btc200), Some(&serde_json::json!({"strategy_agreement_size_multiplier":1.3}))).is_err());
+        assert_eq!(
+            signal_strategy_order_size_multiplier(
+                strategy,
+                Some(&serde_json::json!({"strategy_order_size_multiplier":0.5}))
+            )
+            .unwrap(),
+            0.5
+        );
+        assert!(signal_strategy_order_size_multiplier(
+            strategy,
+            Some(&serde_json::json!({"strategy_order_size_multiplier":0.0}))
+        )
+        .is_err());
+        assert_eq!(
+            signal_strategy_order_size_multiplier(None, None).unwrap(),
+            1.0
+        );
+        assert_eq!(
+            signal_agreement_size_multiplier(Some(Strategy::Donchian20Btc200), None).unwrap(),
+            1.0
+        );
+        assert_eq!(
+            signal_agreement_size_multiplier(
+                Some(Strategy::Donchian20Btc200),
+                Some(&serde_json::json!({"strategy_agreement_size_multiplier":1.1}))
+            )
+            .unwrap(),
+            1.1
+        );
+        assert!(signal_agreement_size_multiplier(
+            Some(Strategy::Donchian20Btc200),
+            Some(&serde_json::json!({"strategy_agreement_size_multiplier":1.3}))
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn paused_strategy_has_no_entry_budget_and_can_reduce_a_portfolio_position() {
+        let mut settings = Settings::default();
+        let strategy = Strategy::RiskAdjustedTrendPortfolio;
+        settings.strategies = vec![strategy, Strategy::Donchian20Btc200];
+        settings.daily_strategy_notional_limit = 500.0;
+        settings
+            .learned_strategy_size_multipliers
+            .insert(strategy.as_str().into(), 0.0);
+        let signals = dashboard(vec![signal(strategy.as_str(), 1.0, 100_000)]);
+        assert_eq!(
+            signal_weighted_strategy_budget(
+                &settings,
+                &signals,
+                strategy,
+                StrategyCategory::Daily,
+                100_000
+            ),
+            0.0
+        );
+        assert_eq!(
+            portfolio_reduction_quantity(&settings, "ETH-USDT", strategy.as_str()),
+            0.0
+        );
+        settings
+            .strategy_positions
+            .entry("ETH-USDT".into())
+            .or_default()
+            .insert(
+                strategy.as_str().into(),
+                TraderPosition {
+                    quantity: 2.0,
+                    ..TraderPosition::default()
+                },
+            );
+        assert_eq!(
+            portfolio_reduction_quantity(&settings, "ETH-USDT", strategy.as_str()),
+            2.0
+        );
+        assert!(learned_pause_blocks_signal(
+            &settings,
+            Some(strategy),
+            true,
+            "bullish"
+        ));
+        assert!(learned_pause_blocks_signal(
+            &settings,
+            Some(strategy),
+            false,
+            "bearish"
+        ));
+        assert!(!learned_pause_blocks_signal(
+            &settings,
+            Some(strategy),
+            true,
+            "bearish"
+        ));
+        settings
+            .daily_strategy_budgets
+            .insert(strategy.as_str().into(), 200.0);
+        assert_eq!(
+            signal_weighted_strategy_budget(
+                &settings,
+                &signals,
+                strategy,
+                StrategyCategory::Daily,
+                100_000
+            ),
+            0.0
+        );
+    }
+
+    #[test]
+    fn entry_requires_prior_profile_scout_evidence_with_positive_net_return() {
+        let strategy = Strategy::LiveTradeFlow;
+        let mut candidate = signal(strategy.as_str(), 0.8, 100_000);
+        let mut decision = serde_json::json!({
+            "strategy_parameters": {
+                "scout_minimum_walk_forward_samples": 3.0,
+                "scout_minimum_positive_net_rate": 0.5
+            }
+        });
+        candidate.strategy_decision = Some(decision.clone());
+        assert!(validated_strategy_entry_edge(&candidate, strategy).is_err());
+        decision["strategy_walk_forward"] = serde_json::json!({
+            "sampleCount": 3, "positiveNetRate": 0.67,
+            "averageNetReturnPercent": -0.01, "lastSampleTimestampMs": 99_000
+        });
+        candidate.strategy_decision = Some(decision.clone());
+        assert!(validated_strategy_entry_edge(&candidate, strategy).is_err());
+        decision["strategy_walk_forward"]["averageNetReturnPercent"] = serde_json::json!(0.1);
+        candidate.strategy_decision = Some(decision.clone());
+        assert_eq!(
+            validated_strategy_entry_edge(&candidate, strategy).unwrap(),
+            0.1
+        );
+        decision["strategy_walk_forward"]["lastSampleTimestampMs"] = serde_json::json!(100_000);
+        candidate.strategy_decision = Some(decision);
+        assert!(validated_strategy_entry_edge(&candidate, strategy).is_err());
+    }
+
+    #[test]
+    fn loss_cluster_is_scoped_to_profile_and_market_context_and_expires() {
+        let mut settings = Settings::default();
+        let mut candidate = signal("live-trade-flow", 0.8, 100_000);
+        candidate.strategy_decision =
+            Some(serde_json::json!({"strategy_parameters":{"minimum_flow_imbalance":0.2}}));
+        let profile = strategies::profile_id(
+            &candidate.symbol,
+            "live-trade-flow",
+            &signal_strategy_parameters(&candidate),
+        );
+        let key = format!("{profile}|{}", market_context(&candidate));
+        settings.recent_profile_context_returns.insert(
+            key.clone(),
+            vec![(99_999, -0.1), (99_998, -0.2), (99_997, -0.1)],
+        );
+        assert!(has_recent_profile_loss_cluster(
+            &candidate, &settings, 100_000
+        ));
+        assert_eq!(
+            strategy_post_stop_cooldown_ms(
+                &candidate,
+                "live-trade-flow",
+                "ETH-USDT",
+                &settings,
+                100_000
+            ),
+            MAX_POST_STOP_REENTRY_COOLDOWN_MS
+        );
+        assert!(!has_recent_profile_loss_cluster(
+            &candidate,
+            &settings,
+            100_000 + LOSS_CLUSTER_WINDOW_MS
+        ));
+        candidate.direction = "bearish".into();
+        assert!(!has_recent_profile_loss_cluster(
+            &candidate, &settings, 100_000
+        ));
+        candidate.direction = "bullish".into();
+        candidate.strategy_decision.as_mut().unwrap()["strategy_parameters"]
+            ["minimum_flow_imbalance"] = serde_json::json!(0.3);
+        assert!(!has_recent_profile_loss_cluster(
+            &candidate, &settings, 100_000
+        ));
+        settings
+            .recent_profile_context_returns
+            .get_mut(&key)
+            .unwrap()[1]
+            .1 = 0.1;
+        candidate.strategy_decision.as_mut().unwrap()["strategy_parameters"]
+            ["minimum_flow_imbalance"] = serde_json::json!(0.2);
+        assert!(!has_recent_profile_loss_cluster(
+            &candidate, &settings, 100_000
+        ));
+    }
+
+    #[test]
+    fn named_strategy_stop_uses_its_profile_without_unvalidated_widening() {
+        assert_eq!(
+            effective_entry_stop(Some(Strategy::LiveTradeFlow), 0.5, Some(0.5)),
+            0.5
+        );
+        assert!(effective_entry_stop(None, 0.5, Some(0.5)) > 0.5);
     }
 }

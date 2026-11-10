@@ -18,7 +18,12 @@ fn candidate_evidence<'a>(
     dashboard: &'a Dashboard,
     now_ms: u64,
 ) -> Option<&'a WalkForward> {
-    entry_walk_forward(&dashboard.walk_forward, &candidate.symbol, now_ms)
+    entry_walk_forward_for_strategy(
+        &dashboard.walk_forward,
+        &candidate.symbol,
+        candidate.strategy.as_deref(),
+        now_ms,
+    )
 }
 
 fn side_metrics<'a>(candidate: &Signal, evidence: &'a WalkForward) -> &'a SideWalkForwardMetrics {
@@ -129,6 +134,29 @@ mod candidate_evidence_tests {
                 .unwrap()
                 .horizon_seconds,
             300
+        );
+    }
+
+    #[test]
+    fn short_hold_strategy_prefers_sixty_second_evidence() {
+        let dashboard: Dashboard = serde_json::from_value(serde_json::json!({
+            "best": [],
+            "walkForward": [
+                { "symbol": "BTC-USDT", "horizon_seconds": 60, "evidence_generated_at_ms": 1000 },
+                { "symbol": "BTC-USDT", "horizon_seconds": 300, "evidence_generated_at_ms": 1000 }
+            ]
+        }))
+        .unwrap();
+        assert_eq!(
+            entry_walk_forward_for_strategy(
+                &dashboard.walk_forward,
+                "BTC-USDT",
+                Some("live-momentum"),
+                1000,
+            )
+            .unwrap()
+            .horizon_seconds,
+            60
         );
     }
 

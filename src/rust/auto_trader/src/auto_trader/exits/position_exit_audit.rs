@@ -97,7 +97,10 @@ fn position_exit_audit_payload(
 
 fn queue_post_exit_observation(settings: &mut Settings, payload: &serde_json::Value) {
     let reason = payload["reason"].as_str().unwrap_or_default();
-    if !matches!(reason, "take-profit" | "stop-loss" | "profit-protection")
+    if !matches!(
+        reason,
+        "take-profit" | "stop-loss" | "profit-protection" | "thesis-failure"
+    )
         || payload["trade_closed"].as_bool() != Some(true)
     {
         return;
@@ -122,6 +125,11 @@ fn queue_post_exit_observation(settings: &mut Settings, payload: &serde_json::Va
         "direction": direction,
         "exit_price": exit_price,
         "exit_return_percent": payload["net_return_percent"],
+        "exit_fees": payload["exit_fees"],
+        "exit_filled_quantity": payload["exit_filled_quantity"],
+        "effective_stop_loss_percent": payload["effective_stop_loss_percent"],
+        "effective_take_profit_percent": payload["effective_take_profit_percent"],
+        "pre_exit_price_path": payload["price_path"],
         "exit_timestamp_ms": now,
         "observe_at_ms": now.saturating_add(POST_EXIT_OBSERVATION_HORIZON_MS),
         "next_sample_at_ms": now,
@@ -244,5 +252,43 @@ mod tests {
         assert_eq!(payload["fill_rate"], serde_json::Value::Null);
         assert_eq!(payload["net_return_percent"], serde_json::Value::Null);
         assert_eq!(payload["fee_bps"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn thesis_failure_exits_enter_the_existing_post_exit_counterfactual_loop() {
+        let mut settings = Settings::default();
+        let payload = serde_json::json!({
+            "reason": "thesis-failure",
+            "trade_closed": true,
+            "exit_average_price": 99.5,
+            "trade_id": "trade-early-exit",
+            "decision_id": "decision-early-exit",
+            "symbol": "BTC-USDT",
+            "strategy": "live-momentum",
+            "side": "sell",
+            "exit_fees": 0.1,
+            "exit_filled_quantity": 1.0,
+            "effective_stop_loss_percent": 0.5,
+            "effective_take_profit_percent": 0.8,
+            "price_path": [{"timestamp": 123, "bid": 99.4, "ask": 99.6}],
+            "entry_context": {
+                "learning_context": "btc:live-momentum:short",
+                "average_price": 100.0,
+                "fees": 0.1,
+                "quantity": 1.0
+            }
+        });
+
+        queue_post_exit_observation(&mut settings, &payload);
+
+        assert_eq!(settings.post_exit_observations.len(), 1);
+        assert_eq!(settings.post_exit_observations[0]["reason"], "thesis-failure");
+        let observation = &settings.post_exit_observations[0];
+        assert_eq!(observation["entry_context"]["average_price"], 100.0);
+        assert_eq!(observation["entry_context"]["fees"], 0.1);
+        assert_eq!(observation["exit_fees"], 0.1);
+        assert_eq!(observation["exit_filled_quantity"], 1.0);
+        assert_eq!(observation["effective_stop_loss_percent"], 0.5);
+        assert_eq!(observation["pre_exit_price_path"][0]["bid"], 99.4);
     }
 }

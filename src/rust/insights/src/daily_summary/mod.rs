@@ -1,4 +1,3 @@
-use crate::signals::StoredSignalRecord;
 use axum::{Json, Router, extract::Query, http::StatusCode, routing::get};
 use flate2::{Compression, read::MultiGzDecoder, write::GzEncoder};
 use rusqlite::{Connection, MAIN_DB, params};
@@ -377,16 +376,20 @@ fn write_training_archive(
         let mut encoder = GzEncoder::new(file, Compression::fast());
         bincode::serialize_into(&mut encoder, &(record_count as u64))?;
         let mut statement = connection.prepare(
-            "SELECT payload FROM signal_records WHERE kind = ?1 AND timestamp >= ?2 AND timestamp < ?3 ORDER BY timestamp, id",
+            "SELECT timestamp, payload FROM signal_records WHERE kind = ?1 AND timestamp >= ?2 AND timestamp < ?3 ORDER BY timestamp, id",
         )?;
         let rows = statement.query_map(params![kind, day_start, day_start + DAY_MS], |row| {
-            row.get::<_, Vec<u8>>(0)
+            Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?))
         })?;
         for row in rows {
-            let compressed = row?;
+            let (timestamp, compressed) = row?;
             let mut payload = Vec::new();
             MultiGzDecoder::new(compressed.as_slice()).read_to_end(&mut payload)?;
-            let record = crate::signals::deserialize_record(kind, &payload)?;
+            let record = crate::signals::deserialize_record(kind, &payload).map_err(|error| {
+                anyhow::anyhow!(
+                    "failed to decode signal record kind {kind} at timestamp {timestamp}: {error:#}"
+                )
+            })?;
             bincode::serialize_into(&mut encoder, &record)?;
         }
         let file = encoder.finish()?;
@@ -408,6 +411,7 @@ fn write_training_archive(
 #[cfg(test)]
 mod training_archive_tests {
     use super::*;
+    use crate::signals::StoredSignalRecord;
     use std::io::Write;
 
     #[test]

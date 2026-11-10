@@ -13,10 +13,121 @@ async fn receive_scout_markout(
     let Some(instance) = instance else {
         return Ok(StatusCode::NO_CONTENT);
     };
+    let observation = scout_markout_observation(&instance, &markout);
+    let observation_valid = observation.is_some();
+    if let Some(observation) = observation {
+        record_scout_markout_observation(&service, &markout.decision_id, observation).await?;
+    }
+    if markout.observation_only && !observation_valid {
+        return Ok(StatusCode::NO_CONTENT);
+    }
     let Some(outcome) = scout_outcome_from_markout(&instance, markout) else {
         return Ok(StatusCode::NO_CONTENT);
     };
+    if outcome.exit_scenario.starts_with("horizon-") {
+        return receive_scout_horizon_outcome(&service, outcome).await;
+    }
     receive_scout_outcome(State(service), Json(outcome)).await
+}
+
+fn scout_markout_observation(
+    instance: &serde_json::Value,
+    markout: &ScoutMarkoutRequest,
+) -> Option<serde_json::Value> {
+    let timestamp = instance["signal_timestamp"].as_u64()?;
+    if instance["symbol"].as_str() != Some(markout.symbol.as_str())
+        || instance["decision_id"].as_str() != Some(markout.decision_id.as_str())
+        || timestamp.abs_diff(markout.signal_timestamp_ms) > 10_000
+        || markout.evaluated_timestamp_ms < markout.signal_timestamp_ms
+        || !markout.taker_fee_rate.is_finite()
+        || markout.taker_fee_rate < 0.0
+        || (markout.observation_only
+            && (!matches!(markout.horizon_seconds, 60 | 300 | 900 | 3_600)
+                || markout
+                    .evaluated_timestamp_ms
+                    .saturating_sub(markout.signal_timestamp_ms)
+                    < markout.horizon_seconds.saturating_mul(1_000)))
+        || [
+            markout.long_net_percent,
+            markout.short_net_percent,
+            markout.reference_entry_price,
+            markout.reference_exit_price,
+            markout.entry_bid,
+            markout.entry_ask,
+            markout.exit_bid,
+            markout.exit_ask,
+            markout.long_gross_percent,
+            markout.short_gross_percent,
+            markout.path_high,
+            markout.path_low,
+        ]
+        .into_iter()
+        .flatten()
+        .any(|value| !value.is_finite())
+    {
+        return None;
+    }
+    let direction = instance["direction"].as_str()?;
+    let direction_net_return = match direction {
+        "bullish" => markout.long_net_percent,
+        "bearish" => markout.short_net_percent,
+        _ => return None,
+    };
+    direction_net_return?;
+    Some(serde_json::json!({
+        "kind": if markout.observation_only { "horizon" } else { "strategy_exit" },
+        "horizon_seconds": markout.horizon_seconds,
+        "evaluated_timestamp_ms": markout.evaluated_timestamp_ms,
+        "taker_fee_rate": markout.taker_fee_rate,
+        "reference_entry_price": markout.reference_entry_price,
+        "reference_exit_price": markout.reference_exit_price,
+        "entry_bid": markout.entry_bid,
+        "entry_ask": markout.entry_ask,
+        "exit_bid": markout.exit_bid,
+        "exit_ask": markout.exit_ask,
+        "long_gross_percent": markout.long_gross_percent,
+        "short_gross_percent": markout.short_gross_percent,
+        "long_net_percent": markout.long_net_percent,
+        "short_net_percent": markout.short_net_percent,
+        "path_high": markout.path_high,
+        "path_low": markout.path_low,
+        "long_time_to_positive_net_seconds": markout.long_time_to_positive_net_seconds,
+        "short_time_to_positive_net_seconds": markout.short_time_to_positive_net_seconds,
+    }))
+}
+
+async fn record_scout_markout_observation(
+    service: &ServiceState,
+    decision_id: &str,
+    observation: serde_json::Value,
+) -> Result<(), (StatusCode, String)> {
+    let mut state = service.scout.data.lock().await;
+    let Some(instance) = state.scout_instances.get_mut(decision_id) else {
+        return Ok(());
+    };
+    let observations = instance
+        .get("scout_markout_observations")
+        .and_then(serde_json::Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let duplicate = observations.iter().any(|existing| {
+        existing["kind"] == observation["kind"]
+            && (observation["kind"] == "strategy_exit"
+                || existing["horizon_seconds"] == observation["horizon_seconds"])
+    });
+    if duplicate {
+        return Ok(());
+    }
+    let mut observations = observations;
+    observations.push(observation);
+    instance["scout_markout_observations"] = serde_json::json!(observations);
+    state.scout_lifecycle_updated_at_ms = state.scout_lifecycle_updated_at_ms.max(scout_now_ms());
+    persist_scout_state(
+        &service.scout.path,
+        &state,
+        &[&format!("scout_instances@{decision_id}")],
+    )?;
+    Ok(())
 }
 
 fn scout_outcome_from_markout(
@@ -29,19 +140,26 @@ fn scout_outcome_from_markout(
             timestamp.abs_diff(markout.signal_timestamp_ms) > 10_000
         })
         || markout.evaluated_timestamp_ms < markout.signal_timestamp_ms
-        || instance["scout_net_return_percent"].is_number()
+        || (!markout.observation_only && instance["scout_net_return_percent"].is_number())
         || !markout.taker_fee_rate.is_finite()
         || markout.taker_fee_rate < 0.0
     {
         return None;
     }
     let direction = instance["direction"].as_str().unwrap_or_default();
-    let net_return_percent = match direction {
+    let markout_net_return_percent = match direction {
         "bullish" => markout.long_net_percent,
         "bearish" => markout.short_net_percent,
         _ => None,
     };
-    let net_return_percent = net_return_percent.filter(|value| value.is_finite())?;
+    let markout_net_return_percent =
+        markout_net_return_percent.filter(|value| value.is_finite())?;
+    let early_exit_return = (!markout.observation_only
+        && instance["scout_exit_scenario"].as_str() == Some("strategy"))
+        .then(|| instance["scout_thesis_failure_exit_net_return_percent"].as_f64())
+        .flatten()
+        .filter(|value| value.is_finite());
+    let net_return_percent = early_exit_return.unwrap_or(markout_net_return_percent);
     let notional = instance["scout_notional_usd"].as_f64().unwrap_or_default();
     let learning_context = instance["scout_learning_context"].as_str()?.to_owned();
     if !notional.is_finite() || notional <= 0.0 {
@@ -58,8 +176,22 @@ fn scout_outcome_from_markout(
         symbol: markout.symbol,
         strategy: instance["strategy"].as_str().unwrap_or_default().to_owned(),
         strategy_parameters: serde_json::from_value(instance["strategy_parameters"].clone()).unwrap_or_default(),
-        exit_scenario: instance["scout_exit_scenario"].as_str().unwrap_or("strategy").to_owned(),
-        sample_group_id: instance["scout_sample_group_id"].as_str().unwrap_or_default().to_owned(),
+        exit_scenario: if markout.observation_only {
+            format!("horizon-{}", markout.horizon_seconds)
+        } else {
+            instance["scout_exit_scenario"]
+                .as_str()
+                .unwrap_or("strategy")
+                .to_owned()
+        },
+        sample_group_id: if markout.observation_only {
+            String::new()
+        } else {
+            instance["scout_sample_group_id"]
+                .as_str()
+                .unwrap_or_default()
+                .to_owned()
+        },
         scout_parameter_key: instance["scout_parameter_key"].as_str().map(str::to_owned),
         scout_parameter_value: instance["scout_parameter_value"].as_f64(),
         scout_parameter_profile_symbol: instance["scout_parameter_profile_symbol"].as_str().map(str::to_owned),
@@ -82,6 +214,42 @@ fn scout_outcome_from_markout(
         scout_comparison_parameter_profile_symbol: instance["scout_comparison_parameter_profile_symbol"].as_str().map(str::to_owned),
         strategy_parameter_specs: serde_json::from_value(instance["strategy_parameter_specs"].clone()).unwrap_or_default(),
     })
+}
+
+async fn receive_scout_horizon_outcome(
+    service: &ServiceState,
+    outcome: ScoutOutcomeRequest,
+) -> Result<StatusCode, (StatusCode, String)> {
+    let tested = validate_scout_outcome(&outcome)?;
+    let outcome_key = scout_outcome_idempotency_key(&outcome);
+    let mut state = service.scout.data.lock().await;
+    if state.seen.contains(&outcome_key) {
+        return Ok(StatusCode::NO_CONTENT);
+    }
+
+    let mut changed_sections = BTreeSet::from(["seen".to_owned()]);
+    if outcome.scout_comparison_role.is_some() {
+        let (_, paired_ids) = record_paired_scout_outcome(&mut state, &outcome);
+        changed_sections.insert("outbox".to_owned());
+        changed_sections.extend(paired_ids.into_iter().map(|id| format!("pairs@{id}")));
+    } else if outcome.scout_parameter_key.is_none() {
+        let event = outcome_event(&outcome, &tested);
+        if !outbox_has_learning(&state, &event) {
+            state.outbox.push(ScoutOutboxItem::Learning(event));
+            changed_sections.insert("outbox".to_owned());
+        }
+    }
+    state.seen.insert(outcome_key);
+    while state.seen.len() > 100_000 {
+        if let Some(oldest) = state.seen.iter().next().cloned() {
+            state.seen.remove(&oldest);
+        }
+    }
+    let changed_sections = changed_sections.iter().map(String::as_str).collect::<Vec<_>>();
+    persist_scout_state(&service.scout.path, &state, &changed_sections)?;
+    drop(state);
+    schedule_scout_outbox_flush(service);
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn receive_scout_outcome(
@@ -444,28 +612,42 @@ const MAX_ACTIVE_SCOUT_AUDITS: usize = 50_000;
 const MAX_SCOUT_INSTANCES: usize = 100_000;
 
 fn trim_scout_instances(state: &mut PersistedState) -> Vec<String> {
-    let excess = state.scout_instances.len().saturating_sub(MAX_SCOUT_INSTANCES);
-    if excess == 0 {
-        return Vec::new();
-    }
-    let mut oldest = state
-        .scout_instances
-        .iter()
-        .map(|(id, audit)| {
-            (
-                audit["timestamp"].as_u64().unwrap_or_default(),
-                id.clone(),
-            )
-        })
-        .collect::<Vec<_>>();
-    oldest.sort();
-    let evicted = oldest
-        .into_iter()
-        .take(excess)
-        .map(|(_, id)| id)
-        .collect::<Vec<_>>();
-    for id in &evicted {
-        remove_scout_instance(state, id);
+    let mut evicted = Vec::new();
+    while state.scout_instances.len() > MAX_SCOUT_INSTANCES {
+        let mut counts = BTreeMap::<String, usize>::new();
+        for audit in state.scout_instances.values() {
+            let strategy = audit["strategy"].as_str().unwrap_or("unattributed");
+            *counts.entry(strategy.to_owned()).or_default() += 1;
+        }
+        // Never evict the last retained instance for a strategy while another
+        // strategy has multiple retained instances. This guarantees that a
+        // high-volume strategy cannot starve lower-volume strategies.
+        let has_overrepresented_strategy = counts.values().any(|count| *count > 1);
+        let most_represented = counts
+            .iter()
+            .filter(|(_, count)| !has_overrepresented_strategy || **count > 1)
+            .map(|(_, count)| *count)
+            .max()
+            .unwrap_or_default();
+        let oldest = state
+            .scout_instances
+            .iter()
+            .filter(|(_, audit)| {
+                let strategy = audit["strategy"].as_str().unwrap_or("unattributed");
+                counts.get(strategy).copied() == Some(most_represented)
+                    && (!has_overrepresented_strategy
+                        || counts.get(strategy).copied().unwrap_or_default() > 1)
+            })
+            .min_by_key(|(id, audit)| {
+                (
+                    audit["timestamp"].as_u64().unwrap_or_default(),
+                    (*id).clone(),
+                )
+            })
+            .map(|(id, _)| id.clone());
+        let Some(oldest) = oldest else { break };
+        remove_scout_instance(state, &oldest);
+        evicted.push(oldest);
     }
     evicted
 }
@@ -1591,6 +1773,10 @@ fn compact_scout_instance(instance: &serde_json::Value) -> serde_json::Value {
         "strategy_parameter_specs", "stop_loss_percent", "take_profit_percent",
         "scout_level_percent", "scout_net_return_percent",
         "scout_evaluated_timestamp_ms", "scout_taker_fee_rate", "paired_delta_percent",
+        "scout_markout_observations",
+        "scout_thesis_failure_confirmation_count", "scout_thesis_failure_last_signal_timestamp_ms",
+        "scout_thesis_failure_exit_net_return_percent", "scout_thesis_failure_exit_timestamp_ms",
+        "scout_thesis_failure_stop_timestamp_ms",
         "strength",
     ];
     let mut compact = serde_json::Map::new();
@@ -1807,7 +1993,12 @@ fn parameters_without_walk_forward_policy(
         .filter(|(key, _)| {
             !matches!(
                 key.as_str(),
-                "scout_minimum_walk_forward_samples" | "scout_minimum_positive_net_rate"
+                "scout_minimum_walk_forward_samples"
+                    | "scout_minimum_positive_net_rate"
+                    // Cooldown is evaluated as a paired follow-on-entry
+                    // policy. It must not reset the evidence cohort for an
+                    // otherwise identical entry profile.
+                    | "post_stop_cooldown_minutes"
             )
         })
         .map(|(key, value)| (key.clone(), *value))
@@ -2087,6 +2278,7 @@ mod strategy_walk_forward_tests {
             portfolio_instances_by_group,
             strategy_outcome_profile_index_ready: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             live_scout_maximum_duration_ms: Arc::new(std::sync::RwLock::new(BTreeMap::new())),
+            scout_outcomes_cache: Arc::new(Mutex::new(BTreeMap::new())),
             scout: ScoutState {
                 data: Arc::new(Mutex::new(persisted)),
                 path: PathBuf::from("unused"),
@@ -2214,6 +2406,7 @@ mod strategy_walk_forward_tests {
             portfolio_instances_by_group,
             strategy_outcome_profile_index_ready: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             live_scout_maximum_duration_ms: Arc::new(std::sync::RwLock::new(BTreeMap::new())),
+            scout_outcomes_cache: Arc::new(Mutex::new(BTreeMap::new())),
             scout: ScoutState {
                 data: Arc::new(Mutex::new(persisted)),
                 path: PathBuf::from("unused"),
@@ -2616,6 +2809,57 @@ mod scout_markout_instance_tests {
     }
 
     #[test]
+    fn cooldown_variants_share_their_parent_entry_evidence() {
+        let parent = BTreeMap::from([
+            ("minimum_momentum_percent".into(), 0.04),
+            ("post_stop_cooldown_minutes".into(), 2.0),
+        ]);
+        let cooldown_variant = BTreeMap::from([
+            ("minimum_momentum_percent".into(), 0.04),
+            ("post_stop_cooldown_minutes".into(), 4.0),
+        ]);
+        let entry_variant = BTreeMap::from([
+            ("minimum_momentum_percent".into(), 0.06),
+            ("post_stop_cooldown_minutes".into(), 4.0),
+        ]);
+
+        assert!(same_strategy_parameters(&parent, &cooldown_variant));
+        assert!(!same_strategy_parameters(&parent, &entry_variant));
+    }
+
+    #[test]
+    fn scouts_generate_bounded_early_exit_policy_probes() {
+        let specs = [
+            ("thesis_failure_loss_activation_percent", 0.20, 0.10, 0.75, 0.05),
+            ("thesis_failure_confirmation_samples", 2.0, 1.0, 4.0, 1.0),
+            ("thesis_failure_minimum_signal_strength", 0.60, 0.40, 0.90, 0.05),
+        ]
+        .into_iter()
+        .map(|(key, default, min, max, step)| ParameterSpec {
+            key: key.into(),
+            label: key.into(),
+            default,
+            min,
+            max,
+            step,
+            unit: "".into(),
+            learning_direction: 0.0,
+        })
+        .collect::<Vec<_>>();
+        let parameters = specs
+            .iter()
+            .map(|spec| (spec.key.clone(), spec.default))
+            .collect();
+
+        let variants = single_parameter_variants(&parameters, &specs, 0).unwrap();
+        assert_eq!(variants.len(), 6);
+        assert!(variants.iter().all(|changes| {
+            changes.len() == 1
+                && changes.keys().all(|key| key.starts_with("thesis_failure_"))
+        }));
+    }
+
+    #[test]
     fn markout_uses_the_scout_instance_stored_by_this_service() {
         let instance = serde_json::json!({
             "decision_id":"decision-1", "symbol":"BTC-USDT", "strategy":"live-trade-flow",
@@ -2626,6 +2870,7 @@ mod scout_markout_instance_tests {
         let outcome = scout_outcome_from_markout(&instance, ScoutMarkoutRequest {
             decision_id:"decision-1".into(), symbol:"BTC-USDT".into(), signal_timestamp_ms:10,
             evaluated_timestamp_ms:20, taker_fee_rate:0.001, long_net_percent:Some(0.25), short_net_percent:Some(-0.3),
+            ..ScoutMarkoutRequest::default()
         }).unwrap();
         assert_eq!(outcome.net_return_percent, 0.25);
         assert_eq!(outcome.simulated_net_pnl_usd, 0.25);
@@ -2633,7 +2878,101 @@ mod scout_markout_instance_tests {
         assert!(scout_outcome_from_markout(&instance, ScoutMarkoutRequest {
             decision_id:"other".into(), symbol:"ETH-USDT".into(), signal_timestamp_ms:10,
             evaluated_timestamp_ms:20, taker_fee_rate:0.001, long_net_percent:Some(0.25), short_net_percent:None,
+            ..ScoutMarkoutRequest::default()
         }).is_none());
+    }
+
+    #[test]
+    fn horizon_markout_requires_a_completed_supported_window() {
+        let instance = serde_json::json!({
+            "decision_id":"decision-horizon",
+            "symbol":"BTC-USDT",
+            "direction":"bullish",
+            "signal_timestamp":10
+        });
+        let request = || ScoutMarkoutRequest {
+            decision_id: "decision-horizon".into(),
+            symbol: "BTC-USDT".into(),
+            signal_timestamp_ms: 10,
+            evaluated_timestamp_ms: 60_010,
+            taker_fee_rate: 0.001,
+            observation_only: true,
+            horizon_seconds: 60,
+            long_net_percent: Some(0.2),
+            short_net_percent: Some(-0.3),
+            reference_entry_price: Some(100.0),
+            reference_exit_price: Some(100.3),
+            long_gross_percent: Some(0.3),
+            short_gross_percent: Some(-0.3),
+            ..ScoutMarkoutRequest::default()
+        };
+        let observation = scout_markout_observation(&instance, &request()).unwrap();
+        assert_eq!(observation["kind"], "horizon");
+        assert_eq!(observation["horizon_seconds"], 60);
+        assert_eq!(observation["long_net_percent"], 0.2);
+        let evaluated_at_ms = scout_now_ms();
+        let signal_at_ms = evaluated_at_ms.saturating_sub(60_000);
+        let completed_instance = serde_json::json!({
+            "decision_id":"decision-horizon",
+            "symbol":"BTC-USDT",
+            "strategy":"live-momentum",
+            "direction":"bullish",
+            "signal_timestamp":signal_at_ms,
+            "scout_notional_usd":100.0,
+            "scout_learning_context":"scout:live:momentum",
+            "scout_exit_scenario":"strategy",
+            "scout_sample_group_id":"group-1",
+            "scout_net_return_percent":1.5
+        });
+        let mut learning_request = request();
+        learning_request.signal_timestamp_ms = signal_at_ms;
+        learning_request.evaluated_timestamp_ms = evaluated_at_ms;
+        let horizon_outcome =
+            scout_outcome_from_markout(&completed_instance, learning_request).unwrap();
+        assert_eq!(horizon_outcome.net_return_percent, 0.2);
+        assert_eq!(horizon_outcome.exit_scenario, "horizon-60");
+        assert!(horizon_outcome.sample_group_id.is_empty());
+        assert!(validate_scout_outcome(&horizon_outcome).is_ok());
+        assert!(scout_markout_observation(
+            &instance,
+            &ScoutMarkoutRequest {
+                evaluated_timestamp_ms: 60_009,
+                ..request()
+            }
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn strategy_markout_uses_the_replayed_early_exit_return_when_triggered() {
+        let mut instance = serde_json::json!({
+            "decision_id":"decision-early", "symbol":"BTC-USDT", "strategy":"live-momentum",
+            "direction":"bullish", "signal_timestamp":10, "scout_notional_usd":100.0,
+            "scout_learning_context":"scout:live:momentum", "strategy_parameters":{},
+            "scout_exit_scenario":"strategy", "scout_thesis_failure_exit_net_return_percent":-0.35
+        });
+        let request = || ScoutMarkoutRequest {
+            decision_id: "decision-early".into(),
+            symbol: "BTC-USDT".into(),
+            signal_timestamp_ms: 10,
+            evaluated_timestamp_ms: 500,
+            taker_fee_rate: 0.001,
+            long_net_percent: Some(-1.0),
+            short_net_percent: None,
+            ..ScoutMarkoutRequest::default()
+        };
+
+        let outcome = scout_outcome_from_markout(&instance, request()).unwrap();
+        assert_eq!(outcome.net_return_percent, -0.35);
+        assert_eq!(outcome.simulated_net_pnl_usd, -0.35);
+
+        instance["scout_exit_scenario"] = serde_json::json!("stop");
+        assert_eq!(
+            scout_outcome_from_markout(&instance, request())
+                .unwrap()
+                .net_return_percent,
+            -1.0
+        );
     }
 
     #[test]
@@ -2648,8 +2987,8 @@ mod scout_markout_instance_tests {
         let outcome = scout_outcome_from_markout(&instance, ScoutMarkoutRequest {
             decision_id:"baseline-1".into(), symbol:"BTC-USDT".into(), signal_timestamp_ms:10,
             evaluated_timestamp_ms:20, taker_fee_rate:0.001, long_net_percent:Some(0.25), short_net_percent:None,
+            ..ScoutMarkoutRequest::default()
         }).unwrap();
         assert_eq!(outcome_comparison_ids(&outcome), ["pair-a", "pair-b", "pair-c"]);
     }
 }
-

@@ -1,3 +1,120 @@
+fn diagnostic_strategy_blocker(diagnostic: &StrategyDiagnostic) -> Option<StrategyBlocker> {
+    let (symbol, reason) = if diagnostic.btc_gate_required
+        && diagnostic.btc_gate_passed == Some(false)
+    {
+        let window = diagnostic
+            .btc_window_days
+            .map(|days| format!("SMA{days}"))
+            .unwrap_or_else(|| "trend average".to_owned());
+        (
+            "BTC-USDT".to_owned(),
+            match (diagnostic.btc_close, diagnostic.btc_sma) {
+                (Some(close), Some(sma)) => format!(
+                    "BTC trend gate not passed: close {close:.2} vs {window} {sma:.2}"
+                ),
+                _ => format!("BTC trend gate not passed ({window})"),
+            },
+        )
+    } else {
+        let failed = diagnostic.symbols.iter().find_map(|item| {
+            if !item.evaluated || item.signal_active {
+                return None;
+            }
+            if !item.eligible {
+                return Some((
+                    item.symbol.clone(),
+                    "not eligible for this strategy".to_owned(),
+                ));
+            }
+            if !item.primary_passed {
+                let unit = item.primary_metric_unit.as_deref().unwrap_or("");
+                let observed = item
+                    .primary_metric_value
+                    .map(|value| format!("{value:.2} {unit}"))
+                    .unwrap_or_else(|| "unavailable".to_owned());
+                return Some((
+                    item.symbol.clone(),
+                    format!(
+                        "{} not met: observed {}, threshold {:.2} {}; distance {:.2}%",
+                        item.primary_rule,
+                        observed,
+                        item.primary_level,
+                        unit,
+                        item.primary_distance_percent
+                    ),
+                ));
+            }
+            if item.secondary_passed == Some(false) {
+                return Some((
+                    item.symbol.clone(),
+                    format!(
+                        "{} not met (distance {:.2}%)",
+                        item.secondary_rule.as_deref().unwrap_or("secondary rule"),
+                        item.secondary_distance_percent.unwrap_or_default()
+                    ),
+                ));
+            }
+            None
+        })?;
+        failed
+    };
+    Some(StrategyBlocker {
+        strategy: diagnostic.strategy.clone(),
+        symbol,
+        reason,
+        timestamp_ms: diagnostic.as_of_ms,
+    })
+}
+
+#[cfg(test)]
+mod strategy_blocker_tests {
+    use super::*;
+    use strategies::daily::StrategySymbolDiagnostic;
+
+    #[test]
+    fn reports_the_failed_strategy_rule_and_observed_metric() {
+        let diagnostic = StrategyDiagnostic {
+            strategy: "trend-50-200".to_owned(),
+            as_of_ms: 123,
+            btc_close: None,
+            btc_sma: None,
+            btc_distance_percent: None,
+            btc_gate_required: false,
+            btc_gate_passed: None,
+            btc_window_days: None,
+            symbols: vec![StrategySymbolDiagnostic {
+                symbol: "ETH-USDT".to_owned(),
+                close: 90.0,
+                eligible: true,
+                primary_rule: "price above SMA50".to_owned(),
+                primary_level: 100.0,
+                primary_distance_percent: -10.0,
+                primary_metric_value: Some(90.0),
+                primary_metric_unit: Some("price".to_owned()),
+                primary_passed: false,
+                secondary_rule: None,
+                secondary_level: None,
+                secondary_distance_percent: None,
+                secondary_passed: None,
+                evaluated: true,
+                signal_active: false,
+                leader_gap_percent: None,
+                relative_strength_gap_pp: None,
+                rsi_exit_level: None,
+                maximum_hold_days: None,
+                trend_return_windows: None,
+            }],
+        };
+
+        let blocker = diagnostic_strategy_blocker(&diagnostic).unwrap();
+        assert_eq!(blocker.strategy, "trend-50-200");
+        assert_eq!(blocker.symbol, "ETH-USDT");
+        assert!(blocker.reason.contains("observed 90.00 price"));
+        assert!(blocker.reason.contains("threshold 100.00 price"));
+        assert_eq!(blocker.timestamp_ms, 123);
+    }
+}
+
 fn status(state: &AutoTraderState, settings: &Settings) -> StatusResponse {
     if let Ok(mut summary) = state.gap_summary.lock() {
         let day = utc_day();
@@ -7,6 +124,29 @@ fn status(state: &AutoTraderState, settings: &Settings) -> StatusResponse {
                 ..GapSummary::default()
             };
         }
+    }
+    let mut latest_strategy_blockers = state
+        .latest_strategy_blockers
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .clone();
+    let diagnostics = {
+        state
+            .strategy_diagnostic
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone()
+    };
+    for diagnostic in diagnostics.iter() {
+        let existing = latest_strategy_blockers.get(&diagnostic.strategy);
+        if existing.is_some_and(|blocker| blocker.timestamp_ms > diagnostic.as_of_ms) {
+            continue;
+        }
+        if let Some(blocker) = diagnostic_strategy_blocker(diagnostic) {
+            latest_strategy_blockers.insert(diagnostic.strategy.clone(), blocker);
+        } else {
+            latest_strategy_blockers.remove(&diagnostic.strategy);
+            }
     }
     StatusResponse {
         enabled: state.enabled.load(Ordering::Relaxed),
@@ -156,5 +296,6 @@ fn status(state: &AutoTraderState, settings: &Settings) -> StatusResponse {
             .ok()
             .map(|diagnostics| diagnostics.clone())
             .unwrap_or_default(),
+        latest_strategy_blockers: latest_strategy_blockers.into_values().collect(),
     }
 }

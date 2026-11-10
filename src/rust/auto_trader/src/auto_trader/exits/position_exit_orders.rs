@@ -162,6 +162,7 @@ async fn submit_position_exit_order(
                 Some(&position.entry_context),
                 position.scout_entry,
                 strategy_realized_usd,
+                Some(total_trade_pnl / entry_notional * 100.0),
                 position.strategy_decision.as_ref(),
                 position.trade_id.as_deref(),
             );

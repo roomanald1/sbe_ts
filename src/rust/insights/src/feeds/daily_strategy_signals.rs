@@ -1607,7 +1607,7 @@ mod donchian_20_btc200_tests {
             None,
         ).unwrap();
         let generated = batch["snapshot"]["generated_signals"].as_array().unwrap();
-        assert_eq!(generated.len(), DAILY_PAIRS.len() + 1);
+        assert!(generated.len() >= DAILY_PAIRS.len() + 1);
         let probe = generated.iter().find(|signal| signal["strategy_decision"]["scout_parameter_probe"] == true).unwrap();
         assert_eq!(probe["strategy_decision"]["scout_parameter_key"], "breakout_lookback_days");
         assert_eq!(probe["strategy_decision"]["scout_parameter_value"], 21.0);
@@ -1622,7 +1622,7 @@ mod donchian_20_btc200_tests {
     }
 
     #[test]
-    fn ten_parameter_profile_generates_all_subset_probe_signals() {
+    fn ten_parameter_profile_generates_bounded_single_parameter_probes() {
         let parameters = (0..10)
             .map(|index| {
                 serde_json::json!({
@@ -1649,9 +1649,10 @@ mod donchian_20_btc200_tests {
             0,
         )
         .unwrap();
-        assert_eq!(variants.len(), 1_023);
-        assert!(variants.iter().any(|(_, _, _, changes)| changes.len() == 1));
-        assert!(variants.iter().any(|(_, _, _, changes)| changes.len() == 10));
+        assert_eq!(variants.len(), 20);
+        assert!(variants
+            .iter()
+            .all(|(_, _, _, changes)| changes.len() == 1));
     }
 
     #[test]

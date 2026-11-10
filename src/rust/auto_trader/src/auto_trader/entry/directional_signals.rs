@@ -49,9 +49,10 @@ fn prepare_directional_signal_candidates(
             "bearish"
         }
         .into();
-        let evidence = entry_walk_forward(
+        let evidence = entry_walk_forward_for_strategy(
             &dashboard.walk_forward,
             &scout.symbol,
+            scout.strategy.as_deref(),
             now.saturating_mul(1000),
         );
         let payload = signal_audit_payload(
@@ -68,6 +69,43 @@ fn prepare_directional_signal_candidates(
             evidence,
         );
         queue_auto_trader_audit(state, payload);
+        if let Some(market) = dashboard.markets.get(&scout.symbol) {
+            let bid = market
+                .get("bids")
+                .and_then(serde_json::Value::as_array)
+                .and_then(|levels| levels.first())
+                .and_then(|level| level.get("price"))
+                .and_then(serde_json::Value::as_f64);
+            let ask = market
+                .get("asks")
+                .and_then(serde_json::Value::as_array)
+                .and_then(|levels| levels.first())
+                .and_then(|level| level.get("price"))
+                .and_then(serde_json::Value::as_f64);
+            if let Some(entry_price) = bid
+                .zip(ask)
+                .map(|(bid, ask)| (bid + ask) * 0.5)
+                .filter(|price| price.is_finite() && *price > 0.0)
+            {
+                let client = state.client.clone();
+                let base = std::env::var("INSIGHTS_URL")
+                    .unwrap_or_else(|_| "http://127.0.0.1:3004".into());
+                let request = serde_json::json!({
+                    "symbol": scout.symbol,
+                    "timestamp": scout.timestamp,
+                    "direction": scout.direction,
+                    "entry_price": entry_price,
+                });
+                tokio::spawn(async move {
+                    let _ = client
+                        .post(format!("{base}/internal/signals/counterfactual"))
+                        .json(&request)
+                        .timeout(std::time::Duration::from_millis(500))
+                        .send()
+                        .await;
+                });
+            }
+        }
     }
     PreparedSignals {
         signals,

@@ -91,6 +91,10 @@ async fn main() -> anyhow::Result<()> {
             axum::routing::post(register_scout).with_state(Arc::clone(&signal_runtime)),
         )
         .route(
+            "/internal/signals/counterfactual",
+            axum::routing::post(register_counterfactual).with_state(Arc::clone(&signal_runtime)),
+        )
+        .route(
             "/internal/signals/scout-strategy-status",
             axum::routing::post(update_scout_strategy_status).with_state(Arc::clone(&signal_runtime)),
         )

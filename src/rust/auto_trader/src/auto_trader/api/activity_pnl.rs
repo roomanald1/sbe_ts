@@ -1,7 +1,10 @@
 async fn calculate_auto_unrealized_pnl(
     auto_positions: &[(String, TraderPosition)],
+    carry_positions: &[DatedCarryPosition],
 ) -> Option<(f64, BTreeMap<String, f64>)> {
-    let unrealized_pnl = if auto_positions.is_empty() {
+    let unrealized_pnl = if auto_positions.is_empty()
+        && !carry_positions.iter().any(|position| position.status == "open")
+    {
         Some((0.0, BTreeMap::new()))
     } else {
         let base = std::env::var("POSITION_MANAGEMENT_URL")
@@ -63,6 +66,17 @@ async fn calculate_auto_unrealized_pnl(
                 .map(|(_, quote)| quote)
                 .unwrap_or("USD");
             *by_quote.entry(quote.to_owned()).or_default() += pnl;
+        }
+        for position in carry_positions.iter().filter(|position| position.status == "open") {
+            let Some(pnl) = position
+                .marked_net_pnl_usdt
+                .filter(|pnl| pnl.is_finite())
+            else {
+                complete = false;
+                break;
+            };
+            total += pnl;
+            *by_quote.entry("USDT".to_owned()).or_default() += pnl;
         }
         complete.then_some((total, by_quote))
     };

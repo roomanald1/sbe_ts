@@ -244,8 +244,8 @@ mod dated_carry_lifecycle_tests {
             _ => None,
         }).collect::<BTreeMap<_, _>>();
         assert_eq!(paired.len(), 2);
-        assert!(paired["paired-scout:carry-pair-a"].abs() < 1e-8);
-        assert!(paired["paired-scout:carry-pair-b"] < 0.0);
+        assert!(paired["paired-scout:carry-pair-a|scenario:strategy"].abs() < 1e-8);
+        assert!(paired["paired-scout:carry-pair-b|scenario:strategy"] < 0.0);
     }
 }
 

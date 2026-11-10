@@ -739,7 +739,8 @@ mod strategy_parameter_bounds_tests {
         };
         inject_learned_parameters(&settings, &mut signal);
         assert_eq!(signal_strategy_parameters(&signal)["minimum_momentum"], 0.003);
-        assert_eq!(signal.strategy_decision.as_ref().unwrap()["learning_profile_id"], profile_id);
+        assert_eq!(signal.strategy_decision.as_ref().unwrap()["learning_profile_id"],
+            strategies::profile_id("BTC-USDT", "live-momentum", &signal_strategy_parameters(&signal)));
         settings.strategy_parameter_overrides.insert(
             "BTC-USDT:live-momentum:minimum_momentum".into(), 0.004,
         );

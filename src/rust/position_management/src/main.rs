@@ -21,6 +21,7 @@ async fn main() -> anyhow::Result<()> {
                 ("/positions/realized-pnl", &["get"]),
                 ("/positions/fee-summary", &["get"]),
                 ("/positions/account", &["get"]),
+                ("/positions/dated-carry/ledger", &["post"]),
                 ("/positions/account/topups", &["post"]),
                 ("/positions/account/leverage", &["post"]),
                 ("/positions/usd-rates", &["get"]),

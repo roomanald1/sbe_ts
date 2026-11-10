@@ -55,6 +55,8 @@ fn apply_auto_fill(
         }
         // A changed entry basis starts a fresh profit-protection trail.
         position.profit_protection_peak_return_percent = None;
+        position.thesis_failure_confirmation_count = 0;
+        position.thesis_failure_last_signal_timestamp_ms = 0;
         if old == 0.0 {
             position.take_profit_deferred_at_ms = None;
             position.entries = 1;

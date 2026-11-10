@@ -114,6 +114,24 @@ fn save_dated_carry(path: &PathBuf, book: &DatedCarryBook) -> Result<(), String>
     persist_dated_carry_book(path, book)
 }
 
+async fn sync_dated_carry_ledger(
+    state: &AutoTraderState,
+    book: &DatedCarryBook,
+) -> Result<(), String> {
+    let position_url = std::env::var("POSITION_MANAGEMENT_URL")
+        .unwrap_or_else(|_| "http://127.0.0.1:3002".into());
+    state
+        .client
+        .post(format!("{position_url}/positions/dated-carry/ledger"))
+        .json(&book.positions)
+        .send()
+        .await
+        .map_err(|error| format!("dated-carry ledger sync failed: {error}"))?
+        .error_for_status()
+        .map_err(|error| format!("dated-carry ledger sync rejected: {error}"))?;
+    Ok(())
+}
+
 async fn get_dated_carry(State(state): State<AutoTraderState>) -> Json<DatedCarryBook> {
     let mut book = state.dated_carry.lock().await.clone();
     let settings = state.settings.lock().await;
@@ -404,6 +422,9 @@ async fn receive_dated_carry_signal(
     if changed {
         save_dated_carry(&state.dated_carry_path, &book)
             .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error))?;
+        sync_dated_carry_ledger(&state, &book)
+            .await
+            .map_err(|error| (StatusCode::SERVICE_UNAVAILABLE, error))?;
     }
     drop(book);
     if let Some(payload) = audit_payload {

@@ -317,18 +317,38 @@ impl SignalStore {
 }
 
 async fn signal_ui_snapshot(store: &SignalStore) -> serde_json::Value {
-    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as u64;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
     let since = Some(now / 86_400_000 * 86_400_000);
     let signal_dashboard = store.dashboard().await.ok();
     let auto_trader_dashboard = store.auto_trader_dashboard().await.ok();
-    let execution_audit = store.load_auto_trader_execution_audit_page(None, None, 500).await.ok();
+    let execution_audit = store
+        .load_auto_trader_execution_audit_page(None, None, 500)
+        .await
+        .ok();
+    let decision_audit = match store
+        .load_auto_trader_audit_page(None, None, 100, Some("decision".to_owned()))
+        .await
+    {
+        Ok(page) => Some(page),
+        Err(error) => {
+            eprintln!("Recent decision audit read failed: {error:#}");
+            None
+        }
+    };
     let execution_quality = store.auto_trader_execution_quality(since).await.ok();
     let decision_quality = store.auto_trader_decision_quality(since).await.ok();
-    let close_insights = get_position_insights().await.ok().map(|Json(response)| response);
+    let close_insights = get_position_insights()
+        .await
+        .ok()
+        .map(|Json(response)| response);
     serde_json::json!({
         "signal_dashboard": signal_dashboard,
         "auto_trader_dashboard": auto_trader_dashboard,
         "execution_audit": execution_audit,
+        "decision_audit": decision_audit,
         "execution_quality": execution_quality,
         "decision_quality": decision_quality,
         "close_insights": close_insights,

@@ -64,6 +64,7 @@ impl Default for SignalEngine {
             book_bid_levels: Vec::with_capacity(16),
             book_ask_levels: Vec::with_capacity(16),
             book_history: VecDeque::with_capacity(64),
+            counterfactual_book_history: VecDeque::with_capacity(256),
             volatility_1m: None,
             last_research_sample_at: None,
             last_live_snapshot_at: None,

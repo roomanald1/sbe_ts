@@ -143,6 +143,8 @@ fn configured_account_leverage(ledger: &Ledger) -> f64 {
 #[derive(Clone, Default, Serialize, Deserialize)]
 struct Ledger {
     trades: Vec<PositionTrade>,
+    #[serde(default)]
+    dated_carry_positions: Vec<DatedCarryLedgerPosition>,
     #[serde(default = "default_account_cash")]
     initial_cash: f64,
     #[serde(default)]

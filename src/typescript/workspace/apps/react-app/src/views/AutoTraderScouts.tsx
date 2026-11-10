@@ -32,6 +32,40 @@ const percent = (value: unknown) =>
     ? (value > 0 ? '+' : '') + value.toFixed(3) + '%'
     : '—';
 
+function horizonMarkoutColumn(
+  seconds: 60 | 300 | 900 | 3_600,
+): ColDef<AutoTraderScoutPosition> {
+  const horizon = String(seconds);
+  const label = seconds < 3_600 ? `${seconds / 60}m` : '60m';
+  return {
+    colId: `markout-${horizon}`,
+    headerName: `${label} markout`,
+    headerTooltip:
+      'Counterfactual net return after estimated spread and fees. Hover for gross return, path excursion, post-exit continuation, and time to positive net. Horizons on one Scout are correlated observations, not independent trades.',
+    valueGetter: (params) => params.data?.horizonMarkouts?.[horizon],
+    valueFormatter: (params) => percent(params.value?.netReturnPercent),
+    tooltipValueGetter: (params) => {
+      const value = params.value;
+      if (!value) return undefined;
+      return [
+        `Net: ${percent(value.netReturnPercent)}`,
+        `Gross: ${percent(value.grossReturnPercent)}`,
+        `Execution cost: ${percent(value.executionCostPercent)}`,
+        `Best favorable: ${percent(value.bestFavorablePercent)}`,
+        `Worst adverse: ${percent(value.worstAdversePercent)}`,
+        `Post-exit continuation: ${percent(value.postExitNetReturnPercent)}`,
+        `Time to positive net: ${
+          typeof value.timeToPositiveNetSeconds === 'number'
+            ? `${value.timeToPositiveNetSeconds}s`
+            : 'not reached'
+        }`,
+      ].join('\n');
+    },
+    width: 105,
+    minWidth: 95,
+  };
+}
+
 function AutoTraderScoutsComponent() {
   const state = useBehaviorSnapshot(autoTraderScoutModel.state$);
   useEffect(() => {
@@ -182,6 +216,7 @@ function AutoTraderScoutsComponent() {
         minWidth: 75,
         maxWidth: 90,
       },
+      ...([60, 300, 900, 3_600] as const).map(horizonMarkoutColumn),
       {
         field: 'comparisonRole',
         headerName: 'Probe',
@@ -324,7 +359,9 @@ function AutoTraderScoutsComponent() {
         trades. Paired baseline/variant rows show the variant return delta
         against the same signal. A variant can be a raw loss and still improve
         on its baseline. Parameter promotion uses that paired delta; unpaired
-        Scout outcomes remain separate.
+        Scout outcomes remain separate. The 1m/5m/15m/60m markouts are
+        additional fee- and spread-aware observations for each Scout, not
+        additional trades or independent learning samples.
       </p>
       {emptyWhileLoading && (
         <p className="positions-empty" role="status">

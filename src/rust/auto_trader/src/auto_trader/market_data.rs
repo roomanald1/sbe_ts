@@ -7,16 +7,40 @@ fn entry_walk_forward<'a>(
     symbol: &str,
     now_ms: u64,
 ) -> Option<&'a WalkForward> {
-    walk_forward
-        .iter()
-        .filter(|item| {
-            item.symbol == symbol
-                && is_entry_evidence_horizon(item.horizon_seconds)
-                && item.evidence_generated_at_ms > 0
-                && item.evidence_generated_at_ms <= now_ms
-                && now_ms - item.evidence_generated_at_ms <= MAX_WALK_FORWARD_EVIDENCE_AGE_MS
+    entry_walk_forward_for_strategy(walk_forward, symbol, None, now_ms)
+}
+
+fn entry_walk_forward_for_strategy<'a>(
+    walk_forward: &'a [WalkForward],
+    symbol: &str,
+    strategy: Option<&str>,
+    now_ms: u64,
+) -> Option<&'a WalkForward> {
+    let preferred_horizon = strategy
+        .filter(|name| {
+            matches!(
+                *name,
+                "live-momentum"
+                    | "live-trade-flow"
+                    | "live-order-book"
+                    | "live-vwap-dislocation"
+                    | "live-absorption-pressure"
+            )
         })
+        .map(|_| 60);
+    let eligible = walk_forward.iter().filter(|item| {
+        item.symbol == symbol
+            && is_entry_evidence_horizon(item.horizon_seconds)
+            && item.evidence_generated_at_ms > 0
+            && item.evidence_generated_at_ms <= now_ms
+            && now_ms - item.evidence_generated_at_ms <= MAX_WALK_FORWARD_EVIDENCE_AGE_MS
+            && preferred_horizon.is_none_or(|horizon| item.horizon_seconds == horizon)
+    });
+    eligible
         .max_by_key(|item| item.horizon_seconds)
+        .or_else(|| {
+            preferred_horizon.and_then(|_| entry_walk_forward(walk_forward, symbol, now_ms))
+        })
 }
 
 #[derive(Clone, Deserialize)]
@@ -36,8 +60,8 @@ struct Dashboard {
 
 fn is_stablecoin_pair(symbol: &str) -> bool {
     const STABLECOINS: &[&str] = &[
-        "BUSD", "DAI", "FDUSD", "FRAX", "GUSD", "LUSD", "PYUSD", "RLUSD", "TUSD",
-        "USDC", "USDD", "USDE", "USDP", "USDS", "USDT", "USDG", "EURC",
+        "BUSD", "DAI", "FDUSD", "FRAX", "GUSD", "LUSD", "PYUSD", "RLUSD", "TUSD", "USDC", "USDD",
+        "USDE", "USDP", "USDS", "USDT", "USDG", "EURC",
     ];
     let Some((base, quote)) = symbol.split_once('-') else {
         return false;
@@ -93,6 +117,14 @@ enum MissedOpportunityGate {
 struct MissedOpportunityGateBand {
     gate: MissedOpportunityGate,
     threshold: f64,
+    #[serde(default)]
+    symbol: Option<String>,
+    #[serde(default)]
+    direction: Option<String>,
+    #[serde(default)]
+    strategy: Option<String>,
+    #[serde(default)]
+    market_context: Option<String>,
     #[serde(default)]
     horizon_seconds: u64,
     #[serde(default)]
@@ -292,7 +324,14 @@ mod deep_book_assessment_tests {
         let too_small = assess_deep_book(&market, "BTC-USDT", true, 1.0, 10.0).unwrap();
         assert!(too_small.impact_bps.is_infinite());
         assert!(assess_deep_book(&market, "BTC-EUR", true, 10.0, 1.0).is_none());
-        assert!(assess_deep_book(&serde_json::json!({"bids":[],"asks":[]}), "BTC-USDT", true, 10.0, 1.0).is_none());
+        assert!(assess_deep_book(
+            &serde_json::json!({"bids":[],"asks":[]}),
+            "BTC-USDT",
+            true,
+            10.0,
+            1.0
+        )
+        .is_none());
         let crossed = serde_json::json!({"bids":[{"price":101.0,"size":1.0}],"asks":[{"price":100.0,"size":1.0}]});
         assert!(assess_deep_book(&crossed, "BTC-USDT", true, 10.0, 1.0).is_none());
     }

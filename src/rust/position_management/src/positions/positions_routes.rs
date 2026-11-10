@@ -130,6 +130,7 @@ pub async fn router() -> anyhow::Result<Router> {
         .route("/account", get(get_account))
         .route("/positions/account/topups", post(top_up_account))
         .route("/positions/account/leverage", post(set_account_leverage))
+        .route("/positions/dated-carry/ledger", post(sync_dated_carry_ledger))
         .route("/account/topups", post(top_up_account))
         .route("/positions/usd-rates", get(get_usd_rates))
         .route("/positions/fee-rates", get(get_fee_rates))
@@ -161,6 +162,33 @@ pub async fn router() -> anyhow::Result<Router> {
             axum::routing::delete(cancel_order),
         )
         .with_state(store))
+}
+
+async fn sync_dated_carry_ledger(
+    State(store): State<Arc<PositionStore>>,
+    Json(positions): Json<Vec<DatedCarryLedgerPosition>>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    if positions.iter().any(|position| {
+        !position.quantity.is_finite()
+            || position.quantity <= 0.0
+            || !position.spot_entry_price.is_finite()
+            || position.spot_entry_price <= 0.0
+            || !position.future_entry_price.is_finite()
+            || position.future_entry_price <= 0.0
+            || position.spot_symbol.is_empty()
+            || position.future_symbol.is_empty()
+    }) {
+        return Err((StatusCode::BAD_REQUEST, "Invalid dated-carry ledger position".into()));
+    }
+    let mut ledger = store.ledger.lock().await;
+    ledger.dated_carry_positions = positions;
+    store.persist(&ledger).await.map_err(|error| {
+        (StatusCode::INTERNAL_SERVER_ERROR, format!("Could not persist dated-carry ledger: {error}"))
+    })?;
+    Ok(Json(serde_json::json!({
+        "status": "recorded",
+        "positions": ledger.dated_carry_positions.len(),
+    })))
 }
 
 async fn position_ui_stream(

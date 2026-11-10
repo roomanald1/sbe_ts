@@ -7,6 +7,12 @@ pub struct LearnedProfileSnapshot {
     pub profiles: Vec<StrategyProfile>,
     pub strategy_size_multipliers: BTreeMap<String, f64>,
     #[serde(default)]
+    pub recent_profile_context_returns: BTreeMap<String, Vec<(u64, f64)>>,
+    /// Stop distances selected from executable post-exit replays. Keys are the
+    /// exact entering profile id and the signal's market context.
+    #[serde(default)]
+    pub contextual_stop_loss_percents: BTreeMap<String, f64>,
+    #[serde(default)]
     pub context_learning: BTreeMap<String, ContextLearningStat>,
     #[serde(default)]
     pub execution_learning: BTreeMap<String, ExecutionLearningStat>,

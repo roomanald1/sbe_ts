@@ -46,6 +46,102 @@ fn passes_pullback_confirmation(signal: &Signal) -> bool {
         })
 }
 
+fn positive_mixed_exploration_evidence(signal: &Signal, dashboard: &Dashboard, now: u64) -> bool {
+    let Some(evidence) = entry_walk_forward_for_strategy(
+        &dashboard.walk_forward,
+        &signal.symbol,
+        signal.strategy.as_deref(),
+        now.saturating_mul(1_000),
+    ) else {
+        return false;
+    };
+    let side = if signal.direction == "bullish" {
+        &evidence.all_signal_long
+    } else {
+        &evidence.all_signal_short
+    };
+    side.sample_count >= MIN_EXPLORATION_EVIDENCE_SAMPLES
+        && side
+            .average_net_return_percent
+            .is_some_and(|value| value > 0.0)
+        && side
+            .positive_net_rate
+            .is_some_and(|value| value >= MIN_SIDE_POSITIVE_NET_RATE)
+}
+
+fn validated_strategy_evidence(signal: &Signal, dashboard: &Dashboard, now: u64) -> bool {
+    let Some(strategy) = signal.strategy.as_deref().and_then(Strategy::from_name) else {
+        return false;
+    };
+    let parameters = signal_strategy_parameters(signal);
+    let minimum_samples = parameters
+        .get(StrategyParameterKey::ScoutMinimumWalkForwardSamples.as_str())
+        .copied()
+        .filter(|value| value.is_finite() && *value >= 1.0)
+        .map(|value| value.round() as usize);
+    let minimum_positive_rate = parameters
+        .get(StrategyParameterKey::ScoutMinimumPositiveNetRate.as_str())
+        .copied()
+        .filter(|value| value.is_finite() && (0.0..=1.0).contains(value));
+    let Some(decision) = signal.strategy_decision.as_ref() else {
+        return false;
+    };
+    let Some(evidence) = decision.get("strategy_walk_forward") else {
+        return false;
+    };
+    let sample_count = evidence
+        .get("sampleCount")
+        .and_then(serde_json::Value::as_u64);
+    let positive_rate = evidence
+        .get("positiveNetRate")
+        .and_then(serde_json::Value::as_f64);
+    let average_net = evidence
+        .get("averageNetReturnPercent")
+        .and_then(serde_json::Value::as_f64);
+    let last_sample = evidence
+        .get("lastSampleTimestampMs")
+        .and_then(serde_json::Value::as_u64);
+    let strategy_validated = strategy
+        .parameter_specs()
+        .iter()
+        .any(|spec| spec.key == StrategyParameterKey::ScoutMinimumWalkForwardSamples)
+        && sample_count.is_some_and(|samples| {
+            minimum_samples.is_some_and(|minimum| samples as usize >= minimum)
+        })
+        && positive_rate
+            .is_some_and(|rate| minimum_positive_rate.is_some_and(|minimum| rate >= minimum))
+        && average_net.is_some_and(|net| net.is_finite() && net > 0.0)
+        && last_sample.is_some_and(|timestamp| timestamp < signal.timestamp);
+    if !strategy_validated {
+        return false;
+    }
+    // A small strategy-specific cohort can be optimistic by chance. Until it
+    // reaches the normal side-evidence sample minimum, require the generic
+    // symbol/horizon evidence to remain non-negative as a safety veto.
+    if sample_count.is_some_and(|samples| samples < MIN_SIDE_WALK_FORWARD_SAMPLES as u64) {
+        let Some(evidence) = entry_walk_forward(
+            &dashboard.walk_forward,
+            &signal.symbol,
+            now.saturating_mul(1_000),
+        ) else {
+            return true;
+        };
+        let side = if signal.direction == "bullish" {
+            &evidence.all_signal_long
+        } else {
+            &evidence.all_signal_short
+        };
+        return side.sample_count >= MIN_SIDE_WALK_FORWARD_SAMPLES
+            && side
+                .average_net_return_percent
+                .is_some_and(|net| net >= 0.0)
+            && side
+                .positive_net_rate
+                .is_some_and(|rate| rate >= MIN_SIDE_POSITIVE_NET_RATE);
+    }
+    true
+}
+
 fn select_cycle_signal<'a>(
     input: SignalSelectionInput<'a>,
 ) -> Result<(&'a Signal, bool), CycleResult> {
@@ -63,6 +159,15 @@ fn select_cycle_signal<'a>(
         .filter(|signal| {
             signal.strategy_candidate
                 && !is_live_scout_only_signal(signal)
+                && passes_pullback_confirmation(signal)
+                && (signal
+                    .strategy
+                    .as_deref()
+                    .and_then(Strategy::from_name)
+                    .is_none_or(|strategy| {
+                        !strategy.is_live_insight()
+                            || validated_strategy_evidence(signal, dashboard, now)
+                    }))
                 && signal
                     .strategy_decision
                     .as_ref()
@@ -85,20 +190,47 @@ fn select_cycle_signal<'a>(
                 .get(&context)
                 .map(|thresholds| thresholds.strength_floor)
                 .unwrap_or(MIN_STRENGTH);
-            let floor = (adaptive_missed_opportunity_floor(
+            let floor = (adaptive_missed_opportunity_floor_for_signal(
                 learned_floor,
                 MissedOpportunityGate::Strength,
                 &dashboard.missed_opportunity_bands,
+                &signal.symbol,
+                &signal.direction,
+                signal.strategy.as_deref(),
+                context.split(':').nth(1).unwrap_or(&context),
             ) * risk_floor_scale(risk_appetite))
             .clamp(0.0, 1.0);
-            signal.strength.is_finite() && signal.strength >= floor
+            let mixed_exploration = is_mixed_market_context(&context)
+                && positive_mixed_exploration_evidence(signal, dashboard, now)
+                && signal.strength >= MIXED_EXPLORATION_STRENGTH * risk_floor_scale(risk_appetite);
+            let validated_strategy = validated_strategy_evidence(signal, dashboard, now)
+                && signal.strength
+                    >= VALIDATED_STRATEGY_STRENGTH_FLOOR * risk_floor_scale(risk_appetite);
+            signal.strength.is_finite()
+                && (signal.strength >= floor || mixed_exploration || validated_strategy)
         })
         .copied()
         .collect::<Vec<_>>();
+    if let Some(signal) = strength_qualified
+        .iter()
+        .copied()
+        .filter(|signal| {
+            validated_strategy_evidence(signal, dashboard, now)
+                && signal.strength.is_finite()
+                && signal.strength
+                    >= VALIDATED_STRATEGY_STRENGTH_FLOOR * risk_floor_scale(risk_appetite)
+        })
+        .max_by(|a, b| a.strength.total_cmp(&b.strength))
+    {
+        return Ok((signal, false));
+    }
     let strict_candidate = strength_qualified
         .iter()
         .copied()
         .filter(|signal| {
+            if is_mixed_market_context(&market_context(signal)) {
+                return false;
+            }
             if is_live_scout_only_signal(signal) {
                 return false;
             }
@@ -156,23 +288,41 @@ fn select_cycle_signal<'a>(
         return Ok((signal, false));
     }
     let exploration_strength_floor = MIN_EXPLORATION_STRENGTH * risk_floor_scale(risk_appetite);
-    let exploration_score_floor = MIN_EXPLORATION_SCORE * risk_floor_scale(risk_appetite);
     if let Some(signal) = fresh_directional
         .iter()
         .copied()
         .filter(|signal| {
+            let context = market_context(signal);
             signal.strategy.is_none()
                 && !signal.strategy_candidate
                 && !is_live_scout_only_signal(signal)
                 && passes_pullback_confirmation(signal)
                 && signal.strength.is_finite()
-                && signal.strength >= exploration_strength_floor
+                && signal.strength
+                    >= if is_mixed_market_context(&context) {
+                        MIXED_EXPLORATION_STRENGTH * risk_floor_scale(risk_appetite)
+                    } else {
+                        exploration_strength_floor
+                    }
                 && signal.score.is_finite()
-                && signal.score.abs() >= exploration_score_floor
+                && signal.score.abs()
+                    >= (adaptive_missed_opportunity_floor_for_signal(
+                        learning_thresholds
+                            .get(&context)
+                            .map(|thresholds| thresholds.exploration_score_floor)
+                            .unwrap_or(MIN_EXPLORATION_SCORE),
+                        MissedOpportunityGate::Score,
+                        &dashboard.missed_opportunity_bands,
+                        &signal.symbol,
+                        &signal.direction,
+                        signal.strategy.as_deref(),
+                        context.split(':').nth(1).unwrap_or(&context),
+                    ) * risk_floor_scale(risk_appetite))
+                    .max(0.0)
+                && (!is_mixed_market_context(&context)
+                    || positive_mixed_exploration_evidence(signal, dashboard, now))
         })
-        .max_by(|a, b| {
-            (a.strength * a.score.abs()).total_cmp(&(b.strength * b.score.abs()))
-        })
+        .max_by(|a, b| (a.strength * a.score.abs()).total_cmp(&(b.strength * b.score.abs())))
     {
         return Ok((signal, true));
     }
@@ -320,13 +470,10 @@ mod signal_selection_behavior_tests {
         let weak = signal(0.9, 0.29, None, false);
         let weak_signals = vec![weak.clone()];
         let weak_fresh = vec![&weak];
-        assert!(select_cycle_signal(input(
-            &empty_dashboard,
-            &weak_signals,
-            &weak_fresh,
-            50.0,
-        ))
-        .is_err());
+        assert!(
+            select_cycle_signal(input(&empty_dashboard, &weak_signals, &weak_fresh, 50.0,))
+                .is_err()
+        );
     }
 
     #[test]
@@ -341,5 +488,54 @@ mod signal_selection_behavior_tests {
         let selected = selected
             .unwrap_or_else(|_| panic!("generic signal evidence must not veto a named strategy"));
         assert_eq!(selected.0.strategy.as_deref(), Some("live-momentum"));
+    }
+
+    #[test]
+    fn mixed_context_exploration_requires_positive_directional_evidence() {
+        let mut mixed = signal(0.26, 0.9, None, false);
+        mixed.components.trend_5m_volatility_units = None;
+        let signals = vec![mixed.clone()];
+        let fresh = vec![&mixed];
+        let no_evidence = dashboard(Vec::new());
+        assert!(select_cycle_signal(input(&no_evidence, &signals, &fresh, 50.0)).is_err());
+
+        let evidence = serde_json::from_value::<WalkForward>(serde_json::json!({
+            "symbol":"BTC-USDT", "horizon_seconds":300, "evidence_generated_at_ms":100000,
+            "all_signal_long":{"sample_count":12,"average_net_return_percent":0.2,"positive_net_rate":0.7}
+        }))
+        .unwrap_or_else(|_| panic!("expected mixed exploration evidence"));
+        let evidence_dashboard = dashboard(vec![evidence]);
+        let (selected, exploratory) =
+            select_cycle_signal(input(&evidence_dashboard, &signals, &fresh, 50.0))
+                .unwrap_or_else(|_| panic!("positive mixed evidence should permit exploration"));
+        assert_eq!(selected.symbol, mixed.symbol);
+        assert!(exploratory);
+    }
+
+    #[test]
+    fn validated_named_strategy_can_use_a_lower_profile_floor() {
+        let mut candidate = signal(0.26, 0.9, Some("live-momentum"), false);
+        candidate.ranging_probability = Some(0.9);
+        candidate.strategy_decision = Some(serde_json::json!({
+            "strategy_parameters": {
+                "scout_minimum_walk_forward_samples": 3.0,
+                "scout_minimum_positive_net_rate": 0.55
+            },
+            "strategy_walk_forward": {
+                "sampleCount": 7,
+                "positiveNetRate": 0.57,
+                "averageNetReturnPercent": 0.101,
+                "lastSampleTimestampMs": 99
+            }
+        }));
+        let signals = vec![candidate.clone()];
+        let fresh = vec![&candidate];
+        let dashboard = dashboard(Vec::new());
+        let (selected, exploratory) =
+            select_cycle_signal(input(&dashboard, &signals, &fresh, 50.0)).unwrap_or_else(|_| {
+                panic!("validated strategy should pass its relaxed profile floor")
+            });
+        assert_eq!(selected.symbol, candidate.symbol);
+        assert!(!exploratory);
     }
 }

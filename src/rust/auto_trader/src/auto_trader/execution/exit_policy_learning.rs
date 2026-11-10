@@ -1,11 +1,72 @@
 const MIN_VALIDATED_EXIT_POLICY_SAMPLES: usize = 20;
 const STOP_WIDENING_PER_VALIDATION_TIER_PERCENT: f64 = 0.15;
 const MAX_STOP_WIDENING_TIERS: usize = 3;
+const MIN_POST_EXIT_ADAPTATION_SAMPLES: usize = 20;
+const MAX_POST_EXIT_ADJUSTMENT_PERCENT: f64 = 0.5;
+const MAX_POST_EXIT_SAMPLE_PERCENT: f64 = 2.0;
 
-fn learned_exit_policy(
-    signal: &Signal,
-    walk_forward: &[WalkForward],
-) -> Option<(f64, f64, usize)> {
+fn post_exit_policy_adjustments(
+    history: &[serde_json::Value],
+    symbol: &str,
+    strategy: &str,
+    direction: &str,
+) -> (f64, f64, usize) {
+    let matching_samples = |require_symbol: bool, trailing_only: bool| {
+        history
+            .iter()
+            .filter(|item| {
+                item["strategy"].as_str() == Some(strategy)
+                    && (!require_symbol || item["symbol"].as_str() == Some(symbol))
+                    && match direction {
+                        "bullish" => item["side"].as_str() == Some("sell"),
+                        "bearish" => item["side"].as_str() == Some("buy"),
+                        _ => false,
+                    }
+                    && if trailing_only {
+                        item["reason"].as_str() == Some("profit-protection")
+                    } else {
+                        matches!(
+                            item["reason"].as_str(),
+                            Some("take-profit" | "profit-protection")
+                        )
+                    }
+            })
+            .filter_map(|item| {
+                item["best_post_exit_return_percent"]
+                    .as_f64()
+                    .filter(|value| value.is_finite())
+                    .map(|value| value.clamp(0.0, MAX_POST_EXIT_SAMPLE_PERCENT))
+            })
+            .collect::<Vec<_>>()
+    };
+    let validated_mean = |trailing_only: bool| {
+        let symbol_samples = matching_samples(true, trailing_only);
+        let samples = if symbol_samples.len() >= MIN_POST_EXIT_ADAPTATION_SAMPLES {
+            symbol_samples
+        } else {
+            matching_samples(false, trailing_only)
+        };
+        (samples.len() >= MIN_POST_EXIT_ADAPTATION_SAMPLES).then(|| {
+            (
+                samples.iter().sum::<f64>() / samples.len() as f64,
+                samples.len(),
+            )
+        })
+    };
+    let target = validated_mean(false);
+    let trailing = validated_mean(true);
+    (
+        target
+            .map(|(mean, _)| (mean * 0.25).clamp(0.0, MAX_POST_EXIT_ADJUSTMENT_PERCENT))
+            .unwrap_or_default(),
+        trailing
+            .map(|(mean, _)| (mean * 0.25).clamp(0.0, MAX_POST_EXIT_ADJUSTMENT_PERCENT))
+            .unwrap_or_default(),
+        target.map_or(0, |(_, samples)| samples),
+    )
+}
+
+fn learned_exit_policy(signal: &Signal, walk_forward: &[WalkForward]) -> Option<(f64, f64, usize)> {
     walk_forward
         .iter()
         .filter(|item| item.symbol == signal.symbol && matches!(item.horizon_seconds, 900 | 3_600))
@@ -84,22 +145,27 @@ fn risk_adjusted_take_profit_percent(stop_loss_percent: f64, risk_appetite: f64)
 }
 
 fn minimum_reward_risk_take_profit_percent(stop_loss_percent: f64, target_percent: f64) -> f64 {
-    let reward_risk_floor = (stop_loss_percent.max(0.0) * MIN_EXIT_REWARD_RISK_RATIO)
-        .min(MAX_TAKE_PROFIT_PERCENT);
+    let reward_risk_floor =
+        (stop_loss_percent.max(0.0) * MIN_EXIT_REWARD_RISK_RATIO).min(MAX_TAKE_PROFIT_PERCENT);
     target_percent
         .max(reward_risk_floor)
         .clamp(MIN_TAKE_PROFIT_PERCENT, MAX_TAKE_PROFIT_PERCENT)
 }
 
-fn volatility_adjusted_stop_loss_percent(base_stop_percent: f64, volatility_1m_percent: Option<f64>) -> f64 {
+fn volatility_adjusted_stop_loss_percent(
+    base_stop_percent: f64,
+    volatility_1m_percent: Option<f64>,
+) -> f64 {
     let base = base_stop_percent.clamp(MIN_STOP_LOSS_PERCENT, MAX_STOP_LOSS_PERCENT);
-    let Some(volatility) = volatility_1m_percent.filter(|value| value.is_finite() && *value > 0.0) else {
+    let Some(volatility) = volatility_1m_percent.filter(|value| value.is_finite() && *value > 0.0)
+    else {
         return base;
     };
     // volatility_1m_percent is realized one-minute movement; allow 1.5x the
     // square-root-of-time five-minute move, with bounded exposure.
     let volatility_stop = volatility * 5.0_f64.sqrt() * 1.5;
-    base.max(volatility_stop).clamp(MIN_STOP_LOSS_PERCENT, MAX_STOP_LOSS_PERCENT)
+    base.max(volatility_stop)
+        .clamp(MIN_STOP_LOSS_PERCENT, MAX_STOP_LOSS_PERCENT)
 }
 
 fn volatility_size_scale(base_stop_percent: f64, effective_stop_percent: f64) -> f64 {
@@ -124,7 +190,6 @@ fn confidence_adjusted_take_profit_percent(
     };
     minimum_reward_risk_take_profit_percent(stop_loss_percent, target)
 }
-
 
 fn age_adjusted_take_profit_percent(
     strategy_name: Option<&str>,
@@ -165,7 +230,8 @@ fn adapt_exit_policy(settings: &mut Settings) {
     settings.stop_loss_percent = settings
         .stop_loss_percent
         .clamp(MIN_STOP_LOSS_PERCENT, MAX_STOP_LOSS_PERCENT);
-    let candidate = risk_adjusted_take_profit_percent(settings.stop_loss_percent, settings.risk_appetite);
+    let candidate =
+        risk_adjusted_take_profit_percent(settings.stop_loss_percent, settings.risk_appetite);
     settings.take_profit_percent = confidence_adjusted_take_profit_percent(
         &settings.closed_trade_returns_percent,
         candidate,
@@ -181,14 +247,23 @@ mod exit_policy_learning_tests {
     fn risk_and_volatility_adjustments_stay_within_policy_bounds() {
         assert_eq!(volatility_adjusted_stop_loss_percent(1.0, None), 1.0);
         assert!(volatility_adjusted_stop_loss_percent(1.0, Some(1.0)) > 1.0);
-        assert_eq!(volatility_adjusted_stop_loss_percent(1.0, Some(f64::NAN)), 1.0);
+        assert_eq!(
+            volatility_adjusted_stop_loss_percent(1.0, Some(f64::NAN)),
+            1.0
+        );
         assert_eq!(volatility_size_scale(2.0, 4.0), 0.5);
         assert_eq!(volatility_size_scale(2.0, 1.0), 1.0);
         let conservative = risk_adjusted_take_profit_percent(2.0, 0.0);
         let aggressive = risk_adjusted_take_profit_percent(2.0, 100.0);
         assert!(conservative >= aggressive);
-        assert_eq!(minimum_reward_risk_take_profit_percent(1.0, 0.1), 1.0 * MIN_EXIT_REWARD_RISK_RATIO);
-        assert_eq!(minimum_reward_risk_take_profit_percent(200.0, 1.0), MAX_TAKE_PROFIT_PERCENT);
+        assert_eq!(
+            minimum_reward_risk_take_profit_percent(1.0, 0.1),
+            1.0 * MIN_EXIT_REWARD_RISK_RATIO
+        );
+        assert_eq!(
+            minimum_reward_risk_take_profit_percent(200.0, 1.0),
+            MAX_TAKE_PROFIT_PERCENT
+        );
     }
 
     #[test]
@@ -197,10 +272,14 @@ mod exit_policy_learning_tests {
         let strong = vec![1.0; EXTENDED_HOLD_MIN_SAMPLES];
         assert!(!win_rate_supports_extended_hold(&mixed));
         assert!(win_rate_supports_extended_hold(&strong));
-        assert_eq!(confidence_adjusted_take_profit_percent(&mixed, 3.0, 1.0),
-            minimum_reward_risk_take_profit_percent(1.0, EARLY_NET_TAKE_PROFIT_PERCENT));
-        assert_eq!(confidence_adjusted_take_profit_percent(&strong, 3.0, 1.0),
-            minimum_reward_risk_take_profit_percent(1.0, 3.0));
+        assert_eq!(
+            confidence_adjusted_take_profit_percent(&mixed, 3.0, 1.0),
+            minimum_reward_risk_take_profit_percent(1.0, EARLY_NET_TAKE_PROFIT_PERCENT)
+        );
+        assert_eq!(
+            confidence_adjusted_take_profit_percent(&strong, 3.0, 1.0),
+            minimum_reward_risk_take_profit_percent(1.0, 3.0)
+        );
     }
 
     #[test]
@@ -208,7 +287,8 @@ mod exit_policy_learning_tests {
         let signal: Signal = serde_json::from_value(serde_json::json!({
             "symbol":"ETH-USDT", "direction":"bullish", "strength":1.0,
             "timestamp":1, "stale":false
-        })).unwrap();
+        }))
+        .unwrap();
         let accepted: WalkForward = serde_json::from_value(serde_json::json!({
             "symbol":"ETH-USDT", "horizon_seconds":900,
             "learned_long_exit_policy": {
@@ -216,8 +296,12 @@ mod exit_policy_learning_tests {
                 "validation_samples":20, "validation_average_net_return_percent":0.4,
                 "validation_positive_net_rate":0.5
             }
-        })).unwrap();
-        assert_eq!(learned_exit_policy(&signal, std::slice::from_ref(&accepted)), Some((1.5,3.0,20)));
+        }))
+        .unwrap();
+        assert_eq!(
+            learned_exit_policy(&signal, std::slice::from_ref(&accepted)),
+            Some((1.5, 3.0, 20))
+        );
         let insufficient: WalkForward = serde_json::from_value(serde_json::json!({
             "symbol":"ETH-USDT", "horizon_seconds":900,
             "learned_long_exit_policy": {
@@ -225,7 +309,48 @@ mod exit_policy_learning_tests {
                 "validation_samples":19, "validation_average_net_return_percent":0.4,
                 "validation_positive_net_rate":0.5
             }
-        })).unwrap();
+        }))
+        .unwrap();
         assert_eq!(learned_exit_policy(&signal, &[insufficient]), None);
+    }
+
+    #[test]
+    fn post_exit_observations_adjust_only_matching_strategy_direction_with_minimum_samples() {
+        let history = (0..20)
+            .map(|index| {
+                serde_json::json!({
+                    "event_id": format!("tp-{index}"),
+                    "symbol": "BTC-USDT",
+                    "strategy": "live-momentum",
+                    "side": "sell",
+                    "reason": "take-profit",
+                    "best_post_exit_return_percent": 0.8
+                })
+            })
+            .chain((0..20).map(|index| {
+                serde_json::json!({
+                    "event_id": format!("protection-{index}"),
+                    "symbol": "BTC-USDT",
+                    "strategy": "live-momentum",
+                    "side": "sell",
+                    "reason": "profit-protection",
+                    "best_post_exit_return_percent": 0.4
+                })
+            }))
+            .collect::<Vec<_>>();
+        let (target_increase, trailing_increase, sample_count) =
+            post_exit_policy_adjustments(&history, "BTC-USDT", "live-momentum", "bullish");
+        assert_eq!(sample_count, 40);
+        assert!((target_increase - 0.15).abs() < 1e-10);
+        assert!((trailing_increase - 0.1).abs() < 1e-10);
+
+        assert_eq!(
+            post_exit_policy_adjustments(&history[..19], "BTC-USDT", "live-momentum", "bullish"),
+            (0.0, 0.0, 0)
+        );
+        assert_eq!(
+            post_exit_policy_adjustments(&history, "BTC-USDT", "live-momentum", "bearish"),
+            (0.0, 0.0, 0)
+        );
     }
 }

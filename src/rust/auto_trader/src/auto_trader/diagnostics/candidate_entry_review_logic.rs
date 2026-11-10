@@ -25,15 +25,31 @@ fn review_candidate_entry<'a>(
     let context = market_context(candidate);
     let risk_scale = risk_floor_scale(risk_appetite);
     let learned = learning_thresholds.get(&context);
-    let learned_strength = learned.map(|thresholds| thresholds.strength_floor).unwrap_or(MIN_STRENGTH);
-    let learned_score = learned.map(|thresholds| thresholds.exploration_score_floor).unwrap_or(MIN_EXPLORATION_SCORE);
-    let strength_floor = (adaptive_missed_opportunity_floor(
+    let learned_strength = learned
+        .map(|thresholds| thresholds.strength_floor)
+        .unwrap_or(MIN_STRENGTH);
+    let learned_score = learned
+        .map(|thresholds| thresholds.exploration_score_floor)
+        .unwrap_or(MIN_EXPLORATION_SCORE);
+    let strength_floor = (adaptive_missed_opportunity_floor_for_signal(
         learned_strength,
         MissedOpportunityGate::Strength,
         &dashboard.missed_opportunity_bands,
+        &candidate.symbol,
+        &candidate.direction,
+        candidate.strategy.as_deref(),
+        context.split(':').nth(1).unwrap_or(&context),
     ) * risk_scale)
         .clamp(0.0, 1.0);
-    let score_floor = (learned_score * risk_scale)
+    let score_floor = (adaptive_missed_opportunity_floor_for_signal(
+        learned_score,
+        MissedOpportunityGate::Score,
+        &dashboard.missed_opportunity_bands,
+        &candidate.symbol,
+        &candidate.direction,
+        candidate.strategy.as_deref(),
+        context.split(':').nth(1).unwrap_or(&context),
+    ) * risk_scale)
         .max(0.0);
     let evidence = candidate_evidence(candidate, dashboard, now_ms);
     let stale_evidence_age_ms = dashboard
@@ -55,9 +71,7 @@ fn review_candidate_entry<'a>(
     let score_weak = candidate.score.abs() < score_floor;
     let exploration_qualified = !mixed_context
         && candidate.strength.is_finite()
-        && candidate.strength
-            >= learned_strength.max(MIN_EXPLORATION_STRENGTH)
-                * risk_scale
+        && candidate.strength >= learned_strength.max(MIN_EXPLORATION_STRENGTH) * risk_scale
         && candidate.score.is_finite()
         && candidate.score.abs() >= score_floor;
     let evidence_missing = !strength_weak
@@ -66,21 +80,26 @@ fn review_candidate_entry<'a>(
     let research_bad = (!strength_weak || exploration_qualified)
         && research.is_some_and(|metrics| {
             metrics.sample_count >= MIN_SIDE_WALK_FORWARD_SAMPLES
-                && metrics.average_net_return_percent.is_none_or(|net| net <= 0.0)
+                && metrics
+                    .average_net_return_percent
+                    .is_none_or(|net| net <= 0.0)
         });
-    let strict_evidence_bad = !strength_weak && side.is_some_and(|metrics| {
-        metrics.sample_count >= MIN_SIDE_WALK_FORWARD_SAMPLES
-            && (metrics
-                .direction_match_rate
-                .is_none_or(|rate| rate < MIN_SIDE_DIRECTION_MATCH_RATE)
-                || metrics.average_net_return_percent.is_none_or(|net| net <= 0.0)
-                || metrics
-                    .positive_net_rate
-                    .is_none_or(|rate| rate < MIN_SIDE_POSITIVE_NET_RATE)
-                || metrics
-                    .positive_net_rate_lower_95
-                    .is_none_or(|rate| rate < MIN_SIDE_POSITIVE_NET_LOWER_95))
-    });
+    let strict_evidence_bad = !strength_weak
+        && side.is_some_and(|metrics| {
+            metrics.sample_count >= MIN_SIDE_WALK_FORWARD_SAMPLES
+                && (metrics
+                    .direction_match_rate
+                    .is_none_or(|rate| rate < MIN_SIDE_DIRECTION_MATCH_RATE)
+                    || metrics
+                        .average_net_return_percent
+                        .is_none_or(|net| net <= 0.0)
+                    || metrics
+                        .positive_net_rate
+                        .is_none_or(|rate| rate < MIN_SIDE_POSITIVE_NET_RATE)
+                    || metrics
+                        .positive_net_rate_lower_95
+                        .is_none_or(|rate| rate < MIN_SIDE_POSITIVE_NET_LOWER_95))
+        });
     CandidateEntryReview {
         context,
         strength_floor,
@@ -98,4 +117,3 @@ fn review_candidate_entry<'a>(
         strict_evidence_bad,
     }
 }
-

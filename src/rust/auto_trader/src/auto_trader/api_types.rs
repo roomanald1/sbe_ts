@@ -46,6 +46,14 @@ struct StatusResponse {
     symbol_gate_hits: Vec<SymbolGateHit>,
     latest_signal_diagnostic: String,
     strategy_diagnostics: Vec<StrategyDiagnostic>,
+    latest_strategy_blockers: Vec<StrategyBlocker>,
+}
+#[derive(Clone, Serialize)]
+struct StrategyBlocker {
+    strategy: String,
+    symbol: String,
+    reason: String,
+    timestamp_ms: u64,
 }
 #[derive(Serialize)]
 struct StrategyBudgetStatus {

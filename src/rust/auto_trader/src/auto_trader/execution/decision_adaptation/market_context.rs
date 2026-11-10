@@ -151,6 +151,7 @@ fn adaptive_exploration_score_floor(
         .iter()
         .filter(|band| {
             band.gate == MissedOpportunityGate::Score
+                && band.symbol.is_none()
                 && band.horizon_seconds == 300
                 && band.threshold >= COUNTERFACTUAL_SCORE_MIN_THRESHOLD
                 && band.threshold < learned_floor
@@ -169,6 +170,7 @@ fn adaptive_exploration_score_floor(
         .iter()
         .filter(|band| {
             band.gate == MissedOpportunityGate::Score
+                && band.symbol.is_none()
                 && matches!(band.horizon_seconds, 900 | 3_600)
                 && band.threshold >= COUNTERFACTUAL_SCORE_MIN_THRESHOLD
                 && band.threshold < learned_floor
@@ -191,7 +193,6 @@ fn adaptive_exploration_score_floor(
         .unwrap_or(learned_floor);
     short_horizon_floor.min(longer_horizon_floor)
 }
-
 
 fn is_mixed_market_context(context: &str) -> bool {
     context.split(':').nth(1) == Some("mixed")

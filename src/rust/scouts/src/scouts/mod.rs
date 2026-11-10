@@ -14,6 +14,120 @@ include!("scout_report.rs");
 mod tests {
     use super::*;
 
+    async fn check_outbox_acknowledgement(successes: usize) {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let path = std::env::temp_dir().join(format!(
+            "scouts-outbox-{}-{}-{successes}.sqlite",
+            std::process::id(),
+            scout_now_ms()
+        ));
+        let mut persisted = PersistedState::default();
+        for index in 0..=successes {
+            persisted
+                .outbox
+                .push(ScoutOutboxItem::Learning(FeedbackEvent::ScoutOutcome {
+                    event_id: format!("event-{index}"),
+                    observed_at_ms: scout_now_ms(),
+                    learning_context: None,
+                    symbol: "BTC-USDT".into(),
+                    strategy: "live-momentum".into(),
+                    profile_id: "profile".into(),
+                    parameters: BTreeMap::new(),
+                    baseline_parameters: BTreeMap::new(),
+                    specs: Vec::new(),
+                    net_return_percent: 0.1,
+                }));
+        }
+        persist_scout_state(&path, &persisted, &["outbox"]).unwrap();
+        let scout = ScoutState {
+            data: Arc::new(Mutex::new(persisted)),
+            path: path.clone(),
+            flush_lock: Arc::new(Mutex::new(())),
+            flush_scheduled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        };
+        let requests = Arc::new(AtomicUsize::new(0));
+        let stored_at_failure = Arc::new(AtomicUsize::new(usize::MAX));
+        let counter = requests.clone();
+        let observed = stored_at_failure.clone();
+        let db_path = path.clone();
+        let app = axum::Router::new().route(
+            "/feedback",
+            axum::routing::post(move || {
+                let counter = counter.clone();
+                let observed = observed.clone();
+                let db_path = db_path.clone();
+                async move {
+                    if counter.fetch_add(1, Ordering::SeqCst) < successes {
+                        return StatusCode::OK;
+                    }
+                    let db = rusqlite::Connection::open(db_path).unwrap();
+                    let count: i64 = db
+                        .query_row(
+                            "SELECT COUNT(*) FROM scout_records WHERE collection='outbox'",
+                            [],
+                            |row| row.get(0),
+                        )
+                        .unwrap();
+                    observed.store(count as usize, Ordering::SeqCst);
+                    StatusCode::INTERNAL_SERVER_ERROR
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        assert!(
+            flush_scout_outbox(
+                &scout,
+                &reqwest::Client::new(),
+                &format!("http://{address}")
+            )
+            .await
+            .is_err()
+        );
+        assert_eq!(scout.data.lock().await.outbox.len(), 1);
+        assert_eq!(load_scout_state(&path).unwrap().outbox.len(), 1);
+        if successes >= SCOUT_OUTBOX_ACK_BATCH_SIZE {
+            assert_eq!(
+                stored_at_failure.load(Ordering::SeqCst),
+                1,
+                "a full batch must be persisted before the queue drains"
+            );
+        }
+        server.abort();
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("sqlite-wal"));
+        let _ = std::fs::remove_file(path.with_extension("sqlite-shm"));
+    }
+
+    #[tokio::test]
+    async fn outbox_acknowledges_completed_items_on_server_failure() {
+        check_outbox_acknowledgement(2).await;
+    }
+
+    #[tokio::test]
+    async fn outbox_commits_delivered_batches_before_queue_drains() {
+        check_outbox_acknowledgement(SCOUT_OUTBOX_ACK_BATCH_SIZE).await;
+    }
+
+    #[tokio::test]
+    async fn failed_outbox_persistence_keeps_delivered_items_for_retry() {
+        let mut persisted = PersistedState::default();
+        persisted
+            .outbox
+            .push(ScoutOutboxItem::Audit(serde_json::json!({"id": "first"})));
+        let scout = ScoutState {
+            data: Arc::new(Mutex::new(persisted)),
+            path: std::path::PathBuf::from("/dev/null/state.sqlite"),
+            flush_lock: Arc::new(Mutex::new(())),
+            flush_scheduled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        };
+        assert!(acknowledge_scout_outbox(&scout, 1).await.is_err());
+        assert_eq!(scout.data.lock().await.outbox.len(), 1);
+    }
+
     include!("tests/scout_outcome.rs");
     include!("tests/scout_audit_plan.rs");
     include!("tests/scout_plan.rs");
@@ -264,6 +378,7 @@ mod tests {
                 false,
             )),
             live_scout_maximum_duration_ms: Arc::new(std::sync::RwLock::new(BTreeMap::new())),
+            scout_outcomes_cache: Arc::new(Mutex::new(BTreeMap::new())),
             scout: ScoutState {
                 data: Arc::new(Mutex::new(persisted)),
                 path: std::path::PathBuf::new(),

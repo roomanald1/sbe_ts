@@ -34,8 +34,18 @@ impl SignalStore {
     }
 
     pub async fn append_evaluation(&self, evaluation: &SignalEvaluation) -> Result<()> {
-        self.append_record(StoredSignalRecord::Evaluation(evaluation.clone()))
-            .await
+        let mut records = vec![StoredSignalRecord::Evaluation(evaluation.clone())];
+        if !evaluation.counterfactual_quote_path.is_empty() {
+            records.push(StoredSignalRecord::CounterfactualQuotePath(
+                CounterfactualQuotePath {
+                    symbol: evaluation.symbol.clone(),
+                    signal_timestamp: evaluation.signal_timestamp,
+                    horizon_seconds: evaluation.horizon_seconds,
+                    samples: evaluation.counterfactual_quote_path.clone(),
+                },
+            ));
+        }
+        self.append_records(records).await
     }
 
     async fn append_record(&self, record: StoredSignalRecord) -> Result<()> {

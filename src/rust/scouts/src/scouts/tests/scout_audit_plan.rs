@@ -112,6 +112,7 @@ mod scout_audit_plan_tests {
                 "strategy_parameters": {"stop_loss_percent": 0.5},
                 "market_snapshot": {"depth": [1, 2, 3]}
             },
+            "scout_markout_observations": [{"kind":"horizon","horizon_seconds":60}],
             "feature_history": ["large", "signal", "payload"]
         });
         let compact = compact_scout_instance(&full);
@@ -119,6 +120,10 @@ mod scout_audit_plan_tests {
         assert_eq!(compact["strategy_decision"]["observed_close"], 100.0);
         assert_eq!(compact["strategy_decision"]["strategy_order_size_multiplier"], 0.5);
         assert!(compact["strategy_decision"].get("market_snapshot").is_none());
+        assert_eq!(
+            compact["scout_markout_observations"][0]["horizon_seconds"],
+            60
+        );
         assert!(compact.get("feature_history").is_none());
 
         let mut state = PersistedState::default();
@@ -136,4 +141,3 @@ mod scout_audit_plan_tests {
             .is_none());
     }
 }
-

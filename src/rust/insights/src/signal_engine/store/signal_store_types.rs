@@ -22,6 +22,14 @@ pub struct MissedOpportunityGateBand {
     pub gate: String,
     pub threshold: f64,
     #[serde(default)]
+    pub symbol: Option<String>,
+    #[serde(default)]
+    pub direction: Option<String>,
+    #[serde(default)]
+    pub strategy: Option<String>,
+    #[serde(default)]
+    pub market_context: Option<String>,
+    #[serde(default)]
     pub horizon_seconds: u64,
     pub sample_count: usize,
     pub average_net_return_percent: Option<f64>,
@@ -40,6 +48,12 @@ pub struct MissedOpportunityGateBand {
     pub stop_target_average_net_return_percent: Option<f64>,
     #[serde(default)]
     pub stop_target_positive_net_rate: Option<f64>,
+    #[serde(default)]
+    pub strategy_exit_sample_count: usize,
+    #[serde(default)]
+    pub strategy_exit_average_net_return_percent: Option<f64>,
+    #[serde(default)]
+    pub strategy_exit_positive_net_rate: Option<f64>,
 }
 
 #[derive(Clone, Debug, Default, Serialize)]
@@ -133,6 +147,7 @@ pub struct SignalStore {
     walk_forward_cache: Arc<Mutex<Option<(Instant, Vec<SignalWalkForward>)>>>,
     missed_opportunity_cache: Arc<Mutex<Option<(Instant, Vec<MissedOpportunityGateBand>)>>>,
     walk_forward_refreshing: Arc<AtomicBool>,
+    missed_opportunity_refreshing: Arc<AtomicBool>,
 }
 
 struct WriteRequest {
@@ -159,6 +174,7 @@ pub enum StoredSignalRecord {
     BookSnapshot(SignalBookSnapshot),
     ResearchFeatures(SignalResearchFeatures),
     ExternalMarket(ExternalMarketFeatures),
+    CounterfactualQuotePath(CounterfactualQuotePath),
 }
 
 // A short-lived development build added this trailing component before it was

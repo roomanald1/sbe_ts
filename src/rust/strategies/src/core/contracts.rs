@@ -60,6 +60,9 @@ pub enum StrategyParameterKey {
     ProfitProtectionActivationPercent,
     ProfitProtectionGivebackPercent,
     ProfitProtectionMinimumLockPercent,
+    ThesisFailureLossActivationPercent,
+    ThesisFailureConfirmationSamples,
+    ThesisFailureMinimumSignalStrength,
     RelativeStrengthDays,
     RsiEntryMax,
     RsiExitLevel,
@@ -79,6 +82,7 @@ pub enum StrategyParameterKey {
     CarryCostGatePercent,
     TrendSmaDays,
     PostOnlyTimeoutMinutes,
+    PostStopCooldownMinutes,
 }
 
 impl StrategyParameterKey {
@@ -118,6 +122,9 @@ impl StrategyParameterKey {
             Self::ProfitProtectionActivationPercent => "profit_protection_activation_percent",
             Self::ProfitProtectionGivebackPercent => "profit_protection_giveback_percent",
             Self::ProfitProtectionMinimumLockPercent => "profit_protection_minimum_lock_percent",
+            Self::ThesisFailureLossActivationPercent => "thesis_failure_loss_activation_percent",
+            Self::ThesisFailureConfirmationSamples => "thesis_failure_confirmation_samples",
+            Self::ThesisFailureMinimumSignalStrength => "thesis_failure_minimum_signal_strength",
             Self::RelativeStrengthDays => "relative_strength_days",
             Self::RsiEntryMax => "rsi_entry_max",
             Self::RsiExitLevel => "rsi_exit_level",
@@ -137,6 +144,7 @@ impl StrategyParameterKey {
             Self::CarryCostGatePercent => "carry_cost_gate_percent",
             Self::TrendSmaDays => "trend_sma_days",
             Self::PostOnlyTimeoutMinutes => "post_only_timeout_minutes",
+            Self::PostStopCooldownMinutes => "post_stop_cooldown_minutes",
         }
     }
 }

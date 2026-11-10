@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
   applyInstanceTodayPnl,
   AutoTraderOutcomesModel,
+  mergeLatestStrategyDecisions,
   resolveLedgerOrder,
   strategyInstanceForClose,
 } from './AutoTraderOutcomesModel';
@@ -10,6 +11,48 @@ import { buildLegacyLedgerOutcomes } from './legacy_ledger_outcomes';
 import type { PositionTrade } from './PositionTypes';
 
 describe('AutoTraderOutcomesModel', () => {
+  it('uses the newest decision audit instead of an older strategy reason', () => {
+    const latest = mergeLatestStrategyDecisions(
+      {
+        'live-momentum': {
+          timestamp: 1_000,
+          symbols: ['ETH-USDT'],
+          reason: 'older order reason',
+        },
+      },
+      [
+        {
+          stage: 'decision',
+          timestamp: 2_000,
+          status: 'skipped',
+          strategy: 'live-momentum',
+          symbol: 'BTC-USDT',
+          reason: 'entry gate rejected',
+        },
+        {
+          stage: 'decision',
+          timestamp: 3_000,
+          status: 'selected',
+          strategy: 'live-momentum',
+          symbol: 'XRP-USDT',
+          reason: 'candidate selected',
+        },
+        {
+          stage: 'entry',
+          timestamp: 4_000,
+          strategy: 'live-momentum',
+          symbol: 'SOL-USDT',
+          reason: 'not a strategy decision',
+        },
+      ],
+    );
+    assert.deepEqual(latest['live-momentum'], {
+      timestamp: 2_000,
+      symbols: ['BTC-USDT'],
+      reason: 'entry gate rejected',
+    });
+  });
+
   it('applies today P&L to server-built ledger rows by strategy instance', () => {
     const row = {
       rowId: 'ledger-summary:1',

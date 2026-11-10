@@ -1,11 +1,10 @@
 const MAX_SCOUT_SCOUT_DURATION_MS: u64 = 7 * 86_400_000;
 const MAX_COMPLETED_SCOUT_IDS_PER_SYMBOL: usize = 1_024;
 
-fn scout_stop_or_target_hit(
-    pending: &mut PendingOutcome,
-    quote: Option<(u64, f64, f64)>,
-) -> bool {
-    let Some((_, bid, ask)) = quote else { return false; };
+fn scout_stop_or_target_hit(pending: &mut PendingOutcome, quote: Option<(u64, f64, f64)>) -> bool {
+    let Some((_, bid, ask)) = quote else {
+        return false;
+    };
     let (entry, exit) = match pending.direction.as_str() {
         "bullish" => (pending.entry_ask, bid),
         "bearish" => (pending.entry_bid, ask),
@@ -18,27 +17,31 @@ fn scout_stop_or_target_hit(
     ) else {
         return false;
     };
-    let Some(return_percent) = directional_net_return(
-        &pending.direction,
-        entry,
-        exit,
-        pending.taker_fee_rate,
-    ) else {
+    let Some(return_percent) =
+        directional_net_return(&pending.direction, entry, exit, pending.taker_fee_rate)
+    else {
         return false;
     };
     if let Some(activation) = pending.profit_protection_activation_percent {
         if return_percent >= activation {
             pending.profit_protection_peak_return_percent = Some(
-                pending.profit_protection_peak_return_percent
+                pending
+                    .profit_protection_peak_return_percent
                     .map_or(return_percent, |peak| peak.max(return_percent)),
             );
         }
     }
-    let protection_exit = pending.profit_protection_peak_return_percent.is_some_and(|peak| {
-        let giveback = pending.profit_protection_giveback_percent.unwrap_or_default();
-        let minimum_lock = pending.profit_protection_minimum_lock_percent.unwrap_or_default();
-        return_percent <= (peak - giveback).max(minimum_lock)
-    });
+    let protection_exit = pending
+        .profit_protection_peak_return_percent
+        .is_some_and(|peak| {
+            let giveback = pending
+                .profit_protection_giveback_percent
+                .unwrap_or_default();
+            let minimum_lock = pending
+                .profit_protection_minimum_lock_percent
+                .unwrap_or_default();
+            return_percent <= (peak - giveback).max(minimum_lock)
+        });
     return_percent <= -stop || return_percent >= target || protection_exit
 }
 
@@ -140,26 +143,26 @@ impl SignalEngine {
                 }
             }
             let current_quote = self.best_quote.filter(|(quote_time, _, _)| {
-                *quote_time <= timestamp
-                    && timestamp.saturating_sub(*quote_time) <= MAX_BOOK_AGE_MS
+                *quote_time <= timestamp && timestamp.saturating_sub(*quote_time) <= MAX_BOOK_AGE_MS
             });
-            let is_scout = pending.sample_id.is_some();
+            let is_scout = pending.sample_id.is_some() && !pending.scout_observation_only;
             // Live scout feeds can carry trades without a synchronized book
             // update. Use the current trade as a zero-spread mark for scout
             // exits so these simulated positions do not remain open forever.
-            let scout_mark_quote = current_quote
-                .or_else(|| is_scout.then_some((timestamp, price, price)));
+            let scout_mark_quote =
+                current_quote.or_else(|| is_scout.then_some((timestamp, price, price)));
             let scout_age_ms = timestamp.saturating_sub(pending.timestamp);
-            let minimum_hold_active = pending.scout_minimum_hold_days
+            let minimum_hold_active = pending
+                .scout_minimum_hold_days
                 .is_some_and(|days| scout_age_ms < (days * 86_400_000.0) as u64);
-            let maximum_hold_elapsed = pending.scout_maximum_hold_days
+            let maximum_hold_elapsed = pending
+                .scout_maximum_hold_days
                 .is_some_and(|days| scout_age_ms >= (days * 86_400_000.0) as u64);
-            let maximum_scout_duration_elapsed =
-                is_scout
-                    && scout_age_ms
-                        >= pending
-                            .scout_maximum_duration_ms
-                            .unwrap_or(MAX_SCOUT_SCOUT_DURATION_MS);
+            let maximum_scout_duration_elapsed = is_scout
+                && scout_age_ms
+                    >= pending
+                        .scout_maximum_duration_ms
+                        .unwrap_or(MAX_SCOUT_SCOUT_DURATION_MS);
             let scout_exit_reason = if !is_scout {
                 None
             } else if pending.strategy_exit_requested && !minimum_hold_active {
@@ -183,7 +186,10 @@ impl SignalEngine {
                         .saturating_add(pending.horizon_seconds * 1000);
             if scout_exit || fixed_horizon_exit {
                 let evaluation_horizon_seconds = if is_scout {
-                    timestamp.saturating_sub(pending.timestamp).saturating_div(1000).max(1)
+                    timestamp
+                        .saturating_sub(pending.timestamp)
+                        .saturating_div(1000)
+                        .max(1)
                 } else {
                     pending.horizon_seconds
                 };
@@ -305,6 +311,22 @@ impl SignalEngine {
                     pending.entry_bid.zip(exit_ask).and_then(|(entry, exit)| {
                         directional_net_return("bearish", entry, exit, pending.taker_fee_rate)
                     });
+                let counterfactual_quote_path = self
+                    .counterfactual_book_history
+                    .iter()
+                    .filter(|sample| {
+                        sample.timestamp >= pending.timestamp && sample.timestamp <= timestamp
+                    })
+                    .map(|sample| CounterfactualQuoteSample {
+                        timestamp: sample.timestamp,
+                        bid_execution_price: depth_adjusted_quote_execution_price(
+                            &sample.bid_levels,
+                        ),
+                        ask_execution_price: depth_adjusted_quote_execution_price(
+                            &sample.ask_levels,
+                        ),
+                    })
+                    .collect();
                 let evaluation = SignalEvaluation {
                     symbol: pending.symbol,
                     signal_timestamp: pending.timestamp,
@@ -330,6 +352,7 @@ impl SignalEngine {
                     path_high_timestamp,
                     path_low,
                     path_low_timestamp,
+                    counterfactual_quote_path,
                     long_time_to_positive_net_seconds: pending
                         .first_long_positive_net_timestamp
                         .map(|first| first.saturating_sub(pending.timestamp) / 1000),
@@ -338,10 +361,19 @@ impl SignalEngine {
                         .map(|first| first.saturating_sub(pending.timestamp) / 1000),
                 };
                 let scout_id = pending.sample_id.clone();
-                if let Some(sample_id) = scout_id.as_ref() {
+                if let Some(sample_id) = scout_id
+                    .as_ref()
+                    .filter(|_| !pending.scout_observation_only)
+                {
                     self.remember_completed_scout(sample_id.clone());
                 }
-                outcomes.push(CompletedSignalOutcome { legacy, evaluation, scout_id, scout_exit_reason });
+                outcomes.push(CompletedSignalOutcome {
+                    legacy,
+                    evaluation,
+                    scout_id,
+                    scout_exit_reason,
+                    scout_observation_only: pending.scout_observation_only,
+                });
             } else {
                 remaining.push_back(pending);
             }

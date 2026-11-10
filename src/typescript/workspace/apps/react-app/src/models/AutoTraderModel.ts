@@ -2,10 +2,12 @@ import { BehaviorSubject } from 'rxjs';
 import {
   currentPositionSnapshot,
   subscribePositionStream,
+  waitForPositionSnapshot,
 } from '../position_stream';
 import {
   currentAutoTraderSnapshot,
   subscribeAutoTraderStream,
+  waitForAutoTraderSnapshot,
   type AutoTraderUiSnapshot,
 } from '../auto_trader_stream';
 import { subscribeInsightsStream } from '../insights_stream';
@@ -581,11 +583,11 @@ export class AutoTraderModel {
           this.state$.value.decisionQuality,
       });
     });
-    void this.refreshDecisionParameters();
-    void this.refresh();
+    void Promise.all([waitForAutoTraderSnapshot(), waitForPositionSnapshot()])
+      .then(() => { if (this.timer) void this.refresh(); })
+      .catch(() => { if (this.timer) { void this.refreshDecisionParameters(); void this.refresh(); } });
     this.timer = setInterval(() => {
       if (Date.now() - this.autoTraderSnapshotAt > 45_000) void this.refresh();
-      void this.refreshDecisionParameters();
     }, 30_000);
   }
   stop() {

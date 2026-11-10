@@ -96,6 +96,33 @@ struct PositionTrade {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+struct DatedCarryLedgerPosition {
+    spot_symbol: String,
+    future_symbol: String,
+    expiry_ms: u64,
+    entry_ms: u64,
+    quantity: f64,
+    spot_entry_price: f64,
+    future_entry_price: f64,
+    entry_fees: f64,
+    status: String,
+    #[serde(default)]
+    spot_exit_twap: Option<f64>,
+    #[serde(default)]
+    settlement_price: Option<f64>,
+    #[serde(default)]
+    net_pnl_usdt: Option<f64>,
+    #[serde(default)]
+    settlement_source: Option<String>,
+    #[serde(default)]
+    spot_mark_bid: Option<f64>,
+    #[serde(default)]
+    future_mark_ask: Option<f64>,
+    #[serde(default)]
+    marked_net_pnl_usdt: Option<f64>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 struct RestingOrder {
     id: String,
     symbol: String,

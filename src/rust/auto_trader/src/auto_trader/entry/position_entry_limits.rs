@@ -34,7 +34,7 @@ fn signal_position_block_reason(
     if settings.orders.iter().any(|order| strategy_exit_pending(order, signal_key, strategy_key)) {
         return Some(format!("Exit already pending for {signal_key} / {strategy_key}"));
     }
-    let strategy_cooldown_ms = strategy_post_stop_cooldown_ms(strategy_key, signal_key, settings);
+    let strategy_cooldown_ms = strategy_post_stop_cooldown_ms(signal, strategy_key, signal_key, settings, now_ms);
     if !portfolio_rebalance { if let Some(stopped_at) = settings
         .orders
         .iter()

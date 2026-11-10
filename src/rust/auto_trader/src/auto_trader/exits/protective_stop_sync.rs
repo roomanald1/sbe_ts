@@ -139,6 +139,7 @@ async fn sync_protective_stops(
                     Some(&entry_context),
                     scout_entry,
                     strategy_realized_usd,
+                    Some(total_trade_pnl / entry_notional * 100.0),
                     strategy_decision.as_ref(),
                     trade_id.as_deref(),
                 );
@@ -186,7 +187,7 @@ async fn sync_protective_stops(
                     .duration_since(UNIX_EPOCH)
                     .unwrap_or_default()
                     .as_millis() as u64;
-                let payload = protective_stop_audit_payload(
+                let mut payload = protective_stop_audit_payload(
                     &decision_id,
                     &stop,
                     update_timestamp,
@@ -209,6 +210,12 @@ async fn sync_protective_stops(
                     &price_path,
                     fully_closed,
                 );
+                if let Some(trade_id) = trade_id.as_deref() {
+                    payload["trade_id"] = serde_json::json!(trade_id);
+                    payload["entry_context"]["trade_id"] = serde_json::json!(trade_id);
+                }
+                payload["entry_context"]["learning_context"] = serde_json::json!(entry_context);
+                payload["entry_context"]["strategy_decision"] = serde_json::json!(strategy_decision);
                 if fully_closed {
                     let mut settings = state.settings.lock().await;
                     queue_post_exit_observation(&mut settings, &payload);

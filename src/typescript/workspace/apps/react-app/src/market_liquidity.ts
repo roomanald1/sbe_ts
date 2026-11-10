@@ -41,3 +41,4 @@ export function isUnusualTrade(trade: TradeTick, recent: TradeTick[]): boolean {
   const median = values.length ? values[Math.floor(values.length / 2)] : 0;
   return notional >= 10000 || (values.length >= 10 && median > 0 && notional >= median * 5);
 }
+//TODO add tests

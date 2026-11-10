@@ -300,6 +300,42 @@
   color: var(--muted);
   margin-top: 3px;
 }
+.auto-trader-learning-overview {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(155px, 1fr));
+  gap: 7px;
+  margin: 10px 0 6px;
+}
+.auto-trader-learning-overview > div {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 4px;
+  border: 1px solid #242a31;
+  border-radius: 4px;
+  padding: 8px;
+  background: #101419;
+}
+.auto-trader-learning-overview span {
+  color: var(--muted);
+  font: 600 9px/1.3 var(--mono);
+}
+.auto-trader-learning-overview strong {
+  color: #d7e1eb;
+  font: 700 12px/1.35 var(--mono);
+}
+.auto-trader-learning-overview small,
+.auto-trader-learning-caveat {
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.4;
+}
+.auto-trader-learning-caveat {
+  margin: 4px 0 8px !important;
+}
+.auto-trader-learning-error {
+  color: #e59b9b !important;
+}
 .auto-trader-parameter-input button,
 .auto-trader-strategy-parameters > button {
   border: 1px solid #303d4d;
@@ -594,4 +630,13 @@
   grid-column: 2;
   color: #a0a6ad;
   font-size: 9px;
+}
+.auto-trader-gate-delta-positive {
+  color: #82d8a2;
+}
+.auto-trader-gate-delta-negative {
+  color: #f08080;
+}
+.auto-trader-gate-delta-zero {
+  color: #a0a6ad;
 }

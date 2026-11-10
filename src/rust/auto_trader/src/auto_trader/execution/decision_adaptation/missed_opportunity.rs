@@ -3,46 +3,41 @@ fn longer_horizon_score_multiplier(score: f64, bands: &[MissedOpportunityGateBan
         return 1.0;
     }
     let absolute_score = score.abs();
-    let short_horizon = bands
+    bands
         .iter()
         .filter(|band| {
             band.gate == MissedOpportunityGate::Score
-                && band.horizon_seconds == 300
+                && band.symbol.is_none()
+                && matches!(band.horizon_seconds, 900 | 3_600)
                 && band.threshold <= absolute_score
+                && band.stop_target_sample_count >= COUNTERFACTUAL_RELAXATION_SAMPLES
+                && band
+                    .stop_target_average_net_return_percent
+                    .is_some_and(|average| average > 0.0)
+                && band.stop_target_positive_net_rate.is_some_and(|rate| {
+                    wilson_lower_bound(rate, band.stop_target_sample_count)
+                        .is_some_and(|lower| lower > 0.50)
+                })
+                && (band.horizon_seconds == 300
+                    || (band.time_to_profit_sample_count >= COUNTERFACTUAL_RELAXATION_SAMPLES
+                        && band.time_to_profit_rate.is_some_and(|rate| rate >= 0.50)
+                        && band.average_time_to_profit_seconds.is_some_and(|seconds| {
+                            seconds > 300.0 && seconds <= band.horizon_seconds as f64
+                        })))
         })
-        .max_by(|left, right| left.threshold.total_cmp(&right.threshold));
-    let Some(short) = short_horizon else {
-        return 1.0;
-    };
-    let Some(short_average) = short.average_net_return_percent else {
-        return 1.0;
-    };
-    let Some(short_positive_rate) = short.positive_net_rate else {
-        return 1.0;
-    };
-    let supported_longer_horizon = bands.iter().any(|long| {
-        long.gate == MissedOpportunityGate::Score
-            && (long.threshold - short.threshold).abs() < 1e-9
-            && matches!(long.horizon_seconds, 900 | 3_600)
-            && long.sample_count >= COUNTERFACTUAL_RELAXATION_SAMPLES
-            && long.time_to_profit_sample_count >= COUNTERFACTUAL_RELAXATION_SAMPLES
-            && long.average_net_return_percent.is_some_and(|average| {
-                average >= short_average + 0.10 && average > 0.0
-            })
-            && long.positive_net_rate.is_some_and(|rate| {
-                rate >= 0.70 && rate + 0.05 >= short_positive_rate
-            })
-            // The stop-target path model treats a stop breach as the exit,
-            // even if the terminal mark later recovers above entry.
-            && long.stop_target_sample_count >= COUNTERFACTUAL_RELAXATION_SAMPLES
-            && long.stop_target_average_net_return_percent.is_some_and(|value| value > 0.0)
-            && long.stop_target_positive_net_rate.is_some_and(|rate| rate >= 0.70)
-            && long.time_to_profit_rate.is_some_and(|rate| rate >= 0.70)
-            && long.average_time_to_profit_seconds.is_some_and(|seconds| {
-                seconds > 300.0 && seconds <= long.horizon_seconds as f64
-            })
-    });
-    if supported_longer_horizon { 1.5 } else { 1.0 }
+        .filter_map(|band| {
+            let average = band.stop_target_average_net_return_percent?;
+            let rate = band.stop_target_positive_net_rate?;
+            let sample_confidence = band.stop_target_sample_count as f64
+                / (band.stop_target_sample_count as f64 + COUNTERFACTUAL_RELAXATION_SAMPLES as f64);
+            let rate_confidence = (wilson_lower_bound(rate, band.stop_target_sample_count)? - 0.50)
+                .clamp(0.0, 0.50)
+                * 2.0;
+            let return_scale = (average / (1.0 + average)).clamp(0.0, 1.0);
+            Some(1.0 + 0.5 * sample_confidence * rate_confidence * return_scale)
+        })
+        .max_by(f64::total_cmp)
+        .unwrap_or(1.0)
 }
 
 fn adaptive_missed_opportunity_floor(
@@ -50,12 +45,57 @@ fn adaptive_missed_opportunity_floor(
     gate: MissedOpportunityGate,
     bands: &[MissedOpportunityGateBand],
 ) -> f64 {
-    bands
+    adaptive_missed_opportunity_floor_for_scope(learned_floor, gate, bands, None)
+}
+
+fn adaptive_missed_opportunity_floor_for_signal(
+    learned_floor: f64,
+    gate: MissedOpportunityGate,
+    bands: &[MissedOpportunityGateBand],
+    symbol: &str,
+    direction: &str,
+    strategy: Option<&str>,
+    market_context: &str,
+) -> f64 {
+    let scoped_floor = adaptive_missed_opportunity_floor_for_scope(
+        learned_floor,
+        gate,
+        bands,
+        Some((symbol, direction, strategy, market_context)),
+    );
+    if scoped_floor < learned_floor {
+        scoped_floor
+    } else {
+        adaptive_missed_opportunity_floor(learned_floor, gate, bands)
+    }
+}
+
+fn adaptive_missed_opportunity_floor_for_scope(
+    learned_floor: f64,
+    gate: MissedOpportunityGate,
+    bands: &[MissedOpportunityGateBand],
+    scope: Option<(&str, &str, Option<&str>, &str)>,
+) -> f64 {
+    let eligible = bands
         .iter()
         .filter(|band| {
+            let minimum_threshold = match gate {
+                MissedOpportunityGate::Score => COUNTERFACTUAL_SCORE_MIN_THRESHOLD,
+                MissedOpportunityGate::Strength => COUNTERFACTUAL_STRENGTH_MIN_THRESHOLD,
+                MissedOpportunityGate::Other => f64::INFINITY,
+            };
             band.gate == gate
-                && band.horizon_seconds == 300
-                && band.threshold >= COUNTERFACTUAL_STRENGTH_MIN_THRESHOLD
+                && match scope {
+                    Some((symbol, direction, strategy, market_context)) => {
+                        band.symbol.as_deref() == Some(symbol)
+                            && band.direction.as_deref() == Some(direction)
+                            && band.strategy.as_deref() == strategy
+                            && band.market_context.as_deref() == Some(market_context)
+                    }
+                    None => band.symbol.is_none(),
+                }
+                && matches!(band.horizon_seconds, 300 | 900 | 3_600)
+                && band.threshold >= minimum_threshold
                 && band.threshold < learned_floor
                 && band.stop_target_sample_count >= COUNTERFACTUAL_RELAXATION_SAMPLES
                 && band
@@ -63,11 +103,47 @@ fn adaptive_missed_opportunity_floor(
                     .is_some_and(|value| value > 0.0)
                 && band
                     .stop_target_positive_net_rate
-                    .is_some_and(|value| value >= 0.55)
+                    .is_some_and(|value| value >= COUNTERFACTUAL_RELAXATION_POSITIVE_RATE)
+                && (band.horizon_seconds == 300
+                    || (band.sample_count >= COUNTERFACTUAL_RELAXATION_SAMPLES
+                        && band
+                            .average_net_return_percent
+                            .is_some_and(|value| value > 0.0)
+                        && band
+                            .positive_net_rate
+                            .is_some_and(|value| value >= COUNTERFACTUAL_RELAXATION_POSITIVE_RATE)
+                        && band.time_to_profit_sample_count >= COUNTERFACTUAL_RELAXATION_SAMPLES
+                        && band.time_to_profit_rate.is_some_and(|value| value >= 0.50)
+                        && band.average_time_to_profit_seconds.is_some_and(|seconds| {
+                            seconds > 300.0 && seconds <= band.horizon_seconds as f64
+                        })))
+        })
+        .collect::<Vec<_>>();
+    let use_short_horizon = eligible.iter().any(|band| band.horizon_seconds == 300);
+    eligible
+        .into_iter()
+        .filter(|band| {
+            if use_short_horizon {
+                band.horizon_seconds == 300
+            } else {
+                matches!(band.horizon_seconds, 900 | 3_600)
+            }
         })
         .map(|band| band.threshold)
         .min_by(f64::total_cmp)
         .unwrap_or(learned_floor)
+}
+
+fn wilson_lower_bound(rate: f64, sample_count: usize) -> Option<f64> {
+    if !rate.is_finite() || !(0.0..=1.0).contains(&rate) || sample_count == 0 {
+        return None;
+    }
+    let n = sample_count as f64;
+    let z = 1.96;
+    let denominator = 1.0 + z * z / n;
+    let center = rate + z * z / (2.0 * n);
+    let margin = z * ((rate * (1.0 - rate) / n + z * z / (4.0 * n * n)).sqrt());
+    Some(((center - margin) / denominator).clamp(0.0, 1.0))
 }
 #[cfg(test)]
 #[cfg(test)]
@@ -98,8 +174,7 @@ fn adapt_order_type(
     {
         return Some(baseline);
     }
-    let baseline_cost =
-        baseline_stats.all_in_cost_notional_bps / baseline_stats.cost_notional;
+    let baseline_cost = baseline_stats.all_in_cost_notional_bps / baseline_stats.cost_notional;
     let baseline_fill_rate = baseline_stats.fill_rate_total / baseline_stats.samples as f64;
     ALL_ORDER_TYPES
         .iter()
@@ -127,12 +202,26 @@ fn adapt_order_type(
 mod missed_opportunity_learning_behavior_tests {
     use super::*;
 
-    fn band(gate: MissedOpportunityGate, threshold: f64, horizon_seconds: u64) -> MissedOpportunityGateBand {
+    fn band(
+        gate: MissedOpportunityGate,
+        threshold: f64,
+        horizon_seconds: u64,
+    ) -> MissedOpportunityGateBand {
         MissedOpportunityGateBand {
-            gate, threshold, horizon_seconds, sample_count: 100,
-            average_net_return_percent: Some(0.2), positive_net_rate: Some(0.65),
-            time_to_profit_sample_count: 100, time_to_profit_rate: Some(0.75),
-            average_time_to_profit_seconds: Some(400.0), stop_target_sample_count: 100,
+            gate,
+            threshold,
+            symbol: None,
+            direction: None,
+            strategy: None,
+            market_context: None,
+            horizon_seconds,
+            sample_count: 100,
+            average_net_return_percent: Some(0.2),
+            positive_net_rate: Some(0.65),
+            time_to_profit_sample_count: 100,
+            time_to_profit_rate: Some(0.75),
+            average_time_to_profit_seconds: Some(400.0),
+            stop_target_sample_count: 100,
             stop_target_average_net_return_percent: Some(0.3),
             stop_target_positive_net_rate: Some(0.7),
         }
@@ -145,24 +234,112 @@ mod missed_opportunity_learning_behavior_tests {
         long.average_net_return_percent = Some(0.4);
         long.positive_net_rate = Some(0.75);
         assert_eq!(longer_horizon_score_multiplier(0.5, &[short.clone()]), 1.0);
-        assert_eq!(longer_horizon_score_multiplier(f64::NAN, &[short.clone(), long.clone()]), 1.0);
-        assert_eq!(longer_horizon_score_multiplier(0.5, &[short.clone(), long.clone()]), 1.5);
+        assert_eq!(
+            longer_horizon_score_multiplier(f64::NAN, &[short.clone(), long.clone()]),
+            1.0
+        );
+        let multiplier = longer_horizon_score_multiplier(0.5, &[short.clone(), long.clone()]);
+        assert!(multiplier > 1.0 && multiplier < 1.5);
         let mut bad_long = long.clone();
         bad_long.stop_target_average_net_return_percent = Some(-0.1);
-        assert_eq!(longer_horizon_score_multiplier(0.5, &[short.clone(), bad_long]), 1.0);
+        assert_eq!(
+            longer_horizon_score_multiplier(0.5, &[short.clone(), bad_long]),
+            1.0
+        );
         let mut too_slow = long;
         too_slow.average_time_to_profit_seconds = Some(901.0);
-        assert_eq!(longer_horizon_score_multiplier(0.5, &[short, too_slow]), 1.0);
+        assert_eq!(
+            longer_horizon_score_multiplier(0.5, &[short, too_slow]),
+            1.0
+        );
     }
 
     #[test]
-    fn adaptive_floor_uses_only_validated_short_horizon_stop_target_bands() {
+    fn adaptive_floor_uses_longer_horizon_when_short_horizon_is_not_supported() {
         let valid_high = band(MissedOpportunityGate::Strength, 0.5, 300);
         let valid_low = band(MissedOpportunityGate::Strength, 0.35, 300);
-        assert_eq!(adaptive_missed_opportunity_floor(0.8, MissedOpportunityGate::Strength, &[valid_high.clone(), valid_low.clone()]), 0.35);
-        assert_eq!(adaptive_missed_opportunity_floor(0.8, MissedOpportunityGate::Score, &[valid_high.clone()]), 0.8);
+        assert_eq!(
+            adaptive_missed_opportunity_floor(
+                0.8,
+                MissedOpportunityGate::Strength,
+                &[valid_high.clone(), valid_low.clone()]
+            ),
+            0.35
+        );
+        assert_eq!(
+            adaptive_missed_opportunity_floor(
+                0.8,
+                MissedOpportunityGate::Score,
+                &[valid_high.clone()]
+            ),
+            0.8
+        );
         let mut invalid = valid_low;
         invalid.stop_target_sample_count = 0;
-        assert_eq!(adaptive_missed_opportunity_floor(0.8, MissedOpportunityGate::Strength, &[valid_high, invalid]), 0.5);
+        assert_eq!(
+            adaptive_missed_opportunity_floor(
+                0.8,
+                MissedOpportunityGate::Strength,
+                &[valid_high, invalid]
+            ),
+            0.5
+        );
+        let mut longer = band(MissedOpportunityGate::Strength, 0.35, 900);
+        longer.average_time_to_profit_seconds = Some(500.0);
+        assert_eq!(
+            adaptive_missed_opportunity_floor(0.8, MissedOpportunityGate::Strength, &[longer]),
+            0.35
+        );
+    }
+
+    #[test]
+    fn live_threshold_override_uses_matching_symbol_direction_and_strategy_evidence() {
+        let mut scoped = band(MissedOpportunityGate::Score, 0.3, 300);
+        scoped.symbol = Some("BTC-USDT".into());
+        scoped.direction = Some("bullish".into());
+        scoped.strategy = Some("donchian-20-btc200".into());
+        scoped.market_context = Some("trend".into());
+        let global = band(MissedOpportunityGate::Score, 0.4, 300);
+
+        assert_eq!(
+            adaptive_missed_opportunity_floor_for_signal(
+                0.8,
+                MissedOpportunityGate::Score,
+                &[scoped.clone(), global.clone()],
+                "BTC-USDT",
+                "bullish",
+                Some("donchian-20-btc200"),
+                "trend",
+            ),
+            0.3
+        );
+        assert_eq!(
+            adaptive_missed_opportunity_floor_for_signal(
+                0.8,
+                MissedOpportunityGate::Score,
+                &[scoped, global],
+                "BTC-USDT",
+                "bearish",
+                Some("donchian-20-btc200"),
+                "trend",
+            ),
+            0.4
+        );
+    }
+
+    #[test]
+    fn confidence_multiplier_is_monotonic_and_bounded() {
+        let low = band(MissedOpportunityGate::Score, 0.4, 900);
+        let mut high = low.clone();
+        high.stop_target_average_net_return_percent = Some(1.5);
+        high.stop_target_positive_net_rate = Some(0.9);
+        assert!(
+            longer_horizon_score_multiplier(0.5, &[high])
+                > longer_horizon_score_multiplier(0.5, &[low])
+        );
+        assert!(
+            longer_horizon_score_multiplier(0.5, &[band(MissedOpportunityGate::Score, 0.4, 300)])
+                <= 1.5
+        );
     }
 }

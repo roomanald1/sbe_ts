@@ -22,7 +22,7 @@ def classify(articles):
     for row in probabilities:
         negative, neutral, positive = (float(value) for value in row.tolist())
         score = positive - negative
-        direction = "bullish" if score >= 0.15 else "bearish" if score <= -0.15 else "neutral"
+        direction = "bullish" if score >= 0.05 else "bearish" if score <= -0.05 else "neutral"
         results.append({"direction": direction, "score": score, "confidence": max(negative, neutral, positive)})
     return results
 

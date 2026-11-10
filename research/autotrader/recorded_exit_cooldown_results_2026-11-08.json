@@ -1,0 +1,83 @@
+{
+  "since": "2026-11-06T00:00:00+00:00",
+  "queried_at_utc": "2026-11-08T19:42:58.675751+00:00",
+  "latest_closed_exit_utc": "2026-11-08T19:00:47.746000+00:00",
+  "entry_audits": 228,
+  "closed_trade_ids": 164,
+  "eligible_closed_trades": 164,
+  "post_exit_records": 113,
+  "cooldown_observed_history_skipped_pnl": {
+    "5": {},
+    "15": {
+      "2026-11-07": {
+        "count": 5,
+        "sum_usd": -0.4465,
+        "mean_usd": -0.0893,
+        "winners": 2,
+        "losers": 3
+      },
+      "2026-11-08": {
+        "count": 2,
+        "sum_usd": -0.3983,
+        "mean_usd": -0.1992,
+        "winners": 0,
+        "losers": 2
+      }
+    },
+    "30": {
+      "2026-11-07": {
+        "count": 10,
+        "sum_usd": -0.667,
+        "mean_usd": -0.0667,
+        "winners": 5,
+        "losers": 5
+      },
+      "2026-11-08": {
+        "count": 5,
+        "sum_usd": -0.5002,
+        "mean_usd": -0.1,
+        "winners": 2,
+        "losers": 3
+      }
+    }
+  },
+  "stop_screen": {
+    "2026-11-07": {
+      "0.75": {
+        "count": 15,
+        "baseline_usd": -3.4554,
+        "alternative_usd": -3.4991,
+        "extra_minutes_mean": 24.62,
+        "extra_capital_usd_minutes": 16033.84
+      },
+      "1.0": {
+        "count": 15,
+        "baseline_usd": -3.4554,
+        "alternative_usd": -3.4602,
+        "extra_minutes_mean": 27.55,
+        "extra_capital_usd_minutes": 18744.0
+      }
+    },
+    "2026-11-08": {
+      "0.75": {
+        "count": 38,
+        "baseline_usd": -9.1456,
+        "alternative_usd": -7.7395,
+        "extra_minutes_mean": 20.1,
+        "extra_capital_usd_minutes": 36829.81
+      },
+      "1.0": {
+        "count": 38,
+        "baseline_usd": -9.1456,
+        "alternative_usd": -7.7648,
+        "extra_minutes_mean": 24.12,
+        "extra_capital_usd_minutes": 43469.77
+      }
+    }
+  },
+  "stop_exclusions": {
+    "missing_post_exit": 21,
+    "overlapping_reentry": 11,
+    "incomplete_or_unsafe_path": 7
+  }
+}

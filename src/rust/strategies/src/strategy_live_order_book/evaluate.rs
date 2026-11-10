@@ -11,10 +11,10 @@ pub(crate) fn evaluate(insight: &StrategySignal<'_>) -> Result<StrategyDecision,
     let Some(signal) = insight.signal.as_ref() else {
         return Ok(StrategyDecision::Reject);
     };
-    let parameters = &insight.parameters;
-    let Some(minimum) =
-        strategy_parameter_value(&parameters, StrategyParameterKey::MinimumBookImbalance)
-    else {
+    let Some(minimum) = strategy_parameter_value(
+        &insight.parameters,
+        StrategyParameterKey::MinimumBookImbalance,
+    ) else {
         return Ok(StrategyDecision::Reject);
     };
     let side = match insight.direction {
@@ -22,15 +22,43 @@ pub(crate) fn evaluate(insight: &StrategySignal<'_>) -> Result<StrategyDecision,
         Some(SignalDirection::Short) => -1.0,
         None => return Ok(StrategyDecision::Reject),
     };
-    if signal
+    Ok(if signal
         .components
         .book_imbalance
         .is_some_and(|value| side * value >= minimum)
     {
-        Ok(StrategyDecision::Enter)
+        StrategyDecision::Enter
     } else {
-        Ok(StrategyDecision::Reject)
+        StrategyDecision::Reject
+    })
+}
+
+pub(crate) fn entry_rejection_reason(insight: &StrategySignal<'_>) -> Option<String> {
+    let Some(signal) = insight.signal.as_ref() else {
+        return Some("No live insight signal was provided".to_owned());
+    };
+    let Some(minimum) =
+        strategy_parameter_value(&insight.parameters, StrategyParameterKey::MinimumBookImbalance)
+    else {
+        return Some("Learned parameter minimum_book_imbalance is unavailable".to_owned());
+    };
+    let side = match insight.direction {
+        Some(SignalDirection::Long) => 1.0,
+        Some(SignalDirection::Short) => -1.0,
+        None => return Some("Signal direction is neutral or unavailable".to_owned()),
+    };
+    let directional = signal.components.book_imbalance.map(|value| side * value);
+    if directional.is_some_and(|value| value >= minimum) {
+        return None;
     }
+    let observed = match directional {
+        Some(value) if value.is_finite() => format!("{value:.3}"),
+        Some(_) => "non-finite".to_owned(),
+        None => "unavailable".to_owned(),
+    };
+    Some(format!(
+        "Directional order-book imbalance {observed}; requires at least {minimum:.3}"
+    ))
 }
 
 pub(super) fn should_exit_when_disabled(enabled: bool) -> bool {

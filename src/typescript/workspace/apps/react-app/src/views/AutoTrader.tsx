@@ -1,3 +1,5 @@
+
+/* TODO split into multiple files  */
 import { useEffect, useMemo, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { sharedAutoTraderSettingsModel } from '../models/AutoTraderModel';

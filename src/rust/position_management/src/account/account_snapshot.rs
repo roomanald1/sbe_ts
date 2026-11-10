@@ -37,8 +37,25 @@ fn account_snapshot_with_rates(
     });
     let cash = ledger.initial_cash
         + ledger.topups.iter().map(|topup| topup.amount).sum::<f64>()
-        + snapshot.cash_delta;
-    let fees_paid = snapshot.fees_paid;
+        + snapshot.cash_delta
+        + ledger
+            .dated_carry_positions
+            .iter()
+            .map(|position| {
+                if position.status.starts_with("closed") {
+                    position.net_pnl_usdt.unwrap_or_default()
+                } else {
+                    position.quantity * (position.future_entry_price - position.spot_entry_price)
+                        - position.entry_fees
+                }
+            })
+            .sum::<f64>();
+    let fees_paid = snapshot.fees_paid
+        + ledger
+            .dated_carry_positions
+            .iter()
+            .map(|position| position.entry_fees)
+            .sum::<f64>();
     let mut equity_available = snapshot.equity_available;
     let positions = snapshot.positions.into_values().collect::<Vec<_>>();
     let books = store.books_snapshot();
@@ -85,6 +102,45 @@ fn account_snapshot_with_rates(
         // entry_fees is a signed cash flow (negative for a fee); close_fee is
         // an estimated positive cost, so subtract only the latter.
         unrealized_pnl += (gross_unrealized + position.entry_fees - close_fee) * rate;
+    }
+    for position in ledger
+        .dated_carry_positions
+        .iter()
+        .filter(|position| position.status == "open")
+    {
+        let Some(marked_pnl) = position.marked_net_pnl_usdt.filter(|pnl| pnl.is_finite()) else {
+            equity_available = false;
+            continue;
+        };
+        let Some(spot_mark) = position.spot_mark_bid.filter(|price| price.is_finite() && *price > 0.0) else {
+            equity_available = false;
+            continue;
+        };
+        let Some(future_mark) = position.future_mark_ask.filter(|price| price.is_finite() && *price > 0.0) else {
+            equity_available = false;
+            continue;
+        };
+        let rate = rates.get("USDT").copied().unwrap_or_else(|| {
+            equity_available = false;
+            0.0
+        });
+        if rate > 0.0 {
+            let gross_mark = position.quantity
+                * (spot_mark - position.spot_entry_price + position.future_entry_price - future_mark);
+            equity += gross_mark * rate;
+            unrealized_pnl += marked_pnl * rate;
+        }
+    }
+    for position in ledger
+        .dated_carry_positions
+        .iter()
+        .filter(|position| position.status.starts_with("closed"))
+    {
+        if let Some(pnl) = position.net_pnl_usdt.filter(|pnl| pnl.is_finite()) {
+            realized_pnl += pnl * rates.get("USDT").copied().unwrap_or(0.0);
+        } else {
+            equity_available = false;
+        }
     }
     Ok(AccountResponse {
         currency: "USD",

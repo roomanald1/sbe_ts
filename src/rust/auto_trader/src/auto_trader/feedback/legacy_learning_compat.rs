@@ -112,9 +112,13 @@ fn record_strategy_trade_outcome(
     learning_context: Option<&str>,
     _scout: bool,
     realized_pnl_usd: f64,
+    net_return_percent: Option<f64>,
     entry_decision: Option<&serde_json::Value>,
     trade_id: Option<&str>,
 ) {
+    let Some(net_return_percent) = net_return_percent.filter(|value| value.is_finite()) else {
+        return;
+    };
     if !realized_pnl_usd.is_finite() {
         return;
     }
@@ -180,12 +184,7 @@ fn record_strategy_trade_outcome(
                 specs: Vec::new(),
                 scout: _scout,
                 realized_pnl_usd,
-                net_return_percent: entry_decision
-                    .and_then(|decision| decision.get("initial_entry_notional_usd"))
-                    .and_then(serde_json::Value::as_f64)
-                    .filter(|notional| *notional > 0.0)
-                    .map(|notional| realized_pnl_usd / notional * 100.0)
-                    .unwrap_or(0.0),
+                net_return_percent,
                 threshold_observations,
             });
         }
@@ -205,11 +204,11 @@ mod feedback_outbox_tests {
         });
         record_strategy_trade_outcome(
             &mut settings, "BTC-USDT", Some("live-momentum"), Some("scout:btc"), false,
-            1.25, Some(&decision), Some("trade-42"),
+            1.25, Some(0.8), Some(&decision), Some("trade-42"),
         );
         assert!(settings.learning.is_empty(), "the trader must not update learner state inline");
         let Some(FeedbackEvent::TradeOutcome {
-            event_id, profile_id, parameters, realized_pnl_usd, ..
+            event_id, profile_id, parameters, realized_pnl_usd, net_return_percent, ..
         }) = settings.feedback_outbox.first() else {
             panic!("trade outcome was not queued")
         };
@@ -217,6 +216,7 @@ mod feedback_outbox_tests {
         assert_eq!(parameters["minimum_momentum"], 0.003);
         assert_eq!(profile_id, &strategies::profile_id("BTC-USDT", "live-momentum", parameters));
         assert_eq!(*realized_pnl_usd, 1.25);
+        assert_eq!(*net_return_percent, 0.8);
     }
 
     #[test]
@@ -228,8 +228,7 @@ mod feedback_outbox_tests {
             "observed_insight": {
                 "momentum_10s_percent": 0.01,
                 "trend_5m_volatility_units": 0.02
-            },
-            "initial_entry_notional_usd": 100.0
+            }
         });
         record_strategy_trade_outcome(
             &mut settings,
@@ -238,6 +237,7 @@ mod feedback_outbox_tests {
             Some("btc:momentum"),
             false,
             1.25,
+            Some(1.25),
             Some(&decision),
             Some("trade-threshold-1"),
         );
@@ -252,6 +252,23 @@ mod feedback_outbox_tests {
         assert_eq!(threshold_observations[0].parameter_key, "minimum_momentum");
         assert_eq!(threshold_observations[0].threshold, 0.003);
         assert_eq!(threshold_observations[0].feature_value, 0.02);
+    }
+
+    #[test]
+    fn unattributable_reconciliation_deltas_do_not_create_zero_return_trades() {
+        let mut settings = Settings::default();
+        record_strategy_trade_outcome(
+            &mut settings,
+            "BTC-USDT",
+            Some("live-momentum"),
+            Some("btc:momentum"),
+            false,
+            -1.25,
+            None,
+            Some(&serde_json::json!({})),
+            Some("reconciliation-delta"),
+        );
+        assert!(settings.feedback_outbox.is_empty());
     }
 }
 

@@ -465,6 +465,95 @@ impl Strategy {
             Ok(decision)
         })
     }
+    pub fn entry_rejection_reason(self, input: &StrategySignal<'_>) -> Option<String> {
+        let reason = match self {
+            Self::LiveMomentum => strategy_live_momentum::evaluate::entry_rejection_reason(input),
+            Self::LiveTradeFlow => {
+                strategy_live_trade_flow::evaluate::entry_rejection_reason(input)
+            }
+            Self::LiveOrderBook => {
+                strategy_live_order_book::evaluate::entry_rejection_reason(input)
+            }
+            Self::LiveVwapDislocation => {
+                strategy_live_vwap_dislocation::evaluate::entry_rejection_reason(input)
+            }
+            Self::LiveAbsorptionPressure => {
+                strategy_live_absorption_pressure::evaluate::entry_rejection_reason(input)
+            }
+            _ => return None,
+        };
+        if reason.is_some() {
+            return reason;
+        }
+
+        if (self.definition().evaluate)(input).ok()? != StrategyDecision::Enter {
+            return Some("Live strategy evaluator rejected the signal".to_owned());
+        }
+        let evidence = input.walk_forward_evidence?;
+        let specs = self.parameter_specs();
+        let bounded_parameter = |key: StrategyParameterKey| {
+            let spec = specs.iter().find(|spec| spec.key == key)?;
+            let value = input.parameters.get(key.as_str()).copied()?;
+            let step_position = (value - spec.min) / spec.step;
+            (value.is_finite()
+                && value >= spec.min
+                && value <= spec.max
+                && spec.step > 0.0
+                && (step_position - step_position.round()).abs() <= 1e-6)
+                .then_some(value)
+        };
+        let Some(minimum_samples) =
+            bounded_parameter(StrategyParameterKey::ScoutMinimumWalkForwardSamples)
+        else {
+            return Some(
+                "Walk-forward gate parameter scout_minimum_walk_forward_samples is missing or out of bounds"
+                    .to_owned(),
+            );
+        };
+        let Some(minimum_positive_rate) =
+            bounded_parameter(StrategyParameterKey::ScoutMinimumPositiveNetRate)
+        else {
+            return Some(
+                "Walk-forward gate parameter scout_minimum_positive_net_rate is missing or out of bounds"
+                    .to_owned(),
+            );
+        };
+        if evidence.sample_count < minimum_samples.round() as usize {
+            return None;
+        }
+
+        let mut failed_checks = Vec::new();
+        if evidence
+            .average_net_return_percent
+            .is_none_or(|average| average <= 0.0)
+        {
+            let observed = evidence
+                .average_net_return_percent
+                .map(|value| format!("{value:.3}%"))
+                .unwrap_or_else(|| "unavailable".to_owned());
+            failed_checks.push(format!("average net return {observed} (requires > 0%)"));
+        }
+        if evidence
+            .positive_net_rate
+            .is_none_or(|rate| rate < minimum_positive_rate)
+        {
+            let observed = evidence
+                .positive_net_rate
+                .map(|value| format!("{:.1}%", value * 100.0))
+                .unwrap_or_else(|| "unavailable".to_owned());
+            failed_checks.push(format!(
+                "positive net rate {observed} (requires at least {:.1}%)",
+                minimum_positive_rate * 100.0
+            ));
+        }
+        (!failed_checks.is_empty()).then(|| {
+            format!(
+                "Walk-forward evidence failed with {} samples: {}",
+                evidence.sample_count,
+                failed_checks.join("; ")
+            )
+        })
+    }
     pub fn contract(self) -> StrategyContract {
         (self.definition().contract)()
     }
@@ -763,6 +852,144 @@ mod strategy_signal_contract_tests {
                 strategy.as_str()
             );
         }
+    }
+
+    #[test]
+    fn live_rejections_report_observed_value_and_required_threshold() {
+        let cases = [
+            (
+                Strategy::LiveMomentum,
+                "bullish",
+                SignalComponents {
+                    momentum_10s_percent: Some(0.01),
+                    trend_5m_volatility_units: Some(0.02),
+                    ..Default::default()
+                },
+                StrategyParameterKey::MinimumMomentum,
+                0.03,
+                "0.0100%",
+            ),
+            (
+                Strategy::LiveTradeFlow,
+                "bullish",
+                SignalComponents {
+                    trade_flow_imbalance: Some(-0.2),
+                    ..Default::default()
+                },
+                StrategyParameterKey::MinimumFlowImbalance,
+                0.3,
+                "-0.200",
+            ),
+            (
+                Strategy::LiveOrderBook,
+                "bullish",
+                SignalComponents {
+                    book_imbalance: Some(0.1),
+                    ..Default::default()
+                },
+                StrategyParameterKey::MinimumBookImbalance,
+                0.4,
+                "0.100",
+            ),
+            (
+                Strategy::LiveVwapDislocation,
+                "bullish",
+                SignalComponents {
+                    mispricing_vs_vwap_bps: Some(-1.2),
+                    ..Default::default()
+                },
+                StrategyParameterKey::MinimumVwapDislocationBps,
+                2.0,
+                "-1.20 bps",
+            ),
+            (
+                Strategy::LiveAbsorptionPressure,
+                "bullish",
+                SignalComponents {
+                    pressure_without_price_move: Some(0.1),
+                    ..Default::default()
+                },
+                StrategyParameterKey::MinimumAbsorptionPressure,
+                0.2,
+                "-0.100",
+            ),
+        ];
+
+        for (strategy, direction, components, parameter, threshold, expected_value) in cases {
+            let signal = Signal {
+                symbol: "XRP-USDC".to_owned(),
+                direction: direction.to_owned(),
+                strength: 1.0,
+                timestamp: 1,
+                stale: false,
+                score: 1.0,
+                ranging_probability: None,
+                components,
+                strategy_candidate: false,
+                strategy: None,
+                strategy_decision: None,
+                market_regime: None,
+                news_attribution: None,
+                entry_gate: None,
+            };
+            let parameters = BTreeMap::from([(parameter.as_str().to_owned(), threshold)]);
+            let input = StrategySignal::entry(&signal, &parameters);
+
+            assert_eq!(strategy.evaluate(&input).unwrap(), StrategyDecision::Reject);
+            let reason = strategy.entry_rejection_reason(&input).unwrap();
+            assert!(
+                reason.contains(expected_value),
+                "{}: {reason}",
+                strategy.as_str()
+            );
+            assert!(
+                reason.contains(&format!("{threshold:.2}")),
+                "{}: {reason}",
+                strategy.as_str()
+            );
+        }
+    }
+
+    #[test]
+    fn live_rejection_reports_failed_walk_forward_evidence() {
+        let strategy = Strategy::LiveMomentum;
+        let signal = Signal {
+            symbol: "XRP-USDC".to_owned(),
+            direction: "bullish".to_owned(),
+            strength: 1.0,
+            timestamp: 1,
+            stale: false,
+            score: 1.0,
+            ranging_probability: None,
+            components: SignalComponents {
+                momentum_10s_percent: Some(0.01),
+                ..Default::default()
+            },
+            strategy_candidate: false,
+            strategy: None,
+            strategy_decision: Some(serde_json::json!({
+                "strategy_walk_forward": {
+                    "sampleCount": 10000,
+                    "positiveNetRate": 0.6,
+                    "averageNetReturnPercent": -0.1,
+                    "lastSampleTimestampMs": 1
+                }
+            })),
+            market_regime: None,
+            news_attribution: None,
+            entry_gate: None,
+        };
+        let parameters = strategy
+            .parameter_specs()
+            .into_iter()
+            .map(|spec| (spec.key.as_str().to_owned(), spec.default))
+            .collect::<BTreeMap<_, _>>();
+        let input = StrategySignal::entry(&signal, &parameters);
+
+        assert_eq!(strategy.evaluate(&input).unwrap(), StrategyDecision::Reject);
+        let reason = strategy.entry_rejection_reason(&input).unwrap();
+        assert!(reason.contains("10000 samples"));
+        assert!(reason.contains("average net return -0.100%"));
     }
 
     #[test]

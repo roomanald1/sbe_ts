@@ -31,13 +31,14 @@ fn xml_field(item: &str, field: &str) -> Option<String> {
 }
 
 fn news_asset(title: &str) -> String {
-    const ASSETS: [(&str, &str); 18] = [
+    const ASSETS: [(&str, &str); 20] = [
         ("BITCOIN", "BTC"), ("ETHEREUM", "ETH"), ("RIPPLE", "XRP"),
         ("SOLANA", "SOL"), ("BINANCE COIN", "BNB"), ("CARDANO", "ADA"),
         ("DOGECOIN", "DOGE"), ("AVALANCHE", "AVAX"), ("POLKADOT", "DOT"),
         ("CHAINLINK", "LINK"), ("LITECOIN", "LTC"), ("BITCOIN", "BTC"),
         ("BTC", "BTC"), ("ETH", "ETH"), ("XRP", "XRP"), ("SOL", "SOL"),
-        ("BNB", "BNB"), ("ADA", "ADA"),
+        ("BNB", "BNB"), ("ADA", "ADA"), ("COINBASE", "CRYPTO"),
+        ("COINBASE GLOBAL", "CRYPTO"),
     ];
     let upper = format!(" {} ", title.to_ascii_uppercase().replace(|c: char| !c.is_ascii_alphanumeric(), " "));
     let matched = ASSETS.iter().find_map(|(name, ticker)| {
@@ -47,72 +48,83 @@ fn news_asset(title: &str) -> String {
     matched.unwrap_or_else(|| {
         // Generic security, policy, and company news must not be treated as
         // crypto market sentiment simply because it came from a crypto RSS feed.
-        const CRYPTO_CONTEXT: [&str; 16] = [
+        const CRYPTO_CONTEXT: [&str; 18] = [
             " CRYPTO ", " CRYPTOCURRENCY ", " DIGITAL ASSET ", " DIGITAL ASSETS ",
             " BLOCKCHAIN ", " TOKEN ", " TOKENS ", " STABLECOIN ", " STABLECOINS ",
-            " DEFI ", " WEB3 ", " EXCHANGE ", " ON CHAIN ", " ONCHAIN ", " ALTCOIN ", " ALTCOINS ",
+            " DEFI ", " WEB3 ", " EXCHANGE ", " COINBASE ", " TRUST CHARTER ",
+            " ON CHAIN ", " ONCHAIN ", " ALTCOIN ", " ALTCOINS ",
         ];
         if CRYPTO_CONTEXT.iter().any(|term| upper.contains(term)) { "CRYPTO".to_owned() }
         else { "GENERAL".to_owned() }
     })
 }
 
+fn contains_keyword(text: &str, term: &str) -> bool {
+    let text = text.to_ascii_uppercase();
+    let term = term.to_ascii_uppercase();
+    let term_bytes = term.as_bytes();
+    let text_bytes = text.as_bytes();
+    let mut start = 0;
+    while let Some(position) = text_bytes[start..].windows(term_bytes.len()).position(|window| window == term_bytes) {
+        let position = start + position;
+        let before = position == 0 || !text_bytes[position - 1].is_ascii_alphanumeric();
+        let after = position + term_bytes.len() >= text_bytes.len() || !text_bytes[position + term_bytes.len()].is_ascii_alphanumeric();
+        if before && after { return true; }
+        start = position + 1;
+    }
+    false
+}
+
 fn has_adverse_tax_policy(text: &str) -> bool {
-    let upper = text.to_ascii_uppercase();
     ["TAX", "TAXES", "TAXATION", "LEVY", "DUTY", "DUTIES"]
-        .iter().any(|term| upper.contains(term))
+        .iter().any(|term| contains_keyword(text, term))
         && !["TAX CUT", "TAX CUTS", "LOWER TAX", "LOWER TAXES"]
-            .iter().any(|term| upper.contains(term))
+            .iter().any(|term| contains_keyword(text, term))
 }
 
 fn has_market_risk_warning(text: &str) -> bool {
-    let upper = text.to_ascii_uppercase();
-    (upper.contains("LEVERAGE") && (upper.contains("RISK") || upper.contains("HEATING")))
-        || (upper.contains("VOLATILITY") && upper.contains("RISK"))
-        || (upper.contains("CRASH") && (upper.contains("SIMILAR SETUP") || upper.contains("WARNING") || upper.contains("RISK")))
+    (contains_keyword(text, "LEVERAGE") && (contains_keyword(text, "RISK") || contains_keyword(text, "HEATING")))
+        || (contains_keyword(text, "VOLATILITY") && contains_keyword(text, "RISK"))
+        || (contains_keyword(text, "CRASH") && (contains_keyword(text, "SIMILAR SETUP") || contains_keyword(text, "WARNING") || contains_keyword(text, "RISK")))
 }
 
 fn has_corporate_objection(text: &str) -> bool {
-    let upper = text.to_ascii_uppercase();
     ["OBJECTION", "OBJECTIONS", "OPPOSITION", "PUSHBACK", "RESISTANCE", "OPT OUT", "OPTED OUT", "OPTS OUT", "WITHDRAW FROM LISTING"]
-        .iter().any(|term| upper.contains(term))
+        .iter().any(|term| contains_keyword(text, term))
 }
 
 fn has_positive_upgrade_announcement(text: &str) -> bool {
-    let upper = text.to_ascii_uppercase();
     let upgrade = ["UPGRADE", "OVERHAUL", "NETWORK OVERHAUL", "PROTOCOL UPGRADE"]
-        .iter().any(|term| upper.contains(term));
+        .iter().any(|term| contains_keyword(text, term));
     let rollout = ["GOES LIVE", "GO LIVE", "LAUNCHES", "ROLLOUT", "ROLLS OUT", "ACTIVATES", "ACTIVATION"]
-        .iter().any(|term| upper.contains(term));
+        .iter().any(|term| contains_keyword(text, term));
     upgrade && rollout
 }
 
 fn has_material_adverse_event(text: &str) -> bool {
-    let upper = text.to_ascii_uppercase();
     ["HACK", "EXPLOIT", "BREACH", "ATTACK", "OUTAGE", "FAILS TO LAUNCH", "POSTPONED", "DELAYED"]
-        .iter().any(|term| upper.contains(term))
+        .iter().any(|term| contains_keyword(text, term))
 }
 
 fn matched_news_keywords(text: &str) -> Vec<String> {
-    const TERMS: [&str; 48] = [
+    const TERMS: [&str; 51] = [
         "APPROVES", "APPROVAL", "ADOPTS", "LAUNCHES", "SURGES", "RALLIES", "GAINS",
         "INFLOWS", "PARTNERSHIP", "INTEGRATES", "RECORD HIGH", "BREAKS OUT", "GOES LIVE",
-        "UPGRADE", "OVERHAUL", "HACK", "EXPLOIT", "BREACH", "LAWSUIT", "BANNED",
+        "UPGRADE", "OVERHAUL", "TRUST CHARTER", "CHARTER", "REGULATORY APPROVAL",
+        "HACK", "EXPLOIT", "BREACH", "LAWSUIT", "BANNED",
         "PLUNGES", "FALLS", "DROPS", "OUTFLOWS", "LIQUIDATION", "BANKRUPT", "DELIST",
         "DELAYED", "SUED", "BAN", "TAX", "TAXES", "TAXATION", "LEVY", "DUTY", "DUTIES",
         "OBJECTION", "OPPOSITION", "PUSHBACK", "RESISTANCE", "LEVERAGE", "VOLATILITY",
         "CRASH", "RISK", "ATTACK", "OUTAGE", "POSTPONED", "FAILS TO LAUNCH",
     ];
-    let upper = text.to_ascii_uppercase();
-    TERMS.iter().filter(|term| upper.contains(**term)).map(|term| term.to_ascii_lowercase()).collect()
+    TERMS.iter().filter(|term| contains_keyword(text, term)).map(|term| term.to_ascii_lowercase()).collect()
 }
 
 fn classify_news(title: &str, asset: &str, url: String, published_at: String, now: u64) -> NewsArticle {
-    const POSITIVE: [&str; 16] = ["APPROVES", "APPROVAL", "ADOPTS", "LAUNCHES", "SURGES", "RALLIES", "GAINS", "INFLOWS", "PARTNERSHIP", "INTEGRATES", "RECORD HIGH", "BREAKS OUT", "GOES LIVE", "GO LIVE", "UPGRADE", "OVERHAUL"];
+    const POSITIVE: [&str; 18] = ["APPROVES", "APPROVAL", "ADOPTS", "LAUNCHES", "SURGES", "RALLIES", "GAINS", "INFLOWS", "PARTNERSHIP", "INTEGRATES", "RECORD HIGH", "BREAKS OUT", "GOES LIVE", "GO LIVE", "UPGRADE", "OVERHAUL", "TRUST CHARTER", "CHARTER"];
     const NEGATIVE: [&str; 25] = ["HACK", "EXPLOIT", "BREACH", "LAWSUIT", "SUES", "BANNED", "BAN", "PLUNGES", "FALLS", "DROPS", "OUTFLOWS", "LIQUIDATION", "BANKRUPT", "DELIST", "TAX", "TAXES", "TAXATION", "LEVY", "DUTY", "DUTIES", "OBJECTION", "OPPOSITION", "PUSHBACK", "RESISTANCE", "DELAYED"];
-    let upper = title.to_ascii_uppercase();
-    let positive = POSITIVE.iter().filter(|term| upper.contains(**term)).count() as f64;
-    let negative = NEGATIVE.iter().filter(|term| upper.contains(**term)).count() as f64;
+    let positive = POSITIVE.iter().filter(|term| contains_keyword(title, term)).count() as f64;
+    let negative = NEGATIVE.iter().filter(|term| contains_keyword(title, term)).count() as f64;
     let adverse_tax_policy = has_adverse_tax_policy(title);
     let market_risk_warning = has_market_risk_warning(title);
     // Risk warnings take precedence over positive price movement wording.
@@ -283,6 +295,7 @@ mod news_classification_tests {
     #[test]
     fn asset_matching_requires_token_boundaries_or_crypto_context() {
         assert_eq!(news_asset("Bitcoin ETF gains approval"), "BTC");
+        assert_eq!(news_asset("Coinbase gets full U.S. trust charter from federal banking regulator"), "CRYPTO");
         assert_eq!(news_asset("Crypto exchange launches product"), "CRYPTO");
         assert_eq!(news_asset("General market outlook"), "GENERAL");
         assert_eq!(news_asset("Bitcoins are mentioned"), "GENERAL");
@@ -292,6 +305,9 @@ mod news_classification_tests {
     fn classification_prioritizes_adverse_risk_and_excludes_general_news() {
         let bullish = classify_news("Bitcoin upgrade goes live", "BTC", "u".into(), "d".into(), 10);
         assert_eq!(bullish.direction, "bullish");
+        assert!(!contains_keyword("federal banking regulator", "BAN"));
+        let coinbase = classify_news("Coinbase gets full U.S. trust charter from federal banking regulator", "CRYPTO", "u".into(), "d".into(), 10);
+        assert_eq!(coinbase.direction, "bullish");
         let risky = classify_news("Bitcoin gains despite volatility risk", "BTC", "u".into(), "d".into(), 10);
         assert_eq!(risky.direction, "bearish");
         let general = classify_news("Company gains approval", "GENERAL", "u".into(), "d".into(), 10);

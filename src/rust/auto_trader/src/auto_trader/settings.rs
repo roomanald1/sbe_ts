@@ -101,6 +101,8 @@ struct Settings {
     #[serde(default)]
     post_exit_observations: Vec<serde_json::Value>,
     #[serde(default)]
+    post_exit_adaptation_history: Vec<serde_json::Value>,
+    #[serde(default)]
     exit_timing_feedback_outbox: Vec<serde_json::Value>,
     #[serde(default)]
     profile_registration_outbox: Vec<strategies::StrategyProfileRegistration>,
@@ -112,6 +114,10 @@ struct Settings {
     learned_scout_parameter_variants: Vec<strategies::ScoutParameterVariant>,
     #[serde(default)]
     learned_strategy_size_multipliers: BTreeMap<String, f64>,
+    #[serde(default)]
+    recent_profile_context_returns: BTreeMap<String, Vec<(u64, f64)>>,
+    #[serde(default)]
+    contextual_stop_loss_percents: BTreeMap<String, f64>,
     #[serde(default)]
     learned_context_stats: BTreeMap<String, strategies::ContextLearningStat>,
     #[serde(default)]
@@ -186,11 +192,21 @@ fn default_exploration_percent() -> f64 {
 fn default_risk_appetite() -> f64 {
     50.0
 }
-fn default_max_open_positions() -> usize { 20 }
-fn default_max_intraday_open_positions() -> usize { DEFAULT_MAX_INTRADAY_OPEN_POSITIONS }
-fn default_max_daily_open_positions() -> usize { DEFAULT_MAX_DAILY_OPEN_POSITIONS }
-fn default_intraday_notional_limit() -> f64 { DEFAULT_INTRADAY_NOTIONAL_LIMIT }
-fn default_daily_strategy_notional_limit() -> f64 { DEFAULT_DAILY_STRATEGY_NOTIONAL_LIMIT }
+fn default_max_open_positions() -> usize {
+    20
+}
+fn default_max_intraday_open_positions() -> usize {
+    DEFAULT_MAX_INTRADAY_OPEN_POSITIONS
+}
+fn default_max_daily_open_positions() -> usize {
+    DEFAULT_MAX_DAILY_OPEN_POSITIONS
+}
+fn default_intraday_notional_limit() -> f64 {
+    DEFAULT_INTRADAY_NOTIONAL_LIMIT
+}
+fn default_daily_strategy_notional_limit() -> f64 {
+    DEFAULT_DAILY_STRATEGY_NOTIONAL_LIMIT
+}
 fn default_max_entries_per_auto_position() -> u32 {
     DEFAULT_MAX_ENTRIES_PER_AUTO_POSITION
 }
@@ -236,7 +252,9 @@ fn default_strategies() -> Vec<Strategy> {
 fn default_signal_strategies_enabled() -> bool {
     true
 }
-fn default_live_scout_parameter_samples() -> usize { 3 }
+fn default_live_scout_parameter_samples() -> usize {
+    3
+}
 
 impl Default for Settings {
     fn default() -> Self {
@@ -285,12 +303,15 @@ impl Default for Settings {
             context_learning_imported: false,
             feedback_outbox: Vec::new(),
             post_exit_observations: Vec::new(),
+            post_exit_adaptation_history: Vec::new(),
             exit_timing_feedback_outbox: Vec::new(),
             profile_registration_outbox: Vec::new(),
             registered_profile_ids: BTreeSet::new(),
             learned_profiles: BTreeMap::new(),
             learned_scout_parameter_variants: Vec::new(),
             learned_strategy_size_multipliers: BTreeMap::new(),
+            recent_profile_context_returns: BTreeMap::new(),
+            contextual_stop_loss_percents: BTreeMap::new(),
             learned_context_stats: BTreeMap::new(),
             learned_execution_stats: BTreeMap::new(),
             execution_learning: BTreeMap::new(),

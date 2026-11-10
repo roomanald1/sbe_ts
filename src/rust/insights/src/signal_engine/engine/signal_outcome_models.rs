@@ -36,6 +36,14 @@ fn stop_target_counterfactual_return(
     {
         return None;
     }
+    if !evaluation.counterfactual_quote_path.is_empty() {
+        return quote_path_stop_target_return(
+            evaluation,
+            direction,
+            stop_loss_percent,
+            take_profit_percent,
+        );
+    }
     let (entry_bid, entry_ask) = evaluation.entry_bid.zip(evaluation.entry_ask)?;
     if !entry_bid.is_finite() || !entry_ask.is_finite() || entry_bid <= 0.0 || entry_ask < entry_bid
     {
@@ -78,12 +86,136 @@ fn stop_target_counterfactual_return(
     let target_hit = best_net >= take_profit_percent;
     let stop_hit = worst_net <= -stop_loss_percent;
     match (target_hit, stop_hit) {
-        // If both barriers were touched and ordering is unavailable, count the
-        // stop first. This keeps the counterfactual from overstating edge.
-        (_, true) => Some(-stop_loss_percent),
+        (true, true) => {
+            let (target_timestamp, stop_timestamp) = match direction {
+                "bullish" => (
+                    evaluation.path_high_timestamp,
+                    evaluation.path_low_timestamp,
+                ),
+                "bearish" => (
+                    evaluation.path_low_timestamp,
+                    evaluation.path_high_timestamp,
+                ),
+                _ => return None,
+            };
+            if target_timestamp > 0 && target_timestamp < stop_timestamp {
+                Some(take_profit_percent)
+            } else {
+                Some(-stop_loss_percent)
+            }
+        }
+        (false, true) => Some(-stop_loss_percent),
         (true, false) => Some(take_profit_percent),
         (false, false) => terminal_net.filter(|value| value.is_finite()),
     }
+}
+
+const COUNTERFACTUAL_DISPLAYED_DEPTH_FRACTION: f64 = 0.10;
+
+fn quote_path_stop_target_return(
+    evaluation: &SignalEvaluation,
+    direction: &str,
+    stop_loss_percent: f64,
+    take_profit_percent: f64,
+) -> Option<f64> {
+    if !matches!(direction, "bullish" | "bearish") {
+        return None;
+    }
+    let entry = evaluation.counterfactual_quote_path.first()?;
+    let entry_price = quote_path_entry_price(entry, direction)?;
+    let mut terminal = None;
+    for sample in &evaluation.counterfactual_quote_path {
+        if sample.timestamp <= entry.timestamp {
+            continue;
+        }
+        let exit_price = quote_path_exit_price(sample, direction)?;
+        let net = directional_net_return(
+            direction,
+            entry_price,
+            exit_price,
+            evaluation.taker_fee_rate,
+        )?;
+        if net <= -stop_loss_percent || net >= take_profit_percent {
+            return Some(net);
+        }
+        terminal = Some(net);
+    }
+    terminal
+}
+
+pub(super) fn strategy_invalidation_counterfactual_return(
+    evaluation: &SignalEvaluation,
+    direction: &str,
+    invalidation_timestamp: u64,
+) -> Option<f64> {
+    let entry = evaluation.counterfactual_quote_path.first()?;
+    let entry_price = quote_path_entry_price(entry, direction)?;
+    let sample = evaluation
+        .counterfactual_quote_path
+        .iter()
+        .find(|sample| sample.timestamp >= invalidation_timestamp)?;
+    let exit_price = quote_path_exit_price(sample, direction)?;
+    directional_net_return(
+        direction,
+        entry_price,
+        exit_price,
+        evaluation.taker_fee_rate,
+    )
+}
+
+fn quote_path_entry_price(
+    sample: &CounterfactualQuoteSample,
+    direction: &str,
+ ) -> Option<f64> {
+    let entry_price = match direction {
+        "bullish" => sample.ask_execution_price,
+        "bearish" => sample.bid_execution_price,
+        _ => return None,
+    };
+    entry_price.filter(|price| price.is_finite() && *price > 0.0)
+}
+
+fn quote_path_exit_price(
+    sample: &CounterfactualQuoteSample,
+    direction: &str,
+) -> Option<f64> {
+    let exit_price = match direction {
+        "bullish" => sample.bid_execution_price,
+        "bearish" => sample.ask_execution_price,
+        _ => return None,
+    };
+    exit_price.filter(|price| price.is_finite() && *price > 0.0)
+}
+
+pub(super) fn depth_adjusted_quote_execution_price(levels: &[(f64, f64)]) -> Option<f64> {
+    let order_quantity = levels
+        .iter()
+        .filter_map(|(price, size)| {
+            (price.is_finite() && *price > 0.0 && size.is_finite() && *size > 0.0).then_some(*size)
+        })
+        .sum::<f64>()
+        * COUNTERFACTUAL_DISPLAYED_DEPTH_FRACTION;
+    if !order_quantity.is_finite() || order_quantity <= 0.0 {
+        return None;
+    }
+    quote_path_vwap(levels, order_quantity)
+}
+
+fn quote_path_vwap(levels: &[(f64, f64)], order_quantity: f64) -> Option<f64> {
+    let mut remaining = order_quantity;
+    let mut notional = 0.0;
+    for (price, size) in levels.iter().copied() {
+        if !price.is_finite() || price <= 0.0 || !size.is_finite() || size <= 0.0 {
+            continue;
+        }
+        let filled = remaining.min(size);
+        notional += price * filled;
+        remaining -= filled;
+        if remaining <= 1e-12 {
+            return Some(notional / order_quantity);
+        }
+    }
+    None
 }
 
 fn fit_learned_exit_policy(
@@ -161,7 +293,7 @@ fn fit_learned_exit_policy(
     })
 }
 
-fn configured_signal_taker_fee_rate() -> f64 {
+pub fn configured_signal_taker_fee_rate() -> f64 {
     let configured = std::env::var("SIGNALS_TAKER_FEE_RATE")
         .or_else(|_| std::env::var("PAPER_OKX_SPOT_TAKER_FEE_RATE"))
         .ok()
@@ -179,26 +311,148 @@ mod outcome_model_tests {
     #[test]
     fn microprice_and_directional_returns_handle_size_direction_and_invalid_inputs() {
         assert_eq!(sample_microprice(99.0, 3.0, 101.0, 1.0), 100.5);
-        assert!((directional_net_return("bullish", 100.0, 102.0, 0.001).unwrap() - 1.8).abs() < 1e-10);
-        assert!((directional_net_return("bearish", 100.0, 98.0, 0.001).unwrap() - 1.8).abs() < 1e-10);
+        assert!(
+            (directional_net_return("bullish", 100.0, 102.0, 0.001).unwrap() - 1.8).abs() < 1e-10
+        );
+        assert!(
+            (directional_net_return("bearish", 100.0, 98.0, 0.001).unwrap() - 1.8).abs() < 1e-10
+        );
         assert_eq!(directional_net_return("neutral", 100.0, 98.0, 0.0), None);
         assert_eq!(directional_net_return("bullish", 0.0, 98.0, 0.0), None);
     }
 
     #[test]
-    fn stop_target_counterfactual_is_conservative_when_both_barriers_were_hit() {
+    fn depth_adjusted_execution_price_accounts_for_visible_book_depth() {
+        let levels = [
+            (100.0, 0.2),
+            (99.5, 9.8),
+            (0.0, 0.0),
+            (0.0, 0.0),
+            (0.0, 0.0),
+            (0.0, 0.0),
+            (0.0, 0.0),
+        ];
+        let execution_price = depth_adjusted_quote_execution_price(&levels).unwrap();
+        assert!((execution_price - 99.6).abs() < 1e-10);
+    }
+
+    #[test]
+    fn stop_target_counterfactual_respects_observed_barrier_path_order() {
         let evaluation = SignalEvaluation {
-            symbol: "BTC-USDT".into(), signal_timestamp: 1, evaluated_timestamp: 2,
-            horizon_seconds: 60, signal_direction: "bullish".into(), signal_score: 0.5,
-            ranging_probability: None, reference_entry_price: 100.0, reference_exit_price: 100.0,
-            entry_bid: Some(99.9), entry_ask: Some(100.1), entry_quote_timestamp: Some(1),
-            exit_bid: None, exit_ask: None, exit_quote_timestamp: None, taker_fee_rate: 0.0,
-            long_gross_percent: 0.0, short_gross_percent: 0.0, long_net_percent: Some(0.1),
-            short_net_percent: Some(0.1), path_high: 102.0, path_high_timestamp: 2,
-            path_low: 98.0, path_low_timestamp: 2,
-            long_time_to_positive_net_seconds: None, short_time_to_positive_net_seconds: None,
+            symbol: "BTC-USDT".into(),
+            signal_timestamp: 1,
+            evaluated_timestamp: 2,
+            horizon_seconds: 60,
+            signal_direction: "bullish".into(),
+            signal_score: 0.5,
+            ranging_probability: None,
+            reference_entry_price: 100.0,
+            reference_exit_price: 100.0,
+            entry_bid: Some(99.9),
+            entry_ask: Some(100.1),
+            entry_quote_timestamp: Some(1),
+            exit_bid: None,
+            exit_ask: None,
+            exit_quote_timestamp: None,
+            taker_fee_rate: 0.0,
+            long_gross_percent: 0.0,
+            short_gross_percent: 0.0,
+            long_net_percent: Some(0.1),
+            short_net_percent: Some(0.1),
+            path_high: 102.0,
+            path_high_timestamp: 2,
+            path_low: 98.0,
+            path_low_timestamp: 2,
+            counterfactual_quote_path: Vec::new(),
+            long_time_to_positive_net_seconds: None,
+            short_time_to_positive_net_seconds: None,
         };
-        assert_eq!(stop_target_counterfactual_return(&evaluation, "bullish", 0.5, 0.8), Some(-0.5));
-        assert_eq!(stop_target_counterfactual_return(&evaluation, "bullish", 0.0, 0.8), None);
+        let mut with_quote_path = evaluation.clone();
+        with_quote_path
+            .counterfactual_quote_path
+            .push(CounterfactualQuoteSample::default());
+        assert_eq!(
+            bincode::serialize(&evaluation).unwrap(),
+            bincode::serialize(&with_quote_path).unwrap()
+        );
+        assert_eq!(
+            stop_target_counterfactual_return(&evaluation, "bullish", 0.5, 0.8),
+            Some(-0.5)
+        );
+        let target_first = SignalEvaluation {
+            path_high_timestamp: 2,
+            path_low_timestamp: 3,
+            ..evaluation.clone()
+        };
+        assert_eq!(
+            stop_target_counterfactual_return(&target_first, "bullish", 0.5, 0.8),
+            Some(0.8)
+        );
+        let stop_first = SignalEvaluation {
+            path_high_timestamp: 3,
+            path_low_timestamp: 2,
+            ..evaluation.clone()
+        };
+        assert_eq!(
+            stop_target_counterfactual_return(&stop_first, "bullish", 0.5, 0.8),
+            Some(-0.5)
+        );
+        assert_eq!(
+            stop_target_counterfactual_return(&evaluation, "bullish", 0.0, 0.8),
+            None
+        );
+    }
+
+    #[test]
+    fn quote_path_counterfactual_walks_depth_and_uses_the_first_executable_barrier() {
+        let evaluation = SignalEvaluation {
+            symbol: "BTC-USDT".into(),
+            signal_timestamp: 1_000,
+            evaluated_timestamp: 3_000,
+            horizon_seconds: 2,
+            signal_direction: "bullish".into(),
+            signal_score: 0.5,
+            ranging_probability: None,
+            reference_entry_price: 100.0,
+            reference_exit_price: 100.0,
+            entry_bid: Some(99.9),
+            entry_ask: Some(100.1),
+            entry_quote_timestamp: Some(1_000),
+            exit_bid: Some(100.5),
+            exit_ask: Some(100.6),
+            exit_quote_timestamp: Some(3_000),
+            taker_fee_rate: 0.0,
+            long_gross_percent: 0.5,
+            short_gross_percent: -0.5,
+            long_net_percent: Some(0.5),
+            short_net_percent: Some(-0.5),
+            path_high: 101.0,
+            path_high_timestamp: 3_000,
+            path_low: 99.0,
+            path_low_timestamp: 2_000,
+            counterfactual_quote_path: vec![
+                CounterfactualQuoteSample {
+                    timestamp: 1_000,
+                    bid_execution_price: Some(99.9),
+                    ask_execution_price: Some(100.1),
+                },
+                CounterfactualQuoteSample {
+                    timestamp: 2_000,
+                    bid_execution_price: Some(100.58),
+                    ask_execution_price: Some(101.0),
+                },
+                CounterfactualQuoteSample {
+                    timestamp: 3_000,
+                    bid_execution_price: Some(100.6),
+                    ask_execution_price: Some(100.7),
+                },
+            ],
+            long_time_to_positive_net_seconds: None,
+            short_time_to_positive_net_seconds: None,
+        };
+        let result = stop_target_counterfactual_return(&evaluation, "bullish", 0.5, 0.6)
+            .expect("quote path should produce an executable return");
+        assert!(result < 0.6);
+        assert!(result > 0.4);
     }
 }

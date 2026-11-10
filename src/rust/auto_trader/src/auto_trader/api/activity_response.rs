@@ -58,7 +58,7 @@ async fn get_activity(State(state): State<AutoTraderState>) -> Json<ActivityResp
         snapshot_activity_positions(&settings, today_start)
     };
     let carry_positions = state.dated_carry.lock().await.positions.clone();
-    strategy_positions.extend(carry_positions.into_iter()
+    strategy_positions.extend(carry_positions.clone().into_iter()
         .filter(|position| position.status.eq_ignore_ascii_case("open"))
         .map(|position| {
             OpenStrategyPosition {
@@ -99,7 +99,7 @@ async fn get_activity(State(state): State<AutoTraderState>) -> Json<ActivityResp
         &orders,
         &strategy_positions,
     ).await;
-    let unrealized_pnl = calculate_auto_unrealized_pnl(&auto_positions).await;
+    let unrealized_pnl = calculate_auto_unrealized_pnl(&auto_positions, &carry_positions).await;
     let learning = {
         let settings = state.settings.lock().await;
         calculate_activity_learning_metrics(&settings, today_start)

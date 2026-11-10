@@ -132,6 +132,43 @@ async fn register_scout(
 }
 
 #[derive(serde::Deserialize)]
+struct CounterfactualRegistration {
+    symbol: String,
+    timestamp: u64,
+    direction: String,
+    entry_price: f64,
+}
+
+async fn register_counterfactual(
+    axum::extract::State(runtime): axum::extract::State<Arc<SignalRuntime>>,
+    Json(sample): Json<CounterfactualRegistration>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    let now = now_ms();
+    if sample.symbol.is_empty()
+        || sample.symbol.len() > 32
+        || sample.timestamp > now.saturating_add(5_000)
+        || now.saturating_sub(sample.timestamp) > 7 * 86_400_000
+        || !matches!(sample.direction.as_str(), "bullish" | "bearish")
+        || !sample.entry_price.is_finite()
+        || sample.entry_price <= 0.0
+    {
+        return Err((StatusCode::BAD_REQUEST, "Invalid counterfactual sample".to_owned()));
+    }
+    let engine = runtime
+        .engines
+        .entry(sample.symbol.clone())
+        .or_insert_with(|| Arc::new(Mutex::new(SignalEngine::default())))
+        .clone();
+    let accepted = engine.lock().await.track_counterfactual(
+        sample.symbol,
+        sample.timestamp,
+        sample.direction,
+        sample.entry_price,
+    );
+    Ok(if accepted { StatusCode::ACCEPTED } else { StatusCode::NO_CONTENT })
+}
+
+#[derive(serde::Deserialize)]
 struct ScoutStrategyStatusUpdate {
     active_strategy_symbols: Vec<(String, String)>,
     #[serde(default)]
@@ -175,7 +212,7 @@ async fn ingest_signal_event(
         .try_lock()
         .map(|learning| learning.weight)
         .unwrap_or(0.0);
-    let mut scout_learning_outcomes = Vec::<(String, SignalEvaluation)>::new();
+    let mut scout_markouts = Vec::<(String, SignalEvaluation, bool)>::new();
     let (snapshot, records, market, event_timestamp) = {
         let event_timestamp = match &request.event {
             SignalFeedEvent::Price { timestamp, .. }
@@ -243,9 +280,13 @@ async fn ingest_signal_event(
                 }
                 for outcome in outcomes {
                     if outcome.scout_id.is_some() {
-                        crate::service_log!("INFO", "Scout scout completed: sample_id={} symbol={} exit_reason={} age_seconds={}", outcome.scout_id.as_deref().unwrap_or("unknown"), outcome.evaluation.symbol, outcome.scout_exit_reason.unwrap_or("unknown"), outcome.evaluation.horizon_seconds);
+                        crate::service_log!("INFO", "Scout observation completed: sample_id={} symbol={} observation_only={} exit_reason={} age_seconds={}", outcome.scout_id.as_deref().unwrap_or("unknown"), outcome.evaluation.symbol, outcome.scout_observation_only, outcome.scout_exit_reason.unwrap_or("horizon"), outcome.evaluation.horizon_seconds);
                         if let Some(sample_id) = outcome.scout_id.clone() {
-                            scout_learning_outcomes.push((sample_id, outcome.evaluation.clone()));
+                            scout_markouts.push((
+                                sample_id,
+                                outcome.evaluation.clone(),
+                                outcome.scout_observation_only,
+                            ));
                         }
                     }
                     if outcome.legacy.horizon_seconds == 60 {
@@ -451,9 +492,9 @@ async fn ingest_signal_event(
             );
         }
     }
-    if !scout_learning_outcomes.is_empty() {
+    if !scout_markouts.is_empty() {
         tokio::spawn(async move {
-            publish_scout_learning_outcomes(scout_learning_outcomes).await;
+            publish_scout_markouts(scout_markouts).await;
         });
     }
     if let Some(snapshot) = snapshot.as_ref() {
@@ -490,7 +531,9 @@ async fn ingest_signal_event(
     Ok(Json(snapshot))
 }
 
-async fn publish_scout_learning_outcomes(outcomes: Vec<(String, SignalEvaluation)>) {
+async fn publish_scout_markouts(
+    outcomes: Vec<(String, SignalEvaluation, bool)>,
+) {
     let _permit = SCOUT_LEARNING_DELIVERY_LIMIT
         .get_or_init(|| Semaphore::new(2))
         .acquire()
@@ -499,15 +542,29 @@ async fn publish_scout_learning_outcomes(outcomes: Vec<(String, SignalEvaluation
     let client = POSITION_MANAGEMENT_CLIENT.get_or_init(reqwest::Client::new);
     let scouts_base = std::env::var("SCOUTS_SERVICE_URL")
         .unwrap_or_else(|_| "http://127.0.0.1:3011".to_owned());
-    for (decision_id, evaluation) in outcomes {
+    for (decision_id, evaluation, observation_only) in outcomes {
         let payload = serde_json::json!({
             "decision_id": decision_id,
             "symbol": evaluation.symbol,
             "signal_timestamp_ms": evaluation.signal_timestamp,
             "evaluated_timestamp_ms": evaluation.evaluated_timestamp,
             "taker_fee_rate": evaluation.taker_fee_rate,
+            "observation_only": observation_only,
+            "horizon_seconds": evaluation.horizon_seconds,
+            "reference_entry_price": evaluation.reference_entry_price,
+            "reference_exit_price": evaluation.reference_exit_price,
+            "entry_bid": evaluation.entry_bid,
+            "entry_ask": evaluation.entry_ask,
+            "exit_bid": evaluation.exit_bid,
+            "exit_ask": evaluation.exit_ask,
+            "long_gross_percent": evaluation.long_gross_percent,
+            "short_gross_percent": evaluation.short_gross_percent,
             "long_net_percent": evaluation.long_net_percent,
             "short_net_percent": evaluation.short_net_percent,
+            "path_high": evaluation.path_high,
+            "path_low": evaluation.path_low,
+            "long_time_to_positive_net_seconds": evaluation.long_time_to_positive_net_seconds,
+            "short_time_to_positive_net_seconds": evaluation.short_time_to_positive_net_seconds,
         });
         for attempt in 0..3 {
             match client

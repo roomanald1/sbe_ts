@@ -336,6 +336,8 @@ fn scout_delivery_signals(dashboard: &serde_json::Value) -> Vec<serde_json::Valu
         signal["best_ask"] = serde_json::json!(ask);
         signal["price"] = serde_json::json!(bid + (ask - bid) / 2.0);
         signal["book_updated_at_ms"] = serde_json::json!(updated_at);
+        signal["scout_taker_fee_rate"] =
+            serde_json::json!(insights::signals::configured_signal_taker_fee_rate());
         signals.push(signal);
     }
     signals
@@ -559,6 +561,10 @@ mod signal_feed_worker_tests {
         assert_eq!(signals[0]["best_bid"], 100.0);
         assert_eq!(signals[0]["best_ask"], 101.0);
         assert_eq!(signals[0]["price"], 100.5);
+        assert_eq!(
+            signals[0]["scout_taker_fee_rate"],
+            insights::signals::configured_signal_taker_fee_rate()
+        );
         assert!(signals[0]["book_updated_at_ms"].as_u64().unwrap() <= now_ms());
         assert!(serde_json::to_vec(&queued[0].1).unwrap().len() < 1_024);
         let stale_dashboard = serde_json::json!({

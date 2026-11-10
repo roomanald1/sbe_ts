@@ -8,6 +8,7 @@ async fn snapshot_position_ledger(ledger: &Mutex<Ledger>) -> (Ledger, f64, f64) 
     let trade_count = guard.trades.len();
     let mut snapshot = Ledger {
         trades: Vec::new(),
+        dated_carry_positions: guard.dated_carry_positions.clone(),
         initial_cash: guard.initial_cash,
         topups: guard.topups.clone(),
         max_leverage: guard.max_leverage,
@@ -269,6 +270,10 @@ fn load_sqlite_ledger(path: &std::path::Path) -> anyhow::Result<Ledger> {
         });
     }
     let db = rusqlite::Connection::open(path)?;
+    db.execute(
+        "CREATE TABLE IF NOT EXISTS dated_carry_positions(id TEXT PRIMARY KEY, payload TEXT NOT NULL)",
+        [],
+    )?;
     let mut ledger = Ledger {
         initial_cash: default_account_cash(),
         ..Ledger::default()
@@ -295,6 +300,7 @@ fn load_sqlite_ledger(path: &std::path::Path) -> anyhow::Result<Ledger> {
         }};
     }
     read_rows!("trades", trades, PositionTrade);
+    read_rows!("dated_carry_positions", dated_carry_positions, DatedCarryLedgerPosition);
     read_rows!("topups", topups, AccountTopup);
     read_rows!("resting_orders", orders, RestingOrder);
     read_rows!("barrier_orders", barrier_orders, BarrierOrder);
@@ -310,10 +316,11 @@ fn save_sqlite_ledger(path: &std::path::Path, ledger: &Ledger) -> anyhow::Result
         std::fs::create_dir_all(parent)?;
     }
     let mut db = rusqlite::Connection::open(path)?;
-    db.execute_batch("PRAGMA journal_mode=WAL; CREATE TABLE IF NOT EXISTS ledger_meta(id INTEGER PRIMARY KEY CHECK(id=1), payload TEXT NOT NULL); CREATE TABLE IF NOT EXISTS trades(id TEXT PRIMARY KEY, symbol TEXT NOT NULL, timestamp INTEGER NOT NULL, side TEXT NOT NULL, quantity REAL NOT NULL, execution_price REAL NOT NULL, payload TEXT NOT NULL); CREATE INDEX IF NOT EXISTS trades_symbol_time ON trades(symbol,timestamp); CREATE TABLE IF NOT EXISTS topups(id INTEGER PRIMARY KEY, payload TEXT NOT NULL); CREATE TABLE IF NOT EXISTS resting_orders(id TEXT PRIMARY KEY, payload TEXT NOT NULL); CREATE TABLE IF NOT EXISTS barrier_orders(id TEXT PRIMARY KEY, payload TEXT NOT NULL); CREATE TABLE IF NOT EXISTS scheduled_runs(id TEXT PRIMARY KEY, payload TEXT NOT NULL);")?;
+    db.execute_batch("PRAGMA journal_mode=WAL; CREATE TABLE IF NOT EXISTS ledger_meta(id INTEGER PRIMARY KEY CHECK(id=1), payload TEXT NOT NULL); CREATE TABLE IF NOT EXISTS trades(id TEXT PRIMARY KEY, symbol TEXT NOT NULL, timestamp INTEGER NOT NULL, side TEXT NOT NULL, quantity REAL NOT NULL, execution_price REAL NOT NULL, payload TEXT NOT NULL); CREATE INDEX IF NOT EXISTS trades_symbol_time ON trades(symbol,timestamp); CREATE TABLE IF NOT EXISTS dated_carry_positions(id TEXT PRIMARY KEY, payload TEXT NOT NULL); CREATE TABLE IF NOT EXISTS topups(id INTEGER PRIMARY KEY, payload TEXT NOT NULL); CREATE TABLE IF NOT EXISTS resting_orders(id TEXT PRIMARY KEY, payload TEXT NOT NULL); CREATE TABLE IF NOT EXISTS barrier_orders(id TEXT PRIMARY KEY, payload TEXT NOT NULL); CREATE TABLE IF NOT EXISTS scheduled_runs(id TEXT PRIMARY KEY, payload TEXT NOT NULL);")?;
     let tx = db.transaction()?;
     tx.execute("INSERT OR REPLACE INTO ledger_meta(id,payload) VALUES(1,?1)",[serde_json::to_string(&serde_json::json!({"initial_cash":ledger.initial_cash,"max_leverage":ledger.max_leverage}))?])?;
     tx.execute("DELETE FROM trades", [])?;
+    tx.execute("DELETE FROM dated_carry_positions", [])?;
     tx.execute("DELETE FROM topups", [])?;
     tx.execute("DELETE FROM resting_orders", [])?;
     tx.execute("DELETE FROM barrier_orders", [])?;
@@ -333,6 +340,15 @@ fn save_sqlite_ledger(path: &std::path::Path, ledger: &Ledger) -> anyhow::Result
                 t.quantity,
                 t.execution_price,
                 serde_json::to_string(t)?
+            ],
+        )?;
+    }
+    for position in &ledger.dated_carry_positions {
+        tx.execute(
+            "INSERT INTO dated_carry_positions(id,payload) VALUES(?1,?2)",
+            rusqlite::params![
+                format!("{}:{}:{}", position.future_symbol, position.expiry_ms, position.entry_ms),
+                serde_json::to_string(position)?
             ],
         )?;
     }

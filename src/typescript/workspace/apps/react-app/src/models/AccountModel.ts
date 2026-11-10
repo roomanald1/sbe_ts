@@ -2,10 +2,12 @@ import { BehaviorSubject } from 'rxjs';
 import {
   currentPositionSnapshot,
   subscribePositionStream,
+  waitForPositionSnapshot,
 } from '../position_stream';
 import {
   currentAutoTraderSnapshot,
   subscribeAutoTraderStream,
+  waitForAutoTraderSnapshot,
 } from '../auto_trader_stream';
 import { sharedGet } from '../shared_get';
 export type AccountState = {
@@ -88,8 +90,9 @@ export class AccountModel {
     this.stopAutoTraderStream = subscribeAutoTraderStream((snapshot) =>
       updateAutoTotal(snapshot.activity),
     );
-    void this.refresh();
-    this.timer = setInterval(() => void this.refresh(), 30_000);
+    void Promise.all([waitForPositionSnapshot(), waitForAutoTraderSnapshot()])
+      .then(() => { if (this.stopPositionStream) void this.refresh(); })
+      .catch(() => { if (this.stopPositionStream) void this.refresh(); });
   }
   stop() {
     if (this.timer) clearInterval(this.timer);

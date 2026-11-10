@@ -89,11 +89,6 @@ pub(super) async fn accept_feedback(
             .collect::<Vec<_>>(),
         FeedbackEvent::ScoutOutcome { .. } => Vec::new(),
     };
-    registered.samples = registered.samples.saturating_add(1);
-    if event_is_positive(&event) {
-        registered.positive = registered.positive.saturating_add(1);
-    }
-    registered.realized_pnl += event_value(&event);
     let net_return = match &event {
         FeedbackEvent::ScoutOutcome {
             net_return_percent, ..
@@ -108,6 +103,7 @@ pub(super) async fn accept_feedback(
         }
         FeedbackEvent::TradeOutcome { .. } => Vec::new(),
     };
+    let empty_baseline = BTreeMap::new();
     let baseline_parameters = match &event {
         FeedbackEvent::ScoutOutcome {
             baseline_parameters,
@@ -118,13 +114,53 @@ pub(super) async fn accept_feedback(
     registered.outcomes.push(LearningOutcome {
         observed_at_ms: event_observed_at(&event),
         net_return_percent: net_return,
+        evidence_group_id: event_evidence_group_id(&event),
+        learning_context: match &event {
+            FeedbackEvent::TradeOutcome { scout: false, .. } => event_context(&event)
+                .and_then(|context| context.strip_suffix(":trade").map(str::to_owned)),
+            _ => None,
+        },
+        source: match &event {
+            FeedbackEvent::ScoutOutcome { .. } => LearningOutcomeSource::Scout,
+            FeedbackEvent::TradeOutcome { scout: true, .. } => {
+                LearningOutcomeSource::PaperScoutTrade
+            }
+            FeedbackEvent::TradeOutcome { scout: false, .. } => LearningOutcomeSource::Trade,
+        },
+        realized_pnl_usd: match &event {
+            FeedbackEvent::TradeOutcome {
+                realized_pnl_usd, ..
+            } => Some(*realized_pnl_usd),
+            FeedbackEvent::ScoutOutcome { .. } => None,
+        },
         tested_parameter_keys,
         baseline_parameters,
+        paired_comparison: matches!(&event, FeedbackEvent::ScoutOutcome { event_id, .. } if event_id.starts_with("paired-scout:")),
     });
     let cutoff = now_ms().saturating_sub(7 * 24 * 60 * 60 * 1000);
     registered
         .outcomes
         .retain(|outcome| outcome.observed_at_ms >= cutoff);
+    // Registered profile gates and profile statistics use actual closed-trade
+    // evidence only. Scout returns are percentage counterfactuals, not USD P&L.
+    registered.samples = registered
+        .outcomes
+        .iter()
+        .filter(|outcome| outcome.source == LearningOutcomeSource::Trade)
+        .count();
+    registered.positive = registered
+        .outcomes
+        .iter()
+        .filter(|outcome| {
+            outcome.source == LearningOutcomeSource::Trade && outcome.net_return_percent > 0.0
+        })
+        .count();
+    registered.realized_pnl = registered
+        .outcomes
+        .iter()
+        .filter(|outcome| outcome.source == LearningOutcomeSource::Trade)
+        .filter_map(|outcome| outcome.realized_pnl_usd)
+        .sum();
     let updated = update_profile(&registered.profile, event_specs(&event), &event).ok_or((
         StatusCode::UNPROCESSABLE_ENTITY,
         "feedback did not match profile".into(),
@@ -138,10 +174,36 @@ pub(super) async fn accept_feedback(
     let registered_realized_pnl = registered.realized_pnl;
     let registered_specs = registered.specs.clone();
     let registered_profile = registered.profile.clone();
-    let paired_outcomes = if parameter_specs.is_empty() {
+    let baseline_parameters = match &event {
+        FeedbackEvent::ScoutOutcome {
+            baseline_parameters,
+            ..
+        } => baseline_parameters,
+        FeedbackEvent::TradeOutcome { .. } => &empty_baseline,
+    };
+    let active_matches_baseline = active_profiles.get(&profile_key).is_some_and(|active| {
+        active.parameters.len() == parameters.len()
+            && parameters.iter().all(|(key, value)| {
+                if parameter_specs.iter().any(|spec| &spec.key == key) {
+                    baseline_parameters
+                        .get(key)
+                        .is_some_and(|baseline| active.parameters.get(key) == Some(baseline))
+                } else {
+                    active.parameters.get(key) == Some(value)
+                }
+            })
+    });
+    let paired_outcomes = if parameter_specs.is_empty() || !active_matches_baseline {
         Vec::new()
     } else {
-        paired_parameter_outcomes(variants, symbol, strategy, parameters, parameter_specs)
+        paired_parameter_outcomes(
+            variants,
+            symbol,
+            strategy,
+            parameters,
+            parameter_specs,
+            baseline_parameters,
+        )
     };
     let paired_lower_bound = one_sided_90_lower_bound(&paired_outcomes);
     let promote_tested_parameters = matches!(event, FeedbackEvent::ScoutOutcome { .. })
@@ -167,7 +229,9 @@ pub(super) async fn accept_feedback(
         let active = active_profiles
             .entry(profile_key)
             .or_insert(updated.clone());
-        let mut promoted = updated.clone();
+        // A completed trade reports the profile that entered it. It must not
+        // restore old parameter values over a newer paired Scout promotion.
+        let mut promoted = active.clone();
         promoted.version = active.version.saturating_add(1);
         promoted.profile_id =
             strategies::profile_id(&promoted.symbol, &promoted.strategy, &promoted.parameters);
@@ -245,7 +309,7 @@ pub(super) async fn accept_feedback(
             &context,
             event_observed_at(&event),
             event_is_positive(&event),
-            event_value(&event),
+            event_net_return_percent(&event),
         );
     }
     persist(&service.path, &state)?;
@@ -283,26 +347,39 @@ fn paired_parameter_outcomes(
     strategy: &str,
     candidate_parameters: &BTreeMap<String, f64>,
     specs: &[ParameterSpec],
+    baseline_parameters: &BTreeMap<String, f64>,
 ) -> Vec<f64> {
-    let mut outcomes = Vec::new();
-    for variant in variants
-        .values()
-        .filter(|variant| variant.profile.symbol == symbol && variant.profile.strategy == strategy)
-    {
-        let matches_candidate = specs.iter().all(|spec| {
-            variant.profile.parameters.get(&spec.key) == candidate_parameters.get(&spec.key)
-        });
+    let mut grouped_outcomes = BTreeMap::<String, Vec<f64>>::new();
+    for (profile_id, variant) in variants.iter().filter(|(_, variant)| {
+        variant.profile.symbol == symbol && variant.profile.strategy == strategy
+    }) {
+        let matches_candidate = &variant.profile.parameters == candidate_parameters;
         if !matches_candidate {
             continue;
         }
-        outcomes.extend(variant.outcomes.iter().filter_map(|outcome| {
-            specs
-                .iter()
-                .all(|spec| outcome.tested_parameter_keys.contains(&spec.key))
-                .then_some(outcome.net_return_percent)
-        }));
+        for (index, outcome) in variant.outcomes.iter().enumerate() {
+            if outcome.source == LearningOutcomeSource::Scout
+                && outcome.paired_comparison
+                && outcome.baseline_parameters == *baseline_parameters
+                && specs
+                    .iter()
+                    .all(|spec| outcome.tested_parameter_keys.contains(&spec.key))
+            {
+                let group = outcome
+                    .evidence_group_id
+                    .clone()
+                    .unwrap_or_else(|| format!("{profile_id}:{index}"));
+                grouped_outcomes
+                    .entry(group)
+                    .or_default()
+                    .push(outcome.net_return_percent);
+            }
+        }
     }
-    outcomes
+    grouped_outcomes
+        .values()
+        .map(|returns| returns.iter().sum::<f64>() / returns.len() as f64)
+        .collect()
 }
 
 fn promote_paired_parameters(
@@ -318,9 +395,7 @@ fn promote_paired_parameters(
         .filter(|variant| {
             variant.profile.strategy == strategy
                 && variant.profile.symbol == symbol
-                && specs.iter().all(|spec| {
-                    variant.profile.parameters.get(&spec.key) == candidate_parameters.get(&spec.key)
-                })
+                && &variant.profile.parameters == candidate_parameters
                 && variant.outcomes.iter().any(|outcome| {
                     specs
                         .iter()
@@ -400,10 +475,7 @@ pub(super) fn should_publish_trade_profile(
     positive: usize,
     net_outcome: f64,
 ) -> bool {
-    samples >= 5
-        && positive.saturating_mul(2) > samples
-        && net_outcome.is_finite()
-        && net_outcome > 0.0
+    samples >= 5 && positive <= samples && net_outcome.is_finite()
 }
 
 pub(super) fn persist(path: &Path, state: &LearningState) -> Result<(), (StatusCode, String)> {
@@ -449,15 +521,28 @@ pub(super) fn event_is_positive(event: &FeedbackEvent) -> bool {
     }
 }
 
-pub(super) fn event_value(event: &FeedbackEvent) -> f64 {
+pub(super) fn event_net_return_percent(event: &FeedbackEvent) -> f64 {
     match event {
         FeedbackEvent::ScoutOutcome {
             net_return_percent, ..
+        }
+        | FeedbackEvent::TradeOutcome {
+            net_return_percent, ..
         } => *net_return_percent,
-        FeedbackEvent::TradeOutcome {
-            realized_pnl_usd, ..
-        } => *realized_pnl_usd,
     }
+}
+
+fn event_evidence_group_id(event: &FeedbackEvent) -> Option<String> {
+    let event_id = match event {
+        FeedbackEvent::ScoutOutcome { event_id, .. } => event_id,
+        FeedbackEvent::TradeOutcome { .. } => return None,
+    };
+    let (group, horizon) = event_id.rsplit_once(":horizon-")?;
+    horizon
+        .parse::<u64>()
+        .ok()
+        .filter(|seconds| matches!(*seconds, 60 | 300 | 900 | 3_600))?;
+    Some(group.to_owned())
 }
 
 pub(super) fn event_context(event: &FeedbackEvent) -> Option<String> {
@@ -602,12 +687,85 @@ mod tests {
     }
 
     #[test]
+    fn paired_evidence_does_not_mix_baselines_or_surrounding_profiles() {
+        let candidate = BTreeMap::from([("threshold".into(), 0.4), ("stop".into(), 0.5)]);
+        let baseline = BTreeMap::from([("threshold".into(), 0.5)]);
+        let outcome =
+            |baseline: BTreeMap<String, f64>, value: f64, group: Option<&str>| LearningOutcome {
+                observed_at_ms: 100,
+                net_return_percent: value,
+                evidence_group_id: group.map(str::to_owned),
+                learning_context: None,
+                source: LearningOutcomeSource::Scout,
+                realized_pnl_usd: None,
+                paired_comparison: true,
+                tested_parameter_keys: vec!["threshold".into()],
+                baseline_parameters: baseline,
+            };
+        let profile = |parameters: BTreeMap<String, f64>, outcomes| RegisteredProfile {
+            profile: StrategyProfile {
+                profile_id: "profile".into(),
+                version: 0,
+                symbol: "BTC-USDT".into(),
+                strategy: "momentum".into(),
+                parameters,
+                learning_samples: 0,
+                positive_samples: 0,
+                realized_pnl: 0.0,
+            },
+            specs: vec![spec()],
+            samples: 0,
+            positive: 0,
+            realized_pnl: 0.0,
+            outcomes,
+        };
+        let variants = BTreeMap::from([
+            (
+                "candidate".into(),
+                profile(
+                    candidate.clone(),
+                    vec![
+                        outcome(baseline.clone(), 0.1, Some("same-opportunity")),
+                        outcome(baseline.clone(), 0.3, Some("same-opportunity")),
+                        outcome(BTreeMap::from([("threshold".into(), 0.6)]), 1.0, None),
+                    ],
+                ),
+            ),
+            (
+                "other".into(),
+                profile(
+                    BTreeMap::from([("threshold".into(), 0.4), ("stop".into(), 0.8)]),
+                    vec![outcome(baseline.clone(), 2.0, None)],
+                ),
+            ),
+        ]);
+        assert_eq!(
+            paired_parameter_outcomes(
+                &variants,
+                "BTC-USDT",
+                "momentum",
+                &candidate,
+                &[spec()],
+                &baseline
+            ),
+            vec![0.2]
+        );
+    }
+
+    #[test]
     fn feedback_event_helpers_extract_fields_and_positive_values() {
         let scout = scout_event();
         assert_eq!(event_specs(&scout).len(), 1);
         assert!(event_is_positive(&scout));
-        assert_eq!(event_value(&scout), 1.0);
         assert_eq!(event_observed_at(&scout), 100);
+        let mut horizon = scout_event();
+        if let FeedbackEvent::ScoutOutcome { event_id, .. } = &mut horizon {
+            *event_id = "paired-scout:comparison:horizon-300".into();
+        }
+        assert_eq!(
+            event_evidence_group_id(&horizon).as_deref(),
+            Some("paired-scout:comparison")
+        );
         let trade = FeedbackEvent::TradeOutcome {
             event_id: "t".into(),
             observed_at_ms: 200,
@@ -623,7 +781,7 @@ mod tests {
             threshold_observations: Vec::new(),
         };
         assert!(!event_is_positive(&trade));
-        assert_eq!(event_value(&trade), -2.0);
+        assert_eq!(event_net_return_percent(&trade), 3.0);
         assert_eq!(
             event_context(&trade).as_deref(),
             Some("scout:btc:momentum:long:trade")

@@ -23,6 +23,8 @@ let socket: WebSocket | undefined;
 let retryTimer: ReturnType<typeof setTimeout> | undefined;
 let retryDelay = 1000;
 let subscribers = 0;
+let firstSnapshot: Promise<PositionUiSnapshot> | undefined;
+let resolveFirstSnapshot: ((snapshot: PositionUiSnapshot) => void) | undefined;
 
 function connect() {
   if (socket || subscribers === 0) return;
@@ -52,7 +54,11 @@ function connect() {
         && Array.isArray(value.auto_positions?.positions)
         && Array.isArray(value.orders?.orders)
         && Array.isArray(value.trades?.trades)
-        && Array.isArray(value.auto_trades?.trades)) snapshot$.next(value);
+        && Array.isArray(value.auto_trades?.trades)) {
+        snapshot$.next(value);
+        resolveFirstSnapshot?.(value);
+        resolveFirstSnapshot = undefined;
+      }
     } catch { /* Ignore malformed snapshots and keep the last good state. */ }
   };
   next.onclose = () => {
@@ -89,4 +95,15 @@ export function subscribePositionStream(observer: (snapshot: PositionUiSnapshot)
 
 export function currentPositionSnapshot(): PositionUiSnapshot | undefined {
   return snapshot$.value;
+}
+
+export function waitForPositionSnapshot(timeoutMs = 5000): Promise<PositionUiSnapshot> {
+  if (snapshot$.value) return Promise.resolve(snapshot$.value);
+  if (!firstSnapshot) {
+    firstSnapshot = new Promise<PositionUiSnapshot>((resolve) => { resolveFirstSnapshot = resolve; });
+  }
+  return Promise.race([
+    firstSnapshot,
+    new Promise<PositionUiSnapshot>((_, reject) => setTimeout(() => reject(new Error('Position stream unavailable')), timeoutMs)),
+  ]);
 }

@@ -1,46 +1,109 @@
-import { memo, useEffect, useMemo } from 'react';
+import { memo, useEffect, useMemo, useState } from 'react';
 import { usePausedValue } from '@workspace/ui-platform';
 import { AgGridReact } from 'ag-grid-react';
-import { ClientSideRowModelModule, ModuleRegistry, themeQuartz, type ColDef } from 'ag-grid-community';
+import {
+  ClientSideRowModelModule,
+  ModuleRegistry,
+  themeQuartz,
+  type ColDef,
+} from 'ag-grid-community';
 import { FeedToolbar } from './FeedToolbar';
-import { SignalInfoModel, type MissedOpportunityBand, type SignalPerformanceRow, type SignalWalkForwardRow } from '../models/SignalInfoModel';
+import {
+  SignalInfoModel,
+  type MissedOpportunityBand,
+  type PostExitOpportunityRow,
+  type SignalPerformanceRow,
+  type SignalWalkForwardRow,
+  type SkippedSignalAuditRow,
+} from '../models/SignalInfoModel';
 import type { SignalSnapshot } from '../models/SignalsModel';
 import { useBehaviorSnapshot } from '@workspace/ui-platform';
 
 ModuleRegistry.registerModules([ClientSideRowModelModule]);
 const gridTheme = themeQuartz.withParams({
-  accentColor: '#8296ad', backgroundColor: '#0d0f12', borderColor: '#242a31',
-  foregroundColor: '#e7e7e7', headerBackgroundColor: '#11151a',
-  headerTextColor: '#a0a6ad', rowHoverColor: '#141b24',
+  accentColor: '#8296ad',
+  backgroundColor: '#0d0f12',
+  borderColor: '#242a31',
+  foregroundColor: '#e7e7e7',
+  headerBackgroundColor: '#11151a',
+  headerTextColor: '#a0a6ad',
+  rowHoverColor: '#141b24',
 });
-const percent = (value?: number | null) => value == null ? 'N/A' : value.toFixed(3) + '%';
-const ratio = (value?: number | null) => value == null ? 'N/A' : (value * 100).toFixed(1) + '%';
-const horizonLabel = (value: unknown) => ({ 60: '1 minute', 300: '5 minutes', 900: '15 minutes', 3600: '1 hour' } as Record<number, string>)[Number(value)] ?? String(value) + ' seconds';
+const percent = (value?: number | null) =>
+  value == null ? 'N/A' : value.toFixed(3) + '%';
+const ratio = (value?: number | null) =>
+  value == null ? 'N/A' : (value * 100).toFixed(1) + '%';
+const horizonLabel = (value: unknown) =>
+  (
+    ({
+      60: '1 minute',
+      300: '5 minutes',
+      900: '15 minutes',
+      3600: '1 hour',
+    }) as Record<number, string>
+  )[Number(value)] ?? String(value) + ' seconds';
 const signedValueClasses = {
-  'signal-value-positive': (params: { value: unknown }) => typeof params.value === 'number' && params.value > 0,
-  'signal-value-negative': (params: { value: unknown }) => typeof params.value === 'number' && params.value < 0,
+  'signal-value-positive': (params: { value: unknown }) =>
+    typeof params.value === 'number' && params.value > 0,
+  'signal-value-negative': (params: { value: unknown }) =>
+    typeof params.value === 'number' && params.value < 0,
 };
 const directionBadge = ({ value }: { value: unknown }) => {
-  const direction = value === 'bullish' || value === 'bearish' || value === 'ranging' ? value : 'neutral';
-  return <span className={'signal-badge signal-badge-' + direction}>{String(value ?? 'neutral').toUpperCase()}</span>;
+  const direction =
+    value === 'bullish' || value === 'bearish' || value === 'ranging'
+      ? value
+      : 'neutral';
+  return (
+    <span className={'signal-badge signal-badge-' + direction}>
+      {String(value ?? 'neutral').toUpperCase()}
+    </span>
+  );
 };
 const strengthRenderer = ({ value }: { value: unknown }) => {
-  const strength = typeof value === 'number' ? Math.max(0, Math.min(1, value)) : 0;
+  const strength =
+    typeof value === 'number' ? Math.max(0, Math.min(1, value)) : 0;
   const level = strength >= 0.5 ? 'high' : strength >= 0.25 ? 'medium' : 'low';
-  return <span className={'signal-strength signal-strength-' + level}><span className="signal-strength-track"><span style={{ width: (strength * 100) + '%' }} /></span><b>{(strength * 100).toFixed(0)}%</b></span>;
+  return (
+    <span className={'signal-strength signal-strength-' + level}>
+      <span className="signal-strength-track">
+        <span style={{ width: strength * 100 + '%' }} />
+      </span>
+      <b>{(strength * 100).toFixed(0)}%</b>
+    </span>
+  );
 };
 
 function useSignalInfo() {
   const model = useMemo(() => new SignalInfoModel(), []);
   const state = useBehaviorSnapshot(model.state$);
-  useEffect(() => { void model.start(); return () => model.stop(); }, [model]);
+  useEffect(() => {
+    void model.start();
+    return () => model.stop();
+  }, [model]);
   return state;
 }
 
 type BestSignalRow = SignalSnapshot & { time: string };
-export function BestSignalsView({ onTradeSymbol, onRangeOrders }: { onTradeSymbol: (symbol: string, side: 'buy' | 'sell') => void; onRangeOrders: (request: { symbol: string; lower: number; upper: number }) => void }) {
+export function BestSignalsView({
+  onTradeSymbol,
+  onRangeOrders,
+}: {
+  onTradeSymbol: (symbol: string, side: 'buy' | 'sell') => void;
+  onRangeOrders: (request: {
+    symbol: string;
+    lower: number;
+    upper: number;
+  }) => void;
+}) {
   const state = useSignalInfo();
-  const rows = useMemo<BestSignalRow[]>(() => state.best.map((item) => ({ ...item, time: new Date(item.timestamp).toLocaleTimeString() })), [state.best]);
+  const rows = useMemo<BestSignalRow[]>(
+    () =>
+      state.best.map((item) => ({
+        ...item,
+        time: new Date(item.timestamp).toLocaleTimeString(),
+      })),
+    [state.best],
+  );
   const columns = useMemo<ColDef<BestSignalRow>[]>(
     () => [
       {
@@ -264,138 +327,1042 @@ export function BestSignalsView({ onTradeSymbol, onRangeOrders }: { onTradeSymbo
     ],
     [onTradeSymbol, onRangeOrders],
   );
-  return <section className="feed-section signal-info-panel" aria-label="Best signals across markets">
-    <FeedToolbar title="Best signals across top spot markets" />
-    <p className="signal-info-note">Listed alphabetically across the ten highest-turnover spot pairs. The five-minute trend is context only and does not affect the live score. “5m Trend / Vol” shows the move in recent volatility units. Snapshot refreshes every 15 seconds.</p>
-    {state.bestError && <div className="positions-error">{state.bestError}</div>}
-    <div className="data-grid-wrap signal-info-grid"><AgGridReact<BestSignalRow> rowData={rows} columnDefs={columns} defaultColDef={{ sortable: true, resizable: true, flex: 1, minWidth: 80 }} theme={gridTheme} domLayout="autoHeight" rowHeight={26} headerHeight={28} /></div>
-    {rows.length === 0 && <p className="positions-empty">Waiting for fresh signals from the backend.</p>}
-  </section>;
+  return (
+    <section
+      className="feed-section signal-info-panel"
+      aria-label="Best signals across markets"
+    >
+      <FeedToolbar title="Best signals across top spot markets" />
+      <p className="signal-info-note">
+        Listed alphabetically across the ten highest-turnover spot pairs. The
+        five-minute trend is context only and does not affect the live score.
+        “5m Trend / Vol” shows the move in recent volatility units. Snapshot
+        refreshes every 15 seconds.
+      </p>
+      {state.bestError && (
+        <div className="positions-error">{state.bestError}</div>
+      )}
+      <div className="data-grid-wrap signal-info-grid">
+        <AgGridReact<BestSignalRow>
+          rowData={rows}
+          columnDefs={columns}
+          defaultColDef={{
+            sortable: true,
+            resizable: true,
+            flex: 1,
+            minWidth: 80,
+          }}
+          theme={gridTheme}
+          domLayout="autoHeight"
+          rowHeight={26}
+          headerHeight={28}
+        />
+      </div>
+      {rows.length === 0 && (
+        <p className="positions-empty">
+          Waiting for fresh signals from the backend.
+        </p>
+      )}
+    </section>
+  );
 }
 
 type HistoryRow = SignalSnapshot & { time: string };
-function SignalHistoryViewComponent({ paused = false, onTradeSymbol }: { paused?: boolean; onTradeSymbol: (symbol: string, side: 'buy' | 'sell') => void }) {
+function SignalHistoryViewComponent({
+  paused = false,
+  onTradeSymbol,
+}: {
+  paused?: boolean;
+  onTradeSymbol: (symbol: string, side: 'buy' | 'sell') => void;
+}) {
   const state = useSignalInfo();
-  const rows = useMemo<HistoryRow[]>(() => state.history.map((item) => ({ ...item, time: new Date(item.timestamp).toLocaleString() })), [state.history]);
+  const rows = useMemo<HistoryRow[]>(
+    () =>
+      state.history.map((item) => ({
+        ...item,
+        time: new Date(item.timestamp).toLocaleString(),
+      })),
+    [state.history],
+  );
   const displayedRowData = usePausedValue(rows, paused);
-  const columns = useMemo<ColDef<HistoryRow>[]>(() => [
-    { field: 'time', headerName: 'Time', minWidth: 145 },
-    { field: 'symbol', headerName: 'Symbol', minWidth: 100, cellRenderer: ({ value, data }: { value: unknown; data?: HistoryRow }) => <button type="button" className="signal-symbol-link" onClick={() => data && onTradeSymbol(data.symbol, data.direction === 'bearish' ? 'sell' : 'buy')}>{String(value ?? '')}</button> },
-    { field: 'direction', headerName: 'Signal', cellRenderer: directionBadge, minWidth: 100 },
-    { field: 'score', headerName: 'Score', cellClassRules: signedValueClasses, valueFormatter: ({ value }) => Number(value ?? 0).toFixed(2), minWidth: 85 },
-    { field: 'components.trend_1m_percent', headerName: 'Trend 1m', cellClassRules: signedValueClasses, valueGetter: ({ data }) => data?.components.trend_1m_percent, valueFormatter: ({ value }) => percent(value), minWidth: 105 },
-    { field: 'components.trend_5m_percent', headerName: 'Trend 5m', cellClassRules: signedValueClasses, valueGetter: ({ data }) => data?.components.trend_5m_percent, valueFormatter: ({ value }) => percent(value), minWidth: 105 },
-    { field: 'components.trend_5m_volatility_units', headerName: '5m Trend / Vol', cellClassRules: signedValueClasses, valueGetter: ({ data }) => data?.components.trend_5m_volatility_units, valueFormatter: ({ value }) => value == null ? 'N/A' : value.toFixed(2) + 'σ', minWidth: 95 },
-    { field: 'components.momentum_10s_percent', headerName: 'Momentum 10s', cellClassRules: signedValueClasses, valueGetter: ({ data }) => data?.components.momentum_10s_percent, valueFormatter: ({ value }) => percent(value), minWidth: 115 },
-    { field: 'components.trade_flow_imbalance', headerName: 'Trade flow', cellClassRules: signedValueClasses, valueGetter: ({ data }) => data?.components.trade_flow_imbalance, valueFormatter: ({ value }) => ratio(value), minWidth: 100 },
-    { field: 'components.book_imbalance', headerName: 'Book pressure', cellClassRules: signedValueClasses, valueGetter: ({ data }) => data?.components.book_imbalance, valueFormatter: ({ value }) => ratio(value), minWidth: 110 },
-    { field: 'stale', headerName: 'Data', valueFormatter: ({ value }) => value ? 'Stale' : 'Current', minWidth: 85 },
-  ], []);
-  return <section className="feed-section signal-info-panel" aria-label="Signal history">
-    <FeedToolbar title="Recent signal history" />
-    {state.historyError && <div className="positions-error">{state.historyError}</div>}
-    <div className="data-grid-wrap signal-info-grid"><AgGridReact<HistoryRow> rowData={displayedRowData} columnDefs={columns} defaultColDef={{ sortable: true, resizable: true, flex: 1, minWidth: 80 }} theme={gridTheme} domLayout="autoHeight" rowHeight={26} headerHeight={28} /></div>
-    {rows.length === 0 && <p className="positions-empty">No stored signal snapshots yet.</p>}
-  </section>;
+  const columns = useMemo<ColDef<HistoryRow>[]>(
+    () => [
+      { field: 'time', headerName: 'Time', minWidth: 145 },
+      {
+        field: 'symbol',
+        headerName: 'Symbol',
+        minWidth: 100,
+        cellRenderer: ({
+          value,
+          data,
+        }: {
+          value: unknown;
+          data?: HistoryRow;
+        }) => (
+          <button
+            type="button"
+            className="signal-symbol-link"
+            onClick={() =>
+              data &&
+              onTradeSymbol(
+                data.symbol,
+                data.direction === 'bearish' ? 'sell' : 'buy',
+              )
+            }
+          >
+            {String(value ?? '')}
+          </button>
+        ),
+      },
+      {
+        field: 'direction',
+        headerName: 'Signal',
+        cellRenderer: directionBadge,
+        minWidth: 100,
+      },
+      {
+        field: 'score',
+        headerName: 'Score',
+        cellClassRules: signedValueClasses,
+        valueFormatter: ({ value }) => Number(value ?? 0).toFixed(2),
+        minWidth: 85,
+      },
+      {
+        field: 'components.trend_1m_percent',
+        headerName: 'Trend 1m',
+        cellClassRules: signedValueClasses,
+        valueGetter: ({ data }) => data?.components.trend_1m_percent,
+        valueFormatter: ({ value }) => percent(value),
+        minWidth: 105,
+      },
+      {
+        field: 'components.trend_5m_percent',
+        headerName: 'Trend 5m',
+        cellClassRules: signedValueClasses,
+        valueGetter: ({ data }) => data?.components.trend_5m_percent,
+        valueFormatter: ({ value }) => percent(value),
+        minWidth: 105,
+      },
+      {
+        field: 'components.trend_5m_volatility_units',
+        headerName: '5m Trend / Vol',
+        cellClassRules: signedValueClasses,
+        valueGetter: ({ data }) => data?.components.trend_5m_volatility_units,
+        valueFormatter: ({ value }) =>
+          value == null ? 'N/A' : value.toFixed(2) + 'σ',
+        minWidth: 95,
+      },
+      {
+        field: 'components.momentum_10s_percent',
+        headerName: 'Momentum 10s',
+        cellClassRules: signedValueClasses,
+        valueGetter: ({ data }) => data?.components.momentum_10s_percent,
+        valueFormatter: ({ value }) => percent(value),
+        minWidth: 115,
+      },
+      {
+        field: 'components.trade_flow_imbalance',
+        headerName: 'Trade flow',
+        cellClassRules: signedValueClasses,
+        valueGetter: ({ data }) => data?.components.trade_flow_imbalance,
+        valueFormatter: ({ value }) => ratio(value),
+        minWidth: 100,
+      },
+      {
+        field: 'components.book_imbalance',
+        headerName: 'Book pressure',
+        cellClassRules: signedValueClasses,
+        valueGetter: ({ data }) => data?.components.book_imbalance,
+        valueFormatter: ({ value }) => ratio(value),
+        minWidth: 110,
+      },
+      {
+        field: 'stale',
+        headerName: 'Data',
+        valueFormatter: ({ value }) => (value ? 'Stale' : 'Current'),
+        minWidth: 85,
+      },
+    ],
+    [],
+  );
+  return (
+    <section
+      className="feed-section signal-info-panel"
+      aria-label="Signal history"
+    >
+      <FeedToolbar title="Recent signal history" />
+      {state.historyError && (
+        <div className="positions-error">{state.historyError}</div>
+      )}
+      <div className="data-grid-wrap signal-info-grid">
+        <AgGridReact<HistoryRow>
+          rowData={displayedRowData}
+          columnDefs={columns}
+          defaultColDef={{
+            sortable: true,
+            resizable: true,
+            flex: 1,
+            minWidth: 80,
+          }}
+          theme={gridTheme}
+          domLayout="autoHeight"
+          rowHeight={26}
+          headerHeight={28}
+        />
+      </div>
+      {rows.length === 0 && (
+        <p className="positions-empty">No stored signal snapshots yet.</p>
+      )}
+    </section>
+  );
 }
 
 export const SignalHistoryView = memo(SignalHistoryViewComponent);
 
-function SignalPerformanceViewComponent({ paused = false, onTradeSymbol }: { paused?: boolean; onTradeSymbol: (symbol: string, side: 'buy' | 'sell') => void }) {
+function SignalPerformanceViewComponent({
+  paused = false,
+  onTradeSymbol,
+}: {
+  paused?: boolean;
+  onTradeSymbol: (symbol: string, side: 'buy' | 'sell') => void;
+}) {
   const state = useSignalInfo();
   const displayedRowData = usePausedValue(state.performance, paused);
-  const columns = useMemo<ColDef<SignalPerformanceRow>[]>(() => [
-    { field: 'symbol', headerName: 'Symbol', minWidth: 100, cellRenderer: ({ value }: { value: unknown }) => <button type="button" className="signal-symbol-link" onClick={() => onTradeSymbol(String(value ?? ''), 'buy')}>{String(value ?? '')}</button> },
-    { field: 'horizon_seconds', headerName: 'Horizon', valueFormatter: ({ value }) => horizonLabel(value), minWidth: 100 },
-    { field: 'sample_count', headerName: 'Total N', minWidth: 80 },
-    { field: 'directional_sample_count', headerName: 'Directional N', minWidth: 105 },
-    { field: 'neutral_sample_count', headerName: 'Neutral N', minWidth: 90 },
-    { field: 'bullish_match_rate', headerName: 'Bullish hit rate', cellClassRules: { 'signal-performance-good': ({ value }) => typeof value === 'number' && value >= 0.5, 'signal-performance-poor': ({ value }) => typeof value === 'number' && value < 0.5 }, valueFormatter: ({ value }) => ratio(value), minWidth: 125 },
-    { field: 'bearish_match_rate', headerName: 'Bearish hit rate', cellClassRules: { 'signal-performance-good': ({ value }) => typeof value === 'number' && value >= 0.5, 'signal-performance-poor': ({ value }) => typeof value === 'number' && value < 0.5 }, valueFormatter: ({ value }) => ratio(value), minWidth: 125 },
-    { field: 'direction_match_rate', headerName: 'Directional hit rate', cellClassRules: { 'signal-performance-good': ({ value }) => typeof value === 'number' && value >= 0.5, 'signal-performance-poor': ({ value }) => typeof value === 'number' && value < 0.5 }, valueFormatter: ({ value }) => ratio(value), minWidth: 135 },
-    { field: 'net_sample_count', headerName: 'Costed N', minWidth: 85 },
-    { field: 'average_net_return_percent', headerName: 'Avg net return', cellClassRules: signedValueClasses, valueFormatter: ({ value }) => percent(value), minWidth: 120 },
-  ], [onTradeSymbol]);
-  return <section className="feed-section signal-info-panel" aria-label="Signal performance">
-    <FeedToolbar title="Signal outcome tracking" />
-    <p className="signal-info-note">Direction hit rates exclude neutral signals. Older stored outcomes count toward Total N but lack direction and cost data. Net returns use fresh top-of-book entry/exit quotes and the configured taker fee; order size and market impact are not simulated.</p>
-    {state.performanceError && <div className="positions-error">{state.performanceError}</div>}
-    <div className="data-grid-wrap signal-info-grid"><AgGridReact<SignalPerformanceRow> rowData={displayedRowData} columnDefs={columns} defaultColDef={{ sortable: true, resizable: true, flex: 1, minWidth: 80 }} theme={gridTheme} domLayout="autoHeight" rowHeight={26} headerHeight={28} /></div>
-    {state.performance.length === 0 && <p className="positions-empty">Cost-aware outcome samples begin after one minute; 5-minute, 15-minute and 1-hour rows appear as those horizons mature.</p>}
-
-  </section>;
+  const columns = useMemo<ColDef<SignalPerformanceRow>[]>(
+    () => [
+      {
+        field: 'symbol',
+        headerName: 'Symbol',
+        minWidth: 100,
+        cellRenderer: ({ value }: { value: unknown }) => (
+          <button
+            type="button"
+            className="signal-symbol-link"
+            onClick={() => onTradeSymbol(String(value ?? ''), 'buy')}
+          >
+            {String(value ?? '')}
+          </button>
+        ),
+      },
+      {
+        field: 'horizon_seconds',
+        headerName: 'Horizon',
+        valueFormatter: ({ value }) => horizonLabel(value),
+        minWidth: 100,
+      },
+      { field: 'sample_count', headerName: 'Total N', minWidth: 80 },
+      {
+        field: 'directional_sample_count',
+        headerName: 'Directional N',
+        minWidth: 105,
+      },
+      { field: 'neutral_sample_count', headerName: 'Neutral N', minWidth: 90 },
+      {
+        field: 'bullish_match_rate',
+        headerName: 'Bullish hit rate',
+        cellClassRules: {
+          'signal-performance-good': ({ value }) =>
+            typeof value === 'number' && value >= 0.5,
+          'signal-performance-poor': ({ value }) =>
+            typeof value === 'number' && value < 0.5,
+        },
+        valueFormatter: ({ value }) => ratio(value),
+        minWidth: 125,
+      },
+      {
+        field: 'bearish_match_rate',
+        headerName: 'Bearish hit rate',
+        cellClassRules: {
+          'signal-performance-good': ({ value }) =>
+            typeof value === 'number' && value >= 0.5,
+          'signal-performance-poor': ({ value }) =>
+            typeof value === 'number' && value < 0.5,
+        },
+        valueFormatter: ({ value }) => ratio(value),
+        minWidth: 125,
+      },
+      {
+        field: 'direction_match_rate',
+        headerName: 'Directional hit rate',
+        cellClassRules: {
+          'signal-performance-good': ({ value }) =>
+            typeof value === 'number' && value >= 0.5,
+          'signal-performance-poor': ({ value }) =>
+            typeof value === 'number' && value < 0.5,
+        },
+        valueFormatter: ({ value }) => ratio(value),
+        minWidth: 135,
+      },
+      { field: 'net_sample_count', headerName: 'Costed N', minWidth: 85 },
+      {
+        field: 'average_net_return_percent',
+        headerName: 'Avg net return',
+        cellClassRules: signedValueClasses,
+        valueFormatter: ({ value }) => percent(value),
+        minWidth: 120,
+      },
+    ],
+    [onTradeSymbol],
+  );
+  return (
+    <section
+      className="feed-section signal-info-panel"
+      aria-label="Signal performance"
+    >
+      <FeedToolbar title="Signal outcome tracking" />
+      <p className="signal-info-note">
+        Direction hit rates exclude neutral signals. Older stored outcomes count
+        toward Total N but lack direction and cost data. Net returns use fresh
+        top-of-book entry/exit quotes and the configured taker fee; order size
+        and market impact are not simulated.
+      </p>
+      {state.performanceError && (
+        <div className="positions-error">{state.performanceError}</div>
+      )}
+      <div className="data-grid-wrap signal-info-grid">
+        <AgGridReact<SignalPerformanceRow>
+          rowData={displayedRowData}
+          columnDefs={columns}
+          defaultColDef={{
+            sortable: true,
+            resizable: true,
+            flex: 1,
+            minWidth: 80,
+          }}
+          theme={gridTheme}
+          domLayout="autoHeight"
+          rowHeight={26}
+          headerHeight={28}
+        />
+      </div>
+      {state.performance.length === 0 && (
+        <p className="positions-empty">
+          Cost-aware outcome samples begin after one minute; 5-minute, 15-minute
+          and 1-hour rows appear as those horizons mature.
+        </p>
+      )}
+    </section>
+  );
 }
 
-
-function WalkForwardViewComponent({ paused = false, onTradeSymbol }: { paused?: boolean; onTradeSymbol: (symbol: string, side: 'buy' | 'sell') => void }) {
+function WalkForwardViewComponent({
+  paused = false,
+  onTradeSymbol,
+}: {
+  paused?: boolean;
+  onTradeSymbol: (symbol: string, side: 'buy' | 'sell') => void;
+}) {
   const state = useSignalInfo();
   const displayedRows = usePausedValue(state.walkForward, paused);
-  const walkForwardColumns = useMemo<ColDef<SignalWalkForwardRow>[]>(() => [
-    { field: 'symbol', headerName: 'Symbol', minWidth: 100, cellRenderer: ({ value }: { value: unknown }) => <button type="button" className="signal-symbol-link" onClick={() => onTradeSymbol(String(value ?? ''), 'buy')}>{String(value ?? '')}</button> },
-    { field: 'horizon_seconds', headerName: 'Horizon', valueFormatter: ({ value }) => horizonLabel(value), minWidth: 95 },
-    { field: 'training_samples', headerName: 'Training N', minWidth: 100 },
-    { field: 'evaluated_signals', headerName: 'Test N', minWidth: 80 },
-    { field: 'selected_signals', headerName: 'Signals taken', minWidth: 105 },
-    { field: 'selected_strength_threshold', headerName: 'Learned min strength', valueFormatter: ({ value }) => value == null ? 'N/A' : (value * 100).toFixed(0) + '%', minWidth: 145 },
-    { field: 'direction_match_rate', headerName: 'Hit rate', cellClassRules: { 'signal-performance-good': ({ value }) => typeof value === 'number' && value >= 0.5, 'signal-performance-poor': ({ value }) => typeof value === 'number' && value < 0.5 }, valueFormatter: ({ value }) => ratio(value), minWidth: 100 },
-    { field: 'average_net_return_percent', headerName: 'Avg net return', cellClassRules: signedValueClasses, valueFormatter: ({ value }) => percent(value), minWidth: 120 },
-    { field: 'positive_net_rate', headerName: 'Positive net', valueFormatter: ({ value }) => ratio(value), minWidth: 105 },
-    { field: 'baseline_direction_match_rate', headerName: 'Current hit rate', valueFormatter: ({ value }) => ratio(value), minWidth: 115 },
-    { field: 'baseline_average_net_return_percent', headerName: 'Current avg net', cellClassRules: signedValueClasses, valueFormatter: ({ value }) => percent(value), minWidth: 115 },
-    { field: 'five_minute_trend_sample_count', headerName: '5m trend N', minWidth: 90 },
-    { field: 'five_minute_trend_match_rate', headerName: '5m trend hit', valueFormatter: ({ value }) => ratio(value), minWidth: 100 },
-    { field: 'five_minute_trend_average_net_return_percent', headerName: '5m trend avg net', cellClassRules: signedValueClasses, valueFormatter: ({ value }) => percent(value), minWidth: 125 },
-    { field: 'logistic_selected_signals', headerName: 'Logistic N', minWidth: 90 },
-    { field: 'logistic_direction_match_rate', headerName: 'Logistic hit', valueFormatter: ({ value }) => ratio(value), minWidth: 100 },
-    { field: 'logistic_average_net_return_percent', headerName: 'Logistic avg net', cellClassRules: signedValueClasses, valueFormatter: ({ value }) => percent(value), minWidth: 120 },
-    { field: 'logistic_positive_net_rate', headerName: 'Logistic positive net', valueFormatter: ({ value }) => ratio(value), minWidth: 135 },
-    ...(['signal_long', 'signal_short', 'logistic_long', 'logistic_short'] as const).flatMap((side) => {
-      const label = side === 'signal_long' ? 'Signal long' : side === 'signal_short' ? 'Signal short' : side === 'logistic_long' ? 'Logistic long' : 'Logistic short';
-      return [
-        { headerName: label + ' N', valueGetter: ({ data }: { data?: SignalWalkForwardRow }) => data?.[side].sample_count ?? 0, minWidth: 100 },
-        { headerName: label + ' hit', valueGetter: ({ data }: { data?: SignalWalkForwardRow }) => data?.[side].direction_match_rate, valueFormatter: ({ value }: { value: number | null | undefined }) => ratio(value), minWidth: 100 },
-        { headerName: label + ' avg net', valueGetter: ({ data }: { data?: SignalWalkForwardRow }) => data?.[side].average_net_return_percent, cellClassRules: signedValueClasses, valueFormatter: ({ value }: { value: number | null | undefined }) => percent(value), minWidth: 120 },
-        { headerName: label + ' positive net', valueGetter: ({ data }: { data?: SignalWalkForwardRow }) => data?.[side].positive_net_rate, valueFormatter: ({ value }: { value: number | null | undefined }) => ratio(value), minWidth: 125 },
-        { headerName: label + ' 95% lower', valueGetter: ({ data }: { data?: SignalWalkForwardRow }) => data?.[side].positive_net_rate_lower_95, valueFormatter: ({ value }: { value: number | null | undefined }) => ratio(value), minWidth: 125 },
-      ];
-    }),
-  ], [onTradeSymbol]);
-  return <section className="feed-section signal-info-panel walk-forward-panel" aria-label="Walk-forward model evaluation">
-    <FeedToolbar title="Walk-forward model evaluation" />
-    <p className="signal-info-note">Each test prediction is evaluated against later, non-overlapping outcomes. Long and short results are split for the strength filter and logistic model. The 95% lower bound estimates uncertainty in the positive-net rate; side samples under 30 are preliminary. Logistic regression learns from 1m trend, 10s momentum, trade flow and book imbalance. Returns use recorded execution costs; order size and market impact are not included.</p>
-    {state.walkForwardError && <div className="positions-error">{state.walkForwardError}</div>}
-    <div className="data-grid-wrap signal-info-grid walk-forward-grid"><AgGridReact<SignalWalkForwardRow> rowData={displayedRows} columnDefs={walkForwardColumns} defaultColDef={{ sortable: true, resizable: true, flex: 1, minWidth: 80 }} theme={gridTheme} domLayout="autoHeight" rowHeight={26} headerHeight={28} /></div>
-    {displayedRows.length === 0 && <p className="positions-empty">Walk-forward rows appear after at least 31 eligible, non-overlapping costed outcomes are available for a symbol and horizon: 30 training outcomes plus at least one test outcome. Because neutral and overlapping outcomes are excluded, this can take hours for the 1-minute horizon and longer for longer horizons.</p>}
-  </section>;
+  const walkForwardColumns = useMemo<ColDef<SignalWalkForwardRow>[]>(
+    () => [
+      {
+        field: 'symbol',
+        headerName: 'Symbol',
+        minWidth: 100,
+        cellRenderer: ({ value }: { value: unknown }) => (
+          <button
+            type="button"
+            className="signal-symbol-link"
+            onClick={() => onTradeSymbol(String(value ?? ''), 'buy')}
+          >
+            {String(value ?? '')}
+          </button>
+        ),
+      },
+      {
+        field: 'horizon_seconds',
+        headerName: 'Horizon',
+        valueFormatter: ({ value }) => horizonLabel(value),
+        minWidth: 95,
+      },
+      { field: 'training_samples', headerName: 'Training N', minWidth: 100 },
+      { field: 'evaluated_signals', headerName: 'Test N', minWidth: 80 },
+      { field: 'selected_signals', headerName: 'Signals taken', minWidth: 105 },
+      {
+        field: 'selected_strength_threshold',
+        headerName: 'Learned min strength',
+        valueFormatter: ({ value }) =>
+          value == null ? 'N/A' : (value * 100).toFixed(0) + '%',
+        minWidth: 145,
+      },
+      {
+        field: 'direction_match_rate',
+        headerName: 'Hit rate',
+        cellClassRules: {
+          'signal-performance-good': ({ value }) =>
+            typeof value === 'number' && value >= 0.5,
+          'signal-performance-poor': ({ value }) =>
+            typeof value === 'number' && value < 0.5,
+        },
+        valueFormatter: ({ value }) => ratio(value),
+        minWidth: 100,
+      },
+      {
+        field: 'average_net_return_percent',
+        headerName: 'Avg net return',
+        cellClassRules: signedValueClasses,
+        valueFormatter: ({ value }) => percent(value),
+        minWidth: 120,
+      },
+      {
+        field: 'positive_net_rate',
+        headerName: 'Positive net',
+        valueFormatter: ({ value }) => ratio(value),
+        minWidth: 105,
+      },
+      {
+        field: 'baseline_direction_match_rate',
+        headerName: 'Current hit rate',
+        valueFormatter: ({ value }) => ratio(value),
+        minWidth: 115,
+      },
+      {
+        field: 'baseline_average_net_return_percent',
+        headerName: 'Current avg net',
+        cellClassRules: signedValueClasses,
+        valueFormatter: ({ value }) => percent(value),
+        minWidth: 115,
+      },
+      {
+        field: 'five_minute_trend_sample_count',
+        headerName: '5m trend N',
+        minWidth: 90,
+      },
+      {
+        field: 'five_minute_trend_match_rate',
+        headerName: '5m trend hit',
+        valueFormatter: ({ value }) => ratio(value),
+        minWidth: 100,
+      },
+      {
+        field: 'five_minute_trend_average_net_return_percent',
+        headerName: '5m trend avg net',
+        cellClassRules: signedValueClasses,
+        valueFormatter: ({ value }) => percent(value),
+        minWidth: 125,
+      },
+      {
+        field: 'logistic_selected_signals',
+        headerName: 'Logistic N',
+        minWidth: 90,
+      },
+      {
+        field: 'logistic_direction_match_rate',
+        headerName: 'Logistic hit',
+        valueFormatter: ({ value }) => ratio(value),
+        minWidth: 100,
+      },
+      {
+        field: 'logistic_average_net_return_percent',
+        headerName: 'Logistic avg net',
+        cellClassRules: signedValueClasses,
+        valueFormatter: ({ value }) => percent(value),
+        minWidth: 120,
+      },
+      {
+        field: 'logistic_positive_net_rate',
+        headerName: 'Logistic positive net',
+        valueFormatter: ({ value }) => ratio(value),
+        minWidth: 135,
+      },
+      ...(
+        [
+          'signal_long',
+          'signal_short',
+          'logistic_long',
+          'logistic_short',
+        ] as const
+      ).flatMap((side) => {
+        const label =
+          side === 'signal_long'
+            ? 'Signal long'
+            : side === 'signal_short'
+              ? 'Signal short'
+              : side === 'logistic_long'
+                ? 'Logistic long'
+                : 'Logistic short';
+        return [
+          {
+            headerName: label + ' N',
+            valueGetter: ({ data }: { data?: SignalWalkForwardRow }) =>
+              data?.[side].sample_count ?? 0,
+            minWidth: 100,
+          },
+          {
+            headerName: label + ' hit',
+            valueGetter: ({ data }: { data?: SignalWalkForwardRow }) =>
+              data?.[side].direction_match_rate,
+            valueFormatter: ({ value }: { value: number | null | undefined }) =>
+              ratio(value),
+            minWidth: 100,
+          },
+          {
+            headerName: label + ' avg net',
+            valueGetter: ({ data }: { data?: SignalWalkForwardRow }) =>
+              data?.[side].average_net_return_percent,
+            cellClassRules: signedValueClasses,
+            valueFormatter: ({ value }: { value: number | null | undefined }) =>
+              percent(value),
+            minWidth: 120,
+          },
+          {
+            headerName: label + ' positive net',
+            valueGetter: ({ data }: { data?: SignalWalkForwardRow }) =>
+              data?.[side].positive_net_rate,
+            valueFormatter: ({ value }: { value: number | null | undefined }) =>
+              ratio(value),
+            minWidth: 125,
+          },
+          {
+            headerName: label + ' 95% lower',
+            valueGetter: ({ data }: { data?: SignalWalkForwardRow }) =>
+              data?.[side].positive_net_rate_lower_95,
+            valueFormatter: ({ value }: { value: number | null | undefined }) =>
+              ratio(value),
+            minWidth: 125,
+          },
+        ];
+      }),
+    ],
+    [onTradeSymbol],
+  );
+  return (
+    <section
+      className="feed-section signal-info-panel walk-forward-panel"
+      aria-label="Walk-forward model evaluation"
+    >
+      <FeedToolbar title="Walk-forward model evaluation" />
+      <p className="signal-info-note">
+        Each test prediction is evaluated against later, non-overlapping
+        outcomes. Long and short results are split for the strength filter and
+        logistic model. The 95% lower bound estimates uncertainty in the
+        positive-net rate; side samples under 30 are preliminary. Logistic
+        regression learns from 1m trend, 10s momentum, trade flow and book
+        imbalance. Returns use recorded execution costs; order size and market
+        impact are not included.
+      </p>
+      {state.walkForwardError && (
+        <div className="positions-error">{state.walkForwardError}</div>
+      )}
+      <div className="data-grid-wrap signal-info-grid walk-forward-grid">
+        <AgGridReact<SignalWalkForwardRow>
+          rowData={displayedRows}
+          columnDefs={walkForwardColumns}
+          defaultColDef={{
+            sortable: true,
+            resizable: true,
+            flex: 1,
+            minWidth: 80,
+          }}
+          theme={gridTheme}
+          domLayout="autoHeight"
+          rowHeight={26}
+          headerHeight={28}
+        />
+      </div>
+      {displayedRows.length === 0 && (
+        <p className="positions-empty">
+          Walk-forward rows appear after at least 31 eligible, non-overlapping
+          costed outcomes are available for a symbol and horizon: 30 training
+          outcomes plus at least one test outcome. Because neutral and
+          overlapping outcomes are excluded, this can take hours for the
+          1-minute horizon and longer for longer horizons.
+        </p>
+      )}
+    </section>
+  );
 }
 
 export const WalkForwardView = memo(WalkForwardViewComponent);
 
 export const SignalPerformanceView = memo(SignalPerformanceViewComponent);
 
-
-export function MissedOpportunityBandsView({ paused = false }: { paused?: boolean }) {
+export function MissedOpportunityBandsView({
+  paused = false,
+}: {
+  paused?: boolean;
+}) {
   const state = useSignalInfo();
   const rows = usePausedValue(state.missedOpportunityBands, paused);
-  const columns = useMemo<ColDef<MissedOpportunityBand>[]>(() => [
-    { field: 'gate', headerName: 'Gate', minWidth: 120 },
-    { field: 'threshold', headerName: 'Threshold', valueFormatter: ({ value, data }) => data?.gate === 'score' ? Number(value).toFixed(2) : (Number(value) * 100).toFixed(0) + '%', minWidth: 105 },
-    { field: 'horizonSeconds', headerName: 'Horizon', valueFormatter: ({ value }) => (Number(value) / 60).toFixed(0) + 'm', minWidth: 90 },
-    { field: 'sampleCount', headerName: 'Missed signals', minWidth: 110 },
-    { field: 'averageNetReturnPercent', headerName: 'Avg net at horizon', cellClassRules: signedValueClasses, valueFormatter: ({ value }) => percent(value), minWidth: 140 },
-    { field: 'positiveNetRate', headerName: 'Net positive at end', valueFormatter: ({ value }) => ratio(value), minWidth: 140 },
-    { field: 'stopTargetSampleCount', headerName: 'SL/TP samples', minWidth: 105 },
-    { field: 'stopTargetAverageNetReturnPercent', headerName: 'SL/TP simulated net', cellClassRules: signedValueClasses, valueFormatter: ({ value }) => percent(value), minWidth: 145 },
-    { field: 'stopTargetPositiveNetRate', headerName: 'SL/TP win rate', valueFormatter: ({ value }) => ratio(value), minWidth: 120 },
-    { field: 'timeToProfitRate', headerName: 'Became net positive', valueFormatter: ({ value }) => ratio(value), minWidth: 145 },
-    { field: 'averageTimeToProfitSeconds', headerName: 'Avg time to profit', valueFormatter: ({ value }) => value == null ? '—' : Number(value).toFixed(0) + 's', minWidth: 135 },
-    { field: 'medianTimeToProfitSeconds', headerName: 'Median time to profit', valueFormatter: ({ value }) => value == null ? '—' : Number(value).toFixed(0) + 's', minWidth: 145 },
-  ], []);
-  return <section className="feed-section signal-info-panel" aria-label="Missed opportunity bands">
-    <FeedToolbar title="Missed opportunity bands" />
-    <p className="signal-info-note">Skipped-signal outcomes at 1m, 5m, 15m, and 60m, after entry/exit spread and taker fees. “Became net positive” is the share that crossed above zero during the horizon; average and median times use those samples only. SL/TP simulation uses the thresholds recorded at the skipped decision, applies the entry spread as an exit-spread proxy at barrier touches, assumes the stop first if both barriers were touched, and marks any unhit position at the horizon. Five-minute SL/TP outcomes inform gate adjustments; longer windows help assess a sensible holding period.</p>
-    {state.missedOpportunityBandsError && <div className="positions-error">{state.missedOpportunityBandsError}</div>}
-    <div className="data-grid-wrap signal-info-grid"><AgGridReact<MissedOpportunityBand> rowData={rows} columnDefs={columns} defaultColDef={{ sortable: true, resizable: true, flex: 1, minWidth: 80 }} theme={gridTheme} domLayout="autoHeight" rowHeight={26} headerHeight={28} /></div>
-    {rows.length === 0 && !state.missedOpportunityBandsError && <p className="positions-empty">No missed opportunity samples are available yet.</p>}
-  </section>;
+  const [symbol, setSymbol] = useState('');
+  const [direction, setDirection] = useState('');
+  const [strategy, setStrategy] = useState('');
+  const [marketContext, setMarketContext] = useState('');
+  const dimensions = useMemo(
+    () => ({
+      symbols: [
+        ...new Set(rows.flatMap((row) => (row.symbol ? [row.symbol] : []))),
+      ].sort(),
+      directions: [
+        ...new Set(
+          rows.flatMap((row) => (row.direction ? [row.direction] : [])),
+        ),
+      ].sort(),
+      strategies: [
+        ...new Set(rows.flatMap((row) => (row.strategy ? [row.strategy] : []))),
+      ].sort(),
+      contexts: [
+        ...new Set(
+          rows.flatMap((row) => (row.marketContext ? [row.marketContext] : [])),
+        ),
+      ].sort(),
+    }),
+    [rows],
+  );
+  const filteredRows = useMemo(() => {
+    const filtering = Boolean(symbol || direction || strategy || marketContext);
+    return rows.filter((row) =>
+      filtering
+        ? (!symbol || row.symbol === symbol) &&
+          (!direction || row.direction === direction) &&
+          (!strategy || row.strategy === strategy) &&
+          (!marketContext || row.marketContext === marketContext)
+        : !row.symbol && !row.direction && !row.strategy && !row.marketContext,
+    );
+  }, [rows, symbol, direction, strategy, marketContext]);
+  const thresholdSuggestions = useMemo(
+    () =>
+      (['score', 'strength'] as const).flatMap((gate) => {
+        const supported = filteredRows.filter(
+          (row) =>
+            row.gate === gate &&
+            row.sampleCount >= 20 &&
+            row.averageNetReturnPercent != null &&
+            row.averageNetReturnPercent > 0 &&
+            row.stopTargetSampleCount >= 20 &&
+            row.stopTargetAverageNetReturnPercent != null &&
+            row.stopTargetAverageNetReturnPercent > 0 &&
+            row.stopTargetPositiveNetRate != null &&
+            row.stopTargetPositiveNetRate >= 0.55,
+        );
+        const fiveMinute = supported.filter(
+          (row) => row.horizonSeconds === 300,
+        );
+        const evidence = fiveMinute.length
+          ? fiveMinute
+          : supported.filter(
+              (row) =>
+                (row.horizonSeconds === 900 || row.horizonSeconds === 3600) &&
+                row.timeToProfitSampleCount >= 20 &&
+                row.timeToProfitRate != null &&
+                row.timeToProfitRate >= 0.5 &&
+                row.averageTimeToProfitSeconds != null &&
+                row.averageTimeToProfitSeconds > 300 &&
+                row.averageTimeToProfitSeconds <= row.horizonSeconds,
+            );
+        const best = evidence.sort(
+          (left, right) => left.threshold - right.threshold,
+        )[0];
+        return best
+          ? [
+              {
+                gate,
+                threshold: best.threshold,
+                horizonSeconds: best.horizonSeconds,
+                sampleCount: best.stopTargetSampleCount,
+              },
+            ]
+          : [];
+      }),
+    [filteredRows],
+  );
+  const columns = useMemo<ColDef<MissedOpportunityBand>[]>(
+    () => [
+      { field: 'symbol', headerName: 'Symbol', minWidth: 105 },
+      { field: 'direction', headerName: 'Direction', minWidth: 100 },
+      { field: 'strategy', headerName: 'Strategy', minWidth: 150 },
+      { field: 'marketContext', headerName: 'Market context', minWidth: 130 },
+      { field: 'gate', headerName: 'Gate', minWidth: 120 },
+      {
+        field: 'threshold',
+        headerName: 'Threshold',
+        valueFormatter: ({ value, data }) =>
+          data?.gate === 'score'
+            ? Number(value).toFixed(2)
+            : (Number(value) * 100).toFixed(0) + '%',
+        minWidth: 105,
+      },
+      {
+        field: 'horizonSeconds',
+        headerName: 'Horizon',
+        valueFormatter: ({ value }) => (Number(value) / 60).toFixed(0) + 'm',
+        minWidth: 90,
+      },
+      { field: 'sampleCount', headerName: 'Missed signals', minWidth: 110 },
+      {
+        field: 'averageNetReturnPercent',
+        headerName: 'Avg net at horizon',
+        cellClassRules: signedValueClasses,
+        valueFormatter: ({ value }) => percent(value),
+        minWidth: 140,
+      },
+      {
+        field: 'positiveNetRate',
+        headerName: 'Net positive at end',
+        valueFormatter: ({ value }) => ratio(value),
+        minWidth: 140,
+      },
+      {
+        field: 'stopTargetSampleCount',
+        headerName: 'SL/TP samples',
+        minWidth: 105,
+      },
+      {
+        field: 'stopTargetAverageNetReturnPercent',
+        headerName: 'SL/TP simulated net',
+        cellClassRules: signedValueClasses,
+        valueFormatter: ({ value }) => percent(value),
+        minWidth: 145,
+      },
+      {
+        field: 'stopTargetPositiveNetRate',
+        headerName: 'SL/TP win rate',
+        valueFormatter: ({ value }) => ratio(value),
+        minWidth: 120,
+      },
+      {
+        field: 'strategyExitSampleCount',
+        headerName: 'Strategy exits',
+        minWidth: 110,
+      },
+      {
+        field: 'strategyExitAverageNetReturnPercent',
+        headerName: 'Strategy-exit net',
+        cellClassRules: signedValueClasses,
+        valueFormatter: ({ value }) => percent(value),
+        minWidth: 140,
+      },
+      {
+        field: 'strategyExitPositiveNetRate',
+        headerName: 'Strategy-exit win rate',
+        valueFormatter: ({ value }) => ratio(value),
+        minWidth: 150,
+      },
+      {
+        field: 'timeToProfitRate',
+        headerName: 'Became net positive',
+        valueFormatter: ({ value }) => ratio(value),
+        minWidth: 145,
+      },
+      {
+        field: 'averageTimeToProfitSeconds',
+        headerName: 'Avg time to profit',
+        valueFormatter: ({ value }) =>
+          value == null ? '—' : Number(value).toFixed(0) + 's',
+        minWidth: 135,
+      },
+      {
+        field: 'medianTimeToProfitSeconds',
+        headerName: 'Median time to profit',
+        valueFormatter: ({ value }) =>
+          value == null ? '—' : Number(value).toFixed(0) + 's',
+        minWidth: 145,
+      },
+    ],
+    [],
+  );
+  const postExitRows = usePausedValue(state.postExitOpportunities, paused);
+  const postExitColumns = useMemo<ColDef<PostExitOpportunityRow>[]>(
+    () => [
+      {
+        field: 'timestamp',
+        headerName: 'Observed',
+        valueFormatter: ({ value }) =>
+          typeof value === 'number' ? new Date(value).toLocaleString() : '—',
+        minWidth: 165,
+      },
+      { field: 'symbol', headerName: 'Symbol', minWidth: 110 },
+      { field: 'side', headerName: 'Side', minWidth: 90 },
+      { field: 'strategy', headerName: 'Strategy', minWidth: 140 },
+      {
+        field: 'missedReturnPercent',
+        headerName: 'Return after exit',
+        cellClassRules: signedValueClasses,
+        valueFormatter: ({ value }) => percent(value),
+        minWidth: 135,
+      },
+      {
+        field: 'bestPostExitReturnPercent',
+        headerName: 'Best post-exit',
+        cellClassRules: signedValueClasses,
+        valueFormatter: ({ value }) => percent(value),
+        minWidth: 125,
+      },
+      {
+        field: 'worstPostExitReturnPercent',
+        headerName: 'Worst post-exit',
+        cellClassRules: signedValueClasses,
+        valueFormatter: ({ value }) => percent(value),
+        minWidth: 125,
+      },
+      {
+        field: 'missedPnlQuote',
+        headerName: 'Missed P&L (quote)',
+        cellClassRules: signedValueClasses,
+        valueFormatter: ({ value }) =>
+          value == null ? '—' : Number(value).toFixed(2),
+        minWidth: 145,
+      },
+    ],
+    [],
+  );
+  return (
+    <section
+      className="feed-section signal-info-panel"
+      aria-label="Missed opportunity bands"
+    >
+      <FeedToolbar title="Missed opportunity bands" />
+      <p className="signal-info-note">
+        Skipped-signal outcomes at 1m, 5m, 15m, and 60m, after entry/exit spread
+        and taker fees. “Became net positive” is the share that crossed above
+        zero during the horizon; average and median times use those samples
+        only. SL/TP simulation uses the thresholds recorded at the skipped
+        decision and the entry spread as an exit-spread proxy. If both barriers
+        were touched, sampled path-extreme timestamps determine order; ambiguous
+        ordering remains stop-first. Five-minute outcomes are preferred for gate
+        adjustments, with longer windows used when short-horizon evidence is
+        insufficient.
+      </p>
+      <div
+        className="signal-info-filters"
+        aria-label="Missed opportunity filters"
+      >
+        <label className="chart-symbol-control">
+          Symbol
+          <select
+            aria-label="Filter missed opportunities by symbol"
+            value={symbol}
+            onChange={(event) => setSymbol(event.target.value)}
+          >
+            <option value="">All</option>
+            {dimensions.symbols.map((value) => (
+              <option key={value} value={value}>
+                {value}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="chart-symbol-control">
+          Direction
+          <select
+            aria-label="Filter missed opportunities by direction"
+            value={direction}
+            onChange={(event) => setDirection(event.target.value)}
+          >
+            <option value="">All</option>
+            {dimensions.directions.map((value) => (
+              <option key={value} value={value}>
+                {value}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="chart-symbol-control">
+          Strategy
+          <select
+            aria-label="Filter missed opportunities by strategy"
+            value={strategy}
+            onChange={(event) => setStrategy(event.target.value)}
+          >
+            <option value="">All</option>
+            {dimensions.strategies.map((value) => (
+              <option key={value} value={value}>
+                {value}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="chart-symbol-control">
+          Market context
+          <select
+            aria-label="Filter missed opportunities by market context"
+            value={marketContext}
+            onChange={(event) => setMarketContext(event.target.value)}
+          >
+            <option value="">All</option>
+            {dimensions.contexts.map((value) => (
+              <option key={value} value={value}>
+                {value}
+              </option>
+            ))}
+          </select>
+        </label>
+      </div>
+      <p className="signal-info-note">
+        {thresholdSuggestions.length
+          ? `Evidence-backed candidate floors: ${thresholdSuggestions
+              .map(
+                (item) =>
+                  `${item.gate} ≤ ${
+                    item.gate === 'score'
+                      ? item.threshold.toFixed(2)
+                      : `${(item.threshold * 100).toFixed(0)}%`
+                  } (${item.sampleCount} SL/TP samples, ${item.horizonSeconds / 60}m)`,
+              )
+              .join(
+                '; ',
+              )}. These are diagnostics; live gates remain managed by the configured adaptive policy.`
+          : 'No statistically supported threshold relaxation is available for this filter.'}
+      </p>
+      {state.missedOpportunityBandsError && (
+        <div className="positions-error">
+          {state.missedOpportunityBandsError}
+        </div>
+      )}
+      <div className="data-grid-wrap signal-info-grid">
+        <AgGridReact<MissedOpportunityBand>
+          rowData={filteredRows}
+          columnDefs={columns}
+          defaultColDef={{
+            sortable: true,
+            resizable: true,
+            flex: 1,
+            minWidth: 80,
+          }}
+          theme={gridTheme}
+          domLayout="autoHeight"
+          rowHeight={26}
+          headerHeight={28}
+        />
+      </div>
+      {filteredRows.every(
+        (row) => row.sampleCount === 0 && row.stopTargetSampleCount === 0,
+      ) &&
+        !state.missedOpportunityBandsError && (
+          <p className="positions-empty">
+            No missed opportunity samples are available for this filter yet.
+            Candidate outcomes populate after skipped signals have a completed
+            1-minute evaluation.
+          </p>
+        )}
+      <h3 className="signal-info-subheading">
+        Post-exit opportunity observations
+      </h3>
+      <p className="signal-info-note">
+        Closed trades are observed for up to 30 minutes after exit. These
+        results remain separate from skipped-entry bands because they describe
+        realized positions, and are also sent to Learning for exit-timing
+        feedback.
+      </p>
+      <div className="data-grid-wrap signal-info-grid">
+        <AgGridReact<PostExitOpportunityRow>
+          rowData={postExitRows}
+          columnDefs={postExitColumns}
+          defaultColDef={{
+            sortable: true,
+            resizable: true,
+            flex: 1,
+            minWidth: 80,
+          }}
+          theme={gridTheme}
+          domLayout="autoHeight"
+          rowHeight={26}
+          headerHeight={28}
+        />
+      </div>
+      {postExitRows.length === 0 && (
+        <p className="positions-empty">
+          No post-exit observations are available yet.
+        </p>
+      )}
+    </section>
+  );
+}
+
+export function SkippedSignalAuditView({
+  paused = false,
+}: {
+  paused?: boolean;
+}) {
+  const state = useSignalInfo();
+  const rows = usePausedValue(state.skippedSignalAudit, paused);
+  const columns = useMemo<ColDef<SkippedSignalAuditRow>[]>(
+    () => [
+      {
+        field: 'timestamp',
+        headerName: 'Time',
+        valueFormatter: ({ value }) =>
+          typeof value === 'number' ? new Date(value).toLocaleString() : '—',
+        minWidth: 165,
+      },
+      { field: 'symbol', headerName: 'Symbol', minWidth: 110 },
+      { field: 'direction', headerName: 'Direction', minWidth: 100 },
+      { field: 'strategy', headerName: 'Strategy', minWidth: 140 },
+      {
+        field: 'score',
+        headerName: 'Score',
+        valueFormatter: ({ value }) =>
+          typeof value === 'number' ? value.toFixed(3) : '—',
+        minWidth: 90,
+      },
+      {
+        field: 'strength',
+        headerName: 'Strength',
+        valueFormatter: ({ value }) =>
+          typeof value === 'number' ? (value * 100).toFixed(1) + '%' : '—',
+        minWidth: 100,
+      },
+      {
+        headerName: 'Strength floor',
+        valueGetter: ({ data }) => data?.entry_gate?.thresholds?.strength_floor,
+        valueFormatter: ({ value }) =>
+          typeof value === 'number' ? (value * 100).toFixed(1) + '%' : '—',
+        minWidth: 120,
+      },
+      {
+        headerName: 'Score floor',
+        valueGetter: ({ data }) =>
+          data?.entry_gate?.thresholds?.exploration_score_absolute_floor,
+        valueFormatter: ({ value }) =>
+          typeof value === 'number' ? value.toFixed(3) : '—',
+        minWidth: 105,
+      },
+      {
+        headerName: 'Market context',
+        valueGetter: ({ data }) => data?.entry_gate?.market_context,
+        minWidth: 125,
+      },
+      {
+        field: 'reason',
+        headerName: 'Rejection reason',
+        minWidth: 250,
+        flex: 2,
+      },
+    ],
+    [],
+  );
+  return (
+    <section
+      className="feed-section signal-info-panel"
+      aria-label="Skipped signal audit"
+    >
+      <FeedToolbar title="Recent skipped signal audit" />
+      <p className="signal-info-note">
+        Recent skipped and rejected entry decisions, including the observed
+        signal, gate floors, market context, and recorded reason.
+      </p>
+      <div className="data-grid-wrap signal-info-grid">
+        <AgGridReact<SkippedSignalAuditRow>
+          rowData={rows}
+          columnDefs={columns}
+          defaultColDef={{
+            sortable: true,
+            resizable: true,
+            flex: 1,
+            minWidth: 80,
+          }}
+          theme={gridTheme}
+          domLayout="autoHeight"
+          rowHeight={26}
+          headerHeight={28}
+        />
+      </div>
+      {rows.length === 0 && (
+        <p className="positions-empty">
+          No skipped or rejected decision records are available yet.
+        </p>
+      )}
+    </section>
+  );
 }

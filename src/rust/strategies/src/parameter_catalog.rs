@@ -43,6 +43,16 @@ fn strategy_rule_parameter_specs(strategy: Strategy) -> Vec<StrategyParameterSpe
             "%",
             -1.0,
         ));
+        common_risk.push(catalog_param(
+            K::PostStopCooldownMinutes,
+            "Post-stop re-entry cooldown",
+            2.0,
+            0.5,
+            10.0,
+            0.5,
+            "minutes",
+            0.0,
+        ));
     }
     if strategy != Strategy::DatedCarry && strategy.uses_fixed_take_profit() {
         common_risk.push(catalog_param(
@@ -397,5 +407,39 @@ pub(super) fn complete_parameter_specs(strategy: Strategy) -> Vec<StrategyParame
             -1.0,
         ),
     ]);
+    if strategy.is_live_insight() {
+        specs.extend([
+            catalog_param(
+                StrategyParameterKey::ThesisFailureLossActivationPercent,
+                "Thesis-failure loss activation",
+                0.20,
+                0.10,
+                0.75,
+                0.05,
+                "% net loss",
+                -1.0,
+            ),
+            catalog_param(
+                StrategyParameterKey::ThesisFailureConfirmationSamples,
+                "Thesis-failure confirmations",
+                2.0,
+                1.0,
+                4.0,
+                1.0,
+                "fresh signals",
+                1.0,
+            ),
+            catalog_param(
+                StrategyParameterKey::ThesisFailureMinimumSignalStrength,
+                "Thesis-failure signal strength",
+                0.60,
+                0.40,
+                0.90,
+                0.05,
+                "strength",
+                1.0,
+            ),
+        ]);
+    }
     specs
 }

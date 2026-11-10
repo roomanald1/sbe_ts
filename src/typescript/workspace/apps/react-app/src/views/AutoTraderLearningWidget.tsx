@@ -7,6 +7,9 @@ import {
   type ColDef,
 } from 'ag-grid-community';
 import { AutoTraderModel } from '../models/AutoTraderModel';
+import type { LearningSummary } from '../models/AutoTraderOutcomesModel';
+import { summarizeLearningEffectiveness } from '../models/LearningEffectivenessModel';
+import { sharedGet } from '../shared_get';
 import { useBehaviorSnapshot } from '@workspace/ui-platform';
 
 ModuleRegistry.registerModules([ClientSideRowModelModule]);
@@ -43,6 +46,66 @@ type LearningRow = {
   rejected: boolean;
   status: string;
 };
+type TradeEffectivenessRow = {
+  strategy: string;
+  activeSamples: number;
+  activePositiveRate: number | null;
+  activeAverage: number | null;
+  otherSamples: number;
+  otherPositiveRate: number | null;
+  otherAverage: number | null;
+  averageDifference: number | null;
+};
+
+const signedPercentPoints = (value: number | null) =>
+  value == null ? '—' : `${value > 0 ? '+' : ''}${value.toFixed(3)} pp`;
+
+const tradeEffectivenessColumns: ColDef<TradeEffectivenessRow>[] = [
+  { field: 'strategy', headerName: 'Strategy', pinned: 'left', width: 180 },
+  { field: 'activeSamples', headerName: 'Current profile n', width: 105 },
+  {
+    field: 'activePositiveRate',
+    headerName: 'Current win rate',
+    width: 115,
+    valueFormatter: ({ value }) =>
+      Number.isFinite(value) ? `${(value * 100).toFixed(0)}%` : '—',
+  },
+  {
+    field: 'activeAverage',
+    headerName: 'Current avg net',
+    width: 120,
+    valueFormatter: ({ value }) => signedPercentPoints(value ?? null),
+    cellClass: ({ value }) =>
+      value > 0 ? 'learning-increase' : value < 0 ? 'learning-decrease' : '',
+  },
+  { field: 'otherSamples', headerName: 'Other profile n', width: 105 },
+  {
+    field: 'otherPositiveRate',
+    headerName: 'Other win rate',
+    width: 105,
+    valueFormatter: ({ value }) =>
+      Number.isFinite(value) ? `${(value * 100).toFixed(0)}%` : '—',
+  },
+  {
+    field: 'otherAverage',
+    headerName: 'Other avg net',
+    width: 115,
+    valueFormatter: ({ value }) => signedPercentPoints(value ?? null),
+    cellClass: ({ value }) =>
+      value > 0 ? 'learning-increase' : value < 0 ? 'learning-decrease' : '',
+  },
+  {
+    field: 'averageDifference',
+    headerName: 'Current − other',
+    headerTooltip:
+      'Difference between realized average net returns for trades using currently active profile parameters and trades using other parameter profiles in the last seven days. Descriptive only; it is not a causal or risk-adjusted estimate.',
+    width: 125,
+    valueFormatter: ({ value }) => signedPercentPoints(value ?? null),
+    cellClass: ({ value }) =>
+      value > 0 ? 'learning-increase' : value < 0 ? 'learning-decrease' : '',
+  },
+];
+
 const columns: ColDef<LearningRow>[] = [
   { field: 'symbol', headerName: 'Symbol', pinned: 'left', width: 105 },
   { field: 'strategy', headerName: 'Strategy', width: 130 },
@@ -158,11 +221,51 @@ const columns: ColDef<LearningRow>[] = [
 
 export function AutoTraderLearningWidget() {
   const [promotedOnly, setPromotedOnly] = useState(false);
+  const [learningSummary, setLearningSummary] = useState<
+    LearningSummary[] | null
+  >(null);
+  const [learningSummaryError, setLearningSummaryError] = useState<
+    string | undefined
+  >();
   const model = useMemo(() => new AutoTraderModel(), []);
   useEffect(() => {
     model.start();
     return () => model.stop();
   }, [model]);
+  useEffect(() => {
+    let active = true;
+    const refreshSummary = async () => {
+      try {
+        const response = await sharedGet(
+          '/positions/auto-trader/learning-summary',
+        );
+        if (!response.ok) {
+          throw new Error(
+            `Learning summary request failed (${response.status}).`,
+          );
+        }
+        const summary = (await response.json()) as LearningSummary[];
+        if (active) {
+          setLearningSummary(summary);
+          setLearningSummaryError(undefined);
+        }
+      } catch (error) {
+        if (active) {
+          setLearningSummaryError(
+            error instanceof Error
+              ? error.message
+              : 'Could not load Learning summary.',
+          );
+        }
+      }
+    };
+    void refreshSummary();
+    const refreshTimer = setInterval(() => void refreshSummary(), 30_000);
+    return () => {
+      active = false;
+      clearInterval(refreshTimer);
+    };
+  }, []);
   const state = useBehaviorSnapshot(model.state$);
   const profiles = state.decisionParameters?.strategy_profiles ?? [];
   const rows = useMemo(() => {
@@ -267,6 +370,51 @@ export function AutoTraderLearningWidget() {
     }
     return results;
   }, [profiles, state.pendingScoutParameters]);
+  const effectiveness = useMemo(
+    () => summarizeLearningEffectiveness(learningSummary ?? []),
+    [learningSummary],
+  );
+  const actualTradeRows = useMemo(
+    () =>
+      (learningSummary ?? [])
+        .filter(
+          (summary) =>
+            (summary.active_profile_trade_samples ?? 0) > 0 ||
+            (summary.other_profile_trade_samples ?? 0) > 0,
+        )
+        .map((summary): TradeEffectivenessRow => {
+          const activeAverage =
+            summary.active_profile_average_net_return_percent ?? null;
+          const otherAverage =
+            summary.other_profile_average_net_return_percent ?? null;
+          return {
+            strategy: summary.strategy,
+            activeSamples: summary.active_profile_trade_samples ?? 0,
+            activePositiveRate:
+              summary.active_profile_trade_positive_rate ?? null,
+            activeAverage,
+            otherSamples: summary.other_profile_trade_samples ?? 0,
+            otherPositiveRate:
+              summary.other_profile_trade_positive_rate ?? null,
+            otherAverage,
+            averageDifference:
+              activeAverage != null && otherAverage != null
+                ? activeAverage - otherAverage
+                : null,
+          };
+        }),
+    [learningSummary],
+  );
+  const profileReturnDifference =
+    effectiveness.activeProfileReturn != null &&
+    effectiveness.otherProfileReturn != null
+      ? effectiveness.activeProfileReturn - effectiveness.otherProfileReturn
+      : null;
+  const activeCandidates = rows.filter((row) => row.promoted).length;
+  const rejectedCandidates = rows.filter((row) => row.rejected).length;
+  const collectingCandidates = rows.filter((row) =>
+    row.status.startsWith('Collecting'),
+  ).length;
 
   const visibleRows = promotedOnly ? rows.filter((row) => row.promoted) : rows;
 
@@ -275,59 +423,188 @@ export function AutoTraderLearningWidget() {
       className="auto-trader-strategy-parameters"
       aria-label="AutoTrader learning impact"
     >
-      <strong>Scout parameter tests</strong>
+      <strong>Learning effectiveness · realized outcomes</strong>
       <p>
-        Paired scout results show whether each tested parameter value beat its
-        baseline. A positive paired lift means better returns, not a higher
-        parameter value. Results pool by strategy, parameter, and candidate
-        value. “Qualified” means the configured sample minimum and positive
-        one-sided 90% Student-t lower bound are met; “Active” means the current
-        profile uses that candidate. The configured/default column is a
-        reference, not necessarily the paired control value used by each test.
-        Delta is candidate minus control; legacy estimates use
-        Configured/default and carry an asterisk. Both upward and downward
-        candidates are sampled when within parameter bounds. “Avoid” means the
-        upper bound is below zero.
+        This compares actual closed-trade returns from the currently active
+        learned parameter profiles with actual trades taken under other
+        parameter profiles over the last seven days. It answers whether live
+        realized results are moving in the right direction; the comparison is
+        descriptive, not a controlled causal test.
       </p>
-      {rows.length === 0 ? (
-        <p>
-          {state.loading
-            ? 'Loading scout parameter results…'
-            : 'No paired scout parameter results are available yet.'}
+      <div
+        className="auto-trader-learning-overview"
+        aria-label="Realized trade performance over the last seven days"
+      >
+        <div>
+          <span>Current learned profile · actual trades</span>
+          <strong>
+            {learningSummary == null
+              ? '—'
+              : `${effectiveness.activeProfileTrades.toLocaleString()} trades`}
+          </strong>
+          <small>
+            {effectiveness.activeProfilePositiveRate == null
+              ? '—'
+              : `${(effectiveness.activeProfilePositiveRate * 100).toFixed(0)}% positive`}
+            {' · mean net '}
+            {signedPercentPoints(effectiveness.activeProfileReturn)}
+          </small>
+        </div>
+        <div>
+          <span>Other parameter profiles · actual trades</span>
+          <strong>
+            {learningSummary == null
+              ? '—'
+              : `${effectiveness.otherProfileTrades.toLocaleString()} trades`}
+          </strong>
+          <small>
+            {effectiveness.otherProfilePositiveRate == null
+              ? '—'
+              : `${(effectiveness.otherProfilePositiveRate * 100).toFixed(0)}% positive`}
+            {' · mean net '}
+            {signedPercentPoints(effectiveness.otherProfileReturn)}
+          </small>
+        </div>
+        <div>
+          <span>Active profile minus other profiles</span>
+          <strong>{signedPercentPoints(profileReturnDifference)}</strong>
+          <small>
+            {effectiveness.activeProfileTrades === 0 ||
+            effectiveness.otherProfileTrades === 0
+              ? 'Need trades in both groups to compare'
+              : 'Difference in mean realized net return'}
+          </small>
+        </div>
+        <div>
+          <span>Actual trade coverage · 7d</span>
+          <strong>
+            {learningSummary == null
+              ? '—'
+              : `${effectiveness.closedTrades.toLocaleString()} trades`}
+          </strong>
+          <small>Across active and other parameter profiles</small>
+        </div>
+      </div>
+      <p className="auto-trader-learning-caveat">
+        {!effectiveness.activeProfileTrades || !effectiveness.otherProfileTrades
+          ? 'There is not enough realized-trade evidence in both groups to judge effectiveness yet.'
+          : 'This is an observed comparison, not proof that Learning caused the difference. Trade count, market conditions, and risk-adjusted return matter; Scout simulations are excluded from these realized results.'}
+      </p>
+      {learningSummaryError && (
+        <p className="auto-trader-learning-error" role="alert">
+          Learning summary unavailable: {learningSummaryError}
         </p>
-      ) : (
-        <>
-          <button
-            className="auto-trader-learning-filter"
-            type="button"
-            aria-pressed={promotedOnly}
-            onClick={() => setPromotedOnly((value) => !value)}
-          >
-            {promotedOnly ? 'Show all tests' : 'Active only'}
-          </button>
-          {visibleRows.length === 0 ? (
-            <p>No parameter variants are active yet.</p>
-          ) : (
-            <div className="data-grid-wrap auto-trader-learning-grid">
-              <AgGridReact<LearningRow>
-                rowData={visibleRows}
-                columnDefs={columns}
-                getRowId={({ data }) => data.id}
-                defaultColDef={{
-                  sortable: true,
-                  resizable: true,
-                  filter: true,
-                  minWidth: 65,
-                }}
-                theme={learningGridTheme}
-                domLayout="normal"
-                rowHeight={30}
-                headerHeight={28}
-              />
-            </div>
-          )}
-        </>
       )}
+      {learningSummary == null ? (
+        <p>
+          {learningSummaryError
+            ? 'Actual trade results could not be loaded.'
+            : 'Loading actual trade results…'}
+        </p>
+      ) : actualTradeRows.length === 0 ? (
+        <p>No closed-trade results are available for the last seven days.</p>
+      ) : (
+        <div className="data-grid-wrap auto-trader-learning-grid">
+          <AgGridReact<TradeEffectivenessRow>
+            rowData={actualTradeRows}
+            columnDefs={tradeEffectivenessColumns}
+            getRowId={({ data }) => data.strategy}
+            defaultColDef={{
+              sortable: true,
+              resizable: true,
+              filter: true,
+              minWidth: 65,
+            }}
+            theme={learningGridTheme}
+            domLayout="normal"
+            rowHeight={30}
+            headerHeight={28}
+          />
+        </div>
+      )}
+      <details className="auto-trader-learning-experiments">
+        <summary>Scout parameter experiments · simulated evidence</summary>
+        <p>
+          Paired scout results show whether each tested parameter value beat its
+          baseline in simulation. “Qualified” means the configured sample
+          minimum and positive one-sided 90% Student-t lower bound are met;
+          “Active” means the current profile uses that candidate. “Avoid” means
+          the upper bound is below zero. These results guide profile selection
+          but are not realized trading performance.
+        </p>
+        <div className="auto-trader-learning-overview">
+          <div>
+            <span>Paired Scout evidence · 7d</span>
+            <strong>
+              {learningSummary == null
+                ? '—'
+                : `${effectiveness.pairedSamples.toLocaleString()} samples`}
+            </strong>
+            <small>
+              Mean variant-vs-control lift{' '}
+              {signedPercentPoints(effectiveness.pairedLift)}
+            </small>
+          </div>
+          <div>
+            <span>Parameter decisions</span>
+            <strong>
+              {activeCandidates} active · {rejectedCandidates} avoided
+            </strong>
+            <small>{collectingCandidates} still collecting evidence</small>
+          </div>
+          <div>
+            <span>Scout outcomes · 7d</span>
+            <strong>
+              {learningSummary == null
+                ? '—'
+                : `${effectiveness.scoutOutcomes.toLocaleString()} observations`}
+            </strong>
+            <small>
+              Mean counterfactual return{' '}
+              {signedPercentPoints(effectiveness.scoutReturn)}
+            </small>
+          </div>
+        </div>
+        {rows.length === 0 ? (
+          <p>
+            {state.loading
+              ? 'Loading scout parameter results…'
+              : 'No paired scout parameter results are available yet.'}
+          </p>
+        ) : (
+          <>
+            <button
+              className="auto-trader-learning-filter"
+              type="button"
+              aria-pressed={promotedOnly}
+              onClick={() => setPromotedOnly((value) => !value)}
+            >
+              {promotedOnly ? 'Show all tests' : 'Active only'}
+            </button>
+            {visibleRows.length === 0 ? (
+              <p>No parameter variants are active yet.</p>
+            ) : (
+              <div className="data-grid-wrap auto-trader-learning-grid">
+                <AgGridReact<LearningRow>
+                  rowData={visibleRows}
+                  columnDefs={columns}
+                  getRowId={({ data }) => data.id}
+                  defaultColDef={{
+                    sortable: true,
+                    resizable: true,
+                    filter: true,
+                    minWidth: 65,
+                  }}
+                  theme={learningGridTheme}
+                  domLayout="normal"
+                  rowHeight={30}
+                  headerHeight={28}
+                />
+              </div>
+            )}
+          </>
+        )}
+      </details>
     </section>
   );
 }

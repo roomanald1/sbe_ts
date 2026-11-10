@@ -101,6 +101,43 @@ mod scout_outcome_tests {
     }
 
     #[test]
+    fn paired_horizon_feedback_uses_one_opportunity_group_and_unique_event_id() {
+        let mut baseline = outcome("baseline", 0.4);
+        baseline.scout_comparison_id = Some("cmp".into());
+        baseline.scout_comparison_role = Some("baseline".into());
+        baseline.exit_scenario = "horizon-60".into();
+        let mut variant = outcome("variant", 1.1);
+        variant.scout_comparison_id = Some("cmp".into());
+        variant.scout_comparison_role = Some("variant".into());
+        variant.scout_parameter_key = Some("minimum_momentum".into());
+        variant.scout_parameter_value = Some(0.7);
+        variant.exit_scenario = "horizon-60".into();
+
+        let tested = validate_scout_outcome(&variant).unwrap();
+        assert!(tested.contains_key("minimum_momentum"));
+        let FeedbackEvent::ScoutOutcome { event_id, .. } =
+            paired_event("cmp|scenario:horizon-60", &baseline, &variant).unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!(event_id, "paired-scout:cmp:horizon-60");
+    }
+
+    #[test]
+    fn paired_feedback_rejects_different_opportunities() {
+        let baseline = outcome("baseline", 0.4);
+        let mut variant = outcome("variant", 1.1);
+        variant.scout_parameter_key = Some("minimum_momentum".into());
+        variant.scout_parameter_value = Some(0.7);
+        assert!(paired_event("cmp", &baseline, &variant).is_some());
+        variant.learning_context = "scout:other:trade:scenario:strategy".into();
+        assert!(paired_event("cmp", &baseline, &variant).is_none());
+        variant.learning_context = baseline.learning_context.clone();
+        variant.symbol = "ETH-USDT".into();
+        assert!(paired_event("cmp", &baseline, &variant).is_none());
+    }
+
+    #[test]
     fn legacy_pair_completes_with_new_variant_using_legacy_baseline_return() {
         let mut pair = ScoutPair {
             legacy_baseline_return_percent: Some(0.4),
@@ -179,7 +216,10 @@ mod scout_outcome_tests {
         assert!(tested.is_empty());
         let mut state = PersistedState::default();
         let (_, pairs) = record_paired_scout_outcome(&mut state, &baseline);
-        assert_eq!(pairs, vec!["cmp-zero-side"]);
+        assert_eq!(
+            pairs,
+            vec!["cmp-zero-side", "cmp-zero-side|scenario:strategy"]
+        );
         let ScoutOutboxItem::Learning(FeedbackEvent::ScoutOutcome {
             net_return_percent,
             parameters,
@@ -211,4 +251,3 @@ mod scout_outcome_tests {
         assert_eq!(seen.len(), 3);
     }
 }
-

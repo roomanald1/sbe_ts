@@ -343,15 +343,43 @@ pub struct ScoutOutcomeRequest {
     pub strategy_parameter_specs: Vec<ParameterSpec>,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct ScoutMarkoutRequest {
     pub decision_id: String,
     pub symbol: String,
     pub signal_timestamp_ms: u64,
     pub evaluated_timestamp_ms: u64,
     pub taker_fee_rate: f64,
+    #[serde(default)]
+    pub observation_only: bool,
+    #[serde(default)]
+    pub horizon_seconds: u64,
     pub long_net_percent: Option<f64>,
     pub short_net_percent: Option<f64>,
+    #[serde(default)]
+    pub reference_entry_price: Option<f64>,
+    #[serde(default)]
+    pub reference_exit_price: Option<f64>,
+    #[serde(default)]
+    pub entry_bid: Option<f64>,
+    #[serde(default)]
+    pub entry_ask: Option<f64>,
+    #[serde(default)]
+    pub exit_bid: Option<f64>,
+    #[serde(default)]
+    pub exit_ask: Option<f64>,
+    #[serde(default)]
+    pub long_gross_percent: Option<f64>,
+    #[serde(default)]
+    pub short_gross_percent: Option<f64>,
+    #[serde(default)]
+    pub path_high: Option<f64>,
+    #[serde(default)]
+    pub path_low: Option<f64>,
+    #[serde(default)]
+    pub long_time_to_positive_net_seconds: Option<u64>,
+    #[serde(default)]
+    pub short_time_to_positive_net_seconds: Option<u64>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -475,4 +503,3 @@ pub struct LiveScoutPolicy {
     #[serde(default)]
     pub best_ask: Option<f64>,
 }
-

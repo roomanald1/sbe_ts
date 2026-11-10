@@ -1,42 +1,388 @@
 pub(crate) fn deserialize_record(kind: i64, payload: &[u8]) -> Result<StoredSignalRecord> {
-    if let Ok(record) = bincode::deserialize(payload) {
-        return Ok(record);
-    }
     if kind == 0 {
-        let ExtendedSnapshotRecord::Snapshot(snapshot) = bincode::deserialize(payload)?;
-        return Ok(StoredSignalRecord::Snapshot(SignalSnapshot {
-            symbol: snapshot.symbol,
-            timestamp: snapshot.timestamp,
-            direction: snapshot.direction,
-            score: snapshot.score,
-            strength: snapshot.strength,
-            evidence_coverage: None,
-            estimated_accuracy: None,
-            components: SignalComponents {
-                trend_1m_percent: snapshot.components.trend_1m_percent,
-                momentum_10s_percent: snapshot.components.momentum_10s_percent,
-                trade_flow_imbalance: snapshot.components.trade_flow_imbalance,
-                book_imbalance: snapshot.components.book_imbalance,
-                volatility_1m_percent: snapshot.components.volatility_1m_percent,
-                trend_5m_percent: snapshot.components.trend_5m_percent,
-                trend_5m_volatility_units: snapshot.components.trend_5m_volatility_units,
-                mispricing_vs_vwap_bps: snapshot.components.mispricing_vs_vwap_bps,
-                pressure_without_price_move: snapshot
-                    .components
-                    .pressure_without_price_move
-                    .or(snapshot.components.absorption_imbalance),
-                aggressor_cost_bps: snapshot.components.aggressor_cost_bps,
-                ..SignalComponents::default()
-            },
-            reasons: snapshot.reasons,
-            news_attribution: None,
-            stale: snapshot.stale,
-            ranging_probability: snapshot.ranging_probability,
-            range_lower_bound: snapshot.range_lower_bound,
-            range_upper_bound: snapshot.range_upper_bound,
-        }));
+        return deserialize_snapshot_record(payload);
+    }
+    if kind == 6 {
+        return deserialize_quote_path_record(payload);
     }
     Ok(bincode::deserialize(payload)?)
+}
+
+fn deserialize_snapshot_record(payload: &[u8]) -> Result<StoredSignalRecord> {
+    let mut failures = Vec::new();
+    match deserialize_exact::<StoredSignalRecord>(payload) {
+        Ok(record @ StoredSignalRecord::Snapshot(_)) => return Ok(record),
+        Ok(_) => failures.push("current schema decoded a different record kind".to_owned()),
+        Err(error) => failures.push(format!("current schema: {error}")),
+    }
+    match deserialize_exact::<ExtendedSnapshotRecord>(payload) {
+        Ok(ExtendedSnapshotRecord::Snapshot(snapshot)) => {
+            return Ok(StoredSignalRecord::Snapshot(snapshot_from_extended(snapshot)));
+        }
+        Err(error) => failures.push(format!("extended component schema: {error}")),
+    }
+    match deserialize_exact::<LegacySnapshotWithoutVectorsRecord>(payload) {
+        Ok(LegacySnapshotWithoutVectorsRecord::Snapshot(snapshot)) => {
+            return Ok(StoredSignalRecord::Snapshot(snapshot_from_scalar_legacy(snapshot)));
+        }
+        Err(error) => failures.push(format!("scalar-only component schema: {error}")),
+    }
+    match deserialize_exact::<LegacySnapshotWithOptionalRangesRecord>(payload) {
+        Ok(LegacySnapshotWithOptionalRangesRecord::Snapshot(snapshot)) => {
+            return Ok(StoredSignalRecord::Snapshot(
+                snapshot_from_scalar_legacy_with_optional_ranges(snapshot),
+            ));
+        }
+        Err(error) => failures.push(format!("optional range schema: {error}")),
+    }
+    match deserialize_exact::<LegacySnapshotWithoutUpperRangeRecord>(payload) {
+        Ok(LegacySnapshotWithoutUpperRangeRecord::Snapshot(snapshot)) => {
+            return Ok(StoredSignalRecord::Snapshot(
+                snapshot_from_scalar_legacy_without_upper_range(snapshot),
+            ));
+        }
+        Err(error) => failures.push(format!("snapshot without upper range schema: {error}")),
+    }
+    match deserialize_exact::<LegacySnapshotWithoutNewsRecord>(payload) {
+        Ok(LegacySnapshotWithoutNewsRecord::Snapshot(snapshot)) => {
+            return Ok(StoredSignalRecord::Snapshot(snapshot_from_legacy(snapshot)));
+        }
+        Err(error) => failures.push(format!("snapshot without news schema: {error}")),
+    }
+    match deserialize_exact::<LegacyShiftedSnapshotRecord>(payload) {
+        Ok(LegacyShiftedSnapshotRecord::Snapshot(snapshot)) => {
+            return Ok(StoredSignalRecord::Snapshot(snapshot_from_extended(snapshot)));
+        }
+        Ok(_) => failures.push("shifted schema decoded a different record kind".to_owned()),
+        Err(error) => failures.push(format!("shifted enum schema: {error}")),
+    }
+    Err(anyhow::anyhow!(
+        "unsupported kind 0 snapshot schema ({})",
+        failures.join("; ")
+    ))
+}
+
+fn deserialize_quote_path_record(payload: &[u8]) -> Result<StoredSignalRecord> {
+    let mut failures = Vec::new();
+    match deserialize_exact::<StoredSignalRecord>(payload) {
+        Ok(record @ StoredSignalRecord::CounterfactualQuotePath(_)) => return Ok(record),
+        Ok(_) => failures.push("current schema decoded a different record kind".to_owned()),
+        Err(error) => failures.push(format!("current schema: {error}")),
+    }
+    match deserialize_exact::<LegacyStoredSignalRecord>(payload) {
+        Ok(LegacyStoredSignalRecord::CounterfactualQuotePath(path)) => {
+            return Ok(StoredSignalRecord::CounterfactualQuotePath(
+                CounterfactualQuotePath {
+                    symbol: path.symbol,
+                    signal_timestamp: path.signal_timestamp,
+                    horizon_seconds: path.horizon_seconds,
+                    samples: path
+                        .samples
+                        .into_iter()
+                        .map(|sample| CounterfactualQuoteSample {
+                            timestamp: sample.timestamp,
+                            bid_execution_price: depth_adjusted_quote_execution_price(
+                                &sample.bid_levels,
+                            )
+                            .or_else(|| valid_quote_execution_price(sample.bid)),
+                            ask_execution_price: depth_adjusted_quote_execution_price(
+                                &sample.ask_levels,
+                            )
+                            .or_else(|| valid_quote_execution_price(sample.ask)),
+                        })
+                        .collect(),
+                },
+            ));
+        }
+        Ok(_) => failures.push("legacy schema decoded a different record kind".to_owned()),
+        Err(error) => failures.push(format!("legacy schema: {error}")),
+    }
+    Err(anyhow::anyhow!(
+        "unsupported kind 6 quote-path schema ({})",
+        failures.join("; ")
+    ))
+}
+
+fn deserialize_exact<T: serde::de::DeserializeOwned>(payload: &[u8]) -> Result<T> {
+    use bincode::Options;
+
+    bincode::DefaultOptions::new()
+        .with_fixint_encoding()
+        .reject_trailing_bytes()
+        .deserialize(payload)
+        .map_err(Into::into)
+}
+
+fn snapshot_from_extended(snapshot: ExtendedSignalSnapshot) -> SignalSnapshot {
+    SignalSnapshot {
+        symbol: snapshot.symbol,
+        timestamp: snapshot.timestamp,
+        direction: snapshot.direction,
+        score: snapshot.score,
+        strength: snapshot.strength,
+        evidence_coverage: None,
+        estimated_accuracy: None,
+        components: SignalComponents {
+            trend_1m_percent: snapshot.components.trend_1m_percent,
+            momentum_10s_percent: snapshot.components.momentum_10s_percent,
+            trade_flow_imbalance: snapshot.components.trade_flow_imbalance,
+            book_imbalance: snapshot.components.book_imbalance,
+            volatility_1m_percent: snapshot.components.volatility_1m_percent,
+            trend_5m_percent: snapshot.components.trend_5m_percent,
+            trend_5m_volatility_units: snapshot.components.trend_5m_volatility_units,
+            mispricing_vs_vwap_bps: snapshot.components.mispricing_vs_vwap_bps,
+            pressure_without_price_move: snapshot
+                .components
+                .pressure_without_price_move
+                .or(snapshot.components.absorption_imbalance),
+            aggressor_cost_bps: snapshot.components.aggressor_cost_bps,
+            ..SignalComponents::default()
+        },
+        reasons: snapshot.reasons,
+        news_attribution: None,
+        stale: snapshot.stale,
+        ranging_probability: snapshot.ranging_probability,
+        range_lower_bound: snapshot.range_lower_bound,
+        range_upper_bound: snapshot.range_upper_bound,
+    }
+}
+
+fn snapshot_from_legacy(snapshot: LegacySignalSnapshotWithoutNews) -> SignalSnapshot {
+    SignalSnapshot {
+        symbol: snapshot.symbol,
+        timestamp: snapshot.timestamp,
+        direction: snapshot.direction,
+        score: snapshot.score,
+        strength: snapshot.strength,
+        components: snapshot.components,
+        reasons: snapshot.reasons,
+        news_attribution: None,
+        stale: snapshot.stale,
+        ranging_probability: snapshot.ranging_probability,
+        range_lower_bound: snapshot.range_lower_bound,
+        range_upper_bound: snapshot.range_upper_bound,
+        evidence_coverage: None,
+        estimated_accuracy: None,
+    }
+}
+
+fn snapshot_from_scalar_legacy(snapshot: LegacySignalSnapshotWithoutVectors) -> SignalSnapshot {
+    SignalSnapshot {
+        symbol: snapshot.symbol,
+        timestamp: snapshot.timestamp,
+        direction: snapshot.direction,
+        score: snapshot.score,
+        strength: snapshot.strength,
+        components: components_from_scalar_legacy(snapshot.components),
+        reasons: snapshot.reasons,
+        news_attribution: snapshot.news_attribution,
+        stale: snapshot.stale,
+        ranging_probability: Some(snapshot.ranging_probability),
+        range_lower_bound: snapshot.range_lower_bound,
+        range_upper_bound: snapshot.range_upper_bound,
+        evidence_coverage: None,
+        estimated_accuracy: None,
+    }
+}
+
+fn snapshot_from_scalar_legacy_without_upper_range(
+    snapshot: LegacySnapshotWithoutUpperRange,
+) -> SignalSnapshot {
+    SignalSnapshot {
+        symbol: snapshot.symbol,
+        timestamp: snapshot.timestamp,
+        direction: snapshot.direction,
+        score: snapshot.score,
+        strength: snapshot.strength,
+        components: components_from_scalar_legacy(snapshot.components),
+        reasons: snapshot.reasons,
+        news_attribution: snapshot.news_attribution,
+        stale: snapshot.stale,
+        ranging_probability: snapshot.ranging_probability,
+        range_lower_bound: snapshot.range_lower_bound,
+        range_upper_bound: None,
+        evidence_coverage: None,
+        estimated_accuracy: None,
+    }
+}
+
+fn snapshot_from_scalar_legacy_with_optional_ranges(
+    snapshot: LegacySignalSnapshotWithOptionalRanges,
+) -> SignalSnapshot {
+    SignalSnapshot {
+        symbol: snapshot.symbol,
+        timestamp: snapshot.timestamp,
+        direction: snapshot.direction,
+        score: snapshot.score,
+        strength: snapshot.strength,
+        components: components_from_scalar_legacy(snapshot.components),
+        reasons: snapshot.reasons,
+        news_attribution: snapshot.news_attribution,
+        stale: snapshot.stale,
+        ranging_probability: snapshot.ranging_probability,
+        range_lower_bound: snapshot.range_lower_bound,
+        range_upper_bound: snapshot.range_upper_bound,
+        evidence_coverage: None,
+        estimated_accuracy: None,
+    }
+}
+
+fn components_from_scalar_legacy(
+    components: LegacySignalComponentsWithoutVectors,
+) -> SignalComponents {
+    SignalComponents {
+        trend_1m_percent: components.trend_1m_percent,
+        momentum_10s_percent: components.momentum_10s_percent,
+        trade_flow_imbalance: components.trade_flow_imbalance,
+        book_imbalance: components.book_imbalance,
+        volatility_1m_percent: components.volatility_1m_percent,
+        trend_5m_percent: components.trend_5m_percent,
+        trend_5m_volatility_units: components.trend_5m_volatility_units,
+        mispricing_vs_vwap_bps: components.mispricing_vs_vwap_bps,
+        pressure_without_price_move: components.pressure_without_price_move,
+        aggressor_cost_bps: components.aggressor_cost_bps,
+        ..SignalComponents::default()
+    }
+}
+
+#[derive(Deserialize, Serialize)]
+enum LegacySnapshotWithoutVectorsRecord {
+    Snapshot(LegacySignalSnapshotWithoutVectors),
+}
+
+#[derive(Deserialize, Serialize)]
+struct LegacySignalSnapshotWithoutVectors {
+    symbol: String,
+    timestamp: u64,
+    direction: String,
+    score: f64,
+    strength: f64,
+    components: LegacySignalComponentsWithoutVectors,
+    reasons: Vec<String>,
+    news_attribution: Option<NewsAttribution>,
+    stale: bool,
+    ranging_probability: f64,
+    range_lower_bound: Option<f64>,
+    range_upper_bound: Option<f64>,
+}
+
+#[derive(Deserialize, Serialize)]
+enum LegacySnapshotWithOptionalRangesRecord {
+    Snapshot(LegacySignalSnapshotWithOptionalRanges),
+}
+
+#[derive(Deserialize, Serialize)]
+struct LegacySignalSnapshotWithOptionalRanges {
+    symbol: String,
+    timestamp: u64,
+    direction: String,
+    score: f64,
+    strength: f64,
+    components: LegacySignalComponentsWithoutVectors,
+    reasons: Vec<String>,
+    news_attribution: Option<NewsAttribution>,
+    stale: bool,
+    ranging_probability: Option<f64>,
+    range_lower_bound: Option<f64>,
+    range_upper_bound: Option<f64>,
+}
+
+#[derive(Deserialize, Serialize)]
+enum LegacySnapshotWithoutUpperRangeRecord {
+    Snapshot(LegacySnapshotWithoutUpperRange),
+}
+
+#[derive(Deserialize, Serialize)]
+struct LegacySnapshotWithoutUpperRange {
+    symbol: String,
+    timestamp: u64,
+    direction: String,
+    score: f64,
+    strength: f64,
+    components: LegacySignalComponentsWithoutVectors,
+    reasons: Vec<String>,
+    news_attribution: Option<NewsAttribution>,
+    stale: bool,
+    ranging_probability: Option<f64>,
+    range_lower_bound: Option<f64>,
+}
+
+#[derive(Deserialize, Serialize)]
+struct LegacySignalComponentsWithoutVectors {
+    trend_1m_percent: Option<f64>,
+    momentum_10s_percent: Option<f64>,
+    trade_flow_imbalance: Option<f64>,
+    book_imbalance: Option<f64>,
+    volatility_1m_percent: Option<f64>,
+    trend_5m_percent: Option<f64>,
+    trend_5m_volatility_units: Option<f64>,
+    mispricing_vs_vwap_bps: Option<f64>,
+    pressure_without_price_move: Option<f64>,
+    aggressor_cost_bps: Option<f64>,
+}
+
+#[derive(Deserialize, Serialize)]
+enum LegacySnapshotWithoutNewsRecord {
+    Snapshot(LegacySignalSnapshotWithoutNews),
+}
+
+#[derive(Deserialize, Serialize)]
+struct LegacySignalSnapshotWithoutNews {
+    symbol: String,
+    timestamp: u64,
+    direction: String,
+    score: f64,
+    strength: f64,
+    components: SignalComponents,
+    reasons: Vec<String>,
+    stale: bool,
+    ranging_probability: Option<f64>,
+    range_lower_bound: Option<f64>,
+    range_upper_bound: Option<f64>,
+}
+
+#[derive(Deserialize)]
+enum LegacyStoredSignalRecord {
+    Snapshot,
+    Outcome,
+    Evaluation,
+    BookSnapshot,
+    ResearchFeatures,
+    ExternalMarket,
+    CounterfactualQuotePath(LegacyCounterfactualQuotePath),
+}
+
+#[derive(Deserialize)]
+struct LegacyCounterfactualQuotePath {
+    symbol: String,
+    signal_timestamp: u64,
+    horizon_seconds: u64,
+    samples: Vec<LegacyCounterfactualQuoteSample>,
+}
+
+#[derive(Deserialize)]
+struct LegacyCounterfactualQuoteSample {
+    timestamp: u64,
+    bid: f64,
+    ask: f64,
+    bid_levels: Vec<(f64, f64)>,
+    ask_levels: Vec<(f64, f64)>,
+}
+
+#[allow(dead_code)]
+#[derive(Deserialize)]
+enum LegacyShiftedSnapshotRecord {
+    Outcome,
+    Evaluation,
+    BookSnapshot,
+    ResearchFeatures,
+    ExternalMarket,
+    CounterfactualQuotePath,
+    Snapshot(ExtendedSignalSnapshot),
+}
+
+fn valid_quote_execution_price(price: f64) -> Option<f64> {
+    (price.is_finite() && price > 0.0).then_some(price)
 }
 
 fn compress_record(record: &StoredSignalRecord) -> Result<Vec<u8>> {
@@ -53,6 +399,7 @@ fn record_kind(record: &StoredSignalRecord) -> i64 {
         StoredSignalRecord::BookSnapshot(_) => 3,
         StoredSignalRecord::ResearchFeatures(_) => 4,
         StoredSignalRecord::ExternalMarket(_) => 5,
+        StoredSignalRecord::CounterfactualQuotePath(_) => 6,
     }
 }
 
@@ -64,6 +411,7 @@ fn record_timestamp(record: &StoredSignalRecord) -> u64 {
         StoredSignalRecord::BookSnapshot(snapshot) => snapshot.timestamp,
         StoredSignalRecord::ResearchFeatures(features) => features.timestamp,
         StoredSignalRecord::ExternalMarket(features) => features.timestamp,
+        StoredSignalRecord::CounterfactualQuotePath(path) => path.signal_timestamp,
     }
 }
 
@@ -99,8 +447,8 @@ mod tests {
 
     #[test]
     fn legacy_bincode_snapshots_default_new_grading_fields() {
-        let payload = bincode::serialize(&ExtendedSnapshotRecord::Snapshot(
-            ExtendedSignalSnapshot {
+        let payload =
+            bincode::serialize(&ExtendedSnapshotRecord::Snapshot(ExtendedSignalSnapshot {
                 symbol: "BTC-USDT".into(),
                 timestamp: 10_000,
                 direction: "bullish".into(),
@@ -124,9 +472,8 @@ mod tests {
                 ranging_probability: None,
                 range_lower_bound: None,
                 range_upper_bound: None,
-            },
-        ))
-        .unwrap();
+            }))
+            .unwrap();
 
         let StoredSignalRecord::Snapshot(snapshot) = deserialize_record(0, &payload).unwrap()
         else {
@@ -137,6 +484,185 @@ mod tests {
         assert_eq!(snapshot.evidence_coverage, None);
         assert_eq!(snapshot.estimated_accuracy, None);
     }
+
+    #[test]
+    fn historical_snapshot_without_news_decodes_current_component_vectors() {
+        let legacy = LegacySnapshotWithoutNewsRecord::Snapshot(LegacySignalSnapshotWithoutNews {
+            symbol: "BTC-USDT".into(),
+            timestamp: 10_000,
+            direction: "bullish".into(),
+            score: 0.75,
+            strength: 0.4,
+            components: SignalComponents {
+                momentum_by_window: (0..6)
+                    .map(|window_seconds| WindowedSignalValue {
+                        window_seconds,
+                        value: Some(0.1),
+                        sample_count: 2,
+                        span_ms: 1_000,
+                    })
+                    .collect(),
+                ..SignalComponents::default()
+            },
+            reasons: vec!["historical signal".into()],
+            stale: false,
+            ranging_probability: Some(0.2),
+            range_lower_bound: Some(99.0),
+            range_upper_bound: Some(101.0),
+        });
+        let payload = bincode::serialize(&legacy).unwrap();
+
+        let StoredSignalRecord::Snapshot(snapshot) = deserialize_record(0, &payload).unwrap()
+        else {
+            panic!("historical payload should decode as a signal snapshot");
+        };
+
+        assert_eq!(snapshot.symbol, "BTC-USDT");
+        assert_eq!(snapshot.components.momentum_by_window.len(), 6);
+        assert_eq!(snapshot.reasons, vec!["historical signal"]);
+        assert!(snapshot.news_attribution.is_none());
+        assert_eq!(snapshot.evidence_coverage, None);
+        assert_eq!(snapshot.estimated_accuracy, None);
+    }
+
+    #[test]
+    fn historical_scalar_snapshot_decodes_without_windowed_features() {
+        let legacy = LegacySnapshotWithoutVectorsRecord::Snapshot(
+            LegacySignalSnapshotWithoutVectors {
+                symbol: "BTC-USDT".into(),
+                timestamp: 10_000,
+                direction: "neutral".into(),
+                score: 0.4,
+                strength: 0.3,
+                components: LegacySignalComponentsWithoutVectors {
+                    trend_1m_percent: Some(0.1),
+                    momentum_10s_percent: Some(0.2),
+                    trade_flow_imbalance: None,
+                    book_imbalance: Some(-0.2),
+                    volatility_1m_percent: Some(0.3),
+                    trend_5m_percent: Some(0.4),
+                    trend_5m_volatility_units: Some(0.5),
+                    mispricing_vs_vwap_bps: Some(0.6),
+                    pressure_without_price_move: Some(0.7),
+                    aggressor_cost_bps: Some(0.8),
+                },
+                reasons: vec!["historical reason".into()],
+                news_attribution: None,
+                stale: true,
+                ranging_probability: 0.35,
+                range_lower_bound: Some(99.0),
+                range_upper_bound: Some(101.0),
+            },
+        );
+        let payload = bincode::serialize(&legacy).unwrap();
+
+        let StoredSignalRecord::Snapshot(snapshot) = deserialize_record(0, &payload).unwrap()
+        else {
+            panic!("historical payload should decode as a signal snapshot");
+        };
+
+        assert_eq!(snapshot.symbol, "BTC-USDT");
+        assert_eq!(
+            snapshot.components.pressure_without_price_move,
+            Some(0.7)
+        );
+        assert!(snapshot.components.momentum_by_window.is_empty());
+        assert!(snapshot.news_attribution.is_none());
+        assert_eq!(snapshot.ranging_probability, Some(0.35));
+        assert_eq!(snapshot.range_lower_bound, Some(99.0));
+        assert_eq!(snapshot.range_upper_bound, Some(101.0));
+        assert!(snapshot.evidence_coverage.is_none());
+        assert!(snapshot.estimated_accuracy.is_none());
+    }
+
+    #[test]
+    fn historical_snapshot_without_upper_range_defaults_that_field() {
+        let legacy = LegacySnapshotWithoutUpperRangeRecord::Snapshot(
+            LegacySnapshotWithoutUpperRange {
+                symbol: "ETH-USDT".into(),
+                timestamp: 20_000,
+                direction: "neutral".into(),
+                score: 0.2,
+                strength: 0.1,
+                components: LegacySignalComponentsWithoutVectors {
+                    trend_1m_percent: Some(0.1),
+                    momentum_10s_percent: None,
+                    trade_flow_imbalance: None,
+                    book_imbalance: None,
+                    volatility_1m_percent: Some(0.2),
+                    trend_5m_percent: None,
+                    trend_5m_volatility_units: None,
+                    mispricing_vs_vwap_bps: None,
+                    pressure_without_price_move: None,
+                    aggressor_cost_bps: None,
+                },
+                reasons: Vec::new(),
+                news_attribution: None,
+                stale: false,
+                ranging_probability: None,
+                range_lower_bound: None,
+            },
+        );
+        let payload = bincode::serialize(&legacy).unwrap();
+
+        let StoredSignalRecord::Snapshot(snapshot) = deserialize_record(0, &payload).unwrap()
+        else {
+            panic!("historical payload should decode as a signal snapshot");
+        };
+
+        assert_eq!(snapshot.symbol, "ETH-USDT");
+        assert_eq!(snapshot.components.trend_1m_percent, Some(0.1));
+        assert!(snapshot.components.momentum_by_window.is_empty());
+        assert!(snapshot.ranging_probability.is_none());
+        assert!(snapshot.range_lower_bound.is_none());
+        assert!(snapshot.range_upper_bound.is_none());
+    }
+
+    #[test]
+    fn historical_optional_range_snapshot_defaults_new_grading_fields() {
+        let legacy = LegacySnapshotWithOptionalRangesRecord::Snapshot(
+            LegacySignalSnapshotWithOptionalRanges {
+                symbol: "ETH-USDT".into(),
+                timestamp: 30_000,
+                direction: "neutral".into(),
+                score: 0.2,
+                strength: 0.1,
+                components: LegacySignalComponentsWithoutVectors {
+                    trend_1m_percent: None,
+                    momentum_10s_percent: Some(0.1),
+                    trade_flow_imbalance: None,
+                    book_imbalance: None,
+                    volatility_1m_percent: None,
+                    trend_5m_percent: None,
+                    trend_5m_volatility_units: None,
+                    mispricing_vs_vwap_bps: None,
+                    pressure_without_price_move: None,
+                    aggressor_cost_bps: None,
+                },
+                reasons: Vec::new(),
+                news_attribution: None,
+                stale: false,
+                ranging_probability: None,
+                range_lower_bound: None,
+                range_upper_bound: None,
+            },
+        );
+        let payload = bincode::serialize(&legacy).unwrap();
+
+        let StoredSignalRecord::Snapshot(snapshot) = deserialize_record(0, &payload).unwrap()
+        else {
+            panic!("historical payload should decode as a signal snapshot");
+        };
+
+        assert_eq!(snapshot.symbol, "ETH-USDT");
+        assert_eq!(snapshot.components.momentum_10s_percent, Some(0.1));
+        assert!(snapshot.ranging_probability.is_none());
+        assert!(snapshot.range_lower_bound.is_none());
+        assert!(snapshot.range_upper_bound.is_none());
+        assert!(snapshot.evidence_coverage.is_none());
+        assert!(snapshot.estimated_accuracy.is_none());
+    }
+
 }
 
 fn accuracy_bucket(snapshot: &SignalSnapshot) -> u8 {
@@ -169,8 +695,10 @@ fn calibrate_signal_scores(snapshots: &mut [SignalSnapshot], records: &[StoredSi
             StoredSignalRecord::Evaluation(_)
             | StoredSignalRecord::BookSnapshot(_)
             | StoredSignalRecord::ResearchFeatures(_)
-            | StoredSignalRecord::ExternalMarket(_) => {}
+            | StoredSignalRecord::ExternalMarket(_)
+            | StoredSignalRecord::CounterfactualQuotePath(_) => {}
         }
+
     }
     for items in history.values_mut() {
         items.sort_by_key(|snapshot| snapshot.timestamp);
@@ -357,5 +885,143 @@ fn calibrate_signal_scores(snapshots: &mut [SignalSnapshot], records: &[StoredSi
             }
         }
         snapshot.refresh_raw_strength();
+    }
+}
+
+#[cfg(test)]
+mod counterfactual_quote_path_record_tests {
+    use super::*;
+
+    #[allow(dead_code)]
+    #[derive(Serialize)]
+    enum LegacyStoredSignalRecordForTest {
+        Snapshot,
+        Outcome,
+        Evaluation,
+        BookSnapshot,
+        ResearchFeatures,
+        ExternalMarket,
+        CounterfactualQuotePath(LegacyCounterfactualQuotePathForTest),
+    }
+
+    #[derive(Serialize)]
+    struct LegacyCounterfactualQuotePathForTest {
+        symbol: String,
+        signal_timestamp: u64,
+        horizon_seconds: u64,
+        samples: Vec<LegacyCounterfactualQuoteSampleForTest>,
+    }
+
+    #[derive(Serialize)]
+    struct LegacyCounterfactualQuoteSampleForTest {
+        timestamp: u64,
+        bid: f64,
+        ask: f64,
+        bid_levels: Vec<(f64, f64)>,
+        ask_levels: Vec<(f64, f64)>,
+    }
+
+    #[allow(dead_code)]
+    #[derive(Serialize)]
+    enum LegacyShiftedSnapshotRecordForTest {
+        Outcome,
+        Evaluation,
+        BookSnapshot,
+        ResearchFeatures,
+        ExternalMarket,
+        CounterfactualQuotePath,
+        Snapshot(ExtendedSignalSnapshot),
+    }
+
+    #[test]
+    fn quote_paths_use_a_new_record_kind_and_round_trip() {
+        let expected = CounterfactualQuotePath {
+            symbol: "BTC-USDT".into(),
+            signal_timestamp: 10_000,
+            horizon_seconds: 300,
+            samples: vec![CounterfactualQuoteSample {
+                timestamp: 10_000,
+                bid_execution_price: Some(99.9),
+                ask_execution_price: Some(100.1),
+            }],
+        };
+        let record = StoredSignalRecord::CounterfactualQuotePath(expected.clone());
+        assert_eq!(record_kind(&record), 6);
+        assert_eq!(record_timestamp(&record), expected.signal_timestamp);
+
+        let compressed = compress_record(&record).unwrap();
+        let mut decoder = MultiGzDecoder::new(compressed.as_slice());
+        let mut payload = Vec::new();
+        decoder.read_to_end(&mut payload).unwrap();
+        assert!(matches!(
+            deserialize_record(6, &payload).unwrap(),
+            StoredSignalRecord::CounterfactualQuotePath(path)
+                if path.symbol == expected.symbol
+                    && path.signal_timestamp == expected.signal_timestamp
+                    && path.samples.len() == 1
+        ));
+    }
+
+    #[test]
+    fn legacy_quote_paths_decode_with_depth_adjusted_execution_prices() {
+        let legacy = LegacyStoredSignalRecordForTest::CounterfactualQuotePath(
+            LegacyCounterfactualQuotePathForTest {
+                symbol: "BTC-USDT".into(),
+                signal_timestamp: 10_000,
+                horizon_seconds: 300,
+                samples: vec![LegacyCounterfactualQuoteSampleForTest {
+                    timestamp: 10_000,
+                    bid: 99.9,
+                    ask: 100.1,
+                    bid_levels: vec![(100.0, 0.2), (99.5, 9.8)],
+                    ask_levels: vec![(101.0, 0.2), (101.5, 9.8)],
+                }],
+            },
+        );
+        let payload = bincode::serialize(&legacy).unwrap();
+        let StoredSignalRecord::CounterfactualQuotePath(path) =
+            deserialize_record(6, &payload).unwrap()
+        else {
+            panic!("expected counterfactual quote path");
+        };
+        assert!((path.samples[0].bid_execution_price.unwrap() - 99.6).abs() < 1e-10);
+        assert!((path.samples[0].ask_execution_price.unwrap() - 101.4).abs() < 1e-10);
+    }
+
+    #[test]
+    fn legacy_kind_zero_snapshot_with_shifted_enum_tag_decodes() {
+        let legacy = LegacyShiftedSnapshotRecordForTest::Snapshot(ExtendedSignalSnapshot {
+            symbol: "BTC-USDT".into(),
+            timestamp: 10_000,
+            direction: "bullish".into(),
+            score: 0.75,
+            strength: 0.4,
+            components: ExtendedSignalComponents {
+                trend_1m_percent: None,
+                momentum_10s_percent: None,
+                trade_flow_imbalance: None,
+                book_imbalance: None,
+                volatility_1m_percent: None,
+                trend_5m_percent: None,
+                trend_5m_volatility_units: None,
+                mispricing_vs_vwap_bps: None,
+                pressure_without_price_move: None,
+                aggressor_cost_bps: None,
+                absorption_imbalance: None,
+            },
+            reasons: Vec::new(),
+            stale: false,
+            ranging_probability: None,
+            range_lower_bound: None,
+            range_upper_bound: None,
+        });
+        let payload = bincode::serialize(&legacy).unwrap();
+        let StoredSignalRecord::Snapshot(snapshot) = deserialize_record(0, &payload).unwrap()
+        else {
+            panic!("expected signal snapshot");
+        };
+        assert_eq!(snapshot.symbol, "BTC-USDT");
+        assert_eq!(snapshot.evidence_coverage, None);
+        assert_eq!(snapshot.estimated_accuracy, None);
     }
 }

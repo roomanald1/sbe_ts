@@ -63,6 +63,111 @@ fn duration_label(milliseconds: u64) -> String {
     if remainder == 0 { format!("{hours}h") } else { format!("{hours}h {remainder}m") }
 }
 
+fn scout_horizon_markouts(audit: &Value, direction: &str) -> Value {
+    let strategy_exit = audit["scout_markout_observations"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|observation| observation["kind"] == "strategy_exit");
+    let mut markouts = BTreeMap::new();
+    for observation in audit["scout_markout_observations"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|observation| observation["kind"] == "horizon")
+    {
+        let Some(horizon) = observation["horizon_seconds"].as_u64() else {
+            continue;
+        };
+        if !matches!(horizon, 60 | 300 | 900 | 3_600) {
+            continue;
+        }
+        let net = match direction {
+            "bullish" => number(observation, "long_net_percent"),
+            "bearish" => number(observation, "short_net_percent"),
+            _ => None,
+        };
+        let Some(net) = net else {
+            continue;
+        };
+        let entry = number(observation, "reference_entry_price")
+            .filter(|price| *price > 0.0)
+            .or_else(|| number(audit, "scout_entry_price").filter(|price| *price > 0.0));
+        let favorable = entry.and_then(|entry| {
+            let extreme = match direction {
+                "bullish" => number(observation, "path_high"),
+                "bearish" => number(observation, "path_low"),
+                _ => None,
+            }?;
+            Some(if direction == "bullish" {
+                (extreme / entry - 1.0) * 100.0
+            } else {
+                (entry - extreme) / entry * 100.0
+            })
+        });
+        let adverse = entry.and_then(|entry| {
+            let extreme = match direction {
+                "bullish" => number(observation, "path_low"),
+                "bearish" => number(observation, "path_high"),
+                _ => None,
+            }?;
+            Some(if direction == "bullish" {
+                (extreme / entry - 1.0) * 100.0
+            } else {
+                (entry - extreme) / entry * 100.0
+            })
+        });
+        let gross = match direction {
+            "bullish" => number(observation, "long_gross_percent"),
+            "bearish" => number(observation, "short_gross_percent"),
+            _ => None,
+        };
+        let time_to_positive = match direction {
+            "bullish" => observation["long_time_to_positive_net_seconds"].as_u64(),
+            "bearish" => observation["short_time_to_positive_net_seconds"].as_u64(),
+            _ => None,
+        };
+        let post_exit_net = strategy_exit.and_then(|exit| {
+            if observation["evaluated_timestamp_ms"].as_u64()?
+                <= exit["evaluated_timestamp_ms"].as_u64()?
+            {
+                return None;
+            }
+            let (entry, close) = match direction {
+                "bullish" => (number(exit, "exit_ask")?, number(observation, "exit_bid")?),
+                "bearish" => (number(exit, "exit_bid")?, number(observation, "exit_ask")?),
+                _ => return None,
+            };
+            if entry <= 0.0 || close <= 0.0 {
+                return None;
+            }
+            let gross = match direction {
+                "bullish" => (close / entry - 1.0) * 100.0,
+                "bearish" => ((entry - close) / entry) * 100.0,
+                _ => return None,
+            };
+            let fee_rate = number(exit, "taker_fee_rate")?;
+            Some(gross - 2.0 * fee_rate * 100.0)
+        });
+        markouts.insert(
+            horizon.to_string(),
+            json!({
+                "horizonSeconds": horizon,
+                "netReturnPercent": net,
+                "grossReturnPercent": gross,
+                "executionCostPercent": gross.map(|gross| gross - net),
+                "bestFavorablePercent": favorable.filter(|value| value.is_finite()),
+                "worstAdversePercent": adverse.filter(|value| value.is_finite()),
+                "timeToPositiveNetSeconds": time_to_positive,
+                "postExitNetReturnPercent": post_exit_net.filter(|value| value.is_finite()),
+                "observedAt": observation["evaluated_timestamp_ms"],
+                "takerFeeRate": observation["taker_fee_rate"],
+            }),
+        );
+    }
+    json!(markouts)
+}
+
 fn instance_row(audit: &Value, now: u64) -> Option<Value> {
     let decision_id = string(audit, "decision_id")?;
     let symbol = string(audit, "symbol")?;
@@ -119,6 +224,7 @@ fn instance_row(audit: &Value, now: u64) -> Option<Value> {
         "closedAt": evaluated_at, "entryPrice": entry_price, "entryBid": entry_bid, "entryAsk": entry_ask,
         "markPrice": null, "takerFeeRate": taker_fee_rate, "status": status, "netReturnPercent": net_return,
         "openNetReturnPercent": open_net_return, "returnBasis": return_basis,
+        "horizonMarkouts": scout_horizon_markouts(audit, &direction),
         "displayNetReturnPercent": display_return, "netReturnLabel": net_return_label,
         "netReturnEstimated": status == "Open", "netVsBreakevenLeft": bar_left,
         "netVsBreakevenWidth": bar_width, "netVsBreakevenTone": bar_tone
@@ -204,7 +310,26 @@ fn learning_rows(rows: &[Value]) -> Vec<Value> {
 async fn get_scout_outcomes(
     State(service): State<ServiceState>,
     query: axum::extract::Query<ScoutOutcomesQuery>,
-) -> Json<Value> {
+) -> axum::response::Response {
+    let cache_key = format!(
+        "{}|{}|{}|{}|{}|{}|{}",
+        query.source.as_deref().unwrap_or(""),
+        query.status.as_deref().unwrap_or(""),
+        query.page.unwrap_or_default(),
+        query.page_size.unwrap_or_default(),
+        query.learning_symbol.as_deref().unwrap_or(""),
+        query.sort_by.as_deref().unwrap_or(""),
+        query.sort_direction.as_deref().unwrap_or(""),
+    );
+    let mut cache = service.scout_outcomes_cache.lock().await;
+    let cache_ttl = std::time::Duration::from_secs(90);
+    cache.retain(|_, (created, _)| created.elapsed() < cache_ttl);
+    if let Some((_, bytes)) = cache.get(&cache_key) {
+        return axum::response::Response::builder()
+            .header(axum::http::header::CONTENT_TYPE, "application/json")
+            .body(axum::body::Body::from(bytes.clone()))
+            .expect("valid cached Scout outcomes response");
+    }
     let now = scout_now_ms();
     let since = now.saturating_sub(7 * 86_400_000);
     let state = service.scout.data.lock().await;
@@ -272,7 +397,23 @@ async fn get_scout_outcomes(
     let page_count=total.div_ceil(page_size);
     let page=query.page.unwrap_or(0).min(page_count.saturating_sub(1));
     let page_rows=filtered.drain(page.saturating_mul(page_size)..).take(page_size).collect::<Vec<_>>();
-    Json(json!({"rows":page_rows,"summary":{"all":all_summary,"live":live_summary},"learningRows":visible_learning_rows,"learningOutcomes":learning_outcomes,"pendingParameterProbes":pending_parameter_probes,"symbols":symbols,"learningSymbol":requested_symbol,"updatedAt":now,"source":source,"status":status.unwrap_or("all"),"sortBy":sort_by,"sortDirection":if descending {"desc"} else {"asc"},"page":page,"pageSize":page_size,"pageCount":page_count,"totalRows":total,"pageNumber":page+1,"hasPrevious":page>0,"hasNext":page+1<page_count}))
+    let body = serde_json::to_vec(&json!({"rows":page_rows,"summary":{"all":all_summary,"live":live_summary},"learningRows":visible_learning_rows,"learningOutcomes":learning_outcomes,"pendingParameterProbes":pending_parameter_probes,"symbols":symbols,"learningSymbol":requested_symbol,"updatedAt":now,"source":source,"status":status.unwrap_or("all"),"sortBy":sort_by,"sortDirection":if descending {"desc"} else {"asc"},"page":page,"pageSize":page_size,"pageCount":page_count,"totalRows":total,"pageNumber":page+1,"hasPrevious":page>0,"hasNext":page+1<page_count}))
+        .unwrap_or_default();
+    let bytes = axum::body::Bytes::from(body);
+    cache.insert(cache_key, (std::time::Instant::now(), bytes.clone()));
+    if cache.len() > 4 {
+        if let Some(oldest_key) = cache
+            .iter()
+            .min_by_key(|(_, (created, _))| *created)
+            .map(|(key, _)| key.clone())
+        {
+            cache.remove(&oldest_key);
+        }
+    }
+    axum::response::Response::builder()
+        .header(axum::http::header::CONTENT_TYPE, "application/json")
+        .body(axum::body::Body::from(bytes))
+        .expect("valid Scout outcomes response")
 }
 
 #[cfg(test)]
@@ -297,6 +438,50 @@ mod scout_report_tests {
         assert_eq!(row["status"], "Lost");
         assert_eq!(row["netReturnPercent"], -0.25);
         assert_eq!(row["closedAt"], 1500);
+    }
+
+    #[test]
+    fn horizon_markouts_report_directional_net_and_excursion_values() {
+        let mut bullish = audit();
+        bullish["scout_markout_observations"] = json!([{
+            "kind": "horizon",
+            "horizon_seconds": 60,
+            "evaluated_timestamp_ms": 61_000,
+            "reference_entry_price": 100.0,
+            "long_gross_percent": 0.1,
+            "short_gross_percent": -0.1,
+            "long_net_percent": 0.05,
+            "short_net_percent": -0.15,
+            "path_high": 102.0,
+            "path_low": 99.0,
+            "exit_bid": 100.0,
+            "exit_ask": 100.2,
+            "long_time_to_positive_net_seconds": 25,
+            "short_time_to_positive_net_seconds": null,
+            "taker_fee_rate": 0.001
+        },{
+            "kind": "strategy_exit",
+            "evaluated_timestamp_ms": 30_000,
+            "exit_bid": 100.0,
+            "exit_ask": 100.2,
+            "taker_fee_rate": 0.001
+        }]);
+        let markout = instance_row(&bullish, 70_000).unwrap()["horizonMarkouts"]["60"].clone();
+        assert_eq!(markout["netReturnPercent"], 0.05);
+        assert_eq!(markout["executionCostPercent"], 0.05);
+        assert!((markout["bestFavorablePercent"].as_f64().unwrap() - 2.0).abs() < 1e-9);
+        assert!((markout["worstAdversePercent"].as_f64().unwrap() + 1.0).abs() < 1e-9);
+        assert_eq!(markout["timeToPositiveNetSeconds"], 25);
+        assert!(
+            (markout["postExitNetReturnPercent"].as_f64().unwrap() + 0.3996007984).abs() < 1e-8
+        );
+
+        bullish["direction"] = json!("bearish");
+        let short_markout =
+            instance_row(&bullish, 70_000).unwrap()["horizonMarkouts"]["60"].clone();
+        assert_eq!(short_markout["netReturnPercent"], -0.15);
+        assert!((short_markout["bestFavorablePercent"].as_f64().unwrap() - 1.0).abs() < 1e-9);
+        assert!((short_markout["worstAdversePercent"].as_f64().unwrap() + 2.0).abs() < 1e-9);
     }
 
     #[test]

@@ -51,9 +51,29 @@ struct LearningOutcome {
     observed_at_ms: u64,
     net_return_percent: f64,
     #[serde(default)]
+    evidence_group_id: Option<String>,
+    #[serde(default)]
+    learning_context: Option<String>,
+    #[serde(default)]
+    source: LearningOutcomeSource,
+    #[serde(default)]
+    realized_pnl_usd: Option<f64>,
+    #[serde(default)]
+    paired_comparison: bool,
+    #[serde(default)]
     tested_parameter_keys: Vec<String>,
     #[serde(default)]
     baseline_parameters: BTreeMap<String, f64>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum LearningOutcomeSource {
+    #[default]
+    Legacy,
+    Scout,
+    PaperScoutTrade,
+    Trade,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -70,9 +90,26 @@ struct ThresholdTrainingSample {
 #[derive(Serialize)]
 struct StrategySummary {
     strategy: String,
+    // Kept as trade-only aliases for existing clients.
     learning_samples: usize,
     positive_rate: Option<f64>,
     average_net_return_percent: Option<f64>,
+    scout_outcome_samples: usize,
+    scout_positive_rate: Option<f64>,
+    scout_average_net_return_percent: Option<f64>,
+    active_profile_trade_samples: usize,
+    active_profile_trade_positive_rate: Option<f64>,
+    active_profile_average_net_return_percent: Option<f64>,
+    other_profile_trade_samples: usize,
+    other_profile_trade_positive_rate: Option<f64>,
+    other_profile_average_net_return_percent: Option<f64>,
+    paper_scout_trade_samples: usize,
+    paper_scout_positive_rate: Option<f64>,
+    paper_scout_average_net_return_percent: Option<f64>,
+    paired_scout_samples: usize,
+    paired_scout_positive_rate: Option<f64>,
+    average_paired_scout_lift_percent: Option<f64>,
+    unclassified_samples: usize,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -162,7 +199,8 @@ fn event_parts(event: &FeedbackEvent) -> (&str, &str, &str, &BTreeMap<String, f6
 }
 
 pub fn router(path: PathBuf) -> Result<Router, String> {
-    let stored = load_state(&path)?;
+    let mut stored = load_state(&path)?;
+    rebuild_trade_profile_metrics(&mut stored, now_ms());
     let service = ServiceState {
         state: Arc::new(Mutex::new(stored)),
         path,
@@ -799,26 +837,28 @@ mod tests {
             let parameters = BTreeMap::from([("threshold".into(), 0.4)]);
             let profile_id = format!("{symbol}-candidate");
             for sample in 0..3 {
-                let event = FeedbackEvent::ScoutOutcome {
-                    event_id: format!("paired-{symbol}-{sample}"),
-                    observed_at_ms: now_ms() + symbol_index as u64 * 10 + sample,
-                    learning_context: None,
-                    symbol: symbol.into(),
-                    strategy: "live-momentum".into(),
-                    profile_id: profile_id.clone(),
-                    parameters: parameters.clone(),
-                    baseline_parameters: BTreeMap::from([("threshold".into(), 0.5)]),
-                    specs: vec![spec.clone()],
-                    net_return_percent: 0.02,
-                };
-                let response = json_request(
-                    app.clone(),
-                    "POST",
-                    "/feedback",
-                    Some(serde_json::to_vec(&event).unwrap()),
-                )
-                .await;
-                assert_eq!(response.status(), StatusCode::OK);
+                for horizon in [60, 300, 900, 3_600] {
+                    let event = FeedbackEvent::ScoutOutcome {
+                        event_id: format!("paired-scout:{symbol}-{sample}:horizon-{horizon}"),
+                        observed_at_ms: now_ms() + symbol_index as u64 * 10 + sample,
+                        learning_context: None,
+                        symbol: symbol.into(),
+                        strategy: "live-momentum".into(),
+                        profile_id: profile_id.clone(),
+                        parameters: parameters.clone(),
+                        baseline_parameters: BTreeMap::from([("threshold".into(), 0.5)]),
+                        specs: vec![spec.clone()],
+                        net_return_percent: 0.02,
+                    };
+                    let response = json_request(
+                        app.clone(),
+                        "POST",
+                        "/feedback",
+                        Some(serde_json::to_vec(&event).unwrap()),
+                    )
+                    .await;
+                    assert_eq!(response.status(), StatusCode::OK);
+                }
                 if symbol_index == 0 {
                     let response = json_request(app.clone(), "GET", "/profiles", None).await;
                     let profiles: Vec<StrategyProfile> = serde_json::from_slice(
@@ -849,7 +889,7 @@ mod tests {
         // not contribute to BTC's promotion decision or be changed with it.
         for sample in 3..6 {
             let event = FeedbackEvent::ScoutOutcome {
-                event_id: format!("paired-BTC-USDT-extra-{sample}"),
+                event_id: format!("paired-scout:BTC-USDT-extra-{sample}"),
                 observed_at_ms: now_ms() + 100 + sample,
                 learning_context: None,
                 symbol: "BTC-USDT".into(),
@@ -903,6 +943,42 @@ mod tests {
         assert_eq!(eth.paired_baseline_decrease_samples, 3);
         assert_eq!(eth.paired_baseline_delta_samples, 3);
         assert_eq!(eth.lower_90_one_sided_improvement_percent, None);
+        for index in 0..5 {
+            let event = FeedbackEvent::TradeOutcome {
+                event_id: format!("old-profile-close-{index}"),
+                observed_at_ms: now_ms(),
+                learning_context: None,
+                symbol: "BTC-USDT".into(),
+                strategy: "live-momentum".into(),
+                profile_id: "BTC-USDT-baseline".into(),
+                parameters: BTreeMap::from([("threshold".into(), 0.5)]),
+                specs: vec![],
+                scout: false,
+                realized_pnl_usd: -1.0,
+                net_return_percent: -0.1,
+                threshold_observations: vec![],
+            };
+            let response = json_request(
+                app.clone(),
+                "POST",
+                "/feedback",
+                Some(serde_json::to_vec(&event).unwrap()),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::OK);
+        }
+        let response = json_request(app.clone(), "GET", "/profiles", None).await;
+        let profiles: Vec<StrategyProfile> =
+            serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                .unwrap();
+        assert_eq!(
+            profiles
+                .iter()
+                .find(|profile| profile.symbol == "BTC-USDT")
+                .unwrap()
+                .parameters["threshold"],
+            0.4
+        );
         let response = json_request(
             app.clone(),
             "PUT",
@@ -1121,9 +1197,10 @@ mod tests {
     }
 
     #[test]
-    fn trade_profile_statistics_publish_after_repeated_positive_outcomes() {
-        assert!(!should_publish_trade_profile(5, 2, 1.0));
-        assert!(!should_publish_trade_profile(5, 3, -0.1));
+    fn trade_profile_statistics_publish_after_minimum_trade_samples_even_when_losing() {
+        assert!(!should_publish_trade_profile(5, 2, f64::NAN));
+        assert!(!should_publish_trade_profile(5, 6, -1.0));
+        assert!(should_publish_trade_profile(5, 0, -1.0));
         assert!(should_publish_trade_profile(5, 3, 0.1));
         assert!(!should_publish_trade_profile(4, 4, 1.0));
     }
@@ -1177,5 +1254,48 @@ mod tests {
         assert_eq!(parts.1, "ETH-USDT");
         assert_eq!(parts.2, "carry");
         assert_eq!(parts.4, "p2");
+    }
+
+    #[tokio::test]
+    async fn actual_trade_feedback_reaches_the_profile_context_snapshot() {
+        let path = std::env::temp_dir().join(format!(
+            "learning-risk-feedback-{}.sqlite",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let app = router(path.clone()).unwrap();
+        let timestamp = now_ms().saturating_sub(100);
+        for index in 0..3 {
+            let event = FeedbackEvent::TradeOutcome {
+                event_id: format!("risk-trade-{index}"),
+                observed_at_ms: timestamp + index,
+                learning_context: Some("long:mixed:BTC-USDT:live-momentum:P0:depth:lt05".into()),
+                symbol: "BTC-USDT".into(),
+                strategy: "live-momentum".into(),
+                profile_id: "profile-risk".into(),
+                parameters: BTreeMap::new(),
+                specs: vec![],
+                scout: false,
+                realized_pnl_usd: -1.0,
+                net_return_percent: -0.2,
+                threshold_observations: vec![],
+            };
+            let response = json_request(
+                app.clone(),
+                "POST",
+                "/feedback",
+                Some(serde_json::to_vec(&event).unwrap()),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::OK);
+        }
+        let response = json_request(app, "GET", "/decision-snapshot", None).await;
+        let snapshot: LearnedProfileSnapshot =
+            serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                .unwrap();
+        let values = &snapshot.recent_profile_context_returns["profile-risk|long:mixed:BTC-USDT:live-momentum"];
+        assert_eq!(values.len(), 3);
+        assert!(values.iter().all(|sample| sample.1 == -0.2));
+        let _ = std::fs::remove_file(path);
     }
 }

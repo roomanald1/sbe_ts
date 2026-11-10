@@ -75,7 +75,12 @@ pub fn effective_parameter_values(
     overrides: &BTreeMap<String, f64>,
     probe: Option<(&str, f64)>,
 ) -> BTreeMap<String, f64> {
-    let mut parameters = learned.clone();
+    let mut parameters = strategy
+        .parameter_specs()
+        .into_iter()
+        .map(|spec| (spec.key.as_str().to_owned(), spec.default))
+        .collect::<BTreeMap<_, _>>();
+    parameters.extend(learned.clone());
     for spec in strategy.parameter_specs() {
         let key = strategy_parameter_key(profile_symbol, strategy, spec.key.as_str());
         let configured = overrides.get(&key).copied().or_else(|| {
@@ -141,6 +146,19 @@ pub fn strategy_profile_value(profile: &StrategyParameterProfile, key: &str) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn protective_strategies_expose_a_bounded_post_stop_cooldown_probe() {
+        let specs = scout_parameter_specs(Strategy::LiveMomentum);
+        let cooldown = specs
+            .iter()
+            .find(|spec| spec.key == "post_stop_cooldown_minutes")
+            .unwrap();
+        assert_eq!(
+            (cooldown.default, cooldown.min, cooldown.max, cooldown.step),
+            (2.0, 0.5, 10.0, 0.5)
+        );
+    }
 
     #[test]
     fn override_validation_checks_bounds_steps_and_legacy_names() {

@@ -1,3 +1,67 @@
+// A negative-evidence pause remains in persisted trader settings until the
+// operator resets learning. A rolling Learning snapshot alone cannot clear it.
+fn preserve_paused_strategy_multipliers(
+    previous: &BTreeMap<String, f64>,
+    mut incoming: BTreeMap<String, f64>,
+) -> BTreeMap<String, f64> {
+    for (strategy, multiplier) in previous {
+        if multiplier.is_finite() && *multiplier <= 0.0 {
+            incoming.insert(strategy.clone(), 0.0);
+        }
+    }
+    incoming
+}
+
+fn next_profile_registration_for_feedback(
+    registrations: &[strategies::StrategyProfileRegistration],
+    feedback: Option<&FeedbackEvent>,
+) -> Option<strategies::StrategyProfileRegistration> {
+    match feedback {
+        None => registrations.first().cloned(),
+        Some(FeedbackEvent::TradeOutcome { profile_id, .. } | FeedbackEvent::ScoutOutcome { profile_id, .. }) =>
+            registrations.iter().find(|registration| &registration.profile.profile_id == profile_id).cloned(),
+    }
+}
+
+#[cfg(test)]
+mod strategy_pause_snapshot_tests {
+    use super::*;
+
+    #[test]
+    fn pause_survives_rolling_evidence_and_disappearing_profiles_until_reset() {
+        let prior = BTreeMap::from([
+            ("live-momentum".to_owned(), 0.0),
+            ("live-trade-flow".to_owned(), 0.8),
+        ]);
+        let incoming = BTreeMap::from([
+            ("live-momentum".to_owned(), 1.0),
+            ("live-trade-flow".to_owned(), 1.2),
+        ]);
+        let merged = preserve_paused_strategy_multipliers(&prior, incoming.clone());
+        assert_eq!(merged["live-momentum"], 0.0);
+        assert_eq!(merged["live-trade-flow"], 1.2);
+        assert_eq!(preserve_paused_strategy_multipliers(&merged, BTreeMap::new())["live-momentum"], 0.0);
+        assert_eq!(preserve_paused_strategy_multipliers(&BTreeMap::new(), incoming)["live-momentum"], 1.0);
+    }
+
+    #[test]
+    fn feedback_is_not_blocked_by_unrelated_profile_registrations() {
+        let registration = |id: &str| strategies::StrategyProfileRegistration {
+            profile: strategies::StrategyProfile { profile_id: id.into(), version: 0, symbol: "BTC-USDT".into(),
+                strategy: "live-momentum".into(), parameters: BTreeMap::new(), learning_samples: 0,
+                positive_samples: 0, realized_pnl: 0.0 }, specs: vec![],
+        };
+        let registrations = vec![registration("unrelated"), registration("needed")];
+        let event = FeedbackEvent::TradeOutcome { event_id: "trade".into(), observed_at_ms: 1,
+            learning_context: None, symbol: "BTC-USDT".into(), strategy: "live-momentum".into(),
+            profile_id: "needed".into(), parameters: BTreeMap::new(), specs: vec![], scout: false,
+            realized_pnl_usd: -1.0, net_return_percent: -0.1, threshold_observations: vec![] };
+        assert_eq!(next_profile_registration_for_feedback(&registrations, Some(&event)).unwrap().profile.profile_id, "needed");
+        assert!(next_profile_registration_for_feedback(&registrations[..1], Some(&event)).is_none());
+        assert_eq!(next_profile_registration_for_feedback(&registrations, None).unwrap().profile.profile_id, "unrelated");
+    }
+}
+
 pub fn router() -> Router {
     let state_file_path = settings_path();
     let settings_path = settings_database_path(&state_file_path);
@@ -186,7 +250,9 @@ pub fn router() -> Router {
             .build()
             .unwrap_or_else(|_| reqwest::Client::new()),
         latest_daily_strategy_snapshot: Arc::new(Mutex::new(None)),
+        latest_live_strategy_signals: Arc::new(Mutex::new(BTreeMap::new())),
         strategy_diagnostic: Arc::new(std::sync::Mutex::new(Vec::new())),
+        latest_strategy_blockers: Arc::new(std::sync::Mutex::new(BTreeMap::new())),
         enabled: Arc::new(AtomicBool::new(enabled)),
         settings: Arc::new(Mutex::new(settings)),
         settings_persist_notify: Arc::new(Notify::new()),
@@ -221,6 +287,17 @@ pub fn router() -> Router {
     start_settings_persistence_worker(&state);
     start_learning_feedback_worker(&state);
     start_post_exit_observation_worker(&state);
+    let carry_sync_state = state.clone();
+    tokio::spawn(async move {
+        let mut ticker = interval(Duration::from_secs(30));
+        loop {
+            ticker.tick().await;
+            let book = carry_sync_state.dated_carry.lock().await.clone();
+            if let Err(error) = sync_dated_carry_ledger(&carry_sync_state, &book).await {
+                crate::service_log!("WARN", "Dated-carry position-manager sync failed: {error}");
+            }
+        }
+    });
     let rates_worker_state = state.clone();
     tokio::spawn(async move {
         let mut ticker = interval(Duration::from_secs(30));
@@ -435,7 +512,10 @@ fn start_learning_feedback_worker(state: &AutoTraderState) {
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             ticker.tick().await;
-            let registration = publisher_state.settings.lock().await.profile_registration_outbox.first().cloned();
+            let registration = {
+                let settings = publisher_state.settings.lock().await;
+                next_profile_registration_for_feedback(&settings.profile_registration_outbox, settings.feedback_outbox.first())
+            };
             if let Some(registration) = registration {
                 let Some(base) = learning_url.as_deref() else { continue };
                 let response = publisher_state.client.post(format!("{}/profiles", base.trim_end_matches('/')))
@@ -516,8 +596,20 @@ fn start_learning_feedback_worker(state: &AutoTraderState) {
                         changed = true;
                     }
                 }
-                if settings.learned_strategy_size_multipliers != snapshot.strategy_size_multipliers {
-                    settings.learned_strategy_size_multipliers = snapshot.strategy_size_multipliers;
+                let multipliers = preserve_paused_strategy_multipliers(
+                    &settings.learned_strategy_size_multipliers,
+                    snapshot.strategy_size_multipliers,
+                );
+                if settings.learned_strategy_size_multipliers != multipliers {
+                    settings.learned_strategy_size_multipliers = multipliers;
+                    changed = true;
+                }
+                if settings.recent_profile_context_returns != snapshot.recent_profile_context_returns {
+                    settings.recent_profile_context_returns = snapshot.recent_profile_context_returns;
+                    changed = true;
+                }
+                if settings.contextual_stop_loss_percents != snapshot.contextual_stop_loss_percents {
+                    settings.contextual_stop_loss_percents = snapshot.contextual_stop_loss_percents;
                     changed = true;
                 }
                 if settings.learned_context_stats != snapshot.context_learning {

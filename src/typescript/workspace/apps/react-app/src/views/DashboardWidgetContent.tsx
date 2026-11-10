@@ -23,7 +23,14 @@ import { OrderBookPopup } from './OrderBookPopup';
 import { TradesView } from './TradesView';
 import { NewsTicker } from './NewsTicker';
 import { MarketLiquidity } from './MarketLiquidity';
-import { BestSignalsView, MissedOpportunityBandsView, SignalHistoryView, SignalPerformanceView, WalkForwardView } from './SignalInfoViews';
+import {
+  BestSignalsView,
+  MissedOpportunityBandsView,
+  SignalHistoryView,
+  SignalPerformanceView,
+  SkippedSignalAuditView,
+  WalkForwardView,
+} from './SignalInfoViews';
 
 type Props = {
   widget: DashboardWidget;
@@ -35,61 +42,214 @@ type Props = {
   selectionSymbols: string[];
   paused: boolean;
   onTrade: (symbol: string, side?: 'buy' | 'sell') => void;
-  onRangeOrders: (request: { symbol: string; lower: number; upper: number }) => void;
+  onRangeOrders: (request: {
+    symbol: string;
+    lower: number;
+    upper: number;
+  }) => void;
   onSymbolChange: (widgetId: string, symbol: string) => void;
 };
 
 function DashboardWidgetContentComponent(props: Props): ReactNode {
-  const { widget, symbol, prices, connection, feedSource, connectionState, selectionSymbols, paused, onTrade, onRangeOrders, onSymbolChange } = props;
-  const updateSymbol = useCallback((value: string) => onSymbolChange(widget.id, value), [onSymbolChange, widget.id]);
+  const {
+    widget,
+    symbol,
+    prices,
+    connection,
+    feedSource,
+    connectionState,
+    selectionSymbols,
+    paused,
+    onTrade,
+    onRangeOrders,
+    onSymbolChange,
+  } = props;
+  const updateSymbol = useCallback(
+    (value: string) => onSymbolChange(widget.id, value),
+    [onSymbolChange, widget.id],
+  );
   switch (widget.type) {
-    case 'grid': return <SymbolPriceGrid ticks={prices.ticks} feedSource={feedSource} compact onSelectSymbol={onTrade} />;
-    case 'table': return <SymbolPriceTable ticks={prices.ticks} histories={prices.histories} state={connectionState} onSelectSymbol={onTrade} />;
-    case 'chart': return <PriceChangeChart changes={prices} selectedSymbol={symbol} onSymbolChange={updateSymbol} showSymbolSelector onTrade={(side) => symbol && onTrade(symbol, side)} />;
-    case 'positions': return <Positions connection={connection} symbols={selectionSymbols} paused={paused} />;
-    case 'fills': return <Fills paused={paused} />;
-    case 'pnl': return <Pnl connection={connection} paused={paused} />;
-    case 'account': return <Account />;
-    case 'risk': return <PortfolioRisk connection={connection} paused={paused} />;
-    case 'close-insights': return <CloseInsights histories={prices.histories} paused={paused} onTradeSymbol={onTrade} />;
-    case 'hedging': return <Hedging paused={paused} />;
-    case 'auto-trader': return <AutoTrader />;
-    case 'dated-carry': return <DatedCarry />;
-    case 'auto-trader-diagnostics': return <AutoTraderDiagnostics />;
-    case 'auto-trader-learning': return <AutoTraderLearningWidget />;
-    case 'auto-trader-outcomes': return <AutoTraderOutcomes ticks={prices.ticks} />;
-    case 'auto-trader-completed-positions': return <AutoTraderOutcomes closedOnly />;
-    case 'auto-trader-live-positions': return <AutoTraderOutcomes ticks={prices.ticks} liveOnly />;
-    case 'auto-trader-scout-positions': return <AutoTraderScouts />;
-    case 'execution-fees': return <ExecutionFees />;
-    case 'trades': return feedSource === 'okx' ? <TradesView streamKey={widget.id} symbol={symbol} symbols={selectionSymbols} onSymbolChange={updateSymbol} connection={connection} paused={paused} /> : <UnavailableFeed label="Recent trades" message="Recent trade data is available with the OKX feed." />;
-    case 'liquidity': return feedSource === 'okx' ? <MarketLiquidity streamKey={widget.id} symbol={symbol} symbols={selectionSymbols} onSymbolChange={updateSymbol} connection={connection} paused={paused} /> : <UnavailableFeed label="Market liquidity" message="Market liquidity indicators are available with the OKX feed." />;
-    case 'signals': return <BestSignalsView onTradeSymbol={onTrade} onRangeOrders={onRangeOrders} />;
-    case 'news': return <NewsTicker connection={connection} streamKey={widget.id} />;
-    case 'signal-history': return <SignalHistoryView paused={paused} onTradeSymbol={onTrade} />;
-    case 'signal-performance': return <SignalPerformanceView paused={paused} onTradeSymbol={onTrade} />;
-    case 'walk-forward': return <WalkForwardView paused={paused} onTradeSymbol={onTrade} />;
-    case 'missed-opportunity-bands': return <MissedOpportunityBandsView paused={paused} />;
-    case 'book': return feedSource === 'okx' ? <OrderBookPopup streamKey={widget.id} mode="view" symbol={symbol} symbols={selectionSymbols} onSymbolChange={updateSymbol} showSymbolSelector onTrade={onTrade} connection={connection} /> : <UnavailableFeed label="Order book" message="Order book depth is available with the OKX feed." />;
+    case 'grid':
+      return (
+        <SymbolPriceGrid
+          ticks={prices.ticks}
+          feedSource={feedSource}
+          compact
+          onSelectSymbol={onTrade}
+        />
+      );
+    case 'table':
+      return (
+        <SymbolPriceTable
+          ticks={prices.ticks}
+          histories={prices.histories}
+          state={connectionState}
+          onSelectSymbol={onTrade}
+        />
+      );
+    case 'chart':
+      return (
+        <PriceChangeChart
+          changes={prices}
+          selectedSymbol={symbol}
+          onSymbolChange={updateSymbol}
+          showSymbolSelector
+          onTrade={(side) => symbol && onTrade(symbol, side)}
+        />
+      );
+    case 'positions':
+      return (
+        <Positions
+          connection={connection}
+          symbols={selectionSymbols}
+          paused={paused}
+        />
+      );
+    case 'fills':
+      return <Fills paused={paused} />;
+    case 'pnl':
+      return <Pnl connection={connection} paused={paused} />;
+    case 'account':
+      return <Account />;
+    case 'risk':
+      return <PortfolioRisk connection={connection} paused={paused} />;
+    case 'close-insights':
+      return (
+        <CloseInsights
+          histories={prices.histories}
+          paused={paused}
+          onTradeSymbol={onTrade}
+        />
+      );
+    case 'hedging':
+      return <Hedging paused={paused} />;
+    case 'auto-trader':
+      return <AutoTrader />;
+    case 'dated-carry':
+      return <DatedCarry />;
+    case 'auto-trader-diagnostics':
+      return <AutoTraderDiagnostics />;
+    case 'auto-trader-learning':
+      return <AutoTraderLearningWidget />;
+    case 'auto-trader-outcomes':
+      return <AutoTraderOutcomes ticks={prices.ticks} />;
+    case 'auto-trader-completed-positions':
+      return <AutoTraderOutcomes closedOnly />;
+    case 'auto-trader-live-positions':
+      return <AutoTraderOutcomes ticks={prices.ticks} liveOnly />;
+    case 'auto-trader-scout-positions':
+      return <AutoTraderScouts />;
+    case 'execution-fees':
+      return <ExecutionFees />;
+    case 'trades':
+      return feedSource === 'okx' ? (
+        <TradesView
+          streamKey={widget.id}
+          symbol={symbol}
+          symbols={selectionSymbols}
+          onSymbolChange={updateSymbol}
+          connection={connection}
+          paused={paused}
+        />
+      ) : (
+        <UnavailableFeed
+          label="Recent trades"
+          message="Recent trade data is available with the OKX feed."
+        />
+      );
+    case 'liquidity':
+      return feedSource === 'okx' ? (
+        <MarketLiquidity
+          streamKey={widget.id}
+          symbol={symbol}
+          symbols={selectionSymbols}
+          onSymbolChange={updateSymbol}
+          connection={connection}
+          paused={paused}
+        />
+      ) : (
+        <UnavailableFeed
+          label="Market liquidity"
+          message="Market liquidity indicators are available with the OKX feed."
+        />
+      );
+    case 'signals':
+      return (
+        <BestSignalsView
+          onTradeSymbol={onTrade}
+          onRangeOrders={onRangeOrders}
+        />
+      );
+    case 'news':
+      return <NewsTicker connection={connection} streamKey={widget.id} />;
+    case 'signal-history':
+      return <SignalHistoryView paused={paused} onTradeSymbol={onTrade} />;
+    case 'signal-performance':
+      return <SignalPerformanceView paused={paused} onTradeSymbol={onTrade} />;
+    case 'walk-forward':
+      return <WalkForwardView paused={paused} onTradeSymbol={onTrade} />;
+    case 'missed-opportunity-bands':
+      return <MissedOpportunityBandsView paused={paused} />;
+    case 'skipped-signal-audit':
+      return <SkippedSignalAuditView paused={paused} />;
+    case 'book':
+      return feedSource === 'okx' ? (
+        <OrderBookPopup
+          streamKey={widget.id}
+          mode="view"
+          symbol={symbol}
+          symbols={selectionSymbols}
+          onSymbolChange={updateSymbol}
+          showSymbolSelector
+          onTrade={onTrade}
+          connection={connection}
+        />
+      ) : (
+        <UnavailableFeed
+          label="Order book"
+          message="Order book depth is available with the OKX feed."
+        />
+      );
   }
 }
 
-function UnavailableFeed({ label, message }: { label: string; message: string }) {
-  return <section className="feed-section" aria-label={label}><div className="book-popup-message">{message}</div></section>;
+function UnavailableFeed({
+  label,
+  message,
+}: {
+  label: string;
+  message: string;
+}) {
+  return (
+    <section className="feed-section" aria-label={label}>
+      <div className="book-popup-message">{message}</div>
+    </section>
+  );
 }
 
-const priceDrivenWidgets = new Set<DashboardWidget['type']>(['grid', 'table', 'chart', 'close-insights', 'auto-trader-outcomes', 'auto-trader-live-positions', 'auto-trader-scout-positions']);
+const priceDrivenWidgets = new Set<DashboardWidget['type']>([
+  'grid',
+  'table',
+  'chart',
+  'close-insights',
+  'auto-trader-outcomes',
+  'auto-trader-live-positions',
+  'auto-trader-scout-positions',
+]);
 
-export const DashboardWidgetContent = memo(DashboardWidgetContentComponent, (previous, next) =>
-  previous.widget === next.widget
-  && previous.symbol === next.symbol
-  && previous.connection === next.connection
-  && previous.feedSource === next.feedSource
-  && previous.connectionState === next.connectionState
-  && previous.selectionSymbols === next.selectionSymbols
-  && previous.paused === next.paused
-  && previous.onTrade === next.onTrade
-  && previous.onRangeOrders === next.onRangeOrders
-  && previous.onSymbolChange === next.onSymbolChange
-  && (!priceDrivenWidgets.has(next.widget.type) || previous.prices === next.prices)
+export const DashboardWidgetContent = memo(
+  DashboardWidgetContentComponent,
+  (previous, next) =>
+    previous.widget === next.widget &&
+    previous.symbol === next.symbol &&
+    previous.connection === next.connection &&
+    previous.feedSource === next.feedSource &&
+    previous.connectionState === next.connectionState &&
+    previous.selectionSymbols === next.selectionSymbols &&
+    previous.paused === next.paused &&
+    previous.onTrade === next.onTrade &&
+    previous.onRangeOrders === next.onRangeOrders &&
+    previous.onSymbolChange === next.onSymbolChange &&
+    (!priceDrivenWidgets.has(next.widget.type) ||
+      previous.prices === next.prices),
 );

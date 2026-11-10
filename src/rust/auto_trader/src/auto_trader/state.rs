@@ -2,7 +2,9 @@
 struct AutoTraderState {
     client: reqwest::Client,
     latest_daily_strategy_snapshot: Arc<Mutex<Option<DailyStrategySnapshot>>>,
+    latest_live_strategy_signals: Arc<Mutex<BTreeMap<(String, String), Vec<Signal>>>>,
     strategy_diagnostic: Arc<std::sync::Mutex<Vec<StrategyDiagnostic>>>,
+    latest_strategy_blockers: Arc<std::sync::Mutex<BTreeMap<String, StrategyBlocker>>>,
     enabled: Arc<AtomicBool>,
     settings: Arc<Mutex<Settings>>,
     settings_persist_notify: Arc<Notify>,
@@ -42,8 +44,11 @@ struct LearningResponseCache {
     refreshing: BTreeSet<String>,
 }
 
-const LEARNING_RESPONSE_REFRESH_AFTER: Duration = Duration::from_secs(1);
-const LEARNING_RESPONSE_MAX_STALE: Duration = Duration::from_secs(30);
+// Context thresholds are advisory and are requested for many symbol/strategy
+// contexts. Give Learning enough time to service a cold request, while keeping
+// refreshes sparse enough that a busy Learning process is not flooded.
+const LEARNING_RESPONSE_REFRESH_AFTER: Duration = Duration::from_secs(5);
+const LEARNING_RESPONSE_MAX_STALE: Duration = Duration::from_secs(60);
 
 async fn cached_learning_response<T>(
     response_cache: &Arc<Mutex<LearningResponseCache>>,
@@ -75,7 +80,7 @@ where
         tokio::spawn(async move {
             let response = client
                 .post(url)
-                .timeout(Duration::from_millis(250))
+                .timeout(Duration::from_secs(2))
                 .json(&request)
                 .send()
                 .await
@@ -360,6 +365,10 @@ struct TraderPosition {
     take_profit_deferred_at_ms: Option<u64>,
     #[serde(default, alias = "scout_profit_peak_return_percent")]
     profit_protection_peak_return_percent: Option<f64>,
+    #[serde(default)]
+    thesis_failure_confirmation_count: u32,
+    #[serde(default)]
+    thesis_failure_last_signal_timestamp_ms: u64,
     #[serde(default)]
     protective_stops: Vec<ProtectiveStop>,
     #[serde(default)]

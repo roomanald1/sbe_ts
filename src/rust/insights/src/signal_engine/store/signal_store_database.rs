@@ -22,6 +22,7 @@ impl SignalStore {
             walk_forward_cache: Arc::new(Mutex::new(None)),
             missed_opportunity_cache: Arc::new(Mutex::new(None)),
             walk_forward_refreshing: Arc::new(AtomicBool::new(false)),
+            missed_opportunity_refreshing: Arc::new(AtomicBool::new(false)),
         })
     }
 
@@ -49,9 +50,26 @@ impl SignalStore {
         limit: Option<usize>,
     ) -> Result<Vec<StoredSignalRecord>> {
         let path = self.path.clone();
-        tokio::task::spawn_blocking(move || Self::read_records_sync(&path, kind, since, limit))
-            .await
-            .map_err(|error| anyhow::anyhow!("signal read task failed: {error}"))?
+        tokio::task::spawn_blocking(move || {
+            Self::read_records_sync(&path, kind, since, limit, false)
+        })
+        .await
+        .map_err(|error| anyhow::anyhow!("signal read task failed: {error}"))?
+    }
+
+    async fn read_records_with_corrupt_rows(
+        &self,
+        kind: i64,
+        since: Option<u64>,
+        limit: Option<usize>,
+        skip_corrupt_rows: bool,
+    ) -> Result<Vec<StoredSignalRecord>> {
+        let path = self.path.clone();
+        tokio::task::spawn_blocking(move || {
+            Self::read_records_sync(&path, kind, since, limit, skip_corrupt_rows)
+        })
+        .await
+        .map_err(|error| anyhow::anyhow!("signal read task failed: {error}"))?
     }
 
     fn read_records_sync(
@@ -59,6 +77,7 @@ impl SignalStore {
         kind: i64,
         since: Option<u64>,
         limit: Option<usize>,
+        skip_corrupt_rows: bool,
     ) -> Result<Vec<StoredSignalRecord>> {
         let connection = Self::open_database_path(path)?;
         let mut sql = String::from("SELECT payload FROM signal_records WHERE kind = ?");
@@ -87,10 +106,17 @@ impl SignalStore {
         for compressed in compressed_records {
             let mut decoder = MultiGzDecoder::new(compressed.as_slice());
             let mut payload = Vec::new();
-            decoder.read_to_end(&mut payload)?;
-            records.push(deserialize_record(kind, &payload)?);
+            let decoded = decoder
+                .read_to_end(&mut payload)
+                .map_err(anyhow::Error::from)
+                .and_then(|_| deserialize_record(kind, &payload));
+            match decoded {
+                Ok(record) => records.push(record),
+                Err(_) if skip_corrupt_rows => continue,
+                Err(error) => return Err(error),
+            }
         }
-        if (0..=5).contains(&kind) && limit.is_none_or(|limit| records.len() < limit) {
+        if (0..=6).contains(&kind) && limit.is_none_or(|limit| records.len() < limit) {
             let since_day = since.map(|timestamp| (timestamp / 86_400_000) as i64 * 86_400_000);
             let mut statement = connection.prepare(
                 "SELECT training_payload FROM signal_daily_summary WHERE kind = ?1 AND training_payload IS NOT NULL AND (?2 IS NULL OR day_start_ms >= ?2) ORDER BY day_start_ms DESC",
@@ -103,7 +129,11 @@ impl SignalStore {
                 }
                 let compressed = row.get::<_, Vec<u8>>(0)?;
                 let remaining = limit.map_or(usize::MAX, |limit| limit - records.len());
-                let mut archived = read_archive_tail(&compressed, remaining)?;
+                let mut archived = match read_archive_tail(&compressed, remaining) {
+                    Ok(archived) => archived,
+                    Err(_) if skip_corrupt_rows => continue,
+                    Err(error) => return Err(error),
+                };
                 if let Some(timestamp) = since {
                     archived.retain(|record| record_timestamp(record) >= timestamp);
                 }
@@ -169,7 +199,7 @@ impl SignalStore {
                 }
             }
         }
-        if records.len() < limit && (0..=5).contains(&kind) {
+        if records.len() < limit && (0..=6).contains(&kind) {
             let mut statement = connection.prepare(
                 "SELECT training_payload FROM signal_daily_summary WHERE kind = ?1 AND training_payload IS NOT NULL ORDER BY day_start_ms DESC",
             )?;

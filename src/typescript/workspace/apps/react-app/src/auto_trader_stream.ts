@@ -13,6 +13,8 @@ let socket: WebSocket | undefined;
 let retryTimer: ReturnType<typeof setTimeout> | undefined;
 let retryDelay = 1000;
 let subscribers = 0;
+let firstSnapshot: Promise<AutoTraderUiSnapshot> | undefined;
+let resolveFirstSnapshot: ((snapshot: AutoTraderUiSnapshot) => void) | undefined;
 
 function connect() {
   if (socket || subscribers === 0) return;
@@ -30,7 +32,11 @@ function connect() {
         : message.type === 'delta' && snapshot$.value
           ? { ...snapshot$.value, ...message.changes }
           : undefined;
-      if (value && value.status && value.activity && value.parameters && value.dated_carry && Array.isArray(value.execution_audit?.items)) snapshot$.next(value);
+      if (value && value.status && value.activity && value.parameters && value.dated_carry && Array.isArray(value.execution_audit?.items)) {
+        snapshot$.next(value);
+        resolveFirstSnapshot?.(value);
+        resolveFirstSnapshot = undefined;
+      }
     } catch { /* Keep the last valid snapshot. */ }
   };
   next.onclose = () => {
@@ -60,3 +66,15 @@ export function subscribeAutoTraderStream(observer: (snapshot: AutoTraderUiSnaps
 }
 
 export function currentAutoTraderSnapshot(): AutoTraderUiSnapshot | undefined { return snapshot$.value; }
+
+/** Wait for the shared stream before falling back to an HTTP read. */
+export function waitForAutoTraderSnapshot(timeoutMs = 5000): Promise<AutoTraderUiSnapshot> {
+  if (snapshot$.value) return Promise.resolve(snapshot$.value);
+  if (!firstSnapshot) {
+    firstSnapshot = new Promise<AutoTraderUiSnapshot>((resolve) => { resolveFirstSnapshot = resolve; });
+  }
+  return Promise.race([
+    firstSnapshot,
+    new Promise<AutoTraderUiSnapshot>((_, reject) => setTimeout(() => reject(new Error('Auto-trader stream unavailable')), timeoutMs)),
+  ]);
+}
