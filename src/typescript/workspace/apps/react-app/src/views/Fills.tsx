@@ -104,7 +104,9 @@ function FillsComponent({ paused = false }: { paused?: boolean }) {
         minWidth: 60,
         filter: 'agNumberColumnFilter',
         valueFormatter: ({ value, data }) =>
-          value == null ? '' : formatForSymbol(value, data?.symbol ?? '', 'quantity'),
+          value == null
+            ? ''
+            : formatForSymbol(value, data?.symbol ?? '', 'quantity'),
       },
       {
         field: 'execution_price',
@@ -115,49 +117,89 @@ function FillsComponent({ paused = false }: { paused?: boolean }) {
         valueFormatter: ({ value, data }) =>
           value == null
             ? ''
-            : formatForSymbol(value, data?.symbol ?? '', 'price') + ' ' + (data?.quote ?? ''),
+            : formatForSymbol(value, data?.symbol ?? '', 'price') +
+              ' ' +
+              (data?.quote ?? ''),
       },
       {
         field: 'fee',
         headerName: 'Fee',
         minWidth: 80,
-        valueFormatter: ({ value, data }) => value == null ? 'N/A' : numberFormatter.format(value) + ' ' + (data?.fee_currency || data?.quote || ''),
+        valueFormatter: ({ value, data }) =>
+          value == null
+            ? 'N/A'
+            : numberFormatter.format(value) +
+              ' ' +
+              (data?.fee_currency || data?.quote || ''),
       },
       {
         field: 'fee_liquidity',
         headerName: 'Liquidity',
         minWidth: 78,
-        valueFormatter: ({ value }) => value ? String(value).toUpperCase() : 'N/A',
+        valueFormatter: ({ value }) =>
+          value ? String(value).toUpperCase() : 'N/A',
       },
       {
         field: 'decision_price',
         headerName: 'Touch at submit',
-        headerTooltip: 'Best bid for a sell close or best ask for a buy close when the IOC was submitted',
+        headerTooltip:
+          'Best bid for a sell close or best ask for a buy close when the IOC was submitted',
         minWidth: 112,
-        valueFormatter: ({ value, data }) => value == null ? 'N/A' : formatForSymbol(value, data?.symbol ?? '', 'price') + ' ' + (data?.quote ?? ''),
+        valueFormatter: ({ value, data }) =>
+          value == null
+            ? 'N/A'
+            : formatForSymbol(value, data?.symbol ?? '', 'price') +
+              ' ' +
+              (data?.quote ?? ''),
       },
       {
         field: 'decision_mid_price',
         headerName: 'Mid at submit',
-        headerTooltip: 'Mid-price between best bid and ask when the IOC was submitted',
+        headerTooltip:
+          'Mid-price between best bid and ask when the IOC was submitted',
         minWidth: 105,
-        valueFormatter: ({ value, data }) => value == null ? 'N/A' : formatForSymbol(value, data?.symbol ?? '', 'price') + ' ' + (data?.quote ?? ''),
+        valueFormatter: ({ value, data }) =>
+          value == null
+            ? 'N/A'
+            : formatForSymbol(value, data?.symbol ?? '', 'price') +
+              ' ' +
+              (data?.quote ?? ''),
       },
       {
         field: 'slippage',
         headerName: 'Slippage',
-        headerTooltip: 'Execution price versus the submission touch, signed so positive means a better fill',
+        headerTooltip:
+          'Execution price versus the submission touch, signed so positive means a better fill',
         minWidth: 92,
-        cellClass: ({ value }) => value == null || value === 0 ? undefined : value > 0 ? 'pnl-positive' : 'pnl-negative',
-        valueFormatter: ({ value, data }) => value == null ? 'N/A' : formatForSymbol(value, data?.symbol ?? '', 'price') + ' ' + (data?.quote ?? ''),
+        cellClass: ({ value }) =>
+          value == null || value === 0
+            ? undefined
+            : value > 0
+              ? 'pnl-positive'
+              : 'pnl-negative',
+        valueFormatter: ({ value, data }) =>
+          value == null
+            ? 'N/A'
+            : formatForSymbol(value, data?.symbol ?? '', 'price') +
+              ' ' +
+              (data?.quote ?? ''),
       },
       {
         field: 'slippage_bps',
         headerName: 'Slippage (bps)',
-        headerTooltip: 'Signed slippage in basis points versus the submission touch; positive means better execution',
+        headerTooltip:
+          'Signed slippage in basis points versus the submission touch; positive means better execution',
         minWidth: 108,
-        cellClass: ({ value }) => value == null || value === 0 ? undefined : value > 0 ? 'pnl-positive' : 'pnl-negative',
-        valueFormatter: ({ value }) => value == null ? 'N/A' : (value > 0 ? '+' : '') + Number(value).toFixed(2),
+        cellClass: ({ value }) =>
+          value == null || value === 0
+            ? undefined
+            : value > 0
+              ? 'pnl-positive'
+              : 'pnl-negative',
+        valueFormatter: ({ value }) =>
+          value == null
+            ? 'N/A'
+            : (value > 0 ? '+' : '') + Number(value).toFixed(2),
       },
       {
         field: 'value',
@@ -168,7 +210,12 @@ function FillsComponent({ paused = false }: { paused?: boolean }) {
         valueFormatter: ({ value, data }) =>
           value == null
             ? ''
-            : value.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + ' ' + (data?.quote ?? ''),
+            : value.toLocaleString(undefined, {
+                minimumFractionDigits: 2,
+                maximumFractionDigits: 2,
+              }) +
+              ' ' +
+              (data?.quote ?? ''),
       },
     ],
     [],

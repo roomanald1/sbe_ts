@@ -8,7 +8,7 @@ use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque},
     path::PathBuf,
     sync::{
-        Arc, OnceLock,
+        Arc,
         atomic::{AtomicBool, Ordering},
     },
     time::{Duration, Instant},
@@ -20,7 +20,6 @@ const TRADE_WINDOW_MS: u64 = 300_000;
 const ABSORPTION_WINDOW_MS: u64 = 60_000;
 const MAX_BOOK_AGE_MS: u64 = 5_000;
 const MAX_PRICE_LOOKBACK_GAP_MS: u64 = 5_000;
-static POSITION_INSIGHTS_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
 const WALK_FORWARD_MIN_TRAINING_SAMPLES: usize = 30;
 /// Heavy research capture is sampled independently from live signal generation.
 // Persist one research/signal sample every ten seconds. Live signal snapshots
@@ -189,6 +188,10 @@ include!("store/signal_store_walk_forward_result.rs");
 include!("store/signal_store_walk_forward_cache.rs");
 include!("store/signal_store_walk_forward.rs");
 include!("store/signal_store_record_writes.rs");
+
+#[path = "store/browser_rsocket.rs"]
+mod browser_rsocket;
+pub use browser_rsocket::serve_insights_browser_rsocket;
 
 fn run_database_writer(mut connection: Connection, mut receiver: mpsc::Receiver<WriteRequest>) {
     const MAX_BATCH_REQUESTS: usize = 128;

@@ -185,17 +185,12 @@ pub fn router() -> Router {
     let execution_audit_tx = AuditQueue::new(EXECUTION_AUDIT_QUEUE_CAPACITY);
     let audit_health = Arc::new(AtomicU64::new(3));
     let audit_failure_latched = Arc::new(AtomicBool::new(false));
-    let audit_client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(5))
-        .build()
-        .unwrap_or_else(|_| reqwest::Client::new());
-    let execution_audit_client = audit_client.clone();
     let execution_queue = execution_audit_tx.clone();
     let execution_health = Arc::clone(&audit_health);
     tokio::spawn(async move {
         loop {
             let payload = execution_queue.recv().await;
-            store_execution_audit_until_saved(&execution_audit_client, &payload, &execution_health, 2).await;
+            store_execution_audit_until_saved(&payload, &execution_health, 2).await;
             if execution_queue.depth() == 0 {
                 execution_health.fetch_or(2, Ordering::Relaxed);
             }
@@ -206,7 +201,7 @@ pub fn router() -> Router {
     tokio::spawn(async move {
         loop {
             let payload = decision_queue.recv().await;
-            store_execution_audit_until_saved(&audit_client, &payload, &decision_health, 1).await;
+            store_execution_audit_until_saved(&payload, &decision_health, 1).await;
             if decision_queue.depth() == 0 {
                 decision_health.fetch_or(1, Ordering::Relaxed);
             }
@@ -243,12 +238,6 @@ pub fn router() -> Router {
     };
     let (state_updates, _) = tokio::sync::broadcast::channel(64);
     let state = AutoTraderState {
-        // Every worker shares the cycle lock. Bound upstream calls so an
-        // unresponsive position manager cannot stall signal decisions forever.
-        client: reqwest::Client::builder()
-            .timeout(Duration::from_secs(5))
-            .build()
-            .unwrap_or_else(|_| reqwest::Client::new()),
         latest_daily_strategy_snapshot: Arc::new(Mutex::new(None)),
         latest_live_strategy_signals: Arc::new(Mutex::new(BTreeMap::new())),
         strategy_diagnostic: Arc::new(std::sync::Mutex::new(Vec::new())),
@@ -259,7 +248,8 @@ pub fn router() -> Router {
         price_path_last_checkpoint_requested_at: Arc::new(std::sync::Mutex::new(None)),
         state_updates,
         settings_persist_timings_ms: Arc::new(std::sync::Mutex::new(BTreeMap::new())),
-        latest_missed_opportunity_bands: Arc::new(Mutex::new(Vec::new())),
+        latest_missed_opportunity_bands: Arc::new(Mutex::new(Arc::new(Vec::new()))),
+        latest_live_insights_context: Arc::new(Mutex::new(SharedLiveInsightsContext::default())),
         latest_execution_parameters: Arc::new(Mutex::new(None)),
         learning_response_cache: Arc::new(Mutex::new(LearningResponseCache::default())),
         cycle_lock: Arc::new(Mutex::new(())),
@@ -287,13 +277,52 @@ pub fn router() -> Router {
     start_settings_persistence_worker(&state);
     start_learning_feedback_worker(&state);
     start_post_exit_observation_worker(&state);
-    let carry_sync_state = state.clone();
+    let live_context_state = Arc::clone(&state.latest_live_insights_context);
+    tokio::spawn(async move {
+        let refresh_seconds = std::env::var("AUTO_TRADER_LIVE_CONTEXT_REFRESH_SECONDS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .filter(|value| *value > 0)
+            .unwrap_or(30);
+        let mut ticker = interval(Duration::from_secs(refresh_seconds));
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            ticker.tick().await;
+            let response = tokio::time::timeout(
+                Duration::from_secs(3),
+                crate::service_rpc::insights_request("GET", "/internal/live-context", None),
+            )
+            .await;
+            match response {
+                Ok(Ok(response)) if (200..300).contains(&response.status) => {
+                    match serde_json::from_value::<SharedLiveInsightsContext>(response.body) {
+                        Ok(context) => *live_context_state.lock().await = context,
+                        Err(error) => crate::service_log!(
+                            "WARN",
+                            "Could not decode shared Insights live context: {error}"
+                        ),
+                    }
+                }
+                Ok(Ok(response)) => crate::service_log!(
+                    "WARN",
+                    "Insights live context returned status {}",
+                    response.status
+                ),
+                Ok(Err(error)) => crate::service_log!(
+                    "WARN",
+                    "Could not refresh shared Insights live context: {error}"
+                ),
+                Err(_) => crate::service_log!("WARN", "Insights live context refresh timed out"),
+            }
+        }
+    });
+    let carry_sync_book = state.dated_carry.clone();
     tokio::spawn(async move {
         let mut ticker = interval(Duration::from_secs(30));
         loop {
             ticker.tick().await;
-            let book = carry_sync_state.dated_carry.lock().await.clone();
-            if let Err(error) = sync_dated_carry_ledger(&carry_sync_state, &book).await {
+            let book = carry_sync_book.lock().await.clone();
+            if let Err(error) = sync_dated_carry_ledger(&book).await {
                 crate::service_log!("WARN", "Dated-carry position-manager sync failed: {error}");
             }
         }
@@ -433,7 +462,6 @@ pub fn router() -> Router {
         }
     });
     Router::new()
-        .route("/positions/auto-trader/stream", get(auto_trader_stream))
         .route("/positions/auto-trader", get(get_status).put(set_enabled))
         .route(
             "/positions/auto-trader/dated-carry",
@@ -466,12 +494,12 @@ pub fn router() -> Router {
 
 
 async fn get_learning_summary() -> Result<axum::Json<serde_json::Value>, (axum::http::StatusCode, String)> {
-    let base = std::env::var("LEARNING_SERVICE_URL").map_err(|_| (axum::http::StatusCode::SERVICE_UNAVAILABLE, "Learning service is not configured".into()))?;
-    let response = reqwest::Client::new().get(format!("{}/summary", base.trim_end_matches('/'))).timeout(Duration::from_secs(3)).send().await
-        .map_err(|error| (axum::http::StatusCode::BAD_GATEWAY, error.to_string()))?
-        .error_for_status().map_err(|error| (axum::http::StatusCode::BAD_GATEWAY, error.to_string()))?;
-    let value = response.json().await.map_err(|error| (axum::http::StatusCode::BAD_GATEWAY, error.to_string()))?;
-    Ok(axum::Json(value))
+    let response = crate::service_rpc::learning_request(
+        strategies::ScoutWorkerHttpMethod::Get,
+        "/summary",
+        None,
+    ).await.map_err(|error| (axum::http::StatusCode::BAD_GATEWAY, error.to_string()))?;
+    Ok(axum::Json(response.body))
 }
 
 fn feedback_event_id(event: &FeedbackEvent) -> &str {
@@ -502,7 +530,7 @@ fn scout_feedback_parameter_keys(
 }
 
 fn start_learning_feedback_worker(state: &AutoTraderState) {
-    let learning_url = std::env::var("LEARNING_SERVICE_URL").ok();
+    let learning_url = std::env::var("LEARNING_RSOCKET_URL").ok();
     if learning_url.is_none() { return; }
     let profile_learning_url = learning_url.clone();
 
@@ -517,10 +545,12 @@ fn start_learning_feedback_worker(state: &AutoTraderState) {
                 next_profile_registration_for_feedback(&settings.profile_registration_outbox, settings.feedback_outbox.first())
             };
             if let Some(registration) = registration {
-                let Some(base) = learning_url.as_deref() else { continue };
-                let response = publisher_state.client.post(format!("{}/profiles", base.trim_end_matches('/')))
-                    .timeout(Duration::from_secs(3)).json(&registration).send().await;
-                if response.is_ok_and(|response| response.status().is_success()) {
+                let response = crate::service_rpc::learning_request(
+                    strategies::ScoutWorkerHttpMethod::Post,
+                    "/profiles",
+                    Some(serde_json::to_value(&registration).unwrap_or(serde_json::Value::Null)),
+                ).await;
+                if response.is_ok_and(|response| (200..300).contains(&response.status)) {
                     let profile_id = registration.profile.profile_id;
                     let mut settings = publisher_state.settings.lock().await;
                     settings.profile_registration_outbox.retain(|pending| pending.profile.profile_id != profile_id);
@@ -534,14 +564,12 @@ fn start_learning_feedback_worker(state: &AutoTraderState) {
             }
             let event = publisher_state.settings.lock().await.feedback_outbox.first().cloned();
             if let Some(event) = event {
-                let (base, path) = match &event {
-                    FeedbackEvent::ScoutOutcome { .. } => (learning_url.as_deref(), "/feedback"),
-                    FeedbackEvent::TradeOutcome { .. } => (learning_url.as_deref(), "/feedback"),
-                };
-                let Some(base) = base else { continue };
-                let response = publisher_state.client.post(format!("{}{path}", base.trim_end_matches('/')))
-                    .timeout(Duration::from_secs(3)).json(&event).send().await;
-                if response.is_ok_and(|response| response.status().is_success()) {
+                let response = crate::service_rpc::learning_request(
+                    strategies::ScoutWorkerHttpMethod::Post,
+                    "/feedback",
+                    Some(serde_json::to_value(&event).unwrap_or(serde_json::Value::Null)),
+                ).await;
+                if response.is_ok_and(|response| (200..300).contains(&response.status)) {
                     let event_id = feedback_event_id(&event).to_owned();
                     let mut settings = publisher_state.settings.lock().await;
                     settings.feedback_outbox.retain(|pending| feedback_event_id(pending) != event_id);
@@ -554,10 +582,12 @@ fn start_learning_feedback_worker(state: &AutoTraderState) {
             }
             let execution_event = publisher_state.settings.lock().await.execution_feedback_outbox.first().cloned();
             if let Some(event) = execution_event {
-                let Some(base) = learning_url.as_deref() else { continue };
-                let response = publisher_state.client.post(format!("{}/execution-outcomes", base.trim_end_matches('/')))
-                    .timeout(Duration::from_secs(3)).json(&event).send().await;
-                if response.is_ok_and(|response| response.status().is_success()) {
+                let response = crate::service_rpc::learning_request(
+                    strategies::ScoutWorkerHttpMethod::Post,
+                    "/execution-outcomes",
+                    Some(serde_json::to_value(&event).unwrap_or(serde_json::Value::Null)),
+                ).await;
+                if response.is_ok_and(|response| (200..300).contains(&response.status)) {
                     let event_id = event.event_id.clone();
                     let mut settings = publisher_state.settings.lock().await;
                     settings.execution_feedback_outbox.retain(|pending| pending.event_id != event_id);
@@ -570,18 +600,20 @@ fn start_learning_feedback_worker(state: &AutoTraderState) {
         }
     });
 
-    if let Some(base) = profile_learning_url {
+    if profile_learning_url.is_some() {
         let profile_state = state.clone();
-        let client = state.client.clone();
         tokio::spawn(async move {
             let mut ticker = interval(Duration::from_secs(3));
             ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             loop {
                 ticker.tick().await;
-                let Ok(response) = client.get(format!("{}/decision-snapshot", base.trim_end_matches('/')))
-                    .timeout(Duration::from_secs(3)).send().await else { continue };
-                let Ok(response) = response.error_for_status() else { continue };
-                let Ok(snapshot) = response.json::<strategies::LearnedProfileSnapshot>().await else { continue };
+                let Ok(response) = crate::service_rpc::learning_request(
+                    strategies::ScoutWorkerHttpMethod::Get,
+                    "/decision-snapshot",
+                    None,
+                ).await else { continue };
+                if !(200..300).contains(&response.status) { continue; }
+                let Ok(snapshot) = serde_json::from_value::<strategies::LearnedProfileSnapshot>(response.body) else { continue };
                 let mut settings = profile_state.settings.lock().await;
                 let mut changed = false;
                 if settings.learned_scout_parameter_variants != snapshot.scout_parameter_variants {
@@ -631,65 +663,19 @@ fn start_learning_feedback_worker(state: &AutoTraderState) {
     }
 }
 
-async fn auto_trader_stream(State(state): State<AutoTraderState>, websocket: axum::extract::ws::WebSocketUpgrade) -> axum::response::Response {
-    websocket.on_upgrade(move |socket| async move {
-        use axum::extract::ws::Message;
-        use futures_util::{SinkExt, StreamExt};
-        let mut updates = state.state_updates.subscribe();
-        let (mut sender, mut receiver) = socket.split();
-        let mut periodic = tokio::time::interval(Duration::from_secs(15));
-        periodic.tick().await;
-        let mut previous = auto_trader_stream_snapshot(&state).await;
-        let initial = serde_json::json!({ "type": "snapshot", "state": previous }).to_string();
-        if sender.send(Message::Text(initial.into())).await.is_err() { return; }
-        loop {
-            let should_refresh = tokio::select! {
-                update = updates.recv() => match update {
-                    Ok(()) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => true,
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-                },
-                _ = periodic.tick() => true,
-                incoming = receiver.next() => if incoming.is_none() { break } else { false },
-            };
-            if should_refresh {
-                let snapshot = auto_trader_stream_snapshot(&state).await;
-                let mut changes = serde_json::Map::new();
-                if let (Some(current), Some(old)) = (snapshot.as_object(), previous.as_object()) {
-                    for (key, value) in current {
-                        if old.get(key) != Some(value) { changes.insert(key.clone(), value.clone()); }
-                    }
-                }
-                previous = snapshot;
-                if !changes.is_empty() {
-                    let payload = serde_json::json!({ "type": "delta", "changes": changes }).to_string();
-                    if sender.send(Message::Text(payload.into())).await.is_err() { break; }
-                }
-            }
-        }
-    })
-}
-
-async fn auto_trader_stream_snapshot(state: &AutoTraderState) -> serde_json::Value {
-    let status = get_status(State(state.clone())).await.0;
-    let activity = get_activity(State(state.clone())).await.0;
-    let parameters = get_decision_parameters(State(state.clone())).await.0;
-    let dated_carry = get_dated_carry(State(state.clone())).await.0;
-    let insights_url = std::env::var("INSIGHTS_URL").unwrap_or_else(|_| "http://127.0.0.1:3004".into());
-    let audit = match state.client.get(format!("{insights_url}/signals/auto-trader-execution-audit?limit=500")).send().await {
-        Ok(response) if response.status().is_success() => response.json::<serde_json::Value>().await.ok(),
-        _ => None,
-    };
-    serde_json::json!({ "status": status, "activity": activity, "parameters": parameters, "dated_carry": dated_carry, "execution_audit": audit.unwrap_or_else(|| serde_json::json!([])) })
-}
-
 async fn signal_ready(
     State(state): State<AutoTraderState>,
-    Json(dashboard): Json<Dashboard>,
+    Json(mut dashboard): Json<Dashboard>,
 ) -> StatusCode {
     static INGRESS_REQUESTS: AtomicU64 = AtomicU64::new(0);
     static INGRESS_SYMBOLS: AtomicU64 = AtomicU64::new(0);
     static LAST_INGRESS_LOG_MS: AtomicU64 = AtomicU64::new(0);
 
+    {
+        let context = state.latest_live_insights_context.lock().await;
+        dashboard.walk_forward = Arc::clone(&context.walk_forward);
+        dashboard.missed_opportunity_bands = Arc::clone(&context.missed_opportunity_bands);
+    }
     let incoming_symbols = dashboard.best.len() as u64;
     let settings = state.settings.lock().await;
     let generic_enabled = state.enabled.load(Ordering::Relaxed)
@@ -726,8 +712,8 @@ async fn signal_ready(
                 symbol,
                 Dashboard {
                     best: vec![signal],
-                    walk_forward: dashboard.walk_forward.clone(),
-                    missed_opportunity_bands: dashboard.missed_opportunity_bands.clone(),
+                    walk_forward: Arc::clone(&dashboard.walk_forward),
+                    missed_opportunity_bands: Arc::clone(&dashboard.missed_opportunity_bands),
                     markets: dashboard.markets.clone(),
                     queued_at: None,
                     queue_wait_ms: None,
@@ -739,8 +725,6 @@ async fn signal_ready(
         let mut prewarms = state.signal_book_prewarms.lock().await;
         prewarms
             .retain(|_, requested_at| now.duration_since(*requested_at) < Duration::from_secs(300));
-        let position_url = std::env::var("POSITION_MANAGEMENT_URL")
-            .unwrap_or_else(|_| "http://127.0.0.1:3002".to_owned());
         for symbol in prewarm_symbols {
             let should_request = prewarms.get(&symbol).is_none_or(|requested_at| {
                 now.duration_since(*requested_at) >= Duration::from_secs(60)
@@ -749,15 +733,13 @@ async fn signal_ready(
                 continue;
             }
             prewarms.insert(symbol.clone(), now);
-            let client = state.client.clone();
-            let url = format!("{position_url}/internal/market-book/{symbol}/subscribe");
             let requested_symbols = Arc::clone(&state.signal_book_prewarms);
             tokio::spawn(async move {
-                let succeeded = client
-                    .post(url)
-                    .send()
-                    .await
-                    .is_ok_and(|response| response.status().is_success());
+                let succeeded = crate::service_rpc::position_request(
+                    "POST",
+                    &format!("/internal/market-book/{symbol}/subscribe"),
+                    None,
+                ).await.is_ok();
                 if !succeeded {
                     requested_symbols.lock().await.remove(&symbol);
                 }

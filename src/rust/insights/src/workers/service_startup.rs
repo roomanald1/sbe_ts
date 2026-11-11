@@ -40,6 +40,19 @@ async fn main() -> anyhow::Result<()> {
     });
     let (news_tx, news_rx) = watch::channel(initial_news);
     tokio::spawn(poll_news_feed(news_tx));
+    let (browser_news_tx, browser_news_rx) = watch::channel(Arc::new(
+        serde_json::to_value(news_rx.borrow().as_ref())?,
+    ));
+    let mut news_for_browser = news_rx.clone();
+    tokio::spawn(async move {
+        while news_for_browser.changed().await.is_ok() {
+            let snapshot = news_for_browser.borrow_and_update().clone();
+            if let Ok(value) = serde_json::to_value(snapshot.as_ref()) {
+                browser_news_tx.send_replace(Arc::new(value));
+            }
+        }
+    });
+    let (enriched_market_events, _) = broadcast::channel(16_384);
     let signal_runtime = Arc::new(SignalRuntime {
         store: signal_store.clone(),
         engines: DashMap::new(),
@@ -57,31 +70,33 @@ async fn main() -> anyhow::Result<()> {
         }),
         snapshot_diagnostic_at: DashMap::new(),
         latest_prices: DashMap::new(),
+        rolling_volatility: DashMap::new(),
+        enriched_market_events,
     });
+    tokio::spawn(run_insights_market_event_server(
+        signal_runtime.enriched_market_events.clone(),
+    ));
+    tokio::spawn(insights::signals::serve_insights_browser_rsocket(
+        signal_store.clone(),
+        browser_news_rx,
+    ));
     let (signal_event_sender, signal_event_receiver) = tokio::sync::mpsc::channel(8_192);
     tokio::spawn(run_signal_event_workers(
         Arc::clone(&signal_runtime),
         signal_event_receiver,
     ));
+    tokio::spawn(run_feed_ticker_consumer(signal_event_sender.clone()));
     tokio::spawn(run_feed_signal_consumer(signal_event_sender));
     let service_name = if research_only() { "Insights Research" } else { "Insights" };
-    let app = Router::new()
-        .merge(service_docs::routes(service_name, &[("/health", &["get"]), ("/signals/stream", &["get"]), ("/positions/insights", &["get"]), ("/signals/daily-summary", &["get"]), ("/signals/dashboard", &["get"]), ("/signals/history", &["get"])]))
-        .merge(daily_summary::router())
-        .route("/health", get(|| async { "ok" }))
-        .route(
-            "/internal/latency",
-            get(|| async { axum::Json(crate::latency::snapshot()) }),
-        )
-        .route(
-            "/internal/signal-feed-status",
-            get(|| async { axum::Json(crate::latency::signal_feed_status()) }),
-        )
+    let domain_router = Router::new()
         .route(
             "/internal/live-context",
             get(live_context).with_state(Arc::clone(&signal_runtime)),
         )
-        .route("/process-cpu-seconds", get(process_cpu_seconds)).route("/process-memory-bytes", get(process_memory_bytes))
+        .route(
+            "/internal/live-news-context",
+            get(live_news_context).with_state(Arc::clone(&signal_runtime)),
+        )
         .route(
             "/internal/signals/event",
             axum::routing::post(ingest_signal_event).with_state(Arc::clone(&signal_runtime)),
@@ -99,6 +114,34 @@ async fn main() -> anyhow::Result<()> {
             axum::routing::post(update_scout_strategy_status).with_state(Arc::clone(&signal_runtime)),
         )
         .merge(signal_store.router());
+    let scout_rpc_port = std::env::var("INSIGHTS_RPC_RSOCKET_PORT")
+        .unwrap_or_else(|_| "10007".to_owned());
+    tokio::spawn(run_insights_scout_rpc_server(
+        domain_router,
+        format!("0.0.0.0:{scout_rpc_port}"),
+    ));
+    let app = Router::new()
+        .merge(service_docs::routes(
+            service_name,
+            &[
+                ("/health", &["get"]),
+                ("/internal/latency", &["get"]),
+                ("/internal/signal-feed-status", &["get"]),
+                ("/process-cpu-seconds", &["get"]),
+                ("/process-memory-bytes", &["get"]),
+            ],
+        ))
+        .route("/health", get(|| async { "ok" }))
+        .route(
+            "/internal/latency",
+            get(|| async { axum::Json(crate::latency::snapshot()) }),
+        )
+        .route(
+            "/internal/signal-feed-status",
+            get(|| async { axum::Json(crate::latency::signal_feed_status()) }),
+        )
+        .route("/process-cpu-seconds", get(process_cpu_seconds))
+        .route("/process-memory-bytes", get(process_memory_bytes));
     let listener = tokio::net::TcpListener::bind(("0.0.0.0", 3004)).await?;
     crate::service_log!("INFO", "{service_name} service listening on http://0.0.0.0:3004");
     axum::serve(listener, app).await?;
@@ -124,6 +167,18 @@ async fn live_context(
         "walkForward": runtime.store.cached_walk_forward(),
         "missedOpportunityBands": runtime.store.cached_missed_opportunity_bands(),
     }))
+}
+
+async fn live_news_context(
+    axum::extract::State(runtime): axum::extract::State<Arc<SignalRuntime>>,
+) -> Json<serde_json::Value> {
+    let news = Arc::clone(&runtime.news.borrow());
+    let news_weight = runtime
+        .news_learning
+        .try_lock()
+        .map(|learning| learning.weight)
+        .unwrap_or(0.0);
+    Json(serde_json::json!({ "news": news.as_ref(), "weight": news_weight }))
 }
 
 async fn process_memory_bytes() -> String {

@@ -237,15 +237,18 @@ mod dated_carry_lifecycle_tests {
         assert_eq!(response.finalized_count, 3);
         let paired = state.outbox.iter().filter_map(|item| match item {
             ScoutOutboxItem::Learning(FeedbackEvent::ScoutOutcome {
-                event_id,
+                comparison: strategies::ScoutComparisonMetadata::Paired {
+                    group_id,
+                    ..
+                },
                 net_return_percent,
                 ..
-            }) if event_id.starts_with("paired-scout:") => Some((event_id.clone(), *net_return_percent)),
+            }) => Some((group_id.clone(), *net_return_percent)),
             _ => None,
         }).collect::<BTreeMap<_, _>>();
         assert_eq!(paired.len(), 2);
-        assert!(paired["paired-scout:carry-pair-a|scenario:strategy"].abs() < 1e-8);
-        assert!(paired["paired-scout:carry-pair-b|scenario:strategy"] < 0.0);
+        assert!(paired["carry-pair-a"].abs() < 1e-8);
+        assert!(paired["carry-pair-b"] < 0.0);
     }
 }
 

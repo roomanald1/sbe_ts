@@ -19,7 +19,6 @@ import {
 
 ModuleRegistry.registerModules([ClientSideRowModelModule]);
 
-
 const gridTheme = themeQuartz.withParams({
   accentColor: '#8296ad',
   backgroundColor: '#0d0f12',
@@ -43,15 +42,31 @@ function SymbolGridCellRenderer({
       <button
         className="symbol-grid-cell-button"
         type="button"
-        onClick={() => model.selectSymbol(value.symbol, value.direction === 'down' ? 'sell' : 'buy')}
+        onClick={() =>
+          model.selectSymbol(
+            value.symbol,
+            value.direction === 'down' ? 'sell' : 'buy',
+          )
+        }
         disabled={!model.getSnapshot().onSelectSymbol}
-        aria-label={"Open " + (value.direction === 'down' ? 'sell' : 'buy') + ' order for ' + value.symbol}
+        aria-label={
+          'Open ' +
+          (value.direction === 'down' ? 'sell' : 'buy') +
+          ' order for ' +
+          value.symbol
+        }
       >
         <span className="grid-symbol" title={value.symbol}>
           {value.symbol}
         </span>
         <span className={`grid-price price-${value.direction}`}>
-          {formatForSymbol(value.price, value.symbol, 'price')} <span className="grid-volatility">5M {value.volatility5m === undefined ? "N/A" : value.volatility5m.toFixed(3) + "%"}</span>
+          {formatForSymbol(value.price, value.symbol, 'price')}{' '}
+          <span className="grid-volatility">
+            5M{' '}
+            {value.volatility5m === undefined
+              ? 'N/A'
+              : value.volatility5m.toFixed(3) + '%'}
+          </span>
         </span>
       </button>
       {model.getSnapshot().onTradeSymbol && (
@@ -80,7 +95,9 @@ function SymbolGridCellRenderer({
   );
 }
 
-export const SymbolPriceGrid = memo(function SymbolPriceGrid(props: SymbolPriceGridProps) {
+export const SymbolPriceGrid = memo(function SymbolPriceGrid(
+  props: SymbolPriceGridProps,
+) {
   const model = useMemo(
     () =>
       new SymbolPriceGridModel({ ...props, compact: props.compact ?? false }),
@@ -107,7 +124,10 @@ export const SymbolPriceGrid = memo(function SymbolPriceGrid(props: SymbolPriceG
         cellRenderer: SymbolGridCellRenderer,
         cellRendererParams: { model },
         equals: (previous, next) =>
-          previous?.symbol === next?.symbol && previous?.price === next?.price && previous?.volatility1m === next?.volatility1m && previous?.volatility5m === next?.volatility5m,
+          previous?.symbol === next?.symbol &&
+          previous?.price === next?.price &&
+          previous?.volatility1m === next?.volatility1m &&
+          previous?.volatility5m === next?.volatility5m,
         sortable: false,
         resizable: false,
         flex: 1,
@@ -139,8 +159,6 @@ export const SymbolPriceGrid = memo(function SymbolPriceGrid(props: SymbolPriceG
           domLayout="autoHeight"
           rowHeight={compact ? 22 : 28}
           headerHeight={0}
-
-
           suppressCellFocus
         />
       </div>

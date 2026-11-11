@@ -103,7 +103,7 @@ async fn get_realized_pnl(
         ));
     }
     let since_ms = query.since_ms.unwrap_or(0);
-    let (ledger, _, _) = snapshot_position_ledger(&store.ledger).await;
+    let (ledger, _, _, _) = snapshot_position_ledger(&store.ledger).await;
     let snapshot = {
         let mut cache = store
             .realized_pnl_cache

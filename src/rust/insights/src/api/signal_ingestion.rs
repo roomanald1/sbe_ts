@@ -249,8 +249,17 @@ async fn ingest_signal_event(
             SignalFeedEvent::Price {
                 timestamp,
                 price,
-                volatility_1m,
             } => {
+                let (volatility_1m, volatility_5m) = runtime
+                    .rolling_volatility
+                    .entry(request.symbol.clone())
+                    .or_default()
+                    .update(timestamp, price);
+                if let Some(raw) = request.raw_payload.as_ref() {
+                    if let Some(enriched) = enrich_raw_price(raw, volatility_1m, volatility_5m) {
+                        let _ = runtime.enriched_market_events.send(enriched);
+                    }
+                }
                 let (price_count_before, previous_price) = engine.price_state();
                 let outcomes = engine.on_price(timestamp, price, volatility_1m);
                 let (price_count_after, latest_price) = engine.price_state();
@@ -539,9 +548,8 @@ async fn publish_scout_markouts(
         .acquire()
         .await
         .expect("scout learning delivery semaphore remains open");
-    let client = POSITION_MANAGEMENT_CLIENT.get_or_init(reqwest::Client::new);
-    let scouts_base = std::env::var("SCOUTS_SERVICE_URL")
-        .unwrap_or_else(|_| "http://127.0.0.1:3011".to_owned());
+    let learning_rsocket_url = std::env::var("LEARNING_RSOCKET_URL")
+        .unwrap_or_else(|_| "ws://127.0.0.1:10010".to_owned());
     for (decision_id, evaluation, observation_only) in outcomes {
         let payload = serde_json::json!({
             "decision_id": decision_id,
@@ -567,18 +575,29 @@ async fn publish_scout_markouts(
             "short_time_to_positive_net_seconds": evaluation.short_time_to_positive_net_seconds,
         });
         for attempt in 0..3 {
-            match client
-                .post(format!("{}/scout-markout", scouts_base.trim_end_matches('/')))
-                .timeout(Duration::from_secs(2))
-                .json(&payload)
-                .send()
-                .await
-                .and_then(reqwest::Response::error_for_status)
-            {
-                Ok(response) => {
-                    crate::service_log!("INFO", "Scout markout delivered: sample_id={} symbol={} status={} attempt={}", decision_id, evaluation.symbol, response.status(), attempt + 1);
+            let response = strategies::request_scout_worker_route(
+                &learning_rsocket_url,
+                &strategies::ScoutCoordinatorRouteCommand {
+                    request_id: format!("scout-markout:{decision_id}:{}", evaluation.evaluated_timestamp),
+                    strategy: None,
+                    method: strategies::ScoutWorkerHttpMethod::Post,
+                    path: "/scout-markout".into(),
+                    payload: payload.clone(),
+                },
+            )
+            .await;
+            match response {
+                Ok(response) if response.status < 400 => {
+                    crate::service_log!("INFO", "Scout markout delivered: sample_id={} symbol={} status={} attempt={}", decision_id, evaluation.symbol, response.status, attempt + 1);
                     break;
                 }
+                Ok(response) if attempt == 2 => crate::service_log!(
+                    "WARN",
+                    "Could not deliver scout markout sample_id={} symbol={}: status {}",
+                    decision_id,
+                    evaluation.symbol,
+                    response.status
+                ),
                 Err(error) if attempt == 2 => crate::service_log!(
                     "WARN",
                     "Could not deliver scout markout sample_id={} symbol={}: {error}",
@@ -586,6 +605,7 @@ async fn publish_scout_markouts(
                     evaluation.symbol
                 ),
                 Err(_) => tokio::time::sleep(Duration::from_millis(100 * (attempt + 1))).await,
+                Ok(_) => tokio::time::sleep(Duration::from_millis(100 * (attempt + 1))).await,
             }
         }
     }

@@ -1,4 +1,5 @@
 import { BehaviorSubject } from 'rxjs';
+import { learningRpc } from '../learning_rsocket';
 
 export type AutoTraderScoutPosition = {
   decisionId: string;
@@ -294,9 +295,10 @@ export class AutoTraderScoutModel {
         sort_by: filters.sortBy,
         sort_direction: filters.sortDirection,
       });
-      const response = await fetch('/scouts/outcomes?' + query.toString(), {
-        signal: controller.signal,
-      });
+      const response = await learningRpc(
+        'GET',
+        '/outcomes?' + query.toString(),
+      );
       if (!response.ok) throw new Error('Scout outcome data unavailable');
       const data = (await response.json()) as ScoutOutcomesResponse;
       if (requestId !== this.requestId) return;

@@ -980,7 +980,7 @@
       },
       "targets": [
         {
-          "expr": "100 * rate(app_service_process_cpu_seconds_total{service=~\"feed_handlers|position_management|auto_trader|execution|insights|live_signals|news_sentiment|learning|scouts\"}[1m])",
+          "expr": "100 * rate(app_service_process_cpu_seconds_total{service=~\"feed_handlers|binance_feed|position_management|auto_trader|execution|insights|live_signals|news_sentiment|learning|scouts\"}[1m])",
           "legendFormat": "{{service}}",
           "refId": "A"
         }
@@ -1324,7 +1324,7 @@
       },
       "targets": [
         {
-          "expr": "app_service_process_resident_memory_bytes{service=~\"feed_handlers|position_management|auto_trader|execution|insights|live_signals|news_sentiment|learning|scouts\"}",
+          "expr": "app_service_process_resident_memory_bytes{service=~\"feed_handlers|binance_feed|position_management|auto_trader|execution|insights|live_signals|news_sentiment|learning|scouts\"}",
           "legendFormat": "{{service}}",
           "refId": "A"
         }

@@ -10,6 +10,8 @@ import {
   waitForAutoTraderSnapshot,
 } from '../auto_trader_stream';
 import { sharedGet } from '../shared_get';
+import { autoTraderRpc } from '../auto_trader_rsocket';
+import { positionFetch } from '../position_api';
 export type AccountState = {
   cash: number;
   equity: number;
@@ -91,8 +93,12 @@ export class AccountModel {
       updateAutoTotal(snapshot.activity),
     );
     void Promise.all([waitForPositionSnapshot(), waitForAutoTraderSnapshot()])
-      .then(() => { if (this.stopPositionStream) void this.refresh(); })
-      .catch(() => { if (this.stopPositionStream) void this.refresh(); });
+      .then(() => {
+        if (this.stopPositionStream) void this.refresh();
+      })
+      .catch(() => {
+        if (this.stopPositionStream) void this.refresh();
+      });
   }
   stop() {
     if (this.timer) clearInterval(this.timer);
@@ -112,7 +118,7 @@ export class AccountModel {
           : sharedGet('/positions/account'),
         autoSnapshot
           ? Promise.resolve(undefined)
-          : sharedGet('/positions/auto-trader/activity'),
+          : autoTraderRpc('GET', '/positions/auto-trader/activity'),
       ]);
       if (!snapshot?.account && !response?.ok)
         throw new Error('Could not load account (' + response?.status + ')');
@@ -169,7 +175,7 @@ export class AccountModel {
       error: undefined,
     });
     try {
-      const response = await fetch('/positions/account/topups', {
+      const response = await positionFetch('/positions/account/topups', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ amount }),
@@ -195,7 +201,7 @@ export class AccountModel {
       error: undefined,
     });
     try {
-      const response = await fetch('/positions/account/leverage', {
+      const response = await positionFetch('/positions/account/leverage', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ max_leverage }),

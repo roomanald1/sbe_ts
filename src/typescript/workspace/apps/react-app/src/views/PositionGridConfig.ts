@@ -19,4 +19,3 @@ export const defaultPositionColDef: ColDef<PositionGridRow> = {
   flex: 1,
   minWidth: 68,
 };
-

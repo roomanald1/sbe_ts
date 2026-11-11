@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo } from 'react';
 import { AgGridReact } from 'ag-grid-react';
 import {
   ClientSideRowModelModule,
@@ -6,10 +6,11 @@ import {
   themeQuartz,
   type ColDef,
 } from 'ag-grid-community';
-import { AutoTraderModel } from '../models/AutoTraderModel';
-import type { LearningSummary } from '../models/AutoTraderOutcomesModel';
-import { summarizeLearningEffectiveness } from '../models/LearningEffectivenessModel';
-import { sharedGet } from '../shared_get';
+import { AutoTraderLearningWidgetModel } from '../models/AutoTraderLearningWidgetModel';
+import type {
+  LearningRow,
+  TradeEffectivenessRow,
+} from '../models/AutoTraderLearningWidgetModel';
 import { useBehaviorSnapshot } from '@workspace/ui-platform';
 
 ModuleRegistry.registerModules([ClientSideRowModelModule]);
@@ -22,40 +23,6 @@ const learningGridTheme = themeQuartz.withParams({
   headerTextColor: '#a0a6ad',
   rowHoverColor: '#141b24',
 });
-
-type LearningRow = {
-  id: string;
-  symbol: string;
-  strategy: string;
-  parameter: string;
-  unit: string;
-  step: number;
-  base: number;
-  candidate: number;
-  effective: number;
-  pairedDelta: number | null;
-  pairedDeltaSamples: number;
-  pairedUnknownSamples: number;
-  pairedDeltaEstimated: boolean;
-  samples: number;
-  minimumSamples: number;
-  averageLift: number | null;
-  lower95: number | null;
-  upper95: number | null;
-  promoted: boolean;
-  rejected: boolean;
-  status: string;
-};
-type TradeEffectivenessRow = {
-  strategy: string;
-  activeSamples: number;
-  activePositiveRate: number | null;
-  activeAverage: number | null;
-  otherSamples: number;
-  otherPositiveRate: number | null;
-  otherAverage: number | null;
-  averageDifference: number | null;
-};
 
 const signedPercentPoints = (value: number | null) =>
   value == null ? '—' : `${value > 0 ? '+' : ''}${value.toFixed(3)} pp`;
@@ -220,205 +187,25 @@ const columns: ColDef<LearningRow>[] = [
 ];
 
 export function AutoTraderLearningWidget() {
-  const [promotedOnly, setPromotedOnly] = useState(false);
-  const [learningSummary, setLearningSummary] = useState<
-    LearningSummary[] | null
-  >(null);
-  const [learningSummaryError, setLearningSummaryError] = useState<
-    string | undefined
-  >();
-  const model = useMemo(() => new AutoTraderModel(), []);
+  const model = useMemo(() => new AutoTraderLearningWidgetModel(), []);
   useEffect(() => {
     model.start();
     return () => model.stop();
   }, [model]);
-  /* TODO put into model */
-  useEffect(() => {
-    let active = true;
-    const refreshSummary = async () => {
-      try {
-        const response = await sharedGet(
-          '/positions/auto-trader/learning-summary',
-        );
-        if (!response.ok) {
-          throw new Error(
-            `Learning summary request failed (${response.status}).`,
-          );
-        }
-        const summary = (await response.json()) as LearningSummary[];
-        if (active) {
-          setLearningSummary(summary);
-          setLearningSummaryError(undefined);
-        }
-      } catch (error) {
-        if (active) {
-          setLearningSummaryError(
-            error instanceof Error
-              ? error.message
-              : 'Could not load Learning summary.',
-          );
-        }
-      }
-    };
-    void refreshSummary();
-    const refreshTimer = setInterval(() => void refreshSummary(), 30_000);
-    return () => {
-      active = false;
-      clearInterval(refreshTimer);
-    };
-  }, []);
-  const state = useBehaviorSnapshot(model.state$);
-  const profiles = state.decisionParameters?.strategy_profiles ?? [];
-  const rows = useMemo(() => {
-    const results = profiles.flatMap((profile) =>
-      profile.parameters.flatMap((parameter) =>
-        (parameter.scout_variants ?? []).map(
-          (variant): LearningRow => ({
-            id: `${profile.symbol}:${profile.strategy}:${parameter.key}:${variant.candidate_value.toFixed(8)}`,
-            symbol: profile.symbol,
-            strategy: profile.strategy,
-            parameter: parameter.label,
-            unit: parameter.unit,
-            step: parameter.step,
-            base: parameter.configured_value ?? parameter.default_value,
-            candidate: variant.candidate_value,
-            effective: parameter.value,
-            pairedDelta:
-              variant.paired_baseline_delta_samples &&
-              variant.paired_baseline_delta_samples > 0
-                ? (variant.paired_baseline_delta_mean ?? null)
-                : (variant.paired_baseline_unknown_samples ?? 0) > 0
-                  ? variant.candidate_value -
-                    (parameter.configured_value ?? parameter.default_value)
-                  : null,
-            pairedDeltaSamples:
-              variant.paired_baseline_delta_samples &&
-              variant.paired_baseline_delta_samples > 0
-                ? variant.paired_baseline_delta_samples
-                : (variant.paired_baseline_unknown_samples ?? 0),
-            pairedUnknownSamples:
-              variant.paired_baseline_delta_samples &&
-              variant.paired_baseline_delta_samples > 0
-                ? (variant.paired_baseline_unknown_samples ?? 0)
-                : 0,
-            pairedDeltaEstimated:
-              !(variant.paired_baseline_delta_samples ?? 0) &&
-              (variant.paired_baseline_unknown_samples ?? 0) > 0,
-            samples: variant.sample_count,
-            minimumSamples: variant.minimum_samples,
-            averageLift: variant.average_net_improvement_percent,
-            lower95: variant.lower_90_one_sided_improvement_percent ?? null,
-            upper95: variant.upper_90_one_sided_improvement_percent ?? null,
-            promoted: variant.promoted,
-            rejected: variant.rejected,
-            status: variant.promoted
-              ? 'Active'
-              : variant.rejected
-                ? 'Avoid'
-                : variant.sample_count < variant.minimum_samples
-                  ? 'Collecting'
-                  : (variant.lower_90_one_sided_improvement_percent ?? 0) > 0
-                    ? 'Qualified · not active'
-                    : 'Not qualified',
-          }),
-        ),
-      ),
-    );
-    const rowsById = new Map(results.map((row) => [row.id, row]));
-    for (const pending of state.pendingScoutParameters) {
-      const profile = profiles.find(
-        (candidate) =>
-          candidate.symbol === pending.symbol &&
-          candidate.strategy === pending.strategy,
-      );
-      const parameter = profile?.parameters.find(
-        (candidate) => candidate.key === pending.parameter,
-      );
-      if (!profile || !parameter) continue;
-      const id = `${profile.symbol}:${profile.strategy}:${parameter.key}:${pending.candidateValue.toFixed(8)}`;
-      const existing = rowsById.get(id);
-      if (existing) {
-        if (!existing.promoted && existing.samples < existing.minimumSamples) {
-          existing.status = `Collecting · ${pending.openSamples} open`;
-        }
-        continue;
-      }
-      const row: LearningRow = {
-        id,
-        symbol: profile.symbol,
-        strategy: profile.strategy,
-        parameter: parameter.label,
-        unit: parameter.unit,
-        step: parameter.step,
-        base: parameter.configured_value ?? parameter.default_value,
-        candidate: pending.candidateValue,
-        effective: parameter.value,
-        pairedDelta: null,
-        pairedDeltaSamples: 0,
-        pairedUnknownSamples: 0,
-        pairedDeltaEstimated: false,
-        samples: 0,
-        minimumSamples: Number(state.minimumScoutParameterSamples),
-        averageLift: null,
-        lower95: null,
-        upper95: null,
-        promoted: false,
-        rejected: false,
-        status: `Collecting · ${pending.openSamples} open`,
-      };
-      results.push(row);
-      rowsById.set(id, row);
-    }
-    return results;
-  }, [profiles, state.pendingScoutParameters]);
-  const effectiveness = useMemo(
-    () => summarizeLearningEffectiveness(learningSummary ?? []),
-    [learningSummary],
-  );
-  const actualTradeRows = useMemo(
-    () =>
-      (learningSummary ?? [])
-        .filter(
-          (summary) =>
-            (summary.active_profile_trade_samples ?? 0) > 0 ||
-            (summary.other_profile_trade_samples ?? 0) > 0,
-        )
-        .map((summary): TradeEffectivenessRow => {
-          const activeAverage =
-            summary.active_profile_average_net_return_percent ?? null;
-          const otherAverage =
-            summary.other_profile_average_net_return_percent ?? null;
-          return {
-            strategy: summary.strategy,
-            activeSamples: summary.active_profile_trade_samples ?? 0,
-            activePositiveRate:
-              summary.active_profile_trade_positive_rate ?? null,
-            activeAverage,
-            otherSamples: summary.other_profile_trade_samples ?? 0,
-            otherPositiveRate:
-              summary.other_profile_trade_positive_rate ?? null,
-            otherAverage,
-            averageDifference:
-              activeAverage != null && otherAverage != null
-                ? activeAverage - otherAverage
-                : null,
-          };
-        }),
-    [learningSummary],
-  );
-  const profileReturnDifference =
-    effectiveness.activeProfileReturn != null &&
-    effectiveness.otherProfileReturn != null
-      ? effectiveness.activeProfileReturn - effectiveness.otherProfileReturn
-      : null;
-  const activeCandidates = rows.filter((row) => row.promoted).length;
-  const rejectedCandidates = rows.filter((row) => row.rejected).length;
-  const collectingCandidates = rows.filter((row) =>
-    row.status.startsWith('Collecting'),
-  ).length;
-
-  const visibleRows = promotedOnly ? rows.filter((row) => row.promoted) : rows;
-
+  const {
+    source: state,
+    summary: learningSummary,
+    summaryError: learningSummaryError,
+    rows,
+    visibleRows,
+    promotedOnly,
+    effectiveness,
+    actualTradeRows,
+    profileReturnDifference,
+    activeCandidates,
+    rejectedCandidates,
+    collectingCandidates,
+  } = useBehaviorSnapshot(model.state$);
   return (
     <section
       className="auto-trader-strategy-parameters"
@@ -578,7 +365,7 @@ export function AutoTraderLearningWidget() {
               className="auto-trader-learning-filter"
               type="button"
               aria-pressed={promotedOnly}
-              onClick={() => setPromotedOnly((value) => !value)}
+              onClick={() => model.setPromotedOnly(!promotedOnly)}
             >
               {promotedOnly ? 'Show all tests' : 'Active only'}
             </button>

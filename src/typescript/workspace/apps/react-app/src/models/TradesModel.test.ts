@@ -52,9 +52,9 @@ function makeTradeBuffer(params: {
   buffer.fill(32, 8, 72); // space-pad symbol and tradeId
   const view = new DataView(buffer.buffer);
   view.setUint16(0, 89, true); // blockLength
-  view.setUint16(2, 3, true);  // templateId = TRADE_TICK
-  view.setUint16(4, 1, true);  // schemaId = SYMBOL_PRICE_SCHEMA_ID
-  view.setUint16(6, 0, true);  // version
+  view.setUint16(2, 3, true); // templateId = TRADE_TICK
+  view.setUint16(4, 1, true); // schemaId = SYMBOL_PRICE_SCHEMA_ID
+  view.setUint16(6, 0, true); // version
 
   const encoder = new TextEncoder();
   buffer.set(encoder.encode(params.symbol).subarray(0, 32), 8);

@@ -1,34 +1,45 @@
 use ::auto_trader::auto_trader;
+mod browser_rsocket;
 #[path = "../../service_docs.rs"]
 mod service_docs;
 
-use axum::routing::get;
+use axum::{Router, routing::get};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let app = auto_trader::router()
-        .merge(service_docs::routes(
-            "AutoTrader",
-            &[
-                ("/health", &["get"]),
-                ("/positions/auto-trader", &["get", "put"]),
-                ("/positions/auto-trader/settings", &["put"]),
-                ("/positions/auto-trader/dated-carry", &["get", "put"]),
-                ("/positions/auto-trader/parameters", &["get"]),
-                ("/positions/auto-trader/activity", &["get"]),
-                ("/positions/auto-trader/learning-summary", &["get"]),
-            ],
-        ))
-        .route("/health", get(|| async { "ok" }))
-        .route("/process-cpu-seconds", get(process_cpu_seconds))
-        .route("/process-memory-bytes", get(process_memory_bytes));
+    let domain_router = auto_trader::router();
+    let rsocket_router = domain_router.clone();
+    let app = http_router();
+    let port = std::env::var("AUTO_TRADER_RSOCKET_PORT").unwrap_or_else(|_| "10006".to_owned());
+    let address = format!("0.0.0.0:{port}");
     let listener = tokio::net::TcpListener::bind(("0.0.0.0", 3005)).await?;
     ::auto_trader::service_log!(
         "INFO",
         "AutoTrader service listening on http://0.0.0.0:3005"
     );
-    axum::serve(listener, app).await?;
+    tokio::try_join!(
+        async {
+            axum::serve(listener, app)
+                .await
+                .map_err(anyhow::Error::from)
+        },
+        browser_rsocket::serve(rsocket_router, address),
+    )?;
     Ok(())
+}
+
+fn http_router() -> Router {
+    service_docs::routes(
+        "AutoTrader",
+        &[
+            ("/health", &["get"]),
+            ("/process-cpu-seconds", &["get"]),
+            ("/process-memory-bytes", &["get"]),
+        ],
+    )
+    .route("/health", get(|| async { "ok" }))
+    .route("/process-cpu-seconds", get(process_cpu_seconds))
+    .route("/process-memory-bytes", get(process_memory_bytes))
 }
 
 async fn process_memory_bytes() -> String {
@@ -65,19 +76,43 @@ async fn process_cpu_seconds() -> String {
         .to_string()
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::{
+        body::Body,
+        http::{Request, StatusCode},
+    };
+    use tower::ServiceExt;
 
-///
-/// Autotrader module 
-/// 
-/// 
-/// This module is responsible for taking learning outcomes (parameter profiles) and live signals in order to execute trade strategies. 
-/// 
-/// Learning profiles and live signals are communicated via SBE messages over websockets (RSocket) - TODO 
-/// 
-/// Each live signal will evaluate against the strategies evaluate() function. The evaluate function will decide whether to enter, exit or hold the positions. It will also determine the nature of the execution IoC, Limit, VWAP etc based on its learning parameters.
-/// 
-/// Actual execution is done via the Execution module. Also this module does not hold any ledger, it is the responsiblity of the postion manager to hold position statuses. This module is simply a trade creator. 
-/// 
-/// All trades created via this module will communicate via SBE over RSocket to the learning module to inform it of the creation and exit of any trades. This will help inform the future trade runs. 
-/// 
+    #[tokio::test]
+    async fn external_http_listener_exposes_only_ops_not_domain_routes() {
+        let app = http_router();
+        let health = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(health.status(), StatusCode::OK);
 
+        let domain = app
+            .oneshot(
+                Request::builder()
+                    .uri("/positions/auto-trader")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(domain.status(), StatusCode::NOT_FOUND);
+    }
+}
+
+// AutoTrader evaluates signals with strategy profile parameters and delegates
+// order placement and position state to their owning services. Scout
+// walk-forward evidence is requested from Learning over RSocket.

@@ -3,7 +3,7 @@ import {
   currentAutoTraderSnapshot,
   subscribeAutoTraderStream,
 } from '../auto_trader_stream';
-import { sharedGet } from '../shared_get';
+import { autoTraderFetch, autoTraderRpc } from '../auto_trader_rsocket';
 
 export type DatedCarryCandidate = {
   spot_symbol: string;
@@ -115,7 +115,10 @@ export class DatedCarryModel {
           });
         return;
       }
-      const response = await sharedGet('/positions/auto-trader/dated-carry');
+      const response = await autoTraderRpc(
+        'GET',
+        '/positions/auto-trader/dated-carry',
+      );
       if (!response.ok) throw new Error(await response.text());
       const book = (await response.json()) as DatedCarryBook;
       if (this.stopped) return;
@@ -150,11 +153,14 @@ export class DatedCarryModel {
     }
     this.state$.next({ ...current, saving: true, error: undefined });
     try {
-      const response = await fetch('/positions/auto-trader/dated-carry', {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ max_spot_notional_usdt: notional }),
-      });
+      const response = await autoTraderFetch(
+        '/positions/auto-trader/dated-carry',
+        {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ max_spot_notional_usdt: notional }),
+        },
+      );
       if (!response.ok) throw new Error(await response.text());
       const book = (await response.json()) as DatedCarryBook;
       if (!this.stopped)

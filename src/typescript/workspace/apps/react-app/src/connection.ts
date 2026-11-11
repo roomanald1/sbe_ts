@@ -7,7 +7,11 @@ import {
 } from 'rsocket-core';
 
 import * as WebSocketClient from 'rsocket-websocket-client';
-import { ConnectionFeedManager, createBookFeed, createNewsFeed, createTradeFeed } from './connection_feed_manager';
+import {
+  ConnectionFeedManager,
+  createBookFeed,
+  createTradeFeed,
+} from './connection_feed_manager';
 
 export type ConnectionState = 'connecting' | 'connected' | 'reconnecting';
 export type FeedSource = 'okx' | 'synthetic';
@@ -27,8 +31,6 @@ export type BookFeed = {
 };
 
 export type SignalFeed = BookFeed;
-export type NewsFeed = { key: string; data: BehaviorSubject<unknown | undefined>; error: BehaviorSubject<string | undefined> };
-
 const REQUEST_BATCH_SIZE = 500;
 
 const BufferDataEncoder: Encoder<Buffer> = {
@@ -60,10 +62,17 @@ export class Connection {
   private lifecycleGeneration = 0;
   private socket: Awaited<ReturnType<typeof this.createClient>> | undefined;
   private subscription: { cancel: () => void } | undefined;
+  private insightsSocket:
+    | Awaited<ReturnType<typeof this.createClient>>
+    | undefined;
+  private insightsSubscription:
+    | { cancel: () => void; request: (n: number) => void }
+    | undefined;
+  private insightsRetryTimer: ReturnType<typeof setTimeout> | undefined;
+  private insightsRetryAttempt = 0;
   private readonly bookFeeds = this.createBookManager('book');
   private readonly tradeFeeds = this.createTradeManager();
   private readonly signalFeeds = this.createBookManager('signals');
-  private readonly newsFeeds = this.createNewsManager();
   private retryTimer: ReturnType<typeof setTimeout> | undefined;
   private retryAttempt = 0;
 
@@ -95,10 +104,10 @@ export class Connection {
       this.error_message.next(message);
       this.subscription?.cancel();
       this.subscription = undefined;
+      this.closeInsightsSocket();
       this.bookFeeds.cancelAll();
       this.tradeFeeds.cancelAll();
       this.signalFeeds.cancelAll();
-      this.newsFeeds.cancelAll();
       this.socket?.close();
       this.socket = undefined;
 
@@ -139,10 +148,10 @@ export class Connection {
             this.subscription = sub;
             this.connection_state.next('connected');
             this.error_message.next(undefined);
+            if (this.source === 'okx') void this.connectInsights(generation);
             this.bookFeeds.resumeAll();
             this.tradeFeeds.resumeAll();
             this.signalFeeds.resumeAll();
-            this.newsFeeds.resumeAll();
             if (this.source === 'synthetic') {
               requestNext = () => sub.request(REQUEST_BATCH_SIZE);
               sub.request(1000);
@@ -154,7 +163,7 @@ export class Connection {
           onNext: (payload) => {
             if (this.cancelled || generation !== this.lifecycleGeneration)
               return;
-            this.data.next(payload.data);
+            if (this.source === 'synthetic') this.data.next(payload.data);
             updatesSinceRequest += 1;
             if (updatesSinceRequest >= REQUEST_BATCH_SIZE) {
               updatesSinceRequest = 0;
@@ -174,15 +183,24 @@ export class Connection {
     }
   }
 
-  public openBook(key: string, symbol: string): BookFeed { return this.bookFeeds.open(key, symbol); }
-  public closeBook(key: string, feed: BookFeed): void { this.bookFeeds.close(key, feed as BookFeed & { active: boolean }); }
-  public openSignals(key: string, symbol: string): SignalFeed { return this.signalFeeds.open(key, symbol); }
-  public closeSignals(key: string, feed: SignalFeed): void { this.signalFeeds.close(key, feed as SignalFeed & { active: boolean }); }
-  public openTrades(key: string, symbol: string): TradeFeed { return this.tradeFeeds.open(key, symbol); }
-  public closeTrades(key: string, feed: TradeFeed): void { this.tradeFeeds.close(key, feed as TradeFeed & { active: boolean }); }
-  public openNews(key: string): NewsFeed { return this.newsFeeds.open(key); }
-  public closeNews(key: string, feed: NewsFeed): void { this.newsFeeds.close(key, feed as NewsFeed & { active: boolean }); }
-
+  public openBook(key: string, symbol: string): BookFeed {
+    return this.bookFeeds.open(key, symbol);
+  }
+  public closeBook(key: string, feed: BookFeed): void {
+    this.bookFeeds.close(key, feed as BookFeed & { active: boolean });
+  }
+  public openSignals(key: string, symbol: string): SignalFeed {
+    return this.signalFeeds.open(key, symbol);
+  }
+  public closeSignals(key: string, feed: SignalFeed): void {
+    this.signalFeeds.close(key, feed as SignalFeed & { active: boolean });
+  }
+  public openTrades(key: string, symbol: string): TradeFeed {
+    return this.tradeFeeds.open(key, symbol);
+  }
+  public closeTrades(key: string, feed: TradeFeed): void {
+    this.tradeFeeds.close(key, feed as TradeFeed & { active: boolean });
+  }
   private createBookManager(requestType: 'book' | 'signals') {
     return new ConnectionFeedManager({
       create: createBookFeed,
@@ -203,17 +221,11 @@ export class Connection {
     });
   }
 
-  private createNewsManager() {
-    return new ConnectionFeedManager({
-      create: createNewsFeed,
-      request: () => 'news:*',
-      demand: 1,
-      getSocket: () => this.socket as never,
-      getGeneration: () => this.lifecycleGeneration,
-    });
+  private async createClient() {
+    return this.createClientForUrl(this.url);
   }
 
-  private async createClient() {
+  private async createClientForUrl(url: string) {
     const setupOptions = {
       keepAlive: 30000,
       lifetime: 120000,
@@ -233,7 +245,7 @@ export class Connection {
     };
     const transport = new TransportClass(
       {
-        url: this.url,
+        url,
         wsCreator: (url: string) => new WebSocket(url),
       },
       encoders,
@@ -247,6 +259,99 @@ export class Connection {
     return await client.connect();
   }
 
+  private async connectInsights(generation: number): Promise<void> {
+    const url =
+      import.meta.env.VITE_INSIGHTS_RSOCKET_URL ??
+      (import.meta.env.DEV ||
+      (typeof window !== 'undefined' &&
+        ['localhost', '127.0.0.1'].includes(window.location.hostname))
+        ? 'ws://localhost:10004'
+        : 'wss://sbe-ts.onrender.com');
+    try {
+      const client = await this.createClientForUrl(url);
+      if (
+        this.cancelled ||
+        generation !== this.lifecycleGeneration ||
+        this.source !== 'okx'
+      ) {
+        client.close();
+        return;
+      }
+      this.insightsSocket = client;
+      client.requestStream({ data: Buffer.from('tickers:*') }).subscribe({
+        onSubscribe: (sub) => {
+          if (this.cancelled || generation !== this.lifecycleGeneration) {
+            sub.cancel();
+            return;
+          }
+          this.insightsSubscription = sub;
+          this.insightsRetryAttempt = 0;
+          this.error_message.next(undefined);
+          if (this.socket) this.connection_state.next('connected');
+          sub.request(REQUEST_BATCH_SIZE);
+        },
+        onNext: (payload) => {
+          if (this.cancelled || generation !== this.lifecycleGeneration) return;
+          if (Buffer.isBuffer(payload.data)) {
+            this.data.next(payload.data);
+            this.insightsSubscription?.request(1);
+          }
+        },
+        onError: (error) =>
+          this.scheduleInsightsReconnect(
+            generation,
+            error.message ?? 'Insights RSocket stream disconnected',
+          ),
+        onComplete: () =>
+          this.scheduleInsightsReconnect(
+            generation,
+            'Insights stream completed; reconnecting',
+          ),
+      });
+    } catch (error) {
+      this.scheduleInsightsReconnect(
+        generation,
+        error instanceof Error
+          ? error.message
+          : 'Unable to connect to Insights RSocket server',
+      );
+    }
+  }
+
+  private scheduleInsightsReconnect(generation: number, message: string): void {
+    if (
+      this.cancelled ||
+      generation !== this.lifecycleGeneration ||
+      this.insightsRetryTimer !== undefined
+    )
+      return;
+    this.error_message.next(message);
+    this.connection_state.next('reconnecting');
+    this.closeInsightsSocket();
+    const delay = Math.min(1000 * 2 ** this.insightsRetryAttempt, 30000);
+    this.insightsRetryAttempt += 1;
+    this.insightsRetryTimer = setTimeout(() => {
+      this.insightsRetryTimer = undefined;
+      if (
+        generation === this.lifecycleGeneration &&
+        !this.cancelled &&
+        this.source === 'okx'
+      )
+        void this.connectInsights(generation);
+    }, delay);
+  }
+
+  private closeInsightsSocket(): void {
+    if (this.insightsRetryTimer !== undefined) {
+      clearTimeout(this.insightsRetryTimer);
+      this.insightsRetryTimer = undefined;
+    }
+    this.insightsSubscription?.cancel();
+    this.insightsSubscription = undefined;
+    this.insightsSocket?.close();
+    this.insightsSocket = undefined;
+  }
+
   public dispose() {
     this.cancelled = true;
     this.lifecycleGeneration += 1;
@@ -255,10 +360,10 @@ export class Connection {
       this.retryTimer = undefined;
     }
     this.subscription?.cancel();
+    this.closeInsightsSocket();
     this.bookFeeds.closeAll();
     this.tradeFeeds.closeAll();
     this.signalFeeds.closeAll();
-    this.newsFeeds.closeAll();
     this.socket?.close();
   }
 }

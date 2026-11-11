@@ -4,6 +4,6 @@ RUN pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu 
 COPY scripts/requirements-news-sentiment.txt ./requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 COPY scripts/classify_news.py ./classify_news.py
-ENV NEWS_SENTIMENT_HOST=0.0.0.0 NEWS_SENTIMENT_PORT=3006
-EXPOSE 3006
+ENV NEWS_SENTIMENT_HOST=0.0.0.0 NEWS_SENTIMENT_OPS_PORT=3006 NEWS_SENTIMENT_RSOCKET_PORT=10012
+EXPOSE 3006 10012
 CMD ["python", "classify_news.py"]

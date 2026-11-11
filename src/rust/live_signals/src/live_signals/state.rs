@@ -24,8 +24,6 @@ impl LiveState {
     }
 }
 
-pub(super) static HTTP_CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
-
 pub(super) fn enqueue_snapshot(state: &LiveState, symbol: &str, snapshot: &SignalSnapshot) {
     let context = Arc::clone(&state.news_context.borrow());
     let mut snapshot = snapshot.clone();
@@ -36,8 +34,6 @@ pub(super) fn enqueue_snapshot(state: &LiveState, symbol: &str, snapshot: &Signa
     }
     let dashboard = json!({
         "best": [snapshot.clone()],
-        "walkForward": context.walk_forward,
-        "missedOpportunityBands": context.missed_opportunity_bands,
         "markets": Value::Object(markets)
     });
     state.latest.insert(
@@ -94,8 +90,6 @@ mod tests {
     #[test]
     fn enqueue_snapshot_builds_autotrader_payload_and_uses_cached_market() {
         let (_sender, receiver) = watch::channel(Arc::new(NewsContext {
-            walk_forward: vec![json!({"symbol": "BTC-USDT"})],
-            missed_opportunity_bands: vec![json!({"gate": "score"})],
             ..NewsContext::default()
         }));
         let state = LiveState::new(receiver);
@@ -110,8 +104,8 @@ mod tests {
         let payload = state.pending_delivery.get("BTC-USDT").unwrap();
         assert_eq!(state.pending_scout_delivery.len(), 1);
         assert_eq!(payload["best"][0]["symbol"], "BTC-USDT");
-        assert_eq!(payload["walkForward"][0]["symbol"], "BTC-USDT");
-        assert_eq!(payload["missedOpportunityBands"][0]["gate"], "score");
+        assert!(payload.get("walkForward").is_none());
+        assert!(payload.get("missedOpportunityBands").is_none());
         assert_eq!(payload["markets"]["BTC-USDT"]["bids"][0]["price"], 99.0);
     }
 }

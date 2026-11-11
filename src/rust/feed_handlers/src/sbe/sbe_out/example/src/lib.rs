@@ -1,17 +1,18 @@
 #![forbid(unsafe_code)]
 #![allow(clippy::upper_case_acronyms)]
 #![allow(non_camel_case_types)]
-use ::core::{convert::TryInto};
+use ::core::convert::TryInto;
 
-pub mod trade_tick_codec;
 pub mod book_depth_codec;
+pub mod enriched_symbol_price_codec;
 pub mod message_header_codec;
 pub mod symbol_price_codec;
+pub mod trade_tick_codec;
 
-pub use trade_tick_codec::*;
 pub use book_depth_codec::*;
 pub use message_header_codec::*;
 pub use symbol_price_codec::*;
+pub use trade_tick_codec::*;
 
 pub type SbeResult<T> = core::result::Result<T, SbeErr>;
 
@@ -131,7 +132,6 @@ impl<'a> ReadBuf<'a> {
     pub fn get_slice_at(&self, index: usize, len: usize) -> &[u8] {
         self.data.split_at(index).1.split_at(len).0
     }
-
 }
 
 #[derive(Debug, Default)]
@@ -209,4 +209,3 @@ impl<'a> WriteBuf<'a> {
         len
     }
 }
-

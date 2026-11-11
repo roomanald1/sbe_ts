@@ -1,12 +1,12 @@
 use crate::*;
 
-pub use encoder::*;
 pub use decoder::*;
+pub use encoder::*;
 
 pub const SBE_BLOCK_LENGTH: u16 = 89;
 pub const SBE_TEMPLATE_ID: u16 = 3;
 pub const SBE_SCHEMA_ID: u16 = 1;
-pub const SBE_SCHEMA_VERSION: u16 = 7;
+pub const SBE_SCHEMA_VERSION: u16 = 9;
 
 pub mod encoder {
     use super::*;
@@ -211,9 +211,7 @@ pub mod encoder {
             let offset = self.offset + 88;
             self.get_buf_mut().put_u8_at(offset, value);
         }
-
     }
-
 } // end encoder
 
 pub mod decoder {
@@ -385,8 +383,5 @@ pub mod decoder {
         pub fn side(&self) -> u8 {
             self.get_buf().get_u8_at(self.offset + 88)
         }
-
     }
-
 } // end decoder
-

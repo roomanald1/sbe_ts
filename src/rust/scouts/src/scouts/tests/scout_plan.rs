@@ -15,10 +15,9 @@ mod scout_plan_tests {
         let strategy_outcomes_by_profile = Arc::clone(&persisted.strategy_outcomes_by_profile);
         let portfolio_instances_by_group = Arc::clone(&persisted.portfolio_instances_by_group);
         ServiceState {
-            client: reqwest::Client::new(),
-            learning_url: "http://127.0.0.1:1".into(),
-            auto_trader_url: "http://127.0.0.1:1".into(),
-            seen: Arc::new(Mutex::new(BTreeSet::new())),
+            learning_rsocket_url: "ws://127.0.0.1:10010".into(),
+            insights_rsocket_url: "ws://127.0.0.1:10007".into(),
+            auto_trader_rsocket_url: "ws://127.0.0.1:10006".into(),
             strategy_outcomes_by_profile,
             portfolio_instances_by_group,
             strategy_outcome_profile_index_ready: Arc::new(std::sync::atomic::AtomicBool::new(false)),

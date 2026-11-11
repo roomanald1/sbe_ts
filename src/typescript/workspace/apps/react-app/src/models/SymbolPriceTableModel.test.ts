@@ -5,8 +5,16 @@ import type { SymbolPriceTick } from '../types/symbol_price';
 
 describe('SymbolPriceTableModel', () => {
   it('limits visible rows and reports connection-specific empty text', () => {
-    const ticks = [{ symbol: 'BTC-USDT' }, { symbol: 'ETH-USDT' }] as SymbolPriceTick[];
-    const model = new SymbolPriceTableModel({ ticks, histories: new Map(), state: 'connected', maxRows: 1 });
+    const ticks = [
+      { symbol: 'BTC-USDT' },
+      { symbol: 'ETH-USDT' },
+    ] as SymbolPriceTick[];
+    const model = new SymbolPriceTableModel({
+      ticks,
+      histories: new Map(),
+      state: 'connected',
+      maxRows: 1,
+    });
     assert.deepEqual(model.state$.value.visibleTicks, [ticks[0]]);
     assert.match(model.state$.value.emptyMessage, /first SBE message/);
     model.setProps({ ticks, histories: new Map(), state: 'connecting' });
@@ -15,7 +23,14 @@ describe('SymbolPriceTableModel', () => {
   });
   it('forwards symbol selection to the supplied callback', () => {
     let selected = '';
-    const model = new SymbolPriceTableModel({ ticks: [], histories: new Map(), state: 'connected', onSelectSymbol: (symbol, side) => { selected = symbol + ':' + side; } });
+    const model = new SymbolPriceTableModel({
+      ticks: [],
+      histories: new Map(),
+      state: 'connected',
+      onSelectSymbol: (symbol, side) => {
+        selected = symbol + ':' + side;
+      },
+    });
     model.selectSymbol('ETH-USDT', 'sell');
     assert.equal(selected, 'ETH-USDT:sell');
   });

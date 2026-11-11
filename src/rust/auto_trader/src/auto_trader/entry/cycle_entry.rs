@@ -107,8 +107,6 @@ fn update_latest_strategy_blocker(
 
 async fn submit_cycle_signal(
     state: &AutoTraderState,
-    client: &reqwest::Client,
-    position_url: &str,
     dashboard: &Dashboard,
     signal: &Signal,
     exploratory: bool,
@@ -166,7 +164,7 @@ async fn submit_cycle_signal(
         mid,
         market_cache_lookup_ms,
         market_http_fetch_ms,
-    } = match load_signal_market_snapshot(client, position_url, dashboard, now, signal).await {
+    } = match load_signal_market_snapshot(dashboard, now, signal).await {
         Ok(snapshot) => snapshot,
         Err(result) => return Ok(result),
     };
@@ -174,8 +172,6 @@ async fn submit_cycle_signal(
     // order path locks through the in-memory reservation, then releases before HTTP.
     submit_selected_signal(SelectedSignalOrderRequest {
         state,
-        client,
-        position_url,
         dashboard,
         signal,
         exploratory,
@@ -207,7 +203,6 @@ fn evaluate_daily_strategy_signal(signal: &Signal) -> Result<StrategyDecision, S
 }
 
 async fn attach_strategy_walk_forward_evidence(
-    state: &AutoTraderState,
     signals: &mut [Signal],
     now: u64,
 ) {
@@ -230,39 +225,60 @@ async fn attach_strategy_walk_forward_evidence(
     if candidates.is_empty() {
         return;
     }
-    let base =
-        std::env::var("SCOUTS_SERVICE_URL").unwrap_or_else(|_| "http://127.0.0.1:3011".into());
-    let request = scouts::StrategyEvidenceRequest {
-        candidates: candidates.clone(),
+    let expected = candidates
+        .iter()
+        .map(|candidate| {
+            (
+                (
+                    candidate.strategy.clone(),
+                    candidate.symbol.clone(),
+                    candidate.signal_timestamp_ms,
+                ),
+                candidate.parameters.clone(),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    let request = strategies::ScoutCandidateBatch {
+        request_id: format!("auto-trader-walk-forward:{now}:{}", candidates.len()),
+        mode: strategies::ScoutWorkMode::EvidenceOnly,
+        signals: signals
+            .iter()
+            .filter(|signal| {
+                signal_is_fresh(signal, now)
+                    && signal
+                        .strategy
+                        .as_ref()
+                        .is_some_and(|strategy| Strategy::from_name(strategy).is_some())
+            })
+            .filter_map(|signal| serde_json::to_value(signal).ok())
+            .collect(),
     };
-    let evidence = match scouts::request_strategy_walk_forward(&state.client, &base, &request).await
-    {
-        Ok(evidence) if evidence.len() == candidates.len() => evidence,
-        Ok(_) => {
-            log_strategy_walk_forward_failure(
-                "Scouts returned a misaligned strategy walk-forward response",
-            );
-            return;
-        }
+    let learning_rsocket_url = std::env::var("LEARNING_RSOCKET_URL")
+        .unwrap_or_else(|_| "ws://127.0.0.1:10010".into());
+    let response = match strategies::request_scout_candidate_batch(&learning_rsocket_url, &request).await {
+        Ok(response) => response,
         Err(error) => {
             log_strategy_walk_forward_failure(&format!(
-                "Could not load strategy walk-forward evidence: {error}"
+                "Could not load strategy walk-forward evidence over RSocket: {error}"
             ));
             return;
         }
     };
-    let evidence_by_key = candidates
+    let evidence_by_key = response
+        .assignments
         .into_iter()
-        .zip(evidence)
-        .filter_map(|(candidate, evidence)| {
-            Some((
-                (
-                    candidate.strategy,
-                    candidate.symbol,
-                    candidate.signal_timestamp_ms,
-                ),
-                evidence?,
-            ))
+        .filter_map(|assignment| {
+            let evidence = assignment.walk_forward_evidence?;
+            let candidate = assignment.candidate;
+            let strategy = candidate["strategy"].as_str()?.to_owned();
+            let symbol = candidate["symbol"].as_str()?.to_owned();
+            let timestamp = candidate["timestamp"].as_u64()?;
+            let parameters = serde_json::from_value::<BTreeMap<String, f64>>(
+                candidate["strategy_decision"]["strategy_parameters"].clone(),
+            )
+            .ok()?;
+            let key = (strategy, symbol, timestamp);
+            (expected.get(&key) == Some(&parameters)).then_some((key, evidence))
         })
         .collect::<BTreeMap<_, _>>();
     for signal in signals {
@@ -280,15 +296,9 @@ async fn attach_strategy_walk_forward_evidence(
         else {
             continue;
         };
-        let typed_evidence = strategies::StrategyWalkForwardEvidence {
-            sample_count: evidence.sample_count,
-            positive_net_rate: Some(evidence.positive_net_rate),
-            average_net_return_percent: Some(evidence.average_net_return_percent),
-            last_sample_timestamp_ms: evidence.last_sample_timestamp_ms,
-        };
         decision.insert(
             "strategy_walk_forward".into(),
-            serde_json::to_value(typed_evidence).unwrap_or_default(),
+            serde_json::to_value(evidence).unwrap_or_default(),
         );
     }
 }
@@ -349,8 +359,6 @@ fn daily_strategy_candidates<'a>(signals: &[&'a Signal], settings: &Settings) ->
 }
 
 async fn prefetch_daily_candidate_market_books(
-    client: &reqwest::Client,
-    position_url: &str,
     dashboard: &Dashboard,
     candidates: &[&Signal],
     now: u64,
@@ -380,10 +388,8 @@ async fn prefetch_daily_candidate_market_books(
     // candidate behind it.
     let mut tasks = JoinSet::new();
     for symbol in stale_symbols {
-        let client = client.clone();
-        let position_url = position_url.to_owned();
         tasks.spawn(async move {
-            let market = fresh_subscribed_market_book(&client, &position_url, &symbol).await;
+            let market = fresh_subscribed_market_book(&symbol).await;
             (symbol, market)
         });
     }
@@ -525,7 +531,6 @@ fn daily_strategy_batch_result(
 }
 
 async fn request_learning_context_thresholds(
-    client: &reqwest::Client,
     state: &AutoTraderState,
     signals: &[Signal],
     missed_bands: &[MissedOpportunityGateBand],
@@ -534,11 +539,10 @@ async fn request_learning_context_thresholds(
         return BTreeMap::new();
     }
     let contexts = signals.iter().map(market_context).collect::<BTreeSet<_>>();
-    request_learning_context_thresholds_for_contexts(client, state, contexts, missed_bands).await
+    request_learning_context_thresholds_for_contexts(state, contexts, missed_bands).await
 }
 
 async fn request_learning_context_thresholds_for_contexts(
-    client: &reqwest::Client,
     state: &AutoTraderState,
     contexts: BTreeSet<String>,
     missed_bands: &[MissedOpportunityGateBand],
@@ -606,26 +610,17 @@ async fn request_learning_context_thresholds_for_contexts(
             .into_iter()
             .map(|context| strategies::ContextThresholdInput {
                 context,
-                missed_opportunity_bands: bands.clone(),
             })
             .collect(),
+        missed_opportunity_bands: bands,
     };
-    let base =
-        std::env::var("LEARNING_SERVICE_URL").unwrap_or_else(|_| "http://127.0.0.1:3010".into());
-    let cache_key = format!(
-        "context-thresholds:{}",
-        request
-            .contexts
-            .iter()
-            .map(|input| input.context.as_str())
-            .collect::<Vec<_>>()
-            .join("|")
-    );
+    let mut request_hasher = std::collections::hash_map::DefaultHasher::new();
+    std::hash::Hash::hash(&serde_json::to_vec(&request).unwrap_or_default(), &mut request_hasher);
+    let cache_key = format!("context-thresholds:{:x}", std::hash::Hasher::finish(&request_hasher));
     let response = cached_learning_response::<strategies::ContextThresholdResponse>(
         &state.learning_response_cache,
         cache_key,
-        client,
-        format!("{}/context-thresholds", base.trim_end_matches('/')),
+        "/context-thresholds".to_owned(),
         serde_json::to_value(request).unwrap_or(serde_json::Value::Null),
     )
     .await;
@@ -649,7 +644,7 @@ async fn run_cycle_inner(
         settings.risk_limited_sizing = false;
     }
     *state.latest_missed_opportunity_bands.lock().await =
-        dashboard.missed_opportunity_bands.clone();
+        Arc::clone(&dashboard.missed_opportunity_bands);
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|_| {
@@ -659,9 +654,6 @@ async fn run_cycle_inner(
             )
         })?
         .as_secs();
-    let position_url =
-        std::env::var("POSITION_MANAGEMENT_URL").unwrap_or_else(|_| "http://127.0.0.1:3002".into());
-    let client = state.client.clone();
     if let Some(result) = enforce_daily_realized_loss_limit(state).await? {
         return Ok(result);
     }
@@ -726,7 +718,7 @@ async fn run_cycle_inner(
                 .is_some_and(|strategy| !strategy.is_live_insight() && !strategy.is_dated_carry())
     });
     if has_daily_strategy_signals {
-        attach_strategy_walk_forward_evidence(state, &mut dashboard.best, now).await;
+        attach_strategy_walk_forward_evidence(&mut dashboard.best, now).await;
     }
     let has_live_signal_strategies = !live_strategies.is_empty() && has_live_source_signals;
     if !live_strategies.is_empty() && live_source_signals.is_empty() {
@@ -885,7 +877,7 @@ async fn run_cycle_inner(
                 live_strategy_candidates.push(signal);
             }
         }
-        attach_strategy_walk_forward_evidence(state, &mut live_strategy_candidates, now).await;
+        attach_strategy_walk_forward_evidence(&mut live_strategy_candidates, now).await;
     }
     let live_strategy_signals = live_strategy_candidates
         .into_iter()
@@ -1014,7 +1006,6 @@ async fn run_cycle_inner(
         .collect::<Vec<_>>();
     let threshold_refresh_started = Instant::now();
     let learning_thresholds = request_learning_context_thresholds(
-        &client,
         state,
         &learning_signals,
         &dashboard.missed_opportunity_bands,
@@ -1095,8 +1086,6 @@ async fn run_cycle_inner(
             daily_batch_result = Some(skipped(&reason));
         } else {
             let candidate_dashboard = prefetch_daily_candidate_market_books(
-                &client,
-                &position_url,
                 &dashboard,
                 &candidates,
                 now,
@@ -1140,8 +1129,6 @@ async fn run_cycle_inner(
                 }));
                 let result = match submit_cycle_signal(
                     state,
-                    &client,
-                    &position_url,
                     &candidate_dashboard,
                     &sized_signal,
                     false,
@@ -1282,8 +1269,6 @@ async fn run_cycle_inner(
     ));
     let signal_result = submit_cycle_signal(
         state,
-        &client,
-        &position_url,
         &dashboard,
         &audited_signal,
         exploratory,

@@ -50,9 +50,16 @@ function SymbolCellRenderer({
     <button
       className="symbol-tag symbol-book-button"
       type="button"
-      onClick={() => model.selectSymbol(value, data?.direction === 'down' ? 'sell' : 'buy')}
+      onClick={() =>
+        model.selectSymbol(value, data?.direction === 'down' ? 'sell' : 'buy')
+      }
       disabled={!model.getSnapshot().onSelectSymbol}
-      aria-label={'Open ' + (data?.direction === 'down' ? 'sell' : 'buy') + ' order for ' + value}
+      aria-label={
+        'Open ' +
+        (data?.direction === 'down' ? 'sell' : 'buy') +
+        ' order for ' +
+        value
+      }
     >
       {value}
     </button>
@@ -76,23 +83,51 @@ function SparklineCellRenderer({
   const max = Math.max(...prices);
   const range = max - min || 1;
   const points = prices
-    .map((price, index) => `${(index / (prices.length - 1)) * 64},${18 - ((price - min) / range) * 16}`)
+    .map(
+      (price, index) =>
+        `${(index / (prices.length - 1)) * 64},${18 - ((price - min) / range) * 16}`,
+    )
     .join(' ');
   const direction = prices.at(-1)! >= prices[0] ? 'up' : 'down';
 
   return (
-    <button className="trend-cell-button" type="button" aria-label={'View ' + value + ' price chart'} title="View price chart" onClick={() => onShowTrend(value)}>
-    <svg className={`pair-sparkline sparkline-${direction}`} viewBox="0 0 64 20" role="img" aria-label={`${value} recent price trend`}>
-      <polyline points={points} fill="none" stroke="currentColor" strokeWidth="1.5" />
-    </svg>
+    <button
+      className="trend-cell-button"
+      type="button"
+      aria-label={'View ' + value + ' price chart'}
+      title="View price chart"
+      onClick={() => onShowTrend(value)}
+    >
+      <svg
+        className={`pair-sparkline sparkline-${direction}`}
+        viewBox="0 0 64 20"
+        role="img"
+        aria-label={`${value} recent price trend`}
+      >
+        <polyline
+          points={points}
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="1.5"
+        />
+      </svg>
     </button>
   );
 }
-export const SymbolPriceTable = memo(function SymbolPriceTable(props: SymbolPriceTableProps) {
+export const SymbolPriceTable = memo(function SymbolPriceTable(
+  props: SymbolPriceTableProps,
+) {
   const model = useMemo(() => new SymbolPriceTableModel(props), []);
   useEffect(() => {
     model.setProps(props);
-  }, [model, props.ticks, props.state, props.onSelectSymbol, props.maxRows, props.histories]);
+  }, [
+    model,
+    props.ticks,
+    props.state,
+    props.onSelectSymbol,
+    props.maxRows,
+    props.histories,
+  ]);
   const view = useBehaviorSnapshot(model.state$);
   const [trendSymbol, setTrendSymbol] = useState<string>();
   const rowData = view.visibleTicks as TickGridRow[];
@@ -109,8 +144,12 @@ export const SymbolPriceTable = memo(function SymbolPriceTable(props: SymbolPric
         field: 'price',
         headerName: 'PRICE',
         minWidth: 90,
-        cellClass: ({ data }) => data ? 'price-cell price-' + data.direction : undefined,
-        valueFormatter: ({ value, data }) => value == null ? '' : formatForSymbol(value, data?.symbol ?? '', 'price'),
+        cellClass: ({ data }) =>
+          data ? 'price-cell price-' + data.direction : undefined,
+        valueFormatter: ({ value, data }) =>
+          value == null
+            ? ''
+            : formatForSymbol(value, data?.symbol ?? '', 'price'),
       },
       {
         field: 'symbol',
@@ -125,33 +164,42 @@ export const SymbolPriceTable = memo(function SymbolPriceTable(props: SymbolPric
       {
         field: 'volatility1m',
         headerName: 'VOL 1M',
-        headerTooltip: 'Blue bar fills at 0.5% realized volatility over one minute.',
+        headerTooltip:
+          'Blue bar fills at 0.5% realized volatility over one minute.',
         minWidth: 100,
         cellStyle: ({ value }) => {
           if (value == null) return undefined;
           const fill = Math.max(0, Math.min(100, (Number(value) / 0.5) * 100));
-          return { background: `linear-gradient(90deg, rgba(101, 174, 230, 0.18) ${fill}%, transparent ${fill}%)` };
+          return {
+            background: `linear-gradient(90deg, rgba(101, 174, 230, 0.18) ${fill}%, transparent ${fill}%)`,
+          };
         },
-        valueFormatter: ({ value }) => value == null ? 'N/A' : Number(value).toFixed(3) + '%',
+        valueFormatter: ({ value }) =>
+          value == null ? 'N/A' : Number(value).toFixed(3) + '%',
       },
       {
         field: 'volatility5m',
         headerName: 'VOL 5M',
-        headerTooltip: 'Orange bar fills at 1.0% realized volatility over five minutes.',
+        headerTooltip:
+          'Orange bar fills at 1.0% realized volatility over five minutes.',
         minWidth: 100,
         sort: 'desc',
         cellStyle: ({ value }) => {
           if (value == null) return undefined;
           const fill = Math.max(0, Math.min(100, Number(value) * 100));
-          return { background: `linear-gradient(90deg, rgba(245, 166, 85, 0.2) ${fill}%, transparent ${fill}%)` };
+          return {
+            background: `linear-gradient(90deg, rgba(245, 166, 85, 0.2) ${fill}%, transparent ${fill}%)`,
+          };
         },
-        valueFormatter: ({ value }) => value == null ? 'N/A' : Number(value).toFixed(3) + '%',
+        valueFormatter: ({ value }) =>
+          value == null ? 'N/A' : Number(value).toFixed(3) + '%',
       },
       {
         field: 'receivedAt',
         headerName: 'UPDATED',
         minWidth: 112,
-        valueFormatter: ({ value }) => value == null ? '' : timeFormatter.format(value),
+        valueFormatter: ({ value }) =>
+          value == null ? '' : timeFormatter.format(value),
       },
     ],
     [model],
@@ -172,7 +220,12 @@ export const SymbolPriceTable = memo(function SymbolPriceTable(props: SymbolPric
         <AgGridReact<TickGridRow>
           rowData={rowData}
           columnDefs={columnDefs}
-          defaultColDef={{ sortable: true, resizable: true, flex: 1, minWidth: 68 }}
+          defaultColDef={{
+            sortable: true,
+            resizable: true,
+            flex: 1,
+            minWidth: 68,
+          }}
           getRowId={({ data }) => data.symbol}
           theme={tickGridTheme}
           domLayout="normal"
@@ -184,7 +237,13 @@ export const SymbolPriceTable = memo(function SymbolPriceTable(props: SymbolPric
           <p className="positions-empty">{view.emptyMessage}</p>
         )}
       </div>
-      {trendSymbol && <PriceHistoryPopup symbol={trendSymbol} history={view.histories.get(trendSymbol) ?? []} onClose={() => setTrendSymbol(undefined)} />}
+      {trendSymbol && (
+        <PriceHistoryPopup
+          symbol={trendSymbol}
+          history={view.histories.get(trendSymbol) ?? []}
+          onClose={() => setTrendSymbol(undefined)}
+        />
+      )}
     </section>
   );
 });

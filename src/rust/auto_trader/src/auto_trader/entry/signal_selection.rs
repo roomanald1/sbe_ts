@@ -398,7 +398,7 @@ mod signal_selection_behavior_tests {
         Dashboard {
             best: Vec::new(),
             walk_forward: Arc::new(walk_forward),
-            missed_opportunity_bands: Vec::new(),
+            missed_opportunity_bands: Arc::new(Vec::new()),
             markets: Arc::new(BTreeMap::new()),
             queued_at: None,
             queue_wait_ms: None,

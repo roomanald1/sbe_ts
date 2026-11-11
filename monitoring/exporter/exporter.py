@@ -1,14 +1,19 @@
+import asyncio
+import concurrent.futures
 import json
 import os
 import re
+import threading
 import time
 from pathlib import Path
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.error import URLError
 from urllib.request import urlopen
 
+
 SERVICES = {
     "feed_handlers": (os.getenv("FEED_HANDLERS_URL", "http://127.0.0.1:3001"), "/health"),
+    "binance_feed": (os.getenv("BINANCE_FEED_HEALTH_URL", "http://127.0.0.1:3012"), "/health"),
     "position_management": (os.getenv("POSITION_MANAGEMENT_URL", "http://127.0.0.1:3002"), "/health"),
     "auto_trader": (os.getenv("AUTO_TRADER_URL", "http://127.0.0.1:3005"), "/health"),
     "execution": (os.getenv("EXECUTION_URL", "http://127.0.0.1:3003"), "/health"),
@@ -18,11 +23,134 @@ SERVICES = {
     "learning": (os.getenv("LEARNING_SERVICE_URL", "http://127.0.0.1:3010"), "/health"),
     "scouts": (os.getenv("SCOUTS_SERVICE_URL", "http://127.0.0.1:3011"), "/health"),
 }
+RSOCKET_SERVICES = {
+    "position_management": os.getenv(
+        "POSITION_MANAGEMENT_RSOCKET_URL", "ws://127.0.0.1:10005"
+    ),
+    "auto_trader": os.getenv("AUTO_TRADER_RSOCKET_URL", "ws://127.0.0.1:10008"),
+    "learning": os.getenv("LEARNING_RSOCKET_URL", "ws://127.0.0.1:10010"),
+}
+
+_RSOCKET_LOOP = None
+_RSOCKET_LOOP_THREAD = None
+_RSOCKET_LOOP_LOCK = threading.Lock()
+_RSOCKET_CLIENTS = {}
+_RSOCKET_CLIENT_LOCKS = {}
 
 
 def get_json(base, path):
     with urlopen(base + path, timeout=3) as response:
         return json.load(response)
+
+
+async def _rsocket_request(endpoint, request):
+    from rsocket.payload import Payload
+    from rsocket.exceptions import RSocketNoAvailableTransport, RSocketTransportClosed, RSocketTransportError
+
+    lock = _RSOCKET_CLIENT_LOCKS.setdefault(endpoint, asyncio.Lock())
+    async with lock:
+        context, client = _RSOCKET_CLIENTS.get(endpoint, (None, None))
+        if client is None:
+            context = _websocket_client_context(endpoint)
+            client = await context.__aenter__()
+            _RSOCKET_CLIENTS[endpoint] = (context, client)
+    try:
+        response = await asyncio.wait_for(
+            client.request_response(
+                Payload(data=json.dumps(request, separators=(",", ":")).encode("utf-8"))
+            ),
+            timeout=3,
+        )
+    except (RSocketNoAvailableTransport, RSocketTransportClosed, RSocketTransportError, asyncio.TimeoutError):
+        await _discard_rsocket_client(endpoint, context, client)
+        raise
+    if not response or not response.data:
+        raise ValueError("RSocket service returned an empty response")
+    return json.loads(response.data.decode("utf-8"))
+
+
+def _websocket_client_context(endpoint):
+    from rsocket.transports.aiohttp_websocket import websocket_client
+
+    return websocket_client(endpoint)
+
+
+async def _discard_rsocket_client(endpoint, context, client):
+    cached = _RSOCKET_CLIENTS.get(endpoint)
+    if cached is None or cached[1] is not client:
+        return
+    _RSOCKET_CLIENTS.pop(endpoint, None)
+    try:
+        transport = await client._current_transport()
+        websocket = transport._ws
+        connection = websocket._response.connection
+        if connection is not None and connection.transport is not None:
+            connection.transport.abort()
+    except Exception:
+        pass
+    try:
+        await context.__aexit__(None, None, None)
+    except Exception:
+        pass
+
+
+def _rsocket_loop():
+    global _RSOCKET_LOOP, _RSOCKET_LOOP_THREAD
+    with _RSOCKET_LOOP_LOCK:
+        if _RSOCKET_LOOP is None:
+            loop = asyncio.new_event_loop()
+
+            def run_loop():
+                asyncio.set_event_loop(loop)
+                loop.run_forever()
+
+            thread = threading.Thread(target=run_loop, name="exporter-rsocket", daemon=True)
+            thread.start()
+            _RSOCKET_LOOP = loop
+            _RSOCKET_LOOP_THREAD = thread
+        return _RSOCKET_LOOP
+
+
+def _run_rsocket_request(endpoint, request):
+    future = asyncio.run_coroutine_threadsafe(_rsocket_request(endpoint, request), _rsocket_loop())
+    try:
+        return future.result(timeout=3.5)
+    except concurrent.futures.TimeoutError as error:
+        future.cancel()
+        raise TimeoutError(f"RSocket request to {endpoint} timed out") from error
+
+
+def rsocket_get(endpoint, path):
+    try:
+        result = _run_rsocket_request(endpoint, {"method": "GET", "path": path})
+    except Exception as error:
+        raise OSError(f"RSocket request to {endpoint} failed: {error}") from error
+    status = result.get("status")
+    if not isinstance(status, int) or status < 200 or status >= 300:
+        raise ValueError(f"RSocket request failed with status {status}")
+    return result.get("body")
+
+
+def learning_get(endpoint, path):
+    request = {
+        "operation": "worker_route",
+        "request": {
+            "request_id": f"monitoring-exporter-{time.time_ns()}",
+            "strategy": None,
+            "method": "get",
+            "path": path,
+            "payload": None,
+        },
+    }
+    try:
+        result = _run_rsocket_request(endpoint, request)
+    except Exception as error:
+        raise OSError(f"Learning RSocket request to {endpoint} failed: {error}") from error
+    route_result = result.get("worker_route", {}).get("response", {})
+    status = route_result.get("status")
+    if not isinstance(status, int) or status < 200 or status >= 300:
+        raise ValueError(f"Learning route failed with status {status}")
+    return route_result.get("body")
 
 
 METRIC_HEADERS = set()
@@ -166,7 +294,9 @@ def metrics():
     insights_signal_latency_metrics(output)
 
     try:
-        scouts = get_json(SERVICES["scouts"][0], "/outcomes?source=all&page_size=1")
+        scouts = learning_get(
+            RSOCKET_SERVICES["learning"], "/outcomes?source=all&page_size=1"
+        )
         summary = scouts.get("summary", {}).get("all", {})
         total = summary.get("total")
         open_count = summary.get("open")
@@ -176,9 +306,10 @@ def metrics():
     except (OSError, URLError, ValueError, TypeError, AttributeError):
         pass
 
-    base = SERVICES["position_management"][0]
     try:
-        persistence = get_json(base, "/internal/persistence-timing")
+        persistence = rsocket_get(
+            RSOCKET_SERVICES["position_management"], "/internal/persistence-timing"
+        )
         for phase, summary in persistence.items():
             stage = f"position_manager_snapshot_{phase}"
             for stat in ("latest", "average", "p95"):
@@ -190,7 +321,7 @@ def metrics():
     except (OSError, URLError, ValueError, TypeError):
         pass
     try:
-        account = get_json(base, "/positions/account")
+        account = rsocket_get(RSOCKET_SERVICES["position_management"], "/positions/account")
         for key, metric, help_text in [
             ("equity", "app_account_equity_usd", "Current account equity in USD."),
             ("cash", "app_account_cash_usd", "Current account cash in USD."),
@@ -203,16 +334,15 @@ def metrics():
     except (OSError, URLError, ValueError):
         pass
     try:
-        positions = get_json(base, "/positions")
+        positions = rsocket_get(RSOCKET_SERVICES["position_management"], "/positions")
         if isinstance(positions.get("trade_count"), (int, float)):
             output.append(sample("app_trade_count", "Cumulative number of persisted position ledger fill records.", positions["trade_count"], kind="counter"))
         open_positions = sum(1 for position in positions.get("positions", []) if abs(position.get("quantity", 0)) > 1e-12)
         output.append(sample("app_open_positions", "Number of currently open account positions.", open_positions))
     except (OSError, URLError, ValueError, TypeError):
         pass
-    auto_trader_base = SERVICES["auto_trader"][0]
     try:
-        status = get_json(auto_trader_base, "/positions/auto-trader")
+        status = rsocket_get(RSOCKET_SERVICES["auto_trader"], "/positions/auto-trader")
         enabled = bool(status.get("enabled"))
         output.append(sample("app_autotrader_enabled", "Whether AutoTrader is enabled according to its status endpoint.", int(enabled)))
         latest_diagnostic = status.get("latest_signal_diagnostic", "")
@@ -252,7 +382,9 @@ def metrics():
         # successfully fetched enabled state.
         pass
     try:
-        activity = get_json(auto_trader_base, "/positions/auto-trader/activity")
+        activity = rsocket_get(
+            RSOCKET_SERVICES["auto_trader"], "/positions/auto-trader/activity"
+        )
         value = activity.get("insight_processing_latest_ms")
         if isinstance(value, (int, float)):
             output.append(sample("app_autotrader_insight_processing_duration_ms", "Latest milliseconds spent processing one pushed insight through an AutoTrader cycle.", value, {"stat": "latest"}))
@@ -319,7 +451,9 @@ def metrics():
         # Use the position manager's live order book, not AutoTrader's retained
         # activity log. Historical statuses such as "armed" can remain after an
         # exchange order is gone.
-        live_orders = get_json(SERVICES["position_management"][0], "/positions/orders")
+        live_orders = rsocket_get(
+            RSOCKET_SERVICES["position_management"], "/positions/orders"
+        )
         resting_orders = [order for order in live_orders.get("orders", []) if order.get("source") == "auto"]
         barrier_orders = live_orders.get("barrier_orders", [])
         active_barriers = [order for order in barrier_orders if order.get("source") == "auto" and order.get("status") in ("armed", "triggering")]
@@ -400,4 +534,9 @@ class Handler(BaseHTTPRequestHandler):
         pass
 
 
-HTTPServer(("0.0.0.0", 9108), Handler).serve_forever()
+def main():
+    HTTPServer(("0.0.0.0", 9108), Handler).serve_forever()
+
+
+if __name__ == "__main__":
+    main()

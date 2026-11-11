@@ -1,6 +1,4 @@
 async fn sync_protective_stops(
-    client: &reqwest::Client,
-    base: &str,
     state: &AutoTraderState,
 ) -> Result<(), (StatusCode, String)> {
     let tracked = {
@@ -13,16 +11,10 @@ async fn sync_protective_stops(
     if tracked.is_empty() {
         return Ok(());
     }
-    let barriers: Vec<serde_json::Value> = client
-        .get(format!("{base}/positions/barriers"))
-        .send()
-        .await
-        .map_err(upstream_error)?
-        .error_for_status()
-        .map_err(upstream_error)?
-        .json()
-        .await
-        .map_err(upstream_error)?;
+    let barriers: Vec<serde_json::Value> = serde_json::from_value(
+        crate::service_rpc::position_get("/positions/barriers")
+            .await.map_err(|error| (StatusCode::BAD_GATEWAY, error.to_string()))?,
+    ).map_err(|error| (StatusCode::BAD_GATEWAY, error.to_string()))?;
     for (symbol, strategy, stop) in tracked {
         let barrier = barriers
             .iter()

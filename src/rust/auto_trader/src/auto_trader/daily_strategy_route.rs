@@ -4,21 +4,17 @@ fn publish_scout_strategy_status(
     active_parameter_profiles: Vec<(String, String, String, String)>,
     enabled_strategies: Vec<String>,
 ) {
-    let base = std::env::var("INSIGHTS_URL").unwrap_or_else(|_| "http://127.0.0.1:3004".into());
-    let client = state.client.clone();
+    let _ = state;
     tokio::spawn(async move {
-        if let Err(error) = client
-            .post(format!("{base}/internal/signals/scout-strategy-status"))
-            .timeout(std::time::Duration::from_secs(2))
-            .json(&serde_json::json!({
+        if let Err(error) = crate::service_rpc::insights_request(
+            "POST",
+            "/internal/signals/scout-strategy-status",
+            Some(serde_json::json!({
                 "active_strategy_symbols": active_strategy_symbols,
                 "active_parameter_profiles": active_parameter_profiles,
                 "enabled_strategies": enabled_strategies,
-            }))
-            .send()
-            .await
-            .and_then(reqwest::Response::error_for_status)
-        {
+            })),
+        ).await {
             crate::service_log!("WARN", "Could not publish daily Scout exit status: {error}");
         }
     });
@@ -262,7 +258,7 @@ async fn receive_daily_strategy_signals(
                 Dashboard {
                     best,
                     walk_forward: Arc::new(Vec::new()),
-                    missed_opportunity_bands: Vec::new(),
+                    missed_opportunity_bands: Arc::new(Vec::new()),
                     markets: Arc::new(BTreeMap::new()),
                     queued_at: None,
                     queue_wait_ms: None,

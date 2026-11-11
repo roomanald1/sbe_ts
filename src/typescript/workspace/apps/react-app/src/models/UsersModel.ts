@@ -1,4 +1,5 @@
 import { BehaviorSubject } from 'rxjs';
+import { sharedGet } from '../shared_get';
 type User = { id: number; last_logged_in: number };
 export type UserGridCell = User | undefined;
 export type UserGridRow = {
@@ -86,7 +87,7 @@ export class UsersModel {
     const page = this.state$.value.page;
     this.patch({ isFetching: true });
     try {
-      const response = await fetch('/users/' + page);
+      const response = await sharedGet('/users/' + page);
       if (!response.ok)
         throw new Error(
           'Failed to load users: ' +

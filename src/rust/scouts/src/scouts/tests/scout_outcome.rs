@@ -82,6 +82,7 @@ mod scout_outcome_tests {
         let event = paired_event("cmp", &baseline, &variant).unwrap();
         let FeedbackEvent::ScoutOutcome {
             event_id,
+            comparison,
             parameters,
             baseline_parameters,
             specs,
@@ -92,7 +93,14 @@ mod scout_outcome_tests {
         else {
             panic!()
         };
-        assert_eq!(event_id, "paired-scout:cmp");
+        assert_eq!(event_id, "scout-comparison:cmp");
+        assert_eq!(
+            comparison,
+            strategies::ScoutComparisonMetadata::Paired {
+                group_id: "cmp".into(),
+                horizon_seconds: None,
+            }
+        );
         assert_eq!(parameters["minimum_momentum"], 0.7);
         assert_eq!(baseline_parameters["minimum_momentum"], 0.5);
         assert_eq!(specs.len(), 1);
@@ -115,12 +123,19 @@ mod scout_outcome_tests {
 
         let tested = validate_scout_outcome(&variant).unwrap();
         assert!(tested.contains_key("minimum_momentum"));
-        let FeedbackEvent::ScoutOutcome { event_id, .. } =
+        let FeedbackEvent::ScoutOutcome { event_id, comparison, .. } =
             paired_event("cmp|scenario:horizon-60", &baseline, &variant).unwrap()
         else {
             panic!()
         };
-        assert_eq!(event_id, "paired-scout:cmp:horizon-60");
+        assert_eq!(event_id, "scout-comparison:cmp|scenario:horizon-60");
+        assert_eq!(
+            comparison,
+            strategies::ScoutComparisonMetadata::Paired {
+                group_id: "cmp".into(),
+                horizon_seconds: Some(60),
+            }
+        );
     }
 
     #[test]

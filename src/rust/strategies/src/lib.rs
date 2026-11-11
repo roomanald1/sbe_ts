@@ -12,6 +12,7 @@ mod input;
 mod parameter_catalog;
 pub mod parameter_profiles;
 pub mod parameter_types;
+pub mod scout_work;
 pub use input::{
     AbsorptionPressureValue, DailyStrategySignalFeatures, DatedCarryCandidate,
     DatedCarrySettlementSource, DepthSignalValue, Signal, SignalComponents, SignalDirection,
@@ -25,6 +26,15 @@ pub use parameter_profiles::{
 };
 pub use parameter_types::{
     StrategyParameterProfile, StrategyParameterScoutVariant, StrategyParameterValue,
+};
+pub use scout_work::{
+    ScoutCandidateBatch, ScoutCandidateBatchResult, ScoutCoordinatorRequest,
+    ScoutCoordinatorResponse, ScoutCoordinatorRouteCommand, ScoutCoordinatorRouteResult,
+    ScoutFeedbackAcknowledgement, ScoutWorkAssignment, ScoutWorkDecision, ScoutWorkMode,
+    ScoutWorkResult, ScoutWorkerHttpMethod, ScoutWorkerRequest, ScoutWorkerResponse,
+    ScoutWorkerRouteCommand, ScoutWorkerRouteResult, request_learning_route,
+    request_scout_candidate_batch, request_scout_feedback, request_scout_profile_snapshot,
+    request_scout_service_route, request_scout_worker_route,
 };
 
 #[derive(Clone, Copy, Debug)]

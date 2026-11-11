@@ -1,5 +1,5 @@
 use anyhow::Result;
-use bytes::{Bytes, BytesMut};
+use bytes::Bytes;
 use dashmap::DashMap;
 use futures_util::{Stream, StreamExt};
 use rsocket_rust::prelude::*;
@@ -15,13 +15,13 @@ use tokio::time::{Duration, sleep};
 
 use crate::encoders::{SYMBOL_LENGTH, encode_symbol_price_bytes};
 use crate::okx::connectivity::{
-    RollingVolatility, get_all_spot_instruments, get_instrument_data, run_usd_rate_stream,
-    subscribe, subscribe_shared_books, subscribe_shared_trades,
+    get_all_spot_instruments, get_instrument_data, run_usd_rate_stream, subscribe,
+    subscribe_shared_books, subscribe_shared_trades,
 };
 
 const PRICE_UPDATE_CAPACITY: usize = 4096;
 const TICKER_BATCH_INTERVAL: Duration = Duration::from_millis(10);
-const SYMBOL_PRICE_MESSAGE_LENGTH: usize = 64;
+const SYMBOL_PRICE_MESSAGE_LENGTH: usize = 56;
 const MAX_TICKER_BATCH_MESSAGES: usize = 256;
 const TICKER_BATCH_CAPACITY: usize = SYMBOL_PRICE_MESSAGE_LENGTH * MAX_TICKER_BATCH_MESSAGES;
 // Generate signals across the full top-volume spot universe so Auto Trader can
@@ -30,7 +30,6 @@ const SIGNAL_INSTRUMENT_LIMIT: usize = 100;
 static SIGNAL_FEEDS: OnceLock<Arc<DashMap<String, broadcast::Sender<Bytes>>>> = OnceLock::new();
 static SIGNAL_PRICE_FEEDS: OnceLock<Arc<DashMap<String, broadcast::Sender<Bytes>>>> =
     OnceLock::new();
-static NEWS_SNAPSHOT: OnceLock<watch::Sender<Bytes>> = OnceLock::new();
 
 include!("server.rs");
 include!("responder.rs");
@@ -43,7 +42,7 @@ include!("synthetic_feed.rs");
 #[cfg(test)]
 mod websocket_request_tests {
     use super::{
-        publish_news_snapshot, publish_signal_snapshot, requested_book_instrument,
+        is_instrument_list_request, publish_signal_snapshot, requested_book_instrument,
         requested_signal_instrument, requested_trade_instrument,
     };
     use bytes::Bytes;
@@ -88,8 +87,21 @@ mod websocket_request_tests {
     }
 
     #[test]
+    fn recognizes_instrument_list_request_response_route() {
+        assert!(is_instrument_list_request(
+            &Payload::builder()
+                .set_data(b"instruments:list".to_vec())
+                .build()
+        ));
+        assert!(!is_instrument_list_request(
+            &Payload::builder()
+                .set_data(b"instruments:unknown".to_vec())
+                .build()
+        ));
+    }
+
+    #[test]
     fn publishers_report_unavailable_before_server_initialization() {
-        assert!(!publish_news_snapshot(Bytes::new()));
         assert!(!publish_signal_snapshot("BTC-USDT", Bytes::new()));
     }
 }

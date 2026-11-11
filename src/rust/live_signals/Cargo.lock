@@ -411,6 +411,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "example"
+version = "0.1.0"
+
+[[package]]
 name = "fallible-iterator"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -915,8 +919,11 @@ dependencies = [
  "bincode",
  "bytes",
  "dashmap 6.2.1",
+ "example",
  "flate2",
  "futures-util",
+ "http 1.5.0",
+ "http-body-util",
  "libc",
  "reqwest",
  "rsocket_rust",
@@ -925,7 +932,9 @@ dependencies = [
  "scouts",
  "serde",
  "serde_json",
+ "strategies",
  "tokio",
+ "tower",
 ]
 
 [[package]]
@@ -1050,11 +1059,11 @@ dependencies = [
  "futures-util",
  "insights",
  "libc",
- "reqwest",
  "rsocket_rust",
  "rsocket_rust_transport_websocket",
  "serde",
  "serde_json",
+ "strategies",
  "tokio",
  "tower",
 ]
@@ -1682,13 +1691,19 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "axum",
+ "futures-util",
+ "http 1.5.0",
+ "http-body-util",
  "libc",
- "reqwest",
+ "rsocket_rust",
+ "rsocket_rust_transport_websocket",
  "rusqlite",
  "serde",
  "serde_json",
+ "sha2",
  "strategies",
  "tokio",
+ "tower",
 ]
 
 [[package]]
@@ -1798,6 +1813,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "sha2"
+version = "0.10.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a7507d819769d01a365ab707794a4084392c824f54a7a6a7862f8c3d0892b283"
+dependencies = [
+ "cfg-if",
+ "cpufeatures 0.2.17",
+ "digest",
+]
+
+[[package]]
 name = "shlex"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1879,6 +1905,9 @@ checksum = "6ce2be8dc25455e1f91df71bfa12ad37d7af1092ae736f3a6cd0e37bc7810596"
 name = "strategies"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
+ "rsocket_rust",
+ "rsocket_rust_transport_websocket",
  "serde",
  "serde_json",
 ]

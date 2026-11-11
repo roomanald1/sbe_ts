@@ -1,9 +1,3 @@
-pub fn publish_news_snapshot(snapshot: Bytes) -> bool {
-    let Some(sender) = NEWS_SNAPSHOT.get() else { return false; };
-    sender.send_replace(snapshot);
-    true
-}
-
 pub fn publish_signal_snapshot(symbol: &str, snapshot: Bytes) -> bool {
     let Some(feeds) = SIGNAL_FEEDS.get() else { return false; };
     let sender = feeds.get(symbol).map(|entry| entry.value().clone());
@@ -62,11 +56,8 @@ async fn run_signal_feed(
             incoming = prices.recv() => match incoming {
                 Ok(bytes) if has_symbol(&bytes, &instrument) => {
                     crate::metrics::record_queue_depth(&format!("signal_prices/{instrument}"), prices.len());
-                    if bytes.len() >= 64 && read_f64(&bytes, 40).is_some() && read_f64(&bytes, 48).is_some() {
-                        let mut message = BytesMut::with_capacity(bytes.len() + 8);
-                        message.extend_from_slice(&bytes);
-                        message.extend_from_slice(&now_ms().to_le_bytes());
-                        let _ = events.send(message.freeze());
+                    if bytes.len() >= 56 && read_f64(&bytes, 40).is_some() {
+                        let _ = events.send(bytes);
                         crate::metrics::record_queue_depth("signal_events", events.len());
                     }
                 }
@@ -121,11 +112,5 @@ fn has_symbol(bytes: &[u8], symbol: &str) -> bool {
 fn read_f64(bytes: &[u8], offset: usize) -> Option<f64> {
     let value = f64::from_le_bytes(bytes.get(offset..offset + 8)?.try_into().ok()?);
     value.is_finite().then_some(value)
-}
-fn now_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64
 }
 

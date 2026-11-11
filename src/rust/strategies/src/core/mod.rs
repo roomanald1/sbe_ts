@@ -23,7 +23,8 @@ pub use execution::{
     ExecutionOutcomeEvent,
 };
 pub use feedback::{
-    FeedbackEvent, LearnedProfileSnapshot, ScoutParameterVariant, StrategyThresholdObservation,
+    FeedbackEvent, LearnedProfileSnapshot, ScoutComparisonMetadata, ScoutParameterVariant,
+    StrategyThresholdObservation,
 };
 pub use profiles::{ParameterSpec, StrategyProfile, StrategyProfileRegistration, profile_id};
 

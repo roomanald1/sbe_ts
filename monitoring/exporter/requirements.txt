@@ -1,0 +1,1 @@
+rsocket[aiohttp]==0.4.20

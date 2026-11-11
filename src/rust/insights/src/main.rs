@@ -1,10 +1,16 @@
+#[path = "network/binance_client.rs"]
+mod binance_client;
 #[path = "network/feed_client.rs"]
 mod feed_client;
 #[path = "observability/latency.rs"]
 mod latency;
 #[path = "observability/logging.rs"]
 mod logging;
+#[path = "feeds/rolling_volatility.rs"]
+mod rolling_volatility;
+use anyhow::Result;
 use axum::{Json, Router, http::StatusCode, routing::get};
+use bytes::Bytes;
 use dashmap::DashMap;
 use futures_util::StreamExt;
 use insights::{
@@ -15,14 +21,17 @@ use insights::{
         StoredSignalRecord,
     },
 };
+use rsocket_rust::prelude::*;
+use rsocket_rust_transport_websocket::WebsocketServerTransport;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, HashMap},
+    pin::Pin,
     sync::{Arc, OnceLock},
     time::{SystemTime, UNIX_EPOCH},
 };
 use tokio::{
-    sync::{Mutex, Notify, Semaphore, watch},
+    sync::{Mutex, Notify, Semaphore, broadcast, watch},
     time::{Duration, Instant},
 };
 
@@ -32,7 +41,6 @@ enum SignalFeedEvent {
     Price {
         timestamp: u64,
         price: f64,
-        volatility_1m: f64,
     },
     Trade {
         timestamp: u64,
@@ -57,6 +65,8 @@ struct SignalEventRequest {
     symbol: String,
     #[serde(skip)]
     queued_at: Option<Instant>,
+    #[serde(skip)]
+    raw_payload: Option<Bytes>,
     #[serde(flatten)]
     event: SignalFeedEvent,
 }
@@ -74,9 +84,10 @@ struct SignalRuntime {
     news_learning: Mutex<NewsLearning>,
     snapshot_diagnostic_at: DashMap<String, u64>,
     latest_prices: DashMap<String, (u64, f64)>,
+    rolling_volatility: DashMap<String, rolling_volatility::RollingVolatility>,
+    enriched_market_events: broadcast::Sender<Bytes>,
 }
 
-static POSITION_MANAGEMENT_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
 static SCOUT_LEARNING_DELIVERY_LIMIT: OnceLock<Semaphore> = OnceLock::new();
 
 #[derive(Default)]
@@ -147,5 +158,9 @@ include!("feeds/daily_strategy_signals.rs");
 include!("workers/signal_feed_workers.rs");
 
 include!("api/signal_ingestion.rs");
+include!("api/market_event_rsocket.rs");
 
 include!("workers/service_startup.rs");
+
+// TODO figure out if this project really is worth its own service. News classification has very little if any impact on trades.
+// Daily Signals should probably just be inside live-signals crate

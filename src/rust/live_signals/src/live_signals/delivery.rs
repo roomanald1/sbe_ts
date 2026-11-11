@@ -1,20 +1,81 @@
 use super::*;
+use rsocket_rust::Client;
 
 const SCOUT_SIGNALS_PER_BATCH: usize = 20;
-const SCOUT_DELIVERY_TIMEOUT: Duration = Duration::from_secs(5);
 
-async fn post_dashboard(
-    client: &reqwest::Client,
-    endpoint: &str,
-    dashboard: &Value,
-) -> Result<(), reqwest::Error> {
-    client
-        .post(endpoint)
-        .timeout(Duration::from_secs(2))
-        .json(dashboard)
-        .send()
-        .await?
-        .error_for_status()?;
+#[derive(Debug)]
+enum DashboardDeliveryError {
+    Transport(anyhow::Error),
+    Rejected(u16),
+}
+
+struct DeliveryPass {
+    failed: bool,
+    reconnect: bool,
+}
+
+async fn connect_auto_trader(rsocket_url: &str) -> anyhow::Result<Client> {
+    Ok(RSocketFactory::connect()
+        .transport(WebsocketClientTransport::from(rsocket_url))
+        .acceptor(Box::new(|| Box::new(EchoRSocket)))
+        .start()
+        .await?)
+}
+
+async fn post_dashboard(client: &Client, dashboard: &Value) -> Result<(), DashboardDeliveryError> {
+    let request_id = format!(
+        "live-signals:{}:{}",
+        dashboard["updated_at_ms"].as_u64().unwrap_or_default(),
+        dashboard["best"][0]["symbol"].as_str().unwrap_or("unknown")
+    );
+    let response = tokio::time::timeout(
+        Duration::from_secs(2),
+        client.request_response(
+            Payload::builder()
+                .set_data(
+                    serde_json::to_vec(&strategies::ScoutCoordinatorRequest::WorkerRoute(
+                        strategies::ScoutCoordinatorRouteCommand {
+                            request_id,
+                            strategy: None,
+                            method: strategies::ScoutWorkerHttpMethod::Post,
+                            path: "/internal/auto-trader/signal".into(),
+                            payload: dashboard.clone(),
+                        },
+                    ))
+                    .map_err(|error| DashboardDeliveryError::Transport(error.into()))?,
+                )
+                .build(),
+        ),
+    )
+    .await
+    .map_err(|_| {
+        DashboardDeliveryError::Transport(anyhow::anyhow!("AutoTrader RSocket request timed out"))
+    })?
+    .map_err(|error| DashboardDeliveryError::Transport(error.into()))?
+    .ok_or_else(|| {
+        DashboardDeliveryError::Transport(anyhow::anyhow!(
+            "AutoTrader returned an empty RSocket response"
+        ))
+    })?;
+    let response: strategies::ScoutCoordinatorResponse = serde_json::from_slice(
+        response
+            .data()
+            .ok_or_else(|| {
+                DashboardDeliveryError::Transport(anyhow::anyhow!(
+                    "AutoTrader RSocket response had no data"
+                ))
+            })?
+            .as_ref(),
+    )
+    .map_err(|error| DashboardDeliveryError::Transport(error.into()))?;
+    let strategies::ScoutCoordinatorResponse::WorkerRoute(response) = response else {
+        return Err(DashboardDeliveryError::Transport(anyhow::anyhow!(
+            "AutoTrader returned an unexpected RSocket response"
+        )));
+    };
+    if response.status >= 400 {
+        return Err(DashboardDeliveryError::Rejected(response.status));
+    }
     Ok(())
 }
 
@@ -71,17 +132,27 @@ fn scout_payload_batches<'a>(dashboards: impl Iterator<Item = &'a Value>) -> Vec
 }
 
 async fn post_scout_dashboard(
-    client: &reqwest::Client,
-    endpoint: &str,
+    learning_rsocket_url: &str,
+    request_id: &str,
     payload: &Value,
-) -> Result<(), reqwest::Error> {
-    client
-        .post(endpoint)
-        .timeout(SCOUT_DELIVERY_TIMEOUT)
-        .json(payload)
-        .send()
-        .await?
-        .error_for_status()?;
+) -> anyhow::Result<()> {
+    let response = strategies::request_scout_worker_route(
+        learning_rsocket_url,
+        &strategies::ScoutCoordinatorRouteCommand {
+            request_id: request_id.to_owned(),
+            strategy: None,
+            method: strategies::ScoutWorkerHttpMethod::Post,
+            path: "/live-inputs".into(),
+            payload: payload.clone(),
+        },
+    )
+    .await?;
+    if response.status >= 400 {
+        anyhow::bail!(
+            "Learning rejected Scout live inputs: status {}",
+            response.status
+        );
+    }
     Ok(())
 }
 
@@ -111,7 +182,7 @@ fn acknowledge_scout_delivery(state: &LiveState, symbol: &str, dashboard: &Value
     }
 }
 
-async fn deliver_pending_once(state: &LiveState, client: &reqwest::Client, base: &str) -> bool {
+async fn deliver_pending_once(state: &LiveState, client: &Client) -> DeliveryPass {
     let mut values = state
         .pending_delivery
         .iter()
@@ -120,39 +191,42 @@ async fn deliver_pending_once(state: &LiveState, client: &reqwest::Client, base:
     values.sort_by(|a, b| a.0.cmp(&b.0));
 
     let auto_trader_delivery = futures_util::stream::iter(values)
-        .map(|(symbol, dashboard)| {
-            let client = client.clone();
-            let endpoint = format!("{base}/internal/auto-trader/signal");
-            async move {
-                let started = Instant::now();
-                let result = post_dashboard(&client, &endpoint, &dashboard).await;
-                crate::latency::record_auto_trader_delivery(started.elapsed());
-                (symbol, dashboard, result)
-            }
+        .map(|(symbol, dashboard)| async move {
+            let started = Instant::now();
+            let result = post_dashboard(client, &dashboard).await;
+            crate::latency::record_auto_trader_delivery(started.elapsed());
+            (symbol, dashboard, result)
         })
         .buffer_unordered(PUBLISH_CONCURRENCY)
         .collect::<Vec<_>>();
     let results = auto_trader_delivery.await;
-    let mut failed = false;
+    let mut pass = DeliveryPass {
+        failed: false,
+        reconnect: false,
+    };
     for (symbol, dashboard, result) in results {
         match result {
             Ok(()) => {
                 acknowledge_delivery(state, &symbol, &dashboard);
             }
-            Err(error) => {
-                failed = true;
+            Err(DashboardDeliveryError::Transport(error)) => {
+                pass.failed = true;
+                pass.reconnect = true;
                 crate::service_log!("WARN", "Live signal delivery failed for {symbol}: {error}");
+            }
+            Err(DashboardDeliveryError::Rejected(status)) => {
+                pass.failed = true;
+                crate::service_log!(
+                    "WARN",
+                    "AutoTrader rejected live signal for {symbol}: status {status}"
+                );
             }
         }
     }
-    failed
+    pass
 }
 
-async fn deliver_scout_pending_once(
-    state: &LiveState,
-    client: &reqwest::Client,
-    endpoint: &str,
-) -> bool {
+async fn deliver_scout_pending_once(state: &LiveState, learning_rsocket_url: &str) -> bool {
     let mut values = state
         .pending_scout_delivery
         .iter()
@@ -177,7 +251,19 @@ async fn deliver_scout_pending_once(
         let payload = json!({
             "signals": batch.iter().map(|(_, _, signal)| signal.clone()).collect::<Vec<_>>()
         });
-        match post_scout_dashboard(client, endpoint, &payload).await {
+        let request_id = format!(
+            "live-signals:{}:{}",
+            batch
+                .first()
+                .map(|(_, dashboard, _)| dashboard["updated_at_ms"].as_u64().unwrap_or_default())
+                .unwrap_or_default(),
+            batch
+                .iter()
+                .map(|(symbol, _, _)| symbol.as_str())
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+        match post_scout_dashboard(learning_rsocket_url, &request_id, &payload).await {
             Ok(()) => {
                 for (symbol, dashboard, _) in batch {
                     acknowledge_scout_delivery(state, symbol, dashboard);
@@ -193,13 +279,12 @@ async fn deliver_scout_pending_once(
 }
 
 pub(super) async fn run_delivery_worker(state: Arc<LiveState>) {
-    let client = HTTP_CLIENT.get_or_init(reqwest::Client::new).clone();
     let auto_trader_state = Arc::clone(&state);
-    let auto_trader_client = client.clone();
     tokio::spawn(async move {
-        let base =
-            std::env::var("AUTO_TRADER_URL").unwrap_or_else(|_| "http://127.0.0.1:3005".into());
+        let rsocket_url = std::env::var("AUTO_TRADER_RSOCKET_URL")
+            .unwrap_or_else(|_| "ws://127.0.0.1:10006".into());
         let mut retry = Duration::from_millis(250);
+        let mut client = None;
         loop {
             let notified = auto_trader_state.delivery_notify.notified();
             tokio::pin!(notified);
@@ -207,7 +292,25 @@ pub(super) async fn run_delivery_worker(state: Arc<LiveState>) {
                 notified.await;
                 continue;
             }
-            if deliver_pending_once(&auto_trader_state, &auto_trader_client, &base).await {
+            if client.is_none() {
+                match connect_auto_trader(&rsocket_url).await {
+                    Ok(connected) => client = Some(connected),
+                    Err(error) => {
+                        crate::service_log!(
+                            "WARN",
+                            "Could not connect to AutoTrader RSocket: {error}"
+                        );
+                        tokio::time::sleep(retry).await;
+                        retry = (retry * 2).min(Duration::from_secs(5));
+                        continue;
+                    }
+                }
+            }
+            let pass = deliver_pending_once(&auto_trader_state, client.as_ref().unwrap()).await;
+            if pass.reconnect {
+                client = None;
+            }
+            if pass.failed {
                 tokio::time::sleep(retry).await;
                 retry = (retry * 2).min(Duration::from_secs(5));
             } else {
@@ -217,9 +320,8 @@ pub(super) async fn run_delivery_worker(state: Arc<LiveState>) {
     });
 
     tokio::spawn(async move {
-        let base =
-            std::env::var("SCOUTS_SERVICE_URL").unwrap_or_else(|_| "http://127.0.0.1:3011".into());
-        let endpoint = format!("{}/live-inputs", base.trim_end_matches('/'));
+        let learning_rsocket_url =
+            std::env::var("LEARNING_RSOCKET_URL").unwrap_or_else(|_| "ws://127.0.0.1:10010".into());
         let mut retry = Duration::from_millis(250);
         loop {
             let notified = state.scout_delivery_notify.notified();
@@ -228,7 +330,7 @@ pub(super) async fn run_delivery_worker(state: Arc<LiveState>) {
                 notified.await;
                 continue;
             }
-            if deliver_scout_pending_once(&state, &client, &endpoint).await {
+            if deliver_scout_pending_once(&state, &learning_rsocket_url).await {
                 tokio::time::sleep(retry).await;
                 retry = (retry * 2).min(Duration::from_secs(5));
             } else {
@@ -241,7 +343,6 @@ pub(super) async fn run_delivery_worker(state: Arc<LiveState>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::{Json, Router, routing::post};
     use std::sync::Mutex as StdMutex;
 
     fn state() -> LiveState {
@@ -296,135 +397,210 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn scout_delivery_allows_handler_to_complete_past_previous_timeout() {
-        let app = Router::new().route(
-            "/live-inputs",
-            post(|| async {
-                tokio::time::sleep(Duration::from_millis(350)).await;
-                axum::http::StatusCode::ACCEPTED
-            }),
-        );
+    async fn scout_delivery_uses_learning_rsocket_and_acknowledges_after_success() {
+        use rsocket_rust_transport_websocket::WebsocketServerTransport;
+
+        struct TestCoordinator(Arc<StdMutex<Option<Value>>>);
+
+        #[rsocket_rust::async_trait]
+        impl RSocket for TestCoordinator {
+            async fn metadata_push(&self, _request: Payload) -> anyhow::Result<()> {
+                anyhow::bail!("unsupported")
+            }
+            async fn fire_and_forget(&self, _request: Payload) -> anyhow::Result<()> {
+                anyhow::bail!("unsupported")
+            }
+            async fn request_response(&self, request: Payload) -> anyhow::Result<Option<Payload>> {
+                let request: strategies::ScoutCoordinatorRequest =
+                    serde_json::from_slice(request.data().unwrap())?;
+                let strategies::ScoutCoordinatorRequest::WorkerRoute(request) = request else {
+                    anyhow::bail!("expected worker route command")
+                };
+                assert_eq!(request.path, "/live-inputs");
+                *self.0.lock().unwrap() = Some(request.payload);
+                let response = strategies::ScoutCoordinatorResponse::WorkerRoute(
+                    strategies::ScoutCoordinatorRouteResult {
+                        request_id: request.request_id,
+                        status: 204,
+                        body: Value::Null,
+                    },
+                );
+                Ok(Some(
+                    Payload::builder()
+                        .set_data(serde_json::to_vec(&response)?)
+                        .build(),
+                ))
+            }
+            fn request_stream(
+                &self,
+                _request: Payload,
+            ) -> futures_util::stream::BoxStream<'static, anyhow::Result<Payload>> {
+                futures_util::stream::empty().boxed()
+            }
+            fn request_channel(
+                &self,
+                requests: Flux<anyhow::Result<Payload>>,
+            ) -> Flux<anyhow::Result<Payload>> {
+                requests
+            }
+        }
+
+        let received = Arc::new(StdMutex::new(None));
+        let worker_received = Arc::clone(&received);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
-        tokio::spawn(async move {
-            let _ = axum::serve(listener, app).await;
-        });
-
-        post_scout_dashboard(
-            &reqwest::Client::new(),
-            &format!("http://{address}/live-inputs"),
-            &json!({"signals": [{"symbol": "BTC-USDT"}]}),
-        )
-        .await
-        .unwrap();
-    }
-
-    #[tokio::test]
-    async fn posts_dashboard_payload_and_accepts_success_status() {
-        let captured = Arc::new(StdMutex::new(None::<Value>));
-        let app = Router::new().route(
-            "/signal",
-            post({
-                let captured = Arc::clone(&captured);
-                move |Json(payload): Json<Value>| {
-                    *captured.lock().unwrap() = Some(payload);
-                    async { axum::http::StatusCode::NO_CONTENT }
-                }
-            }),
-        );
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        tokio::spawn(async move {
-            let _ = axum::serve(listener, app).await;
-        });
-        let payload = json!({"best": [{"symbol": "BTC-USDT"}]});
-
-        post_dashboard(
-            &reqwest::Client::new(),
-            &format!("http://{address}/signal"),
-            &payload,
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(captured.lock().unwrap().as_ref(), Some(&payload));
-    }
-
-    #[tokio::test]
-    async fn post_dashboard_reports_server_failure() {
-        let app = Router::new().route(
-            "/signal",
-            post(|| async { axum::http::StatusCode::SERVICE_UNAVAILABLE }),
-        );
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        tokio::spawn(async move {
-            let _ = axum::serve(listener, app).await;
-        });
-
-        assert!(
-            post_dashboard(
-                &reqwest::Client::new(),
-                &format!("http://{address}/signal"),
-                &json!({"best": []}),
-            )
-            .await
-            .is_err()
-        );
-    }
-
-    #[tokio::test]
-    async fn delivery_cycle_removes_acknowledged_items_and_retains_failures() {
-        let ok_app = Router::new().route(
-            "/internal/auto-trader/signal",
-            post(|| async { axum::http::StatusCode::NO_CONTENT }),
-        );
-        let ok_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let ok_address = ok_listener.local_addr().unwrap();
-        tokio::spawn(async move {
-            let _ = axum::serve(ok_listener, ok_app).await;
-        });
+        drop(listener);
+        let server = RSocketFactory::receive()
+            .transport(WebsocketServerTransport::from(address.to_string()))
+            .acceptor(Box::new(move |_setup, _socket| {
+                Ok(Box::new(TestCoordinator(Arc::clone(&worker_received))))
+            }))
+            .serve();
+        let server_task = tokio::spawn(async move { server.await });
+        tokio::time::sleep(Duration::from_millis(20)).await;
 
         let state = state();
-        state
-            .pending_delivery
-            .insert("BTC-USDT".into(), json!({"best": []}));
-        state
-            .pending_scout_delivery
-            .insert("BTC-USDT".into(), json!({"best": []}));
-        assert!(
-            !deliver_pending_once(
-                &state,
-                &reqwest::Client::new(),
-                &format!("http://{ok_address}"),
-            )
-            .await
-        );
-        assert!(state.pending_delivery.is_empty());
-        assert!(state.pending_scout_delivery.contains_key("BTC-USDT"));
-
-        let fail_app = Router::new().route(
-            "/internal/auto-trader/signal",
-            post(|| async { axum::http::StatusCode::SERVICE_UNAVAILABLE }),
-        );
-        let fail_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let fail_address = fail_listener.local_addr().unwrap();
-        tokio::spawn(async move {
-            let _ = axum::serve(fail_listener, fail_app).await;
+        let dashboard = json!({
+            "updated_at_ms": 1234,
+            "best": [{"symbol":"BTC-USDT"}],
+            "markets": {"BTC-USDT": {"bids":[{"price":99.0}],"asks":[{"price":101.0}],"updated_at_ms":1234}}
         });
         state
-            .pending_delivery
-            .insert("ETH-USDT".into(), json!({"best": []}));
-
-        assert!(
-            deliver_pending_once(
-                &state,
-                &reqwest::Client::new(),
-                &format!("http://{fail_address}"),
-            )
-            .await
+            .pending_scout_delivery
+            .insert("BTC-USDT".into(), dashboard.clone());
+        let url = format!("ws://{address}");
+        assert!(!deliver_scout_pending_once(&state, &url).await);
+        assert!(state.pending_scout_delivery.is_empty());
+        assert_eq!(
+            received.lock().unwrap().as_ref().unwrap()["signals"][0]["symbol"],
+            "BTC-USDT"
         );
+
+        server_task.abort();
+    }
+
+    struct TestRouteResponder {
+        payloads: Arc<StdMutex<Vec<Value>>>,
+        status: u16,
+    }
+
+    #[rsocket_rust::async_trait]
+    impl RSocket for TestRouteResponder {
+        async fn metadata_push(&self, _request: Payload) -> anyhow::Result<()> {
+            anyhow::bail!("unsupported")
+        }
+        async fn fire_and_forget(&self, _request: Payload) -> anyhow::Result<()> {
+            anyhow::bail!("unsupported")
+        }
+        async fn request_response(&self, request: Payload) -> anyhow::Result<Option<Payload>> {
+            let request: strategies::ScoutCoordinatorRequest =
+                serde_json::from_slice(request.data().unwrap())?;
+            let strategies::ScoutCoordinatorRequest::WorkerRoute(request) = request else {
+                anyhow::bail!("expected route command")
+            };
+            assert_eq!(request.path, "/internal/auto-trader/signal");
+            self.payloads.lock().unwrap().push(request.payload);
+            let response = strategies::ScoutCoordinatorResponse::WorkerRoute(
+                strategies::ScoutCoordinatorRouteResult {
+                    request_id: request.request_id,
+                    status: self.status,
+                    body: Value::Null,
+                },
+            );
+            Ok(Some(
+                Payload::builder()
+                    .set_data(serde_json::to_vec(&response)?)
+                    .build(),
+            ))
+        }
+        fn request_stream(
+            &self,
+            _request: Payload,
+        ) -> futures_util::stream::BoxStream<'static, anyhow::Result<Payload>> {
+            futures_util::stream::empty().boxed()
+        }
+        fn request_channel(
+            &self,
+            requests: Flux<anyhow::Result<Payload>>,
+        ) -> Flux<anyhow::Result<Payload>> {
+            requests
+        }
+    }
+
+    async fn start_route_responder(
+        status: u16,
+    ) -> (
+        String,
+        Arc<StdMutex<Vec<Value>>>,
+        Arc<std::sync::atomic::AtomicUsize>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        use rsocket_rust_transport_websocket::WebsocketServerTransport;
+
+        let payloads = Arc::new(StdMutex::new(Vec::new()));
+        let worker_payloads = Arc::clone(&payloads);
+        let connections = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let worker_connections = Arc::clone(&connections);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        drop(listener);
+        let server = RSocketFactory::receive()
+            .transport(WebsocketServerTransport::from(address.to_string()))
+            .acceptor(Box::new(move |_setup, _socket| {
+                worker_connections.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                Ok(Box::new(TestRouteResponder {
+                    payloads: Arc::clone(&worker_payloads),
+                    status,
+                }))
+            }))
+            .serve();
+        let task = tokio::spawn(async move {
+            let _ = server.await;
+        });
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        (format!("ws://{address}"), payloads, connections, task)
+    }
+
+    #[tokio::test]
+    async fn delivery_cycle_uses_rsocket_and_acknowledges_only_success() {
+        let (ok_url, received, _, ok_task) = start_route_responder(204).await;
+        let (fail_url, _, _, fail_task) = start_route_responder(503).await;
+        let ok_client = connect_auto_trader(&ok_url).await.unwrap();
+        let fail_client = connect_auto_trader(&fail_url).await.unwrap();
+        let state = state();
+        let payload = json!({"updated_at_ms":1234,"best":[{"symbol":"BTC-USDT"}]});
+        state
+            .pending_delivery
+            .insert("BTC-USDT".into(), payload.clone());
+        assert!(!deliver_pending_once(&state, &ok_client).await.failed);
+        assert!(state.pending_delivery.is_empty());
+        assert_eq!(received.lock().unwrap().as_slice(), &[payload]);
+
+        state
+            .pending_delivery
+            .insert("ETH-USDT".into(), json!({"best":[]}));
+        assert!(deliver_pending_once(&state, &fail_client).await.failed);
         assert!(state.pending_delivery.contains_key("ETH-USDT"));
+        ok_task.abort();
+        fail_task.abort();
+    }
+
+    #[tokio::test]
+    async fn live_signal_delivery_reuses_one_rsocket_connection_for_multiple_requests() {
+        let (url, received, connections, server_task) = start_route_responder(204).await;
+        let client = connect_auto_trader(&url).await.unwrap();
+
+        for (timestamp, symbol) in [(1, "BTC-USDT"), (2, "ETH-USDT")] {
+            let dashboard = json!({
+                "updated_at_ms": timestamp,
+                "best": [{"symbol": symbol}],
+            });
+            post_dashboard(&client, &dashboard).await.unwrap();
+        }
+
+        assert_eq!(connections.load(std::sync::atomic::Ordering::Relaxed), 1);
+        assert_eq!(received.lock().unwrap().len(), 2);
+        server_task.abort();
     }
 
     #[test]

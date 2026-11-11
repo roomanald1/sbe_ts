@@ -10,7 +10,10 @@ export class OrderManagerBookFeeds {
   private connection: Connection;
   private readonly active = new Map<string, FeedEntry>();
 
-  private readonly onBook: (symbol: string, depth: ReturnType<typeof decodeBookDepth>) => void;
+  private readonly onBook: (
+    symbol: string,
+    depth: ReturnType<typeof decodeBookDepth>,
+  ) => void;
   private readonly onError: (symbol: string, error?: string) => void;
 
   constructor(

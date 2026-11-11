@@ -1,3 +1,16 @@
-import { ClientSideRowModelApiModule, ColumnApiModule, ModuleRegistry, RowAutoHeightModule, RowStyleModule, TooltipModule } from 'ag-grid-community';
+import {
+  ClientSideRowModelApiModule,
+  ColumnApiModule,
+  ModuleRegistry,
+  RowAutoHeightModule,
+  RowStyleModule,
+  TooltipModule,
+} from 'ag-grid-community';
 
-ModuleRegistry.registerModules([ClientSideRowModelApiModule, ColumnApiModule, RowAutoHeightModule, RowStyleModule, TooltipModule]);
+ModuleRegistry.registerModules([
+  ClientSideRowModelApiModule,
+  ColumnApiModule,
+  RowAutoHeightModule,
+  RowStyleModule,
+  TooltipModule,
+]);

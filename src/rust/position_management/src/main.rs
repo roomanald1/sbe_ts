@@ -1,48 +1,30 @@
-#[path = "observability/logging.rs"]
-mod logging;
-#[path = "../../service_docs.rs"]
-mod service_docs;
-use axum::routing::get;
 #[path = "feeds/feed_client.rs"]
 mod feed_client;
+#[path = "observability/logging.rs"]
+mod logging;
 mod positions;
+#[path = "../../service_docs.rs"]
+mod service_docs;
 #[path = "users/users.rs"]
 mod users;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let app = positions::router()
-        .await?
+    let _internal_position_router = positions::router().await?;
+    let app = axum::Router::new()
         .merge(service_docs::routes(
             "Position Management",
-            &[
-                ("/health", &["get"]),
-                ("/positions", &["get"]),
-                ("/positions/realized-pnl", &["get"]),
-                ("/positions/fee-summary", &["get"]),
-                ("/positions/account", &["get"]),
-                ("/positions/dated-carry/ledger", &["post"]),
-                ("/positions/account/topups", &["post"]),
-                ("/positions/account/leverage", &["post"]),
-                ("/positions/usd-rates", &["get"]),
-                ("/positions/fee-rates", &["get"]),
-                ("/positions/hedge-candidates", &["get"]),
-                ("/positions/trades", &["get"]),
-                ("/positions/vwap", &["get", "post"]),
-                ("/positions/vwap/{id}", &["delete"]),
-                ("/positions/twap", &["post"]),
-                ("/positions/barriers", &["get"]),
-                ("/positions/barriers/profit-target", &["post"]),
-                ("/positions/close-profitable", &["post"]),
-                ("/users/{page}", &["get"]),
-                ("/account", &["get"]),
-                ("/account/topups", &["post"]),
-            ],
+            &[("/health", &["get"])],
         ))
-        .merge(users::router())
-        .route("/health", get(|| async { "ok" }))
-        .route("/process-cpu-seconds", get(process_cpu_seconds))
-        .route("/process-memory-bytes", get(process_memory_bytes));
+        .route("/health", axum::routing::get(|| async { "ok" }))
+        .route(
+            "/process-cpu-seconds",
+            axum::routing::get(process_cpu_seconds),
+        )
+        .route(
+            "/process-memory-bytes",
+            axum::routing::get(process_memory_bytes),
+        );
     let listener = tokio::net::TcpListener::bind(("0.0.0.0", 3002)).await?;
     crate::service_log!(
         "INFO",
@@ -69,7 +51,7 @@ async fn process_cpu_seconds() -> String {
         .to_string()
 }
 
-//TODO put this in and the cpu func above in a lib crate and reuse in all services 
+//TODO put this in and the cpu func above in a lib crate and reuse in all services
 async fn process_memory_bytes() -> String {
     std::fs::read_to_string("/proc/self/status")
         .ok()

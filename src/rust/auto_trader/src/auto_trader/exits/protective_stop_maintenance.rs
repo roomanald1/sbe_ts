@@ -1,13 +1,10 @@
 async fn ensure_protective_stops(
-    client: &reqwest::Client,
-    base: &str,
     state: &AutoTraderState,
 ) -> Result<(), (StatusCode, String)> {
-    let barriers: Vec<serde_json::Value> = client
-        .get(format!("{base}/positions/barriers"))
-        .send().await.map_err(upstream_error)?
-        .error_for_status().map_err(upstream_error)?
-        .json().await.map_err(upstream_error)?;
+    let barriers: Vec<serde_json::Value> = serde_json::from_value(
+        crate::service_rpc::position_get("/positions/barriers")
+            .await.map_err(|error| (StatusCode::BAD_GATEWAY, error.to_string()))?,
+    ).map_err(|error| (StatusCode::BAD_GATEWAY, error.to_string()))?;
     reconcile_local_stop_order_statuses(state, &barriers).await?;
     let (lots, stop_strategies) = {
         let settings = state.settings.lock().await;
@@ -59,7 +56,7 @@ async fn ensure_protective_stops(
             continue;
         }
         let created_at = barrier["created_at"].as_u64().unwrap_or_default();
-        if !cancel_protective_barrier(client, base, state, symbol, barrier_id, created_at, None).await? {
+        if !cancel_protective_barrier(state, symbol, barrier_id, created_at, None).await? {
             blocked_symbols.insert(symbol.to_owned());
             let mut settings = state.settings.lock().await;
             settings.last_risk_note = format!(
@@ -77,7 +74,7 @@ async fn ensure_protective_stops(
         if !uses_protective_stops {
             for stop in &position.protective_stops {
                 if !cancel_protective_barrier(
-                    client, base, state, &symbol, &stop.barrier_id,
+                    state, &symbol, &stop.barrier_id,
                     stop.order_timestamp, Some(&strategy),
                 ).await? {
                     let mut settings = state.settings.lock().await;
@@ -114,7 +111,7 @@ async fn ensure_protective_stops(
             let uncovered_quantity = desired_quantity - covered_quantity;
             let uncovered_fees = position.entry_fees * (uncovered_quantity / desired_quantity);
             if let Err((_, error)) = arm_protective_stop(
-                client, base, state, &symbol, &strategy,
+                state, &symbol, &strategy,
                 if position.quantity > 0.0 { "buy" } else { "sell" },
                 uncovered_quantity, position.average_entry_price, uncovered_fees,
                 position.stop_loss_percent,
@@ -129,7 +126,7 @@ async fn ensure_protective_stops(
             for barrier in &active {
                 let Some(id) = barrier["id"].as_str() else { cancelled_all = false; break; };
                 let created_at = barrier["created_at"].as_u64().unwrap_or_default();
-                if !cancel_protective_barrier(client, base, state, &symbol, id, created_at, Some(&strategy)).await? {
+                if !cancel_protective_barrier(state, &symbol, id, created_at, Some(&strategy)).await? {
                     cancelled_all = false;
                     break;
                 }
@@ -142,7 +139,7 @@ async fn ensure_protective_stops(
         }
         if desired_quantity <= 1e-12 || (!active.is_empty() && !coverage_mismatch) { continue; }
         if let Err((_, error)) = arm_protective_stop(
-            client, base, state, &symbol, &strategy,
+            state, &symbol, &strategy,
             if position.quantity > 0.0 { "buy" } else { "sell" },
             desired_quantity, position.average_entry_price, position.entry_fees,
             position.stop_loss_percent,

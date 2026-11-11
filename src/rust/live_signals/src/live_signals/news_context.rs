@@ -1,19 +1,15 @@
 use super::*;
 
-#[derive(Clone, Deserialize, Default)]
+#[derive(Clone, Deserialize, serde::Serialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct NewsContext {
     #[serde(default)]
     pub(super) news: NewsSnapshot,
     #[serde(default)]
     pub(super) weight: f64,
-    #[serde(default)]
-    pub(super) walk_forward: Vec<Value>,
-    #[serde(default)]
-    pub(super) missed_opportunity_bands: Vec<Value>,
 }
 
-#[derive(Clone, Deserialize, Default)]
+#[derive(Clone, Deserialize, serde::Serialize, Default)]
 pub(super) struct NewsSnapshot {
     #[serde(default)]
     pub(super) source: String,
@@ -21,7 +17,7 @@ pub(super) struct NewsSnapshot {
     pub(super) articles: Vec<NewsArticle>,
 }
 
-#[derive(Clone, Deserialize)]
+#[derive(Clone, Deserialize, serde::Serialize)]
 pub(super) struct NewsArticle {
     title: String,
     url: String,
@@ -101,12 +97,12 @@ pub(super) fn apply_news(snapshot: &mut SignalSnapshot, context: &NewsContext, n
 }
 
 pub(super) async fn poll_research_context(sender: watch::Sender<Arc<NewsContext>>) {
-    let client = HTTP_CLIENT.get_or_init(reqwest::Client::new);
-    let base = std::env::var("INSIGHTS_URL").unwrap_or_else(|_| "http://127.0.0.1:3004".into());
+    let rsocket_url =
+        std::env::var("INSIGHTS_RPC_RSOCKET_URL").unwrap_or_else(|_| "ws://127.0.0.1:10007".into());
     let mut interval = tokio::time::interval(Duration::from_secs(5));
     loop {
         interval.tick().await;
-        match refresh_research_context_once(&sender, client, &base).await {
+        match refresh_research_context_once(&sender, &rsocket_url).await {
             Ok(()) => {}
             Err(error) => {
                 crate::service_log!("WARN", "Could not refresh Insights live context: {error}")
@@ -117,33 +113,117 @@ pub(super) async fn poll_research_context(sender: watch::Sender<Arc<NewsContext>
 
 async fn refresh_research_context_once(
     sender: &watch::Sender<Arc<NewsContext>>,
-    client: &reqwest::Client,
-    base: &str,
-) -> Result<(), reqwest::Error> {
-    let context = fetch_research_context(client, base).await?;
-    let _ = sender.send(Arc::new(context));
+    rsocket_url: &str,
+) -> anyhow::Result<()> {
+    let context = fetch_research_context(rsocket_url).await?;
+    let previous = serde_json::to_value(sender.borrow().as_ref())?;
+    let next = serde_json::to_value(&context)?;
+    if previous != next {
+        let _ = sender.send(Arc::new(context));
+    }
     Ok(())
 }
 
-async fn fetch_research_context(
-    client: &reqwest::Client,
-    base: &str,
-) -> Result<NewsContext, reqwest::Error> {
-    client
-        .get(format!("{base}/internal/live-context"))
-        .timeout(Duration::from_secs(2))
-        .send()
-        .await?
-        .error_for_status()?
-        .json::<NewsContext>()
-        .await
+async fn fetch_research_context(rsocket_url: &str) -> anyhow::Result<NewsContext> {
+    let response = tokio::time::timeout(
+        Duration::from_secs(2),
+        strategies::request_scout_service_route(
+            rsocket_url,
+            &strategies::ScoutCoordinatorRouteCommand {
+                request_id: format!("live-signals-context:{}", now_ms()),
+                strategy: None,
+                method: strategies::ScoutWorkerHttpMethod::Get,
+                path: "/internal/live-news-context".into(),
+                payload: Value::Null,
+            },
+        ),
+    )
+    .await??;
+    if response.status >= 400 {
+        anyhow::bail!(
+            "Insights rejected live-context query: status {}",
+            response.status
+        );
+    }
+    Ok(serde_json::from_value(response.body)?)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::{Json, Router, routing::get};
     use insights::signals::SignalComponents;
+    struct TestInsightsResponder {
+        body: Value,
+        status: u16,
+    }
+
+    #[rsocket_rust::async_trait]
+    impl RSocket for TestInsightsResponder {
+        async fn metadata_push(&self, _request: Payload) -> anyhow::Result<()> {
+            anyhow::bail!("unsupported")
+        }
+        async fn fire_and_forget(&self, _request: Payload) -> anyhow::Result<()> {
+            anyhow::bail!("unsupported")
+        }
+        async fn request_response(&self, request: Payload) -> anyhow::Result<Option<Payload>> {
+            let request: strategies::ScoutCoordinatorRequest =
+                serde_json::from_slice(request.data().unwrap())?;
+            let strategies::ScoutCoordinatorRequest::WorkerRoute(request) = request else {
+                anyhow::bail!("expected route command")
+            };
+            assert_eq!(request.method, strategies::ScoutWorkerHttpMethod::Get);
+            assert_eq!(request.path, "/internal/live-news-context");
+            let response = strategies::ScoutCoordinatorResponse::WorkerRoute(
+                strategies::ScoutCoordinatorRouteResult {
+                    request_id: request.request_id,
+                    status: self.status,
+                    body: self.body.clone(),
+                },
+            );
+            Ok(Some(
+                Payload::builder()
+                    .set_data(serde_json::to_vec(&response)?)
+                    .build(),
+            ))
+        }
+        fn request_stream(
+            &self,
+            _request: Payload,
+        ) -> futures_util::stream::BoxStream<'static, anyhow::Result<Payload>> {
+            futures_util::stream::empty().boxed()
+        }
+        fn request_channel(
+            &self,
+            requests: Flux<anyhow::Result<Payload>>,
+        ) -> Flux<anyhow::Result<Payload>> {
+            requests
+        }
+    }
+
+    async fn start_insights_responder(
+        body: Value,
+        status: u16,
+    ) -> (String, tokio::task::JoinHandle<()>) {
+        use rsocket_rust_transport_websocket::WebsocketServerTransport;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        drop(listener);
+        let server = RSocketFactory::receive()
+            .transport(WebsocketServerTransport::from(address.to_string()))
+            .acceptor(Box::new(move |_setup, _socket| {
+                Ok(Box::new(TestInsightsResponder {
+                    body: body.clone(),
+                    status,
+                }))
+            }))
+            .serve();
+        let task = tokio::spawn(async move {
+            let _ = server.await;
+        });
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        (format!("ws://{address}"), task)
+    }
 
     fn article(asset: &str, direction: &str, score: f64, received_at_ms: u64) -> NewsArticle {
         NewsArticle {
@@ -193,8 +273,6 @@ mod tests {
                 ],
             },
             weight: 0.2,
-            walk_forward: Vec::new(),
-            missed_opportunity_bands: Vec::new(),
         };
         let mut signal = snapshot("BTC-USDT", 0.5);
 
@@ -222,8 +300,6 @@ mod tests {
                 articles: vec![article("CRYPTO", "bullish", 1.0, 2_000_000)],
             },
             weight: 4.0,
-            walk_forward: Vec::new(),
-            missed_opportunity_bands: Vec::new(),
         };
         let mut signal = snapshot("ETH-USDT", 0.5);
 
@@ -248,78 +324,46 @@ mod tests {
 
     #[tokio::test]
     async fn fetch_research_context_decodes_the_service_contract() {
-        let app = Router::new().route(
-            "/internal/live-context",
-            get(|| async {
-                Json(json!({
-                    "news": {"source": "test", "articles": []},
-                    "weight": 0.15,
-                    "walkForward": [{"symbol": "BTC-USDT"}],
-                    "missedOpportunityBands": [{"gate": "score"}]
-                }))
+        let (url, server) = start_insights_responder(
+            json!({
+                "news": {"source": "test", "articles": []},
+                "weight": 0.15,
+                "walkForward": [{"symbol": "BTC-USDT"}],
+                "missedOpportunityBands": [{"gate": "score"}]
             }),
-        );
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        tokio::spawn(async move {
-            let _ = axum::serve(listener, app).await;
-        });
-
-        let context = fetch_research_context(&reqwest::Client::new(), &format!("http://{address}"))
-            .await
-            .unwrap();
+            200,
+        )
+        .await;
+        let context = fetch_research_context(&url).await.unwrap();
 
         assert_eq!(context.weight, 0.15);
-        assert_eq!(context.walk_forward[0]["symbol"], "BTC-USDT");
-        assert_eq!(context.missed_opportunity_bands.len(), 1);
+        assert_eq!(context.news.source, "test");
+        server.abort();
     }
 
     #[tokio::test]
     async fn fetch_research_context_rejects_server_errors() {
-        let app = Router::new().route(
-            "/internal/live-context",
-            get(|| async { axum::http::StatusCode::SERVICE_UNAVAILABLE }),
-        );
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        tokio::spawn(async move {
-            let _ = axum::serve(listener, app).await;
-        });
-
-        assert!(
-            fetch_research_context(&reqwest::Client::new(), &format!("http://{address}"))
-                .await
-                .is_err()
-        );
+        let (url, server) = start_insights_responder(Value::Null, 503).await;
+        assert!(fetch_research_context(&url).await.is_err());
+        server.abort();
     }
 
     #[tokio::test]
     async fn refresh_research_context_updates_watch_state() {
-        let app = Router::new().route(
-            "/internal/live-context",
-            get(|| async {
-                Json(json!({
-                    "news": {"source": "test", "articles": []},
-                    "weight": 0.1
-                }))
+        let (url, server) = start_insights_responder(
+            json!({
+                "news": {"source": "test", "articles": []},
+                "weight": 0.1
             }),
-        );
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        tokio::spawn(async move {
-            let _ = axum::serve(listener, app).await;
-        });
+            200,
+        )
+        .await;
         let (sender, mut receiver) = watch::channel(Arc::new(NewsContext::default()));
 
-        refresh_research_context_once(
-            &sender,
-            &reqwest::Client::new(),
-            &format!("http://{address}"),
-        )
-        .await
-        .unwrap();
+        refresh_research_context_once(&sender, &url).await.unwrap();
 
         assert!(receiver.has_changed().unwrap());
         assert!((receiver.borrow_and_update().weight - 0.1).abs() < 1e-12);
+        server.abort();
     }
 }

@@ -215,11 +215,8 @@ type StrategyWinRateRow = {
   learningAverageNet?: number;
   scoutOutcomeSamples?: number;
   scoutOutcomeAverageNet?: number;
-  paperScoutTradeSamples?: number;
-  paperScoutTradeAverageNet?: number;
   pairedScoutSamples?: number;
   pairedScoutAverageLift?: number;
-  unclassifiedLearningSamples?: number;
   strictEntryGate?: StrictEntryGateSummary;
   strictBaseStrengthFloor?: number;
   strictGateApplies?: boolean;
@@ -739,12 +736,8 @@ function AutoTraderOutcomesComponent({
           learningAverageNet: learning?.average_net_return_percent,
           scoutOutcomeSamples: learning?.scout_outcome_samples,
           scoutOutcomeAverageNet: learning?.scout_average_net_return_percent,
-          paperScoutTradeSamples: learning?.paper_scout_trade_samples,
-          paperScoutTradeAverageNet:
-            learning?.paper_scout_average_net_return_percent,
           pairedScoutSamples: learning?.paired_scout_samples,
           pairedScoutAverageLift: learning?.average_paired_scout_lift_percent,
-          unclassifiedLearningSamples: learning?.unclassified_samples,
           strictEntryGate: state.strictEntryGates[strategy],
           strictBaseStrengthFloor: state.strictBaseStrengthFloor,
           strictGateApplies: strategy.startsWith('live-'),

@@ -56,6 +56,19 @@ pub struct StrategyThresholdObservation {
     pub feature_value: f64,
 }
 
+/// Explicit attribution for a Scout outcome that is one arm of a comparison.
+/// The group identifies the shared opportunity; horizon is present only for
+/// horizon-based markout comparisons.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum ScoutComparisonMetadata {
+    Independent,
+    Paired {
+        group_id: String,
+        horizon_seconds: Option<u64>,
+    },
+}
+
 /// Feedback event envelope; event IDs make retries safe to deduplicate.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -71,6 +84,7 @@ pub enum FeedbackEvent {
         parameters: BTreeMap<String, f64>,
         #[serde(default)]
         baseline_parameters: BTreeMap<String, f64>,
+        comparison: ScoutComparisonMetadata,
         specs: Vec<ParameterSpec>,
         net_return_percent: f64,
     },

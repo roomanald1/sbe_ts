@@ -17,7 +17,6 @@ async fn get_decision_parameters(
     };
     let bands = state.latest_missed_opportunity_bands.lock().await.clone();
     let thresholds = request_learning_context_thresholds_for_contexts(
-        &state.client,
         &state,
         BTreeSet::new(),
         &bands,

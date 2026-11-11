@@ -113,7 +113,7 @@ mod candidate_evidence_tests {
         let unrelated = candidate("bullish");
         assert_eq!(count_negative_evidence_candidates(&[&unrelated], &Dashboard {
             best: Vec::new(), walk_forward: Arc::new(Vec::new()),
-            missed_opportunity_bands: Vec::new(), markets: Arc::new(BTreeMap::new()),
+            missed_opportunity_bands: Arc::new(Vec::new()), markets: Arc::new(BTreeMap::new()),
             queued_at: None, queue_wait_ms: None,
         }, 1_000), 0);
     }

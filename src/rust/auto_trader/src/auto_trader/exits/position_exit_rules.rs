@@ -177,8 +177,6 @@ fn profit_protection_state(
 }
 
 async fn evaluate_position_exit(
-    client: &reqwest::Client,
-    base: &str,
     state: &AutoTraderState,
     symbol: String,
     strategy_key: String,
@@ -571,8 +569,6 @@ async fn evaluate_position_exit(
         order_record_elapsed,
     );
     submit_position_exit_order(
-        client,
-        base,
         state,
         symbol,
         strategy_key,

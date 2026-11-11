@@ -1,23 +1,10 @@
 async fn maybe_place_portfolio_hedge(
-    client: &reqwest::Client,
-    base: &str,
     state: &AutoTraderState,
 ) -> Result<Option<CycleResult>, (StatusCode, String)> {
-    let candidates_request = client
-        .get(format!("{base}/positions/hedge-candidates"))
-        .send();
-    let rates_request = client.get(format!("{base}/positions/usd-rates")).send();
-    let (candidates_response, rates_response) =
-        tokio::try_join!(candidates_request, rates_request).map_err(upstream_error)?;
-    let candidates_response = candidates_response
-        .error_for_status()
-        .map_err(upstream_error)?;
-    let rates_response = rates_response.error_for_status().map_err(upstream_error)?;
     let (candidates, rates_response) = tokio::try_join!(
-        candidates_response.json::<serde_json::Value>(),
-        rates_response.json::<serde_json::Value>(),
-    )
-    .map_err(upstream_error)?;
+        crate::service_rpc::position_get("/positions/hedge-candidates"),
+        crate::service_rpc::position_get("/positions/usd-rates"),
+    ).map_err(|error| (StatusCode::BAD_GATEWAY, error.to_string()))?;
     let rates = &rates_response["rates"];
     let positions = candidates["positions"]
         .as_array()
@@ -70,6 +57,6 @@ async fn maybe_place_portfolio_hedge(
             "Portfolio risk is elevated, but no liquid hedge has enough reliable correlation data; new exposure is blocked",
         )));
     };
-    execute_portfolio_hedge(client, base, state, candidate, now_ms, portfolio_shock_risk).await
+    execute_portfolio_hedge(state, candidate, now_ms, portfolio_shock_risk).await
 }
 

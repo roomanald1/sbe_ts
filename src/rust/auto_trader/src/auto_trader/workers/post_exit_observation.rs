@@ -19,8 +19,6 @@ fn start_post_exit_observation_worker(state: &AutoTraderState) {
 }
 
 async fn collect_due_post_exit_observations(state: &AutoTraderState) -> Result<(), String> {
-    let position_url =
-        std::env::var("POSITION_MANAGEMENT_URL").unwrap_or_else(|_| "http://127.0.0.1:3002".into());
     let now = current_time_ms();
     let due = state
         .settings
@@ -39,21 +37,9 @@ async fn collect_due_post_exit_observations(state: &AutoTraderState) -> Result<(
         if symbol.is_empty() {
             continue;
         }
-        let response = state
-            .client
-            .get(format!(
-                "{position_url}/internal/market-book?symbol={symbol}"
-            ))
-            .timeout(Duration::from_secs(2))
-            .send()
-            .await
-            .map_err(|error| error.to_string())?;
-        let market = response
-            .error_for_status()
-            .map_err(|error| error.to_string())?
-            .json::<serde_json::Value>()
-            .await
-            .map_err(|error| error.to_string())?;
+        let market = crate::service_rpc::position_get(&format!(
+            "/internal/market-book?symbol={symbol}"
+        )).await.map_err(|error| error.to_string())?;
         let book_updated_at = market["updated_at_ms"].as_u64().unwrap_or_default();
         if book_updated_at == 0 || now.saturating_sub(book_updated_at) > 5_000 {
             continue;
@@ -207,9 +193,9 @@ async fn collect_due_post_exit_observations(state: &AutoTraderState) -> Result<(
 }
 
 async fn publish_exit_timing_feedback(state: &AutoTraderState) -> Result<(), String> {
-    let Some(base) = std::env::var("LEARNING_SERVICE_URL").ok() else {
+    if std::env::var("LEARNING_RSOCKET_URL").is_err() {
         return Ok(());
-    };
+    }
     let Some(event) = state
         .settings
         .lock()
@@ -220,17 +206,13 @@ async fn publish_exit_timing_feedback(state: &AutoTraderState) -> Result<(), Str
     else {
         return Ok(());
     };
-    let response = state
-        .client
-        .post(format!("{}/exit-timing", base.trim_end_matches('/')))
-        .timeout(Duration::from_secs(3))
-        .json(&event)
-        .send()
-        .await
-        .map_err(|error| error.to_string())?;
-    if !response.status().is_success() {
-        return Err(format!("learning service returned {}", response.status()));
-    }
+    crate::service_rpc::learning_request(
+        strategies::ScoutWorkerHttpMethod::Post,
+        "/exit-timing",
+        Some(event.clone()),
+    )
+    .await
+    .map_err(|error| error.to_string())?;
     let event_id = event["event_id"].as_str().unwrap_or_default();
     let mut settings = state.settings.lock().await;
     settings

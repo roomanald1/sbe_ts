@@ -10,10 +10,13 @@ use axum::{
 };
 use bytes::Bytes;
 use futures_util::StreamExt;
+use rsocket_rust::prelude::*;
+use rsocket_rust_transport_websocket::WebsocketServerTransport;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, HashMap},
     path::PathBuf,
+    pin::Pin,
     sync::{
         Arc, Mutex as StdMutex, OnceLock, RwLock as StdRwLock,
         atomic::{AtomicBool, Ordering},

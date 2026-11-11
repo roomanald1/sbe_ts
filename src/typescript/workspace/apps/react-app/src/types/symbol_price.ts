@@ -50,9 +50,17 @@ export function decodeSymbolPriceBatch(
 ): SymbolPriceTick[] {
   if (!(data instanceof Uint8Array)) return [];
   const ticks: SymbolPriceTick[] = [];
-  for (let offset = 0; offset + SYMBOL_PRICE_MESSAGE_LENGTH <= data.byteLength; offset += SYMBOL_PRICE_MESSAGE_LENGTH) {
+  for (let offset = 0; offset + HEADER_LENGTH <= data.byteLength; ) {
     const tick = decodeSymbolPriceAt(data, symbols, offset);
     if (tick) ticks.push(tick);
+    const view = new DataView(
+      data.buffer,
+      data.byteOffset + offset,
+      data.byteLength - offset,
+    );
+    const messageLength = symbolPriceMessageLength(view.getUint16(2, true));
+    if (!messageLength) break;
+    offset += messageLength;
   }
   return ticks;
 }
@@ -62,8 +70,7 @@ function decodeSymbolPriceAt(
   symbols: Map<string, SymbolPriceTick> | undefined,
   offset: number,
 ): SymbolPriceTick | undefined {
-  if (data.byteLength - offset < SYMBOL_PRICE_MESSAGE_LENGTH) return;
-
+  if (data.byteLength - offset < HEADER_LENGTH) return;
   // Reuse DataView by storing it on the Uint8Array
   const cachedData = data as CachedDataView;
   let view = cachedData._view;
@@ -73,11 +80,17 @@ function decodeSymbolPriceAt(
   }
 
   const templateId = view.getUint16(offset + 2, true);
+  const messageLength = symbolPriceMessageLength(templateId);
+  if (!messageLength || data.byteLength - offset < messageLength) return;
+  const enriched = templateId === ENRICHED_PRICE_TEMPLATE_ID;
   const schemaId = view.getUint16(offset + 4, true);
 
   if (
-    templateId !== SYMBOL_PRICE_TEMPLATE_ID ||
-    schemaId !== SYMBOL_PRICE_SCHEMA_ID
+    (templateId !== SYMBOL_PRICE_TEMPLATE_ID && !enriched) ||
+    schemaId !== SYMBOL_PRICE_SCHEMA_ID ||
+    view.getUint16(offset, true) !==
+      (enriched ? ENRICHED_PRICE_BLOCK_LENGTH : RAW_PRICE_BLOCK_LENGTH) ||
+    view.getUint16(offset + 6, true) !== SYMBOL_PRICE_SCHEMA_VERSION
   ) {
     return;
   }
@@ -92,10 +105,19 @@ function decodeSymbolPriceAt(
 
   const priceOffset = offset + HEADER_LENGTH + 32;
   const price = view.getFloat64(priceOffset, true);
-  const rawVolatility1m = view.getFloat64(priceOffset + 8, true);
-  const rawVolatility5m = view.getFloat64(priceOffset + 16, true);
-  const volatility1m = Number.isFinite(rawVolatility1m) ? rawVolatility1m : undefined;
-  const volatility5m = Number.isFinite(rawVolatility5m) ? rawVolatility5m : undefined;
+  const receivedAt = Number(view.getBigUint64(priceOffset + 8, true));
+  const rawVolatility1m = enriched
+    ? view.getFloat64(priceOffset + 16, true)
+    : Number.NaN;
+  const rawVolatility5m = enriched
+    ? view.getFloat64(priceOffset + 24, true)
+    : Number.NaN;
+  const volatility1m = Number.isFinite(rawVolatility1m)
+    ? rawVolatility1m
+    : undefined;
+  const volatility5m = Number.isFinite(rawVolatility5m)
+    ? rawVolatility5m
+    : undefined;
   const prev = symbols?.get(symbol);
   const previousPrice = prev?.price;
   const direction: SymbolPriceTick['direction'] =
@@ -111,7 +133,7 @@ function decodeSymbolPriceAt(
     direction,
     volatility1m,
     volatility5m,
-    receivedAt: Date.now(),
+    receivedAt,
   };
 
   symbols?.set(symbol, tick);
@@ -218,9 +240,14 @@ function decodeBookSide(view: DataView, firstPriceOffset: number): BookLevel[] {
 }
 
 const HEADER_LENGTH = 8;
-const SYMBOL_PRICE_MESSAGE_LENGTH = HEADER_LENGTH + 32 + 24;
+const SYMBOL_PRICE_MESSAGE_LENGTH = HEADER_LENGTH + 32 + 16;
+const ENRICHED_PRICE_MESSAGE_LENGTH = HEADER_LENGTH + 32 + 24 + 8;
+const RAW_PRICE_BLOCK_LENGTH = 48;
+const ENRICHED_PRICE_BLOCK_LENGTH = 64;
 const SYMBOL_PRICE_TEMPLATE_ID = 1;
+const ENRICHED_PRICE_TEMPLATE_ID = 4;
 const SYMBOL_PRICE_SCHEMA_ID = 1;
+const SYMBOL_PRICE_SCHEMA_VERSION = 9;
 const BOOK_DEPTH_TEMPLATE_ID = 2;
 const TRADE_TICK_TEMPLATE_ID = 3;
 const BOOK_DEPTH_BLOCK_LENGTH = 264;
@@ -230,3 +257,11 @@ const SYMBOL_FIELD_LENGTH = 32;
 const TRADE_ID_FIELD_LENGTH = 32;
 const TRADE_TICK_BLOCK_LENGTH = 89;
 const TRADE_TICK_MESSAGE_LENGTH = HEADER_LENGTH + TRADE_TICK_BLOCK_LENGTH;
+
+function symbolPriceMessageLength(templateId: number): number {
+  if (templateId === SYMBOL_PRICE_TEMPLATE_ID)
+    return SYMBOL_PRICE_MESSAGE_LENGTH;
+  if (templateId === ENRICHED_PRICE_TEMPLATE_ID)
+    return ENRICHED_PRICE_MESSAGE_LENGTH;
+  return 0;
+}

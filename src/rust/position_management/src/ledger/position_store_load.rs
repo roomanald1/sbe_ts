@@ -1,10 +1,12 @@
 // Trades are append-only after load. Capture metadata and its trade cutoff
 // together, then copy that immutable prefix in short, fair lock acquisitions.
-async fn snapshot_position_ledger(ledger: &Mutex<Ledger>) -> (Ledger, f64, f64) {
+async fn snapshot_position_ledger(ledger: &Mutex<Ledger>) -> (Ledger, f64, f64, f64) {
     let wait_started = Instant::now();
     let guard = ledger.lock().await;
     let mut wait_ms = wait_started.elapsed().as_secs_f64() * 1_000.0;
+    let mut copy_ms = 0.0;
     let hold_started = Instant::now();
+    let copy_started = Instant::now();
     let trade_count = guard.trades.len();
     let mut snapshot = Ledger {
         trades: Vec::new(),
@@ -16,6 +18,7 @@ async fn snapshot_position_ledger(ledger: &Mutex<Ledger>) -> (Ledger, f64, f64) 
         barrier_orders: guard.barrier_orders.clone(),
         scheduled_runs: guard.scheduled_runs.clone(),
     };
+    copy_ms += copy_started.elapsed().as_secs_f64() * 1_000.0;
     drop(guard);
     let mut max_hold_ms = hold_started.elapsed().as_secs_f64() * 1_000.0;
     // Allocation and all report calculations happen without the ledger lock.
@@ -23,18 +26,21 @@ async fn snapshot_position_ledger(ledger: &Mutex<Ledger>) -> (Ledger, f64, f64) 
     while snapshot.trades.len() < trade_count {
         tokio::task::yield_now().await;
         let start = snapshot.trades.len();
-        // Use larger chunks to avoid hundreds of lock reacquisitions and scheduler
-        // yields for a large ledger, while still keeping each critical section bounded.
-        let end = (start + 1_024).min(trade_count);
+        // Keep each clone section short so order and fill processing can acquire the
+        // ledger promptly even when the persisted trade history is large.
+        let end = (start + 256).min(trade_count);
         let wait_started = Instant::now();
         let guard = ledger.lock().await;
-        wait_ms += wait_started.elapsed().as_secs_f64() * 1_000.0;
+        // Report the worst individual acquisition. Summing waits across hundreds
+        // of chunks makes this stage look like one long lock stall.
+        wait_ms = wait_ms.max(wait_started.elapsed().as_secs_f64() * 1_000.0);
         let hold_started = Instant::now();
         snapshot.trades.extend_from_slice(&guard.trades[start..end]);
+        copy_ms += hold_started.elapsed().as_secs_f64() * 1_000.0;
         drop(guard);
         max_hold_ms = max_hold_ms.max(hold_started.elapsed().as_secs_f64() * 1_000.0);
     }
-    (snapshot, wait_ms, max_hold_ms)
+    (snapshot, wait_ms, max_hold_ms, copy_ms)
 }
 
 fn record_position_persistence_sample(
@@ -176,8 +182,7 @@ impl PositionStore {
                 writer_notify.notified().await;
                 // Let a burst of fills and book updates collapse into one current snapshot.
                 tokio::time::sleep(Duration::from_millis(10)).await;
-                let copy_started = Instant::now();
-                let (ledger_snapshot, wait_ms, max_hold_ms) =
+                let (ledger_snapshot, wait_ms, max_hold_ms, copy_ms) =
                     snapshot_position_ledger(&writer_ledger).await;
                 record_position_persistence_sample(&writer_timings, "snapshot_lock_wait", wait_ms);
                 record_position_persistence_sample(
@@ -185,11 +190,7 @@ impl PositionStore {
                     "snapshot_max_lock_hold",
                     max_hold_ms,
                 );
-                record_position_persistence_sample(
-                    &writer_timings,
-                    "snapshot_copy",
-                    copy_started.elapsed().as_secs_f64() * 1_000.0,
-                );
+                record_position_persistence_sample(&writer_timings, "snapshot_copy", copy_ms);
                 let serialization_started = Instant::now();
                 let snapshot = match tokio::task::spawn_blocking(move || ledger_snapshot).await {
                     Ok(snapshot) => snapshot,

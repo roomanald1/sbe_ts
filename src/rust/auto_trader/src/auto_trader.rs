@@ -62,18 +62,48 @@ include!("auto_trader/execution_benchmarks.rs");
 #[cfg(test)]
 mod strategy_cleanup_integration_tests {
     use super::*;
-    use axum::{
-        extract::{Path, State as AxumState},
-        http::StatusCode,
-        routing::delete,
-    };
+    use anyhow::Context;
+    use rsocket_rust::prelude::*;
+    use rsocket_rust_transport_websocket::WebsocketServerTransport;
+    use std::pin::Pin;
 
-    async fn delete_barrier(
-        AxumState(deleted): AxumState<Arc<Mutex<Vec<String>>>>,
-        Path(id): Path<String>,
-    ) -> StatusCode {
-        deleted.lock().await.push(id);
-        StatusCode::NO_CONTENT
+    #[derive(Clone)]
+    struct DeleteBarrierResponder(Arc<Mutex<Vec<String>>>);
+
+    #[rsocket_rust::async_trait]
+    impl RSocket for DeleteBarrierResponder {
+        async fn metadata_push(&self, _: Payload) -> anyhow::Result<()> {
+            anyhow::bail!("unsupported")
+        }
+        async fn fire_and_forget(&self, _: Payload) -> anyhow::Result<()> {
+            anyhow::bail!("unsupported")
+        }
+        async fn request_response(&self, request: Payload) -> anyhow::Result<Option<Payload>> {
+            let request: crate::service_rpc::RpcRequest =
+                serde_json::from_slice(request.data().context("request data missing")?.as_ref())?;
+            anyhow::ensure!(request.method == "DELETE", "expected DELETE request");
+            let barrier_id = request.path.rsplit('/').next().unwrap_or_default();
+            self.0.lock().await.push(barrier_id.to_owned());
+            let response = serde_json::json!({"status": 204, "body": null});
+            Ok(Some(
+                Payload::builder()
+                    .set_data(serde_json::to_vec(&response)?)
+                    .build(),
+            ))
+        }
+        fn request_stream(
+            &self,
+            _: Payload,
+        ) -> Pin<Box<dyn futures_util::Stream<Item = anyhow::Result<Payload>> + Send + 'static>>
+        {
+            Box::pin(futures_util::stream::empty())
+        }
+        fn request_channel(
+            &self,
+            _: Flux<anyhow::Result<Payload>>,
+        ) -> Flux<anyhow::Result<Payload>> {
+            Box::pin(futures_util::stream::empty())
+        }
     }
 
     pub(super) fn test_state(settings: Settings) -> AutoTraderState {
@@ -83,7 +113,6 @@ mod strategy_cleanup_integration_tests {
         let path =
             std::env::temp_dir().join(format!("auto-trader-cleanup-{}.json", std::process::id()));
         AutoTraderState {
-            client: reqwest::Client::new(),
             latest_daily_strategy_snapshot: Arc::new(Mutex::new(None)),
             latest_live_strategy_signals: Arc::new(Mutex::new(BTreeMap::new())),
             strategy_diagnostic: Arc::new(std::sync::Mutex::new(Vec::new())),
@@ -94,7 +123,10 @@ mod strategy_cleanup_integration_tests {
             price_path_last_checkpoint_requested_at: Arc::new(std::sync::Mutex::new(None)),
             state_updates,
             settings_persist_timings_ms: Arc::new(std::sync::Mutex::new(BTreeMap::new())),
-            latest_missed_opportunity_bands: Arc::new(Mutex::new(Vec::new())),
+            latest_missed_opportunity_bands: Arc::new(Mutex::new(Arc::new(Vec::new()))),
+            latest_live_insights_context: Arc::new(
+                Mutex::new(SharedLiveInsightsContext::default()),
+            ),
             latest_execution_parameters: Arc::new(Mutex::new(None)),
             learning_response_cache: Arc::new(Mutex::new(LearningResponseCache::default())),
             cycle_lock: Arc::new(Mutex::new(())),
@@ -167,14 +199,20 @@ mod strategy_cleanup_integration_tests {
     #[tokio::test]
     async fn every_registered_strategy_cancels_its_protective_orders_on_exit() {
         let deleted = Arc::new(Mutex::new(Vec::new()));
-        let app = Router::new()
-            .route("/positions/orders/{id}", delete(delete_barrier))
-            .with_state(Arc::clone(&deleted));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
+        drop(listener);
+        let endpoint = format!("ws://{address}");
+        let responder = DeleteBarrierResponder(Arc::clone(&deleted));
         let server = tokio::spawn(async move {
-            axum::serve(listener, app).await.unwrap();
+            RSocketFactory::receive()
+                .transport(WebsocketServerTransport::from(address.to_string()))
+                .acceptor(Box::new(move |_, _| Ok(Box::new(responder.clone()))))
+                .serve()
+                .await
+                .unwrap();
         });
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         let state = test_state(Settings::default());
 
         for (index, strategy) in Strategy::all().enumerate() {
@@ -208,9 +246,8 @@ mod strategy_cleanup_integration_tests {
             }
 
             assert!(
-                cancel_protective_stops(
-                    &state.client,
-                    &format!("http://{address}"),
+                cancel_protective_stops_at(
+                    Some(&endpoint),
                     &state,
                     "BTC-USDT",
                     Some(strategy_name)

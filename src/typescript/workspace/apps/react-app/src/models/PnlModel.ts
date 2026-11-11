@@ -95,7 +95,10 @@ export class PnlModel {
     );
     for (const symbol of symbols) {
       if (this.feeds.has(symbol)) continue;
-      const feed = this.connection.openBook(this.feedKeyPrefix + ':' + symbol, symbol);
+      const feed = this.connection.openBook(
+        this.feedKeyPrefix + ':' + symbol,
+        symbol,
+      );
       const data = feed.data.subscribe((raw) => {
         if (raw === undefined) {
           delete this.books[symbol];
@@ -132,27 +135,41 @@ export class PnlModel {
   private publishState(error?: string): void {
     const rows = this.positions.map((position) => {
       const book = this.books[position.symbol];
-      const mark = position.quantity > 0
-        ? book?.bids[0]?.price
-        : position.quantity < 0
-          ? book?.asks[0]?.price
-          : undefined;
+      const mark =
+        position.quantity > 0
+          ? book?.bids[0]?.price
+          : position.quantity < 0
+            ? book?.asks[0]?.price
+            : undefined;
       const currency = quoteCurrency(position.symbol);
       const rate = this.usdRates[currency];
-      const unrealized = mark === undefined
-        ? undefined
-        : (mark - position.average_entry_price) * position.quantity - (position.entry_fees ?? 0) - Math.abs(position.quantity * mark) * (position.estimated_exit_fee_rate ?? 0);
+      const unrealized =
+        mark === undefined
+          ? undefined
+          : (mark - position.average_entry_price) * position.quantity -
+            (position.entry_fees ?? 0) -
+            Math.abs(position.quantity * mark) *
+              (position.estimated_exit_fee_rate ?? 0);
       return {
         position,
         mark,
-        exposure: mark === undefined ? undefined : Math.abs(position.quantity * mark),
-        exposureUsd: mark === undefined || rate === undefined ? undefined : Math.abs(position.quantity * mark) * rate,
-        averageEntryUsd: rate === undefined ? undefined : position.average_entry_price * rate,
+        exposure:
+          mark === undefined ? undefined : Math.abs(position.quantity * mark),
+        exposureUsd:
+          mark === undefined || rate === undefined
+            ? undefined
+            : Math.abs(position.quantity * mark) * rate,
+        averageEntryUsd:
+          rate === undefined ? undefined : position.average_entry_price * rate,
         markTimestamp: mark === undefined ? undefined : book?.timestamp,
         unrealized,
-        realizedUsd: rate === undefined ? undefined : position.realized_pnl * rate,
+        realizedUsd:
+          rate === undefined ? undefined : position.realized_pnl * rate,
         feesPaidUsd: rate === undefined ? undefined : position.fees_paid * rate,
-        unrealizedUsd: unrealized === undefined || rate === undefined ? undefined : unrealized * rate,
+        unrealizedUsd:
+          unrealized === undefined || rate === undefined
+            ? undefined
+            : unrealized * rate,
         bookError: this.errors[position.symbol],
       };
     });
@@ -168,7 +185,12 @@ export class PnlModel {
     for (const row of rows) {
       const hasRealized = Math.abs(row.position.realized_pnl) > 1e-12;
       const hasExposure = Math.abs(row.position.quantity) > 1e-12;
-      if (row.realizedUsd === undefined && hasRealized || row.unrealizedUsd === undefined && hasExposure && row.unrealized !== undefined) {
+      if (
+        (row.realizedUsd === undefined && hasRealized) ||
+        (row.unrealizedUsd === undefined &&
+          hasExposure &&
+          row.unrealized !== undefined)
+      ) {
         total.hasUnconvertedPnl = true;
         missing.add(quoteCurrency(row.position.symbol));
       }
@@ -176,13 +198,15 @@ export class PnlModel {
       if (row.feesPaidUsd !== undefined) total.feesPaid += row.feesPaidUsd;
       if (hasExposure) {
         if (row.unrealized === undefined) total.hasUnmarkedExposure = true;
-        else if (row.unrealizedUsd !== undefined) total.unrealized += row.unrealizedUsd;
+        else if (row.unrealizedUsd !== undefined)
+          total.unrealized += row.unrealizedUsd;
       }
     }
     total.missingCurrencies = [...missing].sort();
-    const visibleRows = rows.filter((row) =>
-      Math.abs(row.position.quantity) > 1e-12 ||
-      Math.abs(row.position.realized_pnl) > 1e-12,
+    const visibleRows = rows.filter(
+      (row) =>
+        Math.abs(row.position.quantity) > 1e-12 ||
+        Math.abs(row.position.realized_pnl) > 1e-12,
     );
     this.state$.next({
       rows: visibleRows,

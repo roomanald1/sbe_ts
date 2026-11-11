@@ -1,18 +1,9 @@
 async fn reconcile_auto_positions_with_ledger(
-    client: &reqwest::Client,
-    base: &str,
     state: &AutoTraderState,
 ) -> Result<(), (StatusCode, String)> {
-    let response: serde_json::Value = client
-        .get(format!("{base}/positions?source=auto"))
-        .send()
+    let response = crate::service_rpc::position_get("/positions?source=auto")
         .await
-        .map_err(upstream_error)?
-        .error_for_status()
-        .map_err(upstream_error)?
-        .json()
-        .await
-        .map_err(upstream_error)?;
+        .map_err(|error| (StatusCode::BAD_GATEWAY, error.to_string()))?;
     let ledger_positions = response["positions"]
         .as_array()
         .ok_or((

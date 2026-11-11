@@ -1,6 +1,5 @@
 #[derive(Clone)]
 struct AutoTraderState {
-    client: reqwest::Client,
     latest_daily_strategy_snapshot: Arc<Mutex<Option<DailyStrategySnapshot>>>,
     latest_live_strategy_signals: Arc<Mutex<BTreeMap<(String, String), Vec<Signal>>>>,
     strategy_diagnostic: Arc<std::sync::Mutex<Vec<StrategyDiagnostic>>>,
@@ -11,7 +10,8 @@ struct AutoTraderState {
     price_path_last_checkpoint_requested_at: Arc<std::sync::Mutex<Option<Instant>>>,
     state_updates: broadcast::Sender<()>,
     settings_persist_timings_ms: Arc<std::sync::Mutex<BTreeMap<String, Vec<f64>>>>,
-    latest_missed_opportunity_bands: Arc<Mutex<Vec<MissedOpportunityGateBand>>>,
+    latest_missed_opportunity_bands: Arc<Mutex<Arc<Vec<MissedOpportunityGateBand>>>>,
+    latest_live_insights_context: Arc<Mutex<SharedLiveInsightsContext>>,
     latest_execution_parameters: Arc<Mutex<Option<LatestExecutionParameters>>>,
     learning_response_cache: Arc<Mutex<LearningResponseCache>>,
     cycle_lock: Arc<Mutex<()>>,
@@ -53,8 +53,7 @@ const LEARNING_RESPONSE_MAX_STALE: Duration = Duration::from_secs(60);
 async fn cached_learning_response<T>(
     response_cache: &Arc<Mutex<LearningResponseCache>>,
     cache_key: String,
-    client: &reqwest::Client,
-    url: String,
+    path: String,
     request: serde_json::Value,
 ) -> Option<T>
 where
@@ -75,20 +74,28 @@ where
 
     if refresh {
         let response_cache = response_cache.clone();
-        let client = client.clone();
         let key = cache_key.clone();
         tokio::spawn(async move {
-            let response = client
-                .post(url)
-                .timeout(Duration::from_secs(2))
-                .json(&request)
-                .send()
-                .await
-                .and_then(reqwest::Response::error_for_status);
+            let response = tokio::time::timeout(
+                Duration::from_secs(2),
+                crate::service_rpc::learning_request(
+                    strategies::ScoutWorkerHttpMethod::Post,
+                    &path,
+                    Some(request),
+                ),
+            ).await;
             let value = match response {
-                Ok(response) => response.json::<serde_json::Value>().await.ok(),
-                Err(error) => {
+                Ok(Ok(response)) if (200..300).contains(&response.status) => Some(response.body),
+                Ok(Ok(response)) => {
+                    crate::service_log!("WARN", "Learning returned status {} for {}", response.status, path);
+                    None
+                }
+                Ok(Err(error)) => {
                     crate::service_log!("WARN", "Learning service refresh failed: {error}");
+                    None
+                }
+                Err(_) => {
+                    crate::service_log!("WARN", "Learning service refresh timed out for {}", path);
                     None
                 }
             };
@@ -140,8 +147,7 @@ mod learning_response_cache_tests {
         let response = cached_learning_response::<serde_json::Value>(
             &response_cache,
             cache_key,
-            &reqwest::Client::new(),
-            "http://127.0.0.1:1/execution-decision".to_owned(),
+            "/execution-decision".to_owned(),
             serde_json::Value::Null,
         )
         .await;
@@ -444,14 +450,88 @@ enum PendingSignalKind {
 
 type PendingSignalQueue = BTreeMap<(PendingSignalKind, String), Dashboard>;
 
+// A feed may report a large universe, while the cycle worker can submit only
+// a small batch per pass. Keep the freshest symbols while bounding retained
+// dashboards during bursts or malformed/unexpected symbol floods.
+const DEFAULT_MAX_PENDING_LIVE_SYMBOLS: usize = 4_096;
+
+fn max_pending_live_symbols() -> usize {
+    static LIMIT: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *LIMIT.get_or_init(|| {
+        std::env::var("AUTO_TRADER_MAX_PENDING_LIVE_SYMBOLS")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .filter(|value| *value > 0)
+            .unwrap_or(DEFAULT_MAX_PENDING_LIVE_SYMBOLS)
+    })
+}
+
 fn queue_pending_signal(
     queue: &mut PendingSignalQueue,
     kind: PendingSignalKind,
     symbol: String,
-    mut dashboard: Dashboard,
+    dashboard: Dashboard,
 ) {
-    dashboard.queued_at = Some(Instant::now());
-    queue.insert((kind, symbol), dashboard);
+    queue_pending_signal_with_cap(queue, kind, symbol, dashboard, max_pending_live_symbols());
+}
+
+fn queue_pending_signal_with_cap(
+    queue: &mut PendingSignalQueue,
+    kind: PendingSignalKind,
+    symbol: String,
+    mut dashboard: Dashboard,
+    live_cap: usize,
+) {
+    let key = (kind, symbol);
+    let incoming_timestamp = dashboard
+        .best
+        .iter()
+        .map(|signal| signal.timestamp)
+        .max()
+        .unwrap_or_default();
+    match queue.entry(key) {
+        std::collections::btree_map::Entry::Occupied(mut entry) => {
+            let existing_timestamp = entry
+                .get()
+                .best
+                .iter()
+                .map(|signal| signal.timestamp)
+                .max()
+                .unwrap_or_default();
+            if incoming_timestamp >= existing_timestamp {
+                dashboard.queued_at = Some(Instant::now());
+                entry.insert(dashboard);
+            }
+        }
+        std::collections::btree_map::Entry::Vacant(entry) => {
+            dashboard.queued_at = Some(Instant::now());
+            entry.insert(dashboard);
+        }
+    }
+    let live_count = queue
+        .keys()
+        .filter(|(queued_kind, _)| *queued_kind == PendingSignalKind::Live)
+        .count();
+    if live_count > live_cap {
+        let oldest = queue
+            .iter()
+            .filter(|((queued_kind, _), _)| *queued_kind == PendingSignalKind::Live)
+            .min_by_key(|((_, symbol), dashboard)| {
+                (
+                    dashboard
+                        .best
+                        .iter()
+                        .map(|signal| signal.timestamp)
+                        .max()
+                        .unwrap_or_default(),
+                    symbol.as_str(),
+                )
+            })
+            .map(|(key, _)| key.clone());
+        if let Some(oldest) = oldest {
+            queue.remove(&oldest);
+        }
+    }
 }
 
 fn take_next_pending_signal(queue: &mut PendingSignalQueue) -> Option<Dashboard> {
@@ -564,7 +644,7 @@ mod pending_signal_queue_tests {
                 entry_gate: None,
             }],
             walk_forward: Arc::new(Vec::new()),
-            missed_opportunity_bands: Vec::new(),
+            missed_opportunity_bands: Arc::new(Vec::new()),
             markets: Arc::new(BTreeMap::new()),
             queued_at: None,
             queue_wait_ms: None,
@@ -632,5 +712,69 @@ mod pending_signal_queue_tests {
         assert!(batch.markets.contains_key("SOL-USDT"));
         assert_eq!(queue.len(), 1);
         assert!(queue.contains_key(&(PendingSignalKind::Live, "BTC-USDT".into())));
+    }
+
+    #[test]
+    fn pending_signal_queue_discards_oldest_live_symbols_at_capacity() {
+        let mut queue = PendingSignalQueue::new();
+        queue_pending_signal_with_cap(
+            &mut queue,
+            PendingSignalKind::Daily,
+            "DAILY-KEEP".into(),
+            dashboard(true),
+            2,
+        );
+        for timestamp in 1..=3 {
+            let symbol = format!("ASSET-{timestamp}");
+            let mut dashboard = dashboard(false);
+            dashboard.best[0].symbol = symbol.clone();
+            dashboard.best[0].timestamp = timestamp;
+            queue_pending_signal_with_cap(
+                &mut queue,
+                PendingSignalKind::Live,
+                symbol,
+                dashboard,
+                2,
+            );
+        }
+
+        assert_eq!(queue.len(), 3);
+        assert!(queue.contains_key(&(PendingSignalKind::Daily, "DAILY-KEEP".into())));
+        assert!(!queue.contains_key(&(PendingSignalKind::Live, "ASSET-1".into())));
+        assert!(queue.contains_key(&(PendingSignalKind::Live, "ASSET-3".into())));
+    }
+
+    #[test]
+    fn same_symbol_update_replaces_older_snapshot_without_growing_queue() {
+        let mut queue = PendingSignalQueue::new();
+        for timestamp in [2, 1] {
+            let mut dashboard = dashboard(false);
+            dashboard.best[0].timestamp = timestamp;
+            queue_pending_signal_with_cap(
+                &mut queue,
+                PendingSignalKind::Live,
+                "BTC-USDT".into(),
+                dashboard,
+                1,
+            );
+        }
+
+        assert_eq!(queue.len(), 1);
+        assert_eq!(queue.values().next().unwrap().best[0].timestamp, 2);
+        assert!(queue.values().next().unwrap().queued_at.is_some());
+    }
+
+    #[test]
+    fn batched_signal_retains_queue_wait_measurement() {
+        let mut queue = PendingSignalQueue::new();
+        queue_pending_signal_with_cap(
+            &mut queue,
+            PendingSignalKind::Live,
+            "BTC-USDT".into(),
+            dashboard(false),
+            1,
+        );
+        let batch = take_next_pending_signal_batch(&mut queue, 1).unwrap();
+        assert!(batch.queue_wait_ms.is_some_and(|wait| wait >= 0.0));
     }
 }

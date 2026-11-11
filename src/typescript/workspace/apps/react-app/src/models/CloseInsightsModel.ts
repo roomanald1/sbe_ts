@@ -1,7 +1,14 @@
 import { BehaviorSubject } from 'rxjs';
 import type { Position } from './PositionTypes';
-import { currentPositionSnapshot, subscribePositionStream } from '../position_stream';
-import { currentInsightsSnapshot, subscribeInsightsStream } from '../insights_stream';
+import {
+  currentPositionSnapshot,
+  subscribePositionStream,
+} from '../position_stream';
+import {
+  currentInsightsSnapshot,
+  subscribeInsightsStream,
+} from '../insights_stream';
+import { executionFetch } from '../execution_api';
 
 type BackendInsight = {
   symbol: string;
@@ -17,7 +24,15 @@ type BackendInsight = {
   profitable_close_probability_5m?: number;
   probability_samples: number;
 };
-type BarrierOrder = { id: string; symbol: string; quantity: number; remaining_quantity: number; trigger_price: number; trigger_direction: 'above' | 'below'; status: string };
+type BarrierOrder = {
+  id: string;
+  symbol: string;
+  quantity: number;
+  remaining_quantity: number;
+  trigger_price: number;
+  trigger_direction: 'above' | 'below';
+  status: string;
+};
 export type CloseInsight = {
   position: Position;
   closeSide: 'buy' | 'sell';
@@ -46,7 +61,13 @@ export type CloseInsightsState = {
 };
 
 export class CloseInsightsModel {
-  readonly state$ = new BehaviorSubject<CloseInsightsState>({ insights: [], loading: true, barrierTargetUsd: '1', barriers: [], pendingBarrierSymbols: [] });
+  readonly state$ = new BehaviorSubject<CloseInsightsState>({
+    insights: [],
+    loading: true,
+    barrierTargetUsd: '1',
+    barriers: [],
+    pendingBarrierSymbols: [],
+  });
   private livePositions?: Position[];
   private liveInsights?: BackendInsight[];
   private liveBarriers: BarrierOrder[] = [];
@@ -63,9 +84,13 @@ export class CloseInsightsModel {
       this.liveBarriers = snapshot.orders.barrier_orders ?? [];
       void this.refresh();
     });
-    this.liveInsights = currentInsightsSnapshot()?.close_insights?.insights as BackendInsight[] | undefined;
+    this.liveInsights = currentInsightsSnapshot()?.close_insights?.insights as
+      | BackendInsight[]
+      | undefined;
     this.stopInsightsStream = subscribeInsightsStream((snapshot) => {
-      this.liveInsights = snapshot.close_insights?.insights as BackendInsight[] | undefined;
+      this.liveInsights = snapshot.close_insights?.insights as
+        | BackendInsight[]
+        | undefined;
       void this.refresh();
     });
     void this.refresh();
@@ -79,14 +104,22 @@ export class CloseInsightsModel {
   }
 
   async refresh(): Promise<void> {
-    const positions = this.livePositions ?? currentPositionSnapshot()?.positions.positions;
-    const insights = this.liveInsights ?? currentInsightsSnapshot()?.close_insights?.insights as BackendInsight[] | undefined;
+    const positions =
+      this.livePositions ?? currentPositionSnapshot()?.positions.positions;
+    const insights =
+      this.liveInsights ??
+      (currentInsightsSnapshot()?.close_insights?.insights as
+        | BackendInsight[]
+        | undefined);
     if (!positions || !insights) return;
-      const positionsBySymbol = new Map(positions.map((position) => [position.symbol, position]));
-      const rows = insights.flatMap((insight) => {
-        const position = positionsBySymbol.get(insight.symbol);
-        return position && Math.abs(position.quantity) > 1e-12
-          ? [{
+    const positionsBySymbol = new Map(
+      positions.map((position) => [position.symbol, position]),
+    );
+    const rows = insights.flatMap((insight) => {
+      const position = positionsBySymbol.get(insight.symbol);
+      return position && Math.abs(position.quantity) > 1e-12
+        ? [
+            {
               position,
               closeSide: insight.close_side,
               closeQuantity: insight.close_quantity,
@@ -97,81 +130,151 @@ export class CloseInsightsModel {
               closeFee: insight.close_fee,
               depthCoversPosition: insight.depth_covers_position,
               closeDepthQuantity: insight.close_depth_quantity,
-              profitableCloseProbability5m: insight.profitable_close_probability_5m,
+              profitableCloseProbability5m:
+                insight.profitable_close_probability_5m,
               probabilitySamples: insight.probability_samples,
-            }]
-          : [];
-      });
-      const rates = this.usdRates;
-      this.state$.next({
-        ...this.state$.value,
-        loading: false,
-        error: undefined,
-        barriers: this.liveBarriers,
-        insights: rows.map((row) => {
-          const quote = row.position.symbol.split('-')[1] ?? '';
-          const rate = rates[quote];
-          return {
-            ...row,
-            closeFeeUsd: row.closeFee !== undefined && rate !== undefined ? row.closeFee * rate : undefined,
-            closePnlUsd: row.closePnl !== undefined && rate !== undefined ? row.closePnl * rate : undefined,
-          };
-        }),
-      });
+            },
+          ]
+        : [];
+    });
+    const rates = this.usdRates;
+    this.state$.next({
+      ...this.state$.value,
+      loading: false,
+      error: undefined,
+      barriers: this.liveBarriers,
+      insights: rows.map((row) => {
+        const quote = row.position.symbol.split('-')[1] ?? '';
+        const rate = rates[quote];
+        return {
+          ...row,
+          closeFeeUsd:
+            row.closeFee !== undefined && rate !== undefined
+              ? row.closeFee * rate
+              : undefined,
+          closePnlUsd:
+            row.closePnl !== undefined && rate !== undefined
+              ? row.closePnl * rate
+              : undefined,
+        };
+      }),
+    });
   }
 
   setBarrierTargetUsd(barrierTargetUsd: string): void {
-    this.state$.next({ ...this.state$.value, barrierTargetUsd, error: undefined });
+    this.state$.next({
+      ...this.state$.value,
+      barrierTargetUsd,
+      error: undefined,
+    });
   }
 
   async createProfitBarrier(insight: CloseInsight): Promise<void> {
     const current = this.state$.value;
     const symbol = insight.position.symbol;
-    if (current.pendingBarrierSymbols.includes(symbol) || current.barriers.some((barrier) => barrier.symbol === symbol && barrier.status === 'armed')) return;
+    if (
+      current.pendingBarrierSymbols.includes(symbol) ||
+      current.barriers.some(
+        (barrier) => barrier.symbol === symbol && barrier.status === 'armed',
+      )
+    )
+      return;
     const target = Number(current.barrierTargetUsd);
     if (!Number.isFinite(target) || target <= 0) {
-      this.state$.next({ ...current, error: 'Enter a USD profit target greater than zero' });
+      this.state$.next({
+        ...current,
+        error: 'Enter a USD profit target greater than zero',
+      });
       return;
     }
-    this.state$.next({ ...current, pendingBarrierSymbols: [...current.pendingBarrierSymbols, symbol], error: undefined });
+    this.state$.next({
+      ...current,
+      pendingBarrierSymbols: [...current.pendingBarrierSymbols, symbol],
+      error: undefined,
+    });
     try {
-      const response = await fetch('/positions/barriers/profit-target', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ symbol, target_profit_usd: target }),
-      });
+      const response = await executionFetch(
+        '/positions/barriers/profit-target',
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ symbol, target_profit_usd: target }),
+        },
+      );
       if (!response.ok) {
         const detail = (await response.text()).trim();
-        throw new Error(detail || ('Could not create profit barrier (HTTP ' + response.status + ')'));
+        throw new Error(
+          detail ||
+            'Could not create profit barrier (HTTP ' + response.status + ')',
+        );
       }
       await this.refresh();
     } catch (reason) {
-      this.state$.next({ ...this.state$.value, error: reason instanceof Error ? reason.message : 'Could not create profit barrier' });
+      this.state$.next({
+        ...this.state$.value,
+        error:
+          reason instanceof Error
+            ? reason.message
+            : 'Could not create profit barrier',
+      });
     } finally {
-      this.state$.next({ ...this.state$.value, pendingBarrierSymbols: this.state$.value.pendingBarrierSymbols.filter((pendingSymbol) => pendingSymbol !== symbol) });
+      this.state$.next({
+        ...this.state$.value,
+        pendingBarrierSymbols: this.state$.value.pendingBarrierSymbols.filter(
+          (pendingSymbol) => pendingSymbol !== symbol,
+        ),
+      });
     }
   }
 
   async cancelBarrier(barrier: BarrierOrder): Promise<void> {
     const current = this.state$.value;
-    if (barrier.status !== 'armed' || current.pendingBarrierSymbols.includes(barrier.symbol)) return;
-    this.state$.next({ ...current, pendingBarrierSymbols: [...current.pendingBarrierSymbols, barrier.symbol], error: undefined });
+    if (
+      barrier.status !== 'armed' ||
+      current.pendingBarrierSymbols.includes(barrier.symbol)
+    )
+      return;
+    this.state$.next({
+      ...current,
+      pendingBarrierSymbols: [...current.pendingBarrierSymbols, barrier.symbol],
+      error: undefined,
+    });
     try {
-      const response = await fetch('/positions/orders/' + encodeURIComponent(barrier.id), { method: 'DELETE' });
+      const response = await executionFetch(
+        '/positions/orders/' + encodeURIComponent(barrier.id),
+        { method: 'DELETE' },
+      );
       if (!response.ok) {
         const detail = (await response.text()).trim();
-        throw new Error(detail || ('Could not cancel barrier (HTTP ' + response.status + ')'));
+        throw new Error(
+          detail || 'Could not cancel barrier (HTTP ' + response.status + ')',
+        );
       }
       await this.refresh();
     } catch (reason) {
-      this.state$.next({ ...this.state$.value, error: reason instanceof Error ? reason.message : 'Could not cancel barrier' });
+      this.state$.next({
+        ...this.state$.value,
+        error:
+          reason instanceof Error ? reason.message : 'Could not cancel barrier',
+      });
     } finally {
-      this.state$.next({ ...this.state$.value, pendingBarrierSymbols: this.state$.value.pendingBarrierSymbols.filter((symbol) => symbol !== barrier.symbol) });
+      this.state$.next({
+        ...this.state$.value,
+        pendingBarrierSymbols: this.state$.value.pendingBarrierSymbols.filter(
+          (symbol) => symbol !== barrier.symbol,
+        ),
+      });
     }
   }
 
   requestClose(insight: CloseInsight): void {
-    if (insight.closeDepthQuantity <= 0 || this.state$.value.closingSymbol) return;
-    this.state$.next({ ...this.state$.value, confirmingInsight: insight, error: undefined });
+    if (insight.closeDepthQuantity <= 0 || this.state$.value.closingSymbol)
+      return;
+    this.state$.next({
+      ...this.state$.value,
+      confirmingInsight: insight,
+      error: undefined,
+    });
   }
 
   cancelClose(): void {
@@ -190,20 +293,35 @@ export class CloseInsightsModel {
   private async submitClose(insight: CloseInsight): Promise<void> {
     const current = this.state$.value;
     if (current.closingSymbol) return;
-    this.state$.next({ ...current, confirmingInsight: undefined, closingSymbol: insight.position.symbol, error: undefined });
+    this.state$.next({
+      ...current,
+      confirmingInsight: undefined,
+      closingSymbol: insight.position.symbol,
+      error: undefined,
+    });
     try {
-      const response = await fetch('/positions/close-profitable', {
+      const response = await executionFetch('/positions/close-profitable', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ symbol: insight.position.symbol }),
       });
       if (!response.ok) {
         const detail = (await response.text()).trim();
-        throw new Error(detail || ('Close IOC failed (HTTP ' + response.status + (response.statusText ? ' ' + response.statusText : '') + ')'));
+        throw new Error(
+          detail ||
+            'Close IOC failed (HTTP ' +
+              response.status +
+              (response.statusText ? ' ' + response.statusText : '') +
+              ')',
+        );
       }
       await this.refresh();
     } catch (reason) {
-      this.state$.next({ ...this.state$.value, error: reason instanceof Error ? reason.message : 'Could not close position' });
+      this.state$.next({
+        ...this.state$.value,
+        error:
+          reason instanceof Error ? reason.message : 'Could not close position',
+      });
     } finally {
       this.state$.next({ ...this.state$.value, closingSymbol: undefined });
     }

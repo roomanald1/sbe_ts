@@ -1,2 +1,3 @@
 transformers>=4.45,<5
 safetensors>=0.4
+rsocket[aiohttp]==0.4.20

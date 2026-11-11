@@ -1,13 +1,24 @@
-import { bufferTime, filter, from, map, mergeMap, of, switchMap, type Observable } from 'rxjs';
+import {
+  bufferTime,
+  filter,
+  from,
+  map,
+  mergeMap,
+  of,
+  switchMap,
+  type Observable,
+} from 'rxjs';
 import type { Connection } from './connection';
-import { decodeSymbolPriceBatch, type SymbolPriceTick } from './types/symbol_price';
+import {
+  decodeSymbolPriceBatch,
+  type SymbolPriceTick,
+} from './types/symbol_price';
 import { BehaviorSubject } from 'rxjs';
 
 export type PriceHistorySample = {
   timestamp: number;
   price: number;
 };
-
 
 export type PriceChanges = {
   ticks: SymbolPriceTick[];
@@ -71,7 +82,12 @@ function createPriceChangesObservable(
 
         const latestTick = symbols.get(tick.symbol);
         if (!latestTick) return;
-        if (ticks[index]?.price !== latestTick.price || ticks[index]?.volatility1m !== latestTick.volatility1m || ticks[index]?.volatility5m !== latestTick.volatility5m || ticks[index]?.receivedAt !== latestTick.receivedAt) {
+        if (
+          ticks[index]?.price !== latestTick.price ||
+          ticks[index]?.volatility1m !== latestTick.volatility1m ||
+          ticks[index]?.volatility5m !== latestTick.volatility5m ||
+          ticks[index]?.receivedAt !== latestTick.receivedAt
+        ) {
           ticks[index] = latestTick;
         }
 

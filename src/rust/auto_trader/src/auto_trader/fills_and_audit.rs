@@ -327,19 +327,15 @@ fn queue_auto_trader_audit(state: &AutoTraderState, payload: serde_json::Value) 
     }
 }
 
-async fn store_auto_trader_audit(client: &reqwest::Client, payload: &serde_json::Value) -> bool {
-    let base = std::env::var("INSIGHTS_URL").unwrap_or_else(|_| "http://127.0.0.1:3004".into());
-    let url = format!("{base}/signals/auto-trader-audit");
-    match client
-        .post(&url)
-        .timeout(Duration::from_secs(2))
-        .json(payload)
-        .send()
-        .await
-    {
-        Ok(response) if response.status().is_success() => true,
+async fn store_auto_trader_audit(payload: &serde_json::Value) -> bool {
+    match crate::service_rpc::insights_browser_request(
+        "POST",
+        "/signals/auto-trader-audit",
+        Some(payload.clone()),
+    ).await {
+        Ok(response) if (200..300).contains(&response.status) => true,
         Ok(response) => {
-            crate::service_log!("ERROR", "Auto-trader audit write failed with status {}", response.status());
+            crate::service_log!("ERROR", "Auto-trader audit write failed with status {}", response.status);
             false
         }
         Err(error) => {
@@ -350,13 +346,12 @@ async fn store_auto_trader_audit(client: &reqwest::Client, payload: &serde_json:
 }
 
 async fn store_execution_audit_until_saved(
-    client: &reqwest::Client,
     payload: &serde_json::Value,
     audit_health: &AtomicU64,
     healthy_bit: u64,
 ) {
     let mut retry_delay = Duration::from_secs(1);
-    while !store_auto_trader_audit(client, payload).await {
+    while !store_auto_trader_audit(payload).await {
         if audit_health.fetch_and(!healthy_bit, Ordering::Relaxed) & healthy_bit != 0 {
             crate::service_log!("ERROR", "Auto-trader audit persistence unavailable; new signal entries are paused while queued events retry");
         }

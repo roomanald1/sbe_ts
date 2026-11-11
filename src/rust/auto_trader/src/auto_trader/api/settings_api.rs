@@ -3,9 +3,7 @@ async fn set_enabled(
     Json(request): Json<EnabledRequest>,
 ) -> Result<Json<StatusResponse>, (StatusCode, String)> {
     if request.enabled {
-        let position_url = std::env::var("POSITION_MANAGEMENT_URL")
-            .unwrap_or_else(|_| "http://127.0.0.1:3002".into());
-        sync_auto_positions(&state.client, &position_url, &state).await?;
+        sync_auto_positions(&state).await?;
     }
     state.enabled.store(request.enabled, Ordering::Relaxed);
     let mut settings = state.settings.lock().await;
@@ -259,16 +257,14 @@ async fn update_settings(
     let minimum_scout_parameter_samples = settings.minimum_live_scout_parameter_samples;
     drop(settings);
 
-    if let Ok(base) = std::env::var("LEARNING_SERVICE_URL") {
-        match state.client
-            .put(format!("{}/config/scout-parameter-samples", base.trim_end_matches('/')))
-            .json(&serde_json::json!({ "minimum_samples": minimum_scout_parameter_samples }))
-            .send().await
-        {
-            Ok(response) if response.status().is_success() => {}
-            Ok(response) => crate::service_log!("ERROR", "Could not sync scout sample minimum to Learning service: {}", response.status()),
-            Err(error) => crate::service_log!("ERROR", "Could not sync scout sample minimum to Learning service: {}", error),
-        }
+    match crate::service_rpc::learning_request(
+        strategies::ScoutWorkerHttpMethod::Put,
+        "/config/scout-parameter-samples",
+        Some(serde_json::json!({ "minimum_samples": minimum_scout_parameter_samples })),
+    ).await {
+        Ok(response) if (200..300).contains(&response.status) => {}
+        Ok(response) => crate::service_log!("ERROR", "Could not sync scout sample minimum to Learning service: {}", response.status),
+        Err(error) => crate::service_log!("ERROR", "Could not sync scout sample minimum to Learning service: {}", error),
     }
 
     if request.reset_learning {

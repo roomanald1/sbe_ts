@@ -19,7 +19,8 @@ use strategies::{
     ContextLearningStat, ContextMissedOpportunityBand, ContextThresholdInput,
     ContextThresholdRequest, ContextThresholdResponse, ContextThresholds, ExecutionLearningRequest,
     ExecutionLearningResponse, ExecutionLearningStat, ExecutionOutcomeEvent, FeedbackEvent,
-    LearnedProfileSnapshot, ParameterSpec, StrategyProfile, StrategyProfileRegistration,
+    LearnedProfileSnapshot, ParameterSpec, ScoutComparisonMetadata, StrategyProfile,
+    StrategyProfileRegistration,
 };
 use tokio::sync::Mutex;
 
@@ -27,12 +28,14 @@ mod context;
 mod execution;
 mod feedback;
 mod profiles;
+mod scout_coordinator;
 mod thresholds;
 
 use context::*;
 use execution::*;
 use feedback::*;
 use profiles::*;
+pub use scout_coordinator::ScoutCoordinator;
 use thresholds::*;
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -54,7 +57,6 @@ struct LearningOutcome {
     evidence_group_id: Option<String>,
     #[serde(default)]
     learning_context: Option<String>,
-    #[serde(default)]
     source: LearningOutcomeSource,
     #[serde(default)]
     realized_pnl_usd: Option<f64>,
@@ -66,13 +68,10 @@ struct LearningOutcome {
     baseline_parameters: BTreeMap<String, f64>,
 }
 
-#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 enum LearningOutcomeSource {
-    #[default]
-    Legacy,
     Scout,
-    PaperScoutTrade,
     Trade,
 }
 
@@ -90,7 +89,6 @@ struct ThresholdTrainingSample {
 #[derive(Serialize)]
 struct StrategySummary {
     strategy: String,
-    // Kept as trade-only aliases for existing clients.
     learning_samples: usize,
     positive_rate: Option<f64>,
     average_net_return_percent: Option<f64>,
@@ -103,13 +101,9 @@ struct StrategySummary {
     other_profile_trade_samples: usize,
     other_profile_trade_positive_rate: Option<f64>,
     other_profile_average_net_return_percent: Option<f64>,
-    paper_scout_trade_samples: usize,
-    paper_scout_positive_rate: Option<f64>,
-    paper_scout_average_net_return_percent: Option<f64>,
     paired_scout_samples: usize,
     paired_scout_positive_rate: Option<f64>,
     average_paired_scout_lift_percent: Option<f64>,
-    unclassified_samples: usize,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -199,16 +193,31 @@ fn event_parts(event: &FeedbackEvent) -> (&str, &str, &str, &BTreeMap<String, f6
 }
 
 pub fn router(path: PathBuf) -> Result<Router, String> {
+    let service = service_state(path)?;
+    Ok(service_router(service))
+}
+
+pub fn router_with_scout_coordinator(
+    path: PathBuf,
+    worker_endpoints: &str,
+) -> Result<(Router, ScoutCoordinator), String> {
+    let service = service_state(path)?;
+    let app = service_router(service.clone());
+    let coordinator = ScoutCoordinator::new(service, worker_endpoints, app.clone())?;
+    Ok((app, coordinator))
+}
+
+fn service_state(path: PathBuf) -> Result<ServiceState, String> {
     let mut stored = load_state(&path)?;
     rebuild_trade_profile_metrics(&mut stored, now_ms());
-    let service = ServiceState {
+    Ok(ServiceState {
         state: Arc::new(Mutex::new(stored)),
         path,
-    };
-    Ok(Router::new()
-        .route("/health", get(|| async { "ok" }))
-        .route("/process-cpu-seconds", get(process_cpu_seconds))
-        .route("/process-memory-bytes", get(process_memory_bytes))
+    })
+}
+
+fn service_router(service: ServiceState) -> Router {
+    Router::new()
         .route("/profiles", get(get_profiles).post(register_profile))
         .route("/decision-snapshot", get(get_decision_snapshot))
         .route("/summary", get(get_summary))
@@ -221,7 +230,16 @@ pub fn router(path: PathBuf) -> Result<Router, String> {
         .route("/context-thresholds", post(context_thresholds))
         .route("/execution-decision", post(execution_decision))
         .route("/execution-outcomes", post(execution_outcome))
-        .with_state(service))
+        .with_state(service)
+}
+
+/// Operations-only HTTP surface. Domain requests are served through the
+/// Learning RSocket coordinator.
+pub fn operational_router() -> Router {
+    Router::new()
+        .route("/health", get(|| async { "ok" }))
+        .route("/process-cpu-seconds", get(process_cpu_seconds))
+        .route("/process-memory-bytes", get(process_memory_bytes))
 }
 
 async fn process_cpu_seconds() -> String {
@@ -318,7 +336,8 @@ async fn accept_exit_timing_observation(
         state
             .exit_timing_observations
             .insert(event_id.to_owned(), observation);
-        while state.exit_timing_observations.len() > 10_000 { //TODO remove hardcoding
+        while state.exit_timing_observations.len() > 10_000 {
+            //TODO remove hardcoding
             if let Some(oldest) = state.exit_timing_observations.keys().next().cloned() {
                 state.exit_timing_observations.remove(&oldest);
             }
@@ -334,33 +353,6 @@ fn load_state(path: &Path) -> Result<LearningState, String> {
     use rusqlite::OptionalExtension;
 
     let connection = open_state_db(path)?;
-    let legacy_payload = connection
-        .query_row(
-            "SELECT payload FROM learning_state WHERE id = 1",
-            [],
-            |row| row.get::<_, Vec<u8>>(0),
-        )
-        .optional();
-    //TODO remove legacy handling - we should do a one off purge of that data instead
-    if let Ok(Some(payload)) = legacy_payload {
-        let state: LearningState = serde_json::from_slice(&payload).map_err(|error| {
-            format!(
-                "could not decode learning database {}: {error}",
-                path.display()
-            )
-        })?;
-        persist_normalized(&connection, &state).map_err(|error| {
-            format!(
-                "could not normalize learning database {}: {error}",
-                path.display()
-            )
-        })?;
-        connection
-            .execute("DROP TABLE learning_state", [])
-            .map_err(|error| format!("could not remove legacy learning table: {error}"))?;
-        return Ok(state);
-    }
-
     if let Some(accepted_events) = connection
         .query_row(
             "SELECT accepted_events FROM learning_metadata WHERE id = 1",
@@ -380,7 +372,10 @@ fn load_state(path: &Path) -> Result<LearningState, String> {
             [], |row| row.get::<_, i64>(0),
         ).optional().map_err(|error| format!("could not read learning configuration: {error}"))?
             .and_then(|value| usize::try_from(value).ok())
-            .filter(|value| (2..=100).contains(value))
+            .filter(|value| {
+                (MINIMUM_SCOUT_PARAMETER_SAMPLES..=MAXIMUM_SCOUT_PARAMETER_SAMPLES)
+                    .contains(value)
+            })
             .unwrap_or_else(default_live_scout_parameter_samples);
         load_map(&connection, "learning_variants", &mut state.variants)?;
         load_map(
@@ -409,26 +404,7 @@ fn load_state(path: &Path) -> Result<LearningState, String> {
         )?;
         return Ok(state);
     }
-    //TODO remove any legacy BS
-    let legacy_path = path.with_extension("json");
-    match std::fs::read(&legacy_path) {
-        Ok(bytes) => {
-            let state = serde_json::from_slice::<LearningState>(&bytes).map_err(|error| {
-                format!(
-                    "could not decode legacy learning state {}: {error}",
-                    legacy_path.display()
-                )
-            })?;
-            persist_normalized(&connection, &state)
-                .map_err(|error| format!("could not migrate learning state: {error}"))?;
-            Ok(state)
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(LearningState::default()),
-        Err(error) => Err(format!(
-            "could not read legacy learning state {}: {error}",
-            legacy_path.display()
-        )),
-    }
+    Ok(LearningState::default())
 }
 
 fn load_map<T: for<'de> Deserialize<'de>>(
@@ -633,26 +609,6 @@ mod tests {
     use http_body_util::BodyExt;
     use tower::ServiceExt;
 
-    #[test]
-    fn migrates_legacy_json_state_into_sqlite() {
-        let base = std::env::temp_dir().join(format!("learning-migration-{}", std::process::id()));
-        std::fs::create_dir_all(&base).unwrap();
-        let database = base.join("learning_state.sqlite");
-        let legacy = base.join("learning_state.json");
-        let state = LearningState {
-            accepted_events: 17,
-            ..LearningState::default()
-        };
-        std::fs::write(&legacy, serde_json::to_vec(&state).unwrap()).unwrap();
-
-        let migrated = load_state(&database).unwrap();
-        assert_eq!(migrated.accepted_events, 17);
-        assert_eq!(load_state(&database).unwrap().accepted_events, 17);
-        assert!(legacy.exists(), "migration preserves the source file");
-
-        let _ = std::fs::remove_dir_all(base);
-    }
-
     async fn json_request(
         app: Router,
         method: &str,
@@ -842,7 +798,7 @@ mod tests {
             for sample in 0..3 {
                 for horizon in [60, 300, 900, 3_600] {
                     let event = FeedbackEvent::ScoutOutcome {
-                        event_id: format!("paired-scout:{symbol}-{sample}:horizon-{horizon}"),
+                        event_id: format!("fixture-event-{symbol}-{sample}-{horizon}"),
                         observed_at_ms: now_ms() + symbol_index as u64 * 10 + sample,
                         learning_context: None,
                         symbol: symbol.into(),
@@ -850,6 +806,10 @@ mod tests {
                         profile_id: profile_id.clone(),
                         parameters: parameters.clone(),
                         baseline_parameters: BTreeMap::from([("threshold".into(), 0.5)]),
+                        comparison: ScoutComparisonMetadata::Paired {
+                            group_id: format!("{symbol}-{sample}"),
+                            horizon_seconds: Some(horizon),
+                        },
                         specs: vec![spec.clone()],
                         net_return_percent: 0.02,
                     };
@@ -892,7 +852,7 @@ mod tests {
         // not contribute to BTC's promotion decision or be changed with it.
         for sample in 3..6 {
             let event = FeedbackEvent::ScoutOutcome {
-                event_id: format!("paired-scout:BTC-USDT-extra-{sample}"),
+                event_id: format!("fixture-event-BTC-USDT-extra-{sample}"),
                 observed_at_ms: now_ms() + 100 + sample,
                 learning_context: None,
                 symbol: "BTC-USDT".into(),
@@ -900,6 +860,10 @@ mod tests {
                 profile_id: "BTC-USDT-candidate".into(),
                 parameters: BTreeMap::from([("threshold".into(), 0.4)]),
                 baseline_parameters: BTreeMap::from([("threshold".into(), 0.5)]),
+                comparison: ScoutComparisonMetadata::Paired {
+                    group_id: format!("BTC-USDT-extra-{sample}"),
+                    horizon_seconds: None,
+                },
                 specs: vec![spec.clone()],
                 net_return_percent: 0.02,
             };
@@ -1133,6 +1097,7 @@ mod tests {
             profile_id: "p1".into(),
             parameters: profile.parameters.clone(),
             baseline_parameters: BTreeMap::new(),
+            comparison: ScoutComparisonMetadata::Independent,
             specs: vec![spec.clone()],
             net_return_percent: 2.0,
         };
@@ -1190,6 +1155,7 @@ mod tests {
             profile_id: profile.profile_id.clone(),
             parameters: profile.parameters.clone(),
             baseline_parameters: BTreeMap::new(),
+            comparison: ScoutComparisonMetadata::Independent,
             specs: vec![spec.clone()],
             net_return_percent: -1.0,
         };
@@ -1229,6 +1195,7 @@ mod tests {
             profile_id: "p1".into(),
             parameters: BTreeMap::from([("threshold".into(), 0.5)]),
             baseline_parameters: BTreeMap::new(),
+            comparison: ScoutComparisonMetadata::Independent,
             specs: vec![],
             net_return_percent: 1.0,
         };

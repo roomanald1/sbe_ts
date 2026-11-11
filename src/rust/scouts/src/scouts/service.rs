@@ -1,9 +1,8 @@
 #[derive(Clone)]
 struct ServiceState {
-    client: reqwest::Client,
-    learning_url: String,
-    auto_trader_url: String,
-    seen: Arc<Mutex<BTreeSet<String>>>,
+    learning_rsocket_url: String,
+    insights_rsocket_url: String,
+    auto_trader_rsocket_url: String,
     strategy_outcomes_by_profile:
         Arc<std::sync::RwLock<BTreeMap<String, Vec<StrategyOutcomeProfileIndexEntry>>>>,
     portfolio_instances_by_group:
@@ -89,15 +88,15 @@ fn estimate_live_scout_maximum_durations(
 fn schedule_scout_outbox_flush(service: &ServiceState) {
     schedule_scout_outbox_flush_with(
         service.scout.clone(),
-        service.client.clone(),
-        service.learning_url.clone(),
+        service.learning_rsocket_url.clone(),
+        service.insights_rsocket_url.clone(),
     );
 }
 
 fn schedule_scout_outbox_flush_with(
     scout: ScoutState,
-    client: reqwest::Client,
-    learning_url: String,
+    learning_rsocket_url: String,
+    insights_rsocket_url: String,
 ) {
     if scout
         .flush_scheduled
@@ -107,7 +106,7 @@ fn schedule_scout_outbox_flush_with(
         return;
     }
     tokio::spawn(async move {
-        let result = flush_scout_outbox(&scout, &client, &learning_url).await;
+        let result = flush_scout_outbox(&scout, &learning_rsocket_url, &insights_rsocket_url).await;
         scout
             .flush_scheduled
             .store(false, std::sync::atomic::Ordering::Release);
@@ -117,18 +116,160 @@ fn schedule_scout_outbox_flush_with(
         }
         let pending = !scout.data.lock().await.outbox.is_empty();
         if pending {
-            schedule_scout_outbox_flush_with(scout, client, learning_url);
+            schedule_scout_outbox_flush_with(scout, learning_rsocket_url, insights_rsocket_url);
         }
     });
 }
 
-pub fn router(learning_url: String, auto_trader_url: String) -> Router {
-    let configured_path = std::env::var_os("SCOUTS_STATE_PATH").map(PathBuf::from);
-    let state_path = configured_path
-        .clone()
-        .unwrap_or_else(|| PathBuf::from("../position_management/scouts_state.sqlite"));
+pub fn router() -> Router {
+    Router::new()
+        .route("/health", get(|| async { "ok" }))
+        .route("/process-cpu-seconds", get(process_cpu_seconds))
+        .route("/process-memory-bytes", get(process_memory_bytes))
+}
+
+pub fn strategy_worker_router(strategy: strategies::Strategy, state_path: PathBuf) -> Router {
+    router_with_state(state_path, strategy)
+}
+
+/// Explicit offline migration for the former shared JSON/SQLite state file.
+/// Existing worker databases are never overwritten.
+pub fn import_strategy_partition(
+    source_path: &std::path::Path,
+    destination_path: &std::path::Path,
+    strategy: strategies::Strategy,
+) -> anyhow::Result<usize> {
+    if destination_path.exists() {
+        anyhow::bail!("refusing to overwrite existing strategy state {}", destination_path.display());
+    }
+    let state = load_state_for_import(source_path)?;
+    import_partition_state(state, destination_path, strategy)
+}
+
+/// One-pass partition import for large SQLite state files. Source state is
+/// read once, then cloned and filtered into each configured strategy database.
+pub fn import_strategy_partitions(
+    source_path: &std::path::Path,
+    destination_directory: &std::path::Path,
+) -> anyhow::Result<Vec<(String, usize)>> {
+    let source_state = load_state_for_import(source_path)?;
+    let strategies = source_state
+        .scout_configuration
+        .strategies
+        .iter()
+        .map(|name| {
+            strategies::Strategy::from_name(name)
+                .ok_or_else(|| anyhow::anyhow!("unknown strategy in source config: {name}"))
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    if strategies.is_empty() {
+        anyhow::bail!("source Scout state has no configured strategies");
+    }
+    std::fs::create_dir_all(destination_directory)?;
+    for strategy in &strategies {
+        let destination = destination_directory.join(format!("{}.sqlite", strategy.as_str()));
+        if destination.exists() {
+            anyhow::bail!("refusing to overwrite existing strategy state {}", destination.display());
+        }
+    }
+    strategies
+        .into_iter()
+        .map(|strategy| {
+            let destination = destination_directory.join(format!("{}.sqlite", strategy.as_str()));
+            let count = import_partition_state(source_state.clone(), &destination, strategy)?;
+            Ok((strategy.as_str().to_owned(), count))
+        })
+        .collect()
+}
+
+fn load_state_for_import(source_path: &std::path::Path) -> anyhow::Result<PersistedState> {
+    let mut source = std::fs::File::open(source_path)?;
+    let mut prefix = [0u8; 32];
+    let bytes_read = std::io::Read::read(&mut source, &mut prefix)?;
+    let is_json = prefix[..bytes_read]
+        .iter()
+        .copied()
+        .find(|byte| !byte.is_ascii_whitespace())
+        == Some(b'{');
+    if is_json {
+        Ok(serde_json::from_slice(&std::fs::read(source_path)?)?)
+    } else {
+        let mut value = load_scout_state_value(source_path)?;
+        normalize_import_outbox(&mut value);
+        Ok(serde_json::from_value(value)?)
+    }
+}
+
+fn import_partition_state(
+    mut state: PersistedState,
+    destination_path: &std::path::Path,
+    strategy: strategies::Strategy,
+) -> anyhow::Result<usize> {
+    if destination_path.exists() {
+        anyhow::bail!("refusing to overwrite existing strategy state {}", destination_path.display());
+    }
+    let strategy_name = strategy.as_str();
+    let includes_strategy = |value: &serde_json::Value| json_has_strategy(value, strategy_name);
+    state.scout_configuration.strategies = vec![strategy_name.to_owned()];
+    state.outcomes.retain(|_, outcome| outcome.strategy == strategy_name);
+    state.scout_instances.retain(|_, row| includes_strategy(row));
+    state.pairs.retain(|_, pair| {
+        serde_json::to_value(pair).is_ok_and(|value| includes_strategy(&value))
+    });
+    state.outbox.retain(|item| {
+        serde_json::to_value(item).is_ok_and(|value| includes_strategy(&value))
+    });
+    state.seen.retain(|key| key.contains(strategy_name) || (strategy == strategies::Strategy::DatedCarry && key.contains("dated-carry")));
+    state.scout_sample_at_ms.retain(|key, _| key.contains(strategy_name) || (strategy == strategies::Strategy::DatedCarry && key.contains("dated-carry")));
+    state.scout_sample_active_scenarios.retain(|key, _| key.contains(strategy_name) || (strategy == strategies::Strategy::DatedCarry && key.contains("dated-carry")));
+    state.scout_plan_profiles.retain(|key, value| key.contains(strategy_name) || value == strategy_name);
+    state.scout_plan_results.retain(|key, response| {
+        response.audits.retain(|audit| includes_strategy(audit));
+        response.selected_groups.retain(|group| group.contains(strategy_name));
+        !response.audits.is_empty()
+            || !response.selected_groups.is_empty()
+            || key.contains(strategy_name)
+    });
+    state.scout_pending_samples.retain(|key, sample| key.contains(strategy_name) || serde_json::to_value(sample).is_ok_and(|value| includes_strategy(&value)));
+    state.scout_observation_results.retain(|key, result| key.contains(strategy_name) || (strategy == strategies::Strategy::DatedCarry && key.contains("dated-carry")) || serde_json::to_value(result).is_ok_and(|value| includes_strategy(&value)));
+    state.scout_active_audits.retain(|key, audits| {
+        audits.retain(|audit| includes_strategy(audit));
+        !audits.is_empty() || key.contains(strategy_name)
+    });
+    let count = state.outcomes.len() + state.scout_instances.len() + state.scout_active_audits.values().map(Vec::len).sum::<usize>();
+    persist_scout_state(
+        destination_path,
+        &state,
+        &["scout_configuration", "seen", "outcomes", "scout_instances", "pairs", "outbox", "scout_sample_at_ms", "scout_sample_active_scenarios", "scout_plan_profiles", "scout_plan_results", "scout_pending_samples", "scout_observation_results", "scout_active_audits"],
+    ).map_err(|(_, error)| anyhow::anyhow!(error))?;
+    Ok(count)
+}
+
+fn normalize_import_outbox(state: &mut serde_json::Value) {
+    for item in state["outbox"].as_array_mut().into_iter().flatten() {
+        let payload = &mut item["payload"];
+        if payload["kind"] == "scout_outcome" && payload.get("comparison").is_none() {
+            payload["comparison"] = serde_json::json!({"status":"independent"});
+        }
+    }
+}
+
+fn json_has_strategy(value: &serde_json::Value, strategy: &str) -> bool {
+    match value {
+        serde_json::Value::Object(object) => object.iter().any(|(key, value)| {
+            (matches!(key.as_str(), "strategy" | "strategy_name" | "scout_strategy")
+                && value.as_str().is_some_and(|name| name == strategy || (strategy == "dated-futures-carry" && name == "dated-carry")))
+                || json_has_strategy(value, strategy)
+        }),
+        serde_json::Value::Array(values) => values.iter().any(|value| json_has_strategy(value, strategy)),
+        _ => false,
+    }
+}
+
+fn router_with_state(state_path: PathBuf, worker_strategy: strategies::Strategy) -> Router {
     let mut persisted = load_scout_state(&state_path).unwrap_or_default();
-    let evicted_instances = trim_scout_instances(&mut persisted);
+    persisted.scout_configuration.strategies = vec![worker_strategy.as_str().to_owned()];
+    let _ = persist_scout_state(&state_path, &persisted, &["scout_configuration"]);
     let (changed_instances, changed_audit_groups, changed_plan_results) =
         compact_persisted_scout_payloads(&mut persisted);
     if let Err(error) = persist_compacted_scout_payloads(
@@ -137,19 +278,26 @@ pub fn router(learning_url: String, auto_trader_url: String) -> Router {
         &changed_instances,
         &changed_audit_groups,
         &changed_plan_results,
-        &evicted_instances,
+        &[],
     ) {
         eprintln!("WARN Could not compact persisted Scout payloads: {error}");
     }
+    if let Err(error) = compact_scout_instances_in_db(&state_path) {
+        eprintln!("WARN Could not compact persisted Scout instances: {error}");
+    }
     rebuild_strategy_outcome_profile_index(&mut persisted);
-    rebuild_portfolio_instance_index(&mut persisted);
-    let seen = persisted.seen.clone();
+    if let Err(error) = rebuild_portfolio_instance_index_from_db(&state_path, &mut persisted) {
+        eprintln!("WARN Could not rebuild portfolio instance evidence index: {error}");
+    }
     let strategy_outcomes_by_profile = Arc::clone(&persisted.strategy_outcomes_by_profile);
     let portfolio_instances_by_group = Arc::clone(&persisted.portfolio_instances_by_group);
     let strategy_outcome_profile_index_ready = Arc::new(std::sync::atomic::AtomicBool::new(true));
-    let client = reqwest::Client::new();
-    let insights_url =
-        std::env::var("INSIGHTS_URL").unwrap_or_else(|_| "http://127.0.0.1:3004".into());
+    let learning_rsocket_url = std::env::var("LEARNING_RSOCKET_URL")
+        .unwrap_or_else(|_| "ws://127.0.0.1:10010".into());
+    let insights_rsocket_url = std::env::var("INSIGHTS_RPC_RSOCKET_URL")
+        .unwrap_or_else(|_| "ws://127.0.0.1:10007".into());
+    let auto_trader_rsocket_url = std::env::var("AUTO_TRADER_RSOCKET_URL")
+        .unwrap_or_else(|_| "ws://127.0.0.1:10006".into());
     let scout = ScoutState {
         data: Arc::new(Mutex::new(persisted)),
         path: state_path,
@@ -159,42 +307,48 @@ pub fn router(learning_url: String, auto_trader_url: String) -> Router {
     // Retry durable pending work after startup or a transient downstream
     // failure, even if no new Scout observations arrive.
     let retry_scout = scout.clone();
-    let retry_client = client.clone();
-    let retry_learning_url = learning_url.clone();
+    let retry_learning_rsocket_url = learning_rsocket_url.clone();
+    let retry_insights_rsocket_url = insights_rsocket_url.clone();
     tokio::spawn(async move {
         let mut ticker = tokio::time::interval(std::time::Duration::from_secs(10));
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             ticker.tick().await;
             if !retry_scout.data.lock().await.outbox.is_empty() {
-                schedule_scout_outbox_flush_with(retry_scout.clone(), retry_client.clone(), retry_learning_url.clone());
+                schedule_scout_outbox_flush_with(
+                    retry_scout.clone(),
+                    retry_learning_rsocket_url.clone(),
+                    retry_insights_rsocket_url.clone(),
+                );
             }
         }
     });
     let live_scout_maximum_duration_ms =
         Arc::new(std::sync::RwLock::new(BTreeMap::new()));
     let hold_refresh_cache = Arc::clone(&live_scout_maximum_duration_ms);
-    let hold_refresh_client = client.clone();
-    let hold_refresh_url = auto_trader_url.clone();
+    let hold_refresh_rsocket_url = auto_trader_rsocket_url.clone();
     tokio::spawn(async move {
         let mut ticker = tokio::time::interval(std::time::Duration::from_secs(300));
         loop {
             ticker.tick().await;
-            let response = hold_refresh_client
-                .get(format!(
-                    "{}/positions/auto-trader/activity",
-                    hold_refresh_url.trim_end_matches('/')
-                ))
-                .timeout(std::time::Duration::from_secs(5))
-                .send()
-                .await;
-            let Ok(response) = response.and_then(reqwest::Response::error_for_status) else {
+            let activity = strategies::request_scout_service_route(
+                &hold_refresh_rsocket_url,
+                &strategies::ScoutCoordinatorRouteCommand {
+                    request_id: format!("scout-activity:{}", scout_now_ms()),
+                    strategy: None,
+                    method: strategies::ScoutWorkerHttpMethod::Get,
+                    path: "/positions/auto-trader/activity".into(),
+                    payload: serde_json::Value::Null,
+                },
+            )
+            .await;
+            let Ok(response) = activity else {
                 continue;
             };
-            let Ok(activity) = response.json::<serde_json::Value>().await else {
+            if response.status >= 400 {
                 continue;
-            };
-            let estimates = estimate_live_scout_maximum_durations(&activity);
+            }
+            let estimates = estimate_live_scout_maximum_durations(&response.body);
             if !estimates.is_empty() {
                 *hold_refresh_cache
                     .write()
@@ -202,54 +356,46 @@ pub fn router(learning_url: String, auto_trader_url: String) -> Router {
             }
         }
     });
-    let replay_client = client.clone();
-    let replay_insights_url = insights_url.clone();
+    let replay_insights_rsocket_url = insights_rsocket_url.clone();
     let replay_scout = scout.clone();
     tokio::spawn(async move {
         let mut ticker = tokio::time::interval(std::time::Duration::from_secs(60));
-        let mut previous_healthy = None;
         loop {
             ticker.tick().await;
-            let healthy = replay_client
-                .get(format!("{}/health", replay_insights_url.trim_end_matches('/')))
-                .timeout(std::time::Duration::from_secs(2))
-                .send()
-                .await
-                .is_ok_and(|response| response.status().is_success());
-            let should_replay = healthy && previous_healthy != Some(true);
-            previous_healthy = Some(healthy);
-            if !should_replay {
-                continue;
-            }
             let registrations = {
                 let state = replay_scout.data.lock().await;
                 active_scout_registrations(&state)
             };
             let mut retry_replay = false;
             for registration in registrations {
-                match replay_client
-                    .post(format!(
-                        "{}/internal/scouts/register",
-                        replay_insights_url.trim_end_matches('/')
-                    ))
-                    .timeout(std::time::Duration::from_secs(2))
-                    .json(&registration)
-                    .send()
-                    .await
-                {
-                    Ok(response) if response.status().is_success() => {}
-                    Ok(response) if response.status().is_client_error() => {
-                        let status = response.status();
-                        let detail = response.text().await.unwrap_or_default();
+                let response = strategies::request_scout_service_route(
+                    &replay_insights_rsocket_url,
+                    &strategies::ScoutCoordinatorRouteCommand {
+                        request_id: registration["decision_id"]
+                            .as_str()
+                            .or_else(|| registration["id"].as_str())
+                            .unwrap_or("replay-registration")
+                            .to_owned(),
+                        strategy: None,
+                        method: strategies::ScoutWorkerHttpMethod::Post,
+                        path: "/internal/scouts/register".into(),
+                        payload: registration,
+                    },
+                )
+                .await;
+                match response {
+                    Ok(response) if (200..300).contains(&response.status) => {}
+                    Ok(response) if (400..500).contains(&response.status) => {
                         eprintln!(
-                            "WARN Insights rejected a replayed Scout registration: status={status} detail={}",
-                            detail.chars().take(512).collect::<String>()
+                            "WARN Insights rejected a replayed Scout registration: status={} detail={}",
+                            response.status,
+                            response.body.to_string().chars().take(512).collect::<String>()
                         );
                     }
                     Ok(response) => {
                         eprintln!(
                             "WARN Scout registration replay deferred: Insights returned {}",
-                            response.status()
+                            response.status
                         );
                         retry_replay = true;
                     }
@@ -260,7 +406,7 @@ pub fn router(learning_url: String, auto_trader_url: String) -> Router {
                 }
             }
             if retry_replay {
-                previous_healthy = Some(false);
+                eprintln!("WARN Scout registration replay will retry after the next interval");
             }
         }
     });
@@ -289,10 +435,9 @@ pub fn router(learning_url: String, auto_trader_url: String) -> Router {
         .route("/select-entry", post(select_scout_entry))
         .route("/strategy-walk-forward", post(get_strategy_walk_forward))
         .with_state(ServiceState {
-            client,
-            learning_url,
-            auto_trader_url,
-            seen: Arc::new(Mutex::new(seen)),
+            learning_rsocket_url,
+            insights_rsocket_url,
+            auto_trader_rsocket_url,
             strategy_outcomes_by_profile,
             portfolio_instances_by_group,
             strategy_outcome_profile_index_ready,
@@ -980,7 +1125,7 @@ struct LiveThesisSignalObservation {
 }
 
 fn record_live_thesis_failure_observations(
-    state: &mut PersistedState,
+    instances: &mut BTreeMap<String, serde_json::Value>,
     signals: &[serde_json::Value],
 ) -> Vec<String> {
     let mut observations = BTreeMap::<(String, String), LiveThesisSignalObservation>::new();
@@ -1041,7 +1186,7 @@ fn record_live_thesis_failure_observations(
     }
 
     let mut changed_ids = Vec::new();
-    for (decision_id, instance) in &mut state.scout_instances {
+    for (decision_id, instance) in instances {
         if instance["scout_exit_scenario"].as_str().unwrap_or("strategy") != "strategy"
             || instance["scout_net_return_percent"].is_number()
             || instance["scout_thesis_failure_exit_net_return_percent"].is_number()
@@ -1156,6 +1301,63 @@ fn record_live_thesis_failure_observations(
     changed_ids
 }
 
+fn load_scout_instances_for_signals(
+    path: &std::path::Path,
+    signals: &[serde_json::Value],
+) -> anyhow::Result<BTreeMap<String, serde_json::Value>> {
+    let targets = signals
+        .iter()
+        .filter_map(|signal| {
+            Some((
+                signal.get("strategy")?.as_str()?.to_owned(),
+                signal.get("symbol")?.as_str()?.to_owned(),
+            ))
+        })
+        .collect::<BTreeSet<_>>();
+    let connection = rusqlite::Connection::open(path)?;
+    let mut statement = connection.prepare(
+        "SELECT record_key, payload FROM scout_records WHERE collection='scout_instances' ORDER BY record_key",
+    )?;
+    let rows = statement.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })?;
+    let mut instances = BTreeMap::new();
+    for row in rows {
+        let (decision_id, payload) = row?;
+        let instance: serde_json::Value = serde_json::from_str(&payload)?;
+        let target = instance["strategy"]
+            .as_str()
+            .zip(instance["symbol"].as_str())
+            .map(|(strategy, symbol)| (strategy.to_owned(), symbol.to_owned()));
+        if target.is_some_and(|target| targets.contains(&target)) {
+            instances.insert(decision_id, instance);
+        }
+    }
+    Ok(instances)
+}
+
+fn persist_scout_instance_records(
+    path: &std::path::Path,
+    instances: &BTreeMap<String, serde_json::Value>,
+    ids: &[String],
+) -> anyhow::Result<()> {
+    if ids.is_empty() {
+        return Ok(());
+    }
+    let mut connection = rusqlite::Connection::open(path)?;
+    let tx = connection.transaction()?;
+    for id in ids {
+        if let Some(instance) = instances.get(id) {
+            tx.execute(
+                "UPDATE scout_records SET payload=?1 WHERE collection='scout_instances' AND record_key=?2",
+                rusqlite::params![serde_json::to_string(instance)?, id],
+            )?;
+        }
+    }
+    tx.commit()?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod live_thesis_failure_replay_tests {
     use super::*;
@@ -1208,12 +1410,12 @@ mod live_thesis_failure_replay_tests {
         state.scout_instances.insert("hard_stop".into(), hard_stop);
 
         let first = vec![opposing_signal(1_000, 99.85)];
-        assert_eq!(record_live_thesis_failure_observations(&mut state, &first).len(), 3);
+        assert_eq!(record_live_thesis_failure_observations(&mut state.scout_instances, &first).len(), 3);
         assert_eq!(state.scout_instances["baseline"]["scout_thesis_failure_confirmation_count"], 1);
         assert_eq!(state.scout_instances["higher_threshold"]["scout_thesis_failure_confirmation_count"], 0);
 
         let second = vec![opposing_signal(2_000, 99.85)];
-        assert_eq!(record_live_thesis_failure_observations(&mut state, &second).len(), 2);
+        assert_eq!(record_live_thesis_failure_observations(&mut state.scout_instances, &second).len(), 2);
         assert!(state.scout_instances["baseline"]["scout_thesis_failure_exit_net_return_percent"].is_number());
         assert!(state.scout_instances["higher_threshold"]["scout_thesis_failure_exit_net_return_percent"].is_null());
         assert!(state.scout_instances["hard_stop"]["scout_thesis_failure_exit_net_return_percent"].is_null());
@@ -1247,11 +1449,8 @@ async fn receive_live_scout_inputs(
             && price.is_some_and(|price| price.is_finite() && price > 0.0)
     }).collect::<Vec<_>>();
     if signals.is_empty() { return Ok(StatusCode::NO_CONTENT); }
-    let snapshot = service.client.get(format!("{}/decision-snapshot", service.learning_url.trim_end_matches('/')))
-        .timeout(std::time::Duration::from_secs(2)).send().await
-        .map_err(|error| (StatusCode::BAD_GATEWAY, error.to_string()))?
-        .error_for_status().map_err(|error| (StatusCode::BAD_GATEWAY, error.to_string()))?
-        .json::<serde_json::Value>().await
+    let snapshot = strategies::request_scout_profile_snapshot(&service.learning_rsocket_url)
+        .await
         .map_err(|error| (StatusCode::BAD_GATEWAY, error.to_string()))?;
     let mut profiles = Vec::new();
     let symbols = signals.iter().filter_map(|signal| signal.get("symbol").and_then(serde_json::Value::as_str))
@@ -1273,14 +1472,22 @@ async fn receive_live_scout_inputs(
         !profiles.iter().any(|profile| profile.symbol == *symbol && profile.strategy == *strategy)
     }));
     if has_missing_profiles {
-        let response = service.client
-            .get(format!("{}/positions/auto-trader/parameters", service.auto_trader_url.trim_end_matches('/')))
-            .timeout(std::time::Duration::from_secs(2)).send().await
-            .map_err(|error| (StatusCode::BAD_GATEWAY, error.to_string()))?
-            .error_for_status().map_err(|error| (StatusCode::BAD_GATEWAY, error.to_string()))?
-            .json::<serde_json::Value>().await
-            .map_err(|error| (StatusCode::BAD_GATEWAY, error.to_string()))?;
-        let fallback_profiles = auto_trader_live_profiles(&response, &symbols, &configuration.strategies);
+        let response = strategies::request_scout_service_route(
+            &service.auto_trader_rsocket_url,
+            &strategies::ScoutCoordinatorRouteCommand {
+                request_id: format!("scout-parameters:{now_ms}"),
+                strategy: None,
+                method: strategies::ScoutWorkerHttpMethod::Get,
+                path: "/positions/auto-trader/parameters".into(),
+                payload: serde_json::Value::Null,
+            },
+        )
+        .await
+        .map_err(|error| (StatusCode::BAD_GATEWAY, error.to_string()))?;
+        if response.status >= 400 {
+            return Err((StatusCode::BAD_GATEWAY, "AutoTrader rejected Scout profile lookup".into()));
+        }
+        let fallback_profiles = auto_trader_live_profiles(&response.body, &symbols, &configuration.strategies);
         for profile in fallback_profiles {
             if !profiles.iter().any(|existing| existing.symbol == profile.symbol && existing.strategy == profile.strategy) {
                 profiles.push(profile);
@@ -1344,15 +1551,23 @@ async fn receive_live_scout_inputs(
         .collect::<Vec<_>>();
     {
         let mut state = service.scout.data.lock().await;
-        let changed_instances =
-            record_live_thesis_failure_observations(&mut state, &thesis_signal_candidates);
-        if !changed_instances.is_empty() {
-            let changed_sections = changed_instances
-                .iter()
-                .map(|id| format!("scout_instances@{id}"))
-                .collect::<Vec<_>>();
-            let changed_sections = changed_sections.iter().map(String::as_str).collect::<Vec<_>>();
-            persist_scout_state(&service.scout.path, &state, &changed_sections)?;
+        let mut candidate_instances =
+            load_scout_instances_for_signals(&service.scout.path, &thesis_signal_candidates)
+                .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
+        let changed_instances = record_live_thesis_failure_observations(
+            &mut candidate_instances,
+            &thesis_signal_candidates,
+        );
+        persist_scout_instance_records(
+            &service.scout.path,
+            &candidate_instances,
+            &changed_instances,
+        )
+        .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
+        for decision_id in changed_instances {
+            if let Some(instance) = candidate_instances.get(&decision_id) {
+                cache_scout_instance(&mut state, &decision_id, instance.clone());
+            }
         }
     }
     let mut batches = BTreeMap::<String, LiveScoutProbeBatch>::new();
@@ -1781,11 +1996,8 @@ async fn receive_dated_carry_scout_inputs(
     }
     schedule_scout_outbox_flush(&service);
 
-    let snapshot = service.client.get(format!("{}/decision-snapshot", service.learning_url.trim_end_matches('/')))
-        .timeout(std::time::Duration::from_secs(2)).send().await
-        .map_err(|error| (StatusCode::BAD_GATEWAY, error.to_string()))?
-        .error_for_status().map_err(|error| (StatusCode::BAD_GATEWAY, error.to_string()))?
-        .json::<serde_json::Value>().await
+    let snapshot = strategies::request_scout_profile_snapshot(&service.learning_rsocket_url)
+        .await
         .map_err(|error| (StatusCode::BAD_GATEWAY, error.to_string()))?;
     let profiles = snapshot.get("profiles").and_then(serde_json::Value::as_array).cloned().unwrap_or_default();
     let day = request.now_ms / 86_400_000;
@@ -1922,7 +2134,8 @@ async fn finalize_sample(
     Json(request): Json<FinalizeRequest>,
 ) -> Result<StatusCode, (StatusCode, String)> {
     let event_id = request.sample.event_id.clone();
-    if service.seen.lock().await.contains(&event_id) {
+    if service.scout.data.lock().await.seen.contains(&event_id)
+        || scout_record_exists(&service.scout.path, "seen", &event_id)? {
         return Ok(StatusCode::NO_CONTENT);
     }
     let event = request
@@ -1935,17 +2148,18 @@ async fn finalize_sample(
         .ok_or((StatusCode::BAD_REQUEST, "invalid scout sample".into()))?;
     forward_event(&service, &event).await?;
     {
-        let mut seen = service.seen.lock().await;
-        seen.insert(event_id.clone());
-        while seen.len() > 100_000 {
-            if let Some(oldest) = seen.iter().next().cloned() {
-                seen.remove(&oldest);
+        let mut persisted = service.scout.data.lock().await;
+        persisted.seen.insert(event_id.clone());
+        while persisted.seen.len() > 100_000 {
+            if let Some(oldest) = persisted.seen.iter().next().cloned() {
+                persisted.seen.remove(&oldest);
             }
         }
-        let mut persisted = service.scout.data.lock().await;
-        persisted.seen.insert(event_id);
-        persisted.seen.extend(seen.iter().cloned());
-        persist_scout_state(&service.scout.path, &persisted, &["seen"])?;
+        persist_scout_state(
+            &service.scout.path,
+            &persisted,
+            &[&format!("seen@{event_id}")],
+        )?;
     }
     Ok(StatusCode::NO_CONTENT)
 }
@@ -2174,6 +2388,7 @@ fn outcome_event(outcome: &ScoutOutcomeRequest, tested: &BTreeMap<String, f64>) 
         profile_id: strategies::profile_id(profile_symbol, &outcome.strategy, &parameters),
         parameters,
         baseline_parameters: BTreeMap::new(),
+        comparison: strategies::ScoutComparisonMetadata::Independent,
         specs,
         net_return_percent: outcome.net_return_percent,
     }
@@ -2217,18 +2432,14 @@ fn paired_event(
         .filter(|spec| tested.contains_key(&spec.key) && parameters.contains_key(&spec.key))
         .cloned()
         .collect();
-    let event_id = if let Some(seconds) = variant
+    let horizon_seconds = variant
         .exit_scenario
         .strip_prefix("horizon-")
-        .and_then(|seconds| seconds.parse::<u64>().ok())
-    {
-        let comparison_group = comparison_id
-            .split_once("|scenario:")
-            .map_or(comparison_id, |(group, _)| group);
-        format!("paired-scout:{comparison_group}:horizon-{seconds}")
-    } else {
-        format!("paired-scout:{comparison_id}")
-    };
+        .and_then(|seconds| seconds.parse::<u64>().ok());
+    let comparison_group = comparison_id
+        .split_once("|scenario:")
+        .map_or(comparison_id, |(group, _)| group);
+    let event_id = format!("scout-comparison:{comparison_id}");
     Some(FeedbackEvent::ScoutOutcome {
         event_id,
         observed_at_ms: baseline
@@ -2240,6 +2451,10 @@ fn paired_event(
         profile_id: strategies::profile_id(profile_symbol, &variant.strategy, &parameters),
         parameters,
         baseline_parameters,
+        comparison: strategies::ScoutComparisonMetadata::Paired {
+            group_id: comparison_group.to_owned(),
+            horizon_seconds,
+        },
         specs,
         net_return_percent: variant.net_return_percent - baseline.net_return_percent,
     })
@@ -2648,10 +2863,14 @@ fn persist_scout_state(
 ) -> Result<(), (StatusCode, String)> {
     let mut changes = serde_json::Map::new();
     let mut sync_outbox = false;
+    let mut sync_seen = false;
     for section in changed_sections {
         if *section == "outbox" {
             sync_outbox = true;
             continue;
+        }
+        if *section == "seen" || section.starts_with("seen@") {
+            sync_seen = true;
         }
         if let Some((collection, key)) = section.split_once('@') {
             let value = scout_state_record(state, collection, key)?;
@@ -2693,6 +2912,13 @@ fn persist_scout_state(
     }
     if sync_outbox {
         sync_outbox_delta(&tx, &state.outbox)?;
+    }
+    if sync_seen {
+        tx.execute(
+            "DELETE FROM scout_records WHERE collection='seen' AND record_key IN (SELECT record_key FROM scout_records WHERE collection='seen' ORDER BY record_key LIMIT MAX(0, (SELECT COUNT(*) FROM scout_records WHERE collection='seen') - 100000))",
+            [],
+        )
+        .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
     }
     tx.commit().map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
     Ok(())
@@ -2900,6 +3126,247 @@ fn sync_record_array(
 }
 
 fn load_scout_state(path: &std::path::Path) -> anyhow::Result<PersistedState> {
+    // Decode each persisted record directly into its final collection. Building
+    // one giant serde_json::Value tree first duplicated the full database in
+    // memory during startup (and again while converting that tree into state).
+    // The offline importer still uses load_scout_state_value when it needs a
+    // whole-file transformation; runtime workers do not.
+    let connection = rusqlite::Connection::open(path)?;
+    let config = connection.query_row(
+        "SELECT strategies, max_active_samples, max_active_positions, max_sample_notional, stop_loss_percent, take_profit_percent FROM scout_configuration WHERE id=1",
+        [],
+        |row| Ok(serde_json::json!({
+            "strategies": serde_json::from_str::<Vec<String>>(&row.get::<_, String>(0)?).unwrap_or_default(),
+            "max_active_samples": row.get::<_, i64>(1)?,
+            "max_active_positions": row.get::<_, i64>(2)?,
+            "max_sample_notional": row.get::<_, f64>(3)?,
+            "stop_loss_percent": row.get::<_, f64>(4)?,
+            "take_profit_percent": row.get::<_, f64>(5)?,
+        })),
+    )?;
+    let (cursor, lifecycle): (i64, i64) = connection.query_row(
+        "SELECT variant_rotation_cursor, lifecycle_updated_at_ms FROM scout_metadata WHERE id=1",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    let mut state = PersistedState {
+        scout_configuration: serde_json::from_value(config)?,
+        scout_variant_rotation_cursor: cursor.max(0) as usize,
+        scout_lifecycle_updated_at_ms: lifecycle.max(0) as u64,
+        ..PersistedState::default()
+    };
+    // Seen IDs are an exact SQLite-backed set. Loading up to 100k string keys
+    // into runtime state duplicated memory without helping membership checks.
+    state.outcomes = load_scout_collection(&connection, "outcomes", |_, payload| {
+        Ok(serde_json::from_str(payload)?)
+    })?;
+    // Full instance history is accessed through SQLite-backed report and
+    // point-lookup helpers. `scout_instances` in PersistedState is a bounded
+    // cache of recently touched decision IDs only.
+    state.pairs = load_scout_collection(&connection, "pairs", |_, payload| {
+        Ok(serde_json::from_str(payload)?)
+    })?;
+    state.outbox = load_scout_collection(&connection, "outbox", |_, payload| {
+        Ok(serde_json::from_str(payload)?)
+    })?
+    .into_values()
+    .collect();
+    state.scout_sample_at_ms = load_scout_collection(&connection, "scout_sample_at_ms", |_, payload| {
+        Ok(serde_json::from_str(payload)?)
+    })?;
+    state.scout_sample_active_scenarios = load_scout_collection(
+        &connection,
+        "scout_sample_active_scenarios",
+        |_, payload| Ok(serde_json::from_str(payload)?),
+    )?;
+    state.scout_plan_profiles = load_scout_collection(&connection, "scout_plan_profiles", |_, payload| {
+        Ok(serde_json::from_str(payload)?)
+    })?;
+    state.scout_plan_results = load_scout_collection(&connection, "scout_plan_results", |_, payload| {
+        Ok(serde_json::from_str(payload)?)
+    })?;
+    state.scout_pending_samples = load_scout_collection(&connection, "scout_pending_samples", |_, payload| {
+        Ok(serde_json::from_str(payload)?)
+    })?;
+    state.scout_observation_results = load_scout_collection(
+        &connection,
+        "scout_observation_results",
+        |_, payload| Ok(serde_json::from_str(payload)?),
+    )?;
+    state.scout_active_audits = load_scout_collection(&connection, "scout_active_audits", |_, payload| {
+        Ok(serde_json::from_str(payload)?)
+    })?;
+    Ok(state)
+}
+
+fn load_scout_collection<T>(
+    connection: &rusqlite::Connection,
+    collection: &str,
+    mut decode: impl FnMut(&str, &str) -> anyhow::Result<T>,
+) -> anyhow::Result<BTreeMap<String, T>> {
+    let mut statement = connection.prepare(
+        "SELECT record_key, payload FROM scout_records WHERE collection=?1 ORDER BY record_key",
+    )?;
+    let rows = statement.query_map([collection], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })?;
+    let mut values = BTreeMap::new();
+    for row in rows {
+        let (key, payload) = row?;
+        values.insert(key.clone(), decode(&key, &payload)?);
+    }
+    Ok(values)
+}
+
+const MAX_CACHED_SCOUT_INSTANCES: usize = 4_096;
+
+fn cache_scout_instance(state: &mut PersistedState, key: &str, instance: serde_json::Value) {
+    let instance = compact_scout_instance(&instance);
+    state.scout_instances.insert(key.to_owned(), instance.clone());
+    remove_portfolio_instance_index_entry_by_id(state, key);
+    add_portfolio_instance_index_entry(state, key, &instance);
+    trim_scout_instance_cache(state);
+}
+
+// Cache eviction removes only the full JSON value. Compact portfolio evidence
+// remains indexed separately and all history remains in SQLite.
+fn trim_scout_instance_cache(state: &mut PersistedState) {
+    while state.scout_instances.len() > MAX_CACHED_SCOUT_INSTANCES {
+        let oldest = state
+            .scout_instances
+            .iter()
+            .min_by_key(|(id, value)| {
+                (value["timestamp"].as_u64().unwrap_or_default(), (*id).clone())
+            })
+            .map(|(id, _)| id.clone());
+        let Some(oldest) = oldest else { break };
+        state.scout_instances.remove(&oldest);
+    }
+}
+
+fn load_scout_instance(
+    path: &std::path::Path,
+    decision_id: &str,
+) -> anyhow::Result<Option<serde_json::Value>> {
+    let connection = rusqlite::Connection::open(path)?;
+    connection
+        .query_row(
+            "SELECT payload FROM scout_records WHERE collection='scout_instances' AND record_key=?1",
+            [decision_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?
+        .map(|payload| serde_json::from_str(&payload).map_err(Into::into))
+        .transpose()
+}
+
+fn ensure_scout_instance_loaded(
+    state: &mut PersistedState,
+    path: &std::path::Path,
+    decision_id: &str,
+) -> anyhow::Result<Option<serde_json::Value>> {
+    if let Some(instance) = state.scout_instances.get(decision_id) {
+        return Ok(Some(instance.clone()));
+    }
+    let Some(instance) = load_scout_instance(path, decision_id)? else {
+        return Ok(None);
+    };
+    cache_scout_instance(state, decision_id, instance.clone());
+    Ok(Some(instance))
+}
+
+fn load_scout_instances_since(
+    path: &std::path::Path,
+    since_ms: u64,
+) -> anyhow::Result<BTreeMap<String, serde_json::Value>> {
+    let connection = rusqlite::Connection::open(path)?;
+    let mut statement = connection.prepare(
+        "SELECT record_key, payload FROM scout_records WHERE collection='scout_instances' ORDER BY record_key",
+    )?;
+    let rows = statement.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })?;
+    let mut instances = BTreeMap::new();
+    for row in rows {
+        let (key, payload) = row?;
+        let instance: serde_json::Value = serde_json::from_str(&payload)?;
+        if instance["timestamp"].as_u64().unwrap_or_default() >= since_ms {
+            instances.insert(key, instance);
+        }
+    }
+    Ok(instances)
+}
+
+fn compact_scout_instances_in_db(path: &std::path::Path) -> anyhow::Result<()> {
+    let connection = rusqlite::Connection::open(path)?;
+    let mut statement = connection.prepare(
+        "SELECT record_key, payload FROM scout_records WHERE collection='scout_instances' ORDER BY record_key",
+    )?;
+    let rows = statement.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })?;
+    let mut update = connection.prepare(
+        "UPDATE scout_records SET payload=?1 WHERE collection='scout_instances' AND record_key=?2",
+    )?;
+    for row in rows {
+        let (key, payload) = row?;
+        let instance: serde_json::Value = serde_json::from_str(&payload)?;
+        let compact = compact_scout_instance(&instance);
+        if compact != instance {
+            update.execute(rusqlite::params![serde_json::to_string(&compact)?, key])?;
+        }
+    }
+    Ok(())
+}
+
+fn rebuild_portfolio_instance_index_from_db(
+    path: &std::path::Path,
+    state: &mut PersistedState,
+) -> anyhow::Result<()> {
+    let connection = rusqlite::Connection::open(path)?;
+    let mut statement = connection.prepare(
+        "SELECT record_key, payload FROM scout_records WHERE collection='scout_instances' ORDER BY record_key",
+    )?;
+    let rows = statement.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })?;
+    let mut rebuilt = BTreeMap::<String, Vec<PortfolioInstanceEvidence>>::new();
+    for row in rows {
+        let (decision_id, payload) = row?;
+        let instance: serde_json::Value = serde_json::from_str(&payload)?;
+        if let Some((group, evidence)) = portfolio_instance_entry(&decision_id, &instance) {
+            rebuilt.entry(group).or_default().push(evidence);
+        }
+    }
+    for instances in rebuilt.values_mut() {
+        instances.sort_by(|left, right| left.decision_id.cmp(&right.decision_id));
+    }
+    *state
+        .portfolio_instances_by_group
+        .write()
+        .unwrap_or_else(|error| error.into_inner()) = rebuilt;
+    Ok(())
+}
+
+fn scout_record_exists(
+    path: &std::path::Path,
+    collection: &str,
+    key: &str,
+) -> Result<bool, (StatusCode, String)> {
+    let connection = rusqlite::Connection::open(path)
+        .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
+    connection
+        .query_row(
+            "SELECT 1 FROM scout_records WHERE collection=?1 AND record_key=?2",
+            rusqlite::params![collection, key],
+            |_| Ok(()),
+        )
+        .optional()
+        .map(|value| value.is_some())
+        .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))
+}
+
+fn load_scout_state_value(path: &std::path::Path) -> anyhow::Result<serde_json::Value> {
     let connection = rusqlite::Connection::open(path)?;
     let mut state = serde_json::Map::new();
     let configuration = connection.query_row(
@@ -2929,7 +3396,7 @@ fn load_scout_state(path: &std::path::Path) -> anyhow::Result<PersistedState> {
             state.insert(collection.into(), serde_json::Value::Object(values));
         }
     }
-    Ok(serde_json::from_value(serde_json::Value::Object(state))?)
+    Ok(serde_json::Value::Object(state))
 }
 
 fn active_scout_registrations(state: &PersistedState) -> Vec<serde_json::Value> {
@@ -2945,8 +3412,8 @@ const SCOUT_OUTBOX_ACK_BATCH_SIZE: usize = 64;
 
 async fn flush_scout_outbox(
     scout: &ScoutState,
-    client: &reqwest::Client,
-    learning_url: &str,
+    learning_rsocket_url: &str,
+    insights_rsocket_url: &str,
 ) -> Result<(), (StatusCode, String)> {
     let _flush = scout.flush_lock.lock().await;
     let mut acknowledged = 0usize;
@@ -2964,46 +3431,47 @@ async fn flush_scout_outbox(
             }
             continue;
         }
-        let (url, payload) = match &item {
-            ScoutOutboxItem::Learning(event) => (
-                format!("{}/feedback", learning_url.trim_end_matches('/')),
-                serde_json::to_value(event).unwrap_or_default(),
-            ),
-            ScoutOutboxItem::Audit(_) => unreachable!("audit items are removed without Insights delivery"),
-            ScoutOutboxItem::Registration(registration) => {
-                let base = std::env::var("INSIGHTS_URL")
-                    .unwrap_or_else(|_| "http://127.0.0.1:3004".into());
-                (
-                    format!(
-                        "{}/internal/scouts/register",
-                        base.trim_end_matches('/')
-                    ),
-                    registration.clone(),
-                )
+        let delivery = match &item {
+            ScoutOutboxItem::Learning(event) => {
+                strategies::request_scout_feedback(learning_rsocket_url, event)
+                    .await
+                    .map(|ack| (ack.status, ack.detail.unwrap_or_default()))
             }
+            ScoutOutboxItem::Registration(registration) => {
+                let request_id = registration["decision_id"]
+                    .as_str()
+                    .or_else(|| registration["id"].as_str())
+                    .unwrap_or("registration")
+                    .to_owned();
+                strategies::request_scout_service_route(
+                    insights_rsocket_url,
+                    &strategies::ScoutCoordinatorRouteCommand {
+                        request_id,
+                        strategy: None,
+                        method: strategies::ScoutWorkerHttpMethod::Post,
+                        path: "/internal/scouts/register".into(),
+                        payload: registration.clone(),
+                    },
+                )
+                .await
+                .map(|response| (response.status, response.body.to_string()))
+            }
+            ScoutOutboxItem::Audit(_) => unreachable!("audit items are removed without Insights delivery"),
         };
-        let response = match client
-            .post(url)
-            .timeout(std::time::Duration::from_secs(2))
-            .json(&payload)
-            .send()
-            .await
-        {
+        let (status, detail) = match delivery {
             Ok(response) => response,
             Err(error) => {
                 acknowledge_scout_outbox(scout, acknowledged).await?;
                 return Err((
                     StatusCode::BAD_GATEWAY,
-                    format!("Scout outbox delivery failed: {error}"),
+                    format!("Scout outbox RSocket delivery failed: {error}"),
                 ));
             }
         };
-        let status = response.status();
-        if status.is_client_error()
-            && status != StatusCode::REQUEST_TIMEOUT
-            && status != StatusCode::TOO_MANY_REQUESTS
+        if (400..500).contains(&status)
+            && !(status == StatusCode::REQUEST_TIMEOUT.as_u16()
+                || status == StatusCode::TOO_MANY_REQUESTS.as_u16())
         {
-            let body = response.text().await.unwrap_or_default();
             eprintln!(
                 "ERROR Discarding permanently rejected Scout outbox item: status={status} kind={} detail={}",
                 match item {
@@ -3011,13 +3479,13 @@ async fn flush_scout_outbox(
                     ScoutOutboxItem::Registration(_) => "registration",
                     ScoutOutboxItem::Audit(_) => "audit",
                 },
-                body.chars().take(512).collect::<String>(),
+                detail.chars().take(512).collect::<String>(),
             );
-        } else if !status.is_success() {
+        } else if status >= 400 {
             acknowledge_scout_outbox(scout, acknowledged).await?;
             return Err((
                 StatusCode::BAD_GATEWAY,
-                format!("Scout outbox delivery failed with {status}"),
+                format!("Scout outbox RSocket delivery failed with {status}: {detail}"),
             ));
         }
         acknowledged += 1;

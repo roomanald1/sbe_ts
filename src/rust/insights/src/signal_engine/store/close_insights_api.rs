@@ -22,6 +22,34 @@ struct PositionInsightsInput {
     positions: Vec<Position>,
     markets: HashMap<String, PositionMarketInput>,
 }
+#[derive(Deserialize)]
+struct PositionRpcResponse {
+    status: u16,
+    #[serde(default)]
+    headers: std::collections::BTreeMap<String, String>,
+    body: serde_json::Value,
+}
+fn parse_position_insights_rpc_response(
+    bytes: &[u8],
+) -> Result<PositionInsightsInput, String> {
+    let envelope: PositionRpcResponse = serde_json::from_slice(bytes)
+        .map_err(|error| format!("Invalid Position Management RSocket response: {error}"))?;
+    if !(200..300).contains(&envelope.status) {
+        return Err(format!(
+            "Position Management returned status {}",
+            envelope.status
+        ));
+    }
+    if let Some(content_type) = envelope.headers.get("content-type")
+        && !content_type.starts_with("application/json")
+    {
+        return Err(format!(
+            "Position Management returned unsupported content type {content_type}"
+        ));
+    }
+    serde_json::from_value(envelope.body)
+        .map_err(|error| format!("Invalid position insight input: {error}"))
+}
 #[derive(Serialize)]
 #[serde(rename_all = "lowercase")]
 enum TradeSide {
@@ -49,34 +77,59 @@ struct CloseInsightsResponse {
 }
 
 async fn get_position_insights() -> Result<Json<CloseInsightsResponse>, (StatusCode, String)> {
-    let base = std::env::var("POSITION_MANAGEMENT_URL")
-        .unwrap_or_else(|_| "http://127.0.0.1:3002".to_owned());
-    let source: PositionInsightsInput = POSITION_INSIGHTS_CLIENT
-        .get_or_init(reqwest::Client::new)
-        .get(format!("{base}/internal/insights-inputs"))
-        .send()
+    use rsocket_rust::{prelude::*, utils::EchoRSocket};
+    use rsocket_rust_transport_websocket::WebsocketClientTransport;
+
+    let endpoint = std::env::var("POSITION_MANAGEMENT_RSOCKET_URL")
+        .unwrap_or_else(|_| "ws://127.0.0.1:10005".to_owned());
+    let client = RSocketFactory::connect()
+        .transport(WebsocketClientTransport::from(endpoint.as_str()))
+        .acceptor(Box::new(|| Box::new(EchoRSocket)))
+        .start()
         .await
         .map_err(|error| {
             (
                 StatusCode::BAD_GATEWAY,
-                format!("Position Management request failed: {error}"),
-            )
-        })?
-        .error_for_status()
-        .map_err(|error| {
-            (
-                StatusCode::BAD_GATEWAY,
-                format!("Position Management returned an error: {error}"),
-            )
-        })?
-        .json()
-        .await
-        .map_err(|error| {
-            (
-                StatusCode::BAD_GATEWAY,
-                format!("Invalid position insight input: {error}"),
+                format!("Position Management RSocket connection failed: {error}"),
             )
         })?;
+    let request = serde_json::json!({
+        "method": "GET",
+        "path": "/internal/insights-inputs"
+    });
+    let request = serde_json::to_vec(&request).map_err(|error| {
+        (
+            StatusCode::BAD_GATEWAY,
+            format!("Could not encode Position Management request: {error}"),
+        )
+    })?;
+    let response = client
+        .request_response(Payload::builder().set_data(request).build())
+        .await
+        .map_err(|error| {
+            (
+                StatusCode::BAD_GATEWAY,
+                format!("Position Management RSocket request failed: {error}"),
+            )
+        })?
+        .ok_or_else(|| {
+            (
+                StatusCode::BAD_GATEWAY,
+                "Position Management returned an empty RSocket response".to_owned(),
+            )
+        })?;
+    let data = response.data().ok_or_else(|| {
+        (
+            StatusCode::BAD_GATEWAY,
+            "Position Management returned no response data".to_owned(),
+        )
+    })?;
+    let source = parse_position_insights_rpc_response(data.as_ref()).map_err(|error| {
+        (
+            StatusCode::BAD_GATEWAY,
+            error,
+        )
+    })?;
     let insights = source
         .positions
         .into_iter()
@@ -208,4 +261,31 @@ fn normal_cdf(value: f64) -> f64 {
             * t)
             * (-x * x).exp();
     0.5 * (1.0 + sign * erf)
+}
+
+#[cfg(test)]
+mod position_insights_rpc_tests {
+    use super::parse_position_insights_rpc_response;
+
+    #[test]
+    fn parses_position_management_rpc_envelope() {
+        let response = br#"{"status":200,"headers":{"content-type":"application/json"},"body":{"positions":[],"markets":{}}}"#;
+        let parsed = parse_position_insights_rpc_response(response).unwrap();
+        assert!(parsed.positions.is_empty());
+        assert!(parsed.markets.is_empty());
+    }
+
+    #[test]
+    fn rejects_non_success_status_and_unsupported_content_type() {
+        let status = br#"{"status":503,"headers":{},"body":{}}"#;
+        assert!(parse_position_insights_rpc_response(status)
+            .err()
+            .unwrap()
+            .contains("status 503"));
+        let content_type = br#"{"status":200,"headers":{"content-type":"text/plain"},"body":{}}"#;
+        assert!(parse_position_insights_rpc_response(content_type)
+            .err()
+            .unwrap()
+            .contains("content type"));
+    }
 }

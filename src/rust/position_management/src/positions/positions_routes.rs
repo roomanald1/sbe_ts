@@ -120,8 +120,7 @@ pub async fn router() -> anyhow::Result<Router> {
             tokio::time::sleep(Duration::from_secs(1)).await;
         }
     });
-    Ok(Router::new()
-        .route("/positions/stream", get(position_ui_stream))
+    let router = Router::new()
         .route("/internal/persistence-timing", get(get_persistence_timing))
         .route("/positions", get(get_positions))
         .route("/positions/realized-pnl", get(get_realized_pnl))
@@ -161,7 +160,10 @@ pub async fn router() -> anyhow::Result<Router> {
             "/positions/orders/{id}",
             axum::routing::delete(cancel_order),
         )
-        .with_state(store))
+        .with_state(Arc::clone(&store))
+        .merge(crate::users::router());
+    start_position_rsocket(router.clone(), Arc::clone(&store));
+    Ok(router)
 }
 
 async fn sync_dated_carry_ledger(
@@ -191,96 +193,81 @@ async fn sync_dated_carry_ledger(
     })))
 }
 
-async fn position_ui_stream(
-    State(store): State<Arc<PositionStore>>,
-    websocket: axum::extract::ws::WebSocketUpgrade,
-) -> axum::response::Response {
-    websocket.on_upgrade(move |socket| async move {
-        use axum::extract::ws::Message;
-        use futures_util::{SinkExt, StreamExt};
-
-        let mut updates = store.state_updates.subscribe();
-        let (mut sender, mut receiver) = socket.split();
-        let mut rates_refresh = tokio::time::interval(Duration::from_secs(30));
-        rates_refresh.tick().await;
-        let mut hedge_refresh = tokio::time::interval(Duration::from_secs(15));
-        hedge_refresh.tick().await;
-        let mut previous = position_ui_snapshot(&store).await;
-        previous["hedge_candidates"] = hedge_candidates_snapshot(&store).await;
-        let Ok(initial) = serde_json::to_string(&serde_json::json!({ "type": "snapshot", "state": previous })) else { return };
-        if sender.send(Message::Text(initial.into())).await.is_err() { return; }
-        loop {
-            tokio::select! {
-                update = updates.recv() => match update {
-                    Ok(()) | Err(broadcast::error::RecvError::Lagged(_)) => {
-                        let snapshot = position_ui_snapshot(&store).await;
-                        let mut snapshot = snapshot;
-                        snapshot["hedge_candidates"] = previous["hedge_candidates"].clone();
-                        let mut changes = serde_json::Map::new();
-                        let mut auto_trade_appends = Vec::new();
-                        if let (Some(current), Some(old)) = (snapshot.as_object(), previous.as_object()) {
-                            for (key, value) in current {
-                                if key == "auto_trades" {
-                                    let current_trades = value.get("trades").and_then(serde_json::Value::as_array);
-                                    let previous_trades = old.get(key).and_then(|value| value.get("trades")).and_then(serde_json::Value::as_array);
-                                    if let (Some(current_trades), Some(previous_trades)) = (current_trades, previous_trades) {
-                                        let previous_last_id = previous_trades.last().and_then(|trade| trade.get("id"));
-                                        if let Some(last_index) = previous_last_id.and_then(|id| current_trades.iter().position(|trade| trade.get("id") == Some(id))) {
-                                            auto_trade_appends.extend(current_trades[last_index + 1..].iter().cloned());
-                                            continue;
-                                        }
-                                        if current_trades.last().and_then(|trade| trade.get("id")) == previous_last_id {
-                                            continue;
+fn position_ui_events(
+    store: Arc<PositionStore>,
+) -> impl futures_util::Stream<Item = Result<serde_json::Value, anyhow::Error>> + Send {
+    let updates = store.state_updates.subscribe();
+    let rates_refresh = tokio::time::interval(Duration::from_secs(30));
+    let hedge_refresh = tokio::time::interval(Duration::from_secs(15));
+    futures_util::stream::unfold(
+        (store, updates, None, false, rates_refresh, hedge_refresh),
+        |(store, mut updates, mut previous, initialized, mut rates_refresh, mut hedge_refresh)| async move {
+            if !initialized {
+                let mut snapshot = position_ui_snapshot(&store).await;
+                snapshot["hedge_candidates"] = hedge_candidates_snapshot(&store).await;
+                let event = serde_json::json!({ "type": "snapshot", "state": snapshot });
+                return Some((Ok(event), (store, updates, Some(snapshot), true, rates_refresh, hedge_refresh)));
+            }
+            loop {
+                tokio::select! {
+                    update = updates.recv() => match update {
+                        Ok(()) | Err(broadcast::error::RecvError::Lagged(_)) => {
+                            let mut snapshot = position_ui_snapshot(&store).await;
+                            snapshot["hedge_candidates"] = previous.as_ref().and_then(|old: &serde_json::Value| old.get("hedge_candidates")).cloned().unwrap_or(serde_json::Value::Null);
+                            let mut changes = serde_json::Map::new();
+                            let mut auto_trade_appends = Vec::new();
+                            if let (Some(current), Some(old)) = (snapshot.as_object(), previous.as_ref().and_then(serde_json::Value::as_object)) {
+                                for (key, value) in current {
+                                    if key == "auto_trades" {
+                                        let current_trades = value.get("trades").and_then(serde_json::Value::as_array);
+                                        let previous_trades = old.get(key).and_then(|value| value.get("trades")).and_then(serde_json::Value::as_array);
+                                        if let (Some(current_trades), Some(previous_trades)) = (current_trades, previous_trades) {
+                                            let previous_last_id = previous_trades.last().and_then(|trade| trade.get("id"));
+                                            if let Some(last_index) = previous_last_id.and_then(|id| current_trades.iter().position(|trade| trade.get("id") == Some(id))) {
+                                                auto_trade_appends.extend(current_trades[last_index + 1..].iter().cloned());
+                                                continue;
+                                            }
+                                            if current_trades.last().and_then(|trade| trade.get("id")) == previous_last_id { continue; }
                                         }
                                     }
-                                }
-                                if old.get(key) != Some(value) {
-                                    changes.insert(key.clone(), value.clone());
+                                    if old.get(key) != Some(value) { changes.insert(key.clone(), value.clone()); }
                                 }
                             }
+                            previous = Some(snapshot);
+                            if !changes.is_empty() || !auto_trade_appends.is_empty() {
+                                let event = serde_json::json!({ "type": "delta", "changes": changes, "auto_trade_appends": auto_trade_appends });
+                                return Some((Ok(event), (store, updates, previous, true, rates_refresh, hedge_refresh)));
+                            }
                         }
-                        previous = snapshot;
-                        if !changes.is_empty() || !auto_trade_appends.is_empty() {
-                            let Ok(payload) = serde_json::to_string(&serde_json::json!({ "type": "delta", "changes": changes, "auto_trade_appends": auto_trade_appends })) else { break };
-                            if sender.send(Message::Text(payload.into())).await.is_err() { break; }
+                        Err(broadcast::error::RecvError::Closed) => return None,
+                    },
+                    _ = rates_refresh.tick() => {
+                        let rates = serde_json::to_value(latest_stream_usd_rates()).unwrap_or(serde_json::Value::Null);
+                        let account = account_ui_snapshot(&store, &rates).await;
+                        let mut changes = serde_json::Map::new();
+                        if previous.as_ref().and_then(|p| p.get("usd_rates")) != Some(&rates) { changes.insert("usd_rates".into(), rates.clone()); }
+                        if previous.as_ref().and_then(|p| p.get("account")) != Some(&account) { changes.insert("account".into(), account.clone()); }
+                        if let Some(old) = previous.as_mut() { old["usd_rates"] = rates; old["account"] = account; }
+                        if !changes.is_empty() {
+                            return Some((Ok(serde_json::json!({ "type": "delta", "changes": changes })), (store, updates, previous, true, rates_refresh, hedge_refresh)));
                         }
-                    }
-                    Err(broadcast::error::RecvError::Closed) => break,
-                },
-                _ = rates_refresh.tick() => {
-                    let rates = serde_json::to_value(latest_stream_usd_rates()).unwrap_or(serde_json::Value::Null);
-                    let account = account_ui_snapshot(&store, &rates).await;
-                    let mut changes = serde_json::Map::new();
-                    if previous.get("usd_rates") != Some(&rates) {
-                        changes.insert("usd_rates".into(), rates.clone());
-                    }
-                    if previous.get("account") != Some(&account) {
-                        changes.insert("account".into(), account.clone());
-                    }
-                    previous["usd_rates"] = rates;
-                    previous["account"] = account;
-                    if !changes.is_empty() {
-                        let payload = serde_json::json!({ "type": "delta", "changes": changes }).to_string();
-                        if sender.send(Message::Text(payload.into())).await.is_err() { break; }
-                    }
-                },
-                _ = hedge_refresh.tick() => {
-                    let hedge = hedge_candidates_snapshot(&store).await;
-                    if previous.get("hedge_candidates") != Some(&hedge) {
-                        previous["hedge_candidates"] = hedge.clone();
-                        let payload = serde_json::json!({ "type": "delta", "changes": { "hedge_candidates": hedge } }).to_string();
-                        if sender.send(Message::Text(payload.into())).await.is_err() { break; }
-                    }
-                },
-                incoming = receiver.next() => if incoming.is_none() { break; },
+                    },
+                    _ = hedge_refresh.tick() => {
+                        let hedge = hedge_candidates_snapshot(&store).await;
+                        if previous.as_ref().and_then(|p| p.get("hedge_candidates")) != Some(&hedge) {
+                            if let Some(old) = previous.as_mut() { old["hedge_candidates"] = hedge.clone(); }
+                            return Some((Ok(serde_json::json!({ "type": "delta", "changes": { "hedge_candidates": hedge } })), (store, updates, previous, true, rates_refresh, hedge_refresh)));
+                        }
+                    },
+                }
             }
-        }
-    })
+        },
+    )
 }
 
 async fn position_ui_snapshot(store: &Arc<PositionStore>) -> serde_json::Value {
     let (positions, auto_positions, orders, trades, auto_trades, account) = {
-        let (ledger, _, _) = snapshot_position_ledger(&store.ledger).await;
+    let (ledger, _, _, _) = snapshot_position_ledger(&store.ledger).await;
         let positions = cached_position_summary(store, &ledger, None);
         let auto_positions = cached_position_summary(store, &ledger, Some("auto"));
         let orders = OrdersResponse { orders: ledger.orders.clone(), barrier_orders: ledger.barrier_orders.clone() };
@@ -365,4 +352,171 @@ async fn get_persistence_timing(
             samples: sorted.len(),
         }))
     }).collect())
+}
+
+#[derive(Clone, serde::Deserialize)]
+struct PositionRpcRequest {
+    method: String,
+    path: String,
+    #[serde(default)]
+    body: Option<serde_json::Value>,
+}
+
+struct PositionRSocketResponder {
+    router: Router,
+    store: Arc<PositionStore>,
+}
+
+impl RSocket for PositionRSocketResponder {
+    fn metadata_push<'life0, 'async_trait>(
+        &'life0 self,
+        _request: Payload,
+    ) -> Pin<Box<dyn futures_util::Future<Output = anyhow::Result<()>> + Send + 'async_trait>>
+    where Self: 'async_trait, 'life0: 'async_trait {
+        Box::pin(async { Err(anyhow::anyhow!("RSocket metadata push is unsupported")) })
+    }
+
+    fn fire_and_forget<'life0, 'async_trait>(
+        &'life0 self,
+        _request: Payload,
+    ) -> Pin<Box<dyn futures_util::Future<Output = anyhow::Result<()>> + Send + 'async_trait>>
+    where Self: 'async_trait, 'life0: 'async_trait {
+        Box::pin(async { Err(anyhow::anyhow!("RSocket fire-and-forget is unsupported")) })
+    }
+
+    fn request_response<'life0, 'async_trait>(
+        &'life0 self,
+        request: Payload,
+    ) -> Pin<Box<dyn futures_util::Future<Output = anyhow::Result<Option<Payload>>> + Send + 'async_trait>>
+    where Self: 'async_trait, 'life0: 'async_trait {
+        let router = self.router.clone();
+        Box::pin(async move {
+            let bytes = request.data().ok_or_else(|| anyhow::anyhow!("RSocket request data is required"))?;
+            let rpc: PositionRpcRequest = serde_json::from_slice(bytes.as_ref())?;
+            let method = rpc.method.parse::<axum::http::Method>()?;
+            if !is_position_rpc_path(&rpc.path) {
+                anyhow::bail!("unsupported Position Management RSocket path");
+            }
+            let body = rpc.body.map(|value| serde_json::to_vec(&value)).transpose()?.unwrap_or_default();
+            let request = Request::builder()
+                .method(method)
+                .uri(&rpc.path)
+                .header(axum::http::header::CONTENT_TYPE, "application/json")
+                .body(Body::from(body))?;
+            use tower::ServiceExt;
+            let response = router.oneshot(request).await?;
+            let status = response.status().as_u16();
+            let headers = response
+                .headers()
+                .iter()
+                .filter_map(|(name, value)| {
+                    value
+                        .to_str()
+                        .ok()
+                        .map(|value| (name.as_str().to_owned(), value.to_owned()))
+                })
+                .collect::<std::collections::BTreeMap<_, _>>();
+            let body = axum::body::to_bytes(response.into_body(), 16 * 1024 * 1024).await?;
+            let response = serde_json::json!({
+                "status": status,
+                "headers": headers,
+                "body": serde_json::from_slice::<serde_json::Value>(&body)
+                    .unwrap_or_else(|_| serde_json::Value::String(String::from_utf8_lossy(&body).into_owned()))
+            });
+            Ok(Some(Payload::new(Some(Bytes::from(serde_json::to_vec(&response)?)), None)))
+        })
+    }
+
+    fn request_stream(
+        &self,
+        request: Payload,
+    ) -> Pin<Box<dyn futures_util::Stream<Item = Result<Payload, anyhow::Error>> + Send + 'static>> {
+        let is_ui_stream = request.data().is_some_and(|data| data.as_ref() == b"position-ui:*");
+        if !is_ui_stream {
+            return Box::pin(futures_util::stream::once(async {
+                Err(anyhow::anyhow!("unsupported Position Management RSocket stream"))
+            }));
+        }
+        Box::pin(position_ui_events(Arc::clone(&self.store)).map(|event| {
+            let event = event?;
+            Ok(Payload::new(Some(Bytes::from(serde_json::to_vec(&event)?)), None))
+        }))
+    }
+
+    fn request_channel(&self, _requests: Flux<Result<Payload, anyhow::Error>>) -> Flux<Result<Payload, anyhow::Error>> {
+        futures_util::stream::once(async { Err(anyhow::anyhow!("RSocket request-channel is unsupported")) }).boxed()
+    }
+}
+
+fn is_position_rpc_path(path: &str) -> bool {
+    let path = path.split('?').next().unwrap_or(path);
+    (path.starts_with("/positions") && !path.starts_with("/positions/auto-trader"))
+        || matches!(path, "/account" | "/account/topups")
+        || path.starts_with("/users/")
+        || matches!(
+            path,
+            "/internal/insights-inputs"
+                | "/internal/market-book"
+                | "/internal/persistence-timing"
+        )
+        || (path.starts_with("/internal/market-book/") && path.ends_with("/subscribe"))
+}
+
+fn start_position_rsocket(router: Router, store: Arc<PositionStore>) {
+    let port = std::env::var("POSITION_MANAGEMENT_RSOCKET_PORT").unwrap_or_else(|_| "10005".to_owned());
+    tokio::spawn(async move {
+        let address = format!("0.0.0.0:{port}");
+        crate::service_log!("INFO", "Position Management RSocket server listening on ws://{address}");
+        if let Err(error) = RSocketFactory::receive()
+            .transport(WebsocketServerTransport::from(address))
+            .acceptor(Box::new(move |_setup, _socket| {
+                Ok(Box::new(PositionRSocketResponder { router: router.clone(), store: Arc::clone(&store) }))
+            }))
+            .serve()
+            .await
+        {
+            crate::service_log!("ERROR", "Position Management RSocket server stopped: {error:#}");
+        }
+    });
+}
+
+#[cfg(test)]
+mod position_rsocket_contract_tests {
+    use super::{PositionRpcRequest, is_position_rpc_path};
+
+    #[test]
+    fn accepts_only_position_management_rpc_routes() {
+        for route in [
+            "/positions?source=auto",
+            "/positions/account",
+            "/positions/trades?limit=100",
+            "/account/topups",
+            "/users/1",
+            "/internal/insights-inputs?symbol=BTC-USDT",
+            "/internal/market-book?symbol=BTC-USDT",
+            "/internal/market-book/BTC-USDT/subscribe",
+            "/internal/persistence-timing",
+        ] {
+            assert!(is_position_rpc_path(route), "unexpectedly rejected {route}");
+        }
+        for route in [
+            "/positions/auto-trader",
+            "/positions/auto-trader/activity",
+            "/signals/stream",
+            "/health",
+            "/internal/other",
+        ] {
+            assert!(!is_position_rpc_path(route), "unexpectedly accepted {route}");
+        }
+    }
+
+    #[test]
+    fn rpc_request_contract_carries_method_path_query_and_body() {
+        let request: PositionRpcRequest = serde_json::from_str(
+            r#"{"method":"POST","path":"/positions/account/topups?dry_run=false","body":{"amount":25.0}}"#,
+        ).unwrap();
+        assert_eq!(request.method, "POST");
+        assert_eq!(request.path, "/positions/account/topups?dry_run=false");
+        assert_eq!(request.body.unwrap()["amount"], 25.0);
+    }
 }

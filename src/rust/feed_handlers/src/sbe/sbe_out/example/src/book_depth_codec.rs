@@ -1,12 +1,12 @@
 use crate::*;
 
-pub use encoder::*;
 pub use decoder::*;
+pub use encoder::*;
 
 pub const SBE_BLOCK_LENGTH: u16 = 264;
 pub const SBE_TEMPLATE_ID: u16 = 2;
 pub const SBE_SCHEMA_ID: u16 = 1;
-pub const SBE_SCHEMA_VERSION: u16 = 7;
+pub const SBE_SCHEMA_VERSION: u16 = 9;
 
 pub mod encoder {
     use super::*;
@@ -514,9 +514,7 @@ pub mod encoder {
             let offset = self.offset + 256;
             self.get_buf_mut().put_f64_at(offset, value);
         }
-
     }
-
 } // end encoder
 
 pub mod decoder {
@@ -799,8 +797,5 @@ pub mod decoder {
         pub fn ask_size_6(&self) -> f64 {
             self.get_buf().get_f64_at(self.offset + 256)
         }
-
     }
-
 } // end decoder
-

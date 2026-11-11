@@ -25,7 +25,10 @@ ModuleRegistry.registerModules([
   TextFilterModule,
 ]);
 
-import { positionsGridTheme, defaultPositionColDef } from './PositionGridConfig';
+import {
+  positionsGridTheme,
+  defaultPositionColDef,
+} from './PositionGridConfig';
 import { quoteCurrency, type PositionGridRow } from './PositionGridTypes';
 
 function CancelOrderCell({
@@ -77,7 +80,11 @@ function PositionsComponent({
         id: order.id,
         kind: 'order' as const,
         createdAt: order.timestamp,
-        orderType: order.post_only ? 'Post-only limit' : order.time_in_force === 'gtd' ? 'GTD limit' : 'Limit',
+        orderType: order.post_only
+          ? 'Post-only limit'
+          : order.time_in_force === 'gtd'
+            ? 'GTD limit'
+            : 'Limit',
         expiresAt: order.expires_at,
         orderTimeInForce: order.time_in_force,
         status: 'Resting',
@@ -106,48 +113,76 @@ function PositionsComponent({
         triggerDirection: order.trigger_direction,
         executionType: order.execution_type,
         activationLimit: order.limit_price,
-        current: state.books[order.symbol]?.bids[0] && state.books[order.symbol]?.asks[0]
-          ? ((state.books[order.symbol]!.bids[0].price + state.books[order.symbol]!.asks[0].price) / 2)
-          : (state.books[order.symbol]?.bids[0]?.price ?? state.books[order.symbol]?.asks[0]?.price),
+        current:
+          state.books[order.symbol]?.bids[0] &&
+          state.books[order.symbol]?.asks[0]
+            ? (state.books[order.symbol]!.bids[0].price +
+                state.books[order.symbol]!.asks[0].price) /
+              2
+            : (state.books[order.symbol]?.bids[0]?.price ??
+              state.books[order.symbol]?.asks[0]?.price),
         quote: quoteCurrency(order.symbol),
         bookError: state.bookErrors[order.symbol],
       })),
       ...state.vwapRuns.slice(-20).map((run) => ({
-          id: run.id,
-          kind: 'vwap' as const,
-          createdAt: run.started_at,
-          orderType: run.strategy === 'twap' ? 'TWAP' : 'VWAP',
-          status: run.status,
-          symbol: run.symbol,
-          side: run.side,
-          executed: run.executed_quantity,
-          remaining: Math.max(run.quantity - run.executed_quantity, 0),
-          progress: run.quantity > 0 ? Math.min(run.executed_quantity / run.quantity, 1) * 100 : 0,
-          etaMinutes: run.executed_quantity > 0 && run.started_at < Date.now()
-            ? (Math.max(run.quantity - run.executed_quantity, 0) / (run.executed_quantity / ((Date.now() - run.started_at) / 60000)))
+        id: run.id,
+        kind: 'vwap' as const,
+        createdAt: run.started_at,
+        orderType: run.strategy === 'twap' ? 'TWAP' : 'VWAP',
+        status: run.status,
+        symbol: run.symbol,
+        side: run.side,
+        executed: run.executed_quantity,
+        remaining: Math.max(run.quantity - run.executed_quantity, 0),
+        progress:
+          run.quantity > 0
+            ? Math.min(run.executed_quantity / run.quantity, 1) * 100
+            : 0,
+        etaMinutes:
+          run.executed_quantity > 0 && run.started_at < Date.now()
+            ? Math.max(run.quantity - run.executed_quantity, 0) /
+              (run.executed_quantity / ((Date.now() - run.started_at) / 60000))
             : undefined,
-          executionVwap: run.executed_quantity > 0 ? run.execution_vwap : undefined,
-          marketVwap: run.executed_quantity > 0 ? run.market_vwap : undefined,
-          slippage: run.executed_quantity > 0 ? run.slippage : undefined,
-          quote: quoteCurrency(run.symbol),
-        })),
+        executionVwap:
+          run.executed_quantity > 0 ? run.execution_vwap : undefined,
+        marketVwap: run.executed_quantity > 0 ? run.market_vwap : undefined,
+        slippage: run.executed_quantity > 0 ? run.slippage : undefined,
+        quote: quoteCurrency(run.symbol),
+      })),
     ],
-    [state.rows, state.barrierOrders, state.vwapRuns, state.books, state.bookErrors],
+    [
+      state.rows,
+      state.barrierOrders,
+      state.vwapRuns,
+      state.books,
+      state.bookErrors,
+    ],
   );
   const displayedRowData = usePausedValue(rowData, paused);
   const columnDefs = useMemo<ColDef<PositionGridRow>[]>(
     () => [
       { field: 'symbol', headerName: 'Symbol', minWidth: 90 },
-      { field: 'orderType', headerName: 'Type', minWidth: 92, tooltipValueGetter: ({ value }) => getOrderTypeDescription(value) },
+      {
+        field: 'orderType',
+        headerName: 'Type',
+        minWidth: 92,
+        tooltipValueGetter: ({ value }) => getOrderTypeDescription(value),
+      },
       {
         field: 'createdAt',
         headerName: 'Time',
         minWidth: 120,
         sort: 'desc',
         sortIndex: 0,
-        valueFormatter: ({ value }) => value == null ? '' : new Date(value).toLocaleString(),
+        valueFormatter: ({ value }) =>
+          value == null ? '' : new Date(value).toLocaleString(),
       },
-      { field: 'status', headerName: 'Status', minWidth: 105, tooltipField: 'error' },
+      {
+        field: 'status',
+        headerName: 'Status',
+        minWidth: 105,
+        tooltipField: 'error',
+      },
       {
         field: 'side',
         headerName: 'Side',
@@ -163,7 +198,9 @@ function PositionsComponent({
         minWidth: 68,
         filter: 'agNumberColumnFilter',
         valueFormatter: ({ value, data }) =>
-          value === undefined ? '' : formatForSymbol(value, data?.symbol ?? '', 'quantity'),
+          value === undefined
+            ? ''
+            : formatForSymbol(value, data?.symbol ?? '', 'quantity'),
       },
       {
         field: 'remaining',
@@ -171,49 +208,113 @@ function PositionsComponent({
         minWidth: 68,
         filter: 'agNumberColumnFilter',
         valueFormatter: ({ value, data }) =>
-          value === undefined ? '' : formatForSymbol(value, data?.symbol ?? '', 'quantity'),
+          value === undefined
+            ? ''
+            : formatForSymbol(value, data?.symbol ?? '', 'quantity'),
       },
-      ...(state.vwapRuns.length > 0 ? [{
-        headerName: 'VWAP',
-        marryChildren: true,
-        children: [
-          {
-            field: 'progress',
-            headerName: 'Filled',
-            minWidth: 88,
-            valueFormatter: ({ value, data }: { value: number | undefined; data: PositionGridRow | undefined }) => data?.kind === 'vwap' && value != null ? value.toFixed(1) + '%' : '',
-          },
-          {
-            field: 'etaMinutes',
-            headerName: 'Pace ETA',
-            minWidth: 82,
-            valueFormatter: ({ value, data }: { value: number | undefined; data: PositionGridRow | undefined }) => data?.kind === 'vwap' && value != null && Number.isFinite(value) ? Math.ceil(value) + ' min' : data?.kind === 'vwap' ? '—' : '',
-          },
-          {
-            field: 'executionVwap',
-            headerName: 'Exec VWAP',
-            minWidth: 92,
-            valueFormatter: ({ value, data }: { value: number | undefined; data: PositionGridRow | undefined }) => data?.kind === 'vwap' && value != null ? formatForSymbol(value, data.symbol, 'price') + ' ' + data.quote : '',
-          },
-          {
-            field: 'marketVwap',
-            headerName: 'Market VWAP',
-            minWidth: 92,
-            valueFormatter: ({ value, data }: { value: number | undefined; data: PositionGridRow | undefined }) => data?.kind === 'vwap' && value != null ? formatForSymbol(value, data.symbol, 'price') + ' ' + data.quote : '',
-          },
-          {
-            field: 'slippage',
-            headerName: 'VWAP delta',
-            minWidth: 92,
-            valueFormatter: ({ value, data }: { value: number | undefined; data: PositionGridRow | undefined }) => data?.kind === 'vwap' && value != null ? formatForSymbol(value, data.symbol, 'price') + ' ' + data.quote : '',
-          },
-        ],
-      } satisfies ColGroupDef<PositionGridRow>] : []),
+      ...(state.vwapRuns.length > 0
+        ? [
+            {
+              headerName: 'VWAP',
+              marryChildren: true,
+              children: [
+                {
+                  field: 'progress',
+                  headerName: 'Filled',
+                  minWidth: 88,
+                  valueFormatter: ({
+                    value,
+                    data,
+                  }: {
+                    value: number | undefined;
+                    data: PositionGridRow | undefined;
+                  }) =>
+                    data?.kind === 'vwap' && value != null
+                      ? value.toFixed(1) + '%'
+                      : '',
+                },
+                {
+                  field: 'etaMinutes',
+                  headerName: 'Pace ETA',
+                  minWidth: 82,
+                  valueFormatter: ({
+                    value,
+                    data,
+                  }: {
+                    value: number | undefined;
+                    data: PositionGridRow | undefined;
+                  }) =>
+                    data?.kind === 'vwap' &&
+                    value != null &&
+                    Number.isFinite(value)
+                      ? Math.ceil(value) + ' min'
+                      : data?.kind === 'vwap'
+                        ? '—'
+                        : '',
+                },
+                {
+                  field: 'executionVwap',
+                  headerName: 'Exec VWAP',
+                  minWidth: 92,
+                  valueFormatter: ({
+                    value,
+                    data,
+                  }: {
+                    value: number | undefined;
+                    data: PositionGridRow | undefined;
+                  }) =>
+                    data?.kind === 'vwap' && value != null
+                      ? formatForSymbol(value, data.symbol, 'price') +
+                        ' ' +
+                        data.quote
+                      : '',
+                },
+                {
+                  field: 'marketVwap',
+                  headerName: 'Market VWAP',
+                  minWidth: 92,
+                  valueFormatter: ({
+                    value,
+                    data,
+                  }: {
+                    value: number | undefined;
+                    data: PositionGridRow | undefined;
+                  }) =>
+                    data?.kind === 'vwap' && value != null
+                      ? formatForSymbol(value, data.symbol, 'price') +
+                        ' ' +
+                        data.quote
+                      : '',
+                },
+                {
+                  field: 'slippage',
+                  headerName: 'VWAP delta',
+                  minWidth: 92,
+                  valueFormatter: ({
+                    value,
+                    data,
+                  }: {
+                    value: number | undefined;
+                    data: PositionGridRow | undefined;
+                  }) =>
+                    data?.kind === 'vwap' && value != null
+                      ? formatForSymbol(value, data.symbol, 'price') +
+                        ' ' +
+                        data.quote
+                      : '',
+                },
+              ],
+            } satisfies ColGroupDef<PositionGridRow>,
+          ]
+        : []),
       {
         field: 'expiresAt',
         headerName: 'Expires',
         minWidth: 105,
-        valueFormatter: ({ value, data }) => data?.kind === 'order' && value ? new Date(value).toLocaleString() : '',
+        valueFormatter: ({ value, data }) =>
+          data?.kind === 'order' && value
+            ? new Date(value).toLocaleString()
+            : '',
       },
       {
         field: 'limitPrice',
@@ -223,13 +324,29 @@ function PositionsComponent({
         valueFormatter: ({ value, data }) =>
           value === undefined
             ? ''
-            : (data?.kind === 'barrier' ? (data.triggerDirection === 'above' ? 'Above ' : 'Below ') : '') + formatForSymbol(value, data?.symbol ?? '', 'price') + (data?.kind === 'barrier' && data.executionType === 'limit' && data.activationLimit ? ' → limit ' + formatForSymbol(data.activationLimit, data.symbol, 'price') : '') + ' ' + (data?.quote ?? ''),
+            : (data?.kind === 'barrier'
+                ? data.triggerDirection === 'above'
+                  ? 'Above '
+                  : 'Below '
+                : '') +
+              formatForSymbol(value, data?.symbol ?? '', 'price') +
+              (data?.kind === 'barrier' &&
+              data.executionType === 'limit' &&
+              data.activationLimit
+                ? ' → limit ' +
+                  formatForSymbol(data.activationLimit, data.symbol, 'price')
+                : '') +
+              ' ' +
+              (data?.quote ?? ''),
       },
       {
         field: 'estimatedFee',
         headerName: 'Est. fee',
         minWidth: 80,
-        valueFormatter: ({ value, data }) => value == null || data?.kind !== 'order' ? '' : formatForSymbol(value, data.symbol, 'price') + ' ' + data.quote,
+        valueFormatter: ({ value, data }) =>
+          value == null || data?.kind !== 'order'
+            ? ''
+            : formatForSymbol(value, data.symbol, 'price') + ' ' + data.quote,
       },
       {
         field: 'current',
@@ -243,7 +360,9 @@ function PositionsComponent({
               ? data.bookError
                 ? 'Unavailable'
                 : 'Loading...'
-              : formatForSymbol(value, data.symbol, 'price') + ' ' + (data.quote ?? ''),
+              : formatForSymbol(value, data.symbol, 'price') +
+                ' ' +
+                (data.quote ?? ''),
       },
       {
         colId: 'actions',

@@ -1,6 +1,4 @@
 async fn submit_position_exit_order(
-    client: &reqwest::Client,
-    base: &str,
     state: &AutoTraderState,
     symbol: String,
     strategy_key: String,
@@ -26,7 +24,7 @@ async fn submit_position_exit_order(
         // The server-side barrier is already watching this price; don't race it with a second IOC.
         return Ok(None);
     }
-    let stops_cancelled = match cancel_protective_stops(client, base, state, &symbol, Some(&strategy_key)).await {
+    let stops_cancelled = match cancel_protective_stops(state, &symbol, Some(&strategy_key)).await {
         Ok(cancelled) => cancelled,
         Err(error) => {
             let mut settings = state.settings.lock().await;
@@ -51,8 +49,6 @@ async fn submit_position_exit_order(
     let notional = quantity * (bid + (ask - bid) * 0.5);
     let submit_started = Instant::now();
     let response = match submit_configured_order(
-        client,
-        base,
         &symbol,
         side,
         quantity,

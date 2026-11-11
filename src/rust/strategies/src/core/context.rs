@@ -29,13 +29,14 @@ pub struct ContextMissedOpportunityBand {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ContextThresholdInput {
     pub context: String,
-    pub missed_opportunity_bands: Vec<ContextMissedOpportunityBand>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ContextThresholdRequest {
     pub learning: BTreeMap<String, ContextLearningStat>,
     pub contexts: Vec<ContextThresholdInput>,
+    #[serde(default)]
+    pub missed_opportunity_bands: Vec<ContextMissedOpportunityBand>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

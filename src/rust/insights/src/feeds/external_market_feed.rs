@@ -39,22 +39,7 @@ async fn poll_news_feed(news: watch::Sender<Arc<NewsFeedSnapshot>>) {
                 snapshot.articles = articles;
             }
         }
-        let forwarded = serde_json::to_vec(&snapshot).unwrap_or_default();
         news.send_replace(Arc::new(snapshot.clone()));
-        let feed_handlers_url = std::env::var("FEED_HANDLERS_URL")
-            .unwrap_or_else(|_| "http://127.0.0.1:3001".to_owned());
-        if !forwarded.is_empty() {
-            if let Err(error) = client
-                .post(format!("{feed_handlers_url}/internal/news/snapshot"))
-                .header(reqwest::header::CONTENT_TYPE, "application/json")
-                .body(forwarded)
-                .send()
-                .await
-                .and_then(reqwest::Response::error_for_status)
-            {
-                crate::service_log!("WARN", "Could not forward RSS snapshot to FeedHandlers: {error}");
-            }
-        }
         tokio::time::sleep(Duration::from_secs(60)).await;
     }
 }

@@ -1,14 +1,15 @@
 use super::*;
 
-//TODO split up function - too hard to read
+pub(super) const MINIMUM_SCOUT_PARAMETER_SAMPLES: usize = 2;
+pub(super) const MAXIMUM_SCOUT_PARAMETER_SAMPLES: usize = 100;
+pub(super) const PARAMETER_STEP_RELATIVE_TOLERANCE: f64 = 1.0e-6;
+
 pub(super) async fn accept_feedback(
     State(service): State<ServiceState>,
     Json(event): Json<FeedbackEvent>,
 ) -> Result<Json<FeedbackResult>, (StatusCode, String)> {
     let (event_id, symbol, strategy, parameters, profile_id) = event_parts(&event);
-    if event_id.is_empty() || parameters.values().any(|value| !value.is_finite()) {
-        return Err((StatusCode::BAD_REQUEST, "invalid feedback event".into()));
-    }
+    validate_feedback_identity(event_id, parameters)?;
     let mut state = service.state.lock().await;
     if state.seen_event_ids.contains(event_id) {
         return Ok(Json(FeedbackResult {
@@ -17,6 +18,7 @@ pub(super) async fn accept_feedback(
             profile: None,
         }));
     }
+
     let profile_key = key(symbol, strategy);
     let minimum_parameter_samples = state.minimum_live_scout_parameter_samples;
     let source_profile = StrategyProfile {
@@ -29,21 +31,57 @@ pub(super) async fn accept_feedback(
         positive_samples: 0,
         realized_pnl: 0.0,
     };
-    let id = variant_key(&source_profile);
-    let LearningState {
-        variants,
-        active_profiles,
-        threshold_samples,
-        ..
-    } = &mut *state;
-    let registered = variants.entry(id).or_insert_with(|| RegisteredProfile {
-        profile: source_profile,
-        specs: event_specs(&event).to_vec(),
-        samples: 0,
-        positive: 0,
-        realized_pnl: 0.0,
-        outcomes: Vec::new(),//TODO make optional so that we dont allocate unnneccesarily 
-    });
+    register_feedback_variant(&mut state, &event, source_profile, parameters, &profile_id)?;
+    let update = append_profile_outcome(&mut state, &event, symbol, strategy, parameters)?;
+    update_active_profile(
+        &mut state,
+        &event,
+        symbol,
+        strategy,
+        parameters,
+        minimum_parameter_samples,
+        &profile_key,
+        &update,
+    );
+    train_threshold_parameters(&mut state, &event, symbol, strategy, &profile_key, &update);
+    finalize_feedback(&mut state, &event, event_id);
+    persist(&service.path, &state)?;
+    Ok(Json(FeedbackResult {
+        accepted: true,
+        duplicate: false,
+        profile: Some(update.profile),
+    }))
+}
+
+fn validate_feedback_identity(
+    event_id: &str,
+    parameters: &BTreeMap<String, f64>,
+) -> Result<(), (StatusCode, String)> {
+    if event_id.is_empty() || parameters.values().any(|value| !value.is_finite()) {
+        Err((StatusCode::BAD_REQUEST, "invalid feedback event".into()))
+    } else {
+        Ok(())
+    }
+}
+
+fn register_feedback_variant(
+    state: &mut LearningState,
+    event: &FeedbackEvent,
+    source_profile: StrategyProfile,
+    parameters: &BTreeMap<String, f64>,
+    profile_id: &str,
+) -> Result<(), (StatusCode, String)> {
+    let registered = state
+        .variants
+        .entry(variant_key(&source_profile))
+        .or_insert_with(|| RegisteredProfile {
+            profile: source_profile,
+            specs: event_specs(event).to_vec(),
+            samples: 0,
+            positive: 0,
+            realized_pnl: 0.0,
+            outcomes: Vec::new(),
+        });
     if registered
         .specs
         .iter()
@@ -54,8 +92,7 @@ pub(super) async fn accept_feedback(
             "feedback does not include valid parameter bounds".into(),
         ));
     }
-    
-    if event_specs(&event).iter().any(|spec| {
+    if event_specs(event).iter().any(|spec| {
         !valid_spec(spec) || !parameters.contains_key(&spec.key) || !registered.specs.contains(spec)
     }) {
         return Err((
@@ -69,67 +106,93 @@ pub(super) async fn accept_feedback(
             "feedback profile does not match registered variant".into(),
         ));
     }
-    let threshold_observations = match &event {
-        FeedbackEvent::TradeOutcome {
-            threshold_observations,
-            ..
-        } => threshold_observations
-            .iter()
-            .filter(|observation| {
-                observation.parameter_key.len() <= 128
-                    && observation.threshold.is_finite()
-                    && observation.feature_value.is_finite()
-                    && parameters
-                        .get(&observation.parameter_key)
-                        .is_some_and(|value| (*value - observation.threshold).abs() <= 1e-8)
-                    && registered
-                        .specs
-                        .iter()
-                        .any(|spec| spec.key == observation.parameter_key)
-            })
-            .cloned()//TODO avoid clone
-            .collect::<Vec<_>>(),
-        FeedbackEvent::ScoutOutcome { .. } => Vec::new(),
+    Ok(())
+}
+
+struct ProfileOutcomeUpdate {
+    profile: StrategyProfile,
+    samples: usize,
+    positive: usize,
+    realized_pnl: f64,
+    registered_specs: Vec<ParameterSpec>,
+    registered_profile: StrategyProfile,
+}
+
+fn append_profile_outcome(
+    state: &mut LearningState,
+    event: &FeedbackEvent,
+    symbol: &str,
+    strategy: &str,
+    parameters: &BTreeMap<String, f64>,
+) -> Result<ProfileOutcomeUpdate, (StatusCode, String)> {
+    let (_, _, _, _, profile_id) = event_parts(event);
+    let variant = StrategyProfile {
+        profile_id,
+        version: 0,
+        symbol: symbol.to_owned(),
+        strategy: strategy.to_owned(),
+        parameters: parameters.clone(),
+        learning_samples: 0,
+        positive_samples: 0,
+        realized_pnl: 0.0,
     };
-    let net_return = match &event {
+    let registered = state
+        .variants
+        .get_mut(&variant_key(&variant))
+        .expect("feedback profile is registered before recording its outcome");
+    record_learning_outcome(registered, event);
+    refresh_profile_statistics(registered);
+    let profile = update_profile(&registered.profile, event_specs(event), event).ok_or((
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "feedback did not match profile".into(),
+    ))?;
+    Ok(ProfileOutcomeUpdate {
+        profile,
+        samples: registered.samples,
+        positive: registered.positive,
+        realized_pnl: registered.realized_pnl,
+        registered_specs: registered.specs.clone(),
+        registered_profile: registered.profile.clone(),
+    })
+}
+
+fn record_learning_outcome(registered: &mut RegisteredProfile, event: &FeedbackEvent) {
+    registered.outcomes.push(learning_outcome(event));
+    let cutoff = now_ms().saturating_sub(7 * 24 * 60 * 60 * 1000);
+    registered
+        .outcomes
+        .retain(|outcome| outcome.observed_at_ms >= cutoff);
+}
+
+// Outcome history stores the complete event; threshold samples are added by the
+// caller once the state borrow is available. This helper constructs that record.
+fn learning_outcome(event: &FeedbackEvent) -> LearningOutcome {
+    let (tested_parameter_keys, baseline_parameters) = match event {
         FeedbackEvent::ScoutOutcome {
-            net_return_percent, ..
-        } => *net_return_percent,
-        FeedbackEvent::TradeOutcome {
-            net_return_percent, ..
-        } => *net_return_percent,
-    };
-    let tested_parameter_keys = match &event {
-        FeedbackEvent::ScoutOutcome { specs, .. } => {
-            specs.iter().map(|spec| spec.key.clone()).collect()//TODO avoid clone
-        }
-        FeedbackEvent::TradeOutcome { .. } => Vec::new(),
-    };
-    let empty_baseline = BTreeMap::new();
-    let baseline_parameters = match &event {
-        FeedbackEvent::ScoutOutcome {
+            specs,
             baseline_parameters,
             ..
-        } => baseline_parameters.clone(),
-        FeedbackEvent::TradeOutcome { .. } => BTreeMap::new(),
+        } => (
+            specs.iter().map(|spec| spec.key.clone()).collect(),
+            baseline_parameters.clone(),
+        ),
+        FeedbackEvent::TradeOutcome { .. } => (Vec::new(), BTreeMap::new()),
     };
-    registered.outcomes.push(LearningOutcome {
-        observed_at_ms: event_observed_at(&event),
-        net_return_percent: net_return,
-        evidence_group_id: event_evidence_group_id(&event),
-        learning_context: match &event {
-            FeedbackEvent::TradeOutcome { scout: false, .. } => event_context(&event)
+    LearningOutcome {
+        observed_at_ms: event_observed_at(event),
+        net_return_percent: event_net_return_percent(event),
+        evidence_group_id: event_evidence_group_id(event),
+        learning_context: match event {
+            FeedbackEvent::TradeOutcome { scout: false, .. } => event_context(event)
                 .and_then(|context| context.strip_suffix(":trade").map(str::to_owned)),
             _ => None,
         },
-        source: match &event {
+        source: match event {
             FeedbackEvent::ScoutOutcome { .. } => LearningOutcomeSource::Scout,
-            FeedbackEvent::TradeOutcome { scout: true, .. } => {
-                LearningOutcomeSource::PaperScoutTrade//TODO this looks wrong - surely we have scouts or trades - nothing in between
-            }
+            FeedbackEvent::TradeOutcome { scout: true, .. } => LearningOutcomeSource::Scout,
             FeedbackEvent::TradeOutcome { scout: false, .. } => LearningOutcomeSource::Trade,
         },
-        realized_pnl_usd: match &event {
+        realized_pnl_usd: match event {
             FeedbackEvent::TradeOutcome {
                 realized_pnl_usd, ..
             } => Some(*realized_pnl_usd),
@@ -137,166 +200,216 @@ pub(super) async fn accept_feedback(
         },
         tested_parameter_keys,
         baseline_parameters,
-        paired_comparison: matches!(&event, FeedbackEvent::ScoutOutcome { event_id, .. } if event_id.starts_with("paired-scout:")),//TODO - yuk remove string ids partial lookups. Make id a composite key ? and store the composites separately
-    });
-    let cutoff = now_ms().saturating_sub(7 * 24 * 60 * 60 * 1000);
-    registered
-        .outcomes
-        .retain(|outcome| outcome.observed_at_ms >= cutoff);
-    // Registered profile gates and profile statistics use actual closed-trade
-    // evidence only. Scout returns are percentage counterfactuals, not USD P&L.
+        paired_comparison: matches!(
+            event,
+            FeedbackEvent::ScoutOutcome {
+                comparison: ScoutComparisonMetadata::Paired { .. },
+                ..
+            }
+        ),
+    }
+}
+
+fn refresh_profile_statistics(registered: &mut RegisteredProfile) {
+    // Profile gates and statistics use actual closed-trade evidence only.
     registered.samples = registered
         .outcomes
         .iter()
-        .filter(|outcome| outcome.source == LearningOutcomeSource::Trade)
+        .filter(|o| o.source == LearningOutcomeSource::Trade)
         .count();
     registered.positive = registered
         .outcomes
         .iter()
-        .filter(|outcome| {
-            outcome.source == LearningOutcomeSource::Trade && outcome.net_return_percent > 0.0
-        })
+        .filter(|o| o.source == LearningOutcomeSource::Trade && o.net_return_percent > 0.0)
         .count();
     registered.realized_pnl = registered
         .outcomes
         .iter()
-        .filter(|outcome| outcome.source == LearningOutcomeSource::Trade)
-        .filter_map(|outcome| outcome.realized_pnl_usd)
+        .filter(|o| o.source == LearningOutcomeSource::Trade)
+        .filter_map(|o| o.realized_pnl_usd)
         .sum();
-    let updated = update_profile(&registered.profile, event_specs(&event), &event).ok_or((
-        StatusCode::UNPROCESSABLE_ENTITY,
-        "feedback did not match profile".into(),
-    ))?;
-    let parameter_specs = match &event {
+}
+
+fn update_active_profile(
+    state: &mut LearningState,
+    event: &FeedbackEvent,
+    symbol: &str,
+    strategy: &str,
+    parameters: &BTreeMap<String, f64>,
+    minimum_parameter_samples: usize,
+    profile_key: &str,
+    update: &ProfileOutcomeUpdate,
+) {
+    let specs = match event {
         FeedbackEvent::ScoutOutcome { specs, .. } => specs.as_slice(),
-        FeedbackEvent::TradeOutcome { .. } => &[],
+        _ => &[],
     };
-    let registered_samples = registered.samples;
-    let registered_positive = registered.positive;
-    let registered_realized_pnl = registered.realized_pnl;
-    let registered_specs = registered.specs.clone();
-    let registered_profile = registered.profile.clone();
-    let baseline_parameters = match &event {
+    let empty_baseline = BTreeMap::new();
+    let baseline = match event {
         FeedbackEvent::ScoutOutcome {
             baseline_parameters,
             ..
         } => baseline_parameters,
-        FeedbackEvent::TradeOutcome { .. } => &empty_baseline,
+        _ => &empty_baseline,
     };
-    let active_matches_baseline = active_profiles.get(&profile_key).is_some_and(|active| {
-        active.parameters.len() == parameters.len()
-            && parameters.iter().all(|(key, value)| {
-                if parameter_specs.iter().any(|spec| &spec.key == key) {
-                    baseline_parameters
-                        .get(key)
-                        .is_some_and(|baseline| active.parameters.get(key) == Some(baseline))
-                } else {
-                    active.parameters.get(key) == Some(value)
-                }
-            })
-    });
-    let paired_outcomes = if parameter_specs.is_empty() || !active_matches_baseline {
+    let active_matches_baseline = state
+        .active_profiles
+        .get(profile_key)
+        .is_some_and(|active| {
+            active.parameters.len() == parameters.len()
+                && parameters.iter().all(|(key, value)| {
+                    if specs.iter().any(|spec| &spec.key == key) {
+                        baseline
+                            .get(key)
+                            .is_some_and(|base| active.parameters.get(key) == Some(base))
+                    } else {
+                        active.parameters.get(key) == Some(value)
+                    }
+                })
+        });
+    let paired = if specs.is_empty() || !active_matches_baseline {
         Vec::new()
     } else {
         paired_parameter_outcomes(
-            variants,
+            &state.variants,
             symbol,
             strategy,
             parameters,
-            parameter_specs,
-            baseline_parameters,
+            specs,
+            baseline,
         )
     };
-    let paired_lower_bound = one_sided_90_lower_bound(&paired_outcomes);
-    let promote_tested_parameters = matches!(event, FeedbackEvent::ScoutOutcome { .. })
-        && !parameter_specs.is_empty()
-        && paired_outcomes.len() >= minimum_parameter_samples
-        && paired_lower_bound.is_some_and(|lower_bound| lower_bound > 0.0);
-    if promote_tested_parameters {
+    let promote_candidate = matches!(event, FeedbackEvent::ScoutOutcome { .. })
+        && !specs.is_empty()
+        && paired.len() >= minimum_parameter_samples
+        && one_sided_90_lower_bound(&paired).is_some_and(|bound| bound > 0.0);
+    if promote_candidate {
         promote_paired_parameters(
-            variants,
-            active_profiles,
+            &state.variants,
+            &mut state.active_profiles,
             symbol,
             strategy,
-            parameter_specs,
+            specs,
             parameters,
         );
     } else if matches!(event, FeedbackEvent::TradeOutcome { .. })
-        && should_publish_trade_profile(
-            registered_samples,
-            registered_positive,
-            registered_realized_pnl,
-        )
+        && should_publish_trade_profile(update.samples, update.positive, update.realized_pnl)
     {
-        let active = active_profiles
-            .entry(profile_key)
-            .or_insert(updated.clone());
-        // A completed trade reports the profile that entered it. It must not
-        // restore old parameter values over a newer paired Scout promotion.
+        let active = state
+            .active_profiles
+            .entry(profile_key.to_owned())
+            .or_insert(update.profile.clone());
+        // Trade feedback reports its entry profile without undoing newer Scout promotion.
         let mut promoted = active.clone();
         promoted.version = active.version.saturating_add(1);
         promoted.profile_id =
             strategies::profile_id(&promoted.symbol, &promoted.strategy, &promoted.parameters);
-        promoted.learning_samples = registered_samples;
-        promoted.positive_samples = registered_positive;
-        promoted.realized_pnl = registered_realized_pnl;
+        promoted.learning_samples = update.samples;
+        promoted.positive_samples = update.positive;
+        promoted.realized_pnl = update.realized_pnl;
         *active = promoted;
     }
-    if !threshold_observations.is_empty() {
-        let net_return_percent = match &event {
-            FeedbackEvent::TradeOutcome {
-                net_return_percent, ..
-            } => *net_return_percent,
-            FeedbackEvent::ScoutOutcome { .. } => 0.0,
-        };
-        if net_return_percent.is_finite() {
-            for observation in threshold_observations {
-                threshold_samples.push(ThresholdTrainingSample {
-                    symbol: symbol.to_owned(),
-                    strategy: strategy.to_owned(),
-                    parameter_key: observation.parameter_key,
-                    observed_at_ms: event_observed_at(&event),
-                    threshold: observation.threshold,
-                    feature_value: observation.feature_value,
-                    net_return_percent,
-                });
-            }
-            if threshold_samples.len() > 100_000 {//TODO remove hardcoding
-                threshold_samples.sort_by_key(|sample| sample.observed_at_ms);
-                threshold_samples.drain(..threshold_samples.len() - 100_000);
-            }
+}
 
-            for spec in registered_specs {
-                let parameter_key = spec.key.as_str();
-                if !threshold_samples.iter().any(|sample| {
-                    sample.strategy == strategy && sample.parameter_key == parameter_key
-                }) {
-                    continue;
-                }
-                let profile_key = key(symbol, strategy);
-                let active_value = active_profiles
-                    .get(&profile_key)
-                    .and_then(|active| active.parameters.get(parameter_key))
-                    .copied()
-                    .or_else(|| registered_profile.parameters.get(parameter_key).copied());
-                let Some(base) = active_value else { continue };
-                let Some(tuned) = walk_forward_threshold(&spec, base, strategy, threshold_samples)
-                else {
-                    continue;
-                };
-                if (tuned - base).abs() < spec.step * 1e-6 { //TODO remove hardcoding
-                    continue;
-                }
-                let active = active_profiles
-                    .entry(profile_key)
-                    .or_insert_with(|| registered_profile.clone());
-                active.parameters.insert(parameter_key.to_owned(), tuned);
-                active.version = active.version.saturating_add(1);
-                active.profile_id =
-                    strategies::profile_id(&active.symbol, &active.strategy, &active.parameters);
-            }
-        }
+fn train_threshold_parameters(
+    state: &mut LearningState,
+    event: &FeedbackEvent,
+    symbol: &str,
+    strategy: &str,
+    profile_key: &str,
+    update: &ProfileOutcomeUpdate,
+) {
+    let FeedbackEvent::TradeOutcome {
+        threshold_observations,
+        net_return_percent,
+        ..
+    } = event
+    else {
+        return;
+    };
+    if !net_return_percent.is_finite() {
+        return;
     }
+    let valid_observations = threshold_observations
+        .iter()
+        .filter(|observation| {
+            observation.parameter_key.len() <= 128
+                && observation.threshold.is_finite()
+                && observation.feature_value.is_finite()
+                && update
+                    .registered_profile
+                    .parameters
+                    .get(&observation.parameter_key)
+                    .is_some_and(|value| (*value - observation.threshold).abs() <= 1e-8)
+                && update
+                    .registered_specs
+                    .iter()
+                    .any(|spec| spec.key == observation.parameter_key)
+        })
+        .collect::<Vec<_>>();
+    if valid_observations.is_empty() {
+        return;
+    }
+    for observation in valid_observations {
+        state.threshold_samples.push(ThresholdTrainingSample {
+            symbol: symbol.to_owned(),
+            strategy: strategy.to_owned(),
+            parameter_key: observation.parameter_key.clone(),
+            observed_at_ms: event_observed_at(event),
+            threshold: observation.threshold,
+            feature_value: observation.feature_value,
+            net_return_percent: *net_return_percent,
+        });
+    }
+    if state.threshold_samples.len() > 100_000 {
+        state
+            .threshold_samples
+            .sort_by_key(|sample| sample.observed_at_ms);
+        state
+            .threshold_samples
+            .drain(..state.threshold_samples.len() - 100_000);
+    }
+    for spec in &update.registered_specs {
+        let parameter_key = spec.key.as_str();
+        if !state
+            .threshold_samples
+            .iter()
+            .any(|sample| sample.strategy == strategy && sample.parameter_key == parameter_key)
+        {
+            continue;
+        }
+        let active_value = state
+            .active_profiles
+            .get(profile_key)
+            .and_then(|active| active.parameters.get(parameter_key))
+            .copied()
+            .or_else(|| {
+                update
+                    .registered_profile
+                    .parameters
+                    .get(parameter_key)
+                    .copied()
+            });
+        let Some(base) = active_value else { continue };
+        let Some(tuned) = walk_forward_threshold(spec, base, strategy, &state.threshold_samples)
+        else {
+            continue;
+        };
+        if !tuning_delta_is_effective(spec.step, base, tuned) {
+            continue;
+        }
+        let active = state
+            .active_profiles
+            .entry(profile_key.to_owned())
+            .or_insert_with(|| update.registered_profile.clone());
+        active.parameters.insert(parameter_key.to_owned(), tuned);
+        active.version = active.version.saturating_add(1);
+        active.profile_id =
+            strategies::profile_id(&active.symbol, &active.strategy, &active.parameters);
+    }
+}
+
+fn finalize_feedback(state: &mut LearningState, event: &FeedbackEvent, event_id: &str) {
     state.seen_event_ids.insert(event_id.to_owned());
     while state.seen_event_ids.len() > 100_000 {
         let Some(oldest) = state.seen_event_ids.iter().next().cloned() else {
@@ -305,22 +418,15 @@ pub(super) async fn accept_feedback(
         state.seen_event_ids.remove(&oldest);
     }
     state.accepted_events = state.accepted_events.saturating_add(1);
-    if let Some(context) = event_context(&event) {
+    if let Some(context) = event_context(event) {
         record_context_outcome(
             &mut state.context_learning,
             &context,
-            event_observed_at(&event),
-            event_is_positive(&event),
-            event_net_return_percent(&event),
+            event_observed_at(event),
+            event_was_profitable(event),
+            event_net_return_percent(event),
         );
     }
-    persist(&service.path, &state)?;
-    //TODO replace in service comms with websockets. HTTP is too slow
-    Ok(Json(FeedbackResult {
-        accepted: true,
-        duplicate: false,
-        profile: Some(updated),
-    }))
 }
 
 #[derive(Deserialize)]
@@ -332,17 +438,24 @@ pub(super) async fn update_scout_parameter_samples(
     State(service): State<ServiceState>,
     Json(request): Json<ScoutParameterSamplesRequest>,
 ) -> Result<Json<usize>, (StatusCode, String)> {
-    //TODO remove hardcoding
-    if !(2..=100).contains(&request.minimum_samples) {
+    if !(MINIMUM_SCOUT_PARAMETER_SAMPLES..=MAXIMUM_SCOUT_PARAMETER_SAMPLES)
+        .contains(&request.minimum_samples)
+    {
         return Err((
             StatusCode::BAD_REQUEST,
-            "minimum_samples must be between 2 and 100".into(),
+            format!(
+                "minimum_samples must be between {MINIMUM_SCOUT_PARAMETER_SAMPLES} and {MAXIMUM_SCOUT_PARAMETER_SAMPLES}"
+            ),
         ));
     }
     let mut state = service.state.lock().await;
     state.minimum_live_scout_parameter_samples = request.minimum_samples;
     persist(&service.path, &state)?;
     Ok(Json(state.minimum_live_scout_parameter_samples))
+}
+
+fn tuning_delta_is_effective(step: f64, base: f64, tuned: f64) -> bool {
+    (tuned - base).abs() >= step * PARAMETER_STEP_RELATIVE_TOLERANCE
 }
 
 fn paired_parameter_outcomes(
@@ -485,7 +598,7 @@ pub(super) fn should_publish_trade_profile(
 }
 
 pub(super) fn persist(path: &Path, state: &LearningState) -> Result<(), (StatusCode, String)> {
-    //TODO - could we just keep the db open ? 
+    //TODO - could we just keep the db open ?
     let connection =
         super::open_state_db(path).map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error))?;
     super::persist_normalized(&connection, state).map_err(|error| {
@@ -517,8 +630,8 @@ pub(super) fn event_specs(event: &FeedbackEvent) -> &[ParameterSpec] {
     }
 }
 
-//TODO rename - is positive is vague. 
-pub(super) fn event_is_positive(event: &FeedbackEvent) -> bool {
+//TODO rename - is positive is vague.
+pub(super) fn event_was_profitable(event: &FeedbackEvent) -> bool {
     match event {
         FeedbackEvent::ScoutOutcome {
             net_return_percent, ..
@@ -541,16 +654,14 @@ pub(super) fn event_net_return_percent(event: &FeedbackEvent) -> f64 {
 }
 
 fn event_evidence_group_id(event: &FeedbackEvent) -> Option<String> {
-    let event_id = match event {
-        FeedbackEvent::ScoutOutcome { event_id, .. } => event_id,
-        FeedbackEvent::TradeOutcome { .. } => return None,
+    let FeedbackEvent::ScoutOutcome {
+        comparison: ScoutComparisonMetadata::Paired { group_id, .. },
+        ..
+    } = event
+    else {
+        return None;
     };
-    let (group, horizon) = event_id.rsplit_once(":horizon-")?;
-    horizon
-        .parse::<u64>()
-        .ok()
-        .filter(|seconds| matches!(*seconds, 60 | 300 | 900 | 3_600))?;
-    Some(group.to_owned())
+    Some(group_id.clone())
 }
 
 pub(super) fn event_context(event: &FeedbackEvent) -> Option<String> {
@@ -690,6 +801,7 @@ mod tests {
             profile_id: "p".into(),
             parameters: BTreeMap::from([("threshold".into(), 0.5)]),
             baseline_parameters: BTreeMap::new(),
+            comparison: ScoutComparisonMetadata::Independent,
             specs: vec![spec()],
             net_return_percent: 1.0,
         }
@@ -765,15 +877,28 @@ mod tests {
     fn feedback_event_helpers_extract_fields_and_positive_values() {
         let scout = scout_event();
         assert_eq!(event_specs(&scout).len(), 1);
-        assert!(event_is_positive(&scout));
+        assert!(event_was_profitable(&scout));
         assert_eq!(event_observed_at(&scout), 100);
         let mut horizon = scout_event();
-        if let FeedbackEvent::ScoutOutcome { event_id, .. } = &mut horizon {
-            *event_id = "paired-scout:comparison:horizon-300".into();
+        if let FeedbackEvent::ScoutOutcome { comparison, .. } = &mut horizon {
+            *comparison = ScoutComparisonMetadata::Paired {
+                group_id: "comparison".into(),
+                horizon_seconds: None,
+            };
         }
         assert_eq!(
             event_evidence_group_id(&horizon).as_deref(),
-            Some("paired-scout:comparison")
+            Some("comparison")
+        );
+        if let FeedbackEvent::ScoutOutcome { comparison, .. } = &mut horizon {
+            *comparison = ScoutComparisonMetadata::Paired {
+                group_id: "comparison".into(),
+                horizon_seconds: Some(300),
+            };
+        }
+        assert_eq!(
+            event_evidence_group_id(&horizon).as_deref(),
+            Some("comparison")
         );
         let trade = FeedbackEvent::TradeOutcome {
             event_id: "t".into(),
@@ -789,12 +914,38 @@ mod tests {
             net_return_percent: 3.0,
             threshold_observations: Vec::new(),
         };
-        assert!(!event_is_positive(&trade));
+        assert!(!event_was_profitable(&trade));
         assert_eq!(event_net_return_percent(&trade), 3.0);
         assert_eq!(
             event_context(&trade).as_deref(),
             Some("scout:btc:momentum:long:trade")
         );
+    }
+
+    #[test]
+    fn tuning_delta_uses_step_relative_tolerance_boundary() {
+        let step = 0.5;
+        let base = 10.0;
+        let tolerance = step * PARAMETER_STEP_RELATIVE_TOLERANCE;
+        assert!(!tuning_delta_is_effective(
+            step,
+            base,
+            base + tolerance * 0.5
+        ));
+        assert!(tuning_delta_is_effective(step, base, base + tolerance));
+    }
+
+    #[test]
+    fn scout_feedback_requires_explicit_comparison_metadata() {
+        let serialized = serde_json::to_value(scout_event()).unwrap();
+        assert_eq!(
+            serialized["comparison"]["status"],
+            serde_json::json!("independent")
+        );
+
+        let mut legacy = serialized;
+        legacy.as_object_mut().unwrap().remove("comparison");
+        assert!(serde_json::from_value::<FeedbackEvent>(legacy).is_err());
     }
 
     #[test]
@@ -818,6 +969,38 @@ mod tests {
         }
         let scout = scout_event();
         assert_eq!(event_context(&scout).as_deref(), Some("btc:momentum:long"));
+    }
+
+    #[test]
+    fn scout_trade_outcomes_share_the_scout_category() {
+        let mut scout_trade = match scout_event() {
+            FeedbackEvent::ScoutOutcome { .. } => FeedbackEvent::TradeOutcome {
+                event_id: "paper-scout".into(),
+                observed_at_ms: 1,
+                learning_context: None,
+                symbol: "BTC-USDT".into(),
+                strategy: "momentum".into(),
+                profile_id: "p".into(),
+                parameters: BTreeMap::new(),
+                specs: vec![],
+                scout: true,
+                realized_pnl_usd: 1.0,
+                net_return_percent: 0.5,
+                threshold_observations: vec![],
+            },
+            _ => unreachable!(),
+        };
+        assert_eq!(
+            learning_outcome(&scout_trade).source,
+            LearningOutcomeSource::Scout
+        );
+        if let FeedbackEvent::TradeOutcome { scout, .. } = &mut scout_trade {
+            *scout = false;
+        }
+        assert_eq!(
+            learning_outcome(&scout_trade).source,
+            LearningOutcomeSource::Trade
+        );
     }
 
     #[test]

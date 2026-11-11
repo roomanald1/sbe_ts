@@ -342,45 +342,6 @@ pub struct ScoutPlanResponse {
     pub selected_groups: Vec<String>,
 }
 
-pub async fn request_scout_plan(
-    base_url: &str,
-    request: &ScoutPlanRequest,
-) -> Result<ScoutPlanResponse, String> {
-    reqwest::Client::new()
-        .post(format!("{}/scout-plan", base_url.trim_end_matches('/')))
-        .timeout(std::time::Duration::from_secs(5))
-        .json(request)
-        .send()
-        .await
-        .map_err(|error| error.to_string())?
-        .error_for_status()
-        .map_err(|error| error.to_string())?
-        .json()
-        .await
-        .map_err(|error| error.to_string())
-}
-
-pub async fn request_scout_lifecycle_observe(
-    base_url: &str,
-    request: &ScoutLifecycleObserveRequest,
-) -> Result<ScoutLifecycleObserveResponse, String> {
-    reqwest::Client::new()
-        .post(format!(
-            "{}/scout-lifecycle/observe",
-            base_url.trim_end_matches('/')
-        ))
-        .timeout(std::time::Duration::from_secs(5))
-        .json(request)
-        .send()
-        .await
-        .map_err(|error| error.to_string())?
-        .error_for_status()
-        .map_err(|error| error.to_string())?
-        .json()
-        .await
-        .map_err(|error| error.to_string())
-}
-
 #[derive(Clone)]
 struct ScoutState {
     data: Arc<Mutex<PersistedState>>,

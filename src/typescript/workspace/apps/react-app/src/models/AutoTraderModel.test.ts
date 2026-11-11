@@ -8,7 +8,10 @@ describe('AutoTraderModel', () => {
     model.setLimits('250', '2000', '25', '15', '8');
     model.setDailyStrategyBudget('trend-50-200', '150');
     assert.equal(model.state$.value.maxOrderNotional, '250');
-    assert.equal(model.state$.value.dailyStrategyBudgets['trend-50-200'], '150');
+    assert.equal(
+      model.state$.value.dailyStrategyBudgets['trend-50-200'],
+      '150',
+    );
     model.stop();
   });
 });

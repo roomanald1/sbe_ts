@@ -1,7 +1,11 @@
 import { formatForSymbol } from '../instrument_precision';
 import type { BookLevel } from '../types/symbol_price';
 
-const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 0 });
+const money = new Intl.NumberFormat('en-US', {
+  style: 'currency',
+  currency: 'USD',
+  maximumFractionDigits: 0,
+});
 
 export function DepthRows({
   levels,
@@ -38,7 +42,15 @@ export function DepthRows({
           {side === 'bid' ? (
             <span className="book-level-quantity book-level-quantity-bid">
               <strong>{formatForSymbol(level.size, symbol, 'quantity')}</strong>
-              <small>Σ {quoteDepth ? money.format(level.cumulativeNotional ?? level.cumulativeSize * level.price) : formatForSymbol(level.cumulativeSize, symbol, 'quantity')}</small>
+              <small>
+                Σ{' '}
+                {quoteDepth
+                  ? money.format(
+                      level.cumulativeNotional ??
+                        level.cumulativeSize * level.price,
+                    )
+                  : formatForSymbol(level.cumulativeSize, symbol, 'quantity')}
+              </small>
             </span>
           ) : (
             <span className="book-level-empty" aria-hidden="true" />
@@ -49,7 +61,15 @@ export function DepthRows({
           {side === 'ask' ? (
             <span className="book-level-quantity book-level-quantity-ask">
               <strong>{formatForSymbol(level.size, symbol, 'quantity')}</strong>
-              <small>Σ {quoteDepth ? money.format(level.cumulativeNotional ?? level.cumulativeSize * level.price) : formatForSymbol(level.cumulativeSize, symbol, 'quantity')}</small>
+              <small>
+                Σ{' '}
+                {quoteDepth
+                  ? money.format(
+                      level.cumulativeNotional ??
+                        level.cumulativeSize * level.price,
+                    )
+                  : formatForSymbol(level.cumulativeSize, symbol, 'quantity')}
+              </small>
             </span>
           ) : (
             <span className="book-level-empty" aria-hidden="true" />
@@ -69,8 +89,14 @@ export function DepthBalance({
   asks: BookLevel[];
   label: string;
 }) {
-  const bidTotal = label === '50' ? (bids.at(-1)?.cumulativeNotional ?? 0) : (bids.at(-1)?.cumulativeSize ?? 0);
-  const askTotal = label === '50' ? (asks.at(-1)?.cumulativeNotional ?? 0) : (asks.at(-1)?.cumulativeSize ?? 0);
+  const bidTotal =
+    label === '50'
+      ? (bids.at(-1)?.cumulativeNotional ?? 0)
+      : (bids.at(-1)?.cumulativeSize ?? 0);
+  const askTotal =
+    label === '50'
+      ? (asks.at(-1)?.cumulativeNotional ?? 0)
+      : (asks.at(-1)?.cumulativeSize ?? 0);
   const total = bidTotal + askTotal;
   if (total <= 0) return null;
 
@@ -80,7 +106,15 @@ export function DepthBalance({
   return (
     <div
       className="book-balance"
-      aria-label={'Top-' + label + ' depth: bids ' + Math.round(bidShare) + '%, asks ' + Math.round(askShare) + '%'}
+      aria-label={
+        'Top-' +
+        label +
+        ' depth: bids ' +
+        Math.round(bidShare) +
+        '%, asks ' +
+        Math.round(askShare) +
+        '%'
+      }
     >
       <div className="book-balance-labels">
         <span>TOP {label} DEPTH</span>
@@ -108,9 +142,21 @@ export function DepthBalance({
   );
 }
 
-export function SweepSummary({ bids, asks, mid, symbol }: { bids: BookLevel[]; asks: BookLevel[]; mid: number; symbol: string }) {
+export function SweepSummary({
+  bids,
+  asks,
+  mid,
+  symbol,
+}: {
+  bids: BookLevel[];
+  asks: BookLevel[];
+  mid: number;
+  symbol: string;
+}) {
   const estimate = (levels: BookLevel[], target: number) => {
-    let remaining = target, quantity = 0, notional = 0;
+    let remaining = target,
+      quantity = 0,
+      notional = 0;
     for (const level of levels) {
       const available = level.price * level.size;
       const taken = Math.min(remaining, available);
@@ -122,14 +168,26 @@ export function SweepSummary({ bids, asks, mid, symbol }: { bids: BookLevel[]; a
     if (quantity <= 0) return '—';
     const average = notional / quantity;
     const impactBps = Math.abs(average / mid - 1) * 10000;
-    return remaining > 0 ? 'partial · ' + Math.round(notional).toLocaleString() + ' USD' : formatForSymbol(average, symbol, 'price') + ' · ' + impactBps.toFixed(2) + ' bps';
+    return remaining > 0
+      ? 'partial · ' + Math.round(notional).toLocaleString() + ' USD'
+      : formatForSymbol(average, symbol, 'price') +
+          ' · ' +
+          impactBps.toFixed(2) +
+          ' bps';
   };
-  return <div className="book-sweep-summary">
-    <strong>ESTIMATED MARKET SWEEP</strong>
-    <span className="book-sweep-note">Static snapshot · before fees · displayed book only</span>
-    {[250, 500, 1000].map((amount) => <div className="book-sweep-row" key={amount}>
-      <span>USD {amount}</span><span>Buy: {estimate(asks, amount)}</span><span>Sell: {estimate(bids, amount)}</span>
-    </div>)}
-  </div>;
+  return (
+    <div className="book-sweep-summary">
+      <strong>ESTIMATED MARKET SWEEP</strong>
+      <span className="book-sweep-note">
+        Static snapshot · before fees · displayed book only
+      </span>
+      {[250, 500, 1000].map((amount) => (
+        <div className="book-sweep-row" key={amount}>
+          <span>USD {amount}</span>
+          <span>Buy: {estimate(asks, amount)}</span>
+          <span>Sell: {estimate(bids, amount)}</span>
+        </div>
+      ))}
+    </div>
+  );
 }
-

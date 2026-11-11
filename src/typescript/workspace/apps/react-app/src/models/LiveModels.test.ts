@@ -2,6 +2,7 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { BehaviorSubject } from 'rxjs';
 import { AutoTraderScoutModel } from './AutoTraderScoutModel';
+import { setLearningRpcRequesterForTests } from '../learning_rsocket';
 import { CloseInsightsModel } from './CloseInsightsModel';
 import { OrderBookModel } from './OrderBookModel';
 import { OrderManagerBookFeeds } from './OrderManagerBookFeeds';
@@ -11,64 +12,130 @@ import type { Connection } from '../connection';
 async function withFetch(impl: typeof fetch, run: () => Promise<void>) {
   const original = globalThis.fetch;
   globalThis.fetch = impl;
-  try { await run(); } finally { globalThis.fetch = original; }
+  try {
+    await run();
+  } finally {
+    globalThis.fetch = original;
+  }
 }
-function jsonResponse(body: unknown) { return { ok: true, json: async () => body, text: async () => '' } as Response; }
+function jsonResponse(body: unknown) {
+  return { ok: true, json: async () => body, text: async () => '' } as Response;
+}
 function scoutOutcomesResponse(rows: unknown[]) {
   return {
     rows,
     summary: {
-      all: { total: rows.length, open: 0, resolved: rows.length, wins: 0, losses: 0, flats: 0, unavailable: 0 },
-      live: { total: rows.length, open: 0, resolved: rows.length, wins: 0, losses: 0, flats: 0, unavailable: 0 },
+      all: {
+        total: rows.length,
+        open: 0,
+        resolved: rows.length,
+        wins: 0,
+        losses: 0,
+        flats: 0,
+        unavailable: 0,
+      },
+      live: {
+        total: rows.length,
+        open: 0,
+        resolved: rows.length,
+        wins: 0,
+        losses: 0,
+        flats: 0,
+        unavailable: 0,
+      },
     },
-    learningRows: [], symbols: ['BTC-USDT'], learningSymbol: null, learningOutcomes: [],
-    updatedAt: Date.now(), source: 'live', status: 'all', page: 0, pageNumber: 1,
-    pageSize: 50, pageCount: 1, totalRows: rows.length, hasPrevious: false, hasNext: false,
+    learningRows: [],
+    symbols: ['BTC-USDT'],
+    learningSymbol: null,
+    learningOutcomes: [],
+    updatedAt: Date.now(),
+    source: 'live',
+    status: 'all',
+    page: 0,
+    pageNumber: 1,
+    pageSize: 50,
+    pageCount: 1,
+    totalRows: rows.length,
+    hasPrevious: false,
+    hasNext: false,
   };
 }
 
 describe('AutoTraderScoutModel', () => {
   it('loads unavailable Scout outcomes without an entry price from Insights', async () => {
     const timestamp = Date.now();
-    await withFetch(async (url) => {
-      assert.match(String(url), /\/scouts\/outcomes/);
-      return jsonResponse(scoutOutcomesResponse([{
-        decisionId: 'missing-entry', symbol: 'ETH-USDT', direction: 'bearish',
-        strategy: 'live-trade-flow', strength: 0.5, source: 'Scout',
-        exitScenario: 'strategy', openedAt: timestamp, takerFeeRate: 0,
-        status: 'Outcome unavailable',
-      }]));
-    }, async () => {
-      const model = new AutoTraderScoutModel();
-      model.start();
-      await new Promise<void>((resolve) => setTimeout(resolve, 0));
-      assert.equal(model.state$.value.rows[0].status, 'Outcome unavailable');
-      model.stop();
+    setLearningRpcRequesterForTests(async (_method, path) => {
+      assert.match(path, /\/outcomes/);
+      return jsonResponse(
+        scoutOutcomesResponse([
+          {
+            decisionId: 'missing-entry',
+            symbol: 'ETH-USDT',
+            direction: 'bearish',
+            strategy: 'live-trade-flow',
+            strength: 0.5,
+            source: 'Scout',
+            exitScenario: 'strategy',
+            openedAt: timestamp,
+            takerFeeRate: 0,
+            status: 'Outcome unavailable',
+          },
+        ]),
+      );
     });
+    await withFetch(
+      async () => jsonResponse({}),
+      async () => {
+        const model = new AutoTraderScoutModel();
+        model.start();
+        await new Promise<void>((resolve) => setTimeout(resolve, 0));
+        assert.equal(model.state$.value.rows[0].status, 'Outcome unavailable');
+        model.stop();
+      },
+    );
+    setLearningRpcRequesterForTests();
   });
 
   it('loads the fee-aware Scout outcomes computed by Insights', async () => {
     const timestamp = Date.now();
-    await withFetch(async (url) => {
-      assert.match(String(url), /\/scouts\/outcomes/);
-      return jsonResponse(scoutOutcomesResponse([{
-        decisionId: 'd1', symbol: 'BTC-USDT', direction: 'bullish',
-        strategy: 'live-momentum', strength: 0.8, source: 'Scout',
-        exitScenario: 'strategy', openedAt: timestamp, closedAt: timestamp + 300_000,
-        entryPrice: 100, takerFeeRate: 0.002, status: 'Won', netReturnPercent: 0.5,
-      }]));
-    }, async () => {
-      const model = new AutoTraderScoutModel();
-      model.start();
-      await new Promise<void>((resolve) => setTimeout(resolve, 0));
-      const row = model.state$.value.rows[0];
-      assert.equal(row.decisionId, 'd1');
-      assert.equal(row.status, 'Won');
-      assert.equal(row.source, 'Scout');
-      assert.equal(row.netReturnPercent, 0.5);
-      assert.equal(row.takerFeeRate, 0.002);
-      model.stop();
+    setLearningRpcRequesterForTests(async (_method, path) => {
+      assert.match(path, /\/outcomes/);
+      return jsonResponse(
+        scoutOutcomesResponse([
+          {
+            decisionId: 'd1',
+            symbol: 'BTC-USDT',
+            direction: 'bullish',
+            strategy: 'live-momentum',
+            strength: 0.8,
+            source: 'Scout',
+            exitScenario: 'strategy',
+            openedAt: timestamp,
+            closedAt: timestamp + 300_000,
+            entryPrice: 100,
+            takerFeeRate: 0.002,
+            status: 'Won',
+            netReturnPercent: 0.5,
+          },
+        ]),
+      );
     });
+    await withFetch(
+      async () => jsonResponse({}),
+      async () => {
+        const model = new AutoTraderScoutModel();
+        model.start();
+        await new Promise<void>((resolve) => setTimeout(resolve, 0));
+        const row = model.state$.value.rows[0];
+        assert.equal(row.decisionId, 'd1');
+        assert.equal(row.status, 'Won');
+        assert.equal(row.source, 'Scout');
+        assert.equal(row.netReturnPercent, 0.5);
+        assert.equal(row.takerFeeRate, 0.002);
+        model.stop();
+      },
+    );
+    setLearningRpcRequesterForTests();
   });
 });
 
@@ -80,15 +147,35 @@ describe('CloseInsightsModel', () => {
       { symbol: 'ETH-USDT', quantity: 0 },
     ];
     (model as any).liveInsights = [
-      { symbol: 'BTC-USDT', close_side: 'sell', close_quantity: 1, close_pnl: 3, close_fee: 0.5, depth_covers_position: true, close_depth_quantity: 2, probability_samples: 4 },
-      { symbol: 'ETH-USDT', close_side: 'sell', close_quantity: 1, depth_covers_position: true, close_depth_quantity: 1, probability_samples: 1 },
+      {
+        symbol: 'BTC-USDT',
+        close_side: 'sell',
+        close_quantity: 1,
+        close_pnl: 3,
+        close_fee: 0.5,
+        depth_covers_position: true,
+        close_depth_quantity: 2,
+        probability_samples: 4,
+      },
+      {
+        symbol: 'ETH-USDT',
+        close_side: 'sell',
+        close_quantity: 1,
+        depth_covers_position: true,
+        close_depth_quantity: 1,
+        probability_samples: 1,
+      },
     ];
     (model as any).usdRates = { USDT: 1.2 };
     await model.refresh();
     assert.equal(model.state$.value.loading, false);
     assert.equal(model.state$.value.insights.length, 1);
-    assert.ok(Math.abs((model.state$.value.insights[0].closePnlUsd ?? 0) - 3.6) < 1e-9);
-    assert.ok(Math.abs((model.state$.value.insights[0].closeFeeUsd ?? 0) - 0.6) < 1e-9);
+    assert.ok(
+      Math.abs((model.state$.value.insights[0].closePnlUsd ?? 0) - 3.6) < 1e-9,
+    );
+    assert.ok(
+      Math.abs((model.state$.value.insights[0].closeFeeUsd ?? 0) - 0.6) < 1e-9,
+    );
     const insight = model.state$.value.insights[0];
     model.requestClose(insight);
     assert.equal(model.state$.value.confirmingInsight, insight);
@@ -99,46 +186,105 @@ describe('CloseInsightsModel', () => {
 
   it('requires positive close depth and rejects invalid profit targets locally', async () => {
     let requests = 0;
-    await withFetch(async () => { requests++; return jsonResponse({}); }, async () => {
-      const model = new CloseInsightsModel();
-      const insight = { position: { symbol: 'BTC-USDT', quantity: 1 }, closeDepthQuantity: 0 } as any;
-      model.requestClose(insight);
-      assert.equal(model.state$.value.confirmingInsight, undefined);
-      model.setBarrierTargetUsd('0');
-      await model.createProfitBarrier({ ...insight, closeDepthQuantity: 1 });
-      assert.match(model.state$.value.error ?? '', /greater than zero/);
-      assert.equal(requests, 0);
-      model.stop();
-    });
+    await withFetch(
+      async () => {
+        requests++;
+        return jsonResponse({});
+      },
+      async () => {
+        const model = new CloseInsightsModel();
+        const insight = {
+          position: { symbol: 'BTC-USDT', quantity: 1 },
+          closeDepthQuantity: 0,
+        } as any;
+        model.requestClose(insight);
+        assert.equal(model.state$.value.confirmingInsight, undefined);
+        model.setBarrierTargetUsd('0');
+        await model.createProfitBarrier({ ...insight, closeDepthQuantity: 1 });
+        assert.match(model.state$.value.error ?? '', /greater than zero/);
+        assert.equal(requests, 0);
+        model.stop();
+      },
+    );
   });
 });
 
 function createFeedConnection() {
-  const openedBooks: Array<{ key: string; symbol: string; data: BehaviorSubject<unknown | undefined>; error: BehaviorSubject<string | undefined> }> = [];
-  const openedSignals: Array<{ key: string; symbol: string; data: BehaviorSubject<unknown | undefined>; error: BehaviorSubject<string | undefined> }> = [];
+  const openedBooks: Array<{
+    key: string;
+    symbol: string;
+    data: BehaviorSubject<unknown | undefined>;
+    error: BehaviorSubject<string | undefined>;
+  }> = [];
+  const openedSignals: Array<{
+    key: string;
+    symbol: string;
+    data: BehaviorSubject<unknown | undefined>;
+    error: BehaviorSubject<string | undefined>;
+  }> = [];
   const closed: string[] = [];
   return {
     connection: {
-      openBook: (key: string, symbol: string) => { const feed = { key, symbol, data: new BehaviorSubject<unknown | undefined>(undefined), error: new BehaviorSubject<string | undefined>(undefined) }; openedBooks.push(feed); return feed; },
-      closeBook: (key: string) => { closed.push(key); },
-      openSignals: (key: string, symbol: string) => { const feed = { key, symbol, data: new BehaviorSubject<unknown | undefined>(undefined), error: new BehaviorSubject<string | undefined>(undefined) }; openedSignals.push(feed); return feed; },
-      closeSignals: (key: string) => { closed.push(key); },
+      openBook: (key: string, symbol: string) => {
+        const feed = {
+          key,
+          symbol,
+          data: new BehaviorSubject<unknown | undefined>(undefined),
+          error: new BehaviorSubject<string | undefined>(undefined),
+        };
+        openedBooks.push(feed);
+        return feed;
+      },
+      closeBook: (key: string) => {
+        closed.push(key);
+      },
+      openSignals: (key: string, symbol: string) => {
+        const feed = {
+          key,
+          symbol,
+          data: new BehaviorSubject<unknown | undefined>(undefined),
+          error: new BehaviorSubject<string | undefined>(undefined),
+        };
+        openedSignals.push(feed);
+        return feed;
+      },
+      closeSignals: (key: string) => {
+        closed.push(key);
+      },
     } as unknown as Connection,
-    openedBooks, openedSignals, closed,
+    openedBooks,
+    openedSignals,
+    closed,
   };
 }
 
 describe('SignalsModel', () => {
   it('decodes matching JSON updates, reports malformed input and closes its feed', () => {
     const mock = createFeedConnection();
-    const model = new SignalsModel({ connection: mock.connection, symbol: 'BTC-USDT', streamKey: 'signal-1' });
+    const model = new SignalsModel({
+      connection: mock.connection,
+      symbol: 'BTC-USDT',
+      streamKey: 'signal-1',
+    });
     model.start();
     const feed = mock.openedSignals[0];
-    const signal = { symbol: 'BTC-USDT', timestamp: 1, direction: 'bullish', score: 0.5, strength: 0.7, components: {}, reasons: [], stale: false };
+    const signal = {
+      symbol: 'BTC-USDT',
+      timestamp: 1,
+      direction: 'bullish',
+      score: 0.5,
+      strength: 0.7,
+      components: {},
+      reasons: [],
+      stale: false,
+    };
     feed.data.next(JSON.stringify(signal));
     assert.deepEqual(model.state$.value.snapshot, signal);
     feed.data.next('{bad json');
-    assert.equal(model.state$.value.error, 'Received an invalid signal update.');
+    assert.equal(
+      model.state$.value.error,
+      'Received an invalid signal update.',
+    );
     feed.error.next('offline');
     assert.equal(model.state$.value.error, 'offline');
     model.stop();
@@ -149,7 +295,11 @@ describe('SignalsModel', () => {
 describe('OrderBookModel', () => {
   it('handles feed errors and closes and reopens its subscription when frozen state toggles', () => {
     const mock = createFeedConnection();
-    const model = new OrderBookModel({ connection: mock.connection, symbol: 'BTC-USDT', streamKey: 'book-1' });
+    const model = new OrderBookModel({
+      connection: mock.connection,
+      symbol: 'BTC-USDT',
+      streamKey: 'book-1',
+    });
     model.start();
     mock.openedBooks[0].error.next('disconnected');
     assert.equal(model.state$.value.error, 'disconnected');
@@ -169,7 +319,11 @@ describe('OrderManagerBookFeeds', () => {
     const mock = createFeedConnection();
     const errors: Array<[string, string | undefined]> = [];
     const books: Array<[string, unknown]> = [];
-    const feeds = new OrderManagerBookFeeds(mock.connection, (symbol, depth) => books.push([symbol, depth]), (symbol, error) => errors.push([symbol, error]));
+    const feeds = new OrderManagerBookFeeds(
+      mock.connection,
+      (symbol, depth) => books.push([symbol, depth]),
+      (symbol, error) => errors.push([symbol, error]),
+    );
     feeds.sync(new Set(['BTC-USDT']));
     feeds.sync(new Set(['BTC-USDT']));
     assert.equal(mock.openedBooks.length, 1);

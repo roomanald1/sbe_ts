@@ -12,23 +12,25 @@ use tokio::sync::broadcast;
 const SYMBOL_LENGTH: usize = 32;
 const ITERATIONS: u64 = 5_000_000;
 
-fn encode(symbol: &[u8; SYMBOL_LENGTH], price: f64) -> Vec<u8> {
+fn encode(symbol: &[u8; SYMBOL_LENGTH], price: f64, timestamp: u64) -> Vec<u8> {
     let header_length = message_header_codec::ENCODED_LENGTH;
     let mut buffer = vec![0; header_length + SBE_BLOCK_LENGTH as usize];
 
     let mut encoder = SymbolPriceEncoder::default().wrap(WriteBuf::new(&mut buffer), header_length);
     encoder.symbol(*symbol);
     encoder.price(price);
+    encoder.timestamp(timestamp);
     drop(encoder.header(0));
 
     buffer
 }
 
-fn encode_into(symbol: &[u8; SYMBOL_LENGTH], price: f64, buffer: &mut [u8]) {
+fn encode_into(symbol: &[u8; SYMBOL_LENGTH], price: f64, timestamp: u64, buffer: &mut [u8]) {
     let header_length = message_header_codec::ENCODED_LENGTH;
     let mut encoder = SymbolPriceEncoder::default().wrap(WriteBuf::new(buffer), header_length);
     encoder.symbol(*symbol);
     encoder.price(price);
+    encoder.timestamp(timestamp);
     drop(encoder.header(0));
 }
 
@@ -49,7 +51,7 @@ fn benchmark_fanout(clients: usize, iterations: u64) {
     for index in 0..iterations {
         let price = black_box(42_000.25 + (index % 100) as f64);
         for _ in 0..clients {
-            let data = encode(black_box(&symbol), price);
+            let data = encode(black_box(&symbol), price, index);
             black_box(Payload::builder().set_data(data).build());
         }
     }
@@ -62,7 +64,7 @@ fn benchmark_fanout(clients: usize, iterations: u64) {
     let started = Instant::now();
     for index in 0..iterations {
         let price = black_box(42_000.25 + (index % 100) as f64);
-        let encoded = Bytes::from(encode(black_box(&symbol), price));
+        let encoded = Bytes::from(encode(black_box(&symbol), price, index));
         for _ in 0..clients {
             black_box(Payload::new(Some(encoded.clone()), None));
         }
@@ -83,7 +85,7 @@ fn benchmark_broadcast_fanout(clients: usize, iterations: u64) {
     let started = Instant::now();
     for index in 0..iterations {
         let price = black_box(42_000.25 + (index % 100) as f64);
-        let encoded = Bytes::from(encode(black_box(&symbol), price));
+        let encoded = Bytes::from(encode(black_box(&symbol), price, index));
         black_box(sender.send(encoded).unwrap());
         for receiver in &mut receivers {
             let data = receiver.try_recv().unwrap();
@@ -121,16 +123,16 @@ fn main() {
     let mut reused = vec![0; message_header_codec::ENCODED_LENGTH + SBE_BLOCK_LENGTH as usize];
 
     for _ in 0..100_000 {
-        let data = encode(black_box(&symbol), black_box(42_000.25));
+        let data = encode(black_box(&symbol), black_box(42_000.25), 0);
         black_box(Payload::builder().set_data(data).build());
-        encode_into(black_box(&symbol), black_box(42_000.25), &mut reused);
+        encode_into(black_box(&symbol), black_box(42_000.25), 0, &mut reused);
         black_box(&reused);
     }
 
     let started = Instant::now();
     for index in 0..ITERATIONS {
         let price = black_box(42_000.25 + (index % 100) as f64);
-        let data = encode(black_box(&symbol), price);
+        let data = encode(black_box(&symbol), price, index);
         black_box(Payload::builder().set_data(data).build());
     }
     report(
@@ -142,7 +144,7 @@ fn main() {
     let started = Instant::now();
     for index in 0..ITERATIONS {
         let price = black_box(42_000.25 + (index % 100) as f64);
-        encode_into(black_box(&symbol), price, &mut reused);
+        encode_into(black_box(&symbol), price, index, &mut reused);
         black_box(&reused);
     }
     report(
@@ -165,7 +167,7 @@ fn main() {
     let started = Instant::now();
     for index in 0..synthetic_iterations {
         let (symbol, price) = synthetic_price_update(index / 100, (index % 100) as usize);
-        let data = encode(black_box(&symbol), black_box(price));
+        let data = encode(black_box(&symbol), black_box(price), index);
         black_box(Payload::builder().set_data(data).build());
     }
     report(

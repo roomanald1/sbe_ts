@@ -14,8 +14,199 @@ include!("scout_report.rs");
 mod tests {
     use super::*;
 
+    #[test]
+    fn scout_instance_cache_stays_bounded_without_dropping_database_rows() {
+        let path = std::env::temp_dir().join(format!(
+            "scout-instance-cache-bound-{}-{}.sqlite",
+            std::process::id(),
+            scout_now_ms()
+        ));
+        let mut persisted = PersistedState::default();
+        for index in 0..(MAX_CACHED_SCOUT_INSTANCES + 17) {
+            let decision_id = format!("decision-{index:05}");
+            persisted.scout_instances.insert(
+                decision_id.clone(),
+                serde_json::json!({
+                    "decision_id":decision_id,
+                    "strategy":"live-momentum",
+                    "symbol":"BTC-USDT",
+                    "timestamp":index as u64 + 1,
+                    "direction":"bullish",
+                    "scout_entry_price":100.0
+                }),
+            );
+        }
+        persist_scout_state(&path, &persisted, &["scout_instances"]).unwrap();
+
+        let mut runtime = load_scout_state(&path).unwrap();
+        assert!(runtime.scout_instances.is_empty());
+        let report_rows = load_scout_instances_since(&path, 0).unwrap();
+        assert_eq!(report_rows.len(), MAX_CACHED_SCOUT_INSTANCES + 17);
+        for (decision_id, instance) in report_rows {
+            cache_scout_instance(&mut runtime, &decision_id, instance);
+        }
+        assert_eq!(runtime.scout_instances.len(), MAX_CACHED_SCOUT_INSTANCES);
+        assert_eq!(
+            rusqlite::Connection::open(&path)
+                .unwrap()
+                .query_row(
+                    "SELECT COUNT(*) FROM scout_records WHERE collection='scout_instances'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap() as usize,
+            MAX_CACHED_SCOUT_INSTANCES + 17
+        );
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("sqlite-wal"));
+        let _ = std::fs::remove_file(path.with_extension("sqlite-shm"));
+    }
+
+    #[test]
+    fn strategy_state_import_partitions_records_and_never_overwrites_existing_destination() {
+        let directory =
+            std::env::temp_dir().join(format!("scout-partition-import-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).unwrap();
+        let source = directory.join("legacy.json");
+        let destination = directory.join("live-momentum.sqlite");
+        std::fs::write(&source, serde_json::json!({
+            "scout_configuration":{"strategies":["live-momentum","live-trade-flow"]},
+            "seen":["live-scout:live-momentum:BTC", "live-scout:live-trade-flow:ETH"],
+            "outcomes":{},
+            "scout_instances":{
+                "m":{"strategy":"live-momentum","symbol":"BTC-USDT"},
+                "t":{"strategy":"live-trade-flow","symbol":"ETH-USDT"}
+            }, "pairs":{}, "outbox":[],
+            "scout_sample_at_ms":{"live-scout:live-momentum|BTC-USDT|bullish":10,"live-scout:live-trade-flow|ETH-USDT|bearish":20},
+            "scout_sample_active_scenarios":{}, "scout_variant_rotation_cursor":1,
+            "scout_lifecycle_updated_at_ms":10,"scout_plan_profiles":{},"scout_plan_results":{},
+            "scout_pending_samples":{},"scout_observation_results":{},"scout_active_audits":{}
+        }).to_string()).unwrap();
+        let count =
+            import_strategy_partition(&source, &destination, strategies::Strategy::LiveMomentum)
+                .unwrap();
+        assert_eq!(count, 1);
+        let imported = load_scout_state(&destination).unwrap();
+        assert_eq!(
+            load_scout_instance(&destination, "m").unwrap().unwrap()["strategy"],
+            "live-momentum"
+        );
+        assert!(imported.scout_instances.is_empty());
+        assert_eq!(imported.seen.len(), 0);
+        assert!(scout_record_exists(&destination, "seen", "live-scout:live-momentum:BTC").unwrap());
+        assert_eq!(imported.scout_sample_at_ms.len(), 1);
+        assert!(
+            import_strategy_partition(&source, &destination, strategies::Strategy::LiveMomentum)
+                .is_err()
+        );
+        let bulk_directory = directory.join("bulk");
+        let partitions = import_strategy_partitions(&source, &bulk_directory).unwrap();
+        assert_eq!(partitions.len(), 2);
+        assert!(
+            partitions
+                .iter()
+                .any(|(strategy, count)| strategy == "live-momentum" && *count == 1)
+        );
+        assert!(
+            partitions
+                .iter()
+                .any(|(strategy, count)| strategy == "live-trade-flow" && *count == 1)
+        );
+        let trade_flow = load_scout_state(&bulk_directory.join("live-trade-flow.sqlite")).unwrap();
+        assert!(trade_flow.scout_instances.is_empty());
+        assert!(
+            load_scout_instance(&bulk_directory.join("live-trade-flow.sqlite"), "t")
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            load_scout_instance(&bulk_directory.join("live-trade-flow.sqlite"), "m")
+                .unwrap()
+                .is_none()
+        );
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
     async fn check_outbox_acknowledgement(successes: usize) {
+        use anyhow::Context;
+        use rsocket_rust::prelude::*;
+        use rsocket_rust_transport_websocket::WebsocketServerTransport;
         use std::sync::atomic::{AtomicUsize, Ordering};
+        use strategies::{
+            ScoutCoordinatorRequest, ScoutCoordinatorResponse, ScoutFeedbackAcknowledgement,
+        };
+
+        struct FeedbackResponder {
+            successes: usize,
+            requests: Arc<AtomicUsize>,
+            db_path: std::path::PathBuf,
+            persisted_before_failure: Arc<AtomicUsize>,
+        }
+
+        #[rsocket_rust::async_trait]
+        impl RSocket for FeedbackResponder {
+            async fn metadata_push(&self, _request: Payload) -> anyhow::Result<()> {
+                anyhow::bail!("unsupported")
+            }
+            async fn fire_and_forget(&self, _request: Payload) -> anyhow::Result<()> {
+                anyhow::bail!("unsupported")
+            }
+            async fn request_response(&self, request: Payload) -> anyhow::Result<Option<Payload>> {
+                let ScoutCoordinatorRequest::Feedback(event) =
+                    serde_json::from_slice(request.data().context("missing feedback request")?)?
+                else {
+                    anyhow::bail!("expected Learning feedback event")
+                };
+                let event_id = match &event {
+                    FeedbackEvent::ScoutOutcome { event_id, .. }
+                    | FeedbackEvent::TradeOutcome { event_id, .. } => event_id.clone(),
+                };
+                let fail = self.requests.fetch_add(1, Ordering::SeqCst) >= self.successes;
+                let acknowledgement = if fail {
+                    let db = rusqlite::Connection::open(&self.db_path)?;
+                    let count: i64 = db.query_row(
+                        "SELECT COUNT(*) FROM scout_records WHERE collection='outbox'",
+                        [],
+                        |row| row.get(0),
+                    )?;
+                    self.persisted_before_failure
+                        .store(count as usize, Ordering::SeqCst);
+                    ScoutFeedbackAcknowledgement {
+                        event_id,
+                        accepted: false,
+                        duplicate: false,
+                        status: 500,
+                        detail: Some("temporary test failure".into()),
+                    }
+                } else {
+                    ScoutFeedbackAcknowledgement {
+                        event_id,
+                        accepted: true,
+                        duplicate: false,
+                        status: 200,
+                        detail: None,
+                    }
+                };
+                Ok(Some(
+                    Payload::builder()
+                        .set_data(serde_json::to_vec(&ScoutCoordinatorResponse::Feedback(
+                            acknowledgement,
+                        ))?)
+                        .build(),
+                ))
+            }
+            fn request_stream(&self, _request: Payload) -> Flux<anyhow::Result<Payload>> {
+                Box::pin(futures_util::stream::empty())
+            }
+            fn request_channel(
+                &self,
+                requests: Flux<anyhow::Result<Payload>>,
+            ) -> Flux<anyhow::Result<Payload>> {
+                requests
+            }
+        }
+
         let path = std::env::temp_dir().join(format!(
             "scouts-outbox-{}-{}-{successes}.sqlite",
             std::process::id(),
@@ -34,6 +225,7 @@ mod tests {
                     profile_id: "profile".into(),
                     parameters: BTreeMap::new(),
                     baseline_parameters: BTreeMap::new(),
+                    comparison: strategies::ScoutComparisonMetadata::Independent,
                     specs: Vec::new(),
                     net_return_percent: 0.1,
                 }));
@@ -45,47 +237,34 @@ mod tests {
             flush_lock: Arc::new(Mutex::new(())),
             flush_scheduled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         };
-        let requests = Arc::new(AtomicUsize::new(0));
-        let stored_at_failure = Arc::new(AtomicUsize::new(usize::MAX));
-        let counter = requests.clone();
-        let observed = stored_at_failure.clone();
-        let db_path = path.clone();
-        let app = axum::Router::new().route(
-            "/feedback",
-            axum::routing::post(move || {
-                let counter = counter.clone();
-                let observed = observed.clone();
-                let db_path = db_path.clone();
-                async move {
-                    if counter.fetch_add(1, Ordering::SeqCst) < successes {
-                        return StatusCode::OK;
-                    }
-                    let db = rusqlite::Connection::open(db_path).unwrap();
-                    let count: i64 = db
-                        .query_row(
-                            "SELECT COUNT(*) FROM scout_records WHERE collection='outbox'",
-                            [],
-                            |row| row.get(0),
-                        )
-                        .unwrap();
-                    observed.store(count as usize, Ordering::SeqCst);
-                    StatusCode::INTERNAL_SERVER_ERROR
-                }
-            }),
-        );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
-        let server = tokio::spawn(async move {
-            axum::serve(listener, app).await.unwrap();
-        });
+        drop(listener);
+        let requests = Arc::new(AtomicUsize::new(0));
+        let stored_at_failure = Arc::new(AtomicUsize::new(usize::MAX));
+        let responder = FeedbackResponder {
+            successes,
+            requests: requests.clone(),
+            db_path: path.clone(),
+            persisted_before_failure: stored_at_failure.clone(),
+        };
+        let server = RSocketFactory::receive()
+            .transport(WebsocketServerTransport::from(address.to_string()))
+            .acceptor(Box::new(move |_setup, _socket| {
+                Ok(Box::new(FeedbackResponder {
+                    successes: responder.successes,
+                    requests: responder.requests.clone(),
+                    db_path: responder.db_path.clone(),
+                    persisted_before_failure: responder.persisted_before_failure.clone(),
+                }))
+            }))
+            .serve();
+        let server = tokio::spawn(async move { server.await });
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         assert!(
-            flush_scout_outbox(
-                &scout,
-                &reqwest::Client::new(),
-                &format!("http://{address}")
-            )
-            .await
-            .is_err()
+            flush_scout_outbox(&scout, &format!("ws://{address}"), "ws://127.0.0.1:10005",)
+                .await
+                .is_err()
         );
         assert_eq!(scout.data.lock().await.outbox.len(), 1);
         assert_eq!(load_scout_state(&path).unwrap().outbox.len(), 1);
@@ -260,6 +439,7 @@ mod tests {
             profile_id: "profile".into(),
             parameters: BTreeMap::new(),
             baseline_parameters: BTreeMap::new(),
+            comparison: strategies::ScoutComparisonMetadata::Independent,
             specs: Vec::new(),
             net_return_percent: 0.5,
         };
@@ -277,7 +457,17 @@ mod tests {
         };
         assert!(persist_scout_state(&path, &state, &["seen", "outbox"]).is_ok());
         let loaded = load_scout_state(&path).unwrap();
-        assert!(loaded.seen.contains("event-1"));
+        let mut value_loaded: PersistedState =
+            serde_json::from_value(load_scout_state_value(&path).unwrap()).unwrap();
+        value_loaded.seen.clear();
+        value_loaded.scout_instances.clear();
+        assert_eq!(
+            serde_json::to_value(&loaded).unwrap(),
+            serde_json::to_value(&value_loaded).unwrap(),
+            "streamed runtime loading must preserve every persisted collection"
+        );
+        assert!(loaded.seen.is_empty());
+        assert!(scout_record_exists(&path, "seen", "event-1").unwrap());
         assert_eq!(loaded.outbox.len(), 2);
         assert_eq!(feedback_event_id(&event), "event-1");
         assert!(outbox_has_learning(&loaded, &event));
@@ -368,10 +558,9 @@ mod tests {
     async fn repeated_outbox_flush_triggers_coalesce_while_flush_is_locked() {
         let persisted = PersistedState::default();
         let service = ServiceState {
-            client: reqwest::Client::new(),
-            learning_url: String::new(),
-            auto_trader_url: String::new(),
-            seen: Arc::new(Mutex::new(BTreeSet::new())),
+            learning_rsocket_url: String::new(),
+            insights_rsocket_url: String::new(),
+            auto_trader_rsocket_url: String::new(),
             strategy_outcomes_by_profile: Arc::clone(&persisted.strategy_outcomes_by_profile),
             portfolio_instances_by_group: Arc::clone(&persisted.portfolio_instances_by_group),
             strategy_outcome_profile_index_ready: Arc::new(std::sync::atomic::AtomicBool::new(

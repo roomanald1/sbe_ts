@@ -1,16 +1,14 @@
 async fn maybe_exit_auto_position(
-    client: &reqwest::Client,
-    base: &str,
     state: &AutoTraderState,
 ) -> Result<Option<CycleResult>, (StatusCode, String)> {
-    // Reconciliation performs position-manager HTTP calls and may persist
+    // Reconciliation performs Position Management RSocket calls and may persist
     // settings. Keep it outside the shared cycle lock so this periodic
     // maintenance work does not inflate cycle-lock hold time. Each in-memory
     // update is serialized by the settings mutex, and the exit path below
     // still takes the cycle lock before mutating orders or positions.
-    sync_protective_stops(client, base, state).await?;
-    reconcile_auto_positions_with_ledger(client, base, state).await?;
-    ensure_protective_stops(client, base, state).await?;
+    sync_protective_stops(state).await?;
+    reconcile_auto_positions_with_ledger(state).await?;
+    ensure_protective_stops(state).await?;
     let positions = {
         let settings = state.settings.lock().await;
         settings
@@ -30,20 +28,11 @@ async fn maybe_exit_auto_position(
     // stop/order handling below.
     let mut input_tasks = JoinSet::new();
     for (symbol, _, _) in &positions {
-        let client = client.clone();
-        let base = base.to_owned();
         let symbol = symbol.clone();
         input_tasks.spawn(async move {
-            let inputs: serde_json::Value = client
-                .get(format!("{base}/internal/insights-inputs?symbol={symbol}"))
-                .send()
-                .await
-                .map_err(upstream_error)?
-                .error_for_status()
-                .map_err(upstream_error)?
-                .json()
-                .await
-                .map_err(upstream_error)?;
+            let inputs = crate::service_rpc::position_get(&format!(
+                "/internal/insights-inputs?symbol={symbol}"
+            )).await.map_err(|error| (StatusCode::BAD_GATEWAY, error.to_string()))?;
             Ok::<_, (StatusCode, String)>((symbol, inputs))
         });
     }
@@ -78,8 +67,6 @@ async fn maybe_exit_auto_position(
     // and settings persistence do not block incoming signal cycles.
     for (symbol, strategy, position) in positions {
         if let Some(result) = evaluate_position_exit(
-            client,
-            base,
             state,
             symbol,
             strategy,

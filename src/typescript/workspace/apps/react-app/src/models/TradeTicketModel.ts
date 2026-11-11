@@ -4,10 +4,26 @@ import type { BookFeed, Connection } from '../connection';
 import { decodeBookDepth, type BookDepth } from '../types/symbol_price';
 import { deriveTradeTicketState } from './TradeTicketDerived';
 import { fetchFeeRates } from './fee_rates';
-import { currentPositionSnapshot, subscribePositionStream } from '../position_stream';
+import { executionFetch } from '../execution_api';
+import {
+  currentPositionSnapshot,
+  subscribePositionStream,
+} from '../position_stream';
 
 export type Side = 'buy' | 'sell';
-export type OrderType = 'market' | 'ioc' | 'limit' | 'vwap' | 'twap' | 'barrier' | 'stop-market' | 'stop-limit' | 'trailing-stop' | 'post-only-limit' | 'fok' | 'gtd';
+export type OrderType =
+  | 'market'
+  | 'ioc'
+  | 'limit'
+  | 'vwap'
+  | 'twap'
+  | 'barrier'
+  | 'stop-market'
+  | 'stop-limit'
+  | 'trailing-stop'
+  | 'post-only-limit'
+  | 'fok'
+  | 'gtd';
 export type BarrierDirection = 'above' | 'below';
 export type TrailingMode = 'amount' | 'percent';
 type Props = { symbol: string; initialSide: Side; connection: Connection };
@@ -62,7 +78,9 @@ export class TradeTicketModel {
       limitPrice: '',
       barrierPrice: '',
       barrierDirection: props.initialSide === 'sell' ? 'above' : 'below',
-      trailingValue: '', trailingMode: 'percent', expiresAtLocal: '',
+      trailingValue: '',
+      trailingMode: 'percent',
+      expiresAtLocal: '',
       busy: false,
       bookError: '',
       message: '',
@@ -100,11 +118,48 @@ export class TradeTicketModel {
     if (this.feed) return;
     const { connection, symbol } = this.props$.value;
     this.stopPositionStream = subscribePositionStream((snapshot) => {
-      if (snapshot.fee_rates) this.update({ makerFeeRate: snapshot.fee_rates.maker, takerFeeRate: snapshot.fee_rates.taker });
+      if (snapshot.fee_rates)
+        this.update({
+          makerFeeRate: snapshot.fee_rates.maker,
+          takerFeeRate: snapshot.fee_rates.taker,
+        });
       const runs = snapshot.vwap_runs?.runs ?? [];
-      const run = (runs.find((item) => item.id === this.state$.value.vwapRunId)
-        ?? [...runs].reverse().find((item) => item.symbol === this.props$.value.symbol && item.status === 'running')) as { id: string; symbol: string; status: string; executed_quantity: number; strategy?: string; error?: string } | undefined;
-      if (run) this.update({ orderType: run.strategy ? (run.strategy === 'twap' ? 'twap' : 'vwap') : this.state$.value.orderType, vwapRunId: run.id, vwapStatus: run.status, vwapExecutedQuantity: run.executed_quantity, message: run.error ?? ((run.strategy === 'twap' ? 'TWAP ' : 'VWAP ') + run.status + ' · filled ' + run.executed_quantity) });
+      const run = (runs.find(
+        (item) => item.id === this.state$.value.vwapRunId,
+      ) ??
+        [...runs]
+          .reverse()
+          .find(
+            (item) =>
+              item.symbol === this.props$.value.symbol &&
+              item.status === 'running',
+          )) as
+        | {
+            id: string;
+            symbol: string;
+            status: string;
+            executed_quantity: number;
+            strategy?: string;
+            error?: string;
+          }
+        | undefined;
+      if (run)
+        this.update({
+          orderType: run.strategy
+            ? run.strategy === 'twap'
+              ? 'twap'
+              : 'vwap'
+            : this.state$.value.orderType,
+          vwapRunId: run.id,
+          vwapStatus: run.status,
+          vwapExecutedQuantity: run.executed_quantity,
+          message:
+            run.error ??
+            (run.strategy === 'twap' ? 'TWAP ' : 'VWAP ') +
+              run.status +
+              ' · filled ' +
+              run.executed_quantity,
+        });
     });
     void this.loadFeeRates();
     void this.loadActiveVwap(symbol);
@@ -136,7 +191,10 @@ export class TradeTicketModel {
     this.errorSub = undefined;
   }
   setSide(side: Side): void {
-    this.update({ side, barrierDirection: side === 'sell' ? 'above' : 'below' });
+    this.update({
+      side,
+      barrierDirection: side === 'sell' ? 'above' : 'below',
+    });
   }
   setOrderType(orderType: OrderType): void {
     this.update({ orderType, confirmedLimitPrice: undefined });
@@ -156,13 +214,22 @@ export class TradeTicketModel {
   setBarrierPrice(barrierPrice: string): void {
     this.update({ barrierPrice, message: '' });
   }
-  setBarrierDirection(barrierDirection: BarrierDirection): void { this.update({ barrierDirection }); }
-  setTrailingValue(trailingValue: string): void { this.update({ trailingValue, message: '' }); }
-  setTrailingMode(trailingMode: TrailingMode): void { this.update({ trailingMode }); }
-  setExpiresAtLocal(expiresAtLocal: string): void { this.update({ expiresAtLocal, message: '' }); }
+  setBarrierDirection(barrierDirection: BarrierDirection): void {
+    this.update({ barrierDirection });
+  }
+  setTrailingValue(trailingValue: string): void {
+    this.update({ trailingValue, message: '' });
+  }
+  setTrailingMode(trailingMode: TrailingMode): void {
+    this.update({ trailingMode });
+  }
+  setExpiresAtLocal(expiresAtLocal: string): void {
+    this.update({ expiresAtLocal, message: '' });
+  }
   private async loadFeeRates(): Promise<void> {
     const rates = await fetchFeeRates();
-    if (rates) this.update({ makerFeeRate: rates.maker, takerFeeRate: rates.taker });
+    if (rates)
+      this.update({ makerFeeRate: rates.maker, takerFeeRate: rates.taker });
   }
   async submit(): Promise<void> {
     const state = this.state$.value;
@@ -171,23 +238,47 @@ export class TradeTicketModel {
     const barrierPrice = Number(state.barrierPrice);
     const durationMinutes = Number(state.durationMinutes);
     const trailingValue = Number(state.trailingValue);
-    const expiresAt = state.expiresAtLocal ? new Date(state.expiresAtLocal).getTime() : undefined;
-    const hasLimit = ['limit', 'stop-limit', 'post-only-limit', 'gtd'].includes(state.orderType);
-    const hasTrigger = ['barrier', 'stop-market', 'stop-limit'].includes(state.orderType);
+    const expiresAt = state.expiresAtLocal
+      ? new Date(state.expiresAtLocal).getTime()
+      : undefined;
+    const hasLimit = ['limit', 'stop-limit', 'post-only-limit', 'gtd'].includes(
+      state.orderType,
+    );
+    const hasTrigger = ['barrier', 'stop-market', 'stop-limit'].includes(
+      state.orderType,
+    );
     const participationRate = Number(state.participationRate) / 100;
     const instrument = await getInstrumentPrecision(state.symbol);
-    if (instrument && (!alignsToStep(quantity, instrument.lotSz) || (hasLimit && !alignsToStep(limitPrice, instrument.tickSz)) || (hasTrigger && !alignsToStep(barrierPrice, instrument.tickSz)))) {
-      this.update({ message: 'Quantity or price does not match this instrument tick or lot size.' }); return;
+    if (
+      instrument &&
+      (!alignsToStep(quantity, instrument.lotSz) ||
+        (hasLimit && !alignsToStep(limitPrice, instrument.tickSz)) ||
+        (hasTrigger && !alignsToStep(barrierPrice, instrument.tickSz)))
+    ) {
+      this.update({
+        message:
+          'Quantity or price does not match this instrument tick or lot size.',
+      });
+      return;
     }
     if (
       !Number.isFinite(quantity) ||
       quantity <= 0 ||
       (hasLimit && (!Number.isFinite(limitPrice) || limitPrice <= 0)) ||
       (hasTrigger && (!Number.isFinite(barrierPrice) || barrierPrice <= 0)) ||
-      (state.orderType === 'trailing-stop' && (!Number.isFinite(trailingValue) || trailingValue <= 0 || (state.trailingMode === 'percent' && trailingValue >= 100))) ||
+      (state.orderType === 'trailing-stop' &&
+        (!Number.isFinite(trailingValue) ||
+          trailingValue <= 0 ||
+          (state.trailingMode === 'percent' && trailingValue >= 100))) ||
       (state.orderType === 'gtd' && (!expiresAt || expiresAt <= Date.now())) ||
-      ((state.orderType === 'vwap' || state.orderType === 'twap') && (!Number.isInteger(durationMinutes) || durationMinutes < 5 || durationMinutes > 390)) ||
-      (state.orderType === 'vwap' && (!Number.isFinite(participationRate) || participationRate < 0.01 || participationRate > 1))
+      ((state.orderType === 'vwap' || state.orderType === 'twap') &&
+        (!Number.isInteger(durationMinutes) ||
+          durationMinutes < 5 ||
+          durationMinutes > 390)) ||
+      (state.orderType === 'vwap' &&
+        (!Number.isFinite(participationRate) ||
+          participationRate < 0.01 ||
+          participationRate > 1))
     )
       return;
     if (
@@ -197,7 +288,8 @@ export class TradeTicketModel {
     ) {
       this.update({
         confirmedLimitPrice: state.limitPrice,
-        message: state.limitPriceWarning + ' Submit again to confirm this price.',
+        message:
+          state.limitPriceWarning + ' Submit again to confirm this price.',
       });
       return;
     }
@@ -206,21 +298,47 @@ export class TradeTicketModel {
       const isVwap = state.orderType === 'vwap';
       const isTwap = state.orderType === 'twap';
       const scheduled = isVwap || isTwap;
-      const requestOrderType = state.orderType === 'gtd' ? 'limit' : state.orderType;
-      const response = await fetch(isVwap ? '/positions/vwap' : isTwap ? '/positions/twap' : '/positions/orders', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          symbol: state.symbol,
-          side: state.side,
-          ...(scheduled ? { duration_minutes: durationMinutes, ...(isVwap ? { max_participation_rate: participationRate } : {}) } : { order_type: requestOrderType }),
-          quantity,
-          ...(hasLimit ? { limit_price: limitPrice } : {}),
-          ...(hasTrigger ? { trigger_price: barrierPrice, trigger_direction: state.barrierDirection } : {}),
-          ...(state.orderType === 'trailing-stop' ? (state.trailingMode === 'amount' ? { trailing_amount: trailingValue } : { trailing_percent: trailingValue / 100 }) : {}),
-          ...(state.orderType === 'gtd' ? { time_in_force: 'gtd', expires_at: expiresAt } : {}),
-        }),
-      });
+      const requestOrderType =
+        state.orderType === 'gtd' ? 'limit' : state.orderType;
+      const response = await executionFetch(
+        isVwap
+          ? '/positions/vwap'
+          : isTwap
+            ? '/positions/twap'
+            : '/positions/orders',
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            symbol: state.symbol,
+            side: state.side,
+            ...(scheduled
+              ? {
+                  duration_minutes: durationMinutes,
+                  ...(isVwap
+                    ? { max_participation_rate: participationRate }
+                    : {}),
+                }
+              : { order_type: requestOrderType }),
+            quantity,
+            ...(hasLimit ? { limit_price: limitPrice } : {}),
+            ...(hasTrigger
+              ? {
+                  trigger_price: barrierPrice,
+                  trigger_direction: state.barrierDirection,
+                }
+              : {}),
+            ...(state.orderType === 'trailing-stop'
+              ? state.trailingMode === 'amount'
+                ? { trailing_amount: trailingValue }
+                : { trailing_percent: trailingValue / 100 }
+              : {}),
+            ...(state.orderType === 'gtd'
+              ? { time_in_force: 'gtd', expires_at: expiresAt }
+              : {}),
+          }),
+        },
+      );
       if (!response.ok) {
         const detail = (await response.text()).trim();
         throw new Error(
@@ -228,16 +346,44 @@ export class TradeTicketModel {
         );
       }
       const result = (await response.json()) as {
-        filled_quantity?: number; remaining_quantity?: number; average_execution_price?: number; estimated_fee?: number;
-        id?: string; status?: string; executed_quantity?: number;
-        barrier_order?: { id: string; status: string; trigger_price: number; trigger_direction: BarrierDirection; order_kind?: string };
+        filled_quantity?: number;
+        remaining_quantity?: number;
+        average_execution_price?: number;
+        estimated_fee?: number;
+        id?: string;
+        status?: string;
+        executed_quantity?: number;
+        barrier_order?: {
+          id: string;
+          status: string;
+          trigger_price: number;
+          trigger_direction: BarrierDirection;
+          order_kind?: string;
+        };
       };
       if (result.barrier_order) {
-        this.update({ message: (result.barrier_order.order_kind ?? 'Barrier') + ' order ' + result.barrier_order.id + ' armed ' + result.barrier_order.trigger_direction + ' ' + result.barrier_order.trigger_price + '.', quantity: '', barrierPrice: '' });
+        this.update({
+          message:
+            (result.barrier_order.order_kind ?? 'Barrier') +
+            ' order ' +
+            result.barrier_order.id +
+            ' armed ' +
+            result.barrier_order.trigger_direction +
+            ' ' +
+            result.barrier_order.trigger_price +
+            '.',
+          quantity: '',
+          barrierPrice: '',
+        });
         return;
       }
       if (scheduled && result.id) {
-        this.update({ vwapRunId: result.id, vwapStatus: result.status ?? 'running', vwapExecutedQuantity: result.executed_quantity ?? 0, message: (isTwap ? 'TWAP' : 'VWAP') + ' execution started.' });
+        this.update({
+          vwapRunId: result.id,
+          vwapStatus: result.status ?? 'running',
+          vwapExecutedQuantity: result.executed_quantity ?? 0,
+          message: (isTwap ? 'TWAP' : 'VWAP') + ' execution started.',
+        });
         this.syncVwapFromStream(result.id);
         return;
       }
@@ -264,25 +410,71 @@ export class TradeTicketModel {
     }
   }
   private async loadActiveVwap(symbol: string): Promise<void> {
-    const runs = currentPositionSnapshot()?.vwap_runs?.runs as Array<{ id: string; symbol: string; status: string; executed_quantity: number; strategy?: string }> | undefined;
+    const runs = currentPositionSnapshot()?.vwap_runs?.runs as
+      | Array<{
+          id: string;
+          symbol: string;
+          status: string;
+          executed_quantity: number;
+          strategy?: string;
+        }>
+      | undefined;
     if (!runs || this.props$.value.symbol !== symbol) return;
-    const run = [...runs].reverse().find((item) => item.symbol === symbol && item.status === 'running');
-    if (run) this.update({ orderType: run.strategy === 'twap' ? 'twap' : 'vwap', vwapRunId: run.id, vwapStatus: run.status, vwapExecutedQuantity: run.executed_quantity, message: 'Resumed monitoring ' + (run.strategy === 'twap' ? 'TWAP' : 'VWAP') + ' execution.' });
+    const run = [...runs]
+      .reverse()
+      .find((item) => item.symbol === symbol && item.status === 'running');
+    if (run)
+      this.update({
+        orderType: run.strategy === 'twap' ? 'twap' : 'vwap',
+        vwapRunId: run.id,
+        vwapStatus: run.status,
+        vwapExecutedQuantity: run.executed_quantity,
+        message:
+          'Resumed monitoring ' +
+          (run.strategy === 'twap' ? 'TWAP' : 'VWAP') +
+          ' execution.',
+      });
   }
   private syncVwapFromStream(runId: string): void {
-    const run = (currentPositionSnapshot()?.vwap_runs?.runs ?? []).find((item) => item.id === runId) as { status: string; executed_quantity: number; error?: string; strategy?: string } | undefined;
-    if (run) this.update({ vwapStatus: run.status, vwapExecutedQuantity: run.executed_quantity, message: run.error ?? ((run.strategy === 'twap' ? 'TWAP ' : 'VWAP ') + run.status + ' · filled ' + run.executed_quantity) });
+    const run = (currentPositionSnapshot()?.vwap_runs?.runs ?? []).find(
+      (item) => item.id === runId,
+    ) as
+      | {
+          status: string;
+          executed_quantity: number;
+          error?: string;
+          strategy?: string;
+        }
+      | undefined;
+    if (run)
+      this.update({
+        vwapStatus: run.status,
+        vwapExecutedQuantity: run.executed_quantity,
+        message:
+          run.error ??
+          (run.strategy === 'twap' ? 'TWAP ' : 'VWAP ') +
+            run.status +
+            ' · filled ' +
+            run.executed_quantity,
+      });
   }
   async cancelVwap(): Promise<void> {
     const id = this.state$.value.vwapRunId;
     if (!id) return;
-    try { await fetch('/positions/vwap/' + encodeURIComponent(id), { method: 'DELETE' }); }
-    finally { this.update({ vwapStatus: 'cancelled', message: (this.state$.value.orderType === 'twap' ? 'TWAP' : 'VWAP') + ' execution cancelled.' }); }
+    try {
+      await executionFetch('/positions/vwap/' + encodeURIComponent(id), {
+        method: 'DELETE',
+      });
+    } finally {
+      this.update({
+        vwapStatus: 'cancelled',
+        message:
+          (this.state$.value.orderType === 'twap' ? 'TWAP' : 'VWAP') +
+          ' execution cancelled.',
+      });
+    }
   }
   private update(update: Partial<TradeTicketState>): void {
     this.state$.next(deriveTradeTicketState(this.state$.value, update));
   }
 }
-
-
-

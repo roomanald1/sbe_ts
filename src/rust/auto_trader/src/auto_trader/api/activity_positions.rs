@@ -35,23 +35,13 @@ fn external_close_order_for_trade<'a>(
 }
 
 async fn fetch_closed_ledger_rows(
-    client: &reqwest::Client,
-    position_url: &str,
     today_start: u64,
     orders: &[TraderOrder],
     open_positions: &[OpenStrategyPosition],
 ) -> Vec<serde_json::Value> {
-    let Ok(response) = client
-        .get(format!(
-            "{position_url}/positions/trades?since_ms={today_start}"
-        ))
-        .send()
-        .await
-        .and_then(reqwest::Response::error_for_status)
-    else {
-        return Vec::new();
-    };
-    let Ok(body) = response.json::<serde_json::Value>().await else {
+    let Ok(body) = crate::service_rpc::position_get(&format!(
+        "/positions/trades?since_ms={today_start}"
+    )).await else {
         return Vec::new();
     };
     let mut order_by_id = BTreeMap::<String, &TraderOrder>::new();
@@ -395,15 +385,13 @@ fn snapshot_activity_positions(settings: &Settings, today_start: u64) -> Activit
 }
 
 async fn await_activity_realized_pnl(
-    client: &reqwest::Client,
-    position_url: &str,
     orders: &mut [TraderOrder],
 ) -> (
     Option<f64>,
     Option<BTreeMap<String, f64>>,
     Vec<PnlBreakdown>,
 ) {
-    let ledger_pnl = fetch_ledger_realized_pnl(client, position_url).await.ok();
+    let ledger_pnl = fetch_ledger_realized_pnl().await.ok();
     let (realized_pnl, realized_pnl_by_quote, pnl_breakdown) = if let Some(pnl) = ledger_pnl {
         for order in orders.iter_mut() {
             let realized = if order.purpose == "stop-loss" {

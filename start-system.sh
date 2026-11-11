@@ -21,5 +21,9 @@ for service in "${services[@]}"; do
     break
   fi
 done
-docker compose -p sbe-system -f system/compose.yml up -d "${services[@]}"
+compose_args=(-p sbe-system -f system/compose.yml)
+if [[ "${SCOUT_WORKERS_ENABLED:-true}" == "true" ]]; then
+  compose_args+=(--profile scout-workers)
+fi
+docker compose "${compose_args[@]}" up -d "${services[@]}"
 echo "System is running. App: http://localhost:5173"

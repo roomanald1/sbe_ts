@@ -1,12 +1,12 @@
 use crate::*;
 
-pub use encoder::*;
 pub use decoder::*;
+pub use encoder::*;
 
-pub const SBE_BLOCK_LENGTH: u16 = 56;
+pub const SBE_BLOCK_LENGTH: u16 = 48;
 pub const SBE_TEMPLATE_ID: u16 = 1;
 pub const SBE_SCHEMA_ID: u16 = 1;
-pub const SBE_SCHEMA_VERSION: u16 = 7;
+pub const SBE_SCHEMA_VERSION: u16 = 9;
 
 pub mod encoder {
     use super::*;
@@ -122,23 +122,15 @@ pub mod encoder {
             let offset = self.offset + 32;
             self.get_buf_mut().put_f64_at(offset, value);
         }
-        /// primitive field 'volatility1m'
+        /// primitive field 'timestamp'
         /// - encodedOffset: 40
         /// - encodedLength: 8
         #[inline]
-        pub fn volatility_1m(&mut self, value: f64) {
+        pub fn timestamp(&mut self, value: u64) {
             let offset = self.offset + 40;
-            self.get_buf_mut().put_f64_at(offset, value);
+            self.get_buf_mut().put_u64_at(offset, value);
         }
-
-        #[inline]
-        pub fn volatility_5m(&mut self, value: f64) {
-            let offset = self.offset + 48;
-            self.get_buf_mut().put_f64_at(offset, value);
-        }
-
     }
-
 } // end encoder
 
 pub mod decoder {
@@ -255,16 +247,8 @@ pub mod decoder {
         }
         /// primitive field - 'REQUIRED'
         #[inline]
-        pub fn volatility_1m(&self) -> f64 {
-            self.get_buf().get_f64_at(self.offset + 40)
+        pub fn timestamp(&self) -> u64 {
+            self.get_buf().get_u64_at(self.offset + 40)
         }
-
-        #[inline]
-        pub fn volatility_5m(&self) -> f64 {
-            self.get_buf().get_f64_at(self.offset + 48)
-        }
-
     }
-
 } // end decoder
-

@@ -351,7 +351,7 @@ fn scout_parameter_variant_snapshots(
                 .specs
                 .iter()
                 .find(|spec| spec.key == *parameter)
-                .map_or(1e-8, |spec| spec.step * 1e-6);
+                .map_or(1e-8, |spec| spec.step * PARAMETER_STEP_RELATIVE_TOLERANCE);
             if direction_groups.insert((key.clone(), group_id.clone())) {
                 match baseline {
                     Some(baseline) if *value > baseline + step => direction_counts[0] += 1,
@@ -542,7 +542,7 @@ mod tests {
         let mut state = LearningState::default();
         let mut variant = scout_variant("A", &[0.2, 0.4, 0.6, 0.8]);
         for outcome in &mut variant.outcomes {
-            outcome.evidence_group_id = Some("paired-scout:comparison".into());
+            outcome.evidence_group_id = Some("comparison".into());
         }
         state.variants.insert("candidate".into(), variant);
 
@@ -596,18 +596,12 @@ mod tests {
 
         let mut paper_scout = scout_variant("DOGE-USDT", &[0.05]);
         paper_scout.profile.strategy = "example-strategy".into();
-        paper_scout.outcomes[0].source = LearningOutcomeSource::PaperScoutTrade;
+        paper_scout.outcomes[0].source = LearningOutcomeSource::Scout;
         paper_scout.outcomes[0].realized_pnl_usd = Some(0.25);
         paper_scout.outcomes[0].baseline_parameters.clear();
         paper_scout.outcomes[0].tested_parameter_keys.clear();
         paper_scout.outcomes[0].observed_at_ms = now_ms();
         state.variants.insert("paper-scout".into(), paper_scout);
-
-        let mut legacy = scout_variant("XRP-USDT", &[99.0]);
-        legacy.profile.strategy = "example-strategy".into();
-        legacy.outcomes[0].source = LearningOutcomeSource::Legacy;
-        legacy.outcomes[0].observed_at_ms = now_ms();
-        state.variants.insert("legacy".into(), legacy);
 
         let service = ServiceState {
             state: Arc::new(tokio::sync::Mutex::new(state)),
@@ -626,13 +620,10 @@ mod tests {
         );
         assert_eq!(summary.other_profile_trade_samples, 1);
         assert_eq!(summary.other_profile_average_net_return_percent, Some(-0.4));
-        assert_eq!(summary.scout_outcome_samples, 2);
-        assert_eq!(summary.scout_average_net_return_percent, Some(0.25));
-        assert_eq!(summary.paper_scout_trade_samples, 1);
-        assert_eq!(summary.paper_scout_average_net_return_percent, Some(0.05));
+        assert_eq!(summary.scout_outcome_samples, 3);
+        assert!((summary.scout_average_net_return_percent.unwrap() - (0.55 / 3.0)).abs() < 1e-10);
         assert_eq!(summary.paired_scout_samples, 1);
         assert_eq!(summary.average_paired_scout_lift_percent, Some(0.1));
-        assert_eq!(summary.unclassified_samples, 1);
     }
 
     #[tokio::test]
@@ -709,10 +700,8 @@ pub(super) async fn get_summary(State(service): State<ServiceState>) -> Json<Vec
         trades: Vec<f64>,
         active_profile_trades: Vec<f64>,
         other_profile_trades: Vec<f64>,
-        paper_scout_trades: Vec<f64>,
         scouts: BTreeMap<String, Vec<f64>>,
         paired_scouts: BTreeMap<String, Vec<f64>>,
-        unclassified: usize,
     }
     let mut summaries: BTreeMap<String, Returns> = BTreeMap::new();
     for (profile_id, profile) in &state.variants {
@@ -742,9 +731,6 @@ pub(super) async fn get_summary(State(service): State<ServiceState>) -> Json<Vec
                             .push(outcome.net_return_percent);
                     }
                 }
-                LearningOutcomeSource::PaperScoutTrade => {
-                    summary.paper_scout_trades.push(outcome.net_return_percent)
-                }
                 LearningOutcomeSource::Scout => {
                     // Scout net is the overall Scout return, including paired
                     // comparisons. Keep a second bucket so the paired lift
@@ -766,7 +752,6 @@ pub(super) async fn get_summary(State(service): State<ServiceState>) -> Json<Vec
                             .push(outcome.net_return_percent);
                     }
                 }
-                LearningOutcomeSource::Legacy => summary.unclassified += 1,
             }
         }
     }
@@ -788,8 +773,6 @@ pub(super) async fn get_summary(State(service): State<ServiceState>) -> Json<Vec
                     summarize(&returns.active_profile_trades);
                 let (other_trade_count, other_trade_positive_rate, other_trade_average) =
                     summarize(&returns.other_profile_trades);
-                let (paper_scout_count, paper_scout_positive_rate, paper_scout_average) =
-                    summarize(&returns.paper_scout_trades);
                 let grouped_returns = |groups: &BTreeMap<String, Vec<f64>>| {
                     groups
                         .values()
@@ -815,13 +798,9 @@ pub(super) async fn get_summary(State(service): State<ServiceState>) -> Json<Vec
                     other_profile_trade_samples: other_trade_count,
                     other_profile_trade_positive_rate: other_trade_positive_rate,
                     other_profile_average_net_return_percent: other_trade_average,
-                    paper_scout_trade_samples: paper_scout_count,
-                    paper_scout_positive_rate,
-                    paper_scout_average_net_return_percent: paper_scout_average,
                     paired_scout_samples: paired_count,
                     paired_scout_positive_rate: paired_positive_rate,
                     average_paired_scout_lift_percent: paired_average,
-                    unclassified_samples: returns.unclassified,
                 }
             })
             .collect(),

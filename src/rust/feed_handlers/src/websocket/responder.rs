@@ -5,7 +5,6 @@ struct ServerResponder {
     signal_price_feeds: Arc<DashMap<String, broadcast::Sender<Bytes>>>,
     signal_events: broadcast::Sender<Bytes>,
     usd_rate_snapshot: watch::Sender<Bytes>,
-    news_snapshot: watch::Sender<Bytes>,
 }
 
 impl RSocket for ServerResponder {
@@ -48,18 +47,6 @@ impl RSocket for ServerResponder {
                 stream,
                 "FeedHandlers ticker API client disconnected".to_owned(),
             );
-        }
-
-        if payload.data().and_then(|data| std::str::from_utf8(data.as_ref()).ok()) == Some("news:*") {
-            let stream = futures_util::stream::unfold(
-                (self.news_snapshot.subscribe(), true),
-                |(mut snapshot, initial)| async move {
-                    if !initial && snapshot.changed().await.is_err() { return None; }
-                    let data = snapshot.borrow_and_update().clone();
-                    Some((Ok(Payload::new(Some(data), None)), (snapshot, false)))
-                },
-            ).boxed();
-            return log_stream_end(stream, "Backend news snapshot stream disconnected".to_owned());
         }
 
         if payload.data().and_then(|data| std::str::from_utf8(data.as_ref()).ok()) == Some("usd-rates:*") {
@@ -186,38 +173,26 @@ impl RSocket for ServerResponder {
             if synthetic { "synthetic" } else { "OKX" }
         );
         let stream = if synthetic {
-            futures_util::stream::unfold(
-                (
-                    0_u64,
-                    0_usize,
-                    (0..100)
-                        .map(|_| RollingVolatility::default())
-                        .collect::<Vec<_>>(),
-                ),
-                |(round, symbol_index, mut volatility_by_symbol)| async move {
+            futures_util::stream::unfold((0_u64, 0_usize), |(round, symbol_index)| async move {
                     if symbol_index == 0 {
                         sleep(Duration::from_millis(10)).await;
                     }
 
                     let (symbol, price) = synthetic_price_update(round, symbol_index);
-                    let volatility = volatility_by_symbol[symbol_index]
-                        .update(round.saturating_mul(1_000), price);
                     let result = Ok(Payload::builder()
                         .set_data(encode_symbol_price_bytes(
                             &symbol,
                             price,
-                            volatility.0,
-                            volatility.1,
+                            round.saturating_mul(1_000),
                         ))
                         .build());
                     let next_state = if symbol_index == 99 {
-                        (round.wrapping_add(1), 0, volatility_by_symbol)
+                        (round.wrapping_add(1), 0)
                     } else {
-                        (round, symbol_index + 1, volatility_by_symbol)
+                        (round, symbol_index + 1)
                     };
                     Some((result, next_state))
-                },
-            )
+            })
             .boxed()
         } else {
             futures_util::stream::unfold(self.price_updates.subscribe(), |mut updates| async move {
@@ -254,7 +229,7 @@ impl RSocket for ServerResponder {
     )]
     fn metadata_push<'life0, 'async_trait>(
         &'life0 self,
-        req: Payload,
+        _req: Payload,
     ) -> ::core::pin::Pin<
         Box<dyn ::core::future::Future<Output = Result<()>> + ::core::marker::Send + 'async_trait>,
     >
@@ -262,7 +237,7 @@ impl RSocket for ServerResponder {
         'life0: 'async_trait,
         Self: 'async_trait,
     {
-        todo!()
+        Box::pin(async { Err(anyhow::anyhow!("RSocket metadata push is unsupported")) })
     }
 
     #[doc = " Fire and Forget interaction model of RSocket."]
@@ -273,7 +248,7 @@ impl RSocket for ServerResponder {
     )]
     fn fire_and_forget<'life0, 'async_trait>(
         &'life0 self,
-        req: Payload,
+        _req: Payload,
     ) -> ::core::pin::Pin<
         Box<dyn ::core::future::Future<Output = Result<()>> + ::core::marker::Send + 'async_trait>,
     >
@@ -281,7 +256,7 @@ impl RSocket for ServerResponder {
         'life0: 'async_trait,
         Self: 'async_trait,
     {
-        todo!()
+        Box::pin(async { Err(anyhow::anyhow!("RSocket fire-and-forget is unsupported")) })
     }
 
     #[doc = " Request-Response interaction model of RSocket."]
@@ -304,12 +279,77 @@ impl RSocket for ServerResponder {
         'life0: 'async_trait,
         Self: 'async_trait,
     {
-        todo!()
+        Box::pin(async move {
+            if let Some(data) = req.data() {
+                if let Ok(strategies::ScoutCoordinatorRequest::WorkerRoute(command)) =
+                    serde_json::from_slice::<strategies::ScoutCoordinatorRequest>(data)
+                {
+                    if command.path != "/internal/signals/snapshot"
+                        || command.method != strategies::ScoutWorkerHttpMethod::Post
+                    {
+                        anyhow::bail!("unsupported FeedHandlers RSocket route: {}", command.path);
+                    }
+                    let symbol = command.payload["symbol"]
+                        .as_str()
+                        .ok_or_else(|| anyhow::anyhow!("signal snapshot is missing symbol"))?;
+                    let bytes = serde_json::to_vec(&command.payload)?;
+                    let status = if crate::websocket::publish_signal_snapshot(
+                        symbol,
+                        Bytes::from(bytes),
+                    ) {
+                        202
+                    } else {
+                        404
+                    };
+                    let result = strategies::ScoutCoordinatorResponse::WorkerRoute(
+                        strategies::ScoutCoordinatorRouteResult {
+                            request_id: command.request_id,
+                            status,
+                            body: serde_json::Value::Null,
+                        },
+                    );
+                    return Ok(Some(
+                        Payload::builder()
+                            .set_data(serde_json::to_vec(&result)?)
+                            .build(),
+                    ));
+                }
+            }
+            let route = req
+                .data()
+                .and_then(|data| std::str::from_utf8(data.as_ref()).ok())
+                .ok_or_else(|| anyhow::anyhow!("invalid FeedHandlers request-response route"))?;
+            if !is_instrument_list_request(&req) {
+                anyhow::bail!("unsupported FeedHandlers request-response route: {route}");
+            }
+            let symbols = match get_all_spot_instruments().await {
+                Ok(symbols) => symbols,
+                Err(error) => {
+                    crate::service_log!("ERROR", "Unable to load full spot instrument list: {error:#}; using ticker symbols");
+                    get_instrument_data().await.unwrap_or_default()
+                }
+            };
+            let instruments = crate::okx::connectivity::get_spot_instrument_precisions()
+                .await
+                .unwrap_or_default();
+            let data = serde_json::to_vec(&serde_json::json!({"symbols": symbols, "instruments": instruments}))?;
+            Ok(Some(Payload::new(Some(Bytes::from(data)), None)))
+        })
     }
 
     #[doc = " Request-Channel interaction model of RSocket."]
-    fn request_channel(&self, reqs: Flux<Result<Payload>>) -> Flux<Result<Payload>> {
-        todo!()
+    fn request_channel(&self, _reqs: Flux<Result<Payload>>) -> Flux<Result<Payload>> {
+        futures_util::stream::once(async {
+            Err(anyhow::anyhow!("RSocket request-channel is unsupported"))
+        })
+        .boxed()
     }
+}
+
+fn is_instrument_list_request(payload: &Payload) -> bool {
+    payload
+        .data()
+        .and_then(|data| std::str::from_utf8(data.as_ref()).ok())
+        == Some("instruments:list")
 }
 

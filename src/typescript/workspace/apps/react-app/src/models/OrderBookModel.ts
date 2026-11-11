@@ -37,7 +37,12 @@ export class OrderBookModel {
       old.streamKey !== props.streamKey
     ) {
       this.stop();
-      this.patch({ symbol: props.symbol, depth: undefined, deepDepth: undefined, error: undefined });
+      this.patch({
+        symbol: props.symbol,
+        depth: undefined,
+        deepDepth: undefined,
+        error: undefined,
+      });
       this.start();
     }
   }
@@ -58,7 +63,8 @@ export class OrderBookModel {
         return;
       }
       const depth = decodeBookDepth(raw);
-      if (depth?.symbol === symbol) this.patch({ depth, deepDepth: depth, error: undefined });
+      if (depth?.symbol === symbol)
+        this.patch({ depth, deepDepth: depth, error: undefined });
     });
     this.errorSub = feed.error.subscribe((error) => {
       if (error) this.patch({ error });

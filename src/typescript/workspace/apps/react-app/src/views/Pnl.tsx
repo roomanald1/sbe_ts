@@ -63,7 +63,13 @@ const defaultPnlColDef: ColDef<PnlGridRow> = {
   minWidth: 68,
 };
 
-function PnlComponent({ connection, paused = false }: { connection: Connection; paused?: boolean }) {
+function PnlComponent({
+  connection,
+  paused = false,
+}: {
+  connection: Connection;
+  paused?: boolean;
+}) {
   const model = useMemo(() => new PnlModel(connection), []);
   useEffect(() => {
     model.setConnection(connection);
@@ -76,34 +82,77 @@ function PnlComponent({ connection, paused = false }: { connection: Connection; 
     model.state$,
   );
   const rowData = useMemo<PnlGridRow[]>(
-    () => rows.map(({ position, mark, unrealized, realizedUsd, unrealizedUsd, feesPaidUsd, averageEntryUsd, markTimestamp, bookError }) => ({
-        symbol: position.symbol,
-        quantity: position.quantity,
-        averageEntry:
-          position.quantity === 0 ? undefined : averageEntryUsd,
-        mark,
-        realized: realizedUsd,
-        unrealized: unrealizedUsd,
-        feesPaid: feesPaidUsd,
-        returnPct:
-          position.average_entry_price > 0 && unrealized !== undefined
-            ? (unrealized / (Math.abs(position.quantity) * position.average_entry_price)) * 100
-            : undefined,
-        lastTrade: position.last_trade_timestamp,
-        markTimestamp,
-        quote: quoteCurrency(position.symbol),
-        bookError,
-      })),
+    () =>
+      rows.map(
+        ({
+          position,
+          mark,
+          unrealized,
+          realizedUsd,
+          unrealizedUsd,
+          feesPaidUsd,
+          averageEntryUsd,
+          markTimestamp,
+          bookError,
+        }) => ({
+          symbol: position.symbol,
+          quantity: position.quantity,
+          averageEntry: position.quantity === 0 ? undefined : averageEntryUsd,
+          mark,
+          realized: realizedUsd,
+          unrealized: unrealizedUsd,
+          feesPaid: feesPaidUsd,
+          returnPct:
+            position.average_entry_price > 0 && unrealized !== undefined
+              ? (unrealized /
+                  (Math.abs(position.quantity) *
+                    position.average_entry_price)) *
+                100
+              : undefined,
+          lastTrade: position.last_trade_timestamp,
+          markTimestamp,
+          quote: quoteCurrency(position.symbol),
+          bookError,
+        }),
+      ),
     [rows],
   );
   const displayedRowData = usePausedValue(rowData, paused);
   const columnDefs = useMemo<ColDef<PnlGridRow>[]>(
     () => [
       { field: 'symbol', headerName: 'Instrument', minWidth: 90 },
-      { field: 'feesPaid', headerName: 'Fees paid', minWidth: 90, valueFormatter: ({ value }) => value == null ? 'N/A' : moneyFormatter.format(value) + ' USD' },
-      { field: 'returnPct', headerName: 'Return %', minWidth: 75, valueFormatter: ({ value }) => value == null ? '—' : value.toFixed(2) + '%' },
-      { field: 'lastTrade', headerName: 'Last trade', minWidth: 75, valueFormatter: ({ value }) => value ? Math.max(0, Math.floor((Date.now() - value) / 86400000)) + 'd' : '—' },
-      { field: 'markTimestamp', headerName: 'Mark age', minWidth: 85, valueFormatter: ({ value }) => value ? Math.max(0, Math.floor((Date.now() - value) / 1000)) + 's' : '—' },
+      {
+        field: 'feesPaid',
+        headerName: 'Fees paid',
+        minWidth: 90,
+        valueFormatter: ({ value }) =>
+          value == null ? 'N/A' : moneyFormatter.format(value) + ' USD',
+      },
+      {
+        field: 'returnPct',
+        headerName: 'Return %',
+        minWidth: 75,
+        valueFormatter: ({ value }) =>
+          value == null ? '—' : value.toFixed(2) + '%',
+      },
+      {
+        field: 'lastTrade',
+        headerName: 'Last trade',
+        minWidth: 75,
+        valueFormatter: ({ value }) =>
+          value
+            ? Math.max(0, Math.floor((Date.now() - value) / 86400000)) + 'd'
+            : '—',
+      },
+      {
+        field: 'markTimestamp',
+        headerName: 'Mark age',
+        minWidth: 85,
+        valueFormatter: ({ value }) =>
+          value
+            ? Math.max(0, Math.floor((Date.now() - value) / 1000)) + 's'
+            : '—',
+      },
       {
         field: 'quantity',
         headerName: 'Net qty',
@@ -116,7 +165,9 @@ function PnlComponent({ connection, paused = false }: { connection: Connection; 
               ? 'pnl-positive'
               : 'pnl-negative',
         valueFormatter: ({ value, data }) =>
-          value == null ? '' : formatForSymbol(value, data?.symbol ?? '', 'quantity'),
+          value == null
+            ? ''
+            : formatForSymbol(value, data?.symbol ?? '', 'quantity'),
       },
       {
         field: 'averageEntry',
@@ -126,7 +177,9 @@ function PnlComponent({ connection, paused = false }: { connection: Connection; 
         valueFormatter: ({ value, data }) =>
           value == null
             ? '—'
-            : formatForSymbol(value, data?.symbol ?? '', 'price') + ' USD / ' + (data?.symbol.split('-')[0] ?? 'unit'),
+            : formatForSymbol(value, data?.symbol ?? '', 'price') +
+              ' USD / ' +
+              (data?.symbol.split('-')[0] ?? 'unit'),
       },
       {
         field: 'mark',
@@ -140,7 +193,9 @@ function PnlComponent({ connection, paused = false }: { connection: Connection; 
               : data?.bookError
                 ? 'Unavailable'
                 : 'Loading…'
-            : formatForSymbol(value, data?.symbol ?? '', 'price') + ' ' + (data?.quote ?? ''),
+            : formatForSymbol(value, data?.symbol ?? '', 'price') +
+              ' ' +
+              (data?.quote ?? ''),
       },
       {
         field: 'realized',
@@ -154,9 +209,7 @@ function PnlComponent({ connection, paused = false }: { connection: Connection; 
               ? 'pnl-positive'
               : 'pnl-negative',
         valueFormatter: ({ value }) =>
-          value == null
-            ? ''
-            : moneyFormatter.format(value) + ' USD',
+          value == null ? '' : moneyFormatter.format(value) + ' USD',
       },
       {
         field: 'unrealized',
@@ -170,9 +223,7 @@ function PnlComponent({ connection, paused = false }: { connection: Connection; 
               ? 'pnl-positive'
               : 'pnl-negative',
         valueFormatter: ({ value }) =>
-          value == null
-            ? '—'
-            : moneyFormatter.format(value) + ' USD',
+          value == null ? '—' : moneyFormatter.format(value) + ' USD',
       },
     ],
     [],
@@ -197,14 +248,19 @@ function PnlComponent({ connection, paused = false }: { connection: Connection; 
                 <strong
                   className={combined >= 0 ? 'pnl-positive' : 'pnl-negative'}
                 >
-                  {total.hasUnconvertedPnl ? 'Unavailable' : moneyFormatter.format(combined) + ' USD'}
+                  {total.hasUnconvertedPnl
+                    ? 'Unavailable'
+                    : moneyFormatter.format(combined) + ' USD'}
                 </strong>
                 <small>
-                  Fees {moneyFormatter.format(total.feesPaid)} USD - Realized {moneyFormatter.format(total.realized)} USD · Unrealized{' '}
+                  Fees {moneyFormatter.format(total.feesPaid)} USD - Realized{' '}
+                  {moneyFormatter.format(total.realized)} USD · Unrealized{' '}
                   {total.hasUnmarkedExposure
                     ? 'Loading mark…'
                     : moneyFormatter.format(total.unrealized) + ' USD'}
-                  {total.hasUnconvertedPnl && ' · Missing OKX USD rate: ' + total.missingCurrencies.join(', ')}
+                  {total.hasUnconvertedPnl &&
+                    ' · Missing OKX USD rate: ' +
+                      total.missingCurrencies.join(', ')}
                 </small>
               </div>
             );

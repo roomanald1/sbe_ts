@@ -11,6 +11,9 @@ import {
   type AutoTraderUiSnapshot,
 } from '../auto_trader_stream';
 import { subscribeInsightsStream } from '../insights_stream';
+import { insightsFetch } from '../insights_rsocket';
+import { autoTraderFetch, autoTraderRpc } from '../auto_trader_rsocket';
+import { learningRpc } from '../learning_rsocket';
 import { sharedGet } from '../shared_get';
 
 export type AutoTraderOrder = {
@@ -584,8 +587,15 @@ export class AutoTraderModel {
       });
     });
     void Promise.all([waitForAutoTraderSnapshot(), waitForPositionSnapshot()])
-      .then(() => { if (this.timer) void this.refresh(); })
-      .catch(() => { if (this.timer) { void this.refreshDecisionParameters(); void this.refresh(); } });
+      .then(() => {
+        if (this.timer) void this.refresh();
+      })
+      .catch(() => {
+        if (this.timer) {
+          void this.refreshDecisionParameters();
+          void this.refresh();
+        }
+      });
     this.timer = setInterval(() => {
       if (Date.now() - this.autoTraderSnapshotAt > 45_000) void this.refresh();
     }, 30_000);
@@ -785,10 +795,10 @@ export class AutoTraderModel {
           positionsResponse,
           auditResponse,
         ] = await Promise.all([
-          sharedGet('/positions/auto-trader'),
-          sharedGet('/positions/auto-trader/activity'),
+          autoTraderRpc('GET', '/positions/auto-trader'),
+          autoTraderRpc('GET', '/positions/auto-trader/activity'),
           sharedGet('/positions?source=auto'),
-          sharedGet('/signals/auto-trader-execution-audit'),
+          insightsFetch('/signals/auto-trader-execution-audit'),
         ]);
         if (!statusResponse.ok)
           throw await this.responseError('status', statusResponse);
@@ -834,9 +844,9 @@ export class AutoTraderModel {
           /* Keep cached rates; missing currencies remain unavailable. */
         }
       }
-      const scoutConfigResponse = await sharedGet(
-        '/scouts/configuration',
-        30_000,
+      const scoutConfigResponse = await learningRpc(
+        'GET',
+        '/configuration',
       ).catch(() => undefined);
       const scoutConfiguration = scoutConfigResponse?.ok
         ? ((await scoutConfigResponse.json()) as {
@@ -853,10 +863,9 @@ export class AutoTraderModel {
               this.state$.value.scoutMaxActivePositions,
             ),
           };
-      const scoutStatusResponse = await sharedGet(
-        '/scouts/status',
-        30_000,
-      ).catch(() => undefined);
+      const scoutStatusResponse = await learningRpc('GET', '/status').catch(
+        () => undefined,
+      );
       const scoutStatus = scoutStatusResponse?.ok
         ? ((await scoutStatusResponse.json()) as {
             active_samples: number;
@@ -1172,9 +1181,10 @@ export class AutoTraderModel {
       const [response, scoutResponse] = await Promise.all([
         streamedParameters
           ? Promise.resolve(undefined)
-          : sharedGet('/positions/auto-trader/parameters'),
-        sharedGet(
-          '/scouts/outcomes?source=all&status=open&page=0&page_size=1',
+          : autoTraderRpc('GET', '/positions/auto-trader/parameters'),
+        learningRpc(
+          'GET',
+          '/outcomes?source=all&status=open&page=0&page_size=1',
         ).catch(() => undefined),
       ]);
       if (!streamedParameters && !response?.ok) {
@@ -1268,7 +1278,7 @@ export class AutoTraderModel {
   async setEnabled(enabled: boolean) {
     this.state$.next({ ...this.state$.value, busy: true, error: undefined });
     try {
-      const response = await fetch('/positions/auto-trader', {
+      const response = await autoTraderFetch('/positions/auto-trader', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ enabled }),
@@ -1292,77 +1302,82 @@ export class AutoTraderModel {
     const current = this.state$.value;
     this.state$.next({ ...current, busy: true, error: undefined });
     try {
-      const response = await fetch('/positions/auto-trader/settings', {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          strategies: current.strategies,
-          signal_strategies_enabled: current.strategies.some((strategy) =>
-            strategy.startsWith('live-'),
-          ),
-          max_order_notional: Number(current.maxOrderNotional),
-          daily_notional_limit: Number(current.dailyNotionalLimit),
-          daily_realized_loss_limit: Number(current.dailyRealizedLossLimit),
-          exploration_percent: Number(current.explorationPercent),
-          risk_appetite: Number(current.riskAppetite),
-          max_open_positions: Number(current.maxOpenPositions),
-          max_intraday_open_positions: Number(current.maxIntradayOpenPositions),
-          max_daily_open_positions: Number(current.maxDailyOpenPositions),
-          intraday_notional_limit: Number(current.intradayNotionalLimit),
-          daily_strategy_notional_limit: Number(
-            current.dailyStrategyNotionalLimit,
-          ),
-          daily_strategy_budgets: Object.fromEntries(
-            current.strategies
-              .filter(
-                (strategy) =>
-                  !strategy.startsWith('live-') &&
-                  strategy !== 'dated-futures-carry',
-              )
-              .map((strategy) => [
-                strategy,
-                Number(current.dailyStrategyBudgets[strategy] ?? 0),
-              ]),
-          ),
-          intraday_strategy_budgets: Object.fromEntries(
-            current.strategies
-              .filter((strategy) => strategy.startsWith('live-'))
-              .map((strategy) => [
-                strategy,
-                Number(current.intradayStrategyBudgets[strategy] ?? 0),
-              ]),
-          ),
-          max_entries_per_auto_position: Number(current.maxEntriesPerPosition),
-          vwap_duration_minutes: Number(current.vwapDurationMinutes),
-          vwap_participation_percent: Number(current.vwapParticipationPercent),
-          limit_offset_bps: Number(current.limitOffsetBps),
-          trigger_offset_bps: Number(current.triggerOffsetBps),
-          trailing_distance_percent: Number(current.trailingDistancePercent),
-          closed_trade_window: Number(current.closedTradeWindow),
-          minimum_scout_parameter_samples: Number(
-            current.minimumScoutParameterSamples,
-          ),
-          ...(this.strategyParametersDirty
-            ? {
-                strategy_parameter_overrides:
-                  current.strategyParameterOverrides,
-              }
-            : {}),
-          ...(resetStrategyProfile
-            ? { reset_strategy_profile: resetStrategyProfile }
-            : {}),
-          reset_learning: resetLearning,
-        }),
-      });
+      const response = await autoTraderFetch(
+        '/positions/auto-trader/settings',
+        {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            strategies: current.strategies,
+            signal_strategies_enabled: current.strategies.some((strategy) =>
+              strategy.startsWith('live-'),
+            ),
+            max_order_notional: Number(current.maxOrderNotional),
+            daily_notional_limit: Number(current.dailyNotionalLimit),
+            daily_realized_loss_limit: Number(current.dailyRealizedLossLimit),
+            exploration_percent: Number(current.explorationPercent),
+            risk_appetite: Number(current.riskAppetite),
+            max_open_positions: Number(current.maxOpenPositions),
+            max_intraday_open_positions: Number(
+              current.maxIntradayOpenPositions,
+            ),
+            max_daily_open_positions: Number(current.maxDailyOpenPositions),
+            intraday_notional_limit: Number(current.intradayNotionalLimit),
+            daily_strategy_notional_limit: Number(
+              current.dailyStrategyNotionalLimit,
+            ),
+            daily_strategy_budgets: Object.fromEntries(
+              current.strategies
+                .filter(
+                  (strategy) =>
+                    !strategy.startsWith('live-') &&
+                    strategy !== 'dated-futures-carry',
+                )
+                .map((strategy) => [
+                  strategy,
+                  Number(current.dailyStrategyBudgets[strategy] ?? 0),
+                ]),
+            ),
+            intraday_strategy_budgets: Object.fromEntries(
+              current.strategies
+                .filter((strategy) => strategy.startsWith('live-'))
+                .map((strategy) => [
+                  strategy,
+                  Number(current.intradayStrategyBudgets[strategy] ?? 0),
+                ]),
+            ),
+            max_entries_per_auto_position: Number(
+              current.maxEntriesPerPosition,
+            ),
+            vwap_duration_minutes: Number(current.vwapDurationMinutes),
+            vwap_participation_percent: Number(
+              current.vwapParticipationPercent,
+            ),
+            limit_offset_bps: Number(current.limitOffsetBps),
+            trigger_offset_bps: Number(current.triggerOffsetBps),
+            trailing_distance_percent: Number(current.trailingDistancePercent),
+            closed_trade_window: Number(current.closedTradeWindow),
+            minimum_scout_parameter_samples: Number(
+              current.minimumScoutParameterSamples,
+            ),
+            ...(this.strategyParametersDirty
+              ? {
+                  strategy_parameter_overrides:
+                    current.strategyParameterOverrides,
+                }
+              : {}),
+            ...(resetStrategyProfile
+              ? { reset_strategy_profile: resetStrategyProfile }
+              : {}),
+            reset_learning: resetLearning,
+          }),
+        },
+      );
       if (!response.ok) throw new Error(await response.text());
-      const scoutResponse = await fetch('/scouts/configuration', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          strategies: current.scoutStrategies,
-          max_active_samples: Number(current.maxConcurrentScoutSamples),
-          max_active_positions: Number(current.scoutMaxActivePositions),
-        }),
+      const scoutResponse = await learningRpc('POST', '/configuration', {
+        strategies: current.scoutStrategies,
+        max_active_samples: Number(current.maxConcurrentScoutSamples),
+        max_active_positions: Number(current.scoutMaxActivePositions),
       });
       if (!scoutResponse.ok) throw new Error(await scoutResponse.text());
       // A refresh may already be in flight with a snapshot from before this PUT.

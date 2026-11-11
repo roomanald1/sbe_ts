@@ -15,13 +15,6 @@ fn skipped(reason: &str) -> CycleResult {
         order_response: None,
     }
 }
-fn upstream_error(error: reqwest::Error) -> (StatusCode, String) {
-    (
-        StatusCode::BAD_GATEWAY,
-        format!("Auto trader upstream request failed: {error}"),
-    )
-}
-
 #[cfg(test)]
 mod cycle_result_helper_tests {
     use super::*;

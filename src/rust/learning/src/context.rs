@@ -10,11 +10,11 @@ pub(super) async fn context_thresholds(
             .learning
             .values()
             .any(|stats| !stats.realized_pnl.is_finite())
-        || request.contexts.iter().any(|input| {
-            input.context.is_empty()
-                || input.context.len() > 256
-                || input.missed_opportunity_bands.len() > 2_000
-        })
+        || request.missed_opportunity_bands.len() > 2_000
+        || request
+            .contexts
+            .iter()
+            .any(|input| input.context.is_empty() || input.context.len() > 256)
     {
         return Err((
             StatusCode::BAD_REQUEST,
@@ -47,7 +47,6 @@ pub(super) async fn context_thresholds(
                     .entry(context.to_owned())
                     .or_insert(ContextThresholdInput {
                         context: context.to_owned(),
-                        missed_opportunity_bands: Vec::new(),
                     });
             }
         }
@@ -55,6 +54,7 @@ pub(super) async fn context_thresholds(
     } else {
         request.contexts
     };
+    let missed_opportunity_bands = request.missed_opportunity_bands;
     let thresholds = context_inputs
         .iter()
         .map(|input| {
@@ -66,10 +66,7 @@ pub(super) async fn context_thresholds(
                 input.context.clone(),
                 ContextThresholds {
                     strength_floor: context_strength_floor(&stats),
-                    exploration_score_floor: context_score_floor(
-                        &stats,
-                        &input.missed_opportunity_bands,
-                    ),
+                    exploration_score_floor: context_score_floor(&stats, &missed_opportunity_bands),
                     learning_samples: trade_stats.samples,
                     positive_rate: (trade_stats.samples > 0)
                         .then_some(trade_stats.positive as f64 / trade_stats.samples as f64),
@@ -259,6 +256,7 @@ mod tests {
                 ("not-a-trade".into(), stat(90, 90, 90.0, 0)),
             ]),
             contexts: Vec::new(),
+            missed_opportunity_bands: Vec::new(),
         };
 
         let Json(response) = context_thresholds(State(service.clone()), Json(request))
@@ -280,11 +278,57 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn context_thresholds_apply_shared_missed_opportunity_bands_to_each_context() {
+        let service = service("shared-bands");
+        let _ = std::fs::remove_file(&service.path);
+        let request = ContextThresholdRequest {
+            learning: BTreeMap::new(),
+            contexts: vec![
+                ContextThresholdInput {
+                    context: "trend:btc".into(),
+                },
+                ContextThresholdInput {
+                    context: "trend:eth".into(),
+                },
+            ],
+            missed_opportunity_bands: vec![ContextMissedOpportunityBand {
+                gate: "score".into(),
+                threshold: 0.25,
+                horizon_seconds: 300,
+                sample_count: 0,
+                average_net_return_percent: None,
+                positive_net_rate: None,
+                time_to_profit_sample_count: 0,
+                time_to_profit_rate: None,
+                average_time_to_profit_seconds: None,
+                stop_target_sample_count: 20,
+                stop_target_average_net_return_percent: Some(1.0),
+                stop_target_positive_net_rate: Some(0.6),
+            }],
+        };
+
+        let Json(response) = context_thresholds(State(service.clone()), Json(request))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            response.thresholds["trend:btc"].exploration_score_floor,
+            0.25
+        );
+        assert_eq!(
+            response.thresholds["trend:eth"].exploration_score_floor,
+            0.25
+        );
+        let _ = std::fs::remove_file(&service.path);
+    }
+
+    #[tokio::test]
     async fn context_thresholds_reject_non_finite_stats_and_empty_contexts() {
         let service = service("invalid");
         let invalid_stats = ContextThresholdRequest {
             learning: BTreeMap::from([("ctx:trade".into(), stat(1, 0, f64::NAN, 0))]),
             contexts: Vec::new(),
+            missed_opportunity_bands: Vec::new(),
         };
         let error = context_thresholds(State(service.clone()), Json(invalid_stats))
             .await
@@ -295,8 +339,8 @@ mod tests {
             learning: BTreeMap::new(),
             contexts: vec![ContextThresholdInput {
                 context: String::new(),
-                missed_opportunity_bands: Vec::new(),
             }],
+            missed_opportunity_bands: Vec::new(),
         };
         let error = context_thresholds(State(service), Json(invalid_context))
             .await

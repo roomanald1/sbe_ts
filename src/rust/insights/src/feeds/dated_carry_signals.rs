@@ -60,8 +60,14 @@ fn carry_future_step(symbol: &serde_json::Value) -> f64 {
 }
 
 async fn carry_paper_size(client: &reqwest::Client, base: &str) -> f64 {
-    let url = format!("{base}/positions/auto-trader/dated-carry");
-    carry_market_json(client, &url).await.ok()
+    let url = std::env::var("AUTO_TRADER_RSOCKET_URL")
+        .unwrap_or_else(|_| "ws://127.0.0.1:10006".into());
+    let _ = (client, base);
+    strategies::request_scout_service_route(&url, &strategies::ScoutCoordinatorRouteCommand {
+        request_id: format!("insights-carry:{}", now_ms()), strategy: None,
+        method: strategies::ScoutWorkerHttpMethod::Get,
+        path: "/positions/auto-trader/dated-carry".into(), payload: serde_json::Value::Null,
+    }).await.ok().filter(|response| response.status < 400).map(|response| response.body)
         .and_then(|book| book.get("max_spot_notional_usdt").and_then(serde_json::Value::as_f64))
         .filter(|size| size.is_finite() && (100.0..=10_000.0).contains(size))
         .unwrap_or(1_000.0)
@@ -243,21 +249,34 @@ async fn carry_settlement_price(
 
 async fn carry_publish(client: &reqwest::Client, base: &str, signal: &serde_json::Value) -> anyhow::Result<()> {
     if signal.get("kind").and_then(serde_json::Value::as_str) == Some("scan") {
-        let scouts = std::env::var("SCOUTS_SERVICE_URL")
-            .unwrap_or_else(|_| "http://127.0.0.1:3011".into());
+        let learning = std::env::var("LEARNING_RSOCKET_URL")
+            .unwrap_or_else(|_| "ws://127.0.0.1:10010".into());
         let scout_request = serde_json::json!({
             "request_id": format!("dated-carry:{}", signal.get("emitted_at_ms").and_then(serde_json::Value::as_u64).unwrap_or_default()),
             "now_ms": signal.get("emitted_at_ms"),
             "candidates": signal.get("candidates").cloned().unwrap_or_else(|| serde_json::json!([])),
         });
-        if let Err(error) = client.post(format!("{}/dated-carry-inputs", scouts.trim_end_matches('/')))
-            .json(&scout_request).send().await.and_then(reqwest::Response::error_for_status)
-        {
+        let response = strategies::request_scout_worker_route(&learning, &strategies::ScoutCoordinatorRouteCommand {
+            request_id: scout_request["request_id"].as_str().unwrap_or_default().to_owned(),
+            strategy: None, method: strategies::ScoutWorkerHttpMethod::Post,
+            path: "/dated-carry-inputs".into(), payload: scout_request,
+        }).await;
+        if let Err(error) = response.map_err(anyhow::Error::from).and_then(|response| {
+            if response.status >= 400 { anyhow::bail!("Learning Scout dated-carry route returned {}", response.status); }
+            Ok(())
+        }) {
             crate::service_log!("WARN", "Dated carry Scout scan delivery failed: {error}");
         }
     }
-    client.post(format!("{base}/internal/auto-trader/dated-carry-signal"))
-        .json(signal).send().await?.error_for_status()?;
+    let auto = std::env::var("AUTO_TRADER_RSOCKET_URL")
+        .unwrap_or_else(|_| "ws://127.0.0.1:10006".into());
+    let response = strategies::request_scout_service_route(&auto, &strategies::ScoutCoordinatorRouteCommand {
+        request_id: format!("insights-carry:{}", now_ms()), strategy: None,
+        method: strategies::ScoutWorkerHttpMethod::Post,
+        path: "/internal/auto-trader/dated-carry-signal".into(), payload: signal.clone(),
+    }).await?;
+    if response.status >= 400 { anyhow::bail!("AutoTrader dated-carry route returned {}", response.status); }
+    let _ = (client, base);
     Ok(())
 }
 
@@ -265,8 +284,7 @@ async fn run_dated_carry_signal_worker(store: SignalStore) {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
         .build().unwrap_or_else(|_| reqwest::Client::new());
-    let base = std::env::var("AUTO_TRADER_URL")
-        .unwrap_or_else(|_| "http://127.0.0.1:3005".into());
+    let base = String::new();
     let mut sent_settlements = BTreeSet::new();
     let mut audited_entries = BTreeSet::new();
     let mut ticker = tokio::time::interval(Duration::from_secs(300));

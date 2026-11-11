@@ -6,6 +6,7 @@ services:
     environment:
       WORKSPACE_ROOT: /workspace
       DOCKER_WORKSPACE_ROOT: ${REPO_ROOT:-..}
+      SCOUT_WORKERS_ENABLED: ${SCOUT_WORKERS_ENABLED:-true}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
@@ -79,12 +80,16 @@ services:
       POSITION_MANAGEMENT_URL: http://host.docker.internal:3002
       AUTO_TRADER_URL: http://host.docker.internal:3005
       FEED_HANDLERS_URL: http://host.docker.internal:3001
+      BINANCE_FEED_HEALTH_URL: http://host.docker.internal:3012
       EXECUTION_URL: http://host.docker.internal:3003
       INSIGHTS_URL: http://host.docker.internal:3004
       LIVE_SIGNALS_URL: http://host.docker.internal:3007
       NEWS_SENTIMENT_URL: http://host.docker.internal:3006
       LEARNING_SERVICE_URL: http://host.docker.internal:3010
       SCOUTS_SERVICE_URL: http://host.docker.internal:3011
+      POSITION_MANAGEMENT_RSOCKET_URL: ws://position-management:10005
+      AUTO_TRADER_RSOCKET_URL: ws://auto-trader:10006
+      LEARNING_RSOCKET_URL: ws://learning:10010
       SQLITE_DB_PATHS: /data/insights/signals.sqlite:/data/position_management/auto_trader_state.sqlite:/data/learning/learning_state.sqlite
       PERSISTENT_STORE_PATHS: /data/position_management/positions.sqlite
     extra_hosts:
@@ -93,6 +98,9 @@ services:
       - insights-data:/data/insights:ro
       - position-management-data:/data/position_management:ro
       - learning-data:/data/learning:ro
+    networks:
+      - default
+      - system-services
     restart: unless-stopped
 
   grafana:
@@ -127,3 +135,8 @@ volumes:
   prometheus-data:
   loki-data:
   alloy-data:
+
+networks:
+  system-services:
+    external: true
+    name: sbe-system_default

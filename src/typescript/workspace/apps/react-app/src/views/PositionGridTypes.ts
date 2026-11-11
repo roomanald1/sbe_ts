@@ -28,4 +28,3 @@ export type PositionGridRow = {
   marketVwap?: number;
   slippage?: number;
 };
-

@@ -883,19 +883,9 @@ fn quote_usd_rate_for_map(rates: &BTreeMap<String, f64>, symbol: &str) -> f64 {
 }
 
 async fn refresh_usd_rates(state: &AutoTraderState) -> Result<(), (StatusCode, String)> {
-    let base =
-        std::env::var("POSITION_MANAGEMENT_URL").unwrap_or_else(|_| "http://127.0.0.1:3002".into());
-    let response = state
-        .client
-        .get(format!("{base}/positions/usd-rates"))
-        .send()
+    let response = crate::service_rpc::position_get("/positions/usd-rates")
         .await
-        .map_err(upstream_error)?
-        .error_for_status()
-        .map_err(upstream_error)?
-        .json::<serde_json::Value>()
-        .await
-        .map_err(upstream_error)?;
+        .map_err(|error| (StatusCode::BAD_GATEWAY, error.to_string()))?;
     let Some(rates) = response.get("rates").and_then(serde_json::Value::as_object) else {
         return Err((
             StatusCode::BAD_GATEWAY,

@@ -36,7 +36,7 @@ use feed::feed_consumer;
 use market_data::{MarketEvent, SignalEvent, book_value, decode_event, now_ms};
 use news_context::{NewsContext, apply_news, poll_research_context};
 use signal_workers::run_shards;
-use state::{HTTP_CLIENT, LiveState, enqueue_snapshot};
+use state::{LiveState, enqueue_snapshot};
 
 pub(crate) async fn run() -> anyhow::Result<()> {
     let (context_tx, context_rx) = watch::channel(Arc::new(NewsContext::default()));
@@ -46,11 +46,11 @@ pub(crate) async fn run() -> anyhow::Result<()> {
     let (event_tx, event_rx) = mpsc::channel(INGRESS_QUEUE_CAPACITY);
     tokio::spawn(run_shards(Arc::clone(&state), event_rx));
     tokio::spawn(feed_consumer(event_tx));
-    let app = router(state);
+    let app = router();
     let listener = tokio::net::TcpListener::bind(("0.0.0.0", 3007)).await?;
     crate::service_log!(
         "INFO",
-        "Live Signals service listening on http://0.0.0.0:3007; publishes current market signals directly to AutoTrader"
+        "Live Signals service listening on http://0.0.0.0:3007; its HTTP surface is operations-only"
     );
     axum::serve(listener, app).await?;
     Ok(())

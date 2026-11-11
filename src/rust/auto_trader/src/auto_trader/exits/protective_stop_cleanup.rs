@@ -1,6 +1,13 @@
 async fn cancel_protective_stops(
-    client: &reqwest::Client,
-    base: &str,
+    state: &AutoTraderState,
+    symbol: &str,
+    strategy: Option<&str>,
+) -> Result<bool, (StatusCode, String)> {
+    cancel_protective_stops_at(None, state, symbol, strategy).await
+}
+
+async fn cancel_protective_stops_at(
+    endpoint: Option<&str>,
     state: &AutoTraderState,
     symbol: &str,
     strategy: Option<&str>,
@@ -14,12 +21,12 @@ async fn cancel_protective_stops(
             .unwrap_or_default()
     };
     for stop in stops {
-        let response = client
-            .delete(format!("{base}/positions/orders/{}", stop.barrier_id))
-            .send()
-            .await
-            .map_err(upstream_error)?;
-        if !response.status().is_success() {
+        let path = format!("/positions/orders/{}", stop.barrier_id);
+        let response = match endpoint {
+            Some(endpoint) => crate::service_rpc::position_request_at(endpoint, "DELETE", &path, None).await,
+            None => crate::service_rpc::position_request("DELETE", &path, None).await,
+        }.map_err(|error| (StatusCode::BAD_GATEWAY, error.to_string()))?;
+        if !(200..300).contains(&response.status) {
             return Ok(false);
         }
         let mut settings = state.settings.lock().await;

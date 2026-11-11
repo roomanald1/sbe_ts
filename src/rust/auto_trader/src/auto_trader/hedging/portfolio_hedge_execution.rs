@@ -1,6 +1,4 @@
 async fn execute_portfolio_hedge(
-    client: &reqwest::Client,
-    base: &str,
     state: &AutoTraderState,
     candidate: (String, String, f64, f64, f64, f64),
     now_ms: u64,
@@ -35,7 +33,7 @@ async fn execute_portfolio_hedge(
     }
     request_settings_persist(state)?;
     drop(settings);
-    if !cancel_protective_stops(client, base, state, &symbol, None).await? {
+    if !cancel_protective_stops(state, &symbol, None).await? {
         let mut settings = state.settings.lock().await;
         if let Some(order) = settings
             .orders
@@ -63,14 +61,12 @@ async fn execute_portfolio_hedge(
         settings.used_notional_today = allocated_notional(&settings);
         request_settings_persist(state)?;
         drop(settings);
-        ensure_protective_stops(client, base, state).await?;
+        ensure_protective_stops(state).await?;
         return Ok(Some(skipped(
             "Auto Trader was disabled before hedge submission",
         )));
     }
     let response = match submit_configured_order(
-        client,
-        base,
         &symbol,
         &side,
         quantity,
@@ -95,7 +91,7 @@ async fn execute_portfolio_hedge(
             }
             request_settings_persist(state)?;
             drop(settings);
-            ensure_protective_stops(client, base, state).await?;
+            ensure_protective_stops(state).await?;
             return Err(error);
         }
     };
@@ -179,7 +175,7 @@ async fn execute_portfolio_hedge(
     settings.used_notional_today = allocated_notional(&settings);
     request_settings_persist(state)?;
     drop(settings);
-    ensure_protective_stops(client, base, state).await?;
+    ensure_protective_stops(state).await?;
     Ok(Some(CycleResult {
         status: "hedge_submitted",
         reason: Some(format!(

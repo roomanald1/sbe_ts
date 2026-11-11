@@ -21,8 +21,7 @@ struct MakerFillRecord {
 }
 
 async fn reconcile_maker_fills(
-    client: &reqwest::Client,
-    base: &str,
+    endpoint: &str,
     state: &AutoTraderState,
 ) -> Result<(), (StatusCode, String)> {
     let has_pending = state.settings.lock().await.orders.iter().any(|order| {
@@ -32,29 +31,12 @@ async fn reconcile_maker_fills(
     if !has_pending {
         return Ok(());
     }
-    let fills = client
-        .get(format!("{base}/positions/trades"))
-        .send()
+    let fills = crate::service_rpc::position_get_at(endpoint, "/positions/trades")
         .await
         .map_err(|error| {
             (
                 StatusCode::BAD_GATEWAY,
                 format!("Unable to fetch maker fills: {error}"),
-            )
-        })?
-        .error_for_status()
-        .map_err(|error| {
-            (
-                StatusCode::BAD_GATEWAY,
-                format!("Maker fill lookup failed: {error}"),
-            )
-        })?
-        .json::<serde_json::Value>()
-        .await
-        .map_err(|error| {
-            (
-                StatusCode::BAD_GATEWAY,
-                format!("Invalid maker fill response: {error}"),
             )
         })?;
     let records = serde_json::from_value::<Vec<MakerFillRecord>>(fills["trades"].clone()).map_err(
@@ -65,29 +47,12 @@ async fn reconcile_maker_fills(
             )
         },
     )?;
-    let open = client
-        .get(format!("{base}/positions/orders"))
-        .send()
+    let open = crate::service_rpc::position_get_at(endpoint, "/positions/orders")
         .await
         .map_err(|error| {
             (
                 StatusCode::BAD_GATEWAY,
                 format!("Unable to fetch resting orders: {error}"),
-            )
-        })?
-        .error_for_status()
-        .map_err(|error| {
-            (
-                StatusCode::BAD_GATEWAY,
-                format!("Resting order lookup failed: {error}"),
-            )
-        })?
-        .json::<serde_json::Value>()
-        .await
-        .map_err(|error| {
-            (
-                StatusCode::BAD_GATEWAY,
-                format!("Invalid resting order response: {error}"),
             )
         })?;
     let active_ids = open["orders"]
@@ -280,20 +245,44 @@ mod maker_reconciliation_tests {
 
     #[tokio::test]
     async fn recovers_true_strategy_without_double_counting_mirrored_inventory() {
-        let app = Router::new()
-            .route("/positions/trades", get(|| async {
-                Json(serde_json::json!({"trades": [{
-                    "id": "maker-fill-1", "symbol": "BTC-USDT", "side": "buy",
-                    "quantity": 1.0, "execution_price": 100.0, "fee": -0.08,
-                    "resting_order_id": "resting-1"
-                }]}))
-            }))
-            .route("/positions/orders", get(|| async {
-                Json(serde_json::json!({"orders": []}))
-            }));
+        use rsocket_rust::prelude::*;
+        use rsocket_rust_transport_websocket::WebsocketServerTransport;
+        use std::pin::Pin;
+
+        #[derive(Clone)]
+        struct Fixture;
+        #[rsocket_rust::async_trait]
+        impl RSocket for Fixture {
+            async fn metadata_push(&self, _: Payload) -> anyhow::Result<()> { anyhow::bail!("unsupported") }
+            async fn fire_and_forget(&self, _: Payload) -> anyhow::Result<()> { anyhow::bail!("unsupported") }
+            async fn request_response(&self, req: Payload) -> anyhow::Result<Option<Payload>> {
+                let request: crate::service_rpc::RpcRequest = serde_json::from_slice(req.data().unwrap().as_ref())?;
+                let body = match request.path.as_str() {
+                    "/positions/trades" => serde_json::json!({"trades": [{
+                        "id": "maker-fill-1", "symbol": "BTC-USDT", "side": "buy",
+                        "quantity": 1.0, "execution_price": 100.0, "fee": -0.08,
+                        "resting_order_id": "resting-1"
+                    }]}),
+                    "/positions/orders" => serde_json::json!({"orders": []}),
+                    path => anyhow::bail!("unexpected route: {path}"),
+                };
+                let response = serde_json::json!({"status": 200, "body": body});
+                Ok(Some(Payload::builder().set_data(serde_json::to_vec(&response)?).build()))
+            }
+            fn request_stream(&self, _: Payload) -> Pin<Box<dyn futures_util::Stream<Item = anyhow::Result<Payload>> + Send + 'static>> { Box::pin(futures_util::stream::empty()) }
+            fn request_channel(&self, _: Flux<anyhow::Result<Payload>>) -> Flux<anyhow::Result<Payload>> { Box::pin(futures_util::stream::empty()) }
+        }
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
-        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap(); });
+        drop(listener);
+        let endpoint = format!("ws://{address}");
+        let server = tokio::spawn(async move {
+            RSocketFactory::receive()
+                .transport(WebsocketServerTransport::from(address.to_string()))
+                .acceptor(Box::new(|_, _| Ok(Box::new(Fixture))))
+                .serve().await.unwrap();
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         let strategy = "risk-adjusted-trend-portfolio";
         let mut settings = Settings::default();
         let mut order = strategy_cleanup_integration_tests::order(strategy, 42);
@@ -311,10 +300,9 @@ mod maker_reconciliation_tests {
             ..TraderPosition::default()
         });
         let state = strategy_cleanup_integration_tests::test_state(settings);
-        let base = format!("http://{address}");
-        reconcile_maker_fills(&state.client, &base, &state).await.unwrap();
+        reconcile_maker_fills(&endpoint, &state).await.unwrap();
         // A second pass must not replay the same fill or duplicate its lot.
-        reconcile_maker_fills(&state.client, &base, &state).await.unwrap();
+        reconcile_maker_fills(&endpoint, &state).await.unwrap();
         let settings = state.settings.lock().await;
         let aggregate = &settings.positions["BTC-USDT"];
         assert_eq!(aggregate.quantity, 1.0);

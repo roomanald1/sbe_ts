@@ -1,7 +1,5 @@
 struct SelectedSignalOrderRequest<'a> {
     state: &'a AutoTraderState,
-    client: &'a reqwest::Client,
-    position_url: &'a str,
     dashboard: &'a Dashboard,
     signal: &'a Signal,
     exploratory: bool,
@@ -39,8 +37,6 @@ async fn submit_selected_signal(
     }
     let SelectedSignalOrderRequest {
         state,
-        client,
-        position_url,
         dashboard,
         signal,
         exploratory,
@@ -443,8 +439,6 @@ async fn submit_selected_signal(
     drop(cycle_guard);
     let submission = SelectedOrderExecution {
         state: state.clone(),
-        client: client.clone(),
-        position_url: position_url.to_owned(),
         signal: signal.clone(),
         exploratory,
         counterfactual_stop_loss_percent,

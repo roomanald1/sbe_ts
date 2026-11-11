@@ -1,18 +1,16 @@
 async fn cancel_protective_barrier(
-    client: &reqwest::Client,
-    base: &str,
     state: &AutoTraderState,
     symbol: &str,
     barrier_id: &str,
     created_at: u64,
     strategy: Option<&str>,
 ) -> Result<bool, (StatusCode, String)> {
-    let response = client
-        .delete(format!("{base}/positions/orders/{barrier_id}"))
-        .send()
-        .await
-        .map_err(upstream_error)?;
-    if !response.status().is_success() && response.status() != StatusCode::NOT_FOUND {
+    let response = crate::service_rpc::position_request(
+        "DELETE",
+        &format!("/positions/orders/{barrier_id}"),
+        None,
+    ).await.map_err(|error| (StatusCode::BAD_GATEWAY, error.to_string()))?;
+    if !(200..300).contains(&response.status) && response.status != StatusCode::NOT_FOUND.as_u16() {
         return Ok(false);
     }
     let mut settings = state.settings.lock().await;

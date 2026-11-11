@@ -1,7 +1,11 @@
 import { BehaviorSubject } from 'rxjs';
-import type { BookFeed, NewsFeed, TradeFeed } from './connection';
+import type { BookFeed, TradeFeed } from './connection';
 
-type Feed = (BookFeed | TradeFeed | NewsFeed) & { symbol?: string; active: boolean; subscription?: StreamSubscription };
+type Feed = (BookFeed | TradeFeed) & {
+  symbol?: string;
+  active: boolean;
+  subscription?: StreamSubscription;
+};
 type StreamSubscription = { cancel(): void; request(count: number): void };
 type StreamPayload = { data: unknown };
 type StreamObserver = {
@@ -11,7 +15,9 @@ type StreamObserver = {
   onComplete(): void;
 };
 type StreamSocket = {
-  requestStream(options: { data: Buffer }): { subscribe(observer: StreamObserver): void };
+  requestStream(options: { data: Buffer }): {
+    subscribe(observer: StreamObserver): void;
+  };
 };
 
 type FeedOptions<F extends Feed> = {
@@ -26,7 +32,9 @@ type FeedOptions<F extends Feed> = {
 export class ConnectionFeedManager<F extends Feed> {
   private readonly feeds = new Map<string, F>();
   private readonly options: FeedOptions<F>;
-  constructor(options: FeedOptions<F>) { this.options = options; }
+  constructor(options: FeedOptions<F>) {
+    this.options = options;
+  }
 
   open(key: string, symbol?: string): F {
     const existing = this.feeds.get(key);
@@ -72,47 +80,80 @@ export class ConnectionFeedManager<F extends Feed> {
     feed.active = true;
     let received = 0;
     let requestNext: (() => void) | undefined;
-    socket.requestStream({ data: Buffer.from(this.options.request(feed)) }).subscribe({
-      onSubscribe: (subscription) => {
-        if (!this.isCurrent(feed, socket, generation)) { subscription.cancel(); return; }
-        feed.subscription = subscription;
-        requestNext = () => subscription.request(this.options.demand);
-        requestNext();
-      },
-      onNext: (payload) => {
-        if (!this.isCurrent(feed, socket, generation)) return;
-        feed.data.next(payload.data);
-        feed.error.next(undefined);
-        received += 1;
-        if (received >= this.options.demand) { received = 0; requestNext?.(); }
-      },
-      onError: (error) => this.fail(feed, socket, error.message ?? 'Feed disconnected'),
-      onComplete: () => this.fail(feed, socket, 'Feed completed'),
-    });
+    socket
+      .requestStream({ data: Buffer.from(this.options.request(feed)) })
+      .subscribe({
+        onSubscribe: (subscription) => {
+          if (!this.isCurrent(feed, socket, generation)) {
+            subscription.cancel();
+            return;
+          }
+          feed.subscription = subscription;
+          requestNext = () => subscription.request(this.options.demand);
+          requestNext();
+        },
+        onNext: (payload) => {
+          if (!this.isCurrent(feed, socket, generation)) return;
+          feed.data.next(payload.data);
+          feed.error.next(undefined);
+          received += 1;
+          if (received >= this.options.demand) {
+            received = 0;
+            requestNext?.();
+          }
+        },
+        onError: (error) =>
+          this.fail(feed, socket, error.message ?? 'Feed disconnected'),
+        onComplete: () => this.fail(feed, socket, 'Feed completed'),
+      });
   }
 
-  private isCurrent(feed: F, socket: StreamSocket, generation: number): boolean {
-    return this.feeds.get(feed.key) === feed
-      && this.options.getSocket() === socket
-      && this.options.getGeneration() === generation;
+  private isCurrent(
+    feed: F,
+    socket: StreamSocket,
+    generation: number,
+  ): boolean {
+    return (
+      this.feeds.get(feed.key) === feed &&
+      this.options.getSocket() === socket &&
+      this.options.getGeneration() === generation
+    );
   }
 
   private fail(feed: F, socket: StreamSocket, message: string): void {
-    if (this.feeds.get(feed.key) !== feed || this.options.getSocket() !== socket) return;
+    if (
+      this.feeds.get(feed.key) !== feed ||
+      this.options.getSocket() !== socket
+    )
+      return;
     feed.subscription = undefined;
     feed.active = false;
     feed.error.next(message);
   }
 }
 
-export function createBookFeed(key: string, symbol = ''): BookFeed & { active: boolean } {
-  return { key, symbol, data: new BehaviorSubject<unknown | undefined>(undefined), error: new BehaviorSubject<string | undefined>(undefined), active: false };
+export function createBookFeed(
+  key: string,
+  symbol = '',
+): BookFeed & { active: boolean } {
+  return {
+    key,
+    symbol,
+    data: new BehaviorSubject<unknown | undefined>(undefined),
+    error: new BehaviorSubject<string | undefined>(undefined),
+    active: false,
+  };
 }
 
-export function createTradeFeed(key: string, symbol = ''): TradeFeed & { active: boolean } {
-  return { key, symbol, data: new BehaviorSubject<unknown | undefined>(undefined), error: new BehaviorSubject<string | undefined>(undefined), active: false };
-}
-
-export function createNewsFeed(key: string): NewsFeed & { active: boolean } {
-  return { key, data: new BehaviorSubject<unknown | undefined>(undefined), error: new BehaviorSubject<string | undefined>(undefined), active: false };
+export function createTradeFeed(
+  key: string,
+  symbol = '',
+): TradeFeed & { active: boolean } {
+  return {
+    key,
+    symbol,
+    data: new BehaviorSubject<unknown | undefined>(undefined),
+    error: new BehaviorSubject<string | undefined>(undefined),
+    active: false,
+  };
 }

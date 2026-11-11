@@ -28,8 +28,6 @@ pub async fn serve() -> Result<()> {
     let initial_usd_rates = Bytes::from_static(br#"{"rates":{"USD":1.0},"updated_at":0,"updated_at_by_currency":{"USD":0}}"#);
     let (usd_rate_snapshot, _) = watch::channel(initial_usd_rates);
     tokio::spawn(run_usd_rate_stream(usd_rate_snapshot.clone()));
-    let (news_snapshot, _) = watch::channel(Bytes::from_static(br#"{"updated_at_ms":0,"source":"CoinDesk RSS","stale":true,"error":null,"articles":[]}"#));
-    let _ = NEWS_SNAPSHOT.set(news_snapshot.clone());
     let signal_feeds = SIGNAL_FEEDS.get_or_init(|| Arc::new(DashMap::new())).clone();
     let signal_price_feeds = SIGNAL_PRICE_FEEDS.get_or_init(|| Arc::new(DashMap::new())).clone();
     let (signal_events, _) = broadcast::channel::<Bytes>(65_536);
@@ -109,7 +107,6 @@ pub async fn serve() -> Result<()> {
                 signal_price_feeds: Arc::clone(&signal_price_feeds),
                 signal_events: signal_events.clone(),
                 usd_rate_snapshot: usd_rate_snapshot.clone(),
-                news_snapshot: news_snapshot.clone(),
             }))
         }))
         .serve();

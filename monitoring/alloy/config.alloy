@@ -1,6 +1,7 @@
 local.file_match "application_logs" {
   path_targets = [
     {"__path__" = "/var/log/app/feed_handlers.log", "job" = "application", "service" = "feed_handlers"},
+    {"__path__" = "/var/log/app/binance_feed.log", "job" = "application", "service" = "binance_feed"},
     {"__path__" = "/var/log/app/position_management.log", "job" = "application", "service" = "position_management"},
     {"__path__" = "/var/log/app/execution.log", "job" = "application", "service" = "execution"},
     {"__path__" = "/var/log/app/insights.log", "job" = "application", "service" = "insights"},

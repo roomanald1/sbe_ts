@@ -2,14 +2,11 @@ async fn receive_scout_markout(
     State(service): State<ServiceState>,
     Json(markout): Json<ScoutMarkoutRequest>,
 ) -> Result<StatusCode, (StatusCode, String)> {
-    let instance = service
-        .scout
-        .data
-        .lock()
-        .await
-        .scout_instances
-        .get(&markout.decision_id)
-        .cloned();
+    let instance = {
+        let mut state = service.scout.data.lock().await;
+        ensure_scout_instance_loaded(&mut state, &service.scout.path, &markout.decision_id)
+            .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?
+    };
     let Some(instance) = instance else {
         return Ok(StatusCode::NO_CONTENT);
     };
@@ -102,6 +99,8 @@ async fn record_scout_markout_observation(
     observation: serde_json::Value,
 ) -> Result<(), (StatusCode, String)> {
     let mut state = service.scout.data.lock().await;
+    ensure_scout_instance_loaded(&mut state, &service.scout.path, decision_id)
+        .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
     let Some(instance) = state.scout_instances.get_mut(decision_id) else {
         return Ok(());
     };
@@ -223,7 +222,9 @@ async fn receive_scout_horizon_outcome(
     let tested = validate_scout_outcome(&outcome)?;
     let outcome_key = scout_outcome_idempotency_key(&outcome);
     let mut state = service.scout.data.lock().await;
-    if state.seen.contains(&outcome_key) {
+    if state.seen.contains(&outcome_key)
+        || scout_record_exists(&service.scout.path, "seen", &outcome_key)?
+    {
         return Ok(StatusCode::NO_CONTENT);
     }
 
@@ -260,7 +261,9 @@ async fn receive_scout_outcome(
     {
         let mut state = service.scout.data.lock().await;
         let outcome_key = scout_outcome_idempotency_key(&outcome);
-        if !state.seen.contains(&outcome_key) {
+        if !state.seen.contains(&outcome_key)
+            && !scout_record_exists(&service.scout.path, "seen", &outcome_key)?
+        {
             let mut changed_records = BTreeSet::from([
                 format!("outcomes@{outcome_key}"),
                 format!("scout_instances@{}", outcome.decision_id),
@@ -279,6 +282,12 @@ async fn receive_scout_outcome(
                 changed_records.insert(format!("pairs@{comparison_id}"));
             }
             insert_scout_outcome(&mut state, outcome_key.clone(), outcome.clone());
+            ensure_scout_instance_loaded(
+                &mut state,
+                &service.scout.path,
+                &outcome.decision_id,
+            )
+            .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
             if let Some(instance) = state.scout_instances.get_mut(&outcome.decision_id) {
                 instance["scout_net_return_percent"] = serde_json::json!(outcome.net_return_percent);
                 instance["scout_evaluated_timestamp_ms"] = serde_json::json!(outcome.evaluated_timestamp_ms);
@@ -286,6 +295,8 @@ async fn receive_scout_outcome(
             }
             for (variant_id, delta) in paired_updates {
                 changed_records.insert(format!("scout_instances@{variant_id}"));
+                ensure_scout_instance_loaded(&mut state, &service.scout.path, &variant_id)
+                    .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
                 if let Some(instance) = state.scout_instances.get_mut(&variant_id) {
                     instance["paired_delta_percent"] = serde_json::json!(delta);
                 }
@@ -505,6 +516,7 @@ fn apply_scout_lifecycle_observation_with_changes(
                 ),
                 parameters: probe.parameters.clone(),
                 baseline_parameters: BTreeMap::new(),
+                comparison: strategies::ScoutComparisonMetadata::Independent,
                 specs: specs.clone(),
                 net_return_percent,
             };
@@ -595,63 +607,15 @@ fn apply_scout_lifecycle_observation_with_changes(
             changed_records.insert(format!("scout_observation_results@{oldest}"));
         }
     }
-    changed_records.extend(
-        trim_scout_instances(state)
-            .into_iter()
-            .map(|id| format!("scout_instances@{id}")),
-    );
+    trim_scout_instance_cache(state);
     state.scout_lifecycle_updated_at_ms = state.scout_lifecycle_updated_at_ms.max(request.now_ms);
     (response, changed_records)
 }
 
-// Active audits are duplicated in `scout_instances` for markout lookup and can
-// otherwise accumulate indefinitely when a sample never receives a terminal
-// outcome. Keep the replay state bounded as well as the instance map.
+// Active audits are duplicated in SQLite-backed `scout_instances` for report
+// and markout use. Keep the replay-state copy bounded independently.
 const MAX_ACTIVE_SCOUT_AUDIT_GROUPS: usize = 10_000;
 const MAX_ACTIVE_SCOUT_AUDITS: usize = 50_000;
-const MAX_SCOUT_INSTANCES: usize = 100_000;
-
-fn trim_scout_instances(state: &mut PersistedState) -> Vec<String> {
-    let mut evicted = Vec::new();
-    while state.scout_instances.len() > MAX_SCOUT_INSTANCES {
-        let mut counts = BTreeMap::<String, usize>::new();
-        for audit in state.scout_instances.values() {
-            let strategy = audit["strategy"].as_str().unwrap_or("unattributed");
-            *counts.entry(strategy.to_owned()).or_default() += 1;
-        }
-        // Never evict the last retained instance for a strategy while another
-        // strategy has multiple retained instances. This guarantees that a
-        // high-volume strategy cannot starve lower-volume strategies.
-        let has_overrepresented_strategy = counts.values().any(|count| *count > 1);
-        let most_represented = counts
-            .iter()
-            .filter(|(_, count)| !has_overrepresented_strategy || **count > 1)
-            .map(|(_, count)| *count)
-            .max()
-            .unwrap_or_default();
-        let oldest = state
-            .scout_instances
-            .iter()
-            .filter(|(_, audit)| {
-                let strategy = audit["strategy"].as_str().unwrap_or("unattributed");
-                counts.get(strategy).copied() == Some(most_represented)
-                    && (!has_overrepresented_strategy
-                        || counts.get(strategy).copied().unwrap_or_default() > 1)
-            })
-            .min_by_key(|(id, audit)| {
-                (
-                    audit["timestamp"].as_u64().unwrap_or_default(),
-                    (*id).clone(),
-                )
-            })
-            .map(|(id, _)| id.clone());
-        let Some(oldest) = oldest else { break };
-        remove_scout_instance(state, &oldest);
-        evicted.push(oldest);
-    }
-    evicted
-}
-
 fn trim_active_scout_audits(state: &mut PersistedState) -> Vec<String> {
     let mut active_audit_count = state
         .scout_active_audits
@@ -1091,7 +1055,7 @@ async fn create_scout_plan(
         changed_cooldown_keys.insert(candidate.cooldown_key.clone());
         active_batch_keys.insert(batch_key);
     }
-    changed_instance_ids.extend(trim_scout_instances(&mut state));
+    trim_scout_instance_cache(&mut state);
     state.scout_lifecycle_updated_at_ms = state.scout_lifecycle_updated_at_ms.max(request.now_ms);
     let mut cached_response = response.clone();
     cached_response.audits = cached_response
@@ -1137,23 +1101,26 @@ async fn forward_event(
     service: &ServiceState,
     event: &FeedbackEvent,
 ) -> Result<(), (StatusCode, String)> {
-    service
-        .client
-        .post(format!(
-            "{}/feedback",
-            service.learning_url.trim_end_matches('/')
-        ))
-        .json(event)
-        .send()
-        .await
-        .and_then(reqwest::Response::error_for_status)
-        .map(|_| ())
-        .map_err(|error| {
-            (
-                StatusCode::BAD_GATEWAY,
-                format!("learning service rejected Scout feedback: {error}"),
-            )
-        })
+    let acknowledgement = strategies::request_scout_feedback(
+        &service.learning_rsocket_url,
+        event,
+    )
+    .await
+    .map_err(|error| {
+        (
+            StatusCode::BAD_GATEWAY,
+            format!("Learning rejected Scout feedback over RSocket: {error}"),
+        )
+    })?;
+    if acknowledgement.status >= 400 {
+        return Err((
+            StatusCode::BAD_GATEWAY,
+            acknowledgement
+                .detail
+                .unwrap_or_else(|| "Learning rejected Scout feedback".into()),
+        ));
+    }
+    Ok(())
 }
 
 #[derive(Deserialize)]
@@ -1193,6 +1160,7 @@ impl ScoutSample {
             profile_id: self.profile_id,
             parameters: self.parameters,
             baseline_parameters: BTreeMap::new(),
+            comparison: strategies::ScoutComparisonMetadata::Independent,
             specs: self.specs,
             net_return_percent,
         })
@@ -1698,6 +1666,7 @@ fn portfolio_instance_entry(
     ))
 }
 
+#[cfg(test)]
 fn rebuild_portfolio_instance_index(state: &mut PersistedState) {
     let mut rebuilt = BTreeMap::<String, Vec<PortfolioInstanceEvidence>>::new();
     for (decision_id, instance) in &state.scout_instances {
@@ -1714,27 +1683,40 @@ fn rebuild_portfolio_instance_index(state: &mut PersistedState) {
         .unwrap_or_else(|error| error.into_inner()) = rebuilt;
 }
 
-fn remove_portfolio_instance_index_entry(
+fn remove_portfolio_instance_index_entry_by_id(state: &mut PersistedState, decision_id: &str) {
+    let mut index = state
+        .portfolio_instances_by_group
+        .write()
+        .unwrap_or_else(|error| error.into_inner());
+    let empty_groups = index
+        .iter_mut()
+        .filter_map(|(group, instances)| {
+        instances.retain(|entry| entry.decision_id != decision_id);
+            instances.is_empty().then(|| group.clone())
+        })
+        .collect::<Vec<_>>();
+    for group in empty_groups {
+        index.remove(&group);
+    }
+}
+
+fn add_portfolio_instance_index_entry(
     state: &mut PersistedState,
     decision_id: &str,
     instance: &serde_json::Value,
 ) {
-    let Some((group, _)) = portfolio_instance_entry(decision_id, instance) else {
+    let Some((group, evidence)) = portfolio_instance_entry(decision_id, instance) else {
         return;
     };
     let mut index = state
         .portfolio_instances_by_group
         .write()
         .unwrap_or_else(|error| error.into_inner());
-    let remove_group = if let Some(instances) = index.get_mut(&group) {
-        instances.retain(|entry| entry.decision_id != decision_id);
-        instances.is_empty()
-    } else {
-        false
-    };
-    if remove_group {
-        index.remove(&group);
-    }
+    let instances = index.entry(group).or_default();
+    let position = instances
+        .binary_search_by(|existing| existing.decision_id.as_str().cmp(decision_id))
+        .unwrap_or_else(|position| position);
+    instances.insert(position, evidence);
 }
 
 fn insert_scout_instance(
@@ -1742,21 +1724,7 @@ fn insert_scout_instance(
     decision_id: &str,
     instance: serde_json::Value,
 ) {
-    let instance = compact_scout_instance(&instance);
-    if let Some(previous) = state.scout_instances.insert(decision_id.to_owned(), instance.clone()) {
-        remove_portfolio_instance_index_entry(state, decision_id, &previous);
-    }
-    if let Some((group, evidence)) = portfolio_instance_entry(decision_id, &instance) {
-        let mut index = state
-            .portfolio_instances_by_group
-            .write()
-            .unwrap_or_else(|error| error.into_inner());
-        let instances = index.entry(group).or_default();
-        let position = instances
-            .binary_search_by(|existing| existing.decision_id.as_str().cmp(decision_id))
-            .unwrap_or_else(|position| position);
-        instances.insert(position, evidence);
-    }
+    cache_scout_instance(state, decision_id, instance);
 }
 
 fn compact_scout_instance(instance: &serde_json::Value) -> serde_json::Value {
@@ -1892,10 +1860,10 @@ fn persist_compacted_scout_payloads(
     Ok(())
 }
 
+#[cfg(test)]
 fn remove_scout_instance(state: &mut PersistedState, decision_id: &str) {
-    if let Some(instance) = state.scout_instances.remove(decision_id) {
-        remove_portfolio_instance_index_entry(state, decision_id, &instance);
-    }
+    state.scout_instances.remove(decision_id);
+    remove_portfolio_instance_index_entry_by_id(state, decision_id);
 }
 
 fn remove_outcome_from_profile_index(
@@ -2104,6 +2072,27 @@ fn portfolio_strategy_walk_forward(
 mod strategy_walk_forward_tests {
     use super::*;
 
+    fn test_service(path: &std::path::Path, state: PersistedState) -> ServiceState {
+        ServiceState {
+            learning_rsocket_url: String::new(),
+            insights_rsocket_url: String::new(),
+            auto_trader_rsocket_url: String::new(),
+            strategy_outcomes_by_profile: Arc::clone(&state.strategy_outcomes_by_profile),
+            portfolio_instances_by_group: Arc::clone(&state.portfolio_instances_by_group),
+            strategy_outcome_profile_index_ready: Arc::new(
+                std::sync::atomic::AtomicBool::new(false),
+            ),
+            live_scout_maximum_duration_ms: Arc::new(std::sync::RwLock::new(BTreeMap::new())),
+            scout_outcomes_cache: Arc::new(Mutex::new(BTreeMap::new())),
+            scout: ScoutState {
+                data: Arc::new(Mutex::new(state)),
+                path: path.to_path_buf(),
+                flush_lock: Arc::new(Mutex::new(())),
+                flush_scheduled: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            },
+        }
+    }
+
     #[test]
     fn active_scout_audit_cache_evicts_payload_but_preserves_lifecycle_state() {
         let mut state = PersistedState::default();
@@ -2122,6 +2111,42 @@ mod strategy_walk_forward_tests {
         assert!(state.scout_active_audits.is_empty());
         assert!(state.scout_sample_active_scenarios.contains_key("old-group"));
         assert!(state.scout_plan_profiles.contains_key("old-group"));
+    }
+
+    #[test]
+    fn portfolio_evidence_index_rebuilds_from_sqlite_without_resident_instances() {
+        let path = std::env::temp_dir().join(format!(
+            "scout-portfolio-index-restart-{}-{}.sqlite",
+            std::process::id(),
+            scout_now_ms()
+        ));
+        let mut persisted = PersistedState::default();
+        for (decision_id, weight) in [("portfolio-a", 0.6), ("portfolio-b", 0.4)] {
+            persisted.scout_instances.insert(
+                decision_id.into(),
+                serde_json::json!({
+                    "strategy":"risk-adjusted-trend-portfolio",
+                    "scout_exit_scenario":"strategy",
+                    "scout_sample_group_id":"portfolio-group",
+                    "strategy_parameters":{"risk_target":0.1},
+                    "strategy_decision":{"strategy_order_size_multiplier":weight}
+                }),
+            );
+        }
+        persist_scout_state(&path, &persisted, &["scout_instances"]).unwrap();
+        let mut restarted = load_scout_state(&path).unwrap();
+        assert!(restarted.scout_instances.is_empty());
+        rebuild_portfolio_instance_index_from_db(&path, &mut restarted).unwrap();
+        let index = restarted
+            .portfolio_instances_by_group
+            .read()
+            .unwrap();
+        let evidence = &index["portfolio-group"];
+        assert_eq!(evidence.len(), 2);
+        assert_eq!(evidence[0].decision_id, "portfolio-a");
+        assert_eq!(evidence[1].decision_id, "portfolio-b");
+        drop(index);
+        let _ = std::fs::remove_file(path);
     }
 
     fn outcome(id: &str, profile: BTreeMap<String, f64>, signal_ms: u64, evaluated_ms: u64, net: f64) -> ScoutOutcomeRequest {
@@ -2151,6 +2176,127 @@ mod strategy_walk_forward_tests {
             scout_comparison_parameter_profile_symbol: None,
             strategy_parameter_specs: Vec::new(),
         }
+    }
+
+    #[tokio::test]
+    async fn persisted_outcome_retry_is_idempotent_after_worker_restart() {
+        let path = std::env::temp_dir().join(format!(
+            "scout-outcome-restart-{}-{}.sqlite",
+            std::process::id(),
+            scout_now_ms()
+        ));
+        let initial = PersistedState::default();
+        persist_scout_state(&path, &initial, &["scout_configuration"]).unwrap();
+        let first = test_service(&path, load_scout_state(&path).unwrap());
+        let now = scout_now_ms();
+        let request = outcome(
+            "restart-idempotency",
+            BTreeMap::new(),
+            now.saturating_sub(100),
+            now,
+            0.25,
+        );
+        receive_scout_outcome(State(first), Json(request.clone()))
+            .await
+            .unwrap();
+
+        let restarted_state = load_scout_state(&path).unwrap();
+        assert_eq!(restarted_state.outcomes.len(), 1);
+        assert!(restarted_state.seen.is_empty());
+        assert!(scout_record_exists(
+            &path,
+            "seen",
+            &scout_outcome_idempotency_key(&request)
+        )
+        .unwrap());
+        let restarted = test_service(&path, restarted_state);
+        receive_scout_outcome(State(restarted), Json(request))
+            .await
+            .unwrap();
+        assert_eq!(load_scout_state(&path).unwrap().outcomes.len(), 1);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn paired_outcome_completes_and_retries_after_worker_restart() {
+        let path = std::env::temp_dir().join(format!(
+            "scout-paired-outcome-restart-{}-{}.sqlite",
+            std::process::id(),
+            scout_now_ms()
+        ));
+        let initial = PersistedState::default();
+        persist_scout_state(&path, &initial, &["scout_configuration"]).unwrap();
+        let now = scout_now_ms();
+        let mut baseline = outcome(
+            "paired-baseline",
+            BTreeMap::from([("minimum_momentum".into(), 0.5)]),
+            now.saturating_sub(100),
+            now,
+            0.2,
+        );
+        baseline.scout_comparison_role = Some("baseline".into());
+        baseline.scout_comparison_ids = vec!["restart-comparison".into()];
+        baseline.strategy_parameter_specs = vec![strategies::ParameterSpec {
+            key: "minimum_momentum".into(),
+            label: "Minimum momentum".into(),
+            default: 0.5,
+            min: 0.0,
+            max: 1.0,
+            step: 0.1,
+            unit: "rate".into(),
+            learning_direction: 1.0,
+        }];
+        receive_scout_outcome(
+            State(test_service(&path, load_scout_state(&path).unwrap())),
+            Json(baseline),
+        )
+        .await
+        .unwrap();
+
+        let mut variant = outcome(
+            "paired-variant",
+            BTreeMap::from([("minimum_momentum".into(), 0.6)]),
+            now.saturating_sub(100),
+            now,
+            0.5,
+        );
+        variant.scout_parameter_key = Some("minimum_momentum".into());
+        variant.scout_parameter_value = Some(0.6);
+        variant.scout_parameter_profile_symbol = Some("BTC-USDT".into());
+        variant.scout_comparison_id = Some("restart-comparison".into());
+        variant.scout_comparison_role = Some("variant".into());
+        variant.strategy_parameter_specs = vec![strategies::ParameterSpec {
+            key: "minimum_momentum".into(),
+            label: "Minimum momentum".into(),
+            default: 0.5,
+            min: 0.0,
+            max: 1.0,
+            step: 0.1,
+            unit: "rate".into(),
+            learning_direction: 1.0,
+        }];
+        receive_scout_outcome(
+            State(test_service(&path, load_scout_state(&path).unwrap())),
+            Json(variant.clone()),
+        )
+        .await
+        .unwrap();
+        let completed = load_scout_state(&path).unwrap();
+        assert_eq!(completed.outcomes.len(), 2);
+        assert!(completed.pairs.is_empty());
+        let feedback_count = completed.outbox.len();
+        assert!(feedback_count <= 1);
+
+        receive_scout_outcome(
+            State(test_service(&path, load_scout_state(&path).unwrap())),
+            Json(variant),
+        )
+        .await
+        .unwrap();
+        let retried = load_scout_state(&path).unwrap();
+        assert_eq!(retried.outcomes.len(), 2);
+        assert_eq!(retried.outbox.len(), feedback_count);
+        let _ = std::fs::remove_file(path);
     }
 
     fn indexed_outcome(outcome: &ScoutOutcomeRequest) -> StrategyOutcomeProfileIndexEntry {
@@ -2270,10 +2416,9 @@ mod strategy_walk_forward_tests {
         let strategy_outcomes_by_profile = Arc::clone(&persisted.strategy_outcomes_by_profile);
         let portfolio_instances_by_group = Arc::clone(&persisted.portfolio_instances_by_group);
         let service = ServiceState {
-            client: reqwest::Client::new(),
-            learning_url: String::new(),
-            auto_trader_url: String::new(),
-            seen: Arc::new(Mutex::new(BTreeSet::new())),
+            learning_rsocket_url: String::new(),
+            insights_rsocket_url: String::new(),
+            auto_trader_rsocket_url: String::new(),
             strategy_outcomes_by_profile,
             portfolio_instances_by_group,
             strategy_outcome_profile_index_ready: Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -2398,10 +2543,9 @@ mod strategy_walk_forward_tests {
         let strategy_outcomes_by_profile = Arc::clone(&persisted.strategy_outcomes_by_profile);
         let portfolio_instances_by_group = Arc::clone(&persisted.portfolio_instances_by_group);
         let service = ServiceState {
-            client: reqwest::Client::new(),
-            learning_url: String::new(),
-            auto_trader_url: String::new(),
-            seen: Arc::new(Mutex::new(BTreeSet::new())),
+            learning_rsocket_url: String::new(),
+            insights_rsocket_url: String::new(),
+            auto_trader_rsocket_url: String::new(),
             strategy_outcomes_by_profile,
             portfolio_instances_by_group,
             strategy_outcome_profile_index_ready: Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -2783,6 +2927,60 @@ fn live_scout_feature_signal(
 #[cfg(test)]
 mod scout_markout_instance_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn markout_observation_loads_and_updates_instance_after_restart() {
+        let path = std::env::temp_dir().join(format!(
+            "scout-markout-restart-{}-{}.sqlite",
+            std::process::id(),
+            scout_now_ms()
+        ));
+        let mut persisted = PersistedState::default();
+        persisted.scout_instances.insert(
+            "decision-restart".into(),
+            serde_json::json!({
+                "decision_id":"decision-restart",
+                "symbol":"BTC-USDT",
+                "strategy":"live-trade-flow",
+                "direction":"bullish",
+                "signal_timestamp":100,
+                "scout_sample_group_id":"restart-group"
+            }),
+        );
+        persist_scout_state(&path, &persisted, &["scout_instances"]).unwrap();
+        let restarted = load_scout_state(&path).unwrap();
+        assert!(restarted.scout_instances.is_empty());
+        let service = ServiceState {
+            learning_rsocket_url: String::new(),
+            insights_rsocket_url: String::new(),
+            auto_trader_rsocket_url: String::new(),
+            strategy_outcomes_by_profile: Arc::clone(&restarted.strategy_outcomes_by_profile),
+            portfolio_instances_by_group: Arc::clone(&restarted.portfolio_instances_by_group),
+            strategy_outcome_profile_index_ready: Arc::new(
+                std::sync::atomic::AtomicBool::new(false),
+            ),
+            live_scout_maximum_duration_ms: Arc::new(std::sync::RwLock::new(BTreeMap::new())),
+            scout_outcomes_cache: Arc::new(Mutex::new(BTreeMap::new())),
+            scout: ScoutState {
+                data: Arc::new(Mutex::new(restarted)),
+                path: path.clone(),
+                flush_lock: Arc::new(Mutex::new(())),
+                flush_scheduled: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            },
+        };
+        record_scout_markout_observation(
+            &service,
+            "decision-restart",
+            serde_json::json!({"kind":"horizon","horizon_seconds":60}),
+        )
+        .await
+        .unwrap();
+        let updated = load_scout_instance(&path, "decision-restart")
+            .unwrap()
+            .unwrap();
+        assert_eq!(updated["scout_markout_observations"][0]["kind"], "horizon");
+        let _ = std::fs::remove_file(path);
+    }
 
     #[test]
     fn parameter_variant_generation_skips_confidently_rejected_values() {

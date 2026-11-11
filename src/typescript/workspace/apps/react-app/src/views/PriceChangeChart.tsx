@@ -31,7 +31,10 @@ export function PriceChangeChart({
     [],
   );
   const data = useBehaviorSnapshot(model.state$, (state) => state.data);
-  const chartSize = useBehaviorSnapshot(model.state$, (state) => state.chartSize);
+  const chartSize = useBehaviorSnapshot(
+    model.state$,
+    (state) => state.chartSize,
+  );
   useEffect(() => {
     model.updateProps({
       changes,
@@ -40,8 +43,14 @@ export function PriceChangeChart({
       onSymbolChange,
     });
   }, [model, changes, initialSymbol, selectedSymbol, onSymbolChange]);
-  const handleResize = useCallback((width: number, height: number) => model.setChartSize(width, height), [model]);
-  const handleSymbolChange = useCallback((symbol: string) => model.selectSymbol(symbol), [model]);
+  const handleResize = useCallback(
+    (width: number, height: number) => model.setChartSize(width, height),
+    [model],
+  );
+  const handleSymbolChange = useCallback(
+    (symbol: string) => model.selectSymbol(symbol),
+    [model],
+  );
   return (
     <PriceChangeChartView
       data={data}
@@ -53,4 +62,3 @@ export function PriceChangeChart({
     />
   );
 }
-

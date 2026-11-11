@@ -1,3 +1,11 @@
+fn is_raw_symbol_price(bytes: &[u8]) -> bool {
+    bytes.len() >= 56
+        && u16::from_le_bytes(bytes[0..2].try_into().unwrap_or_default()) == 48
+        && u16::from_le_bytes(bytes[2..4].try_into().unwrap_or_default()) == 1
+        && u16::from_le_bytes(bytes[4..6].try_into().unwrap_or_default()) == 1
+        && u16::from_le_bytes(bytes[6..8].try_into().unwrap_or_default()) == 9
+}
+
 fn decode_signal_event(bytes: &[u8]) -> Option<SignalEventRequest> {
     let symbol_bytes = bytes.get(8..40)?;
     let symbol = std::str::from_utf8(symbol_bytes)
@@ -6,10 +14,9 @@ fn decode_signal_event(bytes: &[u8]) -> Option<SignalEventRequest> {
         .to_owned();
     let template = u16::from_le_bytes(bytes.get(2..4)?.try_into().ok()?);
     let event = match template {
-        1 if bytes.len() >= 72 => SignalFeedEvent::Price {
-            timestamp: u64::from_le_bytes(bytes.get(64..72)?.try_into().ok()?),
+        1 if is_raw_symbol_price(bytes) => SignalFeedEvent::Price {
+            timestamp: u64::from_le_bytes(bytes.get(48..56)?.try_into().ok()?),
             price: f64::from_le_bytes(bytes.get(40..48)?.try_into().ok()?),
-            volatility_1m: f64::from_le_bytes(bytes.get(48..56)?.try_into().ok()?),
         },
         2 if bytes.len() >= 272 => {
             let bid_levels = std::array::from_fn(|index| {
@@ -58,7 +65,20 @@ fn decode_signal_event(bytes: &[u8]) -> Option<SignalEventRequest> {
         },
         _ => return None,
     };
-    Some(SignalEventRequest { symbol, queued_at: None, event })
+    Some(SignalEventRequest {
+        symbol,
+        raw_payload: Some(Bytes::copy_from_slice(bytes)),
+        queued_at: None,
+        event,
+    })
+}
+
+fn decode_ticker_batch(bytes: &[u8]) -> Vec<SignalEventRequest> {
+    bytes
+        .chunks_exact(56)
+        .filter_map(decode_signal_event)
+        .filter(|request| matches!(request.event, SignalFeedEvent::Price { .. }))
+        .collect()
 }
 
 const SIGNAL_EVENT_SHARD_COUNT: usize = 16;
@@ -80,6 +100,11 @@ async fn run_signal_event_workers(
             while let Some(request) = shard.recv().await {
                 if let Some(queued_at) = request.queued_at {
                     crate::latency::record_event_queue_wait(queued_at.elapsed());
+                }
+                if !matches!(&request.event, SignalFeedEvent::Price { .. }) {
+                    if let Some(raw) = request.raw_payload.as_ref() {
+                        let _ = worker_runtime.enriched_market_events.send(raw.clone());
+                    }
                 }
                 if let Err((status, error)) = ingest_signal_event(
                     axum::extract::State(Arc::clone(&worker_runtime)),
@@ -133,12 +158,10 @@ async fn run_feed_signal_consumer(event_sender: tokio::sync::mpsc::Sender<Signal
                 );
                 let mut heartbeat = tokio::time::interval(Duration::from_secs(60));
                 heartbeat.tick().await;
-                let mut price_events = 0_u64;
                 let mut trade_events = 0_u64;
                 let mut book_events = 0_u64;
                 let mut invalid_events = 0_u64;
                 let mut last_event_at: Option<Instant> = None;
-                let mut last_price_event_at: HashMap<String, Instant> = HashMap::new();
                 loop {
                     tokio::select! {
                         _ = heartbeat.tick() => {
@@ -146,19 +169,10 @@ async fn run_feed_signal_consumer(event_sender: tokio::sync::mpsc::Sender<Signal
                                 .map(|last_event| last_event.elapsed().as_secs())
                                 .map(|seconds| seconds.to_string())
                                 .unwrap_or_else(|| "never".to_owned());
-                            let mut stale_price_symbols = last_price_event_at
-                                .iter()
-                                .map(|(symbol, last_event)| (symbol.clone(), last_event.elapsed().as_secs()))
-                                .filter(|(_, age_seconds)| *age_seconds >= 60)
-                                .collect::<Vec<_>>();
-                            stale_price_symbols.sort_by(|left, right| right.1.cmp(&left.1));
-                            let stale_price_count = stale_price_symbols.len();
-                            stale_price_symbols.truncate(10);
                             crate::service_log!(
                                 "INFO",
-                                "FeedHandlers signal-event stream heartbeat: price={price_events} trade={trade_events} book={book_events} invalid={invalid_events} last_event_idle_seconds={idle_seconds} symbols_without_price_for_60s={stale_price_count} stalest_price_events={stale_price_symbols:?}"
+                                "FeedHandlers signal-event stream heartbeat: trade={trade_events} book={book_events} invalid={invalid_events} last_event_idle_seconds={idle_seconds}"
                             );
-                            price_events = 0;
                             trade_events = 0;
                             book_events = 0;
                             invalid_events = 0;
@@ -167,18 +181,17 @@ async fn run_feed_signal_consumer(event_sender: tokio::sync::mpsc::Sender<Signal
                             match event {
                                 Some(Ok(bytes)) => match decode_signal_event(&bytes) {
                                     Some(mut request) => {
-                                        last_event_at = Some(Instant::now());
                                         match &request.event {
                                             SignalFeedEvent::Price { .. } => {
-                                                crate::latency::record_signal_feed_event("price");
-                                                price_events += 1;
-                                                last_price_event_at.insert(request.symbol.clone(), Instant::now());
+                                                continue;
                                             }
                                             SignalFeedEvent::Trade { .. } => {
+                                                last_event_at = Some(Instant::now());
                                                 crate::latency::record_signal_feed_event("trade");
                                                 trade_events += 1;
                                             }
                                             SignalFeedEvent::Book { .. } => {
+                                                last_event_at = Some(Instant::now());
                                                 crate::latency::record_signal_feed_event("book");
                                                 book_events += 1;
                                             }
@@ -227,6 +240,35 @@ async fn run_feed_signal_consumer(event_sender: tokio::sync::mpsc::Sender<Signal
     }
 }
 
+async fn run_feed_ticker_consumer(event_sender: tokio::sync::mpsc::Sender<SignalEventRequest>) {
+    let mut retry_delay = Duration::from_secs(1);
+    loop {
+        match feed_client::ticker_events().await {
+            Ok(mut events) => {
+                crate::service_log!("INFO", "Connected to FeedHandlers raw ticker RSocket stream");
+                while let Some(event) = events.next().await {
+                    match event {
+                        Ok(bytes) => {
+                            for request in decode_ticker_batch(&bytes) {
+                                crate::latency::record_signal_feed_event("price");
+                                if event_sender.send(request).await.is_err() {
+                                    crate::service_log!("ERROR", "Signal event processing queue stopped");
+                                    return;
+                                }
+                            }
+                        }
+                        Err(error) => crate::service_log!("WARN", "Invalid FeedHandlers raw ticker batch: {error:#}"),
+                    }
+                }
+                crate::service_log!("WARN", "FeedHandlers raw ticker RSocket stream disconnected; reconnecting in {}s", retry_delay.as_secs());
+            }
+            Err(error) => crate::service_log!("WARN", "Could not connect to FeedHandlers raw ticker stream: {error:#}; retrying in {}s", retry_delay.as_secs()),
+        }
+        tokio::time::sleep(retry_delay).await;
+        retry_delay = (retry_delay * 2).min(Duration::from_secs(30));
+    }
+}
+
 const AUTO_TRADER_SIGNAL_PUSH_CONCURRENCY: usize = 8;
 const AUTO_TRADER_SIGNAL_PUSH_TIMEOUT: Duration = Duration::from_secs(2);
 
@@ -244,28 +286,46 @@ fn drain_latest(map: &DashMap<String, serde_json::Value>) -> Vec<(String, serde_
 }
 
 async fn deliver_signal_dashboard(
-    client: reqwest::Client,
-    endpoint: String,
+    auto_trader_rsocket_url: String,
     symbol: String,
     dashboard: serde_json::Value,
-) -> (String, serde_json::Value, Result<(), reqwest::Error>) {
+) -> (String, serde_json::Value, Result<(), String>) {
     let started = Instant::now();
-    let result = client
-        .post(endpoint)
-        .timeout(AUTO_TRADER_SIGNAL_PUSH_TIMEOUT)
-        .json(&dashboard)
-        .send()
-        .await
-        .and_then(reqwest::Response::error_for_status)
-        .map(|_| ());
+    let request_id = format!(
+        "insights-signal:{}:{}",
+        dashboard["symbol"].as_str().unwrap_or(&symbol),
+        dashboard["timestamp"].as_u64().unwrap_or_default()
+    );
+    let result = tokio::time::timeout(
+        AUTO_TRADER_SIGNAL_PUSH_TIMEOUT,
+        strategies::request_scout_service_route(
+            &auto_trader_rsocket_url,
+            &strategies::ScoutCoordinatorRouteCommand {
+                request_id,
+                strategy: None,
+                method: strategies::ScoutWorkerHttpMethod::Post,
+                path: "/internal/auto-trader/signal".into(),
+                payload: dashboard.clone(),
+            },
+        ),
+    )
+    .await
+    .map_err(|_| "AutoTrader RSocket signal delivery timed out".to_owned())
+    .and_then(|response| response.map_err(|error| error.to_string()))
+    .and_then(|response| {
+        if response.status >= 400 {
+            Err(format!("AutoTrader rejected signal: status {}", response.status))
+        } else {
+            Ok(())
+        }
+    });
     crate::latency::record_auto_trader_delivery(started.elapsed());
 
     (symbol, dashboard, result)
 }
 
 async fn deliver_signal_batch(
-    client: &reqwest::Client,
-    base: &str,
+    auto_trader_rsocket_url: &str,
     dashboards: Vec<(String, serde_json::Value)>,
 ) -> (BTreeMap<String, serde_json::Value>, Option<String>) {
     // Bound load on AutoTrader while allowing unrelated symbols to progress
@@ -273,12 +333,7 @@ async fn deliver_signal_batch(
     // which competed with scout-learning writes for AutoTrader's state lock.
     let results = futures_util::stream::iter(dashboards)
         .map(|(symbol, dashboard)| {
-            deliver_signal_dashboard(
-                client.clone(),
-                format!("{base}/internal/auto-trader/signal"),
-                symbol,
-                dashboard,
-            )
+            deliver_signal_dashboard(auto_trader_rsocket_url.to_owned(), symbol, dashboard)
         })
         .buffer_unordered(AUTO_TRADER_SIGNAL_PUSH_CONCURRENCY)
         .collect::<Vec<_>>()
@@ -343,21 +398,35 @@ fn scout_delivery_signals(dashboard: &serde_json::Value) -> Vec<serde_json::Valu
     signals
 }
 
-async fn deliver_scout_inputs(client: &reqwest::Client, dashboards: &[(String, serde_json::Value)]) {
-    let base = std::env::var("SCOUTS_SERVICE_URL")
-        .unwrap_or_else(|_| "http://127.0.0.1:3011".to_owned());
+async fn deliver_scout_inputs(dashboards: &[(String, serde_json::Value)]) {
+    let learning_rsocket_url = std::env::var("LEARNING_RSOCKET_URL")
+        .unwrap_or_else(|_| "ws://127.0.0.1:10010".to_owned());
     for (_symbol, dashboard) in dashboards {
         let signals = scout_delivery_signals(dashboard);
         if signals.is_empty() {
             continue;
         }
-        let result = client
-            .post(format!("{}/live-inputs", base.trim_end_matches('/')))
-            .timeout(std::time::Duration::from_secs(10))
-            .json(&serde_json::json!({ "signals": signals }))
-            .send().await.and_then(reqwest::Response::error_for_status);
-        if let Err(error) = result {
-            crate::service_log!("WARN", "Live Scout input delivery failed: {error}");
+        let result = strategies::request_scout_worker_route(
+            &learning_rsocket_url,
+            &strategies::ScoutCoordinatorRouteCommand {
+                request_id: format!("insights-live:{}:{}", signals[0]["symbol"].as_str().unwrap_or(""), signals[0]["timestamp"].as_u64().unwrap_or_default()),
+                strategy: None,
+                method: strategies::ScoutWorkerHttpMethod::Post,
+                path: "/live-inputs".into(),
+                payload: serde_json::json!({ "signals": signals }),
+            },
+        )
+        .await;
+        match result {
+            Ok(response) if response.status < 400 => {}
+            Ok(response) => crate::service_log!(
+                "WARN",
+                "Learning rejected live Scout input delivery with status {}",
+                response.status
+            ),
+            Err(error) => {
+                crate::service_log!("WARN", "Live Scout input delivery failed: {error}");
+            }
         }
     }
 }
@@ -366,7 +435,6 @@ async fn run_scout_input_push_worker(
     pending_scout_inputs: Arc<DashMap<String, serde_json::Value>>,
     scout_notify: Arc<Notify>,
 ) {
-    let client = POSITION_MANAGEMENT_CLIENT.get_or_init(reqwest::Client::new);
     loop {
         let notified = scout_notify.notified();
         tokio::pin!(notified);
@@ -375,7 +443,7 @@ async fn run_scout_input_push_worker(
             notified.await;
             continue;
         }
-        deliver_scout_inputs(client, &dashboards).await;
+        deliver_scout_inputs(&dashboards).await;
     }
 }
 
@@ -383,9 +451,8 @@ async fn run_ui_snapshot_push_worker(
     pending_snapshots: Arc<DashMap<String, serde_json::Value>>,
     notify: Arc<Notify>,
 ) {
-    let client = POSITION_MANAGEMENT_CLIENT.get_or_init(reqwest::Client::new);
-    let base =
-        std::env::var("FEED_HANDLERS_URL").unwrap_or_else(|_| "http://127.0.0.1:3001".to_owned());
+    let feed_rsocket_url = std::env::var("FEED_HANDLERS_RSOCKET_URL")
+        .unwrap_or_else(|_| "ws://127.0.0.1:10001".to_owned());
     loop {
         let notified = notify.notified();
         tokio::pin!(notified);
@@ -395,18 +462,30 @@ async fn run_ui_snapshot_push_worker(
             continue;
         };
         for (_, snapshot) in snapshots {
-            if let Err(error) = client
-                .post(format!("{base}/internal/signals/snapshot"))
-                .timeout(std::time::Duration::from_millis(250))
-                .json(&snapshot)
-                .send()
-                .await
-                .and_then(reqwest::Response::error_for_status)
-            {
-                crate::service_log!(
+            let symbol = snapshot["symbol"].as_str().unwrap_or("unknown");
+            let timestamp = snapshot["timestamp"].as_u64().unwrap_or_default();
+            let result = strategies::request_scout_service_route(
+                &feed_rsocket_url,
+                &strategies::ScoutCoordinatorRouteCommand {
+                    request_id: format!("insights-snapshot:{symbol}:{timestamp}"),
+                    strategy: None,
+                    method: strategies::ScoutWorkerHttpMethod::Post,
+                    path: "/internal/signals/snapshot".into(),
+                    payload: snapshot,
+                },
+            )
+            .await;
+            match result {
+                Ok(response) if response.status < 400 => {}
+                Ok(response) => crate::service_log!(
+                    "WARN",
+                    "Signal snapshot fanout to FeedHandlers failed: status {}",
+                    response.status
+                ),
+                Err(error) => crate::service_log!(
                     "WARN",
                     "Signal snapshot fanout to FeedHandlers failed: {error}"
-                );
+                ),
             }
         }
     }
@@ -418,9 +497,8 @@ async fn run_signal_push_worker(
     pending_scout_inputs: Arc<DashMap<String, serde_json::Value>>,
     scout_notify: Arc<Notify>,
 ) {
-    let client = POSITION_MANAGEMENT_CLIENT.get_or_init(reqwest::Client::new);
-    let base =
-        std::env::var("AUTO_TRADER_URL").unwrap_or_else(|_| "http://127.0.0.1:3005".to_owned());
+    let auto_trader_rsocket_url = std::env::var("AUTO_TRADER_RSOCKET_URL")
+        .unwrap_or_else(|_| "ws://127.0.0.1:10006".to_owned());
     let mut retry_delay = std::time::Duration::from_millis(250);
     let mut endpoint_available = true;
     loop {
@@ -439,7 +517,8 @@ async fn run_signal_push_worker(
             );
         }
         scout_notify.notify_one();
-        let (failed, first_error) = deliver_signal_batch(&client, &base, dashboards).await;
+        let (failed, first_error) =
+            deliver_signal_batch(&auto_trader_rsocket_url, dashboards).await;
         if !failed.is_empty() {
             if endpoint_available {
                 crate::service_log!(
@@ -477,13 +556,15 @@ mod signal_feed_worker_tests {
 
     #[test]
     fn decoder_reads_price_and_trade_contract_fields_and_rejects_truncated_events() {
-        let mut price = base_event(1, 72);
+        let mut price = base_event(1, 56);
+        price[0..2].copy_from_slice(&48_u16.to_le_bytes());
+        price[4..6].copy_from_slice(&1_u16.to_le_bytes());
+        price[6..8].copy_from_slice(&9_u16.to_le_bytes());
         price[40..48].copy_from_slice(&100.5_f64.to_le_bytes());
-        price[48..56].copy_from_slice(&0.2_f64.to_le_bytes());
-        price[64..72].copy_from_slice(&123_u64.to_le_bytes());
+        price[48..56].copy_from_slice(&123_u64.to_le_bytes());
         let decoded = decode_signal_event(&price).unwrap();
         assert_eq!(decoded.symbol, "BTC-USDT");
-        assert!(matches!(decoded.event, SignalFeedEvent::Price { timestamp: 123, price: 100.5, volatility_1m: 0.2 }));
+        assert!(matches!(decoded.event, SignalFeedEvent::Price { timestamp: 123, price: 100.5 }));
 
         let mut trade = base_event(3, 97);
         trade[72..80].copy_from_slice(&456_u64.to_le_bytes());
@@ -492,9 +573,37 @@ mod signal_feed_worker_tests {
         trade[96] = 1;
         assert!(matches!(decode_signal_event(&trade).unwrap().event, SignalFeedEvent::Trade { timestamp: 456, price: 101.0, size: 2.0, is_buy: true }));
 
-        assert!(decode_signal_event(&price[..71]).is_none());
+        assert!(decode_signal_event(&price[..55]).is_none());
         assert!(decode_signal_event(&base_event(99, 100)).is_none());
         assert!(decode_signal_event(&[0; 20]).is_none());
+    }
+
+    #[test]
+    fn ticker_batch_decoder_reads_multiple_raw_prices_and_ignores_other_templates() {
+        let mut first = base_event(1, 56);
+        first[0..2].copy_from_slice(&48_u16.to_le_bytes());
+        first[4..6].copy_from_slice(&1_u16.to_le_bytes());
+        first[6..8].copy_from_slice(&9_u16.to_le_bytes());
+        first[40..48].copy_from_slice(&100.0_f64.to_le_bytes());
+        first[48..56].copy_from_slice(&1_u64.to_le_bytes());
+        let mut second = base_event(1, 56);
+        second[0..2].copy_from_slice(&48_u16.to_le_bytes());
+        second[4..6].copy_from_slice(&1_u16.to_le_bytes());
+        second[6..8].copy_from_slice(&9_u16.to_le_bytes());
+        second[8..16].copy_from_slice(b"ETH-USDT");
+        second[40..48].copy_from_slice(&200.0_f64.to_le_bytes());
+        second[48..56].copy_from_slice(&2_u64.to_le_bytes());
+        let trade = base_event(3, 56);
+        let mut batch = first;
+        batch.extend_from_slice(&second);
+        batch.extend_from_slice(&trade);
+
+        let decoded = decode_ticker_batch(&batch);
+        assert_eq!(decoded.len(), 2);
+        assert_eq!(decoded[0].symbol, "BTC-USDT");
+        assert_eq!(decoded[1].symbol, "ETH-USDT");
+        assert!(matches!(decoded[0].event, SignalFeedEvent::Price { timestamp: 1, price: 100.0 }));
+        assert!(matches!(decoded[1].event, SignalFeedEvent::Price { timestamp: 2, price: 200.0 }));
     }
 
     #[test]

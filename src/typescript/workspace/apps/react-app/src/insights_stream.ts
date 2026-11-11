@@ -1,4 +1,5 @@
 import { BehaviorSubject } from 'rxjs';
+import { insightsRequestStream } from './insights_rsocket';
 
 export type InsightsUiSnapshot = {
   signal_dashboard?: Record<string, unknown>;
@@ -19,48 +20,60 @@ export type InsightsUiSnapshot = {
 const snapshot$ = new BehaviorSubject<InsightsUiSnapshot | undefined>(
   undefined,
 );
-let socket: WebSocket | undefined;
+let stream: { cancel: () => void } | undefined;
 let retryTimer: ReturnType<typeof setTimeout> | undefined;
-let retryDelay = 1000;
+let retryDelay = 1_000;
 let subscribers = 0;
+let generation = 0;
+let requestStream = insightsRequestStream;
+
+export function setInsightsStreamRequesterForTests(
+  requester: typeof insightsRequestStream,
+) {
+  requestStream = requester;
+}
 
 function connect() {
-  if (socket || subscribers === 0) return;
-  const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-  const next = new WebSocket(
-    `${protocol}//${window.location.host}/signals/stream`,
-  );
-  socket = next;
-  next.onopen = () => {
-    retryDelay = 1000;
-  };
-  next.onmessage = (event) => {
-    try {
-      const message = JSON.parse(String(event.data)) as
-        | { type: 'snapshot'; state: InsightsUiSnapshot }
-        | { type: 'delta'; changes: Partial<InsightsUiSnapshot> };
-      const value =
-        message.type === 'snapshot'
-          ? message.state
-          : message.type === 'delta' && snapshot$.value
-            ? { ...snapshot$.value, ...message.changes }
-            : undefined;
-      if (value) snapshot$.next(value);
-    } catch {
-      /* Keep the last valid snapshot. */
-    }
-  };
-  next.onclose = () => {
-    if (socket === next) socket = undefined;
-    if (subscribers && !retryTimer) {
+  if (stream || subscribers === 0) return;
+  const currentGeneration = ++generation;
+  void requestStream(
+    'ui.snapshot',
+    (data) => {
+      if (currentGeneration !== generation) return;
+      try {
+        const message = JSON.parse(Buffer.from(data).toString()) as {
+          type: 'snapshot' | 'delta';
+          state?: InsightsUiSnapshot;
+          changes?: Partial<InsightsUiSnapshot>;
+        };
+        if (message.type === 'snapshot' && message.state) {
+          snapshot$.next(message.state);
+          retryDelay = 1_000;
+        } else if (message.type === 'delta' && snapshot$.value) {
+          snapshot$.next({ ...snapshot$.value, ...message.changes });
+        }
+      } catch {
+        /* Keep the last valid snapshot. */
+      }
+    },
+    () => {
+      if (currentGeneration !== generation || !subscribers || retryTimer)
+        return;
+      stream = undefined;
+      const delay = retryDelay;
+      retryDelay = Math.min(retryDelay * 2, 30_000);
       retryTimer = setTimeout(() => {
         retryTimer = undefined;
         connect();
-      }, retryDelay);
-      retryDelay = Math.min(retryDelay * 2, 30_000);
+      }, delay);
+    },
+  ).then((subscription) => {
+    if (currentGeneration !== generation || !subscribers) {
+      subscription.cancel();
+      return;
     }
-  };
-  next.onerror = () => next.close();
+    stream = subscription;
+  });
 }
 
 export function subscribeInsightsStream(
@@ -75,10 +88,11 @@ export function subscribeInsightsStream(
     subscription.unsubscribe();
     subscribers = Math.max(0, subscribers - 1);
     if (!subscribers) {
+      generation += 1;
       if (retryTimer) clearTimeout(retryTimer);
       retryTimer = undefined;
-      socket?.close();
-      socket = undefined;
+      stream?.cancel();
+      stream = undefined;
     }
   };
 }

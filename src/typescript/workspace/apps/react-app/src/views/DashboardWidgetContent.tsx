@@ -181,7 +181,7 @@ function DashboardWidgetContentComponent(props: Props): ReactNode {
         />
       );
     case 'news':
-      return <NewsTicker connection={connection} streamKey={widget.id} />;
+      return <NewsTicker streamKey={widget.id} />;
     case 'signal-history':
       return <SignalHistoryView paused={paused} onTradeSymbol={onTrade} />;
     case 'signal-performance':

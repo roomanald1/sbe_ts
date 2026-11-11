@@ -1,6 +1,4 @@
 async fn load_signal_market_snapshot(
-    client: &reqwest::Client,
-    position_url: &str,
     dashboard: &Dashboard,
     now: u64,
     signal: &Signal,
@@ -19,7 +17,7 @@ async fn load_signal_market_snapshot(
         (cached_market, 0.0)
     } else {
         let fetch_started = Instant::now();
-        let market = fresh_subscribed_market_book(client, position_url, &signal.symbol).await;
+        let market = fresh_subscribed_market_book(&signal.symbol).await;
         (market, fetch_started.elapsed().as_secs_f64() * 1_000.0)
     };
     let Some(market) = market else {
@@ -46,16 +44,6 @@ async fn load_signal_market_snapshot(
         ));
     };
     let mid = bid + (ask - bid) * 0.5;
-    // Warm the paper manager's book subscription while the remaining order
-    // checks run, so the submit path doesn't pay the feed's first-book delay.
-    let warm_client = client.clone();
-    let warm_url = format!(
-        "{position_url}/internal/market-book/{}/subscribe",
-        signal.symbol
-    );
-    tokio::spawn(async move {
-        let _ = warm_client.post(warm_url).send().await;
-    });
     Ok(SignalMarketSnapshot {
         market,
         bid,

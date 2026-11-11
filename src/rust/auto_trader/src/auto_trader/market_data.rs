@@ -47,15 +47,25 @@ fn entry_walk_forward_for_strategy<'a>(
 #[serde(rename_all = "camelCase")]
 struct Dashboard {
     best: Vec<Signal>,
+    #[serde(default)]
     walk_forward: Arc<Vec<WalkForward>>,
     #[serde(default)]
-    missed_opportunity_bands: Vec<MissedOpportunityGateBand>,
+    missed_opportunity_bands: Arc<Vec<MissedOpportunityGateBand>>,
     #[serde(default)]
     markets: Arc<BTreeMap<String, serde_json::Value>>,
     #[serde(skip)]
     queued_at: Option<Instant>,
     #[serde(skip)]
     queue_wait_ms: Option<f64>,
+}
+
+#[derive(Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SharedLiveInsightsContext {
+    #[serde(default)]
+    walk_forward: Arc<Vec<WalkForward>>,
+    #[serde(default)]
+    missed_opportunity_bands: Arc<Vec<MissedOpportunityGateBand>>,
 }
 
 fn is_stablecoin_pair(symbol: &str) -> bool {

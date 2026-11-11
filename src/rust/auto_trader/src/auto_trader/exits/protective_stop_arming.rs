@@ -19,8 +19,6 @@ fn build_protective_stop_request(
 }
 
 async fn arm_protective_stop(
-    client: &reqwest::Client,
-    base: &str,
     state: &AutoTraderState,
     symbol: &str,
     strategy: &str,
@@ -73,17 +71,13 @@ async fn arm_protective_stop(
         trigger_direction,
         client_order_id,
     );
-    let response = client
-        .post(format!("{base}/positions/orders"))
-        .json(&request)
-        .send()
-        .await
-        .map_err(upstream_error)?;
-    let status = response.status();
-    let payload = response
-        .json::<serde_json::Value>()
-        .await
-        .map_err(upstream_error)?;
+    let response = crate::service_rpc::position_request(
+        "POST",
+        "/positions/orders",
+        Some(request),
+    ).await.map_err(|error| (StatusCode::BAD_GATEWAY, error.to_string()))?;
+    let status = StatusCode::from_u16(response.status).unwrap_or(StatusCode::BAD_GATEWAY);
+    let payload = response.body;
     if !status.is_success() {
         return Err((
             StatusCode::BAD_GATEWAY,
@@ -142,10 +136,11 @@ async fn arm_protective_stop(
         request_settings_persist(state)?;
     } else {
         drop(settings);
-        let _ = client
-            .delete(format!("{base}/positions/orders/{id}"))
-            .send()
-            .await;
+        let _ = crate::service_rpc::position_request(
+            "DELETE",
+            &format!("/positions/orders/{id}"),
+            None,
+        ).await;
     }
     Ok(())
 }

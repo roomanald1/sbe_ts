@@ -33,8 +33,6 @@ mod scheduled_order_reconciliation_tests {
 }
 
 async fn reconcile_scheduled_fills(
-    client: &reqwest::Client,
-    base: &str,
     state: &AutoTraderState,
 ) -> Result<(), (StatusCode, String)> {
     let is_reconcilable = |order: &&TraderOrder| {
@@ -56,9 +54,9 @@ async fn reconcile_scheduled_fills(
     if !has_pending {
         return Ok(());
     }
-    let (trades_response, runs_response) = tokio::try_join!(
-        client.get(format!("{base}/positions/trades")).send(),
-        client.get(format!("{base}/positions/vwap")).send(),
+    let (trades, runs) = tokio::try_join!(
+        crate::service_rpc::position_get("/positions/trades"),
+        crate::service_rpc::position_get("/positions/vwap"),
     )
     .map_err(|error| {
         (
@@ -66,36 +64,6 @@ async fn reconcile_scheduled_fills(
             format!("Unable to fetch Auto Trader executions: {error}"),
         )
     })?;
-    let trades_response = trades_response.error_for_status().map_err(|error| {
-        (
-            StatusCode::BAD_GATEWAY,
-            format!("Auto Trader trade ledger lookup failed: {error}"),
-        )
-    })?;
-    let runs_response = runs_response.error_for_status().map_err(|error| {
-        (
-            StatusCode::BAD_GATEWAY,
-            format!("Scheduled execution status lookup failed: {error}"),
-        )
-    })?;
-    let trades = trades_response
-        .json::<serde_json::Value>()
-        .await
-        .map_err(|error| {
-            (
-                StatusCode::BAD_GATEWAY,
-                format!("Invalid Auto Trader trade ledger: {error}"),
-            )
-        })?;
-    let runs = runs_response
-        .json::<serde_json::Value>()
-        .await
-        .map_err(|error| {
-            (
-                StatusCode::BAD_GATEWAY,
-                format!("Invalid scheduled execution status: {error}"),
-            )
-        })?;
     let trade_rows = trades["trades"].as_array().cloned().unwrap_or_default();
     let run_rows = runs["runs"].as_array().cloned().unwrap_or_default();
     let mut settings = state.settings.lock().await;

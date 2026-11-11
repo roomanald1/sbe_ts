@@ -48,10 +48,10 @@ pub(super) fn decode_event(bytes: &[u8]) -> Option<SignalEvent> {
     }
     let template = u16::from_le_bytes(bytes.get(2..4)?.try_into().ok()?);
     let event = match template {
-        1 if bytes.len() >= 72 => MarketEvent::Price {
-            timestamp: u64::from_le_bytes(bytes.get(64..72)?.try_into().ok()?),
+        4 if is_enriched_symbol_price(bytes) => MarketEvent::Price {
+            timestamp: u64::from_le_bytes(bytes.get(48..56)?.try_into().ok()?),
             price: f64::from_le_bytes(bytes.get(40..48)?.try_into().ok()?),
-            volatility_1m: f64::from_le_bytes(bytes.get(48..56)?.try_into().ok()?),
+            volatility_1m: f64::from_le_bytes(bytes.get(56..64)?.try_into().ok()?),
         },
         2 if bytes.len() >= 272 => {
             let bid_levels = std::array::from_fn(|index| {
@@ -107,6 +107,14 @@ pub(super) fn decode_event(bytes: &[u8]) -> Option<SignalEvent> {
     })
 }
 
+fn is_enriched_symbol_price(bytes: &[u8]) -> bool {
+    bytes.len() >= 72
+        && u16::from_le_bytes(bytes[0..2].try_into().unwrap_or_default()) == 64
+        && u16::from_le_bytes(bytes[2..4].try_into().unwrap_or_default()) == 4
+        && u16::from_le_bytes(bytes[4..6].try_into().unwrap_or_default()) == 1
+        && u16::from_le_bytes(bytes[6..8].try_into().unwrap_or_default()) == 9
+}
+
 pub(super) fn book_value(timestamp: u64, bids: &[(f64, f64)], asks: &[(f64, f64)]) -> Value {
     let encode = |levels: &[(f64, f64)]| {
         levels
@@ -142,10 +150,13 @@ mod tests {
 
     #[test]
     fn decodes_price_trade_and_book_templates() {
-        let mut price = base_event(1, 72);
+        let mut price = base_event(4, 72);
+        price[0..2].copy_from_slice(&64_u16.to_le_bytes());
+        price[4..6].copy_from_slice(&1_u16.to_le_bytes());
+        price[6..8].copy_from_slice(&9_u16.to_le_bytes());
         put_f64(&mut price, 40, 42_000.5);
-        put_f64(&mut price, 48, 0.25);
-        price[64..72].copy_from_slice(&123_456_u64.to_le_bytes());
+        price[48..56].copy_from_slice(&123_456_u64.to_le_bytes());
+        put_f64(&mut price, 56, 0.25);
         let decoded = decode_event(&price).unwrap();
         assert_eq!(decoded.symbol, "BTC-USDT");
         assert!(matches!(
@@ -194,6 +205,8 @@ mod tests {
         assert!(decode_event(&base_event(99, 100)).is_none());
         assert!(decode_event(&base_event(1, 71)).is_none());
         assert!(decode_event(&[0; 20]).is_none());
+        assert!(decode_event(&base_event(1, 72)).is_none());
+        assert!(decode_event(&base_event(4, 71)).is_none());
         let mut no_symbol = vec![0; 72];
         no_symbol[2..4].copy_from_slice(&1_u16.to_le_bytes());
         assert!(decode_event(&no_symbol).is_none());

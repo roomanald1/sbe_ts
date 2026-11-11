@@ -41,7 +41,6 @@ fn ticker_heartbeat_action(now: u64, last_message: u64, ping_started: u64) -> Ti
 fn encode_ticker_updates(
     text: &str,
     instrument_lookup: &HashSet<Arc<str>>,
-    volatility_by_instrument: &DashMap<Arc<str>, RollingVolatility>,
 ) -> Result<Vec<Bytes>> {
     let update = match serde_json::from_str::<TickerMessage<'_>>(text) {
         Ok(update) => update,
@@ -77,16 +76,7 @@ fn encode_ticker_updates(
             .ts
             .and_then(|value| value.parse::<u64>().ok())
             .unwrap_or_else(now_ms);
-        let Some(mut volatility) = volatility_by_instrument.get_mut(instrument) else {
-            continue;
-        };
-        let (volatility_1m, volatility_5m) = volatility.update(timestamp_ms, price);
-        encoded_updates.push(encode_symbol_price(
-            instrument,
-            price,
-            volatility_1m,
-            volatility_5m,
-        )?);
+        encoded_updates.push(encode_symbol_price(instrument, price, timestamp_ms)?);
     }
     Ok(encoded_updates)
 }
@@ -103,11 +93,6 @@ async fn subscribe_once(
 
     crate::service_log!("INFO", "OKX WebSocket handshake has been successfully completed");
     let (mut write, read) = incoming_ws.split();
-    let volatility_by_instrument = Arc::new({
-        let states = DashMap::<Arc<str>, RollingVolatility>::with_capacity(instrument_lookup.len());
-        for instrument in instrument_lookup.iter() { states.insert(Arc::clone(instrument), RollingVolatility::default()); }
-        states
-    });
     let last_message_at = Arc::new(AtomicU64::new(now_ms()));
     let ping_sent_at = Arc::new(AtomicU64::new(0));
     let monitor_last_message_at = Arc::clone(&last_message_at);
@@ -117,7 +102,6 @@ async fn subscribe_once(
         read.try_for_each(move |message| {
             let instrument_lookup = instrument_lookup.clone();
             let price_updates = price_updates.clone();
-            let volatility_by_instrument = Arc::clone(&volatility_by_instrument);
             let last_message_at = Arc::clone(&last_message_at);
             let ping_sent_at = Arc::clone(&ping_sent_at);
             async move {
@@ -133,11 +117,7 @@ async fn subscribe_once(
                         return Ok(());
                     }
                 };
-                for encoded in encode_ticker_updates(
-                    text,
-                    &instrument_lookup,
-                    &volatility_by_instrument,
-                )? {
+                for encoded in encode_ticker_updates(text, &instrument_lookup)? {
                     let _ = price_updates.send(encoded);
                     crate::metrics::record_queue_depth("price_updates", price_updates.len());
                 }
@@ -188,8 +168,6 @@ mod connection_loop_tests {
         TickerHeartbeatAction, encode_ticker_updates, ticker_heartbeat_action,
         ticker_subscription_requests,
     };
-    use crate::okx::connectivity::RollingVolatility;
-    use dashmap::DashMap;
     use serde_json::Value;
     use std::collections::HashSet;
     use std::sync::Arc;
@@ -223,33 +201,30 @@ mod connection_loop_tests {
     #[test]
     fn encodes_only_valid_tickers_for_subscribed_instruments() {
         let lookup = HashSet::from([Arc::<str>::from("BTC-USDT")]);
-        let volatility = DashMap::from_iter([(Arc::<str>::from("BTC-USDT"), RollingVolatility::default())]);
         let text = r#"{"data":[
             {"instId":"BTC-USDT","last":"65000.5","ts":"1700000000000"},
             {"instId":"ETH-USDT","last":"3000","ts":"1700000000000"},
             {"instId":"BTC-USDT","last":"NaN","ts":"1700000000001"}
         ]}"#;
 
-        let encoded = encode_ticker_updates(text, &lookup, &volatility).unwrap();
+        let encoded = encode_ticker_updates(text, &lookup).unwrap();
 
         assert_eq!(encoded.len(), 1);
         assert_eq!(
             f64::from_le_bytes(encoded[0][40..48].try_into().unwrap()),
             65000.5
         );
-        assert!(encode_ticker_updates("not-json", &lookup, &volatility)
+        assert!(encode_ticker_updates("not-json", &lookup)
             .unwrap()
             .is_empty());
         assert!(encode_ticker_updates(
             r#"{"event":"error","msg":"bad subscription"}"#,
             &lookup,
-            &volatility
         )
         .is_err());
         assert!(encode_ticker_updates(
             r#"{"event":"subscribe"}"#,
             &lookup,
-            &volatility
         )
         .unwrap()
         .is_empty());

@@ -20,9 +20,6 @@ type OrderBookPopupProps = {
   onTrade?: (symbol: string, side: 'buy' | 'sell') => void;
 };
 
-
-
-
 export function OrderBookPopup({
   symbol,
   connection,
@@ -59,9 +56,16 @@ export function OrderBookPopup({
   const frozen = state.frozen;
   const error = state.error;
   const selectedDepth = depthMode === '50' ? state.deepDepth : state.depth;
-  const visibleDepth = selectedDepth?.symbol === symbol ? selectedDepth : undefined;
-  const maximumBidDepth = depthMode === '50' ? (visibleDepth?.bids.at(-1)?.cumulativeNotional ?? 0) : (visibleDepth?.bids.at(-1)?.cumulativeSize ?? 0);
-  const maximumAskDepth = depthMode === '50' ? (visibleDepth?.asks.at(-1)?.cumulativeNotional ?? 0) : (visibleDepth?.asks.at(-1)?.cumulativeSize ?? 0);
+  const visibleDepth =
+    selectedDepth?.symbol === symbol ? selectedDepth : undefined;
+  const maximumBidDepth =
+    depthMode === '50'
+      ? (visibleDepth?.bids.at(-1)?.cumulativeNotional ?? 0)
+      : (visibleDepth?.bids.at(-1)?.cumulativeSize ?? 0);
+  const maximumAskDepth =
+    depthMode === '50'
+      ? (visibleDepth?.asks.at(-1)?.cumulativeNotional ?? 0)
+      : (visibleDepth?.asks.at(-1)?.cumulativeSize ?? 0);
   const spread =
     visibleDepth?.bids[0] && visibleDepth.asks[0]
       ? visibleDepth.asks[0].price - visibleDepth.bids[0].price
@@ -133,9 +137,25 @@ export function OrderBookPopup({
                 </button>
               </>
             )}
-            <div className="book-depth-mode" role="group" aria-label="Displayed order book depth">
-              <button type="button" aria-pressed={depthMode === '7'} onClick={() => setDepthMode('7')}>7 levels</button>
-              <button type="button" aria-pressed={depthMode === '50'} onClick={() => setDepthMode('50')}>50 levels</button>
+            <div
+              className="book-depth-mode"
+              role="group"
+              aria-label="Displayed order book depth"
+            >
+              <button
+                type="button"
+                aria-pressed={depthMode === '7'}
+                onClick={() => setDepthMode('7')}
+              >
+                7 levels
+              </button>
+              <button
+                type="button"
+                aria-pressed={depthMode === '50'}
+                onClick={() => setDepthMode('50')}
+              >
+                50 levels
+              </button>
             </div>
             <span className={`book-stream-status${frozen ? ' is-frozen' : ''}`}>
               {frozen ? 'FROZEN' : 'LIVE'}
@@ -161,9 +181,13 @@ export function OrderBookPopup({
           </div>
         </header>
         <div className="book-popup-columns" aria-hidden="true">
-          <span>{depthMode === '50' ? 'CUMULATIVE QUOTE DEPTH' : 'BID SIZE'}</span>
+          <span>
+            {depthMode === '50' ? 'CUMULATIVE QUOTE DEPTH' : 'BID SIZE'}
+          </span>
           <span>PRICE</span>
-          <span>{depthMode === '50' ? 'CUMULATIVE QUOTE DEPTH' : 'ASK SIZE'}</span>
+          <span>
+            {depthMode === '50' ? 'CUMULATIVE QUOTE DEPTH' : 'ASK SIZE'}
+          </span>
         </div>
         {error ? (
           <div className="book-popup-message book-popup-error">{error}</div>
@@ -186,13 +210,17 @@ export function OrderBookPopup({
                 <div className="book-market-metric">
                   <span>MID</span>
                   <strong>
-                    {mid === undefined ? '—' : formatForSymbol(mid, symbol, 'price')}
+                    {mid === undefined
+                      ? '—'
+                      : formatForSymbol(mid, symbol, 'price')}
                   </strong>
                 </div>
                 <div className="book-market-metric">
                   <span>SPREAD</span>
                   <strong>
-                    {spread === undefined ? '—' : formatForSymbol(spread, symbol, 'price')}
+                    {spread === undefined
+                      ? '—'
+                      : formatForSymbol(spread, symbol, 'price')}
                   </strong>
                 </div>
               </div>
@@ -200,7 +228,16 @@ export function OrderBookPopup({
                 {new Date(visibleDepth.timestamp).toLocaleTimeString()}
               </time>
             </div>
-            {mid !== undefined && depthMode === '50' && (symbol.endsWith('-USDT') || symbol.endsWith('-USDC')) && <SweepSummary bids={visibleDepth.bids} asks={visibleDepth.asks} mid={mid} symbol={symbol} />}
+            {mid !== undefined &&
+              depthMode === '50' &&
+              (symbol.endsWith('-USDT') || symbol.endsWith('-USDC')) && (
+                <SweepSummary
+                  bids={visibleDepth.bids}
+                  asks={visibleDepth.asks}
+                  mid={mid}
+                  symbol={symbol}
+                />
+              )}
             <DepthRows
               levels={visibleDepth.bids}
               side="bid"
@@ -208,13 +245,24 @@ export function OrderBookPopup({
               symbol={symbol}
               quoteDepth={depthMode === '50'}
             />
-            <DepthBalance bids={visibleDepth.bids} asks={visibleDepth.asks} label={depthMode} />
+            <DepthBalance
+              bids={visibleDepth.bids}
+              asks={visibleDepth.asks}
+              label={depthMode}
+            />
           </>
         )}
         <footer className="book-popup-footer">
           {visibleDepth
-            ? 'Snapshot ' + new Date(visibleDepth.timestamp).toLocaleTimeString() + (depthMode === '50' ? ' · 50 levels from OKX REST' : ' · 7 live levels') + (frozen ? ' · paused' : '')
-            : (depthMode === '50' ? 'Waiting for the 50-level OKX snapshot…' : 'Live updates begin after selection')}
+            ? 'Snapshot ' +
+              new Date(visibleDepth.timestamp).toLocaleTimeString() +
+              (depthMode === '50'
+                ? ' · 50 levels from OKX REST'
+                : ' · 7 live levels') +
+              (frozen ? ' · paused' : '')
+            : depthMode === '50'
+              ? 'Waiting for the 50-level OKX snapshot…'
+              : 'Live updates begin after selection'}
         </footer>
       </section>
     </div>

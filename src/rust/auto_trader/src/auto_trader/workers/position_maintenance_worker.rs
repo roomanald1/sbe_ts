@@ -1,15 +1,14 @@
 async fn run_position_maintenance(state: &AutoTraderState) -> Result<(), (StatusCode, String)> {
-    let position_url =
-        std::env::var("POSITION_MANAGEMENT_URL").unwrap_or_else(|_| "http://127.0.0.1:3002".into());
-    let client = state.client.clone();
+    let position_rsocket_url = std::env::var("POSITION_MANAGEMENT_RSOCKET_URL")
+        .map_err(|error| (StatusCode::SERVICE_UNAVAILABLE, error.to_string()))?;
     // Consume fills before classifying disappeared resting orders as inactive.
-    reconcile_maker_fills(&client, &position_url, state).await?;
-    if let Err(error) = reconcile_inactive_execution_orders(&client, &position_url, state).await {
+    reconcile_maker_fills(&position_rsocket_url, state).await?;
+    if let Err(error) = reconcile_inactive_execution_orders(state).await {
         crate::service_log!("WARN", "Pending-order reconciliation failed: {}", error.1);
     }
-    reconcile_scheduled_fills(&client, &position_url, state).await?;
-    sync_auto_positions(&client, &position_url, state).await?;
-    let _ = maybe_exit_auto_position(&client, &position_url, state).await?;
+    reconcile_scheduled_fills(state).await?;
+    sync_auto_positions(state).await?;
+    let _ = maybe_exit_auto_position(state).await?;
     Ok(())
 }
 
@@ -24,22 +23,12 @@ struct LedgerRealizedPnl {
 }
 
 async fn fetch_ledger_realized_pnl(
-    client: &reqwest::Client,
-    base: &str,
 ) -> Result<LedgerRealizedPnl, (StatusCode, String)> {
-    client
-        .get(format!(
-            "{base}/positions/realized-pnl?source=auto&since_ms={}",
-            utc_day_start_ms()
-        ))
-        .send()
-        .await
-        .map_err(upstream_error)?
-        .error_for_status()
-        .map_err(upstream_error)?
-        .json::<LedgerRealizedPnl>()
-        .await
-        .map_err(upstream_error)
+    let value = crate::service_rpc::position_get(&format!(
+        "/positions/realized-pnl?source=auto&since_ms={}",
+        utc_day_start_ms()
+    )).await.map_err(|error| (StatusCode::BAD_GATEWAY, error.to_string()))?;
+    serde_json::from_value(value).map_err(|error| (StatusCode::BAD_GATEWAY, error.to_string()))
 }
 
 #[derive(Deserialize)]
@@ -52,11 +41,9 @@ struct SourcePositionRecord {
 }
 
 async fn sync_auto_positions(
-    client: &reqwest::Client,
-    base: &str,
     state: &AutoTraderState,
 ) -> Result<(), (StatusCode, String)> {
-    let ledger_pnl = fetch_ledger_realized_pnl(client, base).await?;
+    let ledger_pnl = fetch_ledger_realized_pnl().await?;
     let rates = state.settings.lock().await.usd_rates.clone();
     let realized_all_time_usd = match ledger_pnl.realized_pnl_all_time_usd {
         Some(value) => value,
@@ -80,29 +67,12 @@ async fn sync_auto_positions(
             ));
         }
     };
-    let positions = client
-        .get(format!("{base}/positions?source=auto"))
-        .send()
+    let positions = crate::service_rpc::position_get("/positions?source=auto")
         .await
         .map_err(|error| {
             (
                 StatusCode::BAD_GATEWAY,
                 format!("Unable to fetch Auto Trader positions: {error}"),
-            )
-        })?
-        .error_for_status()
-        .map_err(|error| {
-            (
-                StatusCode::BAD_GATEWAY,
-                format!("Auto Trader positions lookup failed: {error}"),
-            )
-        })?
-        .json::<serde_json::Value>()
-        .await
-        .map_err(|error| {
-            (
-                StatusCode::BAD_GATEWAY,
-                format!("Invalid Auto Trader positions response: {error}"),
             )
         })?;
     let positions =
@@ -249,19 +219,9 @@ async fn sync_auto_positions(
         payload["status"] = serde_json::json!("filled");
         payload["realized_pnl"] = serde_json::json!(realized_pnl);
         payload["duration_ms"] = serde_json::json!((entry_timestamp > 0).then_some(now.saturating_sub(entry_timestamp)));
-        let trades_url = format!(
-            "{base}/positions/trades?symbol={symbol}&source=auto&since_ms={entry_timestamp}"
-        );
-        let trades = client
-            .get(trades_url)
-            .send()
-            .await
-            .map_err(upstream_error)?
-            .error_for_status()
-            .map_err(upstream_error)?
-            .json::<serde_json::Value>()
-            .await
-            .map_err(upstream_error)?;
+        let trades = crate::service_rpc::position_get(&format!(
+            "/positions/trades?symbol={symbol}&source=auto&since_ms={entry_timestamp}"
+        )).await.map_err(|error| (StatusCode::BAD_GATEWAY, error.to_string()))?;
         let close_side = if payload["entry_position_side"].as_str() == Some("long") { "sell" } else { "buy" };
         let trade_rows = trades["trades"].as_array().cloned().unwrap_or_default();
         let closed_quantity = payload["close_quantity"].as_f64().unwrap_or(0.0);
@@ -347,20 +307,10 @@ async fn sync_auto_positions(
 
 
 async fn reconcile_inactive_execution_orders(
-    client: &reqwest::Client,
-    base: &str,
     state: &AutoTraderState,
 ) -> Result<(), (StatusCode, String)> {
-    let response = client
-        .get(format!("{base}/positions/orders"))
-        .send()
-        .await
-        .map_err(|error| (StatusCode::BAD_GATEWAY, format!("Unable to fetch active orders: {error}")))?
-        .error_for_status()
-        .map_err(|error| (StatusCode::BAD_GATEWAY, format!("Active order lookup failed: {error}")))?
-        .json::<serde_json::Value>()
-        .await
-        .map_err(|error| (StatusCode::BAD_GATEWAY, format!("Invalid active order response: {error}")))?;
+    let response = crate::service_rpc::position_get("/positions/orders")
+        .await.map_err(|error| (StatusCode::BAD_GATEWAY, format!("Could not fetch active orders: {error}")))?;
     let active_ids = response["orders"]
         .as_array()
         .into_iter()

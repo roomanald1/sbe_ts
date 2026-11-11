@@ -3,8 +3,6 @@ async fn submit_and_record_selected_order(
 ) -> Result<CycleResult, (StatusCode, String)> {
     let SelectedOrderExecution {
         state,
-        client,
-        position_url,
         signal,
         exploratory,
         counterfactual_stop_loss_percent,
@@ -33,8 +31,6 @@ async fn submit_and_record_selected_order(
         expires_at,
     } = input;
     let state = &state;
-    let client = &client;
-    let position_url = position_url.as_str();
     let signal = &signal;
     let evidence = evidence.as_ref();
     let side = side.as_str();
@@ -57,8 +53,6 @@ async fn submit_and_record_selected_order(
         ));
     }
     let response = match submit_configured_order(
-        &client,
-        &position_url,
         &signal.symbol,
         side,
         quantity,
@@ -383,7 +377,7 @@ async fn submit_and_record_selected_order(
     let stop_armed = if filled > 0.0 {
         // Reconcile aggregate exposure without cancelling correctly sided stops;
         // newly filled quantity gets its own barrier while existing protection stays armed.
-        match ensure_protective_stops(&client, &position_url, state).await {
+        match ensure_protective_stops(state).await {
             Ok(()) => {
                 let settings = state.settings.lock().await;
                 settings

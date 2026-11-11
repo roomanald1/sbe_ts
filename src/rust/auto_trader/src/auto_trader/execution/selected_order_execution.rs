@@ -1,7 +1,5 @@
 struct SelectedOrderExecution {
     state: AutoTraderState,
-    client: reqwest::Client,
-    position_url: String,
     signal: Signal,
     exploratory: bool,
     counterfactual_stop_loss_percent: f64,

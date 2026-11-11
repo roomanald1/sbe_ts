@@ -87,9 +87,6 @@ fn prepare_directional_signal_candidates(
                 .map(|(bid, ask)| (bid + ask) * 0.5)
                 .filter(|price| price.is_finite() && *price > 0.0)
             {
-                let client = state.client.clone();
-                let base = std::env::var("INSIGHTS_URL")
-                    .unwrap_or_else(|_| "http://127.0.0.1:3004".into());
                 let request = serde_json::json!({
                     "symbol": scout.symbol,
                     "timestamp": scout.timestamp,
@@ -97,12 +94,11 @@ fn prepare_directional_signal_candidates(
                     "entry_price": entry_price,
                 });
                 tokio::spawn(async move {
-                    let _ = client
-                        .post(format!("{base}/internal/signals/counterfactual"))
-                        .json(&request)
-                        .timeout(std::time::Duration::from_millis(500))
-                        .send()
-                        .await;
+                    let _ = crate::service_rpc::insights_request(
+                        "POST",
+                        "/internal/signals/counterfactual",
+                        Some(request),
+                    ).await;
                 });
             }
         }

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo } from 'react';
 import { AgGridReact } from 'ag-grid-react';
 import {
   ClientSideRowModelModule,
@@ -7,12 +7,13 @@ import {
   type ColDef,
   type ICellRendererParams,
 } from 'ag-grid-community';
-import {
-  AutoTraderModel,
-  type StrategyDiagnostic,
-} from '../models/AutoTraderModel';
+import type { StrategyDiagnostic } from '../models/AutoTraderModel';
 import { useBehaviorSnapshot } from '@workspace/ui-platform';
 import { FeedToolbar } from './FeedToolbar';
+import {
+  AutoTraderDiagnosticsModel,
+  type DiagnosticsRow,
+} from '../models/AutoTraderDiagnosticsModel';
 
 ModuleRegistry.registerModules([ClientSideRowModelModule]);
 const diagnosticsGridTheme = themeQuartz.withParams({
@@ -24,47 +25,21 @@ const diagnosticsGridTheme = themeQuartz.withParams({
   headerTextColor: '#a0a6ad',
   rowHoverColor: '#141b24',
 });
-type GateHit = {
-  gate: string;
-  count: number;
-  detail: string;
-  distance: number | null;
-};
-type SymbolGroup = {
-  kind: 'symbol';
-  symbol: string;
-  direction: string;
-  gates: GateHit[];
-  distance: number | null;
-  readinessScore: number;
-  expanded: boolean;
-};
-type GateDetailRow = {
-  kind: 'gate';
-  symbol: string;
-  direction: string;
-  distance: number | null;
-  gate: string;
-  count: number;
-  detail: string;
-};
-type DiagnosticsRow = SymbolGroup | GateDetailRow;
 type StrategyDiagnosticRow = StrategyDiagnostic['symbols'][number];
 type GateColumnParams = ICellRendererParams<DiagnosticsRow> & {
-  onToggle: (key: string) => void;
+  onToggle: (symbol: string, direction: string) => void;
 };
 function GateColumnCell({ data, onToggle }: GateColumnParams) {
   if (!data) return null;
   if (data.kind === 'gate')
     return <span className="auto-trader-detail-gate">{data.gate}</span>;
-  const key = data.symbol + ':' + data.direction;
   return (
     <button
       className="auto-trader-detail-toggle"
       type="button"
       onClick={(event) => {
         event.stopPropagation();
-        onToggle(key);
+        onToggle(data.symbol, data.direction);
       }}
     >
       {data.expanded
@@ -78,105 +53,13 @@ function GateColumnCell({ data, onToggle }: GateColumnParams) {
 }
 
 export function AutoTraderDiagnostics() {
-  const [expandedGroups, setExpandedGroups] = useState<Set<string>>(
-    () => new Set(),
-  );
-  const model = useMemo(() => new AutoTraderModel(), []);
+  const model = useMemo(() => new AutoTraderDiagnosticsModel(), []);
   useEffect(() => {
     model.start();
     return () => model.stop();
   }, [model]);
   const state = useBehaviorSnapshot(model.state$);
-  const symbolGroups = useMemo(() => {
-    const grouped = new Map<
-      string,
-      {
-        symbol: string;
-        direction: string;
-        gates: Array<{
-          gate: string;
-          count: number;
-          detail: string;
-          distance: number | null;
-        }>;
-      }
-    >();
-    /* TODO push this logic into the model */
-    state.symbolGateHits.forEach((item) => {
-      const key = item.symbol + ':' + item.direction;
-      const group = grouped.get(key) ?? {
-        symbol: item.symbol,
-        direction: item.direction,
-        gates: [],
-      };
-      group.gates.push({
-        gate: item.gate,
-        count: item.count,
-        detail: item.last_detail,
-        distance: item.distance_to_pass,
-      });
-      grouped.set(key, group);
-    });
-    return Array.from(grouped.values())
-      .map((group) => ({
-        ...group,
-        kind: 'symbol' as const,
-        expanded: expandedGroups.has(group.symbol + ':' + group.direction),
-        distance: group.gates.reduce<number | null>(
-          (max, item) =>
-            item.distance === null || item.distance === undefined
-              ? max
-              : Math.max(max ?? 0, item.distance),
-          null,
-        ),
-        readinessScore: group.gates.some((item) => item.gate === 'Readiness')
-          ? 100
-          : Math.round(
-              100 /
-                (1 +
-                  group.gates.reduce(
-                    (penalty, item) =>
-                      penalty +
-                      (item.distance === null || item.distance === undefined
-                        ? 1
-                        : Math.max(item.distance, 0.05)),
-                    0,
-                  )),
-            ),
-      }))
-      .sort(
-        (a, b) =>
-          a.symbol.localeCompare(b.symbol) ||
-          a.direction.localeCompare(b.direction),
-      );
-  }, [state.symbolGateHits, expandedGroups]);
-  const toggleGroup = (key: string) =>
-    setExpandedGroups((current) => {
-      const next = new Set(current);
-      if (next.has(key)) next.delete(key);
-      else next.add(key);
-      return next;
-    });
-  const gridRows = useMemo<DiagnosticsRow[]>(
-    () =>
-      symbolGroups.flatMap((group) => [
-        group,
-        ...(group.expanded
-          ? group.gates.map(
-              (gate): GateDetailRow => ({
-                kind: 'gate',
-                symbol: group.symbol,
-                direction: group.direction,
-                distance: group.distance,
-                gate: gate.gate,
-                count: gate.count,
-                detail: gate.detail,
-              }),
-            )
-          : []),
-      ]),
-    [symbolGroups],
-  );
+  const { diagnosticRows: gridRows, symbolGroupCount } = state;
   const strategyColumns = useMemo<ColDef<StrategyDiagnosticRow>[]>(
     () => [
       { field: 'symbol', headerName: 'Symbol', minWidth: 110, flex: 0.7 },
@@ -305,7 +188,10 @@ export function AutoTraderDiagnostics() {
         sortable: false,
         filter: false,
         cellRenderer: GateColumnCell,
-        cellRendererParams: { onToggle: toggleGroup },
+        cellRendererParams: {
+          onToggle: (symbol: string, direction: string) =>
+            model.toggleGroup(symbol, direction),
+        },
       },
       {
         field: 'count',
@@ -462,9 +348,9 @@ export function AutoTraderDiagnostics() {
         >
           <div className="auto-trader-diagnostics-heading">
             <strong>By symbol and direction</strong>
-            <span>{symbolGroups.length} groups</span>
+            <span>{symbolGroupCount} groups</span>
           </div>
-          {symbolGroups.length > 0 ? (
+          {symbolGroupCount > 0 ? (
             <div className="data-grid-wrap auto-trader-symbol-grid">
               <AgGridReact<DiagnosticsRow>
                 animateRows={false}

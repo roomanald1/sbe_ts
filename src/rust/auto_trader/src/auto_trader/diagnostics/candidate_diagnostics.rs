@@ -186,7 +186,7 @@ mod candidate_diagnostic_tests {
         let candidate = candidate(0.0, 0.0);
         let dashboard = Dashboard {
             best: Vec::new(), walk_forward: Arc::new(Vec::new()),
-            missed_opportunity_bands: Vec::new(), markets: Arc::new(BTreeMap::new()),
+            missed_opportunity_bands: Arc::new(Vec::new()), markets: Arc::new(BTreeMap::new()),
             queued_at: None, queue_wait_ms: None,
         };
         let diagnostic = candidate_entry_diagnostic(&candidate, &dashboard, &EMPTY_CONTEXT_THRESHOLDS, 50.0, 1_000);

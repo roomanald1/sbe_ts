@@ -8,7 +8,13 @@ describe('getLimitPriceMarkWarning', () => {
     assert.match(getLimitPriceMarkWarning('10', 100) ?? '', /10×/);
   });
   it('does not warn for closer prices or invalid inputs', () => {
-    for (const [price, mark] of [['99', 10], ['0', 10], ['abc', 10], ['10', 0]] as const) assert.equal(getLimitPriceMarkWarning(price, mark), undefined);
+    for (const [price, mark] of [
+      ['99', 10],
+      ['0', 10],
+      ['abc', 10],
+      ['10', 0],
+    ] as const)
+      assert.equal(getLimitPriceMarkWarning(price, mark), undefined);
     assert.equal(getLimitPriceMarkWarning('100'), undefined);
   });
 });

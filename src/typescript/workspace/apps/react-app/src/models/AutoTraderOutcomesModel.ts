@@ -13,6 +13,9 @@ import {
   type AutoTraderUiSnapshot,
 } from '../auto_trader_stream';
 import { sharedGet } from '../shared_get';
+import { insightsFetch } from '../insights_rsocket';
+import { executionFetch } from '../execution_api';
+import { autoTraderRpc } from '../auto_trader_rsocket';
 
 export type AutoTraderOutcome = {
   rowId: string;
@@ -244,7 +247,6 @@ type StrategyLearning = {
 };
 export type LearningSummary = {
   strategy: string;
-  // These legacy field names now carry closed-trade outcomes only.
   learning_samples: number;
   positive_rate?: number;
   average_net_return_percent?: number;
@@ -257,13 +259,9 @@ export type LearningSummary = {
   other_profile_trade_samples?: number;
   other_profile_trade_positive_rate?: number | null;
   other_profile_average_net_return_percent?: number | null;
-  paper_scout_trade_samples?: number;
-  paper_scout_positive_rate?: number;
-  paper_scout_average_net_return_percent?: number;
   paired_scout_samples?: number;
   paired_scout_positive_rate?: number;
   average_paired_scout_lift_percent?: number;
-  unclassified_samples?: number;
 };
 type StrategySymbolDiagnostic = {
   symbol: string;
@@ -684,7 +682,7 @@ export class AutoTraderOutcomesModel {
     });
     try {
       const strategyInstanceId = strategyInstanceForClose(current.rows, symbol);
-      const response = await fetch('/positions/close-profitable', {
+      const response = await executionFetch('/positions/close-profitable', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -769,20 +767,20 @@ export class AutoTraderOutcomesModel {
       ] = await Promise.all([
         autoSnapshot
           ? Promise.resolve(undefined)
-          : sharedGet('/signals/auto-trader-execution-audit?limit=500'),
+          : insightsFetch('/signals/auto-trader-execution-audit?limit=500'),
         // Closed-position rows must reflect the latest fill reported by the
         // positions stream. The AutoTrader stream is still a useful fallback,
         // but its periodic snapshot can otherwise leave this screen stale.
-        sharedGet('/positions/auto-trader/activity'),
+        autoTraderRpc('GET', '/positions/auto-trader/activity'),
         autoSnapshot
           ? Promise.resolve(undefined)
-          : sharedGet('/positions/auto-trader'),
-        sharedGet('/positions/auto-trader/learning-summary', 30_000).catch(
+          : autoTraderRpc('GET', '/positions/auto-trader'),
+        autoTraderRpc('GET', '/positions/auto-trader/learning-summary').catch(
           () => undefined,
         ),
         autoSnapshot
           ? Promise.resolve(undefined)
-          : sharedGet('/positions/auto-trader/dated-carry'),
+          : autoTraderRpc('GET', '/positions/auto-trader/dated-carry'),
         // The stream can lag the activity snapshot after a new AutoTrader
         // entry. Fetch the HTTP snapshot as well so a symbol missing from the
         // stream is not dropped from the live positions view.
@@ -797,18 +795,18 @@ export class AutoTraderOutcomesModel {
             )
           : Promise.resolve(undefined),
         refreshGateAudit
-          ? sharedGet(
+          ? insightsFetch(
               '/signals/auto-trader-audit?stage=decision&limit=1000',
             ).catch(() => undefined)
           : Promise.resolve(undefined),
         refreshStrategyEvaluationAudit
-          ? sharedGet(
+          ? insightsFetch(
               '/signals/auto-trader-audit?stage=strategy%3Aevaluation&limit=1000',
             ).catch(() => undefined)
           : Promise.resolve(undefined),
         autoSnapshot
           ? Promise.resolve(undefined)
-          : sharedGet('/positions/auto-trader/parameters').catch(
+          : autoTraderRpc('GET', '/positions/auto-trader/parameters').catch(
               () => undefined,
             ),
         sharedGet('/positions/usd-rates', 30_000).catch(() => undefined),
@@ -1749,7 +1747,7 @@ export class AutoTraderOutcomesModel {
         sharedGet(url),
         this.auditCursor == null
           ? Promise.resolve(undefined)
-          : sharedGet(
+          : insightsFetch(
               '/signals/auto-trader-execution-audit?cursor=' +
                 this.auditCursor +
                 '&limit=500',
@@ -1862,7 +1860,7 @@ export class AutoTraderOutcomesModel {
     if (cursor == null || this.state$.value.loadingOlderAudit) return;
     this.state$.next({ ...this.state$.value, loadingOlderAudit: true });
     try {
-      const response = await sharedGet(
+      const response = await insightsFetch(
         `/signals/auto-trader-execution-audit?cursor=${cursor}&limit=500`,
       );
       if (!response.ok)

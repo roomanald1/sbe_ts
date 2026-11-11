@@ -27,7 +27,12 @@ import type { Connection } from '../connection';
 const connection = {} as Connection;
 function bookConnection(): Connection {
   return {
-    openBook: (key: string, symbol: string) => ({ key, symbol, data: new BehaviorSubject<unknown | undefined>(undefined), error: new BehaviorSubject<string | undefined>(undefined) }),
+    openBook: (key: string, symbol: string) => ({
+      key,
+      symbol,
+      data: new BehaviorSubject<unknown | undefined>(undefined),
+      error: new BehaviorSubject<string | undefined>(undefined),
+    }),
     closeBook: () => undefined,
   } as unknown as Connection;
 }
@@ -88,10 +93,18 @@ describe('model initial state and simple actions', () => {
   });
 
   it('initializes liquidity and order book models for the selected symbol', () => {
-    const liquidity = new MarketLiquidityModel({ symbol: 'BTC-USDT', connection, streamKey: 'test' });
+    const liquidity = new MarketLiquidityModel({
+      symbol: 'BTC-USDT',
+      connection,
+      streamKey: 'test',
+    });
     assert.equal(liquidity.state$.value.symbol, 'BTC-USDT');
     assert.deepEqual(liquidity.state$.value.bands, []);
-    const book = new OrderBookModel({ symbol: 'ETH-USDT', connection, streamKey: 'test' });
+    const book = new OrderBookModel({
+      symbol: 'ETH-USDT',
+      connection,
+      streamKey: 'test',
+    });
     assert.equal(book.getSnapshot().symbol, 'ETH-USDT');
     assert.equal(book.state$.value.frozen, false);
     book.stop();
@@ -99,10 +112,17 @@ describe('model initial state and simple actions', () => {
   });
 
   it('constructs book feeds and order manager state from symbols', () => {
-    const feeds = new OrderManagerBookFeeds(connection, () => undefined, () => undefined);
+    const feeds = new OrderManagerBookFeeds(
+      connection,
+      () => undefined,
+      () => undefined,
+    );
     feeds.sync(new Set());
     feeds.close();
-    const model = new OrderManagerModel({ connection: bookConnection(), symbols: ['BTC-USDT', 'ETH-USDT'] });
+    const model = new OrderManagerModel({
+      connection: bookConnection(),
+      symbols: ['BTC-USDT', 'ETH-USDT'],
+    });
     assert.equal(model.state$.value.selectedSymbol, 'BTC-USDT');
     assert.equal(model.state$.value.orderType, 'ioc');
     model.setSymbol('ETH-USDT');
@@ -119,12 +139,18 @@ describe('model initial state and simple actions', () => {
   });
 
   it('updates chart dimensions and selects symbols', () => {
-    const model = new PriceChangeChartModel({ changes: { ticks: [], histories: new Map() }, initialSymbol: 'BTC-USDT' });
+    const model = new PriceChangeChartModel({
+      changes: { ticks: [], histories: new Map() },
+      initialSymbol: 'BTC-USDT',
+    });
     assert.equal(model.getSnapshot().chartSize.width, 900);
     model.setChartSize(0, 300);
     assert.equal(model.getSnapshot().chartSize.width, 900);
     model.setChartSize(640, 320);
-    assert.deepEqual(model.getSnapshot().chartSize, { width: 640, height: 320 });
+    assert.deepEqual(model.getSnapshot().chartSize, {
+      width: 640,
+      height: 320,
+    });
     model.selectSymbol('ETH-USDT');
     assert.equal(model.props$.value.initialSymbol, 'BTC-USDT');
   });
@@ -133,13 +159,21 @@ describe('model initial state and simple actions', () => {
     const info = new SignalInfoModel();
     assert.deepEqual(info.state$.value.best, []);
     info.stop();
-    const signals = new SignalsModel({ connection, symbol: 'BTC-USDT', streamKey: 'test' });
+    const signals = new SignalsModel({
+      connection,
+      symbol: 'BTC-USDT',
+      streamKey: 'test',
+    });
     assert.deepEqual(signals.state$.value, { symbol: 'BTC-USDT' });
     signals.stop();
   });
 
   it('initializes trade ticket and updates order fields', () => {
-    const model = new TradeTicketModel({ symbol: 'BTC-USDT', initialSide: 'sell', connection });
+    const model = new TradeTicketModel({
+      symbol: 'BTC-USDT',
+      initialSide: 'sell',
+      connection,
+    });
     assert.equal(model.state$.value.side, 'sell');
     assert.equal(model.state$.value.barrierDirection, 'above');
     model.setQuantity('2.5');
@@ -151,7 +185,11 @@ describe('model initial state and simple actions', () => {
 
   it('paginates the users view input and blocks invalid page numbers', async () => {
     const originalFetch = globalThis.fetch;
-    globalThis.fetch = async () => ({ ok: true, json: async () => ({ data: [], has_more: false }) }) as Response;
+    globalThis.fetch = async () =>
+      ({
+        ok: true,
+        json: async () => ({ data: [], has_more: false }),
+      }) as Response;
     const model = new UsersModel();
     assert.equal(model.state$.value.rowData.length, 10);
     model.setPageInput('0');
@@ -174,9 +212,32 @@ describe('order manager derivation helpers', () => {
 
   it('derives midpoint, fees, and order rows from state', () => {
     const state = deriveOrderManagerState({
-      symbols: ['BTC-USDT'], books: { 'BTC-USDT': { symbol: 'BTC-USDT', bids: [{ price: 99 }], asks: [{ price: 101 }] } }, bookErrors: {},
-      selectedSymbol: 'BTC-USDT', side: 'buy', quantity: '2', orderType: 'ioc', limitPrice: '', barrierPrice: '', barrierDirection: 'below',
-      orders: [], barrierOrders: [], vwapRuns: [], rows: [], makerFeeRate: 0.001, takerFeeRate: 0.002, durationMinutes: '60', participationRate: '10', loading: false, submitting: false,
+      symbols: ['BTC-USDT'],
+      books: {
+        'BTC-USDT': {
+          symbol: 'BTC-USDT',
+          bids: [{ price: 99 }],
+          asks: [{ price: 101 }],
+        },
+      },
+      bookErrors: {},
+      selectedSymbol: 'BTC-USDT',
+      side: 'buy',
+      quantity: '2',
+      orderType: 'ioc',
+      limitPrice: '',
+      barrierPrice: '',
+      barrierDirection: 'below',
+      orders: [],
+      barrierOrders: [],
+      vwapRuns: [],
+      rows: [],
+      makerFeeRate: 0.001,
+      takerFeeRate: 0.002,
+      durationMinutes: '60',
+      participationRate: '10',
+      loading: false,
+      submitting: false,
     } as never);
     assert.equal(state.selectedCurrentPrice, 100);
     assert.equal(state.estimatedFee, 0.4);
@@ -184,11 +245,45 @@ describe('order manager derivation helpers', () => {
   });
 
   it('serializes VWAP and barrier submissions with their specific fields', () => {
-    const state = { selectedSymbol: 'BTC-USDT', side: 'sell', orderType: 'vwap', barrierDirection: 'above' } as any;
-    assert.deepEqual(orderSubmissionBody(state, { quantity: 2, limitPrice: 0, barrierPrice: 0, durationMinutes: 30, participationRate: 0.2 }), {
-      symbol: 'BTC-USDT', side: 'sell', duration_minutes: 30, max_participation_rate: 0.2, quantity: 2,
+    const state = {
+      selectedSymbol: 'BTC-USDT',
+      side: 'sell',
+      orderType: 'vwap',
+      barrierDirection: 'above',
+    } as any;
+    assert.deepEqual(
+      orderSubmissionBody(state, {
+        quantity: 2,
+        limitPrice: 0,
+        barrierPrice: 0,
+        durationMinutes: 30,
+        participationRate: 0.2,
+      }),
+      {
+        symbol: 'BTC-USDT',
+        side: 'sell',
+        duration_minutes: 30,
+        max_participation_rate: 0.2,
+        quantity: 2,
+      },
+    );
+    const barrier = orderSubmissionBody(
+      { ...state, orderType: 'barrier' } as never,
+      {
+        quantity: 2,
+        limitPrice: 0,
+        barrierPrice: 105,
+        durationMinutes: 30,
+        participationRate: 0.2,
+      },
+    );
+    assert.deepEqual(barrier, {
+      symbol: 'BTC-USDT',
+      side: 'sell',
+      order_type: 'barrier',
+      quantity: 2,
+      trigger_price: 105,
+      trigger_direction: 'above',
     });
-    const barrier = orderSubmissionBody({ ...state, orderType: 'barrier' } as never, { quantity: 2, limitPrice: 0, barrierPrice: 105, durationMinutes: 30, participationRate: 0.2 });
-    assert.deepEqual(barrier, { symbol: 'BTC-USDT', side: 'sell', order_type: 'barrier', quantity: 2, trigger_price: 105, trigger_direction: 'above' });
   });
 });

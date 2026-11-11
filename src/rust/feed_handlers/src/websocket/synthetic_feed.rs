@@ -32,8 +32,8 @@ mod tests {
         assert_ne!(first_price, next_price);
         assert!(first_price.is_finite() && first_price > 0.0);
         assert_eq!(
-            encode_symbol_price_bytes(&symbol, first_price, f64::NAN, f64::NAN).len(),
-            64
+            encode_symbol_price_bytes(&symbol, first_price, 1234).len(),
+            56
         );
     }
 

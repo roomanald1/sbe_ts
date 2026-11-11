@@ -340,7 +340,6 @@ struct SignalExecutionPlan {
 
 async fn execution_learning_decision(
     state: &AutoTraderState,
-    client: &reqwest::Client,
     context: &str,
     baseline: AutoOrderType,
     signal: &Signal,
@@ -391,8 +390,6 @@ async fn execution_learning_decision(
             BTreeMap::new()
         },
     };
-    let base =
-        std::env::var("LEARNING_SERVICE_URL").unwrap_or_else(|_| "http://127.0.0.1:3010".into());
     let baseline_order_type = request.baseline_order_type.clone();
     let cache_key = format!(
         "execution-decision:{context}:{baseline_order_type}:{risk_appetite:.4}:{}:{}",
@@ -402,8 +399,7 @@ async fn execution_learning_decision(
     let response = cached_learning_response::<strategies::ExecutionLearningResponse>(
         &state.learning_response_cache,
         cache_key,
-        client,
-        format!("{}/execution-decision", base.trim_end_matches('/')),
+        "/execution-decision".to_owned(),
         serde_json::to_value(request).unwrap_or(serde_json::Value::Null),
     )
     .await;
@@ -756,7 +752,6 @@ async fn prepare_signal_execution_plan(
     let execution_learning_started = Instant::now();
     let (execution_learning, imported_execution_learning) = execution_learning_decision(
         state,
-        &state.client,
         &context,
         baseline_type,
         signal,
@@ -945,7 +940,7 @@ mod signal_execution_budget_tests {
         Dashboard {
             best,
             walk_forward: Arc::new(Vec::new()),
-            missed_opportunity_bands: Vec::new(),
+            missed_opportunity_bands: Arc::new(Vec::new()),
             markets: Arc::new(BTreeMap::new()),
             queued_at: None,
             queue_wait_ms: None,

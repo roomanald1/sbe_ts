@@ -114,21 +114,14 @@ fn save_dated_carry(path: &PathBuf, book: &DatedCarryBook) -> Result<(), String>
     persist_dated_carry_book(path, book)
 }
 
-async fn sync_dated_carry_ledger(
-    state: &AutoTraderState,
-    book: &DatedCarryBook,
-) -> Result<(), String> {
-    let position_url = std::env::var("POSITION_MANAGEMENT_URL")
-        .unwrap_or_else(|_| "http://127.0.0.1:3002".into());
-    state
-        .client
-        .post(format!("{position_url}/positions/dated-carry/ledger"))
-        .json(&book.positions)
-        .send()
-        .await
-        .map_err(|error| format!("dated-carry ledger sync failed: {error}"))?
-        .error_for_status()
-        .map_err(|error| format!("dated-carry ledger sync rejected: {error}"))?;
+async fn sync_dated_carry_ledger(book: &DatedCarryBook) -> Result<(), String> {
+    crate::service_rpc::position_send(
+        "POST",
+        "/positions/dated-carry/ledger",
+        serde_json::to_value(&book.positions).map_err(|error| error.to_string())?,
+    )
+    .await
+    .map_err(|error| format!("dated-carry ledger sync failed: {error}"))?;
     Ok(())
 }
 
@@ -238,31 +231,27 @@ async fn receive_dated_carry_signal(
             let mut strategy_input = StrategySignal::dated_carry_entry(
                 &candidate, emitted_at_ms, now_ms, &strategy_parameters,
             );
-            let scouts_url = std::env::var("SCOUTS_SERVICE_URL")
-                .unwrap_or_else(|_| "http://127.0.0.1:3011".into());
-            let evidence_request = scouts::StrategyEvidenceRequest {
-                candidates: vec![scouts::StrategyEvidenceCandidate {
-                    symbol: spot_profile_symbol.clone(),
-                    strategy: Strategy::DatedCarry.as_str().into(),
-                    signal_timestamp_ms: emitted_at_ms,
-                    parameters: strategy_parameters.clone(),
-                }],
+            let learning_rsocket_url = std::env::var("LEARNING_RSOCKET_URL")
+                .unwrap_or_else(|_| "ws://127.0.0.1:10010".into());
+            let evidence_request = strategies::ScoutCandidateBatch {
+                request_id: format!("dated-carry-evidence:{spot_profile_symbol}:{emitted_at_ms}"),
+                mode: strategies::ScoutWorkMode::EvidenceOnly,
+                signals: vec![serde_json::json!({
+                    "symbol": spot_profile_symbol.clone(),
+                    "strategy": Strategy::DatedCarry.as_str(),
+                    "timestamp": emitted_at_ms,
+                    "direction": "bullish",
+                    "strategy_decision": {"strategy_parameters": strategy_parameters.clone()}
+                })],
             };
-            if let Ok(mut evidence) = scouts::request_strategy_walk_forward(
-                &state.client,
-                &scouts_url,
-                &evidence_request,
-            )
-            .await
+            if let Ok(response) =
+                strategies::request_scout_candidate_batch(&learning_rsocket_url, &evidence_request)
+                    .await
             {
-                if let Some(Some(evidence)) = evidence.pop() {
-                    strategy_input.walk_forward_evidence = Some(strategies::StrategyWalkForwardEvidence {
-                        sample_count: evidence.sample_count,
-                        positive_net_rate: Some(evidence.positive_net_rate),
-                        average_net_return_percent: Some(evidence.average_net_return_percent),
-                        last_sample_timestamp_ms: evidence.last_sample_timestamp_ms,
-                    });
-                }
+                strategy_input.walk_forward_evidence = response
+                    .assignments
+                    .into_iter()
+                    .find_map(|assignment| assignment.walk_forward_evidence);
             }
             let entry_decision = Strategy::DatedCarry
                 .evaluate(&strategy_input)
@@ -422,7 +411,7 @@ async fn receive_dated_carry_signal(
     if changed {
         save_dated_carry(&state.dated_carry_path, &book)
             .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error))?;
-        sync_dated_carry_ledger(&state, &book)
+        sync_dated_carry_ledger(&book)
             .await
             .map_err(|error| (StatusCode::SERVICE_UNAVAILABLE, error))?;
     }

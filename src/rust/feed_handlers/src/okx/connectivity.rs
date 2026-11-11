@@ -1,12 +1,11 @@
 use anyhow::Result;
 use bytes::Bytes;
-use dashmap::DashMap;
 use futures_util::{SinkExt, StreamExt, TryStreamExt};
 use reqwest::header::USER_AGENT;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
-    collections::{BTreeMap, HashMap, HashSet, VecDeque},
+    collections::{BTreeMap, HashMap, HashSet},
     sync::{
         Arc, Mutex as StdMutex, OnceLock,
         atomic::{AtomicU64, Ordering},
@@ -25,7 +24,6 @@ use crate::encoders::{SYMBOL_LENGTH, encode_book_depth, encode_symbol_price, enc
 const INITIAL_RECONNECT_DELAY: Duration = Duration::from_secs(1);
 const MAX_RECONNECT_DELAY: Duration = Duration::from_secs(30);
 const STABLE_CONNECTION_DURATION: Duration = Duration::from_secs(60);
-const VOLATILITY_HISTORY_MS: u64 = 300_000;
 const OKX_IDLE_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(20);
 const OKX_PONG_TIMEOUT: Duration = Duration::from_secs(10);
 const OKX_PUBLIC_WS_URL: &str = "wss://ws.okx.com/ws/v5/public";
@@ -44,16 +42,6 @@ async fn wait_for_okx_connection_slot() {
     *next_slot = Instant::now() + OKX_CONNECT_MIN_INTERVAL;
 }
 
-#[derive(Default)]
-pub(crate) struct RollingVolatility {
-    samples: VecDeque<(u64, f64)>,
-    minute_returns: VecDeque<(u64, f64)>,
-    window_returns: VecDeque<(u64, f64)>,
-    minute_squared_sum: f64,
-    window_squared_sum: f64,
-}
-
-include!("volatility_tracking.rs");
 include!("instrument_catalog.rs");
 include!("okx_message_types.rs");
 include!("usd_rate_stream.rs");

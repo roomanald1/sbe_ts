@@ -332,9 +332,16 @@ async fn get_scout_outcomes(
     }
     let now = scout_now_ms();
     let since = now.saturating_sub(7 * 86_400_000);
-    let state = service.scout.data.lock().await;
-    let mut rows = state.scout_instances.values()
-        .filter(|audit| audit["timestamp"].as_u64().unwrap_or_default() >= since)
+    let instances = match load_scout_instances_since(&service.scout.path, since) {
+        Ok(instances) => instances,
+        Err(error) => {
+            return axum::response::Response::builder()
+                .status(axum::http::StatusCode::INTERNAL_SERVER_ERROR)
+                .body(axum::body::Body::from(error.to_string()))
+                .expect("valid Scout outcomes error response");
+        }
+    };
+    let mut rows = instances.values()
         .filter_map(|audit| instance_row(audit, now))
         .collect::<Vec<_>>();
     let sort_by = query.sort_by.as_deref().filter(|field| matches!(*field, "symbol" | "strategy" | "status" | "exitScenario" | "scoutLevelPercent" | "openedAt" | "durationLabel" | "entryPrice" | "markPrice" | "netReturnLabel" | "displayNetReturnPercent" | "comparisonRole" | "pairedDeltaPercent" | "strength")).unwrap_or("openedAt");
@@ -419,6 +426,7 @@ async fn get_scout_outcomes(
 #[cfg(test)]
 mod scout_report_tests {
     use super::*;
+    use http_body_util::BodyExt;
 
     fn audit() -> Value {
         json!({"decision_id":"sample-1","symbol":"BTC-USDT","strategy":"live-trade-flow","direction":"bullish","timestamp":1000,"strength":0.8,"scout_entry_price":100.0,"scout_exit_scenario":"strategy","scout":true})
@@ -438,6 +446,62 @@ mod scout_report_tests {
         assert_eq!(row["status"], "Lost");
         assert_eq!(row["netReturnPercent"], -0.25);
         assert_eq!(row["closedAt"], 1500);
+    }
+
+    #[tokio::test]
+    async fn persisted_scout_report_rows_survive_worker_restart() {
+        let path = std::env::temp_dir().join(format!(
+            "scout-report-restart-{}-{}.sqlite",
+            std::process::id(),
+            scout_now_ms()
+        ));
+        let now = scout_now_ms();
+        let mut state = PersistedState::default();
+        let mut stored = audit();
+        stored["timestamp"] = json!(now);
+        state.scout_instances.insert("sample-1".into(), stored.clone());
+        persist_scout_state(&path, &state, &["scout_instances"]).unwrap();
+
+        let restarted = load_scout_state(&path).unwrap();
+        assert!(restarted.scout_instances.is_empty());
+        let service = ServiceState {
+            learning_rsocket_url: String::new(),
+            insights_rsocket_url: String::new(),
+            auto_trader_rsocket_url: String::new(),
+            strategy_outcomes_by_profile: Arc::clone(&restarted.strategy_outcomes_by_profile),
+            portfolio_instances_by_group: Arc::clone(&restarted.portfolio_instances_by_group),
+            strategy_outcome_profile_index_ready: Arc::new(
+                std::sync::atomic::AtomicBool::new(true),
+            ),
+            live_scout_maximum_duration_ms: Arc::new(std::sync::RwLock::new(BTreeMap::new())),
+            scout_outcomes_cache: Arc::new(Mutex::new(BTreeMap::new())),
+            scout: ScoutState {
+                data: Arc::new(Mutex::new(restarted)),
+                path: path.clone(),
+                flush_lock: Arc::new(Mutex::new(())),
+                flush_scheduled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            },
+        };
+        let response = get_scout_outcomes(
+            State(service),
+            axum::extract::Query(ScoutOutcomesQuery {
+                page: Some(0),
+                page_size: Some(50),
+                source: Some("all".into()),
+                status: None,
+                learning_symbol: None,
+                sort_by: None,
+                sort_direction: None,
+            }),
+        )
+        .await;
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let report: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(report["totalRows"], 1);
+        assert_eq!(report["rows"][0]["decisionId"], "sample-1");
+        assert_eq!(report["rows"][0]["symbol"], "BTC-USDT");
+        assert_eq!(report["rows"][0]["status"], "Open");
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]

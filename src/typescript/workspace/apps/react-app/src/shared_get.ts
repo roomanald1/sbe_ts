@@ -1,3 +1,5 @@
+import { executionRpc, positionRpc } from './position_rsocket';
+
 const pendingGets = new Map<string, Promise<Response>>();
 const cachedGets = new Map<
   string,
@@ -16,7 +18,13 @@ export function sharedGet(url: string, cacheForMs = 0): Promise<Response> {
 
   let pending = pendingGets.get(url);
   if (!pending) {
-    pending = fetch(url)
+    pending = (
+      usesExecutionRSocket(url)
+        ? executionRpc('GET', url)
+        : usesPositionManagementRSocket(url)
+          ? positionRpc('GET', url)
+          : fetch(url)
+    )
       .then(async (response) => {
         if (
           cacheForMs > 0 &&
@@ -36,5 +44,36 @@ export function sharedGet(url: string, cacheForMs = 0): Promise<Response> {
   }
   return pending.then((response) =>
     typeof response.clone === 'function' ? response.clone() : response,
+  );
+}
+function usesExecutionRSocket(url: string): boolean {
+  const path = new URL(
+    url,
+    typeof window === 'undefined' ? 'http://localhost' : window.location.href,
+  ).pathname;
+  return (
+    path.startsWith('/positions/orders') ||
+    path.startsWith('/positions/vwap') ||
+    path.startsWith('/positions/twap') ||
+    path.startsWith('/positions/barriers') ||
+    path.startsWith('/positions/close-profitable')
+  );
+}
+
+function usesPositionManagementRSocket(url: string): boolean {
+  const path = new URL(
+    url,
+    typeof window === 'undefined' ? 'http://localhost' : window.location.href,
+  ).pathname;
+  return (
+    path === '/positions' ||
+    path.startsWith('/positions/trades') ||
+    path.startsWith('/positions/account') ||
+    path.startsWith('/positions/realized-pnl') ||
+    path.startsWith('/positions/fee-') ||
+    path.startsWith('/positions/usd-rates') ||
+    path.startsWith('/positions/hedge-candidates') ||
+    path === '/account' ||
+    path.startsWith('/users/')
   );
 }

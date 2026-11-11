@@ -7,8 +7,8 @@ fn next_retry_delay(retry: Duration) -> Duration {
 pub(super) async fn feed_consumer(sender: mpsc::Sender<SignalEvent>) {
     let mut retry = Duration::from_secs(1);
     loop {
-        let url = std::env::var("FEED_HANDLERS_RSOCKET_URL")
-            .unwrap_or_else(|_| "ws://127.0.0.1:10001".into());
+        let url =
+            std::env::var("INSIGHTS_RSOCKET_URL").unwrap_or_else(|_| "ws://127.0.0.1:10004".into());
         let client = RSocketFactory::connect()
             .transport(WebsocketClientTransport::from(url.as_str()))
             .acceptor(Box::new(|| Box::new(EchoRSocket)))
@@ -20,7 +20,7 @@ pub(super) async fn feed_consumer(sender: mpsc::Sender<SignalEvent>) {
                     .request_stream(Payload::builder().set_data_utf8("signal-events:*").build());
                 crate::service_log!(
                     "INFO",
-                    "Live Signals connected to FeedHandlers event stream"
+                    "Live Signals connected to Insights enriched market-event stream"
                 );
                 retry = Duration::from_secs(1);
                 if !forward_feed_stream(&mut stream, &sender).await {
@@ -30,7 +30,7 @@ pub(super) async fn feed_consumer(sender: mpsc::Sender<SignalEvent>) {
             }
             Err(error) => crate::service_log!(
                 "WARN",
-                "Live Signals could not connect to FeedHandlers: {error:#}"
+                "Live Signals could not connect to Insights: {error:#}"
             ),
         }
         tokio::time::sleep(retry).await;
@@ -74,11 +74,14 @@ mod tests {
 
     fn price_payload() -> Payload {
         let mut bytes = vec![0; 72];
-        bytes[2..4].copy_from_slice(&1_u16.to_le_bytes());
+        bytes[0..2].copy_from_slice(&64_u16.to_le_bytes());
+        bytes[2..4].copy_from_slice(&4_u16.to_le_bytes());
+        bytes[4..6].copy_from_slice(&1_u16.to_le_bytes());
+        bytes[6..8].copy_from_slice(&9_u16.to_le_bytes());
         bytes[8..16].copy_from_slice(b"BTC-USDT");
         bytes[40..48].copy_from_slice(&100.0_f64.to_le_bytes());
-        bytes[48..56].copy_from_slice(&0.1_f64.to_le_bytes());
-        bytes[64..72].copy_from_slice(&1_000_u64.to_le_bytes());
+        bytes[48..56].copy_from_slice(&1_000_u64.to_le_bytes());
+        bytes[56..64].copy_from_slice(&0.1_f64.to_le_bytes());
         Payload::new(Some(Bytes::from(bytes)), None)
     }
 

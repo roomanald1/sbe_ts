@@ -28,6 +28,3 @@ export type Position = {
   estimated_exit_fee_rate: number;
   last_trade_timestamp: number;
 };
-
-
-

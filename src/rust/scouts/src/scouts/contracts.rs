@@ -7,6 +7,7 @@ use axum::{
     routing::{get, post},
 };
 use serde::{Deserialize, Serialize};
+use rusqlite::OptionalExtension;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -33,6 +34,16 @@ pub struct ParameterVariant {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ParameterVariantsBatchRequest {
     pub requests: Vec<ParameterVariantsRequest>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct ParameterVariantsResponse {
+    pub variants: Option<Vec<ParameterVariant>>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct ParameterVariantsBatchResponse {
+    pub responses: Vec<ParameterVariantsResponse>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -122,6 +133,11 @@ pub struct ScoutEntrySelectionRequest {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
+struct ScoutEntrySelectionResponse {
+    candidate_index: Option<usize>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct StrategyEvidenceCandidate {
     pub symbol: String,
     pub strategy: String,
@@ -142,140 +158,6 @@ pub struct StrategyWalkForwardEvidence {
     pub positive_net_rate: f64,
     pub average_net_return_percent: f64,
     pub last_sample_timestamp_ms: u64,
-}
-
-pub async fn request_strategy_walk_forward(
-    client: &reqwest::Client,
-    base_url: &str,
-    request: &StrategyEvidenceRequest,
-) -> Result<Vec<Option<StrategyWalkForwardEvidence>>, String> {
-    let timeout = if request
-        .candidates
-        .iter()
-        .any(|candidate| candidate.strategy == "risk-adjusted-trend-portfolio")
-    {
-        std::time::Duration::from_secs(3)
-    } else {
-        std::time::Duration::from_millis(1_500)
-    };
-    client
-        .post(format!("{}/strategy-walk-forward", base_url.trim_end_matches('/')))
-        .timeout(timeout)
-        .json(request)
-        .send()
-        .await
-        .map_err(|error| error.to_string())?
-        .error_for_status()
-        .map_err(|error| error.to_string())?
-        .json()
-        .await
-        .map_err(|error| error.to_string())
-}
-
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-struct ScoutEntrySelectionResponse {
-    candidate_index: Option<usize>,
-}
-
-pub async fn request_scout_entry_selection(
-    base_url: &str,
-    request: &ScoutEntrySelectionRequest,
-) -> Result<Option<usize>, String> {
-    reqwest::Client::new()
-        .post(format!("{}/select-entry", base_url.trim_end_matches('/')))
-        .timeout(std::time::Duration::from_millis(250))
-        .json(request)
-        .send()
-        .await
-        .map_err(|error| error.to_string())?
-        .error_for_status()
-        .map_err(|error| error.to_string())?
-        .json::<ScoutEntrySelectionResponse>()
-        .await
-        .map(|response| response.candidate_index)
-        .map_err(|error| error.to_string())
-}
-
-pub async fn request_live_candidates(
-    base_url: &str,
-    request: &LiveScoutCandidatesRequest,
-) -> Result<Vec<serde_json::Value>, String> {
-    reqwest::Client::new()
-        .post(format!(
-            "{}/live-candidates",
-            base_url.trim_end_matches('/')
-        ))
-        .timeout(std::time::Duration::from_secs(3))
-        .json(request)
-        .send()
-        .await
-        .map_err(|error| error.to_string())?
-        .error_for_status()
-        .map_err(|error| error.to_string())?
-        .json()
-        .await
-        .map_err(|error| error.to_string())
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-struct ParameterVariantsResponse {
-    variants: Option<Vec<ParameterVariant>>,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-struct ParameterVariantsBatchResponse {
-    responses: Vec<ParameterVariantsResponse>,
-}
-
-/// Generate parameter variants in the Scout process, keeping bounded sweep
-/// work out of AutoTrader's signal and order cycle.
-pub async fn request_parameter_variants(
-    base_url: &str,
-    request: &ParameterVariantsRequest,
-) -> Result<Option<Vec<ParameterVariant>>, String> {
-    reqwest::Client::new()
-        .post(format!("{}/variants", base_url.trim_end_matches('/')))
-        .timeout(std::time::Duration::from_secs(2))
-        .json(request)
-        .send()
-        .await
-        .map_err(|error| error.to_string())?
-        .error_for_status()
-        .map_err(|error| error.to_string())?
-        .json::<ParameterVariantsResponse>()
-        .await
-        .map(|response| response.variants)
-        .map_err(|error| error.to_string())
-}
-
-pub async fn request_parameter_variants_batch(
-    base_url: &str,
-    request: &ParameterVariantsBatchRequest,
-) -> Result<Vec<Option<Vec<ParameterVariant>>>, String> {
-    #[derive(Deserialize)]
-    struct Response {
-        responses: Vec<ParameterVariantsResponse>,
-    }
-    reqwest::Client::new()
-        .post(format!("{}/variants/batch", base_url.trim_end_matches('/')))
-        .timeout(std::time::Duration::from_secs(5))
-        .json(request)
-        .send()
-        .await
-        .map_err(|error| error.to_string())?
-        .error_for_status()
-        .map_err(|error| error.to_string())?
-        .json::<Response>()
-        .await
-        .map(|response| {
-            response
-                .responses
-                .into_iter()
-                .map(|item| item.variants)
-                .collect()
-        })
-        .map_err(|error| error.to_string())
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

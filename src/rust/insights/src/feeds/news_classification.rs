@@ -234,6 +234,8 @@ fn apply_news_signal(snapshot: &mut SignalSnapshot, news: &NewsFeedSnapshot, now
 }
 
 async fn classify_headlines_with_model(articles: &mut [NewsArticle]) {
+    use rsocket_rust::{prelude::*, utils::EchoRSocket};
+    use rsocket_rust_transport_websocket::WebsocketClientTransport;
     if articles.is_empty() { return; }
     #[derive(Deserialize)]
     struct Prediction { direction: String, score: f64, confidence: f64 }
@@ -245,11 +247,24 @@ async fn classify_headlines_with_model(articles: &mut [NewsArticle]) {
         let article = &articles[index];
         serde_json::json!({"title": article.title, "article_text": article.article_text})
     }).collect::<Vec<_>>();
-    let endpoint = std::env::var("NEWS_SENTIMENT_URL").unwrap_or_else(|_| "http://127.0.0.1:3006/classify".to_owned());
-    let client = POSITION_MANAGEMENT_CLIENT.get_or_init(reqwest::Client::new);
-    let response = client.post(endpoint).timeout(Duration::from_secs(45)).json(&input).send().await;
-    let Ok(response) = response.and_then(reqwest::Response::error_for_status) else { return; };
-    let Ok(predictions) = response.json::<Vec<Prediction>>().await else { return; };
+    let endpoint = std::env::var("NEWS_SENTIMENT_RSOCKET_URL")
+        .unwrap_or_else(|_| "ws://127.0.0.1:10012/rsocket".to_owned());
+    let Ok(client) = RSocketFactory::connect()
+        .transport(WebsocketClientTransport::from(endpoint.as_str()))
+        .acceptor(Box::new(|| Box::new(EchoRSocket)))
+        .start()
+        .await else { return; };
+    let request = match serde_json::to_vec(&input) {
+        Ok(request) => request,
+        Err(_) => return,
+    };
+    let response = tokio::time::timeout(
+        Duration::from_secs(45),
+        client.request_response(Payload::builder().set_data(request).build()),
+    ).await;
+    let Ok(Ok(Some(response))) = response else { return; };
+    let Some(response) = response.data() else { return; };
+    let Ok(predictions) = serde_json::from_slice::<Vec<Prediction>>(response.as_ref()) else { return; };
     if predictions.len() != crypto_indexes.len() { return; }
     for (index, prediction) in crypto_indexes.into_iter().zip(predictions) {
         let article = &mut articles[index];

@@ -82,12 +82,13 @@ export function MarketLiquidityComponent({
     ? estimateSlippage(state.book, side, Number(quantity))
     : undefined;
   const rowData = useMemo<LiquidityGridRow[]>(
-    () => state.bands.map((band, index) => ({
-      ...band,
-      bidQuote: band.bidNotional,
-      askQuote: band.askNotional,
-      trend: state.trends[index] ?? 'warming',
-    })),
+    () =>
+      state.bands.map((band, index) => ({
+        ...band,
+        bidQuote: band.bidNotional,
+        askQuote: band.askNotional,
+        trend: state.trends[index] ?? 'warming',
+      })),
     [state.bands, state.trends],
   );
   const displayedRowData = usePausedValue(rowData, paused);
@@ -103,7 +104,8 @@ export function MarketLiquidityComponent({
       {
         field: 'bidSize',
         headerName: 'Bid qty',
-        valueFormatter: ({ value }) => formatForSymbol(value ?? 0, symbol, 'quantity'),
+        valueFormatter: ({ value }) =>
+          formatForSymbol(value ?? 0, symbol, 'quantity'),
       },
       {
         field: 'bidQuote',
@@ -113,7 +115,8 @@ export function MarketLiquidityComponent({
       {
         field: 'askSize',
         headerName: 'Ask qty',
-        valueFormatter: ({ value }) => formatForSymbol(value ?? 0, symbol, 'quantity'),
+        valueFormatter: ({ value }) =>
+          formatForSymbol(value ?? 0, symbol, 'quantity'),
       },
       {
         field: 'askQuote',
@@ -123,7 +126,8 @@ export function MarketLiquidityComponent({
       {
         field: 'imbalance',
         headerName: 'Imbalance',
-        cellClass: ({ value }) => value >= 0 ? 'liquidity-bid' : 'liquidity-ask',
+        cellClass: ({ value }) =>
+          value >= 0 ? 'liquidity-bid' : 'liquidity-ask',
         valueFormatter: ({ value }) => `${((value ?? 0) * 100).toFixed(1)}%`,
       },
       { field: 'trend', headerName: 'Trend (1m)' },
@@ -132,7 +136,10 @@ export function MarketLiquidityComponent({
   );
 
   return (
-    <section className="feed-section liquidity-view" aria-label="Market liquidity">
+    <section
+      className="feed-section liquidity-view"
+      aria-label="Market liquidity"
+    >
       <FeedToolbar title="Market liquidity">
         <label className="chart-symbol-control">
           <span>SYMBOL</span>
@@ -141,18 +148,30 @@ export function MarketLiquidityComponent({
             value={symbol}
             onChange={(event) => onSymbolChange?.(event.target.value)}
           >
-            {symbols.map((item) => <option key={item} value={item}>{item}</option>)}
+            {symbols.map((item) => (
+              <option key={item} value={item}>
+                {item}
+              </option>
+            ))}
           </select>
         </label>
       </FeedToolbar>
-      {state.error && <div className="positions-error" role="alert">{state.error}</div>}
+      {state.error && (
+        <div className="positions-error" role="alert">
+          {state.error}
+        </div>
+      )}
       {!state.book ? (
         <div className="book-popup-message">Waiting for live book data…</div>
       ) : (
         <>
           <div className="liquidity-mid">
             MID
-            <strong>{number.format((state.book.bids[0].price + state.book.asks[0].price) / 2)}</strong>
+            <strong>
+              {number.format(
+                (state.book.bids[0].price + state.book.asks[0].price) / 2,
+              )}
+            </strong>
             <span>Top {state.book.bids.length} levels per side</span>
           </div>
           <div className="data-grid-wrap pnl-grid-wrap liquidity-grid-wrap">
@@ -174,40 +193,87 @@ export function MarketLiquidityComponent({
             <strong>Proposed order slippage</strong>
             <label>
               Side
-              <select value={side} onChange={(event) => setSide(event.target.value as 'buy' | 'sell')}>
+              <select
+                value={side}
+                onChange={(event) =>
+                  setSide(event.target.value as 'buy' | 'sell')
+                }
+              >
                 <option value="buy">Buy</option>
                 <option value="sell">Sell</option>
               </select>
             </label>
             <label>
               Quantity
-              <input type="number" min="0" step="any" value={quantity} onChange={(event) => setQuantity(event.target.value)} />
+              <input
+                type="number"
+                min="0"
+                step="any"
+                value={quantity}
+                onChange={(event) => setQuantity(event.target.value)}
+              />
             </label>
             <span>
-              Average {slippage?.averagePrice === undefined ? '—' : formatForSymbol(slippage.averagePrice, symbol, 'price')}
+              Average{' '}
+              {slippage?.averagePrice === undefined
+                ? '—'
+                : formatForSymbol(slippage.averagePrice, symbol, 'price')}
               {' · '}Slippage {slippage?.slippageBps?.toFixed(2) ?? '—'} bps
             </span>
             {(slippage?.unfilledQuantity ?? 0) > 0 && (
-              <small>{formatForSymbol(slippage!.unfilledQuantity, symbol, 'quantity')} beyond displayed depth.</small>
+              <small>
+                {formatForSymbol(
+                  slippage!.unfilledQuantity,
+                  symbol,
+                  'quantity',
+                )}{' '}
+                beyond displayed depth.
+              </small>
             )}
-            <small>Estimate walks the displayed book; deeper orders may have additional slippage.</small>
+            <small>
+              Estimate walks the displayed book; deeper orders may have
+              additional slippage.
+            </small>
           </div>
           <div className="liquidity-lower">
             <div>
               <h3>Liquidity gaps ≥ 0.1%</h3>
-              {gaps.length ? gaps.slice(0, 6).map((gap, index) => (
-                <p key={index} className={gap.side === 'bid' ? 'liquidity-bid' : 'liquidity-ask'}>
-                  {gap.side.toUpperCase()} {formatForSymbol(gap.from, symbol, 'price')}–{formatForSymbol(gap.to, symbol, 'price')} · {gap.gapPercent.toFixed(3)}%
-                </p>
-              )) : <p>No wide level gaps detected.</p>}
+              {gaps.length ? (
+                gaps.slice(0, 6).map((gap, index) => (
+                  <p
+                    key={index}
+                    className={
+                      gap.side === 'bid' ? 'liquidity-bid' : 'liquidity-ask'
+                    }
+                  >
+                    {gap.side.toUpperCase()}{' '}
+                    {formatForSymbol(gap.from, symbol, 'price')}–
+                    {formatForSymbol(gap.to, symbol, 'price')} ·{' '}
+                    {gap.gapPercent.toFixed(3)}%
+                  </p>
+                ))
+              ) : (
+                <p>No wide level gaps detected.</p>
+              )}
             </div>
             <div>
               <h3>Large or unusual trades</h3>
-              {state.unusualTrades.length ? state.unusualTrades.slice(0, 6).map((trade) => (
-                <p key={trade.tradeId} className={trade.side === 'buy' ? 'liquidity-bid' : 'liquidity-ask'}>
-                  {trade.side.toUpperCase()} {formatForSymbol(trade.size, symbol, 'quantity')} · {quote.format(trade.price * trade.size)} quote
-                </p>
-              )) : <p>Waiting for trades ≥ 10,000 quote or 5× recent median.</p>}
+              {state.unusualTrades.length ? (
+                state.unusualTrades.slice(0, 6).map((trade) => (
+                  <p
+                    key={trade.tradeId}
+                    className={
+                      trade.side === 'buy' ? 'liquidity-bid' : 'liquidity-ask'
+                    }
+                  >
+                    {trade.side.toUpperCase()}{' '}
+                    {formatForSymbol(trade.size, symbol, 'quantity')} ·{' '}
+                    {quote.format(trade.price * trade.size)} quote
+                  </p>
+                ))
+              ) : (
+                <p>Waiting for trades ≥ 10,000 quote or 5× recent median.</p>
+              )}
             </div>
           </div>
         </>

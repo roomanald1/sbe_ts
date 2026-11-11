@@ -84,7 +84,7 @@ pub struct DailyStrategySignalFeatures {
     pub cross_sectional_threshold: Option<f64>,
 }
 
-#[derive(Clone, Copy, Debug, Default, Deserialize, serde::Serialize)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, serde::Serialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct StrategyWalkForwardEvidence {
     pub sample_count: usize,

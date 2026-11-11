@@ -1,0 +1,9 @@
+# Insights
+
+Insights consumes raw ticker batches and market events from FeedHandlers over RSocket. It computes rolling one-minute and five-minute realized volatility from timestamped prices, uses the one-minute value in its signal engine, and publishes enriched price events from its own RSocket server on port 10004. Enriched prices use the distinct `EnrichedSymbolPrice` SBE template (ID 4); FeedHandlers' `SymbolPrice` template (ID 1) remains raw. The `tickers:*` request serves enriched price events to the browser; `signal-events:*` serves those price events together with book and trade events to Live Signals.
+
+Live Signals turns the enriched market-event stream into strategy signals. React keeps its FeedHandlers connection for book, trade, and news feeds and opens a second connection to Insights for price updates and volatility.
+
+Insights also owns signal evaluation, outcome and research storage, news classification, and daily strategy signal workers. RSocket on port 10004 serves market-data streams, port 10007 serves internal service requests, and port 10011 serves browser queries, mutations, UI snapshots, and news snapshots. HTTP on port 3004 is operations-only (health, metrics, and documentation). Exchange and vendor API requests remain HTTP.
+
+Configure the Insights market-event listener with `INSIGHTS_RSOCKET_PORT` (default `10004`), the service RPC listener with `INSIGHTS_RPC_RSOCKET_PORT` (default `10007`), and the browser listener with `INSIGHTS_BROWSER_RSOCKET_PORT` (default `10011`). Live Signals uses `INSIGHTS_RSOCKET_URL` and `INSIGHTS_RPC_RSOCKET_URL`; the React app uses `VITE_INSIGHTS_RSOCKET_URL` and `VITE_INSIGHTS_BROWSER_RSOCKET_URL`. The news-sentiment classifier is called over RSocket request-response; its HTTP listener is for health and process metrics only.

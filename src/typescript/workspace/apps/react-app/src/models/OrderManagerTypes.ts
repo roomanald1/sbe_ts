@@ -27,7 +27,12 @@ export type BarrierOrder = {
   filled_quantity: number;
   trigger_price: number;
   trigger_direction: BarrierDirection;
-  order_kind?: 'barrier' | 'profit-target' | 'stop-market' | 'stop-limit' | 'trailing-stop';
+  order_kind?:
+    | 'barrier'
+    | 'profit-target'
+    | 'stop-market'
+    | 'stop-limit'
+    | 'trailing-stop';
   execution_type?: 'market' | 'limit';
   limit_price?: number;
   trailing_amount?: number;
@@ -38,7 +43,10 @@ export type BarrierOrder = {
   average_execution_price?: number;
   error?: string;
 };
-export type OrdersResponse = { orders: RestingOrder[]; barrier_orders?: BarrierOrder[] };
+export type OrdersResponse = {
+  orders: RestingOrder[];
+  barrier_orders?: BarrierOrder[];
+};
 export type VwapRun = {
   id: string;
   symbol: string;

@@ -1,35 +1,15 @@
 async fn apply_protection_order_failure_reasons(
-    client: &reqwest::Client,
-    position_url: &str,
     orders: &mut [TraderOrder],
     fallback_open_symbols: &[String],
 ) {
-    let ledger_open_symbols = match client
-        .get(format!("{position_url}/positions?source=auto"))
-        .send()
+    let ledger_open_symbols = crate::service_rpc::position_get("/positions?source=auto")
         .await
-        .and_then(reqwest::Response::error_for_status)
-    {
-        Ok(response) => match response.json::<serde_json::Value>().await {
-            Ok(body) => body["positions"]
-                .as_array()
-                .map(|positions| {
-                    positions
-                        .iter()
-                        .filter(|position| {
-                            position["quantity"]
-                                .as_f64()
-                                .is_some_and(|quantity| quantity.abs() > 1e-12)
-                        })
-                        .filter_map(|position| {
-                            position["symbol"].as_str().map(str::to_owned)
-                        })
-                        .collect::<BTreeSet<_>>()
-                }),
-            Err(_) => None,
-        },
-        Err(_) => None,
-    }
+        .ok()
+        .and_then(|body| body["positions"].as_array().map(|positions| {
+            positions.iter().filter(|position| {
+                position["quantity"].as_f64().is_some_and(|quantity| quantity.abs() > 1e-12)
+            }).filter_map(|position| position["symbol"].as_str().map(str::to_owned)).collect::<BTreeSet<_>>()
+        }))
     .unwrap_or_else(|| fallback_open_symbols.iter().cloned().collect());
 
     for order in orders.iter_mut().filter(|order| {
@@ -79,22 +59,16 @@ async fn get_activity(State(state): State<AutoTraderState>) -> Json<ActivityResp
                 carry_details: Some(position),
             }
         }));
-    let position_url =
-        std::env::var("POSITION_MANAGEMENT_URL").unwrap_or_else(|_| "http://127.0.0.1:3002".into());
     apply_protection_order_failure_reasons(
-        &state.client,
-        &position_url,
         &mut orders,
         &open_position_symbols,
     )
     .await;
     let (realized_pnl, realized_pnl_by_quote, pnl_breakdown) =
-        await_activity_realized_pnl(&state.client, &position_url, &mut orders).await;
+        await_activity_realized_pnl(&mut orders).await;
     // Closed-position ledger rows are supplied by the backend activity contract
     // so the client does not have to infer strategy ownership from fill history.
     let closed_ledger_rows = fetch_closed_ledger_rows(
-        &state.client,
-        &position_url,
         today_start,
         &orders,
         &strategy_positions,

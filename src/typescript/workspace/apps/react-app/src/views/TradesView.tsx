@@ -86,15 +86,16 @@ export function TradesViewComponent({
   }, [model]);
 
   const rowData = useMemo<TradeGridRow[]>(
-    () => state.trades.map((trade) => {
-      const existingRow = gridRowsByTrade.current.get(trade);
-      if (existingRow) return existingRow;
+    () =>
+      state.trades.map((trade) => {
+        const existingRow = gridRowsByTrade.current.get(trade);
+        if (existingRow) return existingRow;
 
-      const { timestamp, ...tradeData } = trade;
-      const row = { ...tradeData, time: new Date(timestamp) };
-      gridRowsByTrade.current.set(trade, row);
-      return row;
-    }),
+        const { timestamp, ...tradeData } = trade;
+        const row = { ...tradeData, time: new Date(timestamp) };
+        gridRowsByTrade.current.set(trade, row);
+        return row;
+      }),
     [state.trades],
   );
   const displayedRowData = usePausedValue(rowData, paused);

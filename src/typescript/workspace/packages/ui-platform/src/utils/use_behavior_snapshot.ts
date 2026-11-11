@@ -3,7 +3,7 @@ import type { BehaviorSubject } from 'rxjs';
 
 export function useBehaviorSnapshot<T, S = T>(
   observable: BehaviorSubject<T>,
-  selector: (value: T) => S = ((value: T) => value as unknown as S),
+  selector: (value: T) => S = (value: T) => value as unknown as S,
 ): S {
   const selectorRef = useRef(selector);
   selectorRef.current = selector;
@@ -16,7 +16,10 @@ export function useBehaviorSnapshot<T, S = T>(
   // until the store changes. Keep the selected value cached instead of
   // recomputing it during React's render checks.
   if (snapshotRef.current.source !== observable) {
-    snapshotRef.current = { source: observable, value: selector(observable.value) };
+    snapshotRef.current = {
+      source: observable,
+      value: selector(observable.value),
+    };
   }
 
   const subscribe = useCallback(
