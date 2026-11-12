@@ -1,27 +1,43 @@
 name: sbe-system
-x-scout-worker-env: &scout-worker-env
+x-strategy-x-scout-env: &strategy-x-scout-env
+  STRATEGY_X_WORKER_ROLE: scout
   SCOUT_WORKER_LISTEN_ADDR: 0.0.0.0:10200
+  STRATEGY_X_METRICS_LISTEN_ADDR: 0.0.0.0:10202
   SCOUT_WORKER_MAX_IN_FLIGHT: ${SCOUT_WORKER_MAX_IN_FLIGHT:-1}
   SCOUT_WORKER_MAX_PAYLOAD_BYTES: ${SCOUT_WORKER_MAX_PAYLOAD_BYTES:-1048576}
   SCOUT_WORKER_MAX_PERSISTED_RESULTS: ${SCOUT_WORKER_MAX_PERSISTED_RESULTS:-10000}
   LEARNING_RSOCKET_URL: ws://learning:10010
   INSIGHTS_RPC_RSOCKET_URL: ws://insights:10007
   AUTO_TRADER_RSOCKET_URL: ws://auto-trader:10006
-x-scout-worker-base: &scout-worker-base
-  build: { context: .., dockerfile: system/Dockerfile.rust, args: { CRATE: scouts, BIN: scouts } }
+x-strategy-x-scout-base: &strategy-x-scout-base
+  build: { context: .., dockerfile: system/Dockerfile.rust, args: { CRATE: strategy, BIN: strategy, FEATURES: service } }
   profiles: [scout-workers]
-  volumes: ["scouts-state:/data"]
+  volumes: ["strategy-x-state:/data"]
   depends_on: [learning, insights, auto-trader]
   deploy:
     resources:
       limits:
-        cpus: ${SCOUT_WORKER_CPU_LIMIT:-0.75}
-        memory: ${SCOUT_WORKER_MEMORY_LIMIT:-2G}
+        cpus: ${SCOUT_WORKER_CPU_LIMIT:-0.25}
+        memory: ${SCOUT_WORKER_MEMORY_LIMIT:-1536M}
+  cpu_shares: ${SCOUT_WORKER_CPU_SHARES:-512}
   restart: unless-stopped
-  healthcheck: { test: ["CMD", "bash", "-c", "</dev/tcp/127.0.0.1/10200"], interval: 15s, timeout: 3s, retries: 5 }
+  healthcheck: { test: ["CMD", "bash", "-c", "</dev/tcp/127.0.0.1/10202"], interval: 15s, timeout: 3s, retries: 5 }
+x-strategy-x-live-env: &strategy-x-live-env
+  STRATEGY_X_METRICS_LISTEN_ADDR: 0.0.0.0:10202
+x-strategy-x-live-base: &strategy-x-live-base
+  build: { context: .., dockerfile: system/Dockerfile.rust, args: { CRATE: strategy, BIN: strategy, FEATURES: service } }
+  restart: unless-stopped
+  deploy:
+    resources:
+      limits:
+        cpus: ${STRATEGY_X_LIVE_CPU_LIMIT:-0.25}
+        memory: ${STRATEGY_X_LIVE_MEMORY_LIMIT:-256M}
+  cpu_shares: ${STRATEGY_X_LIVE_CPU_SHARES:-2048}
+  healthcheck: { test: ["CMD", "bash", "-c", "</dev/tcp/127.0.0.1/10202"], interval: 10s, timeout: 3s, retries: 5 }
 services:
   feed-handlers:
     build: { context: .., dockerfile: system/Dockerfile.rust, args: { CRATE: feed_handlers, BIN: feed_handlers } }
+    deploy: { resources: { limits: { memory: "${FEED_HANDLERS_MEMORY_LIMIT:-512M}" } } }
     environment: { SERVICE_LOG_DIR: /var/log/app }
     volumes: ["../logs:/var/log/app"]
     ports: ["3001:3001", "10001:10001"]
@@ -29,6 +45,7 @@ services:
     healthcheck: { test: ["CMD", "bash", "-c", "</dev/tcp/127.0.0.1/3001"], interval: 15s, timeout: 3s, retries: 5 }
   binance-feed:
     build: { context: .., dockerfile: system/Dockerfile.rust, args: { CRATE: binance_feed, BIN: binance_feed } }
+    deploy: { resources: { limits: { memory: "${BINANCE_FEED_MEMORY_LIMIT:-256M}" } } }
     environment: { SERVICE_LOG_DIR: /var/log/app, PORT: 3012, RSOCKET_PORT: 10002 }
     volumes: ["../logs:/var/log/app"]
     ports: ["3012:3012"]
@@ -36,6 +53,7 @@ services:
     healthcheck: { test: ["CMD", "bash", "-c", "</dev/tcp/127.0.0.1/3012"], interval: 15s, timeout: 3s, retries: 5 }
   position-management:
     build: { context: .., dockerfile: system/Dockerfile.rust, args: { CRATE: position_management, BIN: position_management } }
+    deploy: { resources: { limits: { memory: "${POSITION_MANAGEMENT_MEMORY_LIMIT:-8G}" } } }
     environment: { SERVICE_LOG_DIR: /var/log/app, FEED_HANDLERS_RSOCKET_URL: ws://feed-handlers:10001, POSITION_MANAGEMENT_RSOCKET_PORT: 10005, POSITIONS_FILE: /data/positions.json }
     volumes: ["../logs:/var/log/app", "position-management-data:/data"]
     ports: ["3002:3002", "10005:10005"]
@@ -43,6 +61,7 @@ services:
     healthcheck: { test: ["CMD", "bash", "-c", "</dev/tcp/127.0.0.1/3002"], interval: 15s, timeout: 3s, retries: 5 }
   execution:
     build: { context: .., dockerfile: system/Dockerfile.rust, args: { CRATE: execution, BIN: execution } }
+    deploy: { resources: { limits: { memory: "${EXECUTION_MEMORY_LIMIT:-256M}" } } }
     environment: { SERVICE_LOG_DIR: /var/log/app, POSITION_MANAGEMENT_RSOCKET_URL: ws://position-management:10005, EXECUTION_RSOCKET_PORT: 10006 }
     volumes: ["../logs:/var/log/app"]
     ports: ["3003:3003", "10006:10006"]
@@ -50,36 +69,51 @@ services:
     healthcheck: { test: ["CMD", "bash", "-c", "</dev/tcp/127.0.0.1/3003"], interval: 15s, timeout: 3s, retries: 5 }
   insights:
     build: { context: .., dockerfile: system/Dockerfile.rust, args: { CRATE: insights, BIN: insights } }
-    environment: { SERVICE_LOG_DIR: /var/log/app, BINANCE_FEED_RSOCKET_URL: ws://binance-feed:10002, FEED_HANDLERS_RSOCKET_URL: ws://feed-handlers:10001, POSITION_MANAGEMENT_RSOCKET_URL: ws://position-management:10005, AUTO_TRADER_RSOCKET_URL: ws://auto-trader:10006, INSIGHTS_RPC_RSOCKET_PORT: 10007, INSIGHTS_BROWSER_RSOCKET_PORT: 10011, NEWS_SENTIMENT_RSOCKET_URL: ws://news-sentiment:10012/rsocket, LEARNING_RSOCKET_URL: ws://learning:10010, SIGNALS_FILE: /data/signals.jsonl, INSIGHTS_RESEARCH_ONLY: "true" }
+    deploy: { resources: { limits: { memory: "${INSIGHTS_MEMORY_LIMIT:-4G}" } } }
+    environment: { SERVICE_LOG_DIR: /var/log/app, BINANCE_FEED_RSOCKET_URL: ws://binance-feed:10002, FEED_HANDLERS_RSOCKET_URL: ws://feed-handlers:10001, POSITION_MANAGEMENT_RSOCKET_URL: ws://position-management:10005, AUTO_TRADER_RSOCKET_URL: ws://auto-trader:10006, INSIGHTS_RPC_RSOCKET_PORT: 10007, INSIGHTS_BROWSER_RSOCKET_PORT: 10011, NEWS_SENTIMENT_RSOCKET_URL: ws://news-sentiment:10012/rsocket, LEARNING_RSOCKET_URL: ws://learning:10010, SIGNALS_FILE: /data/signals.jsonl }
     volumes: ["../logs:/var/log/app", "insights-data:/data"]
     depends_on: [binance-feed, news-sentiment]
     ports: ["3004:3004", "10004:10004", "10011:10011"]
     restart: unless-stopped
     healthcheck: { test: ["CMD", "bash", "-c", "</dev/tcp/127.0.0.1/3004"], interval: 15s, timeout: 3s, retries: 5 }
-  live-signals:
-    build: { context: .., dockerfile: system/Dockerfile.rust, args: { CRATE: live_signals, BIN: live_signals } }
-    environment: { SERVICE_LOG_DIR: /var/log/app, INSIGHTS_RSOCKET_URL: ws://insights:10004, INSIGHTS_RPC_RSOCKET_URL: ws://insights:10007, AUTO_TRADER_RSOCKET_URL: ws://auto-trader:10006, LEARNING_RSOCKET_URL: ws://learning:10010 }
-    depends_on: [feed-handlers, insights, auto-trader, learning]
-    volumes: ["../logs:/var/log/app"]
-    ports: ["3007:3007"]
-    restart: unless-stopped
-    healthcheck: { test: ["CMD", "bash", "-c", "</dev/tcp/127.0.0.1/3007"], interval: 15s, timeout: 3s, retries: 5 }
   insights-maintenance:
     build: { context: .., dockerfile: system/Dockerfile.rust, args: { CRATE: insights, BIN: insights-maintenance } }
+    deploy: { resources: { limits: { memory: "${INSIGHTS_MAINTENANCE_MEMORY_LIMIT:-256M}" } } }
     environment: { SERVICE_LOG_DIR: /var/log/app, SIGNALS_FILE: /data/signals.jsonl }
     volumes: ["../logs:/var/log/app", "insights-data:/data"]
     depends_on: { insights: { condition: service_healthy } }
     restart: unless-stopped
   auto-trader:
     build: { context: .., dockerfile: system/Dockerfile.rust, args: { CRATE: auto_trader, BIN: auto_trader } }
-    environment: { SERVICE_LOG_DIR: /var/log/app, AUTO_TRADER_RSOCKET_PORT: 10006, AUTO_TRADER_LIVE_CONTEXT_REFRESH_SECONDS: "${AUTO_TRADER_LIVE_CONTEXT_REFRESH_SECONDS:-30}", AUTO_TRADER_MAX_PENDING_LIVE_SYMBOLS: "${AUTO_TRADER_MAX_PENDING_LIVE_SYMBOLS:-4096}", POSITION_MANAGEMENT_RSOCKET_URL: ws://position-management:10005, INSIGHTS_RPC_RSOCKET_URL: ws://insights:10007, INSIGHTS_BROWSER_RSOCKET_URL: ws://insights:10011, LEARNING_RSOCKET_URL: ws://learning:10010, AUTO_TRADER_STATE_FILE: /data/auto_trader_state.json }
+    deploy: { resources: { limits: { memory: "${AUTO_TRADER_MEMORY_LIMIT:-3G}" } } }
+    environment: { SERVICE_LOG_DIR: /var/log/app, AUTO_TRADER_RSOCKET_PORT: 10006, AUTO_TRADER_LIVE_CONTEXT_REFRESH_SECONDS: "${AUTO_TRADER_LIVE_CONTEXT_REFRESH_SECONDS:-30}", AUTO_TRADER_MAX_PENDING_LIVE_SYMBOLS: "${AUTO_TRADER_MAX_PENDING_LIVE_SYMBOLS:-256}", POSITION_MANAGEMENT_RSOCKET_URL: ws://position-management:10005, INSIGHTS_RPC_RSOCKET_URL: ws://insights:10007, INSIGHTS_BROWSER_RSOCKET_URL: ws://insights:10011, LEARNING_RSOCKET_URL: ws://learning:10010, AUTO_TRADER_STATE_FILE: /data/auto_trader_state.json, AUTO_TRADER_LIVE_WORKER_ENDPOINTS: "live-momentum=ws://strategy-x-live-momentum:10201,live-trade-flow=ws://strategy-x-live-trade-flow:10201,live-order-book=ws://strategy-x-live-order-book:10201,live-vwap-dislocation=ws://strategy-x-live-vwap-dislocation:10201,live-absorption-pressure=ws://strategy-x-live-absorption-pressure:10201,donchian-55-btc200=ws://strategy-x-live-donchian-55-btc200:10201,donchian-20-sma200=ws://strategy-x-live-donchian-20-sma200:10201,donchian-20-btc200=ws://strategy-x-live-donchian-20-btc200:10201,donchian-10-btc200=ws://strategy-x-live-donchian-10-btc200:10201,donchian-20-btc200-hold3=ws://strategy-x-live-donchian-20-btc200-hold3:10201,risk-adjusted-trend-portfolio=ws://strategy-x-live-risk-adjusted-trend-portfolio:10201,trend-sleeves-btc200=ws://strategy-x-live-trend-sleeves-btc200:10201,trend-50-200=ws://strategy-x-live-trend-50-200:10201,relative-strength-90-sma200=ws://strategy-x-live-relative-strength-90-sma200:10201,risk-adjusted-monthly-momentum=ws://strategy-x-live-risk-adjusted-monthly-momentum:10201,rsi2-oversold-rebound=ws://strategy-x-live-rsi2-oversold-rebound:10201,dated-futures-carry=ws://strategy-x-live-dated-futures-carry:10201" }
     volumes: ["../logs:/var/log/app", "position-management-data:/data"]
-    depends_on: [position-management, insights]
+    depends_on:
+      position-management: { condition: service_healthy }
+      insights: { condition: service_healthy }
+      strategy-x-live-momentum: { condition: service_healthy }
+      strategy-x-live-trade-flow: { condition: service_healthy }
+      strategy-x-live-order-book: { condition: service_healthy }
+      strategy-x-live-vwap-dislocation: { condition: service_healthy }
+      strategy-x-live-absorption-pressure: { condition: service_healthy }
+      strategy-x-live-donchian-55-btc200: { condition: service_healthy }
+      strategy-x-live-donchian-20-sma200: { condition: service_healthy }
+      strategy-x-live-donchian-20-btc200: { condition: service_healthy }
+      strategy-x-live-donchian-10-btc200: { condition: service_healthy }
+      strategy-x-live-donchian-20-btc200-hold3: { condition: service_healthy }
+      strategy-x-live-risk-adjusted-trend-portfolio: { condition: service_healthy }
+      strategy-x-live-trend-sleeves-btc200: { condition: service_healthy }
+      strategy-x-live-trend-50-200: { condition: service_healthy }
+      strategy-x-live-relative-strength-90-sma200: { condition: service_healthy }
+      strategy-x-live-risk-adjusted-monthly-momentum: { condition: service_healthy }
+      strategy-x-live-rsi2-oversold-rebound: { condition: service_healthy }
+      strategy-x-live-dated-futures-carry: { condition: service_healthy }
     ports: ["3005:3005", "10008:10006"]
     restart: unless-stopped
     healthcheck: { test: ["CMD", "bash", "-c", "</dev/tcp/127.0.0.1/3005"], interval: 15s, timeout: 3s, retries: 5 }
   news-sentiment:
     build: { context: ../src/rust/insights, dockerfile: scripts/Dockerfile.news-sentiment }
+    deploy: { resources: { limits: { memory: "${NEWS_SENTIMENT_MEMORY_LIMIT:-512M}" } } }
     environment: { NEWS_SENTIMENT_HOST: 0.0.0.0, NEWS_SENTIMENT_OPS_PORT: 3006, NEWS_SENTIMENT_RSOCKET_PORT: 10012, HF_HOME: /models }
     volumes: ["news-models:/models"]
     ports: ["3006:3006"]
@@ -87,85 +121,134 @@ services:
     healthcheck: { test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:3006/health')"], interval: 30s, timeout: 5s, retries: 5, start_period: 120s }
   learning:
     build: { context: .., dockerfile: system/Dockerfile.rust, args: { CRATE: learning, BIN: learning } }
+    deploy: { resources: { limits: { memory: "${LEARNING_MEMORY_LIMIT:-10G}" } } }
     environment:
       LEARNING_LISTEN_ADDR: 0.0.0.0:3010
       LEARNING_RSOCKET_LISTEN_ADDR: 0.0.0.0:10010
       LEARNING_STATE_FILE: /data/learning_state.sqlite
+      MALLOC_ARENA_MAX: ${LEARNING_MALLOC_ARENA_MAX:-4}
       SCOUT_WORKERS_ENABLED: ${SCOUT_WORKERS_ENABLED:-true}
       SCOUT_COORDINATOR_MAX_BATCH_SIGNALS: ${SCOUT_COORDINATOR_MAX_BATCH_SIGNALS:-64}
       SCOUT_COORDINATOR_MAX_ASSIGNMENTS: ${SCOUT_COORDINATOR_MAX_ASSIGNMENTS:-512}
       SCOUT_COORDINATOR_MAX_BATCH_BYTES: ${SCOUT_COORDINATOR_MAX_BATCH_BYTES:-8388608}
       SCOUT_COORDINATOR_WORKER_TIMEOUT_MS: ${SCOUT_COORDINATOR_WORKER_TIMEOUT_MS:-3000}
-      SCOUT_WORKER_ENDPOINTS: "live-momentum=ws://scout-worker-live-momentum:10200;live-trade-flow=ws://scout-worker-live-trade-flow:10200;live-order-book=ws://scout-worker-live-order-book:10200;live-vwap-dislocation=ws://scout-worker-live-vwap-dislocation:10200;live-absorption-pressure=ws://scout-worker-live-absorption-pressure:10200;donchian-55-btc200=ws://scout-worker-donchian-55-btc200:10200;donchian-20-sma200=ws://scout-worker-donchian-20-sma200:10200;donchian-20-btc200=ws://scout-worker-donchian-20-btc200:10200;donchian-10-btc200=ws://scout-worker-donchian-10-btc200:10200;donchian-20-btc200-hold3=ws://scout-worker-donchian-20-btc200-hold3:10200;risk-adjusted-trend-portfolio=ws://scout-worker-risk-adjusted-trend-portfolio:10200;trend-sleeves-btc200=ws://scout-worker-trend-sleeves-btc200:10200;trend-50-200=ws://scout-worker-trend-50-200:10200;relative-strength-90-sma200=ws://scout-worker-relative-strength-90-sma200:10200;risk-adjusted-monthly-momentum=ws://scout-worker-risk-adjusted-monthly-momentum:10200;rsi2-oversold-rebound=ws://scout-worker-rsi2-oversold-rebound:10200;dated-futures-carry=ws://scout-worker-dated-futures-carry:10200"
+      SCOUT_WORKER_ENDPOINTS: "live-momentum=ws://strategy-x-scout-live-momentum:10200;live-trade-flow=ws://strategy-x-scout-live-trade-flow:10200;live-order-book=ws://strategy-x-scout-live-order-book:10200;live-vwap-dislocation=ws://strategy-x-scout-live-vwap-dislocation:10200;live-absorption-pressure=ws://strategy-x-scout-live-absorption-pressure:10200;donchian-55-btc200=ws://strategy-x-scout-donchian-55-btc200:10200;donchian-20-sma200=ws://strategy-x-scout-donchian-20-sma200:10200;donchian-20-btc200=ws://strategy-x-scout-donchian-20-btc200:10200;donchian-10-btc200=ws://strategy-x-scout-donchian-10-btc200:10200;donchian-20-btc200-hold3=ws://strategy-x-scout-donchian-20-btc200-hold3:10200;risk-adjusted-trend-portfolio=ws://strategy-x-scout-risk-adjusted-trend-portfolio:10200;trend-sleeves-btc200=ws://strategy-x-scout-trend-sleeves-btc200:10200;trend-50-200=ws://strategy-x-scout-trend-50-200:10200;relative-strength-90-sma200=ws://strategy-x-scout-relative-strength-90-sma200:10200;risk-adjusted-monthly-momentum=ws://strategy-x-scout-risk-adjusted-monthly-momentum:10200;rsi2-oversold-rebound=ws://strategy-x-scout-rsi2-oversold-rebound:10200;dated-futures-carry=ws://strategy-x-scout-dated-futures-carry:10200"
     volumes: ["learning-data:/data"]
     ports: ["3010:3010", "10010:10010"]
     restart: unless-stopped
     healthcheck: { test: ["CMD", "bash", "-c", "</dev/tcp/127.0.0.1/3010"], interval: 15s, timeout: 3s, retries: 5 }
-  scouts:
-    build: { context: .., dockerfile: system/Dockerfile.rust, args: { CRATE: scouts, BIN: scouts } }
-    environment: { SCOUTS_LISTEN_ADDR: 0.0.0.0:3011 }
-    ports: ["3011:3011"]
-    restart: unless-stopped
-    healthcheck: { test: ["CMD", "bash", "-c", "</dev/tcp/127.0.0.1/3011"], interval: 15s, timeout: 3s, retries: 5 }
-  scout-worker-live-momentum:
-    <<: *scout-worker-base
-    environment: { <<: *scout-worker-env, SCOUT_WORKER_STRATEGY: live-momentum, SCOUT_WORKER_STATE_PATH: /data/workers/live-momentum.sqlite }
-  scout-worker-live-trade-flow:
-    <<: *scout-worker-base
-    environment: { <<: *scout-worker-env, SCOUT_WORKER_STRATEGY: live-trade-flow, SCOUT_WORKER_STATE_PATH: /data/workers/live-trade-flow.sqlite }
-  scout-worker-live-order-book:
-    <<: *scout-worker-base
-    environment: { <<: *scout-worker-env, SCOUT_WORKER_STRATEGY: live-order-book, SCOUT_WORKER_STATE_PATH: /data/workers/live-order-book.sqlite }
-  scout-worker-live-vwap-dislocation:
-    <<: *scout-worker-base
-    environment: { <<: *scout-worker-env, SCOUT_WORKER_STRATEGY: live-vwap-dislocation, SCOUT_WORKER_STATE_PATH: /data/workers/live-vwap-dislocation.sqlite }
-  scout-worker-live-absorption-pressure:
-    <<: *scout-worker-base
-    environment: { <<: *scout-worker-env, SCOUT_WORKER_STRATEGY: live-absorption-pressure, SCOUT_WORKER_STATE_PATH: /data/workers/live-absorption-pressure.sqlite }
-  scout-worker-donchian-55-btc200:
-    <<: *scout-worker-base
-    environment: { <<: *scout-worker-env, SCOUT_WORKER_STRATEGY: donchian-55-btc200, SCOUT_WORKER_STATE_PATH: /data/workers/donchian-55-btc200.sqlite }
-  scout-worker-donchian-20-sma200:
-    <<: *scout-worker-base
-    environment: { <<: *scout-worker-env, SCOUT_WORKER_STRATEGY: donchian-20-sma200, SCOUT_WORKER_STATE_PATH: /data/workers/donchian-20-sma200.sqlite }
-  scout-worker-donchian-20-btc200:
-    <<: *scout-worker-base
-    environment: { <<: *scout-worker-env, SCOUT_WORKER_STRATEGY: donchian-20-btc200, SCOUT_WORKER_STATE_PATH: /data/workers/donchian-20-btc200.sqlite }
-  scout-worker-donchian-10-btc200:
-    <<: *scout-worker-base
-    environment: { <<: *scout-worker-env, SCOUT_WORKER_STRATEGY: donchian-10-btc200, SCOUT_WORKER_STATE_PATH: /data/workers/donchian-10-btc200.sqlite }
-  scout-worker-donchian-20-btc200-hold3:
-    <<: *scout-worker-base
-    environment: { <<: *scout-worker-env, SCOUT_WORKER_STRATEGY: donchian-20-btc200-hold3, SCOUT_WORKER_STATE_PATH: /data/workers/donchian-20-btc200-hold3.sqlite }
-  scout-worker-risk-adjusted-trend-portfolio:
-    <<: *scout-worker-base
-    environment: { <<: *scout-worker-env, SCOUT_WORKER_STRATEGY: risk-adjusted-trend-portfolio, SCOUT_WORKER_STATE_PATH: /data/workers/risk-adjusted-trend-portfolio.sqlite }
-  scout-worker-trend-sleeves-btc200:
-    <<: *scout-worker-base
-    environment: { <<: *scout-worker-env, SCOUT_WORKER_STRATEGY: trend-sleeves-btc200, SCOUT_WORKER_STATE_PATH: /data/workers/trend-sleeves-btc200.sqlite }
-  scout-worker-trend-50-200:
-    <<: *scout-worker-base
-    environment: { <<: *scout-worker-env, SCOUT_WORKER_STRATEGY: trend-50-200, SCOUT_WORKER_STATE_PATH: /data/workers/trend-50-200.sqlite }
-  scout-worker-relative-strength-90-sma200:
-    <<: *scout-worker-base
-    environment: { <<: *scout-worker-env, SCOUT_WORKER_STRATEGY: relative-strength-90-sma200, SCOUT_WORKER_STATE_PATH: /data/workers/relative-strength-90-sma200.sqlite }
-  scout-worker-risk-adjusted-monthly-momentum:
-    <<: *scout-worker-base
-    environment: { <<: *scout-worker-env, SCOUT_WORKER_STRATEGY: risk-adjusted-monthly-momentum, SCOUT_WORKER_STATE_PATH: /data/workers/risk-adjusted-monthly-momentum.sqlite }
-  scout-worker-rsi2-oversold-rebound:
-    <<: *scout-worker-base
-    environment: { <<: *scout-worker-env, SCOUT_WORKER_STRATEGY: rsi2-oversold-rebound, SCOUT_WORKER_STATE_PATH: /data/workers/rsi2-oversold-rebound.sqlite }
-  scout-worker-dated-futures-carry:
-    <<: *scout-worker-base
-    environment: { <<: *scout-worker-env, SCOUT_WORKER_STRATEGY: dated-futures-carry, SCOUT_WORKER_STATE_PATH: /data/workers/dated-futures-carry.sqlite }
+  strategy-x-live-momentum:
+    <<: *strategy-x-live-base
+    environment: { <<: *strategy-x-live-env, STRATEGY_X_WORKER_ROLE: live, STRATEGY_X_WORKER_STRATEGY: live-momentum, STRATEGY_X_LIVE_LISTEN_ADDR: 0.0.0.0:10201, STRATEGY_X_LIVE_MAX_IN_FLIGHT: "32", STRATEGY_X_LIVE_MAX_PAYLOAD_BYTES: "262144" }
+  strategy-x-scout-live-momentum:
+    <<: *strategy-x-scout-base
+    environment: { <<: *strategy-x-scout-env, STRATEGY_X_WORKER_STRATEGY: live-momentum, SCOUT_WORKER_STATE_PATH: /data/workers/live-momentum.sqlite }
+  strategy-x-live-trade-flow:
+    <<: *strategy-x-live-base
+    environment: { <<: *strategy-x-live-env, STRATEGY_X_WORKER_ROLE: live, STRATEGY_X_WORKER_STRATEGY: live-trade-flow, STRATEGY_X_LIVE_LISTEN_ADDR: 0.0.0.0:10201, STRATEGY_X_LIVE_MAX_IN_FLIGHT: "32", STRATEGY_X_LIVE_MAX_PAYLOAD_BYTES: "262144" }
+  strategy-x-scout-live-trade-flow:
+    <<: *strategy-x-scout-base
+    environment: { <<: *strategy-x-scout-env, STRATEGY_X_WORKER_STRATEGY: live-trade-flow, SCOUT_WORKER_STATE_PATH: /data/workers/live-trade-flow.sqlite }
+  strategy-x-live-order-book:
+    <<: *strategy-x-live-base
+    environment: { <<: *strategy-x-live-env, STRATEGY_X_WORKER_ROLE: live, STRATEGY_X_WORKER_STRATEGY: live-order-book, STRATEGY_X_LIVE_LISTEN_ADDR: 0.0.0.0:10201, STRATEGY_X_LIVE_MAX_IN_FLIGHT: "32", STRATEGY_X_LIVE_MAX_PAYLOAD_BYTES: "262144" }
+  strategy-x-scout-live-order-book:
+    <<: *strategy-x-scout-base
+    environment: { <<: *strategy-x-scout-env, STRATEGY_X_WORKER_STRATEGY: live-order-book, SCOUT_WORKER_STATE_PATH: /data/workers/live-order-book.sqlite }
+  strategy-x-live-vwap-dislocation:
+    <<: *strategy-x-live-base
+    environment: { <<: *strategy-x-live-env, STRATEGY_X_WORKER_ROLE: live, STRATEGY_X_WORKER_STRATEGY: live-vwap-dislocation, STRATEGY_X_LIVE_LISTEN_ADDR: 0.0.0.0:10201, STRATEGY_X_LIVE_MAX_IN_FLIGHT: "32", STRATEGY_X_LIVE_MAX_PAYLOAD_BYTES: "262144" }
+  strategy-x-scout-live-vwap-dislocation:
+    <<: *strategy-x-scout-base
+    environment: { <<: *strategy-x-scout-env, STRATEGY_X_WORKER_STRATEGY: live-vwap-dislocation, SCOUT_WORKER_STATE_PATH: /data/workers/live-vwap-dislocation.sqlite }
+  strategy-x-live-absorption-pressure:
+    <<: *strategy-x-live-base
+    environment: { <<: *strategy-x-live-env, STRATEGY_X_WORKER_ROLE: live, STRATEGY_X_WORKER_STRATEGY: live-absorption-pressure, STRATEGY_X_LIVE_LISTEN_ADDR: 0.0.0.0:10201, STRATEGY_X_LIVE_MAX_IN_FLIGHT: "32", STRATEGY_X_LIVE_MAX_PAYLOAD_BYTES: "262144" }
+  strategy-x-scout-live-absorption-pressure:
+    <<: *strategy-x-scout-base
+    environment: { <<: *strategy-x-scout-env, STRATEGY_X_WORKER_STRATEGY: live-absorption-pressure, SCOUT_WORKER_STATE_PATH: /data/workers/live-absorption-pressure.sqlite }
+  strategy-x-live-donchian-55-btc200:
+    <<: *strategy-x-live-base
+    environment: { <<: *strategy-x-live-env, STRATEGY_X_WORKER_ROLE: live, STRATEGY_X_WORKER_STRATEGY: donchian-55-btc200, STRATEGY_X_LIVE_LISTEN_ADDR: 0.0.0.0:10201, STRATEGY_X_LIVE_MAX_IN_FLIGHT: "32", STRATEGY_X_LIVE_MAX_PAYLOAD_BYTES: "262144" }
+  strategy-x-scout-donchian-55-btc200:
+    <<: *strategy-x-scout-base
+    environment: { <<: *strategy-x-scout-env, STRATEGY_X_WORKER_STRATEGY: donchian-55-btc200, SCOUT_WORKER_STATE_PATH: /data/workers/donchian-55-btc200.sqlite }
+  strategy-x-live-donchian-20-sma200:
+    <<: *strategy-x-live-base
+    environment: { <<: *strategy-x-live-env, STRATEGY_X_WORKER_ROLE: live, STRATEGY_X_WORKER_STRATEGY: donchian-20-sma200, STRATEGY_X_LIVE_LISTEN_ADDR: 0.0.0.0:10201, STRATEGY_X_LIVE_MAX_IN_FLIGHT: "32", STRATEGY_X_LIVE_MAX_PAYLOAD_BYTES: "262144" }
+  strategy-x-scout-donchian-20-sma200:
+    <<: *strategy-x-scout-base
+    environment: { <<: *strategy-x-scout-env, STRATEGY_X_WORKER_STRATEGY: donchian-20-sma200, SCOUT_WORKER_STATE_PATH: /data/workers/donchian-20-sma200.sqlite }
+  strategy-x-live-donchian-20-btc200:
+    <<: *strategy-x-live-base
+    environment: { <<: *strategy-x-live-env, STRATEGY_X_WORKER_ROLE: live, STRATEGY_X_WORKER_STRATEGY: donchian-20-btc200, STRATEGY_X_LIVE_LISTEN_ADDR: 0.0.0.0:10201, STRATEGY_X_LIVE_MAX_IN_FLIGHT: "32", STRATEGY_X_LIVE_MAX_PAYLOAD_BYTES: "262144" }
+  strategy-x-scout-donchian-20-btc200:
+    <<: *strategy-x-scout-base
+    environment: { <<: *strategy-x-scout-env, STRATEGY_X_WORKER_STRATEGY: donchian-20-btc200, SCOUT_WORKER_STATE_PATH: /data/workers/donchian-20-btc200.sqlite }
+  strategy-x-live-donchian-10-btc200:
+    <<: *strategy-x-live-base
+    environment: { <<: *strategy-x-live-env, STRATEGY_X_WORKER_ROLE: live, STRATEGY_X_WORKER_STRATEGY: donchian-10-btc200, STRATEGY_X_LIVE_LISTEN_ADDR: 0.0.0.0:10201, STRATEGY_X_LIVE_MAX_IN_FLIGHT: "32", STRATEGY_X_LIVE_MAX_PAYLOAD_BYTES: "262144" }
+  strategy-x-scout-donchian-10-btc200:
+    <<: *strategy-x-scout-base
+    environment: { <<: *strategy-x-scout-env, STRATEGY_X_WORKER_STRATEGY: donchian-10-btc200, SCOUT_WORKER_STATE_PATH: /data/workers/donchian-10-btc200.sqlite }
+  strategy-x-live-donchian-20-btc200-hold3:
+    <<: *strategy-x-live-base
+    environment: { <<: *strategy-x-live-env, STRATEGY_X_WORKER_ROLE: live, STRATEGY_X_WORKER_STRATEGY: donchian-20-btc200-hold3, STRATEGY_X_LIVE_LISTEN_ADDR: 0.0.0.0:10201, STRATEGY_X_LIVE_MAX_IN_FLIGHT: "32", STRATEGY_X_LIVE_MAX_PAYLOAD_BYTES: "262144" }
+  strategy-x-scout-donchian-20-btc200-hold3:
+    <<: *strategy-x-scout-base
+    environment: { <<: *strategy-x-scout-env, STRATEGY_X_WORKER_STRATEGY: donchian-20-btc200-hold3, SCOUT_WORKER_STATE_PATH: /data/workers/donchian-20-btc200-hold3.sqlite }
+  strategy-x-live-risk-adjusted-trend-portfolio:
+    <<: *strategy-x-live-base
+    environment: { <<: *strategy-x-live-env, STRATEGY_X_WORKER_ROLE: live, STRATEGY_X_WORKER_STRATEGY: risk-adjusted-trend-portfolio, STRATEGY_X_LIVE_LISTEN_ADDR: 0.0.0.0:10201, STRATEGY_X_LIVE_MAX_IN_FLIGHT: "32", STRATEGY_X_LIVE_MAX_PAYLOAD_BYTES: "262144" }
+  strategy-x-scout-risk-adjusted-trend-portfolio:
+    <<: *strategy-x-scout-base
+    environment: { <<: *strategy-x-scout-env, STRATEGY_X_WORKER_STRATEGY: risk-adjusted-trend-portfolio, SCOUT_WORKER_STATE_PATH: /data/workers/risk-adjusted-trend-portfolio.sqlite }
+  strategy-x-live-trend-sleeves-btc200:
+    <<: *strategy-x-live-base
+    environment: { <<: *strategy-x-live-env, STRATEGY_X_WORKER_ROLE: live, STRATEGY_X_WORKER_STRATEGY: trend-sleeves-btc200, STRATEGY_X_LIVE_LISTEN_ADDR: 0.0.0.0:10201, STRATEGY_X_LIVE_MAX_IN_FLIGHT: "32", STRATEGY_X_LIVE_MAX_PAYLOAD_BYTES: "262144" }
+  strategy-x-scout-trend-sleeves-btc200:
+    <<: *strategy-x-scout-base
+    environment: { <<: *strategy-x-scout-env, STRATEGY_X_WORKER_STRATEGY: trend-sleeves-btc200, SCOUT_WORKER_STATE_PATH: /data/workers/trend-sleeves-btc200.sqlite }
+  strategy-x-live-trend-50-200:
+    <<: *strategy-x-live-base
+    environment: { <<: *strategy-x-live-env, STRATEGY_X_WORKER_ROLE: live, STRATEGY_X_WORKER_STRATEGY: trend-50-200, STRATEGY_X_LIVE_LISTEN_ADDR: 0.0.0.0:10201, STRATEGY_X_LIVE_MAX_IN_FLIGHT: "32", STRATEGY_X_LIVE_MAX_PAYLOAD_BYTES: "262144" }
+  strategy-x-scout-trend-50-200:
+    <<: *strategy-x-scout-base
+    environment: { <<: *strategy-x-scout-env, STRATEGY_X_WORKER_STRATEGY: trend-50-200, SCOUT_WORKER_STATE_PATH: /data/workers/trend-50-200.sqlite }
+  strategy-x-live-relative-strength-90-sma200:
+    <<: *strategy-x-live-base
+    environment: { <<: *strategy-x-live-env, STRATEGY_X_WORKER_ROLE: live, STRATEGY_X_WORKER_STRATEGY: relative-strength-90-sma200, STRATEGY_X_LIVE_LISTEN_ADDR: 0.0.0.0:10201, STRATEGY_X_LIVE_MAX_IN_FLIGHT: "32", STRATEGY_X_LIVE_MAX_PAYLOAD_BYTES: "262144" }
+  strategy-x-scout-relative-strength-90-sma200:
+    <<: *strategy-x-scout-base
+    environment: { <<: *strategy-x-scout-env, STRATEGY_X_WORKER_STRATEGY: relative-strength-90-sma200, SCOUT_WORKER_STATE_PATH: /data/workers/relative-strength-90-sma200.sqlite }
+  strategy-x-live-risk-adjusted-monthly-momentum:
+    <<: *strategy-x-live-base
+    environment: { <<: *strategy-x-live-env, STRATEGY_X_WORKER_ROLE: live, STRATEGY_X_WORKER_STRATEGY: risk-adjusted-monthly-momentum, STRATEGY_X_LIVE_LISTEN_ADDR: 0.0.0.0:10201, STRATEGY_X_LIVE_MAX_IN_FLIGHT: "32", STRATEGY_X_LIVE_MAX_PAYLOAD_BYTES: "262144" }
+  strategy-x-scout-risk-adjusted-monthly-momentum:
+    <<: *strategy-x-scout-base
+    environment: { <<: *strategy-x-scout-env, STRATEGY_X_WORKER_STRATEGY: risk-adjusted-monthly-momentum, SCOUT_WORKER_STATE_PATH: /data/workers/risk-adjusted-monthly-momentum.sqlite }
+  strategy-x-live-rsi2-oversold-rebound:
+    <<: *strategy-x-live-base
+    environment: { <<: *strategy-x-live-env, STRATEGY_X_WORKER_ROLE: live, STRATEGY_X_WORKER_STRATEGY: rsi2-oversold-rebound, STRATEGY_X_LIVE_LISTEN_ADDR: 0.0.0.0:10201, STRATEGY_X_LIVE_MAX_IN_FLIGHT: "32", STRATEGY_X_LIVE_MAX_PAYLOAD_BYTES: "262144" }
+  strategy-x-scout-rsi2-oversold-rebound:
+    <<: *strategy-x-scout-base
+    environment: { <<: *strategy-x-scout-env, STRATEGY_X_WORKER_STRATEGY: rsi2-oversold-rebound, SCOUT_WORKER_STATE_PATH: /data/workers/rsi2-oversold-rebound.sqlite }
+  strategy-x-live-dated-futures-carry:
+    <<: *strategy-x-live-base
+    environment: { <<: *strategy-x-live-env, STRATEGY_X_WORKER_ROLE: live, STRATEGY_X_WORKER_STRATEGY: dated-futures-carry, STRATEGY_X_LIVE_LISTEN_ADDR: 0.0.0.0:10201, STRATEGY_X_LIVE_MAX_IN_FLIGHT: "32", STRATEGY_X_LIVE_MAX_PAYLOAD_BYTES: "262144" }
+  strategy-x-scout-dated-futures-carry:
+    <<: *strategy-x-scout-base
+    environment: { <<: *strategy-x-scout-env, STRATEGY_X_WORKER_STRATEGY: dated-futures-carry, SCOUT_WORKER_STATE_PATH: /data/workers/dated-futures-carry.sqlite }
   web:
     build: { context: .., dockerfile: system/Dockerfile.web }
+    deploy: { resources: { limits: { memory: "${WEB_MEMORY_LIMIT:-1G}" } } }
     working_dir: /app/apps/react-app
     command: ["npm", "run", "dev", "--", "--host", "0.0.0.0", "--port", "5173", "--strictPort"]
     volumes:
       - "${REPO_ROOT:-..}/src/typescript/workspace/apps/react-app:/app/apps/react-app"
       - /app/apps/react-app/node_modules
     environment:
+      NODE_OPTIONS: --max-old-space-size=768
       VITE_RSOCKET_URL: ws://localhost:10001
       VITE_INSIGHTS_RSOCKET_URL: ws://localhost:10004
       VITE_INSIGHTS_BROWSER_RSOCKET_URL: ws://localhost:10011
@@ -183,5 +266,5 @@ volumes:
     name: sbe-insights-data
   learning-data:
     name: sbe-learning-data
-  scouts-state:
+  strategy-x-state:
     name: sbe-scouts-state

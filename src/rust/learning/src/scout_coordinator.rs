@@ -4,14 +4,17 @@ use futures_util::{Stream, stream};
 use http_body_util::BodyExt;
 use rsocket_rust::{prelude::*, utils::EchoRSocket};
 use rsocket_rust_transport_websocket::{WebsocketClientTransport, WebsocketServerTransport};
-use std::{collections::BTreeMap, pin::Pin, time::Duration};
-use strategies::{
-    ScoutCandidateBatch, ScoutCandidateBatchResult, ScoutCoordinatorRequest,
+use std::{collections::BTreeMap, pin::Pin, sync::Arc, time::Duration};
+use strategy::{
+    MAX_REPLAY_SIGNALS, ScoutCandidateBatch, ScoutCandidateBatchResult, ScoutCoordinatorRequest,
     ScoutCoordinatorResponse, ScoutCoordinatorRouteCommand, ScoutCoordinatorRouteResult,
-    ScoutFeedbackAcknowledgement, ScoutWorkAssignment, ScoutWorkResult, ScoutWorkerHttpMethod,
-    ScoutWorkerRequest, ScoutWorkerResponse, ScoutWorkerRouteCommand, ScoutWorkerRouteResult,
-    Strategy, StrategyProfile,
+    ScoutFeedbackAcknowledgement, ScoutWorkAssignment, ScoutWorkDecision, ScoutWorkMode,
+    ScoutWorkResult, ScoutWorkerHttpMethod, ScoutWorkerRequest, ScoutWorkerResponse,
+    ScoutWorkerRouteCommand, ScoutWorkerRouteResult, Strategy, StrategyProfile,
+    StrategyReplayPoint, StrategyReplayRequest, StrategyReplayResponse,
+    request_scout_service_route,
 };
+use tokio::sync::Mutex as AsyncMutex;
 use tower::ServiceExt;
 
 use crate::ServiceState;
@@ -20,6 +23,128 @@ const DEFAULT_MAX_SCOUT_BATCH_SIGNALS: usize = 64;
 const DEFAULT_MAX_SCOUT_ASSIGNMENTS: usize = 512;
 const DEFAULT_MAX_SCOUT_BATCH_BYTES: usize = 8 * 1024 * 1024;
 const DEFAULT_WORKER_TIMEOUT_MS: usize = 3_000;
+const DEFAULT_REPLAY_WORKER_TIMEOUT_MS: usize = 10_000;
+const MAX_REPLAY_TOTAL_SIGNALS: usize = 10_000;
+const MAX_REPLAY_TOTAL_PAGES: usize = 128;
+const MAX_REPLAY_TOTAL_RECORDS_SCANNED: usize = 524_288;
+const MAX_REPLAY_TOTAL_MS: u64 = 24 * 60 * 60 * 1_000;
+const MAX_REPLAY_SIGNAL_GAP_MS: u64 = 30_000;
+
+fn strategy_replay_horizons_ms(strategy: &str) -> Option<Vec<u64>> {
+    if !matches!(
+        strategy,
+        "live-momentum"
+            | "live-trade-flow"
+            | "live-order-book"
+            | "live-vwap-dislocation"
+            | "live-absorption-pressure"
+    ) {
+        return None;
+    }
+    let default = vec![5 * 60_000, 30 * 60_000, 2 * 60 * 60_000, 8 * 60 * 60_000];
+    let environment_name = format!(
+        "LEARNING_REPLAY_HORIZONS_{}",
+        strategy.to_ascii_uppercase().replace('-', "_")
+    );
+    let Ok(value) = std::env::var(environment_name) else {
+        return Some(default);
+    };
+    let horizons = value
+        .split(',')
+        .filter_map(|part| part.trim().parse::<u64>().ok())
+        .collect::<Vec<_>>();
+    (horizons.len() == 4
+        && horizons
+            .iter()
+            .all(|value| *value > 0 && *value <= MAX_REPLAY_TOTAL_MS)
+        && horizons.windows(2).all(|window| window[0] < window[1]))
+    .then_some(horizons)
+}
+
+fn missed_opportunity_band(
+    job: &crate::MissedOpportunityJob,
+    horizon_ms: u64,
+    result: &crate::MissedOpportunityHorizon,
+    gate: &str,
+    threshold: f64,
+) -> Option<strategy::ContextMissedOpportunityBand> {
+    if !result.complete || !threshold.is_finite() {
+        return None;
+    }
+    let markout = result
+        .gross_directional_return_percent
+        .filter(|value| value.is_finite())?;
+    Some(strategy::ContextMissedOpportunityBand {
+        gate: gate.into(),
+        threshold,
+        horizon_seconds: horizon_ms / 1_000,
+        sample_count: 1,
+        average_net_return_percent: None,
+        positive_net_rate: None,
+        time_to_profit_sample_count: 0,
+        time_to_profit_rate: None,
+        average_time_to_profit_seconds: None,
+        stop_target_sample_count: 0,
+        stop_target_average_net_return_percent: None,
+        stop_target_positive_net_rate: None,
+        symbol: Some(job.symbol.clone()),
+        direction: Some(job.direction.clone()),
+        strategy: Some(job.strategy.clone()),
+        profile_id: Some(job.profile_id.clone()),
+        market_context: Some(job.learning_context.clone()),
+        complete: true,
+        gross_directional_markout_percent: Some(markout),
+        event_id: Some(job.event_id.clone()),
+        observed_at_ms: job.observed_at_ms,
+    })
+}
+
+fn encode_query_component(value: &str) -> String {
+    let mut encoded = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.') {
+            encoded.push(byte as char);
+        } else {
+            encoded.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    encoded
+}
+
+fn gross_return_from_exit(context: &crate::TradeReplayContext, mark: f64) -> f64 {
+    let direction = if context.side.eq_ignore_ascii_case("long") {
+        1.0
+    } else {
+        -1.0
+    };
+    (mark / context.exit_price - 1.0) * direction * 100.0
+}
+
+fn classify_replay_exit(
+    complete: bool,
+    entry_found: bool,
+    position_open: bool,
+    counterfactual_exit_ms: Option<u64>,
+    actual_exit_ms: u64,
+) -> &'static str {
+    if !complete || !entry_found {
+        return "indeterminate";
+    }
+    if let Some(exit_ms) = counterfactual_exit_ms {
+        let difference = exit_ms as i128 - actual_exit_ms as i128;
+        if difference.abs() <= 20_000 {
+            "on_time"
+        } else if difference > 0 {
+            "early"
+        } else {
+            "late"
+        }
+    } else if position_open {
+        "early"
+    } else {
+        "indeterminate"
+    }
+}
 
 #[derive(Clone)]
 pub struct ScoutCoordinator {
@@ -30,7 +155,10 @@ pub struct ScoutCoordinator {
     max_assignments: usize,
     max_batch_bytes: usize,
     worker_timeout: Duration,
+    replay_worker_timeout: Duration,
     enabled: bool,
+    insights_rsocket_url: String,
+    replay_gate: Arc<AsyncMutex<()>>,
 }
 
 impl ScoutCoordinator {
@@ -60,14 +188,35 @@ impl ScoutCoordinator {
                 "SCOUT_COORDINATOR_WORKER_TIMEOUT_MS",
                 DEFAULT_WORKER_TIMEOUT_MS,
             )? as u64),
+            replay_worker_timeout: Duration::from_millis(env_limit(
+                "LEARNING_REPLAY_WORKER_TIMEOUT_MS",
+                DEFAULT_REPLAY_WORKER_TIMEOUT_MS,
+            )? as u64),
             enabled: std::env::var("SCOUT_WORKERS_ENABLED")
                 .map(|value| value.eq_ignore_ascii_case("true"))
                 .unwrap_or(true),
+            insights_rsocket_url: std::env::var("INSIGHTS_RPC_RSOCKET_URL")
+                .unwrap_or_else(|_| "ws://insights:10007".into()),
+            replay_gate: Arc::new(AsyncMutex::new(())),
         })
     }
 
     pub async fn serve(self, address: String) -> anyhow::Result<()> {
         let responder = CoordinatorResponder(self);
+        let replay_coordinator = responder.0.clone();
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(Duration::from_secs(1));
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                ticker.tick().await;
+                if let Err(error) = replay_coordinator.process_next_strategy_replay().await {
+                    eprintln!("Learning strategy replay worker failed: {error:#}");
+                }
+                if let Err(error) = replay_coordinator.process_next_missed_opportunity().await {
+                    eprintln!("Learning missed-opportunity worker failed: {error:#}");
+                }
+            }
+        });
         eprintln!("Learning Scout coordinator listening on ws://{address}");
         RSocketFactory::receive()
             .transport(WebsocketServerTransport::from(address))
@@ -98,12 +247,20 @@ impl ScoutCoordinator {
 
         let state = self.state.state.lock().await;
         let mut assignments = Vec::new();
+        let mut results = Vec::new();
         for (signal_index, signal) in request.signals.iter().enumerate() {
             let symbol = signal["symbol"]
                 .as_str()
                 .filter(|symbol| !symbol.is_empty())
                 .context("Scout signal is missing its symbol")?;
-            for profile in selected_profiles(&state, symbol, signal)? {
+            let mut profiles = selected_profiles(&state, symbol, signal)?;
+            if request.mode == ScoutWorkMode::EvidenceOnly {
+                let Some(parameters) = requested_profile_parameters(signal) else {
+                    continue;
+                };
+                profiles.retain(|profile| profile.parameters == parameters);
+            }
+            for profile in profiles {
                 let strategy = Strategy::from_name(&profile.strategy).with_context(|| {
                     format!("Learning profile has unknown strategy {}", profile.strategy)
                 })?;
@@ -128,6 +285,19 @@ impl ScoutCoordinator {
                         profile.profile_id,
                         direction
                     );
+                    let evidence =
+                        walk_forward_evidence(&state, &profile, signal_timestamp_ms(signal));
+                    if request.mode == ScoutWorkMode::EvidenceOnly {
+                        results.push(ScoutWorkResult {
+                            assignment_id,
+                            strategy,
+                            symbol: symbol.to_owned(),
+                            decision: ScoutWorkDecision::NotEvaluated,
+                            candidate: compact_evidence_candidate(signal, &profile),
+                            walk_forward_evidence: evidence,
+                        });
+                        continue;
+                    }
                     assignments.push((
                         endpoint.clone(),
                         ScoutWorkAssignment {
@@ -138,14 +308,14 @@ impl ScoutCoordinator {
                             parameters: profile.parameters.clone(),
                             candidate,
                         },
-                        walk_forward_evidence(&state, &profile, signal_timestamp_ms(signal)),
+                        evidence,
                     ));
                 }
             }
         }
         drop(state);
 
-        let mut results = Vec::with_capacity(assignments.len());
+        results.reserve(assignments.len());
         for (endpoint, assignment, evidence) in assignments {
             let expected_id = assignment.assignment_id.clone();
             let expected_strategy = assignment.strategy;
@@ -166,6 +336,611 @@ impl ScoutCoordinator {
             request_id: request.request_id,
             assignments: results,
         })
+    }
+
+    async fn replay_strategy(
+        &self,
+        request: StrategyReplayRequest,
+    ) -> anyhow::Result<StrategyReplayResponse> {
+        if request.job_id.trim().is_empty()
+            || request.points.is_empty()
+            || request.points.len() > MAX_REPLAY_SIGNALS
+        {
+            bail!("strategy replay request is outside its configured bounds");
+        }
+        let endpoint = self
+            .worker_endpoints
+            .get(request.strategy.as_str())
+            .with_context(|| {
+                format!(
+                    "no RSocket worker configured for {}",
+                    request.strategy.as_str()
+                )
+            })?;
+        let expected_job_id = request.job_id.clone();
+        let expected_strategy = request.strategy;
+        let expected_symbol = request.symbol.clone();
+        let expected_profile_id = request.profile_id.clone();
+        let response = tokio::time::timeout(
+            self.replay_worker_timeout,
+            dispatch_strategy_replay(endpoint, &request),
+        )
+        .await
+        .context("strategy replay worker timed out")??;
+        if response.job_id != expected_job_id
+            || response.strategy != expected_strategy
+            || response.symbol != expected_symbol
+            || response.profile_id != expected_profile_id
+            || response.evaluated_count != response.decisions.len()
+        {
+            bail!("strategy replay worker returned a mismatched result");
+        }
+        Ok(response)
+    }
+
+    async fn process_next_strategy_replay(&self) -> anyhow::Result<()> {
+        if !self.enabled {
+            return Ok(());
+        }
+        let Ok(_permit) = self.replay_gate.try_lock() else {
+            return Ok(());
+        };
+        let mut job = {
+            let mut state = self.state.state.lock().await;
+            let Some(event_id) = state
+                .strategy_replay_jobs
+                .values()
+                .filter(|job| job.status == crate::StrategyReplayStatus::Pending)
+                .min_by_key(|job| (job.created_at_ms, job.event_id.clone()))
+                .map(|job| job.event_id.clone())
+            else {
+                return Ok(());
+            };
+            let job = state
+                .strategy_replay_jobs
+                .get_mut(&event_id)
+                .expect("selected replay job exists");
+            job.status = crate::StrategyReplayStatus::Running;
+            job.attempts = job.attempts.saturating_add(1);
+            job.updated_at_ms = crate::now_ms();
+            let job = job.clone();
+            crate::persist(&self.state.path, &state).map_err(|error| anyhow::anyhow!(error.1))?;
+            job
+        };
+        match self.run_strategy_replay(&mut job).await {
+            Ok((status, result, reason)) => {
+                job.status = status;
+                job.result = result;
+                job.reason = reason;
+            }
+            Err(error) => {
+                job.status = crate::StrategyReplayStatus::Failed;
+                job.reason = Some(error.to_string());
+            }
+        }
+        job.updated_at_ms = crate::now_ms();
+        self.save_strategy_replay_job(&job).await?;
+        Ok(())
+    }
+
+    async fn process_next_missed_opportunity(&self) -> anyhow::Result<()> {
+        if !self.enabled {
+            return Ok(());
+        }
+        let mut job = {
+            let mut state = self.state.state.lock().await;
+            let now = crate::now_ms();
+            let Some(event_id) = state
+                .missed_opportunity_jobs
+                .values()
+                .filter(|job| {
+                    job.status == crate::StrategyReplayStatus::Pending
+                        && strategy_replay_horizons_ms(&job.strategy).is_some_and(|horizons| {
+                            horizons
+                                .last()
+                                .is_some_and(|last| now >= job.observed_at_ms.saturating_add(*last))
+                        })
+                })
+                .min_by_key(|job| (job.observed_at_ms, job.event_id.clone()))
+                .map(|job| job.event_id.clone())
+            else {
+                return Ok(());
+            };
+            let job = state
+                .missed_opportunity_jobs
+                .get_mut(&event_id)
+                .expect("selected missed-opportunity job exists");
+            job.status = crate::StrategyReplayStatus::Running;
+            let job = job.clone();
+            crate::persist(&self.state.path, &state).map_err(|error| anyhow::anyhow!(error.1))?;
+            job
+        };
+        let horizons = strategy_replay_horizons_ms(&job.strategy)
+            .context("strategy has no configured missed-opportunity horizons")?;
+        let result = self
+            .run_missed_opportunity_history(&mut job, &horizons)
+            .await;
+        match result {
+            Ok(()) => {
+                job.status = crate::StrategyReplayStatus::Completed;
+                job.reason = None;
+            }
+            Err(error) => {
+                job.status = crate::StrategyReplayStatus::Unsupported;
+                job.reason = Some(error.to_string());
+            }
+        }
+        let mut state = self.state.state.lock().await;
+        if job.status == crate::StrategyReplayStatus::Completed {
+            for (&horizon_ms, result) in &job.horizons {
+                for (gate, threshold) in [("score", job.score.abs()), ("strength", job.strength)] {
+                    let Some(band) =
+                        missed_opportunity_band(&job, horizon_ms, result, gate, threshold)
+                    else {
+                        continue;
+                    };
+                    state.missed_opportunity_bands.retain(|existing| {
+                        !(existing.event_id == band.event_id
+                            && existing.gate == band.gate
+                            && existing.horizon_seconds == band.horizon_seconds)
+                    });
+                    state.missed_opportunity_bands.push(band);
+                }
+            }
+            if state.missed_opportunity_bands.len() > 2_000 {
+                let excess = state.missed_opportunity_bands.len() - 2_000;
+                state.missed_opportunity_bands.drain(..excess);
+            }
+        }
+        state
+            .missed_opportunity_jobs
+            .insert(job.event_id.clone(), job);
+        crate::persist(&self.state.path, &state).map_err(|error| anyhow::anyhow!(error.1))?;
+        Ok(())
+    }
+
+    async fn run_missed_opportunity_history(
+        &self,
+        job: &mut crate::MissedOpportunityJob,
+        horizons: &[u64],
+    ) -> anyhow::Result<()> {
+        let through_ms = job
+            .observed_at_ms
+            .saturating_add(*horizons.last().context("horizons are empty")?);
+        let mut more = true;
+        let mut last_signal = job.coverage_through_ms;
+        while more {
+            if job.pages_scanned >= 20 {
+                bail!("missed-opportunity history exceeded its page cap");
+            }
+            let cursor = job
+                .history_cursor
+                .as_ref()
+                .map(|cursor| format!("&cursor={cursor}"))
+                .unwrap_or_default();
+            let path = format!(
+                "/internal/strategy-snapshot-history?symbol={}&fromMs={}&throughMs={}&limit=512{}",
+                encode_query_component(&job.symbol),
+                job.observed_at_ms,
+                through_ms,
+                cursor
+            );
+            let route = ScoutCoordinatorRouteCommand {
+                request_id: format!("{}:missed:{}", job.event_id, job.pages_scanned),
+                strategy: None,
+                method: ScoutWorkerHttpMethod::Get,
+                path,
+                payload: serde_json::Value::Null,
+            };
+            let page = request_scout_service_route(&self.insights_rsocket_url, &route).await?;
+            if page.status != 200 {
+                bail!(
+                    "Insights missed-opportunity history returned HTTP {}",
+                    page.status
+                );
+            }
+            let records = page.body["records"]
+                .as_array()
+                .context("history response omitted records")?;
+            for record in records {
+                let timestamp = record["snapshot"]["timestamp"]
+                    .as_u64()
+                    .context("history record omitted timestamp")?;
+                if let Some(previous) = last_signal {
+                    if timestamp <= previous {
+                        bail!("history timestamps are not strictly ordered");
+                    }
+                    if timestamp.saturating_sub(previous) > MAX_REPLAY_SIGNAL_GAP_MS {
+                        job.cadence_gap_detected = true;
+                        job.cadence_gap_at_ms.get_or_insert(previous);
+                    }
+                }
+                last_signal = Some(timestamp);
+                job.coverage_start_ms.get_or_insert(timestamp);
+                job.coverage_through_ms = Some(timestamp);
+                let Some(bid) = record["topBid"]
+                    .as_f64()
+                    .filter(|price| price.is_finite() && *price > 0.0)
+                else {
+                    continue;
+                };
+                let Some(ask) = record["topAsk"]
+                    .as_f64()
+                    .filter(|price| price.is_finite() && *price >= bid)
+                else {
+                    continue;
+                };
+                let mark = (bid + ask) / 2.0;
+                if job.reference_price.is_none()
+                    && timestamp.abs_diff(job.observed_at_ms) <= MAX_REPLAY_SIGNAL_GAP_MS
+                {
+                    job.reference_price = Some(if job.direction == "bullish" { ask } else { bid });
+                }
+                for horizon in horizons {
+                    let target = job.observed_at_ms.saturating_add(*horizon);
+                    if timestamp.abs_diff(target) <= MAX_REPLAY_SIGNAL_GAP_MS {
+                        let replace = job
+                            .horizons
+                            .get(horizon)
+                            .and_then(|sample| sample.timestamp_ms)
+                            .is_none_or(|old| old.abs_diff(target) > timestamp.abs_diff(target));
+                        if replace {
+                            let direction = if job.direction == "bullish" {
+                                1.0
+                            } else {
+                                -1.0
+                            };
+                            job.horizons.insert(
+                                *horizon,
+                                crate::MissedOpportunityHorizon {
+                                    mark_price: Some(mark),
+                                    timestamp_ms: Some(timestamp),
+                                    gross_directional_return_percent: job.reference_price.map(
+                                        |reference| (mark / reference - 1.0) * direction * 100.0,
+                                    ),
+                                    complete: false,
+                                },
+                            );
+                        }
+                    }
+                }
+            }
+            job.corrupt_records = job
+                .corrupt_records
+                .saturating_add(page.body["corruptRecords"].as_u64().unwrap_or_default() as usize);
+            job.archived_days_unscanned = job.archived_days_unscanned.max(
+                page.body["archivedDaysUnscanned"]
+                    .as_u64()
+                    .unwrap_or_default() as usize,
+            );
+            job.archived_days_unavailable = job.archived_days_unavailable.max(
+                page.body["archivedDaysUnavailable"]
+                    .as_u64()
+                    .unwrap_or_default() as usize,
+            );
+            more = page.body["moreAvailable"].as_bool().unwrap_or(false);
+            job.history_cursor = page.body["nextCursor"].as_str().map(str::to_owned);
+            job.pages_scanned += 1;
+            job.reason = Some("history scan in progress".into());
+            let mut state = self.state.state.lock().await;
+            state
+                .missed_opportunity_jobs
+                .insert(job.event_id.clone(), job.clone());
+            crate::persist(&self.state.path, &state).map_err(|error| anyhow::anyhow!(error.1))?;
+        }
+        let coverage_complete = job.reference_price.is_some()
+            && job.coverage_start_ms.is_some_and(|start| {
+                start <= job.observed_at_ms.saturating_add(MAX_REPLAY_SIGNAL_GAP_MS)
+            })
+            && job
+                .coverage_through_ms
+                .is_some_and(|end| end.saturating_add(MAX_REPLAY_SIGNAL_GAP_MS) >= through_ms)
+            && job.corrupt_records == 0
+            && job.archived_days_unscanned == 0
+            && job.archived_days_unavailable == 0;
+        for (horizon, sample) in &mut job.horizons {
+            let target = job.observed_at_ms.saturating_add(*horizon);
+            sample.complete = coverage_complete
+                && sample.timestamp_ms.is_some_and(|timestamp| {
+                    timestamp.abs_diff(target) <= MAX_REPLAY_SIGNAL_GAP_MS
+                })
+                && job.cadence_gap_at_ms.is_none_or(|gap| gap > target);
+        }
+        if job.horizons.values().all(|sample| !sample.complete) {
+            job.reason =
+                Some("history or book-mark coverage was incomplete; no band was learned".into());
+        }
+        Ok(())
+    }
+
+    async fn save_strategy_replay_job(&self, job: &crate::StrategyReplayJob) -> anyhow::Result<()> {
+        let mut state = self.state.state.lock().await;
+        state
+            .strategy_replay_jobs
+            .insert(job.event_id.clone(), job.clone());
+        crate::persist(&self.state.path, &state).map_err(|error| anyhow::anyhow!(error.1))
+    }
+
+    async fn run_strategy_replay(
+        &self,
+        job: &mut crate::StrategyReplayJob,
+    ) -> anyhow::Result<(
+        crate::StrategyReplayStatus,
+        Option<crate::StrategyReplayResult>,
+        Option<String>,
+    )> {
+        let context = job.context.as_ref().context("replay context is missing")?;
+        let strategy = Strategy::from_name(&job.strategy).context("unknown replay strategy")?;
+        if !job.strategy.starts_with("live-") {
+            return Ok((
+                crate::StrategyReplayStatus::Unsupported,
+                None,
+                Some("exact daily strategy features are not persisted in replay history".into()),
+            ));
+        }
+        if job.horizons_ms.is_empty() {
+            job.horizons_ms = strategy_replay_horizons_ms(&job.strategy)
+                .context("strategy has no configured replay horizons")?;
+            self.save_strategy_replay_job(job).await?;
+        }
+        let horizons = job.horizons_ms.clone();
+        let observation_through_ms = context
+            .exit_timestamp_ms
+            .saturating_add(*horizons.last().context("replay horizon list is empty")?);
+        let requested_from_ms = context.entry_timestamp_ms;
+        if observation_through_ms.saturating_sub(requested_from_ms) > MAX_REPLAY_TOTAL_MS {
+            return Ok((
+                crate::StrategyReplayStatus::Unsupported,
+                None,
+                Some("trade replay range exceeds the bounded 24-hour signal cap".into()),
+            ));
+        }
+        let mut more_available = true;
+        let mut virtual_open = job.counterfactual_position_open;
+        let mut entry_found = job.counterfactual_entry_found;
+        while more_available {
+            if job.signals_scanned >= MAX_REPLAY_TOTAL_SIGNALS
+                || job.pages_scanned >= MAX_REPLAY_TOTAL_PAGES
+                || job.records_scanned >= MAX_REPLAY_TOTAL_RECORDS_SCANNED
+            {
+                return Ok((
+                    crate::StrategyReplayStatus::Unsupported,
+                    None,
+                    Some("trade replay exceeded the bounded snapshot cap".into()),
+                ));
+            }
+            let cursor_query = job
+                .history_cursor
+                .as_ref()
+                .map(|cursor| format!("&cursor={cursor}"))
+                .unwrap_or_default();
+            let path = format!(
+                "/internal/strategy-snapshot-history?symbol={}&fromMs={}&throughMs={}&limit={}{cursor_query}",
+                encode_query_component(&context.market_symbol),
+                requested_from_ms,
+                observation_through_ms,
+                MAX_REPLAY_SIGNALS.min(256),
+            );
+            let route = ScoutCoordinatorRouteCommand {
+                request_id: format!("{}:history:{}", job.event_id, job.pages_scanned),
+                strategy: None,
+                method: ScoutWorkerHttpMethod::Get,
+                path,
+                payload: serde_json::Value::Null,
+            };
+            let page = request_scout_service_route(&self.insights_rsocket_url, &route).await?;
+            if page.status != 200 {
+                anyhow::bail!("Insights snapshot history returned HTTP {}", page.status);
+            }
+            let records = page.body["records"]
+                .as_array()
+                .context("Insights snapshot history omitted records")?;
+            if records.is_empty() && page.body["moreAvailable"].as_bool().unwrap_or(false) {
+                anyhow::bail!("Insights snapshot history returned an empty page with more data");
+            }
+            let cursor = page.body["nextCursor"].as_str().map(str::to_owned);
+            let more = page.body["moreAvailable"].as_bool().unwrap_or(false);
+            job.records_scanned = job
+                .records_scanned
+                .saturating_add(page.body["scannedRecords"].as_u64().unwrap_or_default() as usize);
+            let mut points = Vec::with_capacity(records.len());
+            for record in records {
+                let snapshot = record
+                    .get("snapshot")
+                    .context("snapshot history record omitted snapshot")?;
+                let timestamp_ms = snapshot["timestamp"]
+                    .as_u64()
+                    .context("snapshot history record omitted timestamp")?;
+                let symbol_value = snapshot["symbol"]
+                    .as_str()
+                    .context("snapshot history record omitted symbol")?;
+                if symbol_value != context.market_symbol {
+                    continue;
+                }
+                if let Some(previous) = job.last_signal_timestamp_ms {
+                    if timestamp_ms <= previous {
+                        anyhow::bail!("Insights replay snapshots are not strictly ordered");
+                    }
+                    if timestamp_ms.saturating_sub(previous) > MAX_REPLAY_SIGNAL_GAP_MS {
+                        job.cadence_gap_detected = true;
+                        job.cadence_gap_at_ms.get_or_insert(previous);
+                    }
+                }
+                job.coverage_start_ms.get_or_insert(timestamp_ms);
+                job.coverage_through_ms = Some(timestamp_ms);
+                job.last_signal_timestamp_ms = Some(timestamp_ms);
+                let mut signal_json = snapshot.clone();
+                signal_json["strategy"] = serde_json::json!(job.strategy);
+                signal_json["strategy_candidate"] = serde_json::json!(true);
+                signal_json["strategy_decision"] = context
+                    .entry_walk_forward_evidence
+                    .map(|evidence| serde_json::json!({"strategy_walk_forward": evidence}))
+                    .unwrap_or(serde_json::Value::Null);
+                signal_json["market_regime"] = serde_json::Value::Null;
+                signal_json["entry_gate"] = serde_json::Value::Null;
+                let signal: strategy::StrategyMarketSignal = serde_json::from_value(signal_json)
+                    .context("persisted signal snapshot cannot reconstruct StrategyMarketSignal")?;
+                points.push(StrategyReplayPoint {
+                    timestamp_ms,
+                    signal,
+                    top_bid: record["topBid"].as_f64(),
+                    top_ask: record["topAsk"].as_f64(),
+                });
+            }
+            job.archived_days_unscanned = job.archived_days_unscanned.max(
+                page.body["archivedDaysUnscanned"]
+                    .as_u64()
+                    .unwrap_or_default() as usize,
+            );
+            job.archived_days_unavailable = job.archived_days_unavailable.max(
+                page.body["archivedDaysUnavailable"]
+                    .as_u64()
+                    .unwrap_or_default() as usize,
+            );
+            job.corrupt_history_records = job
+                .corrupt_history_records
+                .saturating_add(page.body["corruptRecords"].as_u64().unwrap_or_default() as usize);
+            let request = StrategyReplayRequest {
+                job_id: job.event_id.clone(),
+                strategy,
+                symbol: context.market_symbol.clone(),
+                profile_symbol: job.symbol.clone(),
+                profile_id: job.profile_id.clone(),
+                parameters: job.parameters.clone(),
+                entry_timestamp_ms: context.entry_timestamp_ms,
+                actual_exit_timestamp_ms: context.exit_timestamp_ms,
+                observation_through_timestamp_ms: observation_through_ms,
+                position_side: context.side.clone(),
+                counterfactual_position_open: virtual_open,
+                counterfactual_entry_found: entry_found,
+                points,
+            };
+            if !request.points.is_empty() {
+                let response = self.replay_strategy(request).await?;
+                if response.input_count != response.evaluated_count {
+                    anyhow::bail!("Scout replay worker omitted decisions");
+                }
+                for point in &response.decisions {
+                    if let Some(mark) = point.mark_price {
+                        if point.timestamp_ms.abs_diff(context.exit_timestamp_ms)
+                            <= MAX_REPLAY_SIGNAL_GAP_MS
+                        {
+                            job.mark_at_actual_exit = Some(mark);
+                        }
+                        if point.timestamp_ms.abs_diff(observation_through_ms)
+                            <= MAX_REPLAY_SIGNAL_GAP_MS
+                        {
+                            job.mark_at_observation_end = Some(mark);
+                        }
+                        for horizon_ms in &horizons {
+                            let target = context.exit_timestamp_ms.saturating_add(*horizon_ms);
+                            if point.timestamp_ms.abs_diff(target) <= MAX_REPLAY_SIGNAL_GAP_MS {
+                                let prior = job.horizon_mark_timestamps.get(horizon_ms).copied();
+                                if prior.is_none_or(|timestamp| {
+                                    timestamp.abs_diff(target) > point.timestamp_ms.abs_diff(target)
+                                }) {
+                                    job.horizon_mark_timestamps
+                                        .insert(*horizon_ms, point.timestamp_ms);
+                                    job.horizon_mark_prices.insert(*horizon_ms, mark);
+                                }
+                            }
+                        }
+                    }
+                }
+                if job.counterfactual_exit_timestamp_ms.is_none() {
+                    job.counterfactual_exit_timestamp_ms =
+                        response.counterfactual_exit_timestamp_ms;
+                    job.counterfactual_exit_mark_price = response.counterfactual_exit_mark_price;
+                }
+                virtual_open = response.counterfactual_position_open;
+                entry_found = response.counterfactual_entry_found;
+                job.counterfactual_position_open = virtual_open;
+                job.counterfactual_entry_found = entry_found;
+                job.signals_scanned = job.signals_scanned.saturating_add(response.evaluated_count);
+            }
+            job.pages_scanned = job.pages_scanned.saturating_add(1);
+            job.history_cursor = cursor;
+            job.updated_at_ms = crate::now_ms();
+            self.save_strategy_replay_job(job).await?;
+            more_available = more;
+        }
+        let observation_end = job.coverage_through_ms.unwrap_or_default();
+        let base_coverage_complete = job.coverage_start_ms.is_some_and(|start| {
+            start <= requested_from_ms.saturating_add(MAX_REPLAY_SIGNAL_GAP_MS)
+        }) && job.archived_days_unscanned == 0
+            && job.archived_days_unavailable == 0
+            && job.corrupt_history_records == 0;
+        let mut horizon_results = Vec::with_capacity(horizons.len());
+        for horizon_ms in &horizons {
+            let target = context.exit_timestamp_ms.saturating_add(*horizon_ms);
+            let complete = base_coverage_complete
+                && observation_end.saturating_add(MAX_REPLAY_SIGNAL_GAP_MS) >= target
+                && job.cadence_gap_at_ms.is_none_or(|gap_at| gap_at > target);
+            let classification = classify_replay_exit(
+                complete,
+                job.counterfactual_entry_found,
+                job.counterfactual_position_open,
+                job.counterfactual_exit_timestamp_ms,
+                context.exit_timestamp_ms,
+            );
+            let estimated_mark_return_percent = job
+                .horizon_mark_prices
+                .get(horizon_ms)
+                .copied()
+                .map(|mark| gross_return_from_exit(context, mark));
+            horizon_results.push(crate::StrategyReplayHorizonResult {
+                horizon_ms: *horizon_ms,
+                classification: classification.into(),
+                counterfactual_exit_timestamp_ms: job.counterfactual_exit_timestamp_ms,
+                estimated_mark_return_percent,
+                complete,
+            });
+        }
+        let any_complete_horizon = horizon_results.iter().any(|horizon| horizon.complete);
+        let classification = horizon_results
+            .iter()
+            .rev()
+            .find(|horizon| horizon.complete)
+            .map(|horizon| horizon.classification.clone())
+            .unwrap_or_else(|| "indeterminate".into());
+        let estimated_mark_return_percent = horizon_results
+            .iter()
+            .rev()
+            .find_map(|horizon| horizon.estimated_mark_return_percent);
+        let reason = if !any_complete_horizon {
+            "snapshot coverage does not reach any complete replay checkpoint".to_owned()
+        } else if !job.counterfactual_entry_found {
+            "the replay profile did not produce a counterfactual entry".to_owned()
+        } else if estimated_mark_return_percent.is_some() {
+            "10-second book markouts are indicative; they are not executable fills or slippage estimates".to_owned()
+        } else {
+            "no top-of-book marks were available at the replay checkpoints".to_owned()
+        };
+        Ok((
+            if any_complete_horizon {
+                crate::StrategyReplayStatus::Completed
+            } else {
+                crate::StrategyReplayStatus::Unsupported
+            },
+            Some(crate::StrategyReplayResult {
+                classification,
+                input_count: job.signals_scanned,
+                evaluated_count: job.signals_scanned,
+                first_exit_timestamp_ms: job.counterfactual_exit_timestamp_ms,
+                estimated_mark_return_percent,
+                execution_costs_complete: context.execution_costs_complete,
+                reason: Some(reason),
+                horizons: horizon_results,
+            }),
+            if any_complete_horizon {
+                None
+            } else {
+                Some(
+                    "snapshot history is incomplete or has gaps across all replay checkpoints"
+                        .into(),
+                )
+            },
+        ))
     }
 
     async fn route_worker_command(
@@ -214,7 +989,7 @@ impl ScoutCoordinator {
 
     async fn accept_scout_feedback(
         &self,
-        event: strategies::FeedbackEvent,
+        event: strategy::FeedbackEvent,
     ) -> anyhow::Result<ScoutFeedbackAcknowledgement> {
         let event_id = crate::event_parts(&event).0.to_owned();
         match crate::accept_feedback(axum::extract::State(self.state.clone()), axum::Json(event))
@@ -672,7 +1447,7 @@ fn selected_profiles(
                 .map(|spec| (spec.key.as_str().to_owned(), spec.default))
                 .collect::<BTreeMap<_, _>>();
             StrategyProfile {
-                profile_id: strategies::profile_id(symbol, &strategy_name, &parameters),
+                profile_id: strategy::profile_id(symbol, &strategy_name, &parameters),
                 version: 0,
                 symbol: symbol.to_owned(),
                 strategy: strategy_name.clone(),
@@ -769,7 +1544,7 @@ fn walk_forward_evidence(
     state: &crate::LearningState,
     profile: &StrategyProfile,
     signal_timestamp_ms: u64,
-) -> Option<strategies::StrategyWalkForwardEvidence> {
+) -> Option<strategy::StrategyWalkForwardEvidence> {
     let registered = state.variants.values().find(|registered| {
         registered.profile.symbol == profile.symbol
             && registered.profile.strategy == profile.strategy
@@ -798,11 +1573,29 @@ fn walk_forward_evidence(
         .map(|outcome| outcome.net_return_percent)
         .sum::<f64>()
         / sample_count as f64;
-    Some(strategies::StrategyWalkForwardEvidence {
+    Some(strategy::StrategyWalkForwardEvidence {
         sample_count,
         positive_net_rate: Some(positive_rate),
         average_net_return_percent: Some(average_return),
         last_sample_timestamp_ms: samples.last()?.observed_at_ms,
+    })
+}
+
+fn requested_profile_parameters(signal: &serde_json::Value) -> Option<BTreeMap<String, f64>> {
+    serde_json::from_value(signal["strategy_decision"]["strategy_parameters"].clone()).ok()
+}
+
+fn compact_evidence_candidate(
+    signal: &serde_json::Value,
+    profile: &StrategyProfile,
+) -> serde_json::Value {
+    serde_json::json!({
+        "strategy": profile.strategy,
+        "symbol": profile.symbol,
+        "timestamp": signal["timestamp"],
+        "strategy_decision": {
+            "strategy_parameters": profile.parameters,
+        },
     })
 }
 
@@ -884,6 +1677,38 @@ async fn dispatch_assignment(
     Ok(result)
 }
 
+async fn dispatch_strategy_replay(
+    endpoint: &str,
+    request: &StrategyReplayRequest,
+) -> anyhow::Result<StrategyReplayResponse> {
+    let client = RSocketFactory::connect()
+        .transport(WebsocketClientTransport::from(endpoint))
+        .acceptor(Box::new(|| Box::new(EchoRSocket)))
+        .start()
+        .await
+        .with_context(|| format!("could not connect to strategy worker at {endpoint}"))?;
+    let response = client
+        .request_response(
+            Payload::builder()
+                .set_data(serde_json::to_vec(&ScoutWorkerRequest::StrategyReplay(
+                    request.clone(),
+                ))?)
+                .build(),
+        )
+        .await?
+        .context("strategy worker returned an empty replay response")?;
+    let response: ScoutWorkerResponse = serde_json::from_slice(
+        response
+            .data()
+            .context("strategy worker response had no data")?,
+    )
+    .context("invalid strategy worker response")?;
+    let ScoutWorkerResponse::StrategyReplay(result) = response else {
+        bail!("strategy worker returned the wrong replay operation");
+    };
+    Ok(result)
+}
+
 #[derive(Clone)]
 struct CoordinatorResponder(ScoutCoordinator);
 
@@ -907,6 +1732,9 @@ impl RSocket for CoordinatorResponder {
         let result = match request {
             ScoutCoordinatorRequest::CandidateBatch(request) => {
                 ScoutCoordinatorResponse::CandidateBatch(self.0.coordinate(request).await?)
+            }
+            ScoutCoordinatorRequest::StrategyReplay(request) => {
+                ScoutCoordinatorResponse::StrategyReplay(self.0.replay_strategy(request).await?)
             }
             ScoutCoordinatorRequest::WorkerRoute(command) => {
                 ScoutCoordinatorResponse::WorkerRoute(self.0.route_worker_command(command).await?)
@@ -954,12 +1782,96 @@ impl RSocket for CoordinatorResponder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::LearningState;
+    use crate::{LearningState, RegisteredProfile, variant_key};
     use rsocket_rust_transport_websocket::WebsocketServerTransport;
     use std::path::PathBuf;
     use std::sync::{Arc, Mutex as StdMutex};
-    use strategies::StrategyProfile;
+    use strategy::StrategyProfile;
     use tokio::sync::Mutex;
+
+    #[test]
+    fn replay_classification_requires_complete_attributed_evidence() {
+        assert_eq!(
+            classify_replay_exit(true, true, true, Some(100_010), 100_000),
+            "on_time"
+        );
+        assert_eq!(
+            classify_replay_exit(true, true, false, Some(70_000), 100_000),
+            "late"
+        );
+        assert_eq!(
+            classify_replay_exit(true, true, true, Some(130_000), 100_000),
+            "early"
+        );
+        assert_eq!(
+            classify_replay_exit(true, true, true, None, 100_000),
+            "early"
+        );
+        assert_eq!(
+            classify_replay_exit(false, true, true, Some(70_000), 100_000),
+            "indeterminate"
+        );
+        assert_eq!(
+            classify_replay_exit(true, false, false, None, 100_000),
+            "indeterminate"
+        );
+    }
+
+    #[test]
+    fn default_live_replay_uses_four_increasing_checkpoints() {
+        assert_eq!(
+            strategy_replay_horizons_ms("live-momentum"),
+            Some(vec![300_000, 1_800_000, 7_200_000, 28_800_000])
+        );
+        assert!(strategy_replay_horizons_ms("donchian-20-btc200").is_none());
+    }
+
+    #[test]
+    fn missed_opportunity_bands_require_complete_history_and_keep_gross_markouts_out_of_net_fields()
+    {
+        let job = crate::MissedOpportunityJob {
+            event_id: "missed-1".into(),
+            observed_at_ms: 1_000,
+            symbol: "BTC-USDT".into(),
+            strategy: "live-momentum".into(),
+            profile_id: "profile-1".into(),
+            parameters: BTreeMap::new(),
+            direction: "bullish".into(),
+            strength: 0.6,
+            score: 0.3,
+            learning_context: "trend:btc".into(),
+            status: crate::StrategyReplayStatus::Completed,
+            reason: None,
+            horizons: BTreeMap::new(),
+            history_cursor: None,
+            pages_scanned: 1,
+            coverage_start_ms: Some(1_000),
+            coverage_through_ms: Some(30_000_000),
+            corrupt_records: 0,
+            archived_days_unscanned: 0,
+            archived_days_unavailable: 0,
+            cadence_gap_detected: false,
+            cadence_gap_at_ms: None,
+            reference_price: None,
+        };
+        let incomplete = crate::MissedOpportunityHorizon {
+            mark_price: Some(101.0),
+            timestamp_ms: Some(301_000),
+            gross_directional_return_percent: Some(1.0),
+            complete: false,
+        };
+        assert!(missed_opportunity_band(&job, 300_000, &incomplete, "score", 0.3).is_none());
+        let complete = crate::MissedOpportunityHorizon {
+            complete: true,
+            ..incomplete
+        };
+        let band = missed_opportunity_band(&job, 300_000, &complete, "score", 0.3).unwrap();
+        assert!(band.complete);
+        assert_eq!(band.gross_directional_markout_percent, Some(1.0));
+        assert_eq!(band.average_net_return_percent, None);
+        assert_eq!(band.stop_target_average_net_return_percent, None);
+        assert_eq!(band.profile_id.as_deref(), Some("profile-1"));
+    }
 
     struct AssignmentResponder(Arc<StdMutex<Vec<ScoutWorkAssignment>>>);
 
@@ -982,7 +1894,7 @@ mod tests {
                 assignment_id: assignment.assignment_id,
                 strategy: assignment.strategy,
                 symbol: assignment.symbol,
-                decision: strategies::ScoutWorkDecision::Enter,
+                decision: strategy::ScoutWorkDecision::Enter,
                 candidate: assignment.candidate,
                 walk_forward_evidence: None,
             };
@@ -1050,6 +1962,89 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn evidence_only_uses_the_requested_profile_without_worker_or_full_signal_copy() {
+        let baseline = StrategyProfile {
+            profile_id: "baseline".into(),
+            version: 1,
+            symbol: "BTC-USDT".into(),
+            strategy: "live-momentum".into(),
+            parameters: BTreeMap::from([("minimum_momentum".into(), 0.45)]),
+            learning_samples: 1,
+            positive_samples: 1,
+            realized_pnl: 1.0,
+        };
+        let requested = StrategyProfile {
+            profile_id: "requested".into(),
+            version: 0,
+            symbol: "BTC-USDT".into(),
+            strategy: "live-momentum".into(),
+            parameters: BTreeMap::from([("minimum_momentum".into(), 0.6)]),
+            learning_samples: 0,
+            positive_samples: 0,
+            realized_pnl: 0.0,
+        };
+        let mut state = LearningState::default();
+        state
+            .active_profiles
+            .insert("BTC-USDT:live-momentum".into(), baseline);
+        state.variants.insert(
+            variant_key(&requested),
+            RegisteredProfile {
+                profile: requested,
+                specs: Vec::new(),
+                samples: 0,
+                positive: 0,
+                realized_pnl: 0.0,
+                outcomes: Vec::new(),
+            },
+        );
+        let service = ServiceState {
+            state: Arc::new(Mutex::new(state)),
+            path: PathBuf::new(),
+        };
+        let coordinator =
+            ScoutCoordinator::new(service, "live-momentum=ws://127.0.0.1:1", Router::new())
+                .unwrap();
+
+        let response = coordinator
+            .coordinate(ScoutCandidateBatch {
+                request_id: "evidence-only".into(),
+                mode: ScoutWorkMode::EvidenceOnly,
+                signals: vec![serde_json::json!({
+                    "symbol":"BTC-USDT",
+                    "strategy":"live-momentum",
+                    "direction":"bullish",
+                    "timestamp":123,
+                    "strategy_decision":{"strategy_parameters":{"minimum_momentum":0.6}},
+                    "components":{"large_market_payload":"discarded from the compact response"}
+                })],
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(response.assignments.len(), 1);
+        assert_eq!(
+            response.assignments[0].decision,
+            ScoutWorkDecision::NotEvaluated
+        );
+        assert_eq!(
+            response.assignments[0].candidate["strategy"],
+            "live-momentum"
+        );
+        assert_eq!(response.assignments[0].candidate["timestamp"], 123);
+        assert_eq!(
+            response.assignments[0].candidate["strategy_decision"]["strategy_parameters"]["minimum_momentum"],
+            0.6
+        );
+        assert!(
+            response.assignments[0]
+                .candidate
+                .get("components")
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
     async fn learning_selects_active_profile_and_dispatches_typed_assignment_over_rsocket() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
@@ -1090,7 +2085,7 @@ mod tests {
         let response = coordinator
             .coordinate(ScoutCandidateBatch {
                 request_id: "signal-batch-1".into(),
-                mode: strategies::ScoutWorkMode::Evaluate,
+                mode: strategy::ScoutWorkMode::Evaluate,
                 signals: vec![serde_json::json!({
                     "symbol":"BTC-USDT", "strategy":"live-momentum", "direction":"bullish",
                     "components":{"momentum_10s_percent":0.8}
@@ -1102,7 +2097,7 @@ mod tests {
         assert_eq!(response.assignments.len(), 1);
         assert_eq!(
             response.assignments[0].decision,
-            strategies::ScoutWorkDecision::Enter
+            strategy::ScoutWorkDecision::Enter
         );
         let received = assignments.lock().unwrap();
         assert_eq!(received.len(), 1);

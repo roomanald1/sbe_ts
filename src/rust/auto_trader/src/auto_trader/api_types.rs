@@ -5,6 +5,8 @@ struct StatusResponse {
     audit_failure_latched: bool,
     decision_audit_queue_depth: usize,
     execution_audit_queue_depth: usize,
+    decision_audit_queue_estimated_bytes: usize,
+    execution_audit_queue_estimated_bytes: usize,
     audit_coalesced_decisions: u64,
     audit_dropped_events: u64,
     strategy: String,

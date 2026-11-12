@@ -1,20 +1,19 @@
 #[cfg(test)]
-static EMPTY_CONTEXT_THRESHOLDS: std::sync::LazyLock<BTreeMap<String, strategies::ContextThresholds>> =
+static EMPTY_CONTEXT_THRESHOLDS: std::sync::LazyLock<BTreeMap<String, strategy::ContextThresholds>> =
     std::sync::LazyLock::new(BTreeMap::new);
 
 fn candidate_entry_diagnostic(
     candidate: &Signal,
     dashboard: &Dashboard,
-    learning_thresholds: &BTreeMap<String, strategies::ContextThresholds>,
+    learning_thresholds: &BTreeMap<String, strategy::ContextThresholds>,
     risk_appetite: f64,
-    now_ms: u64,
+    _now_ms: u64,
 ) -> String {
     let review = review_candidate_entry(
         candidate,
         dashboard,
         learning_thresholds,
         risk_appetite,
-        now_ms,
     );
     let failures = candidate_entry_failures(candidate, &review);
     let (walk_forward, research) = format_candidate_evidence(&review);
@@ -39,17 +38,16 @@ fn candidate_entry_diagnostic(
 fn candidate_entry_audit_value(
     candidate: &Signal,
     dashboard: &Dashboard,
-    learning_thresholds: &BTreeMap<String, strategies::ContextThresholds>,
+    learning_thresholds: &BTreeMap<String, strategy::ContextThresholds>,
     risk_appetite: f64,
     selection_mode: &str,
-    now_ms: u64,
+    _now_ms: u64,
 ) -> serde_json::Value {
     let review = review_candidate_entry(
         candidate,
         dashboard,
         learning_thresholds,
         risk_appetite,
-        now_ms,
     );
     let failures = if selection_mode == "rejected" {
         candidate_entry_failures(candidate, &review)
@@ -67,19 +65,12 @@ fn candidate_entry_audit_value(
         "thresholds": {
             "strength_floor": review.strength_floor,
             "exploration_score_absolute_floor": review.score_floor,
-            "minimum_side_walk_forward_samples": MIN_SIDE_WALK_FORWARD_SAMPLES,
-            "minimum_exploration_evidence_samples": MIN_EXPLORATION_EVIDENCE_SAMPLES,
-            "minimum_side_direction_match_rate": MIN_SIDE_DIRECTION_MATCH_RATE,
-            "minimum_side_positive_net_rate": MIN_SIDE_POSITIVE_NET_RATE,
-            "minimum_side_positive_net_lower_95": MIN_SIDE_POSITIVE_NET_LOWER_95,
         },
         "checks": {
-            "walk_forward_evidence_fresh": review.evidence.is_some(),
-            "walk_forward_evidence_age_ms": review.stale_evidence_age_ms,
+            "strategy_walk_forward_evidence_present": review.strategy_evidence_present,
             "strength_pass": !review.strength_weak,
             "exploration_score_pass": !review.score_weak,
             "exploration_context_pass": !review.mixed_context,
-            "strict_walk_forward_pass": !review.strict_evidence_bad && !review.evidence_missing && !review.research_bad,
         },
         "rejection_reasons": failures,
     })
@@ -87,18 +78,17 @@ fn candidate_entry_audit_value(
 
 fn candidate_entry_failures(
     candidate: &Signal,
-    review: &CandidateEntryReview<'_>,
+    review: &CandidateEntryReview,
 ) -> Vec<String> {
     let mut failures = Vec::new();
     add_strength_failure(candidate, review, &mut failures);
     add_score_failure(candidate, review, &mut failures);
-    add_evidence_failures(review, &mut failures);
     failures
 }
 
 fn add_strength_failure(
     candidate: &Signal,
-    review: &CandidateEntryReview<'_>,
+    review: &CandidateEntryReview,
     failures: &mut Vec<String>,
 ) {
     if review.strength_weak {
@@ -111,7 +101,7 @@ fn add_strength_failure(
 
 fn add_score_failure(
     candidate: &Signal,
-    review: &CandidateEntryReview<'_>,
+    review: &CandidateEntryReview,
     failures: &mut Vec<String>,
 ) {
     if review.mixed_context {
@@ -121,35 +111,6 @@ fn add_score_failure(
             "score {:.2} < {:.2}",
             candidate.score.abs(), review.score_floor
         ));
-    }
-}
-
-fn add_evidence_failures(
-    review: &CandidateEntryReview<'_>,
-    failures: &mut Vec<String>,
-) {
-    if review.evidence_bad {
-        failures.push(format!(
-            "exploration needs net return > 0 and positive rate ≥ {:.0}%",
-            NEGATIVE_EVIDENCE_FLOOR * 100.0
-        ));
-    }
-    if review.evidence_missing {
-        failures.push(format!(
-            "normal entry needs {} side samples",
-            MIN_SIDE_WALK_FORWARD_SAMPLES
-        ));
-    }
-    if review.strict_evidence_bad {
-        failures.push(format!(
-            "normal entry needs hit ≥ {:.0}%, net > 0, positive rate ≥ {:.0}%, lower-95 ≥ {:.0}%",
-            MIN_SIDE_DIRECTION_MATCH_RATE * 100.0,
-            MIN_SIDE_POSITIVE_NET_RATE * 100.0,
-            MIN_SIDE_POSITIVE_NET_LOWER_95 * 100.0
-        ));
-    }
-    if review.research_bad {
-        failures.push("research-model side return is not positive".into());
     }
 }
 
@@ -166,18 +127,7 @@ mod candidate_diagnostic_tests {
 
     fn dashboard_with_evidence() -> Dashboard {
         serde_json::from_value(serde_json::json!({
-            "best": [],
-            "walkForward": [{
-                "symbol": "BTC-USDT", "horizon_seconds": 300, "evidence_generated_at_ms": 1000,
-                "all_signal_long": {
-                    "sample_count": 40, "direction_match_rate": 0.8,
-                    "average_net_return_percent": 0.4, "positive_net_rate": 0.7,
-                    "positive_net_rate_lower_95": 0.6
-                },
-                "research_logistic_long": {
-                    "sample_count": 40, "average_net_return_percent": 0.3
-                }
-            }]
+            "best": []
         })).unwrap()
     }
 
@@ -185,7 +135,7 @@ mod candidate_diagnostic_tests {
     fn rejected_candidate_diagnostic_and_audit_explain_strength_and_score() {
         let candidate = candidate(0.0, 0.0);
         let dashboard = Dashboard {
-            best: Vec::new(), walk_forward: Arc::new(Vec::new()),
+            best: Vec::new(),
             missed_opportunity_bands: Arc::new(Vec::new()), markets: Arc::new(BTreeMap::new()),
             queued_at: None, queue_wait_ms: None,
         };
@@ -202,10 +152,10 @@ mod candidate_diagnostic_tests {
     fn supported_candidate_passes_strict_checks_and_audit_omits_rejections() {
         let candidate = candidate(0.9, 0.9);
         let dashboard = dashboard_with_evidence();
-        let failures = candidate_entry_failures(&candidate, &review_candidate_entry(&candidate, &dashboard, &EMPTY_CONTEXT_THRESHOLDS, 50.0, 1_000));
+        let failures = candidate_entry_failures(&candidate, &review_candidate_entry(&candidate, &dashboard, &EMPTY_CONTEXT_THRESHOLDS, 50.0));
         assert!(failures.is_empty(), "{failures:?}");
         let audit = candidate_entry_audit_value(&candidate, &dashboard, &EMPTY_CONTEXT_THRESHOLDS, 50.0, "strict", 1_000);
-        assert_eq!(audit["checks"]["strict_walk_forward_pass"], true);
+        assert_eq!(audit["checks"]["strategy_walk_forward_evidence_present"], false);
         assert!(audit["rejection_reasons"].as_array().unwrap().is_empty());
         assert!(candidate_entry_diagnostic(&candidate, &dashboard, &EMPTY_CONTEXT_THRESHOLDS, 50.0, 1_000).contains("did not pass combined entry checks"));
     }

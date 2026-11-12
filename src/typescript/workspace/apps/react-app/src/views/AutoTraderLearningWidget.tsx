@@ -204,6 +204,7 @@ export function AutoTraderLearningWidget() {
     profileReturnDifference,
     activeCandidates,
     rejectedCandidates,
+    qualifiedCandidates,
     collectingCandidates,
   } = useBehaviorSnapshot(model.state$);
   return (
@@ -338,7 +339,10 @@ export function AutoTraderLearningWidget() {
             <strong>
               {activeCandidates} active · {rejectedCandidates} avoided
             </strong>
-            <small>{collectingCandidates} still collecting evidence</small>
+            <small>
+              {qualifiedCandidates} qualified, not active ·{' '}
+              {collectingCandidates} still collecting evidence
+            </small>
           </div>
           <div>
             <span>Scout outcomes · 7d</span>

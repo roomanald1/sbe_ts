@@ -31,14 +31,15 @@ fn xml_field(item: &str, field: &str) -> Option<String> {
 }
 
 fn news_asset(title: &str) -> String {
-    const ASSETS: [(&str, &str); 20] = [
+    const ASSETS: [(&str, &str); 23] = [
         ("BITCOIN", "BTC"), ("ETHEREUM", "ETH"), ("RIPPLE", "XRP"),
         ("SOLANA", "SOL"), ("BINANCE COIN", "BNB"), ("CARDANO", "ADA"),
         ("DOGECOIN", "DOGE"), ("AVALANCHE", "AVAX"), ("POLKADOT", "DOT"),
+        ("ZCASH", "ZEC"),
         ("CHAINLINK", "LINK"), ("LITECOIN", "LTC"), ("BITCOIN", "BTC"),
         ("BTC", "BTC"), ("ETH", "ETH"), ("XRP", "XRP"), ("SOL", "SOL"),
-        ("BNB", "BNB"), ("ADA", "ADA"), ("COINBASE", "CRYPTO"),
-        ("COINBASE GLOBAL", "CRYPTO"),
+        ("BNB", "BNB"), ("ADA", "ADA"), ("ZEC", "ZEC"), ("COINBASE", "CRYPTO"),
+        ("COINBASE GLOBAL", "CRYPTO"), ("KRAKEN", "CRYPTO"),
     ];
     let upper = format!(" {} ", title.to_ascii_uppercase().replace(|c: char| !c.is_ascii_alphanumeric(), " "));
     let matched = ASSETS.iter().find_map(|(name, ticker)| {
@@ -99,6 +100,44 @@ fn has_positive_upgrade_announcement(text: &str) -> bool {
     let rollout = ["GOES LIVE", "GO LIVE", "LAUNCHES", "ROLLOUT", "ROLLS OUT", "ACTIVATES", "ACTIVATION"]
         .iter().any(|term| contains_keyword(text, term));
     upgrade && rollout
+}
+
+fn has_concrete_product_launch(text: &str) -> bool {
+    ["LAUNCHES", "LAUNCHING", "DEBUT", "GOES LIVE", "START TRADING", "STARTS TRADING", "SET TO START TRADING", "BEGIN TRADING", "LIST OVER"]
+        .iter().any(|term| contains_keyword(text, term))
+}
+
+fn has_material_business_decline(text: &str) -> bool {
+    let decline = ["FALLS", "FELL", "DROPS", "DROPPED", "PLUNGES", "PLUNGED", "SLUMPS", "DECLINES"]
+        .iter().any(|term| contains_keyword(text, term));
+    let metric = ["REVENUE", "SALES", "PROFIT", "INCOME", "MINING RIG"]
+        .iter().any(|term| contains_keyword(text, term));
+    decline && metric
+}
+
+fn has_offsetting_treasury_proposal(text: &str) -> bool {
+    ["GRANTS TREASURY", "COMMUNITY GRANTS", "BLOCK REWARDS"]
+        .iter().any(|term| contains_keyword(text, term))
+        && ["PULLING", "REMOVE", "REDIRECT", "VOTE"]
+            .iter().any(|term| contains_keyword(text, term))
+}
+
+fn has_macro_headwind_with_crypto_weakness(text: &str) -> bool {
+    let macro_event = [
+        "INFLATION REPORT",
+        "INFLATION DATA",
+        "CONSUMER PRICE INDEX",
+        "FED RATE INCREASE",
+        "RATE INCREASE",
+        "RATE HIKE",
+        "INTEREST RATE HIKE",
+    ]
+    .iter()
+    .any(|term| contains_keyword(text, term));
+    let relative_weakness = ["SLIPS", "SLIPPED", "LAGS", "LAGGED", "UNDERPERFORMS", "UNDERPERFORMED"]
+        .iter()
+        .any(|term| contains_keyword(text, term));
+    macro_event && relative_weakness
 }
 
 fn has_material_adverse_event(text: &str) -> bool {
@@ -274,10 +313,22 @@ async fn classify_headlines_with_model(articles: &mut [NewsArticle]) {
         article.sentiment_confidence = prediction.confidence.clamp(0.0, 1.0);
         article.sentiment_model = "finetuned-finbert-crypto".to_owned();
         let text = format!("{} {}", article.title, article.article_text);
-        if has_positive_upgrade_announcement(&text) && !has_material_adverse_event(&text) {
+        if has_material_business_decline(&text) {
+            article.direction = "bearish".to_owned();
+            article.score = article.score.min(-0.6);
+            article.signal_reason = format!("Material operating decline outweighs a share buyback or other corporate offset · model confidence {:.0}%", article.sentiment_confidence * 100.0);
+        } else if has_offsetting_treasury_proposal(&text) {
+            article.direction = "neutral".to_owned();
+            article.score = 0.0;
+            article.signal_reason = "Mixed token-supply and ecosystem-funding effects; price direction is unclear".to_owned();
+        } else if has_macro_headwind_with_crypto_weakness(&text) {
+            article.direction = "bearish".to_owned();
+            article.score = article.score.min(-0.6);
+            article.signal_reason = "Crypto underperformance ahead of inflation or tighter-rate news is a negative macro signal".to_owned();
+        } else if (has_positive_upgrade_announcement(&text) || has_concrete_product_launch(&text)) && !has_material_adverse_event(&text) {
             article.direction = "bullish".to_owned();
-            article.score = article.score.max(0.5);
-            article.signal_reason = format!("Positive network upgrade rollout overrides incidental negative wording · model confidence {:.0}%", article.sentiment_confidence * 100.0);
+            article.score = article.score.max(if article.sentiment_confidence < 0.35 { 0.65 } else { 0.5 });
+            article.signal_reason = format!("Concrete product launch outweighs incidental or earlier objection wording · model confidence {:.0}%", article.sentiment_confidence * 100.0);
         } else if has_market_risk_warning(&text) {
             article.direction = "bearish".to_owned();
             article.score = -1.0;
@@ -328,6 +379,36 @@ mod news_classification_tests {
         let general = classify_news("Company gains approval", "GENERAL", "u".into(), "d".into(), 10);
         assert_eq!(general.score, 0.0);
         assert_eq!(general.direction, "neutral");
+    }
+
+    #[test]
+    fn asset_matcher_recognizes_zcash_and_token_launch_outweighs_incidental_pushback() {
+        assert_eq!(news_asset("Zcash holders to vote on grants treasury"), "ZEC");
+        let text = "OKX brings tokenized stock trading live after initial issuer pushback; venue is set to start trading and will list over 70 assets";
+        assert!(has_concrete_product_launch(text));
+        assert!(!has_material_adverse_event(text));
+        assert_eq!(news_asset("OKX tokenized stock trading with Coinbase and Circle"), "CRYPTO");
+        assert_eq!(news_asset("Kraken's xStocks adds 200 UK and EU shares"), "CRYPTO");
+    }
+
+    #[test]
+    fn operating_revenue_drop_is_bearish_despite_buyback_language() {
+        assert!(has_material_business_decline("Canaan may sell more bitcoin for stock buybacks as mining-rig revenue falls 96%"));
+    }
+
+    #[test]
+    fn treasury_supply_and_funding_proposals_are_mixed() {
+        assert!(has_offsetting_treasury_proposal("Zcash vote on pulling ZEC from grants treasury and redirecting block rewards"));
+    }
+
+    #[test]
+    fn crypto_weakness_ahead_of_inflation_or_tighter_rates_is_bearish() {
+        assert!(has_macro_headwind_with_crypto_weakness(
+            "Bitcoin slips before US inflation report as traders price in Fed rate increase"
+        ));
+        assert!(has_macro_headwind_with_crypto_weakness(
+            "Bitcoin lags stock rebound in advance of U.S. inflation report"
+        ));
     }
 
     #[test]

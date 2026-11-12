@@ -1,4 +1,11 @@
-export function Header(props: { state$: any; error$: any; feedUrl: string }) {
+export function Header(props: {
+  state$: any;
+  error$: any;
+  feedUrl: string;
+  insightsState$: any;
+  insightsError$: any;
+  showInsights: boolean;
+}) {
   return (
     <>
       <header className="topbar">
@@ -20,6 +27,18 @@ export function Header(props: { state$: any; error$: any; feedUrl: string }) {
                 ? 'CONNECTING'
                 : 'RECONNECTING'}
           </div>
+          {props.showInsights && props.insightsState$ !== 'connected' && (
+            <div
+              className={`connection-status ${props.insightsState$}`}
+              title={props.insightsError$ ?? 'Connecting to Insights'}
+            >
+              <span className="status-dot" />
+              INSIGHTS{' '}
+              {props.insightsState$ === 'connecting'
+                ? 'CONNECTING'
+                : 'RECONNECTING'}
+            </div>
+          )}
         </div>
       </header>
 
@@ -30,6 +49,11 @@ export function Header(props: { state$: any; error$: any; feedUrl: string }) {
       >
         {props.error$ ?? ''}
       </div>
+      {props.showInsights && props.insightsError$ && (
+        <div className="feed-notice" role="status">
+          Insights RSocket: {props.insightsError$}
+        </div>
+      )}
     </>
   );
 }

@@ -29,7 +29,6 @@ import {
   SignalHistoryView,
   SignalPerformanceView,
   SkippedSignalAuditView,
-  WalkForwardView,
 } from './SignalInfoViews';
 
 type Props = {
@@ -186,8 +185,6 @@ function DashboardWidgetContentComponent(props: Props): ReactNode {
       return <SignalHistoryView paused={paused} onTradeSymbol={onTrade} />;
     case 'signal-performance':
       return <SignalPerformanceView paused={paused} onTradeSymbol={onTrade} />;
-    case 'walk-forward':
-      return <WalkForwardView paused={paused} onTradeSymbol={onTrade} />;
     case 'missed-opportunity-bands':
       return <MissedOpportunityBandsView paused={paused} />;
     case 'skipped-signal-audit':

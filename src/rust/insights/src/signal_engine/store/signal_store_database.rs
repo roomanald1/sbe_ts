@@ -19,10 +19,6 @@ impl SignalStore {
             execution_quality_cache: Arc::new(Mutex::new(None)),
             decision_quality_cache: Arc::new(Mutex::new(None)),
             calibration_records_cache: Arc::new(Mutex::new(None)),
-            walk_forward_cache: Arc::new(Mutex::new(None)),
-            missed_opportunity_cache: Arc::new(Mutex::new(None)),
-            walk_forward_refreshing: Arc::new(AtomicBool::new(false)),
-            missed_opportunity_refreshing: Arc::new(AtomicBool::new(false)),
         })
     }
 
@@ -228,10 +224,11 @@ impl SignalStore {
 
     async fn read_calibration_records(&self) -> Result<Arc<Vec<StoredSignalRecord>>> {
         // Best, recent, and performance views use overlapping records. Share
-        // one decompression pass across their independently refreshed caches.
+        // one bounded dashboard-only window across their independently
+        // refreshed caches; live signal generation never reads this cache.
         let mut cache = self.calibration_records_cache.lock().await;
         if let Some((created, records)) = cache.as_ref() {
-            if created.elapsed() < Duration::from_secs(60) {
+            if created.elapsed() < Duration::from_secs(15) {
                 return Ok(Arc::clone(records));
             }
         }
@@ -281,6 +278,12 @@ fn read_archive_tail(compressed: &[u8], limit: usize) -> Result<Vec<StoredSignal
 #[cfg(test)]
 mod archive_reader_tests {
     use super::*;
+
+    #[test]
+    fn dashboard_calibration_cache_has_a_small_retention_bound() {
+        assert_eq!(super::CALIBRATION_SNAPSHOT_LIMIT, 1_000);
+        assert_eq!(super::CALIBRATION_OUTCOME_LIMIT, 5_000);
+    }
 
     #[test]
     fn archive_reader_keeps_only_the_newest_records() {

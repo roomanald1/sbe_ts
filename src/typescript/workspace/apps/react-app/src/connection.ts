@@ -80,6 +80,10 @@ export class Connection {
     new BehaviorSubject<ConnectionState>('connecting');
   public error_message: BehaviorSubject<string | undefined> =
     new BehaviorSubject<string | undefined>(undefined);
+  public insights_connection_state: BehaviorSubject<ConnectionState> =
+    new BehaviorSubject<ConnectionState>('connecting');
+  public insights_error_message: BehaviorSubject<string | undefined> =
+    new BehaviorSubject<string | undefined>(undefined);
   public data: BehaviorSubject<unknown | undefined> = new BehaviorSubject<
     unknown | undefined
   >(undefined);
@@ -102,6 +106,8 @@ export class Connection {
 
       this.connection_state.next('reconnecting');
       this.error_message.next(message);
+      this.insights_connection_state.next('connecting');
+      this.insights_error_message.next(undefined);
       this.subscription?.cancel();
       this.subscription = undefined;
       this.closeInsightsSocket();
@@ -286,8 +292,8 @@ export class Connection {
           }
           this.insightsSubscription = sub;
           this.insightsRetryAttempt = 0;
-          this.error_message.next(undefined);
-          if (this.socket) this.connection_state.next('connected');
+          this.insights_connection_state.next('connected');
+          this.insights_error_message.next(undefined);
           sub.request(REQUEST_BATCH_SIZE);
         },
         onNext: (payload) => {
@@ -325,8 +331,8 @@ export class Connection {
       this.insightsRetryTimer !== undefined
     )
       return;
-    this.error_message.next(message);
-    this.connection_state.next('reconnecting');
+    this.insights_error_message.next(message);
+    this.insights_connection_state.next('reconnecting');
     this.closeInsightsSocket();
     const delay = Math.min(1000 * 2 ** this.insightsRetryAttempt, 30000);
     this.insightsRetryAttempt += 1;

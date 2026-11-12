@@ -26,7 +26,7 @@ fn decay_execution_quality(stats: &mut ExecutionLearningStats, now_ms: u64) {
 }
 
 fn record_execution_order_quality(
-    feedback_outbox: &mut Vec<strategies::ExecutionOutcomeEvent>,
+    feedback_outbox: &mut Vec<strategy::ExecutionOutcomeEvent>,
     recorded_order_ids: &mut BTreeSet<String>,
     order: &TraderOrder,
 ) {
@@ -69,7 +69,7 @@ fn record_execution_order_quality(
             }
         }
     }
-    feedback_outbox.push(strategies::ExecutionOutcomeEvent {
+    feedback_outbox.push(strategy::ExecutionOutcomeEvent {
         event_id: id.clone(),
         observed_at_ms: current_time_ms(),
         context: context.to_owned(),
@@ -200,7 +200,7 @@ const LOSS_CLUSTER_SIZE_MULTIPLIER: f64 = 0.5;
 fn has_recent_profile_loss_cluster(signal: &Signal, settings: &Settings, now_ms: u64) -> bool {
     let Some(strategy) = signal.strategy.as_deref().and_then(Strategy::from_name) else { return false; };
     let parameters = signal_strategy_parameters(signal);
-    let profile = strategies::profile_id(&signal.symbol, strategy.as_str(), &parameters);
+    let profile = strategy::profile_id(&signal.symbol, strategy.as_str(), &parameters);
     let key = format!("{profile}|{}", market_context(signal));
     let Some(returns) = settings.recent_profile_context_returns.get(&key) else { return false; };
     returns.len() >= LOSS_CLUSTER_SIZE && returns.iter().take(LOSS_CLUSTER_SIZE).all(|(timestamp, value)| {

@@ -20,10 +20,12 @@ fn inject_learned_parameters(settings: &Settings, signal: &mut Signal) {
         &settings.strategy_parameter_overrides,
         probe,
     );
-    let profile_id = strategies::profile_id(&profile_symbol, strategy_name, &parameters);
+    let profile_id = strategy::profile_id(&profile_symbol, strategy_name, &parameters);
     let Some(decision) = signal.strategy_decision.as_mut().and_then(serde_json::Value::as_object_mut) else { return; };
     decision.insert("strategy_parameters".into(), serde_json::json!(parameters));
     decision.insert("learning_profile_id".into(), serde_json::json!(profile_id));
+    decision.insert("learning_profile_symbol".into(), serde_json::json!(profile_symbol));
+    decision.insert("learning_profile_version".into(), serde_json::json!(profile.version));
 }
 
 #[cfg(test)]
@@ -61,7 +63,7 @@ fn next_scout_parameter_probe(
     parameters: &BTreeMap<String, f64>,
     day: u64,
 ) -> Option<(String, f64)> {
-    scouts::next_parameter_probe(symbol, strategy.as_str(), parameters, &scout_parameter_specs(strategy), day)
+    strategy::next_parameter_probe(symbol, strategy.as_str(), parameters, &scout_parameter_specs(strategy), day)
 }
 
 // Pair scouts measure interactions while keeping exploration bounded to two
@@ -74,24 +76,30 @@ fn next_scout_parameter_combination(
     parameters: &BTreeMap<String, f64>,
     day: u64,
 ) -> Option<BTreeMap<String, f64>> {
-    scouts::next_parameter_combination(symbol, strategy.as_str(), parameters, &scout_parameter_specs(strategy), day)
+    strategy::next_parameter_combination(symbol, strategy.as_str(), parameters, &scout_parameter_specs(strategy), day)
 }
 
 #[cfg(test)]
 fn scout_context_hash(parameters: &BTreeMap<String, f64>, excluded: &BTreeMap<String, f64>) -> String {
-    scouts::context_hash(parameters, excluded)
+    let mut hash = 14_695_981_039_346_656_037_u64;
+    for (key, value) in parameters.iter().filter(|(key, _)| !excluded.contains_key(*key)) {
+        for byte in format!("{key}={value:.8};").bytes() {
+            hash = (hash ^ u64::from(byte)).wrapping_mul(1_099_511_628_211);
+        }
+    }
+    format!("{hash:016x}")
 }
 
 #[cfg(test)]
 fn scout_combination_key(
     values: &BTreeMap<String, f64>, full_profile: &BTreeMap<String, f64>,
 ) -> Option<String> {
-    scouts::combination_key(values, full_profile)
+    strategy::combination_key(values, full_profile)
 }
 
 #[cfg(test)]
 fn scout_combination_context(key: &str) -> Option<&str> {
-    scouts::combination_context(key)
+    strategy::combination_context(key)
 }
 
 #[cfg(test)]
@@ -127,7 +135,7 @@ fn best_scout_parameter_value(
     settings: &Settings,
     _symbol: &str,
     strategy: Strategy,
-    spec: &strategies::StrategyParameterSpec,
+    spec: &strategy::StrategyParameterSpec,
 ) -> Option<f64> {
     scout_parameter_variants(settings, strategy, spec)
         .into_iter()
@@ -148,7 +156,7 @@ fn best_scout_parameter_value(
 fn scout_parameter_variants(
     settings: &Settings,
     strategy: Strategy,
-    spec: &strategies::StrategyParameterSpec,
+    spec: &strategy::StrategyParameterSpec,
 ) -> Vec<StrategyParameterScoutVariant> {
     let mut candidates: BTreeMap<String, (f64, Vec<(u64, f64)>)> = BTreeMap::new();
     for (key, stored) in &settings.learning {
@@ -262,7 +270,6 @@ fn strategy_parameter_profile(
     learning.recent_trade_pnls.truncate(STRATEGY_SIZING_RECENT_TRADES);
     let positive_rate =
         (learning.samples > 0).then_some(learning.positive as f64 / learning.samples as f64);
-    let pooled_threshold_samples = strategy_threshold_samples_across_symbols(settings, strategy);
     let learned_profile = settings
         .learned_profiles
         .get(&format!("{symbol}:{}", strategy.as_str()));
@@ -285,20 +292,7 @@ fn strategy_parameter_profile(
         };
         let value = best_scout_parameter_value(settings, symbol, strategy, spec)
             .or(learned_value)
-            .unwrap_or_else(|| {
-            if is_walk_forward_threshold(spec.key) {
-                let history = &pooled_threshold_samples;
-                // Same-strategy trade and scout observations are pooled across
-                // symbols, but a threshold only moves when a walk-forward
-                // candidate passes its train and holdout checks.
-                if let Some(validated_threshold) = walk_forward_threshold(spec, base, history) {
-                    return validated_threshold;
-                }
-                walk_forward_threshold(spec, base, &learning.threshold_samples).unwrap_or(base)
-            } else {
-                base
-            }
-        });
+            .unwrap_or(base);
         (spec.key.as_str().to_owned(), value)
     }).collect::<BTreeMap<_, _>>();
     let learned_combination =
@@ -395,7 +389,7 @@ fn learned_strategy_parameter_profile(
                 .filter(|variant| variant.symbol == symbol
                     && variant.strategy == strategy.as_str()
                     && variant.parameter == spec.key.as_str())
-                .map(|variant| strategies::StrategyParameterScoutVariant {
+                .map(|variant| strategy::StrategyParameterScoutVariant {
                     candidate_value: variant.candidate_value,
                     sample_count: variant.sample_count,
                     minimum_samples: variant.minimum_samples,
@@ -424,32 +418,6 @@ fn learned_strategy_parameter_profile(
     }
 }
 
-#[cfg(test)]
-fn strategy_threshold_samples_across_symbols(
-    settings: &Settings,
-    strategy: Strategy,
-) -> Vec<StrategyThresholdSample> {
-    let mut samples = settings
-        .learning
-        .iter()
-        .filter(|(key, _)| {
-            let parts = key.split(':').collect::<Vec<_>>();
-            (parts.len() == 3 && parts[0] == "trade" && parts[2] == strategy.as_str())
-                || (matches!(parts.len(), 3 | 4)
-                    && parts[0] == "scout"
-                    && parts[2] == strategy.as_str())
-        })
-        .flat_map(|(_, stats)| stats.threshold_samples.iter().cloned())
-        .filter(|sample| {
-            sample.feature_value.is_finite()
-                && sample.threshold.is_finite()
-                && sample.net_return_percent.is_finite()
-        })
-        .collect::<Vec<_>>();
-    samples.sort_by_key(|sample| sample.timestamp_ms);
-    samples
-}
-
 fn threshold_observation(
     strategy: &str,
     decision: &serde_json::Value,
@@ -474,9 +442,9 @@ fn threshold_observation(
     let feature = if key == StrategyParameterKey::RsiEntryMax {
         decision.get("primary_metric_value")?.as_f64()?
     } else {
-        let side = match strategies::SignalDirection::from_wire(decision.get("direction")?.as_str()?)? {
-            strategies::SignalDirection::Long => 1.0,
-            strategies::SignalDirection::Short => -1.0,
+        let side = match strategy::SignalDirection::from_wire(decision.get("direction")?.as_str()?)? {
+            strategy::SignalDirection::Long => 1.0,
+            strategy::SignalDirection::Short => -1.0,
         };
         let components = decision.get("observed_insight")?;
         let read = |name: &str| {
@@ -505,167 +473,6 @@ fn threshold_observation(
     feature.is_finite().then_some((key, threshold, feature))
 }
 
-#[cfg(test)]
-const MIN_THRESHOLD_TRAIN_SAMPLES: usize = 20;
-#[cfg(test)]
-const MIN_THRESHOLD_VALIDATION_SAMPLES: usize = 10;
-#[cfg(test)]
-const MAX_THRESHOLD_VALIDATION_SAMPLES: usize = 64;
-#[cfg(test)]
-const MIN_THRESHOLD_VALIDATION_GAIN_PERCENT: f64 = 0.05;
-
-#[cfg(test)]
-fn is_walk_forward_threshold(key: StrategyParameterKey) -> bool {
-    matches!(
-        key,
-        StrategyParameterKey::MinimumMomentum
-            | StrategyParameterKey::MinimumFlowImbalance
-            | StrategyParameterKey::MinimumBookImbalance
-            | StrategyParameterKey::MinimumVwapDislocationBps
-            | StrategyParameterKey::MinimumAbsorptionPressure
-            | StrategyParameterKey::RsiEntryMax
-    )
-}
-
-#[cfg(test)]
-fn threshold_accepts(key: StrategyParameterKey, feature: f64, threshold: f64) -> bool {
-    if key == StrategyParameterKey::RsiEntryMax {
-        feature <= threshold
-    } else if key == StrategyParameterKey::MinimumMomentum {
-        feature > threshold
-    } else {
-        feature >= threshold
-    }
-}
-
-#[cfg(test)]
-fn threshold_return_stats(
-    samples: &[StrategyThresholdSample],
-    key: StrategyParameterKey,
-    threshold: f64,
-) -> Option<(usize, f64, f64)> {
-    let outcomes = samples
-        .iter()
-        .filter_map(|sample| {
-            if sample.parameter_key != key {
-                return None;
-            }
-            let supported = if key == StrategyParameterKey::RsiEntryMax {
-                threshold <= sample.threshold
-            } else {
-                threshold >= sample.threshold
-            };
-            (supported && threshold_accepts(key, sample.feature_value, threshold))
-                .then_some(sample.net_return_percent)
-        })
-        .collect::<Vec<_>>();
-    if outcomes.is_empty() {
-        return None;
-    }
-    let count = outcomes.len();
-    let average = outcomes.iter().sum::<f64>() / count as f64;
-    let variance = if count > 1 {
-        outcomes
-            .iter()
-            .map(|value| (value - average).powi(2))
-            .sum::<f64>()
-            / (count - 1) as f64
-    } else {
-        return Some((count, average, f64::NEG_INFINITY));
-    };
-    let lower_95 = average - 1.96 * (variance / count as f64).sqrt();
-    Some((count, average, lower_95))
-}
-
-#[cfg(test)]
-fn walk_forward_threshold(
-    spec: &strategies::StrategyParameterSpec,
-    base: f64,
-    history: &[StrategyThresholdSample],
-) -> Option<f64> {
-    if history.len() < MIN_THRESHOLD_TRAIN_SAMPLES + MIN_THRESHOLD_VALIDATION_SAMPLES {
-        return None;
-    }
-    let mut samples = history
-        .iter()
-        .filter(|sample| {
-            sample.parameter_key == spec.key
-                && sample.threshold.is_finite()
-                && sample.feature_value.is_finite()
-                && sample.net_return_percent.is_finite()
-        })
-        .collect::<Vec<_>>();
-    samples.sort_by_key(|sample| sample.timestamp_ms);
-    if samples.len() < MIN_THRESHOLD_TRAIN_SAMPLES + MIN_THRESHOLD_VALIDATION_SAMPLES {
-        return None;
-    }
-    if samples.len() > MIN_THRESHOLD_VALIDATION_SAMPLES + MAX_THRESHOLD_VALIDATION_SAMPLES {
-        samples.drain(
-            ..samples.len() - MIN_THRESHOLD_VALIDATION_SAMPLES - MAX_THRESHOLD_VALIDATION_SAMPLES,
-        );
-    }
-    let split = samples.len() * 2 / 3;
-    let split_timestamp = samples[split].timestamp_ms;
-    let split = samples.partition_point(|sample| sample.timestamp_ms < split_timestamp);
-    let train = samples[..split]
-        .iter()
-        .map(|sample| (*sample).clone())
-        .collect::<Vec<_>>();
-    let validation = samples[split..]
-        .iter()
-        .map(|sample| (*sample).clone())
-        .collect::<Vec<_>>();
-    if train.len() < MIN_THRESHOLD_TRAIN_SAMPLES
-        || validation.len() < MIN_THRESHOLD_VALIDATION_SAMPLES
-    {
-        return None;
-    }
-    // Keep holdout observations out of the candidate search boundary too.
-    let supported_boundary = if spec.key == StrategyParameterKey::RsiEntryMax {
-        train
-            .iter()
-            .map(|sample| sample.threshold)
-            .fold(base, f64::min)
-    } else {
-        train
-            .iter()
-            .map(|sample| sample.threshold)
-            .fold(base, f64::max)
-    };
-    let mut best: Option<(f64, f64)> = None;
-    let steps = ((spec.max - spec.min) / spec.step).round() as usize;
-    for index in 0..=steps {
-        let threshold = (spec.min + index as f64 * spec.step).clamp(spec.min, spec.max);
-        let tighter_than_recorded = if spec.key == StrategyParameterKey::RsiEntryMax {
-            threshold <= supported_boundary
-        } else {
-            threshold >= supported_boundary
-        };
-        if !tighter_than_recorded {
-            continue;
-        }
-        let Some((count, _average, lower_95)) = threshold_return_stats(&train, spec.key, threshold)
-        else {
-            continue;
-        };
-        if count >= MIN_THRESHOLD_TRAIN_SAMPLES
-            && best.is_none_or(|(_, best_lower_95)| lower_95 > best_lower_95)
-        {
-            best = Some((threshold, lower_95));
-        }
-    }
-    let (threshold, _) = best?;
-    let (validation_count, validation_average, validation_lower_95) =
-        threshold_return_stats(&validation, spec.key, threshold)?;
-    let (baseline_count, _, baseline_lower_95) =
-        threshold_return_stats(&validation, spec.key, base)?;
-    (validation_count >= MIN_THRESHOLD_VALIDATION_SAMPLES
-        && baseline_count >= MIN_THRESHOLD_VALIDATION_SAMPLES
-        && validation_average > 0.0
-        && validation_lower_95 >= baseline_lower_95 + MIN_THRESHOLD_VALIDATION_GAIN_PERCENT)
-        .then_some(threshold)
-}
-
 fn strategy_parameter_values(
     settings: &Settings,
     symbol: &str,
@@ -687,7 +494,7 @@ fn queue_strategy_profile_registration(
     let parameters = profile.parameters.iter()
         .map(|parameter| (parameter.key.clone(), parameter.value))
         .collect::<BTreeMap<_, _>>();
-    let profile_id = strategies::profile_id(symbol, strategy.as_str(), &parameters);
+    let profile_id = strategy::profile_id(symbol, strategy.as_str(), &parameters);
     if settings.registered_profile_ids.contains(&profile_id) { return; }
     if settings.profile_registration_outbox.iter().any(|registration| {
         registration.profile.profile_id == profile_id
@@ -697,13 +504,13 @@ fn queue_strategy_profile_registration(
     let version = settings.learned_profiles
         .get(&format!("{symbol}:{}", strategy.as_str()))
         .map_or(0, |learned| learned.version);
-    let specs = strategy.parameter_specs().into_iter().map(|spec| strategies::ParameterSpec {
+    let specs = strategy.parameter_specs().into_iter().map(|spec| strategy::ParameterSpec {
         key: spec.key.as_str().to_owned(), label: spec.label.to_owned(), default: spec.default,
         min: spec.min, max: spec.max, step: spec.step, unit: spec.unit.to_owned(),
         learning_direction: spec.learning_direction,
     }).filter(|spec| parameters.contains_key(&spec.key)).collect();
-    settings.profile_registration_outbox.push(strategies::StrategyProfileRegistration {
-        profile: strategies::StrategyProfile {
+    settings.profile_registration_outbox.push(strategy::StrategyProfileRegistration {
+        profile: strategy::StrategyProfile {
             profile_id, version, symbol: symbol.to_owned(), strategy: strategy.as_str().to_owned(),
             parameters, learning_samples: profile.learning_samples,
             positive_samples: (profile.learning_samples as f64 * profile.positive_rate.unwrap_or(0.0)).round() as usize,
@@ -713,8 +520,6 @@ fn queue_strategy_profile_registration(
     });
 }
 
-const WALK_FORWARD_POLICY_MIN_SAMPLES: usize = 30;
-
 #[cfg(test)]
 mod strategy_parameter_bounds_tests {
     use super::*;
@@ -723,8 +528,8 @@ mod strategy_parameter_bounds_tests {
     fn hot_path_overlays_the_latest_learning_profile_on_signal_parameters() {
         let mut settings = Settings::default();
         let parameters = BTreeMap::from([("minimum_momentum".to_owned(), 0.003)]);
-        let profile_id = strategies::profile_id("BTC-USDT", "live-momentum", &parameters);
-        settings.learned_profiles.insert("BTC-USDT:live-momentum".into(), strategies::StrategyProfile {
+        let profile_id = strategy::profile_id("BTC-USDT", "live-momentum", &parameters);
+        settings.learned_profiles.insert("BTC-USDT:live-momentum".into(), strategy::StrategyProfile {
             profile_id: profile_id.clone(), version: 5, symbol: "BTC-USDT".into(),
             strategy: "live-momentum".into(), parameters,
             learning_samples: 8, positive_samples: 6, realized_pnl: 4.0,
@@ -740,7 +545,7 @@ mod strategy_parameter_bounds_tests {
         inject_learned_parameters(&settings, &mut signal);
         assert_eq!(signal_strategy_parameters(&signal)["minimum_momentum"], 0.003);
         assert_eq!(signal.strategy_decision.as_ref().unwrap()["learning_profile_id"],
-            strategies::profile_id("BTC-USDT", "live-momentum", &signal_strategy_parameters(&signal)));
+            strategy::profile_id("BTC-USDT", "live-momentum", &signal_strategy_parameters(&signal)));
         settings.strategy_parameter_overrides.insert(
             "BTC-USDT:live-momentum:minimum_momentum".into(), 0.004,
         );
@@ -757,7 +562,7 @@ mod strategy_parameter_bounds_tests {
         queue_strategy_profile_registration(&mut settings, "BTC-USDT", strategy, &profile);
         assert_eq!(settings.profile_registration_outbox.len(), 1);
         let registration = &settings.profile_registration_outbox[0];
-        assert_eq!(registration.profile.profile_id, strategies::profile_id(
+        assert_eq!(registration.profile.profile_id, strategy::profile_id(
             "BTC-USDT", strategy.as_str(), &registration.profile.parameters,
         ));
         assert!(!registration.specs.is_empty());
@@ -851,280 +656,146 @@ mod strategy_parameter_bounds_tests {
 }
 
 #[cfg(test)]
-mod threshold_walk_forward_tests {
+mod threshold_profile_source_tests {
     use super::*;
 
-    fn flow_sample(
-        timestamp: u64,
-        feature: f64,
-        pnl: f64,
-        threshold: f64,
-    ) -> StrategyThresholdSample {
-        StrategyThresholdSample {
-            timestamp_ms: timestamp,
-            parameter_key: StrategyParameterKey::MinimumFlowImbalance,
-            threshold,
-            feature_value: feature,
-            net_return_percent: pnl,
-        }
-    }
-
     #[test]
-    fn extracts_the_signal_feature_for_each_learned_threshold() {
-        let cases = [
-            (
-                "live-momentum",
-                serde_json::json!({
-                    "direction":"bearish", "observed_insight":{"momentum_10s_percent":0.001,"trend_5m_volatility_units":0.02},
-                    "strategy_parameters":{"minimum_momentum":0.0}
-                }),
-                StrategyParameterKey::MinimumMomentum,
-                -0.001,
-            ),
-            (
-                "live-trade-flow",
-                serde_json::json!({
-                    "direction":"bullish", "observed_insight":{"trade_flow_imbalance":0.2},
-                    "strategy_parameters":{"minimum_flow_imbalance":0.15}
-                }),
-                StrategyParameterKey::MinimumFlowImbalance,
-                0.2,
-            ),
-            (
-                "live-order-book",
-                serde_json::json!({
-                    "direction":"bearish", "observed_insight":{"book_imbalance":-0.3},
-                    "strategy_parameters":{"minimum_book_imbalance":0.15}
-                }),
-                StrategyParameterKey::MinimumBookImbalance,
-                0.3,
-            ),
-            (
-                "live-vwap-dislocation",
-                serde_json::json!({
-                    "direction":"bullish", "observed_insight":{"mispricing_vs_vwap_bps":2.0},
-                    "strategy_parameters":{"minimum_vwap_dislocation_bps":1.0}
-                }),
-                StrategyParameterKey::MinimumVwapDislocationBps,
-                2.0,
-            ),
-            (
-                "live-absorption-pressure",
-                serde_json::json!({
-                    "direction":"bearish", "observed_insight":{"pressure_without_price_move":0.4},
-                    "strategy_parameters":{"minimum_absorption_pressure":0.2}
-                }),
-                StrategyParameterKey::MinimumAbsorptionPressure,
-                0.4,
-            ),
-        ];
-        for (strategy, decision, key, feature) in cases {
-            assert_eq!(
-                threshold_observation(strategy, &decision),
-                Some((
-                    key,
-                    decision["strategy_parameters"][key.as_str()]
-                        .as_f64()
-                        .unwrap(),
-                    feature
-                ))
-            );
-        }
-    }
-
-    #[test]
-    fn tightens_a_threshold_only_when_later_holdout_edge_improves() {
-        let spec = Strategy::LiveTradeFlow.parameter_specs()
-            .into_iter()
-            .find(|spec| spec.key == StrategyParameterKey::MinimumFlowImbalance)
-            .unwrap();
-        let mut samples = Vec::new();
-        for index in 0..70_u64 {
-            let (feature, pnl) = if index % 2 == 0 {
-                (0.025, -0.2)
-            } else {
-                (0.075, 1.0)
-            };
-            samples.push(flow_sample(index, feature, pnl, 0.02));
-        }
-
-        let tuned = walk_forward_threshold(&spec, 0.02, &samples);
-        assert_eq!(tuned, Some(0.03));
-    }
-
-    #[test]
-    fn leaves_threshold_unchanged_without_enough_holdout_samples() {
-        let spec = Strategy::LiveMomentum.parameter_specs()
-            .into_iter()
-            .find(|spec| spec.key == StrategyParameterKey::MinimumMomentum)
-            .unwrap();
-        let samples = (0..MIN_THRESHOLD_TRAIN_SAMPLES + MIN_THRESHOLD_VALIDATION_SAMPLES - 1)
-            .map(|index| StrategyThresholdSample {
-                timestamp_ms: index as u64,
-                parameter_key: StrategyParameterKey::MinimumMomentum,
-                threshold: 0.0,
-                feature_value: 0.01,
-                net_return_percent: 0.5,
-            })
-            .collect::<Vec<_>>();
-
-        assert_eq!(walk_forward_threshold(&spec, 0.0, &samples), None);
-    }
-
-    #[test]
-    fn rsi_entry_ceiling_uses_daily_rsi_feature_without_directional_wire_data() {
-        let spec = Strategy::Rsi2OversoldRebound.parameter_specs()
-            .into_iter()
-            .find(|spec| spec.key == StrategyParameterKey::RsiEntryMax)
-            .unwrap();
+    fn extracts_threshold_evidence_for_learning_feedback() {
         let decision = serde_json::json!({
-            "primary_metric_value": 7.0,
-            "strategy_parameters": { "rsi_entry_max": 10.0 }
+            "direction":"bullish",
+            "observed_insight":{"trade_flow_imbalance":0.2},
+            "strategy_parameters":{"minimum_flow_imbalance":0.15}
         });
         assert_eq!(
-            threshold_observation("rsi2-oversold-rebound", &decision),
-            Some((StrategyParameterKey::RsiEntryMax, 10.0, 7.0))
+            threshold_observation("live-trade-flow", &decision),
+            Some((StrategyParameterKey::MinimumFlowImbalance, 0.15, 0.2))
         );
-        assert!(walk_forward_threshold(&spec, 10.0, &[]).is_none());
     }
 
     #[test]
-    fn generic_profitable_outcomes_do_not_move_unproven_parameters() {
+    fn learned_threshold_comes_from_learning_snapshot_and_configured_override_wins() {
         let strategy = Strategy::LiveTradeFlow;
+        let threshold_key = StrategyParameterKey::MinimumFlowImbalance.as_str();
+        let profile_key = format!("BTC-USDT:{}", strategy.as_str());
+        let learned_value = 0.08;
         let mut settings = Settings::default();
+        settings.learned_profiles.insert(profile_key, strategy::StrategyProfile {
+            profile_id: strategy::profile_id("BTC-USDT", strategy.as_str(), &BTreeMap::from([
+                (threshold_key.to_owned(), learned_value),
+            ])),
+            version: 7,
+            symbol: "BTC-USDT".into(),
+            strategy: strategy.as_str().into(),
+            parameters: BTreeMap::from([(threshold_key.to_owned(), learned_value)]),
+            learning_samples: 40,
+            positive_samples: 24,
+            realized_pnl: 4.2,
+        });
+
+        let active = learned_strategy_parameter_profile(&settings, "BTC-USDT", strategy);
+        let threshold = active.parameters.iter().find(|p| p.key == threshold_key).unwrap();
+        assert_eq!(threshold.learned_value, learned_value);
+        assert_eq!(threshold.value, learned_value);
+        assert_eq!(threshold.scout_variants.len(), 0);
+
         settings.strategy_parameter_overrides.insert(
-            strategy_parameter_key("BTC-USDT", strategy, "learning_rate"),
-            0.25,
+            strategy_parameter_key("BTC-USDT", strategy, threshold_key), 0.12,
         );
-        let key = strategy_trade_learning_key("BTC-USDT", strategy.as_str());
-        let stats = settings.learning.entry(key).or_default();
-        for _ in 0..30 {
-            record_learning_outcome(stats, 1.0);
-        }
-        let profile = strategy_parameter_profile(&settings, "BTC-USDT", strategy);
-        let samples = profile.parameters.iter()
-            .find(|parameter| parameter.key == StrategyParameterKey::ScoutMinimumWalkForwardSamples.as_str())
-            .unwrap();
-        let positive_rate = profile.parameters.iter()
-            .find(|parameter| parameter.key == StrategyParameterKey::ScoutMinimumPositiveNetRate.as_str())
-            .unwrap();
-        assert_eq!(samples.learned_value, samples.default_value);
-        assert_eq!(positive_rate.learned_value, positive_rate.default_value);
-        assert!((samples.min..=samples.max).contains(&samples.learned_value));
-        assert!((positive_rate.min..=positive_rate.max).contains(&positive_rate.learned_value));
+        let overridden = learned_strategy_parameter_profile(&settings, "BTC-USDT", strategy);
+        let threshold = overridden.parameters.iter().find(|p| p.key == threshold_key).unwrap();
+        assert_eq!(threshold.learned_value, learned_value);
+        assert_eq!(threshold.configured_value, Some(0.12));
+        assert_eq!(threshold.value, 0.12);
+        assert!(threshold.overridden);
     }
 
     #[test]
-    fn negative_pooled_live_results_do_not_move_an_unvalidated_threshold() {
+    fn active_profile_uses_profile_symbol_and_filters_out_of_bounds_learning() {
         let strategy = Strategy::LiveTradeFlow;
-        let spec = strategy.parameter_specs()
-            .into_iter()
-            .find(|spec| spec.key == StrategyParameterKey::MinimumFlowImbalance)
-            .unwrap();
+        let key = format!("ETH-USDT:{}", strategy.as_str());
         let mut settings = Settings::default();
+        settings.learned_profiles.insert(key, strategy::StrategyProfile {
+            profile_id: "learning-profile".into(),
+            version: 3,
+            symbol: "ETH-USDT".into(),
+            strategy: strategy.as_str().into(),
+            parameters: BTreeMap::from([(
+                StrategyParameterKey::MinimumFlowImbalance.as_str().into(), 2.0,
+            )]),
+            learning_samples: 10,
+            positive_samples: 5,
+            realized_pnl: 1.0,
+        });
+
+        // The query key follows the profile symbol (which can differ from the
+        // signal symbol for scout variants); invalid learned values fall back to
+        // the strategy default while the active profile's metadata is retained.
+        let profile = learned_strategy_parameter_profile(&settings, "ETH-USDT", strategy);
+        let threshold = profile.parameters.iter()
+            .find(|p| p.key == StrategyParameterKey::MinimumFlowImbalance.as_str())
+            .unwrap();
+        assert_eq!(threshold.value, threshold.default_value);
+        assert_eq!(profile.learning_samples, 10);
+    }
+
+    #[test]
+    fn scout_probe_overrides_configured_threshold_and_identity_uses_its_profile_symbol() {
+        let strategy = Strategy::LiveTradeFlow;
+        let profile_symbol = "ETH-USDT";
+        let mut settings = Settings::default();
+        settings.learned_profiles.insert(
+            format!("{profile_symbol}:{}", strategy.as_str()),
+            strategy::StrategyProfile {
+                profile_id: "base-profile".into(),
+                version: 4,
+                symbol: profile_symbol.into(),
+                strategy: strategy.as_str().into(),
+                parameters: BTreeMap::from([(
+                    StrategyParameterKey::MinimumFlowImbalance.as_str().into(), 0.07,
+                )]),
+                learning_samples: 20,
+                positive_samples: 12,
+                realized_pnl: 2.0,
+            },
+        );
         settings.strategy_parameter_overrides.insert(
-            strategy_parameter_key("BTC-USDT", strategy, spec.key.as_str()),
-            0.02,
+            strategy_parameter_key(
+                profile_symbol,
+                strategy,
+                StrategyParameterKey::MinimumFlowImbalance.as_str(),
+            ),
+            0.10,
         );
-        for symbol in ["BTC-USDT", "ETH-USDT"] {
-            let stats = settings
-                .learning
-                .entry(strategy_trade_learning_key(symbol, strategy.as_str()))
-                .or_default();
-            for index in 0..24 {
-                record_learning_outcome(stats, -1.0);
-                stats.threshold_samples.push(StrategyThresholdSample {
-                    timestamp_ms: index,
-                    parameter_key: spec.key,
-                    threshold: spec.default,
-                    feature_value: 0.20,
-                    net_return_percent: -0.25,
-                });
-            }
-        }
+        let mut signal = Signal {
+            symbol: "BTC-USDT".into(),
+            direction: "bullish".into(),
+            strength: 1.0,
+            timestamp: 1,
+            stale: false,
+            score: 1.0,
+            ranging_probability: None,
+            components: SignalComponents::default(),
+            strategy_candidate: true,
+            strategy: Some(strategy.as_str().into()),
+            strategy_decision: Some(serde_json::json!({
+                "scout_parameter_profile_symbol": profile_symbol,
+                "scout_parameter_key": "minimum_flow_imbalance",
+                "scout_parameter_value": 0.15,
+                "strategy_parameters": { "minimum_flow_imbalance": 0.02 }
+            })),
+            market_regime: None,
+            news_attribution: None,
+            entry_gate: None,
+        };
 
-        let profile = strategy_parameter_profile(&settings, "BTC-USDT", strategy);
-        let threshold = profile
-            .parameters
-            .iter()
-            .find(|parameter| parameter.key == spec.key.as_str())
-            .unwrap();
-        assert_eq!(threshold.learned_value, 0.02);
-    }
-
-    #[test]
-    fn threshold_walk_forward_validation_can_select_a_tested_entry_threshold() {
-        let strategy = Strategy::LiveTradeFlow;
-        let spec = strategy.parameter_specs()
-            .into_iter()
-            .find(|spec| spec.key == StrategyParameterKey::MinimumFlowImbalance)
-            .unwrap();
-        let mut settings = Settings::default();
-        let btc_stats = settings
-            .learning
-            .entry(strategy_trade_learning_key("BTC-USDT", strategy.as_str()))
-            .or_default();
-        for index in 0..70_u64 {
-            let (feature_value, net_return_percent) = if index % 2 == 0 {
-                (0.16, -0.2)
-            } else {
-                (0.25, 1.0)
-            };
-            btc_stats.threshold_samples.push(StrategyThresholdSample {
-                timestamp_ms: index,
-                parameter_key: spec.key,
-                threshold: spec.default,
-                feature_value,
-                net_return_percent,
-            });
-        }
-
-        let validated = walk_forward_threshold(&spec, spec.default, &btc_stats.threshold_samples)
-            .unwrap();
-        assert!((validated - 0.17).abs() < 1e-9);
-        let profile = strategy_parameter_profile(&settings, "BTC-USDT", strategy);
-        let threshold = profile
-            .parameters
-            .iter()
-            .find(|parameter| parameter.key == spec.key.as_str())
-            .unwrap();
-        assert!((threshold.learned_value - validated).abs() < 1e-9);
-    }
-
-    #[test]
-    fn parameter_profile_uses_validated_walk_forward_threshold() {
-        let strategy = Strategy::LiveTradeFlow;
-        let spec = strategy.parameter_specs()
-            .into_iter()
-            .find(|spec| spec.key == StrategyParameterKey::MinimumFlowImbalance)
-            .unwrap();
-        let mut settings = Settings::default();
-        let key = strategy_trade_learning_key("BTC-USDT", strategy.as_str());
-        let stats = settings.learning.entry(key).or_default();
-        for index in 0..70_u64 {
-            let (feature_value, net_return_percent) = if index % 2 == 0 {
-                (0.16, -0.2)
-            } else {
-                (0.25, 1.0)
-            };
-            stats.threshold_samples.push(StrategyThresholdSample {
-                timestamp_ms: index,
-                parameter_key: spec.key,
-                threshold: 0.15,
-                feature_value,
-                net_return_percent,
-            });
-        }
-
-        let profile = strategy_parameter_profile(&settings, "BTC-USDT", strategy);
-        let threshold = profile
-            .parameters
-            .iter()
-            .find(|parameter| parameter.key == StrategyParameterKey::MinimumFlowImbalance.as_str())
-            .unwrap();
-        assert!((threshold.learned_value - 0.17).abs() < 1e-9);
-        assert!(
-            threshold.min <= threshold.learned_value && threshold.learned_value <= threshold.max
+        inject_learned_parameters(&settings, &mut signal);
+        let parameters = signal_strategy_parameters(&signal);
+        assert_eq!(parameters["minimum_flow_imbalance"], 0.15);
+        let decision = signal.strategy_decision.as_ref().unwrap();
+        assert_eq!(decision["learning_profile_symbol"], profile_symbol);
+        assert_eq!(
+            decision["learning_profile_id"],
+            strategy::profile_id(profile_symbol, strategy.as_str(), &parameters),
         );
     }
 }
@@ -1168,25 +839,6 @@ mod scout_parameter_learning_tests {
             .find(|parameter| parameter.key == StrategyParameterKey::BreakoutLookbackDays.as_str())
             .unwrap();
         assert_eq!(lookback.learned_value, lookback.default_value);
-    }
-
-    #[test]
-    fn pooled_threshold_history_includes_same_strategy_scout_samples() {
-        let mut settings = Settings::default();
-        let strategy = Strategy::LiveTradeFlow;
-        let key = strategy_scout_learning_key("ETH-USDT", strategy.as_str(), "strategy");
-        let scout = settings.learning.entry(key).or_default();
-        scout.threshold_samples.push(StrategyThresholdSample {
-            timestamp_ms: 1,
-            parameter_key: StrategyParameterKey::MinimumFlowImbalance,
-            threshold: 0.15,
-            feature_value: 0.20,
-            net_return_percent: 0.3,
-        });
-
-        let samples = strategy_threshold_samples_across_symbols(&settings, strategy);
-        assert_eq!(samples.len(), 1);
-        assert_eq!(samples[0].parameter_key, StrategyParameterKey::MinimumFlowImbalance);
     }
 
     #[test]

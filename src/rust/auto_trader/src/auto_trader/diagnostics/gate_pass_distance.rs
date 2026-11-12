@@ -18,24 +18,6 @@ fn gate_distance_to_pass(gate: &str, detail: &str) -> Option<f64> {
             ((threshold - actual) / threshold.abs()).max(0.0)
         }
     }
-    fn metric(text: &str, name: &str, section: Option<&str>) -> Option<f64> {
-        let scoped = match section {
-            Some(section) => text.split_once(section)?.1,
-            None => text,
-        };
-        let value = scoped.split_once(name)?.1.split_whitespace().next()?;
-        if value == "n/a" { None } else { number(value) }
-    }
-    fn positive_rate_gap(detail: &str, threshold: f64) -> Option<f64> {
-        let actual_percent = metric(detail, "positive=", None)?;
-        Some(lower_bound_gap(actual_percent / 100.0, threshold))
-    }
-    fn return_to_zero_gap(detail: &str, section: Option<&str>) -> Option<f64> {
-        let actual_percent = metric(detail, "net=", section)?;
-        // Return values are reported in percent; one percentage point is the normalization unit at a zero threshold.
-        Some((-actual_percent).max(0.0))
-    }
-
     let mut gaps = Vec::new();
     if let Some(failed) = detail.split("failed: ").nth(1) {
         if let Some((actual_text, threshold_text)) = failed.split_once(" < ") {
@@ -91,49 +73,6 @@ fn gate_distance_to_pass(gate: &str, detail: &str) -> Option<f64> {
                     gaps.push(((actual - limit) / limit.abs()).max(0.0));
                 }
             }
-        }
-    }
-    if gate == "Strict walk-forward sample minimum" {
-        if let (Some(actual), Some(required)) = (
-            detail.split("n=").nth(1).and_then(number_at_start),
-            detail.split("needs ").nth(1).and_then(number_at_start),
-        ) {
-            if required != 0.0 {
-                gaps.push(((required - actual) / required).max(0.0));
-            }
-        }
-    }
-    if gate == "Strict walk-forward quality thresholds" {
-        if let Some(hit_percent) = metric(detail, "hit=", None) {
-            gaps.push(lower_bound_gap(
-                hit_percent / 100.0,
-                MIN_SIDE_DIRECTION_MATCH_RATE,
-            ));
-        }
-        if let Some(return_gap) = return_to_zero_gap(detail, None) {
-            gaps.push(return_gap);
-        }
-        if let Some(gap) = positive_rate_gap(detail, MIN_SIDE_POSITIVE_NET_RATE) {
-            gaps.push(gap);
-        }
-        if let Some(lower_percent) = metric(detail, "lower95=", None) {
-            gaps.push(lower_bound_gap(
-                lower_percent / 100.0,
-                MIN_SIDE_POSITIVE_NET_LOWER_95,
-            ));
-        }
-    }
-    if gate == "Exploration walk-forward return and positive-rate floor" {
-        if let Some(return_gap) = return_to_zero_gap(detail, None) {
-            gaps.push(return_gap);
-        }
-        if let Some(gap) = positive_rate_gap(detail, NEGATIVE_EVIDENCE_FLOOR) {
-            gaps.push(gap);
-        }
-    }
-    if gate == "Research-model side evidence" {
-        if let Some(return_gap) = return_to_zero_gap(detail, Some("research-model ")) {
-            gaps.push(return_gap);
         }
     }
     if gate == "Existing position / re-entry limit" {
@@ -214,10 +153,6 @@ mod gate_pass_distance_tests {
             ("Execution cost versus measured edge", "failed: 1.5 > 1.0", 0.5),
             ("Signal freshness", "signal age 12s > max age 10s", 0.2),
             ("Directional signal", "score 0.2 vs floor 0.4; range probability 0.3 must be below 0.2", 0.5),
-            ("Strict walk-forward sample minimum", "side n=10 needs 20 samples", 0.5),
-            ("Strict walk-forward quality thresholds", "hit=40% net=-0.2% positive=50% lower95=40%", 0.15 / 0.55),
-            ("Exploration walk-forward return and positive-rate floor", "net=-0.4% positive=20%", 0.25 / 0.45),
-            ("Research-model side evidence", "walk-forward n=20 net=0.5%; research-model n=10 net=-0.3%", 0.3),
             ("Existing position / re-entry limit", "entries 5 >= max 4", 0.25),
             ("Deep-book minimum order capacity", "Deep-book capacity for ETH (8) is below minimum paper order (10)", 0.2),
             ("Deep-book impact limit", "estimated impact 20 bps exceeds 10 bps", 1.0),
@@ -232,7 +167,6 @@ mod gate_pass_distance_tests {
 
     #[test]
     fn strict_sample_and_capacity_gaps_do_not_report_negative_distance() {
-        assert_eq!(gate_distance_to_pass("Strict walk-forward sample minimum", "n=30 needs 20 samples"), Some(0.0));
         assert_eq!(gate_distance_to_pass("Deep-book impact limit", "estimated impact 5 bps exceeds 10 bps"), Some(0.0));
         assert_eq!(gate_distance_to_pass("Directional signal", "range probability 0.1 must be below 0"), None);
     }

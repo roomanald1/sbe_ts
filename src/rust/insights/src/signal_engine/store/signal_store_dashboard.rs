@@ -1,26 +1,19 @@
 impl SignalStore {
     pub async fn auto_trader_dashboard(&self) -> Result<AutoTraderDashboard> {
-        let (best, walk_forward) = tokio::try_join!(self.best(100), self.walk_forward())?;
-        let missed_opportunity_bands = self.missed_opportunity_bands().await?;
-        Ok(AutoTraderDashboard {
-            best,
-            walk_forward,
-            missed_opportunity_bands,
-        })
+        let best = self.best(100).await?;
+        Ok(AutoTraderDashboard { best })
     }
 
     pub async fn dashboard(&self) -> Result<SignalDashboard> {
-        let (best, history, performance, walk_forward) = tokio::try_join!(
+        let (best, history, performance) = tokio::try_join!(
             self.best(10),
             self.recent(200),
             self.performance(),
-            self.walk_forward(),
         )?;
         Ok(SignalDashboard {
             best,
             history,
             performance,
-            walk_forward,
         })
     }
 

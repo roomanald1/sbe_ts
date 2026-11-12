@@ -15,6 +15,10 @@ pub(super) async fn execution_decision(
                 || !stats.cost_notional.is_finite()
                 || !stats.all_in_cost_notional_bps.is_finite()
         })
+        || request
+            .learning
+            .keys()
+            .any(|key| key.is_empty() || key.len() > 320)
     {
         return Err((
             StatusCode::BAD_REQUEST,
@@ -22,6 +26,17 @@ pub(super) async fn execution_decision(
         ));
     }
     let mut state = service.state.lock().await;
+    let new_keys = request
+        .learning
+        .keys()
+        .filter(|key| !state.execution_learning.contains_key(*key))
+        .count();
+    if state.execution_learning.len().saturating_add(new_keys) > retention::MAX_EXECUTION_STATS {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Learning execution-stat capacity is full".into(),
+        ));
+    }
     let mut imported = false;
     for (key, stats) in &request.learning {
         if !state.execution_learning.contains_key(key) {
@@ -81,10 +96,19 @@ pub(super) async fn execution_outcome(
         return Err((StatusCode::BAD_REQUEST, "invalid execution outcome".into()));
     }
     let mut state = service.state.lock().await;
-    if state.seen_execution_event_ids.contains(&event.event_id) {
+    if state.seen_execution_event_ids.contains(&event.event_id)
+        || (state.seen_execution_event_ids_overflowed
+            && durable_event_id_exists(
+                &service.path,
+                "learning_seen_execution_event_ids",
+                &event.event_id,
+            )
+            .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error))?)
+    {
         return Ok(StatusCode::NO_CONTENT);
     }
     let key = format!("{}:exec:{}", event.context, event.order_type);
+    retention::ensure_execution_room(&state, &key)?;
     let stats = state
         .execution_learning
         .entry(key)
@@ -116,10 +140,18 @@ pub(super) async fn execution_outcome(
         stats.all_in_cost_notional_bps += event.all_in_cost_notional_bps;
     }
     stats.updated_at_ms = event.observed_at_ms;
-    state.seen_execution_event_ids.insert(event.event_id);
+    state
+        .seen_execution_event_ids
+        .insert(event.event_id.clone());
     while state.seen_execution_event_ids.len() > 100_000 {
-        if let Some(oldest) = state.seen_execution_event_ids.iter().next().cloned() {
+        if let Some(oldest) = state
+            .seen_execution_event_ids
+            .iter()
+            .find(|seen_id| seen_id.as_str() != event.event_id)
+            .cloned()
+        {
             state.seen_execution_event_ids.remove(&oldest);
+            state.seen_execution_event_ids_overflowed = true;
         }
     }
     persist(&service.path, &state)?;

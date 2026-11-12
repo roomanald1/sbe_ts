@@ -25,30 +25,39 @@ fn live_strategy_feature_signal(
     signal: &Signal,
     strategy: Strategy,
     parameters: &BTreeMap<String, f64>,
-) -> Option<Signal> {
-    let parameter = |key: StrategyParameterKey| parameters.get(key.as_str()).copied();
+) -> Result<Signal, String> {
+    let parameter = |key: StrategyParameterKey| {
+        parameters.get(key.as_str()).copied().ok_or_else(|| {
+            format!("Configured parameter '{}' is unavailable", key.as_str())
+        })
+    };
     let mut configured = signal.clone();
     match strategy {
         Strategy::LiveMomentum => {
             let momentum_window = parameter(StrategyParameterKey::MomentumLookbackSeconds)? as u16;
             let trend_window = parameter(StrategyParameterKey::TrendLookbackSeconds)? as u16;
             configured.components.momentum_10s_percent = signal.components.momentum_by_window
-                .iter().find(|feature| feature.window_seconds == momentum_window)?.value;
+                .iter().find(|feature| feature.window_seconds == momentum_window)
+                .ok_or_else(|| format!("Momentum feature window {momentum_window}s is missing"))?.value;
             configured.components.trend_5m_volatility_units = signal.components.trend_volatility_units_by_window
-                .iter().find(|feature| feature.window_seconds == trend_window)?.value;
+                .iter().find(|feature| feature.window_seconds == trend_window)
+                .ok_or_else(|| format!("Trend-volatility feature window {trend_window}s is missing"))?.value;
         }
         Strategy::LiveTradeFlow => {
             let window = parameter(StrategyParameterKey::TradeFlowWindowSeconds)? as u16;
             configured.components.trade_flow_imbalance = signal.components.trade_flow_by_window
-                .iter().find(|feature| feature.window_seconds == window)?.value;
+                .iter().find(|feature| feature.window_seconds == window)
+                .ok_or_else(|| format!("Trade-flow feature window {window}s is missing"))?.value;
         }
         Strategy::LiveOrderBook => {
             let depth = parameter(StrategyParameterKey::BookDepthLevels)? as u8;
             let momentum_window = parameter(StrategyParameterKey::MomentumLookbackSeconds)? as u16;
             configured.components.book_imbalance = signal.components.book_imbalance_by_depth
-                .iter().find(|feature| feature.depth_levels == depth)?.value;
+                .iter().find(|feature| feature.depth_levels == depth)
+                .ok_or_else(|| format!("Order-book feature at depth {depth} is missing"))?.value;
             configured.components.momentum_10s_percent = signal.components.momentum_by_window
-                .iter().find(|feature| feature.window_seconds == momentum_window)?.value;
+                .iter().find(|feature| feature.window_seconds == momentum_window)
+                .ok_or_else(|| format!("Momentum feature window {momentum_window}s is missing"))?.value;
         }
         Strategy::LiveVwapDislocation => {
             let window = parameter(StrategyParameterKey::VwapLookbackSeconds)? as u16;
@@ -56,9 +65,11 @@ fn live_strategy_feature_signal(
             let minimum_count = parameter(StrategyParameterKey::VwapMinimumTradeCount)? as u16;
             let minimum_span_ms = (parameter(StrategyParameterKey::VwapMinimumTradeSpanSeconds)? * 1_000.0) as u32;
             configured.components.momentum_10s_percent = signal.components.momentum_by_window
-                .iter().find(|feature| feature.window_seconds == momentum_window)?.value;
+                .iter().find(|feature| feature.window_seconds == momentum_window)
+                .ok_or_else(|| format!("Momentum feature window {momentum_window}s is missing"))?.value;
             let feature = signal.components.vwap_dislocation_by_window
-                .iter().find(|feature| feature.window_seconds == window)?;
+                .iter().find(|feature| feature.window_seconds == window)
+                .ok_or_else(|| format!("VWAP-dislocation feature window {window}s is missing"))?;
             configured.components.mispricing_vs_vwap_bps =
                 (feature.sample_count >= minimum_count && feature.span_ms >= minimum_span_ms)
                     .then_some(feature.value).flatten();
@@ -70,9 +81,16 @@ fn live_strategy_feature_signal(
             let maximum_move = parameter(StrategyParameterKey::AbsorptionMaximumPriceMovePercent)?;
             let momentum_window = parameter(StrategyParameterKey::MomentumLookbackSeconds)? as u16;
             let movement = signal.components.momentum_by_window.iter()
-                .find(|feature| feature.window_seconds == momentum_window)?.value?;
+                .find(|feature| feature.window_seconds == momentum_window)
+                .ok_or_else(|| format!("Momentum feature window {momentum_window}s is missing"))?
+                .value
+                .ok_or_else(|| format!("Momentum feature window {momentum_window}s has no value yet"))?;
             configured.components.momentum_10s_percent = Some(movement);
-            if movement.abs() > maximum_move { return None; }
+            if movement.abs() > maximum_move {
+                return Err(format!(
+                    "Price movement {movement:.4}% exceeds the configured maximum {maximum_move:.4}%"
+                ));
+            }
             let pressure = signal.components.absorption_pressure_by_window.iter()
                 .find(|feature| feature.window_seconds == window
                     && feature.replenishment_window_ms == replenishment_ms
@@ -87,7 +105,7 @@ fn live_strategy_feature_signal(
                 .map(|flow| -flow);
             configured.components.pressure_without_price_move = pressure.or(flow_fallback);
         }
-        _ => return None,
+        _ => return Err(format!("Strategy '{}' has no live-feature adapter", strategy.as_str())),
     }
     // The selected scalar features and applied parameters are retained in the
     // decision audit; raw variants are only needed before strategy evaluation.
@@ -97,7 +115,7 @@ fn live_strategy_feature_signal(
     configured.components.book_imbalance_by_depth.clear();
     configured.components.vwap_dislocation_by_window.clear();
     configured.components.absorption_pressure_by_window.clear();
-    Some(configured)
+    Ok(configured)
 }
 
 #[cfg(test)]
@@ -106,7 +124,7 @@ fn live_scout_direction_probes(
     strategy: Strategy,
     parameters: &BTreeMap<String, f64>,
 ) -> Vec<Signal> {
-    let Some(signal) = live_strategy_feature_signal(signal, strategy, parameters) else {
+    let Ok(signal) = live_strategy_feature_signal(signal, strategy, parameters) else {
         return Vec::new();
     };
     let source_values: Vec<f64> = match strategy {
@@ -285,6 +303,14 @@ fn collect_signal_candidates<'a>(
             if is_stablecoin_pair(&signal.symbol) {
                 return false;
             }
+            if !matches!(signal.direction.as_str(), "bullish" | "bearish") {
+                non_directional_count += 1;
+                return false;
+            }
+            // Only count stale directional signals as stale candidates. Neutral
+            // and ranging snapshots cannot enter a position, so including them
+            // inflated the stale-signal metric with signals that were never
+            // actionable.
             if !signal_is_fresh(signal, now) {
                 stale_signal_count += 1;
                 let age = now.saturating_sub(signal.timestamp / 1000);
@@ -292,10 +318,6 @@ fn collect_signal_candidates<'a>(
                 if !stale_symbols.iter().any(|symbol| symbol == &signal.symbol) {
                     stale_symbols.push(signal.symbol.clone());
                 }
-                return false;
-            }
-            if !matches!(signal.direction.as_str(), "bullish" | "bearish") {
-                non_directional_count += 1;
                 return false;
             }
             let block_reason = signal_candidate_position_block_reason(
@@ -342,7 +364,7 @@ struct SignalSelectionInput<'a> {
     non_directional_count: usize,
     position_blocked_count: usize,
     position_block_details: &'a [String],
-    learning_thresholds: &'a BTreeMap<String, strategies::ContextThresholds>,
+    learning_thresholds: &'a BTreeMap<String, strategy::ContextThresholds>,
     risk_appetite: f64,
     open_positions: &'a BTreeMap<String, TraderPosition>,
     max_entries_per_auto_position: u32,
@@ -372,17 +394,12 @@ fn format_no_tradeable_bias(
         max_entries_per_auto_position,
         ..
     } = *input;
-    let blocked_by_negative = count_negative_evidence_candidates(
-        exploration_qualified,
-        dashboard,
-        now.saturating_mul(1000),
-    );
     let waiting_for_pullback = fresh_directional
         .iter()
         .filter(|signal| needs_pullback_confirmation(signal) && !passes_pullback_confirmation(signal))
         .count();
     let mut reason = format!(
-        "No tradeable bias: fresh directional {}/{} ({} inferred from neutral score; filtered: {} stale, {} non-directional, {} blocked by existing positions, {} awaiting 10s pullback); contextual learned strength floors passed {}; exploration strength floor {:.2}; contextual raw-score floors passed {}; {} candidate(s) blocked by negative walk-forward history",
+        "No tradeable bias: fresh directional {}/{} ({} inferred from neutral score; filtered: {} stale, {} non-directional, {} blocked by existing positions, {} awaiting 10s pullback); contextual learned strength floors passed {}; exploration strength floor {:.2}; contextual raw-score floors passed {}",
         fresh_directional.len(),
         signals.len(),
         inferred_direction_count,
@@ -392,8 +409,7 @@ fn format_no_tradeable_bias(
         waiting_for_pullback,
         strength_qualified.len(),
         MIN_EXPLORATION_STRENGTH * risk_floor_scale(risk_appetite),
-        exploration_qualified.len(),
-        blocked_by_negative
+        exploration_qualified.len()
     );
     if stale_signal_count > 0 {
         reason.push_str(&format!(
@@ -490,6 +506,34 @@ mod live_scout_direction_tests {
             .into_iter()
             .map(|spec| (spec.key.as_str().to_owned(), spec.default))
             .collect()
+    }
+
+    #[test]
+    fn live_feature_blocker_identifies_the_missing_configured_window() {
+        let error = live_strategy_feature_signal(
+            &source(),
+            Strategy::LiveMomentum,
+            &parameters(Strategy::LiveMomentum),
+        )
+        .unwrap_err();
+        assert_eq!(error, "Momentum feature window 10s is missing");
+    }
+
+    #[test]
+    fn absorption_blocker_identifies_a_feature_window_still_warming_up() {
+        let mut signal = source();
+        signal.components.momentum_by_window = vec![WindowedSignalValue {
+            window_seconds: 10,
+            value: None,
+            ..Default::default()
+        }];
+        let error = live_strategy_feature_signal(
+            &signal,
+            Strategy::LiveAbsorptionPressure,
+            &parameters(Strategy::LiveAbsorptionPressure),
+        )
+        .unwrap_err();
+        assert_eq!(error, "Momentum feature window 10s has no value yet");
     }
 
     #[test]

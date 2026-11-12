@@ -348,7 +348,7 @@ async fn execution_learning_decision(
     exploratory: bool,
     learning: &BTreeMap<String, ExecutionLearningStats>,
     import_legacy_learning: bool,
-) -> (strategies::ExecutionLearningResponse, bool) {
+) -> (strategy::ExecutionLearningResponse, bool) {
     let order_types = ALL_ORDER_TYPES
         .iter()
         .filter_map(|kind| serde_json::to_value(kind).ok()?.as_str().map(str::to_owned))
@@ -358,7 +358,7 @@ async fn execution_learning_decision(
         .filter(|kind| exploratory || should_explore_execution_profile(signal, **kind))
         .filter_map(|kind| serde_json::to_value(kind).ok()?.as_str().map(str::to_owned))
         .collect();
-    let request = strategies::ExecutionLearningRequest {
+    let request = strategy::ExecutionLearningRequest {
         context: context.to_owned(),
         baseline_order_type: serde_json::to_value(baseline)
             .ok()
@@ -375,7 +375,7 @@ async fn execution_learning_decision(
                 .map(|(key, stats)| {
                     (
                         key.clone(),
-                        strategies::ExecutionLearningStat {
+                        strategy::ExecutionLearningStat {
                             samples: stats.samples,
                             filled_samples: stats.filled_samples,
                             fill_rate_total: stats.fill_rate_total,
@@ -396,7 +396,7 @@ async fn execution_learning_decision(
         request.allow_order_type_adaptation,
         request.explore_profile_order_types.join("|")
     );
-    let response = cached_learning_response::<strategies::ExecutionLearningResponse>(
+    let response = cached_learning_response::<strategy::ExecutionLearningResponse>(
         &state.learning_response_cache,
         cache_key,
         "/execution-decision".to_owned(),
@@ -405,7 +405,7 @@ async fn execution_learning_decision(
     .await;
     let imported = response.is_some() && import_legacy_learning;
     (
-        response.unwrap_or_else(|| strategies::ExecutionLearningResponse {
+        response.unwrap_or_else(|| strategy::ExecutionLearningResponse {
             learned_order_type: Some(baseline_order_type),
             schedule_depth_threshold: DEFAULT_SCHEDULE_DEPTH_RATIO,
             schedule_threshold_samples: 0,
@@ -484,57 +484,13 @@ async fn prepare_signal_execution_plan(
                 "take_profit_percent",
             ))
     });
-    let learned_exit_policy = if strategy.is_none() {
-        learned_exit_policy(signal, &dashboard.walk_forward)
-    } else {
-        None
-    };
-    let per_strategy_history_is_mature = strategy_profile
-        .as_ref()
-        .is_some_and(|profile| profile.learning_samples >= WALK_FORWARD_POLICY_MIN_SAMPLES);
     let baseline_stop = stop_parameter.unwrap_or(counterfactual_stop_loss_percent);
     let baseline_target = target_parameter.unwrap_or(counterfactual_take_profit_percent);
-    let bounded_learned_policy = learned_exit_policy.map(|(stop, target, samples)| {
-        let widening_tiers =
-            (samples / MIN_VALIDATED_EXIT_POLICY_SAMPLES).clamp(1, MAX_STOP_WIDENING_TIERS) as f64;
-        let max_widening = STOP_WIDENING_PER_VALIDATION_TIER_PERCENT * widening_tiers;
-        let stop = if stop > baseline_stop {
-            stop.min(baseline_stop + max_widening)
-        } else {
-            stop
-        };
-        (stop, target)
-    });
-    // Respect either manual exit override. Otherwise a validated walk-forward
-    // policy can widen the stop, including after the strategy profile matures,
-    // only when held-out results beat the conservative baseline.
-    let explicit_exit_override = explicit_stop || explicit_target;
-    let validated_wider_policy = (!explicit_exit_override)
-        .then_some(bounded_learned_policy)
-        .flatten()
-        .filter(|(stop, _)| *stop > baseline_stop + 1e-9);
-    let configured_stop = if explicit_exit_override {
-        baseline_stop
-    } else if let Some((stop, _)) = validated_wider_policy {
-        stop
-    } else if per_strategy_history_is_mature {
-        baseline_stop
-    } else {
-        bounded_learned_policy
-            .map(|(stop, _)| stop)
-            .unwrap_or(baseline_stop)
-    };
-    let mut configured_target = if explicit_exit_override {
-        baseline_target
-    } else if let Some((_, target)) = validated_wider_policy {
-        target
-    } else if per_strategy_history_is_mature {
-        baseline_target
-    } else {
-        bounded_learned_policy
-            .map(|(_, target)| target)
-            .unwrap_or(baseline_target)
-    };
+    // Generic signal walk-forward is no longer an exit-policy source. Stop and
+    // target values come from the selected strategy profile or configured
+    // defaults, with Learning-owned post-exit feedback applied below.
+    let configured_stop = baseline_stop;
+    let mut configured_target = baseline_target;
     if !explicit_target && post_exit_sample_count >= MIN_POST_EXIT_ADAPTATION_SAMPLES {
         let strategy_target_max = strategy
             .and_then(|kind| {
@@ -551,7 +507,7 @@ async fn prepare_signal_execution_plan(
         .then(|| {
             let kind = strategy?;
             let parameters = signal_strategy_parameters(signal);
-            let profile_id = strategies::profile_id(&signal.symbol, kind.as_str(), &parameters);
+            let profile_id = strategy::profile_id(&signal.symbol, kind.as_str(), &parameters);
             settings
                 .contextual_stop_loss_percents
                 .get(&format!("{profile_id}|{}", market_context(signal)))
@@ -730,24 +686,12 @@ async fn prepare_signal_execution_plan(
         minimum_book_order * quote_rate,
     );
     let deep_book_ms = deep_book_started.elapsed().as_secs_f64() * 1000.0;
-    let (effective_take_profit_percent, horizon_take_profit_percent) =
-        if validated_wider_policy.is_some() {
-            // Keep the target paired with the wider stop that passed walk-forward
-            // validation; unrelated target heuristics would invalidate that result.
-            (configured_target, None)
-        } else {
-            let horizon_take_profit_percent = horizon_adjusted_take_profit_percent(
-                signal,
-                &dashboard.walk_forward,
-                configured_target,
-            );
-            let effective_take_profit_percent = confidence_adjusted_take_profit_percent(
-                &settings.closed_trade_returns_percent,
-                horizon_take_profit_percent.unwrap_or(configured_target),
-                effective_stop_loss_percent,
-            );
-            (effective_take_profit_percent, horizon_take_profit_percent)
-        };
+    let horizon_take_profit_percent = None;
+    let effective_take_profit_percent = confidence_adjusted_take_profit_percent(
+        &settings.closed_trade_returns_percent,
+        configured_target,
+        effective_stop_loss_percent,
+    );
     let context = market_context(&signal);
     let execution_learning_started = Instant::now();
     let (execution_learning, imported_execution_learning) = execution_learning_decision(
@@ -890,10 +834,10 @@ mod risk_adjusted_monthly_momentum_sizing_tests {
             ("SOL-USDT", 1, 1, 0.5),
         ] {
             let parameters = BTreeMap::new();
-            let profile_id = strategies::profile_id(symbol, strategy.as_str(), &parameters);
+            let profile_id = strategy::profile_id(symbol, strategy.as_str(), &parameters);
             settings.learned_profiles.insert(
                 format!("{symbol}:{}", strategy.as_str()),
-                strategies::StrategyProfile {
+                strategy::StrategyProfile {
                     profile_id,
                     version: 1,
                     symbol: symbol.to_owned(),
@@ -939,7 +883,6 @@ mod signal_execution_budget_tests {
     fn dashboard(best: Vec<Signal>) -> Dashboard {
         Dashboard {
             best,
-            walk_forward: Arc::new(Vec::new()),
             missed_opportunity_bands: Arc::new(Vec::new()),
             markets: Arc::new(BTreeMap::new()),
             queued_at: None,
@@ -1208,7 +1151,7 @@ mod signal_execution_budget_tests {
         let mut candidate = signal("live-trade-flow", 0.8, 100_000);
         candidate.strategy_decision =
             Some(serde_json::json!({"strategy_parameters":{"minimum_flow_imbalance":0.2}}));
-        let profile = strategies::profile_id(
+        let profile = strategy::profile_id(
             &candidate.symbol,
             "live-trade-flow",
             &signal_strategy_parameters(&candidate),

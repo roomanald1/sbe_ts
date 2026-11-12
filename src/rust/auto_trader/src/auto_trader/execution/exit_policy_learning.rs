@@ -1,6 +1,3 @@
-const MIN_VALIDATED_EXIT_POLICY_SAMPLES: usize = 20;
-const STOP_WIDENING_PER_VALIDATION_TIER_PERCENT: f64 = 0.15;
-const MAX_STOP_WIDENING_TIERS: usize = 3;
 const MIN_POST_EXIT_ADAPTATION_SAMPLES: usize = 20;
 const MAX_POST_EXIT_ADJUSTMENT_PERCENT: f64 = 0.5;
 const MAX_POST_EXIT_SAMPLE_PERCENT: f64 = 2.0;
@@ -64,73 +61,6 @@ fn post_exit_policy_adjustments(
             .unwrap_or_default(),
         target.map_or(0, |(_, samples)| samples),
     )
-}
-
-fn learned_exit_policy(signal: &Signal, walk_forward: &[WalkForward]) -> Option<(f64, f64, usize)> {
-    walk_forward
-        .iter()
-        .filter(|item| item.symbol == signal.symbol && matches!(item.horizon_seconds, 900 | 3_600))
-        .filter_map(|item| {
-            let policy = if signal.direction == "bullish" {
-                item.learned_long_exit_policy.as_ref()
-            } else {
-                item.learned_short_exit_policy.as_ref()
-            }?;
-            (policy.validation_samples >= MIN_VALIDATED_EXIT_POLICY_SAMPLES
-                && policy.validation_average_net_return_percent > 0.0
-                && policy.validation_positive_net_rate >= 0.40
-                && policy.stop_loss_percent.is_finite()
-                && policy.take_profit_percent.is_finite())
-            .then_some((
-                policy.validation_average_net_return_percent,
-                policy.stop_loss_percent,
-                policy.take_profit_percent,
-                policy.validation_samples,
-            ))
-        })
-        .max_by(|left, right| left.0.total_cmp(&right.0))
-        .map(|(_, stop, target, samples)| (stop, target, samples))
-}
-
-fn horizon_adjusted_take_profit_percent(
-    signal: &Signal,
-    walk_forward: &[WalkForward],
-    base_target_percent: f64,
-) -> Option<f64> {
-    walk_forward
-        .iter()
-        .filter(|item| item.symbol == signal.symbol && matches!(item.horizon_seconds, 900 | 3_600))
-        .filter(|item| {
-            let metrics = if signal.direction == "bullish" {
-                &item.all_signal_long
-            } else {
-                &item.all_signal_short
-            };
-            metrics.sample_count >= MIN_SIDE_WALK_FORWARD_SAMPLES
-                && metrics
-                    .direction_match_rate
-                    .is_some_and(|rate| rate >= MIN_SIDE_DIRECTION_MATCH_RATE)
-                && metrics.positive_net_rate.is_some_and(|rate| rate >= 0.60)
-                && metrics
-                    .positive_net_rate_lower_95
-                    .is_some_and(|rate| rate >= MIN_SIDE_POSITIVE_NET_LOWER_95)
-                && metrics
-                    .average_net_return_percent
-                    .is_some_and(|average| average > base_target_percent)
-        })
-        .filter_map(|item| {
-            if signal.direction == "bullish" {
-                item.all_signal_long.average_net_return_percent
-            } else {
-                item.all_signal_short.average_net_return_percent
-            }
-        })
-        .max_by(f64::total_cmp)
-        .map(|average_return| {
-            (average_return * 0.75)
-                .max(base_target_percent)
-                .min(MAX_TAKE_PROFIT_PERCENT)
-        })
 }
 
 fn risk_adjusted_take_profit_percent(stop_loss_percent: f64, risk_appetite: f64) -> f64 {
@@ -280,38 +210,6 @@ mod exit_policy_learning_tests {
             confidence_adjusted_take_profit_percent(&strong, 3.0, 1.0),
             minimum_reward_risk_take_profit_percent(1.0, 3.0)
         );
-    }
-
-    #[test]
-    fn learned_exit_policy_requires_validated_positive_evidence_for_matching_side() {
-        let signal: Signal = serde_json::from_value(serde_json::json!({
-            "symbol":"ETH-USDT", "direction":"bullish", "strength":1.0,
-            "timestamp":1, "stale":false
-        }))
-        .unwrap();
-        let accepted: WalkForward = serde_json::from_value(serde_json::json!({
-            "symbol":"ETH-USDT", "horizon_seconds":900,
-            "learned_long_exit_policy": {
-                "stop_loss_percent":1.5, "take_profit_percent":3.0,
-                "validation_samples":20, "validation_average_net_return_percent":0.4,
-                "validation_positive_net_rate":0.5
-            }
-        }))
-        .unwrap();
-        assert_eq!(
-            learned_exit_policy(&signal, std::slice::from_ref(&accepted)),
-            Some((1.5, 3.0, 20))
-        );
-        let insufficient: WalkForward = serde_json::from_value(serde_json::json!({
-            "symbol":"ETH-USDT", "horizon_seconds":900,
-            "learned_long_exit_policy": {
-                "stop_loss_percent":1.5, "take_profit_percent":3.0,
-                "validation_samples":19, "validation_average_net_return_percent":0.4,
-                "validation_positive_net_rate":0.5
-            }
-        }))
-        .unwrap();
-        assert_eq!(learned_exit_policy(&signal, &[insufficient]), None);
     }
 
     #[test]

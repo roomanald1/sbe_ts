@@ -207,7 +207,7 @@ async fn publish_exit_timing_feedback(state: &AutoTraderState) -> Result<(), Str
         return Ok(());
     };
     crate::service_rpc::learning_request(
-        strategies::ScoutWorkerHttpMethod::Post,
+        strategy::ScoutWorkerHttpMethod::Post,
         "/exit-timing",
         Some(event.clone()),
     )

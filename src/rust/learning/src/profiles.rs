@@ -110,7 +110,7 @@ fn contextual_stop_loss_percents(state: &LearningState, cutoff: u64) -> BTreeMap
         };
         let Some(strategy) = observation["strategy"]
             .as_str()
-            .and_then(strategies::Strategy::from_name)
+            .and_then(strategy::Strategy::from_name)
         else {
             continue;
         };
@@ -306,7 +306,7 @@ pub(super) fn rebuild_trade_profile_metrics(state: &mut LearningState, now: u64)
 
 fn scout_parameter_variant_snapshots(
     state: &LearningState,
-) -> Vec<strategies::ScoutParameterVariant> {
+) -> Vec<strategy::ScoutParameterVariant> {
     type CandidateKey = (String, String, String, String);
     let mut outcomes = BTreeMap::<CandidateKey, BTreeMap<String, Vec<f64>>>::new();
     let mut baseline_directions = BTreeMap::<CandidateKey, [usize; 4]>::new();
@@ -412,7 +412,7 @@ fn scout_parameter_variant_snapshots(
             .get(&format!("{symbol}:{strategy}"))
             .and_then(|profile| profile.parameters.get(&parameter))
             .copied();
-        snapshots.push(strategies::ScoutParameterVariant {
+        snapshots.push(strategy::ScoutParameterVariant {
             symbol,
             strategy,
             parameter,
@@ -816,7 +816,8 @@ pub(super) fn now_ms() -> u64 {
 pub(super) fn event_observed_at(event: &FeedbackEvent) -> u64 {
     match event {
         FeedbackEvent::ScoutOutcome { observed_at_ms, .. }
-        | FeedbackEvent::TradeOutcome { observed_at_ms, .. } => *observed_at_ms,
+        | FeedbackEvent::TradeOutcome { observed_at_ms, .. }
+        | FeedbackEvent::MissedOpportunityCandidate { observed_at_ms, .. } => *observed_at_ms,
     }
 }
 
@@ -824,7 +825,21 @@ pub(super) async fn register_profile(
     State(service): State<ServiceState>,
     Json(request): Json<StrategyProfileRegistration>,
 ) -> Result<StatusCode, (StatusCode, String)> {
+    if serde_json::to_vec(&request).map_or(true, |encoded| encoded.len() > 16 * 1024) {
+        return Err((
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "profile registration exceeds the 16 KiB limit".into(),
+        ));
+    }
     if request.profile.profile_id.is_empty()
+        || request.profile.profile_id.len() > 128
+        || request.profile.symbol.is_empty()
+        || request.profile.symbol.len() > 64
+        || request.profile.strategy.is_empty()
+        || request.profile.strategy.len() > 64
+        || request.profile.parameters.len() > 64
+        || request.profile.parameters.keys().any(|key| key.len() > 128)
+        || request.specs.len() > 64
         || request
             .profile
             .parameters
@@ -843,7 +858,9 @@ pub(super) async fn register_profile(
     }
     let profile_key = key(&request.profile.symbol, &request.profile.strategy);
     let mut state = service.state.lock().await;
+    retention::ensure_active_profile_room(&state, &profile_key)?;
     let id = variant_key(&request.profile);
+    retention::ensure_variant_room(&mut state, &id)?;
     state.variants.entry(id).or_insert(RegisteredProfile {
         profile: request.profile.clone(),
         specs: request.specs,

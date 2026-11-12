@@ -13,7 +13,6 @@ import {
   type MissedOpportunityBand,
   type PostExitOpportunityRow,
   type SignalPerformanceRow,
-  type SignalWalkForwardRow,
   type SkippedSignalAuditRow,
 } from '../models/SignalInfoModel';
 import type { SignalSnapshot } from '../models/SignalsModel';
@@ -645,237 +644,6 @@ function SignalPerformanceViewComponent({
   );
 }
 
-function WalkForwardViewComponent({
-  paused = false,
-  onTradeSymbol,
-}: {
-  paused?: boolean;
-  onTradeSymbol: (symbol: string, side: 'buy' | 'sell') => void;
-}) {
-  const state = useSignalInfo();
-  const displayedRows = usePausedValue(state.walkForward, paused);
-  const walkForwardColumns = useMemo<ColDef<SignalWalkForwardRow>[]>(
-    () => [
-      {
-        field: 'symbol',
-        headerName: 'Symbol',
-        minWidth: 100,
-        cellRenderer: ({ value }: { value: unknown }) => (
-          <button
-            type="button"
-            className="signal-symbol-link"
-            onClick={() => onTradeSymbol(String(value ?? ''), 'buy')}
-          >
-            {String(value ?? '')}
-          </button>
-        ),
-      },
-      {
-        field: 'horizon_seconds',
-        headerName: 'Horizon',
-        valueFormatter: ({ value }) => horizonLabel(value),
-        minWidth: 95,
-      },
-      { field: 'training_samples', headerName: 'Training N', minWidth: 100 },
-      { field: 'evaluated_signals', headerName: 'Test N', minWidth: 80 },
-      { field: 'selected_signals', headerName: 'Signals taken', minWidth: 105 },
-      {
-        field: 'selected_strength_threshold',
-        headerName: 'Learned min strength',
-        valueFormatter: ({ value }) =>
-          value == null ? 'N/A' : (value * 100).toFixed(0) + '%',
-        minWidth: 145,
-      },
-      {
-        field: 'direction_match_rate',
-        headerName: 'Hit rate',
-        cellClassRules: {
-          'signal-performance-good': ({ value }) =>
-            typeof value === 'number' && value >= 0.5,
-          'signal-performance-poor': ({ value }) =>
-            typeof value === 'number' && value < 0.5,
-        },
-        valueFormatter: ({ value }) => ratio(value),
-        minWidth: 100,
-      },
-      {
-        field: 'average_net_return_percent',
-        headerName: 'Avg net return',
-        cellClassRules: signedValueClasses,
-        valueFormatter: ({ value }) => percent(value),
-        minWidth: 120,
-      },
-      {
-        field: 'positive_net_rate',
-        headerName: 'Positive net',
-        valueFormatter: ({ value }) => ratio(value),
-        minWidth: 105,
-      },
-      {
-        field: 'baseline_direction_match_rate',
-        headerName: 'Current hit rate',
-        valueFormatter: ({ value }) => ratio(value),
-        minWidth: 115,
-      },
-      {
-        field: 'baseline_average_net_return_percent',
-        headerName: 'Current avg net',
-        cellClassRules: signedValueClasses,
-        valueFormatter: ({ value }) => percent(value),
-        minWidth: 115,
-      },
-      {
-        field: 'five_minute_trend_sample_count',
-        headerName: '5m trend N',
-        minWidth: 90,
-      },
-      {
-        field: 'five_minute_trend_match_rate',
-        headerName: '5m trend hit',
-        valueFormatter: ({ value }) => ratio(value),
-        minWidth: 100,
-      },
-      {
-        field: 'five_minute_trend_average_net_return_percent',
-        headerName: '5m trend avg net',
-        cellClassRules: signedValueClasses,
-        valueFormatter: ({ value }) => percent(value),
-        minWidth: 125,
-      },
-      {
-        field: 'logistic_selected_signals',
-        headerName: 'Logistic N',
-        minWidth: 90,
-      },
-      {
-        field: 'logistic_direction_match_rate',
-        headerName: 'Logistic hit',
-        valueFormatter: ({ value }) => ratio(value),
-        minWidth: 100,
-      },
-      {
-        field: 'logistic_average_net_return_percent',
-        headerName: 'Logistic avg net',
-        cellClassRules: signedValueClasses,
-        valueFormatter: ({ value }) => percent(value),
-        minWidth: 120,
-      },
-      {
-        field: 'logistic_positive_net_rate',
-        headerName: 'Logistic positive net',
-        valueFormatter: ({ value }) => ratio(value),
-        minWidth: 135,
-      },
-      ...(
-        [
-          'signal_long',
-          'signal_short',
-          'logistic_long',
-          'logistic_short',
-        ] as const
-      ).flatMap((side) => {
-        const label =
-          side === 'signal_long'
-            ? 'Signal long'
-            : side === 'signal_short'
-              ? 'Signal short'
-              : side === 'logistic_long'
-                ? 'Logistic long'
-                : 'Logistic short';
-        return [
-          {
-            headerName: label + ' N',
-            valueGetter: ({ data }: { data?: SignalWalkForwardRow }) =>
-              data?.[side].sample_count ?? 0,
-            minWidth: 100,
-          },
-          {
-            headerName: label + ' hit',
-            valueGetter: ({ data }: { data?: SignalWalkForwardRow }) =>
-              data?.[side].direction_match_rate,
-            valueFormatter: ({ value }: { value: number | null | undefined }) =>
-              ratio(value),
-            minWidth: 100,
-          },
-          {
-            headerName: label + ' avg net',
-            valueGetter: ({ data }: { data?: SignalWalkForwardRow }) =>
-              data?.[side].average_net_return_percent,
-            cellClassRules: signedValueClasses,
-            valueFormatter: ({ value }: { value: number | null | undefined }) =>
-              percent(value),
-            minWidth: 120,
-          },
-          {
-            headerName: label + ' positive net',
-            valueGetter: ({ data }: { data?: SignalWalkForwardRow }) =>
-              data?.[side].positive_net_rate,
-            valueFormatter: ({ value }: { value: number | null | undefined }) =>
-              ratio(value),
-            minWidth: 125,
-          },
-          {
-            headerName: label + ' 95% lower',
-            valueGetter: ({ data }: { data?: SignalWalkForwardRow }) =>
-              data?.[side].positive_net_rate_lower_95,
-            valueFormatter: ({ value }: { value: number | null | undefined }) =>
-              ratio(value),
-            minWidth: 125,
-          },
-        ];
-      }),
-    ],
-    [onTradeSymbol],
-  );
-  return (
-    <section
-      className="feed-section signal-info-panel walk-forward-panel"
-      aria-label="Walk-forward model evaluation"
-    >
-      <FeedToolbar title="Walk-forward model evaluation" />
-      <p className="signal-info-note">
-        Each test prediction is evaluated against later, non-overlapping
-        outcomes. Long and short results are split for the strength filter and
-        logistic model. The 95% lower bound estimates uncertainty in the
-        positive-net rate; side samples under 30 are preliminary. Logistic
-        regression learns from 1m trend, 10s momentum, trade flow and book
-        imbalance. Returns use recorded execution costs; order size and market
-        impact are not included.
-      </p>
-      {state.walkForwardError && (
-        <div className="positions-error">{state.walkForwardError}</div>
-      )}
-      <div className="data-grid-wrap signal-info-grid walk-forward-grid">
-        <AgGridReact<SignalWalkForwardRow>
-          rowData={displayedRows}
-          columnDefs={walkForwardColumns}
-          defaultColDef={{
-            sortable: true,
-            resizable: true,
-            flex: 1,
-            minWidth: 80,
-          }}
-          theme={gridTheme}
-          domLayout="autoHeight"
-          rowHeight={26}
-          headerHeight={28}
-        />
-      </div>
-      {displayedRows.length === 0 && (
-        <p className="positions-empty">
-          Walk-forward rows appear after at least 31 eligible, non-overlapping
-          costed outcomes are available for a symbol and horizon: 30 training
-          outcomes plus at least one test outcome. Because neutral and
-          overlapping outcomes are excluded, this can take hours for the
-          1-minute horizon and longer for longer horizons.
-        </p>
-      )}
-    </section>
-  );
-}
-
-export const WalkForwardView = memo(WalkForwardViewComponent);
-
 export const SignalPerformanceView = memo(SignalPerformanceViewComponent);
 
 export function MissedOpportunityBandsView({
@@ -969,10 +737,30 @@ export function MissedOpportunityBandsView({
   );
   const columns = useMemo<ColDef<MissedOpportunityBand>[]>(
     () => [
-      { field: 'symbol', headerName: 'Symbol', minWidth: 105 },
-      { field: 'direction', headerName: 'Direction', minWidth: 100 },
-      { field: 'strategy', headerName: 'Strategy', minWidth: 150 },
-      { field: 'marketContext', headerName: 'Market context', minWidth: 130 },
+      {
+        field: 'symbol',
+        headerName: 'Symbol',
+        valueFormatter: ({ value }) => value || 'All',
+        minWidth: 105,
+      },
+      {
+        field: 'direction',
+        headerName: 'Direction',
+        valueFormatter: ({ value }) => value || 'All',
+        minWidth: 100,
+      },
+      {
+        field: 'strategy',
+        headerName: 'Strategy',
+        valueFormatter: ({ value }) => value || 'All',
+        minWidth: 150,
+      },
+      {
+        field: 'marketContext',
+        headerName: 'Market context',
+        valueFormatter: ({ value }) => value || 'All',
+        minWidth: 130,
+      },
       { field: 'gate', headerName: 'Gate', minWidth: 120 },
       {
         field: 'threshold',

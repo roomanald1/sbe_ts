@@ -46,30 +46,7 @@ fn passes_pullback_confirmation(signal: &Signal) -> bool {
         })
 }
 
-fn positive_mixed_exploration_evidence(signal: &Signal, dashboard: &Dashboard, now: u64) -> bool {
-    let Some(evidence) = entry_walk_forward_for_strategy(
-        &dashboard.walk_forward,
-        &signal.symbol,
-        signal.strategy.as_deref(),
-        now.saturating_mul(1_000),
-    ) else {
-        return false;
-    };
-    let side = if signal.direction == "bullish" {
-        &evidence.all_signal_long
-    } else {
-        &evidence.all_signal_short
-    };
-    side.sample_count >= MIN_EXPLORATION_EVIDENCE_SAMPLES
-        && side
-            .average_net_return_percent
-            .is_some_and(|value| value > 0.0)
-        && side
-            .positive_net_rate
-            .is_some_and(|value| value >= MIN_SIDE_POSITIVE_NET_RATE)
-}
-
-fn validated_strategy_evidence(signal: &Signal, dashboard: &Dashboard, now: u64) -> bool {
+fn validated_strategy_evidence(signal: &Signal) -> bool {
     let Some(strategy) = signal.strategy.as_deref().and_then(Strategy::from_name) else {
         return false;
     };
@@ -115,30 +92,6 @@ fn validated_strategy_evidence(signal: &Signal, dashboard: &Dashboard, now: u64)
     if !strategy_validated {
         return false;
     }
-    // A small strategy-specific cohort can be optimistic by chance. Until it
-    // reaches the normal side-evidence sample minimum, require the generic
-    // symbol/horizon evidence to remain non-negative as a safety veto.
-    if sample_count.is_some_and(|samples| samples < MIN_SIDE_WALK_FORWARD_SAMPLES as u64) {
-        let Some(evidence) = entry_walk_forward(
-            &dashboard.walk_forward,
-            &signal.symbol,
-            now.saturating_mul(1_000),
-        ) else {
-            return true;
-        };
-        let side = if signal.direction == "bullish" {
-            &evidence.all_signal_long
-        } else {
-            &evidence.all_signal_short
-        };
-        return side.sample_count >= MIN_SIDE_WALK_FORWARD_SAMPLES
-            && side
-                .average_net_return_percent
-                .is_some_and(|net| net >= 0.0)
-            && side
-                .positive_net_rate
-                .is_some_and(|rate| rate >= MIN_SIDE_POSITIVE_NET_RATE);
-    }
     true
 }
 
@@ -150,7 +103,6 @@ fn select_cycle_signal<'a>(
         fresh_directional,
         learning_thresholds,
         risk_appetite,
-        now,
         ..
     } = input;
     if let Some(signal) = fresh_directional
@@ -166,7 +118,7 @@ fn select_cycle_signal<'a>(
                     .and_then(Strategy::from_name)
                     .is_none_or(|strategy| {
                         !strategy.is_live_insight()
-                            || validated_strategy_evidence(signal, dashboard, now)
+                            || validated_strategy_evidence(signal)
                     }))
                 && signal
                     .strategy_decision
@@ -201,9 +153,9 @@ fn select_cycle_signal<'a>(
             ) * risk_floor_scale(risk_appetite))
             .clamp(0.0, 1.0);
             let mixed_exploration = is_mixed_market_context(&context)
-                && positive_mixed_exploration_evidence(signal, dashboard, now)
+                && validated_strategy_evidence(signal)
                 && signal.strength >= MIXED_EXPLORATION_STRENGTH * risk_floor_scale(risk_appetite);
-            let validated_strategy = validated_strategy_evidence(signal, dashboard, now)
+            let validated_strategy = validated_strategy_evidence(signal)
                 && signal.strength
                     >= VALIDATED_STRATEGY_STRENGTH_FLOOR * risk_floor_scale(risk_appetite);
             signal.strength.is_finite()
@@ -215,7 +167,7 @@ fn select_cycle_signal<'a>(
         .iter()
         .copied()
         .filter(|signal| {
-            validated_strategy_evidence(signal, dashboard, now)
+            validated_strategy_evidence(signal)
                 && signal.strength.is_finite()
                 && signal.strength
                     >= VALIDATED_STRATEGY_STRENGTH_FLOOR * risk_floor_scale(risk_appetite)
@@ -234,54 +186,7 @@ fn select_cycle_signal<'a>(
             if is_live_scout_only_signal(signal) {
                 return false;
             }
-            // Insights' walk-forward rows use generic directional outcomes
-            // grouped by symbol and horizon. They do not replay a named
-            // strategy or its parameter profile, so they cannot validate or
-            // reject strategy-attributed signals.
-            if signal.strategy.is_some() || signal.strategy_candidate {
-                return true;
-            }
-            let walk_forward = entry_walk_forward(
-                &dashboard.walk_forward,
-                &signal.symbol,
-                now.saturating_mul(1000),
-            );
-            let side_evidence = walk_forward.map(|item| {
-                if signal.direction == "bullish" {
-                    &item.all_signal_long
-                } else {
-                    &item.all_signal_short
-                }
-            });
-            let research_evidence = walk_forward.map(|item| {
-                if signal.direction == "bullish" {
-                    &item.research_logistic_long
-                } else {
-                    &item.research_logistic_short
-                }
-            });
-            side_evidence.is_some_and(|evidence| {
-                let research_supports = research_evidence.is_none_or(|research| {
-                    research.sample_count < MIN_SIDE_WALK_FORWARD_SAMPLES
-                        || research
-                            .average_net_return_percent
-                            .is_some_and(|net| net > 0.0)
-                });
-                evidence.sample_count >= MIN_SIDE_WALK_FORWARD_SAMPLES
-                    && evidence
-                        .direction_match_rate
-                        .is_some_and(|rate| rate >= MIN_SIDE_DIRECTION_MATCH_RATE)
-                    && evidence
-                        .average_net_return_percent
-                        .is_some_and(|net| net > 0.0)
-                    && evidence
-                        .positive_net_rate
-                        .is_some_and(|rate| rate >= MIN_SIDE_POSITIVE_NET_RATE)
-                    && evidence
-                        .positive_net_rate_lower_95
-                        .is_some_and(|rate| rate >= MIN_SIDE_POSITIVE_NET_LOWER_95)
-                    && research_supports
-            })
+            signal.strategy.is_some() || signal.strategy_candidate
         })
         .max_by(|a, b| a.strength.total_cmp(&b.strength));
     if let Some(signal) = strict_candidate {
@@ -320,7 +225,7 @@ fn select_cycle_signal<'a>(
                     ) * risk_floor_scale(risk_appetite))
                     .max(0.0)
                 && (!is_mixed_market_context(&context)
-                    || positive_mixed_exploration_evidence(signal, dashboard, now))
+                    || validated_strategy_evidence(signal))
         })
         .max_by(|a, b| (a.strength * a.score.abs()).total_cmp(&(b.strength * b.score.abs())))
     {
@@ -341,7 +246,7 @@ mod signal_selection_behavior_tests {
     use super::*;
 
     static EMPTY_LEARNING_THRESHOLDS: std::sync::LazyLock<
-        BTreeMap<String, strategies::ContextThresholds>,
+        BTreeMap<String, strategy::ContextThresholds>,
     > = std::sync::LazyLock::new(BTreeMap::new);
     static EMPTY_POSITIONS: std::sync::LazyLock<BTreeMap<String, TraderPosition>> =
         std::sync::LazyLock::new(BTreeMap::new);
@@ -394,10 +299,9 @@ mod signal_selection_behavior_tests {
         }
     }
 
-    fn dashboard(walk_forward: Vec<WalkForward>) -> Dashboard {
+    fn dashboard() -> Dashboard {
         Dashboard {
             best: Vec::new(),
-            walk_forward: Arc::new(walk_forward),
             missed_opportunity_bands: Arc::new(Vec::new()),
             markets: Arc::new(BTreeMap::new()),
             queued_at: None,
@@ -411,7 +315,7 @@ mod signal_selection_behavior_tests {
         let live = signal(0.9, 0.9, None, false);
         let signals = vec![daily.clone(), live.clone()];
         let fresh = vec![&daily, &live];
-        let empty_dashboard = dashboard(Vec::new());
+        let empty_dashboard = dashboard();
         let selected = select_cycle_signal(input(&empty_dashboard, &signals, &fresh, 50.0))
             .unwrap_or_else(|_| panic!("expected signal selection to succeed"));
         assert_eq!(selected.0.symbol, "BTC-USDT");
@@ -438,25 +342,20 @@ mod signal_selection_behavior_tests {
     }
 
     #[test]
-    fn selects_strict_evidence_before_capped_exploration_without_history() {
+    fn generic_signal_walk_forward_is_not_an_entry_evidence_source() {
         let strict = signal(0.9, 0.9, None, false);
-        let evidence = serde_json::from_value::<WalkForward>(serde_json::json!({
-            "symbol":"BTC-USDT", "horizon_seconds":300, "evidence_generated_at_ms":100000,
-            "all_signal_long":{"sample_count":40,"direction_match_rate":0.8,"average_net_return_percent":0.5,"positive_net_rate":0.8,"positive_net_rate_lower_95":0.6},
-            "research_logistic_long":{"sample_count":40,"average_net_return_percent":0.3}
-        })).unwrap_or_else(|_| panic!("expected signal selection to succeed"));
         let signals = vec![strict.clone()];
         let fresh = vec![&strict];
-        let strict_dashboard = dashboard(vec![evidence]);
+        let strict_dashboard = dashboard();
         let selected = select_cycle_signal(input(&strict_dashboard, &signals, &fresh, 50.0))
             .unwrap_or_else(|_| panic!("expected signal selection to succeed"));
         assert_eq!(selected.0.symbol, strict.symbol);
-        assert!(!selected.1);
+        assert!(selected.1);
 
         let unvalidated = signal(0.9, 0.9, None, false);
         let unvalidated_signals = vec![unvalidated.clone()];
         let unvalidated_fresh = vec![&unvalidated];
-        let empty_dashboard = dashboard(Vec::new());
+        let empty_dashboard = dashboard();
         let (selected, exploratory) = select_cycle_signal(input(
             &empty_dashboard,
             &unvalidated_signals,
@@ -477,11 +376,11 @@ mod signal_selection_behavior_tests {
     }
 
     #[test]
-    fn generic_signal_walk_forward_does_not_veto_strategy_attributed_signals() {
+    fn strategy_attributed_signal_does_not_need_generic_signal_walk_forward() {
         let strategy_signal = signal(0.9, 0.9, Some("live-momentum"), false);
         let signals = vec![strategy_signal.clone()];
         let fresh = vec![&strategy_signal];
-        let no_strategy_evidence = dashboard(Vec::new());
+        let no_strategy_evidence = dashboard();
 
         let selected = select_cycle_signal(input(&no_strategy_evidence, &signals, &fresh, 50.0));
 
@@ -491,25 +390,32 @@ mod signal_selection_behavior_tests {
     }
 
     #[test]
-    fn mixed_context_exploration_requires_positive_directional_evidence() {
-        let mut mixed = signal(0.26, 0.9, None, false);
+    fn mixed_context_accepts_profile_validated_strategy_at_its_floor() {
+        let mut mixed = signal(0.26, 0.9, Some("live-momentum"), false);
         mixed.components.trend_5m_volatility_units = None;
+        let attributed_evidence = serde_json::json!({
+            "strategy_parameters": {
+                "scout_minimum_walk_forward_samples": 3.0,
+                "scout_minimum_positive_net_rate": 0.55
+            },
+            "strategy_walk_forward": {
+                "sampleCount": 7, "positiveNetRate": 0.57,
+                "averageNetReturnPercent": 0.101, "lastSampleTimestampMs": 99
+            }
+        });
         let signals = vec![mixed.clone()];
         let fresh = vec![&mixed];
-        let no_evidence = dashboard(Vec::new());
+        let no_evidence = dashboard();
         assert!(select_cycle_signal(input(&no_evidence, &signals, &fresh, 50.0)).is_err());
+        mixed.strategy_decision = Some(attributed_evidence);
+        let signals = vec![mixed.clone()];
+        let fresh = vec![&mixed];
 
-        let evidence = serde_json::from_value::<WalkForward>(serde_json::json!({
-            "symbol":"BTC-USDT", "horizon_seconds":300, "evidence_generated_at_ms":100000,
-            "all_signal_long":{"sample_count":12,"average_net_return_percent":0.2,"positive_net_rate":0.7}
-        }))
-        .unwrap_or_else(|_| panic!("expected mixed exploration evidence"));
-        let evidence_dashboard = dashboard(vec![evidence]);
         let (selected, exploratory) =
-            select_cycle_signal(input(&evidence_dashboard, &signals, &fresh, 50.0))
+            select_cycle_signal(input(&no_evidence, &signals, &fresh, 50.0))
                 .unwrap_or_else(|_| panic!("positive mixed evidence should permit exploration"));
         assert_eq!(selected.symbol, mixed.symbol);
-        assert!(exploratory);
+        assert!(!exploratory);
     }
 
     #[test]
@@ -530,7 +436,7 @@ mod signal_selection_behavior_tests {
         }));
         let signals = vec![candidate.clone()];
         let fresh = vec![&candidate];
-        let dashboard = dashboard(Vec::new());
+        let dashboard = dashboard();
         let (selected, exploratory) =
             select_cycle_signal(input(&dashboard, &signals, &fresh, 50.0)).unwrap_or_else(|_| {
                 panic!("validated strategy should pass its relaxed profile floor")

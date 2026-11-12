@@ -107,7 +107,7 @@ Reproduce the DVOL analysis with `python3 research/autotrader/dvol_risk_sizing_s
 
 ## Candidate found: risk-adjusted monthly momentum rotation
 
-The current AutoTrader already has a raw 90-day relative-strength rule ([strategy contract](../../src/rust/strategies/src/strategy_relative_strength_90_sma200/contract.rs)). This candidate changes the ranking and portfolio control: on the first daily bar of each month, require BTC above its 200-day SMA, require each candidate above its own 100-day SMA with positive 90-day return, then select the highest 90-day return divided by trailing 60-day realized volatility. Hold one spot asset or cash until the next monthly rebalance. Size the selected position to a 40% annualized-volatility target, capped at 100%. Signals use prior closes and execute at the next open.
+The current AutoTrader already has a raw 90-day relative-strength rule ([strategy contract](../../src/rust/strategy/src/strategy_relative_strength_90_sma200/contract.rs)). This candidate changes the ranking and portfolio control: on the first daily bar of each month, require BTC above its 200-day SMA, require each candidate above its own 100-day SMA with positive 90-day return, then select the highest 90-day return divided by trailing 60-day realized volatility. Hold one spot asset or cash until the next monthly rebalance. Size the selected position to a 40% annualized-volatility target, capped at 100%. Signals use prior closes and execute at the next open.
 
 | Cost per side | 2021-22 (from Mar 2021) | 2023-24 | 2025 | 2026 through Oct 22 |
 |---|---:|---:|---:|---:|

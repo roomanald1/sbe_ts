@@ -3,10 +3,11 @@ impl SignalStore {
         let dashboard_store = self.clone();
         let history_store = self.clone();
         let performance_store = self.clone();
-        let evaluation_store = self.clone();
         let raw_evaluation_store = self.clone();
         let book_snapshot_store = self.clone();
         let research_feature_store = self.clone();
+        let bounded_research_history_store = self.clone();
+        let bounded_strategy_snapshot_history_store = self.clone();
         let external_market_store = self.clone();
         let auto_trader_store = self.clone();
         let audit_store = self.clone();
@@ -14,6 +15,30 @@ impl SignalStore {
         let ui_stream_store = self.clone();
         let best_store = self;
         Router::new()
+            .route(
+                "/internal/strategy-snapshot-history",
+                get(move |axum::extract::Query(query): axum::extract::Query<StrategySnapshotHistoryQuery>| {
+                    let store = bounded_strategy_snapshot_history_store.clone();
+                    async move {
+                        match store.strategy_snapshot_history(query).await {
+                            Ok(page) => Ok(Json(page)),
+                            Err(error) => Err((StatusCode::BAD_REQUEST, error.to_string())),
+                        }
+                    }
+                }),
+            )
+            .route(
+                "/internal/research-features/history",
+                get(move |axum::extract::Query(query): axum::extract::Query<ResearchFeatureHistoryQuery>| {
+                    let store = bounded_research_history_store.clone();
+                    async move {
+                        match store.research_feature_history(query).await {
+                            Ok(page) => Ok(Json(page)),
+                            Err(error) => Err((StatusCode::BAD_REQUEST, error.to_string())),
+                        }
+                    }
+                }),
+            )
             .route("/signals/stream", get(move |websocket: axum::extract::ws::WebSocketUpgrade| {
                 let store = ui_stream_store.clone();
                 async move {
@@ -199,20 +224,6 @@ impl SignalStore {
                     let store = best_store.clone();
                     async move {
                         match store.best(10).await {
-                            Ok(items) => Ok(Json(items)),
-                            Err(error) => {
-                                Err((StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))
-                            }
-                        }
-                    }
-                }),
-            )
-            .route(
-                "/signals/walk-forward",
-                get(move || {
-                    let store = evaluation_store.clone();
-                    async move {
-                        match store.walk_forward().await {
                             Ok(items) => Ok(Json(items)),
                             Err(error) => {
                                 Err((StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))

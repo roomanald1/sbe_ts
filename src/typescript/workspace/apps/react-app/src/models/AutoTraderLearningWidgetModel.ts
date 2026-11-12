@@ -54,6 +54,7 @@ export type AutoTraderLearningWidgetState = {
   profileReturnDifference: number | null;
   activeCandidates: number;
   rejectedCandidates: number;
+  qualifiedCandidates: number;
   collectingCandidates: number;
 };
 
@@ -203,6 +204,9 @@ export function projectLearningWidgetState(
         : null,
     activeCandidates: rows.filter((row) => row.promoted).length,
     rejectedCandidates: rows.filter((row) => row.rejected).length,
+    qualifiedCandidates: rows.filter(
+      (row) => row.status === 'Qualified · not active',
+    ).length,
     collectingCandidates: rows.filter((row) =>
       row.status.startsWith('Collecting'),
     ).length,

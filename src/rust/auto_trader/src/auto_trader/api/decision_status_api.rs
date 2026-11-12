@@ -15,13 +15,8 @@ async fn get_decision_parameters(
             settings.clone(),
         )
     };
+    let thresholds = request_learning_context_thresholds_for_contexts(&state, BTreeSet::new()).await;
     let bands = state.latest_missed_opportunity_bands.lock().await.clone();
-    let thresholds = request_learning_context_thresholds_for_contexts(
-        &state,
-        BTreeSet::new(),
-        &bands,
-    )
-    .await;
     let floor_scale = risk_floor_scale(risk_appetite);
     let contexts = thresholds
         .into_iter()
@@ -130,7 +125,6 @@ fn build_decision_thresholds(
 ) -> Vec<DecisionParameter> {
     let mut thresholds = Vec::new();
     thresholds.extend(signal_qualification_thresholds(risk_appetite));
-    thresholds.extend(historical_evidence_thresholds());
     thresholds.extend(counterfactual_relaxation_thresholds());
     thresholds.extend(order_selection_thresholds(risk_appetite));
     thresholds.extend(market_context_thresholds());
@@ -204,8 +198,8 @@ mod decision_profile_tests {
         let parameters = BTreeMap::new();
         settings.learned_profiles.insert(
             "XRP-USDC:live-momentum".into(),
-            strategies::StrategyProfile {
-                profile_id: strategies::profile_id("XRP-USDC", "live-momentum", &parameters),
+            strategy::StrategyProfile {
+                profile_id: strategy::profile_id("XRP-USDC", "live-momentum", &parameters),
                 version: 1,
                 symbol: "XRP-USDC".into(),
                 strategy: "live-momentum".into(),
@@ -231,7 +225,7 @@ mod decision_profile_tests {
         let spec = Strategy::LiveMomentum.parameter_specs()[0];
         settings
             .learned_scout_parameter_variants
-            .push(strategies::ScoutParameterVariant {
+            .push(strategy::ScoutParameterVariant {
                 symbol: "BTC-USDT".into(),
                 strategy: Strategy::LiveMomentum.as_str().into(),
                 parameter: spec.key.as_str().into(),

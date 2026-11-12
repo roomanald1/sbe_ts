@@ -86,9 +86,6 @@ impl InsightsBrowserResponder {
                 });
             }
             ("GET", "/signals/best") => serde_json::to_value(self.store.best(10).await?)?,
-            ("GET", "/signals/walk-forward") => {
-                serde_json::to_value(self.store.walk_forward().await?)?
-            }
             ("GET", "/signals/evaluations") => {
                 let horizons = query.get("horizons").map(|value| {
                     value

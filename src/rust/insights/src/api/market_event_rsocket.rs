@@ -79,21 +79,22 @@ impl RSocket for InsightsMarketEventResponder {
                 .as_ref()
                 .context("Insights Scout RSocket route is not configured")?;
             let bytes = request.data().context("empty Scout service route request")?;
-            let request: strategies::ScoutCoordinatorRequest =
+            let request: strategy::ScoutCoordinatorRequest =
                 serde_json::from_slice(bytes).context("invalid Scout service route request")?;
-            let strategies::ScoutCoordinatorRequest::WorkerRoute(command) = request else {
+            let strategy::ScoutCoordinatorRequest::WorkerRoute(command) = request else {
                 anyhow::bail!("Insights accepts Scout service route operations only");
             };
             let path = command.path.split('?').next().unwrap_or(&command.path);
             let method = match command.method {
-                strategies::ScoutWorkerHttpMethod::Get => http::Method::GET,
-                strategies::ScoutWorkerHttpMethod::Post => http::Method::POST,
-                strategies::ScoutWorkerHttpMethod::Put => http::Method::PUT,
-                strategies::ScoutWorkerHttpMethod::Delete => http::Method::DELETE,
+                strategy::ScoutWorkerHttpMethod::Get => http::Method::GET,
+                strategy::ScoutWorkerHttpMethod::Post => http::Method::POST,
+                strategy::ScoutWorkerHttpMethod::Put => http::Method::PUT,
+                strategy::ScoutWorkerHttpMethod::Delete => http::Method::DELETE,
             };
             let allowed = match (method.clone(), path) {
-                (http::Method::GET, "/internal/live-context") => true,
                 (http::Method::GET, "/internal/live-news-context") => true,
+                (http::Method::GET, "/internal/research-features/history") => true,
+                (http::Method::GET, "/internal/strategy-snapshot-history") => true,
                 (http::Method::POST, "/internal/scouts/register")
                 | (http::Method::POST, "/internal/signals/counterfactual")
                 | (http::Method::POST, "/internal/signals/scout-strategy-status") => true,
@@ -123,8 +124,8 @@ impl RSocket for InsightsMarketEventResponder {
             let body = serde_json::from_slice(&body).unwrap_or_else(|_| {
                 serde_json::Value::String(String::from_utf8_lossy(&body).into())
             });
-            let result = strategies::ScoutCoordinatorResponse::WorkerRoute(
-                strategies::ScoutCoordinatorRouteResult {
+            let result = strategy::ScoutCoordinatorResponse::WorkerRoute(
+                strategy::ScoutCoordinatorRouteResult {
                     request_id: command.request_id,
                     status,
                     body,
@@ -234,7 +235,7 @@ pub async fn run_insights_scout_rpc_server(
 mod market_event_rsocket_tests {
     use super::enrich_raw_price;
     use super::run_insights_scout_rpc_server;
-    use axum::{Json, Router, routing::post};
+    use axum::{Json, Router, routing::{get, post}};
     use bytes::Bytes;
     use sbe_schema::{
         ReadBuf, enriched_symbol_price_codec::EnrichedSymbolPriceDecoder,
@@ -291,12 +292,12 @@ mod market_event_rsocket_tests {
         let server = tokio::spawn(run_insights_scout_rpc_server(app, address.to_string()));
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
 
-        let response = strategies::request_scout_service_route(
+        let response = strategy::request_scout_service_route(
             &format!("ws://{address}"),
-            &strategies::ScoutCoordinatorRouteCommand {
+            &strategy::ScoutCoordinatorRouteCommand {
                 request_id: "registration-1".into(),
                 strategy: None,
-                method: strategies::ScoutWorkerHttpMethod::Post,
+                method: strategy::ScoutWorkerHttpMethod::Post,
                 path: "/internal/scouts/register".into(),
                 payload: serde_json::json!({"decision_id":"decision-1"}),
             },
@@ -305,6 +306,50 @@ mod market_event_rsocket_tests {
         .unwrap();
         assert_eq!(response.status, 200);
         assert_eq!(response.body["registered"], "decision-1");
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn research_history_route_is_internal_and_available_over_rsocket() {
+        let app = Router::new().route(
+            "/internal/research-features/history",
+            get(|| async { Json(serde_json::json!({"historyComplete": true, "records": []})) }),
+        ).route(
+            "/internal/strategy-snapshot-history",
+            get(|| async { Json(serde_json::json!({"historyComplete": true, "records": [], "bookMarkCoverageComplete": false})) }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        drop(listener);
+        let server = tokio::spawn(run_insights_scout_rpc_server(app, address.to_string()));
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+
+        let response = strategy::request_scout_service_route(
+            &format!("ws://{address}"),
+            &strategy::ScoutCoordinatorRouteCommand {
+                request_id: "research-history-1".into(),
+                strategy: None,
+                method: strategy::ScoutWorkerHttpMethod::Get,
+                path: "/internal/research-features/history?symbol=BTC-USDT&fromMs=1&throughMs=2".into(),
+                payload: serde_json::Value::Null,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.status, 200);
+        assert_eq!(response.body["historyComplete"], true);
+        let snapshot_response = strategy::request_scout_service_route(
+            &format!("ws://{address}"),
+            &strategy::ScoutCoordinatorRouteCommand {
+                request_id: "snapshot-history-1".into(),
+                strategy: None,
+                method: strategy::ScoutWorkerHttpMethod::Get,
+                path: "/internal/strategy-snapshot-history?symbol=BTC-USDT&fromMs=1&throughMs=2".into(),
+                payload: serde_json::Value::Null,
+            },
+        ).await.unwrap();
+        assert_eq!(snapshot_response.status, 200);
+        assert_eq!(snapshot_response.body["records"].as_array().unwrap().len(), 0);
         server.abort();
     }
 }

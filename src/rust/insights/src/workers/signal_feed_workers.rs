@@ -298,12 +298,12 @@ async fn deliver_signal_dashboard(
     );
     let result = tokio::time::timeout(
         AUTO_TRADER_SIGNAL_PUSH_TIMEOUT,
-        strategies::request_scout_service_route(
+        strategy::request_scout_service_route(
             &auto_trader_rsocket_url,
-            &strategies::ScoutCoordinatorRouteCommand {
+            &strategy::ScoutCoordinatorRouteCommand {
                 request_id,
                 strategy: None,
-                method: strategies::ScoutWorkerHttpMethod::Post,
+                method: strategy::ScoutWorkerHttpMethod::Post,
                 path: "/internal/auto-trader/signal".into(),
                 payload: dashboard.clone(),
             },
@@ -406,12 +406,12 @@ async fn deliver_scout_inputs(dashboards: &[(String, serde_json::Value)]) {
         if signals.is_empty() {
             continue;
         }
-        let result = strategies::request_scout_worker_route(
+        let result = strategy::request_scout_worker_route(
             &learning_rsocket_url,
-            &strategies::ScoutCoordinatorRouteCommand {
+            &strategy::ScoutCoordinatorRouteCommand {
                 request_id: format!("insights-live:{}:{}", signals[0]["symbol"].as_str().unwrap_or(""), signals[0]["timestamp"].as_u64().unwrap_or_default()),
                 strategy: None,
-                method: strategies::ScoutWorkerHttpMethod::Post,
+                method: strategy::ScoutWorkerHttpMethod::Post,
                 path: "/live-inputs".into(),
                 payload: serde_json::json!({ "signals": signals }),
             },
@@ -464,12 +464,12 @@ async fn run_ui_snapshot_push_worker(
         for (_, snapshot) in snapshots {
             let symbol = snapshot["symbol"].as_str().unwrap_or("unknown");
             let timestamp = snapshot["timestamp"].as_u64().unwrap_or_default();
-            let result = strategies::request_scout_service_route(
+            let result = strategy::request_scout_service_route(
                 &feed_rsocket_url,
-                &strategies::ScoutCoordinatorRouteCommand {
+                &strategy::ScoutCoordinatorRouteCommand {
                     request_id: format!("insights-snapshot:{symbol}:{timestamp}"),
                     strategy: None,
-                    method: strategies::ScoutWorkerHttpMethod::Post,
+                    method: strategy::ScoutWorkerHttpMethod::Post,
                     path: "/internal/signals/snapshot".into(),
                     payload: snapshot,
                 },
@@ -639,7 +639,6 @@ mod signal_feed_worker_tests {
         let bulky_dashboard = serde_json::json!({
             "best": [{"symbol":"BTC-USDT", "sequence":0}],
             "markets": {"BTC-USDT": {"updated_at_ms":now_ms(), "bids":[{"price":100.0}], "asks":[{"price":101.0}]}},
-            "walkForward": vec!["x".repeat(1024); 10_000],
             "missedOpportunityBands": vec!["y".repeat(1024); 10_000],
         });
         cache.insert(
@@ -662,7 +661,6 @@ mod signal_feed_worker_tests {
         let queued = drain_latest(&cache);
         assert_eq!(queued.len(), 1);
         assert_eq!(queued[0].1["best"][0]["sequence"], 49_999);
-        assert!(queued[0].1.get("walkForward").is_none());
         assert!(queued[0].1.get("missedOpportunityBands").is_none());
 
         let signals = scout_delivery_signals(&queued[0].1);

@@ -258,7 +258,7 @@ async fn update_settings(
     drop(settings);
 
     match crate::service_rpc::learning_request(
-        strategies::ScoutWorkerHttpMethod::Put,
+        strategy::ScoutWorkerHttpMethod::Put,
         "/config/scout-parameter-samples",
         Some(serde_json::json!({ "minimum_samples": minimum_scout_parameter_samples })),
     ).await {

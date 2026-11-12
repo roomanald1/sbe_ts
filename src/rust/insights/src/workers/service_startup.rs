@@ -14,18 +14,16 @@ async fn main() -> anyhow::Result<()> {
     let signal_push_notify = Arc::new(Notify::new());
     let scout_push_cache = Arc::new(DashMap::new());
     let scout_push_notify = Arc::new(Notify::new());
-    if !research_only() {
-        tokio::spawn(run_signal_push_worker(
-            Arc::clone(&signal_push_cache),
-            Arc::clone(&signal_push_notify),
-            Arc::clone(&scout_push_cache),
-            Arc::clone(&scout_push_notify),
-        ));
-        tokio::spawn(run_scout_input_push_worker(
-            Arc::clone(&scout_push_cache),
-            Arc::clone(&scout_push_notify),
-        ));
-    }
+    tokio::spawn(run_signal_push_worker(
+        Arc::clone(&signal_push_cache),
+        Arc::clone(&signal_push_notify),
+        Arc::clone(&scout_push_cache),
+        Arc::clone(&scout_push_notify),
+    ));
+    tokio::spawn(run_scout_input_push_worker(
+        Arc::clone(&scout_push_cache),
+        Arc::clone(&scout_push_notify),
+    ));
     let market_cache = Arc::new(DashMap::new());
     let ui_snapshot_cache = Arc::new(DashMap::new());
     let ui_snapshot_notify = Arc::new(Notify::new());
@@ -55,9 +53,14 @@ async fn main() -> anyhow::Result<()> {
     let (enriched_market_events, _) = broadcast::channel(16_384);
     let signal_runtime = Arc::new(SignalRuntime {
         store: signal_store.clone(),
+        active_symbols: DashMap::new(),
+        symbol_admission_gate: Mutex::new(()),
+        max_active_symbols: configured_positive_usize("INSIGHTS_MAX_ACTIVE_SYMBOLS", DEFAULT_MAX_ACTIVE_SYMBOLS),
+        symbol_idle_ttl_ms: configured_positive_u64("INSIGHTS_SYMBOL_IDLE_TTL_MS", DEFAULT_SYMBOL_IDLE_TTL_MS),
         engines: DashMap::new(),
         research_record_sender,
         signal_push_cache,
+        scout_push_cache,
         signal_push_notify,
         market_cache,
         market_push_at: DashMap::new(),
@@ -87,12 +90,8 @@ async fn main() -> anyhow::Result<()> {
     ));
     tokio::spawn(run_feed_ticker_consumer(signal_event_sender.clone()));
     tokio::spawn(run_feed_signal_consumer(signal_event_sender));
-    let service_name = if research_only() { "Insights Research" } else { "Insights" };
+    let service_name = "Insights";
     let domain_router = Router::new()
-        .route(
-            "/internal/live-context",
-            get(live_context).with_state(Arc::clone(&signal_runtime)),
-        )
         .route(
             "/internal/live-news-context",
             get(live_news_context).with_state(Arc::clone(&signal_runtime)),
@@ -146,27 +145,6 @@ async fn main() -> anyhow::Result<()> {
     crate::service_log!("INFO", "{service_name} service listening on http://0.0.0.0:3004");
     axum::serve(listener, app).await?;
     Ok(())
-}
-
-async fn live_context(
-    axum::extract::State(runtime): axum::extract::State<Arc<SignalRuntime>>,
-) -> Json<serde_json::Value> {
-    // Trigger cached research refreshes from the background poller. These methods
-    // schedule expensive scans asynchronously and return the last completed values.
-    let _ = runtime.store.walk_forward().await;
-    let _ = runtime.store.missed_opportunity_bands().await;
-    let news = Arc::clone(&runtime.news.borrow());
-    let news_weight = runtime
-        .news_learning
-        .try_lock()
-        .map(|learning| learning.weight)
-        .unwrap_or(0.0);
-    Json(serde_json::json!({
-        "news": news.as_ref(),
-        "weight": news_weight,
-        "walkForward": runtime.store.cached_walk_forward(),
-        "missedOpportunityBands": runtime.store.cached_missed_opportunity_bands(),
-    }))
 }
 
 async fn live_news_context(

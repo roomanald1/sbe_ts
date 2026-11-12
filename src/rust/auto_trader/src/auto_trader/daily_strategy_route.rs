@@ -20,7 +20,7 @@ fn publish_scout_strategy_status(
     });
 }
 
-use strategies::daily::daily_strategy_signal_key;
+use strategy::daily::daily_strategy_signal_key;
 
 async fn receive_daily_strategy_signals(
     State(state): State<AutoTraderState>,
@@ -72,25 +72,70 @@ async fn receive_daily_strategy_signals(
             "Daily strategy batch has an invalid signal".into(),
         ));
     }
-    let trading_strategies = state.settings.lock().await.strategies.clone();
+    let settings = state.settings.lock().await;
+    let trading_strategies = settings.strategies.clone();
+    for signal in &mut snapshot.generated_signals {
+        inject_learned_parameters(&settings, signal);
+    }
+    let enabled = state.enabled.load(Ordering::Relaxed);
+    drop(settings);
+    let mut requests = Vec::new();
+    let mut request_indexes = Vec::new();
+    for (index, signal) in snapshot.generated_signals.iter().enumerate() {
+            let Some(strategy) = signal.strategy.as_deref().and_then(Strategy::from_name) else {
+                continue;
+            };
+            let is_scout_probe = signal.strategy_decision.as_ref()
+                .and_then(|value| value.get("scout_parameter_probe"))
+                .and_then(serde_json::Value::as_bool) == Some(true);
+            if !trading_strategies.contains(&strategy) || is_scout_probe {
+                continue;
+            }
+            match crate::service_rpc::live_entry_evaluation_request(
+                strategy,
+                signal,
+                signal_strategy_parameters(signal),
+            ) {
+                Ok(request) => {
+                    request_indexes.push(index);
+                    requests.push(request);
+                }
+                Err(error) => crate::service_log!(
+                    "WARN",
+                    "Could not prepare daily Strategy X evaluation for {} {}: {error}",
+                    strategy.as_str(),
+                    signal.symbol,
+                ),
+            }
+    }
+    let mut entered = vec![false; snapshot.generated_signals.len()];
+    let mut evaluated = vec![false; snapshot.generated_signals.len()];
+    for (index, result) in request_indexes
+        .into_iter()
+        .zip(crate::service_rpc::request_live_evaluations(requests).await)
+    {
+        match result {
+            Ok(decision) => {
+                evaluated[index] = true;
+                entered[index] = decision == strategy::LiveStrategyDecision::Enter;
+            }
+            Err(error) => {
+                let signal = &snapshot.generated_signals[index];
+                crate::service_log!(
+                    "WARN",
+                    "Daily Strategy X evaluation failed closed for {} {}: {error}",
+                    signal.strategy.as_deref().unwrap_or("unknown"),
+                    signal.symbol,
+                );
+            }
+        }
+    }
     snapshot.active_strategy_symbols = snapshot
         .generated_signals
         .iter()
-        .filter_map(|signal| {
-            let strategy = signal.strategy.as_deref().and_then(Strategy::from_name)?;
-            if !trading_strategies.contains(&strategy)
-                || signal.strategy_decision.as_ref().and_then(|value| value.get("scout_parameter_probe"))
-                    .and_then(serde_json::Value::as_bool) == Some(true)
-            {
-                return None;
-            }
-            let parameters = signal_strategy_parameters(signal);
-            let input = StrategySignal::entry(signal, &parameters);
-            let entered = matches!(strategy.evaluate(&input), Ok(StrategyDecision::Enter));
-            if !entered {
-                return None;
-            }
-            Some((strategy.as_str().to_owned(), signal.symbol.clone()))
+        .enumerate()
+        .filter_map(|(index, signal)| {
+            entered[index].then(|| (signal.strategy.clone().unwrap_or_default(), signal.symbol.clone()))
         })
         .collect();
     let active_symbols = snapshot.active_strategy_symbols.clone();
@@ -98,10 +143,16 @@ async fn receive_daily_strategy_signals(
     snapshot.evaluated_strategy_symbols.clear();
     for diagnostic in &mut diagnostics {
         for item in &mut diagnostic.symbols {
-            item.evaluated = true;
             let key = (diagnostic.strategy.clone(), item.symbol.clone());
-            snapshot.evaluated_strategy_symbols.insert(key.clone());
-            item.signal_active = active_symbols.contains(&key);
+            item.evaluated = snapshot.generated_signals.iter().enumerate().any(|(index, signal)| {
+                evaluated[index]
+                    && signal.strategy.as_deref() == Some(diagnostic.strategy.as_str())
+                    && signal.symbol == item.symbol
+            });
+            if item.evaluated {
+                snapshot.evaluated_strategy_symbols.insert(key.clone());
+            }
+            item.signal_active = item.evaluated && active_symbols.contains(&key);
         }
     }
     snapshot.diagnostics = diagnostics.clone();
@@ -122,46 +173,12 @@ async fn receive_daily_strategy_signals(
     if let Ok(mut current) = state.strategy_diagnostic.lock() {
         *current = diagnostics.clone();
     }
-    if !state.enabled.load(Ordering::Relaxed) {
+    if !enabled {
         publish_scout_strategy_status(&state, Vec::new(), Vec::new(), Vec::new());
         return Ok(StatusCode::ACCEPTED);
     }
     let mut settings = state.settings.lock().await;
-    for signal in &mut snapshot.generated_signals {
-        inject_learned_parameters(&settings, signal);
-    }
-    snapshot.active_strategy_symbols = snapshot
-        .generated_signals
-        .iter()
-        .filter_map(|signal| {
-            let strategy = signal.strategy.as_deref().and_then(Strategy::from_name)?;
-            if !settings.strategies.contains(&strategy)
-                || signal.strategy_decision.as_ref().and_then(|value| value.get("scout_parameter_probe"))
-                    .and_then(serde_json::Value::as_bool) == Some(true)
-            {
-                return None;
-            }
-            let parameters = signal_strategy_parameters(signal);
-            let entered = matches!(
-                strategy.evaluate(&StrategySignal::entry(signal, &parameters)),
-                Ok(StrategyDecision::Enter)
-            );
-            if !entered {
-                return None;
-            }
-            Some((strategy.as_str().to_owned(), signal.symbol.clone()))
-        })
-        .collect();
-    let active_symbols = snapshot.active_strategy_symbols.clone();
-    for diagnostic in &mut diagnostics {
-        for item in &mut diagnostic.symbols {
-            item.signal_active =
-                active_symbols.contains(&(diagnostic.strategy.clone(), item.symbol.clone()));
-        }
-    }
-    snapshot.diagnostics = diagnostics.clone();
-    let enabled_strategies = settings
-        .strategies
+    let enabled_strategies = trading_strategies
         .iter()
         .filter(|strategy| !strategy.is_dated_carry())
         .map(|strategy| strategy.as_str().to_owned())
@@ -257,7 +274,6 @@ async fn receive_daily_strategy_signals(
                 symbol,
                 Dashboard {
                     best,
-                    walk_forward: Arc::new(Vec::new()),
                     missed_opportunity_bands: Arc::new(Vec::new()),
                     markets: Arc::new(BTreeMap::new()),
                     queued_at: None,

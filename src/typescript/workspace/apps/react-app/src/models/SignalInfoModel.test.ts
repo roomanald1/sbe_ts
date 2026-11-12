@@ -24,7 +24,6 @@ describe('SignalInfoModel', () => {
                 best: [{ symbol: 'BTC-USDT', direction: 'bullish' }],
                 history: [],
                 performance: [],
-                walkForward: [],
               },
               auto_trader_dashboard: {
                 missedOpportunityBands: [

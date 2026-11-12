@@ -161,6 +161,18 @@ async fn submit_position_exit_order(
                 Some(total_trade_pnl / entry_notional * 100.0),
                 position.strategy_decision.as_ref(),
                 position.trade_id.as_deref(),
+                average_price.and_then(|exit_price| build_trade_replay_context(
+                    &symbol,
+                    position.entry_timestamp_ms,
+                    current_time_ms(),
+                    if position.quantity > 0.0 { "long" } else { "short" },
+                    position.average_entry_price,
+                    exit_price,
+                    position.quantity.abs(),
+                    position.total_entry_fees_paid.max(position.entry_fees),
+                    fee,
+                    entry_walk_forward_evidence(position.strategy_decision.as_ref()),
+                )),
             );
             adapt_exit_policy(&mut settings);
         }

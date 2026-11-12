@@ -280,6 +280,7 @@ async fn sync_auto_positions(
                             Some(net_return_percent),
                             audit["strategy_decision"].as_object().map(|_| &audit["strategy_decision"]),
                             audit["trade_id"].as_str(),
+                            replay_context_from_close_audit(&audit),
                         );
                         request_settings_persist(state)?;
                     }

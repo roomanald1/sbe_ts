@@ -117,47 +117,6 @@ fn signal_qualification_thresholds(risk_appetite: f64) -> Vec<DecisionParameter>
     ]
 }
 
-fn historical_evidence_thresholds() -> Vec<DecisionParameter> {
-    vec![
-        parameter(
-            "Historical evidence",
-            "Minimum strict walk-forward samples",
-            MIN_SIDE_WALK_FORWARD_SAMPLES as f64,
-            "samples",
-        ),
-        parameter(
-            "Historical evidence",
-            "Minimum direction match rate",
-            MIN_SIDE_DIRECTION_MATCH_RATE,
-            "rate",
-        ),
-        parameter(
-            "Historical evidence",
-            "Minimum positive net rate",
-            MIN_SIDE_POSITIVE_NET_RATE,
-            "rate",
-        ),
-        parameter(
-            "Historical evidence",
-            "Minimum 95% positive-rate lower bound",
-            MIN_SIDE_POSITIVE_NET_LOWER_95,
-            "rate",
-        ),
-        parameter(
-            "Historical evidence",
-            "Minimum exploration evidence samples",
-            MIN_EXPLORATION_EVIDENCE_SAMPLES as f64,
-            "samples",
-        ),
-        parameter(
-            "Historical evidence",
-            "Minimum exploration positive rate",
-            NEGATIVE_EVIDENCE_FLOOR,
-            "rate",
-        ),
-    ]
-}
-
 fn counterfactual_relaxation_thresholds() -> Vec<DecisionParameter> {
     vec![
         parameter(

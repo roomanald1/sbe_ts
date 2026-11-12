@@ -117,7 +117,7 @@ async fn execute_portfolio_hedge(
         };
         slippage * filled * execution
     });
-    settings.execution_feedback_outbox.push(strategies::ExecutionOutcomeEvent {
+    settings.execution_feedback_outbox.push(strategy::ExecutionOutcomeEvent {
         event_id: format!("portfolio-hedge:{timestamp}"),
         observed_at_ms: timestamp,
         context: "portfolio-hedge".into(),

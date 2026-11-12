@@ -7,6 +7,7 @@ src/rust/position_management/target/*
 src/rust/learning/learning_state.sqlite
 src/rust/learning/learning_state.sqlite-shm
 src/rust/learning/learning_state.sqlite-wal
+src/rust/learning/strategy_state/
 src/rust/learning/learning_state.json
 src/rust/position_management/auto_trader_state.json
 src/rust/position_management/auto_trader_state.msgpack

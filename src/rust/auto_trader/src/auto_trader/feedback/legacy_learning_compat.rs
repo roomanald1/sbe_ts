@@ -115,6 +115,7 @@ fn record_strategy_trade_outcome(
     net_return_percent: Option<f64>,
     entry_decision: Option<&serde_json::Value>,
     trade_id: Option<&str>,
+    replay_context: Option<strategy::TradeReplayContext>,
 ) {
     let Some(net_return_percent) = net_return_percent.filter(|value| value.is_finite()) else {
         return;
@@ -155,11 +156,11 @@ fn record_strategy_trade_outcome(
                 }
             }
         }
-        let profile_id = strategies::profile_id(profile_symbol, strategy, &parameters);
+        let profile_id = strategy::profile_id(profile_symbol, strategy, &parameters);
         let threshold_observations = entry_decision
             .and_then(|decision| threshold_observation(strategy, decision))
             .map(|(parameter_key, threshold, feature_value)| {
-                vec![strategies::StrategyThresholdObservation {
+                vec![strategy::StrategyThresholdObservation {
                     parameter_key: parameter_key.as_str().to_owned(),
                     threshold,
                     feature_value,
@@ -168,9 +169,9 @@ fn record_strategy_trade_outcome(
             .unwrap_or_default();
         let event_id = format!("trade:{}", trade_id.filter(|value| !value.is_empty()).unwrap_or(learning_context.unwrap_or(symbol)));
         if !settings.feedback_outbox.iter().any(|event| matches!(event,
-            strategies::FeedbackEvent::TradeOutcome { event_id: pending, .. } if pending == &event_id
+            strategy::FeedbackEvent::TradeOutcome { event_id: pending, .. } if pending == &event_id
         )) {
-            settings.feedback_outbox.push(strategies::FeedbackEvent::TradeOutcome {
+            settings.feedback_outbox.push(strategy::FeedbackEvent::TradeOutcome {
                 event_id,
                 observed_at_ms: current_time_ms(),
                 learning_context: learning_context.map(str::to_owned),
@@ -186,14 +187,129 @@ fn record_strategy_trade_outcome(
                 realized_pnl_usd,
                 net_return_percent,
                 threshold_observations,
+                replay_context,
             });
         }
     }
 }
 
+fn replay_context_from_close_audit(
+    audit: &serde_json::Value,
+) -> Option<strategy::TradeReplayContext> {
+    let entry_timestamp_ms = audit["entry_timestamp_ms"]
+        .as_u64()
+        .or_else(|| audit["entry_context"]["timestamp_ms"].as_u64())?;
+    let fills = audit["exit_fills"].as_array()?;
+    let (mut quantity, mut notional, mut exit_fees, mut exit_timestamp_ms) = (0.0, 0.0, 0.0, 0);
+    for fill in fills {
+        let fill_quantity = fill["quantity"].as_f64()?;
+        let fill_price = fill["execution_price"].as_f64()?;
+        let fill_timestamp = fill["timestamp"].as_u64()?;
+        let fee = fill["fee"].as_f64().unwrap_or_default();
+        if !fill_quantity.is_finite() || fill_quantity <= 0.0
+            || !fill_price.is_finite() || fill_price <= 0.0
+            || !fee.is_finite() || fee < 0.0
+        {
+            return None;
+        }
+        quantity += fill_quantity;
+        notional += fill_quantity * fill_price;
+        exit_fees += fee;
+        exit_timestamp_ms = exit_timestamp_ms.max(fill_timestamp);
+    }
+    let entry_price = audit["entry_average_price"]
+        .as_f64()
+        .or_else(|| audit["entry_context"]["average_price"].as_f64())?;
+    let entry_quantity = audit["entry_quantity"]
+        .as_f64()
+        .or_else(|| audit["entry_context"]["quantity"].as_f64())?;
+    let entry_fees = audit["entry_fees_paid"]
+        .as_f64()
+        .or_else(|| audit["entry_context"]["total_entry_fees_paid"].as_f64())?;
+    let exit_price = (quantity > 0.0).then_some(notional / quantity)?;
+    let side = audit["entry_position_side"].as_str()?.to_owned();
+    if entry_timestamp_ms == 0 || exit_timestamp_ms <= entry_timestamp_ms
+        || !entry_price.is_finite() || entry_price <= 0.0
+        || !entry_quantity.is_finite() || entry_quantity <= 0.0
+        || quantity + 1e-12 < entry_quantity
+        || !entry_fees.is_finite() || entry_fees < 0.0
+    {
+        return None;
+    }
+    Some(strategy::TradeReplayContext {
+        market_symbol: audit["symbol"].as_str()?.to_owned(),
+        entry_timestamp_ms,
+        exit_timestamp_ms,
+        side,
+        entry_price,
+        exit_price,
+        quantity: entry_quantity,
+        entry_fees,
+        exit_fees,
+        entry_walk_forward_evidence: serde_json::from_value(
+            audit["strategy_decision"]["strategy_walk_forward"].clone(),
+        ).ok(),
+        // The fill prices and fees are known; historical executable quotes
+        // needed to compare alternate exit costs are not present here.
+        execution_costs_complete: false,
+    })
+}
+
+fn build_trade_replay_context(
+    market_symbol: &str,
+    entry_timestamp_ms: u64,
+    exit_timestamp_ms: u64,
+    side: &str,
+    entry_price: f64,
+    exit_price: f64,
+    quantity: f64,
+    entry_fees: f64,
+    exit_fees: f64,
+    entry_walk_forward_evidence: Option<strategy::StrategyWalkForwardEvidence>,
+) -> Option<strategy::TradeReplayContext> {
+    if market_symbol.is_empty() || entry_timestamp_ms == 0 || exit_timestamp_ms <= entry_timestamp_ms
+        || ![entry_price, exit_price, quantity, entry_fees, exit_fees].iter().all(|v| v.is_finite())
+        || entry_price <= 0.0 || exit_price <= 0.0 || quantity <= 0.0 || entry_fees < 0.0 || exit_fees < 0.0
+    {
+        return None;
+    }
+    Some(strategy::TradeReplayContext {
+        market_symbol: market_symbol.to_owned(), entry_timestamp_ms, exit_timestamp_ms,
+        side: side.to_owned(), entry_price, exit_price, quantity, entry_fees, exit_fees,
+        entry_walk_forward_evidence,
+        execution_costs_complete: false,
+    })
+}
+
+fn entry_walk_forward_evidence(
+    decision: Option<&serde_json::Value>,
+) -> Option<strategy::StrategyWalkForwardEvidence> {
+    let value = decision?.get("strategy_walk_forward")?.clone();
+    serde_json::from_value(value).ok()
+}
+
 #[cfg(test)]
 mod feedback_outbox_tests {
     use super::*;
+
+    #[test]
+    fn closed_audit_contributes_filled_trade_replay_context() {
+        let context = replay_context_from_close_audit(&serde_json::json!({
+            "symbol":"BTC-USDT", "entry_timestamp_ms":1_000,
+            "strategy_decision":{"strategy_walk_forward":{"sampleCount":8,"positiveNetRate":0.75,"averageNetReturnPercent":0.2,"lastSampleTimestampMs":900}},
+            "entry_position_side":"long", "entry_average_price":100.0,
+            "entry_quantity":2.0, "entry_fees_paid":0.1,
+            "exit_fills":[{"timestamp":2_000,"quantity":1.0,"execution_price":101.0,"fee":0.05},
+                           {"timestamp":3_000,"quantity":1.0,"execution_price":102.0,"fee":0.05}]
+        })).unwrap();
+        assert_eq!(context.market_symbol, "BTC-USDT");
+        assert_eq!(context.entry_timestamp_ms, 1_000);
+        assert_eq!(context.exit_timestamp_ms, 3_000);
+        assert_eq!(context.exit_price, 101.5);
+        assert_eq!(context.quantity, 2.0);
+        assert!(!context.execution_costs_complete);
+        assert_eq!(context.entry_walk_forward_evidence.unwrap().sample_count, 8);
+    }
 
     #[test]
     fn completed_trade_is_queued_for_external_learning_with_its_exact_profile() {
@@ -204,7 +320,7 @@ mod feedback_outbox_tests {
         });
         record_strategy_trade_outcome(
             &mut settings, "BTC-USDT", Some("live-momentum"), Some("scout:btc"), false,
-            1.25, Some(0.8), Some(&decision), Some("trade-42"),
+            1.25, Some(0.8), Some(&decision), Some("trade-42"), None,
         );
         assert!(settings.learning.is_empty(), "the trader must not update learner state inline");
         let Some(FeedbackEvent::TradeOutcome {
@@ -214,7 +330,7 @@ mod feedback_outbox_tests {
         };
         assert_eq!(event_id, "trade:trade-42");
         assert_eq!(parameters["minimum_momentum"], 0.003);
-        assert_eq!(profile_id, &strategies::profile_id("BTC-USDT", "live-momentum", parameters));
+        assert_eq!(profile_id, &strategy::profile_id("BTC-USDT", "live-momentum", parameters));
         assert_eq!(*realized_pnl_usd, 1.25);
         assert_eq!(*net_return_percent, 0.8);
     }
@@ -240,6 +356,7 @@ mod feedback_outbox_tests {
             Some(1.25),
             Some(&decision),
             Some("trade-threshold-1"),
+            None,
         );
         let Some(FeedbackEvent::TradeOutcome {
             threshold_observations,
@@ -267,6 +384,7 @@ mod feedback_outbox_tests {
             None,
             Some(&serde_json::json!({})),
             Some("reconciliation-delta"),
+            None,
         );
         assert!(settings.feedback_outbox.is_empty());
     }

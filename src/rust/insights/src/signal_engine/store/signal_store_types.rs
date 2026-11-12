@@ -4,56 +4,12 @@ pub struct SignalDashboard {
     pub best: Vec<SignalSnapshot>,
     pub history: Vec<SignalSnapshot>,
     pub performance: Vec<SignalPerformance>,
-    pub walk_forward: Vec<SignalWalkForward>,
 }
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AutoTraderDashboard {
     pub best: Vec<SignalSnapshot>,
-    pub walk_forward: Vec<SignalWalkForward>,
-    #[serde(rename = "missedOpportunityBands", default)]
-    pub missed_opportunity_bands: Vec<MissedOpportunityGateBand>,
-}
-
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct MissedOpportunityGateBand {
-    pub gate: String,
-    pub threshold: f64,
-    #[serde(default)]
-    pub symbol: Option<String>,
-    #[serde(default)]
-    pub direction: Option<String>,
-    #[serde(default)]
-    pub strategy: Option<String>,
-    #[serde(default)]
-    pub market_context: Option<String>,
-    #[serde(default)]
-    pub horizon_seconds: u64,
-    pub sample_count: usize,
-    pub average_net_return_percent: Option<f64>,
-    pub positive_net_rate: Option<f64>,
-    #[serde(default)]
-    pub time_to_profit_sample_count: usize,
-    #[serde(default)]
-    pub time_to_profit_rate: Option<f64>,
-    #[serde(default)]
-    pub average_time_to_profit_seconds: Option<f64>,
-    #[serde(default)]
-    pub median_time_to_profit_seconds: Option<f64>,
-    #[serde(default)]
-    pub stop_target_sample_count: usize,
-    #[serde(default)]
-    pub stop_target_average_net_return_percent: Option<f64>,
-    #[serde(default)]
-    pub stop_target_positive_net_rate: Option<f64>,
-    #[serde(default)]
-    pub strategy_exit_sample_count: usize,
-    #[serde(default)]
-    pub strategy_exit_average_net_return_percent: Option<f64>,
-    #[serde(default)]
-    pub strategy_exit_positive_net_rate: Option<f64>,
 }
 
 #[derive(Clone, Debug, Default, Serialize)]
@@ -144,10 +100,6 @@ pub struct SignalStore {
     decision_quality_cache:
         Arc<Mutex<Option<(Option<u64>, Instant, AutoTraderDecisionQualitySummary)>>>,
     calibration_records_cache: Arc<Mutex<Option<(Instant, Arc<Vec<StoredSignalRecord>>)>>>,
-    walk_forward_cache: Arc<Mutex<Option<(Instant, Vec<SignalWalkForward>)>>>,
-    missed_opportunity_cache: Arc<Mutex<Option<(Instant, Vec<MissedOpportunityGateBand>)>>>,
-    walk_forward_refreshing: Arc<AtomicBool>,
-    missed_opportunity_refreshing: Arc<AtomicBool>,
 }
 
 struct WriteRequest {

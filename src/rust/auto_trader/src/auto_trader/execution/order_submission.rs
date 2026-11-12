@@ -9,7 +9,6 @@ async fn submit_and_record_selected_order(
         counterfactual_take_profit_percent,
         effective_stop_loss_percent,
         effective_take_profit_percent,
-        evidence,
         side,
         quantity,
         notional,
@@ -32,7 +31,6 @@ async fn submit_and_record_selected_order(
     } = input;
     let state = &state;
     let signal = &signal;
-    let evidence = evidence.as_ref();
     let side = side.as_str();
     let decision_id = decision_id.as_str();
     let learning_context = learning_context.as_str();
@@ -123,6 +121,7 @@ async fn submit_and_record_selected_order(
         Option<f64>,
         Option<serde_json::Value>,
         Option<String>,
+        Option<strategy::TradeReplayContext>,
     )> = None;
     let mut position_trade_id = decision_id.to_owned();
     let (realized_delta, _learned_type) = if filled > 0.0 {
@@ -204,8 +203,20 @@ async fn submit_and_record_selected_order(
                 total_trade_pnl,
                 (entry_notional > 0.0)
                     .then_some(total_trade_pnl / entry_notional * 100.0),
-                prior.strategy_decision,
+                prior.strategy_decision.clone(),
                 prior.trade_id,
+                average_price.and_then(|exit_price| build_trade_replay_context(
+                    &signal.symbol,
+                    prior.entry_timestamp_ms,
+                    current_time_ms(),
+                    if prior.quantity > 0.0 { "long" } else { "short" },
+                    prior.average_entry_price,
+                    exit_price,
+                    prior.quantity.abs(),
+                    prior.total_entry_fees_paid.max(prior.entry_fees),
+                    fee,
+                    entry_walk_forward_evidence(prior.strategy_decision.as_ref()),
+                )),
             ));
         }
         if let Some(position) = settings.positions.get_mut(&signal.symbol) {
@@ -230,7 +241,7 @@ async fn submit_and_record_selected_order(
     let realized_delta_usd = realized_usd(&settings, &signal.symbol, realized_delta);
     settings.realized_pnl += realized_delta_usd;
     settings.daily_realized_pnl += realized_delta_usd;
-    if let Some((strategy, learning_context, scout_entry, total_pnl, net_return_percent, decision, trade_id)) = completed_strategy_trade {
+    if let Some((strategy, learning_context, scout_entry, total_pnl, net_return_percent, decision, trade_id, replay_context)) = completed_strategy_trade {
         let total_pnl_usd = realized_usd(&settings, &signal.symbol, total_pnl);
         record_strategy_trade_outcome(
             &mut settings,
@@ -242,6 +253,7 @@ async fn submit_and_record_selected_order(
             net_return_percent,
             decision.as_ref(),
             trade_id.as_deref(),
+            replay_context,
         );
     }
     let status = if response
@@ -313,7 +325,6 @@ async fn submit_and_record_selected_order(
         Some(exploratory),
         counterfactual_stop_loss_percent,
         counterfactual_take_profit_percent,
-        evidence,
     );
     audit_payload["trade_id"] = serde_json::json!(position_trade_id);
     audit_payload["effective_stop_loss_percent"] = serde_json::json!(effective_stop_loss_percent);

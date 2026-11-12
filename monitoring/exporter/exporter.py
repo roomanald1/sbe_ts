@@ -18,10 +18,8 @@ SERVICES = {
     "auto_trader": (os.getenv("AUTO_TRADER_URL", "http://127.0.0.1:3005"), "/health"),
     "execution": (os.getenv("EXECUTION_URL", "http://127.0.0.1:3003"), "/health"),
     "insights": (os.getenv("INSIGHTS_URL", "http://127.0.0.1:3004"), "/health"),
-    "live_signals": (os.getenv("LIVE_SIGNALS_URL", "http://127.0.0.1:3007"), "/health"),
     "news_sentiment": (os.getenv("NEWS_SENTIMENT_URL", "http://127.0.0.1:3006"), "/health"),
     "learning": (os.getenv("LEARNING_SERVICE_URL", "http://127.0.0.1:3010"), "/health"),
-    "scouts": (os.getenv("SCOUTS_SERVICE_URL", "http://127.0.0.1:3011"), "/health"),
 }
 RSOCKET_SERVICES = {
     "position_management": os.getenv(
@@ -30,6 +28,14 @@ RSOCKET_SERVICES = {
     "auto_trader": os.getenv("AUTO_TRADER_RSOCKET_URL", "ws://127.0.0.1:10008"),
     "learning": os.getenv("LEARNING_RSOCKET_URL", "ws://127.0.0.1:10010"),
 }
+STRATEGY_X_WORKER_STRATEGIES = (
+    "live-momentum", "live-trade-flow", "live-order-book", "live-vwap-dislocation",
+    "live-absorption-pressure", "donchian-55-btc200", "donchian-20-sma200",
+    "donchian-20-btc200", "donchian-10-btc200", "donchian-20-btc200-hold3",
+    "risk-adjusted-trend-portfolio", "trend-sleeves-btc200", "trend-50-200",
+    "relative-strength-90-sma200", "risk-adjusted-monthly-momentum",
+    "rsi2-oversold-rebound", "dated-futures-carry",
+)
 
 _RSOCKET_LOOP = None
 _RSOCKET_LOOP_THREAD = None
@@ -216,7 +222,7 @@ def insights_maintenance_metrics(output):
 
 
 def insights_signal_latency_metrics(output):
-    base = SERVICES["live_signals"][0]
+    base = SERVICES["insights"][0]
     try:
         latency = get_json(base, "/internal/latency")
     except (OSError, URLError, ValueError, TypeError):
@@ -229,26 +235,22 @@ def insights_signal_latency_metrics(output):
             value = summary.get(stat)
             if isinstance(value, (int, float)):
                 output.append(sample(
-                    "app_live_signals_latency_microseconds",
-                    "Approximate Live Signals pipeline latency percentile in microseconds.",
+                    "app_insights_signal_latency_microseconds",
+                    "Approximate Insights signal pipeline latency percentile in microseconds.",
                     value,
                     {"stage": stage, "stat": stat.removesuffix("_us")},
                 ))
         count = summary.get("count")
         if isinstance(count, (int, float)):
             output.append(sample(
-                "app_live_signals_latency_observations_total",
-                "Cumulative Live Signals latency observations.",
+                "app_insights_signal_latency_observations_total",
+                "Cumulative Insights signal latency observations.",
                 count,
                 {"stage": stage},
                 kind="counter",
             ))
 
-    try:
-        research_latency = get_json(SERVICES["insights"][0], "/internal/latency")
-    except (OSError, URLError, ValueError, TypeError):
-        research_latency = {}
-    dropped = research_latency.get("dropped_research_records")
+    dropped = latency.get("dropped_research_records")
     if isinstance(dropped, (int, float)):
         output.append(sample(
             "app_insights_research_records_dropped_total",
@@ -292,6 +294,7 @@ def metrics():
 
     insights_maintenance_metrics(output)
     insights_signal_latency_metrics(output)
+    strategy_worker_metrics(output)
 
     try:
         scouts = learning_get(
@@ -512,6 +515,70 @@ def metrics():
     except (OSError, URLError, ValueError, TypeError):
         pass
     return "".join(output).encode()
+
+
+def strategy_worker_metrics(output):
+    """Scrape internal metrics from each live and Scout worker process."""
+    port = os.getenv("STRATEGY_X_METRICS_PORT", "10202")
+    workers = []
+    for role in ("live", "scout"):
+        for strategy in STRATEGY_X_WORKER_STRATEGIES:
+            if role == "live" and strategy.startswith("live-"):
+                host = f"strategy-x-{strategy}"
+            else:
+                host = f"strategy-x-{role}-{strategy}"
+            workers.append((role, strategy, f"http://{host}:{port}/metrics"))
+
+    def fetch_worker_metrics(worker):
+        role, strategy, url = worker
+        try:
+            with urlopen(url, timeout=3) as response:
+                return role, strategy, response.read().decode("utf-8")
+        except (OSError, URLError, UnicodeDecodeError):
+            return role, strategy, None
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=len(workers)) as executor:
+        for role, strategy, body in executor.map(fetch_worker_metrics, workers):
+            labels = {"role": role, "strategy": strategy}
+            memory_limit = worker_memory_limit_bytes(role)
+            output.append(sample(
+                "app_strategy_worker_memory_limit_bytes",
+                "Configured container memory limit for a per-strategy worker process.",
+                memory_limit,
+                labels,
+            ))
+            up = int(body is not None)
+            output.append(sample(
+                "app_strategy_worker_up",
+                "Whether a per-strategy worker metrics endpoint is reachable.",
+                up,
+                labels,
+            ))
+            if body is None:
+                continue
+            for line in body.splitlines():
+                if not line:
+                    continue
+                if line.startswith("#"):
+                    parts = line.split(maxsplit=3)
+                    if len(parts) > 2 and parts[2] not in METRIC_HEADERS:
+                        METRIC_HEADERS.add(parts[2])
+                        output.append(line + "\n")
+                else:
+                    output.append(line + "\n")
+
+
+def worker_memory_limit_bytes(role):
+    env_name = "STRATEGY_X_SCOUT_MEMORY_LIMIT" if role == "scout" else "STRATEGY_X_LIVE_MEMORY_LIMIT"
+    raw = os.getenv(env_name)
+    if not raw:
+        return 1536 * 1024 * 1024 if role == "scout" else 256 * 1024 * 1024
+    value = raw.strip().upper()
+    multipliers = {"K": 1024, "M": 1024**2, "G": 1024**3}
+    suffix = value[-1:]
+    if suffix in multipliers:
+        return int(float(value[:-1]) * multipliers[suffix])
+    return int(value)
 
 
 class Handler(BaseHTTPRequestHandler):

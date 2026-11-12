@@ -251,13 +251,8 @@ fn signal_audit_payload(
     exploratory: Option<bool>,
     stop_loss_percent: f64,
     take_profit_percent: f64,
-    evidence: Option<&WalkForward>,
 ) -> serde_json::Value {
     let decision_id = signal_decision_id(signal);
-    let evidence_metrics = evidence.map(|item| serde_json::json!({
-        "horizon_seconds": item.horizon_seconds,
-        "metrics": if signal.direction == "bullish" { &item.all_signal_long } else { &item.all_signal_short },
-    }));
     let mut audited_components = serde_json::to_value(&signal.components).unwrap_or_default();
     if let (Some(component_values), Some(parameters)) = (
         audited_components.as_object_mut(),
@@ -291,7 +286,6 @@ fn signal_audit_payload(
         "exploratory": exploratory,
         "stop_loss_percent": stop_loss_percent,
         "take_profit_percent": take_profit_percent,
-        "walk_forward_evidence": evidence_metrics,
         "status": status,
         "reason": reason,
     });

@@ -63,9 +63,9 @@ async fn carry_paper_size(client: &reqwest::Client, base: &str) -> f64 {
     let url = std::env::var("AUTO_TRADER_RSOCKET_URL")
         .unwrap_or_else(|_| "ws://127.0.0.1:10006".into());
     let _ = (client, base);
-    strategies::request_scout_service_route(&url, &strategies::ScoutCoordinatorRouteCommand {
+    strategy::request_scout_service_route(&url, &strategy::ScoutCoordinatorRouteCommand {
         request_id: format!("insights-carry:{}", now_ms()), strategy: None,
-        method: strategies::ScoutWorkerHttpMethod::Get,
+        method: strategy::ScoutWorkerHttpMethod::Get,
         path: "/positions/auto-trader/dated-carry".into(), payload: serde_json::Value::Null,
     }).await.ok().filter(|response| response.status < 400).map(|response| response.body)
         .and_then(|book| book.get("max_spot_notional_usdt").and_then(serde_json::Value::as_f64))
@@ -256,9 +256,9 @@ async fn carry_publish(client: &reqwest::Client, base: &str, signal: &serde_json
             "now_ms": signal.get("emitted_at_ms"),
             "candidates": signal.get("candidates").cloned().unwrap_or_else(|| serde_json::json!([])),
         });
-        let response = strategies::request_scout_worker_route(&learning, &strategies::ScoutCoordinatorRouteCommand {
+        let response = strategy::request_scout_worker_route(&learning, &strategy::ScoutCoordinatorRouteCommand {
             request_id: scout_request["request_id"].as_str().unwrap_or_default().to_owned(),
-            strategy: None, method: strategies::ScoutWorkerHttpMethod::Post,
+            strategy: None, method: strategy::ScoutWorkerHttpMethod::Post,
             path: "/dated-carry-inputs".into(), payload: scout_request,
         }).await;
         if let Err(error) = response.map_err(anyhow::Error::from).and_then(|response| {
@@ -270,9 +270,9 @@ async fn carry_publish(client: &reqwest::Client, base: &str, signal: &serde_json
     }
     let auto = std::env::var("AUTO_TRADER_RSOCKET_URL")
         .unwrap_or_else(|_| "ws://127.0.0.1:10006".into());
-    let response = strategies::request_scout_service_route(&auto, &strategies::ScoutCoordinatorRouteCommand {
+    let response = strategy::request_scout_service_route(&auto, &strategy::ScoutCoordinatorRouteCommand {
         request_id: format!("insights-carry:{}", now_ms()), strategy: None,
-        method: strategies::ScoutWorkerHttpMethod::Post,
+        method: strategy::ScoutWorkerHttpMethod::Post,
         path: "/internal/auto-trader/dated-carry-signal".into(), payload: signal.clone(),
     }).await?;
     if response.status >= 400 { anyhow::bail!("AutoTrader dated-carry route returned {}", response.status); }

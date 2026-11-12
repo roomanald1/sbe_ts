@@ -97,7 +97,7 @@ struct Settings {
     #[serde(default)]
     context_learning_imported: bool,
     #[serde(default)]
-    feedback_outbox: Vec<strategies::FeedbackEvent>,
+    feedback_outbox: Vec<strategy::FeedbackEvent>,
     #[serde(default)]
     post_exit_observations: Vec<serde_json::Value>,
     #[serde(default)]
@@ -105,13 +105,13 @@ struct Settings {
     #[serde(default)]
     exit_timing_feedback_outbox: Vec<serde_json::Value>,
     #[serde(default)]
-    profile_registration_outbox: Vec<strategies::StrategyProfileRegistration>,
+    profile_registration_outbox: Vec<strategy::StrategyProfileRegistration>,
     #[serde(default)]
     registered_profile_ids: BTreeSet<String>,
     #[serde(default)]
-    learned_profiles: BTreeMap<String, strategies::StrategyProfile>,
+    learned_profiles: BTreeMap<String, strategy::StrategyProfile>,
     #[serde(default)]
-    learned_scout_parameter_variants: Vec<strategies::ScoutParameterVariant>,
+    learned_scout_parameter_variants: Vec<strategy::ScoutParameterVariant>,
     #[serde(default)]
     learned_strategy_size_multipliers: BTreeMap<String, f64>,
     #[serde(default)]
@@ -119,9 +119,9 @@ struct Settings {
     #[serde(default)]
     contextual_stop_loss_percents: BTreeMap<String, f64>,
     #[serde(default)]
-    learned_context_stats: BTreeMap<String, strategies::ContextLearningStat>,
+    learned_context_stats: BTreeMap<String, strategy::ContextLearningStat>,
     #[serde(default)]
-    learned_execution_stats: BTreeMap<String, strategies::ExecutionLearningStat>,
+    learned_execution_stats: BTreeMap<String, strategy::ExecutionLearningStat>,
     #[serde(default)]
     execution_learning: BTreeMap<String, ExecutionLearningStats>,
     #[serde(default)]
@@ -129,7 +129,7 @@ struct Settings {
     #[serde(default)]
     execution_learning_order_ids: BTreeSet<String>,
     #[serde(default)]
-    execution_feedback_outbox: Vec<strategies::ExecutionOutcomeEvent>,
+    execution_feedback_outbox: Vec<strategy::ExecutionOutcomeEvent>,
     // Retained only long enough to import in-flight state created before
     // Scouts became the owner of paired scout outcomes.
     #[serde(default)]

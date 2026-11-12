@@ -100,6 +100,9 @@ async fn register_scout(
     if !valid_scout_sample(&sample, now) {
         return Err((StatusCode::BAD_REQUEST, "Invalid scout scout sample".to_owned()));
     }
+    admit_runtime_symbol(&runtime, &sample.symbol)
+        .await
+        .map_err(|()| (StatusCode::TOO_MANY_REQUESTS, "Insights active-symbol capacity reached".to_owned()))?;
     let engine = runtime
         .engines
         .entry(sample.symbol.clone())
@@ -205,6 +208,9 @@ async fn ingest_signal_event(
     if request.symbol.is_empty() || !request.symbol.is_ascii() || request.symbol.len() > 32 {
         return Err((StatusCode::BAD_REQUEST, "Invalid signal symbol".to_owned()));
     }
+    admit_runtime_symbol(&runtime, &request.symbol)
+        .await
+        .map_err(|()| (StatusCode::TOO_MANY_REQUESTS, "Insights active-symbol capacity reached".to_owned()))?;
     // Nonblocking snapshot read: market feed handling never waits on RSS/model work.
     let current_news = Arc::clone(&runtime.news.borrow());
     let current_news_weight = runtime
@@ -300,7 +306,8 @@ async fn ingest_signal_event(
                     }
                     if outcome.legacy.horizon_seconds == 60 {
                         if let Ok(mut learning) = runtime.news_learning.try_lock() {
-                            if let Some(vote) = learning.pending.remove(&(
+                            prune_news_pending(&mut learning, now_ms());
+                            if let Some((vote, _)) = learning.pending.remove(&(
                                 outcome.legacy.symbol.clone(),
                                 outcome.legacy.signal_timestamp,
                             )) {
@@ -320,14 +327,9 @@ async fn ingest_signal_event(
                     records.push(StoredSignalRecord::Outcome(outcome.legacy));
                     records.push(StoredSignalRecord::Evaluation(outcome.evaluation));
                 }
-                let should_compute_snapshot = accepted
-                    && if crate::research_only() {
-                        engine.research_sample_is_due(timestamp)
-                    } else {
-                        engine.live_snapshot_due(timestamp)
-                    };
+                let should_compute_snapshot = accepted && engine.live_snapshot_due(timestamp);
                 let should_capture_research =
-                    should_compute_snapshot && engine.research_sample_is_due(timestamp);
+                    accepted && engine.research_sample_is_due(timestamp);
                 let snapshot_started = Instant::now();
                 let mut snapshot = should_compute_snapshot
                     .then(|| {
@@ -404,9 +406,10 @@ async fn ingest_signal_event(
                         engine.track(snapshot);
                         if let Some(vote) = news_vote {
                             if let Ok(mut learning) = runtime.news_learning.try_lock() {
+                                prune_news_pending(&mut learning, now_ms());
                                 learning
                                     .pending
-                                    .insert((snapshot.symbol.clone(), snapshot.timestamp), vote);
+                                    .insert((snapshot.symbol.clone(), snapshot.timestamp), (vote, now_ms()));
                             }
                         }
                         let mut persisted_snapshot = snapshot.clone();
@@ -463,7 +466,7 @@ async fn ingest_signal_event(
         };
         (snapshot, records, market, event_timestamp)
     };
-    if snapshot.is_none() && !crate::research_only() {
+    if snapshot.is_none() {
         if let Some(markets) = market.as_ref() {
             if let Some(mut dashboard) = runtime.signal_push_cache.get_mut(&request.symbol) {
                 dashboard["markets"] = markets.clone();
@@ -507,23 +510,15 @@ async fn ingest_signal_event(
         });
     }
     if let Some(snapshot) = snapshot.as_ref() {
-        if !crate::research_only() {
-            let markets = market.unwrap_or_else(|| serde_json::json!({}));
-            // Historical counterfactual analysis scans a large database. Signal
-            // ingestion only needs the latest completed result; dashboard reads
-            // schedule any refresh in the background.
-            let missed_opportunity_bands = runtime.store.cached_missed_opportunity_bands();
-            let dashboard = serde_json::json!({
-                "best": [snapshot],
-                "walkForward": runtime.store.cached_walk_forward(),
-                "missedOpportunityBands": missed_opportunity_bands,
-                "markets": markets
-            });
-            runtime
-                .signal_push_cache
-                .insert(snapshot.symbol.clone(), dashboard);
-            runtime.signal_push_notify.notify_one();
-        }
+        let markets = market.unwrap_or_else(|| serde_json::json!({}));
+        let dashboard = serde_json::json!({
+            "best": [snapshot],
+            "markets": markets
+        });
+        runtime
+            .signal_push_cache
+            .insert(snapshot.symbol.clone(), dashboard);
+        runtime.signal_push_notify.notify_one();
         let mut ui_snapshot = snapshot.clone();
         ui_snapshot.components.momentum_by_window.clear();
         ui_snapshot.components.trend_volatility_units_by_window.clear();
@@ -575,12 +570,12 @@ async fn publish_scout_markouts(
             "short_time_to_positive_net_seconds": evaluation.short_time_to_positive_net_seconds,
         });
         for attempt in 0..3 {
-            let response = strategies::request_scout_worker_route(
+            let response = strategy::request_scout_worker_route(
                 &learning_rsocket_url,
-                &strategies::ScoutCoordinatorRouteCommand {
+                &strategy::ScoutCoordinatorRouteCommand {
                     request_id: format!("scout-markout:{decision_id}:{}", evaluation.evaluated_timestamp),
                     strategy: None,
-                    method: strategies::ScoutWorkerHttpMethod::Post,
+                    method: strategy::ScoutWorkerHttpMethod::Post,
                     path: "/scout-markout".into(),
                     payload: payload.clone(),
                 },

@@ -113,7 +113,7 @@
       "description": "Application service logs collected from the repository logs directory.",
       "gridPos": {
         "x": 0,
-        "y": 81,
+        "y": 111,
         "w": 24,
         "h": 7
       },
@@ -612,7 +612,7 @@
         "type": "prometheus",
         "uid": "prometheus"
       },
-      "description": "Approximate p50 and p95 durations from the Live Signals event pipeline. Values are in microseconds; percentiles are calculated by the service from cumulative latency buckets.",
+      "description": "Approximate p50 and p95 durations from the Insights signal pipeline. Values are in microseconds; percentiles are calculated from cumulative latency buckets.",
       "fieldConfig": {
         "defaults": {
           "unit": "µs",
@@ -639,12 +639,12 @@
       },
       "targets": [
         {
-          "expr": "app_live_signals_latency_microseconds",
+          "expr": "app_insights_signal_latency_microseconds",
           "legendFormat": "{{stage}} {{stat}}",
           "refId": "A"
         }
       ],
-      "title": "Live signal stages (µs)",
+      "title": "Insights signal stages (µs)",
       "type": "timeseries"
     },
     {
@@ -705,7 +705,7 @@
       "collapsed": false,
       "gridPos": {
         "x": 0,
-        "y": 66,
+        "y": 96,
         "w": 24,
         "h": 1
       },
@@ -729,7 +729,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 67,
+        "y": 97,
         "w": 8,
         "h": 4
       },
@@ -768,7 +768,7 @@
       },
       "gridPos": {
         "x": 8,
-        "y": 67,
+        "y": 97,
         "w": 8,
         "h": 4
       },
@@ -806,7 +806,7 @@
       },
       "gridPos": {
         "x": 16,
-        "y": 67,
+        "y": 97,
         "w": 8,
         "h": 4
       },
@@ -845,7 +845,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 71,
+        "y": 101,
         "w": 8,
         "h": 4
       },
@@ -883,7 +883,7 @@
       },
       "gridPos": {
         "x": 8,
-        "y": 71,
+        "y": 101,
         "w": 8,
         "h": 4
       },
@@ -926,7 +926,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 88,
+        "y": 118,
         "w": 24,
         "h": 5
       },
@@ -964,7 +964,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 75,
+        "y": 105,
         "w": 12,
         "h": 5
       },
@@ -980,7 +980,7 @@
       },
       "targets": [
         {
-          "expr": "100 * rate(app_service_process_cpu_seconds_total{service=~\"feed_handlers|binance_feed|position_management|auto_trader|execution|insights|live_signals|news_sentiment|learning|scouts\"}[1m])",
+          "expr": "100 * rate(app_service_process_cpu_seconds_total{service=~\"feed_handlers|binance_feed|position_management|auto_trader|execution|insights|news_sentiment|learning\"}[1m])",
           "legendFormat": "{{service}}",
           "refId": "A"
         }
@@ -1308,7 +1308,7 @@
       },
       "gridPos": {
         "x": 12,
-        "y": 75,
+        "y": 105,
         "w": 12,
         "h": 5
       },
@@ -1324,7 +1324,7 @@
       },
       "targets": [
         {
-          "expr": "app_service_process_resident_memory_bytes{service=~\"feed_handlers|binance_feed|position_management|auto_trader|execution|insights|live_signals|news_sentiment|learning|scouts\"}",
+          "expr": "app_service_process_resident_memory_bytes{service=~\"feed_handlers|binance_feed|position_management|auto_trader|execution|insights|news_sentiment|learning\"}",
           "legendFormat": "{{service}}",
           "refId": "A"
         }
@@ -1537,7 +1537,7 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "app_service_up{service=~\"insights|live_signals|scouts|auto_trader\"}",
+          "expr": "app_service_up{service=~\"insights|auto_trader|learning\"}",
           "legendFormat": "{{service}}",
           "queryType": "instant",
           "refId": "A"
@@ -1758,7 +1758,7 @@
       "collapsed": false,
       "gridPos": {
         "x": 0,
-        "y": 80,
+        "y": 110,
         "w": 24,
         "h": 1
       },
@@ -2098,7 +2098,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 93,
+        "y": 123,
         "w": 24,
         "h": 5
       },
@@ -2136,7 +2136,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 98,
+        "y": 128,
         "w": 24,
         "h": 5
       },
@@ -2174,7 +2174,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 103,
+        "y": 133,
         "w": 24,
         "h": 5
       },
@@ -2309,6 +2309,86 @@
       ],
       "title": "Closed Scouts",
       "type": "stat"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "bytes", "min": 0 }, "overrides": [] },
+      "gridPos": {"x": 12, "y": 66, "w": 12, "h": 6},
+      "id": 221,
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "single" } },
+      "targets": [{ "expr": "app_strategy_worker_process_resident_memory_bytes{role=~\"$worker_role\",strategy=~\"$worker_strategy\"}", "legendFormat": "{{role}} · {{strategy}}", "refId": "A" }],
+      "title": "Strategy worker memory",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "ops", "min": 0 }, "overrides": [] },
+      "gridPos": {"x": 12, "y": 72, "w": 12, "h": 6},
+      "id": 222,
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        { "expr": "sum by (role, strategy) (rate(app_strategy_worker_requests_total{role=~\"$worker_role\",strategy=~\"$worker_strategy\"}[5m]))", "legendFormat": "{{role}} · {{strategy}} requests/s", "refId": "A" },
+        { "expr": "sum by (role, strategy) (rate(app_strategy_worker_saturation_rejects_total{role=~\"$worker_role\",strategy=~\"$worker_strategy\"}[5m]))", "legendFormat": "{{role}} · {{strategy}} saturated/s", "refId": "B" }
+      ],
+      "title": "Strategy worker throughput and saturation",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "value" },
+            "properties": [
+              { "id": "mappings", "value": [{ "options": { "0": { "text": "DOWN", "color": "red" }, "1": { "text": "UP", "color": "green" } }, "type": "value" }] },
+              { "id": "thresholds", "value": { "mode": "absolute", "steps": [{ "color": "red", "value": null }, { "color": "green", "value": 1 }] } },
+              { "id": "custom.cellOptions", "value": { "type": "color-background" } },
+              { "id": "custom.width", "value": 100 }
+            ]
+          }
+        ]
+      },
+      "gridPos": {"x": 0, "y": 66, "w": 12, "h": 30},
+      "id": 223,
+      "options": { "cellHeight": "sm", "footer": { "show": false }, "showHeader": true },
+      "targets": [{ "expr": "app_strategy_worker_up{role=~\"$worker_role\",strategy=~\"$worker_strategy\"}", "instant": true, "format": "table", "refId": "A" }],
+      "transformations": [{ "id": "organize", "options": { "excludeByName": { "Time": true, "__name__": true, "instance": true, "job": true }, "indexByName": { "role": 0, "strategy": 1, "Value": 2 }, "renameByName": { "Value": "value" } } }],
+      "title": "Strategy worker availability by role and strategy",
+      "type": "table"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "s", "min": 0 }, "overrides": [] },
+      "gridPos": {"x": 12, "y": 78, "w": 12, "h": 6},
+      "id": 224,
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "targets": [{ "expr": "histogram_quantile(0.95, sum by (le, role, strategy) (rate(app_strategy_worker_request_duration_seconds_bucket{role=~\"$worker_role\",strategy=~\"$worker_strategy\"}[5m])))", "legendFormat": "{{role}} · {{strategy}} p95", "refId": "A" }],
+      "title": "Strategy worker p95 request latency",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "ops", "min": 0 }, "overrides": [] },
+      "gridPos": {"x": 12, "y": 84, "w": 12, "h": 6},
+      "id": 225,
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        { "expr": "sum by (role, strategy) (rate(app_strategy_worker_errors_total{role=~\"$worker_role\",strategy=~\"$worker_strategy\"}[5m]))", "legendFormat": "{{role}} · {{strategy}} errors/s", "refId": "A" },
+        { "expr": "sum by (role, strategy) (rate(app_strategy_worker_timeouts_total{role=~\"$worker_role\",strategy=~\"$worker_strategy\"}[5m]))", "legendFormat": "{{role}} · {{strategy}} timeouts/s", "refId": "B" }
+      ],
+      "title": "Strategy worker errors and timeouts",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "percent", "min": 0 }, "overrides": [] },
+      "gridPos": {"x": 12, "y": 90, "w": 12, "h": 6},
+      "id": 226,
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "targets": [{ "expr": "100 * (app_strategy_worker_process_resident_memory_bytes{role=~\"$worker_role\",strategy=~\"$worker_strategy\"} / app_strategy_worker_memory_limit_bytes{role=~\"$worker_role\",strategy=~\"$worker_strategy\"})", "legendFormat": "{{role}} · {{strategy}} memory use", "refId": "A" }],
+      "title": "Strategy worker RSS as percent of memory limit",
+      "type": "timeseries"
     }
   ],
   "refresh": "15s",
@@ -2347,6 +2427,42 @@
           "text": "ERROR",
           "value": "ERROR"
         },
+        "multi": true,
+        "includeAll": true,
+        "allValue": ".*",
+        "hide": 0,
+        "skipUrlSync": false
+      },
+      {
+        "name": "worker_role",
+        "label": "Worker role",
+        "type": "query",
+        "datasource": { "type": "prometheus", "uid": "prometheus" },
+        "definition": "label_values(app_strategy_worker_up, role)",
+        "query": { "query": "label_values(app_strategy_worker_up, role)", "refId": "PrometheusVariableQueryEditor-VariableQuery" },
+        "current": { "selected": true, "text": "All", "value": "$__all" },
+        "options": [],
+        "refresh": 1,
+        "regex": "",
+        "sort": 1,
+        "multi": true,
+        "includeAll": true,
+        "allValue": ".*",
+        "hide": 0,
+        "skipUrlSync": false
+      },
+      {
+        "name": "worker_strategy",
+        "label": "Strategy",
+        "type": "query",
+        "datasource": { "type": "prometheus", "uid": "prometheus" },
+        "definition": "label_values(app_strategy_worker_up{role=~\"$worker_role\"}, strategy)",
+        "query": { "query": "label_values(app_strategy_worker_up{role=~\"$worker_role\"}, strategy)", "refId": "PrometheusVariableQueryEditor-VariableQuery" },
+        "current": { "selected": true, "text": "All", "value": "$__all" },
+        "options": [],
+        "refresh": 1,
+        "regex": "",
+        "sort": 1,
         "multi": true,
         "includeAll": true,
         "allValue": ".*",

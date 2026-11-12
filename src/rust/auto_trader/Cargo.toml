@@ -14,8 +14,7 @@ rsocket_rust = "0.7.5"
 rsocket_rust_transport_websocket = "0.7.4"
 serde = { version = "1.0.229", features = ["derive", "rc"] }
 serde_json = "1.0.151"
-scouts = { path = "../scouts" }
-strategies = { path = "../strategies" }
+strategy = { path = "../strategy" }
 tokio = { version = "1.53.1", features = ["fs", "io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
 tower = { version = "0.5.2", features = ["util"] }
 

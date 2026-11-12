@@ -3,7 +3,7 @@
 
 use axum::{
     Json, Router,
-    extract::State,
+    extract::{Path as AxumPath, State},
     http::StatusCode,
     routing::{get, post},
 };
@@ -14,13 +14,13 @@ use std::{
     sync::Arc,
 };
 #[cfg(test)]
-use strategies::StrategyThresholdObservation;
-use strategies::{
+use strategy::StrategyThresholdObservation;
+use strategy::{
     ContextLearningStat, ContextMissedOpportunityBand, ContextThresholdInput,
     ContextThresholdRequest, ContextThresholdResponse, ContextThresholds, ExecutionLearningRequest,
     ExecutionLearningResponse, ExecutionLearningStat, ExecutionOutcomeEvent, FeedbackEvent,
     LearnedProfileSnapshot, ParameterSpec, ScoutComparisonMetadata, StrategyProfile,
-    StrategyProfileRegistration,
+    StrategyProfileRegistration, TradeReplayContext,
 };
 use tokio::sync::Mutex;
 
@@ -28,6 +28,7 @@ mod context;
 mod execution;
 mod feedback;
 mod profiles;
+mod retention;
 mod scout_coordinator;
 mod thresholds;
 
@@ -114,6 +115,10 @@ struct LearningState {
     active_profiles: BTreeMap<String, StrategyProfile>,
     #[serde(default)]
     context_learning: BTreeMap<String, ContextLearningStat>,
+    // Bounded Learning-owned counterfactual evidence. Existing state files
+    // deserialize this as empty; do not fabricate evidence from raw signals.
+    #[serde(default)]
+    missed_opportunity_bands: Vec<ContextMissedOpportunityBand>,
     #[serde(default)]
     execution_learning: BTreeMap<String, ExecutionLearningStat>,
     #[serde(default)]
@@ -122,8 +127,18 @@ struct LearningState {
     seen_execution_event_ids: BTreeSet<String>,
     #[serde(default)]
     exit_timing_observations: BTreeMap<String, serde_json::Value>,
+    #[serde(default)]
+    strategy_replay_jobs: BTreeMap<String, StrategyReplayJob>,
+    #[serde(default)]
+    missed_opportunity_jobs: BTreeMap<String, MissedOpportunityJob>,
     seen_event_ids: BTreeSet<String>,
     accepted_events: u64,
+    #[serde(skip)]
+    outcome_history_truncated: bool,
+    #[serde(skip)]
+    seen_event_ids_overflowed: bool,
+    #[serde(skip)]
+    seen_execution_event_ids_overflowed: bool,
 }
 
 fn default_live_scout_parameter_samples() -> usize {
@@ -137,14 +152,154 @@ impl Default for LearningState {
             variants: BTreeMap::new(),
             active_profiles: BTreeMap::new(),
             context_learning: BTreeMap::new(),
+            missed_opportunity_bands: Vec::new(),
             execution_learning: BTreeMap::new(),
             threshold_samples: Vec::new(),
             seen_execution_event_ids: BTreeSet::new(),
             exit_timing_observations: BTreeMap::new(),
+            strategy_replay_jobs: BTreeMap::new(),
+            missed_opportunity_jobs: BTreeMap::new(),
             seen_event_ids: BTreeSet::new(),
             accepted_events: 0,
+            outcome_history_truncated: false,
+            seen_event_ids_overflowed: false,
+            seen_execution_event_ids_overflowed: false,
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum StrategyReplayStatus {
+    Pending,
+    Running,
+    Completed,
+    Failed,
+    Unsupported,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct StrategyReplayJob {
+    event_id: String,
+    symbol: String,
+    strategy: String,
+    profile_id: String,
+    parameters: BTreeMap<String, f64>,
+    context: Option<TradeReplayContext>,
+    status: StrategyReplayStatus,
+    attempts: u32,
+    created_at_ms: u64,
+    updated_at_ms: u64,
+    reason: Option<String>,
+    result: Option<StrategyReplayResult>,
+    #[serde(default)]
+    history_cursor: Option<String>,
+    #[serde(default)]
+    pages_scanned: usize,
+    #[serde(default)]
+    records_scanned: usize,
+    #[serde(default)]
+    signals_scanned: usize,
+    #[serde(default)]
+    coverage_start_ms: Option<u64>,
+    #[serde(default)]
+    coverage_through_ms: Option<u64>,
+    #[serde(default)]
+    last_signal_timestamp_ms: Option<u64>,
+    #[serde(default)]
+    cadence_gap_detected: bool,
+    #[serde(default)]
+    cadence_gap_at_ms: Option<u64>,
+    #[serde(default)]
+    counterfactual_entry_found: bool,
+    #[serde(default)]
+    counterfactual_position_open: bool,
+    #[serde(default)]
+    counterfactual_exit_timestamp_ms: Option<u64>,
+    #[serde(default)]
+    counterfactual_exit_mark_price: Option<f64>,
+    #[serde(default)]
+    mark_at_actual_exit: Option<f64>,
+    #[serde(default)]
+    mark_at_observation_end: Option<f64>,
+    #[serde(default)]
+    archived_days_unscanned: usize,
+    #[serde(default)]
+    archived_days_unavailable: usize,
+    #[serde(default)]
+    corrupt_history_records: usize,
+    #[serde(default)]
+    horizon_mark_prices: BTreeMap<u64, f64>,
+    #[serde(default)]
+    horizon_mark_timestamps: BTreeMap<u64, u64>,
+    #[serde(default)]
+    horizons_ms: Vec<u64>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct StrategyReplayResult {
+    classification: String,
+    input_count: usize,
+    evaluated_count: usize,
+    first_exit_timestamp_ms: Option<u64>,
+    estimated_mark_return_percent: Option<f64>,
+    execution_costs_complete: bool,
+    reason: Option<String>,
+    horizons: Vec<StrategyReplayHorizonResult>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct StrategyReplayHorizonResult {
+    horizon_ms: u64,
+    classification: String,
+    counterfactual_exit_timestamp_ms: Option<u64>,
+    estimated_mark_return_percent: Option<f64>,
+    complete: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct MissedOpportunityJob {
+    event_id: String,
+    observed_at_ms: u64,
+    symbol: String,
+    strategy: String,
+    profile_id: String,
+    parameters: BTreeMap<String, f64>,
+    direction: String,
+    strength: f64,
+    score: f64,
+    learning_context: String,
+    status: StrategyReplayStatus,
+    reason: Option<String>,
+    horizons: BTreeMap<u64, MissedOpportunityHorizon>,
+    #[serde(default)]
+    history_cursor: Option<String>,
+    #[serde(default)]
+    pages_scanned: usize,
+    #[serde(default)]
+    coverage_start_ms: Option<u64>,
+    #[serde(default)]
+    coverage_through_ms: Option<u64>,
+    #[serde(default)]
+    corrupt_records: usize,
+    #[serde(default)]
+    archived_days_unscanned: usize,
+    #[serde(default)]
+    archived_days_unavailable: usize,
+    #[serde(default)]
+    cadence_gap_detected: bool,
+    #[serde(default)]
+    cadence_gap_at_ms: Option<u64>,
+    #[serde(default)]
+    reference_price: Option<f64>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct MissedOpportunityHorizon {
+    mark_price: Option<f64>,
+    timestamp_ms: Option<u64>,
+    gross_directional_return_percent: Option<f64>,
+    complete: bool,
 }
 
 #[derive(Clone)]
@@ -189,6 +344,14 @@ fn event_parts(event: &FeedbackEvent) -> (&str, &str, &str, &BTreeMap<String, f6
             parameters,
             ..
         } => (event_id, symbol, strategy, parameters, profile_id.clone()),
+        FeedbackEvent::MissedOpportunityCandidate {
+            event_id,
+            symbol,
+            strategy,
+            profile_id,
+            parameters,
+            ..
+        } => (event_id, symbol, strategy, parameters, profile_id.clone()),
     }
 }
 
@@ -209,7 +372,27 @@ pub fn router_with_scout_coordinator(
 
 fn service_state(path: PathBuf) -> Result<ServiceState, String> {
     let mut stored = load_state(&path)?;
-    rebuild_trade_profile_metrics(&mut stored, now_ms());
+    for job in stored.strategy_replay_jobs.values_mut() {
+        if job.status == StrategyReplayStatus::Running {
+            job.status = StrategyReplayStatus::Pending;
+            job.updated_at_ms = now_ms();
+            job.reason =
+                Some("resumed from its durable history cursor after Learning restarted".into());
+        }
+    }
+    for job in stored.missed_opportunity_jobs.values_mut() {
+        if job.status == StrategyReplayStatus::Running {
+            job.status = StrategyReplayStatus::Pending;
+            job.reason = Some(
+                "resumed from durable snapshot-history cursor after Learning restarted".into(),
+            );
+        }
+    }
+    feedback::reconcile_scout_profiles(&mut stored);
+    if !stored.outcome_history_truncated {
+        rebuild_trade_profile_metrics(&mut stored, now_ms());
+    }
+    feedback::persist(&path, &stored).map_err(|(_, error)| error)?;
     Ok(ServiceState {
         state: Arc::new(Mutex::new(stored)),
         path,
@@ -223,6 +406,12 @@ fn service_router(service: ServiceState) -> Router {
         .route("/summary", get(get_summary))
         .route("/feedback", post(accept_feedback))
         .route("/exit-timing", post(accept_exit_timing_observation))
+        .route("/strategy-replays", get(get_strategy_replays))
+        .route("/strategy-replays/{event_id}", get(get_strategy_replay))
+        .route(
+            "/strategy-replays/{event_id}/retry",
+            post(retry_strategy_replay),
+        )
         .route(
             "/config/scout-parameter-samples",
             axum::routing::put(update_scout_parameter_samples),
@@ -294,13 +483,18 @@ fn open_state_db(path: &Path) -> Result<rusqlite::Connection, String> {
              CREATE TABLE IF NOT EXISTS learning_metadata (id INTEGER PRIMARY KEY CHECK (id = 1), accepted_events INTEGER NOT NULL);
              CREATE TABLE IF NOT EXISTS learning_config (key TEXT PRIMARY KEY, value INTEGER NOT NULL);
              CREATE TABLE IF NOT EXISTS learning_variants (id TEXT PRIMARY KEY, payload TEXT NOT NULL);
+             CREATE TABLE IF NOT EXISTS learning_variant_recency (id TEXT PRIMARY KEY, last_seen_ms INTEGER NOT NULL);
+             CREATE INDEX IF NOT EXISTS learning_variant_recency_latest ON learning_variant_recency(last_seen_ms DESC, id DESC);
              CREATE TABLE IF NOT EXISTS learning_active_profiles (id TEXT PRIMARY KEY, payload TEXT NOT NULL);
              CREATE TABLE IF NOT EXISTS learning_context_stats (id TEXT PRIMARY KEY, payload TEXT NOT NULL);
              CREATE TABLE IF NOT EXISTS learning_execution_stats (id TEXT PRIMARY KEY, payload TEXT NOT NULL);
              CREATE TABLE IF NOT EXISTS learning_threshold_samples (id INTEGER PRIMARY KEY, payload TEXT NOT NULL);
              CREATE TABLE IF NOT EXISTS learning_seen_event_ids (id TEXT PRIMARY KEY);
              CREATE TABLE IF NOT EXISTS learning_seen_execution_event_ids (id TEXT PRIMARY KEY);
-             CREATE TABLE IF NOT EXISTS learning_exit_timing_observations (id TEXT PRIMARY KEY, payload TEXT NOT NULL);",
+             CREATE TABLE IF NOT EXISTS learning_exit_timing_observations (id TEXT PRIMARY KEY, payload TEXT NOT NULL);
+             CREATE TABLE IF NOT EXISTS learning_strategy_replay_jobs (id TEXT PRIMARY KEY, payload TEXT NOT NULL);
+             CREATE TABLE IF NOT EXISTS learning_missed_opportunity_jobs (id TEXT PRIMARY KEY, payload TEXT NOT NULL);
+             CREATE TABLE IF NOT EXISTS learning_missed_opportunity_bands (id INTEGER PRIMARY KEY, payload TEXT NOT NULL);",
         )
         .map_err(|error| {
             format!(
@@ -309,6 +503,159 @@ fn open_state_db(path: &Path) -> Result<rusqlite::Connection, String> {
             )
         })?;
     Ok(connection)
+}
+
+fn durable_event_id_exists(path: &Path, table: &str, event_id: &str) -> Result<bool, String> {
+    let table = match table {
+        "learning_seen_event_ids" | "learning_seen_execution_event_ids" => table,
+        _ => return Err(format!("unsupported Learning event-ID table {table}")),
+    };
+    let connection = open_state_db(path)?;
+    connection
+        .query_row(
+            &format!("SELECT EXISTS(SELECT 1 FROM {table} WHERE id = ?1)"),
+            [event_id],
+            |row| row.get::<_, bool>(0),
+        )
+        .map_err(|error| format!("could not check durable Learning event ID: {error}"))
+}
+
+fn backfill_variant_recency(connection: &rusqlite::Connection) -> Result<(), String> {
+    connection
+        .execute(
+            "INSERT OR IGNORE INTO learning_variant_recency (id, last_seen_ms)
+             SELECT v.id, COALESCE((
+                 SELECT MAX(CAST(json_extract(outcome.value, '$.observed_at_ms') AS INTEGER))
+                 FROM json_each(v.payload, '$.outcomes') AS outcome
+             ), 0)
+             FROM learning_variants AS v
+             WHERE NOT EXISTS (
+                 SELECT 1 FROM learning_variant_recency AS r WHERE r.id = v.id
+             )",
+            [],
+        )
+        .map_err(|error| format!("could not backfill Learning variant recency: {error}"))?;
+    Ok(())
+}
+
+fn load_recent_map<T: for<'de> Deserialize<'de>>(
+    connection: &rusqlite::Connection,
+    table: &str,
+    limit: usize,
+    target: &mut BTreeMap<String, T>,
+) -> Result<(), String> {
+    let updated_at = match table {
+        "learning_context_stats" | "learning_execution_stats" => "$.updated_at_ms",
+        "learning_exit_timing_observations" => "$.observed_at_ms",
+        _ => return Err(format!("unsupported bounded Learning table {table}")),
+    };
+    let mut statement = connection
+        .prepare(&format!(
+            "SELECT id, payload FROM {table}
+             ORDER BY CAST(json_extract(payload, '{updated_at}') AS INTEGER) DESC, id DESC
+             LIMIT ?1"
+        ))
+        .map_err(|error| error.to_string())?;
+    let rows = statement
+        .query_map([limit as i64], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .map_err(|error| error.to_string())?;
+    for row in rows {
+        let (id, payload) = row.map_err(|error| error.to_string())?;
+        target.insert(
+            id,
+            serde_json::from_str(&payload).map_err(|error| error.to_string())?,
+        );
+    }
+    Ok(())
+}
+
+fn load_recent_rows<T: for<'de> Deserialize<'de>>(
+    connection: &rusqlite::Connection,
+    table: &str,
+    limit: usize,
+) -> Result<Vec<T>, String> {
+    let mut statement = connection
+        .prepare(&format!(
+            "SELECT payload FROM {table} ORDER BY id DESC LIMIT ?1"
+        ))
+        .map_err(|error| error.to_string())?;
+    let mut rows = statement
+        .query_map([limit as i64], |row| row.get::<_, String>(0))
+        .map_err(|error| error.to_string())?
+        .map(|row| {
+            let payload = row.map_err(|error| error.to_string())?;
+            serde_json::from_str(&payload).map_err(|error| error.to_string())
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    rows.reverse();
+    Ok(rows)
+}
+
+fn load_recent_variants(
+    connection: &rusqlite::Connection,
+    limit: usize,
+    target: &mut BTreeMap<String, RegisteredProfile>,
+) -> Result<bool, String> {
+    let available = limit.saturating_sub(target.len());
+    if available == 0 {
+        return Ok(false);
+    }
+    let mut statement = connection
+        .prepare(
+            "SELECT v.id, v.payload FROM learning_variants AS v
+             LEFT JOIN learning_variant_recency AS r ON r.id = v.id
+             ORDER BY COALESCE(r.last_seen_ms, 0) DESC, v.id DESC LIMIT ?1",
+        )
+        .map_err(|error| error.to_string())?;
+    let rows = statement
+        .query_map([available as i64], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .map_err(|error| error.to_string())?;
+    let mut loaded = 0usize;
+    let mut truncated = false;
+    for row in rows {
+        let (id, payload) = row.map_err(|error| error.to_string())?;
+        let mut variant: RegisteredProfile =
+            serde_json::from_str(&payload).map_err(|error| error.to_string())?;
+        truncated |= retention::compact_variant_outcomes(&mut variant, now_ms());
+        target.entry(id).or_insert(variant);
+        loaded += 1;
+        if loaded % 100 == 0 {
+            truncated |= retention::compact_outcome_working_set(target);
+        }
+    }
+    truncated |= retention::compact_outcome_working_set(target);
+    Ok(truncated)
+}
+
+fn load_one_variant_entry(
+    connection: &rusqlite::Connection,
+    id: &str,
+    target: &mut BTreeMap<String, RegisteredProfile>,
+) -> Result<bool, String> {
+    use rusqlite::OptionalExtension;
+    let payload = connection
+        .query_row(
+            "SELECT payload FROM learning_variants WHERE id = ?1",
+            [id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(|error| error.to_string())?;
+    if let Some(payload) = payload {
+        let mut variant: RegisteredProfile =
+            serde_json::from_str(&payload).map_err(|error| error.to_string())?;
+        let mut truncated = retention::compact_variant_outcomes(&mut variant, now_ms());
+        target.insert(id.to_owned(), variant);
+        if target.len() % 100 == 0 {
+            truncated |= retention::compact_outcome_working_set(target);
+        }
+        return Ok(truncated);
+    }
+    Ok(false)
 }
 
 async fn accept_exit_timing_observation(
@@ -330,6 +677,12 @@ async fn accept_exit_timing_observation(
             "invalid exit-timing observation".into(),
         ));
     }
+    if serde_json::to_vec(&observation).map_or(true, |encoded| encoded.len() > 16 * 1024) {
+        return Err((
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "exit-timing observation exceeds the 16 KiB limit".into(),
+        ));
+    }
     let mut state = service.state.lock().await;
     let duplicate = state.exit_timing_observations.contains_key(event_id);
     if !duplicate {
@@ -347,6 +700,56 @@ async fn accept_exit_timing_observation(
     Ok(Json(
         serde_json::json!({"accepted": true, "duplicate": duplicate}),
     ))
+}
+
+async fn get_strategy_replays(State(service): State<ServiceState>) -> Json<Vec<StrategyReplayJob>> {
+    let state = service.state.lock().await;
+    let mut jobs = state
+        .strategy_replay_jobs
+        .values()
+        .cloned()
+        .collect::<Vec<_>>();
+    jobs.sort_by_key(|job| std::cmp::Reverse(job.updated_at_ms));
+    jobs.truncate(100);
+    Json(jobs)
+}
+
+async fn get_strategy_replay(
+    State(service): State<ServiceState>,
+    AxumPath(event_id): AxumPath<String>,
+) -> Result<Json<StrategyReplayJob>, StatusCode> {
+    service
+        .state
+        .lock()
+        .await
+        .strategy_replay_jobs
+        .get(&event_id)
+        .cloned()
+        .map(Json)
+        .ok_or(StatusCode::NOT_FOUND)
+}
+
+async fn retry_strategy_replay(
+    State(service): State<ServiceState>,
+    AxumPath(event_id): AxumPath<String>,
+) -> Result<Json<StrategyReplayJob>, (StatusCode, String)> {
+    let mut state = service.state.lock().await;
+    let job = state.strategy_replay_jobs.get_mut(&event_id).ok_or((
+        StatusCode::NOT_FOUND,
+        "strategy replay job not found".into(),
+    ))?;
+    if job.status != StrategyReplayStatus::Failed || job.attempts >= 5 {
+        return Err((
+            StatusCode::CONFLICT,
+            "only failed jobs with fewer than five attempts can be retried".into(),
+        ));
+    }
+    job.status = StrategyReplayStatus::Pending;
+    job.reason = None;
+    job.updated_at_ms = now_ms();
+    let result = job.clone();
+    persist(&service.path, &state)?;
+    Ok(Json(result))
 }
 
 fn load_state(path: &Path) -> Result<LearningState, String> {
@@ -377,31 +780,129 @@ fn load_state(path: &Path) -> Result<LearningState, String> {
                     .contains(value)
             })
             .unwrap_or_else(default_live_scout_parameter_samples);
-        load_map(&connection, "learning_variants", &mut state.variants)?;
+        state.outcome_history_truncated = connection
+            .query_row(
+                "SELECT value FROM learning_config WHERE key = 'outcome_history_truncated'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()
+            .map_err(|error| format!("could not read Learning retention marker: {error}"))?
+            .unwrap_or_default()
+            != 0;
+        state.seen_event_ids_overflowed = connection
+            .query_row(
+                "SELECT value FROM learning_config WHERE key = 'seen_event_ids_overflowed'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()
+            .map_err(|error| format!("could not read Learning event-ID retention marker: {error}"))?
+            .unwrap_or_default()
+            != 0;
+        state.seen_execution_event_ids_overflowed = connection
+            .query_row(
+                "SELECT value FROM learning_config WHERE key = 'seen_execution_event_ids_overflowed'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()
+            .map_err(|error| format!("could not read Learning execution event-ID retention marker: {error}"))?
+            .unwrap_or_default()
+            != 0;
+        let active_profile_rows: i64 = connection
+            .query_row("SELECT COUNT(*) FROM learning_active_profiles", [], |row| {
+                row.get(0)
+            })
+            .map_err(|error| format!("could not count Learning active profiles: {error}"))?;
+        if active_profile_rows as usize > retention::MAX_ACTIVE_PROFILES {
+            return Err(format!(
+                "Learning database has {active_profile_rows} active profiles; in-memory limit is {}",
+                retention::MAX_ACTIVE_PROFILES
+            ));
+        }
         load_map(
             &connection,
             "learning_active_profiles",
             &mut state.active_profiles,
         )?;
-        load_map(
+        load_recent_map(
             &connection,
             "learning_context_stats",
+            retention::MAX_CONTEXT_STATS,
             &mut state.context_learning,
         )?;
-        load_map(
+        load_recent_map(
             &connection,
             "learning_execution_stats",
+            retention::MAX_EXECUTION_STATS,
             &mut state.execution_learning,
         )?;
-        state.threshold_samples = load_rows(&connection, "learning_threshold_samples")?;
+        state.threshold_samples =
+            load_recent_rows(&connection, "learning_threshold_samples", 100_000)?;
         state.seen_event_ids = load_ids(&connection, "learning_seen_event_ids")?;
         state.seen_execution_event_ids =
             load_ids(&connection, "learning_seen_execution_event_ids")?;
-        load_map(
+        state.seen_event_ids_overflowed |= connection
+            .query_row("SELECT COUNT(*) FROM learning_seen_event_ids", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .map_err(|error| format!("could not count Learning feedback IDs: {error}"))?
+            as usize
+            > 100_000;
+        state.seen_execution_event_ids_overflowed |= connection
+            .query_row(
+                "SELECT COUNT(*) FROM learning_seen_execution_event_ids",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .map_err(|error| format!("could not count Learning execution IDs: {error}"))?
+            as usize
+            > 100_000;
+        load_recent_map(
             &connection,
             "learning_exit_timing_observations",
+            10_000,
             &mut state.exit_timing_observations,
         )?;
+        load_map(
+            &connection,
+            "learning_strategy_replay_jobs",
+            &mut state.strategy_replay_jobs,
+        )?;
+        load_map(
+            &connection,
+            "learning_missed_opportunity_jobs",
+            &mut state.missed_opportunity_jobs,
+        )?;
+        state.missed_opportunity_bands =
+            load_recent_rows(&connection, "learning_missed_opportunity_bands", 2_000)?;
+        backfill_variant_recency(&connection)?;
+        let mut variant_history_truncated = false;
+        for id in state.active_profiles.values().map(variant_key) {
+            variant_history_truncated |=
+                load_one_variant_entry(&connection, &id, &mut state.variants)?;
+        }
+        variant_history_truncated |= load_recent_variants(
+            &connection,
+            retention::MAX_VARIANTS_IN_MEMORY,
+            &mut state.variants,
+        )?;
+        variant_history_truncated |= retention::compact_variants(&mut state);
+        let database_variant_count: i64 = connection
+            .query_row("SELECT COUNT(*) FROM learning_variants", [], |row| {
+                row.get(0)
+            })
+            .map_err(|error| format!("could not count Learning variants: {error}"))?;
+        state.outcome_history_truncated |=
+            variant_history_truncated || database_variant_count as usize > state.variants.len();
+        // Compact legacy high-volume outcome histories before they become the
+        // live working set. Replay jobs and idempotency keys are intentionally
+        // retained unchanged because they are durable workflow state.
+        for variant in state.variants.values_mut() {
+            state.outcome_history_truncated |=
+                retention::compact_variant_outcomes(variant, now_ms());
+        }
         return Ok(state);
     }
     Ok(LearningState::default())
@@ -430,26 +931,11 @@ fn load_map<T: for<'de> Deserialize<'de>>(
     Ok(())
 }
 
-fn load_rows<T: for<'de> Deserialize<'de>>(
-    connection: &rusqlite::Connection,
-    table: &str,
-) -> Result<Vec<T>, String> {
-    let mut statement = connection
-        .prepare(&format!("SELECT payload FROM {table} ORDER BY id"))
-        .map_err(|error| error.to_string())?;
-    statement
-        .query_map([], |row| row.get::<_, String>(0))
-        .map_err(|error| error.to_string())?
-        .map(|row| {
-            let payload = row.map_err(|error| error.to_string())?;
-            serde_json::from_str(&payload).map_err(|error| error.to_string())
-        })
-        .collect()
-}
-
 fn load_ids(connection: &rusqlite::Connection, table: &str) -> Result<BTreeSet<String>, String> {
     let mut statement = connection
-        .prepare(&format!("SELECT id FROM {table}"))
+        .prepare(&format!(
+            "SELECT id FROM {table} ORDER BY rowid DESC LIMIT 100000"
+        ))
         .map_err(|error| error.to_string())?;
     statement
         .query_map([], |row| row.get(0))
@@ -474,18 +960,51 @@ pub(crate) fn persist_normalized(
          ON CONFLICT(key) DO UPDATE SET value = excluded.value",
         [state.minimum_live_scout_parameter_samples as i64],
     )?;
-    write_map(&transaction, "learning_variants", &state.variants)?;
+    transaction.execute(
+        "INSERT INTO learning_config (key, value) VALUES ('outcome_history_truncated', ?1)
+         ON CONFLICT(key) DO UPDATE SET value = MAX(value, excluded.value)",
+        [if state.outcome_history_truncated {
+            1_i64
+        } else {
+            0_i64
+        }],
+    )?;
+    transaction.execute(
+        "INSERT INTO learning_config (key, value) VALUES ('seen_event_ids_overflowed', ?1)
+         ON CONFLICT(key) DO UPDATE SET value = MAX(value, excluded.value)",
+        [if state.seen_event_ids_overflowed {
+            1_i64
+        } else {
+            0_i64
+        }],
+    )?;
+    transaction.execute(
+        "INSERT INTO learning_config (key, value) VALUES ('seen_execution_event_ids_overflowed', ?1)
+         ON CONFLICT(key) DO UPDATE SET value = MAX(value, excluded.value)",
+        [if state.seen_execution_event_ids_overflowed { 1_i64 } else { 0_i64 }],
+    )?;
+    write_map_preserving_history(&transaction, "learning_variants", &state.variants)?;
+    {
+        let last_seen_ms = now_ms() as i64;
+        let mut statement = transaction.prepare_cached(
+            "INSERT INTO learning_variant_recency (id, last_seen_ms) VALUES (?1, ?2)
+             ON CONFLICT(id) DO UPDATE SET last_seen_ms = MAX(last_seen_ms, excluded.last_seen_ms)",
+        )?;
+        for id in state.variants.keys() {
+            statement.execute(rusqlite::params![id, last_seen_ms])?;
+        }
+    }
     write_map(
         &transaction,
         "learning_active_profiles",
         &state.active_profiles,
     )?;
-    write_map(
+    write_map_preserving_history(
         &transaction,
         "learning_context_stats",
         &state.context_learning,
     )?;
-    write_map(
+    write_map_preserving_history(
         &transaction,
         "learning_execution_stats",
         &state.execution_learning,
@@ -499,7 +1018,7 @@ pub(crate) fn persist_normalized(
             .collect::<Vec<_>>();
         sync_rows(&transaction, "learning_threshold_samples", &rows)?;
     }
-    sync_ids(
+    sync_ids_preserving_history(
         &transaction,
         "learning_seen_event_ids",
         &state.seen_event_ids,
@@ -509,7 +1028,24 @@ pub(crate) fn persist_normalized(
         "learning_exit_timing_observations",
         &state.exit_timing_observations,
     )?;
-    sync_ids(
+    write_map(
+        &transaction,
+        "learning_strategy_replay_jobs",
+        &state.strategy_replay_jobs,
+    )?;
+    write_map(
+        &transaction,
+        "learning_missed_opportunity_jobs",
+        &state.missed_opportunity_jobs,
+    )?;
+    let bands = state
+        .missed_opportunity_bands
+        .iter()
+        .enumerate()
+        .map(|(id, band)| (id as i64, band))
+        .collect::<Vec<_>>();
+    sync_rows(&transaction, "learning_missed_opportunity_bands", &bands)?;
+    sync_ids_preserving_history(
         &transaction,
         "learning_seen_execution_event_ids",
         &state.seen_execution_event_ids,
@@ -550,6 +1086,24 @@ fn write_map<T: Serialize>(
     Ok(())
 }
 
+fn write_map_preserving_history<T: Serialize>(
+    connection: &rusqlite::Connection,
+    table: &str,
+    values: &BTreeMap<String, T>,
+) -> rusqlite::Result<()> {
+    let mut statement = connection.prepare_cached(&format!(
+        "INSERT INTO {table} (id, payload) VALUES (?1, ?2)
+         ON CONFLICT(id) DO UPDATE SET payload = excluded.payload"
+    ))?;
+    for (id, value) in values {
+        statement.execute(rusqlite::params![
+            id,
+            serde_json::to_string(value).unwrap_or_default()
+        ])?;
+    }
+    Ok(())
+}
+
 fn sync_rows<T: Serialize>(
     connection: &rusqlite::Connection,
     table: &str,
@@ -576,7 +1130,7 @@ fn sync_rows<T: Serialize>(
     Ok(())
 }
 
-fn sync_ids(
+fn sync_ids_preserving_history(
     connection: &rusqlite::Connection,
     table: &str,
     values: &BTreeSet<String>,
@@ -585,19 +1139,6 @@ fn sync_ids(
         connection.prepare_cached(&format!("INSERT OR IGNORE INTO {table} (id) VALUES (?1)"))?;
     for id in values {
         statement.execute([id])?;
-    }
-    drop(statement);
-    let existing = {
-        let mut statement = connection.prepare_cached(&format!("SELECT id FROM {table}"))?;
-        statement
-            .query_map([], |row| row.get::<_, String>(0))?
-            .collect::<rusqlite::Result<Vec<_>>>()?
-    };
-    let mut delete = connection.prepare_cached(&format!("DELETE FROM {table} WHERE id = ?1"))?;
-    for id in existing {
-        if !values.contains(&id) {
-            delete.execute([id])?;
-        }
     }
     Ok(())
 }
@@ -608,6 +1149,60 @@ mod tests {
     use axum::body::Body;
     use http_body_util::BodyExt;
     use tower::ServiceExt;
+
+    #[test]
+    fn variant_loader_hydrates_only_recent_sqlite_rows() {
+        let path = std::env::temp_dir().join(format!(
+            "learning-recent-variant-loader-{}-{}.sqlite",
+            std::process::id(),
+            now_ms()
+        ));
+        let connection = open_state_db(&path).unwrap();
+        for index in 0..3 {
+            let profile = StrategyProfile {
+                profile_id: format!("profile-{index}"),
+                version: 0,
+                symbol: "BTC-USDT".into(),
+                strategy: "live-example".into(),
+                parameters: BTreeMap::from([("x".into(), index as f64)]),
+                learning_samples: 0,
+                positive_samples: 0,
+                realized_pnl: 0.0,
+            };
+            let id = variant_key(&profile);
+            let variant = RegisteredProfile {
+                profile,
+                specs: Vec::new(),
+                samples: 0,
+                positive: 0,
+                realized_pnl: 0.0,
+                outcomes: Vec::new(),
+            };
+            connection
+                .execute(
+                    "INSERT INTO learning_variants (id, payload) VALUES (?1, ?2)",
+                    rusqlite::params![id, serde_json::to_string(&variant).unwrap()],
+                )
+                .unwrap();
+            connection
+                .execute(
+                    "INSERT INTO learning_variant_recency (id, last_seen_ms) VALUES (?1, ?2)",
+                    rusqlite::params![id, index],
+                )
+                .unwrap();
+        }
+        let mut loaded = BTreeMap::new();
+        load_recent_variants(&connection, 2, &mut loaded).unwrap();
+        let profile_ids = loaded
+            .values()
+            .map(|variant| variant.profile.profile_id.as_str())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(loaded.len(), 2);
+        assert!(profile_ids.contains("profile-1"));
+        assert!(profile_ids.contains("profile-2"));
+        drop(connection);
+        let _ = std::fs::remove_file(path);
+    }
 
     async fn json_request(
         app: Router,
@@ -691,6 +1286,7 @@ mod tests {
                 realized_pnl_usd: 1.0,
                 net_return_percent: 1.0,
                 threshold_observations: Vec::new(),
+                replay_context: None,
             };
             let response = json_request(
                 app.clone(),
@@ -714,6 +1310,7 @@ mod tests {
             realized_pnl_usd: 1.0,
             net_return_percent: 1.0,
             threshold_observations: Vec::new(),
+            replay_context: None,
         };
         let response = json_request(
             app.clone(),
@@ -924,6 +1521,7 @@ mod tests {
                 realized_pnl_usd: -1.0,
                 net_return_percent: -0.1,
                 threshold_observations: vec![],
+                replay_context: None,
             };
             let response = json_request(
                 app.clone(),
@@ -1043,6 +1641,7 @@ mod tests {
                     threshold: 0.02,
                     feature_value,
                 }],
+                replay_context: None,
             };
             let response = json_request(
                 app.clone(),
@@ -1126,6 +1725,7 @@ mod tests {
                     realized_pnl_usd: 1.0,
                     net_return_percent: 1.0,
                     threshold_observations: Vec::new(),
+                    replay_context: None,
                 }
             )
             .is_none()
@@ -1218,6 +1818,7 @@ mod tests {
             realized_pnl_usd: 1.0,
             net_return_percent: 0.5,
             threshold_observations: Vec::new(),
+            replay_context: None,
         };
         let parts = event_parts(&trade);
         assert_eq!(parts.0, "trade-id");
@@ -1249,6 +1850,7 @@ mod tests {
                 realized_pnl_usd: -1.0,
                 net_return_percent: -0.2,
                 threshold_observations: vec![],
+                replay_context: None,
             };
             let response = json_request(
                 app.clone(),

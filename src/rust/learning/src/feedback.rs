@@ -8,10 +8,120 @@ pub(super) async fn accept_feedback(
     State(service): State<ServiceState>,
     Json(event): Json<FeedbackEvent>,
 ) -> Result<Json<FeedbackResult>, (StatusCode, String)> {
+    if serde_json::to_vec(&event).map_or(true, |encoded| encoded.len() > 16 * 1024) {
+        return Err((
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "Learning feedback event exceeds the 16 KiB limit".into(),
+        ));
+    }
+    if let FeedbackEvent::MissedOpportunityCandidate {
+        event_id,
+        observed_at_ms,
+        symbol,
+        strategy,
+        profile_id,
+        parameters,
+        direction,
+        strength,
+        score,
+        learning_context,
+    } = &event
+    {
+        if event_id.trim().is_empty()
+            || event_id.len() > 256
+            || symbol.trim().is_empty()
+            || symbol.len() > 64
+            || strategy.is_empty()
+            || strategy.len() > 64
+            || profile_id.trim().is_empty()
+            || profile_id.len() > 128
+            || parameters.len() > 64
+            || parameters.keys().any(|key| key.len() > 128)
+            || !strategy.starts_with("live-")
+            || !matches!(direction.as_str(), "bullish" | "bearish")
+            || !strength.is_finite()
+            || !score.is_finite()
+            || parameters.values().any(|value| !value.is_finite())
+            || learning_context.len() > 256
+        {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "invalid missed-opportunity candidate".into(),
+            ));
+        }
+        let mut state = service.state.lock().await;
+        if has_seen_feedback_id(&state, &service.path, event_id)? {
+            return Ok(Json(FeedbackResult {
+                accepted: true,
+                duplicate: true,
+                profile: None,
+            }));
+        }
+        const MAX_MISSED_OPPORTUNITY_JOBS: usize = 10_000;
+        if state.missed_opportunity_jobs.len() >= MAX_MISSED_OPPORTUNITY_JOBS {
+            let terminal = state
+                .missed_opportunity_jobs
+                .values()
+                .find(|job| {
+                    matches!(
+                        job.status,
+                        StrategyReplayStatus::Completed
+                            | StrategyReplayStatus::Failed
+                            | StrategyReplayStatus::Unsupported
+                    )
+                })
+                .map(|job| job.event_id.clone());
+            if let Some(terminal) = terminal {
+                state.missed_opportunity_jobs.remove(&terminal);
+            }
+        }
+        if state.missed_opportunity_jobs.len() >= MAX_MISSED_OPPORTUNITY_JOBS {
+            return Err((
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Learning missed-opportunity queue is full".into(),
+            ));
+        }
+        state.missed_opportunity_jobs.insert(
+            event_id.clone(),
+            MissedOpportunityJob {
+                event_id: event_id.clone(),
+                observed_at_ms: *observed_at_ms,
+                symbol: symbol.clone(),
+                strategy: strategy.clone(),
+                profile_id: profile_id.clone(),
+                parameters: parameters.clone(),
+                direction: direction.clone(),
+                strength: *strength,
+                score: *score,
+                learning_context: learning_context.clone(),
+                status: StrategyReplayStatus::Pending,
+                reason: None,
+                horizons: BTreeMap::new(),
+                history_cursor: None,
+                pages_scanned: 0,
+                coverage_start_ms: None,
+                coverage_through_ms: None,
+                corrupt_records: 0,
+                archived_days_unscanned: 0,
+                archived_days_unavailable: 0,
+                cadence_gap_detected: false,
+                cadence_gap_at_ms: None,
+                reference_price: None,
+            },
+        );
+        finalize_feedback(&mut state, &event, event_id);
+        persist(&service.path, &state)?;
+        return Ok(Json(FeedbackResult {
+            accepted: true,
+            duplicate: false,
+            profile: None,
+        }));
+    }
     let (event_id, symbol, strategy, parameters, profile_id) = event_parts(&event);
-    validate_feedback_identity(event_id, parameters)?;
+    validate_feedback_identity(event_id, symbol, strategy, &profile_id, parameters)?;
+    validate_trade_replay_context(&event)?;
     let mut state = service.state.lock().await;
-    if state.seen_event_ids.contains(event_id) {
+    if has_seen_feedback_id(&state, &service.path, event_id)? {
         return Ok(Json(FeedbackResult {
             accepted: true,
             duplicate: true,
@@ -19,7 +129,18 @@ pub(super) async fn accept_feedback(
         }));
     }
 
+    if matches!(&event, FeedbackEvent::TradeOutcome { .. }) && !has_replay_job_capacity(&state) {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Learning replay queue is full".into(),
+        ));
+    }
+
     let profile_key = key(symbol, strategy);
+    retention::ensure_active_profile_room(&state, &profile_key)?;
+    if let Some(context) = event_context(&event) {
+        retention::ensure_context_room(&state, &context)?;
+    }
     let minimum_parameter_samples = state.minimum_live_scout_parameter_samples;
     let source_profile = StrategyProfile {
         profile_id: profile_id.clone(),
@@ -32,6 +153,7 @@ pub(super) async fn accept_feedback(
         realized_pnl: 0.0,
     };
     register_feedback_variant(&mut state, &event, source_profile, parameters, &profile_id)?;
+    register_scout_baseline_if_missing(&mut state, &event, symbol, strategy);
     let update = append_profile_outcome(&mut state, &event, symbol, strategy, parameters)?;
     update_active_profile(
         &mut state,
@@ -43,7 +165,11 @@ pub(super) async fn accept_feedback(
         &profile_key,
         &update,
     );
+    if matches!(&event, FeedbackEvent::ScoutOutcome { .. }) {
+        promote_qualified_scout_candidates(&mut state, symbol, strategy, minimum_parameter_samples);
+    }
     train_threshold_parameters(&mut state, &event, symbol, strategy, &profile_key, &update);
+    enqueue_strategy_replay(&mut state, &event);
     finalize_feedback(&mut state, &event, event_id);
     persist(&service.path, &state)?;
     Ok(Json(FeedbackResult {
@@ -53,11 +179,397 @@ pub(super) async fn accept_feedback(
     }))
 }
 
+fn has_seen_feedback_id(
+    state: &LearningState,
+    path: &Path,
+    event_id: &str,
+) -> Result<bool, (StatusCode, String)> {
+    if state.seen_event_ids.contains(event_id) {
+        return Ok(true);
+    }
+    if state.seen_event_ids_overflowed {
+        return durable_event_id_exists(path, "learning_seen_event_ids", event_id)
+            .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error));
+    }
+    Ok(false)
+}
+
+fn validate_trade_replay_context(event: &FeedbackEvent) -> Result<(), (StatusCode, String)> {
+    let FeedbackEvent::TradeOutcome {
+        replay_context: Some(context),
+        ..
+    } = event
+    else {
+        return Ok(());
+    };
+    if context.market_symbol.trim().is_empty()
+        || context.entry_timestamp_ms == 0
+        || context.exit_timestamp_ms <= context.entry_timestamp_ms
+        || ![
+            context.entry_price,
+            context.exit_price,
+            context.quantity,
+            context.entry_fees,
+            context.exit_fees,
+        ]
+        .iter()
+        .all(|value| value.is_finite())
+        || context.entry_price <= 0.0
+        || context.exit_price <= 0.0
+        || context.quantity <= 0.0
+        || context.entry_fees < 0.0
+        || context.exit_fees < 0.0
+        || !matches!(context.side.as_str(), "long" | "short")
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "invalid trade replay context".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn enqueue_strategy_replay(state: &mut LearningState, event: &FeedbackEvent) {
+    let FeedbackEvent::TradeOutcome {
+        event_id,
+        symbol,
+        strategy,
+        profile_id,
+        parameters,
+        replay_context,
+        ..
+    } = event
+    else {
+        return;
+    };
+    const MAX_DURABLE_REPLAY_JOBS: usize = 10_000;
+    if state.strategy_replay_jobs.contains_key(event_id) {
+        return;
+    }
+    if state.strategy_replay_jobs.len() >= MAX_DURABLE_REPLAY_JOBS {
+        let oldest_terminal = state
+            .strategy_replay_jobs
+            .values()
+            .filter(|job| {
+                matches!(
+                    job.status,
+                    StrategyReplayStatus::Completed
+                        | StrategyReplayStatus::Failed
+                        | StrategyReplayStatus::Unsupported
+                )
+            })
+            .min_by_key(|job| (job.updated_at_ms, job.event_id.clone()))
+            .map(|job| job.event_id.clone());
+        if let Some(oldest) = oldest_terminal {
+            state.strategy_replay_jobs.remove(&oldest);
+        }
+    }
+    let reason = if state.strategy_replay_jobs.len() >= MAX_DURABLE_REPLAY_JOBS {
+        Some("bounded replay queue is full".to_owned())
+    } else if !strategy.starts_with("live-") {
+        Some("daily and dated-carry strategies require exact daily/carry replay inputs".to_owned())
+    } else if replay_context.is_none() {
+        Some("trade feedback lacks entry/exit timestamps, prices, fees, or quantity".to_owned())
+    } else if strategy == "live-trade-flow"
+        && replay_context
+            .as_ref()
+            .is_some_and(|context| context.entry_walk_forward_evidence.is_none())
+    {
+        Some(
+            "live trade-flow replay requires its immutable entry-time walk-forward evidence"
+                .to_owned(),
+        )
+    } else {
+        None
+    };
+    let now = now_ms();
+    state.strategy_replay_jobs.insert(
+        event_id.clone(),
+        StrategyReplayJob {
+            event_id: event_id.clone(),
+            symbol: symbol.clone(),
+            strategy: strategy.clone(),
+            profile_id: profile_id.clone(),
+            parameters: parameters.clone(),
+            context: replay_context.clone(),
+            status: if reason.is_some() {
+                StrategyReplayStatus::Unsupported
+            } else {
+                StrategyReplayStatus::Pending
+            },
+            attempts: 0,
+            created_at_ms: now,
+            updated_at_ms: now,
+            reason,
+            result: None,
+            history_cursor: None,
+            pages_scanned: 0,
+            signals_scanned: 0,
+            records_scanned: 0,
+            coverage_start_ms: None,
+            coverage_through_ms: None,
+            last_signal_timestamp_ms: None,
+            cadence_gap_detected: false,
+            counterfactual_entry_found: false,
+            cadence_gap_at_ms: None,
+            counterfactual_position_open: false,
+            counterfactual_exit_timestamp_ms: None,
+            counterfactual_exit_mark_price: None,
+            mark_at_actual_exit: None,
+            mark_at_observation_end: None,
+            archived_days_unscanned: 0,
+            archived_days_unavailable: 0,
+            corrupt_history_records: 0,
+            horizon_mark_prices: BTreeMap::new(),
+            horizon_mark_timestamps: BTreeMap::new(),
+            horizons_ms: Vec::new(),
+        },
+    );
+}
+
+fn has_replay_job_capacity(state: &LearningState) -> bool {
+    const MAX_DURABLE_REPLAY_JOBS: usize = 10_000;
+    state.strategy_replay_jobs.len() < MAX_DURABLE_REPLAY_JOBS
+        || state.strategy_replay_jobs.values().any(|job| {
+            matches!(
+                job.status,
+                StrategyReplayStatus::Completed
+                    | StrategyReplayStatus::Failed
+                    | StrategyReplayStatus::Unsupported
+            )
+        })
+}
+
+fn register_scout_baseline_if_missing(
+    state: &mut LearningState,
+    event: &FeedbackEvent,
+    symbol: &str,
+    strategy: &str,
+) {
+    let FeedbackEvent::ScoutOutcome {
+        parameters,
+        baseline_parameters,
+        comparison,
+        specs,
+        ..
+    } = event
+    else {
+        return;
+    };
+    if !matches!(comparison, strategy::ScoutComparisonMetadata::Paired { .. })
+        || specs.is_empty()
+        || baseline_parameters.is_empty()
+    {
+        return;
+    }
+
+    let mut baseline = parameters.clone();
+    for spec in specs {
+        let Some(value) = baseline_parameters.get(&spec.key) else {
+            return;
+        };
+        baseline.insert(spec.key.clone(), *value);
+    }
+
+    state
+        .active_profiles
+        .entry(key(symbol, strategy))
+        .or_insert_with(|| StrategyProfile {
+            profile_id: strategy::profile_id(symbol, strategy, &baseline),
+            version: 0,
+            symbol: symbol.to_owned(),
+            strategy: strategy.to_owned(),
+            parameters: baseline,
+            learning_samples: 0,
+            positive_samples: 0,
+            realized_pnl: 0.0,
+        });
+}
+
+fn promote_qualified_scout_candidates(
+    state: &mut LearningState,
+    symbol: &str,
+    strategy: &str,
+    minimum_parameter_samples: usize,
+) {
+    let mut candidates = BTreeMap::new();
+    for variant in state
+        .variants
+        .values()
+        .filter(|variant| variant.profile.symbol == symbol && variant.profile.strategy == strategy)
+    {
+        for outcome in variant.outcomes.iter().filter(|outcome| {
+            outcome.source == LearningOutcomeSource::Scout
+                && outcome.paired_comparison
+                && !outcome.baseline_parameters.is_empty()
+                && !outcome.tested_parameter_keys.is_empty()
+        }) {
+            let specs = variant
+                .specs
+                .iter()
+                .filter(|spec| outcome.tested_parameter_keys.contains(&spec.key))
+                .cloned()
+                .collect::<Vec<_>>();
+            if specs.len() != outcome.tested_parameter_keys.len() {
+                continue;
+            }
+            let baseline = outcome.baseline_parameters.clone();
+            let candidate_parameters = variant.profile.parameters.clone();
+            let tested_keys = outcome.tested_parameter_keys.clone();
+            let Ok(signature) =
+                serde_json::to_string(&(&candidate_parameters, &baseline, &tested_keys))
+            else {
+                continue;
+            };
+            candidates
+                .entry(signature)
+                .or_insert((candidate_parameters, baseline, specs));
+        }
+    }
+
+    let profile_key = key(symbol, strategy);
+    for (_, (candidate_parameters, baseline, specs)) in candidates {
+        let active_matches_baseline =
+            state
+                .active_profiles
+                .get(&profile_key)
+                .is_some_and(|active| {
+                    active.parameters.len() == candidate_parameters.len()
+                        && candidate_parameters.iter().all(|(parameter, value)| {
+                            if specs.iter().any(|spec| &spec.key == parameter) {
+                                baseline.get(parameter).is_some_and(|base| {
+                                    active.parameters.get(parameter) == Some(base)
+                                })
+                            } else {
+                                active.parameters.get(parameter) == Some(value)
+                            }
+                        })
+                });
+        if !active_matches_baseline {
+            continue;
+        }
+        let paired = paired_parameter_outcomes(
+            &state.variants,
+            symbol,
+            strategy,
+            &candidate_parameters,
+            &specs,
+            &baseline,
+        );
+        if paired.len() < minimum_parameter_samples
+            || !one_sided_90_lower_bound(&paired).is_some_and(|bound| bound > 0.0)
+        {
+            continue;
+        }
+        promote_paired_parameters(
+            &state.variants,
+            &mut state.active_profiles,
+            symbol,
+            strategy,
+            &specs,
+            &candidate_parameters,
+        );
+    }
+}
+
+pub(super) fn reconcile_scout_profiles(state: &mut LearningState) {
+    let mut latest_baselines = BTreeMap::<String, (u64, StrategyProfile)>::new();
+    for variant in state.variants.values() {
+        for outcome in variant.outcomes.iter().filter(|outcome| {
+            outcome.source == LearningOutcomeSource::Scout
+                && outcome.paired_comparison
+                && !outcome.baseline_parameters.is_empty()
+                && !outcome.tested_parameter_keys.is_empty()
+        }) {
+            let specs = variant
+                .specs
+                .iter()
+                .filter(|spec| outcome.tested_parameter_keys.contains(&spec.key))
+                .collect::<Vec<_>>();
+            if specs.len() != outcome.tested_parameter_keys.len() {
+                continue;
+            }
+            let mut parameters = variant.profile.parameters.clone();
+            let mut valid_baseline = true;
+            for spec in specs {
+                let Some(value) = outcome.baseline_parameters.get(&spec.key) else {
+                    valid_baseline = false;
+                    break;
+                };
+                parameters.insert(spec.key.clone(), *value);
+            }
+            if !valid_baseline {
+                continue;
+            }
+            let profile_key = key(&variant.profile.symbol, &variant.profile.strategy);
+            let candidate = StrategyProfile {
+                profile_id: strategy::profile_id(
+                    &variant.profile.symbol,
+                    &variant.profile.strategy,
+                    &parameters,
+                ),
+                version: 0,
+                symbol: variant.profile.symbol.clone(),
+                strategy: variant.profile.strategy.clone(),
+                parameters,
+                learning_samples: 0,
+                positive_samples: 0,
+                realized_pnl: 0.0,
+            };
+            let replace = latest_baselines
+                .get(&profile_key)
+                .is_none_or(|(observed_at_ms, _)| outcome.observed_at_ms > *observed_at_ms);
+            if replace {
+                latest_baselines.insert(profile_key, (outcome.observed_at_ms, candidate));
+            }
+        }
+    }
+
+    for (profile_key, (_, baseline)) in latest_baselines {
+        state.active_profiles.entry(profile_key).or_insert(baseline);
+    }
+
+    let strategies = state
+        .variants
+        .values()
+        .map(|variant| {
+            (
+                variant.profile.symbol.clone(),
+                variant.profile.strategy.clone(),
+            )
+        })
+        .collect::<BTreeSet<_>>();
+    for (symbol, strategy) in strategies {
+        promote_qualified_scout_candidates(
+            state,
+            &symbol,
+            &strategy,
+            state.minimum_live_scout_parameter_samples,
+        );
+    }
+}
+
 fn validate_feedback_identity(
     event_id: &str,
+    symbol: &str,
+    strategy: &str,
+    profile_id: &str,
     parameters: &BTreeMap<String, f64>,
 ) -> Result<(), (StatusCode, String)> {
-    if event_id.is_empty() || parameters.values().any(|value| !value.is_finite()) {
+    if event_id.is_empty()
+        || event_id.len() > 256
+        || symbol.is_empty()
+        || symbol.len() > 64
+        || strategy.is_empty()
+        || strategy.len() > 64
+        || profile_id.is_empty()
+        || profile_id.len() > 128
+        || parameters.len() > 64
+        || parameters
+            .keys()
+            .any(|key| key.is_empty() || key.len() > 128)
+        || parameters.values().any(|value| !value.is_finite())
+    {
         Err((StatusCode::BAD_REQUEST, "invalid feedback event".into()))
     } else {
         Ok(())
@@ -71,9 +583,11 @@ fn register_feedback_variant(
     parameters: &BTreeMap<String, f64>,
     profile_id: &str,
 ) -> Result<(), (StatusCode, String)> {
+    let incoming_id = variant_key(&source_profile);
+    retention::ensure_variant_room(state, &incoming_id)?;
     let registered = state
         .variants
-        .entry(variant_key(&source_profile))
+        .entry(incoming_id)
         .or_insert_with(|| RegisteredProfile {
             profile: source_profile,
             specs: event_specs(event).to_vec(),
@@ -146,14 +660,19 @@ fn append_profile_outcome(
         StatusCode::UNPROCESSABLE_ENTITY,
         "feedback did not match profile".into(),
     ))?;
-    Ok(ProfileOutcomeUpdate {
+    let update = ProfileOutcomeUpdate {
         profile,
         samples: registered.samples,
         positive: registered.positive,
         realized_pnl: registered.realized_pnl,
         registered_specs: registered.specs.clone(),
         registered_profile: registered.profile.clone(),
-    })
+    };
+    if retention::compact_outcome_working_set(&mut state.variants) {
+        state.outcome_history_truncated = true;
+        rebuild_trade_profile_metrics(state, now_ms());
+    }
+    Ok(update)
 }
 
 fn record_learning_outcome(registered: &mut RegisteredProfile, event: &FeedbackEvent) {
@@ -162,6 +681,7 @@ fn record_learning_outcome(registered: &mut RegisteredProfile, event: &FeedbackE
     registered
         .outcomes
         .retain(|outcome| outcome.observed_at_ms >= cutoff);
+    retention::compact_variant_outcomes(registered, now_ms());
 }
 
 // Outcome history stores the complete event; threshold samples are added by the
@@ -177,6 +697,7 @@ fn learning_outcome(event: &FeedbackEvent) -> LearningOutcome {
             baseline_parameters.clone(),
         ),
         FeedbackEvent::TradeOutcome { .. } => (Vec::new(), BTreeMap::new()),
+        FeedbackEvent::MissedOpportunityCandidate { .. } => (Vec::new(), BTreeMap::new()),
     };
     LearningOutcome {
         observed_at_ms: event_observed_at(event),
@@ -191,12 +712,14 @@ fn learning_outcome(event: &FeedbackEvent) -> LearningOutcome {
             FeedbackEvent::ScoutOutcome { .. } => LearningOutcomeSource::Scout,
             FeedbackEvent::TradeOutcome { scout: true, .. } => LearningOutcomeSource::Scout,
             FeedbackEvent::TradeOutcome { scout: false, .. } => LearningOutcomeSource::Trade,
+            FeedbackEvent::MissedOpportunityCandidate { .. } => LearningOutcomeSource::Trade,
         },
         realized_pnl_usd: match event {
             FeedbackEvent::TradeOutcome {
                 realized_pnl_usd, ..
             } => Some(*realized_pnl_usd),
             FeedbackEvent::ScoutOutcome { .. } => None,
+            FeedbackEvent::MissedOpportunityCandidate { .. } => None,
         },
         tested_parameter_keys,
         baseline_parameters,
@@ -303,7 +826,7 @@ fn update_active_profile(
         let mut promoted = active.clone();
         promoted.version = active.version.saturating_add(1);
         promoted.profile_id =
-            strategies::profile_id(&promoted.symbol, &promoted.strategy, &promoted.parameters);
+            strategy::profile_id(&promoted.symbol, &promoted.strategy, &promoted.parameters);
         promoted.learning_samples = update.samples;
         promoted.positive_samples = update.positive;
         promoted.realized_pnl = update.realized_pnl;
@@ -405,17 +928,23 @@ fn train_threshold_parameters(
         active.parameters.insert(parameter_key.to_owned(), tuned);
         active.version = active.version.saturating_add(1);
         active.profile_id =
-            strategies::profile_id(&active.symbol, &active.strategy, &active.parameters);
+            strategy::profile_id(&active.symbol, &active.strategy, &active.parameters);
     }
 }
 
 fn finalize_feedback(state: &mut LearningState, event: &FeedbackEvent, event_id: &str) {
     state.seen_event_ids.insert(event_id.to_owned());
     while state.seen_event_ids.len() > 100_000 {
-        let Some(oldest) = state.seen_event_ids.iter().next().cloned() else {
+        let Some(oldest) = state
+            .seen_event_ids
+            .iter()
+            .find(|seen_id| seen_id.as_str() != event_id)
+            .cloned()
+        else {
             break;
         };
         state.seen_event_ids.remove(&oldest);
+        state.seen_event_ids_overflowed = true;
     }
     state.accepted_events = state.accepted_events.saturating_add(1);
     if let Some(context) = event_context(event) {
@@ -542,7 +1071,7 @@ fn promote_paired_parameters(
         if changed {
             promoted.version = active.version.saturating_add(1);
             promoted.profile_id =
-                strategies::profile_id(&promoted.symbol, &promoted.strategy, &promoted.parameters);
+                strategy::profile_id(&promoted.symbol, &promoted.strategy, &promoted.parameters);
             active_profiles.insert(profile_key, promoted);
         }
     }
@@ -627,6 +1156,7 @@ pub(super) fn event_specs(event: &FeedbackEvent) -> &[ParameterSpec] {
         FeedbackEvent::ScoutOutcome { specs, .. } | FeedbackEvent::TradeOutcome { specs, .. } => {
             specs
         }
+        FeedbackEvent::MissedOpportunityCandidate { .. } => &[],
     }
 }
 
@@ -639,6 +1169,7 @@ pub(super) fn event_was_profitable(event: &FeedbackEvent) -> bool {
         FeedbackEvent::TradeOutcome {
             realized_pnl_usd, ..
         } => *realized_pnl_usd > 0.0,
+        FeedbackEvent::MissedOpportunityCandidate { .. } => false,
     }
 }
 
@@ -650,6 +1181,7 @@ pub(super) fn event_net_return_percent(event: &FeedbackEvent) -> f64 {
         | FeedbackEvent::TradeOutcome {
             net_return_percent, ..
         } => *net_return_percent,
+        FeedbackEvent::MissedOpportunityCandidate { .. } => 0.0,
     }
 }
 
@@ -679,6 +1211,7 @@ pub(super) fn event_context(event: &FeedbackEvent) -> Option<String> {
             let context = context.split_once(":P")?.0;
             (context.split(':').count() >= 3).then(|| format!("{scout_prefix}{context}:trade"))
         }
+        FeedbackEvent::MissedOpportunityCandidate { .. } => None,
     }
 }
 
@@ -745,6 +1278,7 @@ pub fn update_profile(
             realized_pnl_usd,
             ..
         } => (profile_id, strategy, symbol, parameters, *realized_pnl_usd),
+        FeedbackEvent::MissedOpportunityCandidate { .. } => return None,
     };
     if event_profile != &profile.profile_id
         || strategy != &profile.strategy
@@ -760,13 +1294,174 @@ pub fn update_profile(
     let _ = specs;
     updated.version = updated.version.saturating_add(1);
     updated.profile_id =
-        strategies::profile_id(&updated.symbol, &updated.strategy, &updated.parameters);
+        strategy::profile_id(&updated.symbol, &updated.strategy, &updated.parameters);
     Some(updated)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn missed_opportunity_feedback_is_attributed_deduplicated_and_durable() {
+        let path = std::env::temp_dir().join(format!(
+            "learning-missed-{}-{}.sqlite",
+            std::process::id(),
+            now_ms()
+        ));
+        let service = ServiceState {
+            state: Arc::new(Mutex::new(LearningState::default())),
+            path: path.clone(),
+        };
+        let event = FeedbackEvent::MissedOpportunityCandidate {
+            event_id: "missed:BTC-USDT:live-momentum:1000".into(),
+            observed_at_ms: 1_000,
+            symbol: "BTC-USDT".into(),
+            strategy: "live-momentum".into(),
+            profile_id: "profile-1".into(),
+            parameters: BTreeMap::from([("minimum_momentum".into(), 0.002)]),
+            direction: "bullish".into(),
+            strength: 0.61,
+            score: 0.31,
+            learning_context: "trend:btc".into(),
+        };
+        let accepted = accept_feedback(State(service.clone()), Json(event.clone()))
+            .await
+            .unwrap();
+        assert!(accepted.0.accepted);
+        let duplicate = accept_feedback(State(service.clone()), Json(event))
+            .await
+            .unwrap();
+        assert!(duplicate.0.duplicate);
+        let state = service.state.lock().await;
+        let job = state
+            .missed_opportunity_jobs
+            .get("missed:BTC-USDT:live-momentum:1000")
+            .unwrap();
+        assert_eq!(job.strategy, "live-momentum");
+        assert_eq!(job.profile_id, "profile-1");
+        assert_eq!(job.parameters["minimum_momentum"], 0.002);
+        assert!(
+            load_state(&path)
+                .unwrap()
+                .missed_opportunity_jobs
+                .contains_key(&job.event_id)
+        );
+        drop(state);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("sqlite-wal"));
+        let _ = std::fs::remove_file(path.with_extension("sqlite-shm"));
+    }
+
+    #[test]
+    fn trade_feedback_creates_one_durable_replay_job_and_missing_context_is_unsupported() {
+        let event = FeedbackEvent::TradeOutcome {
+            event_id: "trade:missing-context".into(),
+            observed_at_ms: 1,
+            learning_context: None,
+            symbol: "BTC-USDT".into(),
+            strategy: "live-momentum".into(),
+            profile_id: "profile".into(),
+            parameters: BTreeMap::new(),
+            specs: vec![],
+            scout: false,
+            realized_pnl_usd: 1.0,
+            net_return_percent: 1.0,
+            threshold_observations: vec![],
+            replay_context: None,
+        };
+        let mut state = LearningState::default();
+        enqueue_strategy_replay(&mut state, &event);
+        enqueue_strategy_replay(&mut state, &event);
+        assert_eq!(state.strategy_replay_jobs.len(), 1);
+        let job = state
+            .strategy_replay_jobs
+            .get("trade:missing-context")
+            .unwrap();
+        assert_eq!(job.status, StrategyReplayStatus::Unsupported);
+        assert!(job.reason.as_deref().unwrap().contains("lacks entry/exit"));
+    }
+
+    #[test]
+    fn dated_trade_replay_is_unsupported_without_exact_daily_inputs() {
+        let event = FeedbackEvent::TradeOutcome {
+            event_id: "trade:daily".into(),
+            observed_at_ms: 1,
+            learning_context: None,
+            symbol: "BTC-USDT".into(),
+            strategy: "donchian-20-btc200".into(),
+            profile_id: "profile".into(),
+            parameters: BTreeMap::new(),
+            specs: vec![],
+            scout: false,
+            realized_pnl_usd: 1.0,
+            net_return_percent: 1.0,
+            threshold_observations: vec![],
+            replay_context: None,
+        };
+        let mut state = LearningState::default();
+        enqueue_strategy_replay(&mut state, &event);
+        let job = state.strategy_replay_jobs.get("trade:daily").unwrap();
+        assert_eq!(job.status, StrategyReplayStatus::Unsupported);
+        assert!(job.reason.as_deref().unwrap().contains("exact daily"));
+    }
+
+    #[test]
+    fn pending_replay_job_and_cursor_state_survive_sqlite_reload() {
+        let event = FeedbackEvent::TradeOutcome {
+            event_id: "trade:replay".into(),
+            observed_at_ms: 1,
+            learning_context: None,
+            symbol: "BTC-USDT".into(),
+            strategy: "live-momentum".into(),
+            profile_id: "profile".into(),
+            parameters: BTreeMap::new(),
+            specs: vec![],
+            scout: false,
+            realized_pnl_usd: 1.0,
+            net_return_percent: 1.0,
+            threshold_observations: vec![],
+            replay_context: Some(strategy::TradeReplayContext {
+                market_symbol: "BTC-USDT".into(),
+                entry_timestamp_ms: 1_000,
+                exit_timestamp_ms: 2_000,
+                side: "long".into(),
+                entry_price: 10.0,
+                exit_price: 11.0,
+                quantity: 1.0,
+                entry_fees: 0.01,
+                exit_fees: 0.01,
+                execution_costs_complete: false,
+                entry_walk_forward_evidence: None,
+            }),
+        };
+        let mut state = LearningState::default();
+        enqueue_strategy_replay(&mut state, &event);
+        let job = state.strategy_replay_jobs.get_mut("trade:replay").unwrap();
+        job.history_cursor = Some("1500:42".into());
+        job.counterfactual_position_open = true;
+        job.counterfactual_entry_found = true;
+        job.horizons_ms = vec![300_000, 1_800_000, 7_200_000, 28_800_000];
+        job.counterfactual_exit_timestamp_ms = Some(50_000);
+        let path =
+            std::env::temp_dir().join(format!("learning-replay-{}.sqlite", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        persist(&path, &state).unwrap();
+        let loaded = super::super::load_state(&path).unwrap();
+        let loaded_job = loaded.strategy_replay_jobs.get("trade:replay").unwrap();
+        assert_eq!(loaded_job.history_cursor.as_deref(), Some("1500:42"));
+        assert!(loaded_job.counterfactual_position_open);
+        assert!(loaded_job.counterfactual_entry_found);
+        assert_eq!(loaded_job.counterfactual_exit_timestamp_ms, Some(50_000));
+        assert_eq!(
+            loaded_job.horizons_ms,
+            [300_000, 1_800_000, 7_200_000, 28_800_000]
+        );
+        assert_eq!(loaded_job.status, StrategyReplayStatus::Pending);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("sqlite-wal"));
+        let _ = std::fs::remove_file(path.with_extension("sqlite-shm"));
+    }
 
     #[test]
     fn one_sided_90_student_t_bounds_match_small_and_mature_samples() {
@@ -913,6 +1608,7 @@ mod tests {
             realized_pnl_usd: -2.0,
             net_return_percent: 3.0,
             threshold_observations: Vec::new(),
+            replay_context: None,
         };
         assert!(!event_was_profitable(&trade));
         assert_eq!(event_net_return_percent(&trade), 3.0);
@@ -964,6 +1660,7 @@ mod tests {
                 realized_pnl_usd: 0.0,
                 net_return_percent: 0.0,
                 threshold_observations: Vec::new(),
+                replay_context: None,
             };
             assert!(event_context(&event).is_none());
         }
@@ -987,6 +1684,7 @@ mod tests {
                 realized_pnl_usd: 1.0,
                 net_return_percent: 0.5,
                 threshold_observations: vec![],
+                replay_context: None,
             },
             _ => unreachable!(),
         };
@@ -1057,7 +1755,33 @@ mod tests {
         assert!(decoded.variants.is_empty());
         assert_eq!(decoded.accepted_events, 1);
         assert_eq!(decoded.minimum_live_scout_parameter_samples, 9);
-        assert_eq!(decoded.seen_event_ids, ["keep".to_owned()].into());
+        assert_eq!(
+            decoded.seen_event_ids,
+            ["keep".to_owned(), "remove".to_owned()].into()
+        );
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn evicted_feedback_ids_are_still_deduplicated_from_sqlite() {
+        let path = std::env::temp_dir().join(format!(
+            "learning-feedback-dedupe-test-{}-{}.sqlite",
+            std::process::id(),
+            now_ms()
+        ));
+        let connection = open_state_db(&path).unwrap();
+        connection
+            .execute(
+                "INSERT INTO learning_seen_event_ids (id) VALUES (?1)",
+                ["evicted-trade-id"],
+            )
+            .unwrap();
+        drop(connection);
+
+        let mut state = LearningState::default();
+        state.seen_event_ids_overflowed = true;
+        assert!(has_seen_feedback_id(&state, &path, "evicted-trade-id").unwrap());
+        assert!(!has_seen_feedback_id(&state, &path, "new-trade-id").unwrap());
+        let _ = std::fs::remove_file(path);
     }
 }

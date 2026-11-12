@@ -10,7 +10,10 @@ pub(super) async fn context_thresholds(
             .learning
             .values()
             .any(|stats| !stats.realized_pnl.is_finite())
-        || request.missed_opportunity_bands.len() > 2_000
+        || request
+            .learning
+            .keys()
+            .any(|key| key.is_empty() || key.len() > 256)
         || request
             .contexts
             .iter()
@@ -23,6 +26,17 @@ pub(super) async fn context_thresholds(
     }
     let now = now_ms();
     let mut state = service.state.lock().await;
+    let new_keys = request
+        .learning
+        .keys()
+        .filter(|key| !state.context_learning.contains_key(*key))
+        .count();
+    if state.context_learning.len().saturating_add(new_keys) > retention::MAX_CONTEXT_STATS {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Learning context-stat capacity is full".into(),
+        ));
+    }
     let mut imported = false;
     for (key, stats) in request.learning {
         if !state.context_learning.contains_key(&key) {
@@ -34,6 +48,12 @@ pub(super) async fn context_thresholds(
         persist(&service.path, &state)?;
     }
     let learning = state.context_learning.clone();
+    let missed_opportunity_bands = state
+        .missed_opportunity_bands
+        .iter()
+        .take(2_000)
+        .cloned()
+        .collect::<Vec<_>>();
     drop(state);
     let context_inputs = if request.contexts.is_empty() {
         let mut contexts = BTreeMap::new();
@@ -54,7 +74,6 @@ pub(super) async fn context_thresholds(
     } else {
         request.contexts
     };
-    let missed_opportunity_bands = request.missed_opportunity_bands;
     let thresholds = context_inputs
         .iter()
         .map(|input| {
@@ -78,7 +97,10 @@ pub(super) async fn context_thresholds(
             )
         })
         .collect();
-    Ok(Json(ContextThresholdResponse { thresholds }))
+    Ok(Json(ContextThresholdResponse {
+        thresholds,
+        missed_opportunity_bands,
+    }))
 }
 
 #[derive(Default)]
@@ -256,7 +278,6 @@ mod tests {
                 ("not-a-trade".into(), stat(90, 90, 90.0, 0)),
             ]),
             contexts: Vec::new(),
-            missed_opportunity_bands: Vec::new(),
         };
 
         let Json(response) = context_thresholds(State(service.clone()), Json(request))
@@ -278,9 +299,32 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn context_thresholds_apply_shared_missed_opportunity_bands_to_each_context() {
+    async fn context_thresholds_use_learning_owned_bands_for_each_context() {
         let service = service("shared-bands");
         let _ = std::fs::remove_file(&service.path);
+        service.state.lock().await.missed_opportunity_bands = vec![ContextMissedOpportunityBand {
+            gate: "score".into(),
+            threshold: 0.25,
+            horizon_seconds: 300,
+            sample_count: 0,
+            average_net_return_percent: None,
+            positive_net_rate: None,
+            time_to_profit_sample_count: 0,
+            time_to_profit_rate: None,
+            average_time_to_profit_seconds: None,
+            stop_target_sample_count: 20,
+            stop_target_average_net_return_percent: Some(1.0),
+            stop_target_positive_net_rate: Some(0.6),
+            symbol: None,
+            direction: None,
+            strategy: None,
+            profile_id: None,
+            market_context: None,
+            complete: false,
+            gross_directional_markout_percent: None,
+            event_id: None,
+            observed_at_ms: 0,
+        }];
         let request = ContextThresholdRequest {
             learning: BTreeMap::new(),
             contexts: vec![
@@ -291,20 +335,6 @@ mod tests {
                     context: "trend:eth".into(),
                 },
             ],
-            missed_opportunity_bands: vec![ContextMissedOpportunityBand {
-                gate: "score".into(),
-                threshold: 0.25,
-                horizon_seconds: 300,
-                sample_count: 0,
-                average_net_return_percent: None,
-                positive_net_rate: None,
-                time_to_profit_sample_count: 0,
-                time_to_profit_rate: None,
-                average_time_to_profit_seconds: None,
-                stop_target_sample_count: 20,
-                stop_target_average_net_return_percent: Some(1.0),
-                stop_target_positive_net_rate: Some(0.6),
-            }],
         };
 
         let Json(response) = context_thresholds(State(service.clone()), Json(request))
@@ -319,6 +349,7 @@ mod tests {
             response.thresholds["trend:eth"].exploration_score_floor,
             0.25
         );
+        assert_eq!(response.missed_opportunity_bands.len(), 1);
         let _ = std::fs::remove_file(&service.path);
     }
 
@@ -328,7 +359,6 @@ mod tests {
         let invalid_stats = ContextThresholdRequest {
             learning: BTreeMap::from([("ctx:trade".into(), stat(1, 0, f64::NAN, 0))]),
             contexts: Vec::new(),
-            missed_opportunity_bands: Vec::new(),
         };
         let error = context_thresholds(State(service.clone()), Json(invalid_stats))
             .await
@@ -340,7 +370,6 @@ mod tests {
             contexts: vec![ContextThresholdInput {
                 context: String::new(),
             }],
-            missed_opportunity_bands: Vec::new(),
         };
         let error = context_thresholds(State(service), Json(invalid_context))
             .await
@@ -368,6 +397,15 @@ mod tests {
             time_to_profit_sample_count: 24,
             time_to_profit_rate: Some(0.6),
             average_time_to_profit_seconds: Some(600.0),
+            symbol: None,
+            direction: None,
+            strategy: None,
+            profile_id: None,
+            market_context: None,
+            complete: false,
+            gross_directional_markout_percent: None,
+            event_id: None,
+            observed_at_ms: 0,
         };
         assert_eq!(context_score_floor(&stats, &[acceptable.clone()]), 0.25);
 
@@ -448,6 +486,15 @@ mod tests {
             stop_target_sample_count: 20,
             stop_target_average_net_return_percent: Some(1.0),
             stop_target_positive_net_rate: Some(0.6),
+            symbol: None,
+            direction: None,
+            strategy: None,
+            profile_id: None,
+            market_context: None,
+            complete: false,
+            gross_directional_markout_percent: None,
+            event_id: None,
+            observed_at_ms: 0,
         };
         assert_eq!(
             context_score_floor(&AggregatedContextStats::default(), &[band]),

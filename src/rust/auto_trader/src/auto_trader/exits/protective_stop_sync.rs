@@ -134,6 +134,18 @@ async fn sync_protective_stops(
                     Some(total_trade_pnl / entry_notional * 100.0),
                     strategy_decision.as_ref(),
                     trade_id.as_deref(),
+                    build_trade_replay_context(
+                        &symbol,
+                        position_entry_timestamp_ms,
+                        barrier["triggered_at"].as_u64().unwrap_or_else(current_time_ms),
+                        if side == "sell" { "long" } else { "short" },
+                        entry_price_before,
+                        total_notional / total_filled.max(f64::EPSILON),
+                        entry_quantity,
+                        total_entry_fees_paid.max(entry_fees),
+                        total_fee,
+                        entry_walk_forward_evidence(strategy_decision.as_ref()),
+                    ),
                 );
                 adapt_exit_policy(&mut settings);
             }

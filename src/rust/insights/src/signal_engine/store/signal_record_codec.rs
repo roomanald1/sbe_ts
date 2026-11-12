@@ -934,35 +934,6 @@ mod counterfactual_quote_path_record_tests {
     }
 
     #[test]
-    fn quote_paths_use_a_new_record_kind_and_round_trip() {
-        let expected = CounterfactualQuotePath {
-            symbol: "BTC-USDT".into(),
-            signal_timestamp: 10_000,
-            horizon_seconds: 300,
-            samples: vec![CounterfactualQuoteSample {
-                timestamp: 10_000,
-                bid_execution_price: Some(99.9),
-                ask_execution_price: Some(100.1),
-            }],
-        };
-        let record = StoredSignalRecord::CounterfactualQuotePath(expected.clone());
-        assert_eq!(record_kind(&record), 6);
-        assert_eq!(record_timestamp(&record), expected.signal_timestamp);
-
-        let compressed = compress_record(&record).unwrap();
-        let mut decoder = MultiGzDecoder::new(compressed.as_slice());
-        let mut payload = Vec::new();
-        decoder.read_to_end(&mut payload).unwrap();
-        assert!(matches!(
-            deserialize_record(6, &payload).unwrap(),
-            StoredSignalRecord::CounterfactualQuotePath(path)
-                if path.symbol == expected.symbol
-                    && path.signal_timestamp == expected.signal_timestamp
-                    && path.samples.len() == 1
-        ));
-    }
-
-    #[test]
     fn legacy_quote_paths_decode_with_depth_adjusted_execution_prices() {
         let legacy = LegacyStoredSignalRecordForTest::CounterfactualQuotePath(
             LegacyCounterfactualQuotePathForTest {

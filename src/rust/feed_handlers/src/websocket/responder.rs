@@ -281,11 +281,11 @@ impl RSocket for ServerResponder {
     {
         Box::pin(async move {
             if let Some(data) = req.data() {
-                if let Ok(strategies::ScoutCoordinatorRequest::WorkerRoute(command)) =
-                    serde_json::from_slice::<strategies::ScoutCoordinatorRequest>(data)
+                if let Ok(strategy::ScoutCoordinatorRequest::WorkerRoute(command)) =
+                    serde_json::from_slice::<strategy::ScoutCoordinatorRequest>(data)
                 {
                     if command.path != "/internal/signals/snapshot"
-                        || command.method != strategies::ScoutWorkerHttpMethod::Post
+                        || command.method != strategy::ScoutWorkerHttpMethod::Post
                     {
                         anyhow::bail!("unsupported FeedHandlers RSocket route: {}", command.path);
                     }
@@ -301,8 +301,8 @@ impl RSocket for ServerResponder {
                     } else {
                         404
                     };
-                    let result = strategies::ScoutCoordinatorResponse::WorkerRoute(
-                        strategies::ScoutCoordinatorRouteResult {
+                    let result = strategy::ScoutCoordinatorResponse::WorkerRoute(
+                        strategy::ScoutCoordinatorRouteResult {
                             request_id: command.request_id,
                             status,
                             body: serde_json::Value::Null,

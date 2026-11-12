@@ -311,22 +311,6 @@ impl SignalEngine {
                     pending.entry_bid.zip(exit_ask).and_then(|(entry, exit)| {
                         directional_net_return("bearish", entry, exit, pending.taker_fee_rate)
                     });
-                let counterfactual_quote_path = self
-                    .counterfactual_book_history
-                    .iter()
-                    .filter(|sample| {
-                        sample.timestamp >= pending.timestamp && sample.timestamp <= timestamp
-                    })
-                    .map(|sample| CounterfactualQuoteSample {
-                        timestamp: sample.timestamp,
-                        bid_execution_price: depth_adjusted_quote_execution_price(
-                            &sample.bid_levels,
-                        ),
-                        ask_execution_price: depth_adjusted_quote_execution_price(
-                            &sample.ask_levels,
-                        ),
-                    })
-                    .collect();
                 let evaluation = SignalEvaluation {
                     symbol: pending.symbol,
                     signal_timestamp: pending.timestamp,
@@ -352,7 +336,6 @@ impl SignalEngine {
                     path_high_timestamp,
                     path_low,
                     path_low_timestamp,
-                    counterfactual_quote_path,
                     long_time_to_positive_net_seconds: pending
                         .first_long_positive_net_timestamp
                         .map(|first| first.saturating_sub(pending.timestamp) / 1000),
@@ -393,6 +376,29 @@ impl SignalEngine {
             self.price_return(timestamp.saturating_sub(60_000)),
             self.price_return(timestamp.saturating_sub(300_000)),
         )
+    }
+}
+
+#[cfg(test)]
+mod independent_snapshot_cadence_tests {
+    use super::*;
+
+    #[test]
+    fn research_sampling_does_not_replace_live_snapshot_cadence() {
+        let mut engine = SignalEngine::default();
+        let start = 1_000;
+
+        assert!(engine.live_snapshot_due(start));
+        assert!(engine.research_sample_is_due(start));
+        assert!(engine.research_sample_due(start));
+
+        assert!(engine.live_snapshot_due(start + LIVE_SIGNAL_SNAPSHOT_INTERVAL_MS));
+        assert!(!engine.research_sample_is_due(start + LIVE_SIGNAL_SNAPSHOT_INTERVAL_MS));
+
+        let research_due = start + RESEARCH_SAMPLE_INTERVAL_MS;
+        assert!(engine.live_snapshot_due(research_due));
+        assert!(engine.research_sample_is_due(research_due));
+        assert!(engine.research_sample_due(research_due));
     }
 }
 

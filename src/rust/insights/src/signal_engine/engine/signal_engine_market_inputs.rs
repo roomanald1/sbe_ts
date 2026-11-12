@@ -1,3 +1,20 @@
+fn feature_vector(components: &SignalComponents) -> Option<[f64; 4]> {
+    let values = [
+        components
+            .trend_1m_percent
+            .map(|v| (v / 0.25).clamp(-4.0, 4.0)),
+        components
+            .momentum_10s_percent
+            .map(|v| (v / 0.12).clamp(-4.0, 4.0)),
+        components.trade_flow_imbalance,
+        components.book_imbalance,
+    ];
+    values
+        .iter()
+        .all(Option::is_some)
+        .then(|| values.map(Option::unwrap))
+}
+
 impl SignalEngine {
     pub fn track_counterfactual(
         &mut self,
@@ -433,47 +450,6 @@ impl SignalEngine {
             }) {
                 self.book_history.pop_front();
             }
-            let should_record_counterfactual =
-                self.counterfactual_book_history
-                    .back()
-                    .is_none_or(|previous| {
-                        timestamp == previous.timestamp
-                            || timestamp.saturating_sub(previous.timestamp)
-                                >= COUNTERFACTUAL_BOOK_HISTORY_SAMPLE_INTERVAL_MS
-                    });
-            if should_record_counterfactual {
-                let counterfactual_sample = BookHistorySample {
-                    timestamp,
-                    bid: best_bid,
-                    ask: best_ask,
-                    bid_levels,
-                    ask_levels,
-                };
-                if self
-                    .counterfactual_book_history
-                    .back()
-                    .is_some_and(|previous| previous.timestamp == timestamp)
-                {
-                    *self
-                        .counterfactual_book_history
-                        .back_mut()
-                        .expect("counterfactual history has a back") = counterfactual_sample;
-                } else {
-                    self.counterfactual_book_history
-                        .push_back(counterfactual_sample);
-                }
-                while self
-                    .counterfactual_book_history
-                    .front()
-                    .is_some_and(|sample| {
-                        sample.timestamp < timestamp.saturating_sub(3_600_000)
-                            || self.counterfactual_book_history.len()
-                                > COUNTERFACTUAL_BOOK_HISTORY_SAMPLE_LIMIT
-                    })
-                {
-                    self.counterfactual_book_history.pop_front();
-                }
-            }
         }
         let bid: f64 = bid_sizes
             .iter()
@@ -587,37 +563,6 @@ mod scout_tests {
         assert!(engine.book_history.len() <= BOOK_HISTORY_SAMPLE_LIMIT);
         assert!(engine.book_history.len() <= 601);
         assert_eq!(engine.book_history.back().unwrap().timestamp, 119_900);
-    }
-
-    #[test]
-    fn counterfactual_quote_history_retains_a_bounded_one_second_hour_path() {
-        let mut engine = SignalEngine::default();
-        for timestamp in (0..=3_602_000).step_by(500) {
-            engine.on_book(
-                timestamp,
-                99.9,
-                100.1,
-                &[1.0],
-                &[1.0],
-                &[(99.9, 1.0)],
-                &[(100.1, 1.0)],
-            );
-        }
-        assert!(
-            engine.counterfactual_book_history.len() <= COUNTERFACTUAL_BOOK_HISTORY_SAMPLE_LIMIT
-        );
-        assert_eq!(
-            engine.counterfactual_book_history.back().unwrap().timestamp,
-            3_602_000
-        );
-        assert!(
-            engine
-                .counterfactual_book_history
-                .front()
-                .unwrap()
-                .timestamp
-                >= 2_000
-        );
     }
 
     #[test]

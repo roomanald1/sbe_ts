@@ -11,7 +11,6 @@ struct AutoTraderState {
     state_updates: broadcast::Sender<()>,
     settings_persist_timings_ms: Arc<std::sync::Mutex<BTreeMap<String, Vec<f64>>>>,
     latest_missed_opportunity_bands: Arc<Mutex<Arc<Vec<MissedOpportunityGateBand>>>>,
-    latest_live_insights_context: Arc<Mutex<SharedLiveInsightsContext>>,
     latest_execution_parameters: Arc<Mutex<Option<LatestExecutionParameters>>>,
     learning_response_cache: Arc<Mutex<LearningResponseCache>>,
     cycle_lock: Arc<Mutex<()>>,
@@ -48,7 +47,37 @@ struct LearningResponseCache {
 // contexts. Give Learning enough time to service a cold request, while keeping
 // refreshes sparse enough that a busy Learning process is not flooded.
 const LEARNING_RESPONSE_REFRESH_AFTER: Duration = Duration::from_secs(5);
-const LEARNING_RESPONSE_MAX_STALE: Duration = Duration::from_secs(60);
+const LEARNING_RESPONSE_MAX_STALE: Duration = Duration::from_secs(30);
+const LEARNING_RESPONSE_CACHE_CAPACITY: usize = 128;
+const LATEST_STRATEGY_SIGNAL_MAX_AGE_MS: u64 = 10_000;
+const SIGNAL_BOOK_PREWARM_CAPACITY: usize = 4_096;
+
+fn bound_latest_strategy_signals(
+    latest: &mut BTreeMap<(String, String), Vec<Signal>>,
+    active_position_keys: &BTreeSet<(String, String)>,
+    now_ms: u64,
+) {
+    latest.retain(|key, _| active_position_keys.contains(key));
+    for signals in latest.values_mut() {
+        signals.retain(|signal| now_ms.saturating_sub(signal.timestamp) <= LATEST_STRATEGY_SIGNAL_MAX_AGE_MS);
+        if signals.len() > 1 {
+            let newest = signals.iter().max_by_key(|signal| signal.timestamp).cloned();
+            signals.clear();
+            if let Some(signal) = newest { signals.push(signal); }
+        }
+    }
+    latest.retain(|_, signals| !signals.is_empty());
+}
+
+fn bound_signal_book_prewarms(prewarms: &mut BTreeMap<String, Instant>, now: Instant) {
+    prewarms.retain(|_, requested_at| now.duration_since(*requested_at) < Duration::from_secs(300));
+    while prewarms.len() > SIGNAL_BOOK_PREWARM_CAPACITY {
+        let oldest = prewarms.iter().min_by_key(|(_, requested_at)| **requested_at)
+            .map(|(symbol, _)| symbol.clone());
+        let Some(oldest) = oldest else { break };
+        prewarms.remove(&oldest);
+    }
+}
 
 async fn cached_learning_response<T>(
     response_cache: &Arc<Mutex<LearningResponseCache>>,
@@ -79,7 +108,7 @@ where
             let response = tokio::time::timeout(
                 Duration::from_secs(2),
                 crate::service_rpc::learning_request(
-                    strategies::ScoutWorkerHttpMethod::Post,
+                    strategy::ScoutWorkerHttpMethod::Post,
                     &path,
                     Some(request),
                 ),
@@ -103,11 +132,11 @@ where
             cache.refreshing.remove(&key);
             if let Some(value) = value {
                 cache.responses.insert(key, (Instant::now(), value));
-                if cache.responses.len() > 512 {
+                if cache.responses.len() > LEARNING_RESPONSE_CACHE_CAPACITY {
                     cache.responses.retain(|_, (updated_at, _)| {
                         updated_at.elapsed() <= LEARNING_RESPONSE_MAX_STALE
                     });
-                    while cache.responses.len() > 512 {
+                    while cache.responses.len() > LEARNING_RESPONSE_CACHE_CAPACITY {
                         let oldest = cache
                             .responses
                             .iter()
@@ -159,12 +188,26 @@ mod learning_response_cache_tests {
 
 const DECISION_AUDIT_QUEUE_CAPACITY: usize = 16_384;
 const EXECUTION_AUDIT_QUEUE_CAPACITY: usize = 4_096;
+const DECISION_AUDIT_QUEUE_MAX_BYTES: usize = 8 * 1024 * 1024;
+const EXECUTION_AUDIT_QUEUE_MAX_BYTES: usize = 8 * 1024 * 1024;
+
+struct QueuedAudit {
+    payload: serde_json::Value,
+    estimated_bytes: usize,
+}
+
+#[derive(Default)]
+struct AuditQueueContents {
+    messages: std::collections::VecDeque<QueuedAudit>,
+    estimated_bytes: usize,
+}
 
 #[derive(Clone)]
 struct AuditQueue {
-    messages: Arc<std::sync::Mutex<std::collections::VecDeque<serde_json::Value>>>,
+    messages: Arc<std::sync::Mutex<AuditQueueContents>>,
     notify: Arc<Notify>,
     capacity: usize,
+    max_bytes: usize,
     coalesced: Arc<AtomicU64>,
     dropped: Arc<AtomicU64>,
 }
@@ -178,11 +221,12 @@ enum AuditEnqueueResult {
 }
 
 impl AuditQueue {
-    fn new(capacity: usize) -> Self {
+    fn new(capacity: usize, max_bytes: usize) -> Self {
         Self {
-            messages: Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new())),
+            messages: Arc::new(std::sync::Mutex::new(AuditQueueContents::default())),
             notify: Arc::new(Notify::new()),
             capacity,
+            max_bytes,
             coalesced: Arc::new(AtomicU64::new(0)),
             dropped: Arc::new(AtomicU64::new(0)),
         }
@@ -191,16 +235,30 @@ impl AuditQueue {
     fn enqueue(&self, payload: serde_json::Value) -> AuditEnqueueResult {
         let replaceable = is_replaceable_audit(&payload);
         let symbol = payload.get("symbol").and_then(serde_json::Value::as_str);
+        let estimated_bytes = estimate_json_value_bytes(&payload);
         let mut messages = self.messages.lock().unwrap_or_else(|error| error.into_inner());
+
+        if estimated_bytes > self.max_bytes {
+            self.dropped.fetch_add(1, Ordering::Relaxed);
+            return AuditEnqueueResult::Dropped;
+        }
 
         if replaceable {
             if let Some(symbol) = symbol {
-                if let Some(existing) = messages.iter_mut().find(|existing| {
-                    is_replaceable_audit(existing)
-                        && existing.get("symbol").and_then(serde_json::Value::as_str) == Some(symbol)
+                if let Some(index) = messages.messages.iter().position(|existing| {
+                    is_replaceable_audit(&existing.payload)
+                        && existing.payload.get("symbol").and_then(serde_json::Value::as_str) == Some(symbol)
                 }) {
-                    if audit_timestamp(&payload) >= audit_timestamp(existing) {
-                        *existing = payload;
+                    let existing_bytes = messages.messages[index].estimated_bytes;
+                    if audit_timestamp(&payload) >= audit_timestamp(&messages.messages[index].payload) {
+                        let projected = messages.estimated_bytes - existing_bytes + estimated_bytes;
+                        if projected <= self.max_bytes {
+                            messages.messages[index] = QueuedAudit { payload, estimated_bytes };
+                            messages.estimated_bytes = projected;
+                        } else {
+                            self.dropped.fetch_add(1, Ordering::Relaxed);
+                            return AuditEnqueueResult::Dropped;
+                        }
                     }
                     self.coalesced.fetch_add(1, Ordering::Relaxed);
                     self.notify.notify_one();
@@ -210,9 +268,13 @@ impl AuditQueue {
         }
 
         let mut result = AuditEnqueueResult::Queued;
-        if messages.len() >= self.capacity {
-            if let Some(index) = messages.iter().position(is_replaceable_audit) {
-                messages.remove(index);
+        while messages.messages.len() >= self.capacity
+            || messages.estimated_bytes.saturating_add(estimated_bytes) > self.max_bytes
+        {
+            if let Some(index) = messages.messages.iter().position(|queued| is_replaceable_audit(&queued.payload)) {
+                if let Some(evicted) = messages.messages.remove(index) {
+                    messages.estimated_bytes = messages.estimated_bytes.saturating_sub(evicted.estimated_bytes);
+                }
                 self.dropped.fetch_add(1, Ordering::Relaxed);
                 result = AuditEnqueueResult::EvictedOld;
             } else {
@@ -220,7 +282,8 @@ impl AuditQueue {
                 return AuditEnqueueResult::Dropped;
             }
         }
-        messages.push_back(payload);
+        messages.estimated_bytes += estimated_bytes;
+        messages.messages.push_back(QueuedAudit { payload, estimated_bytes });
         self.notify.notify_one();
         result
     }
@@ -229,17 +292,37 @@ impl AuditQueue {
         loop {
             let notified = self.notify.notified();
             tokio::pin!(notified);
-            if let Some(payload) = self.messages.lock()
-                .unwrap_or_else(|error| error.into_inner()).pop_front()
+            let queued = {
+                let mut contents = self.messages.lock().unwrap_or_else(|error| error.into_inner());
+                let queued = contents.messages.pop_front();
+                if let Some(queued) = &queued {
+                    contents.estimated_bytes = contents.estimated_bytes.saturating_sub(queued.estimated_bytes);
+                }
+                queued
+            };
+            if let Some(payload) = queued
             {
-                return payload;
+                return payload.payload;
             }
             notified.await;
         }
     }
 
     fn depth(&self) -> usize {
-        self.messages.lock().unwrap_or_else(|error| error.into_inner()).len()
+        self.messages.lock().unwrap_or_else(|error| error.into_inner()).messages.len()
+    }
+
+    fn estimated_bytes(&self) -> usize {
+        self.messages.lock().unwrap_or_else(|error| error.into_inner()).estimated_bytes
+    }
+}
+
+fn estimate_json_value_bytes(value: &serde_json::Value) -> usize {
+    match value {
+        serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => 32,
+        serde_json::Value::String(value) => 32 + value.len(),
+        serde_json::Value::Array(values) => 24 + values.iter().map(estimate_json_value_bytes).sum::<usize>(),
+        serde_json::Value::Object(values) => 24 + values.iter().map(|(key, value)| 32 + key.len() + estimate_json_value_bytes(value)).sum::<usize>(),
     }
 }
 
@@ -253,6 +336,65 @@ fn is_replaceable_audit(payload: &serde_json::Value) -> bool {
             payload.get("status").and_then(serde_json::Value::as_str),
             Some("rejected" | "skipped")
         )
+}
+
+#[cfg(test)]
+mod audit_queue_tests {
+    use super::*;
+
+    fn audit(stage: &str, status: &str, symbol: &str, timestamp: u64, detail: &str) -> serde_json::Value {
+        serde_json::json!({
+            "stage": stage,
+            "status": status,
+            "symbol": symbol,
+            "timestamp": timestamp,
+            "trade_id": format!("trade-{symbol}"),
+            "detail": detail,
+        })
+    }
+
+    #[test]
+    fn decision_queue_coalesces_by_symbol_and_accounts_for_replaced_bytes() {
+        let queue = AuditQueue::new(8, 512);
+        assert_eq!(queue.enqueue(audit("decision", "rejected", "BTC", 1, "old")), AuditEnqueueResult::Queued);
+        let bytes_before = queue.estimated_bytes();
+
+        assert_eq!(queue.enqueue(audit("decision", "rejected", "BTC", 2, "newer")), AuditEnqueueResult::Coalesced);
+
+        assert_eq!(queue.depth(), 1);
+        assert!(queue.estimated_bytes() > bytes_before);
+        assert!(queue.estimated_bytes() <= 512);
+        assert_eq!(queue.coalesced.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn audit_queue_evicts_replaceable_decisions_before_exceeding_byte_budget() {
+        let queue = AuditQueue::new(8, 700);
+        for index in 0..3 {
+            let payload = audit("decision", "rejected", &format!("S{index}"), index, &"x".repeat(40));
+            let result = queue.enqueue(payload);
+            assert!(matches!(result, AuditEnqueueResult::Queued | AuditEnqueueResult::EvictedOld));
+        }
+        assert!(queue.estimated_bytes() <= 700);
+        assert!(matches!(
+            queue.enqueue(audit("decision", "selected", "LIVE", 10, "critical")),
+            AuditEnqueueResult::Queued | AuditEnqueueResult::EvictedOld
+        ));
+        assert!(queue.estimated_bytes() <= 700);
+        assert!(queue.dropped.load(Ordering::Relaxed) > 0);
+    }
+
+    #[test]
+    fn execution_queue_never_evicts_critical_records_to_admit_another() {
+        let queue = AuditQueue::new(8, 1_000);
+        let first = audit("exit_fill", "filled", "BTC", 1, &"x".repeat(30));
+        let second = audit("exit_fill", "filled", "ETH", 2, &"y".repeat(30));
+        assert_eq!(queue.enqueue(first.clone()), AuditEnqueueResult::Queued);
+        assert_eq!(queue.enqueue(second), AuditEnqueueResult::Dropped);
+        assert_eq!(queue.depth(), 1);
+        assert!(queue.estimated_bytes() <= 1_000);
+        assert_eq!(queue.dropped.load(Ordering::Relaxed), 1);
+    }
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -399,15 +541,6 @@ struct ProtectiveStop {
     processed_notional: f64,
     processed_fee: f64,
 }
-#[derive(Clone, Serialize, Deserialize)]
-struct StrategyThresholdSample {
-    timestamp_ms: u64,
-    parameter_key: StrategyParameterKey,
-    threshold: f64,
-    feature_value: f64,
-    net_return_percent: f64,
-}
-
 #[derive(Clone, Default, Serialize, Deserialize)]
 struct LearningStats {
     samples: usize,
@@ -427,8 +560,6 @@ struct LearningStats {
     // current win-rate or net-P&L estimates.
     #[serde(default)]
     recent_trade_pnls: Vec<(u64, f64)>,
-    #[serde(default)]
-    threshold_samples: Vec<StrategyThresholdSample>,
 }
 
 #[derive(Clone, Default, Serialize, Deserialize)]
@@ -453,7 +584,7 @@ type PendingSignalQueue = BTreeMap<(PendingSignalKind, String), Dashboard>;
 // A feed may report a large universe, while the cycle worker can submit only
 // a small batch per pass. Keep the freshest symbols while bounding retained
 // dashboards during bursts or malformed/unexpected symbol floods.
-const DEFAULT_MAX_PENDING_LIVE_SYMBOLS: usize = 4_096;
+const DEFAULT_MAX_PENDING_LIVE_SYMBOLS: usize = 256;
 
 fn max_pending_live_symbols() -> usize {
     static LIMIT: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
@@ -482,6 +613,7 @@ fn queue_pending_signal_with_cap(
     mut dashboard: Dashboard,
     live_cap: usize,
 ) {
+    retain_pending_dashboard_market(&mut dashboard, &symbol);
     let key = (kind, symbol);
     let incoming_timestamp = dashboard
         .best
@@ -532,6 +664,11 @@ fn queue_pending_signal_with_cap(
             queue.remove(&oldest);
         }
     }
+}
+
+fn retain_pending_dashboard_market(dashboard: &mut Dashboard, symbol: &str) {
+    let market = dashboard.markets.get(symbol).cloned();
+    dashboard.markets = Arc::new(market.map(|market| BTreeMap::from([(symbol.to_owned(), market)])).unwrap_or_default());
 }
 
 fn take_next_pending_signal(queue: &mut PendingSignalQueue) -> Option<Dashboard> {
@@ -643,12 +780,52 @@ mod pending_signal_queue_tests {
                 news_attribution: None,
                 entry_gate: None,
             }],
-            walk_forward: Arc::new(Vec::new()),
             missed_opportunity_bands: Arc::new(Vec::new()),
             markets: Arc::new(BTreeMap::new()),
             queued_at: None,
             queue_wait_ms: None,
         }
+    }
+
+    fn strategy_signal(symbol: &str, timestamp: u64) -> Signal {
+        Signal {
+            symbol: symbol.into(), direction: "bullish".into(), strength: 1.0,
+            timestamp, stale: false, score: 1.0, ranging_probability: None,
+            components: SignalComponents::default(), strategy_candidate: true,
+            strategy: Some("live-momentum".into()), strategy_decision: None,
+            market_regime: None, news_attribution: None, entry_gate: None,
+        }
+    }
+
+    #[test]
+    fn latest_strategy_signal_cache_keeps_only_the_freshest_signal_and_expires_old_keys() {
+        let key = ("BTC-USDT".to_owned(), "live-momentum".to_owned());
+        let mut latest = BTreeMap::from([(key.clone(), vec![
+            strategy_signal("BTC-USDT", 198_000), strategy_signal("BTC-USDT", 199_000),
+        ])]);
+        latest.insert(("OLD-USDT".into(), "live-momentum".into()),
+            vec![strategy_signal("OLD-USDT", 1)]);
+
+        bound_latest_strategy_signals(&mut latest, &BTreeSet::from([key.clone()]), 200_000);
+
+        assert_eq!(latest.len(), 1);
+        assert_eq!(latest[&key].len(), 1);
+        assert_eq!(latest[&key][0].timestamp, 199_000);
+    }
+
+    #[test]
+    fn signal_book_prewarm_cache_is_capped_and_expires_old_entries() {
+        let now = Instant::now();
+        let mut prewarms = BTreeMap::new();
+        prewarms.insert("EXPIRED".into(), now - Duration::from_secs(301));
+        for index in 0..=SIGNAL_BOOK_PREWARM_CAPACITY {
+            prewarms.insert(format!("S{index}"), now - Duration::from_millis(index as u64));
+        }
+
+        bound_signal_book_prewarms(&mut prewarms, now);
+
+        assert_eq!(prewarms.len(), SIGNAL_BOOK_PREWARM_CAPACITY);
+        assert!(!prewarms.contains_key("EXPIRED"));
     }
 
     #[test]
@@ -742,6 +919,37 @@ mod pending_signal_queue_tests {
         assert!(queue.contains_key(&(PendingSignalKind::Daily, "DAILY-KEEP".into())));
         assert!(!queue.contains_key(&(PendingSignalKind::Live, "ASSET-1".into())));
         assert!(queue.contains_key(&(PendingSignalKind::Live, "ASSET-3".into())));
+    }
+
+    #[test]
+    fn pending_signal_queue_keeps_only_each_symbol_market_and_merges_batch_books() {
+        let full_markets = Arc::new(BTreeMap::from([
+            ("BTC-USDT".into(), serde_json::json!({"bids":[{"price":100.0,"size":1.0}]})),
+            ("ETH-USDT".into(), serde_json::json!({"bids":[{"price":50.0,"size":2.0}]})),
+            ("SOL-USDT".into(), serde_json::json!({"bids":[{"price":25.0,"size":3.0}]})),
+        ]));
+        let mut queue = PendingSignalQueue::new();
+        for symbol in ["BTC-USDT", "ETH-USDT"] {
+            let mut item = dashboard(false);
+            item.best[0].symbol = symbol.into();
+            item.markets = Arc::clone(&full_markets);
+            queue_pending_signal_with_cap(
+                &mut queue,
+                PendingSignalKind::Live,
+                symbol.into(),
+                item,
+                256,
+            );
+            let queued = &queue[&(PendingSignalKind::Live, symbol.into())];
+            assert_eq!(queued.markets.len(), 1);
+            assert!(queued.markets.contains_key(symbol));
+        }
+
+        let batch = take_next_pending_signal_batch(&mut queue, 2).unwrap();
+        assert_eq!(batch.markets.len(), 2);
+        assert!(batch.markets.contains_key("BTC-USDT"));
+        assert!(batch.markets.contains_key("ETH-USDT"));
+        assert!(!batch.markets.contains_key("SOL-USDT"));
     }
 
     #[test]

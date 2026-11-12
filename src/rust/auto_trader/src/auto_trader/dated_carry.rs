@@ -1,8 +1,7 @@
 // Paper-only dated futures cash-and-carry. It never submits exchange orders.
 #[cfg(test)]
-const CARRY_COST_GATE_PERCENT: f64 = strategies::DATED_CARRY_COST_BUDGET_PERCENT;
+const CARRY_COST_GATE_PERCENT: f64 = strategy::DATED_CARRY_COST_BUDGET_PERCENT;
 const CARRY_ENTRY_SLIPPAGE: f64 = 0.0005;
-const CARRY_DAY_MS: u64 = 86_400_000;
 
 #[derive(Clone, Serialize, Deserialize)]
 struct DatedCarryPosition {
@@ -219,42 +218,46 @@ async fn receive_dated_carry_signal(
                 return Err((StatusCode::BAD_REQUEST, "Carry entry signal is stale".into()));
             }
             let spot_profile_symbol = candidate.spot_symbol.replace("USDT", "-USDT");
-            let strategy_parameters = {
+            let (strategy_parameters, profile_version) = {
                 let settings = state.settings.lock().await;
-                strategy_parameter_values(&settings, &spot_profile_symbol, Strategy::DatedCarry)
+                let key = format!("{}:{}", spot_profile_symbol, Strategy::DatedCarry.as_str());
+                (
+                    strategy_parameter_values(&settings, &spot_profile_symbol, Strategy::DatedCarry),
+                    settings.learned_profiles.get(&key).map_or(0, |profile| profile.version),
+                )
             };
-            let Some(minimum_days) = strategy_parameter_value(
+            if strategy_parameter_value(
                 &strategy_parameters, StrategyParameterKey::CarryMinimumDaysToExpiry,
-            ) else {
+            ).is_none() {
                 return Err((StatusCode::BAD_REQUEST, "Missing learned carry expiry parameter".into()));
-            };
-            let mut strategy_input = StrategySignal::dated_carry_entry(
-                &candidate, emitted_at_ms, now_ms, &strategy_parameters,
-            );
-            let learning_rsocket_url = std::env::var("LEARNING_RSOCKET_URL")
-                .unwrap_or_else(|_| "ws://127.0.0.1:10010".into());
-            let evidence_request = strategies::ScoutCandidateBatch {
-                request_id: format!("dated-carry-evidence:{spot_profile_symbol}:{emitted_at_ms}"),
-                mode: strategies::ScoutWorkMode::EvidenceOnly,
-                signals: vec![serde_json::json!({
-                    "symbol": spot_profile_symbol.clone(),
-                    "strategy": Strategy::DatedCarry.as_str(),
-                    "timestamp": emitted_at_ms,
-                    "direction": "bullish",
-                    "strategy_decision": {"strategy_parameters": strategy_parameters.clone()}
-                })],
-            };
-            if let Ok(response) =
-                strategies::request_scout_candidate_batch(&learning_rsocket_url, &evidence_request)
-                    .await
-            {
-                strategy_input.walk_forward_evidence = response
-                    .assignments
-                    .into_iter()
-                    .find_map(|assignment| assignment.walk_forward_evidence);
             }
-            let entry_decision = Strategy::DatedCarry
-                .evaluate(&strategy_input)
+            let profile_id = strategy::profile_id(
+                &spot_profile_symbol,
+                Strategy::DatedCarry.as_str(),
+                &strategy_parameters,
+            );
+            let request = crate::service_rpc::live_evaluation_request(
+                Strategy::DatedCarry,
+                candidate.spot_symbol.clone(),
+                profile_id,
+                spot_profile_symbol,
+                profile_version,
+                strategy_parameters,
+                strategy::LiveEvaluationInput::DatedCarryEntry {
+                    emitted_at_ms,
+                    evaluated_at_ms: now_ms,
+                    candidate: candidate.clone(),
+                },
+            );
+            let entry_decision = crate::service_rpc::request_live_evaluation(&request)
+                .await
+                .map(|decision| match decision {
+                    strategy::LiveStrategyDecision::Enter => StrategyDecision::Enter,
+                    strategy::LiveStrategyDecision::Hold => StrategyDecision::Hold,
+                    strategy::LiveStrategyDecision::Exit => StrategyDecision::Exit,
+                    strategy::LiveStrategyDecision::Rebalance => StrategyDecision::Rebalance,
+                    strategy::LiveStrategyDecision::Reject => StrategyDecision::Reject,
+                })
                 .unwrap_or(StrategyDecision::Reject);
             if !candidate.quantity.is_finite()
                 || !candidate.spot_ask.is_finite()
@@ -273,10 +276,6 @@ async fn receive_dated_carry_signal(
                 || !candidate.future_symbol.starts_with(&format!("{}_", candidate.spot_symbol))
             {
                 return Err((StatusCode::BAD_REQUEST, "Invalid dated carry entry signal".into()));
-            }
-            let days = (candidate.expiry_ms - now_ms) as f64 / CARRY_DAY_MS as f64;
-            if days < minimum_days {
-                return Ok(StatusCode::ACCEPTED);
             }
             book.checked_at_ms = emitted_at_ms;
             book.last_error = None;
@@ -358,18 +357,38 @@ async fn receive_dated_carry_signal(
             settlement_source,
         } => {
             let strategy_parameters = BTreeMap::new();
-            let exit_decision = Strategy::DatedCarry
-                .evaluate(&StrategySignal::dated_carry_settlement(
+            let profile_id = strategy::profile_id(
+                &spot_symbol,
+                Strategy::DatedCarry.as_str(),
+                &strategy_parameters,
+            );
+            let request = crate::service_rpc::live_evaluation_request(
+                Strategy::DatedCarry,
+                spot_symbol.clone(),
+                profile_id,
+                spot_symbol.clone(),
+                0,
+                strategy_parameters,
+                strategy::LiveEvaluationInput::Settlement {
                     emitted_at_ms,
-                    now_ms,
-                    &spot_symbol,
-                    &future_symbol,
+                    evaluated_at_ms: now_ms,
+                    spot_symbol: spot_symbol.clone(),
+                    future_symbol: future_symbol.clone(),
                     expiry_ms,
                     spot_exit_twap,
                     settlement_price,
-                    Some(settlement_source),
-                    &strategy_parameters,
-                ))
+                    settlement_source: Some(settlement_source),
+                },
+            );
+            let exit_decision = crate::service_rpc::request_live_evaluation(&request)
+                .await
+                .map(|decision| match decision {
+                    strategy::LiveStrategyDecision::Enter => StrategyDecision::Enter,
+                    strategy::LiveStrategyDecision::Hold => StrategyDecision::Hold,
+                    strategy::LiveStrategyDecision::Exit => StrategyDecision::Exit,
+                    strategy::LiveStrategyDecision::Rebalance => StrategyDecision::Rebalance,
+                    strategy::LiveStrategyDecision::Reject => StrategyDecision::Reject,
+                })
                 .unwrap_or(StrategyDecision::Hold);
             if exit_decision != StrategyDecision::Exit {
                 return Err((StatusCode::BAD_REQUEST, "Invalid dated carry settlement signal".into()));
@@ -430,7 +449,7 @@ mod dated_carry_probe_contract_tests {
         DatedCarryCandidate {
             spot_symbol: "BTCUSDT".into(),
             future_symbol: "BTCUSDT_Q1".into(),
-            expiry_ms: 1_700_000_000_000 + 10 * CARRY_DAY_MS,
+            expiry_ms: 1_700_000_000_000 + 10 * 86_400_000,
             days_to_expiry: 10.0,
             quantity: 0.01,
             spot_ask: 100.0,

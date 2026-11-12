@@ -9,8 +9,6 @@ struct BookHistorySample {
 
 const BOOK_HISTORY_SAMPLE_INTERVAL_MS: u64 = 100;
 const BOOK_HISTORY_SAMPLE_LIMIT: usize = 601;
-const COUNTERFACTUAL_BOOK_HISTORY_SAMPLE_INTERVAL_MS: u64 = 1_000;
-const COUNTERFACTUAL_BOOK_HISTORY_SAMPLE_LIMIT: usize = 3_601;
 
 #[derive(Clone)]
 struct PendingOutcome {
@@ -84,7 +82,6 @@ pub struct SignalEngine {
     book_bid_levels: Vec<(f64, f64)>,
     book_ask_levels: Vec<(f64, f64)>,
     book_history: VecDeque<BookHistorySample>,
-    counterfactual_book_history: VecDeque<BookHistorySample>,
     volatility_1m: Option<f64>,
     last_research_sample_at: Option<u64>,
     last_live_snapshot_at: Option<u64>,

@@ -103,6 +103,16 @@ function AutoTraderScoutsComponent() {
               : undefined,
       },
       {
+        colId: 'recordType',
+        headerName: 'Record',
+        headerTooltip:
+          'A simulated outcome is a closed Scout-only record. It is not an order or a position managed by AutoTrader or Position Management.',
+        valueGetter: ({ data }) =>
+          data?.simulated ? 'Simulated outcome' : 'Scout audit',
+        width: 125,
+        minWidth: 115,
+      },
+      {
         field: 'exitScenario',
         headerName: 'Exit scenario',
         valueFormatter: ({ value }) =>

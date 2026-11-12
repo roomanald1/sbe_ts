@@ -1,54 +1,9 @@
-use strategies::{SignalComponents, StrategyMarketSignal as Signal};
-
-const MAX_WALK_FORWARD_EVIDENCE_AGE_MS: u64 = 30 * 60 * 1_000;
-
-fn entry_walk_forward<'a>(
-    walk_forward: &'a [WalkForward],
-    symbol: &str,
-    now_ms: u64,
-) -> Option<&'a WalkForward> {
-    entry_walk_forward_for_strategy(walk_forward, symbol, None, now_ms)
-}
-
-fn entry_walk_forward_for_strategy<'a>(
-    walk_forward: &'a [WalkForward],
-    symbol: &str,
-    strategy: Option<&str>,
-    now_ms: u64,
-) -> Option<&'a WalkForward> {
-    let preferred_horizon = strategy
-        .filter(|name| {
-            matches!(
-                *name,
-                "live-momentum"
-                    | "live-trade-flow"
-                    | "live-order-book"
-                    | "live-vwap-dislocation"
-                    | "live-absorption-pressure"
-            )
-        })
-        .map(|_| 60);
-    let eligible = walk_forward.iter().filter(|item| {
-        item.symbol == symbol
-            && is_entry_evidence_horizon(item.horizon_seconds)
-            && item.evidence_generated_at_ms > 0
-            && item.evidence_generated_at_ms <= now_ms
-            && now_ms - item.evidence_generated_at_ms <= MAX_WALK_FORWARD_EVIDENCE_AGE_MS
-            && preferred_horizon.is_none_or(|horizon| item.horizon_seconds == horizon)
-    });
-    eligible
-        .max_by_key(|item| item.horizon_seconds)
-        .or_else(|| {
-            preferred_horizon.and_then(|_| entry_walk_forward(walk_forward, symbol, now_ms))
-        })
-}
+use strategy::{SignalComponents, StrategyMarketSignal as Signal};
 
 #[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct Dashboard {
     best: Vec<Signal>,
-    #[serde(default)]
-    walk_forward: Arc<Vec<WalkForward>>,
     #[serde(default)]
     missed_opportunity_bands: Arc<Vec<MissedOpportunityGateBand>>,
     #[serde(default)]
@@ -57,15 +12,6 @@ struct Dashboard {
     queued_at: Option<Instant>,
     #[serde(skip)]
     queue_wait_ms: Option<f64>,
-}
-
-#[derive(Clone, Default, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct SharedLiveInsightsContext {
-    #[serde(default)]
-    walk_forward: Arc<Vec<WalkForward>>,
-    #[serde(default)]
-    missed_opportunity_bands: Arc<Vec<MissedOpportunityGateBand>>,
 }
 
 fn is_stablecoin_pair(symbol: &str) -> bool {
@@ -78,41 +24,6 @@ fn is_stablecoin_pair(symbol: &str) -> bool {
     };
     STABLECOINS.contains(&base.to_ascii_uppercase().as_str())
         && STABLECOINS.contains(&quote.to_ascii_uppercase().as_str())
-}
-#[derive(Clone, Deserialize, Serialize)]
-struct LearnedExitPolicy {
-    stop_loss_percent: f64,
-    take_profit_percent: f64,
-    validation_samples: usize,
-    validation_average_net_return_percent: f64,
-    validation_positive_net_rate: f64,
-}
-#[derive(Clone, Deserialize, Serialize)]
-struct WalkForward {
-    symbol: String,
-    horizon_seconds: u64,
-    #[serde(default)]
-    evidence_generated_at_ms: u64,
-    #[serde(default)]
-    learned_long_exit_policy: Option<LearnedExitPolicy>,
-    #[serde(default)]
-    learned_short_exit_policy: Option<LearnedExitPolicy>,
-    #[serde(default)]
-    all_signal_long: SideWalkForwardMetrics,
-    #[serde(default)]
-    all_signal_short: SideWalkForwardMetrics,
-    #[serde(default)]
-    research_logistic_long: SideWalkForwardMetrics,
-    #[serde(default)]
-    research_logistic_short: SideWalkForwardMetrics,
-}
-#[derive(Clone, Default, Deserialize, Serialize)]
-struct SideWalkForwardMetrics {
-    sample_count: usize,
-    direction_match_rate: Option<f64>,
-    average_net_return_percent: Option<f64>,
-    positive_net_rate: Option<f64>,
-    positive_net_rate_lower_95: Option<f64>,
 }
 #[derive(Clone, Copy, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]

@@ -13,13 +13,14 @@ fn preserve_paused_strategy_multipliers(
 }
 
 fn next_profile_registration_for_feedback(
-    registrations: &[strategies::StrategyProfileRegistration],
+    registrations: &[strategy::StrategyProfileRegistration],
     feedback: Option<&FeedbackEvent>,
-) -> Option<strategies::StrategyProfileRegistration> {
+) -> Option<strategy::StrategyProfileRegistration> {
     match feedback {
         None => registrations.first().cloned(),
         Some(FeedbackEvent::TradeOutcome { profile_id, .. } | FeedbackEvent::ScoutOutcome { profile_id, .. }) =>
             registrations.iter().find(|registration| &registration.profile.profile_id == profile_id).cloned(),
+        Some(FeedbackEvent::MissedOpportunityCandidate { .. }) => None,
     }
 }
 
@@ -46,8 +47,8 @@ mod strategy_pause_snapshot_tests {
 
     #[test]
     fn feedback_is_not_blocked_by_unrelated_profile_registrations() {
-        let registration = |id: &str| strategies::StrategyProfileRegistration {
-            profile: strategies::StrategyProfile { profile_id: id.into(), version: 0, symbol: "BTC-USDT".into(),
+        let registration = |id: &str| strategy::StrategyProfileRegistration {
+            profile: strategy::StrategyProfile { profile_id: id.into(), version: 0, symbol: "BTC-USDT".into(),
                 strategy: "live-momentum".into(), parameters: BTreeMap::new(), learning_samples: 0,
                 positive_samples: 0, realized_pnl: 0.0 }, specs: vec![],
         };
@@ -55,7 +56,7 @@ mod strategy_pause_snapshot_tests {
         let event = FeedbackEvent::TradeOutcome { event_id: "trade".into(), observed_at_ms: 1,
             learning_context: None, symbol: "BTC-USDT".into(), strategy: "live-momentum".into(),
             profile_id: "needed".into(), parameters: BTreeMap::new(), specs: vec![], scout: false,
-            realized_pnl_usd: -1.0, net_return_percent: -0.1, threshold_observations: vec![] };
+            realized_pnl_usd: -1.0, net_return_percent: -0.1, threshold_observations: vec![], replay_context: None };
         assert_eq!(next_profile_registration_for_feedback(&registrations, Some(&event)).unwrap().profile.profile_id, "needed");
         assert!(next_profile_registration_for_feedback(&registrations[..1], Some(&event)).is_none());
         assert_eq!(next_profile_registration_for_feedback(&registrations, None).unwrap().profile.profile_id, "unrelated");
@@ -181,8 +182,8 @@ pub fn router() -> Router {
         .map(|value| value == "true")
         .unwrap_or(settings.enabled);
     settings.enabled = enabled;
-    let audit_tx = AuditQueue::new(DECISION_AUDIT_QUEUE_CAPACITY);
-    let execution_audit_tx = AuditQueue::new(EXECUTION_AUDIT_QUEUE_CAPACITY);
+    let audit_tx = AuditQueue::new(DECISION_AUDIT_QUEUE_CAPACITY, DECISION_AUDIT_QUEUE_MAX_BYTES);
+    let execution_audit_tx = AuditQueue::new(EXECUTION_AUDIT_QUEUE_CAPACITY, EXECUTION_AUDIT_QUEUE_MAX_BYTES);
     let audit_health = Arc::new(AtomicU64::new(3));
     let audit_failure_latched = Arc::new(AtomicBool::new(false));
     let execution_queue = execution_audit_tx.clone();
@@ -249,7 +250,6 @@ pub fn router() -> Router {
         state_updates,
         settings_persist_timings_ms: Arc::new(std::sync::Mutex::new(BTreeMap::new())),
         latest_missed_opportunity_bands: Arc::new(Mutex::new(Arc::new(Vec::new()))),
-        latest_live_insights_context: Arc::new(Mutex::new(SharedLiveInsightsContext::default())),
         latest_execution_parameters: Arc::new(Mutex::new(None)),
         learning_response_cache: Arc::new(Mutex::new(LearningResponseCache::default())),
         cycle_lock: Arc::new(Mutex::new(())),
@@ -277,45 +277,6 @@ pub fn router() -> Router {
     start_settings_persistence_worker(&state);
     start_learning_feedback_worker(&state);
     start_post_exit_observation_worker(&state);
-    let live_context_state = Arc::clone(&state.latest_live_insights_context);
-    tokio::spawn(async move {
-        let refresh_seconds = std::env::var("AUTO_TRADER_LIVE_CONTEXT_REFRESH_SECONDS")
-            .ok()
-            .and_then(|value| value.parse::<u64>().ok())
-            .filter(|value| *value > 0)
-            .unwrap_or(30);
-        let mut ticker = interval(Duration::from_secs(refresh_seconds));
-        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        loop {
-            ticker.tick().await;
-            let response = tokio::time::timeout(
-                Duration::from_secs(3),
-                crate::service_rpc::insights_request("GET", "/internal/live-context", None),
-            )
-            .await;
-            match response {
-                Ok(Ok(response)) if (200..300).contains(&response.status) => {
-                    match serde_json::from_value::<SharedLiveInsightsContext>(response.body) {
-                        Ok(context) => *live_context_state.lock().await = context,
-                        Err(error) => crate::service_log!(
-                            "WARN",
-                            "Could not decode shared Insights live context: {error}"
-                        ),
-                    }
-                }
-                Ok(Ok(response)) => crate::service_log!(
-                    "WARN",
-                    "Insights live context returned status {}",
-                    response.status
-                ),
-                Ok(Err(error)) => crate::service_log!(
-                    "WARN",
-                    "Could not refresh shared Insights live context: {error}"
-                ),
-                Err(_) => crate::service_log!("WARN", "Insights live context refresh timed out"),
-            }
-        }
-    });
     let carry_sync_book = state.dated_carry.clone();
     tokio::spawn(async move {
         let mut ticker = interval(Duration::from_secs(30));
@@ -495,7 +456,7 @@ pub fn router() -> Router {
 
 async fn get_learning_summary() -> Result<axum::Json<serde_json::Value>, (axum::http::StatusCode, String)> {
     let response = crate::service_rpc::learning_request(
-        strategies::ScoutWorkerHttpMethod::Get,
+        strategy::ScoutWorkerHttpMethod::Get,
         "/summary",
         None,
     ).await.map_err(|error| (axum::http::StatusCode::BAD_GATEWAY, error.to_string()))?;
@@ -505,7 +466,8 @@ async fn get_learning_summary() -> Result<axum::Json<serde_json::Value>, (axum::
 fn feedback_event_id(event: &FeedbackEvent) -> &str {
     match event {
         FeedbackEvent::ScoutOutcome { event_id, .. }
-        | FeedbackEvent::TradeOutcome { event_id, .. } => event_id,
+        | FeedbackEvent::TradeOutcome { event_id, .. }
+        | FeedbackEvent::MissedOpportunityCandidate { event_id, .. } => event_id,
     }
 }
 
@@ -546,7 +508,7 @@ fn start_learning_feedback_worker(state: &AutoTraderState) {
             };
             if let Some(registration) = registration {
                 let response = crate::service_rpc::learning_request(
-                    strategies::ScoutWorkerHttpMethod::Post,
+                    strategy::ScoutWorkerHttpMethod::Post,
                     "/profiles",
                     Some(serde_json::to_value(&registration).unwrap_or(serde_json::Value::Null)),
                 ).await;
@@ -565,7 +527,7 @@ fn start_learning_feedback_worker(state: &AutoTraderState) {
             let event = publisher_state.settings.lock().await.feedback_outbox.first().cloned();
             if let Some(event) = event {
                 let response = crate::service_rpc::learning_request(
-                    strategies::ScoutWorkerHttpMethod::Post,
+                    strategy::ScoutWorkerHttpMethod::Post,
                     "/feedback",
                     Some(serde_json::to_value(&event).unwrap_or(serde_json::Value::Null)),
                 ).await;
@@ -583,7 +545,7 @@ fn start_learning_feedback_worker(state: &AutoTraderState) {
             let execution_event = publisher_state.settings.lock().await.execution_feedback_outbox.first().cloned();
             if let Some(event) = execution_event {
                 let response = crate::service_rpc::learning_request(
-                    strategies::ScoutWorkerHttpMethod::Post,
+                    strategy::ScoutWorkerHttpMethod::Post,
                     "/execution-outcomes",
                     Some(serde_json::to_value(&event).unwrap_or(serde_json::Value::Null)),
                 ).await;
@@ -608,12 +570,12 @@ fn start_learning_feedback_worker(state: &AutoTraderState) {
             loop {
                 ticker.tick().await;
                 let Ok(response) = crate::service_rpc::learning_request(
-                    strategies::ScoutWorkerHttpMethod::Get,
+                    strategy::ScoutWorkerHttpMethod::Get,
                     "/decision-snapshot",
                     None,
                 ).await else { continue };
                 if !(200..300).contains(&response.status) { continue; }
-                let Ok(snapshot) = serde_json::from_value::<strategies::LearnedProfileSnapshot>(response.body) else { continue };
+                let Ok(snapshot) = serde_json::from_value::<strategy::LearnedProfileSnapshot>(response.body) else { continue };
                 let mut settings = profile_state.settings.lock().await;
                 let mut changed = false;
                 if settings.learned_scout_parameter_variants != snapshot.scout_parameter_variants {
@@ -671,11 +633,7 @@ async fn signal_ready(
     static INGRESS_SYMBOLS: AtomicU64 = AtomicU64::new(0);
     static LAST_INGRESS_LOG_MS: AtomicU64 = AtomicU64::new(0);
 
-    {
-        let context = state.latest_live_insights_context.lock().await;
-        dashboard.walk_forward = Arc::clone(&context.walk_forward);
-        dashboard.missed_opportunity_bands = Arc::clone(&context.missed_opportunity_bands);
-    }
+    dashboard.missed_opportunity_bands = state.latest_missed_opportunity_bands.lock().await.clone();
     let incoming_symbols = dashboard.best.len() as u64;
     let settings = state.settings.lock().await;
     let generic_enabled = state.enabled.load(Ordering::Relaxed)
@@ -712,7 +670,6 @@ async fn signal_ready(
                 symbol,
                 Dashboard {
                     best: vec![signal],
-                    walk_forward: Arc::clone(&dashboard.walk_forward),
                     missed_opportunity_bands: Arc::clone(&dashboard.missed_opportunity_bands),
                     markets: dashboard.markets.clone(),
                     queued_at: None,
@@ -723,8 +680,7 @@ async fn signal_ready(
         drop(queue);
         let now = Instant::now();
         let mut prewarms = state.signal_book_prewarms.lock().await;
-        prewarms
-            .retain(|_, requested_at| now.duration_since(*requested_at) < Duration::from_secs(300));
+        bound_signal_book_prewarms(&mut prewarms, now);
         for symbol in prewarm_symbols {
             let should_request = prewarms.get(&symbol).is_none_or(|requested_at| {
                 now.duration_since(*requested_at) >= Duration::from_secs(60)
@@ -733,6 +689,7 @@ async fn signal_ready(
                 continue;
             }
             prewarms.insert(symbol.clone(), now);
+            bound_signal_book_prewarms(&mut prewarms, now);
             let requested_symbols = Arc::clone(&state.signal_book_prewarms);
             tokio::spawn(async move {
                 let succeeded = crate::service_rpc::position_request(
@@ -853,7 +810,7 @@ mod closed_trade_metrics_migration_tests {
             (specs[0].key.as_str().to_owned(), specs[0].default),
             (specs[1].key.as_str().to_owned(), specs[1].default),
         ]);
-        let key = scouts::combination_key(&combination, &full_profile).unwrap();
+        let key = strategy::combination_key(&combination, &full_profile).unwrap();
         assert_eq!(
             scout_feedback_parameter_keys(strategy, Some(&key)),
             combination.keys().cloned().collect()

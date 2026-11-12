@@ -34,13 +34,30 @@ function App() {
   const error$ = useObservable(connection?.error_message, undefined, [
     connection,
   ]);
+  const insightsState$ = useObservable(
+    connection?.insights_connection_state,
+    'connecting',
+    [connection],
+  );
+  const insightsError$ = useObservable(
+    connection?.insights_error_message,
+    undefined,
+    [connection],
+  );
   const changeFeedSource = React.useCallback((source: FeedSource) => {
     setFeedSource(source);
   }, []);
 
   return (
     <main className="terminal">
-      <Header error$={error$} state$={state$} feedUrl={connection?.url ?? ''} />
+      <Header
+        error$={error$}
+        state$={state$}
+        feedUrl={connection?.url ?? ''}
+        insightsState$={insightsState$}
+        insightsError$={insightsError$}
+        showInsights={feedSource === 'okx'}
+      />
       <FeedControls
         connection={connection}
         feedSource={feedSource}

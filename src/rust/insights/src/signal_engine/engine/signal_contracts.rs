@@ -162,129 +162,6 @@ pub struct SignalPerformance {
     pub net_sample_count: usize,
     pub average_net_return_percent: Option<f64>,
 }
-#[derive(Clone, Debug, Default, Serialize)]
-pub struct SideWalkForwardMetrics {
-    pub sample_count: usize,
-    pub direction_match_rate: Option<f64>,
-    pub average_net_return_percent: Option<f64>,
-    pub positive_net_rate: Option<f64>,
-    pub positive_net_rate_lower_95: Option<f64>,
-}
-
-#[derive(Default)]
-struct SideWalkForwardAccumulator {
-    samples: usize,
-    correct: usize,
-    positive_net: usize,
-    net_total: f64,
-}
-impl SideWalkForwardAccumulator {
-    fn record(&mut self, correct: bool, net: f64) {
-        self.samples += 1;
-        if correct {
-            self.correct += 1;
-        }
-        if net > 0.0 {
-            self.positive_net += 1;
-        }
-        self.net_total += net;
-    }
-    fn metrics(&self) -> SideWalkForwardMetrics {
-        let hit_rate = (self.samples > 0).then_some(self.correct as f64 / self.samples as f64);
-        let positive_rate =
-            (self.samples > 0).then_some(self.positive_net as f64 / self.samples as f64);
-        SideWalkForwardMetrics {
-            sample_count: self.samples,
-            direction_match_rate: hit_rate,
-            average_net_return_percent: (self.samples > 0)
-                .then_some(self.net_total / self.samples as f64),
-            positive_net_rate: positive_rate,
-            positive_net_rate_lower_95: wilson_lower_bound(self.positive_net, self.samples),
-        }
-    }
-}
-
-fn wilson_lower_bound(successes: usize, samples: usize) -> Option<f64> {
-    if samples == 0 {
-        return None;
-    }
-    let n = samples as f64;
-    let z = 1.96_f64;
-    let rate = successes as f64 / n;
-    let denominator = 1.0 + z * z / n;
-    let center = rate + z * z / (2.0 * n);
-    let spread = z * ((rate * (1.0 - rate) / n + z * z / (4.0 * n * n)).max(0.0)).sqrt();
-    Some(((center - spread) / denominator).clamp(0.0, 1.0))
-}
-
-#[derive(Clone, Debug, Serialize)]
-pub struct ProbabilityConfidenceMetrics {
-    pub threshold: f64,
-    pub selected_signals: usize,
-    pub direction_match_rate: Option<f64>,
-    pub average_net_return_percent: Option<f64>,
-    pub positive_net_rate: Option<f64>,
-}
-
-#[derive(Clone, Debug, Serialize)]
-pub struct LearnedExitPolicy {
-    pub stop_loss_percent: f64,
-    pub take_profit_percent: f64,
-    pub validation_samples: usize,
-    pub validation_average_net_return_percent: f64,
-    pub validation_positive_net_rate: f64,
-}
-
-#[derive(Clone, Debug, Serialize)]
-pub struct SignalWalkForward {
-    pub symbol: String,
-    pub horizon_seconds: u64,
-    pub evidence_generated_at_ms: u64,
-    pub training_samples: usize,
-    pub evaluated_signals: usize,
-    pub selected_signals: usize,
-    pub selected_strength_threshold: Option<f64>,
-    pub direction_match_rate: Option<f64>,
-    pub average_net_return_percent: Option<f64>,
-    pub positive_net_rate: Option<f64>,
-    pub baseline_direction_match_rate: Option<f64>,
-    pub baseline_average_net_return_percent: Option<f64>,
-    pub five_minute_trend_sample_count: usize,
-    pub five_minute_trend_match_rate: Option<f64>,
-    pub five_minute_trend_average_net_return_percent: Option<f64>,
-    pub logistic_direction_match_rate: Option<f64>,
-    pub logistic_average_net_return_percent: Option<f64>,
-    pub logistic_positive_net_rate: Option<f64>,
-    pub logistic_selected_signals: usize,
-    pub trend_logistic_direction_match_rate: Option<f64>,
-    pub trend_logistic_average_net_return_percent: Option<f64>,
-    pub trend_logistic_positive_net_rate: Option<f64>,
-    pub trend_logistic_selected_signals: usize,
-    pub contrarian_trend_logistic_direction_match_rate: Option<f64>,
-    pub contrarian_trend_logistic_average_net_return_percent: Option<f64>,
-    pub contrarian_trend_logistic_positive_net_rate: Option<f64>,
-    pub contrarian_trend_logistic_selected_signals: usize,
-    pub contrarian_trend_logistic_confidence_bands: Vec<ProbabilityConfidenceMetrics>,
-    pub trend_logistic_confidence_bands: Vec<ProbabilityConfidenceMetrics>,
-    /// Scout results for the live Auto Trader exploration gate, using historical score and fee-adjusted execution cost.
-    pub exploration_score_bands: Vec<ProbabilityConfidenceMetrics>,
-    pub signal_long: SideWalkForwardMetrics,
-    pub signal_short: SideWalkForwardMetrics,
-    /// All directional outcomes before any learned strength selection.
-    pub all_signal_long: SideWalkForwardMetrics,
-    pub all_signal_short: SideWalkForwardMetrics,
-    pub logistic_long: SideWalkForwardMetrics,
-    pub logistic_short: SideWalkForwardMetrics,
-    /// Walk-forward results for models trained on synchronized microstructure and market-context features.
-    pub research_logistic_long: SideWalkForwardMetrics,
-    pub research_logistic_short: SideWalkForwardMetrics,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub learned_long_exit_policy: Option<LearnedExitPolicy>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub learned_short_exit_policy: Option<LearnedExitPolicy>,
-}
-/// Side-by-side executable outcome label. A new enum variant preserves the
-/// existing bincode Snapshot and Outcome layouts for persisted records.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SignalResearchFeatures {
     pub symbol: String,
@@ -364,8 +241,6 @@ pub struct SignalEvaluation {
     pub path_high_timestamp: u64,
     pub path_low: f64,
     pub path_low_timestamp: u64,
-    #[serde(skip)]
-    pub counterfactual_quote_path: Vec<CounterfactualQuoteSample>,
     /// Directional time to positive net after spread and configured taker fees.
     #[serde(default)]
     pub long_time_to_positive_net_seconds: Option<u64>,
@@ -373,6 +248,8 @@ pub struct SignalEvaluation {
     pub short_time_to_positive_net_seconds: Option<u64>,
 }
 
+// Retained only to decode historical kind-6 records. New evaluations never
+// generate or persist quote paths.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct CounterfactualQuoteSample {
     pub timestamp: u64,

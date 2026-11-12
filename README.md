@@ -41,19 +41,20 @@ The UI remains a separate process (`./nx serve react-app`). Backend services run
 | Binance Feed | Binance daily-candle retrieval | RSocket 10002; HTTP 3012 operations |
 | Position Management | Position ledger, account/portfolio APIs, and order lifecycle persistence | RSocket 10005; HTTP 3002 operations |
 | Execution | Paper matching and VWAP scheduling | RSocket 10006; HTTP 3003 operations |
-| Insights Research | Research sampling, outcomes, signal persistence, daily/carry signals, news, and close-out calculations | RSocket 10004 / 10007 / 10011; HTTP 3004 operations |
+| Insights | Live signal generation, enriched market events, research sampling/outcomes, signal persistence, daily/carry signals, and news | RSocket 10004 / 10007 / 10011; HTTP 3004 operations |
 | AutoTrader | Trading loop, settings, and snapshots | RSocket 10006 (host 10008); HTTP 3005 operations |
 | News sentiment | Local headline classifier used by Insights | RSocket 10012; HTTP 3006 operations |
-| Live Signals | Per-symbol signal computation and news overlay | RSocket clients; HTTP 3007 operations |
-| Learning | Scout coordination and bounded strategy profiles | RSocket 10010; HTTP 3010 operations |
-| Scouts | One RSocket worker per strategy; the central listener only serves operations | Worker RSocket 10200; HTTP 3011 operations |
+| Learning | Scout coordination, bounded strategy profiles, outcome feedback, and profile-attributed evidence | RSocket 10010; HTTP 3010 operations |
+| Strategy X | One always-on stateless live evaluator and one Learning-side Scout worker per strategy | RSocket; Compose uses live 10201 and Scout 10200 |
 | Insights Maintenance | Nightly signal archival, raw-record cleanup, training archive expiry, and audit compaction | Background process |
 
 Browser-to-service and service-to-service application traffic uses RSocket request-response or request-stream interactions. HTTP listeners are reserved for health, process/resource and queue metrics, documentation, and service-control operations. Exchange and vendor APIs remain HTTP.
 
-Insights consumes raw FeedHandlers events, derives enriched market data, and publishes it to React and Live Signals over RSocket. Learning selects and coordinates Scout work; strategy-specific Scout workers execute it and keep isolated state. Execution calls Position Management over RSocket for position-owned order operations.
+Insights consumes raw FeedHandlers events, derives enriched market data, generates live signal snapshots, and publishes them to AutoTrader and Learning while independently capturing research samples. AutoTrader sends production strategy entry, position, and rebalance decisions to the dedicated Strategy X live workers. Learning selects and coordinates Scout work; optional strategy-specific Scout workers execute it and keep isolated state. The live workers are stateless and do not mount the Scout state volume. Execution calls Position Management over RSocket for position-owned order operations.
 
-The launcher points `POSITIONS_FILE`, `AUTO_TRADER_STATE_FILE`, `SIGNALS_FILE`, and `LEARNING_STATE_FILE` at persisted files under their owning services. Position data is stored in `src/rust/position_management/positions.json`; AutoTrader state is stored in `src/rust/auto_trader/auto_trader_state.json`; Insights signal history is stored in `src/rust/insights/signals.jsonl`; Learning state is stored in SQLite. Scout state is partitioned into per-strategy worker databases in the `scouts-state` volume; workers do not import the old shared state at startup. Insights Maintenance runs nightly retention and archival against the signal database.
+In the non-container development setup, `run-backend-services.sh` starts both Strategy X roles for all 17 registered strategies. It binds each RSocket listener and metrics listener to its own loopback port and stores Scout worker databases under `src/rust/learning/strategy_state/`.
+
+The launcher points `POSITIONS_FILE`, `AUTO_TRADER_STATE_FILE`, `SIGNALS_FILE`, and `LEARNING_STATE_FILE` at persisted files under their owning services. Position data is stored in `src/rust/position_management/positions.json`; AutoTrader state is stored in `src/rust/auto_trader/auto_trader_state.json`; Insights signal history is stored in `src/rust/insights/signals.jsonl`; Learning state is stored in SQLite. Scout state is partitioned into per-strategy worker databases at `/data/workers/<strategy>.sqlite` in the existing `sbe-scouts-state` volume. Strategy X Scout services use the optional `scout-workers` profile; live evaluators run independently and mount no persistent volume. Insights Maintenance runs nightly retention and archival against the signal database.
 ## Run and manage the local stack
 
 Copy monitoring/.env.example to monitoring/.env and set a unique Grafana password, then launch the separate app and infrastructure Compose projects:

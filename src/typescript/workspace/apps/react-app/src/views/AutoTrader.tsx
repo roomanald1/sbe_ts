@@ -12,6 +12,7 @@ import {
   AutoTraderParametersDialog,
   AutoTraderSettingsDialog,
 } from './AutoTraderDialogs';
+import { AutoTraderExecutionCheck } from './AutoTraderExecutionCheck';
 
 const finiteFixed = (value: unknown, digits: number) =>
   typeof value === 'number' && Number.isFinite(value)
@@ -109,6 +110,7 @@ export function AutoTrader() {
             />
           )}
         </div>
+        <AutoTraderExecutionCheck />
         {!state.auditHealthy && (
           <div className="auto-trader-audit-alert" role="alert">
             <strong>

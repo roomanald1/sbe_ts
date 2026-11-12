@@ -49,12 +49,6 @@ fn prepare_directional_signal_candidates(
             "bearish"
         }
         .into();
-        let evidence = entry_walk_forward_for_strategy(
-            &dashboard.walk_forward,
-            &scout.symbol,
-            scout.strategy.as_deref(),
-            now.saturating_mul(1000),
-        );
         let payload = signal_audit_payload(
             &scout,
             "decision",
@@ -66,7 +60,6 @@ fn prepare_directional_signal_candidates(
             Some(true),
             counterfactual_stop_loss_percent,
             counterfactual_take_profit_percent,
-            evidence,
         );
         queue_auto_trader_audit(state, payload);
         if let Some(market) = dashboard.markets.get(&scout.symbol) {

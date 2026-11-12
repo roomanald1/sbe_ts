@@ -30,19 +30,44 @@ export type ServiceTotals = {
   stopped: number;
 };
 
+const strategyServices = [
+  'live-momentum',
+  'live-trade-flow',
+  'live-order-book',
+  'live-vwap-dislocation',
+  'live-absorption-pressure',
+  'donchian-55-btc200',
+  'donchian-20-sma200',
+  'donchian-20-btc200',
+  'donchian-10-btc200',
+  'donchian-20-btc200-hold3',
+  'risk-adjusted-trend-portfolio',
+  'trend-sleeves-btc200',
+  'trend-50-200',
+  'relative-strength-90-sma200',
+  'risk-adjusted-monthly-momentum',
+  'rsi2-oversold-rebound',
+  'dated-futures-carry',
+];
+
 export const services: Record<Project, string[]> = {
   system: [
     'feed-handlers',
+    'binance-feed',
     'position-management',
     'execution',
     'insights',
     'insights-maintenance',
-    'live-signals',
     'auto-trader',
     'news-sentiment',
     'learning',
-    'scouts',
     'web',
+    ...strategyServices.flatMap((strategy) => [
+      strategy.startsWith('live-')
+        ? `strategy-x-${strategy}`
+        : `strategy-x-live-${strategy}`,
+      `strategy-x-scout-${strategy}`,
+    ]),
   ],
   infra: [
     'prometheus',
@@ -59,10 +84,8 @@ export const swaggerPorts: Record<string, number> = {
   'position-management': 3002,
   execution: 3003,
   insights: 3004,
-  'live-signals': 3007,
   'auto-trader': 3005,
   learning: 3010,
-  scouts: 3011,
 };
 
 export const initialServiceSnapshot: ServiceSnapshot = {

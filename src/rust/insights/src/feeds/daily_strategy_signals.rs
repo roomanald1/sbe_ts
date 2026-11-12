@@ -732,7 +732,7 @@ fn insight_parameter_probe_variants(
         let step = parameter.get("step")?.as_f64()?;
         (key != "learning_rate" && current.is_finite() && min.is_finite()
             && max.is_finite() && step.is_finite() && min < max && step > 0.0)
-            .then_some(scouts::ParameterSpec {
+            .then_some(strategy::ParameterSpec {
                 key,
                 label: parameter.get("label").and_then(serde_json::Value::as_str).unwrap_or_default().to_owned(),
                 default: current,
@@ -743,13 +743,13 @@ fn insight_parameter_probe_variants(
                 learning_direction: 1.0,
             })
     }).collect::<Vec<_>>();
-    let variants = scouts::single_parameter_variants(&baseline, &specs, day)?;
+    let variants = strategy::single_parameter_variants(&baseline, &specs, day)?;
     Some(variants.into_iter().filter_map(|changes| {
         let (key, value) = if changes.len() == 1 {
             let (key, value) = changes.iter().next()?;
             (key.clone(), *value)
         } else {
-            (scouts::combination_key(&changes, &baseline)?, 0.0)
+            (strategy::combination_key(&changes, &baseline)?, 0.0)
         };
         let mut parameters = baseline.clone();
         parameters.extend(changes.iter().map(|(key, value)| (key.clone(), *value)));
@@ -762,7 +762,7 @@ fn insight_parameter_variant_request(
     symbol: &str,
     strategy: &str,
     day: u64,
-) -> Option<(scouts::ParameterVariantsRequest, BTreeMap<String, f64>)> {
+) -> Option<(strategy::ParameterVariantsRequest, BTreeMap<String, f64>)> {
     let profile_symbol = if matches!(strategy, "risk-adjusted-trend-portfolio" | "risk-adjusted-monthly-momentum") {
         "BTC-USDT"
     } else {
@@ -787,7 +787,7 @@ fn insight_parameter_variant_request(
             if !rejected.is_empty() { rejected_values.insert(key.clone(), rejected); }
             (key != "learning_rate" && current.is_finite() && min.is_finite()
                 && max.is_finite() && step.is_finite() && min < max && step > 0.0)
-                .then_some(scouts::ParameterSpec {
+                .then_some(strategy::ParameterSpec {
                     key,
                     label: parameter.get("label").and_then(serde_json::Value::as_str).unwrap_or_default().to_owned(),
                     default: current,
@@ -798,15 +798,15 @@ fn insight_parameter_variant_request(
                     learning_direction: 1.0,
                 })
         }).collect::<Vec<_>>();
-    Some((scouts::ParameterVariantsRequest { parameters: baseline.clone(), specs, day, rejected_values }, baseline))
+    Some((strategy::ParameterVariantsRequest { parameters: baseline.clone(), specs, day, rejected_values }, baseline))
 }
 
 fn request_insight_parameter_probe_variant_batch(
-    jobs: Vec<((String, String), scouts::ParameterVariantsRequest, BTreeMap<String, f64>)>,
+    jobs: Vec<((String, String), strategy::ParameterVariantsRequest, BTreeMap<String, f64>)>,
 ) -> Result<BTreeMap<(String, String), Vec<(String, f64, BTreeMap<String, f64>, BTreeMap<String, f64>)>>, String> {
     if jobs.is_empty() { return Ok(BTreeMap::new()); }
     Ok(jobs.into_iter().filter_map(|(key, request, baseline)| {
-        let variants = scouts::single_parameter_variants(
+        let variants = strategy::single_parameter_variants(
             &request.parameters,
             &request.specs,
             request.day,
@@ -834,13 +834,13 @@ type InsightProbeVariant = (
 async fn auto_trader_rpc(
     url: &str,
     request_id: String,
-    method: strategies::ScoutWorkerHttpMethod,
+    method: strategy::ScoutWorkerHttpMethod,
     path: &str,
     payload: serde_json::Value,
 ) -> anyhow::Result<serde_json::Value> {
-    let response = strategies::request_scout_service_route(
+    let response = strategy::request_scout_service_route(
         url,
-        &strategies::ScoutCoordinatorRouteCommand {
+        &strategy::ScoutCoordinatorRouteCommand {
             request_id,
             strategy: None,
             method,
@@ -861,12 +861,12 @@ async fn learning_scout_rpc(
     path: &str,
     payload: serde_json::Value,
 ) -> anyhow::Result<()> {
-    let response = strategies::request_scout_worker_route(
+    let response = strategy::request_scout_worker_route(
         url,
-        &strategies::ScoutCoordinatorRouteCommand {
+        &strategy::ScoutCoordinatorRouteCommand {
             request_id,
             strategy: None,
-            method: strategies::ScoutWorkerHttpMethod::Post,
+            method: strategy::ScoutWorkerHttpMethod::Post,
             path: path.into(),
             payload,
         },
@@ -1012,7 +1012,7 @@ fn daily_probe_group_key(signal: &serde_json::Value) -> String {
         .or_else(|| decision.and_then(|value| value.get("strategy_parameters")))
         .cloned()
         .unwrap_or(serde_json::Value::Null);
-    format!("{strategy}:{symbol}:{anchor}:{}", scouts::probe_id(&baseline_parameters.to_string()))
+    format!("{strategy}:{symbol}:{anchor}:{}", strategy::probe_id(&baseline_parameters.to_string()))
 }
 
 fn insight_profile_parameters(
@@ -1388,12 +1388,12 @@ async fn poll_daily_strategy_signals(store: SignalStore) {
         ticker.tick().await;
         let result: anyhow::Result<(serde_json::Value, Vec<serde_json::Value>, String)> = async {
             let (status, parameters, configuration) = tokio::try_join!(
-                auto_trader_rpc(&auto, format!("insights-daily:{}", now_ms()), strategies::ScoutWorkerHttpMethod::Get, "/positions/auto-trader", serde_json::Value::Null),
-                auto_trader_rpc(&auto, format!("insights-daily:{}", now_ms()), strategies::ScoutWorkerHttpMethod::Get, "/positions/auto-trader/parameters", serde_json::Value::Null),
+                auto_trader_rpc(&auto, format!("insights-daily:{}", now_ms()), strategy::ScoutWorkerHttpMethod::Get, "/positions/auto-trader", serde_json::Value::Null),
+                auto_trader_rpc(&auto, format!("insights-daily:{}", now_ms()), strategy::ScoutWorkerHttpMethod::Get, "/positions/auto-trader/parameters", serde_json::Value::Null),
                 async {
-                    let response = strategies::request_scout_worker_route(&learning, &strategies::ScoutCoordinatorRouteCommand {
+                    let response = strategy::request_scout_worker_route(&learning, &strategy::ScoutCoordinatorRouteCommand {
                         request_id: format!("insights-daily:{}", now_ms()), strategy: None,
-                        method: strategies::ScoutWorkerHttpMethod::Get, path: "/configuration".into(),
+                        method: strategy::ScoutWorkerHttpMethod::Get, path: "/configuration".into(),
                         payload: serde_json::Value::Null,
                     }).await?;
                     if response.status >= 400 { anyhow::bail!("Learning Scout configuration route returned {}", response.status); }
@@ -1472,7 +1472,7 @@ async fn poll_daily_strategy_signals(store: SignalStore) {
         let diagnostics = batch.get("diagnostics").cloned().unwrap_or_else(|| serde_json::json!([]));
         if !generated.is_empty() {
             let now = snapshot.get("as_of_ms").and_then(serde_json::Value::as_u64).unwrap_or_else(now_ms);
-            let sweep_id = scouts::probe_id(&sweep_signature);
+            let sweep_id = strategy::probe_id(&sweep_signature);
             let probe_window = now / SCOUT_PARAMETER_SAMPLE_INTERVAL_MS;
             let scout_request = serde_json::json!({
                 "request_id": format!("daily-sweep-paired-v2:{sweep_id}:{probe_window}"),
@@ -1504,7 +1504,7 @@ async fn poll_daily_strategy_signals(store: SignalStore) {
                     },
                     "diagnostics": diagnostics.clone(),
                 });
-                if let Err(error) = auto_trader_rpc(&auto, format!("insights-daily:{}", now_ms()), strategies::ScoutWorkerHttpMethod::Post, "/internal/auto-trader/daily-strategy-signals", payload).await {
+                if let Err(error) = auto_trader_rpc(&auto, format!("insights-daily:{}", now_ms()), strategy::ScoutWorkerHttpMethod::Post, "/internal/auto-trader/daily-strategy-signals", payload).await {
                     crate::service_log!("WARN", "Insights daily strategy sweep delivery failed: {error}");
                     group_failed = true;
                     break;
@@ -1527,7 +1527,7 @@ async fn poll_daily_strategy_signals(store: SignalStore) {
                 "diagnostics": diagnostics,
                 "refresh_only": true,
             });
-            if let Err(error) = auto_trader_rpc(&auto, format!("insights-daily:{}", now_ms()), strategies::ScoutWorkerHttpMethod::Post, "/internal/auto-trader/daily-strategy-signals", heartbeat).await {
+            if let Err(error) = auto_trader_rpc(&auto, format!("insights-daily:{}", now_ms()), strategy::ScoutWorkerHttpMethod::Post, "/internal/auto-trader/daily-strategy-signals", heartbeat).await {
                 crate::service_log!("WARN", "Insights daily strategy snapshot refresh failed: {error}");
             }
         }

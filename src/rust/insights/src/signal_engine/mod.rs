@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use axum::{Json, Router, http::StatusCode, routing::get};
 use flate2::{Compression, read::MultiGzDecoder, write::GzEncoder};
 use rusqlite::{Connection, params};
@@ -7,10 +7,7 @@ use std::io::{Read, Write};
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque},
     path::PathBuf,
-    sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-    },
+    sync::Arc,
     time::{Duration, Instant},
 };
 use tokio::sync::{Mutex, mpsc, oneshot};
@@ -20,7 +17,6 @@ const TRADE_WINDOW_MS: u64 = 300_000;
 const ABSORPTION_WINDOW_MS: u64 = 60_000;
 const MAX_BOOK_AGE_MS: u64 = 5_000;
 const MAX_PRICE_LOOKBACK_GAP_MS: u64 = 5_000;
-const WALK_FORWARD_MIN_TRAINING_SAMPLES: usize = 30;
 /// Heavy research capture is sampled independently from live signal generation.
 // Persist one research/signal sample every ten seconds. Live signal snapshots
 // are still computed on every feed event, while this cadence limits the
@@ -28,25 +24,8 @@ const WALK_FORWARD_MIN_TRAINING_SAMPLES: usize = 30;
 pub const RESEARCH_SAMPLE_INTERVAL_MS: u64 = 10_000;
 /// Recompute and publish live signals at most once per symbol every two seconds.
 pub const LIVE_SIGNAL_SNAPSHOT_INTERVAL_MS: u64 = 2_000;
-const WALK_FORWARD_MIN_THRESHOLD_SAMPLES: usize = 10;
-const WALK_FORWARD_TRAINING_WINDOW: usize = 200;
-/// Keep supporting signal records bounded; outcomes have a separate broader
-/// limit because the analysis needs 31 non-overlapping directional outcomes
-/// per symbol and horizon after scanning the shared market universe.
-pub const WALK_FORWARD_RECORD_LIMIT: usize = 2_000;
-/// At the current sampling rate, 1-minute and 5-minute cohorts need hundreds
-/// to thousands of raw outcomes each to produce 31 non-overlapping costed
-/// directional samples. Keep the scan bounded, but large enough for the
-/// current ~100-symbol universe.
-pub const WALK_FORWARD_OUTCOME_LIMIT: usize = 1_250_000;
-const CALIBRATION_SNAPSHOT_LIMIT: usize = 2_000;
-const CALIBRATION_OUTCOME_LIMIT: usize = 20_000;
-const WALK_FORWARD_LOGISTIC_REFRESH_INTERVAL: usize = 100;
-const TREND_LOGISTIC_CONFIDENCE_THRESHOLDS: [f64; 3] = [0.55, 0.60, 0.65];
-const STRENGTH_THRESHOLDS: [f64; 8] = [0.0, 0.1, 0.15, 0.2, 0.25, 0.3, 0.4, 0.5];
-const EXPLORATION_SCORE_THRESHOLDS: [f64; 5] = [0.1, 0.2, 0.3, 0.4, 0.5];
-const MISSED_OPPORTUNITY_SCORE_THRESHOLDS: [f64; 4] = [0.2, 0.3, 0.4, 0.5];
-const MISSED_OPPORTUNITY_STRENGTH_THRESHOLDS: [f64; 5] = [0.25, 0.35, 0.4, 0.45, 0.5];
+const CALIBRATION_SNAPSHOT_LIMIT: usize = 1_000;
+const CALIBRATION_OUTCOME_LIMIT: usize = 5_000;
 
 include!("engine/signal_contracts.rs");
 include!("engine/signal_engine_types.rs");
@@ -63,7 +42,6 @@ impl Default for SignalEngine {
             book_bid_levels: Vec::with_capacity(16),
             book_ask_levels: Vec::with_capacity(16),
             book_history: VecDeque::with_capacity(64),
-            counterfactual_book_history: VecDeque::with_capacity(256),
             volatility_1m: None,
             last_research_sample_at: None,
             last_live_snapshot_at: None,
@@ -132,7 +110,6 @@ fn breakout_watch(
     (pressure >= 0.35).then_some((if bias > 0.0 { "UP" } else { "DOWN" }, pressure))
 }
 
-include!("engine/signal_logistic_models.rs");
 include!("engine/signal_outcome_models.rs");
 
 include!("engine/signal_engine_outcomes.rs");
@@ -141,32 +118,6 @@ include!("engine/signal_engine_market_inputs.rs");
 include!("engine/signal_engine_snapshot.rs");
 include!("engine/signal_snapshot_diagnostics.rs");
 include!("engine/signal_engine_state.rs");
-
-fn select_strength_threshold(training: &[SignalOutcome], evaluated_by: u64) -> Option<f64> {
-    STRENGTH_THRESHOLDS
-        .iter()
-        .copied()
-        .filter_map(|threshold| {
-            let (net_total, selected_count) = training
-                .iter()
-                .filter(|sample| {
-                    sample.evaluated_timestamp <= evaluated_by && sample.strength >= threshold
-                })
-                .fold((0.0, 0usize), |(total, count), sample| {
-                    (
-                        total + sample.net_return_percent.unwrap_or_default(),
-                        count + 1,
-                    )
-                });
-            if selected_count < WALK_FORWARD_MIN_THRESHOLD_SAMPLES {
-                return None;
-            }
-            let mean = net_total / selected_count as f64;
-            (mean > 0.0).then_some((threshold, mean))
-        })
-        .max_by(|left, right| left.1.total_cmp(&right.1).then(left.0.total_cmp(&right.0)))
-        .map(|(threshold, _)| threshold)
-}
 
 include!("store/signal_store_types.rs");
 
@@ -180,13 +131,10 @@ include!("store/signal_store_decision_quality.rs");
 include!("store/signal_store_routes.rs");
 include!("store/close_insights_api.rs");
 include!("store/signal_store_market_data.rs");
+include!("store/signal_store_research_history.rs");
+include!("store/signal_store_snapshot_history.rs");
 include!("store/signal_store_dashboard.rs");
 include!("store/signal_store_performance.rs");
-include!("store/signal_store_missed_opportunities.rs");
-include!("store/signal_walk_forward_samples.rs");
-include!("store/signal_store_walk_forward_result.rs");
-include!("store/signal_store_walk_forward_cache.rs");
-include!("store/signal_store_walk_forward.rs");
 include!("store/signal_store_record_writes.rs");
 
 #[path = "store/browser_rsocket.rs"]
@@ -320,41 +268,6 @@ mod coverage_tests {
             ),
             None
         );
-    }
-
-    #[test]
-    fn strength_threshold_uses_only_available_positive_training_cohorts() {
-        let training = (0..10)
-            .map(|index| SignalOutcome {
-                record_type: "outcome".into(),
-                symbol: "BTCUSDT".into(),
-                signal_timestamp: 1,
-                evaluated_timestamp: 100 + index,
-                horizon_seconds: 60,
-                return_percent: 1.0,
-                direction_match: true,
-                direction: "long".into(),
-                strength: 0.3,
-                net_return_percent: Some(1.0),
-                execution_cost_percent: None,
-                trend_5m_volatility_units: None,
-                trend_5m_direction_match: None,
-                trend_5m_net_return_percent: None,
-                features: None,
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(select_strength_threshold(&training, 105), None);
-        assert_eq!(select_strength_threshold(&training, 200), Some(0.3));
-
-        let losses = training
-            .into_iter()
-            .map(|mut sample| {
-                sample.evaluated_timestamp = 1;
-                sample.net_return_percent = Some(-1.0);
-                sample
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(select_strength_threshold(&losses, 200), None);
     }
 }
 

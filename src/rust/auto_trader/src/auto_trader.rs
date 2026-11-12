@@ -13,18 +13,18 @@ use std::{
     },
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
-use strategies::StrategyDecision;
+use strategy::StrategyDecision;
 #[cfg(test)]
-pub(crate) use strategies::StrategyParameterScoutVariant;
-pub use strategies::benchmark_strategy_evaluation;
-pub(crate) use strategies::daily::{
+pub(crate) use strategy::StrategyParameterScoutVariant;
+pub use strategy::benchmark_strategy_evaluation;
+pub(crate) use strategy::daily::{
     DailyStrategySignalBatch, DailyStrategySnapshot, StrategyDiagnostic, parse_scout_combination,
 };
 #[cfg(test)]
-pub(crate) use strategies::scout_parameter_specs;
+pub(crate) use strategy::scout_parameter_specs;
 #[cfg(test)]
-use strategies::{AbsorptionPressureValue, DepthSignalValue, WindowedSignalValue};
-pub(crate) use strategies::{
+use strategy::{AbsorptionPressureValue, DepthSignalValue, WindowedSignalValue};
+pub(crate) use strategy::{
     DatedCarryCandidate, DatedCarrySettlementSource, FeedbackEvent, Strategy, StrategyParameterKey,
     StrategyParameterProfile, StrategyParameterValue, StrategySignal, confident_win_rate_edge,
     effective_parameter_values, legacy_strategy_parameter_name, signal_strategy_parameters,
@@ -107,8 +107,14 @@ mod strategy_cleanup_integration_tests {
     }
 
     pub(super) fn test_state(settings: Settings) -> AutoTraderState {
-        let audit_tx = AuditQueue::new(DECISION_AUDIT_QUEUE_CAPACITY);
-        let execution_audit_tx = AuditQueue::new(EXECUTION_AUDIT_QUEUE_CAPACITY);
+        let audit_tx = AuditQueue::new(
+            DECISION_AUDIT_QUEUE_CAPACITY,
+            DECISION_AUDIT_QUEUE_MAX_BYTES,
+        );
+        let execution_audit_tx = AuditQueue::new(
+            EXECUTION_AUDIT_QUEUE_CAPACITY,
+            EXECUTION_AUDIT_QUEUE_MAX_BYTES,
+        );
         let (state_updates, _) = tokio::sync::broadcast::channel(1);
         let path =
             std::env::temp_dir().join(format!("auto-trader-cleanup-{}.json", std::process::id()));
@@ -124,9 +130,6 @@ mod strategy_cleanup_integration_tests {
             state_updates,
             settings_persist_timings_ms: Arc::new(std::sync::Mutex::new(BTreeMap::new())),
             latest_missed_opportunity_bands: Arc::new(Mutex::new(Arc::new(Vec::new()))),
-            latest_live_insights_context: Arc::new(
-                Mutex::new(SharedLiveInsightsContext::default()),
-            ),
             latest_execution_parameters: Arc::new(Mutex::new(None)),
             learning_response_cache: Arc::new(Mutex::new(LearningResponseCache::default())),
             cycle_lock: Arc::new(Mutex::new(())),

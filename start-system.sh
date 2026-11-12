@@ -9,21 +9,24 @@ for service in "${services[@]}"; do
     if [[ ! " ${services[*]} " == *" insights-maintenance "* ]]; then
       services+=(insights-maintenance)
     fi
-    if [[ ! " ${services[*]} " == *" live-signals "* ]]; then
-      services+=(live-signals)
-    fi
     break
   fi
   if [[ "$service" == "auto-trader" ]]; then
-    if [[ ! " ${services[*]} " == *" live-signals "* ]]; then
-      services+=(live-signals)
-    fi
     break
   fi
 done
 compose_args=(-p sbe-system -f system/compose.yml)
 if [[ "${SCOUT_WORKERS_ENABLED:-true}" == "true" ]]; then
   compose_args+=(--profile scout-workers)
+  if [[ " ${services[*]} " == *" learning "* ]]; then
+    while IFS= read -r worker; do
+      services+=("$worker")
+    done < <(docker compose "${compose_args[@]}" config --services | rg '^strategy-x-scout-')
+  fi
 fi
-docker compose "${compose_args[@]}" up -d "${services[@]}"
+if [[ ${#services[@]} -eq 0 ]]; then
+  docker compose "${compose_args[@]}" up -d --remove-orphans
+else
+  docker compose "${compose_args[@]}" up -d "${services[@]}"
+fi
 echo "System is running. App: http://localhost:5173"

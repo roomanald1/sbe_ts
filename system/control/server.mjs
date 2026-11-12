@@ -8,11 +8,14 @@ import { promisify } from 'node:util';
 const exec = promisify(execFile);
 const root = process.env.WORKSPACE_ROOT || '/workspace';
 const homepageDist = resolve(root, 'src/typescript/workspace/apps/homepage/dist');
-const services = ['feed-handlers','binance-feed','position-management','execution','insights','insights-maintenance','live-signals','auto-trader','news-sentiment','learning','scouts','web'];
+const services = ['feed-handlers','binance-feed','position-management','execution','insights','insights-maintenance','auto-trader','news-sentiment','learning','web'];
 const send = (res, code, value, type='application/json') => { res.writeHead(code, {'content-type': `${type}; charset=utf-8`}); res.end(type.startsWith('application/json') ? JSON.stringify(value) : value); };
 const contentType = (file) => ({ '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml', '.png': 'image/png', '.ico': 'image/x-icon' }[file.slice(file.lastIndexOf('.'))] || 'application/octet-stream');
 const compose = async (project, file, args) => {
-  const { stdout, stderr } = await exec('docker', ['compose','-p',project,'-f',file,'--progress=quiet',...args], {
+  const composeArgs = [...args];
+  const targetedScoutService = composeArgs.some((arg) => arg.startsWith('strategy-x-scout-'));
+  if (project === 'sbe-system' && (process.env.SCOUT_WORKERS_ENABLED === 'true' || targetedScoutService) && !composeArgs.includes('--profile')) composeArgs.unshift('--profile', 'scout-workers');
+  const { stdout, stderr } = await exec('docker', ['compose','-p',project,'-f',file,'--progress=quiet',...composeArgs], {
     cwd:root,
     timeout: 15 * 60 * 1000,
     maxBuffer: 5 * 1024 * 1024,
@@ -20,6 +23,7 @@ const compose = async (project, file, args) => {
   });
   return stdout || stderr || 'Done';
 };
+const getStrategyServices = async () => (await compose('sbe-system','system/compose.yml',['--profile','scout-workers','config','--services'])).split('\n').filter((service) => service.startsWith('strategy-x-live-') || service.startsWith('strategy-x-scout-'));
 http.createServer(async (req,res) => {
   try {
     const url = new URL(req.url, 'http://localhost');
@@ -42,21 +46,27 @@ http.createServer(async (req,res) => {
       const {project, action, service} = JSON.parse(body);
       if (project === 'all' && !service && ['start','stop','restart'].includes(action)) {
         const verb = action === 'start' ? 'up' : action === 'stop' ? 'stop' : 'restart';
-        const flags = action === 'start' ? ['-d'] : [];
+        const flags = action === 'start' ? ['-d','--remove-orphans'] : [];
         const first = await compose('sbe-system','system/compose.yml',[verb,...flags]);
         const second = await compose('sbe-infra','monitoring/docker-compose.yml',[verb,...flags]);
         return send(res,200,{output:`${first}\n${second}`});
       }
       if (!['system','infra'].includes(project) || !['start','stop','restart','rebuild-restart'].includes(action)) return send(res,400,{error:'Invalid action'});
       if (project === 'infra' && service && !['prometheus','loki','alloy','node-exporter','app-exporter','grafana'].includes(service)) return send(res,400,{error:'Unknown infra service'});
-      if (project === 'system' && service && !services.includes(service)) return send(res,400,{error:'Unknown system service'});
+      if (project === 'system' && service && !services.includes(service) && !(await getStrategyServices()).includes(service)) return send(res,400,{error:'Unknown system service'});
       const file = project === 'system' ? 'system/compose.yml' : 'monitoring/docker-compose.yml';
       let args;
       if (action === 'rebuild-restart') {
         if (!service) return send(res,400,{error:'Rebuild and restart requires a single service'});
         args = ['up','-d','--build','--no-deps',service];
       }
-      else if (action === 'start') args = ['up','-d',...(service ? [service] : [])];
+      else if (action === 'start') {
+        args = ['up','-d',...(project === 'system' && !service ? ['--remove-orphans'] : []),...(service ? [service] : [])];
+        if (project === 'system' && service === 'learning' && process.env.SCOUT_WORKERS_ENABLED !== 'false') {
+          const scoutWorkers = (await getStrategyServices()).filter((name) => name.startsWith('strategy-x-scout-'));
+          args.push(...scoutWorkers);
+        }
+      }
       else if (action === 'stop') args = ['stop',...(service ? [service] : [])];
       else args = ['restart',...(service ? [service] : [])];
       return send(res,200,{output:await compose(project === 'system' ? 'sbe-system' : 'sbe-infra',file,args)});
@@ -147,7 +157,7 @@ async function runLivenessChecks() {
     try { checks.push({ name, ok: true, detail: await fn() }); }
     catch (error) { checks.push({ name, ok: false, detail: error.message }); }
   };
-  for (const [name, port] of [['Feed handlers',3001],['Binance feed',3012],['Execution',3003],['Insights',3004],['Live signals',3007],['News sentiment',3006],['Learning',3010],['Scouts',3011],['Position management',3002],['AutoTrader',3005]]) {
+  for (const [name, port] of [['Feed handlers',3001],['Binance feed',3012],['Execution',3003],['Insights',3004],['News sentiment',3006],['Learning',3010],['Position management',3002],['AutoTrader',3005]]) {
     await check(`${name} health`, async () => {
       const result = await get(port, '/health');
       if (result !== 'ok' && result?.status !== 'ok') throw new Error('Unexpected health response');
@@ -161,10 +171,10 @@ async function runLivenessChecks() {
       catch { return []; }
     });
     const running = new Set(containers.filter((container) => container.State === 'running').map((container) => container.Service));
-    const required = ['feed-handlers','binance-feed','position-management','execution','insights','insights-maintenance','live-signals','auto-trader','news-sentiment','learning','scouts','web'];
+    const strategyServices = await getStrategyServices();
+    const required = ['feed-handlers','binance-feed','position-management','execution','insights','insights-maintenance','auto-trader','news-sentiment','learning','web', ...strategyServices.filter((service) => service.startsWith('strategy-x-live-'))];
     if (process.env.SCOUT_WORKERS_ENABLED === 'true') {
-      const configured = (await compose('sbe-system', 'system/compose.yml', ['--profile', 'scout-workers', 'config', '--services'])).split('\n').filter(Boolean);
-      required.push(...configured.filter((service) => service.startsWith('scout-worker-')));
+      required.push(...strategyServices.filter((service) => service.startsWith('strategy-x-scout-')));
     }
     const missing = required.filter((service) => !running.has(service));
     if (missing.length) throw new Error(`Not running: ${missing.join(', ')}`);

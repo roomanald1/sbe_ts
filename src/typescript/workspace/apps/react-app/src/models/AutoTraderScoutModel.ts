@@ -14,7 +14,7 @@ export type AutoTraderScoutPosition = {
   pairedDeltaPercent?: number;
   pairedDeltaTone?: 'is-positive' | 'is-negative' | 'is-flat';
   exitScenario: 'strategy' | 'tight' | 'wide';
-  direction: 'bullish' | 'bearish';
+  direction: 'bullish' | 'bearish' | 'unknown';
   strength: number;
   openedAt: number;
   durationLabel?: string;
@@ -34,6 +34,7 @@ export type AutoTraderScoutPosition = {
   netVsBreakevenTone?: 'is-positive' | 'is-negative' | 'is-flat';
   netReturnEstimated?: boolean;
   returnBasis?: 'strategy exit' | 'ticker estimate';
+  simulated?: boolean;
   horizonMarkouts?: Record<
     string,
     {

@@ -69,7 +69,7 @@ fn diagnostic_strategy_blocker(diagnostic: &StrategyDiagnostic) -> Option<Strate
 #[cfg(test)]
 mod strategy_blocker_tests {
     use super::*;
-    use strategies::daily::StrategySymbolDiagnostic;
+    use strategy::daily::StrategySymbolDiagnostic;
 
     #[test]
     fn reports_the_failed_strategy_rule_and_observed_metric() {
@@ -155,6 +155,8 @@ fn status(state: &AutoTraderState, settings: &Settings) -> StatusResponse {
         audit_failure_latched: state.audit_failure_latched.load(Ordering::Relaxed),
         decision_audit_queue_depth: state.audit_tx.depth(),
         execution_audit_queue_depth: state.execution_audit_tx.depth(),
+        decision_audit_queue_estimated_bytes: state.audit_tx.estimated_bytes(),
+        execution_audit_queue_estimated_bytes: state.execution_audit_tx.estimated_bytes(),
         audit_coalesced_decisions: state.audit_tx.coalesced.load(Ordering::Relaxed),
         audit_dropped_events: state.audit_tx.dropped.load(Ordering::Relaxed)
             + state.execution_audit_tx.dropped.load(Ordering::Relaxed),

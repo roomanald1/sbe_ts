@@ -536,10 +536,14 @@
   min-height: 24px;
   padding-left: 30px;
 }
-.dashboard-widget .auto-trader-learning-grid {
-  height: auto;
+.dashboard-widget .auto-trader-learning-experiments {
   min-height: 0;
-  flex: 1 1 0;
+  flex: 1 1 auto;
+  overflow: auto;
+}
+.dashboard-widget .auto-trader-learning-grid {
+  height: 220px;
+  min-height: 220px;
 }
 .auto-trader-gates-backdrop {
   position: fixed;

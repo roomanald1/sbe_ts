@@ -55,12 +55,6 @@ async fn submit_selected_signal(
     } = request;
     let cycle_guard = acquire_cycle_lock(state, "signal").await;
     let snapshot_started = Instant::now();
-    let evidence = entry_walk_forward_for_strategy(
-        &dashboard.walk_forward,
-        &signal.symbol,
-        signal.strategy.as_deref(),
-        now.saturating_mul(1000),
-    );
     let decision_id = signal_decision_id(signal);
     let signal_key = signal.symbol.clone();
     let now_ms = now.saturating_mul(1000);
@@ -151,13 +145,6 @@ async fn submit_selected_signal(
         ));
     };
     let spread_bps = (ask - bid) / mid * 10_000.0;
-    let side_edge = evidence.and_then(|item| {
-        if signal.direction == "bullish" {
-            item.all_signal_long.average_net_return_percent
-        } else {
-            item.all_signal_short.average_net_return_percent
-        }
-    });
     let strategy_edge = signal.strategy.as_deref().and_then(Strategy::from_name)
         .filter(|kind| !kind.is_dated_carry())
         .and_then(|kind| validated_strategy_entry_edge(signal, kind).ok());
@@ -166,8 +153,6 @@ async fn submit_selected_signal(
     let (edge_percent, edge_source, fee_bps) =
         if let Some(edge) = strategy_edge {
             (edge, "measured strategy Scout net edge", 0.0)
-        } else if let Some(edge) = side_edge.filter(|v| v.is_finite()) {
-            (edge, "measured walk-forward edge", 0.0)
         } else {
             (
                 effective_take_profit_percent,
@@ -445,7 +430,6 @@ async fn submit_selected_signal(
         counterfactual_take_profit_percent,
         effective_stop_loss_percent,
         effective_take_profit_percent,
-        evidence: evidence.cloned(),
         side: side.to_owned(),
         quantity,
         notional,

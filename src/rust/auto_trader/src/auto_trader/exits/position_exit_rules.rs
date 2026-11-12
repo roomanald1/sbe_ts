@@ -64,6 +64,56 @@ fn opposing_strategy_signal_strength(
         .then_some((strength.clamp(0.0, 1.0), signal.timestamp))
 }
 
+fn position_strategy_parameters(position: &TraderPosition) -> BTreeMap<String, f64> {
+    position
+        .strategy_decision
+        .as_ref()
+        .and_then(|decision| decision.get("strategy_parameters"))
+        .and_then(serde_json::Value::as_object)
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(|(key, value)| value.as_f64().map(|value| (key.clone(), value)))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn daily_rebalance_candidate<'a>(
+    snapshot: &'a DailyStrategySnapshot,
+    strategy: &str,
+    symbol: &str,
+    previous_decision: Option<&serde_json::Value>,
+) -> Option<&'a Signal> {
+    if Strategy::from_name(strategy) != Some(Strategy::RiskAdjustedMonthlyMomentum) {
+        return None;
+    }
+    let previous_anchor = previous_decision?
+        .get("monthly_anchor_close_time_ms")?
+        .as_u64()?;
+    let signal = snapshot
+        .generated_signals
+        .iter()
+        .find(|signal| signal.strategy.as_deref() == Some(strategy) && signal.symbol == symbol)?;
+    signal
+        .strategy_decision
+        .as_ref()?
+        .get("monthly_anchor_close_time_ms")?
+        .as_u64()
+        .is_some_and(|current_anchor| current_anchor > previous_anchor)
+        .then_some(signal)
+}
+
+fn live_decision_from_worker(decision: strategy::LiveStrategyDecision) -> StrategyDecision {
+    match decision {
+        strategy::LiveStrategyDecision::Enter => StrategyDecision::Enter,
+        strategy::LiveStrategyDecision::Hold => StrategyDecision::Hold,
+        strategy::LiveStrategyDecision::Exit => StrategyDecision::Exit,
+        strategy::LiveStrategyDecision::Rebalance => StrategyDecision::Rebalance,
+        strategy::LiveStrategyDecision::Reject => StrategyDecision::Reject,
+    }
+}
+
 fn next_thesis_failure_confirmation(
     current_count: u32,
     last_signal_timestamp_ms: u64,
@@ -327,20 +377,104 @@ async fn evaluate_position_exit(
         && observed_at.saturating_sub(position.entry_timestamp_ms)
             < (minimum_hold_days * 86_400_000.0) as u64;
     // Evaluate signal state and strategy enablement through the strategy lifecycle evaluator.
-    let strategy_decision = strategy_no_longer_eligible.as_deref().map(|strategy| {
-        if let Some(regime) = research_regime.as_ref() {
-            regime.evaluate_position(strategy, &symbol, strategy_enabled,
-                position.strategy_decision.as_ref(), minimum_hold_active)
+    let strategy_decision = if let Some(strategy_name) = strategy_no_longer_eligible.as_deref() {
+        if let Some(strategy) = Strategy::from_name(strategy_name) {
+            let parameters = position_strategy_parameters(&position);
+            let profile_symbol = position.strategy_decision.as_ref()
+                .and_then(|decision| {
+                    decision
+                        .get("learning_profile_symbol")
+                        .or_else(|| decision.get("scout_parameter_profile_symbol"))
+                })
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or(&symbol)
+                .to_owned();
+            let profile_id = strategy::profile_id(&profile_symbol, strategy_name, &parameters);
+            let profile_version = position.strategy_decision.as_ref()
+                .and_then(|decision| decision.get("learning_profile_version"))
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or_default();
+            let daily_signal = research_regime.and_then(|snapshot| {
+                snapshot.generated_signals.iter().find(|signal| {
+                    signal.strategy.as_deref() == Some(strategy_name) && signal.symbol == symbol
+                })
+            });
+            let daily_features = daily_signal
+                .and_then(|signal| signal.strategy_decision.clone())
+                .and_then(|value| serde_json::from_value(value).ok());
+            let signal_active = if minimum_hold_active {
+                None
+            } else {
+                research_regime.and_then(|snapshot| snapshot.signal_active(strategy_name, &symbol))
+            };
+            let mut rebalance_required = false;
+            if !minimum_hold_active {
+                if let Some(snapshot) = research_regime {
+                    if let Some(candidate) = daily_rebalance_candidate(
+                        snapshot,
+                        strategy_name,
+                        &symbol,
+                        position.strategy_decision.as_ref(),
+                    ) {
+                        match crate::service_rpc::live_entry_evaluation_request_for_profile(
+                            strategy,
+                            candidate,
+                            profile_id.clone(),
+                            profile_symbol.clone(),
+                            profile_version,
+                            parameters.clone(),
+                        ) {
+                            Ok(request) => {
+                                rebalance_required = matches!(
+                                    crate::service_rpc::request_live_evaluation(&request).await,
+                                    Ok(strategy::LiveStrategyDecision::Enter)
+                                );
+                            }
+                            Err(error) => crate::service_log!(
+                                "WARN",
+                                "Could not prepare monthly rebalance evaluation for {} {}: {error}",
+                                strategy_name,
+                                symbol,
+                            ),
+                        }
+                    }
+                }
+            }
+            let request = crate::service_rpc::live_position_evaluation_request(
+                strategy,
+                symbol.clone(),
+                profile_id,
+                profile_symbol,
+                profile_version,
+                parameters,
+                strategy::LivePositionContext {
+                    is_open: true,
+                    strategy_enabled,
+                    signal_active,
+                    rebalance_required,
+                    daily_features,
+                },
+            );
+            match crate::service_rpc::request_live_evaluation(&request).await {
+                Ok(decision) => live_decision_from_worker(decision),
+                Err(error) => {
+                    crate::service_log!(
+                        "WARN",
+                        "Open-position Strategy X evaluation failed for {} {}: {error}",
+                        strategy_name,
+                        symbol,
+                    );
+                    StrategyDecision::Hold
+                }
+            }
+        } else if strategy_enabled {
+            StrategyDecision::Hold
         } else {
-            let parameters = BTreeMap::new();
-            Strategy::from_name(strategy).map_or(
-                if strategy_enabled { StrategyDecision::Hold } else { StrategyDecision::Exit },
-                |kind| kind.evaluate(&StrategySignal::position(
-                    &parameters, strategy_enabled, None, false,
-                )).unwrap_or(StrategyDecision::Hold),
-            )
+            StrategyDecision::Exit
         }
-    }).unwrap_or(StrategyDecision::Hold);
+    } else {
+        StrategyDecision::Hold
+    };
     let strategy_disabled = strategy_decision == StrategyDecision::Exit && !strategy_enabled;
     let research_signal_active = research_regime
         .and_then(|snapshot| snapshot.signal_active(&strategy_key, &symbol));

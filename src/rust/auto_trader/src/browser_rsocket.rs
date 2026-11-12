@@ -18,7 +18,7 @@ const MAX_RESPONSE_BODY_BYTES: usize = 8 * 1024 * 1024;
 #[derive(Debug, Deserialize)]
 #[serde(untagged)]
 enum RouteRequest {
-    Scout(strategies::ScoutCoordinatorRequest),
+    Scout(strategy::ScoutCoordinatorRequest),
     Browser(BrowserRouteRequest),
 }
 
@@ -58,15 +58,15 @@ impl RSocket for AutoTraderResponder {
                     dispatch_route(&self.0, &request.method, &request.path, request.body).await?;
                 serde_json::to_vec(&result)?
             }
-            RouteRequest::Scout(strategies::ScoutCoordinatorRequest::WorkerRoute(command)) => {
+            RouteRequest::Scout(strategy::ScoutCoordinatorRequest::WorkerRoute(command)) => {
                 if command.strategy.is_some() {
                     bail!("AutoTrader routes are not strategy-partitioned");
                 }
                 let method = match command.method {
-                    strategies::ScoutWorkerHttpMethod::Get => "GET",
-                    strategies::ScoutWorkerHttpMethod::Put => "PUT",
-                    strategies::ScoutWorkerHttpMethod::Post => "POST",
-                    strategies::ScoutWorkerHttpMethod::Delete => "DELETE",
+                    strategy::ScoutWorkerHttpMethod::Get => "GET",
+                    strategy::ScoutWorkerHttpMethod::Put => "PUT",
+                    strategy::ScoutWorkerHttpMethod::Post => "POST",
+                    strategy::ScoutWorkerHttpMethod::Delete => "DELETE",
                 };
                 let result = dispatch_route(
                     &self.0,
@@ -75,8 +75,8 @@ impl RSocket for AutoTraderResponder {
                     (command.payload != Value::Null).then_some(command.payload),
                 )
                 .await?;
-                serde_json::to_vec(&strategies::ScoutCoordinatorResponse::WorkerRoute(
-                    strategies::ScoutCoordinatorRouteResult {
+                serde_json::to_vec(&strategy::ScoutCoordinatorResponse::WorkerRoute(
+                    strategy::ScoutCoordinatorRouteResult {
                         request_id: command.request_id,
                         status: result.status,
                         body: result.body,
