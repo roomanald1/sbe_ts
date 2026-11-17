@@ -4,6 +4,7 @@ import {
   applyInstanceTodayPnl,
   AutoTraderOutcomesModel,
   mergeLatestStrategyDecisions,
+  parseLearningSummary,
   resolveLedgerOrder,
   strategyInstanceForClose,
 } from './AutoTraderOutcomesModel';
@@ -11,6 +12,23 @@ import { buildLegacyLedgerOutcomes } from './legacy_ledger_outcomes';
 import type { PositionTrade } from './PositionTypes';
 
 describe('AutoTraderOutcomesModel', () => {
+  it('distinguishes unavailable Learning summaries from empty recent outcomes', () => {
+    assert.deepEqual(parseLearningSummary(undefined), {
+      rows: [],
+      status: 'unavailable',
+    });
+    assert.deepEqual(parseLearningSummary([]), { rows: [], status: 'empty' });
+    assert.deepEqual(
+      parseLearningSummary([
+        { strategy: 'live-momentum', learning_samples: 2 },
+      ]),
+      {
+        rows: [{ strategy: 'live-momentum', learning_samples: 2 }],
+        status: 'available',
+      },
+    );
+  });
+
   it('uses the newest decision audit instead of an older strategy reason', () => {
     const latest = mergeLatestStrategyDecisions(
       {

@@ -85,22 +85,14 @@ async fn start_scheduled_run(
             "Participation rate must be between 1% and 100%".into(),
         ));
     }
-    store.ensure_subscription(&symbol);
-    let side_book = store.book(&symbol).ok_or((
+    store.ensure_market_mark_polling(&symbol);
+    let side_mark = store.market_mark(&symbol).ok_or((
         StatusCode::SERVICE_UNAVAILABLE,
         "Live book is required to reserve VWAP buying power".to_owned(),
     ))?;
     let price = match request.side {
-        TradeSide::Buy => side_book
-            .asks
-            .iter()
-            .map(|level| level.price)
-            .fold(0.0_f64, f64::max),
-        TradeSide::Sell => side_book
-            .bids
-            .first()
-            .map(|level| level.price)
-            .unwrap_or(0.0),
+        TradeSide::Buy => side_mark.worst_ask.unwrap_or_default(),
+        TradeSide::Sell => side_mark.bid.unwrap_or_default(),
     };
     if price <= 0.0 {
         return Err((
@@ -177,7 +169,7 @@ async fn start_scheduled_run(
             cancelled: cancelled.clone(),
         },
     );
-    store.ensure_subscription(&symbol);
+    store.ensure_market_mark_polling(&symbol);
     drop(account_ledger);
     let initial_status = status.try_lock().map_err(|_| {
         (StatusCode::SERVICE_UNAVAILABLE, "VWAP status busy".to_owned())

@@ -5,6 +5,8 @@ type Feed = (BookFeed | TradeFeed) & {
   symbol?: string;
   active: boolean;
   subscription?: StreamSubscription;
+  retryTimer?: ReturnType<typeof setTimeout>;
+  retryDelay?: number;
 };
 type StreamSubscription = { cancel(): void; request(count: number): void };
 type StreamPayload = { data: unknown };
@@ -48,6 +50,8 @@ export class ConnectionFeedManager<F extends Feed> {
 
   close(key: string, feed: F): void {
     if (this.feeds.get(key) !== feed) return;
+    if (feed.retryTimer) clearTimeout(feed.retryTimer);
+    feed.retryTimer = undefined;
     feed.subscription?.cancel();
     feed.subscription = undefined;
     feed.active = false;
@@ -58,6 +62,8 @@ export class ConnectionFeedManager<F extends Feed> {
 
   cancelAll(): void {
     for (const feed of this.feeds.values()) {
+      if (feed.retryTimer) clearTimeout(feed.retryTimer);
+      feed.retryTimer = undefined;
       feed.subscription?.cancel();
       feed.subscription = undefined;
       feed.active = false;
@@ -96,6 +102,7 @@ export class ConnectionFeedManager<F extends Feed> {
           if (!this.isCurrent(feed, socket, generation)) return;
           feed.data.next(payload.data);
           feed.error.next(undefined);
+          feed.retryDelay = 1000;
           received += 1;
           if (received >= this.options.demand) {
             received = 0;
@@ -103,8 +110,13 @@ export class ConnectionFeedManager<F extends Feed> {
           }
         },
         onError: (error) =>
-          this.fail(feed, socket, error.message ?? 'Feed disconnected'),
-        onComplete: () => this.fail(feed, socket, 'Feed completed'),
+          this.fail(
+            feed,
+            socket,
+            generation,
+            error.message ?? 'Feed disconnected',
+          ),
+        onComplete: () => this.fail(feed, socket, generation, 'Feed completed'),
       });
   }
 
@@ -120,15 +132,28 @@ export class ConnectionFeedManager<F extends Feed> {
     );
   }
 
-  private fail(feed: F, socket: StreamSocket, message: string): void {
+  private fail(
+    feed: F,
+    socket: StreamSocket,
+    generation: number,
+    message: string,
+  ): void {
     if (
       this.feeds.get(feed.key) !== feed ||
-      this.options.getSocket() !== socket
+      this.options.getSocket() !== socket ||
+      this.options.getGeneration() !== generation
     )
       return;
     feed.subscription = undefined;
     feed.active = false;
     feed.error.next(message);
+    if (feed.retryTimer) return;
+    const delay = feed.retryDelay ?? 1000;
+    feed.retryDelay = Math.min(delay * 2, 30_000);
+    feed.retryTimer = setTimeout(() => {
+      feed.retryTimer = undefined;
+      this.start(feed);
+    }, delay);
   }
 }
 

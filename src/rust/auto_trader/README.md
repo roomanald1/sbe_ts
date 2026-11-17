@@ -1,31 +1,37 @@
 # AutoTrader
 
-AutoTrader owns live trading coordination, portfolio and risk gates, order
-submission, position state, and live outcome attribution. Strategy decisions
-are evaluated by Strategy X live workers; AutoTrader routes each registered
-strategy request to its dedicated worker and remains responsible for applying
-the returned decision.
+AutoTrader owns which live strategies and parameter profiles may trade, plus
+portfolio risk, position state, order submission, and live outcome attribution.
+It does not receive Insights market-signal pushes or evaluate strategy rules.
+Strategy workers subscribe to Insights, evaluate their active profiles, and
+report profile-versioned decisions to AutoTrader. AutoTrader applies its final
+risk and order checks before entering; it consumes worker exit decisions during
+five-second position maintenance while protective orders remain active.
 
-## Strategy X live workers
+## Strategy live workers
 
-`AUTO_TRADER_LIVE_WORKER_ENDPOINTS` is a comma-separated mapping of
-`strategy=ws://host:port` entries. Compose configures one always-on worker per
-registered strategy using `strategy-x-live-<strategy>` at port `10201`. The
-workers use `STRATEGY_X_WORKER_ROLE=live` and
-`STRATEGY_X_WORKER_STRATEGY=<strategy>`. They are stateless and do not share
-Scout databases or queues.
+Compose runs one live worker process per registered strategy at port `10201`.
+Each runner subscribes to Insights on `INSIGHTS_STRATEGY_STREAM_URL`, refreshes
+its profile set from AutoTrader, and evaluates all configured profiles against
+the same feature update. `active_live_strategy_profiles` in AutoTrader settings
+can hold up to 512 bounded profiles across strategies. If no explicit profile
+set is configured for a strategy, AutoTrader supplies its learned/default
+profile per symbol. Worker callbacks include the event ID, profile ID/version,
+parameter hash, and decision. The decision endpoint rejects stale events,
+disabled strategies, and profile snapshots that are no longer active.
 
-Live evaluation requests have bounded concurrency, payload size, and timeout.
-Worker failures reject new strategy decisions; protective order handling and
-position management continue through their existing path.
+Worker subscriptions use reconnect snapshots and a bounded deduplication map.
+Live feature updates older than five seconds fail closed for entries. Daily
+strategy snapshots refresh every 30 seconds; position exits hold safely when
+the last worker decision is stale. Worker failures do not disable protective
+order reconciliation.
 
-When a cycle cannot select a trade, AutoTrader places at most one strongest
-rejected, named live-strategy candidate in its persisted Learning feedback
-outbox. The event carries the exact profile/parameters, direction, score,
-strength, and market context. Generic signal-only candidates and Scout probes
-are excluded. Learning measures later directional markouts from persisted
-10-second features and book marks; these observations are diagnostic and are
-not represented as net trade returns.
+Live strategy workers report decision transitions and periodic status for
+active profiles. AutoTrader records profile-attributed live rejections in its
+Learning feedback outbox so Learning can measure later directional markouts
+from persisted 10-second features and book marks. Those observations are
+diagnostic, not net trade returns. Raw generic signals and Scout probes are
+not sent to AutoTrader.
 
 ## Listeners and state
 
@@ -35,9 +41,16 @@ not represented as net trade returns.
 - `AUTO_TRADER_STATE_FILE` points to the persisted AutoTrader state file.
 
 Process-local caches are bounded: the Learning response cache retains at most
-128 entries for 30 seconds; latest live strategy signals retain one sample only
-for active strategy positions and expire after 10 seconds; market-book prewarm
-requests expire after 5 minutes and cap at 4,096 symbols. Audit queues retain
+128 entries for 30 seconds; latest strategy signals retain one sample only for
+active strategy positions and expire after 10 seconds. Pending worker decisions
+coalesce by symbol and profile ID, retain only that symbol's market book, and
+cap at 256 items by default. Each queued signal and its single-symbol book is
+limited to an estimated 256 KiB, so the queue has a roughly 64 MiB payload
+ceiling. Configure `AUTO_TRADER_MAX_PENDING_LIVE_SIGNAL_ITEMS`; the former
+`AUTO_TRADER_MAX_PENDING_LIVE_SYMBOLS` name remains accepted as an alias.
+Compose caps glibc
+allocator arenas at four by default through `AUTO_TRADER_MALLOC_ARENA_MAX`.
+Audit queues retain
 at most 16,384 decision records / 4,096 execution records and an estimated
 8 MiB of payload each. Replaceable decision rejections may be coalesced or
 evicted to stay within the limits. Execution audit records are never evicted to

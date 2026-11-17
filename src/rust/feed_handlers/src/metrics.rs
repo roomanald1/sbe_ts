@@ -31,6 +31,20 @@ pub fn queue_snapshot() -> Vec<(String, u64, u64)> {
         .collect()
 }
 
+pub fn queue_capacity(queue: &str) -> Option<u64> {
+    let capacity = match queue {
+        "price_updates" => 4_096,
+        "ticker_batches" => 256,
+        "signal_events" => 65_536,
+        "signal_feeds" => 64,
+        _ if queue.starts_with("signal_prices/") => 64,
+        _ if queue.starts_with("shared_trades/") => 512,
+        _ if queue.starts_with("shared_books/") => 32,
+        _ => return None,
+    };
+    Some(capacity)
+}
+
 pub fn record_trade() {
     TRADES.fetch_add(1, Ordering::Relaxed);
 }

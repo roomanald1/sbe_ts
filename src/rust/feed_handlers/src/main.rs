@@ -71,5 +71,8 @@ async fn process_memory_bytes() -> String {
 }
 
 async fn queue_metrics() -> Json<Vec<serde_json::Value>> {
-    Json(feed_handlers::metrics::queue_snapshot().into_iter().map(|(queue, depth, dropped)| serde_json::json!({"queue": queue, "depth": depth, "dropped": dropped})).collect())
+    Json(feed_handlers::metrics::queue_snapshot().into_iter().map(|(queue, depth, dropped)| {
+        let capacity = feed_handlers::metrics::queue_capacity(&queue);
+        serde_json::json!({"queue": queue, "depth": depth, "capacity": capacity, "dropped": dropped})
+    }).collect())
 }

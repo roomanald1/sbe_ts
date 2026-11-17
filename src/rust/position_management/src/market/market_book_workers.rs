@@ -1,15 +1,3 @@
-async fn subscribe_market_book(
-    State(store): State<Arc<PositionStore>>,
-    Path(symbol): Path<String>,
-) -> StatusCode {
-    let symbol = symbol.to_ascii_uppercase();
-    if !valid_position_symbol(&symbol) {
-        return StatusCode::BAD_REQUEST;
-    }
-    store.ensure_subscription(&symbol);
-    StatusCode::NO_CONTENT
-}
-
 async fn expire_orders_loop(store: Arc<PositionStore>) {
     loop {
         tokio::time::sleep(Duration::from_secs(1)).await;
@@ -44,22 +32,22 @@ async fn barrier_order_loop(store: Arc<PositionStore>) {
         if barriers.is_empty() {
             continue;
         }
-        let books = store.books_snapshot();
+        let marks = store.market_marks_snapshot();
         let Ok(now) = now_ms() else {
             continue;
         };
         for barrier in barriers {
-            let Some(book) = books.get(&barrier.symbol) else {
+            let Some(mark) = marks.get(&barrier.symbol) else {
                 continue;
             };
             if barrier.retry_after.is_some_and(|retry_after| now < retry_after)
-                || now.saturating_sub(book.updated_at_ms) > 5_000
+                || now.saturating_sub(mark.updated_at_ms) > 5_000
             {
                 continue;
             }
             let current = match barrier.side {
-                TradeSide::Buy => book.asks.first().map(|level| level.price),
-                TradeSide::Sell => book.bids.first().map(|level| level.price),
+                TradeSide::Buy => mark.ask,
+                TradeSide::Sell => mark.bid,
             };
             let Some(current) = current.filter(|price| price.is_finite() && *price > 0.0) else {
                 continue;

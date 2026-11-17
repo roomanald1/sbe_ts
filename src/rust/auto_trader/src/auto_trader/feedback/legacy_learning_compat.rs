@@ -74,10 +74,6 @@ fn record_closed_trade_outcome(
     }
 }
 
-fn strategy_trade_learning_key(symbol: &str, strategy: &str) -> String {
-    format!("trade:{symbol}:{strategy}")
-}
-
 #[cfg(test)]
 fn strategy_scout_learning_key(symbol: &str, strategy: &str, scenario: &str) -> String {
     format!("scout:{symbol}:{strategy}:{scenario}")

@@ -52,12 +52,9 @@ async fn run_twap(
             request.quantity * (slice + 1) as f64 / SLICES as f64
         };
         let qty = (target_cumulative - executed).max(0.0).min(remaining);
-        let book = store.book(&symbol);
-        if let Some(book) = book {
-            if let (Some(bid), Some(ask)) = (book.bids.first(), book.asks.first()) {
-                market_notional += (bid.price + ask.price) * 0.5;
-                market_samples += 1;
-            }
+        if let Some(mid) = store.market_mark(&symbol).and_then(|mark| mark.mid) {
+            market_notional += mid;
+            market_samples += 1;
         }
         match execute_vwap_child(
             &store,

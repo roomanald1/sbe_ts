@@ -105,6 +105,10 @@ async fn sync_auto_positions(
     let mut changed = false;
     let mut source_symbols = std::collections::BTreeSet::new();
     let mut external_closes = Vec::new();
+    // The order IDs are shared by every external-close reconciliation. Build
+    // this index once instead of rescanning the retained order history for
+    // each changed position while the global settings and cycle locks are held.
+    let mut known_exit_order_ids = None;
     for source_position in positions {
         if !source_position.quantity.is_finite()
             || !source_position.average_entry_price.is_finite()
@@ -153,6 +157,13 @@ async fn sync_auto_positions(
             (realized_delta, close_audit, closed_out, scout_entry)
         };
         if let Some(audit) = close_audit {
+            known_exit_order_ids.get_or_insert_with(|| {
+                settings.orders.iter()
+                    .filter(|order| !matches!(order.purpose.as_str(), "signal" | "scout"))
+                    .flat_map(|order| [Some(order.timestamp.to_string()), order.execution_order_id.clone()])
+                    .flatten()
+                    .collect::<BTreeSet<_>>()
+            });
             let strategy_lots = settings.strategy_positions
                 .get(&source_position.symbol)
                 .map(|lots| lots.iter()
@@ -160,23 +171,28 @@ async fn sync_auto_positions(
                     .map(|(strategy, lot)| (strategy.clone(), lot.clone()))
                     .collect::<Vec<_>>())
                 .unwrap_or_default();
-            let mut known_exit_ids = settings.orders.iter()
-                .filter(|order| !matches!(order.purpose.as_str(), "signal" | "scout"))
-                .flat_map(|order| [Some(order.timestamp.to_string()), order.execution_order_id.clone()])
-                .flatten()
-                .collect::<BTreeSet<_>>();
-            for (_, lot) in &strategy_lots {
-                known_exit_ids.extend(lot.protective_stops.iter().map(|stop| stop.barrier_id.clone()));
+            if closed_out && !scout_entry {
+                for (strategy, lot) in &strategy_lots {
+                    if !lot.scout_entry {
+                        mark_symbol_entry_floor_lift(
+                            &mut settings,
+                            &source_position.symbol,
+                            strategy,
+                            lot.realized_pnl,
+                        );
+                    }
+                }
             }
-            external_closes.push((audit, realized_delta, strategy_lots, current_time_ms(), known_exit_ids));
+            let mut known_barrier_ids = BTreeSet::new();
+            for (_, lot) in &strategy_lots {
+                known_barrier_ids.extend(lot.protective_stops.iter().map(|stop| stop.barrier_id.clone()));
+            }
+            external_closes.push((audit, realized_delta, strategy_lots, current_time_ms(), known_barrier_ids));
         }
         if realized_delta.is_finite() && realized_delta.abs() > 1e-12 {
             // Manual position-manager fills bypass apply_auto_fill; matched
             // strategy-lot audits below provide attributable trade outcomes.
             changed = true;
-            if closed_out && !scout_entry {
-                mark_symbol_reentry_cooldown(&mut settings, &source_position.symbol);
-            }
         }
     }
     // The position manager owns the ledger. Drop cached symbols that no longer
@@ -207,7 +223,12 @@ async fn sync_auto_positions(
         "position_maintenance_ledger_reconciliation",
         reconciliation_elapsed,
     );
-    for (mut payload, realized_pnl, strategy_lots, closed_at_ms, known_exit_ids) in external_closes {
+    let known_exit_order_ids = known_exit_order_ids.unwrap_or_default();
+    for (mut payload, realized_pnl, strategy_lots, closed_at_ms, known_barrier_ids) in external_closes {
+        let known_exit_ids = KnownExitIds {
+            order_ids: &known_exit_order_ids,
+            barrier_ids: &known_barrier_ids,
+        };
         let symbol = payload["symbol"].as_str().unwrap_or_default().to_owned();
         let entry_timestamp = payload["entry_timestamp_ms"].as_u64().unwrap_or_default();
         let now = closed_at_ms;
@@ -286,7 +307,7 @@ async fn sync_auto_positions(
                     }
                 }
                 let has_known_auto_exit = audit["exit_fills"].as_array().into_iter().flatten().any(|fill| {
-                    fill["parent_order_id"].as_str().is_some_and(|parent_id| known_exit_ids.contains(parent_id))
+                fill["parent_order_id"].as_str().is_some_and(|parent_id| known_exit_ids.contains(parent_id))
                 });
                 if !has_known_auto_exit {
                     if let Some(order) = external_close_order(&audit) {

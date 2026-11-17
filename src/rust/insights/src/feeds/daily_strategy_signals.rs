@@ -127,7 +127,6 @@ fn insight_btc_regime(
 }
 
 const INSIGHT_DAY_MS: u64 = 86_400_000;
-const SCOUT_PARAMETER_SAMPLE_INTERVAL_MS: u64 = 4 * 60 * 60 * 1_000;
 
 fn insight_utc_month_id(timestamp_ms: u64) -> i64 {
     let days = (timestamp_ms / INSIGHT_DAY_MS) as i64;
@@ -855,29 +854,6 @@ async fn auto_trader_rpc(
     Ok(response.body)
 }
 
-async fn learning_scout_rpc(
-    url: &str,
-    request_id: String,
-    path: &str,
-    payload: serde_json::Value,
-) -> anyhow::Result<()> {
-    let response = strategy::request_scout_worker_route(
-        url,
-        &strategy::ScoutCoordinatorRouteCommand {
-            request_id,
-            strategy: None,
-            method: strategy::ScoutWorkerHttpMethod::Post,
-            path: path.into(),
-            payload,
-        },
-    )
-    .await?;
-    if response.status >= 400 {
-        anyhow::bail!("Learning Scout route {path} returned {}", response.status);
-    }
-    Ok(())
-}
-
 fn prior_paired_lift(
     profiles: &serde_json::Value,
     profile_symbol: &str,
@@ -913,11 +889,7 @@ fn prioritize_daily_probe_batch(
     let mut unexplored = Vec::<InsightProbeVariant>::new();
     for probe in probes {
         if let Some((score, rejected)) = prior_paired_lift(
-            profiles,
-            profile_symbol,
-            strategy,
-            &probe.0,
-            probe.1,
+            profiles, profile_symbol, strategy, &probe.0, probe.1,
         ) {
             if !rejected && score.is_finite() {
                 known.push((score, probe.clone()));
@@ -926,39 +898,19 @@ fn prioritize_daily_probe_batch(
             unexplored.push(probe.clone());
         }
     }
-    known.sort_by(|left, right| {
-        right.0.total_cmp(&left.0).then_with(|| left.1.0.cmp(&right.1.0))
-    });
+    known.sort_by(|left, right| right.0.total_cmp(&left.0).then_with(|| left.1.0.cmp(&right.1.0)));
     unexplored.sort_by(|left, right| left.0.cmp(&right.0));
     if !unexplored.is_empty() {
         let offset = day as usize % unexplored.len();
         unexplored.rotate_left(offset);
     }
-
-    // Reserve one slot for a rotating untested candidate while ranking the
-    // other slots by observed paired average lift.
-    let known_count = known
-        .len()
-        .min(MAX_DAILY_SCOUT_VARIANTS_PER_BATCH.saturating_sub(1));
-    let mut selected = known
-        .iter()
-        .take(known_count)
-        .map(|(_, probe)| probe.clone())
-        .collect::<Vec<_>>();
-    selected.extend(
-        unexplored
-            .iter()
-            .take(MAX_DAILY_SCOUT_VARIANTS_PER_BATCH - selected.len())
-            .cloned(),
-    );
+    let known_count = known.len().min(MAX_DAILY_SCOUT_VARIANTS_PER_BATCH.saturating_sub(1));
+    let mut selected = known.iter().take(known_count).map(|(_, probe)| probe.clone()).collect::<Vec<_>>();
+    selected.extend(unexplored.iter().take(MAX_DAILY_SCOUT_VARIANTS_PER_BATCH - selected.len()).cloned());
     if selected.len() < MAX_DAILY_SCOUT_VARIANTS_PER_BATCH {
-        selected.extend(
-            known
-                .iter()
-                .skip(known_count)
-                .take(MAX_DAILY_SCOUT_VARIANTS_PER_BATCH - selected.len())
-                .map(|(_, probe)| probe.clone()),
-        );
+        selected.extend(known.iter().skip(known_count)
+            .take(MAX_DAILY_SCOUT_VARIANTS_PER_BATCH - selected.len())
+            .map(|(_, probe)| probe.clone()));
     }
     selected.truncate(MAX_DAILY_SCOUT_VARIANTS_PER_BATCH);
     selected
@@ -969,23 +921,16 @@ mod daily_probe_batch_tests {
     use super::*;
 
     fn probe(key: &str, value: f64) -> InsightProbeVariant {
-        (
-            key.to_owned(),
-            value,
-            BTreeMap::from([(key.to_owned(), value)]),
-            BTreeMap::from([(key.to_owned(), value)]),
-        )
+        (key.to_owned(), value, BTreeMap::from([(key.to_owned(), value)]), BTreeMap::from([(key.to_owned(), value)]))
     }
 
     #[test]
     fn batch_ranks_paired_average_lift_and_keeps_one_exploration_slot() {
         let profiles = serde_json::json!([{
-            "symbol": "BTC-USDT",
-            "strategy": "test-strategy",
-            "parameters": [
-                {"key":"a", "scout_variants":[{"candidate_value": 2.0, "average_net_improvement_percent": 4.0, "rejected": false}]},
-                {"key":"b", "scout_variants":[{"candidate_value": 2.0, "average_net_improvement_percent": 9.0, "rejected": false}]},
-                {"key":"c", "scout_variants":[{"candidate_value": 2.0, "average_net_improvement_percent": 2.0, "rejected": false}]}
+            "symbol": "BTC-USDT", "strategy": "test-strategy", "parameters": [
+                {"key":"a", "scout_variants":[{"candidate_value":2.0,"average_net_improvement_percent":4.0,"rejected":false}]},
+                {"key":"b", "scout_variants":[{"candidate_value":2.0,"average_net_improvement_percent":9.0,"rejected":false}]},
+                {"key":"c", "scout_variants":[{"candidate_value":2.0,"average_net_improvement_percent":2.0,"rejected":false}]}
             ]
         }]);
         let probes = vec![probe("a", 2.0), probe("b", 2.0), probe("c", 2.0), probe("d", 2.0)];
@@ -1374,14 +1319,17 @@ fn insight_daily_batch(
     Ok((batch, audits))
 }
 
-async fn poll_daily_strategy_signals(store: SignalStore) {
+async fn poll_daily_strategy_signals(
+    store: SignalStore,
+    strategy_signal_events: tokio::sync::broadcast::Sender<bytes::Bytes>,
+    legacy_strategy_signal_events: tokio::sync::broadcast::Sender<bytes::Bytes>,
+    latest_daily_strategy_update: Arc<std::sync::RwLock<Option<bytes::Bytes>>>,
+) {
     let auto = std::env::var("AUTO_TRADER_RSOCKET_URL")
         .unwrap_or_else(|_| "ws://127.0.0.1:10006".into());
     let learning = std::env::var("LEARNING_RSOCKET_URL")
         .unwrap_or_else(|_| "ws://127.0.0.1:10010".into());
     let mut audited = std::collections::BTreeSet::<String>::new();
-    let mut last_sweep_signature: Option<String> = None;
-    let mut completed_sweep_groups = std::collections::BTreeSet::<String>::new();
     let mut ticker = tokio::time::interval(Duration::from_secs(30));
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
@@ -1389,7 +1337,7 @@ async fn poll_daily_strategy_signals(store: SignalStore) {
         let result: anyhow::Result<(serde_json::Value, Vec<serde_json::Value>, String)> = async {
             let (status, parameters, configuration) = tokio::try_join!(
                 auto_trader_rpc(&auto, format!("insights-daily:{}", now_ms()), strategy::ScoutWorkerHttpMethod::Get, "/positions/auto-trader", serde_json::Value::Null),
-                auto_trader_rpc(&auto, format!("insights-daily:{}", now_ms()), strategy::ScoutWorkerHttpMethod::Get, "/positions/auto-trader/parameters", serde_json::Value::Null),
+                auto_trader_rpc(&auto, format!("insights-daily:{}", now_ms()), strategy::ScoutWorkerHttpMethod::Get, "/internal/strategy/daily-scan-parameters", serde_json::Value::Null),
                 async {
                     let response = strategy::request_scout_worker_route(&learning, &strategy::ScoutCoordinatorRouteCommand {
                         request_id: format!("insights-daily:{}", now_ms()), strategy: None,
@@ -1462,73 +1410,31 @@ async fn poll_daily_strategy_signals(store: SignalStore) {
                 continue;
             }
         };
-        if last_sweep_signature.as_deref() != Some(sweep_signature.as_str()) {
-            last_sweep_signature = Some(sweep_signature.clone());
-            completed_sweep_groups.clear();
-        }
         let snapshot = batch.get("snapshot").cloned().unwrap_or_else(|| serde_json::json!({}));
-        let generated = snapshot.get("generated_signals").and_then(serde_json::Value::as_array)
-            .cloned().unwrap_or_default();
+        let event_time_ms = snapshot.get("as_of_ms").and_then(serde_json::Value::as_u64).unwrap_or_else(now_ms);
         let diagnostics = batch.get("diagnostics").cloned().unwrap_or_else(|| serde_json::json!([]));
-        if !generated.is_empty() {
-            let now = snapshot.get("as_of_ms").and_then(serde_json::Value::as_u64).unwrap_or_else(now_ms);
-            let sweep_id = strategy::probe_id(&sweep_signature);
-            let probe_window = now / SCOUT_PARAMETER_SAMPLE_INTERVAL_MS;
-            let scout_request = serde_json::json!({
-                "request_id": format!("daily-sweep-paired-v2:{sweep_id}:{probe_window}"),
-                "now_ms": now,
-                "signals": generated.clone(),
-            });
-            if let Err(error) = learning_scout_rpc(&learning, scout_request["request_id"].as_str().unwrap_or_default().to_owned(), "/daily-inputs", scout_request).await {
-                crate::service_log!("WARN", "Insights daily Scout delivery failed: {error}");
-            }
-        }
-        let mut grouped = BTreeMap::<String, Vec<serde_json::Value>>::new();
-        for signal in generated {
-            grouped.entry(daily_probe_group_key(&signal)).or_default().push(signal);
-        }
-        let groups = grouped.into_iter().collect::<Vec<_>>();
-        let mut group_failed = false;
-        for (group_key, signals) in groups {
-            if completed_sweep_groups.contains(&group_key) {
-                continue;
-            }
-            for chunk in signals.chunks(128) {
-                let payload = serde_json::json!({
-                    "snapshot": {
-                        "as_of_ms": snapshot.get("as_of_ms"),
-                    "sweep_id": sweep_signature,
-                        "empty_signal_reasons": snapshot.get("empty_signal_reasons"),
-                        "active_strategy_symbols": snapshot.get("active_strategy_symbols"),
-                        "generated_signals": chunk,
-                    },
-                    "diagnostics": diagnostics.clone(),
-                });
-                if let Err(error) = auto_trader_rpc(&auto, format!("insights-daily:{}", now_ms()), strategy::ScoutWorkerHttpMethod::Post, "/internal/auto-trader/daily-strategy-signals", payload).await {
-                    crate::service_log!("WARN", "Insights daily strategy sweep delivery failed: {error}");
-                    group_failed = true;
-                    break;
+        if let Ok(mut daily_snapshot) = serde_json::from_value::<strategy::daily::DailyStrategySnapshot>(snapshot) {
+            daily_snapshot.diagnostics = serde_json::from_value(diagnostics).unwrap_or_default();
+            populate_daily_snapshot_symbol_status(&mut daily_snapshot);
+            let update = strategy::StrategyInsightUpdate {
+                contract_version: strategy::STRATEGY_INSIGHT_UPDATE_VERSION,
+                event_id: format!("daily:{}:{event_time_ms}", strategy::probe_id(&sweep_signature)),
+                event_time_ms,
+                signal: None,
+                market: None,
+                taker_fee_rate: None,
+                daily_snapshot: Some(daily_snapshot),
+                dated_carry_scan: None,
+                dated_carry_candidate: None,
+                dated_carry_settlement: None,
+            };
+            if let Ok(encoded) = serde_json::to_vec(&update) {
+                let encoded = bytes::Bytes::from(encoded);
+                if let Ok(mut latest) = latest_daily_strategy_update.write() {
+                    *latest = Some(encoded.clone());
                 }
-            }
-            if group_failed {
-                break;
-            }
-            completed_sweep_groups.insert(group_key);
-        }
-        {
-            let heartbeat = serde_json::json!({
-                "snapshot": {
-                    "as_of_ms": snapshot.get("as_of_ms"),
-                    "sweep_id": sweep_signature,
-                    "empty_signal_reasons": snapshot.get("empty_signal_reasons"),
-                    "active_strategy_symbols": [],
-                    "generated_signals": [],
-                },
-                "diagnostics": diagnostics,
-                "refresh_only": true,
-            });
-            if let Err(error) = auto_trader_rpc(&auto, format!("insights-daily:{}", now_ms()), strategy::ScoutWorkerHttpMethod::Post, "/internal/auto-trader/daily-strategy-signals", heartbeat).await {
-                crate::service_log!("WARN", "Insights daily strategy snapshot refresh failed: {error}");
+                let _ = strategy_signal_events.send(encoded.clone());
+                let _ = legacy_strategy_signal_events.send(encoded);
             }
         }
         for audit in audits {
@@ -1554,6 +1460,93 @@ async fn poll_daily_strategy_signals(store: SignalStore) {
                 .and_then(|value| value.parse::<u64>().ok())
                 .is_some_and(|time| now.saturating_sub(time) <= 30 * 86_400_000)
         });
+    }
+}
+
+fn populate_daily_snapshot_symbol_status(
+    snapshot: &mut strategy::daily::DailyStrategySnapshot,
+) {
+    for diagnostic in &snapshot.diagnostics {
+        for symbol in &diagnostic.symbols {
+            if !symbol.evaluated {
+                continue;
+            }
+            let key = (diagnostic.strategy.clone(), symbol.symbol.clone());
+            snapshot.evaluated_strategy_symbols.insert(key.clone());
+            if symbol.signal_active {
+                snapshot.active_strategy_symbols.insert(key);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod daily_snapshot_status_tests {
+    use super::*;
+
+    #[test]
+    fn snapshot_marks_evaluated_symbols_active_only_when_diagnostic_is_active() {
+        let diagnostic = |symbol: &str, evaluated, signal_active| {
+            strategy::daily::StrategySymbolDiagnostic {
+                symbol: symbol.to_owned(),
+                close: 1.0,
+                eligible: true,
+                primary_rule: "test".to_owned(),
+                primary_level: 1.0,
+                primary_distance_percent: 0.0,
+                primary_metric_value: None,
+                primary_metric_unit: None,
+                primary_passed: signal_active,
+                secondary_rule: None,
+                secondary_level: None,
+                secondary_distance_percent: None,
+                secondary_passed: None,
+                evaluated,
+                signal_active,
+                leader_gap_percent: None,
+                relative_strength_gap_pp: None,
+                rsi_exit_level: None,
+                maximum_hold_days: None,
+                trend_return_windows: None,
+            }
+        };
+        let mut snapshot = strategy::daily::DailyStrategySnapshot {
+            as_of_ms: 1,
+            sweep_id: "test".to_owned(),
+            active_strategy_symbols: Default::default(),
+            generated_signals: Vec::new(),
+            evaluated_strategy_symbols: Default::default(),
+            diagnostics: vec![strategy::daily::StrategyDiagnostic {
+                strategy: "donchian-20-btc200".to_owned(),
+                as_of_ms: 1,
+                btc_close: None,
+                btc_sma: None,
+                btc_distance_percent: None,
+                btc_gate_required: false,
+                btc_gate_passed: None,
+                btc_window_days: None,
+                symbols: vec![
+                    diagnostic("BTC-USDT", true, true),
+                    diagnostic("ETH-USDT", true, false),
+                    diagnostic("SOL-USDT", false, true),
+                ],
+            }],
+        };
+
+        populate_daily_snapshot_symbol_status(&mut snapshot);
+
+        assert_eq!(
+            snapshot.signal_active("donchian-20-btc200", "BTC-USDT"),
+            Some(true)
+        );
+        assert_eq!(
+            snapshot.signal_active("donchian-20-btc200", "ETH-USDT"),
+            Some(false)
+        );
+        assert_eq!(
+            snapshot.signal_active("donchian-20-btc200", "SOL-USDT"),
+            None
+        );
     }
 }
 

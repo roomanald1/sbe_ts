@@ -21,7 +21,7 @@ import {
   subscribePositionStream,
 } from '../position_stream';
 import { sharedGet } from '../shared_get';
-import { executionFetch } from '../execution_api';
+import { paperExchangeFetch } from '../paper_exchange_api';
 
 export class OrderManagerModel {
   readonly props$: BehaviorSubject<OrderManagerProps>;
@@ -237,7 +237,7 @@ export class OrderManagerModel {
     this.patch({ submitting: true, error: undefined });
     try {
       const isVwap = state.orderType === 'vwap';
-      const response = await executionFetch(
+      const response = await paperExchangeFetch(
         isVwap ? '/positions/vwap' : '/positions/orders',
         {
           method: 'POST',
@@ -322,7 +322,7 @@ export class OrderManagerModel {
   async cancelVwap(runId = this.state$.value.vwapRunId): Promise<void> {
     if (!runId) return;
     try {
-      const response = await executionFetch(
+      const response = await paperExchangeFetch(
         '/positions/vwap/' + encodeURIComponent(runId),
         { method: 'DELETE' },
       );
@@ -345,7 +345,7 @@ export class OrderManagerModel {
   }
   async cancelOrder(id: string): Promise<void> {
     try {
-      const response = await executionFetch(
+      const response = await paperExchangeFetch(
         '/positions/orders/' + encodeURIComponent(id),
         { method: 'DELETE' },
       );

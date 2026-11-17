@@ -55,7 +55,7 @@ export const services: Record<Project, string[]> = {
     'feed-handlers',
     'binance-feed',
     'position-management',
-    'execution',
+    'paper-exchange',
     'insights',
     'insights-maintenance',
     'auto-trader',
@@ -64,9 +64,9 @@ export const services: Record<Project, string[]> = {
     'web',
     ...strategyServices.flatMap((strategy) => [
       strategy.startsWith('live-')
-        ? `strategy-x-${strategy}`
-        : `strategy-x-live-${strategy}`,
-      `strategy-x-scout-${strategy}`,
+        ? `strategy-${strategy}`
+        : `strategy-live-${strategy}`,
+      `strategy-scout-${strategy}`,
     ]),
   ],
   infra: [
@@ -82,7 +82,7 @@ export const services: Record<Project, string[]> = {
 export const swaggerPorts: Record<string, number> = {
   'feed-handlers': 3001,
   'position-management': 3002,
-  execution: 3003,
+  'paper-exchange': 3003,
   insights: 3004,
   'auto-trader': 3005,
   learning: 3010,

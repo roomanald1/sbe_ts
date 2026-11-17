@@ -161,6 +161,58 @@ async fn update_dated_carry(
 }
 
 #[derive(Deserialize)]
+struct DatedCarryCloseRequest {
+    future_symbol: String,
+}
+
+async fn close_dated_carry(
+    State(state): State<AutoTraderState>,
+    Json(request): Json<DatedCarryCloseRequest>,
+) -> Result<Json<DatedCarryBook>, (StatusCode, String)> {
+    let _work = state.dated_carry_work_lock.lock().await;
+    let mut book = state.dated_carry.lock().await;
+    let position = book.positions.iter_mut().find(|position| {
+        position.future_symbol == request.future_symbol && position.status == "open"
+    }).ok_or((StatusCode::NOT_FOUND, "Open dated carry position not found".into()))?;
+    let (spot_bid, future_ask) = match (position.spot_mark_bid, position.future_mark_ask) {
+        (Some(spot_bid), Some(future_ask)) if spot_bid.is_finite() && spot_bid > 0.0 && future_ask.is_finite() && future_ask > 0.0 => (spot_bid, future_ask),
+        _ => return Err((StatusCode::SERVICE_UNAVAILABLE, "Waiting for a valid market mark before closing dated carry".into())),
+    };
+    let quantity = position.quantity;
+    let spot_exit = spot_bid * (1.0 - CARRY_ENTRY_SLIPPAGE);
+    let future_exit = future_ask * (1.0 + CARRY_ENTRY_SLIPPAGE);
+    let exit_fees = quantity * (0.001 * spot_exit + 0.0005 * future_exit);
+    let net = quantity * (spot_exit - position.spot_entry_price + position.future_entry_price - future_exit)
+        - position.entry_fees - exit_fees;
+    position.spot_exit_twap = Some(spot_exit);
+    position.settlement_price = Some(future_exit);
+    position.settlement_source = Some("manual_mark".into());
+    position.net_pnl_usdt = Some(net);
+    position.status = "closed_manual".into();
+    let audit = serde_json::json!({
+        "decision_id": format!("dated-carry:{}", position.future_symbol),
+        "stage": "dated_carry_exit",
+        "timestamp": carry_now_ms(),
+        "symbol": position.spot_symbol,
+        "future_symbol": position.future_symbol,
+        "quantity": quantity,
+        "spot_exit_twap": spot_exit,
+        "settlement_price": future_exit,
+        "settlement_source": "manual_mark",
+        "net_pnl_usdt": net,
+        "reason": "manual_close",
+    });
+    save_dated_carry(&state.dated_carry_path, &book)
+        .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error))?;
+    sync_dated_carry_ledger(&book).await
+        .map_err(|error| (StatusCode::SERVICE_UNAVAILABLE, error))?;
+    let response = book.clone();
+    drop(book);
+    queue_auto_trader_audit(&state, audit);
+    Ok(Json(response))
+}
+
+#[derive(Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 enum DatedCarrySignal {
     Scan {
@@ -171,6 +223,7 @@ enum DatedCarrySignal {
     Entry {
         emitted_at_ms: u64,
         candidate: DatedCarryCandidate,
+        worker_decision: strategy::LiveStrategyDecision,
     },
     Settlement {
         emitted_at_ms: u64,
@@ -180,6 +233,7 @@ enum DatedCarrySignal {
         spot_exit_twap: f64,
         settlement_price: f64,
         settlement_source: DatedCarrySettlementSource,
+        worker_decision: strategy::LiveStrategyDecision,
     },
 }
 
@@ -213,52 +267,27 @@ async fn receive_dated_carry_signal(
             }
             changed = true;
         }
-        DatedCarrySignal::Entry { emitted_at_ms, candidate } => {
+        DatedCarrySignal::Entry { emitted_at_ms, candidate, worker_decision } => {
             if emitted_at_ms > now_ms + 5_000 || now_ms.saturating_sub(emitted_at_ms) > 120_000 {
                 return Err((StatusCode::BAD_REQUEST, "Carry entry signal is stale".into()));
             }
             let spot_profile_symbol = candidate.spot_symbol.replace("USDT", "-USDT");
-            let (strategy_parameters, profile_version) = {
+            let strategy_parameters = {
                 let settings = state.settings.lock().await;
-                let key = format!("{}:{}", spot_profile_symbol, Strategy::DatedCarry.as_str());
-                (
-                    strategy_parameter_values(&settings, &spot_profile_symbol, Strategy::DatedCarry),
-                    settings.learned_profiles.get(&key).map_or(0, |profile| profile.version),
-                )
+                strategy_parameter_values(&settings, &spot_profile_symbol, Strategy::DatedCarry)
             };
             if strategy_parameter_value(
                 &strategy_parameters, StrategyParameterKey::CarryMinimumDaysToExpiry,
             ).is_none() {
                 return Err((StatusCode::BAD_REQUEST, "Missing learned carry expiry parameter".into()));
             }
-            let profile_id = strategy::profile_id(
-                &spot_profile_symbol,
-                Strategy::DatedCarry.as_str(),
-                &strategy_parameters,
-            );
-            let request = crate::service_rpc::live_evaluation_request(
-                Strategy::DatedCarry,
-                candidate.spot_symbol.clone(),
-                profile_id,
-                spot_profile_symbol,
-                profile_version,
-                strategy_parameters,
-                strategy::LiveEvaluationInput::DatedCarryEntry {
-                    emitted_at_ms,
-                    evaluated_at_ms: now_ms,
-                    candidate: candidate.clone(),
-                },
-            );
-            let entry_decision = crate::service_rpc::request_live_evaluation(&request)
-                .await
-                .map(|decision| match decision {
-                    strategy::LiveStrategyDecision::Enter => StrategyDecision::Enter,
-                    strategy::LiveStrategyDecision::Hold => StrategyDecision::Hold,
-                    strategy::LiveStrategyDecision::Exit => StrategyDecision::Exit,
-                    strategy::LiveStrategyDecision::Rebalance => StrategyDecision::Rebalance,
-                    strategy::LiveStrategyDecision::Reject => StrategyDecision::Reject,
-                })
-                .unwrap_or(StrategyDecision::Reject);
+            let entry_decision = match worker_decision {
+                strategy::LiveStrategyDecision::Enter => StrategyDecision::Enter,
+                strategy::LiveStrategyDecision::Hold => StrategyDecision::Hold,
+                strategy::LiveStrategyDecision::Exit => StrategyDecision::Exit,
+                strategy::LiveStrategyDecision::Rebalance => StrategyDecision::Rebalance,
+                strategy::LiveStrategyDecision::Reject => StrategyDecision::Reject,
+            };
             if !candidate.quantity.is_finite()
                 || !candidate.spot_ask.is_finite()
                 || !candidate.future_bid.is_finite()
@@ -355,41 +384,18 @@ async fn receive_dated_carry_signal(
             spot_exit_twap,
             settlement_price,
             settlement_source,
+            worker_decision,
         } => {
-            let strategy_parameters = BTreeMap::new();
-            let profile_id = strategy::profile_id(
-                &spot_symbol,
-                Strategy::DatedCarry.as_str(),
-                &strategy_parameters,
-            );
-            let request = crate::service_rpc::live_evaluation_request(
-                Strategy::DatedCarry,
-                spot_symbol.clone(),
-                profile_id,
-                spot_symbol.clone(),
-                0,
-                strategy_parameters,
-                strategy::LiveEvaluationInput::Settlement {
-                    emitted_at_ms,
-                    evaluated_at_ms: now_ms,
-                    spot_symbol: spot_symbol.clone(),
-                    future_symbol: future_symbol.clone(),
-                    expiry_ms,
-                    spot_exit_twap,
-                    settlement_price,
-                    settlement_source: Some(settlement_source),
-                },
-            );
-            let exit_decision = crate::service_rpc::request_live_evaluation(&request)
-                .await
-                .map(|decision| match decision {
-                    strategy::LiveStrategyDecision::Enter => StrategyDecision::Enter,
-                    strategy::LiveStrategyDecision::Hold => StrategyDecision::Hold,
-                    strategy::LiveStrategyDecision::Exit => StrategyDecision::Exit,
-                    strategy::LiveStrategyDecision::Rebalance => StrategyDecision::Rebalance,
-                    strategy::LiveStrategyDecision::Reject => StrategyDecision::Reject,
-                })
-                .unwrap_or(StrategyDecision::Hold);
+            if emitted_at_ms > now_ms + 5_000 || now_ms.saturating_sub(emitted_at_ms) > 120_000 {
+                return Err((StatusCode::BAD_REQUEST, "Carry settlement decision is stale".into()));
+            }
+            let exit_decision = match worker_decision {
+                strategy::LiveStrategyDecision::Enter => StrategyDecision::Enter,
+                strategy::LiveStrategyDecision::Hold => StrategyDecision::Hold,
+                strategy::LiveStrategyDecision::Exit => StrategyDecision::Exit,
+                strategy::LiveStrategyDecision::Rebalance => StrategyDecision::Rebalance,
+                strategy::LiveStrategyDecision::Reject => StrategyDecision::Reject,
+            };
             if exit_decision != StrategyDecision::Exit {
                 return Err((StatusCode::BAD_REQUEST, "Invalid dated carry settlement signal".into()));
             }

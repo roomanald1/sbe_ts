@@ -129,7 +129,12 @@ async fn submit_position_exit_order(
     settings.daily_realized_pnl += realized_pnl_usd;
     if filled + 1e-12 >= quantity {
         if !position.scout_entry && settings.positions.get(&symbol).is_none_or(|position| position.quantity.abs() <= 1e-12) {
-            mark_symbol_reentry_cooldown(&mut settings, &symbol);
+            mark_symbol_entry_floor_lift(
+                &mut settings,
+                &symbol,
+                &strategy_key,
+                position.realized_pnl + strategy_realized_pnl,
+            );
         }
         let entry_notional = if position.initial_entry_notional > 0.0 {
             position.initial_entry_notional

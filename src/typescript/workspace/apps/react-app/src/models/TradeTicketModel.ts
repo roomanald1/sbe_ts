@@ -4,7 +4,7 @@ import type { BookFeed, Connection } from '../connection';
 import { decodeBookDepth, type BookDepth } from '../types/symbol_price';
 import { deriveTradeTicketState } from './TradeTicketDerived';
 import { fetchFeeRates } from './fee_rates';
-import { executionFetch } from '../execution_api';
+import { paperExchangeFetch } from '../paper_exchange_api';
 import {
   currentPositionSnapshot,
   subscribePositionStream,
@@ -300,7 +300,7 @@ export class TradeTicketModel {
       const scheduled = isVwap || isTwap;
       const requestOrderType =
         state.orderType === 'gtd' ? 'limit' : state.orderType;
-      const response = await executionFetch(
+      const response = await paperExchangeFetch(
         isVwap
           ? '/positions/vwap'
           : isTwap
@@ -462,7 +462,7 @@ export class TradeTicketModel {
     const id = this.state$.value.vwapRunId;
     if (!id) return;
     try {
-      await executionFetch('/positions/vwap/' + encodeURIComponent(id), {
+      await paperExchangeFetch('/positions/vwap/' + encodeURIComponent(id), {
         method: 'DELETE',
       });
     } finally {

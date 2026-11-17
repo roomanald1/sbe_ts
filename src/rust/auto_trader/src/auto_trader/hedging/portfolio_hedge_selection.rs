@@ -2,7 +2,7 @@ async fn maybe_place_portfolio_hedge(
     state: &AutoTraderState,
 ) -> Result<Option<CycleResult>, (StatusCode, String)> {
     let (candidates, rates_response) = tokio::try_join!(
-        crate::service_rpc::position_get("/positions/hedge-candidates"),
+        portfolio_hedge_candidates(),
         crate::service_rpc::position_get("/positions/usd-rates"),
     ).map_err(|error| (StatusCode::BAD_GATEWAY, error.to_string()))?;
     let rates = &rates_response["rates"];

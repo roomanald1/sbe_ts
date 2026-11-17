@@ -32,3 +32,13 @@ harness = false
 [[bench]]
 name = "book_history_memory"
 harness = false
+
+[[bench]]
+name = "hot_path"
+harness = false
+
+[[bench]]
+name = "feed_events"
+harness = false
+[patch.crates-io]
+rsocket_rust = { path = "../vendor/rsocket_rust" }

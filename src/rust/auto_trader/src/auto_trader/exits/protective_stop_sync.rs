@@ -101,16 +101,22 @@ async fn sync_protective_stops(
             let fully_closed = settings.strategy_positions.get(&symbol)
                 .and_then(|lots| lots.get(&strategy))
                 .is_none_or(|position| position.quantity.abs() <= 1e-12);
+            let trade_realized_pnl = prior_realized_pnl + strategy_realized_delta;
             let entry_notional = if initial_entry_notional > 0.0 {
                 initial_entry_notional
             } else {
                 delta_quantity * entry_price_before
             };
             if fully_closed && !scout_entry && settings.positions.get(&symbol).is_none_or(|position| position.quantity.abs() <= 1e-12) {
-                mark_symbol_reentry_cooldown(&mut settings, &symbol);
+                mark_symbol_entry_floor_lift(
+                    &mut settings,
+                    &symbol,
+                    &strategy,
+                    trade_realized_pnl,
+                );
             }
             if fully_closed && entry_notional > 0.0 {
-                let total_trade_pnl = prior_realized_pnl + strategy_realized_delta;
+                let total_trade_pnl = trade_realized_pnl;
                 let total_fees = if prior_total_fees > 0.0 {
                     prior_total_fees + delta_fee
                 } else {

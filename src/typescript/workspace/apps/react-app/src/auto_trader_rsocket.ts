@@ -6,6 +6,10 @@ import {
 } from 'rsocket-core';
 import * as WebSocketClient from 'rsocket-websocket-client';
 
+const AUTO_TRADER_RPC_TIMEOUT_MS = 5_000;
+const AUTO_TRADER_SNAPSHOT_TIMEOUT_MS = 10_000;
+const AUTO_TRADER_CONNECT_TIMEOUT_MS = 8_000;
+
 const BufferDataEncoder: Encoder<Buffer> = {
   ...BufferEncoder,
   encode: (value, buffer, start, end) => {
@@ -19,6 +23,8 @@ const BufferDataEncoder: Encoder<Buffer> = {
 type AutoTraderSocket = Awaited<ReturnType<typeof connectAutoTraderRSocket>>;
 
 let sharedSocket: Promise<AutoTraderSocket> | undefined;
+let socketConnector: () => Promise<AutoTraderSocket> = connectAutoTraderRSocket;
+let socketGeneration = 0;
 let requestAutoTrader = performAutoTraderRpc;
 
 export function setAutoTraderRpcRequesterForTests(
@@ -27,12 +33,68 @@ export function setAutoTraderRpcRequesterForTests(
   requestAutoTrader = requester ?? performAutoTraderRpc;
 }
 
+export function setAutoTraderSocketFactoryForTests(
+  factory?: () => Promise<unknown>,
+) {
+  socketConnector = factory
+    ? async () => (await factory()) as AutoTraderSocket
+    : connectAutoTraderRSocket;
+  socketGeneration += 1;
+  sharedSocket = undefined;
+}
+
 function getSocket() {
   if (!sharedSocket) {
-    sharedSocket = connectAutoTraderRSocket().catch((error) => {
-      sharedSocket = undefined;
-      throw error;
+    const generation = ++socketGeneration;
+    const connecting = socketConnector();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timedConnection = new Promise<AutoTraderSocket>((resolve, reject) => {
+      timer = setTimeout(() => {
+        if (socketGeneration === generation) sharedSocket = undefined;
+        reject(
+          new Error(
+            `AutoTrader RSocket connection timed out after ${AUTO_TRADER_CONNECT_TIMEOUT_MS} ms`,
+          ),
+        );
+      }, AUTO_TRADER_CONNECT_TIMEOUT_MS);
+      connecting.then(
+        (client) => {
+          if (timer !== undefined) clearTimeout(timer);
+          resolve(client);
+        },
+        (error) => {
+          if (timer !== undefined) clearTimeout(timer);
+          reject(error);
+        },
+      );
     });
+    sharedSocket = timedConnection
+      .then((client) => {
+        client.connectionStatus().subscribe({
+          onSubscribe: (subscription) =>
+            subscription.request(Number.MAX_SAFE_INTEGER),
+          onNext: (status) => {
+            if (
+              (status.kind === 'CLOSED' || status.kind === 'ERROR') &&
+              socketGeneration === generation
+            ) {
+              sharedSocket = undefined;
+              client.close();
+            }
+          },
+          onError: () => {
+            if (socketGeneration === generation) sharedSocket = undefined;
+            client.close();
+          },
+        });
+        return client;
+      })
+      .catch((error) => {
+        if (socketGeneration === generation) {
+          sharedSocket = undefined;
+        }
+        throw error;
+      });
   }
   return sharedSocket;
 }
@@ -69,10 +131,14 @@ async function performAutoTraderRpc(
   path: string,
   body?: unknown,
 ): Promise<Response> {
-  const client = await getSocket();
+  const socket = getSocket();
+  const client = await socket;
   let reply: Uint8Array;
   try {
     reply = await new Promise<Uint8Array>((resolve, reject) => {
+      let settled = false;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      let cancelRequest: (() => void) | undefined;
       client
         .requestResponse({
           data: Buffer.from(
@@ -84,12 +150,39 @@ async function performAutoTraderRpc(
           ),
         })
         .subscribe({
-          onComplete: (payload) => resolve(payload.data as Uint8Array),
-          onError: reject,
+          onSubscribe: (subscription) => {
+            cancelRequest = subscription;
+            if (settled) subscription();
+          },
+          onComplete: (payload) => {
+            if (settled) return;
+            settled = true;
+            if (timer !== undefined) clearTimeout(timer);
+            cancelRequest = undefined;
+            resolve(payload.data as Uint8Array);
+          },
+          onError: (error) => {
+            if (settled) return;
+            settled = true;
+            if (timer !== undefined) clearTimeout(timer);
+            cancelRequest = undefined;
+            reject(error);
+          },
         });
+      timer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        cancelRequest?.();
+        reject(
+          new Error(
+            `AutoTrader ${method} ${path} timed out after ${AUTO_TRADER_RPC_TIMEOUT_MS} ms`,
+          ),
+        );
+      }, AUTO_TRADER_RPC_TIMEOUT_MS);
     });
   } catch (error) {
-    sharedSocket = undefined;
+    if (sharedSocket === socket) sharedSocket = undefined;
+    client.close();
     throw error;
   }
   const response = JSON.parse(Buffer.from(reply).toString()) as {
@@ -113,7 +206,18 @@ export function autoTraderRpc(
   path: string,
   body?: unknown,
 ): Promise<Response> {
-  return requestAutoTrader(method, path, body);
+  const request = requestAutoTrader;
+  return request(method, path, body).catch(async (error: unknown) => {
+    // GETs are safe to retry. A transiently closed browser socket otherwise
+    // leaves every panel in an unavailable state until its next UI refresh.
+    // Writes must remain single-shot because a lost response cannot tell us
+    // whether the server applied the command.
+    if (method.toUpperCase() !== 'GET' || request !== performAutoTraderRpc) {
+      throw error;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    return request(method, path, body);
+  });
 }
 
 export async function autoTraderRequestStream(
@@ -122,43 +226,89 @@ export async function autoTraderRequestStream(
   onError: (error: Error) => void,
 ): Promise<{ cancel: () => void }> {
   let cancelled = false;
-  let subscription:
+  let connectionSubscription:
     | { cancel: () => void; request: (n: number) => void }
     | undefined;
+  let cancelRequest: (() => void) | undefined;
+  let pollTimer: ReturnType<typeof setTimeout> | undefined;
+  let pollTimeout: ReturnType<typeof setTimeout> | undefined;
+  let socketPromise: Promise<AutoTraderSocket> | undefined;
+  let connectedClient: AutoTraderSocket | undefined;
+  const fail = (error: Error) => {
+    if (cancelled) return;
+    cancelled = true;
+    if (sharedSocket === socketPromise) sharedSocket = undefined;
+    connectedClient?.close();
+    if (pollTimer !== undefined) clearTimeout(pollTimer);
+    if (pollTimeout !== undefined) clearTimeout(pollTimeout);
+    cancelRequest?.();
+    connectionSubscription?.cancel();
+    onError(error);
+  };
   try {
-    const client = await getSocket();
+    socketPromise = getSocket();
+    const client = await socketPromise;
+    connectedClient = client;
     if (cancelled) return { cancel: () => undefined };
-    client
-      .requestStream({ data: Buffer.from(JSON.stringify({ route })) })
-      .subscribe({
-        onSubscribe: (nextSubscription) => {
-          if (cancelled) {
-            nextSubscription.cancel();
-            return;
-          }
-          subscription = nextSubscription;
-          nextSubscription.request(1);
-        },
-        onNext: (payload) => {
-          onData(payload.data as Uint8Array);
-          subscription?.request(1);
-        },
-        onError: (error) => {
-          sharedSocket = undefined;
-          onError(error instanceof Error ? error : new Error(String(error)));
-        },
-        onComplete: () => {
-          sharedSocket = undefined;
-          onError(new Error('AutoTrader RSocket stream completed'));
-        },
-      });
+    client.connectionStatus().subscribe({
+      onSubscribe: (nextSubscription) => {
+        if (cancelled) {
+          nextSubscription.cancel();
+          return;
+        }
+        connectionSubscription = nextSubscription;
+        nextSubscription.request(Number.MAX_SAFE_INTEGER);
+      },
+      onNext: (status) => {
+        if (status.kind === 'CLOSED' || status.kind === 'ERROR') {
+          fail(new Error('AutoTrader RSocket connection closed'));
+        }
+      },
+    });
+    if (cancelled) return { cancel: () => undefined };
+    const poll = () => {
+      if (cancelled) return;
+      try {
+        pollTimeout = setTimeout(() => {
+          fail(new Error('AutoTrader snapshot request timed out'));
+        }, AUTO_TRADER_SNAPSHOT_TIMEOUT_MS);
+        client
+          .requestResponse({ data: Buffer.from(JSON.stringify({ route })) })
+          .subscribe({
+            onSubscribe: (subscription) => {
+              cancelRequest = subscription;
+              if (cancelled) subscription();
+            },
+            onComplete: (payload) => {
+              if (cancelled) return;
+              if (pollTimeout !== undefined) clearTimeout(pollTimeout);
+              pollTimeout = undefined;
+              cancelRequest = undefined;
+              onData(payload.data as Uint8Array);
+              pollTimer = setTimeout(poll, 15_000);
+            },
+            onError: (error) => {
+              if (pollTimeout !== undefined) clearTimeout(pollTimeout);
+              pollTimeout = undefined;
+              cancelRequest = undefined;
+              fail(error instanceof Error ? error : new Error(String(error)));
+            },
+          });
+      } catch (error) {
+        fail(error instanceof Error ? error : new Error(String(error)));
+      }
+    };
+    poll();
   } catch (error) {
-    onError(error instanceof Error ? error : new Error(String(error)));
+    fail(error instanceof Error ? error : new Error(String(error)));
   }
   return {
     cancel: () => {
       cancelled = true;
-      subscription?.cancel();
+      if (pollTimer !== undefined) clearTimeout(pollTimer);
+      if (pollTimeout !== undefined) clearTimeout(pollTimeout);
+      cancelRequest?.();
+      connectionSubscription?.cancel();
     },
   };
 }

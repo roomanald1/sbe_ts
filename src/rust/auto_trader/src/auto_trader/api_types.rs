@@ -9,6 +9,7 @@ struct StatusResponse {
     execution_audit_queue_estimated_bytes: usize,
     audit_coalesced_decisions: u64,
     audit_dropped_events: u64,
+    paper_learning_exploration_until_ms: u64,
     strategy: String,
     strategies: Vec<String>,
     signal_strategies_enabled: bool,
@@ -64,6 +65,7 @@ struct StrategyBudgetStatus {
     effective_budget: f64,
     used_notional: f64,
     learning_multiplier: f64,
+    learning_feedback_multiplier: f64,
     learning_samples: usize,
     positive_rate: Option<f64>,
     realized_pnl: f64,
@@ -140,6 +142,8 @@ struct SettingsRequest {
     reset_learning: bool,
     #[serde(default)]
     strategy_parameter_overrides: Option<BTreeMap<String, f64>>,
+    #[serde(default)]
+    active_live_strategy_profiles: Option<BTreeMap<String, Vec<strategy::LiveStrategyProfile>>>,
     #[serde(default)]
     reset_strategy_profile: Option<StrategyProfileReset>,
 }

@@ -24,6 +24,10 @@ async fn main() -> anyhow::Result<()> {
         .route(
             "/process-memory-bytes",
             axum::routing::get(process_memory_bytes),
+        )
+        .route(
+            "/internal/queue-metrics",
+            axum::routing::get(|| async { axum::Json(positions::queue_metrics()) }),
         );
     let listener = tokio::net::TcpListener::bind(("0.0.0.0", 3002)).await?;
     crate::service_log!(

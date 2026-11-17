@@ -186,7 +186,13 @@ fn select_cycle_signal<'a>(
             if is_live_scout_only_signal(signal) {
                 return false;
             }
-            signal.strategy.is_some() || signal.strategy_candidate
+            let named_strategy = signal
+                .strategy
+                .as_deref()
+                .and_then(Strategy::from_name)
+                .is_some();
+            (!named_strategy || validated_strategy_evidence(signal))
+                && (signal.strategy.is_some() || signal.strategy_candidate)
         })
         .max_by(|a, b| a.strength.total_cmp(&b.strength));
     if let Some(signal) = strict_candidate {
@@ -198,9 +204,7 @@ fn select_cycle_signal<'a>(
         .copied()
         .filter(|signal| {
             let context = market_context(signal);
-            signal.strategy.is_none()
-                && !signal.strategy_candidate
-                && !is_live_scout_only_signal(signal)
+            !is_live_scout_only_signal(signal)
                 && passes_pullback_confirmation(signal)
                 && signal.strength.is_finite()
                 && signal.strength

@@ -1,4 +1,4 @@
-import { executionRpc, positionRpc } from './position_rsocket';
+import { paperExchangeRpc, positionRpc } from './position_rsocket';
 
 const pendingGets = new Map<string, Promise<Response>>();
 const cachedGets = new Map<
@@ -20,7 +20,7 @@ export function sharedGet(url: string, cacheForMs = 0): Promise<Response> {
   if (!pending) {
     pending = (
       usesExecutionRSocket(url)
-        ? executionRpc('GET', url)
+        ? paperExchangeRpc('GET', url)
         : usesPositionManagementRSocket(url)
           ? positionRpc('GET', url)
           : fetch(url)
@@ -72,7 +72,6 @@ function usesPositionManagementRSocket(url: string): boolean {
     path.startsWith('/positions/realized-pnl') ||
     path.startsWith('/positions/fee-') ||
     path.startsWith('/positions/usd-rates') ||
-    path.startsWith('/positions/hedge-candidates') ||
     path === '/account' ||
     path.startsWith('/users/')
   );

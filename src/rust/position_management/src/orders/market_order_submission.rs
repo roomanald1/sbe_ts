@@ -2,9 +2,9 @@
 async fn lock_order_ledger(
     ledger: &Mutex<Ledger>,
 ) -> Result<tokio::sync::MutexGuard<'_, Ledger>, (StatusCode, String)> {
-    timeout(Duration::from_millis(5), ledger.lock())
-        .await
-        .map_err(|_| (StatusCode::SERVICE_UNAVAILABLE, "Position ledger busy".to_owned()))
+    // A transient ledger lock must queue orders, not reject an already-filled
+    // entry's reduce-only close and leave the position open.
+    Ok(ledger.lock().await)
 }
 
 async fn submit_order(
@@ -64,6 +64,14 @@ async fn submit_order(
         );
         Some(rates)
     };
+    // Paper matching runs in the Paper Exchange service and can perform
+    // network I/O; do not hold the position ledger lock while waiting on it.
+    let prepared = prepare_market_match(&symbol, &request, &options).await?;
+    let mut matched = prepared.matched;
+    let decision_timestamp = prepared.decision_timestamp;
+    let decision_price = prepared.decision_price;
+    let decision_mid_price = prepared.decision_mid_price;
+    processing_timings_ms.extend(prepared.processing_timings_ms);
     let ledger_lock_started = Instant::now();
     let mut ledger = lock_order_ledger(&store.ledger).await?;
     processing_timings_ms.insert(
@@ -77,17 +85,6 @@ async fn submit_order(
     {
         return Ok(Json(response));
     }
-    let prepared = prepare_market_match(&store, &symbol, &request, &options).await?;
-    let book = prepared.book;
-    let mut matched = prepared.matched;
-    let decision_timestamp = prepared.decision_timestamp;
-    let decision_price = prepared.decision_price;
-    let decision_mid_price = prepared.decision_mid_price;
-    processing_timings_ms.extend(prepared.processing_timings_ms);
-    let levels = match request.side {
-        TradeSide::Buy => &book.asks,
-        TradeSide::Sell => &book.bids,
-    };
     let timestamp = now_ms().map_err(internal_error)?;
     if request.reduce_only {
         let current_quantity = indexed_position_summary(&store, &ledger, Some(&request.source))
@@ -127,7 +124,7 @@ async fn submit_order(
         }
         // Recompute while holding the ledger lock so simultaneous stop barriers
         // see the quantity left after the preceding barrier fill.
-        matched = match_book(&request.side, request.quantity, limit_price, &book);
+        limit_match_quantity(&mut matched, request.quantity);
     }
     if is_fok && matched.remaining_quantity > EPSILON {
         return Err((
@@ -142,20 +139,17 @@ async fn submit_order(
     let remaining = matched.remaining_quantity;
     let filled_quantity = matched.filled_quantity;
     let average_execution_price = matched.average_execution_price;
+    let reserve_price = if matches!(request.side, TradeSide::Buy) {
+        matched.worst_ask.unwrap_or(0.0)
+    } else {
+        reference_price.unwrap_or(0.0)
+    };
     let fills = matched
         .fills
         .into_iter()
         .map(|fill| (fill.quantity, fill.price))
         .collect::<Vec<_>>();
     let capacity_started = Instant::now();
-    let reserve_price = if matches!(request.side, TradeSide::Buy) {
-        levels
-            .iter()
-            .map(|level| level.price)
-            .fold(0.0_f64, f64::max)
-    } else {
-        reference_price.unwrap_or(0.0)
-    };
     if !request.reduce_only {
         ensure_paper_capacity_with_rates(
             &store,
@@ -347,16 +341,6 @@ mod order_ledger_contention_tests {
         assert!(!pending.is_finished());
         drop(held);
         assert!(pending.await.unwrap());
-    }
-
-    #[tokio::test]
-    async fn submission_rejects_prolonged_contention() {
-        let ledger = Mutex::new(Ledger::default());
-        let _held = ledger.lock().await;
-        let started = Instant::now();
-        let error = lock_order_ledger(&ledger).await.err().expect("busy ledger rejected");
-        assert_eq!(error.0, StatusCode::SERVICE_UNAVAILABLE);
-        assert!(started.elapsed() < Duration::from_millis(250));
     }
 
 }

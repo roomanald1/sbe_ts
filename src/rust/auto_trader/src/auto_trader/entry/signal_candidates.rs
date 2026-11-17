@@ -21,101 +21,20 @@ fn live_strategy_source_signals(signals: &[Signal]) -> Vec<Signal> {
     signals.iter().filter(|signal| !is_daily_strategy_signal(signal)).cloned().collect()
 }
 
+fn live_worker_pre_evaluated(signal: &Signal) -> bool {
+    signal.strategy_decision.as_ref()
+        .and_then(|decision| decision.get("live_worker_decision"))
+        .and_then(serde_json::Value::as_str)
+        .is_some()
+}
+
+#[cfg(test)]
 fn live_strategy_feature_signal(
     signal: &Signal,
     strategy: Strategy,
     parameters: &BTreeMap<String, f64>,
 ) -> Result<Signal, String> {
-    let parameter = |key: StrategyParameterKey| {
-        parameters.get(key.as_str()).copied().ok_or_else(|| {
-            format!("Configured parameter '{}' is unavailable", key.as_str())
-        })
-    };
-    let mut configured = signal.clone();
-    match strategy {
-        Strategy::LiveMomentum => {
-            let momentum_window = parameter(StrategyParameterKey::MomentumLookbackSeconds)? as u16;
-            let trend_window = parameter(StrategyParameterKey::TrendLookbackSeconds)? as u16;
-            configured.components.momentum_10s_percent = signal.components.momentum_by_window
-                .iter().find(|feature| feature.window_seconds == momentum_window)
-                .ok_or_else(|| format!("Momentum feature window {momentum_window}s is missing"))?.value;
-            configured.components.trend_5m_volatility_units = signal.components.trend_volatility_units_by_window
-                .iter().find(|feature| feature.window_seconds == trend_window)
-                .ok_or_else(|| format!("Trend-volatility feature window {trend_window}s is missing"))?.value;
-        }
-        Strategy::LiveTradeFlow => {
-            let window = parameter(StrategyParameterKey::TradeFlowWindowSeconds)? as u16;
-            configured.components.trade_flow_imbalance = signal.components.trade_flow_by_window
-                .iter().find(|feature| feature.window_seconds == window)
-                .ok_or_else(|| format!("Trade-flow feature window {window}s is missing"))?.value;
-        }
-        Strategy::LiveOrderBook => {
-            let depth = parameter(StrategyParameterKey::BookDepthLevels)? as u8;
-            let momentum_window = parameter(StrategyParameterKey::MomentumLookbackSeconds)? as u16;
-            configured.components.book_imbalance = signal.components.book_imbalance_by_depth
-                .iter().find(|feature| feature.depth_levels == depth)
-                .ok_or_else(|| format!("Order-book feature at depth {depth} is missing"))?.value;
-            configured.components.momentum_10s_percent = signal.components.momentum_by_window
-                .iter().find(|feature| feature.window_seconds == momentum_window)
-                .ok_or_else(|| format!("Momentum feature window {momentum_window}s is missing"))?.value;
-        }
-        Strategy::LiveVwapDislocation => {
-            let window = parameter(StrategyParameterKey::VwapLookbackSeconds)? as u16;
-            let momentum_window = parameter(StrategyParameterKey::MomentumLookbackSeconds)? as u16;
-            let minimum_count = parameter(StrategyParameterKey::VwapMinimumTradeCount)? as u16;
-            let minimum_span_ms = (parameter(StrategyParameterKey::VwapMinimumTradeSpanSeconds)? * 1_000.0) as u32;
-            configured.components.momentum_10s_percent = signal.components.momentum_by_window
-                .iter().find(|feature| feature.window_seconds == momentum_window)
-                .ok_or_else(|| format!("Momentum feature window {momentum_window}s is missing"))?.value;
-            let feature = signal.components.vwap_dislocation_by_window
-                .iter().find(|feature| feature.window_seconds == window)
-                .ok_or_else(|| format!("VWAP-dislocation feature window {window}s is missing"))?;
-            configured.components.mispricing_vs_vwap_bps =
-                (feature.sample_count >= minimum_count && feature.span_ms >= minimum_span_ms)
-                    .then_some(feature.value).flatten();
-        }
-        Strategy::LiveAbsorptionPressure => {
-            let window = parameter(StrategyParameterKey::AbsorptionLookbackSeconds)? as u16;
-            let replenishment_ms = (parameter(StrategyParameterKey::AbsorptionReplenishmentSeconds)? * 1_000.0).round() as u32;
-            let tolerance = parameter(StrategyParameterKey::AbsorptionTouchToleranceBps)?;
-            let maximum_move = parameter(StrategyParameterKey::AbsorptionMaximumPriceMovePercent)?;
-            let momentum_window = parameter(StrategyParameterKey::MomentumLookbackSeconds)? as u16;
-            let movement = signal.components.momentum_by_window.iter()
-                .find(|feature| feature.window_seconds == momentum_window)
-                .ok_or_else(|| format!("Momentum feature window {momentum_window}s is missing"))?
-                .value
-                .ok_or_else(|| format!("Momentum feature window {momentum_window}s has no value yet"))?;
-            configured.components.momentum_10s_percent = Some(movement);
-            if movement.abs() > maximum_move {
-                return Err(format!(
-                    "Price movement {movement:.4}% exceeds the configured maximum {maximum_move:.4}%"
-                ));
-            }
-            let pressure = signal.components.absorption_pressure_by_window.iter()
-                .find(|feature| feature.window_seconds == window
-                    && feature.replenishment_window_ms == replenishment_ms
-                    && (feature.touch_tolerance_bps - tolerance).abs() < 1e-6)
-                .and_then(|feature| feature.value);
-            let flow_window = parameter(StrategyParameterKey::TradeFlowWindowSeconds)? as u16;
-            let minimum_flow = parameter(StrategyParameterKey::AbsorptionMinimumFlowImbalance)?;
-            let flow_fallback = signal.components.trade_flow_by_window.iter()
-                .find(|feature| feature.window_seconds == flow_window)
-                .and_then(|feature| feature.value)
-                .filter(|flow| flow.abs() >= minimum_flow)
-                .map(|flow| -flow);
-            configured.components.pressure_without_price_move = pressure.or(flow_fallback);
-        }
-        _ => return Err(format!("Strategy '{}' has no live-feature adapter", strategy.as_str())),
-    }
-    // The selected scalar features and applied parameters are retained in the
-    // decision audit; raw variants are only needed before strategy evaluation.
-    configured.components.momentum_by_window.clear();
-    configured.components.trend_volatility_units_by_window.clear();
-    configured.components.trade_flow_by_window.clear();
-    configured.components.book_imbalance_by_depth.clear();
-    configured.components.vwap_dislocation_by_window.clear();
-    configured.components.absorption_pressure_by_window.clear();
-    Ok(configured)
+    strategy::prepare_live_strategy_signal(signal, strategy, parameters)
 }
 
 #[cfg(test)]
@@ -193,6 +112,41 @@ fn signal_max_age_seconds(signal: &Signal) -> u64 {
 
 fn signal_is_fresh(signal: &Signal, now: u64) -> bool {
     !signal.stale && now.saturating_sub(signal.timestamp / 1_000) <= signal_max_age_seconds(signal)
+}
+
+#[cfg(test)]
+mod live_signal_freshness_tests {
+    use super::*;
+
+    fn live_signal() -> Signal {
+        Signal {
+            symbol: "XSOXL-USDT".into(),
+            direction: "bearish".into(),
+            strength: 0.7,
+            timestamp: 1_000_000,
+            stale: false,
+            score: -0.5,
+            ranging_probability: None,
+            components: SignalComponents::default(),
+            strategy_candidate: true,
+            strategy: Some("live-vwap-dislocation".into()),
+            strategy_decision: None,
+            market_regime: None,
+            news_attribution: None,
+            entry_gate: None,
+        }
+    }
+
+    #[test]
+    fn live_signals_allow_processing_latency_but_reject_old_or_stale_inputs() {
+        let mut signal = live_signal();
+        assert!(signal_is_fresh(&signal, 1_006));
+        assert!(signal_is_fresh(&signal, 1_020));
+        assert!(!signal_is_fresh(&signal, 1_021));
+
+        signal.stale = true;
+        assert!(!signal_is_fresh(&signal, 1_001));
+    }
 }
 
 #[cfg(test)]
@@ -745,10 +699,10 @@ mod signal_freshness_tests {
     }
 
     #[test]
-    fn live_signals_expire_at_five_seconds_and_daily_signals_at_ten_minutes() {
+    fn live_signals_expire_at_twenty_seconds_and_daily_signals_at_ten_minutes() {
         let now = 10_000;
-        assert!(signal_is_fresh(&signal(None, 9_995_000, false), now));
-        assert!(!signal_is_fresh(&signal(None, 9_994_000, false), now));
+        assert!(signal_is_fresh(&signal(None, 9_980_000, false), now));
+        assert!(!signal_is_fresh(&signal(None, 9_979_000, false), now));
         assert!(signal_is_fresh(
             &signal(Some("donchian-20-btc200"), 9_400_000, false),
             now,

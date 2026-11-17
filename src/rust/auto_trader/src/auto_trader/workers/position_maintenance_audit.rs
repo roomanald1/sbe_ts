@@ -46,12 +46,23 @@ fn external_close_quantity(prior_quantity: f64, current_quantity: f64) -> f64 {
     }
 }
 
+struct KnownExitIds<'a> {
+    order_ids: &'a BTreeSet<String>,
+    barrier_ids: &'a BTreeSet<String>,
+}
+
+impl KnownExitIds<'_> {
+    fn contains(&self, id: &str) -> bool {
+        self.order_ids.contains(id) || self.barrier_ids.contains(id)
+    }
+}
+
 fn external_close_fills(
     target_quantity: f64,
     close_side: &str,
     trades: &[serde_json::Value],
     through_ms: u64,
-    known_exit_ids: &BTreeSet<String>,
+    known_exit_ids: &KnownExitIds<'_>,
 ) -> Vec<serde_json::Value> {
     let mut candidates = trades.iter()
         .filter(|trade| trade["side"].as_str() == Some(close_side))
@@ -98,7 +109,7 @@ fn external_strategy_close_audits(
     strategy_lots: &[(String, TraderPosition)],
     trades: &[serde_json::Value],
     observed_at: u64,
-    known_exit_ids: &BTreeSet<String>,
+    known_exit_ids: &KnownExitIds<'_>,
 ) -> Vec<serde_json::Value> {
     let close_fills = external_close_fills(target_quantity, close_side, trades, observed_at, known_exit_ids);
     if close_fills.is_empty() { return Vec::new(); }
@@ -318,6 +329,11 @@ mod external_close_audit_tests {
             "fee": 0.0,
             "parent_order_id": "manual-order-1"
         })];
+        let empty_exit_ids = BTreeSet::new();
+        let known_exit_ids = KnownExitIds {
+            order_ids: &empty_exit_ids,
+            barrier_ids: &empty_exit_ids,
+        };
         let audits = external_strategy_close_audits(
             "ETH-USDT",
             0.5,
@@ -325,7 +341,7 @@ mod external_close_audit_tests {
             &[("test-strategy".into(), lot.clone())],
             &fills,
             2_000,
-            &BTreeSet::new(),
+            &known_exit_ids,
         );
 
         assert_eq!(audits.len(), 1);

@@ -36,6 +36,7 @@ export function setInsightsStreamRequesterForTests(
 function connect() {
   if (stream || subscribers === 0) return;
   const currentGeneration = ++generation;
+  let failed = false;
   void requestStream(
     'ui.snapshot',
     (data) => {
@@ -59,7 +60,9 @@ function connect() {
     () => {
       if (currentGeneration !== generation || !subscribers || retryTimer)
         return;
+      failed = true;
       stream = undefined;
+      generation += 1;
       const delay = retryDelay;
       retryDelay = Math.min(retryDelay * 2, 30_000);
       retryTimer = setTimeout(() => {
@@ -68,7 +71,7 @@ function connect() {
       }, delay);
     },
   ).then((subscription) => {
-    if (currentGeneration !== generation || !subscribers) {
+    if (failed || currentGeneration !== generation || !subscribers) {
       subscription.cancel();
       return;
     }

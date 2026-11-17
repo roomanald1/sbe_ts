@@ -2,7 +2,7 @@ use crate::{Signal, Strategy, StrategyDecision, StrategySignal};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
-#[derive(Clone, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct StrategyDiagnostic {
     pub strategy: String,
     pub as_of_ms: u64,
@@ -15,7 +15,7 @@ pub struct StrategyDiagnostic {
     pub symbols: Vec<StrategySymbolDiagnostic>,
 }
 
-#[derive(Clone, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct StrategySymbolDiagnostic {
     pub symbol: String,
     pub close: f64,
@@ -41,14 +41,14 @@ pub struct StrategySymbolDiagnostic {
     pub trend_return_windows: Option<Vec<TrendReturnWindow>>,
 }
 
-#[derive(Clone, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct TrendReturnWindow {
     pub days: usize,
     pub reference_close: f64,
     pub return_percent: f64,
 }
 
-#[derive(Clone, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct DailyStrategySnapshot {
     pub as_of_ms: u64,
     #[serde(default)]
@@ -57,9 +57,9 @@ pub struct DailyStrategySnapshot {
     pub generated_signals: Vec<Signal>,
     // A symbol is inactive only when the latest batch explicitly evaluated it.
     // Missing symbols are unknown (for example, if a batch is partial).
-    #[serde(skip)]
+    #[serde(default)]
     pub evaluated_strategy_symbols: BTreeSet<(String, String)>,
-    #[serde(skip)]
+    #[serde(default)]
     pub diagnostics: Vec<StrategyDiagnostic>,
 }
 

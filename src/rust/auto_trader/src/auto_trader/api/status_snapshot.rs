@@ -116,6 +116,10 @@ mod strategy_blocker_tests {
 }
 
 fn status(state: &AutoTraderState, settings: &Settings) -> StatusResponse {
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or_default();
     if let Ok(mut summary) = state.gap_summary.lock() {
         let day = utc_day();
         if summary.utc_day != day {
@@ -148,11 +152,26 @@ fn status(state: &AutoTraderState, settings: &Settings) -> StatusResponse {
             latest_strategy_blockers.remove(&diagnostic.strategy);
             }
     }
+    if state.enabled.load(Ordering::Relaxed) {
+        for strategy in &settings.strategies {
+            let strategy_name = strategy.as_str();
+            latest_strategy_blockers
+                .entry(strategy_name.to_owned())
+                .or_insert_with(|| StrategyBlocker {
+                    strategy: strategy_name.to_owned(),
+                    symbol: "MARKET".to_owned(),
+                    reason: "No entry candidate was reported by the latest strategy evaluation"
+                        .to_owned(),
+                    timestamp_ms: now_ms,
+                });
+        }
+    }
     StatusResponse {
         enabled: state.enabled.load(Ordering::Relaxed),
         audit_healthy: state.audit_health.load(Ordering::Relaxed) == 3
             && !state.audit_failure_latched.load(Ordering::Relaxed),
         audit_failure_latched: state.audit_failure_latched.load(Ordering::Relaxed),
+        paper_learning_exploration_until_ms: settings.paper_learning_exploration_until_ms,
         decision_audit_queue_depth: state.audit_tx.depth(),
         execution_audit_queue_depth: state.execution_audit_tx.depth(),
         decision_audit_queue_estimated_bytes: state.audit_tx.estimated_bytes(),
@@ -186,7 +205,16 @@ fn status(state: &AutoTraderState, settings: &Settings) -> StatusResponse {
                     base_budget: daily_strategy_budget(settings, strategy.as_str()),
                     effective_budget: daily_strategy_effective_budget(settings, strategy.as_str()),
                     used_notional: allocated_notional_for_strategy(settings, strategy.as_str()),
-                    learning_multiplier: learned_strategy_size_multiplier(&learning),
+                    learning_multiplier: settings
+                        .learned_strategy_size_multipliers
+                        .get(strategy.as_str())
+                        .copied()
+                        .unwrap_or_else(|| learned_strategy_size_multiplier(&learning)),
+                    learning_feedback_multiplier: settings
+                        .learned_strategy_size_multipliers
+                        .get(strategy.as_str())
+                        .copied()
+                        .unwrap_or_else(|| learned_strategy_size_multiplier(&learning)),
                     learning_samples: learning.samples,
                     positive_rate: (learning.samples > 0)
                         .then_some(learning.positive as f64 / learning.samples as f64),
@@ -204,9 +232,14 @@ fn status(state: &AutoTraderState, settings: &Settings) -> StatusResponse {
                 StrategyBudgetStatus {
                     strategy: strategy.as_str().to_owned(),
                     base_budget: intraday_strategy_budget(settings, strategy.as_str()),
-                    effective_budget: intraday_strategy_effective_budget(settings, strategy.as_str()),
+                    effective_budget: intraday_strategy_effective_budget(settings, strategy.as_str(), now_ms),
                     used_notional: allocated_notional_for_strategy(settings, strategy.as_str()),
-                    learning_multiplier: intraday_strategy_size_multiplier(settings, strategy),
+                    learning_multiplier: intraday_strategy_size_multiplier(settings, strategy, now_ms),
+                    learning_feedback_multiplier: settings
+                        .learned_strategy_size_multipliers
+                        .get(strategy.as_str())
+                        .copied()
+                        .unwrap_or_else(|| learned_strategy_size_multiplier(&learning)),
                     learning_samples: learning.samples,
                     positive_rate: (learning.samples > 0)
                         .then_some(learning.positive as f64 / learning.samples as f64),

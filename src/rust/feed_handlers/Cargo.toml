@@ -34,3 +34,5 @@ harness = false
 [[bench]]
 name = "feed_to_subscriber"
 harness = false
+[patch.crates-io]
+rsocket_rust = { path = "../vendor/rsocket_rust" }

@@ -15,14 +15,29 @@ async fn main() -> anyhow::Result<()> {
     let (_domain_router, coordinator) =
         learning::router_with_scout_coordinator(path, &worker_endpoints)
             .map_err(anyhow::Error::msg)?;
-    let app = learning::operational_router().merge(service_docs::routes(
-        "Learning",
-        &[
-            ("/health", &["get"]),
-            ("/process-cpu-seconds", &["get"]),
-            ("/process-memory-bytes", &["get"]),
-        ],
-    ));
+    let scout_update_queue = coordinator.scout_update_queue_sender();
+    let app = learning::operational_router()
+        .route(
+            "/internal/queue-metrics",
+            axum::routing::get(move || {
+                let sender = scout_update_queue.clone();
+                async move {
+                    axum::Json(vec![serde_json::json!({
+                        "queue": "learning_scout_updates",
+                        "depth": sender.len(),
+                        "capacity": 16_384,
+                    })])
+                }
+            }),
+        )
+        .merge(service_docs::routes(
+            "Learning",
+            &[
+                ("/health", &["get"]),
+                ("/process-cpu-seconds", &["get"]),
+                ("/process-memory-bytes", &["get"]),
+            ],
+        ));
     println!("Learning Scout coordinator serving RSocket on ws://{rsocket_address}");
     tokio::try_join!(
         async move {

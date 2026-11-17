@@ -1,27 +1,35 @@
 use anyhow::{Context, bail};
 use axum::{Router, body::Body};
-use futures_util::{Stream, stream};
+use futures_util::{Stream, StreamExt, stream};
 use http_body_util::BodyExt;
-use rsocket_rust::{prelude::*, utils::EchoRSocket};
+use rsocket_rust::{Client, prelude::*, utils::EchoRSocket};
 use rsocket_rust_transport_websocket::{WebsocketClientTransport, WebsocketServerTransport};
-use std::{collections::BTreeMap, pin::Pin, sync::Arc, time::Duration};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::{
+    collections::{BTreeMap, HashMap},
+    pin::Pin,
+    sync::{Arc, Mutex as StdMutex, OnceLock},
+    time::Duration,
+};
 use strategy::{
     MAX_REPLAY_SIGNALS, ScoutCandidateBatch, ScoutCandidateBatchResult, ScoutCoordinatorRequest,
     ScoutCoordinatorResponse, ScoutCoordinatorRouteCommand, ScoutCoordinatorRouteResult,
-    ScoutFeedbackAcknowledgement, ScoutWorkAssignment, ScoutWorkDecision, ScoutWorkMode,
-    ScoutWorkResult, ScoutWorkerHttpMethod, ScoutWorkerRequest, ScoutWorkerResponse,
-    ScoutWorkerRouteCommand, ScoutWorkerRouteResult, Strategy, StrategyProfile,
-    StrategyReplayPoint, StrategyReplayRequest, StrategyReplayResponse,
+    ScoutDataUpdate, ScoutFeedbackAcknowledgement, ScoutStreamEnvelope, ScoutStreamSubscription,
+    ScoutWorkAssignment, ScoutWorkDecision, ScoutWorkMode, ScoutWorkResult, ScoutWorkerHttpMethod,
+    ScoutWorkerRequest, ScoutWorkerResponse, ScoutWorkerRouteCommand, ScoutWorkerRouteResult,
+    Strategy, StrategyProfile, StrategyReplayPoint, StrategyReplayRequest, StrategyReplayResponse,
     request_scout_service_route,
 };
-use tokio::sync::Mutex as AsyncMutex;
+use tokio::sync::{Mutex as AsyncMutex, broadcast, oneshot};
 use tower::ServiceExt;
 
 use crate::ServiceState;
 
 const DEFAULT_MAX_SCOUT_BATCH_SIGNALS: usize = 64;
+const SCOUT_UPDATE_QUEUE_CAPACITY: usize = 16_384;
 const DEFAULT_MAX_SCOUT_ASSIGNMENTS: usize = 512;
 const DEFAULT_MAX_SCOUT_BATCH_BYTES: usize = 8 * 1024 * 1024;
+const PROFILE_SNAPSHOT_PUBLISH_INTERVAL: Duration = Duration::from_secs(120);
 const DEFAULT_WORKER_TIMEOUT_MS: usize = 3_000;
 const DEFAULT_REPLAY_WORKER_TIMEOUT_MS: usize = 10_000;
 const MAX_REPLAY_TOTAL_SIGNALS: usize = 10_000;
@@ -29,6 +37,250 @@ const MAX_REPLAY_TOTAL_PAGES: usize = 128;
 const MAX_REPLAY_TOTAL_RECORDS_SCANNED: usize = 524_288;
 const MAX_REPLAY_TOTAL_MS: u64 = 24 * 60 * 60 * 1_000;
 const MAX_REPLAY_SIGNAL_GAP_MS: u64 = 30_000;
+const MAX_WORKER_SCOUT_VARIANTS: usize = 2_000;
+const MAX_AUTOTRADER_SCOUT_VARIANTS: usize = 5_000;
+
+type ScoutWorkerClientPool = HashMap<String, Arc<Client>>;
+
+fn scout_worker_client_pool() -> &'static StdMutex<ScoutWorkerClientPool> {
+    static CLIENTS: OnceLock<StdMutex<ScoutWorkerClientPool>> = OnceLock::new();
+    CLIENTS.get_or_init(|| StdMutex::new(HashMap::new()))
+}
+
+async fn pooled_scout_worker_client(endpoint: &str) -> anyhow::Result<Arc<Client>> {
+    if let Some(client) = scout_worker_client_pool()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(endpoint)
+        .cloned()
+    {
+        return Ok(client);
+    }
+
+    let connected = Arc::new(
+        RSocketFactory::connect()
+            .transport(WebsocketClientTransport::from(endpoint))
+            .acceptor(Box::new(|| Box::new(EchoRSocket)))
+            .start()
+            .await
+            .with_context(|| format!("could not connect to Scout worker at {endpoint}"))?,
+    );
+    let mut clients = scout_worker_client_pool()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    Ok(clients
+        .entry(endpoint.to_owned())
+        .or_insert(connected)
+        .clone())
+}
+
+fn invalidate_scout_worker_client(endpoint: &str, failed_client: &Arc<Client>) {
+    let mut clients = scout_worker_client_pool()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if clients
+        .get(endpoint)
+        .is_some_and(|client| Arc::ptr_eq(client, failed_client))
+    {
+        clients.remove(endpoint);
+    }
+}
+
+struct ScoutUpdateHub {
+    sender: broadcast::Sender<ScoutStreamEnvelope>,
+    sequence: AtomicU64,
+    latest: std::sync::RwLock<BTreeMap<(String, String), ScoutStreamEnvelope>>,
+    assignments: AsyncMutex<BTreeMap<String, oneshot::Sender<Result<ScoutWorkResult, String>>>>,
+    replays: AsyncMutex<BTreeMap<String, oneshot::Sender<Result<StrategyReplayResponse, String>>>>,
+}
+
+impl ScoutUpdateHub {
+    fn new() -> Arc<Self> {
+        let (sender, _) = broadcast::channel(SCOUT_UPDATE_QUEUE_CAPACITY);
+        Arc::new(Self {
+            sender,
+            sequence: AtomicU64::new(0),
+            latest: std::sync::RwLock::new(BTreeMap::new()),
+            assignments: AsyncMutex::new(BTreeMap::new()),
+            replays: AsyncMutex::new(BTreeMap::new()),
+        })
+    }
+
+    fn publish(&self, strategy: Strategy, update: ScoutDataUpdate) -> u64 {
+        let key = scout_cache_key(&update);
+        let update = match update {
+            ScoutDataUpdate::Profiles(snapshot) => {
+                let previous = key.as_ref().and_then(|key| {
+                    self.latest
+                        .read()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .get(&(strategy.as_str().to_owned(), key.clone()))
+                        .and_then(|envelope| match &envelope.update {
+                            ScoutDataUpdate::Profiles(value) => Some(value.clone()),
+                            _ => None,
+                        })
+                });
+                ScoutDataUpdate::Profiles(merge_profile_snapshots(previous.as_ref(), snapshot))
+            }
+            update => update,
+        };
+        if let Some(key) = key.as_ref() {
+            let latest = self.latest.read().unwrap_or_else(|e| e.into_inner());
+            if latest
+                .get(&(strategy.as_str().to_owned(), key.clone()))
+                .is_some_and(|previous| previous.update == update)
+            {
+                return self.sequence.load(Ordering::Relaxed);
+            }
+        }
+        let sequence = self.sequence.fetch_add(1, Ordering::Relaxed) + 1;
+        let envelope = ScoutStreamEnvelope {
+            strategy,
+            sequence,
+            replayed_from_cache: false,
+            update,
+        };
+        if let Some(key) = key {
+            self.latest
+                .write()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert((strategy.as_str().to_owned(), key), envelope.clone());
+        }
+        let _ = self.sender.send(envelope);
+        sequence
+    }
+
+    fn snapshot(&self, strategy: Strategy) -> Vec<ScoutStreamEnvelope> {
+        self.latest
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .filter(|((name, _), _)| name == strategy.as_str())
+            .map(|(_, update)| {
+                let mut cached = update.clone();
+                cached.replayed_from_cache = true;
+                cached
+            })
+            .collect()
+    }
+
+    fn forget_assignment(&self, strategy: Strategy, assignment_id: &str) {
+        self.latest
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&(
+                strategy.as_str().to_owned(),
+                format!("assignment:{assignment_id}"),
+            ));
+    }
+
+    fn has_cached(&self, strategy: Strategy, key: &str) -> bool {
+        self.latest
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains_key(&(strategy.as_str().to_owned(), key.to_owned()))
+    }
+}
+
+fn strategy_profile_snapshot(
+    snapshot: &serde_json::Value,
+    strategy: Strategy,
+) -> serde_json::Value {
+    let name = strategy.as_str();
+    let mut variants = snapshot["scout_parameter_variants"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|variant| variant["strategy"].as_str() == Some(name))
+        .cloned()
+        .collect::<Vec<_>>();
+    variants.sort_by(|left, right| {
+        right["promoted"]
+            .as_bool()
+            .cmp(&left["promoted"].as_bool())
+            .then_with(|| right["rejected"].as_bool().cmp(&left["rejected"].as_bool()))
+            .then_with(|| {
+                right["sample_count"]
+                    .as_u64()
+                    .cmp(&left["sample_count"].as_u64())
+            })
+            .then_with(|| left["symbol"].as_str().cmp(&right["symbol"].as_str()))
+            .then_with(|| left["parameter"].as_str().cmp(&right["parameter"].as_str()))
+    });
+    variants.truncate(MAX_WORKER_SCOUT_VARIANTS);
+    serde_json::json!({
+        "profiles": snapshot["profiles"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|profile| profile["strategy"].as_str() == Some(name))
+            .cloned()
+            .collect::<Vec<_>>(),
+        "scout_parameter_variants": variants,
+    })
+}
+
+fn trim_autotrader_variant_snapshot(snapshot: &mut strategy::LearnedProfileSnapshot) {
+    snapshot.scout_parameter_variants.sort_by(|left, right| {
+        right
+            .promoted
+            .cmp(&left.promoted)
+            .then_with(|| right.rejected.cmp(&left.rejected))
+            .then_with(|| right.sample_count.cmp(&left.sample_count))
+            .then_with(|| left.symbol.cmp(&right.symbol))
+            .then_with(|| left.strategy.cmp(&right.strategy))
+            .then_with(|| left.parameter.cmp(&right.parameter))
+            .then_with(|| left.candidate_value.total_cmp(&right.candidate_value))
+    });
+    snapshot
+        .scout_parameter_variants
+        .truncate(MAX_AUTOTRADER_SCOUT_VARIANTS);
+}
+
+fn merge_profile_snapshots(
+    previous: Option<&serde_json::Value>,
+    incoming: serde_json::Value,
+) -> serde_json::Value {
+    let mut profiles = BTreeMap::<String, serde_json::Value>::new();
+    let mut variants = BTreeMap::<String, serde_json::Value>::new();
+    for snapshot in previous.into_iter().chain(std::iter::once(&incoming)) {
+        for profile in snapshot["profiles"].as_array().into_iter().flatten() {
+            let key = format!(
+                "{}:{}:{}",
+                profile["symbol"].as_str().unwrap_or_default(),
+                profile["strategy"].as_str().unwrap_or_default(),
+                profile["profile_id"].as_str().unwrap_or_default()
+            );
+            profiles.insert(key, profile.clone());
+        }
+        for variant in snapshot["scout_parameter_variants"]
+            .as_array()
+            .into_iter()
+            .flatten()
+        {
+            variants.insert(
+                serde_json::to_string(variant).unwrap_or_default(),
+                variant.clone(),
+            );
+        }
+    }
+    serde_json::json!({
+        "profiles": profiles.into_values().collect::<Vec<_>>(),
+        "scout_parameter_variants": variants.into_values().collect::<Vec<_>>(),
+    })
+}
+
+fn scout_cache_key(update: &ScoutDataUpdate) -> Option<String> {
+    match update {
+        ScoutDataUpdate::Profiles(_) => Some("profiles".into()),
+        ScoutDataUpdate::Feedback(_) => Some("feedback".into()),
+        ScoutDataUpdate::Configuration(_) => Some("configuration".into()),
+        ScoutDataUpdate::HistoricalReplay(_) => Some("historical_replay".into()),
+        ScoutDataUpdate::Assignment(assignment) => {
+            Some(format!("assignment:{}", assignment.assignment_id))
+        }
+    }
+}
 
 fn strategy_replay_horizons_ms(strategy: &str) -> Option<Vec<u64>> {
     if !matches!(
@@ -158,10 +410,16 @@ pub struct ScoutCoordinator {
     replay_worker_timeout: Duration,
     enabled: bool,
     insights_rsocket_url: String,
+    auto_trader_rsocket_url: String,
     replay_gate: Arc<AsyncMutex<()>>,
+    scout_updates: Arc<ScoutUpdateHub>,
 }
 
 impl ScoutCoordinator {
+    pub fn scout_update_queue_sender(&self) -> broadcast::Sender<ScoutStreamEnvelope> {
+        self.scout_updates.sender.clone()
+    }
+
     pub(crate) fn new(
         state: ServiceState,
         worker_endpoints: &str,
@@ -197,13 +455,135 @@ impl ScoutCoordinator {
                 .unwrap_or(true),
             insights_rsocket_url: std::env::var("INSIGHTS_RPC_RSOCKET_URL")
                 .unwrap_or_else(|_| "ws://insights:10007".into()),
+            auto_trader_rsocket_url: std::env::var("AUTO_TRADER_RSOCKET_URL")
+                .unwrap_or_else(|_| "ws://auto-trader:10006".into()),
             replay_gate: Arc::new(AsyncMutex::new(())),
+            scout_updates: ScoutUpdateHub::new(),
         })
     }
 
     pub async fn serve(self, address: String) -> anyhow::Result<()> {
         let responder = CoordinatorResponder(self);
         let replay_coordinator = responder.0.clone();
+        let snapshot_publisher = responder.0.clone();
+        tokio::spawn(async move {
+            let mut retry = tokio::time::interval(PROFILE_SNAPSHOT_PUBLISH_INTERVAL);
+            retry.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            let mut last_publish_at: Option<tokio::time::Instant> = None;
+            let mut last_trader_snapshot_hash = None;
+            let mut last_trader_sync_at: Option<tokio::time::Instant> = None;
+            loop {
+                tokio::select! {
+                    _ = snapshot_publisher.state.state_updates.notified() => {
+                        // Coalesce bursts of outcomes and profile writes into
+                        // one state push instead of serializing a snapshot per event.
+                        tokio::time::sleep(Duration::from_secs(5)).await;
+                    }
+                    _ = retry.tick() => {}
+                }
+                if last_publish_at
+                    .is_some_and(|last| last.elapsed() < PROFILE_SNAPSHOT_PUBLISH_INTERVAL)
+                {
+                    continue;
+                }
+                let mut snapshot = crate::profiles::get_decision_snapshot(axum::extract::State(
+                    snapshot_publisher.state.clone(),
+                ))
+                .await
+                .0;
+                let scout_snapshot =
+                    serde_json::to_value(&snapshot).unwrap_or(serde_json::Value::Null);
+                for strategy in Strategy::all() {
+                    snapshot_publisher.scout_updates.publish(
+                        strategy,
+                        ScoutDataUpdate::Profiles(strategy_profile_snapshot(
+                            &scout_snapshot,
+                            strategy,
+                        )),
+                    );
+                }
+                trim_autotrader_variant_snapshot(&mut snapshot);
+                let encoded = serde_json::to_vec(&snapshot).unwrap_or_default();
+                let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                std::hash::Hash::hash(&encoded, &mut hasher);
+                let snapshot_hash = std::hash::Hasher::finish(&hasher);
+                let trader_sync_due = last_trader_sync_at
+                    .is_none_or(|last| last.elapsed() >= Duration::from_secs(5 * 60));
+                if last_trader_snapshot_hash != Some(snapshot_hash) || trader_sync_due {
+                    eprintln!(
+                        "Publishing Learning decision snapshot to AutoTrader ({} bytes)",
+                        encoded.len()
+                    );
+                    match strategy::request_learning_snapshot_push(
+                        &snapshot_publisher.auto_trader_rsocket_url,
+                        &snapshot,
+                    )
+                    .await
+                    {
+                        Ok(()) => {
+                            last_trader_snapshot_hash = Some(snapshot_hash);
+                            last_trader_sync_at = Some(tokio::time::Instant::now());
+                        }
+                        Err(error) => {
+                            eprintln!("Learning snapshot push to AutoTrader failed: {error:#}")
+                        }
+                    }
+                }
+                last_publish_at = Some(tokio::time::Instant::now());
+            }
+        });
+        let configuration_publisher = responder.0.clone();
+        tokio::spawn(async move {
+            loop {
+                let pending = configuration_publisher
+                    .worker_endpoints
+                    .iter()
+                    .filter_map(|(name, endpoint)| {
+                        let strategy = Strategy::from_name(name)?;
+                        (!configuration_publisher
+                            .scout_updates
+                            .has_cached(strategy, "configuration"))
+                        .then(|| (strategy, endpoint.clone()))
+                    })
+                    .collect::<Vec<_>>();
+                if pending.is_empty() {
+                    break;
+                }
+                let responses = futures_util::future::join_all(pending.into_iter().map(
+                    |(strategy, endpoint)| {
+                        let coordinator = configuration_publisher.clone();
+                        async move {
+                            let command = ScoutWorkerRouteCommand {
+                                request_id: format!(
+                                    "learning-config-bootstrap:{}:{}",
+                                    strategy.as_str(),
+                                    crate::now_ms()
+                                ),
+                                strategy,
+                                method: ScoutWorkerHttpMethod::Get,
+                                path: "/configuration".into(),
+                                payload: serde_json::Value::Null,
+                            };
+                            (
+                                strategy,
+                                coordinator.dispatch_route(&endpoint, command).await,
+                            )
+                        }
+                    },
+                ))
+                .await;
+                for (strategy, result) in responses {
+                    if let Ok(result) = result {
+                        if (200..300).contains(&result.status) {
+                            configuration_publisher
+                                .scout_updates
+                                .publish(strategy, ScoutDataUpdate::Configuration(result.body));
+                        }
+                    }
+                }
+                tokio::time::sleep(Duration::from_secs(5)).await;
+            }
+        });
         tokio::spawn(async move {
             let mut ticker = tokio::time::interval(Duration::from_secs(1));
             ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -264,8 +644,7 @@ impl ScoutCoordinator {
                 let strategy = Strategy::from_name(&profile.strategy).with_context(|| {
                     format!("Learning profile has unknown strategy {}", profile.strategy)
                 })?;
-                let endpoint = self
-                    .worker_endpoints
+                self.worker_endpoints
                     .get(strategy.as_str())
                     .with_context(|| {
                         format!("no RSocket worker configured for {}", strategy.as_str())
@@ -299,7 +678,6 @@ impl ScoutCoordinator {
                         continue;
                     }
                     assignments.push((
-                        endpoint.clone(),
                         ScoutWorkAssignment {
                             assignment_id,
                             strategy,
@@ -316,16 +694,49 @@ impl ScoutCoordinator {
         drop(state);
 
         results.reserve(assignments.len());
-        for (endpoint, assignment, evidence) in assignments {
+        for (assignment, evidence) in assignments {
             let expected_id = assignment.assignment_id.clone();
             let expected_strategy = assignment.strategy;
-            let mut result = tokio::time::timeout(
-                self.worker_timeout,
-                dispatch_assignment(&endpoint, &assignment),
-            )
-            .await
-            .with_context(|| format!("Scout worker {} timed out", expected_strategy.as_str()))?
-            .with_context(|| format!("Scout worker {} failed", expected_strategy.as_str()))?;
+            let (sender, receiver) = oneshot::channel();
+            self.scout_updates
+                .assignments
+                .lock()
+                .await
+                .insert(expected_id.clone(), sender);
+            let sequence = self
+                .scout_updates
+                .publish(expected_strategy, ScoutDataUpdate::Assignment(assignment));
+            if self.scout_updates.sender.receiver_count() == 0 {
+                self.scout_updates
+                    .assignments
+                    .lock()
+                    .await
+                    .remove(&expected_id);
+                bail!(
+                    "no Scout stream is subscribed for {}",
+                    expected_strategy.as_str()
+                );
+            }
+            let result = tokio::time::timeout(self.worker_timeout, receiver)
+                .await
+                .with_context(|| {
+                    format!(
+                        "Scout worker {} assignment stream timed out (sequence {sequence})",
+                        expected_strategy.as_str()
+                    )
+                })?
+                .with_context(|| {
+                    format!(
+                        "Scout worker {} assignment result channel closed",
+                        expected_strategy.as_str()
+                    )
+                })?;
+            let mut result = result.map_err(|error| {
+                anyhow::anyhow!(
+                    "Scout worker {} assignment failed: {error}",
+                    expected_strategy.as_str()
+                )
+            })?;
             if result.assignment_id != expected_id || result.strategy != expected_strategy {
                 bail!("Scout worker returned a result for a different assignment");
             }
@@ -348,25 +759,36 @@ impl ScoutCoordinator {
         {
             bail!("strategy replay request is outside its configured bounds");
         }
-        let endpoint = self
-            .worker_endpoints
-            .get(request.strategy.as_str())
-            .with_context(|| {
-                format!(
-                    "no RSocket worker configured for {}",
-                    request.strategy.as_str()
-                )
-            })?;
+        anyhow::ensure!(
+            self.worker_endpoints
+                .contains_key(request.strategy.as_str()),
+            "no RSocket worker configured for {}",
+            request.strategy.as_str()
+        );
         let expected_job_id = request.job_id.clone();
         let expected_strategy = request.strategy;
         let expected_symbol = request.symbol.clone();
         let expected_profile_id = request.profile_id.clone();
-        let response = tokio::time::timeout(
-            self.replay_worker_timeout,
-            dispatch_strategy_replay(endpoint, &request),
-        )
-        .await
-        .context("strategy replay worker timed out")??;
+        let (sender, receiver) = oneshot::channel();
+        self.scout_updates
+            .replays
+            .lock()
+            .await
+            .insert(expected_job_id.clone(), sender);
+        self.scout_updates.publish(
+            expected_strategy,
+            ScoutDataUpdate::HistoricalReplay(request.clone()),
+        );
+        let response = tokio::time::timeout(self.replay_worker_timeout, receiver).await;
+        self.scout_updates
+            .replays
+            .lock()
+            .await
+            .remove(&expected_job_id);
+        let response = response
+            .context("strategy replay worker timed out")?
+            .context("strategy replay result channel closed")?
+            .map_err(|error| anyhow::anyhow!("strategy replay worker failed: {error}"))?;
         if response.job_id != expected_job_id
             || response.strategy != expected_strategy
             || response.symbol != expected_symbol
@@ -982,7 +1404,14 @@ impl ScoutCoordinator {
                 path: worker_path,
                 payload,
             };
-            results.push(self.dispatch_route(endpoint, worker_command).await?);
+            let result = self.dispatch_route(endpoint, worker_command).await?;
+            if command.path == "/configuration" {
+                self.scout_updates.publish(
+                    strategy,
+                    ScoutDataUpdate::Configuration(result.body.clone()),
+                );
+            }
+            results.push(result);
         }
         Ok(aggregate_route_results(command, results))
     }
@@ -992,16 +1421,25 @@ impl ScoutCoordinator {
         event: strategy::FeedbackEvent,
     ) -> anyhow::Result<ScoutFeedbackAcknowledgement> {
         let event_id = crate::event_parts(&event).0.to_owned();
-        match crate::accept_feedback(axum::extract::State(self.state.clone()), axum::Json(event))
-            .await
+        match crate::accept_feedback(
+            axum::extract::State(self.state.clone()),
+            axum::Json(event.clone()),
+        )
+        .await
         {
-            Ok(result) => Ok(ScoutFeedbackAcknowledgement {
-                event_id,
-                accepted: result.0.accepted,
-                duplicate: result.0.duplicate,
-                status: 200,
-                detail: None,
-            }),
+            Ok(result) => {
+                if let Some(strategy) = Strategy::from_name(crate::event_parts(&event).2) {
+                    self.scout_updates
+                        .publish(strategy, ScoutDataUpdate::Feedback(event));
+                }
+                Ok(ScoutFeedbackAcknowledgement {
+                    event_id,
+                    accepted: result.0.accepted,
+                    duplicate: result.0.duplicate,
+                    status: 200,
+                    detail: None,
+                })
+            }
             Err((status, message)) => Ok(ScoutFeedbackAcknowledgement {
                 event_id,
                 accepted: false,
@@ -1022,18 +1460,64 @@ impl ScoutCoordinator {
         Ok(serde_json::json!({"profiles": profiles}))
     }
 
+    async fn profile_snapshot_for(
+        &self,
+        symbols: Vec<String>,
+        strategies: Vec<String>,
+    ) -> anyhow::Result<serde_json::Value> {
+        if !self.enabled {
+            return Ok(serde_json::json!({"profiles": [], "scout_parameter_variants": []}));
+        }
+        anyhow::ensure!(
+            symbols.len() <= 512 && strategies.len() <= Strategy::all().count(),
+            "Learning profile snapshot request exceeds its bounds"
+        );
+        let state = self.state.state.lock().await;
+        let mut profiles = Vec::new();
+        let mut profile_symbols = std::collections::BTreeSet::new();
+        for symbol in symbols
+            .into_iter()
+            .filter(|symbol| !symbol.trim().is_empty() && symbol.len() <= 32)
+        {
+            profile_symbols.insert(symbol.clone());
+            for strategy_name in &strategies {
+                let Some(strategy) = Strategy::from_name(strategy_name) else {
+                    continue;
+                };
+                let request = serde_json::json!({
+                    "symbol": symbol,
+                    "strategy": strategy.as_str(),
+                    "strategy_candidate": false,
+                });
+                profiles.extend(
+                    selected_profiles(&state, &symbol, &request)?
+                        .into_iter()
+                        .map(serde_json::to_value)
+                        .collect::<Result<Vec<_>, _>>()?,
+                );
+            }
+        }
+        let scout_parameter_variants = crate::profiles::scout_parameter_variant_snapshots(&state)
+            .into_iter()
+            .filter(|variant| {
+                profile_symbols.contains(&variant.symbol)
+                    && strategies
+                        .iter()
+                        .any(|strategy| strategy == &variant.strategy)
+            })
+            .collect::<Vec<_>>();
+        Ok(
+            serde_json::json!({"profiles": profiles, "scout_parameter_variants": scout_parameter_variants}),
+        )
+    }
+
     async fn dispatch_route(
         &self,
         endpoint: &str,
         command: ScoutWorkerRouteCommand,
     ) -> anyhow::Result<ScoutWorkerRouteResult> {
-        let client = RSocketFactory::connect()
-            .transport(WebsocketClientTransport::from(endpoint))
-            .acceptor(Box::new(|| Box::new(EchoRSocket)))
-            .start()
-            .await
-            .with_context(|| format!("could not connect to Scout worker at {endpoint}"))?;
-        let response = tokio::time::timeout(
+        let client = pooled_scout_worker_client(endpoint).await?;
+        let response = match tokio::time::timeout(
             self.worker_timeout,
             client.request_response(
                 Payload::builder()
@@ -1044,17 +1528,28 @@ impl ScoutCoordinator {
             ),
         )
         .await
-        .context("Scout worker route request timed out")??
-        .context("Scout worker route returned an empty response")?;
+        {
+            Ok(Ok(Some(response))) => response,
+            Ok(Ok(None)) => {
+                invalidate_scout_worker_client(endpoint, &client);
+                bail!("Scout worker route returned an empty response");
+            }
+            Ok(Err(error)) => {
+                invalidate_scout_worker_client(endpoint, &client);
+                return Err(error).context("Scout worker route request failed");
+            }
+            Err(_) => {
+                invalidate_scout_worker_client(endpoint, &client);
+                bail!("Scout worker route request timed out");
+            }
+        };
         let response: ScoutWorkerResponse = serde_json::from_slice(
             response
                 .data()
                 .context("Scout worker route response had no data")?,
         )
         .context("Scout worker route response was invalid")?;
-        let ScoutWorkerResponse::Route(result) = response else {
-            bail!("Scout worker returned the wrong operation response");
-        };
+        let ScoutWorkerResponse::Route(result) = response;
         if result.request_id != command.request_id || result.strategy != command.strategy {
             bail!("Scout worker returned a result for a different lifecycle command");
         }
@@ -1108,6 +1603,11 @@ impl ScoutCoordinator {
         command: ScoutCoordinatorRouteCommand,
     ) -> anyhow::Result<ScoutCoordinatorRouteResult> {
         let path = command.path.split('?').next().unwrap_or(&command.path);
+        let feedback = (path == "/feedback")
+            .then(|| {
+                serde_json::from_value::<strategy::FeedbackEvent>(command.payload.clone()).ok()
+            })
+            .flatten();
         if !learning_route_allowed(path, command.method) {
             bail!("unsupported Learning RSocket route: {path}");
         }
@@ -1137,6 +1637,14 @@ impl ScoutCoordinator {
         let bytes = response.into_body().collect().await?.to_bytes();
         let body = serde_json::from_slice(&bytes)
             .unwrap_or_else(|_| serde_json::Value::String(String::from_utf8_lossy(&bytes).into()));
+        if (200..300).contains(&status) {
+            if let Some(event) = feedback {
+                if let Some(strategy) = Strategy::from_name(crate::event_parts(&event).2) {
+                    self.scout_updates
+                        .publish(strategy, ScoutDataUpdate::Feedback(event));
+                }
+            }
+        }
         Ok(ScoutCoordinatorRouteResult {
             request_id: command.request_id,
             status,
@@ -1151,6 +1659,7 @@ fn learning_route_allowed(path: &str, method: ScoutWorkerHttpMethod) -> bool {
         (ScoutWorkerHttpMethod::Get, "/profiles")
             | (ScoutWorkerHttpMethod::Get, "/decision-snapshot")
             | (ScoutWorkerHttpMethod::Get, "/summary")
+            | (ScoutWorkerHttpMethod::Post, "/profiles")
             | (ScoutWorkerHttpMethod::Post, "/feedback")
             | (ScoutWorkerHttpMethod::Post, "/exit-timing")
             | (ScoutWorkerHttpMethod::Post, "/context-thresholds")
@@ -1645,77 +2154,13 @@ fn env_limit(name: &str, default: usize) -> Result<usize, String> {
     }
 }
 
-async fn dispatch_assignment(
-    endpoint: &str,
-    assignment: &ScoutWorkAssignment,
-) -> anyhow::Result<ScoutWorkResult> {
-    let client = RSocketFactory::connect()
-        .transport(WebsocketClientTransport::from(endpoint))
-        .acceptor(Box::new(|| Box::new(EchoRSocket)))
-        .start()
-        .await
-        .with_context(|| format!("could not connect to Scout worker at {endpoint}"))?;
-    let response = client
-        .request_response(
-            Payload::builder()
-                .set_data(serde_json::to_vec(&ScoutWorkerRequest::Evaluate(
-                    assignment.clone(),
-                ))?)
-                .build(),
-        )
-        .await?
-        .context("Scout worker returned an empty response")?;
-    let response: ScoutWorkerResponse = serde_json::from_slice(
-        response
-            .data()
-            .context("Scout worker response had no data")?,
-    )
-    .context("Scout worker response was not a valid result")?;
-    let ScoutWorkerResponse::Evaluation(result) = response else {
-        bail!("Scout worker returned the wrong operation response");
-    };
-    Ok(result)
-}
-
-async fn dispatch_strategy_replay(
-    endpoint: &str,
-    request: &StrategyReplayRequest,
-) -> anyhow::Result<StrategyReplayResponse> {
-    let client = RSocketFactory::connect()
-        .transport(WebsocketClientTransport::from(endpoint))
-        .acceptor(Box::new(|| Box::new(EchoRSocket)))
-        .start()
-        .await
-        .with_context(|| format!("could not connect to strategy worker at {endpoint}"))?;
-    let response = client
-        .request_response(
-            Payload::builder()
-                .set_data(serde_json::to_vec(&ScoutWorkerRequest::StrategyReplay(
-                    request.clone(),
-                ))?)
-                .build(),
-        )
-        .await?
-        .context("strategy worker returned an empty replay response")?;
-    let response: ScoutWorkerResponse = serde_json::from_slice(
-        response
-            .data()
-            .context("strategy worker response had no data")?,
-    )
-    .context("invalid strategy worker response")?;
-    let ScoutWorkerResponse::StrategyReplay(result) = response else {
-        bail!("strategy worker returned the wrong replay operation");
-    };
-    Ok(result)
-}
-
 #[derive(Clone)]
 struct CoordinatorResponder(ScoutCoordinator);
 
 #[rsocket_rust::async_trait]
 impl RSocket for CoordinatorResponder {
     async fn metadata_push(&self, _req: Payload) -> anyhow::Result<()> {
-        bail!("Learning Scout coordinator accepts request-response only")
+        bail!("Learning Scout coordinator accepts request-response and subscribed streams")
     }
 
     async fn fire_and_forget(&self, _req: Payload) -> anyhow::Result<()> {
@@ -1748,6 +2193,79 @@ impl RSocket for CoordinatorResponder {
             ScoutCoordinatorRequest::ProfileSnapshot => {
                 ScoutCoordinatorResponse::ProfileSnapshot(self.0.profile_snapshot().await?)
             }
+            ScoutCoordinatorRequest::ProfileSnapshotFor {
+                symbols,
+                strategies,
+            } => {
+                let snapshot = self
+                    .0
+                    .profile_snapshot_for(symbols, strategies.clone())
+                    .await?;
+                for strategy in strategies
+                    .iter()
+                    .filter_map(|name| Strategy::from_name(name))
+                {
+                    self.0.scout_updates.publish(
+                        strategy,
+                        ScoutDataUpdate::Profiles(strategy_profile_snapshot(&snapshot, strategy)),
+                    );
+                }
+                ScoutCoordinatorResponse::ProfileSnapshot(snapshot)
+            }
+            ScoutCoordinatorRequest::AssignmentResult(result) => {
+                let assignment_id = result.assignment_id.clone();
+                self.0
+                    .scout_updates
+                    .forget_assignment(result.strategy, &assignment_id);
+                if let Some(waiter) = self
+                    .0
+                    .scout_updates
+                    .assignments
+                    .lock()
+                    .await
+                    .remove(&assignment_id)
+                {
+                    let _ = waiter.send(Ok(result));
+                }
+                ScoutCoordinatorResponse::AssignmentAcknowledged { assignment_id }
+            }
+            ScoutCoordinatorRequest::AssignmentFailed {
+                assignment_id,
+                strategy,
+                detail,
+            } => {
+                self.0
+                    .scout_updates
+                    .forget_assignment(strategy, &assignment_id);
+                if let Some(waiter) = self
+                    .0
+                    .scout_updates
+                    .assignments
+                    .lock()
+                    .await
+                    .remove(&assignment_id)
+                {
+                    let _ = waiter.send(Err(detail));
+                }
+                ScoutCoordinatorResponse::AssignmentAcknowledged { assignment_id }
+            }
+            ScoutCoordinatorRequest::ReplayResult(result) => {
+                let job_id = result.job_id.clone();
+                if let Some(waiter) = self.0.scout_updates.replays.lock().await.remove(&job_id) {
+                    let _ = waiter.send(Ok(result));
+                }
+                ScoutCoordinatorResponse::ReplayAcknowledged { job_id }
+            }
+            ScoutCoordinatorRequest::ReplayFailed {
+                job_id,
+                strategy: _,
+                detail,
+            } => {
+                if let Some(waiter) = self.0.scout_updates.replays.lock().await.remove(&job_id) {
+                    let _ = waiter.send(Err(detail));
+                }
+                ScoutCoordinatorResponse::ReplayAcknowledged { job_id }
+            }
         };
         Ok(Some(
             Payload::builder()
@@ -1758,13 +2276,53 @@ impl RSocket for CoordinatorResponder {
 
     fn request_stream(
         &self,
-        _req: Payload,
+        req: Payload,
     ) -> Pin<Box<dyn Stream<Item = anyhow::Result<Payload>> + Send + 'static>> {
-        Box::pin(stream::once(async {
-            Err(anyhow::anyhow!(
-                "Learning Scout coordinator does not stream work"
-            ))
-        }))
+        let Some(data) = req.data() else {
+            return Box::pin(stream::once(async {
+                Err(anyhow::anyhow!("Scout subscription is empty"))
+            }));
+        };
+        let Ok(subscription) = serde_json::from_slice::<ScoutStreamSubscription>(data) else {
+            return Box::pin(stream::once(async {
+                Err(anyhow::anyhow!("invalid Scout stream subscription"))
+            }));
+        };
+        let strategy = subscription.strategy;
+        let hub = Arc::clone(&self.0.scout_updates);
+        let receiver = hub.sender.subscribe();
+        let initial = hub.snapshot(strategy);
+        let cached = stream::iter(initial.into_iter().map(|item| {
+            serde_json::to_vec(&item)
+                .map(|bytes| Payload::builder().set_data(bytes).build())
+                .map_err(anyhow::Error::from)
+        }));
+        let live = stream::unfold(
+            (receiver, strategy),
+            |(mut receiver, strategy)| async move {
+                loop {
+                    match receiver.recv().await {
+                        Ok(item) if item.strategy == strategy => {
+                            let payload = serde_json::to_vec(&item)
+                                .map(|bytes| Payload::builder().set_data(bytes).build())
+                                .map_err(anyhow::Error::from);
+                            return Some((payload, (receiver, strategy)));
+                        }
+                        Ok(_) => continue,
+                        Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                            return Some((
+                                Err(anyhow::anyhow!(
+                                    "Scout stream lagged by {skipped} updates; reconnect to replay cached state"
+                                )),
+                                (receiver, strategy),
+                            ));
+                        }
+                        Err(broadcast::error::RecvError::Closed) => return None,
+                    }
+                }
+            },
+        );
+        Box::pin(cached.chain(live))
     }
 
     fn request_channel(
@@ -1783,11 +2341,46 @@ impl RSocket for CoordinatorResponder {
 mod tests {
     use super::*;
     use crate::{LearningState, RegisteredProfile, variant_key};
-    use rsocket_rust_transport_websocket::WebsocketServerTransport;
     use std::path::PathBuf;
     use std::sync::{Arc, Mutex as StdMutex};
     use strategy::StrategyProfile;
     use tokio::sync::Mutex;
+
+    #[test]
+    fn rsocket_allows_profile_registration_but_rejects_other_mutations() {
+        assert!(learning_route_allowed(
+            "/profiles",
+            ScoutWorkerHttpMethod::Get,
+        ));
+        assert!(learning_route_allowed(
+            "/profiles",
+            ScoutWorkerHttpMethod::Post,
+        ));
+        assert!(!learning_route_allowed(
+            "/profiles",
+            ScoutWorkerHttpMethod::Delete,
+        ));
+        assert!(!learning_route_allowed(
+            "/unlisted",
+            ScoutWorkerHttpMethod::Post,
+        ));
+    }
+
+    #[test]
+    fn scout_markouts_route_to_their_attributed_strategy_worker() {
+        let command = ScoutCoordinatorRouteCommand {
+            request_id: "markout-1".into(),
+            strategy: None,
+            method: ScoutWorkerHttpMethod::Post,
+            path: "/scout-markout".into(),
+            payload: serde_json::json!({
+                "decision_id": "sample-1",
+                "strategy": "live-trade-flow",
+            }),
+        };
+
+        assert_eq!(route_strategy_names(&command), vec!["live-trade-flow"]);
+    }
 
     #[test]
     fn replay_classification_requires_complete_attributed_evidence() {
@@ -1873,53 +2466,6 @@ mod tests {
         assert_eq!(band.profile_id.as_deref(), Some("profile-1"));
     }
 
-    struct AssignmentResponder(Arc<StdMutex<Vec<ScoutWorkAssignment>>>);
-
-    #[rsocket_rust::async_trait]
-    impl RSocket for AssignmentResponder {
-        async fn metadata_push(&self, _req: Payload) -> anyhow::Result<()> {
-            bail!("unsupported")
-        }
-        async fn fire_and_forget(&self, _req: Payload) -> anyhow::Result<()> {
-            bail!("unsupported")
-        }
-        async fn request_response(&self, req: Payload) -> anyhow::Result<Option<Payload>> {
-            let request: ScoutWorkerRequest =
-                serde_json::from_slice(req.data().context("missing test assignment")?)?;
-            let ScoutWorkerRequest::Evaluate(assignment) = request else {
-                bail!("expected evaluation assignment")
-            };
-            self.0.lock().unwrap().push(assignment.clone());
-            let result = ScoutWorkResult {
-                assignment_id: assignment.assignment_id,
-                strategy: assignment.strategy,
-                symbol: assignment.symbol,
-                decision: strategy::ScoutWorkDecision::Enter,
-                candidate: assignment.candidate,
-                walk_forward_evidence: None,
-            };
-            Ok(Some(
-                Payload::builder()
-                    .set_data(serde_json::to_vec(&ScoutWorkerResponse::Evaluation(
-                        result,
-                    ))?)
-                    .build(),
-            ))
-        }
-        fn request_stream(
-            &self,
-            _req: Payload,
-        ) -> Pin<Box<dyn Stream<Item = anyhow::Result<Payload>> + Send + 'static>> {
-            Box::pin(stream::empty())
-        }
-        fn request_channel(
-            &self,
-            reqs: Flux<anyhow::Result<Payload>>,
-        ) -> Flux<anyhow::Result<Payload>> {
-            reqs
-        }
-    }
-
     #[test]
     fn worker_endpoint_configuration_accepts_only_known_strategy_rsocket_addresses() {
         let parsed = parse_worker_endpoints(
@@ -1930,6 +2476,28 @@ mod tests {
         assert!(parse_worker_endpoints("not-a-strategy=ws://worker:10200").is_err());
         assert!(parse_worker_endpoints("live-momentum=http://worker:10200").is_err());
         assert!(parse_worker_endpoints("live-momentum=ws://a:1;live-momentum=ws://b:2").is_err());
+    }
+
+    #[tokio::test]
+    async fn symbol_scoped_profile_snapshot_is_learning_owned_and_supplies_default_profiles() {
+        let service = ServiceState {
+            state: Arc::new(Mutex::new(LearningState::default())),
+            path: PathBuf::new(),
+            state_updates: Arc::new(tokio::sync::Notify::new()),
+        };
+        let coordinator =
+            ScoutCoordinator::new(service, "live-momentum=ws://127.0.0.1:1", Router::new())
+                .unwrap();
+        let snapshot = coordinator
+            .profile_snapshot_for(vec!["DOGE-USDT".into()], vec!["live-momentum".into()])
+            .await
+            .unwrap();
+        let profiles = snapshot["profiles"].as_array().unwrap();
+        assert_eq!(profiles.len(), 1);
+        assert_eq!(profiles[0]["symbol"], "DOGE-USDT");
+        assert_eq!(profiles[0]["strategy"], "live-momentum");
+        assert_eq!(profiles[0]["version"], 0);
+        assert!(profiles[0]["parameters"].is_object());
     }
 
     #[test]
@@ -2001,6 +2569,7 @@ mod tests {
         let service = ServiceState {
             state: Arc::new(Mutex::new(state)),
             path: PathBuf::new(),
+            state_updates: Arc::new(tokio::sync::Notify::new()),
         };
         let coordinator =
             ScoutCoordinator::new(service, "live-momentum=ws://127.0.0.1:1", Router::new())
@@ -2045,21 +2614,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn learning_selects_active_profile_and_dispatches_typed_assignment_over_rsocket() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        drop(listener);
+    async fn learning_stream_delivers_typed_assignment_and_correlates_worker_result() {
         let assignments = Arc::new(StdMutex::new(Vec::new()));
         let worker_assignments = Arc::clone(&assignments);
-        let server = RSocketFactory::receive()
-            .transport(WebsocketServerTransport::from(address.to_string()))
-            .acceptor(Box::new(move |_setup, _socket| {
-                Ok(Box::new(AssignmentResponder(Arc::clone(
-                    &worker_assignments,
-                ))))
-            }))
-            .serve();
-        let server_task = tokio::spawn(async move { server.await });
 
         let mut state = LearningState::default();
         state.active_profiles.insert(
@@ -2078,10 +2635,30 @@ mod tests {
         let service = ServiceState {
             state: Arc::new(Mutex::new(state)),
             path: PathBuf::new(),
+            state_updates: Arc::new(tokio::sync::Notify::new()),
         };
-        let endpoint = format!("live-momentum=ws://{address}");
+        let endpoint = "live-momentum=ws://127.0.0.1:1";
         let coordinator = ScoutCoordinator::new(service, &endpoint, Router::new()).unwrap();
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        let hub = Arc::clone(&coordinator.scout_updates);
+        let mut receiver = hub.sender.subscribe();
+        let result_task = tokio::spawn(async move {
+            let envelope = receiver.recv().await.unwrap();
+            let ScoutDataUpdate::Assignment(assignment) = envelope.update else {
+                panic!("expected assignment")
+            };
+            worker_assignments.lock().unwrap().push(assignment.clone());
+            let result = ScoutWorkResult {
+                assignment_id: assignment.assignment_id.clone(),
+                strategy: assignment.strategy,
+                symbol: assignment.symbol,
+                decision: ScoutWorkDecision::Enter,
+                candidate: assignment.candidate,
+                walk_forward_evidence: None,
+            };
+            if let Some(waiter) = hub.assignments.lock().await.remove(&result.assignment_id) {
+                let _ = waiter.send(Ok(result));
+            }
+        });
         let response = coordinator
             .coordinate(ScoutCandidateBatch {
                 request_id: "signal-batch-1".into(),
@@ -2105,6 +2682,48 @@ mod tests {
         assert_eq!(received[0].parameters["minimum_momentum"], 0.45);
         assert_eq!(received[0].symbol, "BTC-USDT");
 
-        server_task.abort();
+        result_task.await.unwrap();
+    }
+
+    #[test]
+    fn scout_stream_replays_latest_state_and_pending_assignments() {
+        let hub = ScoutUpdateHub::new();
+        let strategy = Strategy::LiveMomentum;
+        hub.publish(
+            strategy,
+            ScoutDataUpdate::Profiles(serde_json::json!({
+                "profiles":[{"symbol":"BTC-USDT","strategy":"live-momentum","profile_id":"btc-v1"}],
+                "scout_parameter_variants":[]
+            })),
+        );
+        hub.publish(
+            strategy,
+            ScoutDataUpdate::Profiles(serde_json::json!({
+                "profiles":[{"symbol":"ETH-USDT","strategy":"live-momentum","profile_id":"eth-v1"}],
+                "scout_parameter_variants":[]
+            })),
+        );
+        let assignment = ScoutWorkAssignment {
+            assignment_id: "assignment-1".into(),
+            strategy,
+            mode: ScoutWorkMode::Evaluate,
+            symbol: "BTC-USDT".into(),
+            parameters: BTreeMap::new(),
+            candidate: serde_json::json!({"direction":"bullish"}),
+        };
+        hub.publish(strategy, ScoutDataUpdate::Assignment(assignment));
+
+        let snapshot = hub.snapshot(strategy);
+        assert_eq!(snapshot.len(), 2);
+        assert!(snapshot.iter().any(|update| matches!(
+            &update.update,
+            ScoutDataUpdate::Profiles(value) if value["profiles"].as_array().is_some_and(|profiles| profiles.len() == 2)
+        )));
+        assert!(snapshot.iter().any(|update| matches!(
+            &update.update,
+            ScoutDataUpdate::Assignment(value) if value.assignment_id == "assignment-1"
+        )));
+        hub.forget_assignment(strategy, "assignment-1");
+        assert_eq!(hub.snapshot(strategy).len(), 1);
     }
 }

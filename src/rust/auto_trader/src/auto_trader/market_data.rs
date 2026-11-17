@@ -25,7 +25,7 @@ fn is_stablecoin_pair(symbol: &str) -> bool {
     STABLECOINS.contains(&base.to_ascii_uppercase().as_str())
         && STABLECOINS.contains(&quote.to_ascii_uppercase().as_str())
 }
-#[derive(Clone, Copy, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 enum MissedOpportunityGate {
     Score,
@@ -33,9 +33,9 @@ enum MissedOpportunityGate {
     #[serde(other)]
     Other,
 }
-#[derive(Clone, Deserialize)]
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct MissedOpportunityGateBand {
+pub(super) struct MissedOpportunityGateBand {
     gate: MissedOpportunityGate,
     threshold: f64,
     #[serde(default)]

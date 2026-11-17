@@ -1,19 +1,19 @@
 # Learning
 
-Learning owns strategy-profile learning, Scout selection and assignment scheduling, outcome aggregation, feedback, context thresholds, and durable historical replay. It coordinates work and sends typed assignments and lifecycle route commands to the strategy-specific Strategy X Scout workers over RSocket. The workers perform Scout evaluation and lifecycle work. Live trading evaluations use the separate always-on Strategy X live worker set and are routed by AutoTrader. Trade closes enqueue profile-attributed, non-trading replay jobs; skipped live Strategy X candidates enqueue bounded missed-opportunity jobs. Learning waits for the configured horizon to mature, then pages Insights' persisted 10-second strategy snapshots and book marks. Only complete snapshot/book coverage produces diagnostic directional mid-markout bands. These are gross markouts, not executable or net P&L, so their net-return and stop-target fields remain empty and they cannot relax entry gates. Generic Insights signals are never used to infer missed opportunities.
+Learning owns Scout profile selection, parameter variants, outcome attribution, feedback, context thresholds, and durable historical replay. Scout workers subscribe directly to Insights and request symbol-scoped profile snapshots from Learning; Learning no longer forwards live market inputs to those workers. Workers report Scout outcomes and lifecycle results to Learning. AutoTrader independently owns enabled live strategy profiles and final risk/order decisions; live strategy workers subscribe to the same Insights stream and report their profile-versioned decisions to AutoTrader. Trade closes enqueue profile-attributed, non-trading replay jobs; missed live-strategy candidates enqueue bounded missed-opportunity jobs. Learning waits for the configured horizon to mature, then pages Insights' persisted 10-second strategy snapshots and book marks. Only complete snapshot/book coverage produces diagnostic directional mid-markout bands. These are gross markouts, not executable or net P&L, so their net-return and stop-target fields remain empty and they cannot relax entry gates. Generic Insights signals are never used to infer missed opportunities.
 
 ## Listeners
 
 - RSocket request-response listener: `LEARNING_RSOCKET_LISTEN_ADDR`, default `127.0.0.1:10010`.
 - HTTP listener: `LEARNING_LISTEN_ADDR`, default `127.0.0.1:3010`. It exposes health, process CPU/RSS, and operational documentation only. Domain requests use RSocket.
 
-The Learning RSocket endpoint accepts candidate batches, worker-route requests, Scout feedback, and profile-snapshot requests. Worker-route calls are dispatched to the existing local handlers for allowlisted profile, outcome, configuration, status, feedback, threshold, and execution-learning operations. `/configuration`, `/status`, and `/outcomes` are aggregated across configured strategy workers, with global pagination for outcomes.
+The Learning RSocket endpoint accepts candidate batches, worker-route requests, Scout feedback, and profile-snapshot requests. Symbol-scoped profile snapshots include Learning-owned baselines and active parameter variants for direct Scout subscriptions. Worker-route calls are dispatched to local handlers for profile, outcome, configuration, status, feedback, threshold, and execution-learning operations. `/configuration`, `/status`, and `/outcomes` are aggregated across configured Scout workers, with global pagination for outcomes.
 
 ## Configuration
 
 - `LEARNING_STATE_FILE`: normalized SQLite state file; defaults to `learning_state.sqlite`.
 - `SCOUT_WORKERS_ENABLED`: enables worker dispatch; defaults to `true`.
-- `SCOUT_WORKER_ENDPOINTS`: semicolon-separated `strategy=ws://host:port` entries for Scout-role Strategy X workers (Compose service names `strategy-x-scout-<strategy>`, port `10200`).
+- `SCOUT_WORKER_ENDPOINTS`: semicolon-separated `strategy=ws://host:port` entries for Scout-role workers (Compose service names `strategy-scout-<strategy>`, port `10200`).
 - `SCOUT_COORDINATOR_MAX_BATCH_SIGNALS`: maximum signals in a batch; defaults to `64`.
 - `SCOUT_COORDINATOR_MAX_ASSIGNMENTS`: maximum assignments in a batch; defaults to `512`.
 - `LEARNING_REPLAY_HORIZONS_<STRATEGY>`: four increasing comma-separated millisecond horizons for live-strategy trade replay and missed-candidate markouts; defaults to `300000,1800000,7200000,28800000` (5m, 30m, 2h, 8h). The maximum horizon is 24 hours.
@@ -34,7 +34,7 @@ Learning's in-memory working set has explicit cardinality limits:
 
 Archived variant, context-stat, and execution-stat rows stay in SQLite and are not loaded into RAM after they fall outside the bounded working set. Feedback and execution-event IDs also remain in SQLite after leaving the RAM set; when either ID set has overflowed, a cache miss performs an indexed SQLite existence check before accepting the event. The database can therefore continue growing even though Learning's active state is bounded. Replay/missed-opportunity job rows are durable workflow state and are never removed by the variant compactor; existing queue policy only reclaims terminal jobs to admit new work. Outcome detail beyond the count/window limits is intentionally discarded from the active variant payload, but active profile identities and the profile counters persisted before compaction remain available. SQLite archive size has no automatic retention cap yet.
 
-Compose keeps the Scout worker set under the optional `scout-workers` profile. Each strategy's Scout process uses `/data/workers/<strategy>.sqlite` in the existing `sbe-scouts-state` named volume. Live Strategy X workers are independent of Learning's Scout dispatch and persistence.
+Compose keeps the Scout worker set under the optional `scout-workers` profile. Each strategy's Scout process uses `/data/workers/<strategy>.sqlite` in the existing `sbe-scouts-state` named volume. Live workers are independent of Learning's Scout dispatch and persistence.
 
 ## Run and verify
 

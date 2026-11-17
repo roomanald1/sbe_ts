@@ -13,6 +13,8 @@ use crate::parameter_scouting::{
 
 include!("contracts.rs");
 include!("candidate_planning.rs");
+mod registration_replay;
+use registration_replay::RegistrationReplayQueue;
 include!("service.rs");
 include!("scout_handlers.rs");
 include!("scout_report.rs");
@@ -708,13 +710,13 @@ mod tests {
         let service = ServiceState {
             learning_rsocket_url: String::new(),
             insights_rsocket_url: String::new(),
-            auto_trader_rsocket_url: String::new(),
             strategy_outcomes_by_profile: Arc::clone(&persisted.strategy_outcomes_by_profile),
             portfolio_instances_by_group: Arc::clone(&persisted.portfolio_instances_by_group),
             strategy_outcome_profile_index_ready: Arc::new(std::sync::atomic::AtomicBool::new(
                 false,
             )),
             live_scout_maximum_duration_ms: Arc::new(std::sync::RwLock::new(BTreeMap::new())),
+            live_profile_snapshot_cache: Arc::new(Mutex::new(BTreeMap::new())),
             scout_outcomes_cache: Arc::new(Mutex::new(BTreeMap::new())),
             scout: ScoutState {
                 data: Arc::new(Mutex::new(persisted)),

@@ -67,7 +67,7 @@ fn ensure_paper_capacity_with_rates(
     let runs = store.vwap_runs.try_lock().map_err(|_| {
         (StatusCode::SERVICE_UNAVAILABLE, "VWAP reservations busy".to_owned())
     })?;
-    let books = store.books_snapshot();
+    let marks = store.market_marks_snapshot();
     let mut reserved_sell = ledger
         .barrier_orders
         .iter()
@@ -96,10 +96,9 @@ fn ensure_paper_capacity_with_rates(
                 StatusCode::SERVICE_UNAVAILABLE,
                 format!("No OKX USD conversion rate for {run_quote}"),
             ))?;
-            let run_price = books
+            let run_price = marks
                 .get(&status.symbol)
-                .and_then(|book| book.asks.first())
-                .map(|level| level.price)
+                .and_then(|mark| mark.ask)
                 .ok_or((
                     StatusCode::SERVICE_UNAVAILABLE,
                     "Cannot reserve VWAP without a live ask price".into(),
@@ -148,10 +147,9 @@ fn ensure_paper_capacity_with_rates(
             .iter()
             .filter(|position| position.quantity < -EPSILON)
             .map(|position| {
-                let mark = books
+                let mark = marks
                     .get(&position.symbol)
-                    .and_then(|book| book.asks.first())
-                    .map(|level| level.price)
+                    .and_then(|mark| mark.ask)
                     .unwrap_or(position.average_entry_price);
                 let quote = position
                     .symbol
@@ -218,12 +216,8 @@ mod account_capacity_tests {
             persistence_timings_ms: Arc::new(StdMutex::new(BTreeMap::new())),
             trade_index: StdMutex::new(LedgerTradeIndex::default()),
             realized_pnl_cache: StdMutex::new(None),
-            books: StdRwLock::new(HashMap::new()),
-            price_samples: Mutex::new(HashMap::new()),
-            hedge_samples: Mutex::new(HashMap::new()),
-            book_changed: Notify::new(),
-            subscriptions: StdMutex::new(HashMap::new()),
-            spot_symbols: Arc::new(Vec::new()),
+            market_marks: StdRwLock::new(HashMap::new()),
+            market_mark_pollers: StdMutex::new(HashSet::new()),
             vwap_runs: Mutex::new(HashMap::new()),
         }
     }

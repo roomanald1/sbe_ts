@@ -9,7 +9,7 @@ async fn fresh_subscribed_market_book(
     // The GET handler ensures the subscription itself, so a separate POST here
     // only adds a network round trip before the first book poll.
     for _ in 0..4 {
-        if let Ok(market) = crate::service_rpc::position_get(&format!(
+        if let Ok(market) = crate::service_rpc::execution_get(&format!(
             "/internal/market-book?symbol={symbol}"
         )).await
         {

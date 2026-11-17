@@ -2,13 +2,13 @@
 struct ServiceState {
     learning_rsocket_url: String,
     insights_rsocket_url: String,
-    auto_trader_rsocket_url: String,
     strategy_outcomes_by_profile:
         Arc<std::sync::RwLock<BTreeMap<String, Vec<StrategyOutcomeProfileIndexEntry>>>>,
     portfolio_instances_by_group:
         Arc<std::sync::RwLock<BTreeMap<String, Vec<PortfolioInstanceEvidence>>>>,
     strategy_outcome_profile_index_ready: Arc<std::sync::atomic::AtomicBool>,
     live_scout_maximum_duration_ms: Arc<std::sync::RwLock<BTreeMap<String, u64>>>,
+    live_profile_snapshot_cache: Arc<Mutex<BTreeMap<String, (std::time::Instant, serde_json::Value)>>>,
     scout_outcomes_cache: Arc<Mutex<BTreeMap<String, (std::time::Instant, axum::body::Bytes)>>>,
     scout: ScoutState,
 }
@@ -344,66 +344,74 @@ fn router_with_state(state_path: PathBuf, worker_strategy: strategies::Strategy)
     let replay_insights_rsocket_url = insights_rsocket_url.clone();
     let replay_scout = scout.clone();
     tokio::spawn(async move {
-        let mut ticker = tokio::time::interval(std::time::Duration::from_secs(60));
+        let mut cursor = String::new();
+        let mut pending = Vec::new();
         loop {
-            ticker.tick().await;
-            let mut retry_replay = false;
-            let mut cursor = String::new();
-            loop {
-                let (registrations, next_cursor) = match load_active_scout_registration_page(
-                    &replay_scout.path,
-                    &cursor,
-                ) {
-                    Ok(page) => page,
+            match load_active_scout_registration_page(&replay_scout.path, &cursor) {
+                Ok((mut registrations, Some(next_cursor))) => {
+                    pending.append(&mut registrations);
+                    cursor = next_cursor;
+                }
+                Ok((mut registrations, None)) => {
+                    pending.append(&mut registrations);
+                    break;
+                }
+                Err(error) => {
+                    eprintln!("WARN Scout registration replay deferred: {error}");
+                    tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                    cursor.clear();
+                    pending.clear();
+                }
+            }
+        }
+        let mut replay_queue = RegistrationReplayQueue::new(pending);
+        while !replay_queue.is_empty() {
+            let mut failed = Vec::new();
+            for registration in replay_queue.take_pending() {
+                let response = strategies::request_scout_service_route(
+                    &replay_insights_rsocket_url,
+                    &strategies::ScoutCoordinatorRouteCommand {
+                        request_id: registration["decision_id"]
+                            .as_str()
+                            .or_else(|| registration["id"].as_str())
+                            .unwrap_or("replay-registration")
+                            .to_owned(),
+                        strategy: None,
+                        method: strategies::ScoutWorkerHttpMethod::Post,
+                        path: "/internal/scouts/register".into(),
+                        payload: registration.clone(),
+                    },
+                )
+                .await;
+                match response {
+                    Ok(response) if (200..300).contains(&response.status) => {}
+                    Ok(response) if (400..500).contains(&response.status) => {
+                        eprintln!(
+                            "WARN Insights rejected a replayed Scout registration: status={} detail={}",
+                            response.status,
+                            response.body.to_string().chars().take(512).collect::<String>()
+                        );
+                    }
+                    Ok(response) => {
+                        eprintln!(
+                            "WARN Scout registration replay deferred: Insights returned {}",
+                            response.status
+                        );
+                        failed.push(registration);
+                    }
                     Err(error) => {
                         eprintln!("WARN Scout registration replay deferred: {error}");
-                        retry_replay = true;
-                        break;
-                    }
-                };
-                for registration in registrations {
-                    let response = strategies::request_scout_service_route(
-                        &replay_insights_rsocket_url,
-                        &strategies::ScoutCoordinatorRouteCommand {
-                            request_id: registration["decision_id"]
-                                .as_str()
-                                .or_else(|| registration["id"].as_str())
-                                .unwrap_or("replay-registration")
-                                .to_owned(),
-                            strategy: None,
-                            method: strategies::ScoutWorkerHttpMethod::Post,
-                            path: "/internal/scouts/register".into(),
-                            payload: registration,
-                        },
-                    )
-                    .await;
-                    match response {
-                        Ok(response) if (200..300).contains(&response.status) => {}
-                        Ok(response) if (400..500).contains(&response.status) => {
-                            eprintln!(
-                                "WARN Insights rejected a replayed Scout registration: status={} detail={}",
-                                response.status,
-                                response.body.to_string().chars().take(512).collect::<String>()
-                            );
-                        }
-                        Ok(response) => {
-                            eprintln!(
-                                "WARN Scout registration replay deferred: Insights returned {}",
-                                response.status
-                            );
-                            retry_replay = true;
-                        }
-                        Err(error) => {
-                            eprintln!("WARN Scout registration replay deferred: {error}");
-                            retry_replay = true;
-                        }
+                        failed.push(registration);
                     }
                 }
-                let Some(next_cursor) = next_cursor else { break };
-                cursor = next_cursor;
             }
-            if retry_replay {
-                eprintln!("WARN Scout registration replay will retry after the next interval");
+            replay_queue.retry_failed(failed);
+            if !replay_queue.is_empty() {
+                eprintln!(
+                    "WARN Retrying {} failed Scout registrations after the next interval",
+                    replay_queue.pending_len()
+                );
+                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
             }
         }
     });
@@ -421,6 +429,7 @@ fn router_with_state(state_path: PathBuf, worker_strategy: strategies::Strategy)
         .route("/daily-inputs", post(receive_daily_scout_inputs))
         .route("/live-inputs", post(receive_live_scout_inputs))
         .route("/dated-carry-inputs", post(receive_dated_carry_scout_inputs))
+        .route("/internal/learning-snapshot", post(cache_learning_snapshot))
         .route(
             "/scout-lifecycle/state",
             get(get_scout_lifecycle_state).post(set_scout_lifecycle_state),
@@ -434,11 +443,11 @@ fn router_with_state(state_path: PathBuf, worker_strategy: strategies::Strategy)
         .with_state(ServiceState {
             learning_rsocket_url,
             insights_rsocket_url,
-            auto_trader_rsocket_url,
             strategy_outcomes_by_profile,
             portfolio_instances_by_group,
             strategy_outcome_profile_index_ready,
             live_scout_maximum_duration_ms,
+            live_profile_snapshot_cache: Arc::new(Mutex::new(BTreeMap::new())),
             scout_outcomes_cache: Arc::new(Mutex::new(BTreeMap::new())),
             scout,
         })
@@ -467,6 +476,42 @@ async fn get_scout_configuration(
     State(service): State<ServiceState>,
 ) -> Json<ScoutConfiguration> {
     Json(service.scout.data.lock().await.scout_configuration.clone())
+}
+
+async fn cache_learning_snapshot(
+    State(service): State<ServiceState>,
+    Json(snapshot): Json<serde_json::Value>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    let profiles = snapshot["profiles"]
+        .as_array()
+        .ok_or((StatusCode::BAD_REQUEST, "Learning snapshot omitted profiles".into()))?;
+    let variants = snapshot["scout_parameter_variants"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    if profiles.len() > 100_000 || variants.len() > 100_000 {
+        return Err((StatusCode::PAYLOAD_TOO_LARGE, "Learning snapshot exceeds cache limits".into()));
+    }
+    let symbols = profiles.iter()
+        .chain(variants.iter())
+        .filter_map(|value| value["symbol"].as_str())
+        .map(str::to_owned)
+        .collect::<BTreeSet<_>>();
+    let now = std::time::Instant::now();
+    let mut cache = service.live_profile_snapshot_cache.lock().await;
+    cache.clear();
+    for symbol in symbols {
+        let scoped = serde_json::json!({
+            "profiles": profiles.iter().filter(|profile| profile["symbol"].as_str() == Some(symbol.as_str())).cloned().collect::<Vec<_>>(),
+            "scout_parameter_variants": variants.iter().filter(|variant| variant["symbol"].as_str() == Some(symbol.as_str())).cloned().collect::<Vec<_>>(),
+        });
+        cache.insert(symbol, (now, scoped));
+    }
+    while cache.len() > 512 {
+        let Some(key) = cache.keys().next().cloned() else { break };
+        cache.remove(&key);
+    }
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn get_scout_status(State(service): State<ServiceState>) -> Json<ScoutStatus> {
@@ -1424,6 +1469,28 @@ mod live_thesis_failure_replay_tests {
     }
 }
 
+async fn cached_learning_profile_snapshot(service: &ServiceState) -> serde_json::Value {
+    let now = std::time::Instant::now();
+    let mut cache = service.live_profile_snapshot_cache.lock().await;
+    cache.retain(|_, (updated_at, _)| now.duration_since(*updated_at) < std::time::Duration::from_secs(24 * 60 * 60));
+    let mut profiles = BTreeMap::<String, serde_json::Value>::new();
+    let mut variants = BTreeMap::<String, serde_json::Value>::new();
+    for (_, snapshot) in cache.values() {
+        for profile in snapshot["profiles"].as_array().into_iter().flatten() {
+            let key = format!("{}:{}:{}", profile["symbol"].as_str().unwrap_or_default(), profile["strategy"].as_str().unwrap_or_default(), profile["profile_id"].as_str().unwrap_or_default());
+            profiles.insert(key, profile.clone());
+        }
+        for variant in snapshot["scout_parameter_variants"].as_array().into_iter().flatten() {
+            let key = serde_json::to_string(variant).unwrap_or_default();
+            variants.insert(key, variant.clone());
+        }
+    }
+    serde_json::json!({
+        "profiles": profiles.into_values().collect::<Vec<_>>(),
+        "scout_parameter_variants": variants.into_values().collect::<Vec<_>>(),
+    })
+}
+
 async fn receive_live_scout_inputs(
     State(service): State<ServiceState>,
     Json(request): Json<LiveScoutSignalsRequest>,
@@ -1446,12 +1513,40 @@ async fn receive_live_scout_inputs(
             && price.is_some_and(|price| price.is_finite() && price > 0.0)
     }).collect::<Vec<_>>();
     if signals.is_empty() { return Ok(StatusCode::NO_CONTENT); }
-    let snapshot = strategies::request_scout_profile_snapshot(&service.learning_rsocket_url)
+    let symbols = signals.iter()
+        .filter_map(|signal| signal.get("symbol").and_then(serde_json::Value::as_str).map(str::to_owned))
+        .collect::<BTreeSet<_>>();
+    let missing = {
+        let mut cache = service.live_profile_snapshot_cache.lock().await;
+        cache.retain(|_, (updated_at, _)| updated_at.elapsed() < std::time::Duration::from_secs(24 * 60 * 60));
+        symbols.iter().filter(|symbol| !cache.contains_key(*symbol)).cloned().collect::<Vec<_>>()
+    };
+    if !missing.is_empty() {
+        let response = strategies::request_scout_profile_snapshot_for(
+            &service.learning_rsocket_url,
+            missing.clone(),
+            configuration.strategies.clone(),
+        )
         .await
         .map_err(|error| (StatusCode::BAD_GATEWAY, error.to_string()))?;
+        let profiles = response["profiles"].as_array().cloned().unwrap_or_default();
+        let variants = response["scout_parameter_variants"].as_array().cloned().unwrap_or_default();
+        let mut cache = service.live_profile_snapshot_cache.lock().await;
+        for symbol in missing {
+            let scoped = serde_json::json!({
+                "profiles": profiles.iter().filter(|profile| profile["symbol"].as_str() == Some(symbol.as_str())).cloned().collect::<Vec<_>>(),
+                "scout_parameter_variants": variants.iter().filter(|variant| variant["symbol"].as_str() == Some(symbol.as_str())).cloned().collect::<Vec<_>>(),
+            });
+            if cache.len() >= 512 && !cache.contains_key(&symbol) {
+                if let Some(oldest) = cache.iter().min_by_key(|(_, (updated_at, _))| *updated_at).map(|(key, _)| key.clone()) {
+                    cache.remove(&oldest);
+                }
+            }
+            cache.insert(symbol, (std::time::Instant::now(), scoped));
+        }
+    }
+    let snapshot = cached_learning_profile_snapshot(&service).await;
     let mut profiles = Vec::new();
-    let symbols = signals.iter().filter_map(|signal| signal.get("symbol").and_then(serde_json::Value::as_str))
-        .collect::<BTreeSet<_>>();
     for profile in snapshot.get("profiles").and_then(serde_json::Value::as_array).into_iter().flatten() {
         let (Some(symbol), Some(strategy)) = (
             profile.get("symbol").and_then(serde_json::Value::as_str),
@@ -1461,35 +1556,6 @@ async fn receive_live_scout_inputs(
         let parameters = profile.get("parameters").cloned()
             .and_then(|value| serde_json::from_value::<BTreeMap<String, f64>>(value).ok()).unwrap_or_default();
         profiles.push(LiveScoutProfile { symbol: symbol.to_owned(), strategy: strategy.to_owned(), parameters });
-    }
-    let live_strategies = configuration.strategies.iter().filter(|strategy| {
-        matches!(strategy.as_str(), "live-momentum" | "live-trade-flow" | "live-order-book" | "live-vwap-dislocation" | "live-absorption-pressure")
-    }).map(String::as_str).collect::<Vec<_>>();
-    let has_missing_profiles = symbols.iter().any(|symbol| live_strategies.iter().any(|strategy| {
-        !profiles.iter().any(|profile| profile.symbol == *symbol && profile.strategy == *strategy)
-    }));
-    if has_missing_profiles {
-        let response = strategies::request_scout_service_route(
-            &service.auto_trader_rsocket_url,
-            &strategies::ScoutCoordinatorRouteCommand {
-                request_id: format!("scout-parameters:{now_ms}"),
-                strategy: None,
-                method: strategies::ScoutWorkerHttpMethod::Get,
-                path: "/positions/auto-trader/parameters".into(),
-                payload: serde_json::Value::Null,
-            },
-        )
-        .await
-        .map_err(|error| (StatusCode::BAD_GATEWAY, error.to_string()))?;
-        if response.status >= 400 {
-            return Err((StatusCode::BAD_GATEWAY, "AutoTrader rejected Scout profile lookup".into()));
-        }
-        let fallback_profiles = auto_trader_live_profiles(&response.body, &symbols, &configuration.strategies);
-        for profile in fallback_profiles {
-            if !profiles.iter().any(|existing| existing.symbol == profile.symbol && existing.strategy == profile.strategy) {
-                profiles.push(profile);
-            }
-        }
     }
     if profiles.is_empty() { return Ok(StatusCode::NO_CONTENT); }
     let day = now_ms / 86_400_000;
@@ -1926,6 +1992,7 @@ async fn receive_live_scout_inputs(
     Ok(StatusCode::ACCEPTED)
 }
 
+#[cfg(test)]
 fn auto_trader_live_profiles(
     response: &serde_json::Value,
     symbols: &BTreeSet<&str>,
@@ -1993,9 +2060,42 @@ async fn receive_dated_carry_scout_inputs(
     }
     schedule_scout_outbox_flush(&service);
 
-    let snapshot = strategies::request_scout_profile_snapshot(&service.learning_rsocket_url)
+    let profile_symbols = candidates
+        .iter()
+        .filter(|candidate| candidate.eligible)
+        .map(|candidate| candidate.spot_symbol.replace("USDT", "-USDT"))
+        .collect::<BTreeSet<_>>();
+    let missing = {
+        let mut cache = service.live_profile_snapshot_cache.lock().await;
+        cache.retain(|_, (updated_at, _)| updated_at.elapsed() < std::time::Duration::from_secs(24 * 60 * 60));
+        profile_symbols.iter().filter(|symbol| !cache.contains_key(*symbol)).cloned().collect::<Vec<_>>()
+    };
+    if !missing.is_empty() {
+        let response = strategies::request_scout_profile_snapshot_for(
+            &service.learning_rsocket_url,
+            missing.clone(),
+            vec!["dated-futures-carry".into()],
+        )
         .await
         .map_err(|error| (StatusCode::BAD_GATEWAY, error.to_string()))?;
+        let profiles = response["profiles"].as_array().cloned().unwrap_or_default();
+        let variants = response["scout_parameter_variants"].as_array().cloned().unwrap_or_default();
+        let mut cache = service.live_profile_snapshot_cache.lock().await;
+        for symbol in missing {
+            let scoped = serde_json::json!({
+                "profiles": profiles.iter().filter(|profile| profile["symbol"].as_str() == Some(symbol.as_str())).cloned().collect::<Vec<_>>(),
+                "scout_parameter_variants": variants.iter().filter(|variant| variant["symbol"].as_str() == Some(symbol.as_str())).cloned().collect::<Vec<_>>(),
+            });
+            if cache.len() >= 512 && !cache.contains_key(&symbol) {
+                if let Some(oldest) = cache.iter().min_by_key(|(_, (updated_at, _))| *updated_at).map(|(key, _)| key.clone()) {
+                    cache.remove(&oldest);
+                }
+            }
+            cache.insert(symbol, (std::time::Instant::now(), scoped));
+        }
+    }
+
+    let snapshot = cached_learning_profile_snapshot(&service).await;
     let profiles = snapshot.get("profiles").and_then(serde_json::Value::as_array).cloned().unwrap_or_default();
     let day = request.now_ms / 86_400_000;
     let mut plans = Vec::new();
@@ -2376,8 +2476,7 @@ fn outcome_event(outcome: &ScoutOutcomeRequest, tested: &BTreeMap<String, f64>) 
     FeedbackEvent::ScoutOutcome {
         event_id: format!("scout:{}:{}", outcome.decision_id, outcome.exit_scenario),
         observed_at_ms: outcome.evaluated_timestamp_ms,
-        learning_context: (outcome.exit_scenario == "strategy"
-            && outcome.scout_comparison_role.as_deref() != Some("baseline"))
+        learning_context: (outcome.exit_scenario == "strategy")
         .then(|| scout_context_learning_key(&outcome.learning_context))
         .flatten(),
         symbol: profile_symbol.to_owned(),
@@ -2389,6 +2488,19 @@ fn outcome_event(outcome: &ScoutOutcomeRequest, tested: &BTreeMap<String, f64>) 
         specs,
         net_return_percent: outcome.net_return_percent,
     }
+}
+
+fn learning_outcome_event(
+    outcome: &ScoutOutcomeRequest,
+    tested: &BTreeMap<String, f64>,
+) -> Option<FeedbackEvent> {
+    if outcome.scout_parameter_key.is_some()
+        || (outcome.scout_comparison_role.as_deref() == Some("baseline")
+            && outcome.exit_scenario != "strategy")
+    {
+        return None;
+    }
+    Some(outcome_event(outcome, tested))
 }
 
 fn paired_event(
@@ -3203,7 +3315,7 @@ fn load_scout_state(path: &std::path::Path) -> anyhow::Result<PersistedState> {
     trim_active_scout_audits(&mut state);
     log_scout_collection_sizes(&connection)?;
     eprintln!(
-        "INFO Strategy X Scout hydration: outcomes={} (limit {}), plan_results={} (limit {}), active_audits={} groups/{} rows (limits {}/{}), pairs={}, outbox={}, pending_samples={}, observation_results={}",
+        "INFO Strategy Scout hydration: outcomes={} (limit {}), plan_results={} (limit {}), active_audits={} groups/{} rows (limits {}/{}), pairs={}, outbox={}, pending_samples={}, observation_results={}",
         state.outcomes.len(), MAX_CACHED_SCOUT_OUTCOMES,
         state.scout_plan_results.len(), MAX_CACHED_SCOUT_PLAN_RESULTS,
         state.scout_active_audits.len(), state.scout_active_audits.values().map(Vec::len).sum::<usize>(),
@@ -3300,7 +3412,7 @@ fn log_scout_collection_sizes(connection: &rusqlite::Connection) -> anyhow::Resu
     for row in rows {
         let (collection, records, payload_bytes) = row?;
         eprintln!(
-            "INFO Strategy X Scout SQLite collection: collection={} records={} payload_bytes={}",
+            "INFO Strategy Scout SQLite collection: collection={} records={} payload_bytes={}",
             collection,
             records.max(0),
             payload_bytes.max(0)

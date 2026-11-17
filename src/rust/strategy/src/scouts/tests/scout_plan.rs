@@ -17,11 +17,11 @@ mod scout_plan_tests {
         ServiceState {
             learning_rsocket_url: "ws://127.0.0.1:10010".into(),
             insights_rsocket_url: "ws://127.0.0.1:10007".into(),
-            auto_trader_rsocket_url: "ws://127.0.0.1:10006".into(),
             strategy_outcomes_by_profile,
             portfolio_instances_by_group,
             strategy_outcome_profile_index_ready: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             live_scout_maximum_duration_ms: Arc::new(std::sync::RwLock::new(BTreeMap::new())),
+            live_profile_snapshot_cache: Arc::new(Mutex::new(BTreeMap::new())),
             scout_outcomes_cache: Arc::new(Mutex::new(BTreeMap::new())),
             scout: ScoutState {
                 data: Arc::new(Mutex::new(persisted)),

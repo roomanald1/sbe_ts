@@ -6,7 +6,7 @@ import re
 import threading
 import time
 from pathlib import Path
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.error import URLError
 from urllib.request import urlopen
 
@@ -16,7 +16,7 @@ SERVICES = {
     "binance_feed": (os.getenv("BINANCE_FEED_HEALTH_URL", "http://127.0.0.1:3012"), "/health"),
     "position_management": (os.getenv("POSITION_MANAGEMENT_URL", "http://127.0.0.1:3002"), "/health"),
     "auto_trader": (os.getenv("AUTO_TRADER_URL", "http://127.0.0.1:3005"), "/health"),
-    "execution": (os.getenv("EXECUTION_URL", "http://127.0.0.1:3003"), "/health"),
+    "paper_exchange": (os.getenv("PAPER_EXCHANGE_URL", "http://127.0.0.1:3003"), "/health"),
     "insights": (os.getenv("INSIGHTS_URL", "http://127.0.0.1:3004"), "/health"),
     "news_sentiment": (os.getenv("NEWS_SENTIMENT_URL", "http://127.0.0.1:3006"), "/health"),
     "learning": (os.getenv("LEARNING_SERVICE_URL", "http://127.0.0.1:3010"), "/health"),
@@ -28,13 +28,22 @@ RSOCKET_SERVICES = {
     "auto_trader": os.getenv("AUTO_TRADER_RSOCKET_URL", "ws://127.0.0.1:10008"),
     "learning": os.getenv("LEARNING_RSOCKET_URL", "ws://127.0.0.1:10010"),
 }
-STRATEGY_X_WORKER_STRATEGIES = (
+STRATEGY_WORKER_STRATEGIES = (
     "live-momentum", "live-trade-flow", "live-order-book", "live-vwap-dislocation",
     "live-absorption-pressure", "donchian-55-btc200", "donchian-20-sma200",
     "donchian-20-btc200", "donchian-10-btc200", "donchian-20-btc200-hold3",
     "risk-adjusted-trend-portfolio", "trend-sleeves-btc200", "trend-50-200",
     "relative-strength-90-sma200", "risk-adjusted-monthly-momentum",
     "rsi2-oversold-rebound", "dated-futures-carry",
+)
+LIVE_STRATEGY_METRIC_ORDER = (
+    "live-order-book", "live-absorption-pressure", "donchian-55-btc200",
+    "donchian-20-sma200", "donchian-20-btc200", "donchian-10-btc200",
+    "donchian-20-btc200-hold3", "risk-adjusted-trend-portfolio",
+    "trend-sleeves-btc200", "trend-50-200", "relative-strength-90-sma200",
+    "risk-adjusted-monthly-momentum", "rsi2-oversold-rebound",
+    "dated-futures-carry", "live-momentum", "live-trade-flow",
+    "live-vwap-dislocation",
 )
 
 _RSOCKET_LOOP = None
@@ -294,20 +303,8 @@ def metrics():
 
     insights_maintenance_metrics(output)
     insights_signal_latency_metrics(output)
-    strategy_worker_metrics(output)
-
-    try:
-        scouts = learning_get(
-            RSOCKET_SERVICES["learning"], "/outcomes?source=all&page_size=1"
-        )
-        summary = scouts.get("summary", {}).get("all", {})
-        total = summary.get("total")
-        open_count = summary.get("open")
-        if isinstance(total, (int, float)) and isinstance(open_count, (int, float)):
-            output.append(sample("app_scout_instances", "Scout instances in the recent seven-day report, by lifecycle status.", open_count, {"status": "open"}))
-            output.append(sample("app_scout_instances", "Scout instances in the recent seven-day report, by lifecycle status.", max(0, total - open_count), {"status": "closed"}))
-    except (OSError, URLError, ValueError, TypeError, AttributeError):
-        pass
+    open_instance_counts = strategy_live_position_counts()
+    strategy_worker_metrics(output, open_instance_counts)
 
     try:
         persistence = rsocket_get(
@@ -426,9 +423,9 @@ def metrics():
             for stat in ("latest", "average", "p95"):
                 value = summary.get(f"{stat}_ms")
                 if isinstance(value, (int, float)):
-                    output.append(sample("app_autotrader_cycle_lock_scope_duration_ms", "Milliseconds spent in measured sections while holding the AutoTrader cycle lock.", value, {"scope": scope, "stat": stat}))
+                        output.append(sample("app_autotrader_cycle_lock_scope_duration_ms", "Milliseconds spent in measured AutoTrader cycle-lock or signal-settings-lock scopes.", value, {"scope": scope, "stat": stat}))
             if isinstance(summary.get("samples"), (int, float)):
-                output.append(sample("app_autotrader_cycle_lock_scope_duration_samples", "Recent observations for a measured AutoTrader cycle-lock section.", summary["samples"], {"scope": scope}))
+                output.append(sample("app_autotrader_cycle_lock_scope_duration_samples", "Recent observations for a measured AutoTrader lock-related scope.", summary["samples"], {"scope": scope}))
         for key, metric, help_text in [
             ("realized_pnl", "app_autotrader_realized_pnl_usd", "Autotrader cumulative realized P and L in USD."),
             ("unrealized_pnl", "app_autotrader_unrealized_pnl_usd", "Autotrader unrealized P and L in USD."),
@@ -507,32 +504,73 @@ def metrics():
                 output.append(sample("app_feed_messages_total", "Cumulative accepted market feed updates by channel.", value, {"channel": feed}, kind="counter"))
     except (OSError, URLError, ValueError, TypeError):
         pass
-    try:
-        for queue in get_json(SERVICES["feed_handlers"][0], "/internal/queue-metrics"):
-            labels = {"queue": queue.get("queue", "unknown")}
-            output.append(sample("app_feed_queue_size", "Current number of retained messages in a feed handler queue.", queue.get("depth", 0), labels))
-            output.append(sample("app_feed_queue_dropped_messages_total", "Cumulative messages skipped by lagging feed handler queue receivers.", queue.get("dropped", 0), labels, kind="counter"))
-    except (OSError, URLError, ValueError, TypeError):
-        pass
     return "".join(output).encode()
 
 
-def strategy_worker_metrics(output):
+def rsocket_queue_metrics():
+    output = []
+    services = ("feed_handlers", "insights", "learning", "position_management")
+
+    def fetch_service_queues(service):
+        try:
+            return service, get_json(SERVICES[service][0], "/internal/queue-metrics")
+        except (OSError, URLError, ValueError, TypeError):
+            return service, []
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=len(services)) as executor:
+        snapshots = executor.map(fetch_service_queues, services)
+        for service, queues in snapshots:
+            for queue in queues:
+                labels = {"service": service.replace("_", "-"), "queue": queue.get("queue", "unknown")}
+                output.append(sample("app_rsocket_queue_depth", "Current number of retained messages in a bounded interprocess RSocket stream queue.", queue.get("depth", 0), labels))
+                capacity = queue.get("capacity")
+                if isinstance(capacity, (int, float)) and capacity > 0:
+                    output.append(sample("app_rsocket_queue_capacity", "Maximum retained messages for a bounded interprocess RSocket stream queue.", capacity, labels))
+                dropped = queue.get("dropped")
+                if isinstance(dropped, (int, float)):
+                    output.append(sample("app_rsocket_queue_dropped_messages_total", "Cumulative messages skipped by lagging interprocess RSocket stream receivers.", dropped, labels, kind="counter"))
+    return "".join(output).encode()
+
+
+def strategy_live_position_counts():
+    """Return the small live-position count by strategy from AutoTrader."""
+    counts = {"live": None}
+    try:
+        activity = rsocket_get(
+            RSOCKET_SERVICES["auto_trader"], "/positions/auto-trader/activity"
+        )
+        live_counts = {strategy: 0 for strategy in STRATEGY_WORKER_STRATEGIES}
+        for position in activity.get("strategy_positions", activity.get("strategyPositions", [])):
+            strategy = position.get("strategy")
+            if strategy in live_counts:
+                live_counts[strategy] += 1
+        counts["live"] = live_counts
+    except (OSError, URLError, ValueError, TypeError, AttributeError):
+        pass
+    return counts
+
+
+def strategy_worker_metrics(output, open_instance_counts=None):
     """Scrape internal metrics from each live and Scout worker process."""
-    port = os.getenv("STRATEGY_X_METRICS_PORT", "10202")
+    port = os.getenv("STRATEGY_METRICS_PORT", "10202")
     workers = []
     for role in ("live", "scout"):
-        for strategy in STRATEGY_X_WORKER_STRATEGIES:
+        strategies = (
+            LIVE_STRATEGY_METRIC_ORDER
+            if role == "live"
+            else STRATEGY_WORKER_STRATEGIES
+        )
+        for strategy in strategies:
             if role == "live" and strategy.startswith("live-"):
-                host = f"strategy-x-{strategy}"
+                host = f"strategy-{strategy}"
             else:
-                host = f"strategy-x-{role}-{strategy}"
+                host = f"strategy-{role}-{strategy}"
             workers.append((role, strategy, f"http://{host}:{port}/metrics"))
 
     def fetch_worker_metrics(worker):
         role, strategy, url = worker
         try:
-            with urlopen(url, timeout=3) as response:
+            with urlopen(url, timeout=8) as response:
                 return role, strategy, response.read().decode("utf-8")
         except (OSError, URLError, UnicodeDecodeError):
             return role, strategy, None
@@ -554,6 +592,29 @@ def strategy_worker_metrics(output):
                 up,
                 labels,
             ))
+            if role == "live":
+                role_counts = (open_instance_counts or {}).get(role)
+                open_instances = -1 if not up else (
+                    -2 if role_counts is None else role_counts.get(strategy, 0)
+                )
+                status = "DOWN" if not up else "UP"
+                output.append(sample(
+                    "app_strategy_worker_open_instances",
+                    "Open live positions or Scout instances by strategy; -1 means the worker is down and -2 means the count is unavailable.",
+                    open_instances,
+                    {**labels, "status": status},
+                ))
+            elif role == "scout":
+                open_instances = -1 if not up else (
+                    -2 if body is None else scout_open_instance_count(body)
+                )
+                status = "DOWN" if not up else "UP"
+                output.append(sample(
+                    "app_strategy_worker_open_instances",
+                    "Open live positions or Scout instances by strategy; -1 means the worker is down and -2 means the count is unavailable.",
+                    -2 if open_instances is None else open_instances,
+                    {**labels, "status": status},
+                ))
             if body is None:
                 continue
             for line in body.splitlines():
@@ -568,8 +629,80 @@ def strategy_worker_metrics(output):
                     output.append(line + "\n")
 
 
+def cpu_metrics():
+    """Expose CPU counters independently from slower application diagnostics."""
+    output = []
+    output.append("# HELP app_service_process_cpu_seconds_total Cumulative CPU time consumed by an application service process in seconds.\n# TYPE app_service_process_cpu_seconds_total counter\n")
+    services = list(SERVICES.items())
+
+    def fetch_service_cpu(item):
+        name, (base, _) = item
+        try:
+            with urlopen(base + "/process-cpu-seconds", timeout=3) as response:
+                return name, float(response.read().decode().strip())
+        except (OSError, URLError, ValueError):
+            return name, None
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=len(services)) as executor:
+        for name, value in executor.map(fetch_service_cpu, services):
+            if value is not None:
+                output.append(f'app_service_process_cpu_seconds_total{{service="{name}"}} {value}\n')
+
+    port = os.getenv("STRATEGY_METRICS_PORT", "10202")
+    workers = []
+    for role, strategies in (("live", LIVE_STRATEGY_METRIC_ORDER), ("scout", STRATEGY_WORKER_STRATEGIES)):
+        for strategy in strategies:
+            host = f"strategy-{strategy}" if role == "live" and strategy.startswith("live-") else f"strategy-{role}-{strategy}"
+            workers.append((role, strategy, f"http://{host}:{port}/metrics"))
+
+    def fetch_worker_cpu(worker):
+        role, strategy, url = worker
+        try:
+            with urlopen(url, timeout=3) as response:
+                body = response.read().decode("utf-8")
+            for line in body.splitlines():
+                if line.startswith("app_strategy_worker_process_cpu_seconds_total{"):
+                    return role, strategy, line.rsplit(" ", 1)[-1]
+        except (OSError, URLError, UnicodeDecodeError):
+            pass
+        return role, strategy, None
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=len(workers)) as executor:
+        worker_samples = []
+        for role, strategy, value in executor.map(fetch_worker_cpu, workers):
+            if value is not None:
+                worker_samples.append((role, strategy, value))
+    if worker_samples:
+        output.append("# HELP app_strategy_worker_process_cpu_seconds_total Worker process cumulative CPU time.\n# TYPE app_strategy_worker_process_cpu_seconds_total counter\n")
+        for role, strategy, value in worker_samples:
+            output.append(
+                "app_strategy_worker_process_cpu_seconds_total{role=\""
+                + role + "\",strategy=\"" + strategy + "\"} " + value + "\n"
+            )
+    return "".join(output)
+def scout_open_instance_count(body):
+    """Read the current open Scout-instance count from one Scout worker."""
+    for line in body.splitlines():
+        if not line.startswith("app_scout_instances{"):
+            continue
+        labels, separator, value = line[len("app_scout_instances{"):].partition("}")
+        if not separator:
+            continue
+        parsed_labels = {}
+        for label in labels.split(","):
+            key, separator, raw_value = label.partition("=")
+            if separator:
+                parsed_labels[key.strip()] = raw_value.strip().strip('"')
+        if parsed_labels.get("status") == "open":
+            try:
+                return int(float(value.strip()))
+            except ValueError:
+                return None
+    return None
+
+
 def worker_memory_limit_bytes(role):
-    env_name = "STRATEGY_X_SCOUT_MEMORY_LIMIT" if role == "scout" else "STRATEGY_X_LIVE_MEMORY_LIMIT"
+    env_name = "STRATEGY_SCOUT_MEMORY_LIMIT" if role == "scout" else "STRATEGY_LIVE_MEMORY_LIMIT"
     raw = os.getenv(env_name)
     if not raw:
         return 1536 * 1024 * 1024 if role == "scout" else 256 * 1024 * 1024
@@ -585,24 +718,33 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path == "/metrics":
             body = metrics()
+        elif self.path == "/cpu-metrics":
+            body = cpu_metrics()
+        elif self.path == "/queue-metrics":
+            body = rsocket_queue_metrics()
+        elif self.path == "/health":
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"ok")
+            return
+        else:
+            self.send_error(404)
+            return
+        if self.path in ("/metrics", "/cpu-metrics", "/queue-metrics"):
+            if isinstance(body, str):
+                body = body.encode()
             self.send_response(200)
             self.send_header("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
-        elif self.path == "/health":
-            self.send_response(200)
-            self.end_headers()
-            self.wfile.write(b"ok")
-        else:
-            self.send_error(404)
 
     def log_message(self, *_):
         pass
 
 
 def main():
-    HTTPServer(("0.0.0.0", 9108), Handler).serve_forever()
+    ThreadingHTTPServer(("0.0.0.0", 9108), Handler).serve_forever()
 
 
 if __name__ == "__main__":

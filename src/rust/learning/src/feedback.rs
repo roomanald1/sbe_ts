@@ -1136,6 +1136,9 @@ pub(super) fn persist(path: &Path, state: &LearningState) -> Result<(), (StatusC
             format!("could not persist learning state: {error}"),
         )
     })?;
+    if let Some(updates) = &state.state_updates {
+        updates.notify_one();
+    }
     Ok(())
 }
 
@@ -1312,6 +1315,7 @@ mod tests {
         let service = ServiceState {
             state: Arc::new(Mutex::new(LearningState::default())),
             path: path.clone(),
+            state_updates: Arc::new(tokio::sync::Notify::new()),
         };
         let event = FeedbackEvent::MissedOpportunityCandidate {
             event_id: "missed:BTC-USDT:live-momentum:1000".into(),

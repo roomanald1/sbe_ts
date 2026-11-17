@@ -12,7 +12,11 @@ fn strategy_entry_rejection_reason(
             .to_owned();
     }
     let Some(details) = signal.strategy_decision.as_ref() else {
-        return "Strategy X rejected the signal; the worker did not provide a rule detail".to_owned();
+        return format!(
+            "{} rejected {}: no strategy rule metrics were attached to the signal",
+            strategy.as_str(),
+            signal.symbol
+        );
     };
     if details
         .get("btc_gate_required")
@@ -84,7 +88,11 @@ fn strategy_entry_rejection_reason(
     if let Some(reason) = strategy.entry_rejection_reason(&StrategySignal::entry(signal, parameters)) {
         return reason;
     }
-    "Strategy X rejected the signal; the worker did not provide a rule detail".to_owned()
+    format!(
+        "{} rejected {}: its entry conditions were not met",
+        strategy.as_str(),
+        signal.symbol
+    )
 }
 
 fn update_latest_strategy_blocker(
@@ -161,21 +169,17 @@ fn record_cycle_candidate_blockers(
     fallback_reason: &str,
 ) {
     let timestamp_ms = now.saturating_mul(1_000);
-    let mut candidates_by_strategy = BTreeMap::<String, &Signal>::new();
+    let mut candidates_by_strategy = BTreeMap::<String, Vec<&Signal>>::new();
     for signal in signals {
         let Some(strategy) = signal.strategy.as_deref() else {
             continue;
         };
         candidates_by_strategy
             .entry(strategy.to_owned())
-            .and_modify(|current| {
-                if signal.strength.total_cmp(&current.strength).is_gt() {
-                    *current = signal;
-                }
-            })
-            .or_insert(signal);
+            .or_default()
+            .push(signal);
     }
-    for (strategy, candidate) in candidates_by_strategy {
+    for (strategy, candidates) in candidates_by_strategy {
         if selected
             .and_then(|signal| signal.strategy.as_deref())
             .is_some_and(|selected_strategy| selected_strategy == strategy)
@@ -183,21 +187,30 @@ fn record_cycle_candidate_blockers(
             update_latest_strategy_blocker(state, &strategy, timestamp_ms, None);
             continue;
         }
-        let reason = candidate_selection_blocker_reason(
-            candidate,
-            dashboard,
-            learning_thresholds,
-            risk_appetite,
-            now,
-            fallback_reason,
-        );
+        let mut candidates = candidates;
+        candidates.sort_by(|left, right| right.strength.total_cmp(&left.strength));
+        candidates.dedup_by(|left, right| left.symbol == right.symbol
+            && left.direction == right.direction
+            && left.strategy_decision == right.strategy_decision);
+        let reasons = candidates.iter().map(|candidate| {
+            let detail = candidate_selection_blocker_reason(
+                candidate, dashboard, learning_thresholds, risk_appetite, now, fallback_reason,
+            );
+            format!("{} {}: {}", candidate.symbol, candidate.direction, detail)
+        }).collect::<Vec<_>>();
+        let reason = format!("{} candidate(s) evaluated: {}", reasons.len(), reasons.join("; "));
+        let symbol = if candidates.len() == 1 {
+            candidates[0].symbol.clone()
+        } else {
+            "MULTIPLE".to_owned()
+        };
         update_latest_strategy_blocker(
             state,
             &strategy,
             timestamp_ms,
             Some(StrategyBlocker {
                 strategy: strategy.clone(),
-                symbol: candidate.symbol.clone(),
+                symbol,
                 reason,
                 timestamp_ms,
             }),
@@ -320,148 +333,80 @@ async fn submit_cycle_signal(
     .await
 }
 
-fn live_decision_to_strategy_decision(
-    decision: strategy::LiveStrategyDecision,
-) -> StrategyDecision {
-    match decision {
-        strategy::LiveStrategyDecision::Enter => StrategyDecision::Enter,
-        strategy::LiveStrategyDecision::Hold => StrategyDecision::Hold,
-        strategy::LiveStrategyDecision::Exit => StrategyDecision::Exit,
-        strategy::LiveStrategyDecision::Rebalance => StrategyDecision::Rebalance,
-        strategy::LiveStrategyDecision::Reject => StrategyDecision::Reject,
-    }
+fn selected_signal_outcome_audit_payload(
+    signal: &Signal,
+    result: &CycleResult,
+    exploratory: bool,
+    timestamp_ms: u64,
+    stop_loss_percent: f64,
+    take_profit_percent: f64,
+) -> serde_json::Value {
+    let reason = result
+        .reason
+        .as_deref()
+        .unwrap_or("No order submitted; no reason was provided");
+    signal_audit_payload(
+        signal,
+        "decision",
+        timestamp_ms,
+        result.status,
+        Some(reason),
+        Some(exploratory),
+        stop_loss_percent,
+        take_profit_percent,
+    )
 }
 
 async fn evaluate_daily_strategy_signals(
     signals: &[Signal],
     enabled_strategies: &[Strategy],
 ) -> Vec<Result<StrategyDecision, String>> {
-    let requests = signals
-        .iter()
-        .enumerate()
-        .map(|(index, signal)| {
-            let result = signal
-                .strategy_candidate
-                .then(|| signal.strategy.as_deref().and_then(Strategy::from_name))
-                .flatten()
-                .filter(|strategy| enabled_strategies.contains(strategy))
-                .ok_or_else(|| "Daily strategy is not enabled".to_owned())
-                .and_then(|strategy| {
-                    let parameters = signal_strategy_parameters(signal);
-                    crate::service_rpc::live_entry_evaluation_request(strategy, signal, parameters)
-                        .map_err(|error| error.to_string())
-                });
-            (index, result)
-        })
-        .collect::<Vec<_>>();
-    let mut outcomes = vec![Err("Daily strategy evaluation was not requested".to_owned()); signals.len()];
-    let mut batch = Vec::new();
-    let mut indexes = Vec::new();
-    for (index, request) in requests {
-        match request {
-            Ok(request) => {
-                indexes.push(index);
-                batch.push(request);
-            }
-            Err(error) => outcomes[index] = Err(error),
+    signals.iter().map(|signal| {
+        let strategy = signal.strategy.as_deref().and_then(Strategy::from_name);
+        if !strategy.is_some_and(|strategy| enabled_strategies.contains(&strategy)) {
+            return Err("Daily strategy is not enabled".to_owned());
         }
-    }
-    for (index, result) in indexes
-        .into_iter()
-        .zip(crate::service_rpc::request_live_evaluations(batch).await)
-    {
-        outcomes[index] = result
-            .map(live_decision_to_strategy_decision)
-            .map_err(|error| error.to_string());
-    }
-    outcomes
+        if !live_worker_pre_evaluated(signal) {
+            return Err("Daily strategy decision is missing its worker result".to_owned());
+        }
+        Ok(if signal.strategy_decision.as_ref()
+            .and_then(|decision| decision.get("live_worker_decision"))
+            .and_then(serde_json::Value::as_str) == Some("enter")
+        {
+            StrategyDecision::Enter
+        } else {
+            StrategyDecision::Reject
+        })
+    }).collect()
 }
 
 async fn attach_strategy_walk_forward_evidence(
+    state: &AutoTraderState,
     signals: &mut [Signal],
     now: u64,
 ) {
-    let candidates = signals
-        .iter()
-        .filter_map(|signal| {
-            if !signal_is_fresh(signal, now) {
-                return None;
-            }
-            let strategy = signal.strategy.as_ref()?;
-            Strategy::from_name(strategy)?;
-            Some(strategy::StrategyEvidenceCandidate {
-                symbol: signal.symbol.clone(),
-                strategy: strategy.clone(),
-                signal_timestamp_ms: signal.timestamp,
-                parameters: signal_strategy_parameters(signal),
-            })
-        })
-        .collect::<Vec<_>>();
-    if candidates.is_empty() {
-        return;
-    }
-    let expected = candidates
-        .iter()
-        .map(|candidate| {
-            (
-                (
-                    candidate.strategy.clone(),
-                    candidate.symbol.clone(),
-                    candidate.signal_timestamp_ms,
-                ),
-                candidate.parameters.clone(),
-            )
-        })
-        .collect::<BTreeMap<_, _>>();
-    let request = strategy::ScoutCandidateBatch {
-        request_id: format!("auto-trader-walk-forward:{now}:{}", candidates.len()),
-        mode: strategy::ScoutWorkMode::EvidenceOnly,
-        signals: signals
-            .iter()
-            .filter(|signal| {
-                signal_is_fresh(signal, now)
-                    && signal
-                        .strategy
-                        .as_ref()
-                        .is_some_and(|strategy| Strategy::from_name(strategy).is_some())
-            })
-            .filter_map(|signal| serde_json::to_value(signal).ok())
-            .collect(),
-    };
-    let learning_rsocket_url = std::env::var("LEARNING_RSOCKET_URL")
-        .unwrap_or_else(|_| "ws://127.0.0.1:10010".into());
-    let response = match strategy::request_scout_candidate_batch(&learning_rsocket_url, &request).await {
-        Ok(response) => response,
-        Err(error) => {
-            log_strategy_walk_forward_failure(&format!(
-                "Could not load strategy walk-forward evidence over RSocket: {error}"
-            ));
-            return;
-        }
-    };
-    let evidence_by_key = response
-        .assignments
-        .into_iter()
-        .filter_map(|assignment| {
-            let evidence = assignment.walk_forward_evidence?;
-            let candidate = assignment.candidate;
-            let strategy = candidate["strategy"].as_str()?.to_owned();
-            let symbol = candidate["symbol"].as_str()?.to_owned();
-            let timestamp = candidate["timestamp"].as_u64()?;
-            let parameters = serde_json::from_value::<BTreeMap<String, f64>>(
-                candidate["strategy_decision"]["strategy_parameters"].clone(),
-            )
-            .ok()?;
-            let key = (strategy, symbol, timestamp);
-            (expected.get(&key) == Some(&parameters)).then_some((key, evidence))
-        })
-        .collect::<BTreeMap<_, _>>();
+    let evidence_by_profile = state
+        .settings
+        .lock()
+        .await
+        .learned_walk_forward_evidence
+        .clone();
     for signal in signals {
-        let Some(strategy) = signal.strategy.as_ref() else {
+        if !signal_is_fresh(signal, now) || live_worker_pre_evaluated(signal) {
+            continue;
+        }
+        let Some(strategy) = signal.strategy.as_deref().and_then(Strategy::from_name) else {
             continue;
         };
-        let key = (strategy.clone(), signal.symbol.clone(), signal.timestamp);
-        let Some(evidence) = evidence_by_key.get(&key) else {
+        let parameters = signal_strategy_parameters(signal);
+        let profile_id = signal
+            .strategy_decision
+            .as_ref()
+            .and_then(|decision| decision.get("learning_profile_id"))
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned)
+            .unwrap_or_else(|| strategy::profile_id(&signal.symbol, strategy.as_str(), &parameters));
+        let Some(evidence) = evidence_by_profile.get(&profile_id) else {
             continue;
         };
         let Some(decision) = signal
@@ -476,28 +421,6 @@ async fn attach_strategy_walk_forward_evidence(
             serde_json::to_value(evidence).unwrap_or_default(),
         );
     }
-}
-
-fn log_strategy_walk_forward_failure(message: &str) {
-    static LAST_WARNING_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let now_ms = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_millis().min(u128::from(u64::MAX)) as u64)
-        .unwrap_or_default();
-    let previous = LAST_WARNING_MS.load(std::sync::atomic::Ordering::Relaxed);
-    if now_ms.saturating_sub(previous) < 30_000
-        || LAST_WARNING_MS
-            .compare_exchange(
-                previous,
-                now_ms,
-                std::sync::atomic::Ordering::Relaxed,
-                std::sync::atomic::Ordering::Relaxed,
-            )
-            .is_err()
-    {
-        return;
-    }
-    crate::service_log!("WARN", "{message}");
 }
 
 fn daily_candidate_priority(settings: &Settings, signal: &Signal) -> (u8, f64, f64) {
@@ -709,108 +632,18 @@ async fn request_learning_context_thresholds(
     state: &AutoTraderState,
     signals: &[Signal],
 ) -> BTreeMap<String, strategy::ContextThresholds> {
-    if signals.is_empty() {
-        return BTreeMap::new();
-    }
     let contexts = signals.iter().map(market_context).collect::<BTreeSet<_>>();
-    request_learning_context_thresholds_for_contexts(state, contexts).await
-}
-
-async fn request_learning_context_thresholds_for_contexts(
-    state: &AutoTraderState,
-    contexts: BTreeSet<String>,
-) -> BTreeMap<String, strategy::ContextThresholds> {
-    let context_prefixes = contexts
-        .iter()
-        .flat_map(|context| [format!("{context}:"), format!("scout:{context}:")])
-        .collect::<Vec<_>>();
-    let (relevant_learning, import_legacy_learning) = {
-        let settings = state.settings.lock().await;
-        let import_legacy_learning = !settings.context_learning_imported;
-        let learning = if import_legacy_learning {
+    let settings = state.settings.lock().await;
+    contexts
+        .into_iter()
+        .filter_map(|context| {
             settings
-                .learning
-                .iter()
-                .filter(|(key, _)| {
-                    key.ends_with(":trade")
-                        && (context_prefixes.is_empty()
-                            || context_prefixes
-                                .iter()
-                                .any(|prefix| key.starts_with(prefix)))
-                })
-                .map(|(key, stats)| {
-                    (
-                        key.clone(),
-                        strategy::ContextLearningStat {
-                            samples: stats.samples,
-                            positive: stats.positive,
-                            realized_pnl: stats.realized_pnl,
-                            updated_at_ms: stats.updated_at_ms,
-                        },
-                    )
-                })
-                .collect()
-        } else {
-            BTreeMap::new()
-        };
-        (learning, import_legacy_learning)
-    };
-    let request = strategy::ContextThresholdRequest {
-        learning: relevant_learning,
-        contexts: contexts
-            .into_iter()
-            .map(|context| strategy::ContextThresholdInput {
-                context,
-            })
-            .collect(),
-    };
-    let mut request_hasher = std::collections::hash_map::DefaultHasher::new();
-    std::hash::Hash::hash(&serde_json::to_vec(&request).unwrap_or_default(), &mut request_hasher);
-    let cache_key = format!("context-thresholds:{:x}", std::hash::Hasher::finish(&request_hasher));
-    let response = cached_learning_response::<strategy::ContextThresholdResponse>(
-        &state.learning_response_cache,
-        cache_key,
-        "/context-thresholds".to_owned(),
-        serde_json::to_value(request).unwrap_or(serde_json::Value::Null),
-    )
-    .await;
-    if let Some(response) = response.as_ref() {
-        let bands = response
-            .missed_opportunity_bands
-            .iter()
-            .take(2_000)
-            .map(|band| MissedOpportunityGateBand {
-                gate: match band.gate.as_str() {
-                    "score" => MissedOpportunityGate::Score,
-                    "strength" => MissedOpportunityGate::Strength,
-                    _ => MissedOpportunityGate::Other,
-                },
-                threshold: band.threshold,
-                symbol: band.symbol.clone(),
-                direction: band.direction.clone(),
-                strategy: band.strategy.clone(),
-                market_context: band.market_context.clone(),
-                horizon_seconds: band.horizon_seconds,
-                sample_count: band.sample_count,
-                average_net_return_percent: band.average_net_return_percent,
-                positive_net_rate: band.positive_net_rate,
-                time_to_profit_sample_count: band.time_to_profit_sample_count,
-                time_to_profit_rate: band.time_to_profit_rate,
-                average_time_to_profit_seconds: band.average_time_to_profit_seconds,
-                stop_target_sample_count: band.stop_target_sample_count,
-                stop_target_average_net_return_percent: band.stop_target_average_net_return_percent,
-                stop_target_positive_net_rate: band.stop_target_positive_net_rate,
-            })
-            .collect::<Vec<_>>();
-        *state.latest_missed_opportunity_bands.lock().await = Arc::new(bands);
-    }
-    if response.is_some() && import_legacy_learning {
-        let mut settings = state.settings.lock().await;
-        settings.context_learning_imported = true;
-        drop(settings);
-        let _ = request_settings_persist(state);
-    }
-    response.map_or_else(BTreeMap::new, |response| response.thresholds)
+                .learned_context_thresholds
+                .get(&context)
+                .cloned()
+                .map(|thresholds| (context, thresholds))
+        })
+        .collect()
 }
 
 async fn run_cycle_inner(
@@ -925,7 +758,7 @@ async fn run_cycle_inner(
                 .is_some_and(|strategy| !strategy.is_live_insight() && !strategy.is_dated_carry())
     });
     if has_daily_strategy_signals {
-        attach_strategy_walk_forward_evidence(&mut dashboard.best, now).await;
+        attach_strategy_walk_forward_evidence(state, &mut dashboard.best, now).await;
     }
     let has_live_signal_strategies = !live_strategies.is_empty() && has_live_source_signals;
     if !live_strategies.is_empty() && live_source_signals.is_empty() {
@@ -1045,153 +878,52 @@ async fn run_cycle_inner(
     let mut live_strategy_candidates = Vec::new();
     if has_live_signal_strategies {
         for source_signal in &live_source_signals {
-            for strategy in live_strategies.iter().copied() {
-                let parameters =
-                    strategy_parameter_values(&strategy_settings, &source_signal.symbol, strategy);
-                let mut signal = match
-                    live_strategy_feature_signal(source_signal, strategy, &parameters)
-                {
-                    Ok(signal) => signal,
-                    Err(reason) => {
-                    let strategy_name = strategy.as_str();
-                    let timestamp_ms = now.saturating_mul(1000);
-                    update_latest_strategy_blocker(
-                        state,
-                        strategy_name,
-                        timestamp_ms,
-                        Some(StrategyBlocker {
-                            strategy: strategy_name.to_owned(),
-                            symbol: source_signal.symbol.clone(),
-                            reason,
-                            timestamp_ms,
-                        }),
-                    );
-                    continue;
-                    }
-                };
-                let learning_profile_id =
-                    strategy::profile_id(&signal.symbol, strategy.as_str(), &parameters);
-                let learned_profile = strategy_settings.learned_profiles.get(&format!(
-                    "{}:{}",
-                    signal.symbol,
-                    strategy.as_str()
-                ));
-                signal.strategy = Some(strategy.as_str().to_owned());
-                signal.strategy_decision = Some(serde_json::json!({
-                    "scout_only": false,
-                    "strategy": strategy.as_str(),
-                    "contract": strategy.contract(),
-                    "strategy_parameters": parameters,
-                    "learning_profile_id": learning_profile_id,
-                    "learning_profile_version": learned_profile.map_or(0, |profile| profile.version),
-                    "learning_profile_samples": learned_profile.map_or(0, |profile| profile.learning_samples),
-                    "observed_insight": signal.components,
-                    "direction": signal.direction,
-                    "strength": signal.strength,
-                    "score": signal.score,
-                    "direction_source": "aggregate_signal",
-                }));
-                live_strategy_candidates.push(signal);
+            if !live_worker_pre_evaluated(source_signal) {
+                continue;
+            }
+            let Some(strategy) = source_signal.strategy.as_deref().and_then(Strategy::from_name) else {
+                continue;
+            };
+            if live_strategies.contains(&strategy) {
+                live_strategy_candidates.push(source_signal.clone());
             }
         }
-        attach_strategy_walk_forward_evidence(&mut live_strategy_candidates, now).await;
+        attach_strategy_walk_forward_evidence(state, &mut live_strategy_candidates, now).await;
     }
     let mut live_strategy_signals = Vec::new();
-    if !live_strategy_candidates.is_empty() {
-        let mut requests = Vec::with_capacity(live_strategy_candidates.len());
-        let mut request_signals = Vec::with_capacity(live_strategy_candidates.len());
-        for signal in &live_strategy_candidates {
-            let Some(strategy) = signal.strategy.as_deref().and_then(Strategy::from_name) else {
-                continue;
-            };
-            let parameters = signal_strategy_parameters(signal);
-            match crate::service_rpc::live_entry_evaluation_request(strategy, signal, parameters) {
-                Ok(request) => {
-                    requests.push(request);
-                    request_signals.push(signal.clone());
-                }
-                Err(error) => {
-                    update_latest_strategy_blocker(
-                        state,
-                        strategy.as_str(),
-                        now.saturating_mul(1000),
-                        Some(StrategyBlocker {
-                            strategy: strategy.as_str().to_owned(),
-                            symbol: signal.symbol.clone(),
-                            reason: format!("Strategy X request error: {error}"),
-                            timestamp_ms: now.saturating_mul(1000),
-                        }),
-                    );
-                }
-            }
-        }
-        for (signal, result) in request_signals
-            .into_iter()
-            .zip(crate::service_rpc::request_live_evaluations(requests).await)
+    for signal in &live_strategy_candidates {
+        let Some(strategy) = signal.strategy.as_deref().and_then(Strategy::from_name) else {
+            continue;
+        };
+        if signal.strategy_decision.as_ref()
+            .and_then(|decision| decision.get("live_worker_decision"))
+            .and_then(serde_json::Value::as_str) == Some("enter")
         {
-            let Some(strategy) = signal.strategy.as_deref().and_then(Strategy::from_name) else {
-                continue;
-            };
-            let parameters = signal_strategy_parameters(&signal);
-            match result.map(live_decision_to_strategy_decision) {
-                Ok(StrategyDecision::Enter) => {
-                    update_latest_strategy_blocker(
-                        state,
-                        strategy.as_str(),
-                        now.saturating_mul(1000),
-                        None,
-                    );
-                    live_strategy_signals.push(signal);
-                }
-                Ok(_) => {
-                    let timestamp_ms = now.saturating_mul(1000);
-                    let reason = strategy_entry_rejection_reason(&signal, strategy, &parameters);
-                    update_latest_strategy_blocker(
-                        state,
-                        strategy.as_str(),
-                        timestamp_ms,
-                        Some(StrategyBlocker {
-                            strategy: strategy.as_str().to_owned(),
-                            symbol: signal.symbol.clone(),
-                            reason,
-                            timestamp_ms,
-                        }),
-                    );
-                }
-                Err(error) => {
-                    let timestamp_ms = now.saturating_mul(1000);
-                    update_latest_strategy_blocker(
-                        state,
-                        strategy.as_str(),
-                        timestamp_ms,
-                        Some(StrategyBlocker {
-                            strategy: strategy.as_str().to_owned(),
-                            symbol: signal.symbol.clone(),
-                            reason: format!("Strategy evaluation error: {error}"),
-                            timestamp_ms,
-                        }),
-                    );
-                }
-            }
+            update_latest_strategy_blocker(state, strategy.as_str(), now.saturating_mul(1000), None);
+            live_strategy_signals.push(signal.clone());
+        } else {
+            let timestamp_ms = now.saturating_mul(1000);
+            update_latest_strategy_blocker(
+                state,
+                strategy.as_str(),
+                timestamp_ms,
+                Some(StrategyBlocker {
+                    strategy: strategy.as_str().to_owned(),
+                    symbol: signal.symbol.clone(),
+                    reason: "Strategy worker did not approve entry".into(),
+                    timestamp_ms,
+                }),
+            );
         }
     }
-
-    if has_live_signal_strategies {
-        let active_position_keys = {
-            let settings = state.settings.lock().await;
-            let aggregate_keys = settings.positions.iter().filter_map(|(symbol, position)| {
-                if position.quantity.abs() <= 1e-12 {
-                    return None;
-                }
-                position.strategy.as_ref().map(|strategy| (symbol.clone(), strategy.clone()))
-            });
-            aggregate_keys.chain(settings.strategy_positions.iter().flat_map(|(symbol, lots)| {
-                lots.iter().filter_map(move |(strategy, position)| {
-                    (position.quantity.abs() > 1e-12)
-                        .then(|| (symbol.clone(), strategy.clone()))
-                })
-            })).collect::<BTreeSet<_>>()
-        };
+    let active_position_keys = {
+        let settings = state.settings.lock().await;
+        settings.strategy_positions.iter().flat_map(|(symbol, lots)| {
+            lots.iter().filter(|(_, position)| position.quantity.abs() > 1e-12 && !position.scout_entry)
+                .map(|(strategy, _)| (symbol.clone(), strategy.clone()))
+        }).collect::<BTreeSet<_>>()
+    };
+    {
         let mut latest = state.latest_live_strategy_signals.lock().await;
         let refreshed = live_source_signals
             .iter()
@@ -1516,7 +1248,7 @@ async fn run_cycle_inner(
                 );
                 queue_auto_trader_audit(state, payload);
             }
-            // Learning receives at most one actual Strategy X candidate per
+            // Learning receives at most one actual Strategy candidate per
             // cycle. Generic feed signals and Scout probes are not attributed
             // missed opportunities.
             if let Some(candidate) = selection_signals.iter()
@@ -1598,6 +1330,17 @@ async fn run_cycle_inner(
     )
     .await?;
     if signal_result.status != "order_submitting" {
+        queue_auto_trader_audit(
+            state,
+            selected_signal_outcome_audit_payload(
+                &audited_signal,
+                &signal_result,
+                exploratory,
+                now.saturating_mul(1_000),
+                counterfactual_stop_loss_percent,
+                counterfactual_take_profit_percent,
+            ),
+        );
         if let Some(strategy) = audited_signal.strategy.as_deref() {
             let timestamp_ms = now.saturating_mul(1_000);
             let reason = signal_result
@@ -1645,6 +1388,24 @@ mod parallel_daily_cycle_tests {
             news_attribution: None,
             entry_gate: None,
         }
+    }
+
+    #[test]
+    fn exploratory_selection_records_the_downstream_skip_with_gate_context() {
+        let mut candidate = signal("live-order-book");
+        candidate.entry_gate = Some(serde_json::json!({
+            "selection_mode": "exploratory",
+            "checks": { "strength_pass": false }
+        }));
+        let result = skipped_for_signal(&candidate, "Waiting for a fresh subscribed local order book");
+        let audit = selected_signal_outcome_audit_payload(&candidate, &result, true, 11_000, 0.5, 0.8);
+
+        assert_eq!(audit["stage"], "decision");
+        assert_eq!(audit["status"], "skipped");
+        assert_eq!(audit["reason"], "Waiting for a fresh subscribed local order book");
+        assert_eq!(audit["exploratory"], true);
+        assert_eq!(audit["entry_gate"]["checks"]["strength_pass"], false);
+        assert_eq!(audit["decision_id"], "10|ETH-USDT|bullish");
     }
 
     #[test]

@@ -3,7 +3,7 @@ async fn submit_barrier_order(
     symbol: String,
     request: NewOrder,
 ) -> Result<Json<OrderResponse>, (StatusCode, String)> {
-    store.ensure_subscription(&symbol);
+    store.ensure_market_mark_polling(&symbol);
     let trailing = matches!(&request.order_type, OrderType::TrailingStop);
     let (trigger_price, trigger_direction, trailing_amount, trailing_percent, extreme_price) =
         if trailing {
@@ -20,13 +20,13 @@ async fn submit_barrier_order(
                         .into(),
                 ));
             }
-            let book = store.book(&symbol).ok_or((
+            let mark = store.market_mark(&symbol).ok_or((
                 StatusCode::SERVICE_UNAVAILABLE,
                 "Live book required to arm trailing stop".into(),
             ))?;
             let current = match request.side {
-                TradeSide::Sell => book.bids.first().map(|l| l.price),
-                TradeSide::Buy => book.asks.first().map(|l| l.price),
+                TradeSide::Sell => mark.bid,
+                TradeSide::Buy => mark.ask,
             }
             .ok_or((
                 StatusCode::SERVICE_UNAVAILABLE,

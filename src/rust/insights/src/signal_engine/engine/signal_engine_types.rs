@@ -75,6 +75,7 @@ struct AbsorptionTrade {
 pub struct SignalEngine {
     prices: VecDeque<(u64, f64)>,
     pending: VecDeque<PendingOutcome>,
+    pending_scratch: VecDeque<PendingOutcome>,
     trades: VecDeque<(u64, f64, f64, bool, Option<f64>)>,
     absorption_trades: VecDeque<AbsorptionTrade>,
     book_imbalance: Option<f64>,

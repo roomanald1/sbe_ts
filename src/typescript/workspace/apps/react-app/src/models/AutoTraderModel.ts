@@ -6,6 +6,7 @@ import {
 } from '../position_stream';
 import {
   currentAutoTraderSnapshot,
+  isAutoTraderSnapshotFresh,
   subscribeAutoTraderStream,
   waitForAutoTraderSnapshot,
   type AutoTraderUiSnapshot,
@@ -166,6 +167,7 @@ export type StrategyBudget = {
   effective_budget: number;
   used_notional: number;
   learning_multiplier: number;
+  learning_feedback_multiplier?: number;
   learning_samples: number;
   positive_rate?: number | null;
   realized_pnl: number;
@@ -215,6 +217,8 @@ export type AutoTraderState = {
   executionAuditQueueDepth: number;
   auditCoalescedDecisions: number;
   auditDroppedEvents: number;
+  paperLearningExplorationUntilMs: number;
+  filledPaperOrdersSinceRecoveryReset: number;
   strategies: Strategy[];
   scoutStrategies: Strategy[];
   loading: boolean;
@@ -361,6 +365,7 @@ type TraderStatus = {
   execution_audit_queue_depth?: number;
   audit_coalesced_decisions?: number;
   audit_dropped_events?: number;
+  paper_learning_exploration_until_ms?: number;
   strategy?: Strategy;
   strategies?: Strategy[];
   signal_strategies_enabled?: boolean;
@@ -436,6 +441,8 @@ export class AutoTraderModel {
     executionAuditQueueDepth: 0,
     auditCoalescedDecisions: 0,
     auditDroppedEvents: 0,
+    paperLearningExplorationUntilMs: 0,
+    filledPaperOrdersSinceRecoveryReset: 0,
     strategies: [
       'donchian-55-btc200',
       'live-momentum',
@@ -597,7 +604,8 @@ export class AutoTraderModel {
         }
       });
     this.timer = setInterval(() => {
-      if (Date.now() - this.autoTraderSnapshotAt > 45_000) void this.refresh();
+      if (!isAutoTraderSnapshotFresh(this.autoTraderSnapshotAt))
+        void this.refresh();
     }, 30_000);
   }
   stop() {
@@ -775,7 +783,7 @@ export class AutoTraderModel {
       }>;
       const autoSnapshot = this.autoTraderSnapshot;
       const useStreamSnapshot =
-        autoSnapshot && Date.now() - this.autoTraderSnapshotAt <= 45_000;
+        !!autoSnapshot && isAutoTraderSnapshotFresh(this.autoTraderSnapshotAt);
       if (useStreamSnapshot && autoSnapshot) {
         status = autoSnapshot.status as TraderStatus;
         activity = autoSnapshot.activity as TraderActivity;
@@ -919,6 +927,15 @@ export class AutoTraderModel {
               : null,
         };
       });
+      const paperLearningExplorationUntilMs =
+        status.paper_learning_exploration_until_ms ?? 0;
+      const recoveryResetAtMs = paperLearningExplorationUntilMs
+        ? paperLearningExplorationUntilMs - 3 * 60 * 60 * 1000
+        : Number.POSITIVE_INFINITY;
+      const filledPaperOrdersSinceRecoveryReset = orders.filter(
+        (order) =>
+          order.timestamp >= recoveryResetAtMs && order.filled_quantity > 0,
+      ).length;
       const auditTrades = new Map<
         string,
         { entry?: (typeof auditRows)[number]; exits: typeof auditRows }
@@ -1029,6 +1046,8 @@ export class AutoTraderModel {
         executionAuditQueueDepth: status.execution_audit_queue_depth ?? 0,
         auditCoalescedDecisions: status.audit_coalesced_decisions ?? 0,
         auditDroppedEvents: status.audit_dropped_events ?? 0,
+        paperLearningExplorationUntilMs,
+        filledPaperOrdersSinceRecoveryReset,
         strategies: this.limitsDirty
           ? this.state$.value.strategies
           : savedStrategies,

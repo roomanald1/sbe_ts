@@ -270,6 +270,7 @@ pub struct CompletedSignalOutcome {
     pub legacy: SignalOutcome,
     pub evaluation: SignalEvaluation,
     pub scout_id: Option<String>,
+    pub strategy: Option<String>,
     pub scout_exit_reason: Option<&'static str>,
     pub scout_observation_only: bool,
 }

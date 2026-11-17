@@ -1,7 +1,12 @@
 use axum::{Router, extract::State, routing::get};
+use rusqlite::{Connection, OpenFlags};
 use std::sync::{
-    Arc,
+    Arc, Mutex,
     atomic::{AtomicU64, AtomicUsize, Ordering},
+};
+use std::{
+    path::PathBuf,
+    time::{Duration, Instant},
 };
 
 const LATENCY_BUCKETS_SECONDS: [f64; 8] = [0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.5, 1.0];
@@ -10,37 +15,129 @@ const LATENCY_BUCKETS_SECONDS: [f64; 8] = [0.001, 0.005, 0.01, 0.025, 0.05, 0.1,
 pub(crate) struct WorkerMetrics {
     role: &'static str,
     strategy: String,
+    scout_state_path: Option<PathBuf>,
+    scout_counts_cache: Mutex<Option<(Instant, u64, u64)>>,
     requests: AtomicU64,
     errors: AtomicU64,
     timeouts: AtomicU64,
     payload_rejects: AtomicU64,
     saturation_rejects: AtomicU64,
     in_flight: AtomicUsize,
+    insights_connected: AtomicUsize,
+    last_insight_timestamp_ms: AtomicU64,
+    insight_update_failures: AtomicU64,
+    insight_update_timeouts: AtomicU64,
+    decision_report_successes: AtomicU64,
+    decision_report_failures: AtomicU64,
+    last_decision_report_timestamp_ms: AtomicU64,
+    profile_updates: AtomicU64,
+    profile_update_failures: AtomicU64,
+    last_profile_update_timestamp_ms: AtomicU64,
+    profile_set_version: AtomicU64,
     latency_count: AtomicU64,
     latency_sum_ns: AtomicU64,
     latency_buckets: [AtomicU64; 8],
+    insight_route_latency_count: AtomicU64,
+    insight_route_latency_sum_ns: AtomicU64,
+    insight_route_latency_buckets: [AtomicU64; 8],
 }
 
 impl WorkerMetrics {
-    pub(crate) fn new(role: &'static str, strategy: impl Into<String>) -> Arc<Self> {
+    pub(crate) fn new(
+        role: &'static str,
+        strategy: impl Into<String>,
+        scout_state_path: Option<PathBuf>,
+    ) -> Arc<Self> {
         Arc::new(Self {
             role,
             strategy: strategy.into(),
+            scout_state_path,
+            scout_counts_cache: Mutex::new(None),
             requests: AtomicU64::new(0),
             errors: AtomicU64::new(0),
             timeouts: AtomicU64::new(0),
             payload_rejects: AtomicU64::new(0),
             saturation_rejects: AtomicU64::new(0),
             in_flight: AtomicUsize::new(0),
+            insights_connected: AtomicUsize::new(0),
+            last_insight_timestamp_ms: AtomicU64::new(0),
+            insight_update_failures: AtomicU64::new(0),
+            insight_update_timeouts: AtomicU64::new(0),
+            decision_report_successes: AtomicU64::new(0),
+            decision_report_failures: AtomicU64::new(0),
+            last_decision_report_timestamp_ms: AtomicU64::new(0),
+            profile_updates: AtomicU64::new(0),
+            profile_update_failures: AtomicU64::new(0),
+            last_profile_update_timestamp_ms: AtomicU64::new(0),
+            profile_set_version: AtomicU64::new(0),
             latency_count: AtomicU64::new(0),
             latency_sum_ns: AtomicU64::new(0),
             latency_buckets: std::array::from_fn(|_| AtomicU64::new(0)),
+            insight_route_latency_count: AtomicU64::new(0),
+            insight_route_latency_sum_ns: AtomicU64::new(0),
+            insight_route_latency_buckets: std::array::from_fn(|_| AtomicU64::new(0)),
         })
     }
 
     pub(crate) fn begin(&self) {
         self.requests.fetch_add(1, Ordering::Relaxed);
         self.in_flight.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn set_insights_connected(&self, connected: bool) {
+        self.insights_connected
+            .store(usize::from(connected), Ordering::Relaxed);
+    }
+
+    pub(crate) fn record_insight_update(&self, timestamp_ms: u64) {
+        self.last_insight_timestamp_ms
+            .store(timestamp_ms, Ordering::Relaxed);
+    }
+
+    pub(crate) fn record_insight_update_failure(&self, timed_out: bool) {
+        self.insight_update_failures.fetch_add(1, Ordering::Relaxed);
+        if timed_out {
+            self.insight_update_timeouts.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    pub(crate) fn record_decision_report(&self, timestamp_ms: u64, succeeded: bool) {
+        if succeeded {
+            self.decision_report_successes
+                .fetch_add(1, Ordering::Relaxed);
+            self.last_decision_report_timestamp_ms
+                .store(timestamp_ms, Ordering::Relaxed);
+        } else {
+            self.decision_report_failures
+                .fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    pub(crate) fn record_profile_update(&self, timestamp_ms: u64) {
+        self.profile_updates.fetch_add(1, Ordering::Relaxed);
+        self.last_profile_update_timestamp_ms
+            .store(timestamp_ms, Ordering::Relaxed);
+    }
+
+    pub(crate) fn record_profile_update_failure(&self) {
+        self.profile_update_failures.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn record_insight_route_latency(&self, elapsed_ns: u64) {
+        self.insight_route_latency_count
+            .fetch_add(1, Ordering::Relaxed);
+        self.insight_route_latency_sum_ns
+            .fetch_add(elapsed_ns, Ordering::Relaxed);
+        let elapsed = elapsed_ns as f64 / 1_000_000_000.0;
+        for (index, bound) in LATENCY_BUCKETS_SECONDS.iter().enumerate() {
+            if elapsed <= *bound {
+                self.insight_route_latency_buckets[index].fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
+
+    pub(crate) fn set_profile_set_version(&self, version: u64) {
+        self.profile_set_version.store(version, Ordering::Relaxed);
     }
 
     pub(crate) fn finish(&self, elapsed_ns: u64, error: Option<&str>) {
@@ -124,6 +221,85 @@ impl WorkerMetrics {
             &labels,
             self.in_flight.load(Ordering::Relaxed),
         );
+        output.push_str("# HELP app_strategy_worker_insights_connected Whether the worker has an active Insights subscription.\n# TYPE app_strategy_worker_insights_connected gauge\n");
+        metric(
+            &mut output,
+            "app_strategy_worker_insights_connected",
+            &labels,
+            self.insights_connected.load(Ordering::Relaxed),
+        );
+        output.push_str("# HELP app_strategy_worker_last_insight_timestamp_ms Timestamp of the most recent Insights update consumed.\n# TYPE app_strategy_worker_last_insight_timestamp_ms gauge\n");
+        metric(
+            &mut output,
+            "app_strategy_worker_last_insight_timestamp_ms",
+            &labels,
+            self.last_insight_timestamp_ms.load(Ordering::Relaxed),
+        );
+        output.push_str("# HELP app_strategy_worker_insight_update_failures_total Insights updates that failed during evaluation or reporting.\n# TYPE app_strategy_worker_insight_update_failures_total counter\n");
+        metric(
+            &mut output,
+            "app_strategy_worker_insight_update_failures_total",
+            &labels,
+            self.insight_update_failures.load(Ordering::Relaxed),
+        );
+        output.push_str("# HELP app_strategy_worker_insight_update_timeouts_total Insights updates that timed out during evaluation or reporting.\n# TYPE app_strategy_worker_insight_update_timeouts_total counter\n");
+        metric(
+            &mut output,
+            "app_strategy_worker_insight_update_timeouts_total",
+            &labels,
+            self.insight_update_timeouts.load(Ordering::Relaxed),
+        );
+        output.push_str("# HELP app_strategy_worker_decision_reports_total Decision reports accepted by AutoTrader.\n# TYPE app_strategy_worker_decision_reports_total counter\n");
+        metric(
+            &mut output,
+            "app_strategy_worker_decision_reports_total",
+            &labels,
+            self.decision_report_successes.load(Ordering::Relaxed),
+        );
+        output.push_str("# HELP app_strategy_worker_decision_report_failures_total Decision reports that failed to reach AutoTrader.\n# TYPE app_strategy_worker_decision_report_failures_total counter\n");
+        metric(
+            &mut output,
+            "app_strategy_worker_decision_report_failures_total",
+            &labels,
+            self.decision_report_failures.load(Ordering::Relaxed),
+        );
+        output.push_str("# HELP app_strategy_worker_last_decision_report_timestamp_ms Timestamp of the most recent decision report accepted by AutoTrader.\n# TYPE app_strategy_worker_last_decision_report_timestamp_ms gauge\n");
+        metric(
+            &mut output,
+            "app_strategy_worker_last_decision_report_timestamp_ms",
+            &labels,
+            self.last_decision_report_timestamp_ms
+                .load(Ordering::Relaxed),
+        );
+        output.push_str("# HELP app_strategy_worker_profile_updates_total Profile sets pushed by AutoTrader and accepted by the worker.\n# TYPE app_strategy_worker_profile_updates_total counter\n");
+        metric(
+            &mut output,
+            "app_strategy_worker_profile_updates_total",
+            &labels,
+            self.profile_updates.load(Ordering::Relaxed),
+        );
+        output.push_str("# HELP app_strategy_worker_profile_update_failures_total Invalid pushed profile sets rejected by the worker.\n# TYPE app_strategy_worker_profile_update_failures_total counter\n");
+        metric(
+            &mut output,
+            "app_strategy_worker_profile_update_failures_total",
+            &labels,
+            self.profile_update_failures.load(Ordering::Relaxed),
+        );
+        output.push_str("# HELP app_strategy_worker_last_profile_update_timestamp_ms Timestamp of the most recent profile set pushed by AutoTrader and accepted by the worker.\n# TYPE app_strategy_worker_last_profile_update_timestamp_ms gauge\n");
+        metric(
+            &mut output,
+            "app_strategy_worker_last_profile_update_timestamp_ms",
+            &labels,
+            self.last_profile_update_timestamp_ms
+                .load(Ordering::Relaxed),
+        );
+        output.push_str("# HELP app_strategy_worker_profile_set_version AutoTrader profile-set version currently installed by a live worker.\n# TYPE app_strategy_worker_profile_set_version gauge\n");
+        metric(
+            &mut output,
+            "app_strategy_worker_profile_set_version",
+            &labels,
+            self.profile_set_version.load(Ordering::Relaxed),
+        );
         output.push_str("# HELP app_strategy_worker_request_duration_seconds Request processing latency.\n# TYPE app_strategy_worker_request_duration_seconds histogram\n");
         for (index, bound) in LATENCY_BUCKETS_SECONDS.iter().enumerate() {
             let cumulative = self.latency_buckets[index].load(Ordering::Relaxed);
@@ -141,6 +317,40 @@ impl WorkerMetrics {
             "app_strategy_worker_request_duration_seconds_count{{{labels}}} {}\n",
             self.latency_count.load(Ordering::Relaxed)
         ));
+        output.push_str("# HELP app_strategy_worker_insight_route_duration_seconds Time spent dispatching an Insights update through the local Scout handler.\n# TYPE app_strategy_worker_insight_route_duration_seconds histogram\n");
+        for (index, bound) in LATENCY_BUCKETS_SECONDS.iter().enumerate() {
+            let cumulative = self.insight_route_latency_buckets[index].load(Ordering::Relaxed);
+            output.push_str(&format!("app_strategy_worker_insight_route_duration_seconds_bucket{{{labels},le=\"{bound}\"}} {cumulative}\n"));
+        }
+        output.push_str(&format!(
+            "app_strategy_worker_insight_route_duration_seconds_bucket{{{labels},le=\"+Inf\"}} {}\n",
+            self.insight_route_latency_count.load(Ordering::Relaxed)
+        ));
+        output.push_str(&format!(
+            "app_strategy_worker_insight_route_duration_seconds_sum{{{labels}}} {:.9}\n",
+            self.insight_route_latency_sum_ns.load(Ordering::Relaxed) as f64 / 1_000_000_000.0
+        ));
+        output.push_str(&format!(
+            "app_strategy_worker_insight_route_duration_seconds_count{{{labels}}} {}\n",
+            self.insight_route_latency_count.load(Ordering::Relaxed)
+        ));
+        if self.role == "scout"
+            && let Some((open, closed)) = self.scout_instance_counts()
+        {
+            output.push_str("# HELP app_scout_instances Scout instances in the current persisted state, by lifecycle status.\n# TYPE app_scout_instances gauge\n");
+            metric(
+                &mut output,
+                "app_scout_instances",
+                &format!("{labels},status=\"open\""),
+                open,
+            );
+            metric(
+                &mut output,
+                "app_scout_instances",
+                &format!("{labels},status=\"closed\""),
+                closed,
+            );
+        }
         if let Some((rss, cpu_seconds)) = process_usage() {
             output.push_str("# HELP app_strategy_worker_process_resident_memory_bytes Worker process resident memory in bytes.\n# TYPE app_strategy_worker_process_resident_memory_bytes gauge\n");
             metric(
@@ -156,6 +366,57 @@ impl WorkerMetrics {
         }
         output
     }
+
+    fn scout_instance_counts(&self) -> Option<(u64, u64)> {
+        let path = self.scout_state_path.as_ref()?;
+        let mut cache = self.scout_counts_cache.lock().ok()?;
+        if let Some((updated, open, closed)) = cache.as_ref()
+            && updated.elapsed() < Duration::from_secs(60)
+        {
+            return Some((*open, *closed));
+        }
+        let counts = read_scout_instance_counts(path)?;
+        *cache = Some((Instant::now(), counts.0, counts.1));
+        Some(counts)
+    }
+}
+
+fn read_scout_instance_counts(path: &std::path::Path) -> Option<(u64, u64)> {
+    let connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY).ok()?;
+    connection.busy_timeout(Duration::from_millis(250)).ok()?;
+    connection
+        .execute_batch("PRAGMA query_only=ON; PRAGMA cache_size=-512; PRAGMA mmap_size=0; PRAGMA temp_store=FILE;")
+        .ok()?;
+    let (instances, open): (i64, i64) = connection
+        .query_row(
+            "SELECT COUNT(*), COALESCE(SUM(CASE WHEN
+                json_extract(payload, '$.scout_net_return_percent') IS NULL
+                AND (COALESCE(json_extract(payload, '$.strategy'), 'unattributed') NOT LIKE 'live-%'
+                     OR COALESCE(json_extract(payload, '$.scout_entry_price'), json_extract(payload, '$.price'), json_extract(payload, '$.strategy_decision.observed_close')) IS NOT NULL)
+                THEN 1 ELSE 0 END), 0)
+             FROM scout_records
+             WHERE collection='scout_instances'
+               AND COALESCE(json_extract(payload, '$.symbol'), '') != ''
+               AND COALESCE(json_extract(payload, '$.direction'), 'unknown') IN ('bullish', 'bearish', 'unknown')",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .ok()?;
+    let orphaned_outcomes: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM scout_records AS outcome
+             WHERE outcome.collection='outcomes'
+               AND NOT EXISTS (
+                   SELECT 1 FROM scout_records AS instance
+                   WHERE instance.collection='scout_instances'
+                     AND instance.record_key=json_extract(outcome.payload, '$.decision_id')
+               )",
+            [],
+            |row| row.get(0),
+        )
+        .ok()?;
+    let total = instances.max(0).saturating_add(orphaned_outcomes.max(0));
+    Some((open.max(0) as u64, total.saturating_sub(open.max(0)) as u64))
 }
 
 fn metric(output: &mut String, name: &str, labels: &str, value: impl std::fmt::Display) {
@@ -209,10 +470,70 @@ pub(crate) async fn serve_metrics(addr: String, metrics: Arc<WorkerMetrics>) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn scout_metrics_count_open_and_closed_rows_without_a_history_window() {
+        let path =
+            std::env::temp_dir().join(format!("scout-metric-counts-{}.sqlite", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE scout_records(collection TEXT NOT NULL, record_key TEXT NOT NULL, payload TEXT NOT NULL, PRIMARY KEY(collection,record_key));",
+            )
+            .unwrap();
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        let payloads = [
+            (
+                "scout_instances",
+                "open",
+                serde_json::json!({"decision_id":"open","symbol":"BTC-USDT","strategy":"live-momentum","direction":"bullish","timestamp":now-60_000,"scout_entry_price":100.0}),
+            ),
+            (
+                "scout_instances",
+                "closed",
+                serde_json::json!({"decision_id":"closed","symbol":"BTC-USDT","strategy":"live-momentum","direction":"bullish","timestamp":now-60_000,"scout_entry_price":100.0,"scout_net_return_percent":0.5}),
+            ),
+            (
+                "scout_instances",
+                "old-open",
+                serde_json::json!({"decision_id":"old-open","symbol":"BTC-USDT","strategy":"live-momentum","direction":"bullish","timestamp":now-30*86_400_000,"scout_entry_price":100.0}),
+            ),
+            (
+                "outcomes",
+                "orphan|strategy|single",
+                serde_json::json!({"decision_id":"orphan","symbol":"BTC-USDT","strategy":"live-momentum","signal_timestamp_ms":now-60_000,"evaluated_timestamp_ms":now,"exit_scenario":"strategy","net_return_percent":0.1}),
+            ),
+        ];
+        for (collection, key, payload) in payloads {
+            connection
+                .execute(
+                    "INSERT INTO scout_records VALUES (?1,?2,?3)",
+                    rusqlite::params![collection, key, payload.to_string()],
+                )
+                .unwrap();
+        }
+        drop(connection);
+
+        assert_eq!(read_scout_instance_counts(&path), Some((2, 2)));
+        let metrics = WorkerMetrics::new("scout", "live-momentum", Some(path.clone()));
+        let text = metrics.render();
+        assert!(text.contains(
+            "app_scout_instances{role=\"scout\",strategy=\"live-momentum\",status=\"open\"} 2"
+        ));
+        assert!(text.contains(
+            "app_scout_instances{role=\"scout\",strategy=\"live-momentum\",status=\"closed\"} 2"
+        ));
+        let _ = std::fs::remove_file(path);
+    }
 
     #[test]
     fn exports_bounded_role_strategy_metrics_and_histogram() {
-        let metrics = WorkerMetrics::new("live", "live-momentum");
+        let metrics = WorkerMetrics::new("live", "live-momentum", None);
         metrics.begin();
         metrics.finish(8_000_000, Some("payload"));
         metrics.begin();
@@ -233,5 +554,56 @@ mod tests {
             )
         );
         assert!(!text.contains("symbol="));
+    }
+
+    #[test]
+    fn exports_insight_route_latency_histogram() {
+        let metrics = WorkerMetrics::new("scout", "live-momentum", None);
+        metrics.record_insight_route_latency(2_000_000);
+        metrics.record_insight_route_latency(400_000_000);
+
+        let text = metrics.render();
+        assert!(text.contains("app_strategy_worker_insight_route_duration_seconds_bucket"));
+        assert!(text.contains("le=\"0.005\"} 1\n"));
+        assert!(text.contains("le=\"0.5\"} 2\n"));
+        assert!(text.contains(
+            "app_strategy_worker_insight_route_duration_seconds_count{role=\"scout\",strategy=\"live-momentum\"} 2"
+        ));
+    }
+
+    #[test]
+    fn exports_live_report_failures_and_last_successful_report_timestamp() {
+        let metrics = WorkerMetrics::new("live", "live-momentum", None);
+        metrics.record_decision_report(1_700_000_000_000, true);
+        metrics.record_decision_report(1_700_000_001_000, false);
+        metrics.record_insight_update_failure(true);
+        metrics.record_profile_update(1_700_000_002_000);
+        metrics.record_profile_update_failure();
+
+        let text = metrics.render();
+        assert!(text.contains(
+            "app_strategy_worker_decision_reports_total{role=\"live\",strategy=\"live-momentum\"} 1"
+        ));
+        assert!(text.contains(
+            "app_strategy_worker_decision_report_failures_total{role=\"live\",strategy=\"live-momentum\"} 1"
+        ));
+        assert!(text.contains(
+            "app_strategy_worker_insight_update_failures_total{role=\"live\",strategy=\"live-momentum\"} 1"
+        ));
+        assert!(text.contains(
+            "app_strategy_worker_insight_update_timeouts_total{role=\"live\",strategy=\"live-momentum\"} 1"
+        ));
+        assert!(text.contains(
+            "app_strategy_worker_last_decision_report_timestamp_ms{role=\"live\",strategy=\"live-momentum\"} 1700000000000"
+        ));
+        assert!(text.contains(
+            "app_strategy_worker_profile_updates_total{role=\"live\",strategy=\"live-momentum\"} 1"
+        ));
+        assert!(text.contains(
+            "app_strategy_worker_profile_update_failures_total{role=\"live\",strategy=\"live-momentum\"} 1"
+        ));
+        assert!(text.contains(
+            "app_strategy_worker_last_profile_update_timestamp_ms{role=\"live\",strategy=\"live-momentum\"} 1700000002000"
+        ));
     }
 }

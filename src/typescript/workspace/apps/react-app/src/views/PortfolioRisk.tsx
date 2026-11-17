@@ -11,22 +11,7 @@ import type { Connection } from '../connection';
 import { PnlModel } from '../models/PnlModel';
 import { useBehaviorSnapshot } from '@workspace/ui-platform';
 import { FeedToolbar } from './FeedToolbar';
-import {
-  currentPositionSnapshot,
-  subscribePositionStream,
-} from '../position_stream';
-
-type HedgeCorrelationResponse = {
-  pair_correlations?: {
-    symbol_a: string;
-    symbol_b: string;
-    correlation: number | null;
-  }[];
-  positions?: {
-    symbol: string;
-    candidates?: { symbol: string; correlation: number | null }[];
-  }[];
-};
+import { subscribeHedgeCandidates } from '../hedge_candidates';
 
 ModuleRegistry.registerModules([ClientSideRowModelModule]);
 const moneyFormatter = new Intl.NumberFormat(undefined, {
@@ -92,14 +77,14 @@ function PortfolioRiskComponent({
   }, [model]);
   const { rows, loading, error } = useBehaviorSnapshot(model.state$);
   useEffect(() => {
-    const applyCorrelations = (data: HedgeCorrelationResponse) => {
+    return subscribeHedgeCandidates((data) => {
       const next: Record<string, number | null> = {};
       for (const pair of data.pair_correlations ?? []) {
         next[[pair.symbol_a, pair.symbol_b].sort().join('|')] =
           pair.correlation;
       }
-      for (const position of data.positions ?? []) {
-        for (const candidate of position.candidates ?? []) {
+      for (const position of data.positions) {
+        for (const candidate of position.candidates) {
           const key = [position.symbol, candidate.symbol].sort().join('|');
           if (next[key] == null && candidate.correlation != null)
             next[key] = candidate.correlation;
@@ -107,14 +92,7 @@ function PortfolioRiskComponent({
       }
       setCorrelations(next);
       setCorrelationsLoaded(true);
-    };
-    const stop = subscribePositionStream((snapshot) => {
-      if (snapshot.hedge_candidates)
-        applyCorrelations(snapshot.hedge_candidates);
     });
-    const current = currentPositionSnapshot()?.hedge_candidates;
-    if (current) applyCorrelations(current);
-    return stop;
   }, []);
   const openRows = useMemo(
     () => rows.filter((row) => Math.abs(row.position.quantity) > 1e-12),

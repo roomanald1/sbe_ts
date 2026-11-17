@@ -17,7 +17,7 @@
 ## Project map
 
 - Frontend: src/typescript/workspace/apps/react-app.
-- Backend services: src/rust/feed_handlers, src/rust/position_management, src/rust/execution, and src/rust/insights.
+- Backend services: src/rust/feed_handlers, src/rust/position_management, src/rust/paper_exchange, and src/rust/insights.
 - Generated SBE Rust code: src/rust/feed_handlers/src/sbe/sbe_out/example; schema: src/rust/feed_handlers/src/sbe/sbe_schema.xml. Change generated files only when the schema or protocol requires it.
 - Use rg to find relevant symbols and read only the files needed for the task. Avoid lockfiles, build output, dependencies, and generated code unless relevant.
 - Root README has run commands; the Rust crate README describes service behavior and profiling.
@@ -27,6 +27,7 @@
 - Do not start, stop, restart, or otherwise cycle running services unless the user explicitly instructs you to do so. This includes `./start-all.sh`, `./stop-all.sh`, Compose commands, and service-specific process commands. If a task appears to need a restart, explain that and leave the services running until explicitly asked.
 - When the user authorizes a restart after a change, restart only the affected service or services and any services that depend on changed interfaces or runtime data. Do not restart the whole system for a focused change.
 - After any authorized service restart, run the homepage System liveness check from http://localhost:8080 using “Run liveness checks”. Report its pass/fail summary; if the homepage is unavailable, use `POST http://localhost:8080/api/liveness/run` once it is reachable.
+- When the user explicitly requests a full-stack rebuild and restart, run `./rebuild-all.sh` from the repository root. It builds the homepage and benchmarks, then rebuilds and force-recreates all system and infrastructure services. It requires `monitoring/.env` to exist. Do not use it for focused changes; restart only the affected services in that case.
 - System services can be targeted by Compose service name from the repository root: `./stop-system.sh <service...>` followed by `./start-system.sh <service...>`. Infrastructure services can be targeted the same way with `./stop-infra.sh <service...>` and `./start-infra.sh <service...>`. Check `system/compose.yml` and `monitoring/docker-compose.yml` for service names and dependencies; include required dependent services when a change affects them.
 - Use `./start-all.sh` for initial complete-stack startup. Use `./stop-all.sh` only when the complete stack needs to be shut down, and only with explicit user authorization. These scripts operate on both system and infrastructure stacks.
 - Before starting infrastructure, ensure `monitoring/.env` exists. Create it from `monitoring/.env.example` and set a unique Grafana password when needed.
@@ -34,7 +35,7 @@
 
 ## Execution-strategy map
 
-- Position management is in src/rust/position_management; execution and VWAP scheduling are in src/rust/execution.
+- Position management is in src/rust/position_management; paper-exchange simulation and VWAP scheduling are in src/rust/paper_exchange.
 - Both React entry points use the same /positions/vwap API: the trade ticket uses TradeTicketModel.ts and TradeTicketPopup.tsx; the Orders page uses OrderManagerModel.ts and Positions.tsx. Update both client flows if the request or status contract changes.
 - POST /positions/vwap accepts symbol, side, fractional quantity, duration (5–390 minutes), and max participation (1–100%). The backend generates a provisional U-shaped 78-bin curve and starts immediately. GET lists run status; DELETE cancels. Run state is in memory; paper child fills are persisted in the positions ledger.
 - The strategy consumes the existing OKX trade and book feeds; it does not require SBE schema or generated-code changes. For VWAP tasks, start with the files above and trace feed/SBE code only if the data path changes.

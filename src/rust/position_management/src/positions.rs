@@ -14,7 +14,7 @@ use rsocket_rust::prelude::*;
 use rsocket_rust_transport_websocket::WebsocketServerTransport;
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, HashMap, HashSet},
     path::PathBuf,
     pin::Pin,
     sync::{
@@ -28,8 +28,6 @@ use tokio::{
     time::{Duration, Instant, timeout},
 };
 
-const SYMBOL_PRICE_MESSAGE_LENGTH: usize = 64;
-const BOOK_DEPTH: usize = 7;
 const NUM_VWAP_BINS: usize = 78;
 const EPSILON: f64 = 1e-12;
 static HTTP_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
@@ -48,11 +46,14 @@ include!("market/usd_rates.rs");
 
 include!("orders/order_types.rs");
 
-include!("market/book_matching.rs");
+#[path = "orders/paper_exchange_client.rs"]
+mod paper_exchange_client;
+
+include!("market/paper_exchange_state.rs");
 
 include!("ledger/position_store_load.rs");
 
-include!("ledger/position_store_subscriptions.rs");
+include!("ledger/position_store_market_mark_pollers.rs");
 
 include!("scheduling/scheduled_run_lifecycle.rs");
 
@@ -69,10 +70,6 @@ include!("account/account_capacity.rs");
 include!("account/account_routes.rs");
 
 include!("positions/position_reporting.rs");
-
-include!("positions/hedge_candidates.rs");
-
-include!("market/market_insights_inputs.rs");
 
 include!("positions/position_trade_history.rs");
 
@@ -105,12 +102,8 @@ mod coverage_tests {
             persistence_timings_ms: Arc::new(StdMutex::new(BTreeMap::new())),
             trade_index: StdMutex::new(LedgerTradeIndex::default()),
             realized_pnl_cache: StdMutex::new(None),
-            books: StdRwLock::new(HashMap::new()),
-            price_samples: Mutex::new(HashMap::new()),
-            hedge_samples: Mutex::new(HashMap::new()),
-            book_changed: Notify::new(),
-            subscriptions: StdMutex::new(HashMap::new()),
-            spot_symbols: Arc::new(vec!["BTC-USDT".to_owned()]),
+            market_marks: StdRwLock::new(HashMap::new()),
+            market_mark_pollers: StdMutex::new(HashSet::new()),
             vwap_runs: Mutex::new(HashMap::new()),
         })
     }
@@ -267,32 +260,6 @@ mod coverage_tests {
     }
 
     #[tokio::test]
-    async fn insights_handlers_cover_empty_and_invalid_market_paths() {
-        let store = store();
-        assert!(
-            get_insights_inputs(
-                State(Arc::clone(&store)),
-                Query(InsightsInputQuery::default())
-            )
-            .await
-            .unwrap()
-            .0
-            .markets
-            .is_empty()
-        );
-        assert_status(
-            get_market_book(
-                State(store),
-                Query(InsightsInputQuery {
-                    symbol: Some("INVALID".into()),
-                }),
-            )
-            .await,
-            StatusCode::BAD_REQUEST,
-        );
-    }
-
-    #[tokio::test]
     async fn scheduling_subscription_and_ui_snapshot_cover_in_memory_paths() {
         let store = store();
         assert!(
@@ -324,11 +291,6 @@ mod coverage_tests {
             cancel_vwap(State(Arc::clone(&store)), Path("absent".into())).await,
             StatusCode::NOT_FOUND,
         );
-        assert_eq!(
-            subscribe_market_book(State(Arc::clone(&store)), Path("bad symbol".into())).await,
-            StatusCode::BAD_REQUEST
-        );
-
         store
             .persistence_timings_ms
             .lock()
@@ -346,7 +308,6 @@ mod coverage_tests {
                 .unwrap()
                 .is_empty()
         );
-        assert!(!hedge_candidates_snapshot(&store).await.is_null());
     }
 
     #[tokio::test]
@@ -385,21 +346,6 @@ mod coverage_tests {
         )
         .await;
         assert_eq!(status.lock().await.status, "cancelled");
-        let slot = store.book_slot("BTC-USDT");
-        assert_eq!(
-            execute_vwap_child_from_slot(
-                &store,
-                "BTC-USDT",
-                &TradeSide::Buy,
-                1.0,
-                &slot,
-                "manual",
-                "parent",
-            )
-            .await
-            .unwrap_err(),
-            "Live order book unavailable for VWAP child order"
-        );
         store.vwap_runs.lock().await.insert(
             "cancelled-run".into(),
             VwapRunEntry {
@@ -476,21 +422,5 @@ mod coverage_tests {
         assert_eq!(samples["write"].len(), 500);
         assert_eq!(samples["write"][0], 1.0);
         assert_eq!(samples["write"][499], 500.0);
-    }
-
-    #[tokio::test]
-    async fn ticker_samples_are_throttled_and_stale_history_is_pruned() {
-        let store = store();
-        store
-            .record_ticker_sample("BTC-USDT".into(), 100.0, 10_000)
-            .await;
-        store
-            .record_ticker_sample("BTC-USDT".into(), 101.0, 15_000)
-            .await;
-        store
-            .record_ticker_sample("BTC-USDT".into(), 102.0, 40 * 60_000)
-            .await;
-        let samples = store.hedge_samples.lock().await;
-        assert_eq!(samples["BTC-USDT"], vec![(40 * 60_000, 102.0)]);
     }
 }

@@ -35,6 +35,7 @@ impl Default for SignalEngine {
         Self {
             prices: VecDeque::with_capacity(512),
             pending: VecDeque::with_capacity(256),
+            pending_scratch: VecDeque::with_capacity(256),
             trades: VecDeque::with_capacity(2_048),
             absorption_trades: VecDeque::with_capacity(512),
             book_imbalance: None,

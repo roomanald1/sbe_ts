@@ -76,6 +76,18 @@
   grid-template-columns: repeat(auto-fit, minmax(min(100%, 220px), 1fr));
   gap: 8px;
 }
+.auto-trader-learning-block {
+  display: grid;
+  gap: 4px;
+  padding: 10px 12px;
+  border: 1px solid #ef4444;
+  border-radius: 6px;
+  background: color-mix(in srgb, #7f1d1d 32%, transparent);
+  color: #fecaca;
+}
+.auto-trader-learning-block strong {
+  color: #fff;
+}
 .auto-trader-insight {
   display: grid;
   align-content: start;

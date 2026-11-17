@@ -1,11 +1,23 @@
-use super::{ContextLearningStat, ExecutionLearningStat, ParameterSpec, StrategyProfile};
+use super::{
+    ContextLearningStat, ContextMissedOpportunityBand, ExecutionLearningStat, ParameterSpec,
+    StrategyProfile,
+};
 use crate::StrategyWalkForwardEvidence;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct LearnedProfileSnapshot {
     pub profiles: Vec<StrategyProfile>,
+    /// Scout-only walk-forward evidence pushed with the profile state so live
+    /// workers never need to fetch Learning evidence while evaluating signals.
+    #[serde(default)]
+    pub walk_forward_evidence: BTreeMap<String, StrategyWalkForwardEvidence>,
+    /// Exact parameter-profile variants currently registered with Learning.
+    /// Active profiles can diverge from their originally registered variant
+    /// after learning changes parameters, so profile presence is not an ack.
+    #[serde(default)]
+    pub registered_profile_ids: BTreeSet<String>,
     pub strategy_size_multipliers: BTreeMap<String, f64>,
     #[serde(default)]
     pub recent_profile_context_returns: BTreeMap<String, Vec<(u64, f64)>>,
@@ -15,6 +27,11 @@ pub struct LearnedProfileSnapshot {
     pub contextual_stop_loss_percents: BTreeMap<String, f64>,
     #[serde(default)]
     pub context_learning: BTreeMap<String, ContextLearningStat>,
+    /// Precomputed context thresholds pushed to AutoTrader with Learning state.
+    #[serde(default)]
+    pub context_thresholds: BTreeMap<String, crate::ContextThresholds>,
+    #[serde(default)]
+    pub missed_opportunity_bands: Vec<ContextMissedOpportunityBand>,
     #[serde(default)]
     pub execution_learning: BTreeMap<String, ExecutionLearningStat>,
     #[serde(default)]

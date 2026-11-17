@@ -822,6 +822,7 @@ mod scout_tests {
 
         let outcomes = engine.on_price(2_000, 101.2, 0.0);
         assert_eq!(outcomes.len(), 1);
+        assert_eq!(outcomes[0].strategy.as_deref(), Some("live-trade-flow"));
         assert_eq!(outcomes[0].scout_exit_reason, Some("stop_or_target"));
         assert!(outcomes[0].evaluation.long_net_percent.is_some());
     }

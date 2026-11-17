@@ -1,4 +1,4 @@
-import { useEffect, useMemo } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { AgGridReact } from 'ag-grid-react';
 import {
   ClientSideRowModelModule,
@@ -9,6 +9,7 @@ import {
 import { AutoTraderLearningWidgetModel } from '../models/AutoTraderLearningWidgetModel';
 import type {
   LearningRow,
+  LearningDecision,
   TradeEffectivenessRow,
 } from '../models/AutoTraderLearningWidgetModel';
 import { useBehaviorSnapshot } from '@workspace/ui-platform';
@@ -186,8 +187,80 @@ const columns: ColDef<LearningRow>[] = [
   },
 ];
 
+const decisionColumns: ColDef<LearningDecision>[] = [
+  {
+    field: 'timestamp',
+    headerName: 'Time',
+    width: 175,
+    valueFormatter: ({ value }) =>
+      value ? new Date(value).toLocaleString() : '—',
+  },
+  { field: 'symbol', headerName: 'Symbol', width: 115 },
+  { field: 'strategy', headerName: 'Strategy', width: 190 },
+  { field: 'direction', headerName: 'Direction', width: 95 },
+  {
+    field: 'status',
+    headerName: 'Decision',
+    width: 145,
+    valueGetter: ({ data }) => {
+      if (!data) return '—';
+      const selectionMode = data.entry_gate?.selection_mode;
+      if (data.status === 'selected' && selectionMode === 'exploratory')
+        return 'Selected · exploratory';
+      if (data.status === 'selected') return 'Selected · strict';
+      if (data.status === 'skipped' && data.exploratory)
+        return 'Exploratory · skipped';
+      return data.status ?? '—';
+    },
+  },
+  {
+    field: 'strength',
+    headerName: 'Strength',
+    width: 95,
+    valueFormatter: ({ value }) =>
+      Number.isFinite(value) ? Number(value).toFixed(4) : '—',
+  },
+  {
+    field: 'strength_size_multiplier',
+    headerName: 'Strength size ×',
+    headerTooltip:
+      'Signal strength multiplier applied to the order notional cap. Other risk, strategy, budget, and liquidity limits can reduce the final size further.',
+    width: 115,
+    valueFormatter: ({ value }) =>
+      Number.isFinite(value) ? `${Number(value).toFixed(2)}×` : '—',
+  },
+  {
+    field: 'score',
+    headerName: 'Score',
+    width: 95,
+    valueFormatter: ({ value }) =>
+      Number.isFinite(value) ? Number(value).toFixed(4) : '—',
+  },
+  {
+    field: 'reason',
+    headerName: 'Decision context',
+    minWidth: 280,
+    flex: 1,
+    valueGetter: ({ data }) => {
+      if (!data) return '—';
+      const reason =
+        data.reason ?? data.entry_gate?.rejection_reasons?.join(', ');
+      if (
+        data.status === 'selected' &&
+        data.entry_gate?.selection_mode === 'exploratory' &&
+        data.entry_gate.checks?.strength_pass === false
+      ) {
+        return `${reason ?? 'Selected for an exploratory paper entry'} · strict strength check failed; exploratory selection path used`;
+      }
+      return reason ?? 'No reason recorded';
+    },
+  },
+];
+
 export function AutoTraderLearningWidget() {
   const model = useMemo(() => new AutoTraderLearningWidgetModel(), []);
+  const [symbolFilter, setSymbolFilter] = useState('OP-USDT');
+  const [selectedDecision, setSelectedDecision] = useState<LearningDecision>();
   useEffect(() => {
     model.start();
     return () => model.stop();
@@ -206,13 +279,114 @@ export function AutoTraderLearningWidget() {
     rejectedCandidates,
     qualifiedCandidates,
     collectingCandidates,
+    decisions,
+    decisionError,
   } = useBehaviorSnapshot(model.state$);
+  const filteredDecisions = decisions
+    .filter(
+      (decision) =>
+        !symbolFilter ||
+        decision.symbol
+          ?.toUpperCase()
+          .includes(symbolFilter.trim().toUpperCase()),
+    )
+    .sort((left, right) => (right.timestamp ?? 0) - (left.timestamp ?? 0));
   return (
     <section
       className="auto-trader-strategy-parameters"
       aria-label="AutoTrader learning impact"
     >
       <strong>Learning effectiveness · realized outcomes</strong>
+      <div className="auto-trader-learning-decisions-head">
+        <strong>Signal and entry decisions</strong>
+        <label>
+          Symbol{' '}
+          <input
+            value={symbolFilter}
+            onChange={(event) => setSymbolFilter(event.target.value)}
+            placeholder="All symbols"
+          />
+        </label>
+        <small>
+          Last 7 days · {filteredDecisions.length} decisions · select a row to
+          inspect recorded evidence
+        </small>
+      </div>
+      {decisionError && (
+        <p className="auto-trader-learning-error" role="alert">
+          Decision history unavailable: {decisionError}
+        </p>
+      )}
+      {!decisionError && decisions.length === 0 ? (
+        <p>Loading recent strategy decisions…</p>
+      ) : (
+        <div className="data-grid-wrap auto-trader-learning-grid auto-trader-decision-grid">
+          <AgGridReact<LearningDecision>
+            rowData={filteredDecisions}
+            columnDefs={decisionColumns}
+            getRowId={({ data }) =>
+              `${data.decision_id ?? ''}:${data.timestamp ?? 0}:${data.status ?? ''}`
+            }
+            defaultColDef={{
+              sortable: true,
+              resizable: true,
+              filter: true,
+              minWidth: 70,
+            }}
+            onRowClicked={({ data }) => setSelectedDecision(data)}
+            rowSelection={{ mode: 'singleRow', enableClickSelection: true }}
+            theme={learningGridTheme}
+            domLayout="normal"
+            rowHeight={30}
+            headerHeight={28}
+          />
+        </div>
+      )}
+      {selectedDecision && (
+        <details className="auto-trader-learning-decision-detail" open>
+          <summary>
+            {selectedDecision.symbol} · {selectedDecision.strategy} ·{' '}
+            {selectedDecision.status} ·{' '}
+            {selectedDecision.reason ??
+              selectedDecision.entry_gate?.rejection_reasons?.join(', ') ??
+              'No reason recorded'}
+          </summary>
+          <div className="auto-trader-learning-detail-grid">
+            <div>
+              <strong>Gate checks</strong>
+              <pre>
+                {JSON.stringify(
+                  selectedDecision.entry_gate ?? 'No entry gate captured',
+                  null,
+                  2,
+                )}
+              </pre>
+            </div>
+            <div>
+              <strong>Strategy decision and parameters</strong>
+              <pre>
+                {JSON.stringify(
+                  selectedDecision.strategy_decision ??
+                    'No strategy decision captured',
+                  null,
+                  2,
+                )}
+              </pre>
+            </div>
+            <div>
+              <strong>Signal components</strong>
+              <pre>
+                {JSON.stringify(
+                  selectedDecision.signal_components ??
+                    'No signal components captured',
+                  null,
+                  2,
+                )}
+              </pre>
+            </div>
+          </div>
+        </details>
+      )}
       <p>
         This compares actual closed-trade returns from the currently active
         learned parameter profiles with actual trades taken under other

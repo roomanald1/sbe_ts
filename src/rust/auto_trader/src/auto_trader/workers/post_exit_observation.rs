@@ -37,21 +37,15 @@ async fn collect_due_post_exit_observations(state: &AutoTraderState) -> Result<(
         if symbol.is_empty() {
             continue;
         }
-        let market = crate::service_rpc::position_get(&format!(
-            "/internal/market-book?symbol={symbol}"
+        let market = crate::service_rpc::execution_get(&format!(
+            "/internal/market-mark?symbol={symbol}"
         )).await.map_err(|error| error.to_string())?;
         let book_updated_at = market["updated_at_ms"].as_u64().unwrap_or_default();
         if book_updated_at == 0 || now.saturating_sub(book_updated_at) > 5_000 {
             continue;
         }
-        let bid = market["bids"]
-            .as_array()
-            .and_then(|levels| levels.first())
-            .and_then(|level| level["price"].as_f64());
-        let ask = market["asks"]
-            .as_array()
-            .and_then(|levels| levels.first())
-            .and_then(|level| level["price"].as_f64());
+        let bid = market["bid"].as_f64();
+        let ask = market["ask"].as_f64();
         let (Some(bid), Some(ask)) = (bid, ask) else {
             continue;
         };

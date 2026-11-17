@@ -247,40 +247,67 @@ async fn carry_settlement_price(
     Ok((sum / 30.0, "index_1m_estimate"))
 }
 
-async fn carry_publish(client: &reqwest::Client, base: &str, signal: &serde_json::Value) -> anyhow::Result<()> {
-    if signal.get("kind").and_then(serde_json::Value::as_str) == Some("scan") {
-        let learning = std::env::var("LEARNING_RSOCKET_URL")
-            .unwrap_or_else(|_| "ws://127.0.0.1:10010".into());
-        let scout_request = serde_json::json!({
-            "request_id": format!("dated-carry:{}", signal.get("emitted_at_ms").and_then(serde_json::Value::as_u64).unwrap_or_default()),
-            "now_ms": signal.get("emitted_at_ms"),
-            "candidates": signal.get("candidates").cloned().unwrap_or_else(|| serde_json::json!([])),
-        });
-        let response = strategy::request_scout_worker_route(&learning, &strategy::ScoutCoordinatorRouteCommand {
-            request_id: scout_request["request_id"].as_str().unwrap_or_default().to_owned(),
-            strategy: None, method: strategy::ScoutWorkerHttpMethod::Post,
-            path: "/dated-carry-inputs".into(), payload: scout_request,
-        }).await;
-        if let Err(error) = response.map_err(anyhow::Error::from).and_then(|response| {
-            if response.status >= 400 { anyhow::bail!("Learning Scout dated-carry route returned {}", response.status); }
-            Ok(())
-        }) {
-            crate::service_log!("WARN", "Dated carry Scout scan delivery failed: {error}");
+async fn carry_publish(
+    signal_events: &tokio::sync::broadcast::Sender<bytes::Bytes>,
+    legacy_signal_events: &tokio::sync::broadcast::Sender<bytes::Bytes>,
+    latest: &dashmap::DashMap<String, bytes::Bytes>,
+    signal: &serde_json::Value,
+) -> anyhow::Result<()> {
+    let emitted_at_ms = signal.get("emitted_at_ms").and_then(serde_json::Value::as_u64).unwrap_or_default();
+    let kind = signal.get("kind").and_then(serde_json::Value::as_str).unwrap_or_default();
+    let identity = match kind {
+        "entry" => signal["candidate"]["future_symbol"].as_str().unwrap_or("unknown"),
+        "settlement" => signal["future_symbol"].as_str().unwrap_or("unknown"),
+        _ => "scan",
+    };
+    let mut update = strategy::StrategyInsightUpdate {
+        contract_version: strategy::STRATEGY_INSIGHT_UPDATE_VERSION,
+        event_id: format!("dated-carry:{kind}:{identity}:{emitted_at_ms}"),
+        event_time_ms: emitted_at_ms,
+        signal: None,
+        market: None,
+        taker_fee_rate: None,
+        daily_snapshot: None,
+        dated_carry_scan: None,
+        dated_carry_candidate: None,
+        dated_carry_settlement: None,
+    };
+    let key = match kind {
+        "scan" => {
+            update.dated_carry_scan = Some(strategy::DatedCarryScanUpdate {
+                emitted_at_ms,
+                candidates: serde_json::from_value(signal.get("candidates").cloned().unwrap_or_default())?,
+                last_error: signal.get("last_error").and_then(serde_json::Value::as_str).map(str::to_owned),
+            });
+            "__dated-carry-scan".to_owned()
         }
-    }
-    let auto = std::env::var("AUTO_TRADER_RSOCKET_URL")
-        .unwrap_or_else(|_| "ws://127.0.0.1:10006".into());
-    let response = strategy::request_scout_service_route(&auto, &strategy::ScoutCoordinatorRouteCommand {
-        request_id: format!("insights-carry:{}", now_ms()), strategy: None,
-        method: strategy::ScoutWorkerHttpMethod::Post,
-        path: "/internal/auto-trader/dated-carry-signal".into(), payload: signal.clone(),
-    }).await?;
-    if response.status >= 400 { anyhow::bail!("AutoTrader dated-carry route returned {}", response.status); }
-    let _ = (client, base);
+        "entry" => {
+            let candidate = serde_json::from_value(signal.get("candidate").cloned().unwrap_or_default())?;
+            let key = format!("__dated-carry-entry:{}", signal["candidate"]["future_symbol"].as_str().unwrap_or("unknown"));
+            update.dated_carry_candidate = Some(candidate);
+            key
+        }
+        "settlement" => {
+            let settlement = serde_json::from_value::<strategy::DatedCarrySettlementUpdate>(signal.clone())?;
+            let key = format!("__dated-carry-settlement:{}", settlement.future_symbol);
+            update.dated_carry_settlement = Some(settlement);
+            key
+        }
+        _ => anyhow::bail!("unknown dated carry signal kind {kind}"),
+    };
+    let bytes = bytes::Bytes::from(serde_json::to_vec(&update)?);
+    latest.insert(key, bytes.clone());
+    let _ = signal_events.send(bytes.clone());
+    let _ = legacy_signal_events.send(bytes);
     Ok(())
 }
 
-async fn run_dated_carry_signal_worker(store: SignalStore) {
+async fn run_dated_carry_signal_worker(
+    store: SignalStore,
+    signal_events: tokio::sync::broadcast::Sender<bytes::Bytes>,
+    legacy_signal_events: tokio::sync::broadcast::Sender<bytes::Bytes>,
+    latest: Arc<dashmap::DashMap<String, bytes::Bytes>>,
+) {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
         .build().unwrap_or_else(|_| reqwest::Client::new());
@@ -298,7 +325,7 @@ async fn run_dated_carry_signal_worker(store: SignalStore) {
                 let scan = serde_json::json!({
                     "kind": "scan", "emitted_at_ms": now, "candidates": candidates, "last_error": null
                 });
-                if let Err(error) = carry_publish(&client, &base, &scan).await {
+                if let Err(error) = carry_publish(&signal_events, &legacy_signal_events, &latest, &scan).await {
                     crate::service_log!("WARN", "Dated carry scan status delivery failed: {error}");
                 }
                 for signal in signals {
@@ -318,7 +345,7 @@ async fn run_dated_carry_signal_worker(store: SignalStore) {
                             crate::service_log!("WARN", "Dated carry signal audit failed: {error}");
                         }
                     }
-                    if let Err(error) = carry_publish(&client, &base, &signal).await {
+                    if let Err(error) = carry_publish(&signal_events, &legacy_signal_events, &latest, &signal).await {
                         crate::service_log!("WARN", "Dated carry entry signal delivery failed: {error}");
                     }
                 }
@@ -328,7 +355,7 @@ async fn run_dated_carry_signal_worker(store: SignalStore) {
                 let scan = serde_json::json!({
                     "kind": "scan", "emitted_at_ms": now, "candidates": [], "last_error": error.to_string()
                 });
-                if let Err(delivery_error) = carry_publish(&client, &base, &scan).await {
+                if let Err(delivery_error) = carry_publish(&signal_events, &legacy_signal_events, &latest, &scan).await {
                     crate::service_log!("WARN", "Dated carry scan error delivery failed: {delivery_error}");
                 }
             }
@@ -351,7 +378,7 @@ async fn run_dated_carry_signal_worker(store: SignalStore) {
                 "settlement_price": settlement_price,
                 "settlement_source": settlement_source,
             });
-            match carry_publish(&client, &base, &signal).await {
+            match carry_publish(&signal_events, &legacy_signal_events, &latest, &signal).await {
                 Ok(()) => {
                     let audit = serde_json::json!({
                         "decision_id": format!("dated-carry:{future}"),

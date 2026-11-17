@@ -59,7 +59,6 @@ impl Histogram {
 static EVENT_QUEUE_WAIT: Histogram = Histogram::new();
 static ENGINE_LOCK_WAIT: Histogram = Histogram::new();
 static SNAPSHOT_COMPUTE: Histogram = Histogram::new();
-static AUTO_TRADER_DELIVERY: Histogram = Histogram::new();
 static DROPPED_RESEARCH_RECORDS: AtomicU64 = AtomicU64::new(0);
 static SIGNAL_FEED_CONNECTED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
@@ -126,10 +125,6 @@ pub fn record_snapshot_compute(duration: Duration) {
     SNAPSHOT_COMPUTE.record(duration);
 }
 
-pub fn record_auto_trader_delivery(duration: Duration) {
-    AUTO_TRADER_DELIVERY.record(duration);
-}
-
 #[allow(dead_code)]
 pub fn record_dropped_research_records(count: usize) {
     DROPPED_RESEARCH_RECORDS.fetch_add(count as u64, Ordering::Relaxed);
@@ -140,7 +135,6 @@ pub fn snapshot() -> Value {
         "event_queue_wait": EVENT_QUEUE_WAIT.snapshot(),
         "engine_lock_wait": ENGINE_LOCK_WAIT.snapshot(),
         "snapshot_compute": SNAPSHOT_COMPUTE.snapshot(),
-        "auto_trader_delivery": AUTO_TRADER_DELIVERY.snapshot(),
         "dropped_research_records": DROPPED_RESEARCH_RECORDS.load(Ordering::Relaxed),
     })
 }

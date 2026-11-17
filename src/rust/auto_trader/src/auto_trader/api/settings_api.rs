@@ -1,3 +1,38 @@
+fn validate_active_live_strategy_profiles(
+    configured: &BTreeMap<String, Vec<strategy::LiveStrategyProfile>>,
+) -> Result<(), String> {
+    let mut total = 0usize;
+    for (strategy_name, profiles) in configured {
+        let strategy = Strategy::from_name(strategy_name)
+            .ok_or_else(|| format!("Unknown strategy profile set {strategy_name}"))?;
+        if strategy.is_legacy_composite() {
+            return Err(format!("Legacy strategy {strategy_name} cannot have live profiles"));
+        }
+        total = total.saturating_add(profiles.len());
+        if total > 512 {
+            return Err("At most 512 active live strategy profiles may be configured".into());
+        }
+        let specs = strategy.parameter_specs();
+        let mut seen = BTreeSet::new();
+        for profile in profiles {
+            if profile.profile_symbol.trim().is_empty()
+                || !seen.insert(profile.profile_id.clone())
+                || profile.parameters.len() != specs.len()
+                || profile.parameters.keys().any(|key| !specs.iter().any(|spec| spec.key.as_str() == key))
+                || strategy::profile_id(&profile.profile_symbol, strategy_name, &profile.parameters)
+                    != profile.profile_id
+            {
+                return Err(format!("Invalid or duplicate profile for {strategy_name}"));
+            }
+            let overrides = profile.parameters.iter().map(|(key, value)| {
+                (strategy::strategy_parameter_key(&profile.profile_symbol, strategy, key), *value)
+            }).collect::<BTreeMap<_, _>>();
+            strategy::validate_strategy_parameter_overrides(&overrides)?;
+        }
+    }
+    Ok(())
+}
+
 async fn set_enabled(
     State(state): State<AutoTraderState>,
     Json(request): Json<EnabledRequest>,
@@ -15,6 +50,7 @@ async fn set_enabled(
             error.1
         );
     }
+    notify_live_profile_updates(&state);
     Ok(Json(status(&state, &settings)))
 }
 async fn update_settings(
@@ -73,6 +109,10 @@ async fn update_settings(
     }
     if let Some(overrides) = request.strategy_parameter_overrides.as_ref() {
         validate_strategy_parameter_overrides(overrides)
+            .map_err(|error| (StatusCode::BAD_REQUEST, error))?;
+    }
+    if let Some(profiles) = request.active_live_strategy_profiles.as_ref() {
+        validate_active_live_strategy_profiles(profiles)
             .map_err(|error| (StatusCode::BAD_REQUEST, error))?;
     }
     if request
@@ -235,6 +275,9 @@ async fn update_settings(
     if let Some(overrides) = request.strategy_parameter_overrides {
         settings.strategy_parameter_overrides = overrides;
     }
+    if let Some(profiles) = request.active_live_strategy_profiles {
+        settings.active_live_strategy_profiles = profiles;
+    }
     if let Some(profile) = request.reset_strategy_profile {
         let marker = format!(":{}:{}:", profile.symbol, profile.strategy);
         settings.learning.retain(|key, _| !key.contains(&marker));
@@ -242,6 +285,9 @@ async fn update_settings(
         settings
             .strategy_parameter_overrides
             .retain(|key, _| !key.starts_with(&prefix));
+        if let Some(profiles) = settings.active_live_strategy_profiles.get_mut(&profile.strategy) {
+            profiles.retain(|candidate| candidate.profile_symbol != profile.symbol);
+        }
     }
     if request.reset_learning {
         settings.learning.clear();
@@ -252,8 +298,15 @@ async fn update_settings(
         settings.closed_trade_timestamps_ms.clear();
         settings.closed_trade_realized_usd.clear();
         settings.closed_trade_fees_usd.clear();
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_millis() as u64)
+            .unwrap_or_default();
+        settings.paper_learning_exploration_until_ms =
+            now_ms.saturating_add(LEARNING_RESET_PAPER_EXPLORATION_DURATION_MS);
     }
     request_settings_persist(&state)?;
+    notify_live_profile_updates(&state);
     let minimum_scout_parameter_samples = settings.minimum_live_scout_parameter_samples;
     drop(settings);
 
@@ -272,4 +325,53 @@ async fn update_settings(
     }
     let settings = state.settings.lock().await;
     Ok(Json(status(&state, &settings)))
+}
+
+#[cfg(test)]
+mod active_live_profile_tests {
+    use super::*;
+
+    fn profile(strategy: Strategy, symbol: &str, parameter_value: Option<f64>) -> strategy::LiveStrategyProfile {
+        let mut parameters = strategy.parameter_specs().into_iter()
+            .map(|spec| (spec.key.as_str().to_owned(), spec.default))
+            .collect::<BTreeMap<_, _>>();
+        if let Some(value) = parameter_value {
+            let key = strategy.parameter_specs()[0].key.as_str().to_owned();
+            parameters.insert(key, value);
+        }
+        strategy::LiveStrategyProfile {
+            profile_id: strategy::profile_id(symbol, strategy.as_str(), &parameters),
+            profile_symbol: symbol.to_owned(),
+            version: 3,
+            parameters,
+            walk_forward_evidence: None,
+        }
+    }
+
+    #[test]
+    fn autotrader_can_configure_multiple_bounded_live_profiles_per_strategy() {
+        let strategy = Strategy::LiveMomentum;
+        let spec = strategy.parameter_specs()[0];
+        let active = BTreeMap::from([(
+            strategy.as_str().to_owned(),
+            vec![profile(strategy, "BTC-USDT", Some(spec.default)),
+                 profile(strategy, "BTC-USDT", Some(spec.default + spec.step))],
+        )]);
+        assert!(validate_active_live_strategy_profiles(&active).is_ok());
+    }
+
+    #[test]
+    fn active_live_profiles_reject_duplicate_or_out_of_bounds_identity() {
+        let strategy = Strategy::LiveMomentum;
+        let spec = strategy.parameter_specs()[0];
+        let good = profile(strategy, "BTC-USDT", Some(spec.default));
+        let duplicate = BTreeMap::from([(strategy.as_str().to_owned(), vec![good.clone(), good])]);
+        assert!(validate_active_live_strategy_profiles(&duplicate).is_err());
+
+        let mut invalid = profile(strategy, "BTC-USDT", Some(spec.default));
+        invalid.parameters.insert(spec.key.as_str().to_owned(), spec.max + spec.step);
+        invalid.profile_id = strategy::profile_id(&invalid.profile_symbol, strategy.as_str(), &invalid.parameters);
+        let out_of_bounds = BTreeMap::from([(strategy.as_str().to_owned(), vec![invalid])]);
+        assert!(validate_active_live_strategy_profiles(&out_of_bounds).is_err());
+    }
 }

@@ -18,13 +18,38 @@ const BufferDataEncoder: Encoder<Buffer> = {
 
 type FeedHandlersSocket = Awaited<ReturnType<typeof createSocket>>;
 let socket: Promise<FeedHandlersSocket> | undefined;
+let socketGeneration = 0;
 let requestInstrumentList = requestInstrumentListOverSocket;
 
 function getSocket() {
-  socket ??= createSocket().catch((error) => {
-    socket = undefined;
-    throw error;
-  });
+  if (!socket) {
+    const generation = ++socketGeneration;
+    socket = createSocket()
+      .then((client) => {
+        client.connectionStatus().subscribe({
+          onSubscribe: (subscription) =>
+            subscription.request(Number.MAX_SAFE_INTEGER),
+          onNext: (status) => {
+            if (
+              (status.kind === 'CLOSED' || status.kind === 'ERROR') &&
+              socketGeneration === generation
+            ) {
+              socket = undefined;
+              client.close();
+            }
+          },
+          onError: () => {
+            if (socketGeneration === generation) socket = undefined;
+            client.close();
+          },
+        });
+        return client;
+      })
+      .catch((error) => {
+        if (socketGeneration === generation) socket = undefined;
+        throw error;
+      });
+  }
   return socket;
 }
 
@@ -56,16 +81,52 @@ async function createSocket() {
 }
 
 async function requestInstrumentListOverSocket(): Promise<unknown> {
-  const client = await getSocket();
-  const data = await new Promise<Uint8Array>((resolve, reject) => {
-    client
-      .requestResponse({ data: Buffer.from('instruments:list') })
-      .subscribe({
-        onComplete: (payload) => resolve(payload.data as Uint8Array),
-        onError: reject,
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const currentSocket = getSocket();
+    const client = await currentSocket;
+    try {
+      const data = await new Promise<Uint8Array>((resolve, reject) => {
+        let settled = false;
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        let cancelRequest: (() => void) | undefined;
+        client
+          .requestResponse({ data: Buffer.from('instruments:list') })
+          .subscribe({
+            onSubscribe: (subscription) => {
+              cancelRequest = subscription;
+              if (settled) subscription();
+            },
+            onComplete: (payload) => {
+              if (settled) return;
+              settled = true;
+              if (timer !== undefined) clearTimeout(timer);
+              cancelRequest = undefined;
+              resolve(payload.data as Uint8Array);
+            },
+            onError: (error) => {
+              if (settled) return;
+              settled = true;
+              if (timer !== undefined) clearTimeout(timer);
+              cancelRequest = undefined;
+              reject(error);
+            },
+          });
+        timer = setTimeout(() => {
+          if (settled) return;
+          settled = true;
+          cancelRequest?.();
+          reject(new Error('Feed handler instruments request timed out'));
+        }, 5_000);
       });
-  });
-  return JSON.parse(Buffer.from(data).toString()) as unknown;
+      return JSON.parse(Buffer.from(data).toString()) as unknown;
+    } catch (error) {
+      if (socket === currentSocket) socket = undefined;
+      client.close();
+      if (attempt === 1) throw error;
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+  }
+  throw new Error('Feed handler instruments request failed');
 }
 
 export function getInstrumentsOverRSocket(): Promise<unknown> {

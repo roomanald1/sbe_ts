@@ -1,5 +1,5 @@
 import { formatForSymbol } from '../instrument_precision';
-import { executionFetch } from '../execution_api';
+import { paperExchangeFetch } from '../paper_exchange_api';
 import { memo, useEffect, useMemo, useRef, useState } from 'react';
 import { usePausedValue } from '@workspace/ui-platform';
 import { AgGridReact } from 'ag-grid-react';
@@ -9,26 +9,16 @@ import {
   themeQuartz,
   type ColDef,
 } from 'ag-grid-community';
-import type { Position } from '../models/PositionTypes';
-import { FeedToolbar } from './FeedToolbar';
 import {
-  currentPositionSnapshot,
-  subscribePositionStream,
-} from '../position_stream';
+  refreshHedgeCandidates,
+  subscribeHedgeCandidates,
+  type HedgeCandidate,
+  type HedgePosition,
+} from '../hedge_candidates';
+import { FeedToolbar } from './FeedToolbar';
 
 ModuleRegistry.registerModules([ClientSideRowModelModule]);
 
-type HedgeCandidate = {
-  symbol: string;
-  correlation: number | null;
-  paired_samples: number;
-  latest_price: number | null;
-};
-type HedgePosition = Position & {
-  latest_price: number | null;
-  candidates: HedgeCandidate[];
-};
-type Response = { positions: HedgePosition[] };
 type HedgeGridRow = {
   id: string;
   kind: 'position' | 'candidate';
@@ -67,25 +57,17 @@ function HedgingComponent({ paused = false }: { paused?: boolean }) {
   const [busy, setBusy] = useState<string>();
   const [error, setError] = useState<string>();
   useEffect(() => {
-    const applySnapshot = (candidates: Response) => {
+    return subscribeHedgeCandidates((state) => {
       if (
         document.activeElement instanceof HTMLElement &&
         document.activeElement.closest('.hedging-grid-input')
-      )
+      ) {
+        setError(state.error);
         return;
-      setPositions(
-        candidates.positions.filter(
-          (position) => Math.abs(position.quantity) > 1e-12,
-        ),
-      );
-      setError(undefined);
-    };
-    const stop = subscribePositionStream((snapshot) => {
-      if (snapshot.hedge_candidates) applySnapshot(snapshot.hedge_candidates);
+      }
+      setPositions(state.positions);
+      setError(state.error);
     });
-    const current = currentPositionSnapshot()?.hedge_candidates;
-    if (current) applySnapshot(current);
-    return stop;
   }, []);
 
   async function hedge(
@@ -127,7 +109,7 @@ function HedgingComponent({ paused = false }: { paused?: boolean }) {
     setBusy(position.symbol);
     setError(undefined);
     try {
-      const response = await executionFetch('/positions/orders', {
+      const response = await paperExchangeFetch('/positions/orders', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ symbol, side, quantity, order_type: 'ioc' }),
@@ -136,6 +118,7 @@ function HedgingComponent({ paused = false }: { paused?: boolean }) {
         throw new Error(
           (await response.text()).trim() || 'Hedge order rejected',
         );
+      refreshHedgeCandidates();
     } catch (reason) {
       setError(
         reason instanceof Error

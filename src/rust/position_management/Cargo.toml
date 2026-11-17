@@ -5,7 +5,7 @@ edition = "2024"
 
 [dependencies]
 arc-swap = "1.7.1"
-execution = { path = "../execution" }
+paper_exchange = { path = "../paper_exchange" }
 anyhow = "1.0.104"
 axum = "0.8.9"
 bytes = "1.12.1"
@@ -36,3 +36,5 @@ harness = false
 [[bench]]
 name = "service_http"
 harness = false
+[patch.crates-io]
+rsocket_rust = { path = "../vendor/rsocket_rust" }

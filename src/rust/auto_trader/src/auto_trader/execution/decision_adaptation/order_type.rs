@@ -25,8 +25,6 @@ fn should_explore_execution_profile(signal: &Signal, kind: AutoOrderType) -> boo
     hasher.finish() % 10 == 0
 }
 
-#[cfg(test)]
-#[cfg(test)]
 fn choose_parameter_profile(
     kind: AutoOrderType,
     context: &str,
@@ -141,6 +139,57 @@ fn choose_order_type(signal: &Signal, risk_appetite: f64) -> AutoOrderType {
     }
 }
 
+fn learned_execution_order_type(
+    context: &str,
+    baseline: AutoOrderType,
+    learning: &BTreeMap<String, ExecutionLearningStats>,
+    allow_adaptation: bool,
+) -> Option<String> {
+    const MIN_SAMPLES: usize = 10;
+    const MIN_FILLS: usize = 5;
+    let baseline_name = format!("{baseline:?}");
+    if !allow_adaptation {
+        return Some(baseline_name);
+    }
+    let baseline_stats = aggregate_execution_quality(
+        learning,
+        &format!("{context}:P"),
+        &format!(":exec:{baseline_name}"),
+    );
+    if baseline_stats.samples < MIN_SAMPLES
+        || baseline_stats.filled_samples < MIN_FILLS
+        || baseline_stats.cost_notional <= 0.0
+    {
+        return Some(baseline_name);
+    }
+    let baseline_cost = baseline_stats.all_in_cost_notional_bps / baseline_stats.cost_notional;
+    let baseline_fill = baseline_stats.fill_rate_total / baseline_stats.samples as f64;
+    ALL_ORDER_TYPES
+        .iter()
+        .filter(|kind| **kind != baseline)
+        .filter_map(|kind| {
+            let name = format!("{kind:?}");
+            let stats = aggregate_execution_quality(
+                learning,
+                &format!("{context}:P"),
+                &format!(":exec:{name}"),
+            );
+            if stats.samples < MIN_SAMPLES
+                || stats.filled_samples < MIN_FILLS
+                || stats.cost_notional <= 0.0
+            {
+                return None;
+            }
+            let cost = stats.all_in_cost_notional_bps / stats.cost_notional;
+            let fill = stats.fill_rate_total / stats.samples as f64;
+            (fill + 0.05 >= baseline_fill && cost + 0.5 < baseline_cost)
+                .then_some((name, cost))
+        })
+        .min_by(|left, right| left.1.total_cmp(&right.1))
+        .map(|(name, _)| name)
+        .or(Some(baseline_name))
+}
+
 fn schedule_depth_ratio_bucket(ratio: f64) -> &'static str {
     match ratio {
         value if value < 0.05 => "lt05",
@@ -152,8 +201,6 @@ fn schedule_depth_ratio_bucket(ratio: f64) -> &'static str {
     }
 }
 
-#[cfg(test)]
-#[cfg(test)]
 fn learned_schedule_depth_threshold(
     learning: &BTreeMap<String, ExecutionLearningStats>,
     context: &str,

@@ -15,6 +15,7 @@ describe('SignalInfoModel', () => {
     try {
       const model = new SignalInfoModel();
       model.start();
+      await new Promise((resolve) => setTimeout(resolve, 0));
       onData!(
         Buffer.from(
           JSON.stringify({
@@ -29,10 +30,10 @@ describe('SignalInfoModel', () => {
                 missedOpportunityBands: [
                   {
                     gate: 'strength',
-                    threshold: 0.5,
+                    threshold: 0.6,
                     horizonSeconds: 300,
-                    sampleCount: 10,
-                    timeToProfitSampleCount: 2,
+                    sampleCount: 12,
+                    timeToProfitSampleCount: 3,
                     stopTargetSampleCount: 2,
                   },
                 ],
@@ -72,6 +73,7 @@ describe('SignalInfoModel', () => {
         model.state$.value.missedOpportunityBands[0].gate,
         'strength',
       );
+      assert.equal(model.state$.value.missedOpportunityBands[0].threshold, 0.6);
       assert.equal(
         model.state$.value.skippedSignalAudit[0].reason,
         'score below floor',

@@ -1,37 +1,3 @@
-fn decode_book(bytes: &Bytes) -> Option<BookSnapshot> {
-    if bytes.len() < 272 {
-        return None;
-    }
-    let symbol = std::str::from_utf8(&bytes[8..40]).ok()?.trim();
-    if !valid_position_symbol(symbol) {
-        return None;
-    }
-    let mut bids = Vec::new();
-    let mut asks = Vec::new();
-    for index in 0..BOOK_DEPTH {
-        let bid_offset = 48 + index * 16;
-        let ask_offset = 160 + index * 16;
-        let bid = read_level(bytes, bid_offset)?;
-        let ask = read_level(bytes, ask_offset)?;
-        if bid.size > 0.0 {
-            bids.push(bid);
-        }
-        if ask.size > 0.0 {
-            asks.push(ask);
-        }
-    }
-    Some(BookSnapshot {
-        bids,
-        asks,
-        updated_at_ms: now_ms().ok()?,
-    })
-}
-fn read_level(bytes: &[u8], offset: usize) -> Option<BookLevel> {
-    let price = f64::from_le_bytes(bytes.get(offset..offset + 8)?.try_into().ok()?);
-    let size = f64::from_le_bytes(bytes.get(offset + 8..offset + 16)?.try_into().ok()?);
-    (price.is_finite() && price > 0.0 && size.is_finite() && size >= 0.0)
-        .then_some(BookLevel { price, size })
-}
 fn now_ms() -> anyhow::Result<u64> {
     Ok(SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis() as u64)
 }
@@ -145,19 +111,6 @@ mod ledger_helper_tests {
         assert!(!valid_position_symbol("BTC/USDT"));
         assert!(!valid_position_symbol("BÉ-USDT"));
         assert!(!valid_position_symbol("A".repeat(33).as_str()));
-    }
-
-    #[test]
-    fn reads_only_finite_positive_prices_and_nonnegative_sizes() {
-        let level = [100.0_f64.to_le_bytes(), 2.5_f64.to_le_bytes()].concat();
-        let parsed = read_level(&level, 0).unwrap();
-        assert_eq!(parsed.price, 100.0);
-        assert_eq!(parsed.size, 2.5);
-        assert!(read_level(&level[..15], 0).is_none());
-        let invalid_price = [0.0_f64.to_le_bytes(), 1.0_f64.to_le_bytes()].concat();
-        assert!(read_level(&invalid_price, 0).is_none());
-        let invalid_size = [1.0_f64.to_le_bytes(), (-1.0_f64).to_le_bytes()].concat();
-        assert!(read_level(&invalid_size, 0).is_none());
     }
 
     #[test]

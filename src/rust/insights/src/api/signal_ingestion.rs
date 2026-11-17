@@ -127,7 +127,6 @@ async fn register_scout(
         sample.scout_maximum_hold_days,
         sample.scout_maximum_duration_ms,
     ) {
-        crate::service_log!("INFO", "Scout scout registration ignored as duplicate: sample_id={} symbol={}", decision_id, symbol);
         return Ok(StatusCode::NO_CONTENT);
     }
     crate::service_log!("INFO", "Scout scout registered: sample_id={} symbol={} strategy={} exit_scenario={} age_ms={}", decision_id, symbol, strategy, exit_scenario, now.saturating_sub(timestamp));
@@ -218,29 +217,13 @@ async fn ingest_signal_event(
         .try_lock()
         .map(|learning| learning.weight)
         .unwrap_or(0.0);
-    let mut scout_markouts = Vec::<(String, SignalEvaluation, bool)>::new();
-    let (snapshot, records, market, event_timestamp) = {
+    let mut scout_markouts = Vec::<(String, SignalEvaluation, bool, Option<String>)>::new();
+    let (snapshot, records) = {
         let event_timestamp = match &request.event {
             SignalFeedEvent::Price { timestamp, .. }
             | SignalFeedEvent::Trade { timestamp, .. }
             | SignalFeedEvent::Book { timestamp, .. } => *timestamp,
         };
-        // Capture BTC/ETH context opportunistically without taking another symbol's
-        // engine lock. Research samples may omit context while a reference is busy.
-        let btc_engine = runtime
-            .engines
-            .get("BTC-USDT")
-            .map(|entry| Arc::clone(entry.value()));
-        let btc_context = btc_engine
-            .and_then(|engine| engine.try_lock().ok().map(|engine| engine.return_context(event_timestamp)))
-            .unwrap_or((None, None));
-        let eth_engine = runtime
-            .engines
-            .get("ETH-USDT")
-            .map(|entry| Arc::clone(entry.value()));
-        let eth_context = eth_engine
-            .and_then(|engine| engine.try_lock().ok().map(|engine| engine.return_context(event_timestamp)))
-            .unwrap_or((None, None));
         let engine = runtime
             .engines
             .entry(request.symbol.clone())
@@ -250,7 +233,6 @@ async fn ingest_signal_event(
         let mut engine = engine.lock().await;
         crate::latency::record_engine_lock_wait(engine_wait_started.elapsed());
         let mut records = Vec::new();
-        let mut market = None;
         let snapshot = match request.event {
             SignalFeedEvent::Price {
                 timestamp,
@@ -301,6 +283,7 @@ async fn ingest_signal_event(
                                 sample_id,
                                 outcome.evaluation.clone(),
                                 outcome.scout_observation_only,
+                                outcome.strategy.clone(),
                             ));
                         }
                     }
@@ -379,18 +362,41 @@ async fn ingest_signal_event(
                 if let Some(snapshot) = snapshot.as_mut() {
                     let news_vote =
                         apply_news_signal(snapshot, &current_news, now_ms(), current_news_weight);
-                    market =
-                        runtime
-                            .market_cache
-                            .get(&request.symbol)
-                            .and_then(|cached| {
-                                let (book_timestamp, value) = cached.value();
-                                (snapshot.timestamp >= *book_timestamp
-                            && snapshot.timestamp.saturating_sub(*book_timestamp) <= 5_000)
-                            .then(|| serde_json::json!({ request.symbol.clone(): value.clone() }))
-                            });
                     if should_capture_research {
                         engine.research_sample_due(snapshot.timestamp);
+                        // Reference returns are only consumed by research samples.
+                        // Avoid two DashMap lookups and return-history scans for every
+                        // market event; same-symbol context comes from the locked engine.
+                        let btc_context = if request.symbol == "BTC-USDT" {
+                            engine.return_context(event_timestamp)
+                        } else {
+                            runtime
+                                .engines
+                                .get("BTC-USDT")
+                                .and_then(|entry| {
+                                    entry
+                                        .value()
+                                        .try_lock()
+                                        .ok()
+                                        .map(|reference| reference.return_context(event_timestamp))
+                                })
+                                .unwrap_or((None, None))
+                        };
+                        let eth_context = if request.symbol == "ETH-USDT" {
+                            engine.return_context(event_timestamp)
+                        } else {
+                            runtime
+                                .engines
+                                .get("ETH-USDT")
+                                .and_then(|entry| {
+                                    entry
+                                        .value()
+                                        .try_lock()
+                                        .ok()
+                                        .map(|reference| reference.return_context(event_timestamp))
+                                })
+                                .unwrap_or((None, None))
+                        };
                         let features = engine.research_features(
                             &request.symbol,
                             snapshot.timestamp,
@@ -453,47 +459,29 @@ async fn ingest_signal_event(
                     &bid_levels,
                     &ask_levels,
                 );
-                if let Some(value) =
-                    market_value(timestamp, best_bid, best_ask, &bid_levels, &ask_levels)
+                if best_bid.is_finite()
+                    && best_ask.is_finite()
+                    && best_bid > 0.0
+                    && best_ask >= best_bid
                 {
                     runtime
                         .market_cache
-                        .insert(request.symbol.clone(), (timestamp, value.clone()));
-                    market = Some(serde_json::json!({ request.symbol.clone(): value }));
+                        .insert(
+                            request.symbol.clone(),
+                            CachedMarket {
+                                timestamp,
+                                best_bid,
+                                best_ask,
+                                bid_levels,
+                                ask_levels,
+                            },
+                        );
                 }
                 None
             }
         };
-        (snapshot, records, market, event_timestamp)
+        (snapshot, records)
     };
-    if snapshot.is_none() {
-        if let Some(markets) = market.as_ref() {
-            if let Some(mut dashboard) = runtime.signal_push_cache.get_mut(&request.symbol) {
-                dashboard["markets"] = markets.clone();
-                drop(dashboard);
-                let mut should_notify = false;
-                runtime
-                    .market_push_at
-                    .entry(request.symbol.clone())
-                    .and_modify(|last| {
-                        if event_timestamp < *last
-                            || event_timestamp.saturating_sub(*last)
-                                >= LIVE_SIGNAL_SNAPSHOT_INTERVAL_MS
-                        {
-                            *last = event_timestamp;
-                            should_notify = true;
-                        }
-                    })
-                    .or_insert_with(|| {
-                        should_notify = true;
-                        event_timestamp
-                    });
-                if should_notify {
-                    runtime.signal_push_notify.notify_one();
-                }
-            }
-        }
-    }
     if !records.is_empty() {
         if let Err(error) = runtime.research_record_sender.try_send(records) {
             let dropped_records = error.into_inner().len();
@@ -510,15 +498,44 @@ async fn ingest_signal_event(
         });
     }
     if let Some(snapshot) = snapshot.as_ref() {
-        let markets = market.unwrap_or_else(|| serde_json::json!({}));
-        let dashboard = serde_json::json!({
-            "best": [snapshot],
-            "markets": markets
-        });
-        runtime
-            .signal_push_cache
-            .insert(snapshot.symbol.clone(), dashboard);
-        runtime.signal_push_notify.notify_one();
+        let market_value = runtime
+            .market_cache
+            .get(&snapshot.symbol)
+            .and_then(|entry| {
+                let cached = entry.value();
+                if snapshot.timestamp.saturating_sub(cached.timestamp) > 5_000 {
+                    return None;
+                }
+                market_value(
+                    cached.timestamp,
+                    cached.best_bid,
+                    cached.best_ask,
+                    &cached.bid_levels,
+                    &cached.ask_levels,
+                )
+            });
+        if let Ok(signal) = serde_json::from_value::<strategy::StrategyMarketSignal>(
+            serde_json::to_value(snapshot).unwrap_or(serde_json::Value::Null),
+        ) {
+            let update = strategy::StrategyInsightUpdate {
+                contract_version: strategy::STRATEGY_INSIGHT_UPDATE_VERSION,
+                event_id: format!("{}:{}", snapshot.symbol, snapshot.timestamp),
+                event_time_ms: snapshot.timestamp,
+                signal: Some(signal),
+                market: market_value,
+                taker_fee_rate: Some(insights::signals::configured_signal_taker_fee_rate()),
+                daily_snapshot: None,
+                dated_carry_scan: None,
+                dated_carry_candidate: None,
+                dated_carry_settlement: None,
+            };
+            if let Ok(encoded) = serde_json::to_vec(&update) {
+                let encoded = Bytes::from(encoded);
+                runtime.latest_strategy_signal_updates.insert(snapshot.symbol.clone(), encoded.clone());
+                let _ = runtime.strategy_signal_events.send(encoded.clone());
+                let _ = runtime.legacy_strategy_signal_events.send(encoded);
+            }
+        }
         let mut ui_snapshot = snapshot.clone();
         ui_snapshot.components.momentum_by_window.clear();
         ui_snapshot.components.trend_volatility_units_by_window.clear();
@@ -536,7 +553,7 @@ async fn ingest_signal_event(
 }
 
 async fn publish_scout_markouts(
-    outcomes: Vec<(String, SignalEvaluation, bool)>,
+    outcomes: Vec<(String, SignalEvaluation, bool, Option<String>)>,
 ) {
     let _permit = SCOUT_LEARNING_DELIVERY_LIMIT
         .get_or_init(|| Semaphore::new(2))
@@ -545,9 +562,10 @@ async fn publish_scout_markouts(
         .expect("scout learning delivery semaphore remains open");
     let learning_rsocket_url = std::env::var("LEARNING_RSOCKET_URL")
         .unwrap_or_else(|_| "ws://127.0.0.1:10010".to_owned());
-    for (decision_id, evaluation, observation_only) in outcomes {
+    for (decision_id, evaluation, observation_only, strategy) in outcomes {
         let payload = serde_json::json!({
             "decision_id": decision_id,
+            "strategy": strategy,
             "symbol": evaluation.symbol,
             "signal_timestamp_ms": evaluation.signal_timestamp,
             "evaluated_timestamp_ms": evaluation.evaluated_timestamp,

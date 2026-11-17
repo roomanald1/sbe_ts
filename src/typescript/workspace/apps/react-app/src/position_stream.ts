@@ -17,24 +17,6 @@ export type PositionUiSnapshot = {
   account?: Record<string, unknown> | null;
   fee_rates?: { maker: number; taker: number };
   vwap_runs?: { runs: Array<Record<string, unknown>> };
-  hedge_candidates?: {
-    positions: Array<
-      Position & {
-        latest_price: number | null;
-        candidates: Array<{
-          symbol: string;
-          correlation: number | null;
-          paired_samples: number;
-          latest_price: number | null;
-        }>;
-      }
-    >;
-    pair_correlations: Array<{
-      symbol_a: string;
-      symbol_b: string;
-      correlation: number | null;
-    }>;
-  };
 };
 
 const snapshot$ = new BehaviorSubject<PositionUiSnapshot | undefined>(
@@ -158,6 +140,7 @@ export function subscribePositionStream(
       retryTimer = undefined;
       streamSubscription?.cancel();
       streamSubscription = undefined;
+      if (socket) resetPositionRSocket(socket);
       socket = undefined;
     }
   };

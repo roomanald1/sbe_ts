@@ -58,7 +58,8 @@ fn account_snapshot_with_rates(
             .sum::<f64>();
     let mut equity_available = snapshot.equity_available;
     let positions = snapshot.positions.into_values().collect::<Vec<_>>();
-    let books = store.books_snapshot();
+    let marks = store.market_marks_snapshot();
+    let now = now_ms().unwrap_or_default();
     let mut equity = cash;
     let mut realized_pnl = 0.0;
     let mut unrealized_pnl = 0.0;
@@ -81,23 +82,27 @@ fn account_snapshot_with_rates(
         if position.quantity.abs() <= EPSILON {
             continue;
         }
-        let Some(book) = books.get(&position.symbol) else {
+        let Some(mark) = marks.get(&position.symbol) else {
             equity_available = false;
             continue;
         };
+        if now.saturating_sub(mark.updated_at_ms) > 5_000 {
+            equity_available = false;
+            continue;
+        }
         let mark = if position.quantity > 0.0 {
-            book.bids.first()
+            mark.bid
         } else {
-            book.asks.first()
+            mark.ask
         };
         let Some(mark) = mark else {
             equity_available = false;
             continue;
         };
-        let marked_value = position.quantity * mark.price * rate;
+        let marked_value = position.quantity * mark * rate;
         equity += marked_value;
-        let gross_unrealized = (mark.price - position.average_entry_price) * position.quantity;
-        let close_fee = position.quantity.abs() * mark.price * position.estimated_exit_fee_rate;
+        let gross_unrealized = (mark - position.average_entry_price) * position.quantity;
+        let close_fee = position.quantity.abs() * mark * position.estimated_exit_fee_rate;
         estimated_exit_fees += close_fee * rate;
         // entry_fees is a signed cash flow (negative for a fee); close_fee is
         // an estimated positive cost, so subtract only the latter.
@@ -171,12 +176,8 @@ mod account_snapshot_tests {
             persistence_timings_ms: Arc::new(StdMutex::new(BTreeMap::new())),
             trade_index: StdMutex::new(LedgerTradeIndex::default()),
             realized_pnl_cache: StdMutex::new(None),
-            books: StdRwLock::new(HashMap::new()),
-            price_samples: Mutex::new(HashMap::new()),
-            hedge_samples: Mutex::new(HashMap::new()),
-            book_changed: Notify::new(),
-            subscriptions: StdMutex::new(HashMap::new()),
-            spot_symbols: Arc::new(Vec::new()),
+            market_marks: StdRwLock::new(HashMap::new()),
+            market_mark_pollers: StdMutex::new(HashSet::new()),
             vwap_runs: Mutex::new(HashMap::new()),
         }
     }

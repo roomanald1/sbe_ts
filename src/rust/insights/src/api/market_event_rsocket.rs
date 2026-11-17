@@ -4,6 +4,11 @@ use tower::ServiceExt;
 
 struct InsightsMarketEventResponder {
     events: broadcast::Sender<Bytes>,
+    strategy_signals: broadcast::Sender<Bytes>,
+    strategy_maintenance_events: broadcast::Sender<Bytes>,
+    legacy_strategy_signals: broadcast::Sender<Bytes>,
+    latest_strategy_signals: Arc<DashMap<String, Bytes>>,
+    latest_daily_strategy: Arc<std::sync::RwLock<Option<Bytes>>>,
     scout_router: Option<Router>,
 }
 
@@ -150,19 +155,54 @@ impl RSocket for InsightsMarketEventResponder {
         let request = payload
             .data()
             .and_then(|data| std::str::from_utf8(data.as_ref()).ok());
-        let only_prices = match request {
-            Some("signal-events:*") => false,
-            Some("tickers:*") => true,
+        let (events, only_prices, initial_kind) = match request {
+            Some("signal-events:*") => (self.events.subscribe(), false, 0),
+            Some("tickers:*") => (self.events.subscribe(), true, 0),
+            Some("strategy-signals:live") => (self.strategy_signals.subscribe(), false, 1),
+            Some("strategy-signals:maintenance") => (
+                self.strategy_maintenance_events.subscribe(),
+                false,
+                2,
+            ),
+            Some("strategy-signals:*") => {
+                (self.legacy_strategy_signals.subscribe(), false, 3)
+            }
             _ => {
                 return Box::pin(futures_util::stream::once(async {
                     Err(anyhow::anyhow!("unsupported Insights RSocket stream request"))
                 }));
             }
         };
-        let events = self.events.subscribe();
+        let mut initial = Vec::new();
+        if matches!(initial_kind, 1 | 3) {
+            initial.extend(self.latest_strategy_signals.iter().filter_map(|entry| {
+                let is_carry_update = entry.key().starts_with("__dated-carry-");
+                (!is_carry_update || initial_kind == 3).then(|| entry.value().clone())
+            }));
+        } else if initial_kind == 2 {
+            initial.extend(self.latest_strategy_signals.iter().filter_map(|entry| {
+                entry
+                    .key()
+                    .starts_with("__dated-carry-")
+                    .then(|| entry.value().clone())
+            }));
+        }
+        if matches!(initial_kind, 2 | 3) {
+            if let Ok(daily) = self.latest_daily_strategy.read() {
+                if let Some(daily) = daily.as_ref() {
+                    initial.push(daily.clone());
+                }
+            }
+        }
         Box::pin(futures_util::stream::unfold(
-            (events, only_prices),
-            |(mut events, only_prices)| async move {
+            (events, only_prices, initial, 0usize, false),
+            |(mut events, only_prices, initial, index, lagged)| async move {
+                if lagged {
+                    return None;
+                }
+                if let Some(data) = initial.get(index).cloned() {
+                    return Some((Ok(Payload::new(Some(data), None)), (events, only_prices, initial, index + 1, false)));
+                }
                 loop {
                     match events.recv().await {
                         Ok(data) => {
@@ -172,10 +212,13 @@ impl RSocket for InsightsMarketEventResponder {
                             if only_prices && !is_price {
                                 continue;
                             }
-                            break Some((Ok(Payload::new(Some(data), None)), (events, only_prices)));
+                            break Some((Ok(Payload::new(Some(data), None)), (events, only_prices, initial, index, false)));
                         }
                         Err(broadcast::error::RecvError::Lagged(skipped)) => {
-                            crate::service_log!("WARN", "Insights market-event subscriber lagged; skipped {skipped} events");
+                            if !only_prices {
+                                crate::service_log!("WARN", "Insights strategy subscriber lagged; skipped {skipped} updates; reconnecting clients receive the latest snapshots");
+                                break Some((Err(anyhow::anyhow!("Insights strategy stream lagged by {skipped} updates; resubscribe for a current snapshot")), (events, only_prices, initial, index, true)));
+                            }
                         }
                         Err(broadcast::error::RecvError::Closed) => break None,
                     }
@@ -192,7 +235,14 @@ impl RSocket for InsightsMarketEventResponder {
     }
 }
 
-async fn run_insights_market_event_server(events: broadcast::Sender<Bytes>) -> anyhow::Result<()> {
+async fn run_insights_market_event_server(
+    events: broadcast::Sender<Bytes>,
+    strategy_signals: broadcast::Sender<Bytes>,
+    strategy_maintenance_events: broadcast::Sender<Bytes>,
+    legacy_strategy_signals: broadcast::Sender<Bytes>,
+    latest_strategy_signals: Arc<DashMap<String, Bytes>>,
+    latest_daily_strategy: Arc<std::sync::RwLock<Option<Bytes>>>,
+) -> anyhow::Result<()> {
     let port = std::env::var("INSIGHTS_RSOCKET_PORT").unwrap_or_else(|_| "10004".to_owned());
     let address = format!("0.0.0.0:{port}");
     crate::service_log!("INFO", "Insights RSocket market-event server listening on ws://{address}");
@@ -202,6 +252,11 @@ async fn run_insights_market_event_server(events: broadcast::Sender<Bytes>) -> a
             crate::service_log!("INFO", "Insights RSocket client connected: setup={setup:?}");
             Ok(Box::new(InsightsMarketEventResponder {
                 events: events.clone(),
+                strategy_signals: strategy_signals.clone(),
+                strategy_maintenance_events: strategy_maintenance_events.clone(),
+                legacy_strategy_signals: legacy_strategy_signals.clone(),
+                latest_strategy_signals: Arc::clone(&latest_strategy_signals),
+                latest_daily_strategy: Arc::clone(&latest_daily_strategy),
                 scout_router: None,
             }))
         }))
@@ -222,6 +277,11 @@ pub async fn run_insights_scout_rpc_server(
         .acceptor(Box::new(move |_setup, _socket| {
             Ok(Box::new(InsightsMarketEventResponder {
                 events: broadcast::channel(1).0,
+                strategy_signals: broadcast::channel(1).0,
+                strategy_maintenance_events: broadcast::channel(1).0,
+                legacy_strategy_signals: broadcast::channel(1).0,
+                latest_strategy_signals: Arc::new(DashMap::new()),
+                latest_daily_strategy: Arc::new(std::sync::RwLock::new(None)),
                 scout_router: Some(router.clone()),
             }))
         }))
@@ -233,14 +293,137 @@ pub async fn run_insights_scout_rpc_server(
 
 #[cfg(test)]
 mod market_event_rsocket_tests {
-    use super::enrich_raw_price;
-    use super::run_insights_scout_rpc_server;
+    use super::*;
     use axum::{Json, Router, routing::{get, post}};
     use bytes::Bytes;
     use sbe_schema::{
         ReadBuf, enriched_symbol_price_codec::EnrichedSymbolPriceDecoder,
         message_header_codec::MessageHeaderDecoder,
     };
+    use futures_util::StreamExt;
+
+    #[tokio::test]
+    async fn strategy_stream_replays_the_latest_signal_to_new_subscribers() {
+        let (events, _) = broadcast::channel(4);
+        let (strategy_signals, _) = broadcast::channel(4);
+        let latest = Arc::new(DashMap::new());
+        let update = strategy::StrategyInsightUpdate {
+            contract_version: strategy::STRATEGY_INSIGHT_UPDATE_VERSION,
+            event_id: "BTC-USDT:123".into(),
+            event_time_ms: 123,
+            signal: Some(strategy::StrategyMarketSignal {
+                symbol: "BTC-USDT".into(),
+                timestamp: 123,
+                ..Default::default()
+            }),
+            market: None,
+            taker_fee_rate: None,
+            daily_snapshot: None,
+            dated_carry_scan: None,
+            dated_carry_candidate: None,
+            dated_carry_settlement: None,
+        };
+        latest.insert("BTC-USDT".into(), Bytes::from(serde_json::to_vec(&update).unwrap()));
+        let responder = InsightsMarketEventResponder {
+            events,
+            strategy_signals,
+            strategy_maintenance_events: broadcast::channel(4).0,
+            legacy_strategy_signals: broadcast::channel(4).0,
+            latest_strategy_signals: latest,
+            latest_daily_strategy: Arc::new(std::sync::RwLock::new(None)),
+            scout_router: None,
+        };
+        let mut stream = responder.request_stream(
+            Payload::builder()
+                .set_data_utf8("strategy-signals:live")
+                .build(),
+        );
+        let payload = stream.next().await.unwrap().unwrap();
+        let replayed: strategy::StrategyInsightUpdate =
+            serde_json::from_slice(payload.data().unwrap()).unwrap();
+        assert_eq!(replayed.event_id, "BTC-USDT:123");
+    }
+
+    #[tokio::test]
+    async fn maintenance_stream_replays_daily_and_carry_updates_without_market_snapshots() {
+        let latest = Arc::new(DashMap::new());
+        let market = strategy::StrategyInsightUpdate {
+            contract_version: strategy::STRATEGY_INSIGHT_UPDATE_VERSION,
+            event_id: "BTC-USDT:123".into(),
+            event_time_ms: 123,
+            signal: Some(strategy::StrategyMarketSignal {
+                symbol: "BTC-USDT".into(),
+                timestamp: 123,
+                ..Default::default()
+            }),
+            market: None,
+            taker_fee_rate: None,
+            daily_snapshot: None,
+            dated_carry_scan: None,
+            dated_carry_candidate: None,
+            dated_carry_settlement: None,
+        };
+        let carry = strategy::StrategyInsightUpdate {
+            event_id: "dated-carry:scan:123".into(),
+            signal: None,
+            dated_carry_scan: Some(strategy::DatedCarryScanUpdate {
+                emitted_at_ms: 123,
+                candidates: Vec::new(),
+                last_error: None,
+            }),
+            ..market.clone()
+        };
+        latest.insert(
+            "BTC-USDT".into(),
+            Bytes::from(serde_json::to_vec(&market).unwrap()),
+        );
+        latest.insert(
+            "__dated-carry-scan".into(),
+            Bytes::from(serde_json::to_vec(&carry).unwrap()),
+        );
+        let daily = strategy::StrategyInsightUpdate {
+            event_id: "daily:123".into(),
+            signal: None,
+            daily_snapshot: Some(strategy::daily::DailyStrategySnapshot {
+                as_of_ms: 123,
+                sweep_id: String::new(),
+                active_strategy_symbols: Default::default(),
+                generated_signals: Vec::new(),
+                evaluated_strategy_symbols: Default::default(),
+                diagnostics: Vec::new(),
+            }),
+            ..market
+        };
+        let responder = InsightsMarketEventResponder {
+            events: broadcast::channel(4).0,
+            strategy_signals: broadcast::channel(4).0,
+            strategy_maintenance_events: broadcast::channel(4).0,
+            legacy_strategy_signals: broadcast::channel(4).0,
+            latest_strategy_signals: latest,
+            latest_daily_strategy: Arc::new(std::sync::RwLock::new(Some(Bytes::from(
+                serde_json::to_vec(&daily).unwrap(),
+            )))),
+            scout_router: None,
+        };
+        let mut stream = responder.request_stream(
+            Payload::builder()
+                .set_data_utf8("strategy-signals:maintenance")
+                .build(),
+        );
+        let mut replayed = Vec::new();
+        for _ in 0..2 {
+            let payload = stream.next().await.unwrap().unwrap();
+            replayed.push(
+                serde_json::from_slice::<strategy::StrategyInsightUpdate>(
+                    payload.data().unwrap(),
+                )
+                .unwrap(),
+            );
+        }
+        assert!(replayed.iter().any(|update| update.daily_snapshot.is_some()));
+        assert!(replayed.iter().any(|update| update.dated_carry_scan.is_some()));
+        assert!(replayed.iter().all(|update| update.signal.is_none()));
+    }
 
     #[test]
     fn enriched_price_uses_its_typed_sbe_template_and_preserves_values() {

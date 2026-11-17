@@ -1,18 +1,20 @@
 use crate::worker_metrics::{WorkerMetrics, serve_metrics};
 use anyhow::{Context, bail};
 use axum::{Router, body::Body};
-use futures_util::{Stream, stream};
+use futures_util::{Stream, StreamExt, stream};
 use http_body_util::BodyExt;
-use rsocket_rust::prelude::*;
-use rsocket_rust_transport_websocket::WebsocketServerTransport;
+use rsocket_rust::{prelude::*, utils::EchoRSocket};
+use rsocket_rust_transport_websocket::{WebsocketClientTransport, WebsocketServerTransport};
 use rusqlite::{Connection, OptionalExtension, params};
 use sha2::{Digest, Sha256};
+use std::collections::BTreeMap;
 use std::{path::PathBuf, pin::Pin, sync::Arc};
 use strategies::{
-    MAX_REPLAY_SIGNALS, ScoutWorkAssignment, ScoutWorkDecision, ScoutWorkMode, ScoutWorkResult,
-    ScoutWorkerHttpMethod, ScoutWorkerRequest, ScoutWorkerResponse, ScoutWorkerRouteCommand,
-    ScoutWorkerRouteResult, Strategy, StrategyDecision, StrategyInput, StrategyReplayDecisionPoint,
-    StrategyReplayRequest, StrategyReplayResponse,
+    MAX_REPLAY_SIGNALS, ScoutCoordinatorRequest, ScoutCoordinatorResponse, ScoutDataUpdate,
+    ScoutStreamEnvelope, ScoutStreamSubscription, ScoutWorkAssignment, ScoutWorkDecision,
+    ScoutWorkMode, ScoutWorkResult, ScoutWorkerHttpMethod, ScoutWorkerRequest, ScoutWorkerResponse,
+    ScoutWorkerRouteCommand, ScoutWorkerRouteResult, Strategy, StrategyDecision, StrategyInput,
+    StrategyReplayDecisionPoint, StrategyReplayRequest, StrategyReplayResponse,
 };
 use tokio::sync::{Mutex, Semaphore};
 use tower::ServiceExt;
@@ -27,6 +29,8 @@ pub struct ScoutWorkerConfig {
     pub max_payload_bytes: usize,
     pub max_persisted_results: usize,
     pub metrics_listen_addr: String,
+    pub insights_stream_url: String,
+    pub learning_stream_url: String,
 }
 
 impl ScoutWorkerConfig {
@@ -40,8 +44,13 @@ impl ScoutWorkerConfig {
         let max_in_flight = env_usize("SCOUT_WORKER_MAX_IN_FLIGHT", 1)?;
         let max_payload_bytes = env_usize("SCOUT_WORKER_MAX_PAYLOAD_BYTES", 1_048_576)?;
         let max_persisted_results = env_usize("SCOUT_WORKER_MAX_PERSISTED_RESULTS", 10_000)?;
-        let metrics_listen_addr = std::env::var("STRATEGY_X_METRICS_LISTEN_ADDR")
+        let metrics_listen_addr = std::env::var("STRATEGY_METRICS_LISTEN_ADDR")
             .unwrap_or_else(|_| "0.0.0.0:10202".into());
+        let insights_stream_url = std::env::var("INSIGHTS_STRATEGY_STREAM_URL")
+            .unwrap_or_else(|_| "ws://insights:10004".into());
+        let learning_stream_url = std::env::var("LEARNING_SCOUT_STREAM_URL")
+            .or_else(|_| std::env::var("LEARNING_RSOCKET_URL"))
+            .unwrap_or_else(|_| "ws://learning:10010".into());
         if max_in_flight == 0
             || max_payload_bytes == 0
             || max_persisted_results == 0
@@ -57,6 +66,8 @@ impl ScoutWorkerConfig {
             max_payload_bytes,
             max_persisted_results,
             metrics_listen_addr,
+            insights_stream_url,
+            learning_stream_url,
         })
     }
 }
@@ -78,6 +89,7 @@ struct StrategyWorker {
     replay_in_flight: Arc<Semaphore>,
     router: Router,
     metrics: Arc<WorkerMetrics>,
+    latest_updates: Arc<std::sync::RwLock<BTreeMap<String, ScoutDataUpdate>>>,
 }
 
 impl StrategyWorker {
@@ -115,7 +127,12 @@ impl StrategyWorker {
                 config.strategy,
                 config.state_path.clone(),
             ),
-            metrics: WorkerMetrics::new("scout", config.strategy.as_str()),
+            metrics: WorkerMetrics::new(
+                "scout",
+                config.strategy.as_str(),
+                Some(config.state_path.clone()),
+            ),
+            latest_updates: Arc::new(std::sync::RwLock::new(BTreeMap::new())),
             config,
         })
     }
@@ -163,15 +180,44 @@ impl StrategyWorker {
         &self,
         command: ScoutWorkerRouteCommand,
     ) -> anyhow::Result<ScoutWorkerRouteResult> {
+        self.dispatch_local_route(command, true).await
+    }
+
+    /// Insights updates are consumed serially by the one subscription task and
+    /// must not compete with Learning's bounded assignment lane.
+    async fn route_insight_update(
+        &self,
+        command: ScoutWorkerRouteCommand,
+    ) -> anyhow::Result<ScoutWorkerRouteResult> {
+        let started = std::time::Instant::now();
+        let result = self.dispatch_local_route(command, false).await;
+        self.metrics
+            .record_insight_route_latency(started.elapsed().as_nanos() as u64);
+        result
+    }
+
+    async fn dispatch_local_route(
+        &self,
+        command: ScoutWorkerRouteCommand,
+        reserve_assignment_capacity: bool,
+    ) -> anyhow::Result<ScoutWorkerRouteResult> {
         if command.strategy != self.config.strategy {
             bail!("lifecycle command was routed to the wrong strategy worker");
         }
         if command.request_id.trim().is_empty() || !worker_route_allowed(&command.path) {
             bail!("invalid Scout worker lifecycle command");
         }
-        let _permit = Arc::clone(&self.in_flight)
-            .try_acquire_owned()
-            .map_err(|_| anyhow::anyhow!("strategy worker is at its configured in-flight limit"))?;
+        let _permit = if reserve_assignment_capacity {
+            Some(
+                Arc::clone(&self.in_flight)
+                    .try_acquire_owned()
+                    .map_err(|_| {
+                        anyhow::anyhow!("strategy worker is at its configured in-flight limit")
+                    })?,
+            )
+        } else {
+            None
+        };
         let method = match command.method {
             ScoutWorkerHttpMethod::Get => http::Method::GET,
             ScoutWorkerHttpMethod::Post => http::Method::POST,
@@ -263,6 +309,139 @@ impl StrategyWorker {
         tokio::task::spawn_blocking(move || evaluate_strategy_replay(strategy, request))
             .await
             .context("strategy replay task failed")?
+    }
+
+    async fn consume_insight_update(
+        &self,
+        update: crate::StrategyInsightUpdate,
+    ) -> anyhow::Result<()> {
+        let carry_candidates = update
+            .dated_carry_scan
+            .as_ref()
+            .map(|scan| scan.candidates.clone())
+            .or_else(|| {
+                update
+                    .dated_carry_candidate
+                    .clone()
+                    .map(|candidate| vec![candidate])
+            });
+        if let Some(candidates) = carry_candidates {
+            if self.config.strategy == Strategy::DatedCarry {
+                let response = self
+                    .route_insight_update(ScoutWorkerRouteCommand {
+                        request_id: format!("insights-carry:{}", update.event_id),
+                        strategy: self.config.strategy,
+                        method: ScoutWorkerHttpMethod::Post,
+                        path: "/dated-carry-inputs".into(),
+                        payload: serde_json::json!({
+                            "request_id": update.event_id,
+                            "now_ms": update.event_time_ms,
+                            "candidates": serde_json::to_value(candidates)?,
+                        }),
+                    })
+                    .await?;
+                anyhow::ensure!(
+                    (200..300).contains(&response.status),
+                    "local Scout dated-carry-input route returned {}",
+                    response.status
+                );
+            }
+            return Ok(());
+        }
+        if update.dated_carry_settlement.is_some() {
+            return Ok(());
+        }
+        if let Some(snapshot) = update.daily_snapshot.clone() {
+            let signals = snapshot
+                .generated_signals
+                .into_iter()
+                .filter(|signal| signal.strategy.as_deref() == Some(self.config.strategy.as_str()))
+                .map(serde_json::to_value)
+                .collect::<Result<Vec<_>, _>>()?;
+            if !signals.is_empty() {
+                let response = self.route_insight_update(ScoutWorkerRouteCommand {
+                    request_id: format!("insights-daily:{}:{}", self.config.strategy.as_str(), update.event_id),
+                    strategy: self.config.strategy,
+                    method: ScoutWorkerHttpMethod::Post,
+                    path: "/daily-inputs".into(),
+                    payload: serde_json::json!({"request_id": update.event_id, "now_ms": update.event_time_ms, "signals": signals}),
+                }).await?;
+                anyhow::ensure!(
+                    (200..300).contains(&response.status),
+                    "local Scout daily-input route returned {}",
+                    response.status
+                );
+            }
+            return Ok(());
+        }
+        let Some(source_signal) = update.signal else {
+            return Ok(());
+        };
+        if update.contract_version != crate::STRATEGY_INSIGHT_UPDATE_VERSION
+            || update.event_time_ms != source_signal.timestamp
+            || source_signal.stale
+        {
+            return Ok(());
+        }
+        let Some(market) = update.market else {
+            return Ok(());
+        };
+        let bid = market
+            .get("bids")
+            .and_then(serde_json::Value::as_array)
+            .and_then(|levels| levels.first())
+            .and_then(|level| level.get("price"))
+            .and_then(serde_json::Value::as_f64);
+        let ask = market
+            .get("asks")
+            .and_then(serde_json::Value::as_array)
+            .and_then(|levels| levels.first())
+            .and_then(|level| level.get("price"))
+            .and_then(serde_json::Value::as_f64);
+        let updated_at = market
+            .get("updated_at_ms")
+            .and_then(serde_json::Value::as_u64);
+        let Some((bid, ask, updated_at)) = bid
+            .zip(ask)
+            .zip(updated_at)
+            .map(|((bid, ask), updated_at)| (bid, ask, updated_at))
+            .filter(|(bid, ask, updated_at)| {
+                bid.is_finite()
+                    && ask.is_finite()
+                    && *bid > 0.0
+                    && *ask >= *bid
+                    && update.event_time_ms.saturating_sub(*updated_at) <= 5_000
+                    && *updated_at <= update.event_time_ms.saturating_add(5_000)
+            })
+        else {
+            return Ok(());
+        };
+        let mut signal = serde_json::to_value(source_signal.clone())?;
+        signal["best_bid"] = serde_json::json!(bid);
+        signal["best_ask"] = serde_json::json!(ask);
+        signal["price"] = serde_json::json!(bid + (ask - bid) / 2.0);
+        signal["book_updated_at_ms"] = serde_json::json!(updated_at);
+        if let Some(fee) = update
+            .taker_fee_rate
+            .filter(|fee| fee.is_finite() && *fee >= 0.0)
+        {
+            signal["scout_taker_fee_rate"] = serde_json::json!(fee);
+        }
+        let response = self
+            .route_insight_update(ScoutWorkerRouteCommand {
+                request_id: format!("insights-live:{}:{}", source_signal.symbol, update.event_id),
+                strategy: self.config.strategy,
+                method: ScoutWorkerHttpMethod::Post,
+                path: "/live-inputs".into(),
+                payload: serde_json::json!({"signals": [signal]}),
+            })
+            .await?;
+        anyhow::ensure!(
+            (200..300).contains(&response.status),
+            "local Scout live-input route returned {}",
+            response.status
+        );
+        Ok(())
     }
 }
 
@@ -371,6 +550,7 @@ fn worker_route_allowed(path: &str) -> bool {
     matches!(
         path,
         "/configuration"
+            | "/internal/learning-snapshot"
             | "/status"
             | "/outcomes"
             | "/samples"
@@ -483,12 +663,6 @@ async fn handle_worker_request(
     let request: ScoutWorkerRequest =
         serde_json::from_slice(bytes).context("invalid typed Scout worker request")?;
     let response = match request {
-        ScoutWorkerRequest::Evaluate(assignment) => ScoutWorkerResponse::Evaluation(
-            worker.execute(&serde_json::to_vec(&assignment)?).await?,
-        ),
-        ScoutWorkerRequest::StrategyReplay(request) => {
-            ScoutWorkerResponse::StrategyReplay(worker.replay(request).await?)
-        }
         ScoutWorkerRequest::Route(command) => {
             ScoutWorkerResponse::Route(worker.route(command).await?)
         }
@@ -552,7 +726,10 @@ impl RSocket for WorkerResponder {
 pub async fn serve_strategy_worker(config: ScoutWorkerConfig) -> anyhow::Result<()> {
     let worker = Arc::new(StrategyWorker::open(config.clone())?);
     let metrics_server = serve_metrics(config.metrics_listen_addr, Arc::clone(&worker.metrics));
+    let insights_worker = Arc::clone(&worker);
+    let insights_subscriber = run_scout_insights_subscription(insights_worker);
     let address = config.listen_addr.clone();
+    let learning_worker = Arc::clone(&worker);
     eprintln!(
         "Scouts worker for {} listening on ws://{} (max in-flight {}, state {})",
         config.strategy.as_str(),
@@ -566,11 +743,291 @@ pub async fn serve_strategy_worker(config: ScoutWorkerConfig) -> anyhow::Result<
             Ok(Box::new(WorkerResponder(Arc::clone(&worker))))
         }))
         .serve();
+    let learning_subscriber = run_learning_scout_subscription(learning_worker);
     tokio::try_join!(
         async { server.await.context("Scout RSocket worker stopped") },
-        metrics_server
+        metrics_server,
+        insights_subscriber,
+        learning_subscriber
     )?;
     Ok(())
+}
+
+async fn connect_scout_insights_stream(
+    url: &str,
+    strategy: Strategy,
+) -> anyhow::Result<Pin<Box<dyn Stream<Item = anyhow::Result<crate::StrategyInsightUpdate>> + Send>>>
+{
+    let client = RSocketFactory::connect()
+        .transport(WebsocketClientTransport::from(url))
+        .acceptor(Box::new(|| Box::new(EchoRSocket)))
+        .start()
+        .await
+        .context("Insights Scout-stream connection failed")?;
+    let source = client.request_stream(
+        Payload::builder()
+            .set_data_utf8(if strategy.is_live_insight() {
+                "strategy-signals:live"
+            } else {
+                "strategy-signals:maintenance"
+            })
+            .build(),
+    );
+    Ok(Box::pin(source.map(move |item| {
+        let _client = &client;
+        let payload = item.map_err(anyhow::Error::from)?;
+        let bytes = payload
+            .data()
+            .context("Insights returned an empty Scout signal")?;
+        serde_json::from_slice(bytes).context("invalid Insights Scout update")
+    })))
+}
+
+async fn run_learning_scout_subscription(worker: Arc<StrategyWorker>) -> anyhow::Result<()> {
+    let mut retry_delay = std::time::Duration::from_millis(500);
+    loop {
+        let connected = RSocketFactory::connect()
+            .transport(WebsocketClientTransport::from(
+                worker.config.learning_stream_url.as_str(),
+            ))
+            .acceptor(Box::new(|| Box::new(EchoRSocket)))
+            .start()
+            .await;
+        let client = match connected {
+            Ok(client) => client,
+            Err(error) => {
+                eprintln!(
+                    "WARN Scout {} could not connect to Learning stream: {error}",
+                    worker.config.strategy.as_str()
+                );
+                tokio::time::sleep(retry_delay).await;
+                retry_delay = (retry_delay * 2).min(std::time::Duration::from_secs(15));
+                continue;
+            }
+        };
+        let request = serde_json::to_vec(&ScoutStreamSubscription {
+            strategy: worker.config.strategy,
+            after_sequence: 0,
+        })?;
+        let mut source = client.request_stream(Payload::builder().set_data(request).build());
+        retry_delay = std::time::Duration::from_millis(500);
+        while let Some(item) = source.next().await {
+            let payload = match item {
+                Ok(payload) => payload,
+                Err(error) => {
+                    eprintln!(
+                        "WARN Scout {} Learning stream interrupted: {error}",
+                        worker.config.strategy.as_str()
+                    );
+                    break;
+                }
+            };
+            let Some(bytes) = payload.data() else {
+                continue;
+            };
+            let envelope: ScoutStreamEnvelope = match serde_json::from_slice(bytes) {
+                Ok(envelope) => envelope,
+                Err(error) => {
+                    eprintln!(
+                        "WARN Scout {} received invalid Learning update: {error}",
+                        worker.config.strategy.as_str()
+                    );
+                    continue;
+                }
+            };
+            if envelope.strategy != worker.config.strategy {
+                continue;
+            }
+            let replayed_from_cache = envelope.replayed_from_cache;
+            match envelope.update {
+                ScoutDataUpdate::Assignment(assignment) => {
+                    let request = match worker.execute(&serde_json::to_vec(&assignment)?).await {
+                        Ok(result) => ScoutCoordinatorRequest::AssignmentResult(result),
+                        Err(error) => ScoutCoordinatorRequest::AssignmentFailed {
+                            assignment_id: assignment.assignment_id,
+                            strategy: worker.config.strategy,
+                            detail: error.to_string(),
+                        },
+                    };
+                    let response = client
+                        .request_response(
+                            Payload::builder()
+                                .set_data(serde_json::to_vec(&request)?)
+                                .build(),
+                        )
+                        .await?;
+                    if let Some(response) = response {
+                        if let Some(data) = response.data() {
+                            if !matches!(
+                                serde_json::from_slice::<ScoutCoordinatorResponse>(data),
+                                Ok(ScoutCoordinatorResponse::AssignmentAcknowledged { .. })
+                            ) {
+                                eprintln!(
+                                    "WARN Scout {} received an unexpected assignment acknowledgement",
+                                    worker.config.strategy.as_str()
+                                );
+                            }
+                        }
+                    }
+                }
+                ScoutDataUpdate::HistoricalReplay(request) => {
+                    worker
+                        .latest_updates
+                        .write()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .insert(
+                            "historical_replay".into(),
+                            ScoutDataUpdate::HistoricalReplay(request.clone()),
+                        );
+                    if !replayed_from_cache {
+                        let message = match worker.replay(request.clone()).await {
+                            Ok(result) => ScoutCoordinatorRequest::ReplayResult(result),
+                            Err(error) => ScoutCoordinatorRequest::ReplayFailed {
+                                job_id: request.job_id,
+                                strategy: worker.config.strategy,
+                                detail: error.to_string(),
+                            },
+                        };
+                        let response = client
+                            .request_response(
+                                Payload::builder()
+                                    .set_data(serde_json::to_vec(&message)?)
+                                    .build(),
+                            )
+                            .await?;
+                        if !matches!(response.and_then(|payload| payload.data().map(ToOwned::to_owned)), Some(data) if matches!(serde_json::from_slice::<ScoutCoordinatorResponse>(&data), Ok(ScoutCoordinatorResponse::ReplayAcknowledged { .. })))
+                        {
+                            eprintln!(
+                                "WARN Scout {} received an unexpected replay acknowledgement",
+                                worker.config.strategy.as_str()
+                            );
+                        }
+                    }
+                }
+                update => {
+                    if let ScoutDataUpdate::Profiles(snapshot) = &update {
+                        let result = worker
+                            .route_insight_update(ScoutWorkerRouteCommand {
+                                request_id: format!("learning-profile-cache:{}", envelope.sequence),
+                                strategy: worker.config.strategy,
+                                method: ScoutWorkerHttpMethod::Post,
+                                path: "/internal/learning-snapshot".into(),
+                                payload: snapshot.clone(),
+                            })
+                            .await;
+                        match result {
+                            Ok(result) if (200..300).contains(&result.status) => {}
+                            Ok(result) => eprintln!(
+                                "WARN Scout {} could not apply Learning profile snapshot (HTTP {})",
+                                worker.config.strategy.as_str(),
+                                result.status
+                            ),
+                            Err(error) => eprintln!(
+                                "WARN Scout {} skipped oversized or invalid Learning profile snapshot: {error}",
+                                worker.config.strategy.as_str()
+                            ),
+                        }
+                    }
+                    let key = match &update {
+                        ScoutDataUpdate::Profiles(_) => "profiles",
+                        ScoutDataUpdate::Feedback(_) => "feedback",
+                        ScoutDataUpdate::Configuration(_) => "configuration",
+                        ScoutDataUpdate::HistoricalReplay(_) => unreachable!(),
+                        ScoutDataUpdate::Assignment(_) => unreachable!(),
+                    };
+                    worker
+                        .latest_updates
+                        .write()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .insert(key.into(), update);
+                }
+            }
+        }
+        tokio::time::sleep(retry_delay).await;
+        retry_delay = (retry_delay * 2).min(std::time::Duration::from_secs(15));
+    }
+}
+
+async fn run_scout_insights_subscription(worker: Arc<StrategyWorker>) -> anyhow::Result<()> {
+    let mut retry_delay = std::time::Duration::from_millis(500);
+    loop {
+        match connect_scout_insights_stream(
+            &worker.config.insights_stream_url,
+            worker.config.strategy,
+        )
+        .await
+        {
+            Ok(mut updates) => {
+                worker.metrics.set_insights_connected(true);
+                eprintln!(
+                    "Scout {} subscribed to Insights updates",
+                    worker.config.strategy.as_str()
+                );
+                retry_delay = std::time::Duration::from_millis(500);
+                loop {
+                    // Live signal streams should continuously receive snapshots. A
+                    // half-open RSocket stream can otherwise remain marked as
+                    // connected forever while Scouts stop advancing.
+                    let next_update = if worker.config.strategy.is_live_insight() {
+                        match tokio::time::timeout(
+                            std::time::Duration::from_secs(90),
+                            updates.next(),
+                        )
+                        .await
+                        {
+                            Ok(update) => update,
+                            Err(_) => {
+                                worker.metrics.set_insights_connected(false);
+                                eprintln!(
+                                    "WARN Scout {} Insights stream idle for 90 seconds; reconnecting",
+                                    worker.config.strategy.as_str()
+                                );
+                                break;
+                            }
+                        }
+                    } else {
+                        updates.next().await
+                    };
+                    let Some(update) = next_update else {
+                        break;
+                    };
+                    match update {
+                        Ok(update) => {
+                            worker.metrics.record_insight_update(update.event_time_ms);
+                            if let Err(error) = worker.consume_insight_update(update).await {
+                                eprintln!(
+                                    "WARN Scout {} failed to consume Insights update: {error}",
+                                    worker.config.strategy.as_str()
+                                );
+                            }
+                        }
+                        Err(error) => {
+                            worker.metrics.set_insights_connected(false);
+                            eprintln!(
+                                "WARN Scout {} Insights stream needs resubscribe after update gap: {error}",
+                                worker.config.strategy.as_str()
+                            );
+                            break;
+                        }
+                    }
+                }
+                eprintln!(
+                    "WARN Scout {} Insights stream closed; reconnecting",
+                    worker.config.strategy.as_str()
+                );
+                worker.metrics.set_insights_connected(false);
+            }
+            Err(error) => {
+                worker.metrics.set_insights_connected(false);
+                eprintln!(
+                    "WARN Scout {} could not subscribe to Insights: {error}",
+                    worker.config.strategy.as_str()
+                );
+            }
+        }
+        tokio::time::sleep(retry_delay).await;
+        retry_delay = (retry_delay * 2).min(std::time::Duration::from_secs(10));
+    }
 }
 
 #[cfg(test)]
@@ -635,6 +1092,8 @@ mod tests {
             max_payload_bytes: 64 * 1024,
             max_persisted_results: 2,
             metrics_listen_addr: "127.0.0.1:0".into(),
+            insights_stream_url: "ws://127.0.0.1:1".into(),
+            learning_stream_url: "ws://127.0.0.1:1".into(),
         }
     }
 
@@ -690,6 +1149,38 @@ mod tests {
             .unwrap();
         assert_eq!(result.status, 200);
         assert_eq!(result.body["strategies"], json!(["live-momentum"]));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn insight_updates_keep_a_serial_lane_while_assignment_capacity_is_busy() {
+        let path = std::env::temp_dir().join(format!(
+            "scout-worker-insight-capacity-{}.sqlite",
+            std::process::id()
+        ));
+        let worker = StrategyWorker::open(config(Strategy::LiveMomentum, path.clone())).unwrap();
+        let _assignment_permit = Arc::clone(&worker.in_flight).acquire_owned().await.unwrap();
+        let command = ScoutWorkerRouteCommand {
+            request_id: "insight-update".into(),
+            strategy: Strategy::LiveMomentum,
+            method: ScoutWorkerHttpMethod::Get,
+            path: "/configuration".into(),
+            payload: serde_json::Value::Null,
+        };
+
+        let assignment_route_error = worker.route(command.clone()).await.unwrap_err();
+        assert!(
+            assignment_route_error
+                .to_string()
+                .contains("in-flight limit")
+        );
+        let insight_response = worker.route_insight_update(command).await.unwrap();
+
+        assert_eq!(insight_response.status, 200);
+        assert_eq!(
+            insight_response.body["strategies"],
+            json!(["live-momentum"])
+        );
         let _ = std::fs::remove_file(path);
     }
 
@@ -819,64 +1310,24 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn worker_accepts_typed_assignments_over_rsocket_request_response() {
+    async fn worker_rejects_legacy_request_response_assignments() {
         let path = std::env::temp_dir().join(format!(
             "scout-worker-rsocket-{}.sqlite",
             std::process::id()
         ));
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        drop(listener);
-        let worker =
-            Arc::new(StrategyWorker::open(config(Strategy::LiveMomentum, path.clone())).unwrap());
-        let server = RSocketFactory::receive()
-            .transport(WebsocketServerTransport::from(address.to_string()))
-            .acceptor(Box::new(move |_setup, _socket| {
-                Ok(Box::new(WorkerResponder(Arc::clone(&worker))))
-            }))
-            .serve();
-        let server_task = tokio::spawn(async move { server.await });
-
-        let url = format!("ws://{address}");
-        let mut client = None;
-        for _ in 0..25 {
-            match RSocketFactory::connect()
-                .transport(WebsocketClientTransport::from(url.as_str()))
-                .acceptor(Box::new(|| Box::new(EchoRSocket)))
-                .start()
-                .await
-            {
-                Ok(connected) => {
-                    client = Some(connected);
-                    break;
-                }
-                Err(_) => sleep(std::time::Duration::from_millis(20)).await,
-            }
-        }
-        let client = client.expect("RSocket worker should accept a connection");
-        let assignment = assignment("wire-test", Strategy::LiveMomentum);
-        let response = client
-            .request_response(
-                Payload::builder()
-                    .set_data(
-                        serde_json::to_vec(&ScoutWorkerRequest::Evaluate(assignment)).unwrap(),
-                    )
-                    .build(),
-            )
-            .await
-            .unwrap()
-            .expect("worker responds with its evaluation");
-        let ScoutWorkerResponse::Evaluation(result) =
-            serde_json::from_slice(response.data().unwrap()).unwrap()
-        else {
-            panic!("worker should return an evaluation response");
-        };
-        assert_eq!(result.assignment_id, "wire-test");
-        assert_eq!(result.strategy, Strategy::LiveMomentum);
-        assert_eq!(result.decision, ScoutWorkDecision::Enter);
-
-        server_task.abort();
-        drop(client);
+        let worker = StrategyWorker::open(config(Strategy::LiveMomentum, path.clone())).unwrap();
+        let legacy = serde_json::json!({
+            "operation": "evaluate",
+            "request": assignment("wire-test", Strategy::LiveMomentum),
+        });
+        let response = handle_worker_request(
+            &worker,
+            Payload::builder()
+                .set_data(serde_json::to_vec(&legacy).unwrap())
+                .build(),
+        )
+        .await;
+        assert!(response.is_err());
         let _ = std::fs::remove_file(path);
     }
 }

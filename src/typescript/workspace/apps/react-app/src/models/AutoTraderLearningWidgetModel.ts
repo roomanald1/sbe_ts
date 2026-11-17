@@ -6,6 +6,31 @@ import {
   type LearningEffectivenessSummary,
 } from './LearningEffectivenessModel';
 import { autoTraderRpc } from '../auto_trader_rsocket';
+import { insightsFetch } from '../insights_rsocket';
+
+export type LearningDecision = {
+  decision_id?: string;
+  stage?: string;
+  status?: string;
+  timestamp?: number;
+  signal_timestamp?: number;
+  symbol?: string;
+  strategy?: string;
+  direction?: string;
+  score?: number;
+  strength?: number;
+  strength_size_multiplier?: number;
+  exploratory?: boolean;
+  reason?: string;
+  entry_gate?: {
+    selection_mode?: string;
+    checks?: { strength_pass?: boolean; [key: string]: unknown };
+    rejection_reasons?: string[];
+    [key: string]: unknown;
+  };
+  strategy_decision?: Record<string, unknown>;
+  signal_components?: Record<string, unknown>;
+};
 
 export type LearningRow = {
   id: string;
@@ -56,16 +81,31 @@ export type AutoTraderLearningWidgetState = {
   rejectedCandidates: number;
   qualifiedCandidates: number;
   collectingCandidates: number;
+  decisions: LearningDecision[];
+  decisionError?: string;
 };
 
 type SourceModel = Pick<AutoTraderModel, 'state$' | 'start' | 'stop'>;
 type GetSummary = () => Promise<LearningSummary[]>;
+type GetDecisions = () => Promise<LearningDecision[]>;
+
+const requestLearningDecisions: GetDecisions = async () => {
+  const response = await insightsFetch(
+    `/signals/auto-trader-audit?since=${Date.now() - 7 * 24 * 60 * 60_000}&limit=10000&stage=decision`,
+  );
+  if (!response.ok)
+    throw new Error(`Decision history request failed (${response.status}).`);
+  const page = (await response.json()) as { items?: LearningDecision[] };
+  return (page.items ?? []).filter((item) => item.stage === 'decision');
+};
 
 export function projectLearningWidgetState(
   source: AutoTraderState,
   summary: LearningSummary[] | null,
   summaryError: string | undefined,
   promotedOnly: boolean,
+  decisions: LearningDecision[] = [],
+  decisionError?: string,
 ): AutoTraderLearningWidgetState {
   const profiles = source.decisionParameters?.strategy_profiles ?? [];
   const rows = profiles.flatMap((profile) =>
@@ -210,6 +250,8 @@ export function projectLearningWidgetState(
     collectingCandidates: rows.filter((row) =>
       row.status.startsWith('Collecting'),
     ).length,
+    decisions,
+    decisionError,
   };
 }
 
@@ -231,18 +273,23 @@ export class AutoTraderLearningWidgetModel {
   private promotedOnly = false;
   private summary: LearningSummary[] | null = null;
   private summaryError?: string;
+  private decisions: LearningDecision[] = [];
+  private decisionError?: string;
   private running = false;
   private readonly source: SourceModel;
   private readonly getSummary: GetSummary;
+  private readonly getDecisions: GetDecisions;
   private readonly refreshIntervalMs: number;
 
   constructor(
     source: SourceModel = new AutoTraderModel(),
     getSummary: GetSummary = requestLearningSummary,
     refreshIntervalMs = 30_000,
+    getDecisions: GetDecisions = requestLearningDecisions,
   ) {
     this.source = source;
     this.getSummary = getSummary;
+    this.getDecisions = getDecisions;
     this.refreshIntervalMs = refreshIntervalMs;
     this.state$ = new BehaviorSubject(
       projectLearningWidgetState(source.state$.value, null, undefined, false),
@@ -257,10 +304,11 @@ export class AutoTraderLearningWidgetModel {
       this.publish(source),
     );
     void this.refreshSummary();
-    this.refreshTimer = setInterval(
-      () => void this.refreshSummary(),
-      this.refreshIntervalMs,
-    );
+    void this.refreshDecisions();
+    this.refreshTimer = setInterval(() => {
+      void this.refreshSummary();
+      void this.refreshDecisions();
+    }, this.refreshIntervalMs);
   }
 
   stop() {
@@ -291,6 +339,19 @@ export class AutoTraderLearningWidgetModel {
     this.publish(this.source.state$.value);
   }
 
+  async refreshDecisions() {
+    try {
+      this.decisions = await this.getDecisions();
+      this.decisionError = undefined;
+    } catch (reason) {
+      this.decisionError =
+        reason instanceof Error
+          ? reason.message
+          : 'Could not load decision history.';
+    }
+    this.publish(this.source.state$.value);
+  }
+
   private publish(source: AutoTraderState) {
     this.state$.next(
       projectLearningWidgetState(
@@ -298,6 +359,8 @@ export class AutoTraderLearningWidgetModel {
         this.summary,
         this.summaryError,
         this.promotedOnly,
+        this.decisions,
+        this.decisionError,
       ),
     );
   }

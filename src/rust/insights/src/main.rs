@@ -9,16 +9,15 @@ mod logging;
 #[path = "feeds/rolling_volatility.rs"]
 mod rolling_volatility;
 use anyhow::Result;
-use axum::{Json, Router, http::StatusCode, routing::get};
+use axum::{Json, Router, extract::State, http::StatusCode, routing::get};
 use bytes::Bytes;
 use dashmap::DashMap;
 use futures_util::StreamExt;
 use insights::{
     daily_summary,
     signals::{
-        ExternalMarketFeatures, LIVE_SIGNAL_SNAPSHOT_INTERVAL_MS, NewsAttribution,
-        NewsHeadlineAttribution, SignalEngine, SignalEvaluation, SignalSnapshot, SignalStore,
-        StoredSignalRecord,
+        ExternalMarketFeatures, NewsAttribution, NewsHeadlineAttribution, SignalEngine,
+        SignalEvaluation, SignalSnapshot, SignalStore, StoredSignalRecord,
     },
 };
 use rsocket_rust::prelude::*;
@@ -73,19 +72,25 @@ struct SignalEventRequest {
     #[serde(flatten)]
     event: SignalFeedEvent,
 }
+#[derive(Clone, Copy)]
+struct CachedMarket {
+    timestamp: u64,
+    best_bid: f64,
+    best_ask: f64,
+    bid_levels: [(f64, f64); 7],
+    ask_levels: [(f64, f64); 7],
+}
+
 struct SignalRuntime {
-    store: SignalStore,
     active_symbols: DashMap<String, AtomicU64>,
     symbol_admission_gate: Mutex<()>,
     max_active_symbols: usize,
     symbol_idle_ttl_ms: u64,
     engines: DashMap<String, Arc<Mutex<SignalEngine>>>,
     research_record_sender: tokio::sync::mpsc::Sender<Vec<StoredSignalRecord>>,
-    signal_push_cache: Arc<DashMap<String, serde_json::Value>>,
-    scout_push_cache: Arc<DashMap<String, serde_json::Value>>,
-    signal_push_notify: Arc<Notify>,
-    market_cache: Arc<DashMap<String, (u64, serde_json::Value)>>,
-    market_push_at: DashMap<String, u64>,
+    signal_event_sender: tokio::sync::mpsc::Sender<SignalEventRequest>,
+    signal_event_shards: Arc<std::sync::RwLock<Vec<tokio::sync::mpsc::Sender<SignalEventRequest>>>>,
+    market_cache: Arc<DashMap<String, CachedMarket>>,
     ui_snapshot_cache: Arc<DashMap<String, serde_json::Value>>,
     ui_snapshot_notify: Arc<Notify>,
     news: watch::Receiver<Arc<NewsFeedSnapshot>>,
@@ -94,6 +99,64 @@ struct SignalRuntime {
     latest_prices: DashMap<String, (u64, f64)>,
     rolling_volatility: DashMap<String, rolling_volatility::RollingVolatility>,
     enriched_market_events: broadcast::Sender<Bytes>,
+    strategy_signal_events: broadcast::Sender<Bytes>,
+    strategy_maintenance_events: broadcast::Sender<Bytes>,
+    legacy_strategy_signal_events: broadcast::Sender<Bytes>,
+    latest_strategy_signal_updates: Arc<DashMap<String, Bytes>>,
+}
+
+const ENRICHED_MARKET_EVENT_QUEUE_CAPACITY: usize = 16_384;
+const STRATEGY_SIGNAL_QUEUE_CAPACITY: usize = 4_096;
+const STRATEGY_MAINTENANCE_QUEUE_CAPACITY: usize = 128;
+const LEGACY_STRATEGY_SIGNAL_QUEUE_CAPACITY: usize = 4_096;
+const SIGNAL_EVENT_INGRESS_QUEUE_CAPACITY: usize = 8_192;
+
+async fn queue_metrics(State(runtime): State<Arc<SignalRuntime>>) -> Json<Vec<serde_json::Value>> {
+    let queues = [
+        (
+            "insights_market_events",
+            runtime.enriched_market_events.len(),
+            ENRICHED_MARKET_EVENT_QUEUE_CAPACITY,
+        ),
+        (
+            "insights_strategy_signals_live",
+            runtime.strategy_signal_events.len(),
+            STRATEGY_SIGNAL_QUEUE_CAPACITY,
+        ),
+        (
+            "insights_strategy_signals_maintenance",
+            runtime.strategy_maintenance_events.len(),
+            STRATEGY_MAINTENANCE_QUEUE_CAPACITY,
+        ),
+        (
+            "insights_strategy_signals_legacy",
+            runtime.legacy_strategy_signal_events.len(),
+            LEGACY_STRATEGY_SIGNAL_QUEUE_CAPACITY,
+        ),
+    ];
+    let mut metrics = queues
+        .into_iter()
+        .map(|(queue, depth, capacity)| {
+            serde_json::json!({"queue": queue, "depth": depth, "capacity": capacity})
+        })
+        .collect::<Vec<_>>();
+    let ingress_capacity = runtime.signal_event_sender.max_capacity();
+    metrics.push(serde_json::json!({
+        "queue": "insights_feed_to_signal_workers",
+        "depth": ingress_capacity.saturating_sub(runtime.signal_event_sender.capacity()),
+        "capacity": ingress_capacity,
+    }));
+    if let Ok(shards) = runtime.signal_event_shards.read() {
+        metrics.extend(shards.iter().enumerate().map(|(index, sender)| {
+            let capacity = sender.max_capacity();
+            serde_json::json!({
+                "queue": format!("insights_signal_event_shard_{index:02}"),
+                "depth": capacity.saturating_sub(sender.capacity()),
+                "capacity": capacity,
+            })
+        }));
+    }
+    Json(metrics)
 }
 
 // FeedHandlers currently selects the top 100 spot instruments. Leave a 2.5x
@@ -241,10 +304,8 @@ async fn admit_runtime_symbol(runtime: &SignalRuntime, symbol: &str) -> Result<(
         .collect::<Vec<_>>();
     for stale_symbol in stale {
         runtime.engines.remove(&stale_symbol);
-        runtime.signal_push_cache.remove(&stale_symbol);
-        runtime.scout_push_cache.remove(&stale_symbol);
+        runtime.latest_strategy_signal_updates.remove(&stale_symbol);
         runtime.market_cache.remove(&stale_symbol);
-        runtime.market_push_at.remove(&stale_symbol);
         runtime.ui_snapshot_cache.remove(&stale_symbol);
         runtime.snapshot_diagnostic_at.remove(&stale_symbol);
         runtime.latest_prices.remove(&stale_symbol);

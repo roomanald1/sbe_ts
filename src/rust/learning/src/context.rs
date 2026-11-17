@@ -103,7 +103,7 @@ pub(super) async fn context_thresholds(
     }))
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct AggregatedContextStats {
     samples: usize,
     positive: usize,
@@ -168,9 +168,14 @@ fn context_score_floor(
     stats: &AggregatedContextStats,
     bands: &[ContextMissedOpportunityBand],
 ) -> f64 {
+    let (short, long) = opportunity_score_thresholds(bands);
+    context_score_floor_with_opportunity_thresholds(stats, short, long)
+}
+
+fn context_learned_score_floor(stats: &AggregatedContextStats) -> f64 {
     const DEFAULT_FLOOR: f64 = 0.30;
     let win_rate = (stats.positive as f64 + 1.0) / (stats.samples as f64 + 2.0);
-    let learned_floor = if stats.samples >= 30 && stats.realized_pnl < 0.0 && win_rate < 0.25 {
+    if stats.samples >= 30 && stats.realized_pnl < 0.0 && win_rate < 0.25 {
         0.60
     } else if stats.samples >= 30 && stats.realized_pnl < 0.0 && win_rate < 0.30 {
         0.50
@@ -178,14 +183,18 @@ fn context_score_floor(
         0.35
     } else {
         DEFAULT_FLOOR
-    };
-    let short_floor = bands
+    }
+}
+
+fn opportunity_score_thresholds(
+    bands: &[ContextMissedOpportunityBand],
+) -> (Option<f64>, Option<f64>) {
+    let short = bands
         .iter()
         .filter(|band| {
             band.gate == "score"
                 && band.horizon_seconds == 300
                 && band.threshold >= 0.20
-                && band.threshold < learned_floor
                 && band.stop_target_sample_count >= 20
                 && band
                     .stop_target_average_net_return_percent
@@ -195,15 +204,13 @@ fn context_score_floor(
                     .is_some_and(|value| value >= 0.55)
         })
         .map(|band| band.threshold)
-        .min_by(f64::total_cmp)
-        .unwrap_or(learned_floor);
-    let long_floor = bands
+        .min_by(f64::total_cmp);
+    let long = bands
         .iter()
         .filter(|band| {
             band.gate == "score"
                 && matches!(band.horizon_seconds, 900 | 3_600)
                 && band.threshold >= 0.20
-                && band.threshold < learned_floor
                 && band.sample_count >= 20
                 && band
                     .average_net_return_percent
@@ -223,9 +230,111 @@ fn context_score_floor(
                     .is_some_and(|value| value > 300.0 && value <= band.horizon_seconds as f64)
         })
         .map(|band| band.threshold)
-        .min_by(f64::total_cmp)
+        .min_by(f64::total_cmp);
+    (short, long)
+}
+
+fn context_score_floor_with_opportunity_thresholds(
+    stats: &AggregatedContextStats,
+    short_threshold: Option<f64>,
+    long_threshold: Option<f64>,
+) -> f64 {
+    let learned_floor = context_learned_score_floor(stats);
+    let short_floor = short_threshold
+        .filter(|threshold| *threshold < learned_floor)
+        .unwrap_or(learned_floor);
+    let long_floor = long_threshold
+        .filter(|threshold| *threshold < learned_floor)
         .unwrap_or(learned_floor);
     short_floor.min(long_floor)
+}
+
+pub(super) fn snapshot_context_thresholds(
+    state: &LearningState,
+    now: u64,
+) -> BTreeMap<String, ContextThresholds> {
+    let bands = state
+        .missed_opportunity_bands
+        .iter()
+        .take(2_000)
+        .cloned()
+        .collect::<Vec<_>>();
+    let mut trade_stats = BTreeMap::<String, AggregatedContextStats>::new();
+    let mut entry_stats = BTreeMap::<String, AggregatedContextStats>::new();
+    let mut scout_stats = BTreeMap::<String, AggregatedContextStats>::new();
+    for (key, stored) in &state.context_learning {
+        let Some(context_key) = key.strip_suffix(":trade") else {
+            continue;
+        };
+        let (context_key, scout) = context_key
+            .strip_prefix("scout:")
+            .map_or((context_key, false), |context| (context, true));
+        let parts = context_key.split(':').collect::<Vec<_>>();
+        if parts.len() < 3 {
+            continue;
+        }
+        let mut decayed = stored.clone();
+        if decayed.updated_at_ms != 0 {
+            let elapsed = now.saturating_sub(decayed.updated_at_ms);
+            let weight = 0.5_f64.powf(elapsed as f64 / (7.0 * 24.0 * 60.0 * 60.0 * 1_000.0));
+            decayed.samples = (decayed.samples as f64 * weight).round() as usize;
+            decayed.positive =
+                ((decayed.positive as f64 * weight).round() as usize).min(decayed.samples);
+            decayed.realized_pnl *= weight;
+        }
+        for part_count in 3..=parts.len() {
+            let context = parts[..part_count].join(":");
+            add_context_stats(entry_stats.entry(context.clone()).or_default(), &decayed);
+            if scout {
+                add_context_stats(scout_stats.entry(context).or_default(), &decayed);
+            } else {
+                add_context_stats(trade_stats.entry(context).or_default(), &decayed);
+            }
+        }
+    }
+    let mut contexts = entry_stats
+        .keys()
+        .cloned()
+        .collect::<std::collections::BTreeSet<_>>();
+    contexts.extend(
+        bands
+            .iter()
+            .filter_map(|band| band.market_context.clone())
+            .filter(|context| !context.is_empty()),
+    );
+    let (short_band_threshold, long_band_threshold) = opportunity_score_thresholds(&bands);
+    contexts
+        .into_iter()
+        .map(|context| {
+            let trade = trade_stats.get(&context).cloned().unwrap_or_default();
+            let entry = entry_stats.get(&context).cloned().unwrap_or_default();
+            let scout = scout_stats.get(&context).cloned().unwrap_or_default();
+            (
+                context.clone(),
+                ContextThresholds {
+                    strength_floor: context_strength_floor(&entry),
+                    exploration_score_floor: context_score_floor_with_opportunity_thresholds(
+                        &entry,
+                        short_band_threshold,
+                        long_band_threshold,
+                    ),
+                    learning_samples: trade.samples,
+                    positive_rate: (trade.samples > 0)
+                        .then_some(trade.positive as f64 / trade.samples as f64),
+                    scout_outcome_samples: scout.samples,
+                    scout_outcome_positive_rate: (scout.samples > 0)
+                        .then_some(scout.positive as f64 / scout.samples as f64),
+                    scout_outcome_realized_pnl: scout.realized_pnl,
+                },
+            )
+        })
+        .collect()
+}
+
+fn add_context_stats(total: &mut AggregatedContextStats, stats: &ContextLearningStat) {
+    total.samples = total.samples.saturating_add(stats.samples);
+    total.positive = total.positive.saturating_add(stats.positive);
+    total.realized_pnl += stats.realized_pnl;
 }
 
 #[cfg(test)]
@@ -239,6 +348,7 @@ mod tests {
                 "learning-context-{path}-{}.sqlite",
                 std::process::id()
             )),
+            state_updates: std::sync::Arc::new(tokio::sync::Notify::new()),
         }
     }
 

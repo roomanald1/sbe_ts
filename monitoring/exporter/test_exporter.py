@@ -8,7 +8,7 @@ from rsocket.exceptions import RSocketTransportError
 
 class RSocketExporterTests(unittest.TestCase):
     def test_worker_memory_limit_bytes_supports_compose_units(self):
-        with patch.dict("os.environ", {"STRATEGY_X_LIVE_MEMORY_LIMIT": "256M", "STRATEGY_X_SCOUT_MEMORY_LIMIT": "1.5G"}):
+        with patch.dict("os.environ", {"STRATEGY_LIVE_MEMORY_LIMIT": "256M", "STRATEGY_SCOUT_MEMORY_LIMIT": "1.5G"}):
             self.assertEqual(exporter.worker_memory_limit_bytes("live"), 256 * 1024 * 1024)
             self.assertEqual(exporter.worker_memory_limit_bytes("scout"), int(1.5 * 1024**3))
 
@@ -16,7 +16,7 @@ class RSocketExporterTests(unittest.TestCase):
         class Response:
             status = 200
 
-            def __init__(self, body=b"# TYPE worker counter\nworker{role=\"live\",strategy=\"live-momentum\"} 1\n"):
+            def __init__(self, body=b"# TYPE worker counter\nworker{role=\"live\",strategy=\"live-momentum\"} 1\n# TYPE app_strategy_worker_insight_route_duration_seconds histogram\napp_strategy_worker_insight_route_duration_seconds_bucket{role=\"scout\",strategy=\"live-momentum\",le=\"0.005\"} 1\n"):
                 self.body = body
 
             def __enter__(self):
@@ -38,11 +38,13 @@ class RSocketExporterTests(unittest.TestCase):
         with patch.object(exporter, "urlopen", side_effect=open_url):
             exporter.strategy_worker_metrics(output)
 
-        self.assertEqual(len(exporter.STRATEGY_X_WORKER_STRATEGIES) * 2, len(requested))
-        self.assertTrue(any("strategy-x-live-momentum:10202/metrics" in url for url, _ in requested))
-        self.assertTrue(any("strategy-x-scout-live-momentum:10202/metrics" in url for url, _ in requested))
+        self.assertEqual(len(exporter.STRATEGY_WORKER_STRATEGIES) * 2, len(requested))
+        self.assertTrue(all(timeout == 8 for _, timeout in requested))
+        self.assertTrue(any("strategy-live-momentum:10202/metrics" in url for url, _ in requested))
+        self.assertTrue(any("strategy-scout-live-momentum:10202/metrics" in url for url, _ in requested))
         self.assertTrue(any("app_strategy_worker_up" in line and 'role="scout"' in line for line in output))
         self.assertTrue(any("app_strategy_worker_memory_limit_bytes" in line and 'role="live"' in line for line in output))
+        self.assertTrue(any("app_strategy_worker_insight_route_duration_seconds_bucket" in line for line in output))
         self.assertFalse(any("symbol=" in line for line in output))
 
     def test_position_management_route_returns_json_body(self):

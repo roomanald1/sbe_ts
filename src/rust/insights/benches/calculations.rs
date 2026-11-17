@@ -1,4 +1,7 @@
-use std::{hint::black_box, time::Instant};
+#[path = "common/mod.rs"]
+mod support;
+
+use std::hint::black_box;
 
 use insights::signals::SignalEngine;
 
@@ -30,83 +33,102 @@ fn seeded_engine() -> SignalEngine {
     engine
 }
 
-fn report(name: &str, started: Instant, iterations: usize) {
-    println!(
-        "{name}: {:.1} ns/calculation",
-        started.elapsed().as_nanos() as f64 / iterations as f64
-    );
-}
-
-fn snapshot_calculation_benchmark() {
-    const ITERATIONS: usize = 100_000;
-    let mut engine = seeded_engine();
-    let started = Instant::now();
-    for _ in 0..ITERATIONS {
-        black_box(engine.snapshot_with_reasons("BTC-USDT", black_box(360_000), false));
-    }
-    report("live insight snapshot", started, ITERATIONS);
-}
-
-fn snapshot_with_explanations_benchmark() {
-    const ITERATIONS: usize = 100_000;
-    let mut engine = seeded_engine();
-    let started = Instant::now();
-    for _ in 0..ITERATIONS {
-        black_box(engine.snapshot_with_reasons("BTC-USDT", black_box(360_000), true));
-    }
-    report("live snapshot including explanations", started, ITERATIONS);
-}
-
-fn research_feature_calculation_benchmark() {
-    const ITERATIONS: usize = 20_000;
-    let engine = seeded_engine();
-    let started = Instant::now();
-    for _ in 0..ITERATIONS {
-        black_box(engine.research_features(
-            "BTC-USDT",
-            black_box(359_000),
-            (Some(0.2), Some(0.5)),
-            (Some(-0.1), Some(0.3)),
+fn pending_scout_engine(tracked_scouts: usize) -> SignalEngine {
+    let mut engine = SignalEngine::default();
+    for index in 0..tracked_scouts {
+        assert!(engine.track_scout(
+            format!("pending-{index}"),
+            "BTC-USDT".to_owned(),
+            "benchmark".to_owned(),
+            0,
+            "bullish".to_owned(),
+            100.0,
+            0.5,
+            1.0,
+            0.5,
+            0.25,
+            0.1,
+            None,
+            None,
+            None,
+            None,
         ));
     }
-    report("research feature extraction", started, ITERATIONS);
-}
-
-fn price_return_calculation_benchmark() {
-    const ITERATIONS: usize = 100_000;
-    let engine = seeded_engine();
-    let started = Instant::now();
-    for _ in 0..ITERATIONS {
-        black_box(engine.return_context(black_box(359_000)));
-    }
-    report("price return context", started, ITERATIONS);
-}
-
-fn input_diagnostic_calculation_benchmark() {
-    const ITERATIONS: usize = 20_000;
-    let engine = seeded_engine();
-    let started = Instant::now();
-    for _ in 0..ITERATIONS {
-        black_box(engine.input_diagnostic(black_box(359_000)));
-    }
-    report("market input diagnostics", started, ITERATIONS);
-}
-
-fn book_snapshot_calculation_benchmark() {
-    const ITERATIONS: usize = 100_000;
-    let engine = seeded_engine();
-    let started = Instant::now();
-    for _ in 0..ITERATIONS {
-        black_box(engine.book_snapshot("BTC-USDT", black_box(359_000)));
-    }
-    report("book snapshot", started, ITERATIONS);
+    engine
 }
 
 fn main() {
-    snapshot_calculation_benchmark();
-    snapshot_with_explanations_benchmark();
-    research_feature_calculation_benchmark();
-    price_return_calculation_benchmark();
-    input_diagnostic_calculation_benchmark();
-    book_snapshot_calculation_benchmark();
+    support::measure(
+        "live insight snapshot",
+        100_000,
+        seeded_engine,
+        |engine, count| {
+            for _ in 0..count {
+                black_box(engine.snapshot_with_reasons("BTC-USDT", black_box(360_000), false));
+            }
+        },
+    );
+    support::measure(
+        "live snapshot including explanations",
+        100_000,
+        seeded_engine,
+        |engine, count| {
+            for _ in 0..count {
+                black_box(engine.snapshot_with_reasons("BTC-USDT", black_box(360_000), true));
+            }
+        },
+    );
+    support::measure(
+        "research feature extraction",
+        20_000,
+        seeded_engine,
+        |engine, count| {
+            for _ in 0..count {
+                black_box(engine.research_features(
+                    "BTC-USDT",
+                    black_box(359_000),
+                    (Some(0.2), Some(0.5)),
+                    (Some(-0.1), Some(0.3)),
+                ));
+            }
+        },
+    );
+    support::measure(
+        "price return context",
+        100_000,
+        seeded_engine,
+        |engine, count| {
+            for _ in 0..count {
+                black_box(engine.return_context(black_box(359_000)));
+            }
+        },
+    );
+    support::measure(
+        "market input diagnostics",
+        20_000,
+        seeded_engine,
+        |engine, count| {
+            for _ in 0..count {
+                black_box(engine.input_diagnostic(black_box(359_000)));
+            }
+        },
+    );
+    support::measure("book snapshot", 100_000, seeded_engine, |engine, count| {
+        for _ in 0..count {
+            black_box(engine.book_snapshot("BTC-USDT", black_box(359_000)));
+        }
+    });
+    for tracked_scouts in [0, 20, 40, 80, 160] {
+        let pending_outcomes = tracked_scouts * 5;
+        support::measure(
+            &format!("price update with {pending_outcomes} pending scout outcomes"),
+            5_000,
+            move || pending_scout_engine(tracked_scouts),
+            |engine, count| {
+                for timestamp in 1..=count as u64 {
+                    black_box(engine.on_price(timestamp, 100.0, 0.1));
+                }
+            },
+        );
+    }
 }

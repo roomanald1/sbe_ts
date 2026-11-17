@@ -17,9 +17,7 @@ use strategy::StrategyDecision;
 #[cfg(test)]
 pub(crate) use strategy::StrategyParameterScoutVariant;
 pub use strategy::benchmark_strategy_evaluation;
-pub(crate) use strategy::daily::{
-    DailyStrategySignalBatch, DailyStrategySnapshot, StrategyDiagnostic, parse_scout_combination,
-};
+pub(crate) use strategy::daily::{StrategyDiagnostic, parse_scout_combination};
 #[cfg(test)]
 pub(crate) use strategy::scout_parameter_specs;
 #[cfg(test)]
@@ -45,13 +43,13 @@ include!("auto_trader/profile_settings_adapter.rs");
 include!("auto_trader/api_types.rs");
 include!("auto_trader/dated_carry.rs");
 include!("auto_trader/state.rs");
-include!("auto_trader/daily_strategy_route.rs");
 include!("auto_trader/feedback/legacy_learning_compat.rs");
 include!("auto_trader/cycle_types.rs");
 include!("auto_trader/api/http_api.rs");
 include!("auto_trader/workers/mod.rs");
 include!("auto_trader/entry/mod.rs");
 include!("auto_trader/exits/mod.rs");
+include!("auto_trader/hedging/portfolio_hedge_candidates.rs");
 include!("auto_trader/hedging/mod.rs");
 include!("auto_trader/fills_and_audit.rs");
 include!("auto_trader/execution/mod.rs");
@@ -119,25 +117,25 @@ mod strategy_cleanup_integration_tests {
         let path =
             std::env::temp_dir().join(format!("auto-trader-cleanup-{}.json", std::process::id()));
         AutoTraderState {
-            latest_daily_strategy_snapshot: Arc::new(Mutex::new(None)),
             latest_live_strategy_signals: Arc::new(Mutex::new(BTreeMap::new())),
             strategy_diagnostic: Arc::new(std::sync::Mutex::new(Vec::new())),
             latest_strategy_blockers: Arc::new(std::sync::Mutex::new(BTreeMap::new())),
+            latest_worker_decisions: Arc::new(Mutex::new(BTreeMap::new())),
+            seen_worker_decision_events: Arc::new(Mutex::new(BTreeMap::new())),
             enabled: Arc::new(AtomicBool::new(true)),
             settings: Arc::new(Mutex::new(settings)),
             settings_persist_notify: Arc::new(Notify::new()),
             price_path_last_checkpoint_requested_at: Arc::new(std::sync::Mutex::new(None)),
             state_updates,
+            live_profile_updates: tokio::sync::broadcast::channel(1).0,
             settings_persist_timings_ms: Arc::new(std::sync::Mutex::new(BTreeMap::new())),
             latest_missed_opportunity_bands: Arc::new(Mutex::new(Arc::new(Vec::new()))),
             latest_execution_parameters: Arc::new(Mutex::new(None)),
-            learning_response_cache: Arc::new(Mutex::new(LearningResponseCache::default())),
             cycle_lock: Arc::new(Mutex::new(())),
             pending_daily_signals: Arc::new(Mutex::new(BTreeMap::new())),
             daily_signal_notify: Arc::new(Notify::new()),
             pending_live_signals: Arc::new(Mutex::new(BTreeMap::new())),
             live_signal_notify: Arc::new(Notify::new()),
-            signal_book_prewarms: Arc::new(Mutex::new(BTreeMap::new())),
             audit_tx,
             execution_audit_tx,
             audit_health: Arc::new(AtomicU64::new(3)),
@@ -290,6 +288,81 @@ mod strategy_cleanup_integration_tests {
             deleted.iter().collect::<BTreeSet<_>>().len(),
             deleted.len(),
             "a strategy barrier was canceled more than once"
+        );
+    }
+
+    #[tokio::test]
+    async fn typed_live_decision_socket_uses_service_owned_state_and_push_profiles() {
+        let strategy = Strategy::LiveMomentum;
+        let parameters = strategy
+            .parameter_specs()
+            .into_iter()
+            .map(|spec| (spec.key.as_str().to_owned(), spec.default))
+            .collect::<BTreeMap<_, _>>();
+        let profile = strategy::LiveStrategyProfile {
+            profile_id: strategy::profile_id("BTC-USDT", strategy.as_str(), &parameters),
+            profile_symbol: "BTC-USDT".into(),
+            version: 7,
+            parameters: parameters.clone(),
+            walk_forward_evidence: None,
+        };
+        let mut settings = Settings::default();
+        settings.strategies = vec![strategy];
+        settings
+            .active_live_strategy_profiles
+            .insert(strategy.as_str().to_owned(), vec![profile.clone()]);
+        let state = test_state(settings);
+        let socket_api = AutoTraderSocketApi {
+            state: state.clone(),
+        };
+
+        let profile_sets = socket_api.live_profile_sets().await;
+        let profile_set = profile_sets
+            .iter()
+            .find(|set| set.strategy == strategy)
+            .expect("AutoTrader publishes a set for each live worker");
+        assert!(profile_set.enabled);
+        assert_eq!(profile_set.profiles.len(), 1);
+        assert_eq!(profile_set.profiles[0].profile_id, profile.profile_id);
+
+        let timestamp = current_time_ms();
+        let mut signal = strategy::StrategyMarketSignal::default();
+        signal.symbol = "BTC-USDT".into();
+        signal.strategy = Some(strategy.as_str().into());
+        signal.timestamp = timestamp;
+        signal.strategy_decision = Some(serde_json::json!({
+            "strategy_parameters": parameters,
+            "learning_profile_id": profile.profile_id,
+            "learning_profile_symbol": profile.profile_symbol,
+            "learning_profile_version": profile.version,
+        }));
+        let status = socket_api
+            .report_decision(strategy::LiveStrategyDecisionReport {
+                contract_version: strategy::LIVE_EVALUATION_CONTRACT_VERSION,
+                event_id: "socket-decision-test".into(),
+                strategy,
+                symbol: "BTC-USDT".into(),
+                profile_id: profile.profile_id.clone(),
+                profile_version: profile.version,
+                parameter_hash: profile.profile_id,
+                event_time_ms: timestamp,
+                decision: strategy::LiveStrategyDecision::Reject,
+                reason: Some("test rejection".into()),
+                walk_forward_evidence: None,
+                signal,
+                dated_carry_scan: None,
+                dated_carry_candidate: None,
+                dated_carry_settlement: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(status, axum::http::StatusCode::ACCEPTED.as_u16());
+        assert!(
+            state
+                .latest_worker_decisions
+                .lock()
+                .await
+                .contains_key(&("BTC-USDT".into(), strategy.as_str().into()))
         );
     }
 }

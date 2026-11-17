@@ -19,6 +19,7 @@ const BufferDataEncoder: Encoder<Buffer> = {
 export type InsightsSocket = Awaited<ReturnType<typeof connectInsightsRSocket>>;
 
 let sharedSocket: Promise<InsightsSocket> | undefined;
+let socketGeneration = 0;
 let requestInsightsRpc = performInsightsRpc;
 
 export function setInsightsRpcRequesterForTests(
@@ -29,10 +30,32 @@ export function setInsightsRpcRequesterForTests(
 
 function getSocket() {
   if (!sharedSocket) {
-    sharedSocket = connectInsightsRSocket().catch((error) => {
-      sharedSocket = undefined;
-      throw error;
-    });
+    const generation = ++socketGeneration;
+    sharedSocket = connectInsightsRSocket()
+      .then((client) => {
+        client.connectionStatus().subscribe({
+          onSubscribe: (subscription) =>
+            subscription.request(Number.MAX_SAFE_INTEGER),
+          onNext: (status) => {
+            if (
+              (status.kind === 'CLOSED' || status.kind === 'ERROR') &&
+              socketGeneration === generation
+            ) {
+              sharedSocket = undefined;
+              client.close();
+            }
+          },
+          onError: () => {
+            if (socketGeneration === generation) sharedSocket = undefined;
+            client.close();
+          },
+        });
+        return client;
+      })
+      .catch((error) => {
+        if (socketGeneration === generation) sharedSocket = undefined;
+        throw error;
+      });
   }
   return sharedSocket;
 }
@@ -69,23 +92,56 @@ async function performInsightsRpc(
   path: string,
   body?: unknown,
 ): Promise<Response> {
-  const client = await getSocket();
-  const reply = await new Promise<Uint8Array>((resolve, reject) => {
-    client
-      .requestResponse({
-        data: Buffer.from(
-          JSON.stringify({
-            method,
-            path,
-            ...(body === undefined ? {} : { body }),
-          }),
-        ),
-      })
-      .subscribe({
-        onComplete: (payload) => resolve(payload.data as Uint8Array),
-        onError: reject,
-      });
-  });
+  const socket = getSocket();
+  const client = await socket;
+  let reply: Uint8Array;
+  try {
+    reply = await new Promise<Uint8Array>((resolve, reject) => {
+      let settled = false;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      let cancelRequest: (() => void) | undefined;
+      client
+        .requestResponse({
+          data: Buffer.from(
+            JSON.stringify({
+              method,
+              path,
+              ...(body === undefined ? {} : { body }),
+            }),
+          ),
+        })
+        .subscribe({
+          onSubscribe: (subscription) => {
+            cancelRequest = subscription;
+            if (settled) subscription();
+          },
+          onComplete: (payload) => {
+            if (settled) return;
+            settled = true;
+            if (timer !== undefined) clearTimeout(timer);
+            cancelRequest = undefined;
+            resolve(payload.data as Uint8Array);
+          },
+          onError: (error) => {
+            if (settled) return;
+            settled = true;
+            if (timer !== undefined) clearTimeout(timer);
+            cancelRequest = undefined;
+            reject(error);
+          },
+        });
+      timer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        cancelRequest?.();
+        reject(new Error(`Insights ${method} ${path} timed out after 5000 ms`));
+      }, 5_000);
+    });
+  } catch (error) {
+    if (sharedSocket === socket) sharedSocket = undefined;
+    client.close();
+    throw error;
+  }
   const response = JSON.parse(Buffer.from(reply).toString()) as {
     status: number;
     body: unknown;
@@ -107,7 +163,14 @@ export function insightsRpc(
   path: string,
   body?: unknown,
 ): Promise<Response> {
-  return requestInsightsRpc(method, path, body);
+  const request = requestInsightsRpc;
+  return request(method, path, body).catch(async (error: unknown) => {
+    if (method.toUpperCase() !== 'GET' || request !== performInsightsRpc) {
+      throw error;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    return request(method, path, body);
+  });
 }
 
 export async function insightsRequestStream(
@@ -119,8 +182,11 @@ export async function insightsRequestStream(
     | { cancel: () => void; request: (n: number) => void }
     | undefined;
   let cancelled = false;
+  let connectedClient: InsightsSocket | undefined;
+  const socket = getSocket();
   try {
-    const client = await getSocket();
+    const client = await socket;
+    connectedClient = client;
     if (cancelled) return { cancel: () => undefined };
     client
       .requestStream({ data: Buffer.from(JSON.stringify({ route })) })
@@ -135,12 +201,19 @@ export async function insightsRequestStream(
         },
         onNext: (payload) => onData(payload.data as Uint8Array),
         onError: (error) => {
-          sharedSocket = undefined;
+          // Invalidate this socket so the next attempt creates a new client.
+          if (sharedSocket === socket) sharedSocket = undefined;
+          client.close();
           onError(error);
         },
-        onComplete: () => onError(new Error('Insights stream completed')),
+        onComplete: () => {
+          if (sharedSocket === socket) sharedSocket = undefined;
+          client.close();
+          onError(new Error('Insights stream completed'));
+        },
       });
   } catch (error) {
+    connectedClient?.close();
     onError(error instanceof Error ? error : new Error(String(error)));
   }
   return {

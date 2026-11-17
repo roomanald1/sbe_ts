@@ -26,6 +26,43 @@ fn portfolio_reduction_quantity(settings: &Settings, symbol: &str, strategy: &st
         .unwrap_or(0.0)
 }
 
+struct SignalSettingsSnapshot {
+    settings: Settings,
+    quote_rate: f64,
+    settings_lock_wait_ms: f64,
+}
+
+async fn snapshot_signal_settings(
+    state: &AutoTraderState,
+    signal: &Signal,
+    now_ms: u64,
+) -> Result<SignalSettingsSnapshot, String> {
+    let signal_key = signal.symbol.as_str();
+    let settings_lock_started = Instant::now();
+    let mut settings = state.settings.lock().await;
+    let settings_lock_wait = settings_lock_started.elapsed().as_secs_f64() * 1_000.0;
+    record_cycle_lock_scope(state, "signal_settings_lock_wait", settings_lock_started.elapsed());
+    reset_daily_budget(&mut settings);
+    let quote_rate = quote_usd_rate(&settings, signal_key);
+    let strategy_key = signal.strategy.as_deref().unwrap_or("unattributed");
+    if let Some(reason) =
+        signal_position_block_reason(&settings, signal, signal_key, strategy_key, now_ms)
+    {
+        return Err(reason);
+    }
+    if let Some(strategy) = signal.strategy.as_deref().and_then(Strategy::from_name) {
+        let profile = learned_strategy_parameter_profile(&settings, signal_key, strategy);
+        queue_strategy_profile_registration(&mut settings, signal_key, strategy, &profile);
+    }
+    let snapshot = settings.clone();
+    drop(settings);
+    Ok(SignalSettingsSnapshot {
+        settings: snapshot,
+        quote_rate,
+        settings_lock_wait_ms: settings_lock_wait,
+    })
+}
+
 async fn submit_selected_signal(
     request: SelectedSignalOrderRequest<'_>,
 ) -> Result<CycleResult, (StatusCode, String)> {
@@ -53,39 +90,21 @@ async fn submit_selected_signal(
         market_cache_lookup_ms,
         market_http_fetch_ms,
     } = request;
-    let cycle_guard = acquire_cycle_lock(state, "signal").await;
-    let snapshot_started = Instant::now();
+    // The settings mutex serializes the gate/profile update and snapshot below.
+    // Don't also hold the shared cycle lock while scanning and cloning Settings:
+    // order reservation rechecks the gate under the settings mutex before writing.
     let decision_id = signal_decision_id(signal);
-    let signal_key = signal.symbol.clone();
     let now_ms = now.saturating_mul(1000);
-    let settings_lock_started = Instant::now();
-    let mut settings = state.settings.lock().await;
-    let settings_lock_wait_ms = settings_lock_started.elapsed().as_secs_f64() * 1_000.0;
-    record_cycle_lock_scope(
-        state,
-        "signal_settings_lock_wait",
-        settings_lock_started.elapsed(),
-    );
-    reset_daily_budget(&mut settings);
-    let quote_rate = quote_usd_rate(&settings, &signal.symbol);
+    let SignalSettingsSnapshot {
+        settings: settings_snapshot,
+        quote_rate,
+        settings_lock_wait_ms,
+    } = match snapshot_signal_settings(state, signal, now_ms).await {
+        Ok(snapshot) => snapshot,
+        Err(reason) => return Ok(skipped_for_signal(signal, &reason)),
+    };
+    let signal_key = signal.symbol.clone();
     let strategy_key = signal.strategy.as_deref().unwrap_or("unattributed");
-    if let Some(reason) =
-        signal_position_block_reason(&settings, signal, &signal_key, strategy_key, now_ms)
-    {
-        return Ok(skipped_for_signal(signal, &reason));
-    }
-    if let Some(strategy) = signal.strategy.as_deref().and_then(Strategy::from_name) {
-        let profile = learned_strategy_parameter_profile(&settings, &signal.symbol, strategy);
-        queue_strategy_profile_registration(&mut settings, &signal.symbol, strategy, &profile);
-    }
-    let settings_snapshot = settings.clone();
-    drop(settings);
-    drop(cycle_guard);
-    record_cycle_lock_scope(
-        state,
-        "signal_snapshot_and_gate",
-        snapshot_started.elapsed(),
-    );
     let execution_plan_started = Instant::now();
     let plan = match prepare_signal_execution_plan(
         state,
@@ -295,7 +314,14 @@ async fn submit_selected_signal(
         let order_reservation_started = Instant::now();
         reset_daily_budget(&mut settings);
         let strategy = signal.strategy.as_deref().and_then(Strategy::from_name);
-        if learned_pause_blocks_signal(&settings, strategy, reducing_rebalance, &signal.direction) {
+        if learned_pause_blocks_signal(
+            &settings,
+            strategy,
+            signal,
+            reducing_rebalance,
+            &signal.direction,
+            now,
+        ) {
             return Ok(skipped_for_signal(signal, "Strategy entry paused by negative net trade evidence"));
         }
         if let Some(reason) =

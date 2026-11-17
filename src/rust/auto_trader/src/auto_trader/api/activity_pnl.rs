@@ -11,7 +11,7 @@ async fn calculate_auto_unrealized_pnl(
         let mut by_quote = BTreeMap::<String, f64>::new();
         let mut complete = true;
         for (symbol, position) in auto_positions {
-            let Ok(inputs) = crate::service_rpc::position_get(&format!(
+            let Ok(inputs) = crate::service_rpc::execution_get(&format!(
                 "/internal/insights-inputs?symbol={symbol}"
             )).await else {
                 complete = false;

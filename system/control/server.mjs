@@ -8,12 +8,12 @@ import { promisify } from 'node:util';
 const exec = promisify(execFile);
 const root = process.env.WORKSPACE_ROOT || '/workspace';
 const homepageDist = resolve(root, 'src/typescript/workspace/apps/homepage/dist');
-const services = ['feed-handlers','binance-feed','position-management','execution','insights','insights-maintenance','auto-trader','news-sentiment','learning','web'];
+const services = ['feed-handlers','binance-feed','position-management','paper-exchange','insights','insights-maintenance','auto-trader','news-sentiment','learning','web'];
 const send = (res, code, value, type='application/json') => { res.writeHead(code, {'content-type': `${type}; charset=utf-8`}); res.end(type.startsWith('application/json') ? JSON.stringify(value) : value); };
 const contentType = (file) => ({ '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml', '.png': 'image/png', '.ico': 'image/x-icon' }[file.slice(file.lastIndexOf('.'))] || 'application/octet-stream');
 const compose = async (project, file, args) => {
   const composeArgs = [...args];
-  const targetedScoutService = composeArgs.some((arg) => arg.startsWith('strategy-x-scout-'));
+  const targetedScoutService = composeArgs.some((arg) => arg.startsWith('strategy-scout-'));
   if (project === 'sbe-system' && (process.env.SCOUT_WORKERS_ENABLED === 'true' || targetedScoutService) && !composeArgs.includes('--profile')) composeArgs.unshift('--profile', 'scout-workers');
   const { stdout, stderr } = await exec('docker', ['compose','-p',project,'-f',file,'--progress=quiet',...composeArgs], {
     cwd:root,
@@ -23,7 +23,7 @@ const compose = async (project, file, args) => {
   });
   return stdout || stderr || 'Done';
 };
-const getStrategyServices = async () => (await compose('sbe-system','system/compose.yml',['--profile','scout-workers','config','--services'])).split('\n').filter((service) => service.startsWith('strategy-x-live-') || service.startsWith('strategy-x-scout-'));
+const getStrategyServices = async () => (await compose('sbe-system','system/compose.yml',['--profile','scout-workers','config','--services'])).split('\n').filter((service) => service.startsWith('strategy-live-') || service.startsWith('strategy-scout-'));
 http.createServer(async (req,res) => {
   try {
     const url = new URL(req.url, 'http://localhost');
@@ -63,7 +63,7 @@ http.createServer(async (req,res) => {
       else if (action === 'start') {
         args = ['up','-d',...(project === 'system' && !service ? ['--remove-orphans'] : []),...(service ? [service] : [])];
         if (project === 'system' && service === 'learning' && process.env.SCOUT_WORKERS_ENABLED !== 'false') {
-          const scoutWorkers = (await getStrategyServices()).filter((name) => name.startsWith('strategy-x-scout-'));
+          const scoutWorkers = (await getStrategyServices()).filter((name) => name.startsWith('strategy-scout-'));
           args.push(...scoutWorkers);
         }
       }
@@ -157,7 +157,7 @@ async function runLivenessChecks() {
     try { checks.push({ name, ok: true, detail: await fn() }); }
     catch (error) { checks.push({ name, ok: false, detail: error.message }); }
   };
-  for (const [name, port] of [['Feed handlers',3001],['Binance feed',3012],['Execution',3003],['Insights',3004],['News sentiment',3006],['Learning',3010],['Position management',3002],['AutoTrader',3005]]) {
+  for (const [name, port] of [['Feed handlers',3001],['Binance feed',3012],['Paper Exchange',3003],['Insights',3004],['News sentiment',3006],['Learning',3010],['Position management',3002],['AutoTrader',3005]]) {
     await check(`${name} health`, async () => {
       const result = await get(port, '/health');
       if (result !== 'ok' && result?.status !== 'ok') throw new Error('Unexpected health response');
@@ -172,9 +172,9 @@ async function runLivenessChecks() {
     });
     const running = new Set(containers.filter((container) => container.State === 'running').map((container) => container.Service));
     const strategyServices = await getStrategyServices();
-    const required = ['feed-handlers','binance-feed','position-management','execution','insights','insights-maintenance','auto-trader','news-sentiment','learning','web', ...strategyServices.filter((service) => service.startsWith('strategy-x-live-'))];
+    const required = ['feed-handlers','binance-feed','position-management','paper-exchange','insights','insights-maintenance','auto-trader','news-sentiment','learning','web', ...strategyServices.filter((service) => service.startsWith('strategy-live-'))];
     if (process.env.SCOUT_WORKERS_ENABLED === 'true') {
-      required.push(...strategyServices.filter((service) => service.startsWith('strategy-x-scout-')));
+      required.push(...strategyServices.filter((service) => service.startsWith('strategy-scout-')));
     }
     const missing = required.filter((service) => !running.has(service));
     if (missing.length) throw new Error(`Not running: ${missing.join(', ')}`);

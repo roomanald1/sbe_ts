@@ -274,6 +274,7 @@ fn signal_audit_payload(
         "direction": signal.direction,
         "score": signal.score,
         "strength": signal.strength,
+        "strength_size_multiplier": signal_strength_size_multiplier(signal.strength),
         "ranging_probability": signal.ranging_probability,
         "market_context": market_context(signal),
         // Keep execution audit strategy aligned with the entry order fallback.
@@ -310,8 +311,14 @@ fn queue_auto_trader_audit(state: &AutoTraderState, payload: serde_json::Value) 
         &state.audit_tx
     };
     match queue.enqueue(payload) {
-        AuditEnqueueResult::Queued | AuditEnqueueResult::Coalesced => {}
-        AuditEnqueueResult::EvictedOld | AuditEnqueueResult::Dropped => {
+        // Decision rejections/skips are explicitly replaceable under pressure.
+        // Evicting one is an accounted loss, but it must not pause trading:
+        // critical decisions and all execution records remain queued. The
+        // execution queue never evicts; an admission failure is always fatal.
+        AuditEnqueueResult::Queued
+        | AuditEnqueueResult::Coalesced
+        | AuditEnqueueResult::EvictedOld => {}
+        AuditEnqueueResult::Dropped => {
             let bit = if is_execution { 2 } else { 1 };
             state.audit_health.fetch_and(!bit, Ordering::Relaxed);
             if !state.audit_failure_latched.swap(true, Ordering::Relaxed) {

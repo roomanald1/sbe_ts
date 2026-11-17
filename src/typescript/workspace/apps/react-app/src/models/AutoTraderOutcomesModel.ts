@@ -8,13 +8,14 @@ import {
 } from '../position_stream';
 import {
   currentAutoTraderSnapshot,
+  isAutoTraderSnapshotFresh,
   subscribeAutoTraderStream,
   waitForAutoTraderSnapshot,
   type AutoTraderUiSnapshot,
 } from '../auto_trader_stream';
 import { sharedGet } from '../shared_get';
 import { insightsFetch } from '../insights_rsocket';
-import { executionFetch } from '../execution_api';
+import { paperExchangeFetch } from '../paper_exchange_api';
 import { autoTraderRpc } from '../auto_trader_rsocket';
 
 export type AutoTraderOutcome = {
@@ -241,6 +242,7 @@ type LedgerHistoryCache = {
 type StrategyLearning = {
   strategy: string;
   learning_multiplier: number;
+  learning_feedback_multiplier?: number;
   learning_samples: number;
   positive_rate?: number | null;
   realized_pnl?: number;
@@ -262,7 +264,29 @@ export type LearningSummary = {
   paired_scout_samples?: number;
   paired_scout_positive_rate?: number;
   average_paired_scout_lift_percent?: number;
+  effective_size_multiplier?: number;
+  feedback_multiplier?: number;
 };
+export type LearningSummaryStatus = 'available' | 'empty' | 'unavailable';
+
+export function parseLearningSummary(payload: unknown): {
+  rows: LearningSummary[];
+  status: LearningSummaryStatus;
+} {
+  if (
+    !Array.isArray(payload) ||
+    payload.some(
+      (row) =>
+        typeof row !== 'object' ||
+        row === null ||
+        typeof row.strategy !== 'string',
+    )
+  ) {
+    return { rows: [], status: 'unavailable' };
+  }
+  const rows = payload as LearningSummary[];
+  return { rows, status: rows.length ? 'available' : 'empty' };
+}
 type StrategySymbolDiagnostic = {
   symbol: string;
   close: number;
@@ -513,6 +537,7 @@ export class AutoTraderOutcomesModel {
     rows: AutoTraderOutcome[];
     closedLedgerRows: AutoTraderOutcome[];
     learningSummary: Record<string, LearningSummary>;
+    learningSummaryStatus: LearningSummaryStatus;
     strategyLearning: Record<string, StrategyLearning>;
     autoTraderEnabled: boolean;
     autoTraderStatusAvailable: boolean;
@@ -540,6 +565,7 @@ export class AutoTraderOutcomesModel {
     rows: [],
     closedLedgerRows: [],
     learningSummary: {},
+    learningSummaryStatus: 'unavailable',
     strategyLearning: {},
     autoTraderEnabled: false,
     autoTraderStatusAvailable: false,
@@ -570,6 +596,7 @@ export class AutoTraderOutcomesModel {
   private lastStreamRefreshAt = 0;
   private positionSnapshot?: PositionUiSnapshot;
   private autoTraderSnapshot?: AutoTraderUiSnapshot;
+  private autoTraderSnapshotAt = 0;
   private refreshing = false;
   private consumers = 0;
   private gateAuditCache: { records: AuditRecord[]; refreshedAt: number } = {
@@ -581,6 +608,8 @@ export class AutoTraderOutcomesModel {
     refreshedAt: number;
   } = { records: [], refreshedAt: 0 };
   private auditRows: AuditRecord[] = [];
+  private auditRefreshInFlight = false;
+  private auditLastAttemptAt = 0;
   private ledgerRowsCache: AutoTraderOutcome[] = [];
   private slippageTradeSignature = '';
   private slippageBuiltAt = 0;
@@ -609,8 +638,10 @@ export class AutoTraderOutcomesModel {
       this.scheduleRefresh(latestAutoTradeId(snapshot) !== previousTradeId);
     });
     this.autoTraderSnapshot = currentAutoTraderSnapshot();
+    if (this.autoTraderSnapshot) this.autoTraderSnapshotAt = Date.now();
     this.stopAutoTraderStream = subscribeAutoTraderStream((snapshot) => {
       this.autoTraderSnapshot = snapshot;
+      this.autoTraderSnapshotAt = Date.now();
       this.scheduleRefresh();
     });
     this.timer = setInterval(() => {
@@ -682,7 +713,7 @@ export class AutoTraderOutcomesModel {
     });
     try {
       const strategyInstanceId = strategyInstanceForClose(current.rows, symbol);
-      const response = await executionFetch('/positions/close-profitable', {
+      const response = await paperExchangeFetch('/positions/close-profitable', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -692,6 +723,16 @@ export class AutoTraderOutcomesModel {
       });
       if (!response.ok) {
         const detail = (await response.text()).trim();
+        if (response.status === 404) {
+          // The live-position snapshot can outlast the ledger inventory after
+          // a close fill. Reconcile before showing the backend's stale lookup
+          // error to both AutoTrader panels.
+          await this.refresh(true);
+          const stillOpen = this.state$.value.rows.some(
+            (row) => row.symbol === symbol && row.status !== 'Closed',
+          );
+          if (!stillOpen) return;
+        }
         throw new Error(
           detail ||
             'Close IOC failed (HTTP ' +
@@ -714,7 +755,49 @@ export class AutoTraderOutcomesModel {
       this.state$.next({ ...latest, closingSymbols });
     }
   }
+  async confirmDatedCarryClose(symbol: string, futureSymbol: string) {
+    const current = this.state$.value;
+    if (
+      current.closingSymbols.has(symbol) ||
+      !current.confirmingCloseSymbols.has(symbol)
+    )
+      return;
+    const confirmingCloseSymbols = new Set(current.confirmingCloseSymbols);
+    confirmingCloseSymbols.delete(symbol);
+    this.state$.next({
+      ...current,
+      confirmingCloseSymbols,
+      closingSymbols: new Set(current.closingSymbols).add(symbol),
+      error: undefined,
+    });
+    try {
+      const response = await autoTraderRpc(
+        'POST',
+        '/positions/auto-trader/dated-carry',
+        { future_symbol: futureSymbol },
+      );
+      if (!response.ok)
+        throw new Error(
+          (await response.text()).trim() ||
+            'Could not close dated carry position',
+        );
+      await this.refresh(true);
+    } catch (reason) {
+      this.state$.next({
+        ...this.state$.value,
+        error:
+          reason instanceof Error
+            ? reason.message
+            : 'Could not close dated carry position',
+      });
+    } finally {
+      const closingSymbols = new Set(this.state$.value.closingSymbols);
+      closingSymbols.delete(symbol);
+      this.state$.next({ ...this.state$.value, closingSymbols });
+    }
+  }
   private async refresh(forceHttpPositionSnapshot = false) {
+    void this.refreshInsightsAudits();
     if (this.refreshing) {
       this.scheduleRefresh();
       return;
@@ -725,10 +808,8 @@ export class AutoTraderOutcomesModel {
         ? undefined
         : this.positionSnapshot;
       const autoSnapshot = this.autoTraderSnapshot;
-      const refreshGateAudit =
-        Date.now() - this.gateAuditCache.refreshedAt >= 30_000;
-      const refreshStrategyEvaluationAudit =
-        Date.now() - this.strategyEvaluationAuditCache.refreshedAt >= 30_000;
+      const useStreamSnapshot =
+        !!autoSnapshot && isAutoTraderSnapshotFresh(this.autoTraderSnapshotAt);
       const now = new Date();
       const todayStart = Date.UTC(
         now.getUTCFullYear(),
@@ -753,38 +834,38 @@ export class AutoTraderOutcomesModel {
         !this.recentLedgerLoaded ||
         Date.now() - this.recentLedgerLoadedAt >= 30_000;
       const [
-        auditResponse,
         activityResponse,
         learningResponse,
         learningSummaryResponse,
         datedCarryResponse,
         positionsResponse,
         tradesResponse,
-        gateAuditResponse,
-        strategyEvaluationResponse,
         parametersResponse,
         usdRatesResponse,
       ] = await Promise.all([
-        autoSnapshot
-          ? Promise.resolve(undefined)
-          : insightsFetch('/signals/auto-trader-execution-audit?limit=500'),
         // Closed-position rows must reflect the latest fill reported by the
         // positions stream. The AutoTrader stream is still a useful fallback,
         // but its periodic snapshot can otherwise leave this screen stale.
-        autoTraderRpc('GET', '/positions/auto-trader/activity'),
-        autoSnapshot
+        autoTraderRpc('GET', '/positions/auto-trader/activity').catch(
+          () => undefined,
+        ),
+        useStreamSnapshot
           ? Promise.resolve(undefined)
-          : autoTraderRpc('GET', '/positions/auto-trader'),
+          : autoTraderRpc('GET', '/positions/auto-trader').catch(
+              () => undefined,
+            ),
         autoTraderRpc('GET', '/positions/auto-trader/learning-summary').catch(
           () => undefined,
         ),
-        autoSnapshot
+        useStreamSnapshot
           ? Promise.resolve(undefined)
-          : autoTraderRpc('GET', '/positions/auto-trader/dated-carry'),
+          : autoTraderRpc('GET', '/positions/auto-trader/dated-carry').catch(
+              () => undefined,
+            ),
         // The stream can lag the activity snapshot after a new AutoTrader
         // entry. Fetch the HTTP snapshot as well so a symbol missing from the
         // stream is not dropped from the live positions view.
-        sharedGet('/positions?source=auto'),
+        sharedGet('/positions?source=auto').catch(() => undefined),
         // Fills remain useful for open position slippage; closed rows come
         // from the backend activity contract.
         refreshRecentTrades
@@ -792,77 +873,17 @@ export class AutoTraderOutcomesModel {
               '/positions/trades?source=auto&since_ms=' +
                 todayStart +
                 '&limit=500',
-            )
-          : Promise.resolve(undefined),
-        refreshGateAudit
-          ? insightsFetch(
-              '/signals/auto-trader-audit?stage=decision&limit=1000',
             ).catch(() => undefined)
           : Promise.resolve(undefined),
-        refreshStrategyEvaluationAudit
-          ? insightsFetch(
-              '/signals/auto-trader-audit?stage=strategy%3Aevaluation&limit=1000',
-            ).catch(() => undefined)
-          : Promise.resolve(undefined),
-        autoSnapshot
+        useStreamSnapshot
           ? Promise.resolve(undefined)
           : autoTraderRpc('GET', '/positions/auto-trader/parameters').catch(
               () => undefined,
             ),
         sharedGet('/positions/usd-rates', 30_000).catch(() => undefined),
       ]);
-      if (!autoSnapshot && !auditResponse?.ok)
-        throw new Error('Audit unavailable');
       if (!streamSnapshot && !positionsResponse?.ok)
         throw new Error('AutoTrader positions unavailable');
-      if (refreshRecentTrades && !tradesResponse?.ok)
-        throw new Error('AutoTrader fills unavailable');
-      const auditPage =
-        autoSnapshot?.execution_audit ??
-        ((await auditResponse!.json()) as {
-          items?: AuditRecord[];
-          nextCursor?: number | null;
-        });
-      const isInitialAuditPage = this.auditRows.length === 0;
-      if (isInitialAuditPage) this.auditCursor = auditPage.nextCursor ?? null;
-      const mergedAuditRows = new Map<string, AuditRecord>();
-      for (const record of [...this.auditRows, ...(auditPage.items ?? [])]) {
-        mergedAuditRows.set(
-          `${record.decision_id ?? ''}:${record.stage ?? ''}`,
-          record,
-        );
-      }
-      this.auditRows = [...mergedAuditRows.values()].sort(
-        (left, right) => (left.timestamp ?? 0) - (right.timestamp ?? 0),
-      );
-      if (gateAuditResponse?.ok) {
-        try {
-          const gatePage = (await gateAuditResponse.json()) as {
-            items?: AuditRecord[];
-          };
-          if (Array.isArray(gatePage.items))
-            this.gateAuditCache = {
-              records: gatePage.items,
-              refreshedAt: Date.now(),
-            };
-        } catch {
-          /* Keep the most recent successful gate audit. */
-        }
-      }
-      if (strategyEvaluationResponse?.ok) {
-        try {
-          const strategyEvaluationPage =
-            (await strategyEvaluationResponse.json()) as {
-              items?: AuditRecord[];
-            };
-          this.strategyEvaluationAuditCache = {
-            records: strategyEvaluationPage.items ?? [],
-            refreshedAt: Date.now(),
-          };
-        } catch {
-          /* Keep the most recent successful strategy evaluation audit. */
-        }
-      }
       const strategyEvaluationRecords =
         this.strategyEvaluationAuditCache.records;
       const streamedPositions = streamSnapshot?.auto_positions.positions ?? [];
@@ -905,7 +926,9 @@ export class AutoTraderOutcomesModel {
       };
       const activityData = activityResponse?.ok
         ? ((await activityResponse.json()) as ActivityResponse)
-        : ((autoSnapshot?.activity as ActivityResponse) ?? {});
+        : useStreamSnapshot
+          ? ((autoSnapshot?.activity as ActivityResponse) ?? {})
+          : {};
       const streamedRates = streamSnapshot?.usd_rates?.rates;
       const usdRatesData =
         streamedRates && Object.keys(streamedRates).length > 0
@@ -913,23 +936,28 @@ export class AutoTraderOutcomesModel {
           : usdRatesResponse?.ok
             ? ((await usdRatesResponse.json()) as UsdRatesResponse)
             : {};
-      const learningData =
-        (autoSnapshot?.status as AutoTraderLearningResponse) ??
-        (learningResponse?.ok
+      const learningData = useStreamSnapshot
+        ? ((autoSnapshot?.status as AutoTraderLearningResponse) ?? {})
+        : learningResponse?.ok
           ? ((await learningResponse.json()) as AutoTraderLearningResponse)
-          : {});
-      const learningSummary = learningSummaryResponse?.ok
-        ? Object.fromEntries(
-            ((await learningSummaryResponse.json()) as LearningSummary[]).map(
-              (row) => [row.strategy, row],
-            ),
-          )
-        : this.state$.value.learningSummary;
-      const parametersData =
-        (autoSnapshot?.parameters as DecisionParametersResponse) ??
-        (parametersResponse?.ok
+          : {};
+      const learningSummaryPayload = learningSummaryResponse?.ok
+        ? await learningSummaryResponse.json().catch(() => undefined)
+        : undefined;
+      const parsedLearningSummary = parseLearningSummary(
+        learningSummaryPayload,
+      );
+      const learningSummary =
+        parsedLearningSummary.status === 'unavailable'
+          ? this.state$.value.learningSummary
+          : Object.fromEntries(
+              parsedLearningSummary.rows.map((row) => [row.strategy, row]),
+            );
+      const parametersData = useStreamSnapshot
+        ? ((autoSnapshot?.parameters as DecisionParametersResponse) ?? {})
+        : parametersResponse?.ok
           ? ((await parametersResponse.json()) as DecisionParametersResponse)
-          : {});
+          : {};
       const strictBaseStrengthFloor = parametersData.thresholds?.find(
         (parameter) =>
           parameter.section === 'Signal qualification' &&
@@ -994,7 +1022,9 @@ export class AutoTraderOutcomesModel {
         }
       }
       const datedCarryDiagnostics =
-        (autoSnapshot?.dated_carry as DatedCarryDiagnostics) ??
+        (useStreamSnapshot
+          ? (autoSnapshot?.dated_carry as DatedCarryDiagnostics)
+          : undefined) ??
         (datedCarryResponse?.ok
           ? ((await datedCarryResponse.json()) as DatedCarryDiagnostics)
           : undefined);
@@ -1683,10 +1713,13 @@ export class AutoTraderOutcomesModel {
         rows,
         closedLedgerRows: this.ledgerRowsCache,
         learningSummary,
+        learningSummaryStatus: learningSummaryResponse?.ok
+          ? parsedLearningSummary.status
+          : 'unavailable',
         strategyLearning,
         autoTraderEnabled: learningData.enabled ?? false,
         autoTraderStatusAvailable: Boolean(
-          autoSnapshot || learningResponse?.ok,
+          useStreamSnapshot || learningResponse?.ok,
         ),
         enabledStrategies: learningData.strategies ?? [],
         strategyDiagnostics: learningData.strategy_diagnostics ?? [],
@@ -1703,6 +1736,7 @@ export class AutoTraderOutcomesModel {
           ? strategyLots.map(({ symbol, strategy }) => ({ symbol, strategy }))
           : (activityData.open_positions ?? []),
         loading: false,
+        error: undefined,
         auditCursor: this.auditCursor,
         hasOlderLedgerTrades: false,
       });
@@ -1714,6 +1748,86 @@ export class AutoTraderOutcomesModel {
       });
     } finally {
       this.refreshing = false;
+    }
+  }
+
+  private async refreshInsightsAudits() {
+    const now = Date.now();
+    if (this.auditRefreshInFlight || now - this.auditLastAttemptAt < 30_000)
+      return;
+    this.auditRefreshInFlight = true;
+    this.auditLastAttemptAt = now;
+    try {
+      const [executionResponse, gateResponse, strategyEvaluationResponse] =
+        await Promise.all([
+          insightsFetch('/signals/auto-trader-execution-audit?limit=500').catch(
+            () => undefined,
+          ),
+          Date.now() - this.gateAuditCache.refreshedAt >= 30_000
+            ? insightsFetch(
+                '/signals/auto-trader-audit?stage=decision&limit=1000',
+              ).catch(() => undefined)
+            : Promise.resolve(undefined),
+          Date.now() - this.strategyEvaluationAuditCache.refreshedAt >= 30_000
+            ? insightsFetch(
+                '/signals/auto-trader-audit?stage=strategy%3Aevaluation&limit=1000',
+              ).catch(() => undefined)
+            : Promise.resolve(undefined),
+        ]);
+
+      let changed = false;
+      if (executionResponse?.ok) {
+        try {
+          const page = (await executionResponse.json()) as {
+            items?: AuditRecord[];
+            nextCursor?: number | null;
+          };
+          if (this.auditRows.length === 0)
+            this.auditCursor = page.nextCursor ?? null;
+          const merged = new Map<string, AuditRecord>();
+          for (const record of [...this.auditRows, ...(page.items ?? [])])
+            merged.set(
+              `${record.decision_id ?? ''}:${record.stage ?? ''}`,
+              record,
+            );
+          this.auditRows = [...merged.values()].sort(
+            (left, right) => (left.timestamp ?? 0) - (right.timestamp ?? 0),
+          );
+          changed = true;
+        } catch {
+          /* Keep the last successful execution audit page. */
+        }
+      }
+      if (gateResponse?.ok) {
+        try {
+          const page = (await gateResponse.json()) as {
+            items?: AuditRecord[];
+          };
+          if (Array.isArray(page.items)) {
+            this.gateAuditCache = { records: page.items, refreshedAt: now };
+            changed = true;
+          }
+        } catch {
+          /* Keep the last successful gate audit. */
+        }
+      }
+      if (strategyEvaluationResponse?.ok) {
+        try {
+          const page = (await strategyEvaluationResponse.json()) as {
+            items?: AuditRecord[];
+          };
+          this.strategyEvaluationAuditCache = {
+            records: page.items ?? [],
+            refreshedAt: now,
+          };
+          changed = true;
+        } catch {
+          /* Keep the last successful strategy evaluation audit. */
+        }
+      }
+      if (changed && this.consumers > 0) this.scheduleRefresh(true);
+    } finally {
+      this.auditRefreshInFlight = false;
     }
   }
 

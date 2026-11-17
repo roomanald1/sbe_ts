@@ -364,23 +364,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "execution"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "axum",
- "bytes",
- "futures-util",
- "http-body-util",
- "rsocket_rust",
- "rsocket_rust_transport_websocket",
- "serde",
- "serde_json",
- "tokio",
- "tower",
-]
-
-[[package]]
 name = "fallible-iterator"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1096,6 +1079,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "paper_exchange"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "bytes",
+ "futures-util",
+ "http-body-util",
+ "rsocket_rust",
+ "rsocket_rust_transport_websocket",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tower",
+]
+
+[[package]]
 name = "parking_lot_core"
 version = "0.9.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1134,9 +1134,9 @@ dependencies = [
  "arc-swap",
  "axum",
  "bytes",
- "execution",
  "futures-util",
  "http-body-util",
+ "paper_exchange",
  "reqwest",
  "rmp-serde",
  "rsocket_rust",
@@ -1388,8 +1388,6 @@ dependencies = [
 [[package]]
 name = "rsocket_rust"
 version = "0.7.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0a4c676c68d6895cbcecb1b02bdafeb5a2b0b0a652479db7a160474c38c06426"
 dependencies = [
  "anyhow",
  "async-stream",

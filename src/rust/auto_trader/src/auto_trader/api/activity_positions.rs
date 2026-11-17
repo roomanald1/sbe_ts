@@ -35,13 +35,12 @@ fn external_close_order_for_trade<'a>(
 }
 
 async fn fetch_closed_ledger_rows(
-    today_start: u64,
     orders: &[TraderOrder],
     open_positions: &[OpenStrategyPosition],
 ) -> Vec<serde_json::Value> {
-    let Ok(body) = crate::service_rpc::position_get(&format!(
-        "/positions/trades?since_ms={today_start}"
-    )).await else {
+    // Manual Auto entries may predate today and close today. Load the full Auto
+    // fill history so a close is paired with its actual entry fill.
+    let Ok(body) = crate::service_rpc::position_get("/positions/trades?source=auto").await else {
         return Vec::new();
     };
     let mut order_by_id = BTreeMap::<String, &TraderOrder>::new();
@@ -54,12 +53,15 @@ async fn fetch_closed_ledger_rows(
     let mut groups = BTreeMap::<(String, String, String), Vec<serde_json::Value>>::new();
     let mut entry_groups = std::collections::BTreeSet::new();
     let mut manual_close_groups = std::collections::BTreeSet::new();
+    let mut unassigned_auto_trades = BTreeMap::<String, Vec<serde_json::Value>>::new();
     let mut external_close_remaining = orders
         .iter()
         .map(|order| order.filled_quantity.max(0.0))
         .collect::<Vec<_>>();
     for trade in body["trades"].as_array().into_iter().flatten() {
         let parent = trade["parent_order_id"].as_str().unwrap_or_default();
+        let is_manual_auto_fill = parent.starts_with("execution-check-")
+            || parent.starts_with("auto-manual-close:");
         let order = order_by_id.get(parent).copied().or_else(|| {
             let index = external_close_order_for_trade(trade, orders, &external_close_remaining)?;
             let quantity = trade["quantity"].as_f64().unwrap_or_default();
@@ -68,20 +70,41 @@ async fn fetch_closed_ledger_rows(
             orders.get(index)
         });
         let trade_source = trade["source"].as_str().unwrap_or("auto");
+        let Some(symbol) = trade["symbol"].as_str() else {
+            continue;
+        };
+        // Manual Auto orders bypass AutoTrader's strategy order registry, so
+        // their fills have no strategy/decision attribution. Keep them for
+        // position-cycle reconstruction below, including fills with no order
+        // object at all (for example, immediate IOC market orders).
         let Some(order) = order else {
+            if trade_source == "auto" && is_manual_auto_fill {
+                unassigned_auto_trades
+                    .entry(symbol.to_owned())
+                    .or_default()
+                    .push(trade.clone());
+            }
             continue;
         };
         if trade_source != "auto" && (order.strategy.is_none() || order.decision_id.is_none()) {
             continue;
         }
-        let (Some(strategy), Some(decision_id), Some(symbol)) = (
-            order.strategy.as_ref(),
-            order.decision_id.as_ref(),
-            trade["symbol"].as_str(),
-        ) else {
+        if order.strategy.is_none() || order.decision_id.is_none() {
+            if trade_source != "auto" || !is_manual_auto_fill {
+                continue;
+            }
+            unassigned_auto_trades
+                .entry(symbol.to_owned())
+                .or_default()
+                .push(trade.clone());
             continue;
-        };
-        let key = (strategy.clone(), decision_id.clone(), symbol.to_owned());
+        }
+        let strategy = order.strategy.as_deref().expect("strategy checked above");
+        let decision_id = order
+            .decision_id
+            .as_deref()
+            .expect("decision ID checked above");
+        let key = (strategy.to_owned(), decision_id.to_owned(), symbol.to_owned());
         if matches!(order.purpose.as_str(), "signal" | "scout") {
             entry_groups.insert(key.clone());
         }
@@ -89,6 +112,37 @@ async fn fetch_closed_ledger_rows(
             manual_close_groups.insert(key.clone());
         }
         groups.entry(key).or_default().push(trade.clone());
+    }
+    for (symbol, mut trades) in unassigned_auto_trades {
+        trades.sort_by_key(|trade| trade["timestamp"].as_u64().unwrap_or_default());
+        let mut cycle = Vec::new();
+        let mut quantity = 0.0_f64;
+        for trade in trades {
+            let fill_quantity = trade["quantity"].as_f64().unwrap_or_default();
+            let incoming = if trade["side"].as_str() == Some("buy") {
+                fill_quantity
+            } else {
+                -fill_quantity
+            };
+            if !incoming.is_finite() || incoming.abs() <= 1e-12 {
+                continue;
+            }
+            cycle.push(trade);
+            quantity += incoming;
+            if quantity.abs() <= 1e-12 {
+                let opened_at = cycle
+                    .first()
+                    .and_then(|fill| fill["timestamp"].as_u64())
+                    .unwrap_or_default();
+                let decision_id = format!("manual-auto:{symbol}:{opened_at}");
+                let key = ("manual".to_owned(), decision_id, symbol.clone());
+                entry_groups.insert(key.clone());
+                manual_close_groups.insert(key.clone());
+                groups.insert(key, std::mem::take(&mut cycle));
+            }
+        }
+        // Any remaining non-flat cycle stays out of closed positions. It is an
+        // open inventory position, not a completed trade.
     }
     let open = open_positions
         .iter()
@@ -129,13 +183,39 @@ async fn fetch_closed_ledger_rows(
             .filter(|trade| trade["side"].as_str() == Some(entry_side))
             .map(|trade| trade["quantity"].as_f64().unwrap_or_default())
             .sum::<f64>();
+        let entry_notional = trades
+            .iter()
+            .filter(|trade| trade["side"].as_str() == Some(entry_side))
+            .map(|trade| {
+                trade["quantity"].as_f64().unwrap_or_default()
+                    * trade["execution_price"].as_f64().unwrap_or_default()
+            })
+            .sum::<f64>();
+        let entry_price = if quantity > 0.0 {
+            entry_notional / quantity
+        } else {
+            first["execution_price"].as_f64().unwrap_or_default()
+        };
+        let realized_pnl = trades
+            .iter()
+            .map(|trade| {
+                let notional = trade["quantity"].as_f64().unwrap_or_default()
+                    * trade["execution_price"].as_f64().unwrap_or_default();
+                let cashflow = if trade["side"].as_str() == Some("buy") {
+                    -notional
+                } else {
+                    notional
+                };
+                cashflow + trade["fee"].as_f64().unwrap_or_default()
+            })
+            .sum::<f64>();
         let manually_closed = manual_close_groups.contains(&(
             strategy.clone(),
             decision_id.clone(),
             symbol.clone(),
         ));
         let key = format!("{strategy}:{decision_id}:{symbol}");
-        rows.push(serde_json::json!({"rowId":format!("ledger-summary:{key}"),"status":"Closed","decisionId":decision_id,"strategyInstanceId":decision_id,"symbol":symbol,"side":entry_side,"openedAt":first["timestamp"],"closedAt":last["timestamp"],"quantity":quantity,"signedQuantity":if entry_side == "buy" {quantity} else {-quantity},"entryPrice":first["execution_price"],"pnl":0,"entryFees":0,"estimatedExitFeeRate":0,"estimatedExitSlippageBps":0,"pnlQuoteCurrency":symbol.split_once('-').map(|(_,q)|q).unwrap_or("USD"),"strategy":strategy,"direction":if entry_side == "buy" {"LONG"} else {"SHORT"},"strength":null,"scout":false,"source":"unknown","manuallyClosed":manually_closed,"components":{}}));
+        rows.push(serde_json::json!({"rowId":format!("ledger-summary:{key}"),"status":"Closed","decisionId":decision_id,"strategyInstanceId":decision_id,"symbol":symbol,"side":entry_side,"openedAt":first["timestamp"],"closedAt":last["timestamp"],"quantity":quantity,"signedQuantity":if entry_side == "buy" {quantity} else {-quantity},"entryPrice":entry_price,"pnl":realized_pnl,"entryFees":0,"estimatedExitFeeRate":0,"estimatedExitSlippageBps":0,"pnlQuoteCurrency":symbol.split_once('-').map(|(_,q)|q).unwrap_or("USD"),"strategy":strategy,"direction":if entry_side == "buy" {"LONG"} else {"SHORT"},"strength":null,"scout":false,"source":"unknown","manuallyClosed":manually_closed,"components":{}}));
         for trade in trades {
             let trade_source = trade["source"].as_str().unwrap_or("auto");
             rows.push(serde_json::json!({"rowId":format!("ledger-trade:{}",trade["id"].as_str().unwrap_or_default()),"status":"Closed","decisionId":decision_id,"strategyInstanceId":decision_id,"symbol":symbol,"side":trade["side"],"openedAt":trade["timestamp"],"closedAt":trade["timestamp"],"quantity":trade["quantity"],"signedQuantity":if trade["side"].as_str()==Some("buy"){trade["quantity"].as_f64().unwrap_or_default()}else{-trade["quantity"].as_f64().unwrap_or_default()},"entryPrice":trade["execution_price"],"pnl":0,"entryFees":trade["fee"],"estimatedExitFeeRate":trade["fee_rate"],"estimatedExitSlippageBps":0,"pnlQuoteCurrency":symbol.split_once('-').map(|(_,q)|q).unwrap_or("USD"),"strategy":strategy,"direction":trade["side"],"strength":null,"scout":false,"source":"unknown","components":{},"ledgerTrade":trade,"ledgerSource":trade_source}));

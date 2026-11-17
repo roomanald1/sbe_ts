@@ -1,4 +1,12 @@
 use super::*;
+use strategy::StrategyWalkForwardEvidence;
+
+const OUTCOME_HALF_LIFE_MS: u64 = 7 * 24 * 60 * 60 * 1_000;
+
+fn outcome_decay_weight(observed_at_ms: u64, now_ms: u64) -> f64 {
+    let age_ms = now_ms.saturating_sub(observed_at_ms);
+    0.5_f64.powf(age_ms as f64 / OUTCOME_HALF_LIFE_MS as f64)
+}
 
 pub(super) async fn get_profiles(
     State(service): State<ServiceState>,
@@ -10,32 +18,64 @@ pub(super) async fn get_profiles(
 pub(super) async fn get_decision_snapshot(
     State(service): State<ServiceState>,
 ) -> Json<LearnedProfileSnapshot> {
+    let snapshot_now_ms = now_ms();
     let state = service.state.lock().await;
     let profiles = state.active_profiles.values().cloned().collect::<Vec<_>>();
-    let cutoff = now_ms().saturating_sub(7 * 24 * 60 * 60 * 1_000);
-    let mut totals = BTreeMap::<String, (usize, usize, Vec<f64>)>::new();
+    let registered_profile_ids = state
+        .variants
+        .values()
+        .map(|variant| variant.profile.profile_id.clone())
+        .collect();
+    let walk_forward_evidence = state
+        .variants
+        .values()
+        .filter_map(|variant| {
+            let mut weighted_samples = 0.0;
+            let mut weighted_positive = 0.0;
+            let mut weighted_net_return = 0.0;
+            let mut last_sample_timestamp_ms = 0u64;
+            for outcome in &variant.outcomes {
+                if outcome.source != LearningOutcomeSource::Scout
+                    || !outcome.net_return_percent.is_finite()
+                {
+                    continue;
+                }
+                let weight = outcome_decay_weight(outcome.observed_at_ms, snapshot_now_ms);
+                weighted_samples += weight;
+                weighted_positive += if outcome.net_return_percent > 0.0 {
+                    weight
+                } else {
+                    0.0
+                };
+                weighted_net_return += weight * outcome.net_return_percent;
+                last_sample_timestamp_ms = last_sample_timestamp_ms.max(outcome.observed_at_ms);
+            }
+            (weighted_samples > 0.0).then(|| {
+                (
+                    variant.profile.profile_id.clone(),
+                    StrategyWalkForwardEvidence {
+                        sample_count: weighted_samples.round() as usize,
+                        positive_net_rate: Some(weighted_positive / weighted_samples),
+                        average_net_return_percent: Some(weighted_net_return / weighted_samples),
+                        last_sample_timestamp_ms,
+                    },
+                )
+            })
+        })
+        .collect();
+    let cutoff = snapshot_now_ms.saturating_sub(7 * 24 * 60 * 60 * 1_000);
+    let mut totals = BTreeMap::<String, Vec<(u64, f64)>>::new();
     let mut recent_profile_context_returns = BTreeMap::<String, Vec<(u64, f64)>>::new();
-    for profile in &profiles {
-        let entry = totals.entry(profile.strategy.clone()).or_default();
-        entry.0 = entry.0.saturating_add(profile.learning_samples);
-        entry.1 = entry.1.saturating_add(profile.positive_samples);
-    }
     for variant in state.variants.values() {
-        let returns = &mut totals
-            .entry(variant.profile.strategy.clone())
-            .or_default()
-            .2;
-        returns.extend(variant.outcomes.iter().filter_map(|outcome| {
-            (outcome.source == LearningOutcomeSource::Trade
-                && outcome.observed_at_ms >= cutoff
-                && outcome.net_return_percent.is_finite())
-            .then_some(outcome.net_return_percent)
-        }));
+        let returns = totals.entry(variant.profile.strategy.clone()).or_default();
         for outcome in &variant.outcomes {
             if outcome.source != LearningOutcomeSource::Trade
-                || outcome.observed_at_ms < cutoff
                 || !outcome.net_return_percent.is_finite()
             {
+                continue;
+            }
+            returns.push((outcome.observed_at_ms, outcome.net_return_percent));
+            if outcome.observed_at_ms < cutoff {
                 continue;
             }
             let Some(context) = outcome.learning_context.as_deref() else {
@@ -54,18 +94,27 @@ pub(super) async fn get_decision_snapshot(
     let contextual_stop_loss_percents = contextual_stop_loss_percents(&state, cutoff);
     let strategy_size_multipliers = totals
         .into_iter()
-        .map(|(strategy, (samples, positive, returns))| {
-            let multiplier = strategy_size_multiplier(samples, positive, &returns);
+        .map(|(strategy, returns)| {
+            let multiplier = strategy_size_multiplier(&returns, snapshot_now_ms);
             (strategy, multiplier)
         })
         .collect();
     Json(LearnedProfileSnapshot {
         profiles,
+        registered_profile_ids,
         strategy_size_multipliers,
         recent_profile_context_returns,
         contextual_stop_loss_percents,
         context_learning: state.context_learning.clone(),
+        context_thresholds: context::snapshot_context_thresholds(&state, now_ms()),
+        missed_opportunity_bands: state
+            .missed_opportunity_bands
+            .iter()
+            .take(2_000)
+            .cloned()
+            .collect(),
         execution_learning: state.execution_learning.clone(),
+        walk_forward_evidence,
         scout_parameter_variants: scout_parameter_variant_snapshots(&state),
     })
 }
@@ -242,16 +291,26 @@ fn market_context_from_learning_context(value: Option<&str>) -> Option<String> {
 
 const MIN_TRADES_FOR_NEGATIVE_EDGE_PAUSE: usize = 20;
 
-fn strategy_size_multiplier(samples: usize, positive: usize, net_returns: &[f64]) -> f64 {
-    if net_returns.len() >= MIN_TRADES_FOR_NEGATIVE_EDGE_PAUSE
-        && net_returns.iter().sum::<f64>() / net_returns.len() as f64 <= 0.0
+fn strategy_size_multiplier(net_returns: &[(u64, f64)], now_ms: u64) -> f64 {
+    let (samples, positive, weighted_net_return) = net_returns.iter().fold(
+        (0.0, 0.0, 0.0),
+        |(samples, positive, net), (timestamp, return_percent)| {
+            let weight = outcome_decay_weight(*timestamp, now_ms);
+            (
+                samples + weight,
+                positive + if *return_percent > 0.0 { weight } else { 0.0 },
+                net + weight * return_percent,
+            )
+        },
+    );
+    if samples >= MIN_TRADES_FOR_NEGATIVE_EDGE_PAUSE as f64 && weighted_net_return / samples <= 0.0
     {
         return 0.0;
     }
-    if samples == 0 || positive > samples {
+    if samples <= 0.0 || positive > samples {
         return 1.0;
     }
-    let n = samples as f64;
+    let n = samples;
     let posterior = (positive as f64 + 1.0) / (n + 2.0);
     let confidence = n / (n + 2.0);
     let edge = ((posterior - 0.5) * 2.0 * confidence).clamp(-1.0, 1.0);
@@ -304,7 +363,7 @@ pub(super) fn rebuild_trade_profile_metrics(state: &mut LearningState, now: u64)
     }
 }
 
-fn scout_parameter_variant_snapshots(
+pub(super) fn scout_parameter_variant_snapshots(
     state: &LearningState,
 ) -> Vec<strategy::ScoutParameterVariant> {
     type CandidateKey = (String, String, String, String);
@@ -447,12 +506,25 @@ mod tests {
 
     #[test]
     fn sufficiently_sampled_negative_net_trades_pause_strategy_sizing() {
-        let losing = vec![-0.01; MIN_TRADES_FOR_NEGATIVE_EDGE_PAUSE];
-        assert_eq!(strategy_size_multiplier(200, 20, &losing), 0.0);
-        assert!(strategy_size_multiplier(19, 2, &vec![-0.01; 19]) > 0.0);
-        assert!(strategy_size_multiplier(200, 20, &vec![0.01; 20]) > 0.0);
+        let now = now_ms();
+        let losing = vec![(now, -0.01); MIN_TRADES_FOR_NEGATIVE_EDGE_PAUSE];
+        assert_eq!(strategy_size_multiplier(&losing, now), 0.0);
+        assert!(strategy_size_multiplier(&losing[..19], now) > 0.0);
+        let winning = vec![(now, 0.01); MIN_TRADES_FOR_NEGATIVE_EDGE_PAUSE];
+        assert!(strategy_size_multiplier(&winning, now) > 0.0);
         // A high win rate cannot hide negative average net returns.
-        assert_eq!(strategy_size_multiplier(200, 180, &[-0.02; 20]), 0.0);
+        let mostly_winning = (0..MIN_TRADES_FOR_NEGATIVE_EDGE_PAUSE)
+            .map(|index| (now, if index < 18 { 0.01 } else { -0.30 }))
+            .collect::<Vec<_>>();
+        assert_eq!(strategy_size_multiplier(&mostly_winning, now), 0.0);
+    }
+
+    #[test]
+    fn negative_pause_eases_when_old_outcomes_decay_below_sample_threshold() {
+        let now = now_ms();
+        let one_half_life_ago = now.saturating_sub(OUTCOME_HALF_LIFE_MS);
+        let losing = vec![(one_half_life_ago, -0.01); MIN_TRADES_FOR_NEGATIVE_EDGE_PAUSE];
+        assert!(strategy_size_multiplier(&losing, now) > 0.0);
     }
 
     fn scout_variant(symbol: &str, returns: &[f64]) -> RegisteredProfile {
@@ -606,6 +678,7 @@ mod tests {
         let service = ServiceState {
             state: Arc::new(tokio::sync::Mutex::new(state)),
             path: PathBuf::new(),
+            state_updates: Arc::new(tokio::sync::Notify::new()),
         };
         let Json(summaries) = get_summary(State(service)).await;
         let summary = &summaries[0];
@@ -640,11 +713,23 @@ mod tests {
         }
         let profile_id = variant.profile.profile_id.clone();
         state.variants.insert("variant".into(), variant);
+        let mut active_profile = state.variants["variant"].profile.clone();
+        active_profile.profile_id = "different-active-profile".into();
+        state
+            .active_profiles
+            .insert("BTC-USDT:example-strategy".into(), active_profile);
         let service = ServiceState {
             state: Arc::new(tokio::sync::Mutex::new(state)),
             path: PathBuf::new(),
+            state_updates: Arc::new(tokio::sync::Notify::new()),
         };
         let Json(snapshot) = get_decision_snapshot(State(service)).await;
+        assert!(snapshot.registered_profile_ids.contains(&profile_id));
+        assert!(
+            !snapshot
+                .registered_profile_ids
+                .contains("different-active-profile")
+        );
         let samples = &snapshot.recent_profile_context_returns[&format!("{profile_id}|{context}")];
         assert_eq!(
             samples.iter().map(|sample| sample.1).collect::<Vec<_>>(),

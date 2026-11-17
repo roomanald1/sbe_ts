@@ -1,5 +1,547 @@
 # Rust benchmark baseline
 
+## Scale entry notional by signal strength (2026-11-16)
+
+The new bounded strength-to-size test passed. The full AutoTrader suite ran 168
+library tests: 165 passed and the same 3 existing tests failed in live-scout
+direction, signal-execution budget, and strategy-pause snapshot behavior. The
+strategy-evaluation benchmark measured maximum entry / position evaluation at
+18.1 / 5.4 ns; signal serialization / market-depth / order-request / parameter
+validation at 545.6 / 626.6 / 422.9 / 2.4 ns; and settings snapshots at 0 / 256
+/ 10,000 retained orders at 13.186 / 75.891 / 2,957.708 us. Compared with the
+preceding same-day run (18.4 / 4.4 ns; helpers 544.9 / 588.1 / 423.3 / 2.0 ns;
+snapshots 9.526 / 66.734 / 2,871.748 us), position evaluation increased
+22.7%, market-depth assessment 6.5%, parameter validation 20.0%, and settings
+snapshots 3.0% to 38.4%; other measurements changed by -1.6% to +0.1%. This
+benchmark does not exercise the strength-to-size calculation, so the increases
+cannot be attributed to it. Workloads were the same; runtime load can affect
+these microbenchmarks. WSL2 Linux x86_64, optimized Cargo profile.
+
+## Audit the final outcome of selected signal entries (2026-11-16)
+
+The new AutoTrader regression test for an exploratory selection followed by a
+downstream skip passed. The full AutoTrader suite ran 167 library tests: 164
+passed and 3 unrelated existing tests failed in live-scout direction,
+signal-execution budget, and strategy-pause snapshot behavior. The strategy-
+evaluation benchmark measured maximum entry / position evaluation at 18.4 / 4.4
+ns; signal serialization / market-depth / order-request / parameter validation
+at 544.9 / 588.1 / 423.3 / 2.0 ns; and settings snapshots at 0 / 256 / 10,000
+retained orders at 9.526 / 66.734 / 2,871.748 us. Compared with the latest
+comparable run (21.7 / 4.8 ns; helpers 575.2 / 677.1 / 433.4 / 2.0 ns;
+snapshots 11.038 / 72.192 / 3,479.812 us), all measurements were unchanged or
+lower by 2.3% to 17.5%. This benchmark does not exercise audit persistence or
+decision payload construction; results are environment-sensitive. WSL2 Linux
+x86_64, optimized Cargo profile.
+
+## Stream scout assignments and cache Learning updates in workers (2026-11-14)
+
+Strategy passed 172 service-feature library tests; Learning passed 62 library
+tests and 1 binary test. The Strategy registration replay benchmark measured
+26,652 us for 10,000 active registrations, 60 replay intervals, and 500
+transient failures (10,500 encoded requests), 41.7% above the latest comparable
+run (18,803 us). The benchmark does not exercise Learning broadcasts or Scout
+subscriptions and ran while Learning tests were compiling/running, so this
+contended result cannot be attributed to the stream changes. WSL2 Linux x86_64,
+optimized Cargo profile.
+
+## Attach a reason to every strategy rejection (2026-11-14)
+
+Strategy passed 71 library tests; AutoTrader passed 168 library and 8 binary
+tests. The Strategy service-feature bench completed with all 172 harness tests
+ignored and measured Scout registration replay at 18,803 us for 10,000 active
+registrations, 60 intervals, and 500 transient failures (10,500 encoded
+requests), 6.3% above the latest comparable run (17,684 us). This workload does
+not exercise rejection explanations. The AutoTrader strategy-evaluation bench
+measured maximum entry / position evaluation at 21.7 / 4.8 ns; serialization /
+depth / order construction / parameter validation at 575.2 / 677.1 / 433.4 /
+2.0 ns; and settings snapshots at 0 / 256 / 10,000 retained orders at 11.038 /
+72.192 / 3,479.812 us. Compared with the latest comparable run (21.8 / 5.4 ns;
+helpers 642.2 / 752.1 / 467.5 / 2.5 ns; snapshots 14.970 / 94.447 / 4,056.418
+us), all measurements decreased by 0.5% to 26.3%. These workloads do not
+exercise reason generation; results are environment-sensitive. WSL2 Linux
+x86_64, optimized Cargo profiles.
+
+## Report worker route failures and back off during AutoTrader timeouts (2026-11-13)
+
+Strategy passed 169 service-feature library tests; AutoTrader passed 166 library
+and 8 binary tests. The Scout registration replay benchmark measured 17,684 us
+for 10,000 registrations, 60 intervals, and 500 transient failures (10,500
+encoded requests), 8.6% above the latest comparable run (16,283 us). The replay
+workload does not exercise live decision callbacks or profile-query backoff;
+this active-stack run overlapped repeated AutoTrader route timeouts and is
+environment-contended, so the timing cannot be attributed to the change.
+WSL2 Linux x86_64, optimized Cargo profiles.
+
+The AutoTrader strategy-evaluation benchmark measured entry / position maxima
+of 21.8 / 5.4 ns; signal serialization / market-depth / order-request /
+parameter validation measured 642.2 / 752.1 / 467.5 / 2.5 ns; settings
+snapshots at 0 / 256 / 10,000 orders measured 14.970 / 94.447 / 4,056.418 us.
+Compared with the latest same-day run (20.0 / 6.2 ns; helpers 569.0 / 633.7 /
+440.4 / 2.2 ns; snapshots 16.446 / 72.259 / 2,877.191 us), values changed
++9.0% / -12.9%, helpers +12.9% / +18.7% / +6.2% / +13.6%, and snapshots -9.0%
+/ +30.7% / +41.0%. This microbenchmark does not cover persistence coalescing;
+results ran during active strategy-worker route timeouts and are
+environment-contended. WSL2 Linux x86_64, optimized Cargo profile.
+
+## Back off failed live worker routes and expose report health (2026-11-13)
+
+Strategy passed 169 service-feature library tests; AutoTrader passed 166 library
+and 8 binary tests. The Scout registration replay benchmark measured 14,725 us
+for 10,000 registrations, 60 intervals, and 500 transient failures (10,500
+encoded requests), 35.8% above the latest comparable run (10,843 us). This
+synthetic Scout workload does not exercise live Insights report retries or
+profile refresh; the stack was active and AutoTrader/Insights were resource
+contended, so the movement is not attributable to the live-worker changes.
+WSL2 Linux x86_64, optimized Cargo profiles.
+
+The AutoTrader strategy-evaluation benchmark measured entry / position maxima
+of 20.0 / 6.2 ns; signal serialization / market-depth / order-request /
+parameter validation measured 569.0 / 633.7 / 440.4 / 2.2 ns; settings
+snapshots at 0 / 256 / 10,000 orders measured 16.446 / 72.259 / 2,877.191 us.
+Compared with the preceding same-day run (25.0 / 6.1 ns; helpers 639.1 / 727.5
+/ 465.0 / 2.8 ns; snapshots 15.745 / 82.913 / 3,347.611 us), values changed
+-20.0% / +1.6%, helpers -11.0% / -12.9% / -5.3% / -21.4%, and snapshots +4.5%
+/ -12.8% / -14.1%. This microbenchmark does not exercise persistence
+coalescing; run under active system load, so timing differences remain
+environment-sensitive. WSL2 Linux x86_64, optimized Cargo profile.
+
+## Count live strategy rejections in the Reasons summary (2026-11-13)
+
+AutoTrader passed 166 library tests and 8 binary tests. The strategy-evaluation
+benchmark measured entry / position maxima of 25.0 / 6.1 ns; signal
+serialization / market-depth / order-request / parameter validation measured
+639.1 / 727.5 / 465.0 / 2.8 ns; settings snapshots at 0 / 256 / 10,000
+orders measured 15.745 / 82.913 / 3,347.611 us. Compared with the latest
+same-day run (20.3 / 5.4 ns; helpers 604.7 / 696.1 / 447.7 / 2.3 ns;
+snapshots 14.071 / 89.538 / 3,517.862 us), values changed +23.2% / +13.0%,
+helpers +5.7% / +4.5% / +3.9% / +21.7%, and snapshots +11.9% / -7.4% / -4.8%.
+This benchmark does not exercise worker-rejection accounting or the signal
+queue; results ran under active stack load and are environment-sensitive.
+WSL2 Linux x86_64, optimized Cargo profile.
+
+## Coalesce signal reports before bounded parallel cycle evaluation (2026-11-13)
+
+AutoTrader passed 166 library tests and 8 binary tests. The strategy-evaluation
+benchmark measured entry / position maxima of 20.3 / 5.4 ns; signal
+serialization / market-depth / order-request / parameter validation measured
+604.7 / 696.1 / 447.7 / 2.3 ns; settings snapshots at 0 / 256 / 10,000
+orders measured 14.071 / 89.538 / 3,517.862 us. Compared with the latest
+comparable same-day run (18.4 / 3.6 ns; helpers 547.4 / 586.9 / 454.3 / 2.1
+ns; snapshots 10.007 / 71.846 / 2,538.766 us), values changed +10.3% / +50.0%,
+helpers +10.5% / +18.6% / -1.5% / +9.5%, and snapshots +40.6% / +24.6% /
++38.6%. These microbenchmarks do not exercise signal batching or cycle
+scheduling. They ran with the active stack under heavy AutoTrader and Insights
+load, so the increases are environment-contended and are not evidence of a
+batching regression. WSL2 Linux x86_64, optimized Cargo profile.
+
+## Dequeue only after live-worker capacity is available (2026-11-13)
+
+Strategy passed 168 service-feature library tests. The Scout registration replay
+benchmark measured a 10,843 us median for 10,000 registrations, 60 intervals,
+and 500 transient failures (10,500 encoded requests), 10.1% below the prior
+same-workload run (12,065 us). This change bounds live-worker update processing;
+the benchmark does not exercise that path, so the movement is environment
+variation rather than a measured effect. WSL2 Linux x86_64, optimized Cargo
+profile, active stack.
+
+## Match failed Learning evidence cooldown to the evidence refresh interval (2026-11-13)
+
+Strategy passed 168 service-feature library tests. The Scout registration replay
+benchmark measured a 12,065 us median for 10,000 registrations, 60 intervals,
+and 500 transient failures (10,500 encoded requests), 16.1% below the preceding
+same-workload run (14,386 us). The evidence cooldown does not affect registration
+replay; this result is environment-sensitive and does not measure live request
+volume. WSL2 Linux x86_64, optimized Cargo profile, active stack.
+
+## Align live signal queue expiry with the entry freshness window (2026-11-13)
+
+AutoTrader passed 166 library tests and 8 binary tests. The strategy-evaluation
+benchmark completed: evaluator maxima were 18.4 / 3.6 ns; serialization / depth
+/ order / parameter helpers measured 547.4 / 586.9 / 454.3 / 2.1 ns; settings
+snapshots at 0 / 256 / 10,000 retained orders measured 10.007 / 71.846 /
+2,538.766 us. Compared with the preceding same-day run, evaluator maxima
+changed -16.4% / -33.3%, helpers -2.1% / -1.5% / +6.5% / +5.0%, and snapshots
++1.6% / +6.6% / -7.3%. These microbenchmarks do not exercise the live queue
+expiry or cycle backlog; changes are environment-sensitive. WSL2 Linux x86_64,
+optimized Cargo profile, active stack.
+
+## Keep latest per-symbol worker inputs without stream backpressure (2026-11-13)
+
+Strategy passed 168 service-feature library tests. The Scout registration replay
+benchmark measured a 14,386 us median for 10,000 registrations, 60 intervals,
+and 500 transient failures (10,500 encoded requests), 11.9% above the previous
+same-workload run (12,862 us). This benchmark does not exercise the live
+Insights worker stream or the pending-update map; the difference is unrelated
+and environment-sensitive. WSL2 Linux x86_64, optimized Cargo profile, active
+stack.
+
+## Bound repeated failures while loading live profile evidence (2026-11-13)
+
+Strategy passed 168 service-feature library tests. The Scout registration replay
+benchmark measured a 12,862 us median for 10,000 registrations, 60 intervals,
+and 500 transient failures (10,500 encoded requests), 9.4% below the previous
+same-workload run (14,193 us). The live evidence retry cooldown does not affect
+registration replay; this result is environment-sensitive and does not measure
+evidence request volume. WSL2 Linux x86_64, optimized Cargo profile, active
+stack.
+
+## Back off repeated Learning evidence failures (2026-11-13)
+
+Strategy passed 168 service-feature library tests. The Scout registration replay
+benchmark measured a 14,193 us median for 10,000 registrations, 60 intervals,
+and 500 transient failures (10,500 encoded requests), 3.1% above the prior
+same-workload run (13,769 us). This change affects live evidence lookup
+backoff, not registration replay; the small difference is environment-sensitive
+and the benchmark does not measure evidence request volume. WSL2 Linux x86_64,
+optimized Cargo profile, active stack.
+
+## Coalesce queued live Insights snapshots by symbol (2026-11-13)
+
+Strategy passed 168 service-feature library tests. The Scout registration replay
+benchmark completed with a 13,769 us median for 10,000 registrations, 60
+intervals, and 500 transient failures (10,500 encoded requests). Compared with
+the preceding same-workload run (14,986 us), this is 8.1% faster. The queue
+coalescing change does not affect the timed registration replay workload; the
+result is environment-sensitive and no live stream timing is measured by this
+benchmark. WSL2 Linux x86_64, optimized Cargo profile, active stack.
+
+## Gate live Learning evidence lookups behind the local entry rule (2026-11-13)
+
+Strategy passed 167 service-feature library tests. `cargo bench --features
+service` completed with all 167 harness tests ignored and ran the Scout
+registration replay workload: 10,000 registrations, 60 intervals, and 500
+transient failures encoded 10,500 requests in a 14,986 us median. Compared with
+the latest same-workload result (13,349 us), this is 12.3% slower; this change
+does not touch registration replay, and the run overlapped active service
+traffic. The benchmark does not measure live-worker evidence lookup frequency.
+WSL2 Linux x86_64, optimized Cargo profile, active stack.
+
+## Index shared exit IDs once during AutoTrader position reconciliation (2026-11-13)
+
+AutoTrader passed 165 library tests and 8 binary tests. The strategy-evaluation
+benchmark completed: evaluator maxima were 22.0 / 5.4 ns; serialization / depth
+/ order / parameter helpers measured 559.0 / 595.6 / 426.6 / 2.0 ns; settings
+snapshots at 0 / 256 / 10,000 retained orders measured 9.849 / 67.412 /
+2,740.156 us. Compared with the latest comparable same-day run, evaluator maxima
+changed +16.4% / +12.5%, helpers +2.3% / -1.1% / +0.7% / +5.3%, and snapshots
++2.5% / +5.6% / +4.1%. These microbenchmarks do not exercise position
+reconciliation; the change avoids rescanning retained orders once per externally
+closed position, but runtime lock timings require rebuilding the running
+AutoTrader. No services were restarted. WSL2 Linux x86_64, optimized Cargo
+profile, active stack.
+
+## Allow normal live-signal processing latency (2026-11-13)
+
+AutoTrader passed 165 library and 8 binary tests. The Live Signal freshness regression test accepts a 6-second-old live signal, rejects one older than 15 seconds, and still rejects an explicitly stale source. The AutoTrader benchmark completed with all 173 harness tests ignored. Entry / position evaluator maxima were 18.9 / 4.8 ns; signal serialization / market depth / order construction / parameter validation measured 546.5 / 602.4 / 423.5 / 1.9 ns. Settings snapshots at 0 / 256 / 10,000 orders measured 9.607 / 63.820 / 2,631.034 us. Compared with the latest comparable same-day run (18.1 / 3.6 ns; helpers 543.4 / 628.2 / 420.6 / 2.2 ns; snapshots 12.030 / 97.194 / 2,448.180 us), evaluator maxima changed +4.4% / +33.3%, helpers +0.6% / -4.1% / +0.7% / -13.6%, and snapshots -20.1% / -34.3% / +7.5%. This age-window change does not affect benchmarked evaluator or snapshot work; measurements ran with the active stack and are environment-sensitive. The freshness window changed from 5 to 15 seconds after runtime diagnostics showed live candidates rejected at 6 seconds while AutoTrader cycles took about 4 seconds. A pre-existing test assertion for daily-strategy priority was corrected to expect a non-exploratory selection. No services were restarted during these benchmark runs.
+
+Follow-up after moving cycle-slot acquisition ahead of live-signal dequeue: AutoTrader passed 165 library and 8 binary tests. Entry / position evaluator maxima were 21.4 / 5.4 ns; serialization / depth / order / parameter helpers measured 582.1 / 621.2 / 431.3 / 2.1 ns; settings snapshots at 0 / 256 / 10,000 orders measured 10.168 / 75.374 / 2,746.931 us. Compared with the immediately preceding run, evaluator maxima changed +13.2% / +12.5%, helpers +6.5% / +3.1% / +1.8% / +10.5%, and snapshots +5.8% / +18.1% / +4.4%. This queue-ordering change does not affect these workloads; the run overlapped active stack traffic, so the movements are environment-sensitive. No services were restarted during this benchmark run.
+
+Follow-up after expiring stale queued live dashboards: AutoTrader passed 166 library and 8 binary tests. The strategy-evaluation benchmark measured entry / position maxima of 19.0 / 5.6 ns; serialization / depth / order / parameter helpers measured 547.0 / 609.5 / 442.8 / 1.9 ns; settings snapshots at 0 / 256 / 10,000 orders measured 9.970 / 69.195 / 3,120.645 us. Compared with the latest same-day run (18.1 / 3.6 ns; helpers 543.4 / 628.2 / 420.6 / 2.2 ns; snapshots 12.030 / 97.194 / 2,448.180 us), maxima changed +5.0% / +55.6%, helpers +0.7% / -3.0% / +5.3% / -13.6%, and snapshots -17.1% / -28.8% / +27.5%. The queue-expiry change does not affect timed evaluator or settings-snapshot workloads; the 10,000-order snapshot spread was collected under active stack traffic and is environment-sensitive. No services were restarted during this benchmark run.
+
+Follow-up benchmark after limiting queued live reports to an eight-second age: evaluator maxima were 23.4 / 4.8 ns; helpers 588.9 / 617.4 / 441.8 / 1.9 ns; settings snapshots 10.034 / 80.575 / 2,742.079 us. Compared with the prior queue-expiry run (19.0 / 5.6 ns; helpers 547.0 / 609.5 / 442.8 / 1.9 ns; snapshots 9.970 / 69.195 / 3,120.645 us), values changed +23.2% / -14.3%, helpers +7.7% / +1.3% / -0.2% / 0%, and snapshots +0.6% / +16.4% / -12.1%. These unchanged evaluator and snapshot workloads are highly variable under active stack traffic; this freshness filter adds no work to them.
+
+Final follow-up after reserving cycle capacity before dequeue and limiting the live queue to six seconds: AutoTrader passed 166 library and 8 binary tests. Entry / position evaluator maxima were 19.0 / 3.9 ns; helpers 559.0 / 601.4 / 427.6 / 2.1 ns; settings snapshots 10.383 / 74.549 / 2,891.388 us. Compared with the preceding same-day run (23.4 / 4.8 ns; helpers 588.9 / 617.4 / 441.8 / 1.9 ns; snapshots 10.034 / 80.575 / 2,742.079 us), evaluator maxima changed -18.8% / -18.8%, helpers -5.1% / -2.6% / -3.2% / +10.5%, and snapshots +3.5% / -7.5% / +5.4%. The 15-second age window and queue policy do not affect these timed workloads; measurements remain environment-sensitive under active stack traffic.
+
+After tightening the stale-live queue window to six seconds, AutoTrader again passed 166 library and 8 binary tests. The focused benchmark measured entry / position maxima of 17.8 / 3.5 ns; helpers 554.6 / 612.2 / 430.1 / 1.9 ns; settings snapshots 10.827 / 64.700 / 2,821.486 us. Compared with the preceding queue-window run (19.0 / 3.9 ns; helpers 559.0 / 601.4 / 427.6 / 2.1 ns; snapshots 10.383 / 74.549 / 2,891.388 us), values changed -6.3% / -10.3%, helpers -0.8% / +1.8% / +0.6% / -9.5%, and snapshots +4.3% / -13.2% / -2.4%. These measurements do not exercise queue expiry and vary under active stack traffic.
+
+Final measured run after retaining queued live reports for at most two seconds and allowing 20 seconds end-to-end freshness: AutoTrader passed 166 library and 8 binary tests. Entry / position evaluator maxima were 23.6 / 6.5 ns; helpers 606.0 / 640.1 / 469.2 / 2.2 ns; settings snapshots 11.857 / 72.608 / 2,512.450 us. Compared with the prior six-second queue run (17.8 / 3.5 ns; helpers 554.6 / 612.2 / 430.1 / 1.9 ns; snapshots 10.827 / 64.700 / 2,821.486 us), maxima changed +32.6% / +85.7%, helpers +9.4% / +4.6% / +9.1% / +15.8%, and snapshots +9.5% / +12.4% / -11.0%. These workloads do not exercise live queue expiry or freshness behavior; the run overlapped active stack traffic and is highly variable.
+
+Focused benchmark after rechecking live queue age once a cycle slot is available: AutoTrader passed 166 library and 8 binary tests. Entry / position evaluator maxima were 64.0 / 23.8 ns; helpers 804.9 / 1,078.4 / 462.0 / 2.3 ns; settings snapshots 13.627 / 96.201 / 6,248.014 us. Compared with the latest comparable same-day run (18.1 / 3.6 ns; helpers 543.4 / 628.2 / 420.6 / 2.2 ns; snapshots 12.030 / 97.194 / 2,448.180 us), entry / position maxima were +254% / +561%, helpers +48.2% / +71.7% / +9.8% / +4.5%, and snapshots +13.3% / -1.0% / +155%. This unchanged microbenchmark ran under heavy active stack load (AutoTrader sampled at 120% CPU and Learning near 4 GiB RSS) and does not exercise queue expiry; results are severely environment-contended. Do not attribute the increase to the queue policy without a controlled rerun.
+
+## Route Scout markouts by their strategy (2026-11-13)
+
+Insights passed 40 library and 46 binary tests; Learning passed 61 library and 1 binary test. Insights calculations measured 11,262.0 / 11,877.3 / 251.0 / 19.6 / 323.5 / 43.0 ns for live snapshot, explained snapshot, research features, return context, diagnostics, and book snapshot, compared with the latest comparable 13,423.1 / 13,051.6 / 256.1 / 21.1 / 351.0 / 45.3 ns. Changes were -16.1% / -9.0% / -2.0% / -7.1% / -7.8% / -5.1%. Feed-event measurements for on_price / on_trade / on_book / snapshot were 10,689.8 / 7.2 / 38.3 / 39,792.0 ns, versus 12,377.5 / 10.3 / 47.2 / 53,294.0 ns (-13.6% / -30.1% / -18.9% / -25.3%). Hot-path book encoding measured 6,400.5 ns and 192 allocations for legacy JSON, versus 225.9 ns and 6.714 allocations for compact caching. Learning load / decision snapshot / persistence measured 22.01 / 0.19 / 15.32 ms versus latest comparable 2.32 / 0.11 / 6.38 ms (+849% / +73% / +140%); this single run overlapped an active Insights markout backlog and is environment-contended, not attributable to routing metadata. Before the route fix, live diagnosis recorded 29,950 live Scout observations but no live markout deliveries, while 213 unrelated daily markouts delivered. After targeting each callback to its strategy and replaying active registrations, Insights logged more than 434 live markout deliveries and Prometheus aggregate closed count rose from 179,286 to 180,324 (+1,038). Live-trade-flow increased by 94 in the first short sample; other live strategy counts had not yet moved at that sample time. Homepage liveness passed 17/17 after the Insights and Scout worker restarts. These benchmarks do not measure RSocket fanout. WSL2 Linux x86_64, optimized Cargo profiles, active stack. No services were restarted during these benchmark runs.
+
+## Reconnect idle live Scout streams and expose input freshness (2026-11-13)
+
+Strategy passed 166 service-feature library tests. The service-feature bench command completed with all 166 harness tests ignored and ran the Scout registration replay workload: 10,000 registrations, 60 intervals, and 500 transient failures encoded 10,500 requests in a 13,349 us median. Compared with the latest same-workload result (21,275 us), this is 37.3% lower encoding time; request counts and workload are unchanged. This benchmark does not exercise the live Insights stream timeout. WSL2 Linux x86_64, optimized Cargo profile, with the live stack active. Prometheus showed all five live Scout input-freshness values stale during diagnosis. After the focused Scout worker rebuild and restart, homepage liveness passed 17/17 checks and all five live streams delivered fresh updates; the completed count was unchanged over the first 30 seconds, below the 15-minute minimum live Scout hold.
+
+## Avoid pausing entries for replaceable audit evictions (2026-11-12)
+
+AutoTrader passed 164 library tests and 7 binary tests. Entry / position
+evaluator maxima measured 18.1 / 3.6 ns; serialization / depth / order /
+parameter helpers measured 543.4 / 628.2 / 420.6 / 2.2 ns. Settings snapshots
+at 0 / 256 / 10,000 retained orders measured 12.030 / 97.194 / 2,448.180 us.
+Compared with the latest same-day AutoTrader run, evaluator maxima changed
++0.6% / 0%; helper timings changed +3.1% / -8.5% / +0.1% / +15.8%; snapshots
+changed +23.1% / +46.5% / -0.1%. This audit queue policy change does not alter
+those workloads; snapshot measurements varied under active stack traffic.
+WSL2 Linux x86_64, optimized Cargo bench profile. No services were restarted.
+
+## Verify the paired-baseline Learning outbox path (2026-11-12)
+
+Strategy passed 164 service-feature library tests. `cargo bench --features
+service` completed with all 164 harness tests ignored; Strategy has no timed
+benchmark target. The new handler-level test confirms a paired baseline queues
+its absolute outcome for the exact baseline profile, while paired comparison
+feedback remains separate. No timed performance delta is available for this
+Scout feedback change. WSL2 Linux x86_64, optimized Cargo bench profile. Scout
+workers will be rebuilt and restarted; homepage liveness will be checked
+afterward.
+
+## Preserve paired-baseline outcomes for exact-profile Learning (2026-11-12)
+
+Strategy passed 163 service-feature library tests. `cargo bench --features
+service` completed with 163 harness tests ignored; Strategy has no timed
+benchmark target. This change adds one independent Learning event for the
+paired baseline's main strategy scenario while preserving the separate paired
+delta event on the tested variant. It does not change evaluator hot paths, and
+the available Strategy command provides no timing data for Scout feedback
+dispatch. WSL2 Linux x86_64, optimized Cargo bench profile. Scout worker images
+will be rebuilt and restarted; homepage liveness will be checked afterward.
+
+## Log Learning profile registration failures (2026-11-12)
+
+AutoTrader passed 164 library tests and 7 binary tests. Entry / position
+evaluator maxima measured 18.0 / 3.6 ns; serialization / depth / order /
+parameter helpers measured 527.1 / 686.8 / 420.1 / 1.9 ns. Settings snapshots
+at 0 / 256 / 10,000 retained orders measured 9.772 / 66.358 / 2,451.252 us.
+Compared with the preceding same-day run, evaluator maxima changed -5.8% / -34.5%;
+helper values changed -13.6% to +8.5%; snapshots changed -8.5% / -6.8% / -9.5%.
+The benchmark does not exercise profile registration or its new diagnostics;
+single-run variation occurred under active stack traffic. WSL2 Linux x86_64,
+optimized Cargo bench profile. Only AutoTrader will be rebuilt and restarted;
+Learning is already running the updated route allowlist. Homepage liveness will
+be checked after the restart.
+
+## Allow profile registration over Learning RSocket (2026-11-12)
+
+Learning passed 60 library tests and 1 binary test. The unchanged 1,000-variant /
+200-profile / 5,000-event benchmark measured database load / decision snapshot /
+state persistence at 19.28 / 0.17 / 13.58 ms. Compared with the immediately
+preceding run (22.06 / 0.27 / 14.19 ms), these changed -12.6% / -37.0% / -4.3%.
+Both runs used the live stack; the earlier run overlapped Docker builds, so the
+timing movement is host-contention-sensitive and not attributable to the route
+allowlist. This fixture does not measure RSocket route dispatch or registration.
+WSL2 Linux x86_64, optimized Cargo bench profile. Learning will be restarted;
+AutoTrader already runs the snapshot and queue changes. Homepage liveness will
+be checked after the restart.
+
+## Prevent missed-opportunity backlog from starving profile registration (2026-11-12)
+
+AutoTrader passed 164 library tests and 7 binary tests. Entry / position
+evaluator maxima measured 19.1 / 5.5 ns; serialization / depth / order /
+parameter helpers measured 561.9 / 632.8 / 420.8 / 2.2 ns. Settings snapshots
+at 0 / 256 / 10,000 retained orders measured 10.677 / 71.196 / 2,708.528 us.
+Compared with the preceding same-day run, evaluator maxima changed -3.0% / +3.8%;
+helpers were within 4.8%; snapshots changed +9.6% / -26.9% / +0.9%. The run was
+under active stack load and does not benchmark feedback/registration queue
+fairness. WSL2 Linux x86_64, optimized Cargo bench profile. Only AutoTrader was
+restarted for this worker change; Learning was already running the updated
+snapshot contract. Homepage liveness had passed 17/17 checks after the preceding
+Learning and AutoTrader restarts.
+
+## Register active Learning profiles for evidence collection (2026-11-12)
+
+Strategy passed 162 service-feature library tests; Learning passed 59 library
+and 1 binary test; AutoTrader passed 163 library and 7 binary tests. Learning's
+1,000-variant / 200-profile / 5,000-event fixture measured database load /
+decision snapshot / persistence at 22.06 / 0.27 / 14.19 ms. Versus the latest
+same-workload result (8.32 / 0.12 / 6.78 ms), these were +165% / +125% / +109%.
+This run had the live 50-container stack active and overlapped a focused Docker
+rebuild, so the timing increase is environment-contended and not attributable
+to the snapshot-contract change. AutoTrader entry / position evaluator maxima
+were 19.7 / 5.3 ns; serialization / depth / order / parameter helpers measured
+562.5 / 625.5 / 431.1 / 2.1 ns. Settings snapshots at 0 / 256 / 10,000
+retained orders measured 9.737 / 97.377 / 2,685.412 us. Compared with the
+immediately preceding same-day run, evaluator maxima changed -0.5% / -14.5%,
+helpers were within 5%, and settings snapshots changed -7.1% / +44.1% / -10.6%.
+The 256-order snapshot result was collected under the same active-stack load;
+these microbenchmarks do not measure profile registration or evidence routing.
+Strategy has no dedicated timing benchmark. WSL2 Linux x86_64, optimized Cargo
+bench profiles. AutoTrader and Learning were restarted; homepage liveness passed
+17/17 checks.
+
+## Apply changed Learning profile identities (2026-11-12)
+
+AutoTrader passed 161 library tests and 7 binary tests. The strategy evaluation
+benchmark measured entry / position evaluation at 3.0–19.8 / 1.8–6.2 ns;
+signal serialization / market depth / limit-order construction / parameter
+validation measured 563.4 / 628.5 / 429.1 / 2.0 ns. Settings snapshots at 0 /
+256 / 10,000 retained orders measured 10.482 / 67.581 / 3,002.987 us. Compared
+with the latest same-day comparable run, evaluator maxima changed +4.8% / +12.7%;
+helper timings were within 6.3%; settings snapshots changed -3.3% / -1.5% /
++19.8%. The benchmark does not exercise profile snapshot synchronization. It
+ran with the local system stack active, so the largest retained-order snapshot
+variation is environment-sensitive. WSL2 Linux x86_64, optimized Cargo bench
+profile. No services were restarted.
+
+## Bounded parallel insight cycles (2026-11-12)
+
+AutoTrader passed 160 library tests and 7 binary tests. The strategy evaluation
+benchmark measured live strategy entry at 10.6–18.9 ns and position evaluation
+at 2.7–5.5 ns; signal serialization / market depth / limit-order construction /
+parameter validation measured 550.2 / 589.1 / 421.2 / 2.0 ns. Settings snapshots
+at 0 / 256 / 10,000 retained orders measured 10.838 / 68.637 / 2,507.392 us.
+Compared with the latest same-day comparable run (entry 3.8–21.5 ns, position
+2.0–3.9 ns, helpers 565.5 / 700.2 / 467.9 / 2.1 ns, and snapshots 12.829 /
+86.293 / 3,874.467 us), helper timings improved 2.7–15.9%, settings snapshots
+improved 20.4–35.3%, and common live-strategy position evaluations were within
+1.3 ns; the slowest live-momentum case was 1.6 ns higher. These microbenchmarks
+do not measure cycle queue latency or concurrent execution. WSL2 Linux x86_64,
+optimized Cargo bench profile. No services were restarted.
+
+## Prioritize trade learning feedback (2026-11-12)
+
+AutoTrader passed 160 library tests and 7 binary tests. The strategy evaluation
+benchmark measured entry evaluation at 3.8–21.5 ns and position evaluation at
+2.0–3.9 ns; signal serialization / market depth / limit-order construction /
+parameter validation measured 565.5 / 700.2 / 467.9 / 2.1 ns. Settings
+snapshots at 0 / 256 / 10,000 retained orders measured 12.829 / 86.293 /
+3,874.467 us. Compared with the latest comparable recorded run (entry 3.1–18.4
+ns, position 1.8–4.3 ns, helpers 577.4 / 653.9 / 449.9 / 2.0 ns, and settings
+snapshots 16.719 / 71.929 / 2,965.218 us), evaluator maxima changed +16.8% /
+-9.3%, helper measurements varied by -2.1% to +7.1%, and settings snapshots
+varied by -23.3% to +30.7%. These measurements do not exercise feedback queue
+selection; the run occurred with the system stack active, so the unrelated
+settings snapshot variation is environment-sensitive. WSL2 Linux x86_64,
+optimized Cargo bench profile. No services were restarted.
+
+## Insights hot-path benchmark methodology (2026-11-12)
+
+Insights tests passed (40 library, 45 binary). The calculation harness now uses
+one warmup and nine timed samples, reports median and range, uses Linux process
+CPU time rather than wall time, and separately measures allocation calls and
+requested bytes per operation. The hot-path harness compares per-book nested
+JSON construction with compact numeric caching and JSON construction once per
+14 updates. In the latest run, per-book JSON measured 6,819.9 ns/update, 192
+allocations, and 40,607.9 requested bytes; compact caching measured 240.2
+ns/update, 6.714 allocations, and 1,415.5 requested bytes. Across four focused runs,
+compact caching was 25–30× faster in this microbenchmark and used about 96.5%
+fewer allocations and requested bytes. The cache benchmark models the hot-path
+representation and snapshot cadence; it is not an end-to-end service
+measurement.
+
+The calculation medians were 13,423.1 / 13,051.6 / 256.1 / 21.1 / 351.0 /
+45.3 ns for live snapshot, explained snapshot, research features, return
+context, diagnostics, and book snapshot. Their nine-sample ranges remained
+wide under concurrent host load, so compare these CPU-time measurements only
+with later runs using this updated harness and similar conditions. A price
+update measured 15.3 / 2,376.4 / 4,532.6 / 9,079.4 / 18,087.7 ns with
+0 / 100 / 200 / 400 / 800 pending Scout outcomes. The slope is about 22.6 ns
+per pending outcome. A live three-second sample showed 477 price events/s, so
+even 800 pending outcomes on every price event would account for about 8.6 ms
+of CPU per second (0.009 core). This scan scales linearly but is too small to
+explain the multi-core CPU chart. The six-million-row book-history reproduction
+retained 20 MiB RSS in 0.33 s. WSL2 Linux x86_64, optimized Cargo profile. Live
+`perf` profiling remains unavailable without matching WSL2 kernel tools. No
+services were restarted.
+
+## Defer cross-asset returns to research samples (2026-11-12)
+
+Insights tests passed (40 library, 45 binary). Feed ingestion now calculates
+BTC/ETH return context only when the current event produces a research sample;
+same-symbol context still comes from that symbol's locked engine, and other
+reference engines remain nonblocking. This removes two engine-map lookups and
+return-history scans from ordinary ticker, trade, and book events. Book events
+cache numeric levels and build the JSON book only when a signal snapshot needs
+it; unused JSON wrappers and clones were removed. Price updates reuse the
+pending-outcome remainder queue. The initial single-sample calculation run
+measured 20,291.3 / 22,937.6 / 345.8 / 44.6 / 539.9 / 49.2 ns for live
+snapshot, explained snapshot, research features, return context, diagnostics,
+and book snapshot. A focused pending-outcome run measured 21,783.3 ns/update.
+Repeated runs varied sharply on unchanged calculations under concurrent host
+load; these initial timings are superseded by the measurement method in the
+section above. The 6-million-row book-history reproduction retained 20 MiB RSS
+in 0.47 s. WSL2 Linux x86_64, optimized Cargo profile. Live profiling was
+unavailable because matching `linux-tools` for the WSL2 kernel are not
+installed. No services were restarted.
+
+## Restore missed-opportunity bands browser path (2026-11-12)
+
+AutoTrader passed 159 library tests and 7 binary tests; React passed 110 tests.
+The AutoTrader benchmark completed on WSL2 Linux x86_64 with the optimized Cargo
+profile. Entry / position evaluators ranged from 3.1–18.4 / 1.8–4.3 ns, and
+serialization / depth / order / parameter helpers measured 577.4 / 653.9 /
+449.9 / 2.0 ns. The 0 / 256 / 10,000-order settings snapshots measured 16.719 /
+71.929 / 2,965.218 us versus the latest recorded 11.856 / 84.808 / 3,903.786
+us. The band retrieval endpoint is not exercised by these microbenchmarks.
+
+## Rename the Paper Exchange source crate (2026-11-12)
+
+After moving the crate to `src/rust/paper_exchange`, Position Management passed
+29 tests (1 ignored), AutoTrader 159 library / 7 binary, and Paper Exchange 10
+library / 4 binary. The rerun produced 2,093.0 ms for the concurrent file
+workload, 100k-fill decode/encode of 216.7 / 234.4 / 77.8 / 103.6 ms, and
+aggregation / indexed lookup / count scan of 4.58 ms / 55.3 ns / 60.8 ns. These
+unchanged ledger workloads were 4.8–29.1% above the latest archived comparable
+baseline, with the concurrent file workload +12%; recent same-day runs were
+also elevated. Treat the changes as noisy under active stack load, not an effect
+of the source rename. AutoTrader and Paper Exchange benchmark workloads were
+within 10% of the preceding same-day run except the 10,000-order settings
+snapshot (+29%), an unrelated existing workload. Optional service HTTP bench
+was skipped; no services were restarted.
+
+## Position Management mark-cache naming follow-up (2026-11-12)
+
+Position Management passed 29 tests (1 ignored). After renaming its market
+pollers to reflect mark-only caching, the concurrent file workload measured
+2,878.1 ms, 100-fill MessagePack/JSON decode/encode 147.7 / 162.1 / 19.5 / 33.4
+us, and 100k-fill decode/encode 224.6 / 245.9 / 82.7 / 112.0 ms. Aggregation /
+indexed lookup / count scan measured 4.66 ms / 70.3 ns / 76.9 ns. Compared with
+the immediately prior same-day run, the 100k decodes were within 3%, while the
+file workload, encodes, aggregation, and lookups were 7–29% higher. The run was
+under active host load, and the rename does not touch these code paths; treat
+the increases as noisy observations pending a controlled repeat. The optional
+HTTP benchmark remained skipped because `BENCH_SERVICE_URL` was unset.
+
+## Paper Exchange boundary change repeat benchmarks (2026-11-12)
+
+The repeat run completed after renaming the Rust package; Position Management
+passed 29 tests (1 ignored), AutoTrader 159 library / 7 binary, and Paper
+Exchange 10 library / 4 binary. React passed 110 tests and typecheck; exporter
+passed 7 tests. Compose validation and `git diff --check` passed. No services
+were restarted.
+
+Position Management's concurrent file workload measured 2,405.3 ms (+29.2%
+versus 1,861.7 ms). 100-fill decode/encode measured 158.8 / 165.8 / 18.8 / 33.4
+us; 100k-fill decode/encode measured 221.8 / 239.8 / 76.1 / 105.1 ms. Aggregation
+/ indexed lookup / count scan measured 4.27 ms / 54.7 ns / 63.5 ns. Relative to
+the latest comparable recorded run, most unchanged persistence workloads were
+12–33% higher; the previous run in this section was also elevated. These
+single-run results were collected with the stack active and do not measure the
+new Paper Exchange RPC path. The optional HTTP bench was skipped because
+`BENCH_SERVICE_URL` was unset.
+
+AutoTrader evaluator ranges were 3.0–22.9 ns entry and 2.5–6.4 ns position;
+signal serialization / depth / order / parameter helpers measured 594.9 / 680.1
+/ 454.5 / 2.1 ns. Settings snapshot at 0 / 256 / 10,000 orders measured 12.55 /
+80.43 / 2,892.3 us. These workloads do not measure hedge-history retrieval or
+the candidate cache. Paper Exchange scheduler / manager construction measured
+122.2 / 252.6 ns; child calculation and multi-symbol workload measured 5.4
+ns/call and 5.9 ns/event. Against the immediately prior run, construction was
+within 4% / 12%; the multi-symbol workload changed 3.5%. The current benchmark
+does not exercise market-data subscription or order matching RPCs. WSL2 Linux
+x86_64, optimized Cargo profiles.
+
+## Move paper market data and matching to Paper Exchange (2026-11-12)
+
+Position Management (29 passed, 1 ignored), AutoTrader (159 library, 7 binary),
+and Paper Exchange (10 library, 4 binary) tests passed. Paper Exchange now owns
+shared FeedHandlers book/ticker subscriptions and paper matching; Position
+Management consumes compact marks and persists returned fills. Hedge candidates
+are calculated by AutoTrader. No service was restarted.
+
+Position Management benches measured the 100k-row concurrent file workload at
+1,945.1 ms (+4.5% versus 1,861.7 ms), 100-fill MessagePack/JSON decode and
+encode at 136.1 / 154.0 / 19.9 / 32.8 us (+4.8% to +14.6%), and 100k-fill
+decode/encode at 208.5 / 227.5 / 78.0 / 108.7 ms (+10.0% to +26.4%). Aggregation
+/ indexed lookup / count scan measured 4.32 ms / 54.8 ns / 55.8 ns (+12.0% to
+14.9%). These unchanged ledger workloads were higher in this single run;
+the full stack was active and no serialization changes explain the increase.
+The optional HTTP benchmark was skipped because `BENCH_SERVICE_URL` was unset.
+
+AutoTrader entry/position evaluator maxima were 20.3 / 5.5 ns versus 18.4 / 3.1
+ns in the latest same-day recorded run; signal serialization / depth / order /
+parameter helpers measured 584.0 / 655.4 / 455.0 / 2.1 ns versus 547.6 / 571.4
+/ 417.0 / 1.8 ns. These microbenchmarks do not measure the new market-history
+RPC or hedge-candidate cache. Paper Exchange VWAP scheduler / manager
+construction measured 117.8 / 225.6 ns versus 106.8 / 200.1 ns in the latest
+recorded run; the new market-data decode and bounded-history paths have no
+standalone timing benchmark. The multi-symbol VWAP workload measured 5.7
+ns/event and is not directly comparable to the earlier signal-processing event
+workload. WSL2 Linux x86_64, optimized Cargo profiles.
+
 ## Bound AutoTrader audit queues and active signal context (2026-11-12)
 
 AutoTrader tests passed (160 library, 7 binary). Audit queues now cap at
@@ -21,7 +563,7 @@ x86_64, optimized Cargo profile.
 
 ## Bound AutoTrader working caches (2026-11-11)
 
-AutoTrader tests passed (157 library, 7 binary). Latest Strategy X signal
+AutoTrader tests passed (157 library, 7 binary). Latest Strategy signal
 retention now keeps one sample per symbol/strategy, expires entries after 3
 minutes, and caps at 20,480 keys; the book-prewarm map caps at 4,096 symbols
 and 5 minutes; the Learning response cache caps at 128 entries and 30 seconds.
@@ -38,7 +580,7 @@ Cargo profile.
 ## Post-cutover strategy workers and replay verification (2026-11-11)
 
 AutoTrader tests passed (155 library, 7 binary), Learning passed (53 library,
-1 binary), Insights passed (39), FeedHandlers passed (63), and Strategy X
+1 binary), Insights passed (39), FeedHandlers passed (63), and Strategy
 passed (155 with the service feature). React tests passed (110); homepage
 typecheck/build passed; exporter tests passed (6). The full rebuilt system ran
 with 44 required system containers and 8 infrastructure containers. The
@@ -79,7 +621,7 @@ ns, while shared immutable payload was 40.6 / 76.9 / 216.4 ns. Broadcast to
 200 / 400 subscribers measured 4.035 / 8.154 us per event. Feed-to-subscriber
 measured 0.1 / 0.2 / 0.1 us per event for 1 / 16 / overloaded 16 subscribers;
 the intentionally overloaded case reported 674,301 lagged deliveries. These
-SBE/fanout results stayed within recent single-run variation. Strategy X has
+SBE/fanout results stayed within recent single-run variation. Strategy has
 no timed benchmark target; its bench command completed with all 155 harness
 tests ignored. WSL2 Linux x86_64, optimized Cargo profiles; all timing results
 are standalone microbenchmarks, not end-to-end RSocket latency.
@@ -92,11 +634,11 @@ this bounded-hydration change before treating the initial RSS as steady state.
 
 ## Learning-owned multi-horizon strategy replay (2026-11-11)
 
-Learning tests passed (48 library, 1 binary), AutoTrader tests passed (155 library, 7 binary), Strategy X tests passed (153 with the `service` feature), and Insights tests passed (39). Learning's unchanged load fixture (1,000 variants, 200 profiles, 5,000 event IDs) measured 8.46 / 8.38 ms across two runs, decision snapshot 0.13 / 0.11 ms, and state persistence 6.73 / 6.66 ms. Versus the latest same-workload Learning run (2.67 / 0.12 / 7.14 ms), load was +217% / +214%; snapshot varied +8% / -8%; persistence was -6% / -7%. The fixture contains no replay jobs or history, so this is not a measurement of replay processing. These runs occurred while the old duplicate containers were still active and WSL2 host load averaged about 4.5; treat the Learning load result as environment-contended and repeat after runtime cutover before attributing the increase.
+Learning tests passed (48 library, 1 binary), AutoTrader tests passed (155 library, 7 binary), Strategy tests passed (153 with the `service` feature), and Insights tests passed (39). Learning's unchanged load fixture (1,000 variants, 200 profiles, 5,000 event IDs) measured 8.46 / 8.38 ms across two runs, decision snapshot 0.13 / 0.11 ms, and state persistence 6.73 / 6.66 ms. Versus the latest same-workload Learning run (2.67 / 0.12 / 7.14 ms), load was +217% / +214%; snapshot varied +8% / -8%; persistence was -6% / -7%. The fixture contains no replay jobs or history, so this is not a measurement of replay processing. These runs occurred while the old duplicate containers were still active and WSL2 host load averaged about 4.5; treat the Learning load result as environment-contended and repeat after runtime cutover before attributing the increase.
 
 AutoTrader strategy evaluation measured entry 3.0–18.0 ns, position 1.7–3.4 ns, and serialization / depth / order / parameter helpers at 531.9 / 564.2 / 419.0 / 1.8 ns. Against the latest comparable run (3.0–17.9 / 1.8–3.2 ns; 530.1 / 561.5 / 419.5 / 1.8 ns), evaluator maxima changed +0.6% / +6.3%; helpers changed +0.3% / +0.5% / -0.1% / unchanged. These measurements do not exercise the new close-feedback payload or replay path and were collected under the same container contention, so repeat after cutover.
 
-Insights tests passed (39). Calculation benchmarks measured 11,110 / 11,334 / 242.3 / 20.8 / 340.5 / 43.3 ns for live snapshot, explained snapshot, research features, return context, diagnostics, and book snapshot; a focused repeat measured 11,376 / 11,461 / 239.0 / 19.8 / 321.0 / 43.7 ns. Compared with the latest same-day run (10,871.7 / 11,638.6 / 242.5 / 32.4 / 348.5 / 45.0 ns), results were within recent single-run variation except that return-context varied materially across runs. The six-million-row book-history reproduction retained 19 MiB RSS in 0.22 s. Strategy X has no timed benchmark target; `cargo bench --features service` completed with all 153 harness tests ignored. WSL2 Linux x86_64, optimized Cargo profiles. No services were started or restarted; repeat the Learning, AutoTrader, and Insights measurements after the duplicate runtime cutover.
+Insights tests passed (39). Calculation benchmarks measured 11,110 / 11,334 / 242.3 / 20.8 / 340.5 / 43.3 ns for live snapshot, explained snapshot, research features, return context, diagnostics, and book snapshot; a focused repeat measured 11,376 / 11,461 / 239.0 / 19.8 / 321.0 / 43.7 ns. Compared with the latest same-day run (10,871.7 / 11,638.6 / 242.5 / 32.4 / 348.5 / 45.0 ns), results were within recent single-run variation except that return-context varied materially across runs. The six-million-row book-history reproduction retained 19 MiB RSS in 0.22 s. Strategy has no timed benchmark target; `cargo bench --features service` completed with all 153 harness tests ignored. WSL2 Linux x86_64, optimized Cargo profiles. No services were started or restarted; repeat the Learning, AutoTrader, and Insights measurements after the duplicate runtime cutover.
 
 ## Bound Insights active-symbol runtime state (2026-11-11)
 
@@ -112,13 +654,13 @@ AutoTrader tests passed (154 library, 7 binary); Learning passed (43 library, 1 
 
 ## Remove Insights-owned signal validation and missed-opportunity evidence (2026-11-11)
 
-Insights tests passed (35); Learning tests passed (43 library, 1 binary); AutoTrader passed (159 library, 7 binary); Strategy X passed (152 library with `service`); React passed (110). Insights no longer calculates generic signal walk-forward or missed-opportunity bands. AutoTrader no longer consumes Insights generic walk-forward fallbacks; strategy/profile evidence attached by Learning remains. Learning exposes an empty persisted missed-opportunity snapshot until attributed skipped-candidate and quote-path evidence exists; no bands are inferred from raw signals. Insights benchmarks measured 11,211.9 / 11,697.6 / 253.1 / 20.6 / 323.4 / 45.1 ns for live snapshot, explained snapshot, research feature extraction, return context, diagnostics, and book snapshot. The bounded book-history reproduction retained 21 MiB RSS over six million rows and completed in 0.22 s. Compared with the prior same-day run, calculation measurements were within 6.5%; these workloads do not exercise the removed historical scans. Learning load / decision snapshot / persistence measured 2.76 / 0.12 / 6.94 ms, compared with 2.60 / 0.11 / 6.87 ms (+6.2% / +9.1% / +1.0%); the benchmarks do not exercise missed-opportunity evidence handling. Repeated AutoTrader evaluator runs measured entry 3.1–17.8 ns, position 1.8–3.4 ns, and serialization/depth/order/parameter helpers 557.4 / 581.5 / 420.6 / 1.8 ns. Compared with the latest same-day run (3.0–18.1 / 1.7–3.3 ns; 555.3 / 580.1 / 421.5 / 1.9 ns), maximum evaluator values changed -1.7% / +3.0%, and helper values varied by -5.3% to +0.4%. Those microbenchmarks do not exercise RSocket dispatch, timeouts, or concurrency. Strategy X and Learning have no additional timed worker/replay workload. WSL2 Linux x86_64, optimized Cargo bench profile. No services were restarted.
+Insights tests passed (35); Learning tests passed (43 library, 1 binary); AutoTrader passed (159 library, 7 binary); Strategy passed (152 library with `service`); React passed (110). Insights no longer calculates generic signal walk-forward or missed-opportunity bands. AutoTrader no longer consumes Insights generic walk-forward fallbacks; strategy/profile evidence attached by Learning remains. Learning exposes an empty persisted missed-opportunity snapshot until attributed skipped-candidate and quote-path evidence exists; no bands are inferred from raw signals. Insights benchmarks measured 11,211.9 / 11,697.6 / 253.1 / 20.6 / 323.4 / 45.1 ns for live snapshot, explained snapshot, research feature extraction, return context, diagnostics, and book snapshot. The bounded book-history reproduction retained 21 MiB RSS over six million rows and completed in 0.22 s. Compared with the prior same-day run, calculation measurements were within 6.5%; these workloads do not exercise the removed historical scans. Learning load / decision snapshot / persistence measured 2.76 / 0.12 / 6.94 ms, compared with 2.60 / 0.11 / 6.87 ms (+6.2% / +9.1% / +1.0%); the benchmarks do not exercise missed-opportunity evidence handling. Repeated AutoTrader evaluator runs measured entry 3.1–17.8 ns, position 1.8–3.4 ns, and serialization/depth/order/parameter helpers 557.4 / 581.5 / 420.6 / 1.8 ns. Compared with the latest same-day run (3.0–18.1 / 1.7–3.3 ns; 555.3 / 580.1 / 421.5 / 1.9 ns), maximum evaluator values changed -1.7% / +3.0%, and helper values varied by -5.3% to +0.4%. Those microbenchmarks do not exercise RSocket dispatch, timeouts, or concurrency. Strategy and Learning have no additional timed worker/replay workload. WSL2 Linux x86_64, optimized Cargo bench profile. No services were restarted.
 
 ## Show a blocker for every strategy that does not submit an order (2026-11-11)
 
-AutoTrader tests passed (165 library, 7 binary). Benchmarks measured entry evaluation 3.0–18.1 ns, position evaluation 1.7–3.3 ns, and serialization/depth/order/parameter helpers 555.3 / 580.1 / 421.5 / 1.9 ns. Compared with the previous same-day run (entry 3.8–18.7 ns, position 1.8–3.9 ns, helpers 530.5 / 565.9 / 430.9 / 1.8 ns), evaluator ranges were within 22% at the minimum and 4% at the maximum; helpers varied by +4.7% / +2.5% / -2.2% / +5.6%. The evaluation microbenchmarks do not measure candidate-selection blocker reporting or RSocket worker routing. These runs used the 44-container Strategy-X deployment, unlike earlier 28-container runs. WSL2 Linux x86_64, optimized Cargo bench profile.
+AutoTrader tests passed (165 library, 7 binary). Benchmarks measured entry evaluation 3.0–18.1 ns, position evaluation 1.7–3.3 ns, and serialization/depth/order/parameter helpers 555.3 / 580.1 / 421.5 / 1.9 ns. Compared with the previous same-day run (entry 3.8–18.7 ns, position 1.8–3.9 ns, helpers 530.5 / 565.9 / 430.9 / 1.8 ns), evaluator ranges were within 22% at the minimum and 4% at the maximum; helpers varied by +4.7% / +2.5% / -2.2% / +5.6%. The evaluation microbenchmarks do not measure candidate-selection blocker reporting or RSocket worker routing. These runs used the 44-container Strategy deployment, unlike earlier 28-container runs. WSL2 Linux x86_64, optimized Cargo bench profile.
 
-## Route AutoTrader strategy decisions to Strategy X (2026-11-11)
+## Route AutoTrader strategy decisions to Strategy (2026-11-11)
 
 AutoTrader tests passed (165 library, 7 binary). Benchmarks measured entry evaluation at 3.1–18.3 ns, position evaluation at 2.1–3.8 ns, and serialization/depth/order/parameter helpers at 540.5 / 584.5 / 434.1 / 1.9 ns. Compared with the latest same-day AutoTrader run (entry 3.0–18.3 ns, position 1.8–3.4 ns, helpers 534.5 / 571.3 / 440.7 / 1.8 ns), entry was stable, position maximum was 11.8% higher, and helper values varied by -1.5% to +5.6%. These evaluator/helper microbenchmarks do not exercise RSocket routing, timeout, or concurrency behavior; no latency claim is made for the new remote decision path. WSL2 Linux x86_64, optimized Cargo bench profile.
 
@@ -130,9 +672,9 @@ Insights tests passed (43 library, 35 binary) and React tests passed (110). `car
 
 Insights tests passed (48 library, 35 binary). The new internal RSocket route pages symbol-filtered `SignalResearchFeatures` across inclusive time bounds using a chronological timestamp/row-ID cursor, with a 512-row page cap, 4,096-row scan cap, 8 MiB compressed scan cap, 128 KiB decoded-record cap, and 512 KiB JSON response cap. Tests cover symbol/time filtering, page continuation across other symbols, inclusive lower/upper bounds, bounded-scan incomplete coverage, and archived-history coverage reporting. `cargo bench --manifest-path src/rust/insights/Cargo.toml` completed; the 6,000,000-row book-history reproduction retained about 21 MiB RSS and took 0.24 s. Calculation benchmarks measured 11,382.6 / 12,915.1 / 276.7 / 21.0 / 359.1 / 45.7 ns for live snapshot, explained snapshot, feature extraction, return context, diagnostics, and book snapshot. Compared with the latest same-day readings (10,921.0 / 11,190.2 / 238.9 / 19.8 / 319.8 / 45.0 ns), these calculation microbenchmarks varied higher by 1.6–15.8%; they do not exercise the SQLite paging route and the single-run differences cannot be attributed to it. The API reports overlapping archived research days as unscanned or unavailable and marks history incomplete instead of implying full coverage. WSL2 Linux x86_64, optimized Cargo bench profile.
 
-## Add stateless Strategy X live-evaluation worker protocol (2026-11-11)
+## Add stateless Strategy live-evaluation worker protocol (2026-11-11)
 
-Strategy X tests passed: 152 library tests with the `service` feature and 0 binary tests; `cargo bench` completed with 152 unit tests ignored and no timed benchmark workloads. The new live worker exposes a versioned RSocket request-response contract for entry, open-position, dated-carry entry, and settlement evaluation. It validates strategy routing, symbol/profile identity, parameter names/bounds/steps, payload size, and configured in-flight capacity; responses echo request ID and exact profile ID/version. A local WebSocket/RSocket integration test verified correlated profile-attributed response delivery. No timing comparison is available because this crate has no timed benchmark target; its existing evaluator-only tests do not measure RSocket latency, queue behavior, or process memory. WSL2 Linux x86_64.
+Strategy tests passed: 152 library tests with the `service` feature and 0 binary tests; `cargo bench` completed with 152 unit tests ignored and no timed benchmark workloads. The new live worker exposes a versioned RSocket request-response contract for entry, open-position, dated-carry entry, and settlement evaluation. It validates strategy routing, symbol/profile identity, parameter names/bounds/steps, payload size, and configured in-flight capacity; responses echo request ID and exact profile ID/version. A local WebSocket/RSocket integration test verified correlated profile-attributed response delivery. No timing comparison is available because this crate has no timed benchmark target; its existing evaluator-only tests do not measure RSocket latency, queue behavior, or process memory. WSL2 Linux x86_64.
 
 ## Bound Learning evidence-only response fan-out (2026-11-11)
 
@@ -504,22 +1046,83 @@ Learning tests passed (41), Scouts tests passed (74), and React tests passed (10
 
 Learning tests passed (43 library, 1 binary); AutoTrader tests passed (154 library, 7 binary). Learning database load / decision snapshot / state persistence measured 2.93 / 0.14 / 7.00 ms against the latest same-workload run (2.32 / 0.11 / 6.38 ms): +26.3% / +27.3% / +9.7%. These single-run workloads contain no threshold outcome series and do not measure Learning's walk-forward scorer. AutoTrader strategy evaluation measured entry 3.2–23.7 ns and position 1.8–5.1 ns, with serialization / depth / order / parameter helpers at 596.4 / 646.9 / 429.7 / 2.1 ns. Compared with the latest comparable AutoTrader run (3.1–21.3 / 1.8–5.5 ns; 573.2 / 628.3 / 443.6 / 1.9 ns), entry maximum rose 11.3%, position maximum fell 7.3%, and helpers changed +4.0%, +3.0%, -3.1%, and +10.5%. These microbenchmarks do not exercise profile refresh or threshold-history handling; the refactor removes that duplicate AutoTrader history path, while threshold observations still go to Learning. Single-run measurements, WSL2 Linux x86_64, optimized Cargo bench profile. No services were started or restarted.
 
-## Strategy X worker process metrics (2026-11-11)
+## Strategy worker process metrics (2026-11-11)
 
-Strategy X service-feature tests passed (154). Cargo bench completed with all 154 unit tests ignored and no dedicated timing workload, so request instrumentation overhead is not measured and there is no comparable timing result. The change adds a separate internal HTTP listener and atomic counters/histogram to each live and Scout worker; RSS and CPU are read only when the metrics endpoint is scraped. Python exporter tests passed (6), and the Grafana dashboard JSON parsed successfully. WSL2 Linux x86_64, optimized Cargo bench profile. No services were started or restarted.
+Strategy service-feature tests passed (154). Cargo bench completed with all 154 unit tests ignored and no dedicated timing workload, so request instrumentation overhead is not measured and there is no comparable timing result. The change adds a separate internal HTTP listener and atomic counters/histogram to each live and Scout worker; RSS and CPU are read only when the metrics endpoint is scraped. Python exporter tests passed (6), and the Grafana dashboard JSON parsed successfully. WSL2 Linux x86_64, optimized Cargo bench profile. No services were started or restarted.
 
 ## Strategy worker extraction and bounded memory follow-up (2026-11-12)
 
-Verification after the crate rename and memory-bound changes: AutoTrader tests passed (160 library, 7 binary), Learning (58 library, 1 binary), Insights (40 library, 40 binary), FeedHandlers (63), Strategy (159 with service), and exporter tests (7). The full Compose stack was rebuilt against the existing named state volumes; homepage liveness passed 17/17. Prometheus reported 34/34 Strategy worker metric series.
+Verification after the crate rename and memory-bound changes: AutoTrader tests passed (162 library, 7 binary), Learning (58 library, 1 binary), Insights (40 library, 40 binary), FeedHandlers (63), Strategy (160 with service), and exporter tests (7). The full Compose stack was rebuilt against the existing named state volumes; homepage liveness passed 17/17. Prometheus reported 34/34 Strategy worker metric series.
 
 The current benchmark run is not directly comparable to isolated baselines: the full system and infrastructure stacks were active with live feed/worker traffic, and the first five benchmark commands also overlapped each other. AutoTrader measured entry 2.9–17.9 ns and position 1.7–3.0 ns, with serialization/depth/order/parameter helpers at 530.3 / 556.7 / 410.3 / 1.8 ns. Learning's initial overlapping run measured load/snapshot/persistence at 33.79 / 0.12 / 18.60 ms. A serial rerun while the live stack remained active measured 26.53 / 0.13 / 16.47 ms versus the latest prior full-stack run of 8.32 / 0.12 / 6.78 ms. The load and persistence differences are material and remain an open benchmark follow-up; service CPU usage and active traffic make attribution to the retention changes unreliable. Insights measured live snapshot / explained snapshot / research extraction / return context / diagnostics / book snapshot at 12,763.7 / 13,002.0 / 242.9 / 20.1 / 321.5 / 44.1 ns. FeedHandlers measured trade processing 485.8 ns/message, 7/50/400-level snapshots 2.567 / 15.372 / 111.494 us, and incremental update 1.885 us; the active workloads and build contention make these single runs unsuitable for regression claims. Strategy has no dedicated timing target; its 158 service tests were ignored in bench mode. WSL2 Linux x86_64, optimized Cargo profile.
 
 Early post-rebuild memory snapshots were AutoTrader 594 MiB, Insights 2.64 GiB, and Learning 635 MiB. The maximum sampled Scout worker RSS was 1.08 GiB against the updated 1.5 GiB cap (72%). These are startup/short-window measurements, not peak-load acceptance results. Re-run comparable benchmarks and collect longer steady-state and Scout/replay peak RSS without disrupting the running stack.
 
-After observing several Scout workers near 1 GiB RSS with only a few hundred MiB of persisted records, the serialized `/outcomes` response cache was found to have a count cap but no byte cap. It now caches responses up to 4 MiB each, 8 MiB in total, for 30 seconds, and serves larger responses without caching. Strategy tests passed (159), including byte/entry-cap coverage. After rebuilding and restarting the dependency graph, a short 90-second sample showed AutoTrader 1.4 GiB, Insights 1.16 GiB, Learning 226 MiB, and maximum Scout worker RSS 1.06 GiB; several Scout workers were below 150 MiB. Startup and active feed traffic were still changing, so this is not a stable before/after attribution. Homepage liveness passed 17/17 after the restart. WSL2 Linux x86_64, optimized Cargo profile for benchmarks.
+After observing several Scout workers near 1 GiB RSS with only a few hundred MiB of persisted records, the serialized `/outcomes` response cache was found to have a count cap but no byte cap. It now caches responses up to 4 MiB each, 8 MiB in total, for 30 seconds, and serves larger responses without caching. Strategy tests passed (159 at that deployment), including byte/entry-cap coverage. After rebuilding and restarting the dependency graph, a short 90-second sample showed AutoTrader 1.4 GiB, Insights 1.16 GiB, Learning 226 MiB, and maximum Scout worker RSS 1.06 GiB; several Scout workers were below 150 MiB. Startup and active feed traffic were still changing, so this is not a stable before/after attribution. Homepage liveness passed 17/17 after the restart. WSL2 Linux x86_64, optimized Cargo profile for benchmarks.
 
-The same review found the Strategy worker histogram exporter was adding cumulative bucket counters a second time. It now emits the already-cumulative buckets directly, with regression assertions for known observation counts. Strategy tests passed (159) and the 34 live/Scout workers were rebuilt with `--no-deps`; homepage liveness passed 17/17. The previous p95 Prometheus samples are invalid because they include the old bucket encoding. New worker counters reset at deployment; collect a fresh five-minute window after live requests resume before reporting p95. No end-to-end comparison with the old in-process path is available.
+The same review found the Strategy worker histogram exporter was adding cumulative bucket counters a second time. It now emits the already-cumulative buckets directly, with regression assertions for known observation counts. Strategy tests passed (159 at that deployment) and the 34 live/Scout workers were rebuilt with `--no-deps`; homepage liveness passed 17/17. A read-only 85-request smoke check across the 17 live worker endpoints measured a 0.527 ms median and 8.212 ms p95 round trip, including connection setup. The corrected worker-side live p95 reached 0.95 ms; Scout p95 was 1.0 s under real Scout work. The previous p95 Prometheus samples are invalid because they include the old bucket encoding. No end-to-end comparison with the old in-process path is available.
+
+AutoTrader memory follow-up: its pending signal queue retained the full multi-symbol `markets` map on every per-symbol queued dashboard. Queue admission now strips each item down to the matching symbol book, merges those books when forming a processing batch, and lowers the default unique-symbol backlog from 4,096 to 256 (the active feed universe is 100). AutoTrader tests passed (161 library, 7 binary). After deployment with feed traffic continuing, process RSS was 347 MiB shortly after startup and 381 MiB about a minute later, versus 2.91 GiB before the change. The reduction strongly implicates duplicated book maps as the main AutoTrader RSS source; longer burst/steady-state monitoring is still needed. The AutoTrader evaluator benchmark measured entry 3.3–18.9 ns, position 2.0–3.6 ns, and serialization/depth/order/parameter helpers 572.8 / 584.0 / 428.1 / 1.8 ns. Compared with the previous active-stack run (entry 2.9–17.9 ns, position 1.7–3.0 ns; helpers 530.3 / 556.7 / 410.3 / 1.8 ns), maxima changed by +5.6% / +20%; helper changes were +8.0% / +4.9% / +4.3% / unchanged. This single microbenchmark does not exercise the pending dashboard queue and ran under live feed load. WSL2 Linux x86_64, optimized Cargo profile.
+
+Exporter follow-up: monitoring no longer calls Learning's `/outcomes` route and paginates all Scout reports on each scrape. Each Scout worker exports open/closed counts from a cached, read-only SQLite aggregate refreshed once a minute. This removes repeated full report materialization from Learning and all Scout workers. Worker metric tests passed (160 Strategy library tests total); exporter tests passed (7). After deploying the change and restarting Learning against the same durable volume, its RSS was 63 MiB after one minute and 85 MiB after 13 minutes under active feed/worker traffic, versus 5.28 GiB before the change. Current AutoTrader RSS is 636 MiB after a minute of signal ingress, Insights 1.16 GiB, and maximum Scout RSS 1.03 GiB. These are stable enough to show a large improvement, but burst/replay peak and disk-retention checks remain. Homepage liveness passed 17/17 and Prometheus showed 34 worker series. No dedicated timing benchmark covers the metrics SQL query.
+
+The pending signal queue now strips each dashboard to its signal's market, caps each queued signal/book estimate at 256 KiB, and defaults to 256 distinct symbols, giving a 64 MiB aggregate payload bound. The new queue tests passed (162 AutoTrader library, 7 binary). Its microbenchmark measured entry 2.9–17.8 ns and position 1.7–3.1 ns, with serialization/depth/order/parameter helpers 535.9 / 566.7 / 420.2 / 1.8 ns. These are evaluator helpers; the benchmark does not measure queue admission or per-event serialization. Compared with the prior active-stack run (entry 3.3–18.9 ns, position 2.0–3.6 ns; helpers 572.8 / 584.0 / 428.1 / 1.8 ns), all maxima and helpers were equal or lower. WSL2 Linux x86_64, optimized Cargo profile.
 
 ## Improve RSS news outcome classification (2026-11-12)
 
 Insights tests passed (40 library, 44 binary). The classifier recognizes Zcash/ZEC and Kraken-related crypto ecosystem coverage, treats concrete product launches as positive despite incidental or earlier objections, flags material operating revenue declines as bearish despite buyback wording, leaves treasury proposals with offsetting supply and funding effects neutral, and treats crypto underperformance ahead of inflation/tighter-rate news as bearish. The latest Insights calculation run measured 11,275.5 / 11,478.6 / 248.2 / 26.1 / 327.8 / 45.9 ns for live snapshot, explained snapshot, research feature extraction, return context, diagnostics, and book snapshot. Compared with the immediately prior repeat (11,645.2 / 11,570.8 / 253.7 / 20.3 / 323.5 / 44.0 ns), these changed -3.2% / -0.8% / -2.2% / +28.6% / +1.3% / +4.3%. Compared with the latest full-stack result (12,763.7 / 13,002.0 / 242.9 / 20.1 / 321.5 / 44.1 ns), return context was +29.9%; the other workloads were -11.7% / -11.7% / +2.2% / +2.0% / +4.1%. The return-context measurement varied between repeats and the workload does not exercise RSS classification, so this is recorded as a benchmark variation, not attributed to the change. Book-history reproduction retained 6,000,000 rows at approximately 19 MiB RSS in 0.23 s. WSL2 Linux x86_64, optimized Cargo profile.
+
+## AutoTrader signal settings snapshot benchmark (2026-11-12)
+
+AutoTrader tests passed (162 library, 7 binary). The new `signal settings snapshot` benchmark executes the production settings-mutex/gate/profile/snapshot helper with fixed ledgers of 0, 256, and 10,000 retained orders (250 operations each). It measured 9.683 / 63.383 / 2,313.149 us per operation, respectively. This is an uncontended settings-lock benchmark, not a cycle-lock contention test; it includes the settings lock wait sample recording and settings clone. Its synthetic ledger contains compact filled signal orders and does not reproduce other large runtime histories. `cargo bench --manifest-path src/rust/auto_trader/Cargo.toml` completed; all 162 library and 7 binary tests were ignored in bench mode. The existing entry / position evaluator measured 3.0–19.0 / 1.7–3.6 ns; serialization / depth / order / parameter helpers measured 529.0 / 568.8 / 421.9 / 2.0 ns. These evaluator/helper workloads do not exercise the snapshot path. WSL2 Linux x86_64, optimized Cargo profile with the full stack active. No services were restarted.
+
+## Strategy workers consume Insights updates (2026-11-12)
+
+AutoTrader tests passed (158 library, 7 binary), Insights (45), Learning (59 library, 1 binary), Strategy (160 with `service`), React (110), and exporter tests (7). The new daily snapshot status propagation test confirms that evaluated active and inactive symbols are distinguished and unevaluated symbols remain unknown. Compose configuration, Grafana dashboard JSON, `git diff --check`, and Rust formatting passed.
+
+Benchmarks ran with the full service stack active and benchmark commands launched concurrently, so treat them as noisy single-run observations. AutoTrader entry / position evaluation measured 3.4–21.5 / 1.8–5.2 ns; serialization / depth / order / parameter helpers were 534.2 / 663.7 / 427.9 / 1.9 ns. Against the latest active-stack result (3.3–18.9 / 2.0–3.6 ns; helpers 572.8 / 584.0 / 428.1 / 1.8 ns), entry and position maxima rose 13.8% / 44.4%, and helpers changed -6.7% / +13.6% / -0.0% / +5.6%. The current benchmark does not exercise worker dispatch or changed daily-snapshot behavior; repeat under controlled load before attributing these evaluator variations. Signal-settings snapshot results for 0 / 256 / 10,000 orders were 9.659 / 70.306 / 2,403.324 us, respectively, versus 9.683 / 63.383 / 2,313.149 us in the previous run.
+
+Insights measured live snapshot / explained snapshot / research extraction / return context / diagnostics / book snapshot at 13,758.6 / 12,156.0 / 257.3 / 20.9 / 337.3 / 45.6 ns. Against the latest full-stack comparison (12,763.7 / 13,002.0 / 242.9 / 20.1 / 321.5 / 44.1 ns), changes were +7.8% / -6.5% / +5.9% / +4.0% / +4.9% / +3.4%. These workloads do not cover daily snapshot status publication. The book-history reproduction retained six million rows at about 19 MiB RSS in 0.25 s, consistent with the prior 19 MiB / 0.23 s result. Learning load / decision snapshot / persistence measured 21.12 / 0.12 / 13.39 ms; versus the latest full-stack run (26.53 / 0.13 / 16.47 ms), changes were -20.4% / -7.7% / -18.7%. Strategy has no dedicated timing target; its 160 service tests were ignored in bench mode. WSL2 Linux x86_64, optimized Cargo profile. Services remained running during benchmark collection.
+
+Post-cutover callback correction: live Strategy worker decisions now use an unpartitioned AutoTrader RSocket route envelope; the strategy and profile identities remain in the decision payload. AutoTrader rejects strategy-partitioned route envelopes, which prevented live decision callbacks. Strategy tests passed (160), and `cargo bench --manifest-path src/rust/strategy/Cargo.toml --features service` completed with no timing target (160 tests ignored in bench mode). The routing correction has no measured benchmark impact. WSL2 Linux x86_64, optimized Cargo profile.
+
+Worker metric scrape follow-up: all 34 live and Scout metrics endpoints responded during a parallel probe, but several Scout endpoints took 1–4 seconds under their CPU limit while the exporter timeout was 3 seconds. The scrape timeout is now 8 seconds and covered by the exporter unit test. Exporter tests passed (7); after rebuild, Prometheus reported 34/34 worker endpoints up and connected. This is an availability/scrape check, not a timed benchmark.
+
+Scout Insights backpressure isolation: each Scout worker now handles its Insights subscription serially through a lane separate from Learning's one-in-flight assignment/lifecycle capacity. This avoids dropping a market update merely because an assignment is active, while keeping assignment payloads out of an unbounded worker queue. Strategy tests passed (161); `cargo bench --manifest-path src/rust/strategy/Cargo.toml --features service` completed with no timed workload (161 tests ignored). This concurrency change has no benchmark measurement. WSL2 Linux x86_64, optimized Cargo profile.
+
+Scout Insights route latency telemetry (2026-11-12): Strategy tests passed (162), including histogram bucket/count coverage. The Scout worker now exports `app_strategy_worker_insight_route_duration_seconds`, measuring serialization and dispatch through the local handler. The Grafana panel reports pooled p50/p95 in milliseconds; it explicitly excludes Insights stream transport and upstream event delivery. The first live 5-minute window measured 0.56 ms p50 and 77.9 ms p95 across the Scout pool (24,491 route samples at query time); treat this as an initial live sample, not a steady-state baseline. Strategy has no timed bench target; `cargo bench --manifest-path src/rust/strategy/Cargo.toml --features service` completed with all 162 unit tests ignored and no timing measurements. WSL2 Linux x86_64, optimized Cargo profile.
+
+## Avoid repeated Insights Scout registration replay (2026-11-12)
+
+Strategy tests passed (166). The isolated `cargo bench --manifest-path src/rust/strategy/Cargo.toml --features service --bench scout_registration_replay` benchmark exercises the same `RegistrationReplayQueue` used by service replay. With 10,000 synthetic active registrations, 60 intervals, and 500 transient first-pass failures, the repeated-full-replay policy encoded 600,000 request payloads in a 599,599 us median; retry-only encoded 10,500 payloads in 21,275 us, a 98.25% request reduction and 28.2x lower payload-encoding time. Five repetitions; registration set creation/cloning excluded. The benchmark isolates JSON payload encoding and queue policy; it excludes SQLite scans, RSocket transport, Insights handler work, and live-service scheduling. Live diagnosis found 28,378 duplicate Scout registration log lines in a 30-second Insights log window while Insights used about 398% CPU and 1.8 GiB RSS. A 65-second observation of the still-running old implementation sampled Insights at 443–570% CPU and counted a further 27,448 duplicate-registration lines. After the Scout worker rebuild/restart, duplicate-registration logs stopped (zero in a 30-second window), but a paired 30-second Insights CPU sample remained at 541–608%; the replay fix removed the periodic burst but did not lower the overall CPU load. WSL2 Linux x86_64, optimized Cargo profile. Homepage liveness passed 17/17 after the Scout worker restart.
+
+## Route Insights updates only to workers that consume them (2026-11-12)
+
+Insights passed 46 tests and Strategy passed 166 service-feature tests. The Strategy bench suite completed with all 166 tests ignored and no timed Strategy workload. A new Insights feed-event benchmark models a 12,000-price-sample history and 1,000 pending Scout outcomes: `SignalEngine::on_price` / `on_trade` / `on_book` / `snapshot_with_reasons` measured 12,377.5 ns / 10.3 ns / 47.2 ns / 53,294.0 ns per operation. Compared with the immediately preceding same-fixture run (14,186.7 / 10.3 / 45.3 / 53,065.7 ns), values changed -12.8% / 0.0% / +4.2% / +0.4%; these are engine-only calculations and do not exercise RSocket fanout. The stream protocol sends high-frequency market updates to the five live-data evaluators and their five Scouts, instead of all 34 Strategy workers: 70.6% fewer market-update stream recipients. Daily and dated-carry updates stay on the maintenance stream, with initial-state replay and a legacy stream retained.
+
+Post-rebuild observation against the old-stream sample: before the change, Insights used 541.0 / 607.5 / 580.3% process CPU across three 10-second windows, with 11,469 price, 828 trade, and 11,191 book events total. After the change, it used 13.8 / 12.4 / 16.2%, with 11,838 price, 722 trade, and 14,468 book events over the same duration. Mean sampled CPU fell from 576.3% to 14.1% (97.5%); total event volume was 15.1% higher in the after sample. Docker stats reported 15.98% CPU and 292.4 MiB RSS after restart, versus the preceding 1.98 GiB RSS sample. Duplicate Scout registration logs remained at zero in the last 60 seconds. Homepage liveness passed 17/17; all 35 restarted Insights/Strategy containers are healthy. This is a short live sample under active feed traffic, not a long-run baseline. WSL2 Linux x86_64, optimized Cargo profile.
+
+## Provide service-owned fallback entry explanations (2026-11-12)
+
+AutoTrader passed 164 library tests and 7 binary tests. The benchmark measured
+entry / position evaluation maxima of 20.9 / 5.6 ns; serialization / depth /
+order / parameter helpers measured 605.3 / 669.8 / 444.8 / 2.0 ns. Settings
+snapshots at 0 / 256 / 10,000 retained orders measured 11.468 / 79.549 /
+3,161.279 us. Compared with the latest comparable same-day run (18.0 / 3.6 ns
+entry / position maxima, helpers 527.1 / 686.8 / 420.1 / 1.9 ns, snapshots
+9.772 / 66.358 / 2,451.252 us), evaluator, helper and snapshot measurements
+varied; this change affects status response construction and the benchmark does
+not exercise status serialization. WSL2 Linux x86_64, optimized Cargo bench
+profile.
+
+## Reduce live profile refresh contention (2026-11-13)
+
+AutoTrader passed 167 library and 8 binary tests; Strategy passed 169 service-feature tests. The AutoTrader benchmark measured entry / position maxima of 22.2 / 5.9 ns; serialization / market-depth / order-request / parameter-validation helpers measured 623.5 / 739.0 / 467.3 / 2.1 ns; settings snapshots at 0 / 256 / 10,000 orders measured 14.617 / 90.762 / 3,807.465 us. Compared with the immediately preceding same-day run (21.8 / 5.4 ns; helpers 642.2 / 752.1 / 467.5 / 2.5 ns; snapshots 14.970 / 94.447 / 4,056.418 us), values changed +1.8% / +9.3%, helpers -2.9% / -1.7% / -0.0% / -16.0%, and snapshots -2.4% / -3.9% / -6.1%. The benchmark does not measure profile route generation or lock contention.
+
+The Strategy Scout registration replay benchmark measured 18,869 us for 10,000 registrations, 60 intervals, and 500 transient failures (10,500 encoded requests), 6.7% above the previous 17,684 us result. This unrelated synthetic benchmark ran with active, resource-contended services; neither result measures live profile refresh or callback throughput, so the movement is not attributed to this change. WSL2 Linux x86_64, optimized Cargo profiles.
+
+## Push live profiles and decisions over typed RSocket operations (2026-11-14)
+
+AutoTrader passed 168 library and 8 binary tests; Strategy passed 172 service-feature tests. AutoTrader's evaluator benchmark measured entry / position maxima of 22.0 / 4.8 ns; serialization / market-depth / order-request / parameter-validation helpers measured 623.9 / 774.6 / 490.5 / 2.1 ns; settings snapshots at 0 / 256 / 10,000 orders measured 16.963 / 100.632 / 3,700.363 us. Against the immediately preceding same-day run (22.2 / 5.9 ns; helpers 623.5 / 739.0 / 467.3 / 2.1 ns; snapshots 14.617 / 90.762 / 3,807.465 us), values changed -0.9% / -18.6%, helpers +0.1% / +4.8% / +5.0% / unchanged, and snapshots +16.0% / +10.9% / -2.8%. These microbenchmarks do not exercise profile publication or socket decision routing; the stack was active.
+
+The Strategy Scout registration replay benchmark measured 15,041 us for 10,000 registrations, 60 intervals, and 500 transient failures (10,500 encoded requests), 20.3% faster than the latest same-workload result (18,869 us). This benchmark does not exercise live profile pushes or decision reports, so the improvement is not attributed to this change. WSL2 Linux x86_64, optimized Cargo profiles.

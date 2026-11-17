@@ -1,4 +1,4 @@
-import { useEffect, useMemo } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { AutoTraderPageModel } from '../models/AutoTraderPageModel';
 import { AutoTraderOutcomes } from './AutoTraderOutcomes';
 import { useBehaviorSnapshot } from '@workspace/ui-platform';
@@ -18,18 +18,39 @@ const finiteFixed = (value: unknown, digits: number) =>
   typeof value === 'number' && Number.isFinite(value)
     ? value.toFixed(digits)
     : 'n/a';
+
+const STALE_AUTO_TRADER_DECISION_MS = 6 * 60_000;
+
 export function AutoTrader() {
   const pageModel = useMemo(() => new AutoTraderPageModel(), []);
+  const mountedAt = useMemo(() => Date.now(), []);
+  const [clockNow, setClockNow] = useState(() => Date.now());
   useEffect(() => {
     pageModel.start();
     return () => pageModel.stop();
   }, [pageModel]);
+  useEffect(() => {
+    const timer = setInterval(() => setClockNow(Date.now()), 5_000);
+    return () => clearInterval(timer);
+  }, []);
   const page = useBehaviorSnapshot(pageModel.state$);
   const model = pageModel.trader;
   const state = page.trader;
   const { settingsOpen, parametersOpen, decisionDetailsOpen } = page;
   const scoutClosedCount = page.scoutClosedCount;
   const scoutWinRate = page.scoutWinRate;
+  const decisionReferenceAt = state.lastDecisionAt || mountedAt;
+  const decisionAgeMs = Math.max(0, clockNow - decisionReferenceAt);
+  const staleDecision =
+    state.enabled && decisionAgeMs >= STALE_AUTO_TRADER_DECISION_MS;
+  const decisionAgeMinutes = Math.floor(decisionAgeMs / 60_000);
+  const learningFeedbackBlocks = state.intradayStrategyLearning.filter(
+    (budget) =>
+      budget.strategy.startsWith('live-') &&
+      budget.learning_feedback_multiplier === 0,
+  );
+  const paperExplorationActive =
+    state.paperLearningExplorationUntilMs > clockNow;
   return (
     <section
       className={
@@ -128,6 +149,16 @@ export function AutoTrader() {
             </span>
           </div>
         )}
+        {staleDecision && (
+          <div className="auto-trader-audit-alert" role="alert">
+            <strong>No new AutoTrader decisions</strong>
+            <span>
+              No decision has completed for {decisionAgeMinutes} minutes.
+              Strategy workers normally report at least every five minutes;
+              check their report failures and AutoTrader RSocket health.
+            </span>
+          </div>
+        )}
         {state.auditCoalescedDecisions > 0 && (
           <p className="auto-trader-audit-coalesced" role="status">
             Coalesced {state.auditCoalescedDecisions.toLocaleString()}{' '}
@@ -147,6 +178,29 @@ export function AutoTrader() {
             <span> · Overall cap exceeded; new exposure blocked.</span>
           )}
         </p>
+        {state.paperLearningExplorationUntilMs > 0 && (
+          <div className="auto-trader-learning-block" role="status">
+            <strong>
+              Recovery reset: Learning negative feedback blocked live entries
+            </strong>
+            <span>
+              {learningFeedbackBlocks.length > 0
+                ? `${learningFeedbackBlocks
+                    .map((budget) => budget.strategy.replace('live-', ''))
+                    .join(
+                      ', ',
+                    )} currently have zero feedback multipliers from negative trade outcomes.`
+                : 'Negative net trade outcomes had reduced live strategy feedback multipliers to zero.'}{' '}
+              {paperExplorationActive
+                ? ` Paper recovery exploration is temporarily allowing capped entries until ${timestamp.format(state.paperLearningExplorationUntilMs)}.`
+                : ' The temporary paper exploration window has expired; normal Learning gates apply.'}
+            </span>
+            <span>
+              {state.filledPaperOrdersSinceRecoveryReset.toLocaleString()}{' '}
+              additional filled paper orders since recovery reset.
+            </span>
+          </div>
+        )}
         <div className="auto-trader-insights">
           <div
             className="auto-trader-insight auto-trader-decision"

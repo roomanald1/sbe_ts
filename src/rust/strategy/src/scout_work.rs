@@ -129,6 +129,35 @@ pub struct ScoutCandidateBatchResult {
     pub assignments: Vec<ScoutWorkResult>,
 }
 
+/// Learning's durable scout update stream. State updates are retained by
+/// workers as their latest cache entry; assignments are delivered once and
+/// acknowledged separately with `AssignmentResult`.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(tag = "kind", content = "value", rename_all = "snake_case")]
+pub enum ScoutDataUpdate {
+    Profiles(Value),
+    Assignment(ScoutWorkAssignment),
+    Feedback(crate::FeedbackEvent),
+    Configuration(Value),
+    HistoricalReplay(StrategyReplayRequest),
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct ScoutStreamSubscription {
+    pub strategy: Strategy,
+    #[serde(default)]
+    pub after_sequence: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct ScoutStreamEnvelope {
+    pub strategy: Strategy,
+    pub sequence: u64,
+    #[serde(default)]
+    pub replayed_from_cache: bool,
+    pub update: ScoutDataUpdate,
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ScoutWorkerHttpMethod {
@@ -199,6 +228,22 @@ pub enum ScoutCoordinatorRequest {
     LearningRoute(ScoutCoordinatorRouteCommand),
     Feedback(crate::FeedbackEvent),
     ProfileSnapshot,
+    ProfileSnapshotFor {
+        symbols: Vec<String>,
+        strategies: Vec<String>,
+    },
+    AssignmentResult(ScoutWorkResult),
+    AssignmentFailed {
+        assignment_id: String,
+        strategy: Strategy,
+        detail: String,
+    },
+    ReplayResult(StrategyReplayResponse),
+    ReplayFailed {
+        job_id: String,
+        strategy: Strategy,
+        detail: String,
+    },
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
@@ -210,21 +255,19 @@ pub enum ScoutCoordinatorResponse {
     LearningRoute(ScoutCoordinatorRouteResult),
     Feedback(ScoutFeedbackAcknowledgement),
     ProfileSnapshot(Value),
+    AssignmentAcknowledged { assignment_id: String },
+    ReplayAcknowledged { job_id: String },
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(tag = "operation", content = "request", rename_all = "snake_case")]
 pub enum ScoutWorkerRequest {
-    Evaluate(ScoutWorkAssignment),
-    StrategyReplay(StrategyReplayRequest),
     Route(ScoutWorkerRouteCommand),
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(tag = "operation", content = "response", rename_all = "snake_case")]
 pub enum ScoutWorkerResponse {
-    Evaluation(ScoutWorkResult),
-    StrategyReplay(StrategyReplayResponse),
     Route(ScoutWorkerRouteResult),
 }
 
@@ -267,6 +310,12 @@ pub async fn request_scout_candidate_batch(
             bail!("Learning returned the wrong Scout operation response")
         }
         ScoutCoordinatorResponse::LearningRoute(_) => {
+            bail!("Learning returned the wrong Scout operation response")
+        }
+        ScoutCoordinatorResponse::AssignmentAcknowledged { .. } => {
+            bail!("Learning returned the wrong Scout operation response")
+        }
+        ScoutCoordinatorResponse::ReplayAcknowledged { .. } => {
             bail!("Learning returned the wrong Scout operation response")
         }
     }
@@ -340,6 +389,12 @@ pub async fn request_scout_worker_route(
         ScoutCoordinatorResponse::LearningRoute(_) => {
             bail!("Learning returned the wrong Scout operation response")
         }
+        ScoutCoordinatorResponse::AssignmentAcknowledged { .. } => {
+            bail!("Learning returned the wrong Scout operation response")
+        }
+        ScoutCoordinatorResponse::ReplayAcknowledged { .. } => {
+            bail!("Learning returned the wrong Scout operation response")
+        }
     }
 }
 
@@ -379,16 +434,38 @@ pub async fn request_scout_service_route(
     request: &ScoutCoordinatorRouteCommand,
 ) -> anyhow::Result<ScoutCoordinatorRouteResult> {
     validate_learning_rsocket_url(service_rsocket_url)?;
-    let response = pooled_request(
-        service_rsocket_url,
-        Payload::builder()
-            .set_data(serde_json::to_vec(&ScoutCoordinatorRequest::WorkerRoute(
-                request.clone(),
-            ))?)
-            .build(),
+    let client = pooled_rsocket_client(service_rsocket_url).await?;
+    let payload = Payload::builder()
+        .set_data(serde_json::to_vec(&ScoutCoordinatorRequest::WorkerRoute(
+            request.clone(),
+        ))?)
+        .build();
+    #[cfg(feature = "service")]
+    let result = match tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        client.request_response(payload),
     )
     .await
-    .context("Scout service route request failed")?;
+    {
+        Ok(result) => result,
+        Err(_) => {
+            invalidate_pooled_rsocket_client(service_rsocket_url, &client);
+            bail!("Scout service route request to {} timed out", request.path);
+        }
+    };
+    #[cfg(not(feature = "service"))]
+    let result = client.request_response(payload).await;
+    let response = match result {
+        Ok(Some(response)) => response,
+        Ok(None) => {
+            invalidate_pooled_rsocket_client(service_rsocket_url, &client);
+            bail!("Scout service route returned an empty response");
+        }
+        Err(error) => {
+            invalidate_pooled_rsocket_client(service_rsocket_url, &client);
+            return Err(error).context("Scout service route request failed");
+        }
+    };
     match serde_json::from_slice::<ScoutCoordinatorResponse>(
         response
             .data()
@@ -398,6 +475,109 @@ pub async fn request_scout_service_route(
     {
         ScoutCoordinatorResponse::WorkerRoute(response) => Ok(response),
         _ => bail!("Scout service returned the wrong operation response"),
+    }
+}
+
+/// Sends a typed live profile update or decision report over RSocket. This is
+/// the bidirectional live Strategy/AutoTrader contract; it does not tunnel
+/// through an HTTP route.
+#[cfg(feature = "live_socket_client")]
+pub async fn request_live_strategy_socket(
+    service_rsocket_url: &str,
+    request: &crate::LiveStrategySocketRequest,
+) -> anyhow::Result<crate::LiveStrategySocketResponse> {
+    validate_learning_rsocket_url(service_rsocket_url)?;
+    let client = match tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        pooled_rsocket_client(service_rsocket_url),
+    )
+    .await
+    {
+        Ok(client) => client?,
+        Err(_) => bail!("live Strategy RSocket connection timed out"),
+    };
+    let payload = Payload::builder()
+        .set_data(serde_json::to_vec(request)?)
+        .build();
+    let result = match tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        client.request_response(payload),
+    )
+    .await
+    {
+        Ok(result) => result,
+        Err(_) => {
+            invalidate_pooled_rsocket_client(service_rsocket_url, &client);
+            bail!("live Strategy RSocket request timed out");
+        }
+    };
+    let response = match result {
+        Ok(Some(response)) => response,
+        Ok(None) => {
+            invalidate_pooled_rsocket_client(service_rsocket_url, &client);
+            bail!("live Strategy RSocket response was empty");
+        }
+        Err(error) => {
+            invalidate_pooled_rsocket_client(service_rsocket_url, &client);
+            return Err(error).context("live Strategy RSocket request failed");
+        }
+    };
+    serde_json::from_slice(
+        response
+            .data()
+            .context("live Strategy RSocket response had no data")?,
+    )
+    .context("live Strategy RSocket response was invalid")
+}
+
+#[cfg(feature = "live_socket_client")]
+pub async fn request_learning_snapshot_push(
+    auto_trader_rsocket_url: &str,
+    snapshot: &crate::LearnedProfileSnapshot,
+) -> anyhow::Result<()> {
+    validate_learning_rsocket_url(auto_trader_rsocket_url)?;
+    let client = tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        pooled_rsocket_client(auto_trader_rsocket_url),
+    )
+    .await
+    .context("AutoTrader RSocket connection timed out")??;
+    let request = crate::LiveStrategySocketRequest::UpdateLearningSnapshot(snapshot.clone());
+    let payload = Payload::builder()
+        .set_data(serde_json::to_vec(&request)?)
+        .build();
+    let response = match tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        client.request_response(payload),
+    )
+    .await
+    {
+        Ok(Ok(Some(response))) => response,
+        Ok(Ok(None)) => {
+            invalidate_pooled_rsocket_client(auto_trader_rsocket_url, &client);
+            bail!("AutoTrader returned an empty Learning snapshot acknowledgement");
+        }
+        Ok(Err(error)) => {
+            invalidate_pooled_rsocket_client(auto_trader_rsocket_url, &client);
+            return Err(error).context("AutoTrader Learning snapshot push failed");
+        }
+        Err(_) => {
+            invalidate_pooled_rsocket_client(auto_trader_rsocket_url, &client);
+            bail!("AutoTrader Learning snapshot push timed out");
+        }
+    };
+    match serde_json::from_slice::<crate::LiveStrategySocketResponse>(
+        response
+            .data()
+            .context("AutoTrader Learning snapshot acknowledgement had no data")?,
+    )
+    .context("AutoTrader Learning snapshot acknowledgement was invalid")?
+    {
+        crate::LiveStrategySocketResponse::LearningSnapshotApplied => Ok(()),
+        crate::LiveStrategySocketResponse::Rejected { status, detail } => {
+            anyhow::bail!("AutoTrader rejected Learning snapshot with status {status}: {detail}")
+        }
+        _ => anyhow::bail!("AutoTrader returned the wrong Learning snapshot acknowledgement"),
     }
 }
 
@@ -496,6 +676,37 @@ pub async fn request_scout_profile_snapshot(learning_rsocket_url: &str) -> anyho
         Payload::builder()
             .set_data(serde_json::to_vec(
                 &ScoutCoordinatorRequest::ProfileSnapshot,
+            )?)
+            .build(),
+    )
+    .await
+    .context("Learning Scout profile snapshot request failed")?;
+    match serde_json::from_slice::<ScoutCoordinatorResponse>(
+        response
+            .data()
+            .context("Learning coordinator response had no data")?,
+    )
+    .context("Learning coordinator response was not a valid result")?
+    {
+        ScoutCoordinatorResponse::ProfileSnapshot(snapshot) => Ok(snapshot),
+        _ => bail!("Learning returned the wrong Scout operation response"),
+    }
+}
+
+pub async fn request_scout_profile_snapshot_for(
+    learning_rsocket_url: &str,
+    symbols: Vec<String>,
+    strategies: Vec<String>,
+) -> anyhow::Result<Value> {
+    validate_learning_rsocket_url(learning_rsocket_url)?;
+    let response = pooled_request(
+        learning_rsocket_url,
+        Payload::builder()
+            .set_data(serde_json::to_vec(
+                &ScoutCoordinatorRequest::ProfileSnapshotFor {
+                    symbols,
+                    strategies,
+                },
             )?)
             .build(),
     )

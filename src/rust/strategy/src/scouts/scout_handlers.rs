@@ -229,16 +229,16 @@ async fn receive_scout_horizon_outcome(
     }
 
     let mut changed_sections = BTreeSet::from(["seen".to_owned()]);
-    if outcome.scout_comparison_role.is_some() {
-        let (_, paired_ids) = record_paired_scout_outcome(&mut state, &outcome);
-        changed_sections.insert("outbox".to_owned());
-        changed_sections.extend(paired_ids.into_iter().map(|id| format!("pairs@{id}")));
-    } else if outcome.scout_parameter_key.is_none() {
-        let event = outcome_event(&outcome, &tested);
+    if let Some(event) = learning_outcome_event(&outcome, &tested) {
         if !outbox_has_learning(&state, &event) {
             state.outbox.push(ScoutOutboxItem::Learning(event));
             changed_sections.insert("outbox".to_owned());
         }
+    }
+    if outcome.scout_comparison_role.is_some() {
+        let (_, paired_ids) = record_paired_scout_outcome(&mut state, &outcome);
+        changed_sections.insert("outbox".to_owned());
+        changed_sections.extend(paired_ids.into_iter().map(|id| format!("pairs@{id}")));
     }
     state.seen.insert(outcome_key);
     while state.seen.len() > 100_000 {
@@ -269,13 +269,10 @@ async fn receive_scout_outcome(
                 format!("scout_instances@{}", outcome.decision_id),
                 format!("seen@{outcome_key}"),
             ]);
-            let event = outcome_event(&outcome, &tested);
-            let is_probe = outcome.scout_parameter_key.is_some();
-            if !is_probe
-                && outcome.scout_comparison_role.as_deref() != Some("baseline")
-                && !outbox_has_learning(&state, &event)
-            {
-                state.outbox.push(ScoutOutboxItem::Learning(event));
+            if let Some(event) = learning_outcome_event(&outcome, &tested) {
+                if !outbox_has_learning(&state, &event) {
+                    state.outbox.push(ScoutOutboxItem::Learning(event));
+                }
             }
             let (paired_updates, paired_ids) = record_paired_scout_outcome(&mut state, &outcome);
             for comparison_id in paired_ids {
@@ -2069,13 +2066,13 @@ mod strategy_walk_forward_tests {
         ServiceState {
             learning_rsocket_url: String::new(),
             insights_rsocket_url: String::new(),
-            auto_trader_rsocket_url: String::new(),
             strategy_outcomes_by_profile: Arc::clone(&state.strategy_outcomes_by_profile),
             portfolio_instances_by_group: Arc::clone(&state.portfolio_instances_by_group),
             strategy_outcome_profile_index_ready: Arc::new(
                 std::sync::atomic::AtomicBool::new(false),
             ),
             live_scout_maximum_duration_ms: Arc::new(std::sync::RwLock::new(BTreeMap::new())),
+            live_profile_snapshot_cache: Arc::new(Mutex::new(BTreeMap::new())),
             scout_outcomes_cache: Arc::new(Mutex::new(BTreeMap::new())),
             scout: ScoutState {
                 data: Arc::new(Mutex::new(state)),
@@ -2169,6 +2166,49 @@ mod strategy_walk_forward_tests {
             scout_comparison_parameter_profile_symbol: None,
             strategy_parameter_specs: Vec::new(),
         }
+    }
+
+    #[tokio::test]
+    async fn paired_baseline_strategy_outcome_is_queued_for_its_exact_profile() {
+        let path = std::env::temp_dir().join(format!(
+            "scout-baseline-learning-{}-{}.sqlite",
+            std::process::id(),
+            scout_now_ms()
+        ));
+        let parameters = BTreeMap::from([("minimum_momentum".into(), 0.5)]);
+        let mut baseline = outcome("baseline", parameters.clone(), scout_now_ms() - 1_000, scout_now_ms(), 0.4);
+        baseline.scout_comparison_ids = vec!["comparison".into()];
+        baseline.scout_comparison_role = Some("baseline".into());
+        persist_scout_state(&path, &PersistedState::default(), &["seen"]).unwrap();
+        let service = test_service(&path, PersistedState::default());
+
+        let response = receive_scout_outcome(State(service.clone()), Json(baseline)).await.unwrap();
+        assert_eq!(response, StatusCode::NO_CONTENT);
+        let state = service.scout.data.lock().await;
+        assert_eq!(state.outbox.len(), 1);
+        let ScoutOutboxItem::Learning(FeedbackEvent::ScoutOutcome {
+            profile_id,
+            parameters: learned_parameters,
+            comparison,
+            net_return_percent,
+            ..
+        }) = &state.outbox[0]
+        else {
+            panic!("paired baseline should produce an exact-profile Learning event");
+        };
+        assert_eq!(
+            profile_id,
+            &strategies::profile_id("BTC-USDT", "live-momentum", &parameters)
+        );
+        assert_eq!(learned_parameters, &parameters);
+        assert_eq!(
+            comparison,
+            &strategies::ScoutComparisonMetadata::Independent
+        );
+        assert_eq!(*net_return_percent, 0.4);
+        drop(state);
+        drop(service);
+        let _ = std::fs::remove_file(path);
     }
 
     #[tokio::test]
@@ -2456,11 +2496,11 @@ mod strategy_walk_forward_tests {
         let service = ServiceState {
             learning_rsocket_url: String::new(),
             insights_rsocket_url: String::new(),
-            auto_trader_rsocket_url: String::new(),
             strategy_outcomes_by_profile,
             portfolio_instances_by_group,
             strategy_outcome_profile_index_ready: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             live_scout_maximum_duration_ms: Arc::new(std::sync::RwLock::new(BTreeMap::new())),
+            live_profile_snapshot_cache: Arc::new(Mutex::new(BTreeMap::new())),
             scout_outcomes_cache: Arc::new(Mutex::new(BTreeMap::new())),
             scout: ScoutState {
                 data: Arc::new(Mutex::new(persisted)),
@@ -2583,11 +2623,11 @@ mod strategy_walk_forward_tests {
         let service = ServiceState {
             learning_rsocket_url: String::new(),
             insights_rsocket_url: String::new(),
-            auto_trader_rsocket_url: String::new(),
             strategy_outcomes_by_profile,
             portfolio_instances_by_group,
             strategy_outcome_profile_index_ready: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             live_scout_maximum_duration_ms: Arc::new(std::sync::RwLock::new(BTreeMap::new())),
+            live_profile_snapshot_cache: Arc::new(Mutex::new(BTreeMap::new())),
             scout_outcomes_cache: Arc::new(Mutex::new(BTreeMap::new())),
             scout: ScoutState {
                 data: Arc::new(Mutex::new(persisted)),
@@ -2991,13 +3031,13 @@ mod scout_markout_instance_tests {
         let service = ServiceState {
             learning_rsocket_url: String::new(),
             insights_rsocket_url: String::new(),
-            auto_trader_rsocket_url: String::new(),
             strategy_outcomes_by_profile: Arc::clone(&restarted.strategy_outcomes_by_profile),
             portfolio_instances_by_group: Arc::clone(&restarted.portfolio_instances_by_group),
             strategy_outcome_profile_index_ready: Arc::new(
                 std::sync::atomic::AtomicBool::new(false),
             ),
             live_scout_maximum_duration_ms: Arc::new(std::sync::RwLock::new(BTreeMap::new())),
+            live_profile_snapshot_cache: Arc::new(Mutex::new(BTreeMap::new())),
             scout_outcomes_cache: Arc::new(Mutex::new(BTreeMap::new())),
             scout: ScoutState {
                 data: Arc::new(Mutex::new(restarted)),

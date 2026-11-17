@@ -42,7 +42,10 @@ fn ensure_dated_carry_schema(connection: &rusqlite::Connection) -> rusqlite::Res
     )
 }
 
-fn replace_dated_carry_rows(transaction: &rusqlite::Transaction<'_>, book: &DatedCarryBook) -> rusqlite::Result<()> {
+fn replace_dated_carry_rows(
+    transaction: &rusqlite::Transaction<'_>,
+    book: &DatedCarryBook,
+) -> rusqlite::Result<()> {
     transaction.execute(
         "INSERT INTO dated_carry_settings(id, enabled, max_spot_notional_usdt, checked_at_ms, last_error)
          VALUES (1, ?1, ?2, ?3, ?4) ON CONFLICT(id) DO UPDATE SET enabled=excluded.enabled,
@@ -62,7 +65,7 @@ fn replace_dated_carry_rows(transaction: &rusqlite::Transaction<'_>, book: &Date
             rusqlite::params![item.future_symbol,item.spot_symbol,item.expiry_ms as i64,item.entry_ms as i64,item.quantity,item.spot_entry_price,item.future_entry_price,item.entry_fees,item.status,item.spot_exit_twap,item.settlement_price,item.net_pnl_usdt,item.settlement_source,item.spot_mark_bid,item.future_mark_ask,item.spot_leg_pnl_usdt,item.future_leg_pnl_usdt,item.estimated_exit_fees_usdt,item.estimated_exit_slippage_usdt,item.marked_net_pnl_usdt,item.mark_checked_at_ms.map(|v|v as i64)])?;
     }
     Ok(())
-    }
+}
 
 fn read_dated_carry_database(path: &PathBuf) -> rusqlite::Result<Option<DatedCarryBook>> {
     let connection = rusqlite::Connection::open(path)?;
@@ -72,29 +75,88 @@ fn read_dated_carry_database(path: &PathBuf) -> rusqlite::Result<Option<DatedCar
     ensure_dated_carry_schema(&connection)?;
     let transaction = connection.unchecked_transaction()?;
     let settings: Option<(i64, f64, i64, Option<String>)> = transaction.query_row("SELECT enabled,max_spot_notional_usdt,checked_at_ms,last_error FROM dated_carry_settings WHERE id=1", [], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional()?;
-    let Some((enabled, max_spot_notional_usdt, checked_at_ms, last_error)) = settings else { return Ok(None); };
-    let mut book = DatedCarryBook { enabled: enabled != 0, max_spot_notional_usdt, checked_at_ms: checked_at_ms as u64, last_error, ..DatedCarryBook::default() };
+    let Some((enabled, max_spot_notional_usdt, checked_at_ms, last_error)) = settings else {
+        return Ok(None);
+    };
+    let mut book = DatedCarryBook {
+        enabled: enabled != 0,
+        max_spot_notional_usdt,
+        checked_at_ms: checked_at_ms as u64,
+        last_error,
+        ..DatedCarryBook::default()
+    };
     book.candidates = {
         let mut stmt = transaction.prepare("SELECT spot_symbol,future_symbol,expiry_ms,days_to_expiry,quantity,spot_ask,future_bid,spot_bid,future_ask,basis_percent,net_after_budget_percent,eligible,reason FROM dated_carry_candidates ORDER BY future_symbol")?;
-        stmt.query_map([], |r| Ok(DatedCarryCandidate {spot_symbol:r.get(0)?,future_symbol:r.get(1)?,expiry_ms:r.get::<_,i64>(2)? as u64,days_to_expiry:r.get(3)?,quantity:r.get(4)?,spot_ask:r.get(5)?,future_bid:r.get(6)?,spot_bid:r.get(7)?,future_ask:r.get(8)?,basis_percent:r.get(9)?,net_after_budget_percent:r.get(10)?,eligible:r.get::<_,i64>(11)?!=0,reason:r.get(12)?}))?.collect::<rusqlite::Result<Vec<_>>>()?
+        stmt.query_map([], |r| {
+            Ok(DatedCarryCandidate {
+                spot_symbol: r.get(0)?,
+                future_symbol: r.get(1)?,
+                expiry_ms: r.get::<_, i64>(2)? as u64,
+                days_to_expiry: r.get(3)?,
+                quantity: r.get(4)?,
+                spot_ask: r.get(5)?,
+                future_bid: r.get(6)?,
+                spot_bid: r.get(7)?,
+                future_ask: r.get(8)?,
+                basis_percent: r.get(9)?,
+                net_after_budget_percent: r.get(10)?,
+                eligible: r.get::<_, i64>(11)? != 0,
+                reason: r.get(12)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?
     };
     book.positions = {
         let mut stmt = transaction.prepare("SELECT future_symbol,spot_symbol,expiry_ms,entry_ms,quantity,spot_entry_price,future_entry_price,entry_fees,status,spot_exit_twap,settlement_price,net_pnl_usdt,settlement_source,spot_mark_bid,future_mark_ask,spot_leg_pnl_usdt,future_leg_pnl_usdt,estimated_exit_fees_usdt,estimated_exit_slippage_usdt,marked_net_pnl_usdt,mark_checked_at_ms FROM dated_carry_positions ORDER BY id")?;
-        stmt.query_map([], |r| Ok(DatedCarryPosition {future_symbol:r.get(0)?,spot_symbol:r.get(1)?,expiry_ms:r.get::<_,i64>(2)? as u64,entry_ms:r.get::<_,i64>(3)? as u64,quantity:r.get(4)?,spot_entry_price:r.get(5)?,future_entry_price:r.get(6)?,entry_fees:r.get(7)?,status:r.get(8)?,spot_exit_twap:r.get(9)?,settlement_price:r.get(10)?,net_pnl_usdt:r.get(11)?,settlement_source:r.get(12)?,spot_mark_bid:r.get(13)?,future_mark_ask:r.get(14)?,spot_leg_pnl_usdt:r.get(15)?,future_leg_pnl_usdt:r.get(16)?,estimated_exit_fees_usdt:r.get(17)?,estimated_exit_slippage_usdt:r.get(18)?,marked_net_pnl_usdt:r.get(19)?,mark_checked_at_ms:r.get::<_,Option<i64>>(20)?.map(|v|v as u64)}))?.collect::<rusqlite::Result<Vec<_>>>()?
+        stmt.query_map([], |r| {
+            Ok(DatedCarryPosition {
+                future_symbol: r.get(0)?,
+                spot_symbol: r.get(1)?,
+                expiry_ms: r.get::<_, i64>(2)? as u64,
+                entry_ms: r.get::<_, i64>(3)? as u64,
+                quantity: r.get(4)?,
+                spot_entry_price: r.get(5)?,
+                future_entry_price: r.get(6)?,
+                entry_fees: r.get(7)?,
+                status: r.get(8)?,
+                spot_exit_twap: r.get(9)?,
+                settlement_price: r.get(10)?,
+                net_pnl_usdt: r.get(11)?,
+                settlement_source: r.get(12)?,
+                spot_mark_bid: r.get(13)?,
+                future_mark_ask: r.get(14)?,
+                spot_leg_pnl_usdt: r.get(15)?,
+                future_leg_pnl_usdt: r.get(16)?,
+                estimated_exit_fees_usdt: r.get(17)?,
+                estimated_exit_slippage_usdt: r.get(18)?,
+                marked_net_pnl_usdt: r.get(19)?,
+                mark_checked_at_ms: r.get::<_, Option<i64>>(20)?.map(|v| v as u64),
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?
     };
     transaction.commit()?;
     Ok(Some(book))
 }
 
 fn persist_dated_carry_book(path: &PathBuf, book: &DatedCarryBook) -> Result<(), String> {
-    if let Some(parent) = path.parent().filter(|parent| !parent.as_os_str().is_empty()) {
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
         std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
     }
     let connection = rusqlite::Connection::open(path).map_err(|error| error.to_string())?;
-    connection.busy_timeout(Duration::from_secs(5)).map_err(|error| error.to_string())?;
-    connection.execute_batch("PRAGMA journal_mode = WAL;").map_err(|e| e.to_string())?;
+    connection
+        .busy_timeout(Duration::from_secs(5))
+        .map_err(|error| error.to_string())?;
+    connection
+        .execute_batch("PRAGMA journal_mode = WAL;")
+        .map_err(|e| e.to_string())?;
     ensure_dated_carry_schema(&connection).map_err(|e| e.to_string())?;
-    let transaction = connection.unchecked_transaction().map_err(|e| e.to_string())?;
+    let transaction = connection
+        .unchecked_transaction()
+        .map_err(|e| e.to_string())?;
     replace_dated_carry_rows(&transaction, book).map_err(|e| e.to_string())?;
     transaction.commit().map_err(|e| e.to_string())
 }
@@ -109,28 +171,65 @@ fn read_settings_database(path: &PathBuf) -> rusqlite::Result<Option<Settings>> 
         [], |row| row.get(0),
     )?;
     let old_payload: Option<Vec<u8>> = if has_old_table {
-        connection.query_row("SELECT payload FROM auto_trader_state WHERE id=1", [], |row| row.get(0)).optional()?
-    } else { None };
+        connection
+            .query_row(
+                "SELECT payload FROM auto_trader_state WHERE id=1",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?
+    } else {
+        None
+    };
     let transaction = connection.unchecked_transaction()?;
     let mut fields = serde_json::Map::new();
-    let mut statement = transaction.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'setting_%' ORDER BY name")?;
-    let tables = statement.query_map([], |row| row.get::<_, String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut statement = transaction.prepare(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'setting_%' ORDER BY name",
+    )?;
+    let tables = statement
+        .query_map([], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
     drop(statement);
     for table in tables {
         let field = table.strip_prefix("setting_").unwrap_or(&table);
         let sql = format!("SELECT value FROM {table} WHERE id=1");
-        let value: Option<String> = transaction.query_row(&sql, [], |row| row.get(0)).optional()?;
+        let value: Option<String> = transaction
+            .query_row(&sql, [], |row| row.get(0))
+            .optional()?;
         if let Some(value) = value {
-            fields.insert(field.to_owned(), serde_json::from_str(&value).map_err(|error| rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(error)))?);
+            fields.insert(
+                field.to_owned(),
+                serde_json::from_str(&value).map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        0,
+                        rusqlite::types::Type::Text,
+                        Box::new(error),
+                    )
+                })?,
+            );
         }
     }
     let has_normalized = !fields.is_empty();
     transaction.commit()?;
     if has_normalized {
-        return serde_json::from_value(serde_json::Value::Object(fields)).map(Some).map_err(|error| rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(error)));
+        return serde_json::from_value(serde_json::Value::Object(fields))
+            .map(Some)
+            .map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    0,
+                    rusqlite::types::Type::Text,
+                    Box::new(error),
+                )
+            });
     }
     if let Some(payload) = old_payload {
-        let settings: Settings = rmp_serde::from_slice(&payload).map_err(|error| rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Blob, Box::new(error)))?;
+        let settings: Settings = rmp_serde::from_slice(&payload).map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(
+                0,
+                rusqlite::types::Type::Blob,
+                Box::new(error),
+            )
+        })?;
         persist_settings_snapshot(path, &settings).map_err(|(_, error)| {
             rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::other(error)))
         })?;
@@ -143,21 +242,34 @@ fn persist_settings_snapshot(
     path: &PathBuf,
     settings: &Settings,
 ) -> Result<(), (StatusCode, String)> {
-    if let Some(parent) = path.parent().filter(|parent| !parent.as_os_str().is_empty()) {
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
         std::fs::create_dir_all(parent).map_err(settings_persistence_error)?;
     }
     let connection = rusqlite::Connection::open(path).map_err(settings_persistence_error)?;
-    connection.busy_timeout(Duration::from_secs(5)).map_err(settings_persistence_error)?;
-    connection.execute_batch("PRAGMA journal_mode=WAL;").map_err(settings_persistence_error)?;
+    connection
+        .busy_timeout(Duration::from_secs(5))
+        .map_err(settings_persistence_error)?;
+    connection
+        .execute_batch("PRAGMA journal_mode=WAL;")
+        .map_err(settings_persistence_error)?;
     let value = serde_json::to_value(settings).map_err(settings_persistence_error)?;
-    let object = value.as_object().ok_or_else(|| settings_persistence_error("Settings did not serialize as an object"))?;
-    let transaction = connection.unchecked_transaction().map_err(settings_persistence_error)?;
+    let object = value
+        .as_object()
+        .ok_or_else(|| settings_persistence_error("Settings did not serialize as an object"))?;
+    let transaction = connection
+        .unchecked_transaction()
+        .map_err(settings_persistence_error)?;
     for (field, value) in object {
         let table = format!("setting_{field}");
         transaction.execute_batch(&format!("CREATE TABLE IF NOT EXISTS {table} (id INTEGER PRIMARY KEY CHECK(id=1), value TEXT NOT NULL);")).map_err(settings_persistence_error)?;
         transaction.execute(&format!("INSERT INTO {table}(id,value) VALUES(1,?1) ON CONFLICT(id) DO UPDATE SET value=excluded.value"), [serde_json::to_string(value).map_err(settings_persistence_error)?]).map_err(settings_persistence_error)?;
     }
-    transaction.execute_batch("DROP TABLE IF EXISTS auto_trader_state;").map_err(settings_persistence_error)?;
+    transaction
+        .execute_batch("DROP TABLE IF EXISTS auto_trader_state;")
+        .map_err(settings_persistence_error)?;
     transaction.commit().map_err(settings_persistence_error)
 }
 
@@ -185,11 +297,20 @@ mod sqlite_state_tests {
         let path = temporary_database_path();
         let settings = Settings::default();
         persist_settings_snapshot(&path, &settings).unwrap();
-        assert_eq!(serde_json::to_value(read_settings_database(&path).unwrap().unwrap()).unwrap(), serde_json::to_value(settings).unwrap());
+        assert_eq!(
+            serde_json::to_value(read_settings_database(&path).unwrap().unwrap()).unwrap(),
+            serde_json::to_value(settings).unwrap()
+        );
         let connection = rusqlite::Connection::open(&path).unwrap();
         let old_table: i64 = connection.query_row("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='auto_trader_state'", [], |row| row.get(0)).unwrap();
         assert_eq!(old_table, 0);
-        let tables: i64 = connection.query_row("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name LIKE 'setting_%'", [], |row| row.get(0)).unwrap();
+        let tables: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name LIKE 'setting_%'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
         assert!(tables > 50);
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(path.with_extension("sqlite-wal"));
@@ -201,12 +322,24 @@ mod sqlite_state_tests {
         let path = temporary_database_path();
         let settings = Settings::default();
         let connection = rusqlite::Connection::open(&path).unwrap();
-        connection.execute_batch("CREATE TABLE auto_trader_state (id INTEGER PRIMARY KEY, payload BLOB NOT NULL);").unwrap();
-        connection.execute("INSERT INTO auto_trader_state VALUES(1,?1)", [rmp_serde::to_vec_named(&settings).unwrap()]).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE auto_trader_state (id INTEGER PRIMARY KEY, payload BLOB NOT NULL);",
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO auto_trader_state VALUES(1,?1)",
+                [rmp_serde::to_vec_named(&settings).unwrap()],
+            )
+            .unwrap();
         drop(connection);
 
         let loaded = read_settings_database(&path).unwrap().unwrap();
-        assert_eq!(serde_json::to_value(loaded).unwrap(), serde_json::to_value(settings).unwrap());
+        assert_eq!(
+            serde_json::to_value(loaded).unwrap(),
+            serde_json::to_value(settings).unwrap()
+        );
         let connection = rusqlite::Connection::open(&path).unwrap();
         let old_table: i64 = connection.query_row("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='auto_trader_state'", [], |row| row.get(0)).unwrap();
         assert_eq!(old_table, 0);
@@ -266,11 +399,18 @@ mod sqlite_state_tests {
 
         persist_dated_carry_book(&path, &book).unwrap();
         let loaded = read_dated_carry_database(&path).unwrap().unwrap();
-        assert_eq!(serde_json::to_value(&loaded).unwrap(), serde_json::to_value(&book).unwrap());
+        assert_eq!(
+            serde_json::to_value(&loaded).unwrap(),
+            serde_json::to_value(&book).unwrap()
+        );
 
         let connection = rusqlite::Connection::open(&path).unwrap();
         let candidate_columns: i64 = connection
-            .query_row("SELECT COUNT(*) FROM pragma_table_info('dated_carry_candidates')", [], |row| row.get(0))
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('dated_carry_candidates')",
+                [],
+                |row| row.get(0),
+            )
             .unwrap();
         assert_eq!(candidate_columns, 13);
         let _ = std::fs::remove_file(&path);
@@ -300,10 +440,9 @@ fn request_settings_persist(state: &AutoTraderState) -> Result<(), (StatusCode, 
 }
 
 const PRICE_PATH_PERSIST_INTERVAL: Duration = Duration::from_secs(60);
+const SETTINGS_PERSIST_COALESCE_WINDOW: Duration = Duration::from_millis(250);
 
-fn request_price_path_persist_if_due(
-    state: &AutoTraderState,
-) -> Result<(), (StatusCode, String)> {
+fn request_price_path_persist_if_due(state: &AutoTraderState) -> Result<(), (StatusCode, String)> {
     let now = Instant::now();
     let mut last_persisted = state
         .price_path_last_checkpoint_requested_at
@@ -324,7 +463,7 @@ fn start_settings_persistence_worker(state: &AutoTraderState) {
     tokio::spawn(async move {
         loop {
             notify.notified().await;
-            tokio::time::sleep(Duration::from_millis(10)).await;
+            tokio::time::sleep(SETTINGS_PERSIST_COALESCE_WINDOW).await;
             let lock_wait_started = Instant::now();
             let settings_guard = Arc::clone(&settings).lock_owned().await;
             record_settings_persist_sample(
@@ -353,7 +492,11 @@ fn start_settings_persistence_worker(state: &AutoTraderState) {
             );
             let path = path.clone();
             let write_started = Instant::now();
-            match tokio::task::spawn_blocking(move || persist_settings_snapshot(&path, &settings_snapshot)).await {
+            match tokio::task::spawn_blocking(move || {
+                persist_settings_snapshot(&path, &settings_snapshot)
+            })
+            .await
+            {
                 Ok(Ok(())) => record_settings_persist_sample(
                     &timings,
                     "snapshot_write",
@@ -390,8 +533,9 @@ fn utc_day() -> String {
 }
 fn scheduled_stop_headroom_multiplier(order_type: &str, strategy: Option<&str>) -> f64 {
     let scheduled = order_type.starts_with("Vwap") || order_type.starts_with("Twap");
-    if scheduled && Strategy::from_name(strategy.unwrap_or_default())
-        .is_some_and(Strategy::uses_protective_stops)
+    if scheduled
+        && Strategy::from_name(strategy.unwrap_or_default())
+            .is_some_and(Strategy::uses_protective_stops)
     {
         2.0
     } else {
@@ -408,20 +552,33 @@ fn allocated_notional_for_symbol(settings: &Settings, symbol: &str) -> f64 {
     let open_exposure = if let Some(lots) = settings.strategy_positions.get(symbol) {
         lots.values()
             .filter(|position| !position.scout_entry)
-            .map(|position| position.quantity.abs() * position.average_entry_price.max(0.0) * quote_rate)
+            .map(|position| {
+                position.quantity.abs() * position.average_entry_price.max(0.0) * quote_rate
+            })
             .sum()
     } else {
-        settings.positions.get(symbol).filter(|position| !position.scout_entry).map_or(0.0, |position| {
-            position.quantity.abs() * position.average_entry_price.max(0.0) * quote_rate
-        })
+        settings
+            .positions
+            .get(symbol)
+            .filter(|position| !position.scout_entry)
+            .map_or(0.0, |position| {
+                position.quantity.abs() * position.average_entry_price.max(0.0) * quote_rate
+            })
     };
     let mut pending_exposure = 0.0;
     let mut pending_quantity = 0.0;
-    let current_quantity = settings.positions.get(symbol).filter(|position| !position.scout_entry).map_or(0.0, |position| position.quantity);
+    let current_quantity = settings
+        .positions
+        .get(symbol)
+        .filter(|position| !position.scout_entry)
+        .map_or(0.0, |position| position.quantity);
     for order in settings.orders.iter().filter(|order| {
         order.symbol == symbol
             && order.purpose == "signal"
-            && matches!(order.status.as_str(), "submitting" | "accepted" | "resting" | "partially_filled")
+            && matches!(
+                order.status.as_str(),
+                "submitting" | "accepted" | "resting" | "partially_filled"
+            )
             && order.quantity > order.filled_quantity + 1e-12
     }) {
         let remaining = (order.quantity - order.filled_quantity).max(0.0);
@@ -457,17 +614,21 @@ fn allocated_notional_for_category(settings: &Settings, category: Option<Strateg
                 let value = position.quantity.abs()
                     * position.average_entry_price.max(0.0)
                     * quote_usd_rate(settings, symbol);
-                lots_total += value * scheduled_stop_headroom_multiplier(
-                    &position.entry_order_type,
-                    Some(strategy.as_str()),
-                );
+                lots_total += value
+                    * scheduled_stop_headroom_multiplier(
+                        &position.entry_order_type,
+                        Some(strategy.as_str()),
+                    );
             }
         }
         if settings.strategy_positions.is_empty() {
             settings
                 .positions
                 .iter()
-                .filter(|(_, position)| !position.scout_entry && strategy_category(position.strategy.as_deref()) == category)
+                .filter(|(_, position)| {
+                    !position.scout_entry
+                        && strategy_category(position.strategy.as_deref()) == category
+                })
                 .map(|(symbol, position)| {
                     position.quantity.abs()
                         * position.average_entry_price.max(0.0)
@@ -482,27 +643,40 @@ fn allocated_notional_for_category(settings: &Settings, category: Option<Strateg
             lots_total
         }
     } else if !settings.strategy_positions.is_empty() {
-        settings.strategy_positions.iter().flat_map(|(symbol, lots)| {
-            lots.iter().filter(|(_, position)| !position.scout_entry).map(move |(strategy, position)| {
+        settings
+            .strategy_positions
+            .iter()
+            .flat_map(|(symbol, lots)| {
+                lots.iter()
+                    .filter(|(_, position)| !position.scout_entry)
+                    .map(move |(strategy, position)| {
+                        let value = position.quantity.abs()
+                            * position.average_entry_price.max(0.0)
+                            * quote_usd_rate(settings, symbol);
+                        value
+                            * scheduled_stop_headroom_multiplier(
+                                &position.entry_order_type,
+                                Some(strategy.as_str()),
+                            )
+                    })
+            })
+            .sum()
+    } else {
+        settings
+            .positions
+            .iter()
+            .filter(|(_, position)| !position.scout_entry)
+            .map(|(symbol, position)| {
                 let value = position.quantity.abs()
                     * position.average_entry_price.max(0.0)
                     * quote_usd_rate(settings, symbol);
-                value * scheduled_stop_headroom_multiplier(
-                    &position.entry_order_type,
-                    Some(strategy.as_str()),
-                )
+                value
+                    * scheduled_stop_headroom_multiplier(
+                        &position.entry_order_type,
+                        position.strategy.as_deref(),
+                    )
             })
-        }).sum()
-    } else {
-        settings.positions.iter().filter(|(_, position)| !position.scout_entry).map(|(symbol, position)| {
-            let value = position.quantity.abs()
-                * position.average_entry_price.max(0.0)
-                * quote_usd_rate(settings, symbol);
-            value * scheduled_stop_headroom_multiplier(
-                &position.entry_order_type,
-                position.strategy.as_deref(),
-            )
-        }).sum()
+            .sum()
     };
     let mut pending_exposure = 0.0;
     let mut pending_quantity = BTreeMap::<String, f64>::new();
@@ -529,7 +703,8 @@ fn allocated_notional_for_category(settings: &Settings, category: Option<Strateg
                 .map(|lots| {
                     lots.iter()
                         .filter(|(strategy, position)| {
-                            !position.scout_entry && strategy_category(Some(strategy.as_str())) == category
+                            !position.scout_entry
+                                && strategy_category(Some(strategy.as_str())) == category
                         })
                         .map(|(_, position)| position.quantity)
                         .sum::<f64>()
@@ -539,7 +714,8 @@ fn allocated_notional_for_category(settings: &Settings, category: Option<Strateg
                         .positions
                         .get(&order.symbol)
                         .filter(|position| {
-                            !position.scout_entry && strategy_category(position.strategy.as_deref()) == category
+                            !position.scout_entry
+                                && strategy_category(position.strategy.as_deref()) == category
                         })
                         .filter(|position| !position.scout_entry)
                         .map(|position| position.quantity)
@@ -676,9 +852,17 @@ fn daily_strategy_budget(settings: &Settings, strategy: &str) -> f64 {
         .collect::<Vec<_>>();
     let missing = enabled
         .iter()
-        .filter(|candidate| !settings.daily_strategy_budgets.contains_key(candidate.as_str()))
+        .filter(|candidate| {
+            !settings
+                .daily_strategy_budgets
+                .contains_key(candidate.as_str())
+        })
         .count();
-    if missing == 0 || !enabled.iter().any(|candidate| candidate.as_str() == strategy) {
+    if missing == 0
+        || !enabled
+            .iter()
+            .any(|candidate| candidate.as_str() == strategy)
+    {
         return 0.0;
     }
     let configured = enabled
@@ -715,9 +899,17 @@ fn intraday_strategy_budget(settings: &Settings, strategy: &str) -> f64 {
         .collect::<Vec<_>>();
     let missing = enabled
         .iter()
-        .filter(|candidate| !settings.intraday_strategy_budgets.contains_key(candidate.as_str()))
+        .filter(|candidate| {
+            !settings
+                .intraday_strategy_budgets
+                .contains_key(candidate.as_str())
+        })
         .count();
-    if missing == 0 || !enabled.iter().any(|candidate| candidate.as_str() == strategy) {
+    if missing == 0
+        || !enabled
+            .iter()
+            .any(|candidate| candidate.as_str() == strategy)
+    {
         return 0.0;
     }
     let configured = enabled
@@ -797,7 +989,9 @@ fn daily_strategy_open_position_count(settings: &Settings, strategy: &str) -> us
             .positions
             .values()
             .filter(|position| {
-                position.quantity.abs() > 1e-12 && !position.scout_entry && position.strategy.as_deref() == Some(strategy)
+                position.quantity.abs() > 1e-12
+                    && !position.scout_entry
+                    && position.strategy.as_deref() == Some(strategy)
             })
             .count();
     }
@@ -991,8 +1185,12 @@ mod persistence_allocation_tests {
     #[test]
     fn allocated_symbol_exposure_counts_open_lots_and_only_incremental_pending_risk() {
         let mut settings = settings_with_rates();
-        settings.positions.insert("ETH-USDT".into(), position("live-momentum", 2.0, 10.0));
-        settings.orders.push(pending_order("ETH-USDT", "live-momentum", "buy", 5.0));
+        settings
+            .positions
+            .insert("ETH-USDT".into(), position("live-momentum", 2.0, 10.0));
+        settings
+            .orders
+            .push(pending_order("ETH-USDT", "live-momentum", "buy", 5.0));
         assert_eq!(allocated_notional_for_symbol(&settings, "ETH-USDT"), 100.0);
 
         settings.orders[0].side = "sell".into();
@@ -1004,22 +1202,56 @@ mod persistence_allocation_tests {
     #[test]
     fn category_allocation_and_open_counts_support_strategy_lots_and_legacy_positions() {
         let mut settings = settings_with_rates();
-        settings.strategy_positions.entry("ETH-USDT".into()).or_default().insert(
-            "donchian-20-btc200".into(), position("donchian-20-btc200", 2.0, 10.0));
-        settings.strategy_positions.entry("BTC-USDT".into()).or_default().insert(
-            "live-momentum".into(), position("live-momentum", -1.0, 50.0));
-        assert_eq!(allocated_notional_for_category(&settings, Some(StrategyCategory::Daily)), 20.0);
-        assert_eq!(allocated_notional_for_category(&settings, Some(StrategyCategory::Intraday)), 50.0);
+        settings
+            .strategy_positions
+            .entry("ETH-USDT".into())
+            .or_default()
+            .insert(
+                "donchian-20-btc200".into(),
+                position("donchian-20-btc200", 2.0, 10.0),
+            );
+        settings
+            .strategy_positions
+            .entry("BTC-USDT".into())
+            .or_default()
+            .insert(
+                "live-momentum".into(),
+                position("live-momentum", -1.0, 50.0),
+            );
+        assert_eq!(
+            allocated_notional_for_category(&settings, Some(StrategyCategory::Daily)),
+            20.0
+        );
+        assert_eq!(
+            allocated_notional_for_category(&settings, Some(StrategyCategory::Intraday)),
+            50.0
+        );
         assert_eq!(allocated_notional(&settings), 70.0);
         assert_eq!(total_open_position_count(&settings), 2);
-        assert_eq!(category_open_position_count(&settings, StrategyCategory::Daily), 1);
-        assert_eq!(category_open_position_count(&settings, StrategyCategory::Intraday), 1);
+        assert_eq!(
+            category_open_position_count(&settings, StrategyCategory::Daily),
+            1
+        );
+        assert_eq!(
+            category_open_position_count(&settings, StrategyCategory::Intraday),
+            1
+        );
 
         settings.strategy_positions.clear();
-        settings.positions.insert("ETH-USDT".into(), position("donchian-20-btc200", 2.0, 10.0));
-        settings.positions.insert("BTC-USDT".into(), position("live-momentum", -1.0, 50.0));
-        assert_eq!(allocated_notional_for_category(&settings, Some(StrategyCategory::Daily)), 20.0);
-        assert_eq!(category_open_position_count(&settings, StrategyCategory::Intraday), 1);
+        settings
+            .positions
+            .insert("ETH-USDT".into(), position("donchian-20-btc200", 2.0, 10.0));
+        settings
+            .positions
+            .insert("BTC-USDT".into(), position("live-momentum", -1.0, 50.0));
+        assert_eq!(
+            allocated_notional_for_category(&settings, Some(StrategyCategory::Daily)),
+            20.0
+        );
+        assert_eq!(
+            category_open_position_count(&settings, StrategyCategory::Intraday),
+            1
+        );
     }
 
     #[test]
@@ -1027,23 +1259,44 @@ mod persistence_allocation_tests {
         let mut settings = settings_with_rates();
         let mut scout = position("live-momentum", 1.0, 10.0);
         scout.scout_entry = true;
-        settings.strategy_positions.entry("ETH-USDT".into()).or_default()
+        settings
+            .strategy_positions
+            .entry("ETH-USDT".into())
+            .or_default()
             .insert("live-momentum".into(), scout.clone());
-        settings.strategy_positions.entry("BTC-USDT".into()).or_default()
-            .insert("live-trade-flow".into(), position("live-trade-flow", 1.0, 50.0));
-        settings.strategy_positions.entry("SOL-USDT".into()).or_default()
+        settings
+            .strategy_positions
+            .entry("BTC-USDT".into())
+            .or_default()
+            .insert(
+                "live-trade-flow".into(),
+                position("live-trade-flow", 1.0, 50.0),
+            );
+        settings
+            .strategy_positions
+            .entry("SOL-USDT".into())
+            .or_default()
             .insert("trend-50-200".into(), scout);
 
         assert_eq!(total_open_position_count(&settings), 1);
-        assert_eq!(category_open_position_count(&settings, StrategyCategory::Intraday), 1);
-        assert_eq!(category_open_position_count(&settings, StrategyCategory::Daily), 0);
+        assert_eq!(
+            category_open_position_count(&settings, StrategyCategory::Intraday),
+            1
+        );
+        assert_eq!(
+            category_open_position_count(&settings, StrategyCategory::Daily),
+            0
+        );
 
         settings.strategy_positions.clear();
         let mut scout = position("live-momentum", 1.0, 10.0);
         scout.scout_entry = true;
         settings.positions.insert("ETH-USDT".into(), scout);
         assert_eq!(total_open_position_count(&settings), 0);
-        assert_eq!(category_open_position_count(&settings, StrategyCategory::Intraday), 0);
+        assert_eq!(
+            category_open_position_count(&settings, StrategyCategory::Intraday),
+            0
+        );
     }
 
     #[test]
@@ -1056,26 +1309,47 @@ mod persistence_allocation_tests {
             Strategy::LiveTradeFlow,
         ];
         settings.daily_strategy_notional_limit = 300.0;
-        settings.daily_strategy_budgets.insert("donchian-20-btc200".into(), 80.0);
+        settings
+            .daily_strategy_budgets
+            .insert("donchian-20-btc200".into(), 80.0);
         assert_eq!(enabled_daily_strategy_count(&settings), 2);
         assert_eq!(daily_strategy_notional_share(&settings), 150.0);
         assert_eq!(daily_strategy_budget(&settings, "donchian-20-btc200"), 80.0);
-        assert_eq!(daily_strategy_budget(&settings, "donchian-55-btc200"), 220.0);
+        assert_eq!(
+            daily_strategy_budget(&settings, "donchian-55-btc200"),
+            220.0
+        );
         assert_eq!(daily_strategy_budget(&settings, "not-enabled"), 0.0);
 
         settings.intraday_notional_limit = 120.0;
-        settings.intraday_strategy_budgets.insert("live-momentum".into(), 45.0);
+        settings
+            .intraday_strategy_budgets
+            .insert("live-momentum".into(), 45.0);
         assert_eq!(enabled_intraday_strategy_count(&settings), 2);
         assert_eq!(intraday_strategy_notional_share(&settings), 60.0);
         assert_eq!(intraday_strategy_budget(&settings, "live-momentum"), 45.0);
         assert_eq!(intraday_strategy_budget(&settings, "live-trade-flow"), 75.0);
 
-        settings.strategy_positions.entry("ETH-USDT".into()).or_default().insert(
-            "live-momentum".into(), position("live-momentum", 2.0, 10.0));
-        settings.orders.push(pending_order("ETH-USDT", "live-momentum", "buy", 5.0));
-        assert_eq!(allocated_notional_for_strategy(&settings, "live-momentum"), 100.0);
-        assert_eq!(daily_strategy_open_position_count(&settings, "live-momentum"), 1);
-        assert_eq!(daily_strategy_open_position_count(&settings, "donchian-20-btc200"), 0);
+        settings
+            .strategy_positions
+            .entry("ETH-USDT".into())
+            .or_default()
+            .insert("live-momentum".into(), position("live-momentum", 2.0, 10.0));
+        settings
+            .orders
+            .push(pending_order("ETH-USDT", "live-momentum", "buy", 5.0));
+        assert_eq!(
+            allocated_notional_for_strategy(&settings, "live-momentum"),
+            100.0
+        );
+        assert_eq!(
+            daily_strategy_open_position_count(&settings, "live-momentum"),
+            1
+        );
+        assert_eq!(
+            daily_strategy_open_position_count(&settings, "donchian-20-btc200"),
+            0
+        );
     }
 
     #[test]
@@ -1088,16 +1362,36 @@ mod persistence_allocation_tests {
         ];
         let keys = pending_entry_strategy_keys(&settings);
         assert_eq!(keys.len(), 2);
-        assert_eq!(pending_entry_position_count_for_category(&settings, StrategyCategory::Intraday), 1);
-        assert_eq!(pending_entry_position_count_for_category(&settings, StrategyCategory::Daily), 1);
-        assert_eq!(pending_entry_position_count_for_strategy(&settings, "live-momentum"), 1);
-        settings.orders.push(pending_order("SOL-USDT", "live-order-book", "buy", 2.0));
+        assert_eq!(
+            pending_entry_position_count_for_category(&settings, StrategyCategory::Intraday),
+            1
+        );
+        assert_eq!(
+            pending_entry_position_count_for_category(&settings, StrategyCategory::Daily),
+            1
+        );
+        assert_eq!(
+            pending_entry_position_count_for_strategy(&settings, "live-momentum"),
+            1
+        );
+        settings
+            .orders
+            .push(pending_order("SOL-USDT", "live-order-book", "buy", 2.0));
         settings.orders.last_mut().unwrap().purpose = "scout".into();
-        assert_eq!(pending_entry_position_count_for_category(&settings, StrategyCategory::Intraday), 1);
+        assert_eq!(
+            pending_entry_position_count_for_category(&settings, StrategyCategory::Intraday),
+            1
+        );
 
-        settings.strategy_positions.entry("ETH-USDT".into()).or_default().insert(
-            "live-momentum".into(), position("live-momentum", 1.0, 10.0));
-        assert_eq!(pending_entry_position_count_for_strategy(&settings, "live-momentum"), 0);
+        settings
+            .strategy_positions
+            .entry("ETH-USDT".into())
+            .or_default()
+            .insert("live-momentum".into(), position("live-momentum", 1.0, 10.0));
+        assert_eq!(
+            pending_entry_position_count_for_strategy(&settings, "live-momentum"),
+            0
+        );
     }
 
     #[test]
@@ -1107,15 +1401,33 @@ mod persistence_allocation_tests {
         settings.strategies = vec![Strategy::Donchian20Btc200, Strategy::Donchian55Btc200];
         settings.daily_strategy_notional_limit = 320.0;
         settings.intraday_notional_limit = 90.0;
-        assert_eq!(category_position_limit(&settings, StrategyCategory::Daily), 7);
-        assert_eq!(category_notional_limit(&settings, StrategyCategory::Daily), 320.0);
-        assert_eq!(category_notional_limit(&settings, StrategyCategory::Intraday), 90.0);
+        assert_eq!(
+            category_position_limit(&settings, StrategyCategory::Daily),
+            7
+        );
+        assert_eq!(
+            category_notional_limit(&settings, StrategyCategory::Daily),
+            320.0
+        );
+        assert_eq!(
+            category_notional_limit(&settings, StrategyCategory::Intraday),
+            90.0
+        );
         assert_eq!(daily_strategy_position_limit(&settings), 4);
         assert_eq!(quote_usd_rate(&settings, "ETH-USDT"), 1.0);
         assert_eq!(quote_usd_rate_for_map(&BTreeMap::new(), "ETH-XYZ"), 10.0);
-        assert_eq!(quote_usd_rate_for_map(&BTreeMap::from([("XYZ".into(), f64::NAN)]), "ETH-XYZ"), 10.0);
-        assert_eq!(scheduled_stop_headroom_multiplier("Vwap", Some("live-momentum")), 2.0);
-        assert_eq!(scheduled_stop_headroom_multiplier("Limit", Some("live-momentum")), 1.0);
+        assert_eq!(
+            quote_usd_rate_for_map(&BTreeMap::from([("XYZ".into(), f64::NAN)]), "ETH-XYZ"),
+            10.0
+        );
+        assert_eq!(
+            scheduled_stop_headroom_multiplier("Vwap", Some("live-momentum")),
+            2.0
+        );
+        assert_eq!(
+            scheduled_stop_headroom_multiplier("Limit", Some("live-momentum")),
+            1.0
+        );
         assert!(!is_independent_daily_strategy("live-momentum"));
         assert!(is_independent_daily_strategy("donchian-20-btc200"));
     }

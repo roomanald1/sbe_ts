@@ -18,6 +18,7 @@ const BufferDataEncoder: Encoder<Buffer> = {
 
 type LearningSocket = Awaited<ReturnType<typeof connectLearningRSocket>>;
 let sharedSocket: Promise<LearningSocket> | undefined;
+let socketGeneration = 0;
 let requestLearning = performLearningRpc;
 
 export function setLearningRpcRequesterForTests(
@@ -28,10 +29,32 @@ export function setLearningRpcRequesterForTests(
 
 function getSocket() {
   if (!sharedSocket) {
-    sharedSocket = connectLearningRSocket().catch((error) => {
-      sharedSocket = undefined;
-      throw error;
-    });
+    const generation = ++socketGeneration;
+    sharedSocket = connectLearningRSocket()
+      .then((client) => {
+        client.connectionStatus().subscribe({
+          onSubscribe: (subscription) =>
+            subscription.request(Number.MAX_SAFE_INTEGER),
+          onNext: (status) => {
+            if (
+              (status.kind === 'CLOSED' || status.kind === 'ERROR') &&
+              socketGeneration === generation
+            ) {
+              sharedSocket = undefined;
+              client.close();
+            }
+          },
+          onError: () => {
+            if (socketGeneration === generation) sharedSocket = undefined;
+            client.close();
+          },
+        });
+        return client;
+      })
+      .catch((error) => {
+        if (socketGeneration === generation) sharedSocket = undefined;
+        throw error;
+      });
   }
   return sharedSocket;
 }
@@ -68,7 +91,8 @@ async function performLearningRpc(
   path: string,
   body?: unknown,
 ): Promise<Response> {
-  const client = await getSocket();
+  const socket = getSocket();
+  const client = await socket;
   let reply: Uint8Array;
   try {
     reply = await new Promise<Uint8Array>((resolve, reject) => {
@@ -93,7 +117,10 @@ async function performLearningRpc(
         });
     });
   } catch (error) {
-    sharedSocket = undefined;
+    // A failed request can come from a socket that closed between calls.
+    // Invalidate only this generation so a newer connection isn't discarded.
+    if (sharedSocket === socket) sharedSocket = undefined;
+    client.close();
     throw error;
   }
   const envelope = JSON.parse(Buffer.from(reply).toString()) as {
@@ -120,5 +147,12 @@ export function learningRpc(
   path: string,
   body?: unknown,
 ): Promise<Response> {
-  return requestLearning(method, path, body);
+  // Dashboard reads are safe to repeat after a stale RSocket connection. Do
+  // not retry mutations, whose outcome may be unknown when the socket closes.
+  if (method.toUpperCase() !== 'GET')
+    return requestLearning(method, path, body);
+  return requestLearning(method, path, body).catch(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    return requestLearning(method, path, body);
+  });
 }

@@ -1,19 +1,28 @@
-# Strategy X
+# Strategy
 
-Strategy X contains the shared evaluator library and two service roles.
-AutoTrader calls the stateless live-evaluation worker for trading decisions;
-Learning selects and schedules Scout experiments and dispatches them to the
-separate stateful Scout worker. Workers evaluate assigned strategies and
-return typed results; they do not choose strategies or schedule follow-up work.
+Strategy contains the shared evaluator library and two process roles per
+strategy. Both roles subscribe to Insights' typed `strategy-signals:*` stream.
+Live workers load enabled profiles from AutoTrader and report profile-versioned
+decisions back to it. Scout workers load profiles from Learning and return
+Scout results and feedback to Learning. Workers own strategy rules; coordinators
+own profile selection, while AutoTrader retains final risk and order authority.
 
 ## Strategy workers
 
-Each registered strategy has two separate process roles. AutoTrader uses the
-always-on stateless live evaluator (`STRATEGY_X_WORKER_ROLE=live`) on
-`STRATEGY_X_LIVE_LISTEN_ADDR` (default `0.0.0.0:10201`). Learning dispatches
-Scout work to the optional Scout evaluator (`STRATEGY_X_WORKER_ROLE=scout`) on
-`SCOUT_WORKER_LISTEN_ADDR` (default `0.0.0.0:10200`). Both roles select the
-strategy with `STRATEGY_X_WORKER_STRATEGY`.
+Each registered strategy has two process roles. Live workers use
+`STRATEGY_WORKER_ROLE=live`, `STRATEGY_WORKER_STRATEGY`, and
+`STRATEGY_LIVE_LISTEN_ADDR` (default `0.0.0.0:10201`). Scout workers use
+`STRATEGY_WORKER_ROLE=scout` and `SCOUT_WORKER_LISTEN_ADDR` (default
+`0.0.0.0:10200`). Both roles subscribe through
+`INSIGHTS_STRATEGY_STREAM_URL`. Scout workers also subscribe to Learning
+through `LEARNING_SCOUT_STREAM_URL` (defaulting to `LEARNING_RSOCKET_URL`).
+Learning streams profile, feedback, configuration, and historical replay
+updates into each worker's latest-value cache, and delivers assignments on the
+same stream. Workers return assignment results separately over RSocket
+request/response. Profile snapshots refresh the live and dated-carry scout
+profile cache; a never-seen symbol is bootstrapped once, then its snapshot is
+broadcast to the worker caches.
+Profiles in one process share a single Insights subscription.
 
 Scout workers use their own SQLite file from `SCOUT_WORKER_STATE_PATH`. The
 database stores idempotent assignment results and durable Scout state; duplicate
@@ -38,22 +47,37 @@ per-worker RAM.
 
 The worker bounds resource use with configurable settings:
 
-- `SCOUT_WORKER_MAX_IN_FLIGHT` (default `1`): excess assignments are rejected
-  immediately rather than queued in worker memory.
+- `SCOUT_WORKER_MAX_IN_FLIGHT` (default `1`): bounds concurrent Learning
+  assignments and lifecycle requests; excess work is rejected rather than
+  queued in worker memory. Insights updates use a separate serial subscription
+  lane and do not consume this assignment capacity.
 - `SCOUT_WORKER_MAX_PAYLOAD_BYTES` (default `1048576`): maximum serialized
   assignment size.
 - `SCOUT_WORKER_MAX_PERSISTED_RESULTS` (default `10000`): retained result rows
   per strategy database.
 
-Compose defines two worker services per registered strategy: live workers run
-continuously, and Scout workers use the `scout-workers` profile so they start
-only when Learning dispatch is enabled. Scout CPU and memory limits can be set
-with `SCOUT_WORKER_CPU_LIMIT` and `SCOUT_WORKER_MEMORY_LIMIT`; live limits use
-`STRATEGY_X_LIVE_CPU_LIMIT` and `STRATEGY_X_LIVE_MEMORY_LIMIT`.
+Compose defines `strategy-live-<strategy>` and
+`strategy-scout-<strategy>` services. Live workers run continuously; Scout
+workers use the optional `scout-workers` profile. Scout CPU and memory limits
+use `SCOUT_WORKER_CPU_LIMIT` and `SCOUT_WORKER_MEMORY_LIMIT`; live limits use
+`STRATEGY_LIVE_CPU_LIMIT` and `STRATEGY_LIVE_MEMORY_LIMIT`.
+
+Each worker exposes internal `/health` and `/metrics` listeners. Metrics include
+role/strategy request, error, timeout, saturation, in-flight, latency, RSS, and
+CPU series. `app_strategy_worker_insights_connected` and
+`app_strategy_worker_last_insight_timestamp_ms` report subscription state and
+the newest event consumed; live workers expose the currently installed
+AutoTrader profile-set version. Scout workers export
+`app_strategy_worker_insight_route_duration_seconds` for the time spent
+dispatching an Insights update through the local handler. It excludes stream
+transport and upstream event delivery. Scout workers also export cached
+open/closed instance counts from their own SQLite database, refreshing the aggregate at most once per minute;
+the exporter does not load full Scout reports to populate Grafana.
 
 There is no central health-only Scouts process. Scout application routes run
 inside strategy-specific Scout workers and are reached through Learning's
 RSocket coordinator. Existing Scout data remains in 17 per-strategy SQLite
 files at `/data/workers/<strategy>.sqlite` on the named volume
-`sbe-scouts-state`; the Compose volume key is `strategy-x-state`. Worker startup
+`sbe-scouts-state`; the Compose volume key remains `strategy-x-state` to retain
+the existing Scout databases. Worker startup
 does not load a shared database or legacy JSON file.

@@ -213,6 +213,8 @@ type StrategyWinRateRow = {
   learningSamples?: number;
   learningPositiveRate?: number;
   learningAverageNet?: number;
+  effectiveSizeMultiplier?: number;
+  feedbackMultiplier?: number;
   scoutOutcomeSamples?: number;
   scoutOutcomeAverageNet?: number;
   pairedScoutSamples?: number;
@@ -584,7 +586,7 @@ function AutoTraderOutcomesComponent({
         }
         const runReason = latestBlocker
           ? latestBlocker.symbol + ' · ' + latestBlocker.reason
-          : 'No blocker reported by AutoTrader';
+          : '';
         const runReasonAt = latestBlocker?.timestamp_ms;
         const fees = trades.map((row) => row.feesUsd);
         const netValues = trades.map((row) => row.netPnlUsd);
@@ -734,6 +736,10 @@ function AutoTraderOutcomesComponent({
           learningSamples: learning?.learning_samples,
           learningPositiveRate: learning?.positive_rate,
           learningAverageNet: learning?.average_net_return_percent,
+          effectiveSizeMultiplier:
+            state.strategyLearning[strategy]?.learning_multiplier,
+          feedbackMultiplier:
+            state.strategyLearning[strategy]?.learning_feedback_multiplier,
           scoutOutcomeSamples: learning?.scout_outcome_samples,
           scoutOutcomeAverageNet: learning?.scout_average_net_return_percent,
           pairedScoutSamples: learning?.paired_scout_samples,
@@ -971,15 +977,15 @@ function AutoTraderOutcomesComponent({
             },
             {
               field: 'runReason',
-              headerName: 'Latest blocker',
+              headerName: 'Why no entry?',
               headerTooltip:
-                'The latest blocker reported by AutoTrader. Fills and cancellations are not blockers. Events older than 24 hours are marked stale.',
+                'The latest rejection or entry evaluation explanation reported for this strategy.',
               valueFormatter: ({ value, data }) =>
                 value
                   ? data?.runReasonAt
                     ? value + ' · ' + reasonAge(data.runReasonAt)
                     : value
-                  : 'No blocker reported by AutoTrader',
+                  : '—',
               tooltipValueGetter: ({ data }) =>
                 data
                   ? data.runReasonAt
@@ -1068,6 +1074,34 @@ function AutoTraderOutcomesComponent({
               width: 60,
               minWidth: 60,
               maxWidth: 68,
+              flex: 0,
+            },
+            {
+              field: 'feedbackMultiplier',
+              headerName: 'Feedback ×',
+              headerTooltip:
+                'Learning feedback multiplier from closed trade outcomes. Zero means new live entries are paused unless market-specific Scout evidence supports a capped probe.',
+              valueFormatter: ({ value }) =>
+                typeof value === 'number' && Number.isFinite(value)
+                  ? '×' + value.toFixed(2)
+                  : '—',
+              width: 78,
+              minWidth: 74,
+              maxWidth: 84,
+              flex: 0,
+            },
+            {
+              field: 'effectiveSizeMultiplier',
+              headerName: 'Size ×',
+              headerTooltip:
+                'Multiplier currently applied to this strategy’s effective budget. During recovery, a positive market-specific Scout profile may receive a capped probe size.',
+              valueFormatter: ({ value }) =>
+                typeof value === 'number' && Number.isFinite(value)
+                  ? '×' + value.toFixed(2)
+                  : '—',
+              width: 70,
+              minWidth: 66,
+              maxWidth: 76,
               flex: 0,
             },
             {
@@ -1870,14 +1904,56 @@ function AutoTraderOutcomesComponent({
           Boolean(event.target.closest('button')),
         cellRenderer: ({ data }: { data?: OutcomeGridRow }) => {
           if (!liveOnly || !data || data.status !== 'Open') return null;
-          if (data.carryDetails)
-            return (
-              <span title="The paired spot and futures legs are tracked in the dated-carry paper book.">
-                Paired carry
-              </span>
-            );
           const confirming = state.confirmingCloseSymbols.has(data.symbol);
           const closing = state.closingSymbols.has(data.symbol);
+          if (data.carryDetails) {
+            if (closing)
+              return (
+                <span className="auto-trader-close-progress">Closing…</span>
+              );
+            if (confirming)
+              return (
+                <div className="auto-trader-position-close-actions">
+                  <span>Close both dated carry legs?</span>
+                  <button
+                    className="is-confirm"
+                    type="button"
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      void model.confirmDatedCarryClose(
+                        data.symbol,
+                        data.carryDetails!.future_symbol,
+                      );
+                    }}
+                  >
+                    Confirm
+                  </button>
+                  <button
+                    className="is-cancel"
+                    type="button"
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      model.cancelClose(data.symbol);
+                    }}
+                  >
+                    Cancel
+                  </button>
+                </div>
+              );
+            return (
+              <button
+                className="auto-trader-position-close-button"
+                type="button"
+                onClick={(event) => {
+                  event.stopPropagation();
+                  model.requestClose(data.symbol);
+                }}
+                title="Close the dated carry position at its latest market marks"
+              >
+                Close carry
+              </button>
+            );
+          }
           const firstForSymbol = rows.find(
             (row) => row.status === 'Open' && row.symbol === data.symbol,
           );
@@ -2560,6 +2636,21 @@ function AutoTraderOutcomesComponent({
       {!strategyRatesOnly && state.error && (
         <div className="positions-error">{state.error}</div>
       )}
+      {!strategyRatesOnly &&
+        !state.loading &&
+        state.learningSummaryStatus === 'unavailable' && (
+          <div className="positions-error" role="status">
+            Learning summary unavailable. Check that the Learning service is
+            running and reachable.
+          </div>
+        )}
+      {!strategyRatesOnly &&
+        !state.loading &&
+        state.learningSummaryStatus === 'empty' && (
+          <p className="signal-info-note" role="status">
+            No Learning outcomes were recorded in the last 7 days.
+          </p>
+        )}
       {!closedOnly && !strategyRatesOnly && (
         <div
           className={
@@ -3061,6 +3152,25 @@ function AutoTraderOutcomesComponent({
                     ? 'Dated carry entry details'
                     : 'Strategy gate evidence recorded at entry'}
                 </p>
+                <ul>
+                  <li>
+                    <strong>Recorded</strong>
+                    <span>Time in market</span>
+                    <small>
+                      {durationLabel(
+                        Math.max(
+                          0,
+                          (gatePosition.closedAt ?? Date.now()) -
+                            gatePosition.openedAt,
+                        ),
+                      )}
+                      {gatePosition.status === 'Open' ||
+                      gatePosition.status === 'Partially closed'
+                        ? ' · ongoing'
+                        : ''}
+                    </small>
+                  </li>
+                </ul>
                 {!carry && (
                   <>
                     <details className="auto-trader-gate-parameters">

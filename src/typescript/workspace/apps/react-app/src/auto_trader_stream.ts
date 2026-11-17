@@ -15,6 +15,15 @@ export type AutoTraderUiSnapshot = {
 const snapshot$ = new BehaviorSubject<AutoTraderUiSnapshot | undefined>(
   undefined,
 );
+export const AUTO_TRADER_SNAPSHOT_MAX_AGE_MS = 45_000;
+
+export function isAutoTraderSnapshotFresh(
+  updatedAt: number,
+  now = Date.now(),
+): boolean {
+  return updatedAt > 0 && now - updatedAt <= AUTO_TRADER_SNAPSHOT_MAX_AGE_MS;
+}
+
 let stopStream: (() => void) | undefined;
 let retryTimer: ReturnType<typeof setTimeout> | undefined;
 let retryDelay = 1000;

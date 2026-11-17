@@ -1278,8 +1278,6 @@ dependencies = [
 [[package]]
 name = "rsocket_rust"
 version = "0.7.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0a4c676c68d6895cbcecb1b02bdafeb5a2b0b0a652479db7a160474c38c06426"
 dependencies = [
  "anyhow",
  "async-stream",

@@ -139,6 +139,8 @@ struct LearningState {
     seen_event_ids_overflowed: bool,
     #[serde(skip)]
     seen_execution_event_ids_overflowed: bool,
+    #[serde(skip)]
+    state_updates: Option<Arc<tokio::sync::Notify>>,
 }
 
 fn default_live_scout_parameter_samples() -> usize {
@@ -164,6 +166,7 @@ impl Default for LearningState {
             outcome_history_truncated: false,
             seen_event_ids_overflowed: false,
             seen_execution_event_ids_overflowed: false,
+            state_updates: None,
         }
     }
 }
@@ -306,6 +309,7 @@ struct MissedOpportunityHorizon {
 struct ServiceState {
     state: Arc<Mutex<LearningState>>,
     path: PathBuf,
+    state_updates: Arc<tokio::sync::Notify>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -372,6 +376,8 @@ pub fn router_with_scout_coordinator(
 
 fn service_state(path: PathBuf) -> Result<ServiceState, String> {
     let mut stored = load_state(&path)?;
+    let state_updates = Arc::new(tokio::sync::Notify::new());
+    stored.state_updates = Some(Arc::clone(&state_updates));
     for job in stored.strategy_replay_jobs.values_mut() {
         if job.status == StrategyReplayStatus::Running {
             job.status = StrategyReplayStatus::Pending;
@@ -396,6 +402,7 @@ fn service_state(path: PathBuf) -> Result<ServiceState, String> {
     Ok(ServiceState {
         state: Arc::new(Mutex::new(stored)),
         path,
+        state_updates,
     })
 }
 
@@ -1093,7 +1100,8 @@ fn write_map_preserving_history<T: Serialize>(
 ) -> rusqlite::Result<()> {
     let mut statement = connection.prepare_cached(&format!(
         "INSERT INTO {table} (id, payload) VALUES (?1, ?2)
-         ON CONFLICT(id) DO UPDATE SET payload = excluded.payload"
+         ON CONFLICT(id) DO UPDATE SET payload = excluded.payload
+         WHERE payload != excluded.payload"
     ))?;
     for (id, value) in values {
         statement.execute(rusqlite::params![

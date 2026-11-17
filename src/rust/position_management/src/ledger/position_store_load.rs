@@ -58,35 +58,22 @@ fn record_position_persistence_sample(
 }
 
 impl PositionStore {
-    fn book_slot(&self, symbol: &str) -> Arc<ArcSwapOption<BookSnapshot>> {
-        let mut books = self.books.write().expect("book map poisoned");
-        Arc::clone(
-            books
-                .entry(symbol.to_owned())
-                .or_insert_with(|| Arc::new(ArcSwapOption::empty())),
-        )
-    }
-
-    fn book(&self, symbol: &str) -> Option<Arc<BookSnapshot>> {
-        let slot = self
-            .books
+    fn market_mark(&self, symbol: &str) -> Option<MarketMark> {
+        self.market_marks
             .read()
-            .expect("book map poisoned")
+            .expect("market mark map poisoned")
             .get(symbol)
-            .cloned()?;
-        slot.load_full()
+            .cloned()
     }
 
-    fn books_snapshot(&self) -> HashMap<String, Arc<BookSnapshot>> {
-        self.books
+    fn market_marks_snapshot(&self) -> HashMap<String, MarketMark> {
+        self.market_marks
             .read()
-            .expect("book map poisoned")
-            .iter()
-            .filter_map(|(symbol, slot)| slot.load_full().map(|book| (symbol.clone(), book)))
-            .collect()
+            .expect("market mark map poisoned")
+            .clone()
     }
 
-    async fn load(spot_symbols: Arc<Vec<String>>) -> anyhow::Result<Self> {
+    async fn load() -> anyhow::Result<Self> {
         let json_path = std::env::var_os("POSITIONS_FILE")
             .map(PathBuf::from)
             .unwrap_or(std::env::current_dir()?.join("positions.json"));
@@ -94,10 +81,10 @@ impl PositionStore {
             .map(PathBuf::from)
             .map(|path| path.with_extension("sqlite"))
             .unwrap_or_else(|| json_path.with_extension("sqlite"));
-        Self::load_from_path(path, spot_symbols).await
+        Self::load_from_path(path).await
     }
 
-    async fn load_from_path(path: PathBuf, spot_symbols: Arc<Vec<String>>) -> anyhow::Result<Self> {
+    async fn load_from_path(path: PathBuf) -> anyhow::Result<Self> {
         let mut ledger = tokio::task::spawn_blocking({
             let path = path.clone();
             move || load_sqlite_ledger(&path)
@@ -152,7 +139,7 @@ impl PositionStore {
             ledger.orders.len(),
             path.display()
         );
-        let (state_updates, _) = broadcast::channel(32);
+        let (state_updates, _) = broadcast::channel(POSITION_UI_EVENT_QUEUE_CAPACITY);
         let store = Self {
             path,
             ledger: Arc::new(Mutex::new(ledger)),
@@ -161,12 +148,8 @@ impl PositionStore {
             persistence_timings_ms: Arc::new(StdMutex::new(BTreeMap::new())),
             trade_index: StdMutex::new(LedgerTradeIndex::default()),
             realized_pnl_cache: StdMutex::new(None),
-            books: StdRwLock::new(HashMap::new()),
-            price_samples: Mutex::new(HashMap::new()),
-            hedge_samples: Mutex::new(HashMap::new()),
-            book_changed: Notify::new(),
-            subscriptions: StdMutex::new(HashMap::new()),
-            spot_symbols,
+            market_marks: StdRwLock::new(HashMap::new()),
+            market_mark_pollers: StdMutex::new(HashSet::new()),
             vwap_runs: Mutex::new(vwap_runs),
         };
         {
@@ -249,17 +232,6 @@ impl PositionStore {
         self.persistence_notify.notify_one();
         let _ = self.state_updates.send(());
         Ok(())
-    }
-    async fn record_ticker_sample(&self, instrument: String, price: f64, timestamp: u64) {
-        let mut histories = self.hedge_samples.lock().await;
-        let samples = histories.entry(instrument).or_default();
-        if samples
-            .last()
-            .map_or(true, |(last, _)| timestamp.saturating_sub(*last) >= 10_000)
-        {
-            samples.push((timestamp, price));
-            samples.retain(|(time, _)| timestamp.saturating_sub(*time) <= 30 * 60_000);
-        }
     }
 }
 
@@ -462,7 +434,7 @@ mod ledger_snapshot_tests {
             barrier_orders: vec![barrier, auto_stop], scheduled_runs: vec![run],
             ..Ledger::default()
         }).unwrap();
-        let store = PositionStore::load_from_path(path.clone(), Arc::new(vec!["BTC-USDT".into()]))
+        let store = PositionStore::load_from_path(path.clone())
             .await.unwrap();
         let ledger = store.ledger.lock().await;
         assert_eq!(ledger.barrier_orders[0].status, "interrupted");

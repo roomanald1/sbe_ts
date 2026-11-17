@@ -278,32 +278,6 @@ struct TradesResponse {
     has_older: Option<bool>,
 }
 #[derive(Serialize)]
-struct HedgeCandidate {
-    symbol: String,
-    correlation: Option<f64>,
-    paired_samples: usize,
-    latest_price: Option<f64>,
-}
-#[derive(Serialize)]
-struct HedgePosition {
-    symbol: String,
-    quantity: f64,
-    average_entry_price: f64,
-    latest_price: Option<f64>,
-    candidates: Vec<HedgeCandidate>,
-}
-#[derive(Serialize)]
-struct HedgePairCorrelation {
-    symbol_a: String,
-    symbol_b: String,
-    correlation: Option<f64>,
-}
-#[derive(Serialize)]
-struct HedgeCandidatesResponse {
-    positions: Vec<HedgePosition>,
-    pair_correlations: Vec<HedgePairCorrelation>,
-}
-#[derive(Serialize)]
 struct OrdersResponse {
     orders: Vec<RestingOrder>,
     barrier_orders: Vec<BarrierOrder>,

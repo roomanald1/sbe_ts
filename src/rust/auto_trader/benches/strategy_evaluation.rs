@@ -14,4 +14,11 @@ fn main() {
         black_box((&path, ns));
         println!("{path}: {ns:.1} ns/operation");
     }
+    const SNAPSHOT_ITERATIONS: usize = 250;
+    for (path, us) in
+        auto_trader::auto_trader::benchmark_signal_settings_snapshot_path(SNAPSHOT_ITERATIONS)
+    {
+        black_box((&path, us));
+        println!("{path}: {us:.3} us/operation ({SNAPSHOT_ITERATIONS} iterations)");
+    }
 }

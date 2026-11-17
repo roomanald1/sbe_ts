@@ -21,7 +21,7 @@ if [[ "${SCOUT_WORKERS_ENABLED:-true}" == "true" ]]; then
   if [[ " ${services[*]} " == *" learning "* ]]; then
     while IFS= read -r worker; do
       services+=("$worker")
-    done < <(docker compose "${compose_args[@]}" config --services | rg '^strategy-x-scout-')
+    done < <(docker compose "${compose_args[@]}" config --services | rg '^strategy-scout-')
   fi
 fi
 if [[ ${#services[@]} -eq 0 ]]; then

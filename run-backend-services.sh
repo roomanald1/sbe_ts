@@ -15,6 +15,7 @@ export LEARNING_STATE_FILE="${LEARNING_STATE_FILE:-$ROOT/src/rust/learning/learn
 export LEARNING_RSOCKET_URL="ws://127.0.0.1:10010"
 export INSIGHTS_RPC_RSOCKET_URL="ws://127.0.0.1:10007"
 export AUTO_TRADER_RSOCKET_URL="ws://127.0.0.1:10008"
+export PAPER_EXCHANGE_RSOCKET_URL="ws://127.0.0.1:10006"
 export POSITION_MANAGEMENT_RSOCKET_URL="ws://127.0.0.1:10005"
 export FEED_HANDLERS_RSOCKET_URL="ws://127.0.0.1:10001"
 export BINANCE_FEED_RSOCKET_URL="ws://127.0.0.1:10002"
@@ -22,7 +23,7 @@ export NEWS_SENTIMENT_RSOCKET_URL="ws://127.0.0.1:10012/rsocket"
 export FEED_HANDLERS_RSOCKET_PORT=10001
 export BINANCE_FEED_RSOCKET_PORT=10002
 export POSITION_MANAGEMENT_RSOCKET_PORT=10005
-export EXECUTION_RSOCKET_PORT=10006
+export PAPER_EXCHANGE_RSOCKET_PORT=10006
 export INSIGHTS_RSOCKET_PORT=10004
 export INSIGHTS_RPC_RSOCKET_PORT=10007
 export INSIGHTS_BROWSER_RSOCKET_PORT=10011
@@ -120,25 +121,25 @@ start_strategy_worker() {
   if [[ "$role" == "live" ]]; then
     port=$((12001 + index))
     metrics_port=$((14001 + index))
-    STRATEGY_X_WORKER_ROLE=live \
-    STRATEGY_X_WORKER_STRATEGY="$strategy" \
-    STRATEGY_X_LIVE_LISTEN_ADDR="127.0.0.1:$port" \
-    STRATEGY_X_METRICS_LISTEN_ADDR="127.0.0.1:$metrics_port" \
+    STRATEGY_WORKER_ROLE=live \
+    STRATEGY_WORKER_STRATEGY="$strategy" \
+    STRATEGY_LIVE_LISTEN_ADDR="127.0.0.1:$port" \
+    STRATEGY_METRICS_LISTEN_ADDR="127.0.0.1:$metrics_port" \
       cargo run --release --manifest-path src/rust/strategy/Cargo.toml --bin strategy --features service &
   else
     port=$((13001 + index))
     metrics_port=$((15001 + index))
     state_path="$ROOT/src/rust/learning/strategy_state/$strategy.sqlite"
-    STRATEGY_X_WORKER_ROLE=scout \
-    STRATEGY_X_WORKER_STRATEGY="$strategy" \
+    STRATEGY_WORKER_ROLE=scout \
+    STRATEGY_WORKER_STRATEGY="$strategy" \
     SCOUT_WORKER_LISTEN_ADDR="127.0.0.1:$port" \
     SCOUT_WORKER_STATE_PATH="$state_path" \
-    STRATEGY_X_METRICS_LISTEN_ADDR="127.0.0.1:$metrics_port" \
+    STRATEGY_METRICS_LISTEN_ADDR="127.0.0.1:$metrics_port" \
       cargo run --release --manifest-path src/rust/strategy/Cargo.toml --bin strategy --features service &
   fi
   pid=$!
   children+=("$pid")
-  wait_for_worker "$pid" "$metrics_port" "Strategy X $role worker $strategy"
+  wait_for_worker "$pid" "$metrics_port" "Strategy $role worker $strategy"
 }
 
 cargo run --release --manifest-path src/rust/learning/Cargo.toml --bin learning &
@@ -165,7 +166,7 @@ position_pid=$!
 children+=("$position_pid")
 wait_for_service "$position_pid" 3002 "Position Management"
 
-cargo run --release --manifest-path src/rust/execution/Cargo.toml &
+cargo run --release --manifest-path src/rust/paper_exchange/Cargo.toml &
 execution_pid=$!
 children+=("$execution_pid")
 wait_for_service "$execution_pid" 3003 "Execution"

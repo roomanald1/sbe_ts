@@ -1,3 +1,4 @@
+use crate::Strategy;
 use crate::core::{StrategyDecision, StrategyParameterKey};
 use serde::Deserialize;
 use std::collections::BTreeMap;
@@ -27,6 +28,160 @@ pub struct StrategyMarketSignal {
     pub market_regime: Option<String>,
     pub news_attribution: Option<serde_json::Value>,
     pub entry_gate: Option<serde_json::Value>,
+}
+
+/// Select strategy-specific inputs from one shared Insights snapshot.
+/// This adapter belongs to Strategy so coordinators do not interpret features.
+pub fn prepare_live_strategy_signal(
+    signal: &StrategyMarketSignal,
+    strategy: Strategy,
+    parameters: &BTreeMap<String, f64>,
+) -> Result<StrategyMarketSignal, String> {
+    let parameter = |key: StrategyParameterKey| {
+        parameters
+            .get(key.as_str())
+            .copied()
+            .ok_or_else(|| format!("Configured parameter '{}' is unavailable", key.as_str()))
+    };
+    let mut configured = signal.clone();
+    match strategy {
+        Strategy::LiveMomentum => {
+            let momentum_window = parameter(StrategyParameterKey::MomentumLookbackSeconds)? as u16;
+            let trend_window = parameter(StrategyParameterKey::TrendLookbackSeconds)? as u16;
+            configured.components.momentum_10s_percent = Some(
+                signal
+                    .components
+                    .momentum_by_window
+                    .iter()
+                    .find(|feature| feature.window_seconds == momentum_window)
+                    .and_then(|feature| feature.value)
+                    .unwrap_or(0.0),
+            );
+            configured.components.trend_5m_volatility_units = Some(
+                signal
+                    .components
+                    .trend_volatility_units_by_window
+                    .iter()
+                    .find(|feature| feature.window_seconds == trend_window)
+                    .and_then(|feature| feature.value)
+                    .unwrap_or(0.0),
+            );
+        }
+        Strategy::LiveTradeFlow => {
+            let window = parameter(StrategyParameterKey::TradeFlowWindowSeconds)? as u16;
+            configured.components.trade_flow_imbalance = signal
+                .components
+                .trade_flow_by_window
+                .iter()
+                .find(|feature| feature.window_seconds == window)
+                .ok_or_else(|| format!("Trade-flow feature window {window}s is missing"))?
+                .value;
+        }
+        Strategy::LiveOrderBook => {
+            let depth = parameter(StrategyParameterKey::BookDepthLevels)? as u8;
+            let momentum_window = parameter(StrategyParameterKey::MomentumLookbackSeconds)? as u16;
+            configured.components.book_imbalance = signal
+                .components
+                .book_imbalance_by_depth
+                .iter()
+                .find(|feature| feature.depth_levels == depth)
+                .ok_or_else(|| format!("Order-book feature at depth {depth} is missing"))?
+                .value;
+            configured.components.momentum_10s_percent = signal
+                .components
+                .momentum_by_window
+                .iter()
+                .find(|feature| feature.window_seconds == momentum_window)
+                .ok_or_else(|| format!("Momentum feature window {momentum_window}s is missing"))?
+                .value;
+        }
+        Strategy::LiveVwapDislocation => {
+            let window = parameter(StrategyParameterKey::VwapLookbackSeconds)? as u16;
+            let momentum_window = parameter(StrategyParameterKey::MomentumLookbackSeconds)? as u16;
+            let minimum_count = parameter(StrategyParameterKey::VwapMinimumTradeCount)? as u16;
+            let minimum_span_ms =
+                (parameter(StrategyParameterKey::VwapMinimumTradeSpanSeconds)? * 1_000.0) as u32;
+            configured.components.momentum_10s_percent = signal
+                .components
+                .momentum_by_window
+                .iter()
+                .find(|feature| feature.window_seconds == momentum_window)
+                .ok_or_else(|| format!("Momentum feature window {momentum_window}s is missing"))?
+                .value;
+            let feature = signal
+                .components
+                .vwap_dislocation_by_window
+                .iter()
+                .find(|feature| feature.window_seconds == window)
+                .ok_or_else(|| format!("VWAP-dislocation feature window {window}s is missing"))?;
+            configured.components.mispricing_vs_vwap_bps = (feature.sample_count >= minimum_count
+                && feature.span_ms >= minimum_span_ms)
+                .then_some(feature.value)
+                .flatten();
+        }
+        Strategy::LiveAbsorptionPressure => {
+            let window = parameter(StrategyParameterKey::AbsorptionLookbackSeconds)? as u16;
+            let replenishment_ms =
+                (parameter(StrategyParameterKey::AbsorptionReplenishmentSeconds)? * 1_000.0) as u32;
+            let tolerance = parameter(StrategyParameterKey::AbsorptionTouchToleranceBps)?;
+            let maximum_move = parameter(StrategyParameterKey::AbsorptionMaximumPriceMovePercent)?;
+            let momentum_window = parameter(StrategyParameterKey::MomentumLookbackSeconds)? as u16;
+            let movement = signal
+                .components
+                .momentum_by_window
+                .iter()
+                .find(|feature| feature.window_seconds == momentum_window)
+                .ok_or_else(|| format!("Momentum feature window {momentum_window}s is missing"))?
+                .value
+                .ok_or_else(|| {
+                    format!("Momentum feature window {momentum_window}s has no value yet")
+                })?;
+            configured.components.momentum_10s_percent = Some(movement);
+            if movement.abs() > maximum_move {
+                return Err(format!(
+                    "Price movement {movement:.4}% exceeds the configured maximum {maximum_move:.4}%"
+                ));
+            }
+            let pressure = signal
+                .components
+                .absorption_pressure_by_window
+                .iter()
+                .find(|feature| {
+                    feature.window_seconds == window
+                        && feature.replenishment_window_ms == replenishment_ms
+                        && (feature.touch_tolerance_bps - tolerance).abs() < 1e-6
+                })
+                .and_then(|feature| feature.value);
+            let flow_window = parameter(StrategyParameterKey::TradeFlowWindowSeconds)? as u16;
+            let minimum_flow = parameter(StrategyParameterKey::AbsorptionMinimumFlowImbalance)?;
+            let flow_fallback = signal
+                .components
+                .trade_flow_by_window
+                .iter()
+                .find(|feature| feature.window_seconds == flow_window)
+                .and_then(|feature| feature.value)
+                .filter(|flow| flow.abs() >= minimum_flow)
+                .map(|flow| -flow);
+            configured.components.pressure_without_price_move = pressure.or(flow_fallback);
+        }
+        _ => {
+            return Err(format!(
+                "Strategy '{}' has no live-feature adapter",
+                strategy.as_str()
+            ));
+        }
+    }
+    configured.strategy = Some(strategy.as_str().to_owned());
+    configured.components.momentum_by_window.clear();
+    configured
+        .components
+        .trend_volatility_units_by_window
+        .clear();
+    configured.components.trade_flow_by_window.clear();
+    configured.components.book_imbalance_by_depth.clear();
+    configured.components.vwap_dislocation_by_window.clear();
+    configured.components.absorption_pressure_by_window.clear();
+    Ok(configured)
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, serde::Serialize)]

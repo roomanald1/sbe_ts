@@ -69,6 +69,42 @@ mod scout_outcome_tests {
     }
 
     #[test]
+    fn paired_baseline_emits_its_exact_profile_return_for_live_evidence() {
+        let mut baseline = outcome("baseline", 0.4);
+        baseline.scout_comparison_id = Some("cmp".into());
+        baseline.scout_comparison_role = Some("baseline".into());
+        let event = learning_outcome_event(&baseline, &BTreeMap::new()).unwrap();
+        let FeedbackEvent::ScoutOutcome {
+            symbol,
+            strategy,
+            profile_id,
+            parameters,
+            comparison,
+            learning_context,
+            net_return_percent,
+            ..
+        } = event
+        else {
+            panic!()
+        };
+        assert_eq!(symbol, "BTC-USDT");
+        assert_eq!(strategy, "live-momentum");
+        assert_eq!(profile_id, strategies::profile_id("BTC-USDT", "live-momentum", &baseline.strategy_parameters));
+        assert_eq!(parameters, baseline.strategy_parameters);
+        assert_eq!(comparison, strategies::ScoutComparisonMetadata::Independent);
+        assert_eq!(learning_context.as_deref(), Some("scout:BTC:trade"));
+        assert_eq!(net_return_percent, 0.4);
+
+        baseline.exit_scenario = "tight".into();
+        assert!(learning_outcome_event(&baseline, &BTreeMap::new()).is_none());
+
+        baseline.exit_scenario = "strategy".into();
+        baseline.scout_parameter_key = Some("minimum_momentum".into());
+        baseline.scout_parameter_value = Some(0.7);
+        assert!(learning_outcome_event(&baseline, &BTreeMap::from([("minimum_momentum".into(), 0.7)])).is_none());
+    }
+
+    #[test]
     fn paired_feedback_is_variant_minus_baseline_and_keeps_variant_profile() {
         let mut baseline = outcome("baseline", 0.4);
         baseline.scout_comparison_id = Some("cmp".into());

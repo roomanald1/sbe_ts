@@ -33,12 +33,16 @@ pub use input::{
     AbsorptionPressureValue, DailyStrategySignalFeatures, DatedCarryCandidate,
     DatedCarrySettlementSource, DepthSignalValue, Signal, SignalComponents, SignalDirection,
     StrategyInput, StrategyInputLike, StrategyMarketSignal, StrategySignal, StrategySpecificSignal,
-    StrategyWalkForwardEvidence, WindowedSignalValue, strategy_parameter_value,
+    StrategyWalkForwardEvidence, WindowedSignalValue, prepare_live_strategy_signal,
+    strategy_parameter_value,
 };
 pub use live_evaluation::{
-    LIVE_EVALUATION_CONTRACT_VERSION, LiveEvaluationError, LiveEvaluationErrorCode,
-    LiveEvaluationInput, LiveEvaluationRequest, LiveEvaluationResponse, LivePositionContext,
-    LiveStrategyDecision, LiveStrategyProfile,
+    DatedCarryScanUpdate, DatedCarrySettlementUpdate, LIVE_EVALUATION_CONTRACT_VERSION,
+    LiveEvaluationError, LiveEvaluationErrorCode, LiveEvaluationInput, LiveEvaluationRequest,
+    LiveEvaluationResponse, LivePositionContext, LiveStrategyDecision, LiveStrategyDecisionReport,
+    LiveStrategyOpenPosition, LiveStrategyProfile, LiveStrategyProfileSet,
+    LiveStrategySocketRequest, LiveStrategySocketResponse, STRATEGY_INSIGHT_UPDATE_VERSION,
+    StrategyInsightUpdate,
 };
 #[cfg(feature = "service")]
 pub use live_worker::{LiveWorkerConfig, serve_live_worker};
@@ -53,13 +57,16 @@ pub use parameter_types::{
 pub use scout_work::{
     MAX_REPLAY_SIGNALS, ScoutCandidateBatch, ScoutCandidateBatchResult, ScoutCoordinatorRequest,
     ScoutCoordinatorResponse, ScoutCoordinatorRouteCommand, ScoutCoordinatorRouteResult,
-    ScoutFeedbackAcknowledgement, ScoutWorkAssignment, ScoutWorkDecision, ScoutWorkMode,
-    ScoutWorkResult, ScoutWorkerHttpMethod, ScoutWorkerRequest, ScoutWorkerResponse,
-    ScoutWorkerRouteCommand, ScoutWorkerRouteResult, StrategyReplayDecisionPoint,
-    StrategyReplayPoint, StrategyReplayRequest, StrategyReplayResponse, request_learning_route,
-    request_scout_candidate_batch, request_scout_feedback, request_scout_profile_snapshot,
+    ScoutDataUpdate, ScoutFeedbackAcknowledgement, ScoutStreamEnvelope, ScoutStreamSubscription,
+    ScoutWorkAssignment, ScoutWorkDecision, ScoutWorkMode, ScoutWorkResult, ScoutWorkerHttpMethod,
+    ScoutWorkerRequest, ScoutWorkerResponse, ScoutWorkerRouteCommand, ScoutWorkerRouteResult,
+    StrategyReplayDecisionPoint, StrategyReplayPoint, StrategyReplayRequest,
+    StrategyReplayResponse, request_learning_route, request_scout_candidate_batch,
+    request_scout_feedback, request_scout_profile_snapshot, request_scout_profile_snapshot_for,
     request_scout_service_route, request_scout_strategy_replay, request_scout_worker_route,
 };
+#[cfg(feature = "live_socket_client")]
+pub use scout_work::{request_learning_snapshot_push, request_live_strategy_socket};
 #[cfg(feature = "service")]
 pub use scout_worker::{ScoutWorkerConfig, serve_strategy_worker};
 #[cfg(feature = "service")]
@@ -172,6 +179,69 @@ pub struct StrategyDefinition {
     should_exit_when_disabled: fn(bool) -> bool,
     should_exit_when_insight_inactive: Option<fn(bool) -> bool>,
     parameter_specs: fn() -> Vec<StrategyParameterSpec>,
+}
+
+fn strategy_decision_rejection_reason(
+    strategy: Strategy,
+    input: &StrategySignal<'_>,
+) -> Option<String> {
+    let Some(signal) = input.signal else {
+        return Some(format!(
+            "{} rejected entry: no signal data was provided to evaluate its entry rules",
+            strategy.as_str()
+        ));
+    };
+    let Some(details) = signal.strategy_decision.as_ref() else {
+        return Some(format!(
+            "{} rejected entry: the signal did not satisfy its entry rules, and no rule metrics were attached",
+            strategy.as_str()
+        ));
+    };
+    let boolean = |key: &str| details.get(key).and_then(serde_json::Value::as_bool);
+    let number = |key: &str| details.get(key).and_then(serde_json::Value::as_f64);
+    let string = |key: &str| details.get(key).and_then(serde_json::Value::as_str);
+
+    if boolean("btc_gate_required") == Some(true) && boolean("btc_gate_passed") == Some(false) {
+        let window = number("btc_window_days")
+            .map(|days| format!("SMA{}", days as u64))
+            .unwrap_or_else(|| "trend average".to_owned());
+        return Some(match (number("btc_close"), number("btc_sma")) {
+            (Some(close), Some(sma)) => {
+                format!("BTC trend gate failed: close {close:.2} vs {window} {sma:.2}")
+            }
+            _ => format!("BTC trend gate failed ({window})"),
+        });
+    }
+    if boolean("primary_passed") == Some(false) {
+        let rule = string("primary_rule").unwrap_or("primary strategy rule");
+        let unit = string("primary_metric_unit").unwrap_or("");
+        let observed = number("primary_metric_value")
+            .map(|value| format!("{value:.2} {unit}"))
+            .unwrap_or_else(|| "unavailable".to_owned());
+        let threshold = number("primary_level")
+            .map(|value| format!("{value:.2} {unit}"))
+            .unwrap_or_else(|| "unavailable".to_owned());
+        return Some(format!(
+            "{rule} failed: observed {observed}, threshold {threshold}"
+        ));
+    }
+    if boolean("secondary_passed") == Some(false) {
+        let rule = string("secondary_rule").unwrap_or("secondary strategy rule");
+        let distance = number("secondary_distance_percent")
+            .map(|value| format!(" (distance {value:.2}%)"))
+            .unwrap_or_default();
+        return Some(format!("{rule} failed{distance}"));
+    }
+
+    Some(format!(
+        "{} rejected entry: the signal did not satisfy its entry rules{}",
+        strategy.as_str(),
+        if signal.strategy_candidate {
+            ""
+        } else {
+            " because it was not marked as a strategy candidate"
+        }
+    ))
 }
 
 fn no_strategy_parameters() -> Vec<StrategyParameterSpec> {
@@ -518,7 +588,7 @@ impl Strategy {
             Self::LiveAbsorptionPressure => {
                 strategy_live_absorption_pressure::evaluate::entry_rejection_reason(input)
             }
-            _ => return None,
+            _ => return strategy_decision_rejection_reason(self, input),
         };
         if reason.is_some() {
             return reason;

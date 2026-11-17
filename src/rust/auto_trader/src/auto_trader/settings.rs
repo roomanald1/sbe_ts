@@ -95,8 +95,6 @@ struct Settings {
     #[serde(default)]
     learning: BTreeMap<String, LearningStats>,
     #[serde(default)]
-    context_learning_imported: bool,
-    #[serde(default)]
     feedback_outbox: Vec<strategy::FeedbackEvent>,
     #[serde(default)]
     post_exit_observations: Vec<serde_json::Value>,
@@ -111,9 +109,20 @@ struct Settings {
     #[serde(default)]
     learned_profiles: BTreeMap<String, strategy::StrategyProfile>,
     #[serde(default)]
+    learned_walk_forward_evidence:
+        BTreeMap<String, strategy::StrategyWalkForwardEvidence>,
+    #[serde(default)]
+    learned_context_thresholds: BTreeMap<String, strategy::ContextThresholds>,
+    /// Explicitly selected concurrent live parameter profiles, keyed by strategy.
+    #[serde(default)]
+    active_live_strategy_profiles: BTreeMap<String, Vec<strategy::LiveStrategyProfile>>,
+    #[serde(default)]
     learned_scout_parameter_variants: Vec<strategy::ScoutParameterVariant>,
     #[serde(default)]
     learned_strategy_size_multipliers: BTreeMap<String, f64>,
+    /// Temporary bounded paper exploration window started by Reset Learning.
+    #[serde(default)]
+    paper_learning_exploration_until_ms: u64,
     #[serde(default)]
     recent_profile_context_returns: BTreeMap<String, Vec<(u64, f64)>>,
     #[serde(default)]
@@ -151,7 +160,7 @@ struct Settings {
     #[serde(default)]
     last_signal_strength: BTreeMap<String, f64>,
     #[serde(default)]
-    reentry_cooldown_until_ms: BTreeMap<String, u64>,
+    entry_floor_lift_until_ms: BTreeMap<String, u64>,
     // Persisted so a service restart cannot replay the same closed-candle signal.
     #[serde(default)]
     daily_strategy_signal_cursors: BTreeMap<String, u64>,
@@ -300,7 +309,6 @@ impl Default for Settings {
             positions: BTreeMap::new(),
             strategy_positions: BTreeMap::new(),
             learning: BTreeMap::new(),
-            context_learning_imported: false,
             feedback_outbox: Vec::new(),
             post_exit_observations: Vec::new(),
             post_exit_adaptation_history: Vec::new(),
@@ -308,8 +316,12 @@ impl Default for Settings {
             profile_registration_outbox: Vec::new(),
             registered_profile_ids: BTreeSet::new(),
             learned_profiles: BTreeMap::new(),
+            learned_walk_forward_evidence: BTreeMap::new(),
+            learned_context_thresholds: BTreeMap::new(),
+            active_live_strategy_profiles: BTreeMap::new(),
             learned_scout_parameter_variants: Vec::new(),
             learned_strategy_size_multipliers: BTreeMap::new(),
+            paper_learning_exploration_until_ms: 0,
             recent_profile_context_returns: BTreeMap::new(),
             contextual_stop_loss_percents: BTreeMap::new(),
             learned_context_stats: BTreeMap::new(),
@@ -327,7 +339,7 @@ impl Default for Settings {
             last_signal_at: BTreeMap::new(),
             last_signal_direction: BTreeMap::new(),
             last_signal_strength: BTreeMap::new(),
-            reentry_cooldown_until_ms: BTreeMap::new(),
+            entry_floor_lift_until_ms: BTreeMap::new(),
             daily_strategy_signal_cursors: BTreeMap::new(),
         }
     }

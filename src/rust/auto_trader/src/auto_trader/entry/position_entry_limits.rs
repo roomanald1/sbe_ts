@@ -1,11 +1,93 @@
 
-fn mark_symbol_reentry_cooldown(settings: &mut Settings, symbol: &str) {
+const LOSS_ENTRY_FLOOR_LIFT_MS: u64 = 30 * 60 * 1_000;
+const LOSS_ENTRY_FLOOR_MULTIPLIER: f64 = 1.5;
+
+fn entry_floor_lift_key(symbol: &str, strategy: &str) -> String {
+    format!("{symbol}|{strategy}")
+}
+
+fn mark_symbol_entry_floor_lift(
+    settings: &mut Settings,
+    symbol: &str,
+    strategy: &str,
+    realized_pnl: f64,
+) {
     let now_ms = current_time_ms();
-    settings.reentry_cooldown_until_ms.retain(|_, until| *until > now_ms);
-    settings.reentry_cooldown_until_ms.insert(
-        symbol.to_owned(),
-        now_ms.saturating_add(DEFAULT_REENTRY_COOLDOWN_MS),
-    );
+    settings.entry_floor_lift_until_ms.retain(|_, until| *until > now_ms);
+    let key = entry_floor_lift_key(symbol, strategy);
+    if realized_pnl.is_finite()
+        && realized_pnl < 0.0
+        && Strategy::from_name(strategy).is_some_and(|kind| kind.is_live_insight())
+    {
+        settings.entry_floor_lift_until_ms.insert(
+            key,
+            now_ms.saturating_add(LOSS_ENTRY_FLOOR_LIFT_MS),
+        );
+    } else {
+        settings.entry_floor_lift_until_ms.remove(&key);
+    }
+}
+
+fn clears_temporary_entry_floor(signal: &Signal) -> bool {
+    let Some(strategy) = signal.strategy.as_deref().and_then(Strategy::from_name) else {
+        return true;
+    };
+    if !strategy.is_live_insight() {
+        return true;
+    }
+    let parameters = signal_strategy_parameters(signal);
+    let side = match signal.direction.as_str() {
+        "bullish" => 1.0,
+        "bearish" => -1.0,
+        _ => return false,
+    };
+    let threshold = |key: StrategyParameterKey| {
+        parameters
+            .get(key.as_str())
+            .copied()
+            .filter(|value| value.is_finite() && *value >= 0.0)
+            .map(|value| value * LOSS_ENTRY_FLOOR_MULTIPLIER)
+    };
+    let directional = match strategy {
+        Strategy::LiveMomentum => {
+            let Some(floor) = threshold(StrategyParameterKey::MinimumMomentum) else {
+                return false;
+            };
+            return signal
+                .components
+                .momentum_10s_percent
+                .into_iter()
+                .chain(signal.components.trend_5m_volatility_units)
+                .any(|value| value.is_finite() && side * value > floor);
+        }
+        Strategy::LiveTradeFlow => (
+            threshold(StrategyParameterKey::MinimumFlowImbalance),
+            signal.components.trade_flow_imbalance.map(|value| side * value),
+        ),
+        Strategy::LiveOrderBook => (
+            threshold(StrategyParameterKey::MinimumBookImbalance),
+            signal.components.book_imbalance.map(|value| side * value),
+        ),
+        Strategy::LiveVwapDislocation => (
+            threshold(StrategyParameterKey::MinimumVwapDislocationBps),
+            signal
+                .components
+                .mispricing_vs_vwap_bps
+                .map(|value| side * value),
+        ),
+        Strategy::LiveAbsorptionPressure => (
+            threshold(StrategyParameterKey::MinimumAbsorptionPressure),
+            signal
+                .components
+                .pressure_without_price_move
+                .map(|value| -side * value),
+        ),
+        _ => return true,
+    };
+    directional
+        .0
+        .zip(directional.1)
+        .is_some_and(|(floor, value)| value.is_finite() && value >= floor)
 }
 
 fn strategy_exit_pending(order: &TraderOrder, symbol: &str, strategy: &str) -> bool {
@@ -34,25 +116,15 @@ fn signal_position_block_reason(
     if settings.orders.iter().any(|order| strategy_exit_pending(order, signal_key, strategy_key)) {
         return Some(format!("Exit already pending for {signal_key} / {strategy_key}"));
     }
-    let strategy_cooldown_ms = strategy_post_stop_cooldown_ms(signal, strategy_key, signal_key, settings, now_ms);
-    if !portfolio_rebalance { if let Some(stopped_at) = settings
-        .orders
-        .iter()
-        .filter(|order| {
-            order.symbol == signal_key
-                && order.strategy.as_deref() == Some(strategy_key)
-                && order.purpose == "stop-loss"
-                && order.status == "filled"
-                && order.realized_pnl < 0.0
-        })
-        .filter_map(|order| order.triggered_at)
-        .max()
-        .filter(|stopped_at| now_ms.saturating_sub(*stopped_at) < strategy_cooldown_ms)
-    {
-        let seconds_remaining =
-            strategy_cooldown_ms.saturating_sub(now_ms.saturating_sub(stopped_at)) / 1000;
-        return Some(format!("Post-stop cooldown: {signal_key} / {strategy_key} paused for {seconds_remaining}s after a losing protective stop"));
-    }}
+    let floor_lift_active = settings
+        .entry_floor_lift_until_ms
+        .get(&entry_floor_lift_key(signal_key, strategy_key))
+        .is_some_and(|until_ms| now_ms < *until_ms);
+    if floor_lift_active && !portfolio_rebalance && !clears_temporary_entry_floor(signal) {
+        return Some(format!(
+            "Temporary post-loss entry floor: {signal_key} / {strategy_key} must exceed 1.5× its learned threshold"
+        ));
+    }
     let category = strategy_category(Some(strategy_key));
     let open_position_count = total_open_position_count(settings)
         + pending_entry_strategy_keys(settings).len();
@@ -67,16 +139,6 @@ fn signal_position_block_reason(
                 && !position.scout_entry
                 && position.strategy.as_deref() == Some(strategy_key)));
     let already_open = strategy_position.is_some();
-    if !already_open && !portfolio_rebalance {
-        if let Some(until_ms) = settings.reentry_cooldown_until_ms.get(signal_key)
-            .filter(|until_ms| now_ms < **until_ms)
-        {
-            let seconds_remaining = until_ms.saturating_sub(now_ms).div_ceil(1000);
-            return Some(format!(
-                "Symbol re-entry cooldown: {signal_key} paused for {seconds_remaining}s after a completed position"
-            ));
-        }
-    }
     if !already_open && open_position_count >= settings.max_open_positions {
         return Some(format!("Total open-position cap reached ({}/{})", open_position_count, settings.max_open_positions));
     }

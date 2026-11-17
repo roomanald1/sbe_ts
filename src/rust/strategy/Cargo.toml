@@ -21,9 +21,10 @@ service = [
     "dep:libc",
     "dep:rusqlite",
     "dep:sha2",
-    "dep:tokio",
+    "live_socket_client",
     "dep:tower",
 ]
+live_socket_client = ["dep:tokio"]
 
 [dependencies]
 anyhow = "1.0.104"
@@ -44,3 +45,9 @@ tower = { version = "0.5.3", features = ["util"], optional = true }
 [dev-dependencies]
 futures-util = "0.3"
 tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "sync", "time"] }
+
+[[bench]]
+name = "scout_registration_replay"
+harness = false
+[patch.crates-io]
+rsocket_rust = { path = "../vendor/rsocket_rust" }

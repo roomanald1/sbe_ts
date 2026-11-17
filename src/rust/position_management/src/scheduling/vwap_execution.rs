@@ -19,8 +19,8 @@ async fn run_vwap(
         request.quantity * curve[index] / request.max_participation_rate
     });
     let bin_duration_secs = request.duration_minutes as f64 * 60.0 / NUM_VWAP_BINS as f64;
-    let mut manager = match execution::vwap::OrderManager::new(
-        execution::vwap::VwapConfig {
+    let mut manager = match paper_exchange::vwap::OrderManager::new(
+        paper_exchange::vwap::VwapConfig {
             parent_qty: request.quantity,
             historical_vwap_curve: curve,
             max_participation_rate: request.max_participation_rate,
@@ -41,7 +41,6 @@ async fn run_vwap(
         }
     };
     let run_id = status.lock().await.id.clone();
-    let book_slot = store.book_slot(&symbol);
     let (sender, mut receiver) = mpsc::channel(64);
     let trade_symbol = symbol.clone();
     let feed_handle = tokio::spawn(async move {
@@ -103,17 +102,16 @@ async fn run_vwap(
         }
         let action = manager.on_market_trade(trade_qty, trade_price, elapsed_in_bin);
         let child_qty = match action {
-            Some(execution::vwap::OrderAction::NewOrder { qty }) => qty,
-            Some(execution::vwap::OrderAction::ModifyOrder { new_qty }) => new_qty,
-            Some(execution::vwap::OrderAction::CancelOrder) | None => 0.0,
+            Some(paper_exchange::vwap::OrderAction::NewOrder { qty }) => qty,
+            Some(paper_exchange::vwap::OrderAction::ModifyOrder { new_qty }) => new_qty,
+            Some(paper_exchange::vwap::OrderAction::CancelOrder) | None => 0.0,
         };
         if child_qty > EPSILON {
-            match execute_vwap_child_from_slot(
+            match execute_vwap_child(
                 &store,
                 &symbol,
                 &request.side,
                 child_qty,
-                &book_slot,
                 &request.source,
                 &run_id,
             )
@@ -158,38 +156,9 @@ async fn execute_vwap_child(
     source: &str,
     parent_order_id: &str,
 ) -> Result<(f64, Option<f64>), String> {
-    let slot = store
-        .books
-        .read()
-        .expect("book map poisoned")
-        .get(symbol)
-        .cloned()
-        .ok_or_else(|| "Live order book unavailable for VWAP child order".to_string())?;
-    execute_vwap_child_from_slot(
-        store,
-        symbol,
-        side,
-        quantity,
-        &slot,
-        source,
-        parent_order_id,
-    )
-    .await
-}
-
-async fn execute_vwap_child_from_slot(
-    store: &PositionStore,
-    symbol: &str,
-    side: &TradeSide,
-    quantity: f64,
-    book_slot: &Arc<ArcSwapOption<BookSnapshot>>,
-    source: &str,
-    parent_order_id: &str,
-) -> Result<(f64, Option<f64>), String> {
-    let book = book_slot
-        .load_full()
-        .ok_or_else(|| "Live order book unavailable for VWAP child order".to_string())?;
-    let matched = match_book(side, quantity, None, &book);
+    let matched = paper_exchange_match(symbol, side, quantity, None)
+        .await
+        .map_err(|(status, message)| format!("Paper exchange returned {status}: {message}"))?;
     let filled = matched.filled_quantity;
     if filled <= EPSILON {
         return Ok((0.0, None));

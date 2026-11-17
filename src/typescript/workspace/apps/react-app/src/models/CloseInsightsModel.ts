@@ -8,7 +8,7 @@ import {
   currentInsightsSnapshot,
   subscribeInsightsStream,
 } from '../insights_stream';
-import { executionFetch } from '../execution_api';
+import { paperExchangeFetch } from '../paper_exchange_api';
 
 type BackendInsight = {
   symbol: string;
@@ -193,7 +193,7 @@ export class CloseInsightsModel {
       error: undefined,
     });
     try {
-      const response = await executionFetch(
+      const response = await paperExchangeFetch(
         '/positions/barriers/profit-target',
         {
           method: 'POST',
@@ -240,7 +240,7 @@ export class CloseInsightsModel {
       error: undefined,
     });
     try {
-      const response = await executionFetch(
+      const response = await paperExchangeFetch(
         '/positions/orders/' + encodeURIComponent(barrier.id),
         { method: 'DELETE' },
       );
@@ -300,7 +300,7 @@ export class CloseInsightsModel {
       error: undefined,
     });
     try {
-      const response = await executionFetch('/positions/close-profitable', {
+      const response = await paperExchangeFetch('/positions/close-profitable', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ symbol: insight.position.symbol }),

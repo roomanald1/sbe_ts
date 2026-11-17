@@ -1,6 +1,6 @@
 import { useState, type FormEvent } from 'react';
 import { createPortal } from 'react-dom';
-import { executionFetch } from '../execution_api';
+import { paperExchangeFetch } from '../paper_exchange_api';
 
 type RangeOrderRequest = { symbol: string; lower: number; upper: number };
 type OrderResult = { side: 'buy' | 'sell'; ok: boolean; message: string };
@@ -46,7 +46,7 @@ export function RangeOrderPopup({
         { side: 'sell' as const, limit_price: sellPrice },
       ].map(async ({ side, limit_price }): Promise<OrderResult> => {
         try {
-          const response = await executionFetch('/positions/orders', {
+          const response = await paperExchangeFetch('/positions/orders', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({

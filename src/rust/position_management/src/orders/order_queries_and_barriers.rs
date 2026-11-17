@@ -72,7 +72,7 @@ async fn create_profit_barrier(
     } else {
         BarrierDirection::Below
     };
-    store.ensure_subscription(&symbol);
+    store.ensure_market_mark_polling(&symbol);
     let timestamp = now_ms().map_err(internal_error)?;
     let capacity_rates = cached_usd_rates_for_order().await?;
     let mut ledger = store.ledger.lock().await;
@@ -169,7 +169,7 @@ async fn close_profitable(
             (position, default_trade_source())
         }
     };
-    store.ensure_subscription(&symbol);
+    store.ensure_market_mark_polling(&symbol);
     let side = if position.quantity > 0.0 {
         TradeSide::Sell
     } else {

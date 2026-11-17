@@ -302,6 +302,68 @@ fn count_json(counts: ScoutCounts) -> Value {
     json!({"total":counts.total,"open":counts.open,"resolved":counts.wins+counts.losses+counts.flats,"wins":counts.wins,"losses":counts.losses,"flats":counts.flats,"unavailable":counts.unavailable})
 }
 
+fn persisted_scout_summary(path: &std::path::Path, live_only: bool) -> anyhow::Result<Value> {
+    let connection = open_scout_read_connection(path)?;
+    let strategy_filter = if live_only { " AND json_extract(payload, '$.strategy') LIKE 'live-%'" } else { "" };
+    let query = format!(
+        "SELECT
+            COUNT(*),
+            COALESCE(SUM(CASE WHEN json_extract(payload, '$.scout_net_return_percent') IS NULL
+                AND (COALESCE(json_extract(payload, '$.strategy'), 'unattributed') NOT LIKE 'live-%'
+                    OR COALESCE(json_extract(payload, '$.scout_entry_price'), json_extract(payload, '$.price'), json_extract(payload, '$.strategy_decision.observed_close')) IS NOT NULL)
+                THEN 1 ELSE 0 END), 0),
+            COALESCE(SUM(CASE WHEN json_extract(payload, '$.scout_net_return_percent') > 0 THEN 1 ELSE 0 END), 0),
+            COALESCE(SUM(CASE WHEN json_extract(payload, '$.scout_net_return_percent') < 0 THEN 1 ELSE 0 END), 0),
+            COALESCE(SUM(CASE WHEN json_extract(payload, '$.scout_net_return_percent') = 0 THEN 1 ELSE 0 END), 0)
+         FROM scout_records
+         WHERE collection='scout_instances'
+           AND COALESCE(json_extract(payload, '$.symbol'), '') != ''
+           AND COALESCE(json_extract(payload, '$.direction'), 'unknown') IN ('bullish', 'bearish', 'unknown'){}",
+        strategy_filter,
+    );
+    let (instances, open, wins, losses, flats): (i64, i64, i64, i64, i64) = connection
+        .query_row(&query, [], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?))
+        })?;
+    let orphan_filter = if live_only {
+        " AND json_extract(outcome.payload, '$.strategy') LIKE 'live-%'"
+    } else {
+        ""
+    };
+    let orphan_query = format!(
+        "SELECT COUNT(*),
+            COALESCE(SUM(CASE WHEN json_extract(outcome.payload, '$.net_return_percent') > 0 THEN 1 ELSE 0 END), 0),
+            COALESCE(SUM(CASE WHEN json_extract(outcome.payload, '$.net_return_percent') < 0 THEN 1 ELSE 0 END), 0),
+            COALESCE(SUM(CASE WHEN json_extract(outcome.payload, '$.net_return_percent') = 0 THEN 1 ELSE 0 END), 0)
+         FROM scout_records AS outcome
+         WHERE outcome.collection='outcomes'{}
+           AND NOT EXISTS (
+               SELECT 1 FROM scout_records AS instance
+               WHERE instance.collection='scout_instances'
+                 AND instance.record_key=json_extract(outcome.payload, '$.decision_id')
+           )",
+        orphan_filter,
+    );
+    let (orphaned_outcomes, orphan_wins, orphan_losses, orphan_flats): (i64, i64, i64, i64) =
+        connection.query_row(&orphan_query, [], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+        })?;
+    let total = instances.saturating_add(orphaned_outcomes).max(0) as usize;
+    let open = open.max(0) as usize;
+    let wins = wins.saturating_add(orphan_wins).max(0) as usize;
+    let losses = losses.saturating_add(orphan_losses).max(0) as usize;
+    let flats = flats.saturating_add(orphan_flats).max(0) as usize;
+    let resolved = wins + losses + flats;
+    Ok(count_json(ScoutCounts {
+        total,
+        open,
+        wins,
+        losses,
+        flats,
+        unavailable: total.saturating_sub(open + resolved),
+    }))
+}
+
 fn add_learning_result(groups: &mut BTreeMap<String, LearningAggregate>, key: String, mut group: LearningAggregate, row: &Value) {
     let aggregate = groups.entry(key).or_insert_with(|| { group.returns = Vec::new(); group.paired_deltas = Vec::new(); group });
     let status = row["status"].as_str().unwrap_or_default();
@@ -398,8 +460,24 @@ async fn get_scout_outcomes(
     let sort_by = query.sort_by.as_deref().filter(|field| matches!(*field, "symbol" | "strategy" | "status" | "exitScenario" | "scoutLevelPercent" | "openedAt" | "durationLabel" | "entryPrice" | "markPrice" | "netReturnLabel" | "displayNetReturnPercent" | "comparisonRole" | "pairedDeltaPercent" | "strength")).unwrap_or("openedAt");
     let descending = query.sort_direction.as_deref() != Some("asc");
     sort_rows(&mut rows, sort_by, descending);
-    let all_summary=count_json(count_rows(&rows,false));
-    let live_summary=count_json(count_rows(&rows,true));
+    let all_summary = match persisted_scout_summary(&service.scout.path, false) {
+        Ok(summary) => summary,
+        Err(error) => {
+            return axum::response::Response::builder()
+                .status(axum::http::StatusCode::INTERNAL_SERVER_ERROR)
+                .body(axum::body::Body::from(error.to_string()))
+                .expect("valid Scout summary error response");
+        }
+    };
+    let live_summary = match persisted_scout_summary(&service.scout.path, true) {
+        Ok(summary) => summary,
+        Err(error) => {
+            return axum::response::Response::builder()
+                .status(axum::http::StatusCode::INTERNAL_SERVER_ERROR)
+                .body(axum::body::Body::from(error.to_string()))
+                .expect("valid live Scout summary error response");
+        }
+    };
     let mut pending_parameters = BTreeMap::<
         (String, String, String, String),
         BTreeSet<String>,
@@ -565,13 +643,13 @@ mod scout_report_tests {
         let service = ServiceState {
             learning_rsocket_url: String::new(),
             insights_rsocket_url: String::new(),
-            auto_trader_rsocket_url: String::new(),
             strategy_outcomes_by_profile: Arc::clone(&restarted.strategy_outcomes_by_profile),
             portfolio_instances_by_group: Arc::clone(&restarted.portfolio_instances_by_group),
             strategy_outcome_profile_index_ready: Arc::new(
                 std::sync::atomic::AtomicBool::new(true),
             ),
             live_scout_maximum_duration_ms: Arc::new(std::sync::RwLock::new(BTreeMap::new())),
+            live_profile_snapshot_cache: Arc::new(Mutex::new(BTreeMap::new())),
             scout_outcomes_cache: Arc::new(Mutex::new(BTreeMap::new())),
             scout: ScoutState {
                 data: Arc::new(Mutex::new(restarted)),

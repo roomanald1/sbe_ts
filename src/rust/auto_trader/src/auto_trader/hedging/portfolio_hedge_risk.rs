@@ -4,34 +4,11 @@ struct RiskHolding {
     signed_usd: f64,
 }
 
-#[derive(serde::Deserialize)]
-struct HedgePositionData {
-    symbol: String,
-    quantity: f64,
-    average_entry_price: f64,
-    latest_price: Option<f64>,
-    candidates: Vec<HedgeCandidateData>,
-}
-
-#[derive(serde::Deserialize)]
-struct HedgeCandidateData {
-    symbol: String,
-    correlation: Option<f64>,
-    paired_samples: usize,
-    latest_price: Option<f64>,
-}
-
 #[derive(Default, serde::Deserialize)]
 struct HedgePairCorrelationData {
     symbol_a: String,
     symbol_b: String,
     correlation: Option<f64>,
-}
-
-#[derive(serde::Deserialize)]
-struct HedgeCandidatesData {
-    positions: Vec<HedgePositionData>,
-    pair_correlations: Vec<HedgePairCorrelationData>,
 }
 
 fn calculate_risk_holdings(

@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { executionFetch } from '../execution_api';
+import { paperExchangeFetch } from '../paper_exchange_api';
 import {
   getInstrumentList,
   type InstrumentPrecision,
@@ -11,6 +11,31 @@ type OrderResult = {
   filled_quantity?: number;
   average_execution_price?: number;
 };
+
+async function waitForMarketBook(symbol: string): Promise<void> {
+  const deadline = Date.now() + 10_000;
+  let lastDetail = 'No fresh market book is available.';
+
+  while (Date.now() < deadline) {
+    const response = await paperExchangeFetch(
+      `/internal/market-book?symbol=${encodeURIComponent(symbol)}`,
+    );
+    if (response.ok) return;
+
+    const detail = (await response.text()).trim();
+    if (response.status !== 503)
+      throw new Error(
+        detail || `Could not read the live market book (${response.status}).`,
+      );
+
+    lastDetail = detail || lastDetail;
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+
+  throw new Error(
+    `Timed out waiting for a live market book for ${symbol}. ${lastDetail}`,
+  );
+}
 
 async function readAutoPosition(symbol: string): Promise<number> {
   const response = await positionFetch('/positions?source=auto');
@@ -29,25 +54,33 @@ async function submitMarketOrder(
   reduceOnly: boolean,
   clientOrderId: string,
 ): Promise<OrderResult> {
-  const response = await executionFetch('/positions/orders', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      symbol,
-      side,
-      order_type: 'market',
-      quantity,
-      source: 'auto',
-      reduce_only: reduceOnly,
-      client_order_id: clientOrderId,
-      measure_execution_quality: true,
-    }),
+  const request = JSON.stringify({
+    symbol,
+    side,
+    order_type: 'market',
+    quantity,
+    source: 'auto',
+    reduce_only: reduceOnly,
+    client_order_id: clientOrderId,
+    measure_execution_quality: true,
   });
-  if (!response.ok) {
+  for (let attempt = 0; ; attempt += 1) {
+    const response = await paperExchangeFetch('/positions/orders', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: request,
+    });
+    if (response.ok) return (await response.json()) as OrderResult;
+
     const detail = (await response.text()).trim();
+    if (detail.toLowerCase().includes('position ledger busy') && attempt < 5) {
+      // Reuse the same client order ID so a delayed response cannot duplicate
+      // a fill if the server committed before reporting contention.
+      await new Promise((resolve) => setTimeout(resolve, 100 * (attempt + 1)));
+      continue;
+    }
     throw new Error(detail || `${side} order rejected (${response.status}).`);
   }
-  return (await response.json()) as OrderResult;
 }
 
 export function AutoTraderExecutionCheck() {
@@ -92,6 +125,9 @@ export function AutoTraderExecutionCheck() {
       const quantity = Number(selected.lotSz);
       if (!Number.isFinite(quantity) || quantity <= 0)
         throw new Error(`Invalid lot size for ${symbol}.`);
+
+      setMessage(`Waiting for a live ${symbol} market book…`);
+      await waitForMarketBook(symbol);
 
       const clientOrderId = `execution-check-${Date.now()}`;
       const entry = await submitMarketOrder(

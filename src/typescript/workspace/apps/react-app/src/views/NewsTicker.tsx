@@ -14,27 +14,42 @@ export function NewsTicker({ streamKey }: Props) {
   useEffect(() => {
     let active = true;
     let cancel: (() => void) | undefined;
-    void insightsRequestStream(
-      'news.snapshot',
-      (raw) => {
-        if (!active) return;
-        try {
-          const next = decodeNewsSnapshot(raw);
-          setSnapshot(next);
-          setError(next.error ?? undefined);
-        } catch {
-          setError('Received an invalid backend news update.');
-        }
-      },
-      (streamError) => {
-        if (active) setError(streamError.message);
-      },
-    ).then((stream) => {
-      cancel = stream.cancel;
-      if (!active) cancel();
-    });
+    let retryTimer: ReturnType<typeof setTimeout> | undefined;
+    let retryDelay = 1_000;
+    const connect = () => {
+      if (!active) return;
+      void insightsRequestStream(
+        'news.snapshot',
+        (raw) => {
+          if (!active) return;
+          try {
+            const next = decodeNewsSnapshot(raw);
+            setSnapshot(next);
+            setError(next.error ?? undefined);
+            retryDelay = 1_000;
+          } catch {
+            setError('Received an invalid backend news update.');
+          }
+        },
+        (streamError) => {
+          if (!active) return;
+          setError(streamError.message);
+          cancel = undefined;
+          retryTimer = setTimeout(() => {
+            retryTimer = undefined;
+            connect();
+          }, retryDelay);
+          retryDelay = Math.min(retryDelay * 2, 30_000);
+        },
+      ).then((stream) => {
+        cancel = stream.cancel;
+        if (!active) cancel();
+      });
+    };
+    connect();
     return () => {
       active = false;
+      if (retryTimer) clearTimeout(retryTimer);
       cancel?.();
     };
   }, [streamKey]);

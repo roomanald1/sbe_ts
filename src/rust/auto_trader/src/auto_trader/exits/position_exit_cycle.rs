@@ -30,8 +30,8 @@ async fn maybe_exit_auto_position(
     for (symbol, _, _) in &positions {
         let symbol = symbol.clone();
         input_tasks.spawn(async move {
-            let inputs = crate::service_rpc::position_get(&format!(
-                "/internal/insights-inputs?symbol={symbol}"
+            let inputs = crate::service_rpc::execution_get(&format!(
+                "/internal/market-mark?symbol={symbol}"
             )).await.map_err(|error| (StatusCode::BAD_GATEWAY, error.to_string()))?;
             Ok::<_, (StatusCode, String)>((symbol, inputs))
         });
@@ -46,22 +46,6 @@ async fn maybe_exit_auto_position(
         })??;
         inputs_by_symbol.insert(symbol, inputs);
     }
-    let regime_now_ms = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64;
-    let research_regime = state
-        .latest_daily_strategy_snapshot
-        .lock()
-        .await
-        .clone()
-        .filter(|snapshot| regime_now_ms.saturating_sub(snapshot.as_of_ms) <= 10 * 60_000);
-    if research_regime.is_none() {
-        crate::service_log!(
-            "WARN",
-            "Insights daily strategy state unavailable or stale for trend exits"
-        );
-    }
     // Evaluate positions without the shared cycle lock. Exit submission takes
     // that lock only after an exit is actually required, so routine path sampling
     // and settings persistence do not block incoming signal cycles.
@@ -72,7 +56,6 @@ async fn maybe_exit_auto_position(
             strategy,
             position,
             &mut inputs_by_symbol,
-            research_regime.as_ref(),
         )
         .await?
         {

@@ -3,26 +3,10 @@ async fn main() -> anyhow::Result<()> {
     let signal_store = SignalStore::from_environment()?;
     daily_summary::initialize().await?;
     tokio::spawn(poll_external_market_features(signal_store.clone()));
-    tokio::spawn(run_dated_carry_signal_worker(signal_store.clone()));
-    tokio::spawn(poll_daily_strategy_signals(signal_store.clone()));
     let (research_record_sender, research_record_receiver) = tokio::sync::mpsc::channel(4_096);
     tokio::spawn(run_research_record_writer(
         signal_store.clone(),
         research_record_receiver,
-    ));
-    let signal_push_cache = Arc::new(DashMap::new());
-    let signal_push_notify = Arc::new(Notify::new());
-    let scout_push_cache = Arc::new(DashMap::new());
-    let scout_push_notify = Arc::new(Notify::new());
-    tokio::spawn(run_signal_push_worker(
-        Arc::clone(&signal_push_cache),
-        Arc::clone(&signal_push_notify),
-        Arc::clone(&scout_push_cache),
-        Arc::clone(&scout_push_notify),
-    ));
-    tokio::spawn(run_scout_input_push_worker(
-        Arc::clone(&scout_push_cache),
-        Arc::clone(&scout_push_notify),
     ));
     let market_cache = Arc::new(DashMap::new());
     let ui_snapshot_cache = Arc::new(DashMap::new());
@@ -50,20 +34,28 @@ async fn main() -> anyhow::Result<()> {
             }
         }
     });
-    let (enriched_market_events, _) = broadcast::channel(16_384);
+    let (enriched_market_events, _) =
+        broadcast::channel(crate::ENRICHED_MARKET_EVENT_QUEUE_CAPACITY);
+    let (strategy_signal_events, _) = broadcast::channel(crate::STRATEGY_SIGNAL_QUEUE_CAPACITY);
+    let (strategy_maintenance_events, _) =
+        broadcast::channel(crate::STRATEGY_MAINTENANCE_QUEUE_CAPACITY);
+    let (legacy_strategy_signal_events, _) =
+        broadcast::channel(crate::LEGACY_STRATEGY_SIGNAL_QUEUE_CAPACITY);
+    let (signal_event_sender, signal_event_receiver) =
+        tokio::sync::mpsc::channel(crate::SIGNAL_EVENT_INGRESS_QUEUE_CAPACITY);
+    let signal_event_shards = Arc::new(std::sync::RwLock::new(Vec::new()));
+    let latest_strategy_signal_updates = Arc::new(DashMap::new());
+    let latest_daily_strategy_update = Arc::new(std::sync::RwLock::new(None));
     let signal_runtime = Arc::new(SignalRuntime {
-        store: signal_store.clone(),
         active_symbols: DashMap::new(),
         symbol_admission_gate: Mutex::new(()),
         max_active_symbols: configured_positive_usize("INSIGHTS_MAX_ACTIVE_SYMBOLS", DEFAULT_MAX_ACTIVE_SYMBOLS),
         symbol_idle_ttl_ms: configured_positive_u64("INSIGHTS_SYMBOL_IDLE_TTL_MS", DEFAULT_SYMBOL_IDLE_TTL_MS),
         engines: DashMap::new(),
         research_record_sender,
-        signal_push_cache,
-        scout_push_cache,
-        signal_push_notify,
+        signal_event_sender: signal_event_sender.clone(),
+        signal_event_shards,
         market_cache,
-        market_push_at: DashMap::new(),
         ui_snapshot_cache,
         ui_snapshot_notify,
         news: news_rx,
@@ -75,15 +67,35 @@ async fn main() -> anyhow::Result<()> {
         latest_prices: DashMap::new(),
         rolling_volatility: DashMap::new(),
         enriched_market_events,
+        strategy_signal_events,
+        strategy_maintenance_events,
+        legacy_strategy_signal_events,
+        latest_strategy_signal_updates: Arc::clone(&latest_strategy_signal_updates),
     });
+    tokio::spawn(poll_daily_strategy_signals(
+        signal_store.clone(),
+        signal_runtime.strategy_maintenance_events.clone(),
+        signal_runtime.legacy_strategy_signal_events.clone(),
+        Arc::clone(&latest_daily_strategy_update),
+    ));
+    tokio::spawn(run_dated_carry_signal_worker(
+        signal_store.clone(),
+        signal_runtime.strategy_maintenance_events.clone(),
+        signal_runtime.legacy_strategy_signal_events.clone(),
+        Arc::clone(&latest_strategy_signal_updates),
+    ));
     tokio::spawn(run_insights_market_event_server(
         signal_runtime.enriched_market_events.clone(),
+        signal_runtime.strategy_signal_events.clone(),
+        signal_runtime.strategy_maintenance_events.clone(),
+        signal_runtime.legacy_strategy_signal_events.clone(),
+        Arc::clone(&latest_strategy_signal_updates),
+        Arc::clone(&latest_daily_strategy_update),
     ));
     tokio::spawn(insights::signals::serve_insights_browser_rsocket(
         signal_store.clone(),
         browser_news_rx,
     ));
-    let (signal_event_sender, signal_event_receiver) = tokio::sync::mpsc::channel(8_192);
     tokio::spawn(run_signal_event_workers(
         Arc::clone(&signal_runtime),
         signal_event_receiver,
@@ -126,6 +138,7 @@ async fn main() -> anyhow::Result<()> {
                 ("/health", &["get"]),
                 ("/internal/latency", &["get"]),
                 ("/internal/signal-feed-status", &["get"]),
+                ("/internal/queue-metrics", &["get"]),
                 ("/process-cpu-seconds", &["get"]),
                 ("/process-memory-bytes", &["get"]),
             ],
@@ -138,6 +151,10 @@ async fn main() -> anyhow::Result<()> {
         .route(
             "/internal/signal-feed-status",
             get(|| async { axum::Json(crate::latency::signal_feed_status()) }),
+        )
+        .route(
+            "/internal/queue-metrics",
+            get(crate::queue_metrics).with_state(Arc::clone(&signal_runtime)),
         )
         .route("/process-cpu-seconds", get(process_cpu_seconds))
         .route("/process-memory-bytes", get(process_memory_bytes));

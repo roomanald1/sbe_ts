@@ -24,7 +24,7 @@ pub struct ContextMissedOpportunityBand {
     pub stop_target_sample_count: usize,
     pub stop_target_average_net_return_percent: Option<f64>,
     pub stop_target_positive_net_rate: Option<f64>,
-    /// Attribution for a real skipped Strategy X candidate. Markout evidence
+    /// Attribution for a real skipped Strategy candidate. Markout evidence
     /// is diagnostic only; it is never treated as execution-adjusted profit.
     #[serde(default)]
     pub symbol: Option<String>,
@@ -57,7 +57,7 @@ pub struct ContextThresholdRequest {
     pub contexts: Vec<ContextThresholdInput>,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct ContextThresholds {
     pub strength_floor: f64,
     pub exploration_score_floor: f64,

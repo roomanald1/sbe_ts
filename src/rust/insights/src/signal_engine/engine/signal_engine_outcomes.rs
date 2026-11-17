@@ -1,5 +1,6 @@
 const MAX_SCOUT_SCOUT_DURATION_MS: u64 = 7 * 86_400_000;
 const MAX_COMPLETED_SCOUT_IDS_PER_SYMBOL: usize = 1_024;
+const SIGNAL_PRICE_SAMPLE_INTERVAL_MS: u64 = 1_000;
 
 fn scout_stop_or_target_hit(pending: &mut PendingOutcome, quote: Option<(u64, f64, f64)>) -> bool {
     let Some((_, bid, ask)) = quote else {
@@ -100,11 +101,22 @@ impl SignalEngine {
         {
             return Vec::new();
         }
-        self.prices.push_back((timestamp, price));
+        // Keep the signal feature history proportional to elapsed time rather
+        // than exchange tick rate. Outcome/scout checks below still process
+        // every accepted price tick; snapshots only need 1-second samples for
+        // their 5-second through 1-hour windows.
+        if self.prices.back().is_some_and(|(last_timestamp, _)| {
+            timestamp.saturating_sub(*last_timestamp) < SIGNAL_PRICE_SAMPLE_INTERVAL_MS
+        }) {
+            *self.prices.back_mut().expect("price history has a back") = (timestamp, price);
+        } else {
+            self.prices.push_back((timestamp, price));
+        }
         self.volatility_1m = volatility_1m.is_finite().then_some(volatility_1m);
         self.prune(timestamp);
         let mut outcomes = Vec::new();
-        let mut remaining = VecDeque::new();
+        let mut remaining = std::mem::take(&mut self.pending_scratch);
+        remaining.clear();
         while let Some(mut pending) = self.pending.pop_front() {
             if pending.first_long_positive_net_timestamp.is_none()
                 || pending.first_short_positive_net_timestamp.is_none()
@@ -354,6 +366,7 @@ impl SignalEngine {
                     legacy,
                     evaluation,
                     scout_id,
+                    strategy: pending.strategy.clone(),
                     scout_exit_reason,
                     scout_observation_only: pending.scout_observation_only,
                 });
@@ -361,7 +374,7 @@ impl SignalEngine {
                 remaining.push_back(pending);
             }
         }
-        self.pending = remaining;
+        self.pending_scratch = std::mem::replace(&mut self.pending, remaining);
         outcomes
     }
 

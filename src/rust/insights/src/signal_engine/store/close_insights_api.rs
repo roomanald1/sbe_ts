@@ -23,32 +23,39 @@ struct PositionInsightsInput {
     markets: HashMap<String, PositionMarketInput>,
 }
 #[derive(Deserialize)]
+struct PositionList {
+    positions: Vec<Position>,
+}
+#[derive(Deserialize)]
+struct MarketInputs {
+    markets: HashMap<String, PositionMarketInput>,
+}
+#[derive(Deserialize)]
 struct PositionRpcResponse {
     status: u16,
     #[serde(default)]
     headers: std::collections::BTreeMap<String, String>,
     body: serde_json::Value,
 }
-fn parse_position_insights_rpc_response(
-    bytes: &[u8],
-) -> Result<PositionInsightsInput, String> {
+
+fn market_service_clients() -> &'static std::sync::Mutex<HashMap<String, Arc<rsocket_rust::Client>>> {
+    static CLIENTS: std::sync::OnceLock<
+        std::sync::Mutex<HashMap<String, Arc<rsocket_rust::Client>>>,
+    > = std::sync::OnceLock::new();
+    CLIENTS.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+}
+fn parse_service_rpc_response(bytes: &[u8], service: &str) -> Result<serde_json::Value, String> {
     let envelope: PositionRpcResponse = serde_json::from_slice(bytes)
-        .map_err(|error| format!("Invalid Position Management RSocket response: {error}"))?;
+        .map_err(|error| format!("Invalid {service} RSocket response: {error}"))?;
     if !(200..300).contains(&envelope.status) {
-        return Err(format!(
-            "Position Management returned status {}",
-            envelope.status
-        ));
+        return Err(format!("{service} returned status {}", envelope.status));
     }
     if let Some(content_type) = envelope.headers.get("content-type")
         && !content_type.starts_with("application/json")
     {
-        return Err(format!(
-            "Position Management returned unsupported content type {content_type}"
-        ));
+        return Err(format!("{service} returned unsupported content type {content_type}"));
     }
-    serde_json::from_value(envelope.body)
-        .map_err(|error| format!("Invalid position insight input: {error}"))
+    Ok(envelope.body)
 }
 #[derive(Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -76,60 +83,96 @@ struct CloseInsightsResponse {
     insights: Vec<CloseInsight>,
 }
 
-async fn get_position_insights() -> Result<Json<CloseInsightsResponse>, (StatusCode, String)> {
+async fn connect_market_service(endpoint: &str, service: &str) -> Result<Arc<rsocket_rust::Client>, (StatusCode, String)> {
+    if let Some(client) = market_service_clients()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(endpoint)
+        .cloned()
+    {
+        return Ok(client);
+    }
     use rsocket_rust::{prelude::*, utils::EchoRSocket};
     use rsocket_rust_transport_websocket::WebsocketClientTransport;
 
-    let endpoint = std::env::var("POSITION_MANAGEMENT_RSOCKET_URL")
-        .unwrap_or_else(|_| "ws://127.0.0.1:10005".to_owned());
-    let client = RSocketFactory::connect()
-        .transport(WebsocketClientTransport::from(endpoint.as_str()))
+    let connected = Arc::new(RSocketFactory::connect()
+        .transport(WebsocketClientTransport::from(endpoint))
         .acceptor(Box::new(|| Box::new(EchoRSocket)))
         .start()
         .await
-        .map_err(|error| {
-            (
-                StatusCode::BAD_GATEWAY,
-                format!("Position Management RSocket connection failed: {error}"),
-            )
-        })?;
-    let request = serde_json::json!({
-        "method": "GET",
-        "path": "/internal/insights-inputs"
-    });
-    let request = serde_json::to_vec(&request).map_err(|error| {
-        (
-            StatusCode::BAD_GATEWAY,
-            format!("Could not encode Position Management request: {error}"),
-        )
-    })?;
-    let response = client
-        .request_response(Payload::builder().set_data(request).build())
+        .map_err(|error| (StatusCode::BAD_GATEWAY, format!("{service} RSocket connection failed: {error}")))?);
+    let mut clients = market_service_clients()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    Ok(clients
+        .entry(endpoint.to_owned())
+        .or_insert(connected)
+        .clone())
+}
+
+fn invalidate_market_service_client(endpoint: &str, failed_client: &Arc<rsocket_rust::Client>) {
+    let mut clients = market_service_clients()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if clients
+        .get(endpoint)
+        .is_some_and(|client| Arc::ptr_eq(client, failed_client))
+    {
+        clients.remove(endpoint);
+    }
+}
+
+async fn market_service_get(
+    endpoint: &str,
+    client: &Arc<rsocket_rust::Client>,
+    service: &str,
+    path: &str,
+) -> Result<serde_json::Value, (StatusCode, String)> {
+    use rsocket_rust::prelude::*;
+
+    let payload = serde_json::to_vec(&serde_json::json!({ "method": "GET", "path": path }))
+        .map_err(|error| (StatusCode::BAD_GATEWAY, format!("Could not encode {service} request: {error}")))?;
+    let response = match client
+        .request_response(Payload::builder().set_data(payload).build())
         .await
-        .map_err(|error| {
-            (
-                StatusCode::BAD_GATEWAY,
-                format!("Position Management RSocket request failed: {error}"),
-            )
-        })?
-        .ok_or_else(|| {
-            (
-                StatusCode::BAD_GATEWAY,
-                "Position Management returned an empty RSocket response".to_owned(),
-            )
-        })?;
-    let data = response.data().ok_or_else(|| {
-        (
-            StatusCode::BAD_GATEWAY,
-            "Position Management returned no response data".to_owned(),
-        )
-    })?;
-    let source = parse_position_insights_rpc_response(data.as_ref()).map_err(|error| {
-        (
-            StatusCode::BAD_GATEWAY,
-            error,
-        )
-    })?;
+    {
+        Ok(Some(response)) => response,
+        Ok(None) => {
+            invalidate_market_service_client(endpoint, client);
+            return Err((StatusCode::BAD_GATEWAY, format!("{service} returned an empty RSocket response")));
+        }
+        Err(error) => {
+            invalidate_market_service_client(endpoint, client);
+            return Err((StatusCode::BAD_GATEWAY, format!("{service} RSocket request failed: {error}")));
+        }
+    };
+    let data = response.data().ok_or_else(|| (StatusCode::BAD_GATEWAY, format!("{service} returned no response data")))?;
+    parse_service_rpc_response(data.as_ref(), service)
+        .map_err(|error| (StatusCode::BAD_GATEWAY, error))
+}
+
+async fn get_position_insights() -> Result<Json<CloseInsightsResponse>, (StatusCode, String)> {
+    let position_endpoint = std::env::var("POSITION_MANAGEMENT_RSOCKET_URL")
+        .unwrap_or_else(|_| "ws://127.0.0.1:10005".to_owned());
+    let position_client = connect_market_service(&position_endpoint, "Position Management").await?;
+    let position_body = market_service_get(&position_endpoint, &position_client, "Position Management", "/positions").await?;
+    let positions: PositionList = serde_json::from_value(position_body)
+        .map_err(|error| (StatusCode::BAD_GATEWAY, format!("Invalid position list: {error}")))?;
+    let mut markets = HashMap::new();
+    if positions.positions.iter().any(|position| position.quantity.abs() > 1e-12) {
+        let paper_endpoint = std::env::var("PAPER_EXCHANGE_RSOCKET_URL")
+            .unwrap_or_else(|_| "ws://127.0.0.1:10006".to_owned());
+        let paper_client = connect_market_service(&paper_endpoint, "Paper Exchange").await?;
+        for position in &positions.positions {
+            if position.quantity.abs() <= 1e-12 { continue; }
+            let path = format!("/internal/insights-inputs?symbol={}", position.symbol);
+            let body = market_service_get(&paper_endpoint, &paper_client, "Paper Exchange", &path).await?;
+            let market: MarketInputs = serde_json::from_value(body)
+                .map_err(|error| (StatusCode::BAD_GATEWAY, format!("Invalid Paper Exchange market input: {error}")))?;
+            markets.extend(market.markets);
+        }
+    }
+    let source = PositionInsightsInput { positions: positions.positions, markets };
     let insights = source
         .positions
         .into_iter()
@@ -265,25 +308,25 @@ fn normal_cdf(value: f64) -> f64 {
 
 #[cfg(test)]
 mod position_insights_rpc_tests {
-    use super::parse_position_insights_rpc_response;
+    use super::parse_service_rpc_response;
 
     #[test]
     fn parses_position_management_rpc_envelope() {
         let response = br#"{"status":200,"headers":{"content-type":"application/json"},"body":{"positions":[],"markets":{}}}"#;
-        let parsed = parse_position_insights_rpc_response(response).unwrap();
-        assert!(parsed.positions.is_empty());
-        assert!(parsed.markets.is_empty());
+        let parsed = parse_service_rpc_response(response, "Position Management").unwrap();
+        assert!(parsed["positions"].as_array().unwrap().is_empty());
+        assert!(parsed["markets"].as_object().unwrap().is_empty());
     }
 
     #[test]
     fn rejects_non_success_status_and_unsupported_content_type() {
         let status = br#"{"status":503,"headers":{},"body":{}}"#;
-        assert!(parse_position_insights_rpc_response(status)
+        assert!(parse_service_rpc_response(status, "Paper Exchange")
             .err()
             .unwrap()
             .contains("status 503"));
         let content_type = br#"{"status":200,"headers":{"content-type":"text/plain"},"body":{}}"#;
-        assert!(parse_position_insights_rpc_response(content_type)
+        assert!(parse_service_rpc_response(content_type, "Paper Exchange")
             .err()
             .unwrap()
             .contains("content type"));
