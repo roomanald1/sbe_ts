@@ -435,12 +435,20 @@ impl SignalEngine {
             return None;
         }
         let score = inputs.iter().flatten().sum::<f64>() / count as f64;
-        let direction = if score > 0.2 {
+        // A high range probability makes the aggregate direction unreliable:
+        // ordinary feature votes (including the range-edge mean-reversion vote)
+        // can otherwise make the published direction alternate as price moves
+        // around inside the range. Only an independently confirmed breakout
+        // should override this classification for live directional strategies.
+        let confirmed_breakout = volatility_breakout_signal.is_some();
+        let direction = if ranging_probability.is_some_and(|probability| probability >= 0.65)
+            && !confirmed_breakout
+        {
+            "ranging"
+        } else if score > 0.2 {
             "bullish"
         } else if score < -0.2 {
             "bearish"
-        } else if ranging_probability.is_some_and(|probability| probability >= 0.65) {
-            "ranging"
         } else {
             "neutral"
         };

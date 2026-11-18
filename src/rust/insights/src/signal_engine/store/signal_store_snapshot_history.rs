@@ -69,13 +69,16 @@ impl SignalStore {
         limit: usize,
     ) -> Result<StrategySnapshotHistoryPage> {
         let connection = Self::open_database_path(&path.to_path_buf())?;
-        let mut statement = connection.prepare(
-            "SELECT id, timestamp, length(payload) FROM signal_records WHERE kind = 0 AND timestamp >= ?1 AND timestamp <= ?2 AND (?3 IS NULL OR timestamp > ?3 OR (timestamp = ?3 AND id > ?4)) ORDER BY timestamp ASC, id ASC LIMIT ?5",
-        )?;
-        let rows = statement.query_map(
-            params![query.from_ms as i64, query.through_ms as i64, cursor.map(|value| value.0 as i64), cursor.map(|value| value.1).unwrap_or(0), (SNAPSHOT_HISTORY_MAX_SCAN + 1) as i64],
-            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?, row.get::<_, i64>(2)?)),
-        )?;
+        let scan_rows = {
+            let mut statement = connection.prepare(
+                "SELECT id, timestamp, payload FROM signal_records WHERE kind = 0 AND timestamp >= ?1 AND timestamp <= ?2 AND (?3 IS NULL OR timestamp > ?3 OR (timestamp = ?3 AND id > ?4)) ORDER BY timestamp ASC, id ASC LIMIT ?5",
+            )?;
+            let rows = statement.query_map(
+                params![query.from_ms as i64, query.through_ms as i64, cursor.map(|value| value.0 as i64), cursor.map(|value| value.1).unwrap_or(0), (SNAPSHOT_HISTORY_MAX_SCAN + 1) as i64],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?, row.get::<_, Vec<u8>>(2)?)),
+            )?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()?
+        };
         let (archived_days_unscanned, archived_days_unavailable) = Self::snapshot_archive_coverage(
             &connection, query.from_ms, query.through_ms,
         )?;
@@ -91,22 +94,18 @@ impl SignalStore {
         let mut compressed_bytes = 0usize;
         let mut corrupt_records = 0usize;
         let mut bounded = false;
-        for row in rows {
-            let (id, timestamp, compressed_len) = row?;
+        for (id, timestamp, compressed) in scan_rows {
             if page.scanned_records >= SNAPSHOT_HISTORY_MAX_SCAN {
                 page.more_available = true;
                 bounded = true;
                 break;
             }
-            let compressed_len = compressed_len.max(0) as usize;
+            let compressed_len = compressed.len();
             if compressed_len > SNAPSHOT_HISTORY_MAX_COMPRESSED_BYTES.saturating_sub(compressed_bytes) {
                 page.more_available = true;
                 bounded = true;
                 break;
             }
-            let compressed: Vec<u8> = connection.query_row(
-                "SELECT payload FROM signal_records WHERE id = ?1 AND kind = 0", [id], |row| row.get(0),
-            )?;
             compressed_bytes += compressed_len;
             page.scanned_records += 1;
             let timestamp = timestamp.max(0) as u64;
@@ -158,25 +157,29 @@ impl SignalStore {
     fn attach_snapshot_history_book_marks(connection: &Connection, page: &mut StrategySnapshotHistoryPage) -> Result<()> {
         let Some(first) = page.records.first().map(|record| record.snapshot.timestamp) else { return Ok(()); };
         let Some(last) = page.records.last().map(|record| record.snapshot.timestamp) else { return Ok(()); };
-        let mut statement = connection.prepare(
-            "SELECT id, timestamp, length(payload) FROM signal_records WHERE kind = 3 AND timestamp >= ?1 AND timestamp <= ?2 ORDER BY timestamp DESC, id DESC LIMIT ?3",
-        )?;
-        let mut rows = statement.query(params![first.saturating_sub(10_000) as i64, last as i64, (SNAPSHOT_HISTORY_MAX_BOOK_SCAN + 1) as i64])?;
+        let scan_rows = {
+            let mut statement = connection.prepare(
+                "SELECT id, timestamp, payload FROM signal_records WHERE kind = 3 AND timestamp >= ?1 AND timestamp <= ?2 ORDER BY timestamp DESC, id DESC LIMIT ?3",
+            )?;
+            let rows = statement.query_map(
+                params![first.saturating_sub(10_000) as i64, last as i64, (SNAPSHOT_HISTORY_MAX_BOOK_SCAN + 1) as i64],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?, row.get::<_, Vec<u8>>(2)?)),
+            )?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()?
+        };
         let mut books = Vec::new();
         let mut compressed_bytes = 0usize;
         let mut scanned_records = 0usize;
         let mut book_scan_complete = true;
-        while let Some(row) = rows.next()? {
+        for (_id, timestamp, compressed) in scan_rows {
             if scanned_records >= SNAPSHOT_HISTORY_MAX_BOOK_SCAN { book_scan_complete = false; break; }
             scanned_records += 1;
-            let id = row.get::<_, i64>(0)?;
-            let timestamp = row.get::<_, i64>(1)?.max(0) as u64;
-            let compressed_len = row.get::<_, i64>(2)?.max(0) as usize;
+            let timestamp = timestamp.max(0) as u64;
+            let compressed_len = compressed.len();
             if compressed_len > SNAPSHOT_HISTORY_MAX_BOOK_BYTES.saturating_sub(compressed_bytes) {
                 book_scan_complete = false;
                 break;
             }
-            let compressed: Vec<u8> = connection.query_row("SELECT payload FROM signal_records WHERE id = ?1 AND kind = 3", [id], |row| row.get(0))?;
             compressed_bytes += compressed_len;
             let decoder = MultiGzDecoder::new(compressed.as_slice());
             let mut payload = Vec::new();

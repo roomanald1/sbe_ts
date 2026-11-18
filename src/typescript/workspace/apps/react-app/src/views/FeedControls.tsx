@@ -21,6 +21,7 @@ import { useDashboardLayout } from '@workspace/ui-platform';
 import { useBehaviorSnapshot } from '@workspace/ui-platform';
 import type { DashboardWidget } from '@workspace/ui-platform';
 import {
+  DASHBOARD_WIDGET_GROUPS,
   WORKSPACE_LAYOUT_CONFIG,
   WIDGET_LABELS,
   type DashboardWidgetType,
@@ -43,6 +44,10 @@ export function FeedControls({
   onFeedSourceChange,
 }: FeedControlsProps) {
   const [dataView, setDataView] = useState<'markets' | 'users'>('markets');
+  const [workspaceWidgetMenu, setWorkspaceWidgetMenu] = useState<{
+    x: number;
+    y: number;
+  } | null>(null);
   const [tradeRequest, setTradeRequest] = useState<{
     symbol: string;
     side: 'buy' | 'sell';
@@ -248,6 +253,17 @@ export function FeedControls({
       {dataView === 'markets' ? (
         <div
           className="market-dashboard"
+          onContextMenu={(event) => {
+            const target = event.target as HTMLElement;
+            if (
+              target.closest(
+                'button, input, select, textarea, a, .dashboard-widget',
+              )
+            )
+              return;
+            event.preventDefault();
+            setWorkspaceWidgetMenu({ x: event.clientX, y: event.clientY });
+          }}
           onDragOver={(event) => {
             event.preventDefault();
             event.dataTransfer.dropEffect = 'move';
@@ -315,6 +331,73 @@ export function FeedControls({
               dropPreviewRef.current.style.display = 'none';
           }}
         >
+          {workspaceWidgetMenu && (
+            <div
+              className="widget-store-dropdown workspace-context-menu"
+              style={{
+                left: Math.min(workspaceWidgetMenu.x, window.innerWidth - 210),
+                top: Math.min(workspaceWidgetMenu.y, window.innerHeight - 190),
+              }}
+              aria-label="Add a dashboard widget"
+              onMouseLeave={() => setWorkspaceWidgetMenu(null)}
+            >
+              {DASHBOARD_WIDGET_GROUPS.map((group) => (
+                <div
+                  className="widget-store-group"
+                  key={group.label}
+                  onMouseEnter={(event) => {
+                    const item = event.currentTarget;
+                    const submenu = item.querySelector<HTMLElement>(
+                      '.widget-store-submenu',
+                    );
+                    if (!submenu) return;
+                    const rect = item.getBoundingClientRect();
+                    const width = Math.min(240, window.innerWidth - 16);
+                    submenu.style.maxHeight = `${window.innerHeight - 16}px`;
+                    submenu.style.setProperty('--submenu-width', `${width}px`);
+                    submenu.style.top = `${Math.max(8, Math.min(rect.top, window.innerHeight - submenu.offsetHeight - 8))}px`;
+                    submenu.style.left = `${rect.right + width + 8 <= window.innerWidth ? rect.right + 6 : Math.max(8, rect.left - width - 6)}px`;
+                  }}
+                  onFocus={(event) => {
+                    const item = event.currentTarget;
+                    const submenu = item.querySelector<HTMLElement>(
+                      '.widget-store-submenu',
+                    );
+                    if (!submenu) return;
+                    const rect = item.getBoundingClientRect();
+                    const width = Math.min(240, window.innerWidth - 16);
+                    submenu.style.maxHeight = `${window.innerHeight - 16}px`;
+                    submenu.style.setProperty('--submenu-width', `${width}px`);
+                    submenu.style.top = `${Math.max(8, Math.min(rect.top, window.innerHeight - submenu.offsetHeight - 8))}px`;
+                    submenu.style.left = `${rect.right + width + 8 <= window.innerWidth ? rect.right + 6 : Math.max(8, rect.left - width - 6)}px`;
+                  }}
+                >
+                  <button
+                    type="button"
+                    className="widget-store-group-toggle"
+                    aria-haspopup="true"
+                  >
+                    {group.label}
+                    <span aria-hidden="true">›</span>
+                  </button>
+                  <div className="widget-store-submenu">
+                    {group.types.map((type) => (
+                      <button
+                        type="button"
+                        key={type}
+                        onClick={() => {
+                          addWidget(type);
+                          setWorkspaceWidgetMenu(null);
+                        }}
+                      >
+                        Add {WIDGET_LABELS[type]}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
           {dashboardWidgets.map((widget) => (
             <Fragment key={widget.id}>
               {renderWidget(

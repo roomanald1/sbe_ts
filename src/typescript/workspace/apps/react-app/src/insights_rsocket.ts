@@ -92,56 +92,50 @@ async function performInsightsRpc(
   path: string,
   body?: unknown,
 ): Promise<Response> {
-  const socket = getSocket();
-  const client = await socket;
-  let reply: Uint8Array;
-  try {
-    reply = await new Promise<Uint8Array>((resolve, reject) => {
-      let settled = false;
-      let timer: ReturnType<typeof setTimeout> | undefined;
-      let cancelRequest: (() => void) | undefined;
-      client
-        .requestResponse({
-          data: Buffer.from(
-            JSON.stringify({
-              method,
-              path,
-              ...(body === undefined ? {} : { body }),
-            }),
-          ),
-        })
-        .subscribe({
-          onSubscribe: (subscription) => {
-            cancelRequest = subscription;
-            if (settled) subscription();
-          },
-          onComplete: (payload) => {
-            if (settled) return;
-            settled = true;
-            if (timer !== undefined) clearTimeout(timer);
-            cancelRequest = undefined;
-            resolve(payload.data as Uint8Array);
-          },
-          onError: (error) => {
-            if (settled) return;
-            settled = true;
-            if (timer !== undefined) clearTimeout(timer);
-            cancelRequest = undefined;
-            reject(error);
-          },
-        });
-      timer = setTimeout(() => {
-        if (settled) return;
-        settled = true;
-        cancelRequest?.();
-        reject(new Error(`Insights ${method} ${path} timed out after 5000 ms`));
-      }, 5_000);
-    });
-  } catch (error) {
-    if (sharedSocket === socket) sharedSocket = undefined;
-    client.close();
-    throw error;
-  }
+  const client = await getSocket();
+  const reply = await new Promise<Uint8Array>((resolve, reject) => {
+    let settled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let cancelRequest: (() => void) | undefined;
+    client
+      .requestResponse({
+        data: Buffer.from(
+          JSON.stringify({
+            method,
+            path,
+            ...(body === undefined ? {} : { body }),
+          }),
+        ),
+      })
+      .subscribe({
+        onSubscribe: (subscription) => {
+          cancelRequest = subscription;
+          if (settled) subscription();
+        },
+        onComplete: (payload) => {
+          if (settled) return;
+          settled = true;
+          if (timer !== undefined) clearTimeout(timer);
+          cancelRequest = undefined;
+          resolve(payload.data as Uint8Array);
+        },
+        onError: (error) => {
+          if (settled) return;
+          settled = true;
+          if (timer !== undefined) clearTimeout(timer);
+          cancelRequest = undefined;
+          reject(error);
+        },
+      });
+    timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      // Cancel only this request. The RSocket client is shared with
+      // long-lived subscriptions, so a request timeout must not close it.
+      cancelRequest?.();
+      reject(new Error(`Insights ${method} ${path} timed out after 5000 ms`));
+    }, 5_000);
+  });
   const response = JSON.parse(Buffer.from(reply).toString()) as {
     status: number;
     body: unknown;

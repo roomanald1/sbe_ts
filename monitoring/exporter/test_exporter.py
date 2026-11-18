@@ -7,6 +7,59 @@ from rsocket.exceptions import RSocketTransportError
 
 
 class RSocketExporterTests(unittest.TestCase):
+    def test_live_position_counts_accept_empty_activity_snapshot(self):
+        with patch.object(
+            exporter,
+            "rsocket_get",
+            return_value={"live-momentum": 3, "live-trade-flow": 0},
+        ) as request:
+            counts = exporter.strategy_live_position_counts()
+
+        self.assertEqual(request.call_args.args[1], "/internal/strategy/open-position-counts")
+        self.assertTrue(counts["live_available"])
+        self.assertEqual(counts["live"]["live-momentum"], 3)
+        self.assertEqual(counts["live"]["live-trade-flow"], 0)
+
+    def test_live_position_counts_mark_failed_or_malformed_activity_unavailable(self):
+        with patch.object(exporter, "rsocket_get", side_effect=OSError("route unavailable")):
+            failed = exporter.strategy_live_position_counts()
+        with patch.object(exporter, "rsocket_get", return_value=[1, 2]):
+            malformed = exporter.strategy_live_position_counts()
+
+        self.assertFalse(failed["live_available"])
+        self.assertIn("route unavailable", failed["live_error"])
+        self.assertFalse(malformed["live_available"])
+
+    def test_live_worker_metrics_expose_position_count_route_failure(self):
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_):
+                return None
+
+            def read(self):
+                return b""
+
+        output = []
+        with patch.object(exporter, "urlopen", return_value=Response()):
+            exporter.strategy_worker_metrics(
+                output, {"live": None, "live_available": False}
+            )
+
+        self.assertTrue(any(
+            "app_strategy_worker_open_instances" in line
+            and 'role="live"' in line
+            and 'status="UNAVAILABLE"' in line
+            and line.rstrip().endswith("-2")
+            for line in output
+        ))
+        self.assertTrue(any(
+            "app_strategy_position_counts_available " in line
+            and line.rstrip().endswith(" 0")
+            for line in output
+        ))
+
     def test_worker_memory_limit_bytes_supports_compose_units(self):
         with patch.dict("os.environ", {"STRATEGY_LIVE_MEMORY_LIMIT": "256M", "STRATEGY_SCOUT_MEMORY_LIMIT": "1.5G"}):
             self.assertEqual(exporter.worker_memory_limit_bytes("live"), 256 * 1024 * 1024)

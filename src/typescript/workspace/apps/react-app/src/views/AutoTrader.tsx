@@ -1,18 +1,12 @@
 import { useEffect, useMemo, useState } from 'react';
 import { AutoTraderPageModel } from '../models/AutoTraderPageModel';
-import { AutoTraderOutcomes } from './AutoTraderOutcomes';
 import { useBehaviorSnapshot } from '@workspace/ui-platform';
 import { FeedToolbar } from './FeedToolbar';
-import {
-  explainAutoTraderReason,
-  money,
-  timestamp,
-} from './AutoTraderOrderGrid';
+import { money } from './AutoTraderOrderGrid';
 import {
   AutoTraderParametersDialog,
   AutoTraderSettingsDialog,
 } from './AutoTraderDialogs';
-import { AutoTraderExecutionCheck } from './AutoTraderExecutionCheck';
 
 const finiteFixed = (value: unknown, digits: number) =>
   typeof value === 'number' && Number.isFinite(value)
@@ -36,21 +30,12 @@ export function AutoTrader() {
   const page = useBehaviorSnapshot(pageModel.state$);
   const model = pageModel.trader;
   const state = page.trader;
-  const { settingsOpen, parametersOpen, decisionDetailsOpen } = page;
-  const scoutClosedCount = page.scoutClosedCount;
-  const scoutWinRate = page.scoutWinRate;
+  const { settingsOpen, parametersOpen } = page;
   const decisionReferenceAt = state.lastDecisionAt || mountedAt;
   const decisionAgeMs = Math.max(0, clockNow - decisionReferenceAt);
   const staleDecision =
     state.enabled && decisionAgeMs >= STALE_AUTO_TRADER_DECISION_MS;
   const decisionAgeMinutes = Math.floor(decisionAgeMs / 60_000);
-  const learningFeedbackBlocks = state.intradayStrategyLearning.filter(
-    (budget) =>
-      budget.strategy.startsWith('live-') &&
-      budget.learning_feedback_multiplier === 0,
-  );
-  const paperExplorationActive =
-    state.paperLearningExplorationUntilMs > clockNow;
   return (
     <section
       className={
@@ -131,7 +116,6 @@ export function AutoTrader() {
             />
           )}
         </div>
-        <AutoTraderExecutionCheck />
         {!state.auditHealthy && (
           <div className="auto-trader-audit-alert" role="alert">
             <strong>
@@ -178,169 +162,6 @@ export function AutoTrader() {
             <span> · Overall cap exceeded; new exposure blocked.</span>
           )}
         </p>
-        {state.paperLearningExplorationUntilMs > 0 && (
-          <div className="auto-trader-learning-block" role="status">
-            <strong>
-              Recovery reset: Learning negative feedback blocked live entries
-            </strong>
-            <span>
-              {learningFeedbackBlocks.length > 0
-                ? `${learningFeedbackBlocks
-                    .map((budget) => budget.strategy.replace('live-', ''))
-                    .join(
-                      ', ',
-                    )} currently have zero feedback multipliers from negative trade outcomes.`
-                : 'Negative net trade outcomes had reduced live strategy feedback multipliers to zero.'}{' '}
-              {paperExplorationActive
-                ? ` Paper recovery exploration is temporarily allowing capped entries until ${timestamp.format(state.paperLearningExplorationUntilMs)}.`
-                : ' The temporary paper exploration window has expired; normal Learning gates apply.'}
-            </span>
-            <span>
-              {state.filledPaperOrdersSinceRecoveryReset.toLocaleString()}{' '}
-              additional filled paper orders since recovery reset.
-            </span>
-          </div>
-        )}
-        <div className="auto-trader-insights">
-          <div
-            className="auto-trader-insight auto-trader-decision"
-            role="status"
-          >
-            <span className="auto-trader-insight-label">
-              No trades · {state.decisionsSinceTrade.toLocaleString()} scans
-            </span>
-            {state.gapReasons.length > 0 ? (
-              <details className="auto-trader-gap-details">
-                <summary>Reasons · {state.gapReasons.length}</summary>
-                <ol className="auto-trader-gap-reasons">
-                  {state.gapReasons
-                    .slice()
-                    .sort((a, b) => b.count - a.count)
-                    .slice(0, 3)
-                    .map((item) => (
-                      <li key={item.reason}>
-                        <span>{explainAutoTraderReason(item.reason)}</span>
-                        <strong>{item.count.toLocaleString()}</strong>
-                      </li>
-                    ))}
-                </ol>
-              </details>
-            ) : (
-              <span className="auto-trader-decision-text">
-                {state.lastDecision
-                  ? explainAutoTraderReason(state.lastDecision)
-                  : 'Waiting for the first decision.'}
-              </span>
-            )}
-
-            {state.lastDecisionAt > 0 && (
-              <time dateTime={new Date(state.lastDecisionAt).toISOString()}>
-                {timestamp.format(state.lastDecisionAt)}
-              </time>
-            )}
-          </div>
-          <div className="auto-trader-insight">
-            <span className="auto-trader-insight-label">
-              Learning · today UTC
-            </span>
-            <strong>
-              {state.learningSamples} closed trades today ·{' '}
-              {state.learningWinRate == null
-                ? '—'
-                : finiteFixed(state.learningWinRate * 100, 0) + '% positive'}
-            </strong>
-            <span className="auto-trader-learning-detail">
-              Execution samples P0/P1/P2:{' '}
-              {state.parameterProfileSamples.join('/')}{' '}
-              {state.preferredOrderType
-                ? '· Lowest observed cost: ' + state.preferredOrderType
-                : ''}
-            </span>
-          </div>
-          <div
-            className="auto-trader-insight auto-trader-scout-metrics"
-            role="status"
-            aria-label="Scout trade summary"
-          >
-            <span className="auto-trader-insight-label">Scout trades</span>
-            <strong>
-              {page.scoutOpenCount} open · {scoutClosedCount} closed ·{' '}
-              {scoutWinRate === undefined
-                ? '—'
-                : finiteFixed(scoutWinRate, 0) + '%'}{' '}
-              win rate
-            </strong>
-          </div>
-          <div className="auto-trader-insight auto-trader-decision-quality">
-            <span className="auto-trader-insight-label">
-              Decisions · today ·{' '}
-              {state.decisionQuality.completed_trade_samples}/
-              {state.decisionQuality.filled_entry_samples} closed
-            </span>
-            <strong>
-              {state.decisionQuality.decision_samples.toLocaleString()}{' '}
-              decisions · {state.decisionQuality.unresolved_trade_samples} open
-            </strong>
-            <button
-              className="auto-trader-cohort-toggle"
-              type="button"
-              aria-expanded={decisionDetailsOpen}
-              onClick={() => pageModel.toggleDecisionDetails()}
-            >
-              {decisionDetailsOpen
-                ? 'Hide breakdown'
-                : 'Breakdown · ' + state.decisionQuality.cohorts.length}
-            </button>
-            {decisionDetailsOpen && (
-              <div className="auto-trader-learning-detail auto-trader-cohort-list">
-                {state.decisionQuality.cohorts.map((cohort) => (
-                  <span key={cohort.dimension + ':' + cohort.value}>
-                    {cohort.dimension === 'entry_time_utc'
-                      ? 'Entry time (UTC)'
-                      : cohort.dimension === 'market_regime'
-                        ? 'Market regime'
-                        : cohort.dimension.split('_').join(' ')}
-                    : {cohort.value} · {cohort.completed_trade_samples} trades ·{' '}
-                    {cohort.average_net_return_percent >= 0 ? '+' : ''}
-                    {finiteFixed(cohort.average_net_return_percent, 2)}% avg ·{' '}
-                    {finiteFixed(cohort.win_rate * 100, 0)}% wins
-                    {cohort.preliminary ? ' · preliminary' : ''}
-                  </span>
-                ))}
-                {state.decisionQuality.cohorts.length === 0 && (
-                  <span>
-                    Completed, linked outcomes will appear here as trades close.
-                  </span>
-                )}
-                {state.decisionQuality.unpriced_closed_trade_samples > 0 && (
-                  <span>
-                    {state.decisionQuality.unpriced_closed_trade_samples} closed
-                    outcomes lack an entry price and are excluded.
-                  </span>
-                )}
-                {state.decisionQuality.history_truncated && (
-                  <span>Based on the latest 50,000 audit updates.</span>
-                )}
-              </div>
-            )}
-          </div>
-          <div className="auto-trader-insight">
-            <span className="auto-trader-insight-label">
-              Closed today · {state.exitLearningSamples}
-            </span>
-            <strong>
-              {state.closedTradeAverageReturnPercent == null
-                ? 'Average return unavailable'
-                : (state.closedTradeAverageReturnPercent >= 0 ? '+' : '') +
-                  finiteFixed(state.closedTradeAverageReturnPercent, 3) +
-                  '%'}
-            </strong>
-            <span className="auto-trader-learning-detail">
-              {state.closedTradeWins} wins · {state.closedTradeLosses} losses ·{' '}
-              {state.closedTradeFlat} near flat
-            </span>
-          </div>
-        </div>
         <div
           className="auto-trader-pnl-summary"
           aria-label="Auto Trader profit and loss"
@@ -400,7 +221,6 @@ export function AutoTrader() {
             {state.error}
           </p>
         )}
-        <AutoTraderOutcomes embedded strategyRatesOnly />
       </div>
     </section>
   );

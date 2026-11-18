@@ -83,7 +83,7 @@ services:
     depends_on: [binance-feed, news-sentiment, paper-exchange]
     ports: ["3004:3004", "10004:10004", "10011:10011"]
     restart: unless-stopped
-    healthcheck: { test: ["CMD", "bash", "-c", "</dev/tcp/127.0.0.1/3004"], interval: 15s, timeout: 3s, retries: 5 }
+    healthcheck: { test: ["CMD", "bash", "-c", "</dev/tcp/127.0.0.1/3004"], interval: 15s, timeout: 3s, retries: 5, start_period: 5m }
   insights-maintenance:
     build: { context: .., dockerfile: system/Dockerfile.rust, args: { CRATE: insights, BIN: insights-maintenance } }
     deploy: { resources: { limits: { memory: "${INSIGHTS_MAINTENANCE_MEMORY_LIMIT:-256M}" } } }

@@ -1,6 +1,6 @@
 import type { FeedSource } from '../connection';
 import {
-  DASHBOARD_WIDGET_TYPES,
+  DASHBOARD_WIDGET_GROUPS,
   WIDGET_LABELS,
   type DashboardWidgetType,
 } from '../dashboard/widget_catalog';
@@ -139,14 +139,63 @@ export function DashboardToolbar(props: Props) {
                 id="widget-store-dropdown"
                 aria-label="Add a dashboard widget"
               >
-                {DASHBOARD_WIDGET_TYPES.map((type) => (
-                  <button
-                    type="button"
-                    key={type}
-                    onClick={() => onAddWidget(type)}
+                {DASHBOARD_WIDGET_GROUPS.map((group) => (
+                  <div
+                    className="widget-store-group"
+                    key={group.label}
+                    onMouseEnter={(event) => {
+                      const item = event.currentTarget;
+                      const submenu = item.querySelector<HTMLElement>(
+                        '.widget-store-submenu',
+                      );
+                      if (!submenu) return;
+                      const rect = item.getBoundingClientRect();
+                      const width = Math.min(240, window.innerWidth - 16);
+                      submenu.style.maxHeight = `${window.innerHeight - 16}px`;
+                      submenu.style.setProperty(
+                        '--submenu-width',
+                        `${width}px`,
+                      );
+                      submenu.style.top = `${Math.max(8, Math.min(rect.top, window.innerHeight - submenu.offsetHeight - 8))}px`;
+                      submenu.style.left = `${rect.right + width + 8 <= window.innerWidth ? rect.right + 6 : Math.max(8, rect.left - width - 6)}px`;
+                    }}
+                    onFocus={(event) => {
+                      const item = event.currentTarget;
+                      const submenu = item.querySelector<HTMLElement>(
+                        '.widget-store-submenu',
+                      );
+                      if (!submenu) return;
+                      const rect = item.getBoundingClientRect();
+                      const width = Math.min(240, window.innerWidth - 16);
+                      submenu.style.maxHeight = `${window.innerHeight - 16}px`;
+                      submenu.style.setProperty(
+                        '--submenu-width',
+                        `${width}px`,
+                      );
+                      submenu.style.top = `${Math.max(8, Math.min(rect.top, window.innerHeight - submenu.offsetHeight - 8))}px`;
+                      submenu.style.left = `${rect.right + width + 8 <= window.innerWidth ? rect.right + 6 : Math.max(8, rect.left - width - 6)}px`;
+                    }}
                   >
-                    Add {WIDGET_LABELS[type]}
-                  </button>
+                    <button
+                      type="button"
+                      className="widget-store-group-toggle"
+                      aria-haspopup="true"
+                    >
+                      {group.label}
+                      <span aria-hidden="true">›</span>
+                    </button>
+                    <div className="widget-store-submenu">
+                      {group.types.map((type) => (
+                        <button
+                          type="button"
+                          key={type}
+                          onClick={() => onAddWidget(type)}
+                        >
+                          Add {WIDGET_LABELS[type]}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
                 ))}
               </div>
             )}

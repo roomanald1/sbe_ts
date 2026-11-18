@@ -7,7 +7,7 @@ use serde_json::Value;
 use std::{collections::HashMap, pin::Pin, sync::Arc, time::Duration};
 use tokio::sync::watch;
 
-use super::{SignalStore, get_position_insights, signal_ui_snapshot};
+use super::{SignalStore, StrategySnapshotHistoryQuery, get_position_insights, signal_ui_snapshot};
 
 #[derive(Deserialize)]
 struct BrowserRequest {
@@ -135,6 +135,16 @@ impl InsightsBrowserResponder {
                     )
                     .await?,
             )?,
+            ("GET", "/internal/strategy-snapshot-history") => {
+                let query = StrategySnapshotHistoryQuery {
+                    symbol: query.get("symbol").cloned().unwrap_or_default(),
+                    from_ms: number(&query, "fromMs").unwrap_or_default(),
+                    through_ms: number(&query, "throughMs").unwrap_or_default(),
+                    cursor: query.get("cursor").cloned(),
+                    limit: usize_number(&query, "limit"),
+                };
+                serde_json::to_value(self.store.strategy_snapshot_history(query).await?)?
+            }
             _ => bail!("unsupported Insights browser request: {method} {path}"),
         };
         Ok(BrowserResponse {

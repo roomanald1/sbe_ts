@@ -111,7 +111,7 @@
                 },
                 "-2": {
                   "color": "yellow",
-                  "text": "N/A"
+                  "text": "COUNT UNAVAILABLE"
                 }
               },
               "type": "value"

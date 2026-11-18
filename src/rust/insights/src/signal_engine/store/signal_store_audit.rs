@@ -158,15 +158,43 @@ impl SignalStore {
         let path = self.path.clone();
         tokio::task::spawn_blocking(move || {
             let limit = limit.clamp(1, 10_000);
+            let include_final_outcome = stage.as_deref() == Some("decision");
             let connection = Self::open_database_path(&path)?;
-            let mut statement = connection.prepare(
-                "SELECT rowid, payload FROM auto_trader_audit WHERE (?1 IS NULL OR timestamp >= ?1) AND (?2 IS NULL OR rowid < ?2) AND (?3 IS NULL OR stage = ?3) ORDER BY rowid DESC LIMIT ?4",
-            )?;
-            let rows = statement.query_map(
-                params![since.map(|value| value as i64), before_id, stage, (limit + 1) as i64],
-                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?)),
-            )?;
-            let mut rows = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+            let sql = match (since.is_some(), before_id.is_some(), stage.is_some()) {
+                (true, _, true) => "SELECT rowid, payload FROM auto_trader_audit WHERE stage = ?1 AND timestamp >= ?2 AND (?3 IS NULL OR rowid < ?3) ORDER BY timestamp DESC, rowid DESC LIMIT ?4",
+                (_, true, true) => "SELECT rowid, payload FROM auto_trader_audit WHERE stage = ?1 AND rowid < ?2 ORDER BY rowid DESC LIMIT ?3",
+                (true, false, false) => "SELECT rowid, payload FROM auto_trader_audit WHERE timestamp >= ?1 ORDER BY rowid DESC LIMIT ?2",
+                (false, true, false) => "SELECT rowid, payload FROM auto_trader_audit WHERE rowid < ?1 ORDER BY rowid DESC LIMIT ?2",
+                (false, false, true) => "SELECT rowid, payload FROM auto_trader_audit WHERE stage = ?1 ORDER BY rowid DESC LIMIT ?2",
+                _ => "SELECT rowid, payload FROM auto_trader_audit ORDER BY rowid DESC LIMIT ?1",
+            };
+            let mut statement = connection.prepare(sql)?;
+            let rows = match (since, before_id, stage) {
+                (Some(since), before_id, Some(stage)) => statement.query_map(
+                    params![stage, since as i64, before_id, (limit + 1) as i64],
+                    |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?)),
+                )?.collect::<rusqlite::Result<Vec<_>>>()?,
+                (None, Some(before_id), Some(stage)) => statement.query_map(
+                    params![stage, before_id, (limit + 1) as i64],
+                    |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?)),
+                )?.collect::<rusqlite::Result<Vec<_>>>()?,
+                (Some(since), None, None) => statement.query_map(
+                    params![since as i64, (limit + 1) as i64],
+                    |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?)),
+                )?.collect::<rusqlite::Result<Vec<_>>>()?,
+                (None, Some(before_id), None) => statement.query_map(
+                    params![before_id, (limit + 1) as i64],
+                    |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?)),
+                )?.collect::<rusqlite::Result<Vec<_>>>()?,
+                (None, None, Some(stage)) => statement.query_map(
+                    params![stage, (limit + 1) as i64],
+                    |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?)),
+                )?.collect::<rusqlite::Result<Vec<_>>>()?,
+                _ => statement.query_map(params![(limit + 1) as i64],
+                    |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?)),
+                )?.collect::<rusqlite::Result<Vec<_>>>()?,
+            };
+            let mut rows = rows;
             let has_more = rows.len() > limit;
             rows.truncate(limit);
             drop(statement);
@@ -180,6 +208,9 @@ impl SignalStore {
                 items.push(serde_json::from_slice(&json)?);
             }
             items.reverse();
+            if include_final_outcome {
+                attach_final_decision_outcomes(&path, &mut items)?;
+            }
             Ok(AuditPage { items, next_cursor })
         })
         .await
@@ -245,6 +276,70 @@ impl SignalStore {
         .await
         .map_err(|error| anyhow::anyhow!("decision audit count task failed: {error}"))?
     }
+}
+
+fn attach_final_decision_outcomes(
+    path: &PathBuf,
+    decisions: &mut [serde_json::Value],
+) -> Result<()> {
+    let connection = SignalStore::open_database_path(path)?;
+    let mut statement = connection.prepare(
+        "SELECT payload FROM auto_trader_audit WHERE decision_id = ?1 AND stage = 'entry'",
+    )?;
+
+    for decision in decisions {
+        if decision.get("stage").and_then(serde_json::Value::as_str) != Some("decision") {
+            continue;
+        }
+
+        let selected = matches!(
+            decision.get("status").and_then(serde_json::Value::as_str),
+            Some("selected" | "scouted")
+        );
+        if !selected {
+            decision["final_outcome"] = serde_json::json!({
+                "status": decision.get("status"),
+                "reason": decision.get("reason"),
+                "entry": null,
+            });
+            continue;
+        }
+
+        let entry = if let Some(decision_id) = decision
+            .get("decision_id")
+            .and_then(serde_json::Value::as_str)
+        {
+            let mut rows = statement.query(params![decision_id])?;
+            rows.next()?
+                .map(|row| row.get::<_, Vec<u8>>(0))
+                .transpose()?
+                .map(|compressed| -> Result<serde_json::Value> {
+                    let mut decoder = MultiGzDecoder::new(compressed.as_slice());
+                    let mut json = Vec::new();
+                    decoder.read_to_end(&mut json)?;
+                    Ok(serde_json::from_slice(&json)?)
+                })
+                .transpose()?
+        } else {
+            None
+        };
+
+        let final_outcome = match entry {
+            Some(entry) => serde_json::json!({
+                "status": entry.get("status"),
+                "reason": entry.get("reason"),
+                "entry": entry,
+            }),
+            None => serde_json::json!({
+                "status": "pending",
+                "reason": null,
+                "entry": null,
+            }),
+        };
+        decision["final_outcome"] = final_outcome;
+    }
+
+    Ok(())
 }
 
 #[derive(Serialize)]

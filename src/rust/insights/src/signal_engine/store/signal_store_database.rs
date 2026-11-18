@@ -28,7 +28,7 @@ impl SignalStore {
         }
         let connection = Connection::open(path)?;
         connection.busy_timeout(Duration::from_secs(5))?;
-        connection.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; CREATE TABLE IF NOT EXISTS signal_records (id INTEGER PRIMARY KEY, timestamp INTEGER NOT NULL, kind INTEGER NOT NULL, payload BLOB NOT NULL); CREATE INDEX IF NOT EXISTS signal_records_timestamp ON signal_records(timestamp); CREATE INDEX IF NOT EXISTS signal_records_kind_timestamp ON signal_records(kind, timestamp); CREATE TABLE IF NOT EXISTS auto_trader_audit (decision_id TEXT NOT NULL, stage TEXT NOT NULL, timestamp INTEGER NOT NULL, symbol TEXT, payload BLOB NOT NULL, PRIMARY KEY(decision_id, stage)); CREATE INDEX IF NOT EXISTS auto_trader_audit_timestamp ON auto_trader_audit(timestamp);")?;
+        connection.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA wal_autocheckpoint=1000; CREATE TABLE IF NOT EXISTS signal_records (id INTEGER PRIMARY KEY, timestamp INTEGER NOT NULL, kind INTEGER NOT NULL, payload BLOB NOT NULL); CREATE INDEX IF NOT EXISTS signal_records_timestamp ON signal_records(timestamp); CREATE INDEX IF NOT EXISTS signal_records_kind_timestamp ON signal_records(kind, timestamp); CREATE TABLE IF NOT EXISTS auto_trader_audit (decision_id TEXT NOT NULL, stage TEXT NOT NULL, timestamp INTEGER NOT NULL, symbol TEXT, payload BLOB NOT NULL, PRIMARY KEY(decision_id, stage)); CREATE INDEX IF NOT EXISTS auto_trader_audit_timestamp ON auto_trader_audit(timestamp); CREATE INDEX IF NOT EXISTS auto_trader_audit_stage_timestamp ON auto_trader_audit(stage, timestamp DESC);")?;
         Ok(connection)
     }
 
@@ -114,16 +114,22 @@ impl SignalStore {
         }
         if (0..=6).contains(&kind) && limit.is_none_or(|limit| records.len() < limit) {
             let since_day = since.map(|timestamp| (timestamp / 86_400_000) as i64 * 86_400_000);
-            let mut statement = connection.prepare(
-                "SELECT training_payload FROM signal_daily_summary WHERE kind = ?1 AND training_payload IS NOT NULL AND (?2 IS NULL OR day_start_ms >= ?2) ORDER BY day_start_ms DESC",
-            )?;
-            let mut archives = statement.query(params![kind, since_day])?;
-            loop {
-                let Some(row) = archives.next()? else { break };
+            let archive_ids = {
+                let mut statement = connection.prepare(
+                    "SELECT rowid FROM signal_daily_summary WHERE kind = ?1 AND training_payload IS NOT NULL AND (?2 IS NULL OR day_start_ms >= ?2) ORDER BY day_start_ms DESC",
+                )?;
+                let rows = statement.query_map(params![kind, since_day], |row| row.get::<_, i64>(0))?;
+                rows.collect::<rusqlite::Result<Vec<_>>>()?
+            };
+            for archive_id in archive_ids {
                 if limit.is_some_and(|limit| records.len() >= limit) {
                     break;
                 }
-                let compressed = row.get::<_, Vec<u8>>(0)?;
+                let compressed: Vec<u8> = connection.query_row(
+                    "SELECT training_payload FROM signal_daily_summary WHERE rowid = ?1 AND kind = ?2 AND training_payload IS NOT NULL",
+                    params![archive_id, kind],
+                    |row| row.get(0),
+                )?;
                 let remaining = limit.map_or(usize::MAX, |limit| limit - records.len());
                 let mut archived = match read_archive_tail(&compressed, remaining) {
                     Ok(archived) => archived,
@@ -176,37 +182,49 @@ impl SignalStore {
     ) -> Result<Vec<StoredSignalRecord>> {
         let connection = Self::open_database_path(path)?;
         let mut records = Vec::new();
-        {
+        let compressed_records = {
             let mut statement = connection.prepare(
                 "SELECT payload FROM signal_records WHERE kind = ?1 ORDER BY timestamp DESC, id DESC LIMIT ?2",
             )?;
-            let mut rows = statement.query(params![kind, limit.min(i64::MAX as usize) as i64])?;
-            while let Some(row) = rows.next()? {
-                let compressed = row.get::<_, Vec<u8>>(0)?;
-                let mut payload = Vec::new();
-                let decoded = MultiGzDecoder::new(compressed.as_slice())
-                    .read_to_end(&mut payload)
-                    .map_err(anyhow::Error::from)
-                    .and_then(|_| deserialize_record(kind, &payload));
-                match decoded {
-                    Ok(record) => records.push(record),
-                    Err(_) if skip_corrupt_rows => continue,
-                    Err(error) => return Err(error),
-                }
+            let rows = statement.query_map(
+                params![kind, limit.min(i64::MAX as usize) as i64],
+                |row| row.get::<_, Vec<u8>>(0),
+            )?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        // End the SQLite read transaction before decompressing/deserializing.
+        // Large requests (up to 100k research records) otherwise pin a WAL
+        // snapshot for the full CPU-bound decode loop and can stall checkpoints.
+        for compressed in compressed_records {
+            let mut payload = Vec::new();
+            let decoded = MultiGzDecoder::new(compressed.as_slice())
+                .read_to_end(&mut payload)
+                .map_err(anyhow::Error::from)
+                .and_then(|_| deserialize_record(kind, &payload));
+            match decoded {
+                Ok(record) => records.push(record),
+                Err(_) if skip_corrupt_rows => continue,
+                Err(error) => return Err(error),
             }
         }
         if records.len() < limit && (0..=6).contains(&kind) {
-            let mut statement = connection.prepare(
-                "SELECT training_payload FROM signal_daily_summary WHERE kind = ?1 AND training_payload IS NOT NULL ORDER BY day_start_ms DESC",
-            )?;
-            let mut archives = statement.query([kind])?;
-            while records.len() < limit {
-                let Some(row) = archives.next()? else { break };
-                let compressed = row.get::<_, Vec<u8>>(0)?;
-                let remaining = limit - records.len();
+            let archive_ids = {
+                let mut statement = connection.prepare(
+                    "SELECT rowid FROM signal_daily_summary WHERE kind = ?1 AND training_payload IS NOT NULL ORDER BY day_start_ms DESC",
+                )?;
+                let rows = statement.query_map([kind], |row| row.get::<_, i64>(0))?;
+                rows.collect::<rusqlite::Result<Vec<_>>>()?
+            };
+            for archive_id in archive_ids {
                 if records.len() >= limit {
                     break;
                 }
+                let compressed = connection.query_row(
+                    "SELECT training_payload FROM signal_daily_summary WHERE rowid = ?1 AND kind = ?2 AND training_payload IS NOT NULL",
+                    params![archive_id, kind],
+                    |row| row.get::<_, Vec<u8>>(0),
+                )?;
+                let remaining = limit - records.len();
                 let decoded = read_archive_tail(&compressed, remaining);
                 match decoded {
                     Ok(mut archived) => records.append(&mut archived),

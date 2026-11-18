@@ -533,20 +533,24 @@ def rsocket_queue_metrics():
 
 
 def strategy_live_position_counts():
-    """Return the small live-position count by strategy from AutoTrader."""
+    """Return live-position counts and route availability from AutoTrader."""
     counts = {"live": None}
+    counts_available = False
     try:
         activity = rsocket_get(
-            RSOCKET_SERVICES["auto_trader"], "/positions/auto-trader/activity"
+            RSOCKET_SERVICES["auto_trader"], "/internal/strategy/open-position-counts"
         )
         live_counts = {strategy: 0 for strategy in STRATEGY_WORKER_STRATEGIES}
-        for position in activity.get("strategy_positions", activity.get("strategyPositions", [])):
-            strategy = position.get("strategy")
-            if strategy in live_counts:
-                live_counts[strategy] += 1
+        if not isinstance(activity, dict):
+            raise ValueError("AutoTrader position count response was not an object")
+        for strategy, value in activity.items():
+            if strategy in live_counts and isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+                live_counts[strategy] = value
         counts["live"] = live_counts
-    except (OSError, URLError, ValueError, TypeError, AttributeError):
-        pass
+        counts_available = True
+    except (OSError, URLError, ValueError, TypeError, AttributeError) as error:
+        counts["live_error"] = str(error)
+    counts["live_available"] = counts_available
     return counts
 
 
@@ -594,16 +598,23 @@ def strategy_worker_metrics(output, open_instance_counts=None):
             ))
             if role == "live":
                 role_counts = (open_instance_counts or {}).get(role)
+                counts_available = (open_instance_counts or {}).get("live_available", role_counts is not None)
                 open_instances = -1 if not up else (
-                    -2 if role_counts is None else role_counts.get(strategy, 0)
+                    -2 if not counts_available or role_counts is None else role_counts.get(strategy, 0)
                 )
-                status = "DOWN" if not up else "UP"
+                status = "DOWN" if not up else ("UP" if counts_available else "UNAVAILABLE")
                 output.append(sample(
                     "app_strategy_worker_open_instances",
                     "Open live positions or Scout instances by strategy; -1 means the worker is down and -2 means the count is unavailable.",
                     open_instances,
                     {**labels, "status": status},
                 ))
+                if strategy == LIVE_STRATEGY_METRIC_ORDER[0]:
+                    output.append(sample(
+                        "app_strategy_position_counts_available",
+                        "Whether AutoTrader activity was available to count live strategy positions.",
+                        int(bool(counts_available)),
+                    ))
             elif role == "scout":
                 open_instances = -1 if not up else (
                     -2 if body is None else scout_open_instance_count(body)

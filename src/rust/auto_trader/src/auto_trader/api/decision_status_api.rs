@@ -4,6 +4,28 @@ async fn get_status(State(state): State<AutoTraderState>) -> Json<StatusResponse
     Json(status(&state, &settings))
 }
 
+async fn get_strategy_open_position_counts(
+    State(state): State<AutoTraderState>,
+) -> Json<BTreeMap<String, usize>> {
+    let settings = state.settings.lock().await;
+    let mut counts = settings.strategies.iter()
+        .map(|strategy| (strategy.as_str().to_owned(), 0usize))
+        .collect::<BTreeMap<_, _>>();
+    for strategies in settings.strategy_positions.values() {
+        for (name, position) in strategies {
+            if position.quantity.abs() > 1e-12 {
+                *counts.entry(name.clone()).or_default() += 1;
+            }
+        }
+    }
+    let carry_positions = state.dated_carry.lock().await;
+    let open_carry_count = carry_positions.positions.iter()
+        .filter(|position| position.status.eq_ignore_ascii_case("open"))
+        .count();
+    *counts.entry("dated-futures-carry".to_owned()).or_default() += open_carry_count;
+    Json(counts)
+}
+
 async fn get_missed_opportunity_bands(
     State(state): State<AutoTraderState>,
 ) -> Json<Vec<MissedOpportunityGateBand>> {

@@ -22,6 +22,11 @@ export type LearningDecision = {
   strength_size_multiplier?: number;
   exploratory?: boolean;
   reason?: string;
+  final_outcome?: {
+    status?: string;
+    reason?: string | null;
+    entry?: Record<string, unknown> | null;
+  };
   entry_gate?: {
     selection_mode?: string;
     checks?: { strength_pass?: boolean; [key: string]: unknown };

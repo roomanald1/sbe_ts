@@ -10,6 +10,7 @@ export const DASHBOARD_WIDGET_TYPES = [
   'signals',
   'news',
   'signal-history',
+  'signal-replay',
   'signal-performance',
   'missed-opportunity-bands',
   'skipped-signal-audit',
@@ -25,6 +26,8 @@ export const DASHBOARD_WIDGET_TYPES = [
   'auto-trader-diagnostics',
   'auto-trader-learning',
   'auto-trader-outcomes',
+  'auto-trader-strategy-performance',
+  'auto-trader-execution-check',
   'auto-trader-completed-positions',
   'auto-trader-live-positions',
   'auto-trader-scout-positions',
@@ -32,6 +35,55 @@ export const DASHBOARD_WIDGET_TYPES = [
 ] as const;
 
 export type DashboardWidgetType = (typeof DASHBOARD_WIDGET_TYPES)[number];
+
+export const DASHBOARD_WIDGET_GROUPS: {
+  label: string;
+  types: readonly DashboardWidgetType[];
+}[] = [
+  {
+    label: 'Markets',
+    types: ['grid', 'table', 'chart', 'book', 'trades', 'liquidity', 'news'],
+  },
+  {
+    label: 'Signals',
+    types: [
+      'signals',
+      'signal-history',
+      'signal-replay',
+      'signal-performance',
+      'missed-opportunity-bands',
+      'skipped-signal-audit',
+    ],
+  },
+  {
+    label: 'Portfolio',
+    types: [
+      'positions',
+      'fills',
+      'pnl',
+      'account',
+      'risk',
+      'close-insights',
+      'hedging',
+      'execution-fees',
+      'dated-carry',
+    ],
+  },
+  {
+    label: 'Auto Trader',
+    types: [
+      'auto-trader',
+      'auto-trader-diagnostics',
+      'auto-trader-learning',
+      'auto-trader-outcomes',
+      'auto-trader-strategy-performance',
+      'auto-trader-execution-check',
+      'auto-trader-completed-positions',
+      'auto-trader-live-positions',
+      'auto-trader-scout-positions',
+    ],
+  },
+];
 
 export const DEFAULT_WIDGET_TYPES: readonly DashboardWidgetType[] = [
   'grid',
@@ -51,6 +103,7 @@ export const WIDGET_LABELS: Record<DashboardWidgetType, string> = {
   signals: 'Best signals',
   news: 'Crypto news & signals',
   'signal-history': 'Signal history',
+  'signal-replay': 'Trade-flow what-if',
   'signal-performance': 'Signal performance',
   'missed-opportunity-bands': 'Missed opportunity bands',
   'skipped-signal-audit': 'Skipped signal audit',
@@ -66,6 +119,8 @@ export const WIDGET_LABELS: Record<DashboardWidgetType, string> = {
   'auto-trader-diagnostics': 'Auto Trader diagnostics',
   'auto-trader-learning': 'Learning effectiveness',
   'auto-trader-outcomes': 'AutoTrader outcomes',
+  'auto-trader-strategy-performance': 'Strategy performance',
+  'auto-trader-execution-check': 'Execution check',
   'auto-trader-completed-positions': 'AutoTrader closed positions',
   'auto-trader-live-positions': 'AutoTrader live positions',
   'auto-trader-scout-positions': 'AutoTrader scout positions',

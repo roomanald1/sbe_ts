@@ -317,6 +317,34 @@
   flex-direction: column;
   gap: 10px;
 }
+.signal-replay-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  gap: 10px 16px;
+  color: #a0a6ad;
+  font-size: 12px;
+}
+.signal-replay-controls label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.signal-replay-controls input,
+.signal-replay-controls select {
+  min-height: 28px;
+  padding: 4px 7px;
+  border: 1px solid #343b45;
+  border-radius: 4px;
+  background: #11151a;
+  color: #e7e7e7;
+}
+.signal-replay-controls input {
+  width: 130px;
+}
+.signal-replay-controls span {
+  padding-bottom: 7px;
+}
 .signal-info-grid {
   width: 100%;
   overflow: auto;

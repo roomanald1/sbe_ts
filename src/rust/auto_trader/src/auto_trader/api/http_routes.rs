@@ -900,6 +900,10 @@ pub fn router_with_socket() -> (Router, AutoTraderSocketApi) {
         )
         .route("/positions/auto-trader/activity", get(get_activity))
         .route(
+            "/internal/strategy/open-position-counts",
+            get(get_strategy_open_position_counts),
+        )
+        .route(
             "/positions/auto-trader/hedge-candidates",
             get(get_portfolio_hedge_candidates),
         )

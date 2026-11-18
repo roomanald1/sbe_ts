@@ -14,6 +14,7 @@
 - Preserve complete diagnostics. Correctness takes priority over token savings.
 
 ### Output Management
+- For repository searches, exclude generated data, large JSON files and logs unless explicitly needed. Use `rg --max-columns 300 --max-columns-preview` to prevent enormous matching lines from flooding output. Narrow searches by directory and file type wherever practical.
 - Keep individual command outputs below 20K characters where practical.
 - Narrow `rtk rg` searches by directory, file type or symbol; avoid repository-wide output dumps.
 - Use `rtk bulk-read --question` for large files and `sed -n '100,160p' file.rs` for exact code.

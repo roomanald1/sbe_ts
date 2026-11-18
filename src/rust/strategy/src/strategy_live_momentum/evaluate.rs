@@ -31,9 +31,7 @@ pub(crate) fn evaluate(insight: &StrategySignal<'_>) -> Result<StrategyDecision,
     }
     let entry_condition =
         |value: Option<f64>| value.is_some_and(|value| value.is_finite() && side * value > minimum);
-    Ok(if entry_condition(signal.components.momentum_10s_percent)
-        || entry_condition(signal.components.trend_5m_volatility_units)
-    {
+    Ok(if entry_condition(signal.components.momentum_10s_percent) {
         StrategyDecision::Enter
     } else {
         StrategyDecision::Reject
@@ -72,11 +70,10 @@ pub(crate) fn entry_rejection_reason(insight: &StrategySignal<'_>) -> Option<Str
         return Some("Learned parameter minimum_momentum is unavailable".to_owned());
     };
     let momentum = signal.components.momentum_10s_percent.map(|value| side * value);
-    let trend = signal.components.trend_5m_volatility_units.map(|value| side * value);
     let passes = |value: Option<f64>| {
         value.is_some_and(|value| value.is_finite() && value > minimum)
     };
-    if passes(momentum) || passes(trend) {
+    if passes(momentum) {
         return None;
     }
     let describe = |value: Option<f64>| match value {
@@ -85,16 +82,8 @@ pub(crate) fn entry_rejection_reason(insight: &StrategySignal<'_>) -> Option<Str
         None => "unavailable".to_owned(),
     };
     Some(format!(
-        "Directional momentum {} (threshold > {:.4}%) and trend strength {} volatility units (threshold > {:.4}); neither met its threshold",
+        "Directional 10s momentum {} (threshold > {:.4}%); threshold not met",
         describe(momentum),
-        minimum,
-        trend.map(|value| {
-            if value.is_finite() {
-                format!("{value:.4}")
-            } else {
-                "non-finite".to_owned()
-            }
-        }).unwrap_or_else(|| "unavailable".to_owned()),
         minimum
     ))
 }
@@ -142,7 +131,7 @@ mod tests {
     fn entry_requires_signal_aligned_momentum_or_trend() {
         assert!(enters("bullish", Some(0.1), None));
         assert!(enters("bearish", Some(-0.1), None));
-        assert!(enters("bullish", None, Some(0.1)));
+        assert!(!enters("bullish", None, Some(0.1)));
         assert!(!enters("bullish", Some(-0.1), None));
         assert!(!enters("bearish", Some(0.1), None));
         assert!(!enters("neutral", Some(1.0), Some(1.0)));

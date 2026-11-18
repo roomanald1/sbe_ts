@@ -73,13 +73,16 @@ impl SignalStore {
         limit: usize,
     ) -> Result<ResearchFeatureHistoryPage> {
         let connection = Self::open_database_path(&path.to_path_buf())?;
-        let mut statement = connection.prepare(
-            "SELECT id, timestamp, length(payload) FROM signal_records WHERE kind = 4 AND timestamp >= ?1 AND timestamp <= ?2 AND (?3 IS NULL OR timestamp > ?3 OR (timestamp = ?3 AND id > ?4)) ORDER BY timestamp ASC, id ASC LIMIT ?5",
-        )?;
-        let rows = statement.query_map(
-            params![query.from_ms as i64, query.through_ms as i64, cursor.map(|value| value.0 as i64), cursor.map(|value| value.1).unwrap_or(0), (RESEARCH_HISTORY_MAX_SCAN + 1) as i64],
-            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?, row.get::<_, i64>(2)?)),
-        )?;
+        let scan_rows = {
+            let mut statement = connection.prepare(
+                "SELECT id, timestamp, payload FROM signal_records WHERE kind = 4 AND timestamp >= ?1 AND timestamp <= ?2 AND (?3 IS NULL OR timestamp > ?3 OR (timestamp = ?3 AND id > ?4)) ORDER BY timestamp ASC, id ASC LIMIT ?5",
+            )?;
+            let rows = statement.query_map(
+                params![query.from_ms as i64, query.through_ms as i64, cursor.map(|value| value.0 as i64), cursor.map(|value| value.1).unwrap_or(0), (RESEARCH_HISTORY_MAX_SCAN + 1) as i64],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?, row.get::<_, Vec<u8>>(2)?)),
+            )?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()?
+        };
         let mut scan = ResearchHistoryScan {
             page: ResearchFeatureHistoryPage {
                 symbol: query.symbol.clone(),
@@ -107,24 +110,18 @@ impl SignalStore {
         let mut compressed_bytes = 0usize;
         let mut corrupt_record = false;
         let mut bounded = false;
-        for row in rows {
-            let (id, timestamp, compressed_len) = row?;
+        for (id, timestamp, compressed) in scan_rows {
             if scan.page.scanned_records >= RESEARCH_HISTORY_MAX_SCAN {
                 scan.page.more_available = true;
                 bounded = true;
                 break;
             }
-            let compressed_len = compressed_len.max(0) as usize;
+            let compressed_len = compressed.len();
             if compressed_len > RESEARCH_HISTORY_MAX_COMPRESSED_BYTES.saturating_sub(compressed_bytes) {
                 bounded = true;
                 scan.page.more_available = true;
                 break;
             }
-            let compressed: Vec<u8> = connection.query_row(
-                "SELECT payload FROM signal_records WHERE id = ?1 AND kind = 4",
-                [id],
-                |row| row.get(0),
-            )?;
             compressed_bytes += compressed_len;
             scan.page.scanned_records += 1;
             let timestamp = timestamp.max(0) as u64;

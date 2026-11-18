@@ -17,6 +17,8 @@ import { DatedCarry } from './DatedCarry';
 import { AutoTraderDiagnostics } from './AutoTraderDiagnostics';
 import { AutoTraderLearningWidget } from './AutoTraderLearningWidget';
 import { AutoTraderOutcomes } from './AutoTraderOutcomes';
+import { AutoTraderStrategyPerformanceWidget } from './AutoTraderStrategyPerformanceWidget';
+import { AutoTraderExecutionCheck } from './AutoTraderExecutionCheck';
 import { AutoTraderScouts } from './AutoTraderScouts';
 import { ExecutionFees } from './ExecutionFees';
 import { OrderBookPopup } from './OrderBookPopup';
@@ -28,6 +30,7 @@ import {
   MissedOpportunityBandsView,
   SignalHistoryView,
   SignalPerformanceView,
+  SignalReplayWidget,
   SkippedSignalAuditView,
 } from './SignalInfoViews';
 
@@ -132,6 +135,10 @@ function DashboardWidgetContentComponent(props: Props): ReactNode {
       return <AutoTraderLearningWidget />;
     case 'auto-trader-outcomes':
       return <AutoTraderOutcomes ticks={prices.ticks} />;
+    case 'auto-trader-strategy-performance':
+      return <AutoTraderStrategyPerformanceWidget />;
+    case 'auto-trader-execution-check':
+      return <AutoTraderExecutionCheck />;
     case 'auto-trader-completed-positions':
       return <AutoTraderOutcomes closedOnly />;
     case 'auto-trader-live-positions':
@@ -183,6 +190,8 @@ function DashboardWidgetContentComponent(props: Props): ReactNode {
       return <NewsTicker streamKey={widget.id} />;
     case 'signal-history':
       return <SignalHistoryView paused={paused} onTradeSymbol={onTrade} />;
+    case 'signal-replay':
+      return <SignalReplayWidget paused={paused} />;
     case 'signal-performance':
       return <SignalPerformanceView paused={paused} onTradeSymbol={onTrade} />;
     case 'missed-opportunity-bands':

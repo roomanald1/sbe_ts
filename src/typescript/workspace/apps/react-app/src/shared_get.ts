@@ -34,7 +34,13 @@ export function sharedGet(url: string, cacheForMs = 0): Promise<Response> {
           cachedGets.set(url, {
             body: await response.clone().text(),
             expiresAt: Date.now() + cacheForMs,
-            headers: [...response.headers.entries()],
+            headers: (() => {
+              const headers: [string, string][] = [];
+              response.headers.forEach((value, name) => {
+                headers.push([name, value]);
+              });
+              return headers;
+            })(),
           });
         }
         return response;

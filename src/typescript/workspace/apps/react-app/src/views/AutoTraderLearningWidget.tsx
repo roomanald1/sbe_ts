@@ -200,8 +200,8 @@ const decisionColumns: ColDef<LearningDecision>[] = [
   { field: 'direction', headerName: 'Direction', width: 95 },
   {
     field: 'status',
-    headerName: 'Decision',
-    width: 145,
+    headerName: 'Selection',
+    width: 155,
     valueGetter: ({ data }) => {
       if (!data) return '—';
       const selectionMode = data.entry_gate?.selection_mode;
@@ -211,6 +211,17 @@ const decisionColumns: ColDef<LearningDecision>[] = [
       if (data.status === 'skipped' && data.exploratory)
         return 'Exploratory · skipped';
       return data.status ?? '—';
+    },
+  },
+  {
+    colId: 'final_outcome',
+    headerName: 'Final outcome',
+    width: 150,
+    valueGetter: ({ data }) => {
+      if (!data) return '—';
+      if (data.final_outcome?.status === 'pending')
+        return 'Awaiting execution result';
+      return data.final_outcome?.status ?? '—';
     },
   },
   {
@@ -238,13 +249,17 @@ const decisionColumns: ColDef<LearningDecision>[] = [
   },
   {
     field: 'reason',
-    headerName: 'Decision context',
+    headerName: 'Final decision context',
     minWidth: 280,
     flex: 1,
     valueGetter: ({ data }) => {
       if (!data) return '—';
       const reason =
-        data.reason ?? data.entry_gate?.rejection_reasons?.join(', ');
+        data.final_outcome?.reason ??
+        data.reason ??
+        data.entry_gate?.rejection_reasons?.join(', ');
+      if (data.final_outcome?.entry && !data.final_outcome.reason)
+        return `Entry recorded with status: ${data.final_outcome.status}`;
       if (
         data.status === 'selected' &&
         data.entry_gate?.selection_mode === 'exploratory' &&
@@ -346,12 +361,28 @@ export function AutoTraderLearningWidget() {
         <details className="auto-trader-learning-decision-detail" open>
           <summary>
             {selectedDecision.symbol} · {selectedDecision.strategy} ·{' '}
-            {selectedDecision.status} ·{' '}
-            {selectedDecision.reason ??
+            {selectedDecision.status} → final:{' '}
+            {selectedDecision.final_outcome?.status ?? 'pending'} ·{' '}
+            {selectedDecision.final_outcome?.reason ??
+              selectedDecision.reason ??
               selectedDecision.entry_gate?.rejection_reasons?.join(', ') ??
               'No reason recorded'}
           </summary>
           <div className="auto-trader-learning-detail-grid">
+            <div>
+              <strong>Final outcome and execution</strong>
+              <pre>
+                {JSON.stringify(
+                  selectedDecision.final_outcome ?? {
+                    status: 'No final outcome recorded',
+                    reason:
+                      'No entry order or downstream decision outcome was recorded for this selection.',
+                  },
+                  null,
+                  2,
+                )}
+              </pre>
+            </div>
             <div>
               <strong>Gate checks</strong>
               <pre>

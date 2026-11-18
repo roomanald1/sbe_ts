@@ -12,6 +12,7 @@ export type SignalComponents = {
   mispricing_vs_vwap_bps?: number | null;
   pressure_without_price_move?: number | null;
   aggressor_cost_bps?: number | null;
+  trade_flow_by_window?: { window_seconds: number; value: number | null }[];
 };
 export type SignalSnapshot = {
   symbol: string;

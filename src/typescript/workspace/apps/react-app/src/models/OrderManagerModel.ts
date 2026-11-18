@@ -218,11 +218,11 @@ export class OrderManagerModel {
   async submit(): Promise<void> {
     const state = this.state$.value;
     const validation = await validateOrderSubmission(state);
-    if (validation && 'error' in validation) {
+    if (!validation) return;
+    if ('error' in validation) {
       this.patch({ error: validation.error });
       return;
     }
-    if (!validation) return;
     if (
       state.orderType === 'limit' &&
       state.limitPriceWarning &&
