@@ -43,3 +43,10 @@ research/autotrader/runtime/
 # Generated coverage reports
 coverage/
 src/rust/position_management/auto_trader_state.sqlite
+
+# Beads / Dolt files (added by bd init)
+.dolt/
+*.db
+.beads-credential-key
+.beads/proxieddb/
+*.gate.lock*
