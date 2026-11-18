@@ -34,7 +34,7 @@ pub use input::{
     DatedCarrySettlementSource, DepthSignalValue, Signal, SignalComponents, SignalDirection,
     StrategyInput, StrategyInputLike, StrategyMarketSignal, StrategySignal, StrategySpecificSignal,
     StrategyWalkForwardEvidence, WindowedSignalValue, prepare_live_strategy_signal,
-    strategy_parameter_value,
+    regime_conditioned_parameter_value, strategy_parameter_value,
 };
 pub use live_evaluation::{
     DatedCarryScanUpdate, DatedCarrySettlementUpdate, LIVE_EVALUATION_CONTRACT_VERSION,
@@ -560,7 +560,19 @@ impl Strategy {
             else {
                 return Ok(StrategyDecision::Reject);
             };
+            let Some(max_evidence_age_seconds) =
+                bounded_parameter(StrategyParameterKey::ScoutMaximumEvidenceAgeSeconds)
+            else {
+                return Ok(StrategyDecision::Reject);
+            };
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64;
+            let evidence_age_ms = now_ms.saturating_sub(evidence.last_sample_timestamp_ms);
+            let evidence_is_stale = evidence_age_ms > max_evidence_age_seconds as u64 * 1000;
             if evidence.sample_count >= minimum_samples.round() as usize
+                && !evidence_is_stale
                 && (evidence
                     .average_net_return_percent
                     .is_none_or(|average| average <= 0.0)
@@ -626,7 +638,21 @@ impl Strategy {
                     .to_owned(),
             );
         };
-        if evidence.sample_count < minimum_samples.round() as usize {
+        let Some(max_evidence_age_seconds) =
+            bounded_parameter(StrategyParameterKey::ScoutMaximumEvidenceAgeSeconds)
+        else {
+            return Some(
+                "Walk-forward gate parameter scout_maximum_evidence_age_seconds is missing or out of bounds"
+                    .to_owned(),
+            );
+        };
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        let evidence_age_ms = now_ms.saturating_sub(evidence.last_sample_timestamp_ms);
+        let evidence_is_stale = evidence_age_ms > max_evidence_age_seconds as u64 * 1000;
+        if evidence.sample_count < minimum_samples.round() as usize || evidence_is_stale {
             return None;
         }
 
@@ -923,6 +949,29 @@ mod strategy_signal_contract_tests {
                 "{}",
                 strategy.as_str()
             );
+            let mut weak_signal = signal.clone();
+            weak_signal.strength = 0.1;
+            let weak_input = StrategySignal::entry(&weak_signal, &parameters);
+            assert_eq!(
+                strategy.evaluate(&weak_input).unwrap(),
+                StrategyDecision::Reject,
+                "{} accepted a signal below its learned strength threshold",
+                strategy.as_str()
+            );
+            let rejection = strategy.entry_rejection_reason(&weak_input).unwrap();
+            assert!(
+                rejection.contains("Signal strength 0.100") && rejection.contains("minimum 0.300"),
+                "{} returned unexpected strength rejection: {rejection}",
+                strategy.as_str()
+            );
+            weak_signal.strength = f64::NAN;
+            let non_finite_input = StrategySignal::entry(&weak_signal, &parameters);
+            assert_eq!(
+                strategy.evaluate(&non_finite_input).unwrap(),
+                StrategyDecision::Reject,
+                "{} accepted non-finite signal strength",
+                strategy.as_str()
+            );
             let mut opposing = signal.clone();
             match strategy {
                 Strategy::LiveMomentum => opposing.components.momentum_10s_percent = Some(-0.1),
@@ -1040,7 +1089,15 @@ mod strategy_signal_contract_tests {
                 news_attribution: None,
                 entry_gate: None,
             };
-            let parameters = BTreeMap::from([(parameter.as_str().to_owned(), threshold)]);
+            let parameters = BTreeMap::from([
+                (parameter.as_str().to_owned(), threshold),
+                (
+                    StrategyParameterKey::MinimumSignalStrength
+                        .as_str()
+                        .to_owned(),
+                    0.0,
+                ),
+            ]);
             let input = StrategySignal::entry(&signal, &parameters);
 
             assert_eq!(strategy.evaluate(&input).unwrap(), StrategyDecision::Reject);
@@ -1061,6 +1118,10 @@ mod strategy_signal_contract_tests {
     #[test]
     fn live_rejection_reports_failed_walk_forward_evidence() {
         let strategy = Strategy::LiveMomentum;
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
         let signal = Signal {
             symbol: "XRP-USDC".to_owned(),
             direction: "bullish".to_owned(),
@@ -1080,7 +1141,7 @@ mod strategy_signal_contract_tests {
                     "sampleCount": 10000,
                     "positiveNetRate": 0.6,
                     "averageNetReturnPercent": -0.1,
-                    "lastSampleTimestampMs": 1
+                    "lastSampleTimestampMs": now_ms
                 }
             })),
             market_regime: None,

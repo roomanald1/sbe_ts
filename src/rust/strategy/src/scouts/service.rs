@@ -17,6 +17,42 @@ const LIVE_SCOUT_HOLD_PRIOR_SAMPLES: usize = 10;
 const LIVE_SCOUT_DEFAULT_HOLD_MS: u64 = 30 * 60 * 1_000;
 const LIVE_SCOUT_MIN_DURATION_MS: u64 = 15 * 60 * 1_000;
 const LIVE_SCOUT_MAX_DURATION_MS: u64 = 6 * 60 * 60 * 1_000;
+const LIQUID_SCOUT_SYMBOLS: &[&str] = &[
+    "BTC-USDT", "ETH-USDT", "SOL-USDT", "BNB-USDT", "XRP-USDT", "ADA-USDT",
+    "DOGE-USDT", "TRX-USDT", "LINK-USDT", "LTC-USDT", "AVAX-USDT",
+];
+
+fn is_liquid_scout_symbol(symbol: &str) -> bool {
+    LIQUID_SCOUT_SYMBOLS.contains(&symbol)
+}
+
+fn dated_carry_profile_symbol(spot_symbol: &str) -> Option<String> {
+    let profile_symbol = spot_symbol.strip_suffix("USDT")
+        .map(|base| format!("{base}-USDT"))?;
+    is_liquid_scout_symbol(&profile_symbol).then_some(profile_symbol)
+}
+
+#[cfg(test)]
+mod liquid_scout_symbol_tests {
+    use super::{dated_carry_profile_symbol, is_liquid_scout_symbol};
+
+    #[test]
+    fn permits_major_pairs_and_rejects_illiquid_symbols() {
+        assert!(is_liquid_scout_symbol("BTC-USDT"));
+        assert!(is_liquid_scout_symbol("ETH-USDT"));
+        assert!(!is_liquid_scout_symbol("USDC-PLN"));
+        assert!(!is_liquid_scout_symbol("XMSTR-USDT"));
+        assert!(!is_liquid_scout_symbol("BTC-USDC"));
+    }
+
+    #[test]
+    fn dated_carry_uses_only_allowlisted_spot_profile_symbols() {
+        assert_eq!(dated_carry_profile_symbol("BTCUSDT").as_deref(), Some("BTC-USDT"));
+        assert_eq!(dated_carry_profile_symbol("ETHUSDT").as_deref(), Some("ETH-USDT"));
+        assert_eq!(dated_carry_profile_symbol("XMSTRUSDT"), None);
+        assert_eq!(dated_carry_profile_symbol("BTCUSDC"), None);
+    }
+}
 
 fn estimate_live_scout_maximum_durations(
     activity: &serde_json::Value,
@@ -774,6 +810,8 @@ async fn receive_daily_scout_inputs(
         request
             .signals
             .into_iter()
+            .filter(|signal| signal.get("symbol").and_then(serde_json::Value::as_str)
+                .is_some_and(is_liquid_scout_symbol))
             .map(|mut signal| {
                 signal["_scout_probe_window"] = serde_json::json!(probe_window);
                 signal
@@ -1504,6 +1542,9 @@ async fn receive_live_scout_inputs(
     }
     let now_ms = scout_now_ms();
     let signals = request.signals.into_iter().filter(|signal| {
+        signal.get("symbol").and_then(serde_json::Value::as_str)
+            .is_some_and(is_liquid_scout_symbol)
+    }).filter(|signal| {
         let updated = signal.get("book_updated_at_ms").and_then(serde_json::Value::as_u64);
         let bid = signal.get("best_bid").and_then(serde_json::Value::as_f64);
         let ask = signal.get("best_ask").and_then(serde_json::Value::as_f64);
@@ -2039,6 +2080,7 @@ async fn receive_dated_carry_scout_inputs(
     }
     let candidates = request.candidates.into_iter()
         .filter_map(|candidate| serde_json::from_value::<strategies::DatedCarryEntryCandidate>(candidate).ok())
+        .filter(|candidate| dated_carry_profile_symbol(&candidate.spot_symbol).is_some())
         .collect::<Vec<_>>();
     if candidates.is_empty() { return Ok(StatusCode::NO_CONTENT); }
 
@@ -2063,7 +2105,7 @@ async fn receive_dated_carry_scout_inputs(
     let profile_symbols = candidates
         .iter()
         .filter(|candidate| candidate.eligible)
-        .map(|candidate| candidate.spot_symbol.replace("USDT", "-USDT"))
+        .filter_map(|candidate| dated_carry_profile_symbol(&candidate.spot_symbol))
         .collect::<BTreeSet<_>>();
     let missing = {
         let mut cache = service.live_profile_snapshot_cache.lock().await;
@@ -2100,7 +2142,7 @@ async fn receive_dated_carry_scout_inputs(
     let day = request.now_ms / 86_400_000;
     let mut plans = Vec::new();
     for candidate in candidates.iter().filter(|candidate| candidate.eligible && candidate.expiry_ms > request.now_ms.saturating_add(86_400_000)) {
-        let profile_symbol = candidate.spot_symbol.replace("USDT", "-USDT");
+        let Some(profile_symbol) = dated_carry_profile_symbol(&candidate.spot_symbol) else { continue };
         let Some(profile) = profiles.iter().find(|profile| {
             profile.get("symbol").and_then(serde_json::Value::as_str) == Some(profile_symbol.as_str())
                 && profile.get("strategy").and_then(serde_json::Value::as_str) == Some("dated-futures-carry")

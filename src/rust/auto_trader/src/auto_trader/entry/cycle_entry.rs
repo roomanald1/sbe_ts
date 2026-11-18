@@ -406,7 +406,11 @@ async fn attach_strategy_walk_forward_evidence(
             .and_then(serde_json::Value::as_str)
             .map(str::to_owned)
             .unwrap_or_else(|| strategy::profile_id(&signal.symbol, strategy.as_str(), &parameters));
-        let Some(evidence) = evidence_by_profile.get(&profile_id) else {
+        let evidence = evidence_by_profile
+            .get(&profile_id)
+            .or_else(|| evidence_by_profile.get(&format!("{}|{}", signal.symbol, strategy.as_str())))
+            .or_else(|| evidence_by_profile.get(strategy.as_str()));
+        let Some(evidence) = evidence else {
             continue;
         };
         let Some(decision) = signal

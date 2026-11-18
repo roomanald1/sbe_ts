@@ -1645,7 +1645,10 @@ mod tests {
     }
 
     fn request() -> LiveEvaluationRequest {
-        let parameters = BTreeMap::from([("minimum_momentum".into(), 0.005)]);
+        let parameters = BTreeMap::from([
+            ("minimum_momentum".into(), 0.005),
+            ("minimum_signal_strength".into(), 0.0),
+        ]);
         LiveEvaluationRequest {
             contract_version: LIVE_EVALUATION_CONTRACT_VERSION,
             request_id: "r-1".into(),

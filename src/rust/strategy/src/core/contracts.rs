@@ -57,6 +57,23 @@ pub enum StrategyParameterKey {
     MinimumCounterMomentumPercent,
     ScoutMinimumWalkForwardSamples,
     ScoutMinimumPositiveNetRate,
+    ScoutMaximumEvidenceAgeSeconds,
+    MinimumSignalStrength,
+    MinimumMomentumTrend,
+    MinimumMomentumRange,
+    MinimumMomentumVolatile,
+    MinimumFlowImbalanceTrend,
+    MinimumFlowImbalanceRange,
+    MinimumFlowImbalanceVolatile,
+    MinimumBookImbalanceTrend,
+    MinimumBookImbalanceRange,
+    MinimumBookImbalanceVolatile,
+    MinimumVwapDislocationBpsTrend,
+    MinimumVwapDislocationBpsRange,
+    MinimumVwapDislocationBpsVolatile,
+    MinimumAbsorptionPressureTrend,
+    MinimumAbsorptionPressureRange,
+    MinimumAbsorptionPressureVolatile,
     ProfitProtectionActivationPercent,
     ProfitProtectionGivebackPercent,
     ProfitProtectionMinimumLockPercent,
@@ -119,6 +136,23 @@ impl StrategyParameterKey {
             Self::MinimumCounterMomentumPercent => "minimum_counter_momentum_percent",
             Self::ScoutMinimumWalkForwardSamples => "scout_minimum_walk_forward_samples",
             Self::ScoutMinimumPositiveNetRate => "scout_minimum_positive_net_rate",
+            Self::ScoutMaximumEvidenceAgeSeconds => "scout_maximum_evidence_age_seconds",
+            Self::MinimumSignalStrength => "minimum_signal_strength",
+            Self::MinimumMomentumTrend => "minimum_momentum_trend",
+            Self::MinimumMomentumRange => "minimum_momentum_range",
+            Self::MinimumMomentumVolatile => "minimum_momentum_volatile",
+            Self::MinimumFlowImbalanceTrend => "minimum_flow_imbalance_trend",
+            Self::MinimumFlowImbalanceRange => "minimum_flow_imbalance_range",
+            Self::MinimumFlowImbalanceVolatile => "minimum_flow_imbalance_volatile",
+            Self::MinimumBookImbalanceTrend => "minimum_book_imbalance_trend",
+            Self::MinimumBookImbalanceRange => "minimum_book_imbalance_range",
+            Self::MinimumBookImbalanceVolatile => "minimum_book_imbalance_volatile",
+            Self::MinimumVwapDislocationBpsTrend => "minimum_vwap_dislocation_bps_trend",
+            Self::MinimumVwapDislocationBpsRange => "minimum_vwap_dislocation_bps_range",
+            Self::MinimumVwapDislocationBpsVolatile => "minimum_vwap_dislocation_bps_volatile",
+            Self::MinimumAbsorptionPressureTrend => "minimum_absorption_pressure_trend",
+            Self::MinimumAbsorptionPressureRange => "minimum_absorption_pressure_range",
+            Self::MinimumAbsorptionPressureVolatile => "minimum_absorption_pressure_volatile",
             Self::ProfitProtectionActivationPercent => "profit_protection_activation_percent",
             Self::ProfitProtectionGivebackPercent => "profit_protection_giveback_percent",
             Self::ProfitProtectionMinimumLockPercent => "profit_protection_minimum_lock_percent",
@@ -146,5 +180,43 @@ impl StrategyParameterKey {
             Self::PostOnlyTimeoutMinutes => "post_only_timeout_minutes",
             Self::PostStopCooldownMinutes => "post_stop_cooldown_minutes",
         }
+    }
+
+    pub fn regime_threshold(self, regime: &str) -> Option<Self> {
+        let regime = regime.to_ascii_lowercase();
+        let regime = if matches!(regime.as_str(), "trend" | "trending")
+            || regime.starts_with("btc-above-sma")
+            || regime.starts_with("btc-below-sma")
+        {
+            "trend"
+        } else if matches!(regime.as_str(), "range" | "ranging") {
+            "range"
+        } else if matches!(regime.as_str(), "volatile" | "volatility") {
+            "volatile"
+        } else {
+            return None;
+        };
+        Some(match (self, regime) {
+            (Self::MinimumMomentum, "trend") => Self::MinimumMomentumTrend,
+            (Self::MinimumMomentum, "range") => Self::MinimumMomentumRange,
+            (Self::MinimumMomentum, "volatile") => Self::MinimumMomentumVolatile,
+            (Self::MinimumFlowImbalance, "trend") => Self::MinimumFlowImbalanceTrend,
+            (Self::MinimumFlowImbalance, "range") => Self::MinimumFlowImbalanceRange,
+            (Self::MinimumFlowImbalance, "volatile") => Self::MinimumFlowImbalanceVolatile,
+            (Self::MinimumBookImbalance, "trend") => Self::MinimumBookImbalanceTrend,
+            (Self::MinimumBookImbalance, "range") => Self::MinimumBookImbalanceRange,
+            (Self::MinimumBookImbalance, "volatile") => Self::MinimumBookImbalanceVolatile,
+            (Self::MinimumVwapDislocationBps, "trend") => Self::MinimumVwapDislocationBpsTrend,
+            (Self::MinimumVwapDislocationBps, "range") => Self::MinimumVwapDislocationBpsRange,
+            (Self::MinimumVwapDislocationBps, "volatile") => {
+                Self::MinimumVwapDislocationBpsVolatile
+            }
+            (Self::MinimumAbsorptionPressure, "trend") => Self::MinimumAbsorptionPressureTrend,
+            (Self::MinimumAbsorptionPressure, "range") => Self::MinimumAbsorptionPressureRange,
+            (Self::MinimumAbsorptionPressure, "volatile") => {
+                Self::MinimumAbsorptionPressureVolatile
+            }
+            _ => return None,
+        })
     }
 }

@@ -1,4 +1,4 @@
-use crate::{ParameterSpec, Signal, Strategy, StrategyParameterProfile};
+use crate::{ParameterSpec, Signal, Strategy, StrategyParameterKey, StrategyParameterProfile};
 use std::collections::BTreeMap;
 
 pub fn signal_strategy_parameters(signal: &Signal) -> BTreeMap<String, f64> {
@@ -94,6 +94,38 @@ pub fn effective_parameter_values(
             configured.filter(|value| value.is_finite() && *value >= spec.min && *value <= spec.max)
         {
             parameters.insert(spec.key.as_str().to_owned(), value);
+        }
+    }
+    // New regime-specific fields inherit the previously learned shared
+    // threshold until they have acquired a non-default value of their own.
+    for base_key in [
+        StrategyParameterKey::MinimumMomentum,
+        StrategyParameterKey::MinimumFlowImbalance,
+        StrategyParameterKey::MinimumBookImbalance,
+        StrategyParameterKey::MinimumVwapDislocationBps,
+        StrategyParameterKey::MinimumAbsorptionPressure,
+    ] {
+        let Some(base_value) = parameters.get(base_key.as_str()).copied() else {
+            continue;
+        };
+        for regime in ["trend", "range", "volatile"] {
+            let Some(regime_key) = base_key.regime_threshold(regime) else {
+                continue;
+            };
+            let configured_key =
+                strategy_parameter_key(profile_symbol, strategy, regime_key.as_str());
+            let Some(spec) = strategy
+                .parameter_specs()
+                .into_iter()
+                .find(|spec| spec.key == regime_key)
+            else {
+                continue;
+            };
+            if !overrides.contains_key(&configured_key)
+                && parameters.get(regime_key.as_str()) == Some(&spec.default)
+            {
+                parameters.insert(regime_key.as_str().to_owned(), base_value);
+            }
         }
     }
     if let Some((key, value)) = probe {

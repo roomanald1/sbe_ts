@@ -1,6 +1,6 @@
 use super::*;
 
-pub(super) const MINIMUM_SCOUT_PARAMETER_SAMPLES: usize = 2;
+pub(super) const MINIMUM_SCOUT_PARAMETER_SAMPLES: usize = 10;
 pub(super) const MAXIMUM_SCOUT_PARAMETER_SAMPLES: usize = 100;
 pub(super) const PARAMETER_STEP_RELATIVE_TOLERANCE: f64 = 1.0e-6;
 
@@ -489,14 +489,15 @@ pub(super) fn reconcile_scout_profiles(state: &mut LearningState) {
             if specs.len() != outcome.tested_parameter_keys.len() {
                 continue;
             }
-            let mut parameters = variant.profile.parameters.clone();
+            let parameters = variant.profile.parameters.clone();
             let mut valid_baseline = true;
             for spec in specs {
-                let Some(value) = outcome.baseline_parameters.get(&spec.key) else {
+                if outcome.baseline_parameters.get(&spec.key).is_none() {
                     valid_baseline = false;
                     break;
-                };
-                parameters.insert(spec.key.clone(), *value);
+                }
+                // Baseline parameters are validated but not inserted —
+                // the candidate parameters from the variant are used.
             }
             if !valid_baseline {
                 continue;
@@ -1573,6 +1574,109 @@ mod tests {
     }
 
     #[test]
+    fn paired_stop_and_target_evidence_promotes_only_the_symbol_strategy_profile() {
+        let symbol = "ETH-USDT";
+        let strategy_name = "live-momentum";
+        let specs = vec![
+            ParameterSpec {
+                key: "stop_loss_percent".into(),
+                label: "Stop loss".into(),
+                default: 0.5,
+                min: 0.1,
+                max: 1.5,
+                step: 0.05,
+                unit: "%".into(),
+                learning_direction: -1.0,
+            },
+            ParameterSpec {
+                key: "take_profit_percent".into(),
+                label: "Take profit".into(),
+                default: 0.8,
+                min: 0.2,
+                max: 3.0,
+                step: 0.05,
+                unit: "%".into(),
+                learning_direction: 1.0,
+            },
+        ];
+        let baseline = BTreeMap::from([
+            ("stop_loss_percent".into(), 0.5),
+            ("take_profit_percent".into(), 0.8),
+        ]);
+        let candidate = BTreeMap::from([
+            ("stop_loss_percent".into(), 0.6),
+            ("take_profit_percent".into(), 1.0),
+        ]);
+        let candidate_profile = StrategyProfile {
+            profile_id: "eth-risk-candidate".into(),
+            version: 0,
+            symbol: symbol.into(),
+            strategy: strategy_name.into(),
+            parameters: candidate.clone(),
+            learning_samples: 0,
+            positive_samples: 0,
+            realized_pnl: 0.0,
+        };
+        let outcomes = (0..MINIMUM_SCOUT_PARAMETER_SAMPLES)
+            .map(|index| LearningOutcome {
+                observed_at_ms: index as u64 + 1,
+                net_return_percent: 0.1,
+                evidence_group_id: Some(format!("risk-probe-{index}")),
+                learning_context: None,
+                source: LearningOutcomeSource::Scout,
+                realized_pnl_usd: None,
+                paired_comparison: true,
+                tested_parameter_keys: specs.iter().map(|spec| spec.key.clone()).collect(),
+                baseline_parameters: baseline.clone(),
+            })
+            .collect();
+        let registered = RegisteredProfile {
+            profile: candidate_profile,
+            specs: specs.clone(),
+            samples: 0,
+            positive: 0,
+            realized_pnl: 0.0,
+            outcomes,
+        };
+        let mut variants = BTreeMap::new();
+        variants.insert("eth-risk-candidate".into(), registered);
+
+        let make_active = |profile_symbol: &str| StrategyProfile {
+            profile_id: format!("{profile_symbol}-baseline"),
+            version: 4,
+            symbol: profile_symbol.into(),
+            strategy: strategy_name.into(),
+            parameters: baseline.clone(),
+            learning_samples: 12,
+            positive_samples: 7,
+            realized_pnl: 1.25,
+        };
+        let active_profiles = BTreeMap::from([
+            ("ETH-USDT:live-momentum".into(), make_active("ETH-USDT")),
+            ("BTC-USDT:live-momentum".into(), make_active("BTC-USDT")),
+        ]);
+        let mut state = LearningState {
+            variants,
+            active_profiles,
+            ..LearningState::default()
+        };
+        promote_qualified_scout_candidates(
+            &mut state,
+            symbol,
+            strategy_name,
+            MINIMUM_SCOUT_PARAMETER_SAMPLES,
+        );
+        let promoted = &state.active_profiles["ETH-USDT:live-momentum"];
+        assert_eq!(promoted.parameters["stop_loss_percent"], 0.6);
+        assert_eq!(promoted.parameters["take_profit_percent"], 1.0);
+        assert_eq!(promoted.version, 5);
+        assert_eq!(
+            state.active_profiles["BTC-USDT:live-momentum"].parameters,
+            baseline
+        );
+    }
+
+    #[test]
     fn feedback_event_helpers_extract_fields_and_positive_values() {
         let scout = scout_event();
         assert_eq!(event_specs(&scout).len(), 1);
@@ -1747,7 +1851,7 @@ mod tests {
         ));
         let mut state = LearningState {
             accepted_events: 2,
-            minimum_live_scout_parameter_samples: 9,
+            minimum_live_scout_parameter_samples: 10,
             seen_event_ids: ["keep".to_owned(), "remove".to_owned()].into(),
             ..LearningState::default()
         };
@@ -1758,7 +1862,7 @@ mod tests {
         let decoded = super::super::load_state(&path).unwrap();
         assert!(decoded.variants.is_empty());
         assert_eq!(decoded.accepted_events, 1);
-        assert_eq!(decoded.minimum_live_scout_parameter_samples, 9);
+        assert_eq!(decoded.minimum_live_scout_parameter_samples, 10);
         assert_eq!(
             decoded.seen_event_ids,
             ["keep".to_owned(), "remove".to_owned()].into()

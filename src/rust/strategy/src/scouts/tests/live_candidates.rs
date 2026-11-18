@@ -47,13 +47,19 @@ mod tests {
             "live-momentum",
             candidate.clone(),
             "bullish",
-            BTreeMap::from([("minimum_momentum".into(), 0.5)])
+            BTreeMap::from([
+                ("minimum_momentum".into(), 0.5),
+                ("minimum_signal_strength".into(), 0.0),
+            ])
         ));
         assert!(!live_strategy_enters(
             "live-momentum",
             candidate.clone(),
             "bullish",
-            BTreeMap::from([("minimum_momentum".into(), 0.8)])
+            BTreeMap::from([
+                ("minimum_momentum".into(), 0.8),
+                ("minimum_signal_strength".into(), 0.0),
+            ])
         ));
         assert!(!live_strategy_enters(
             "live-momentum",

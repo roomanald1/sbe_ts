@@ -1,5 +1,5 @@
 use crate::{
-    strategy_parameter_value, SignalDirection, StrategyDecision, StrategyParameterKey,
+    regime_conditioned_parameter_value, strategy_parameter_value, SignalDirection, StrategyDecision, StrategyParameterKey,
     StrategySignal,
 };
 pub(crate) fn evaluate(insight: &StrategySignal<'_>) -> Result<StrategyDecision, String> {
@@ -11,12 +11,17 @@ pub(crate) fn evaluate(insight: &StrategySignal<'_>) -> Result<StrategyDecision,
     let Some(signal) = insight.signal.as_ref() else {
         return Ok(StrategyDecision::Reject);
     };
-    let Some(minimum) = strategy_parameter_value(
-        &insight.parameters,
-        StrategyParameterKey::MinimumFlowImbalance,
-    ) else {
+    let Some(minimum) = regime_conditioned_parameter_value(signal, &insight.parameters, StrategyParameterKey::MinimumFlowImbalance) else {
         return Ok(StrategyDecision::Reject);
     };
+    let Some(minimum_strength) =
+        strategy_parameter_value(&insight.parameters, StrategyParameterKey::MinimumSignalStrength)
+    else {
+        return Ok(StrategyDecision::Reject);
+    };
+    if !signal.strength.is_finite() || signal.strength < minimum_strength {
+        return Ok(StrategyDecision::Reject);
+    }
     let side = match insight.direction {
         Some(SignalDirection::Long) => 1.0,
         Some(SignalDirection::Short) => -1.0,
@@ -37,8 +42,25 @@ pub(crate) fn entry_rejection_reason(insight: &StrategySignal<'_>) -> Option<Str
     let Some(signal) = insight.signal.as_ref() else {
         return Some("No live insight signal was provided".to_owned());
     };
+    let Some(minimum_strength) = strategy_parameter_value(
+        &insight.parameters,
+        StrategyParameterKey::MinimumSignalStrength,
+    ) else {
+        return Some("Learned parameter minimum_signal_strength is unavailable".to_owned());
+    };
+    if !signal.strength.is_finite() || signal.strength < minimum_strength {
+        let observed = if signal.strength.is_finite() {
+            format!("{:.3}", signal.strength)
+        } else {
+            "non-finite".to_owned()
+        };
+        return Some(format!(
+            "Signal strength {observed} is below the required minimum {:.3}",
+            minimum_strength
+        ));
+    }
     let Some(minimum) =
-        strategy_parameter_value(&insight.parameters, StrategyParameterKey::MinimumFlowImbalance)
+        regime_conditioned_parameter_value(signal, &insight.parameters, StrategyParameterKey::MinimumFlowImbalance)
     else {
         return Some("Learned parameter minimum_flow_imbalance is unavailable".to_owned());
     };
@@ -153,10 +175,16 @@ mod strategy_walk_forward_tests {
     #[test]
     fn only_mature_negative_strategy_evidence_blocks_an_entry() {
         let signal = signal();
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
         let parameters = BTreeMap::from([
             ("minimum_flow_imbalance".into(), 0.2),
             ("scout_minimum_walk_forward_samples".into(), 3.0),
             ("scout_minimum_positive_net_rate".into(), 0.5),
+            ("scout_maximum_evidence_age_seconds".into(), 86400.0),
+            ("minimum_signal_strength".into(), 0.0),
         ]);
         let mut no_evidence = StrategySignal::entry(&signal, &parameters);
         assert_eq!(Strategy::LiveTradeFlow.evaluate(&no_evidence).unwrap(), StrategyDecision::Enter);
@@ -165,7 +193,7 @@ mod strategy_walk_forward_tests {
             sample_count: 1,
             positive_net_rate: Some(0.0),
             average_net_return_percent: Some(-0.1),
-            last_sample_timestamp_ms: 90_000,
+            last_sample_timestamp_ms: now_ms,
         });
         let immature = no_evidence.clone();
         assert_eq!(Strategy::LiveTradeFlow.evaluate(&immature).unwrap(), StrategyDecision::Enter);
@@ -174,7 +202,7 @@ mod strategy_walk_forward_tests {
             sample_count: 3,
             positive_net_rate: Some(0.0),
             average_net_return_percent: Some(-0.1),
-            last_sample_timestamp_ms: 90_000,
+            last_sample_timestamp_ms: now_ms,
         });
         let mature_negative = no_evidence;
         assert_eq!(Strategy::LiveTradeFlow.evaluate(&mature_negative).unwrap(), StrategyDecision::Reject);

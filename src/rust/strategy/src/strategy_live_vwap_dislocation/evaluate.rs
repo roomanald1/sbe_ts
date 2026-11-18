@@ -1,5 +1,5 @@
 use crate::{
-    strategy_parameter_value, SignalDirection, StrategyDecision, StrategyParameterKey,
+    regime_conditioned_parameter_value, strategy_parameter_value, SignalDirection, StrategyDecision, StrategyParameterKey,
     StrategySignal,
 };
 pub(crate) fn evaluate(insight: &StrategySignal<'_>) -> Result<StrategyDecision, String> {
@@ -11,12 +11,17 @@ pub(crate) fn evaluate(insight: &StrategySignal<'_>) -> Result<StrategyDecision,
     let Some(signal) = insight.signal.as_ref() else {
         return Ok(StrategyDecision::Reject);
     };
-    let Some(minimum) = strategy_parameter_value(
-        &insight.parameters,
-        StrategyParameterKey::MinimumVwapDislocationBps,
-    ) else {
+    let Some(minimum) = regime_conditioned_parameter_value(signal, &insight.parameters, StrategyParameterKey::MinimumVwapDislocationBps) else {
         return Ok(StrategyDecision::Reject);
     };
+    let Some(minimum_strength) =
+        strategy_parameter_value(&insight.parameters, StrategyParameterKey::MinimumSignalStrength)
+    else {
+        return Ok(StrategyDecision::Reject);
+    };
+    if !signal.strength.is_finite() || signal.strength < minimum_strength {
+        return Ok(StrategyDecision::Reject);
+    }
     let side = match insight.direction {
         Some(SignalDirection::Long) => 1.0,
         Some(SignalDirection::Short) => -1.0,
@@ -37,11 +42,25 @@ pub(crate) fn entry_rejection_reason(insight: &StrategySignal<'_>) -> Option<Str
     let Some(signal) = insight.signal.as_ref() else {
         return Some("No live insight signal was provided".to_owned());
     };
+    let Some(minimum_strength) = strategy_parameter_value(
+        &insight.parameters,
+        StrategyParameterKey::MinimumSignalStrength,
+    ) else {
+        return Some("Learned parameter minimum_signal_strength is unavailable".to_owned());
+    };
+    if !signal.strength.is_finite() || signal.strength < minimum_strength {
+        let observed = if signal.strength.is_finite() {
+            format!("{:.3}", signal.strength)
+        } else {
+            "non-finite".to_owned()
+        };
+        return Some(format!(
+            "Signal strength {observed} is below the required minimum {:.3}",
+            minimum_strength
+        ));
+    }
     let Some(minimum) =
-        strategy_parameter_value(
-            &insight.parameters,
-            StrategyParameterKey::MinimumVwapDislocationBps,
-        )
+        regime_conditioned_parameter_value(signal, &insight.parameters, StrategyParameterKey::MinimumVwapDislocationBps)
     else {
         return Some("Learned parameter minimum_vwap_dislocation_bps is unavailable".to_owned());
     };
@@ -104,7 +123,7 @@ mod tests {
 
     #[test]
     fn entry_requires_directional_dislocation_to_meet_learned_threshold() {
-        let parameters = BTreeMap::from([("minimum_vwap_dislocation_bps".to_owned(), 2.0)]);
+        let parameters = BTreeMap::from([("minimum_vwap_dislocation_bps".to_owned(), 2.0), ("minimum_signal_strength".to_owned(), 0.0)]);
         for (direction, dislocation, expected) in [
             ("bullish", Some(2.0), StrategyDecision::Enter),
             ("bullish", Some(1.99), StrategyDecision::Reject),

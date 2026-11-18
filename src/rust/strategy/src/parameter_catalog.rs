@@ -293,7 +293,142 @@ fn strategy_rule_parameter_specs(strategy: Strategy) -> Vec<StrategyParameterSpe
                 "rate",
                 -1.0,
             ),
+            catalog_param(
+                K::ScoutMaximumEvidenceAgeSeconds,
+                "Maximum walk-forward evidence age",
+                86400.0,
+                3600.0,
+                604800.0,
+                3600.0,
+                "seconds",
+                -1.0,
+            ),
+            catalog_param(
+                K::MinimumSignalStrength,
+                "Minimum signal strength for entry",
+                0.3,
+                0.0,
+                1.0,
+                0.05,
+                "strength",
+                1.0,
+            ),
         ]);
+    }
+    let regime_thresholds = match strategy {
+        Strategy::LiveMomentum => Some((
+            [
+                (
+                    K::MinimumMomentumTrend,
+                    "Momentum threshold in trending markets",
+                ),
+                (
+                    K::MinimumMomentumRange,
+                    "Momentum threshold in ranging markets",
+                ),
+                (
+                    K::MinimumMomentumVolatile,
+                    "Momentum threshold in volatile markets",
+                ),
+            ],
+            0.0,
+            0.0,
+            0.02,
+            0.001,
+            "percent",
+        )),
+        Strategy::LiveTradeFlow => Some((
+            [
+                (
+                    K::MinimumFlowImbalanceTrend,
+                    "Trade-flow threshold in trending markets",
+                ),
+                (
+                    K::MinimumFlowImbalanceRange,
+                    "Trade-flow threshold in ranging markets",
+                ),
+                (
+                    K::MinimumFlowImbalanceVolatile,
+                    "Trade-flow threshold in volatile markets",
+                ),
+            ],
+            0.15,
+            0.02,
+            0.8,
+            0.01,
+            "ratio",
+        )),
+        Strategy::LiveOrderBook => Some((
+            [
+                (
+                    K::MinimumBookImbalanceTrend,
+                    "Order-book threshold in trending markets",
+                ),
+                (
+                    K::MinimumBookImbalanceRange,
+                    "Order-book threshold in ranging markets",
+                ),
+                (
+                    K::MinimumBookImbalanceVolatile,
+                    "Order-book threshold in volatile markets",
+                ),
+            ],
+            0.15,
+            0.02,
+            0.8,
+            0.01,
+            "ratio",
+        )),
+        Strategy::LiveVwapDislocation => Some((
+            [
+                (
+                    K::MinimumVwapDislocationBpsTrend,
+                    "VWAP threshold in trending markets",
+                ),
+                (
+                    K::MinimumVwapDislocationBpsRange,
+                    "VWAP threshold in ranging markets",
+                ),
+                (
+                    K::MinimumVwapDislocationBpsVolatile,
+                    "VWAP threshold in volatile markets",
+                ),
+            ],
+            1.0,
+            0.1,
+            20.0,
+            0.1,
+            "bps",
+        )),
+        Strategy::LiveAbsorptionPressure => Some((
+            [
+                (
+                    K::MinimumAbsorptionPressureTrend,
+                    "Absorption threshold in trending markets",
+                ),
+                (
+                    K::MinimumAbsorptionPressureRange,
+                    "Absorption threshold in ranging markets",
+                ),
+                (
+                    K::MinimumAbsorptionPressureVolatile,
+                    "Absorption threshold in volatile markets",
+                ),
+            ],
+            0.2,
+            0.02,
+            0.9,
+            0.01,
+            "ratio",
+        )),
+        _ => None,
+    };
+    if let Some((thresholds, default, min, max, step, unit)) = regime_thresholds {
+        for (key, label) in thresholds {
+            specs.push(catalog_param(
+                key, label, default, min, max, step, unit, -1.0,
+            ));
+        }
     }
     if matches!(
         strategy,

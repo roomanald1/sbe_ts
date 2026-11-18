@@ -2,17 +2,57 @@ use super::*;
 use strategy::StrategyWalkForwardEvidence;
 
 const OUTCOME_HALF_LIFE_MS: u64 = 7 * 24 * 60 * 60 * 1_000;
+const PARAMETER_HALF_LIFE_MS: u64 = 30 * 24 * 60 * 60 * 1_000;
 
 fn outcome_decay_weight(observed_at_ms: u64, now_ms: u64) -> f64 {
     let age_ms = now_ms.saturating_sub(observed_at_ms);
     0.5_f64.powf(age_ms as f64 / OUTCOME_HALF_LIFE_MS as f64)
 }
 
+fn decayed_profile(
+    profile: &StrategyProfile,
+    state: &LearningState,
+    now_ms: u64,
+) -> StrategyProfile {
+    let Some(variant) = state.variants.values().find(|variant| {
+        variant.profile.symbol == profile.symbol
+            && variant.profile.strategy == profile.strategy
+            && variant.profile.parameters == profile.parameters
+    }) else {
+        return profile.clone();
+    };
+    let last_update = variant
+        .outcomes
+        .iter()
+        .map(|outcome| outcome.observed_at_ms)
+        .max()
+        .unwrap_or_default();
+    if last_update == 0 {
+        return profile.clone();
+    }
+    let weight =
+        0.5_f64.powf(now_ms.saturating_sub(last_update) as f64 / PARAMETER_HALF_LIFE_MS as f64);
+    let mut decayed = profile.clone();
+    for spec in &variant.specs {
+        if let Some(value) = decayed.parameters.get_mut(&spec.key) {
+            *value = (spec.default + (*value - spec.default) * weight).clamp(spec.min, spec.max);
+        }
+    }
+    decayed
+}
+
 pub(super) async fn get_profiles(
     State(service): State<ServiceState>,
 ) -> Json<Vec<StrategyProfile>> {
     let state = service.state.lock().await;
-    Json(state.active_profiles.values().cloned().collect())
+    let now = now_ms();
+    Json(
+        state
+            .active_profiles
+            .values()
+            .map(|profile| decayed_profile(profile, &state, now))
+            .collect(),
+    )
 }
 
 pub(super) async fn get_decision_snapshot(
@@ -20,13 +60,17 @@ pub(super) async fn get_decision_snapshot(
 ) -> Json<LearnedProfileSnapshot> {
     let snapshot_now_ms = now_ms();
     let state = service.state.lock().await;
-    let profiles = state.active_profiles.values().cloned().collect::<Vec<_>>();
+    let profiles = state
+        .active_profiles
+        .values()
+        .map(|profile| decayed_profile(profile, &state, snapshot_now_ms))
+        .collect::<Vec<_>>();
     let registered_profile_ids = state
         .variants
         .values()
         .map(|variant| variant.profile.profile_id.clone())
         .collect();
-    let walk_forward_evidence = state
+    let mut walk_forward_evidence: BTreeMap<String, StrategyWalkForwardEvidence> = state
         .variants
         .values()
         .filter_map(|variant| {
@@ -63,6 +107,47 @@ pub(super) async fn get_decision_snapshot(
             })
         })
         .collect();
+    // Keep profile evidence for exact parameter matches, and add progressively
+    // broader buckets so a new parameter profile can use prior evidence for its
+    // symbol before falling back to the strategy-wide history.
+    let mut grouped = BTreeMap::<String, (f64, f64, f64, u64)>::new();
+    for variant in state.variants.values() {
+        for outcome in &variant.outcomes {
+            if outcome.source != LearningOutcomeSource::Scout
+                || !outcome.net_return_percent.is_finite()
+            {
+                continue;
+            }
+            let weight = outcome_decay_weight(outcome.observed_at_ms, snapshot_now_ms);
+            for key in [
+                format!("{}|{}", variant.profile.symbol, variant.profile.strategy),
+                variant.profile.strategy.clone(),
+            ] {
+                let bucket = grouped.entry(key).or_default();
+                bucket.0 += weight;
+                bucket.1 += if outcome.net_return_percent > 0.0 {
+                    weight
+                } else {
+                    0.0
+                };
+                bucket.2 += weight * outcome.net_return_percent;
+                bucket.3 = bucket.3.max(outcome.observed_at_ms);
+            }
+        }
+    }
+    for (key, (weight, positive, net_return, last_sample_timestamp_ms)) in grouped {
+        if weight > 0.0 {
+            walk_forward_evidence.insert(
+                key,
+                StrategyWalkForwardEvidence {
+                    sample_count: weight.round() as usize,
+                    positive_net_rate: Some(positive / weight),
+                    average_net_return_percent: Some(net_return / weight),
+                    last_sample_timestamp_ms,
+                },
+            );
+        }
+    }
     let cutoff = snapshot_now_ms.saturating_sub(7 * 24 * 60 * 60 * 1_000);
     let mut totals = BTreeMap::<String, Vec<(u64, f64)>>::new();
     let mut recent_profile_context_returns = BTreeMap::<String, Vec<(u64, f64)>>::new();
@@ -527,6 +612,23 @@ mod tests {
         assert!(strategy_size_multiplier(&losing, now) > 0.0);
     }
 
+    #[test]
+    fn stale_profile_parameters_decay_toward_catalog_defaults() {
+        let now = now_ms();
+        let mut variant = scout_variant("BTC-USDT", &[0.01]);
+        variant.outcomes[0].observed_at_ms = now.saturating_sub(PARAMETER_HALF_LIFE_MS);
+        let profile = variant.profile.clone();
+        let state = LearningState {
+            variants: BTreeMap::from([(variant_key(&variant.profile), variant)]),
+            ..LearningState::default()
+        };
+
+        let decayed = decayed_profile(&profile, &state, now);
+
+        assert!((decayed.parameters["threshold"] - 0.6).abs() < 1e-9);
+        assert_eq!(profile.parameters["threshold"], 0.7);
+    }
+
     fn scout_variant(symbol: &str, returns: &[f64]) -> RegisteredProfile {
         RegisteredProfile {
             profile: StrategyProfile {
@@ -588,7 +690,7 @@ mod tests {
     #[test]
     fn scout_parameter_evidence_is_aggregated_per_symbol() {
         let mut state = LearningState::default();
-        state.minimum_live_scout_parameter_samples = 2;
+        state.minimum_live_scout_parameter_samples = MINIMUM_SCOUT_PARAMETER_SAMPLES;
         state
             .variants
             .insert("a".into(), scout_variant("A", &[0.2, 0.4]));

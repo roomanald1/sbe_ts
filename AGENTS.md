@@ -1,161 +1,41 @@
-# Agent notes
+# Project Guidance
 
-## Command environment
+## Architecture
+- React: `src/typescript/workspace/apps/react-app`; shared UI: `src/typescript/workspace/packages/ui-platform`.
+- Rust services: `src/rust/` (`feed_handlers`, `insights`, `auto_trader`, `strategy`, `learning`, `position_management`, `paper_exchange`).
+- Signal flow: `feed_handlers` → `insights` → `auto_trader` via `StrategySignal`. Evaluators consume signals; position management handles execution.
+- Do not edit generated SBE codecs unless required by protocol changes.
 
-- If an agent gets stuck performing simple read or write tasks, it is okay to spawn a child agent to continue the work.
-- For larger pieces of work, agents may spawn child agents to handle independent, well-scoped parts in parallel. The parent agent coordinates the work and reviews the combined result; avoid delegation when shared files or dependencies would create unnecessary conflicts.
+## Tools
+- Follow `@RTK.md`; use RTK for supported commands and ast-grep for structural searches.
+- Prefer targeted searches, reads and tests. For blocked reads, use `rtk bulk-read --question` or exact line ranges.
+- Use Context7 for unfamiliar or version-specific APIs.
+- Use Python normally for file transformations; verify replacements and inspect diffs.
+- Preserve complete diagnostics. Correctness takes priority over token savings.
 
-- Use the Linux path /home/ronnie/dev/sbe_ts as the canonical workspace path for file reads, writes, and terminal working directories. Avoid passing the Windows UNC workspace spelling to edit/patch tools: they may reject a WSL reparse point even though the path works as a shell working directory.
-- Run all project commands in Linux under WSL, from /home/ronnie/dev/sbe_ts (or the relevant project directory). This includes nx, cargo, rg, Git, package managers, and build or test commands.
-- Do not invoke project commands through Windows PowerShell, Command Prompt, or Windows executables. In particular, run Nx as ./nx <target> react-app from the WSL repository root; do not launch nx or ./nx from Windows, which can trigger an app chooser.
-- If the available terminal starts in Windows, open/use a WSL/Linux shell first and run the command there.
+### Output Management
+- Keep individual command outputs below 20K characters where practical.
+- Narrow `rtk rg` searches by directory, file type or symbol; avoid repository-wide output dumps.
+- Use `rtk bulk-read --question` for large files and `sed -n '100,160p' file.rs` for exact code.
+- Run focused tests first; avoid printing full test logs unnecessarily.
+- For potentially large outputs, save complete results to `/tmp/` and inspect relevant sections.
+- Avoid printing entire diffs; inspect changed files individually when necessary.
+- Never discard errors, diagnostics or source context required for correctness.
 
-## Git on the WSL workspace
+## Development
+- Rust: `rtk cargo test --manifest-path src/rust/<crate>/Cargo.toml`; use `cargo fmt` after edits.
+- React: `./nx <target> react-app`; run targeted tests and format changed files.
+- Keep business logic in Rust; frontend models handle UI state and views handle rendering.
+- Strategies follow existing patterns, consume `StrategySignal`, and keep entry/open-position decisions in `evaluate.rs`.
+- Preserve learned parameter bounds and feedback attribution.
+- For VWAP API changes, update both trade ticket and Orders flows.
+- Never restart services without explicit permission.
+- For performance changes, consult `research/BENCHMARK_BASELINE.md`.
 
-- Run Git commands from the repository root. If using Windows Git (C:\Program Files\Git\cmd\git.exe) against this WSL workspace via its UNC path and Git reports dubious ownership, add this repository to Windows Git's global safe-directory list: git config --global --add safe.directory '%(prefix)///wsl.localhost/Ubuntu/home/ronnie/dev/sbe_ts'. This is a one-time per-user setup. Prefer using WSL Git from /home/ronnie/dev/sbe_ts when available.
+## Beads
+- Use `bd` for persistent tasks; inspect existing work, update progress and close only after verification.
+- Run `bd prime` when context is missing. No Markdown TODO tracking.
 
-## Project map
-
-- Frontend: src/typescript/workspace/apps/react-app.
-- Backend services: src/rust/feed_handlers, src/rust/position_management, src/rust/paper_exchange, and src/rust/insights.
-- Generated SBE Rust code: src/rust/feed_handlers/src/sbe/sbe_out/example; schema: src/rust/feed_handlers/src/sbe/sbe_schema.xml. Change generated files only when the schema or protocol requires it.
-- Use rg to find relevant symbols and read only the files needed for the task. Avoid lockfiles, build output, dependencies, and generated code unless relevant.
-- Root README has run commands; the Rust crate README describes service behavior and profiling.
-
-## Running and restarting services
-
-- Do not start, stop, restart, or otherwise cycle running services unless the user explicitly instructs you to do so. This includes `./start-all.sh`, `./stop-all.sh`, Compose commands, and service-specific process commands. If a task appears to need a restart, explain that and leave the services running until explicitly asked.
-- When the user authorizes a restart after a change, restart only the affected service or services and any services that depend on changed interfaces or runtime data. Do not restart the whole system for a focused change.
-- After any authorized service restart, run the homepage System liveness check from http://localhost:8080 using “Run liveness checks”. Report its pass/fail summary; if the homepage is unavailable, use `POST http://localhost:8080/api/liveness/run` once it is reachable.
-- When the user explicitly requests a full-stack rebuild and restart, run `./rebuild-all.sh` from the repository root. It builds the homepage and benchmarks, then rebuilds and force-recreates all system and infrastructure services. It requires `monitoring/.env` to exist. Do not use it for focused changes; restart only the affected services in that case.
-- System services can be targeted by Compose service name from the repository root: `./stop-system.sh <service...>` followed by `./start-system.sh <service...>`. Infrastructure services can be targeted the same way with `./stop-infra.sh <service...>` and `./start-infra.sh <service...>`. Check `system/compose.yml` and `monitoring/docker-compose.yml` for service names and dependencies; include required dependent services when a change affects them.
-- Use `./start-all.sh` for initial complete-stack startup. Use `./stop-all.sh` only when the complete stack needs to be shut down, and only with explicit user authorization. These scripts operate on both system and infrastructure stacks.
-- Before starting infrastructure, ensure `monitoring/.env` exists. Create it from `monitoring/.env.example` and set a unique Grafana password when needed.
-- For focused frontend targets, use the Nx guidance below rather than restarting unrelated services.
-
-## Execution-strategy map
-
-- Position management is in src/rust/position_management; paper-exchange simulation and VWAP scheduling are in src/rust/paper_exchange.
-- Both React entry points use the same /positions/vwap API: the trade ticket uses TradeTicketModel.ts and TradeTicketPopup.tsx; the Orders page uses OrderManagerModel.ts and Positions.tsx. Update both client flows if the request or status contract changes.
-- POST /positions/vwap accepts symbol, side, fractional quantity, duration (5–390 minutes), and max participation (1–100%). The backend generates a provisional U-shaped 78-bin curve and starts immediately. GET lists run status; DELETE cancels. Run state is in memory; paper child fills are persisted in the positions ledger.
-- The strategy consumes the existing OKX trade and book feeds; it does not require SBE schema or generated-code changes. For VWAP tasks, start with the files above and trace feed/SBE code only if the data path changes.
-- Exclude positions.json from broad searches with -g !positions.json: it is a large runtime fill ledger, not source. Avoid generated SBE output unless the schema or encoding is part of the task.
-
-## Strategy conventions
-
-- Build every new strategy by following the complete pattern of an existing active strategy, including its strategy folder, evaluator, contract, parameter definitions, registry entry, signal path, and learning integration. Do not add a strategy that bypasses established layers.
-- Subscribe to each strategy's required market data in feed_handlers, pass the resulting inputs through insights, and publish them to auto_trader as StrategySignal data. Keep calculations in the appropriate upstream market-data/insights layer; evaluators must make decisions from StrategySignal rather than subscribing to feeds or reading market data directly.
-- Parameterize every variable strategy behavior, including entry and exit thresholds, timing, sizing, and any other tunable decision. Define defaults and bounds in the strategy parameter specs, carry the parameters in the signal/profile contract, and ensure bounded learning can update them from feedback. Do not hard-code tunable behavior or introduce untracked per-strategy defaults.
-- Preserve the learning feedback loop for new strategies: outcomes/feedback must be attributed to the strategy and its parameter profile so learning can evaluate and adjust those parameters. Scouts may be sent with different adjusted parameter profiles; each scout's evaluations and feedback must remain associated with the parameters it actually used, so feedback updates the corresponding learning profile rather than being mixed across variants.
-- Every active strategy under src/rust/auto_trader/src/auto_trader/strategies/ has one evaluate.rs that owns its signal-based entry rule and open-position decision (Enter, Reject, Hold, Exit, or Rebalance). Do not split strategy decisions across entry.rs and exit.rs.
-- Strategy evaluators receive StrategySignal only; convert serialized text to enums before evaluation. Keep market-data calculations upstream and price-triggered protective order execution in position management.
-- Tunable evaluator thresholds must come from StrategySignal parameters produced by the bounded learned profile. Keep defaults and bounds in the strategy parameter specs; do not duplicate fallback numbers in evaluate.rs. Reject entry if a required learned parameter is missing.
-- Put per-strategy entry, exit, and parameter-bound tests in that strategy's evaluate.rs. Add a folder, evaluate.rs, contract.rs, and parameter definitions for every new strategy, and register it in strategies/mod.rs.
-- `live-insights` is not a strategy. Migrate old saved selections by expanding them into the five separate live strategies, and keep their evidence and outcomes attributed separately.
-
-## Project conventions
-
-- Use AG Grid for tabular data in views instead of native HTML tables, matching the shared data-grid styling. Style inputs and selects with existing app form/control styles rather than browser defaults.
-- Keep business logic in model classes; React views render model state and forward user actions to models.
-- Follow existing RxJS patterns and clean up subscriptions. For a new feed, trace the existing backend-to-frontend path and check subscription cleanup.
-- For dashboard panels, register the widget in apps/react-app/src/views/FeedControls.tsx and follow an existing model/view pair.
-
-## Build caches
-
-- Do not put one-off data migration or legacy import code in runtime application paths. Prefer explicit migration scripts, run them separately, verify the destination data, and remove temporary scripts when the migration is complete.
-
-- Run frontend targets from the repo root with ./nx <target> react-app. Nx caches build, lint, and typecheck; serve and preview are continuous.
-- After any TypeScript code changes, run the repository formatter on the changed TypeScript files.
-- Cargo reuses build artifacts in the crate's target directory. Avoid cleaning caches unless stale output is suspected.
-- After any TypeScript source or test changes, run the React app TypeScript test suite with npm test from src/typescript/workspace/apps/react-app, even when the change seems unrelated to the tests. Run any additional focused typecheck, lint, or build target when the change warrants it.
-- After any Rust source or test changes, run the relevant Rust tests and benchmarks for the affected crate(s). Before benchmarking, read research/BENCHMARK_BASELINE.md. Compare the same workloads with the latest recorded run, report any performance degradation along with meaningful changes and environment/workload differences, and append a dated run section with results. Keep runs from the most recent three days in full. When recording a new run, compact historical run details older than three days into concise dated summaries that preserve notable regressions/improvements, workload and environment differences, skipped or failed targets, and the latest comparable result for each workload. Keep the original first persisted baseline and its environment/methodology notes intact. Do not discard comparison context or treat unlike workloads as regressions.
-- After modifying Rust code, run `cargo fmt` for the affected crate(s) as the final Rust code maintenance step.
-
-## Shell command hygiene
-
-- Run commands from the WSL repository root and use repository-relative paths that exist. Confirm paths mentioned in errors with rg --files or test -e before using them.
-- If Bash startup emits errors from /home/ronnie/.profile, use a non-login shell when supported. Treat startup output as a profile configuration issue; do not copy it into a command or execute it.
-- Use rg for source searches. Use fixed-string mode (rg -F) for literal text containing regex metacharacters; quote and escape regex patterns deliberately.
-- Put only executable command text in the command field. Do not paste terminal output, error lines, diff markers, or explanatory prose there.
-
-@RTK.md
-
-<!-- BEGIN BEADS INTEGRATION v:1 profile:minimal hash:46cd31e7 -->
-## Beads Issue Tracker
-
-This project uses **bd (beads)** for issue tracking. Run `bd prime` to see full workflow context and commands.
-
-### Quick Reference
-
-```bash
-bd ready              # Find available work
-bd show <id>          # View issue details
-bd update <id> --claim  # Claim work
-bd close <id>         # Complete work
-```
-
-### Rules
-
-- Use `bd` for ALL task tracking — do NOT use TodoWrite, TaskCreate, or markdown TODO lists
-- Run `bd prime` for detailed command reference and session close protocol
-- Use `bd remember` for persistent knowledge — do NOT use MEMORY.md files
-
-**Architecture in one line:** issues live in a local Dolt DB; sync uses `refs/dolt/data` on your git remote; `.beads/issues.jsonl` is a passive export. See https://github.com/gastownhall/beads/blob/main/docs/core-concepts/sync-concepts.md for details and anti-patterns.
-
-## Agent Context Profiles
-
-The managed Beads block is task-tracking guidance, not permission to override repository, user, or orchestrator instructions.
-
-- **Conservative (default)**: Use `bd` for task tracking. Do not run git commits, git pushes, or Dolt remote sync unless explicitly asked. At handoff, report changed files, validation, and suggested next commands.
-- **Minimal**: Keep tool instruction files as pointers to `bd prime`; use the same conservative git policy unless active instructions say otherwise.
-- **Team-maintainer**: Only when the repository explicitly opts in, agents may close beads, run quality gates, commit, and push as part of session close. A current "do not commit" or "do not push" instruction still wins.
-
-## Session Completion
-
-This protocol applies when ending a Beads implementation workflow. It is subordinate to explicit user, repository, and orchestrator instructions.
-
-1. **File issues for remaining work** - Create beads for anything that needs follow-up
-2. **Run quality gates** (if code changed) - Tests, linters, builds
-3. **Update issue status** - Close finished work, update in-progress items
-4. **Handle git/sync by active profile**:
-   ```bash
-   # Conservative/minimal/default: report status and proposed commands; wait for approval.
-   git status
-
-   # Team-maintainer opt-in only, unless current instructions forbid it:
-   git pull --rebase
-   bd dolt push
-   git push
-   git status
-   ```
-5. **Hand off** - Summarize changes, validation, issue status, and any blocked sync/commit/push step
-
-**Critical rules:**
-- Explicit user or orchestrator instructions override this Beads block.
-- Do not commit or push without clear authority from the active profile or the current user request.
-- If a required sync or push is blocked, stop and report the exact command and error.
-<!-- END BEADS INTEGRATION -->
-
-<!-- BEGIN BEADS CODEX SETUP: generated by bd setup codex -->
-## Beads Issue Tracker
-
-Use Beads (`bd`) for durable task tracking in repositories that include it. Use the `beads` skill at `.agents/skills/beads/SKILL.md` (project install) or `~/.agents/skills/beads/SKILL.md` (global install) for Beads workflow guidance, then use the `bd` CLI for issue operations.
-
-### Quick Reference
-
-```bash
-bd ready                # Find available work
-bd show <id>            # View issue details
-bd update <id> --claim  # Claim work
-bd close <id>           # Complete work
-bd prime                # Refresh Beads context
-```
-
-### Rules
-
-- Use `bd` for all task tracking; do not create markdown TODO lists.
-- Run `bd prime` when Beads context is missing or stale. Codex 0.129.0+ can load Beads context automatically through native hooks; use `/hooks` to inspect or toggle them.
-- Keep persistent project memory in Beads via `bd remember`; do not create ad hoc memory files.
-
-**Architecture in one line:** issues live in a local Dolt DB; sync uses `refs/dolt/data` on your git remote; `.beads/issues.jsonl` is a passive export. See https://github.com/gastownhall/beads/blob/main/docs/core-concepts/sync-concepts.md for details and anti-patterns.
-<!-- END BEADS CODEX SETUP -->
+## Completion
+- Run relevant checks and report failures or outstanding work.
+- Do not commit, push or sync unless explicitly requested.

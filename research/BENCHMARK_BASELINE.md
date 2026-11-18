@@ -1,5 +1,28 @@
 # Rust benchmark baseline
 
+## Require ten samples before Scout parameter promotion (2026-11-18)
+
+Learning passed 65 tests. The Learning service benchmark was repeated twice with
+the existing workload (1,000 variants, 200 active profiles, 5,000 event IDs):
+database load measured 31.92–35.79 ms, decision snapshots 0.21–0.31 ms, and
+state persistence 18.72–19.12 ms. Compared with the latest same-workload result
+on 2026-11-11 (2.32 / 0.11 / 6.38 ms), each metric was slower in both runs
+(load +1,276–1,443%, snapshot +91–182%, persistence +193–200%). The benchmark
+has no Scout outcome history and does not exercise sample qualification or
+promotion, so these differences cannot be attributed to this change. The
+repeated high readings indicate an environment or runtime difference worth
+investigating; no target failed or was skipped. WSL2 Linux x86_64, optimized
+Cargo bench profile.
+
+## Require minimum strength for live strategy entries (2026-11-18)
+
+Strategy passed 172 service-feature library tests. The Scout registration replay
+benchmark measured 16,364 us for 10,000 active registrations, 60 replay
+intervals, and 500 transient failures (10,500 encoded requests), 13.0% below the
+latest comparable run on 2026-11-14 (18,803 us). This benchmark does not exercise
+live strategy evaluation or the signal-strength gate, so the timing change is
+not attributable to this work. WSL2 Linux x86_64, optimized Cargo profile.
+
 ## Scale entry notional by signal strength (2026-11-16)
 
 The new bounded strength-to-size test passed. The full AutoTrader suite ran 168

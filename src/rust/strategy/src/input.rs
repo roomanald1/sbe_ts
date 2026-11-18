@@ -713,3 +713,16 @@ pub fn strategy_parameter_value(
         .copied()
         .filter(|v| v.is_finite())
 }
+
+pub fn regime_conditioned_parameter_value(
+    signal: &StrategyMarketSignal,
+    parameters: &BTreeMap<String, f64>,
+    key: StrategyParameterKey,
+) -> Option<f64> {
+    signal
+        .market_regime
+        .as_deref()
+        .and_then(|regime| key.regime_threshold(regime))
+        .and_then(|regime_key| strategy_parameter_value(parameters, regime_key))
+        .or_else(|| strategy_parameter_value(parameters, key))
+}

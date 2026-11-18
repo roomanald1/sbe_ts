@@ -554,6 +554,51 @@ mod strategy_parameter_bounds_tests {
     }
 
     #[test]
+    fn learned_stop_and_target_are_loaded_from_each_symbol_strategy_profile() {
+        let strategy = Strategy::LiveMomentum;
+        let mut settings = Settings::default();
+        for (symbol, stop, target) in [
+            ("BTC-USDT", 0.6, 1.0),
+            ("ETH-USDT", 0.9, 1.4),
+        ] {
+            let parameters = BTreeMap::from([
+                ("stop_loss_percent".to_owned(), stop),
+                ("take_profit_percent".to_owned(), target),
+            ]);
+            settings.learned_profiles.insert(
+                format!("{symbol}:{}", strategy.as_str()),
+                strategy::StrategyProfile {
+                    profile_id: strategy::profile_id(symbol, strategy.as_str(), &parameters),
+                    version: 3,
+                    symbol: symbol.into(),
+                    strategy: strategy.as_str().into(),
+                    parameters,
+                    learning_samples: 20,
+                    positive_samples: 12,
+                    realized_pnl: 3.5,
+                },
+            );
+        }
+
+        for (symbol, expected_stop, expected_target) in [
+            ("BTC-USDT", 0.6, 1.0),
+            ("ETH-USDT", 0.9, 1.4),
+        ] {
+            let profile = learned_strategy_parameter_profile(&settings, symbol, strategy);
+            let stop = profile.parameters.iter()
+                .find(|parameter| parameter.key == "stop_loss_percent")
+                .expect("strategy exposes stop loss");
+            let target = profile.parameters.iter()
+                .find(|parameter| parameter.key == "take_profit_percent")
+                .expect("strategy exposes take profit");
+            assert_eq!(stop.value, expected_stop, "stop profile for {symbol}");
+            assert_eq!(stop.learned_value, expected_stop, "learned stop for {symbol}");
+            assert_eq!(target.value, expected_target, "target profile for {symbol}");
+            assert_eq!(target.learned_value, expected_target, "learned target for {symbol}");
+        }
+    }
+
+    #[test]
     fn profile_registration_outbox_deduplicates_exact_variants() {
         let mut settings = Settings::default();
         let strategy = Strategy::LiveMomentum;

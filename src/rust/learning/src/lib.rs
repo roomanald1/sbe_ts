@@ -144,7 +144,21 @@ struct LearningState {
 }
 
 fn default_live_scout_parameter_samples() -> usize {
-    3
+    MINIMUM_SCOUT_PARAMETER_SAMPLES
+}
+
+#[cfg(test)]
+mod scout_sample_defaults_tests {
+    use super::*;
+
+    #[test]
+    fn scout_sample_default_uses_the_enforced_minimum() {
+        assert_eq!(default_live_scout_parameter_samples(), 10);
+        assert_eq!(
+            LearningState::default().minimum_live_scout_parameter_samples,
+            10
+        );
+    }
 }
 
 impl Default for LearningState {
@@ -1392,7 +1406,16 @@ mod tests {
             app.clone(),
             "PUT",
             "/config/scout-parameter-samples",
-            Some(br#"{"minimum_samples":6}"#.to_vec()),
+            Some(br#"{"minimum_samples":9}"#.to_vec()),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+        let response = json_request(
+            app.clone(),
+            "PUT",
+            "/config/scout-parameter-samples",
+            Some(br#"{"minimum_samples":10}"#.to_vec()),
         )
         .await;
         assert_eq!(response.status(), StatusCode::OK);
@@ -1400,7 +1423,7 @@ mod tests {
         for (symbol_index, symbol) in ["BTC-USDT", "ETH-USDT"].into_iter().enumerate() {
             let parameters = BTreeMap::from([("threshold".into(), 0.4)]);
             let profile_id = format!("{symbol}-candidate");
-            for sample in 0..3 {
+            for sample in 0..9 {
                 for horizon in [60, 300, 900, 3_600] {
                     let event = FeedbackEvent::ScoutOutcome {
                         event_id: format!("fixture-event-{symbol}-{sample}-{horizon}"),
@@ -1453,9 +1476,9 @@ mod tests {
                 .all(|profile| profile.parameters["threshold"] == 0.5)
         );
 
-        // BTC now has enough paired outcomes on its own. ETH's samples must
+        // BTC now reaches the ten-sample minimum on its own. ETH's samples must
         // not contribute to BTC's promotion decision or be changed with it.
-        for sample in 3..6 {
+        for sample in 9..10 {
             let event = FeedbackEvent::ScoutOutcome {
                 event_id: format!("fixture-event-BTC-USDT-extra-{sample}"),
                 observed_at_ms: now_ms() + 100 + sample,
@@ -1500,20 +1523,20 @@ mod tests {
             .iter()
             .find(|variant| variant.symbol == "BTC-USDT")
             .unwrap();
-        assert_eq!(btc.sample_count, 6);
+        assert_eq!(btc.sample_count, 10);
         assert!(btc.promoted);
-        assert_eq!(btc.paired_baseline_decrease_samples, 6);
-        assert_eq!(btc.paired_baseline_delta_samples, 6);
-        assert_eq!(btc.lower_90_one_sided_improvement_percent, Some(0.02));
+        assert_eq!(btc.paired_baseline_decrease_samples, 10);
+        assert_eq!(btc.paired_baseline_delta_samples, 10);
+        assert!((btc.lower_90_one_sided_improvement_percent.unwrap() - 0.02).abs() < 1e-10);
         let eth = snapshot
             .scout_parameter_variants
             .iter()
             .find(|variant| variant.symbol == "ETH-USDT")
             .unwrap();
-        assert_eq!(eth.sample_count, 3);
+        assert_eq!(eth.sample_count, 9);
         assert!(!eth.promoted);
-        assert_eq!(eth.paired_baseline_decrease_samples, 3);
-        assert_eq!(eth.paired_baseline_delta_samples, 3);
+        assert_eq!(eth.paired_baseline_decrease_samples, 9);
+        assert_eq!(eth.paired_baseline_delta_samples, 9);
         assert_eq!(eth.lower_90_one_sided_improvement_percent, None);
         for index in 0..5 {
             let event = FeedbackEvent::TradeOutcome {
@@ -1556,7 +1579,7 @@ mod tests {
             app.clone(),
             "PUT",
             "/config/scout-parameter-samples",
-            Some(br#"{"minimum_samples":3}"#.to_vec()),
+            Some(br#"{"minimum_samples":10}"#.to_vec()),
         )
         .await;
         assert_eq!(response.status(), StatusCode::OK);
@@ -1570,15 +1593,15 @@ mod tests {
             .iter()
             .find(|variant| variant.symbol == "BTC-USDT")
             .unwrap();
-        assert_eq!(btc.minimum_samples, 3);
-        assert_eq!(btc.paired_baseline_decrease_samples, 6);
+        assert_eq!(btc.minimum_samples, 10);
+        assert_eq!(btc.paired_baseline_decrease_samples, 10);
         let eth = restarted_snapshot
             .scout_parameter_variants
             .iter()
             .find(|variant| variant.symbol == "ETH-USDT")
             .unwrap();
-        assert_eq!(eth.minimum_samples, 3);
-        assert_eq!(eth.paired_baseline_decrease_samples, 3);
+        assert_eq!(eth.minimum_samples, 10);
+        assert_eq!(eth.paired_baseline_decrease_samples, 9);
         let _ = std::fs::remove_file(path);
     }
 
