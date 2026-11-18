@@ -63,7 +63,11 @@ Copy monitoring/.env.example to monitoring/.env and set a unique Grafana passwor
 
 To run only one side, use `./start-infra.sh` or `./start-system.sh`; stop them with `./stop-infra.sh` or `./stop-system.sh`. You can pass Compose service names to start or stop only selected services, for example `./start-infra.sh grafana`.
 
-To rebuild images and recreate every service in both Compose projects, run `./rebuild-all.sh`. It also rebuilds the homepage and benchmarks bundles used by infrastructure. Set `SCOUT_WORKERS_ENABLED=false` to omit the optional strategy Scout workers.
+To rebuild images and recreate every service in both Compose projects, run `./rebuild-all.sh`. It rebuilds infrastructure before system services and also rebuilds the homepage and benchmarks bundles used by infrastructure. To rebuild only the system services, run `./rebuild-services.sh`. Set `SCOUT_WORKERS_ENABLED=false` to omit the optional strategy Scout workers.
+
+For targeted system rebuilds, use `just rebuild <service> [service ...]`, for example `just rebuild insights auto-trader`. Use `just rebuild-scouts` to rebuild all Scout workers. Targeted rebuilds force-recreate only the named services and do not restart dependencies. Run `just --list` to see the available recipes.
+
+Common development commands are also available through Just: `just fmt <crate>`, `just fmt-rust`, `just check <crate>`, `just test <crate> [filter ...]`, `just typecheck`, and `just diff-check`. Crate names use their directory names, such as `auto_trader`.
 
 Launch Compose through these scripts so bind mounts resolve to this repository's data directories. If services were previously launched from the control container, refresh the controller and recreate the stateful services with `./start-infra.sh service-control` followed by `./start-system.sh position-management auto-trader insights learning`.
 

@@ -8,6 +8,13 @@ pub(super) async fn accept_feedback(
     State(service): State<ServiceState>,
     Json(event): Json<FeedbackEvent>,
 ) -> Result<Json<FeedbackResult>, (StatusCode, String)> {
+    let (_, symbol, _, _, _) = event_parts(&event);
+    if !strategy::is_autotrader_symbol_allowed(symbol) {
+        return Err((
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "symbol is outside the AutoTrader allowlist".into(),
+        ));
+    }
     if serde_json::to_vec(&event).map_or(true, |encoded| encoded.len() > 16 * 1024) {
         return Err((
             StatusCode::PAYLOAD_TOO_LARGE,
@@ -119,6 +126,18 @@ pub(super) async fn accept_feedback(
     }
     let (event_id, symbol, strategy, parameters, profile_id) = event_parts(&event);
     validate_feedback_identity(event_id, symbol, strategy, &profile_id, parameters)?;
+    if matches!(
+        &event,
+        FeedbackEvent::ScoutOutcome {
+            market_regime: Some(regime),
+            ..
+        } if !matches!(regime.as_str(), "range" | "trend" | "volatile" | "mixed")
+    ) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "invalid Scout market regime".into(),
+        ));
+    }
     validate_trade_replay_context(&event)?;
     let mut state = service.state.lock().await;
     if has_seen_feedback_id(&state, &service.path, event_id)? {
@@ -707,6 +726,10 @@ fn learning_outcome(event: &FeedbackEvent) -> LearningOutcome {
         learning_context: match event {
             FeedbackEvent::TradeOutcome { scout: false, .. } => event_context(event)
                 .and_then(|context| context.strip_suffix(":trade").map(str::to_owned)),
+            _ => None,
+        },
+        market_regime: match event {
+            FeedbackEvent::ScoutOutcome { market_regime, .. } => market_regime.clone(),
             _ => None,
         },
         source: match event {
@@ -1496,6 +1519,7 @@ mod tests {
             event_id: "e".into(),
             observed_at_ms: 100,
             learning_context: Some("btc:momentum:long".into()),
+            market_regime: Some("trend".into()),
             symbol: "BTC-USDT".into(),
             strategy: "momentum".into(),
             profile_id: "p".into(),
@@ -1517,6 +1541,7 @@ mod tests {
                 net_return_percent: value,
                 evidence_group_id: group.map(str::to_owned),
                 learning_context: None,
+                market_regime: None,
                 source: LearningOutcomeSource::Scout,
                 realized_pnl_usd: None,
                 paired_comparison: true,
@@ -1623,6 +1648,7 @@ mod tests {
                 net_return_percent: 0.1,
                 evidence_group_id: Some(format!("risk-probe-{index}")),
                 learning_context: None,
+                market_regime: None,
                 source: LearningOutcomeSource::Scout,
                 realized_pnl_usd: None,
                 paired_comparison: true,

@@ -1,5 +1,23 @@
 # Rust benchmark baseline
 
+## Reduce AutoTrader parameter route work (2026-11-18)
+
+The decision-parameters benchmark uses 16 allowed symbols and all non-legacy
+strategies, yielding a 798,465-byte profile JSON payload. Its 20,000 synthetic
+Scout variants use disallowed `BENCH-*` symbols and are filtered from the
+response; they measure the cost of unrelated retained variants, not variant
+serialization. The original implementation measured 98,363.6 us/op in this
+fixture because each profile repeatedly scanned the full variant vector and
+the handler cloned its learning maps. Indexing variants by requested
+symbol/strategy and building response profiles from the settings under lock
+removed those costs. Current optimized measurements are 1,029–1,068 us profile
+build plus 1,060–1,084 us JSON encoding with no retained variants, and 1,454 us
+profile build plus 1,117 us JSON encoding with 20,000 unrelated variants.
+The payload is unchanged in both cases. This is still above the 900 us target;
+the repeated per-profile parameter schema and 798 KB JSON response now dominate.
+The benchmark excludes RSocket transport and HTTP framing. WSL2 Linux x86_64,
+optimized Cargo bench profile.
+
 ## Require ten samples before Scout parameter promotion (2026-11-18)
 
 Learning passed 65 tests. The Learning service benchmark was repeated twice with

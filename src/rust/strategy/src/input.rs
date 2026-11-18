@@ -30,6 +30,44 @@ pub struct StrategyMarketSignal {
     pub entry_gate: Option<serde_json::Value>,
 }
 
+/// Return the canonical regime attached to a signal, deriving it from the
+/// shared market features when the producer did not provide one.
+pub fn market_regime(signal: &StrategyMarketSignal) -> Option<&'static str> {
+    if let Some(regime) = signal.market_regime.as_deref() {
+        match regime {
+            "range" => return Some("range"),
+            "trend" => return Some("trend"),
+            "volatile" => return Some("volatile"),
+            "mixed" => return Some("mixed"),
+            _ => {}
+        }
+    }
+    if signal
+        .ranging_probability
+        .is_some_and(|probability| probability.is_finite() && probability >= 0.65)
+    {
+        return Some("range");
+    }
+    if signal
+        .components
+        .trend_5m_volatility_units
+        .is_some_and(|value| value.is_finite() && value.abs() >= 1.5)
+    {
+        return Some("trend");
+    }
+    if signal
+        .components
+        .volatility_1m_percent
+        .is_some_and(|value| value.is_finite() && value.abs() >= 1.0)
+    {
+        return Some("volatile");
+    }
+    let has_regime_features = signal.ranging_probability.is_some()
+        || signal.components.trend_5m_volatility_units.is_some()
+        || signal.components.volatility_1m_percent.is_some();
+    has_regime_features.then_some("mixed")
+}
+
 /// Select strategy-specific inputs from one shared Insights snapshot.
 /// This adapter belongs to Strategy so coordinators do not interpret features.
 pub fn prepare_live_strategy_signal(
@@ -494,6 +532,31 @@ mod signal_direction_tests {
             SignalDirection::non_directional_reason("ranging"),
             "Signal direction 'ranging' is unsupported"
         );
+    }
+}
+
+#[cfg(test)]
+mod market_regime_tests {
+    use super::{StrategyMarketSignal, market_regime};
+
+    #[test]
+    fn uses_canonical_regime_then_derives_it_from_market_features() {
+        let explicit = StrategyMarketSignal {
+            market_regime: Some("range".into()),
+            ranging_probability: Some(0.1),
+            ..Default::default()
+        };
+        assert_eq!(market_regime(&explicit), Some("range"));
+
+        let volatile = StrategyMarketSignal {
+            components: super::SignalComponents {
+                volatility_1m_percent: Some(1.2),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert_eq!(market_regime(&volatile), Some("volatile"));
+        assert_eq!(market_regime(&StrategyMarketSignal::default()), None);
     }
 }
 pub type Signal = StrategyMarketSignal;

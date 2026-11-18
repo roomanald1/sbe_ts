@@ -17,13 +17,8 @@ const LIVE_SCOUT_HOLD_PRIOR_SAMPLES: usize = 10;
 const LIVE_SCOUT_DEFAULT_HOLD_MS: u64 = 30 * 60 * 1_000;
 const LIVE_SCOUT_MIN_DURATION_MS: u64 = 15 * 60 * 1_000;
 const LIVE_SCOUT_MAX_DURATION_MS: u64 = 6 * 60 * 60 * 1_000;
-const LIQUID_SCOUT_SYMBOLS: &[&str] = &[
-    "BTC-USDT", "ETH-USDT", "SOL-USDT", "BNB-USDT", "XRP-USDT", "ADA-USDT",
-    "DOGE-USDT", "TRX-USDT", "LINK-USDT", "LTC-USDT", "AVAX-USDT",
-];
-
-fn is_liquid_scout_symbol(symbol: &str) -> bool {
-    LIQUID_SCOUT_SYMBOLS.contains(&symbol)
+pub(crate) fn is_liquid_scout_symbol(symbol: &str) -> bool {
+    crate::is_autotrader_symbol_allowed(symbol)
 }
 
 fn dated_carry_profile_symbol(spot_symbol: &str) -> Option<String> {
@@ -2272,6 +2267,12 @@ async fn finalize_sample(
     State(service): State<ServiceState>,
     Json(request): Json<FinalizeRequest>,
 ) -> Result<StatusCode, (StatusCode, String)> {
+    if !is_liquid_scout_symbol(&request.sample.symbol) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Scout sample symbol is outside the Scout allowlist".into(),
+        ));
+    }
     let event_id = request.sample.event_id.clone();
     if service.scout.data.lock().await.seen.contains(&event_id)
         || scout_record_exists(&service.scout.path, "seen", &event_id)? {
@@ -2357,6 +2358,11 @@ fn parameter_keys(outcome: &ScoutOutcomeRequest) -> Option<BTreeMap<String, f64>
 fn validate_scout_outcome(
     outcome: &ScoutOutcomeRequest,
 ) -> Result<BTreeMap<String, f64>, (StatusCode, String)> {
+    let profile_symbol = outcome
+        .scout_parameter_profile_symbol
+        .as_deref()
+        .or(outcome.scout_comparison_parameter_profile_symbol.as_deref())
+        .unwrap_or(&outcome.symbol);
     let mut zero_side_ids = BTreeSet::new();
     let has_duplicate_zero_sides = outcome
         .scout_comparison_zero_sides
@@ -2368,8 +2374,19 @@ fn validate_scout_outcome(
         || !outcome.simulated_net_pnl_usd.is_finite()
         || outcome.symbol.is_empty()
         || outcome.symbol.len() > 32
+        || !is_liquid_scout_symbol(profile_symbol)
+        || outcome
+            .scout_comparison_zero_sides
+            .iter()
+            .any(|side| !is_liquid_scout_symbol(&side.profile_symbol))
         || outcome.strategy.is_empty()
         || outcome.strategy.len() > 120
+        || outcome
+            .market_regime
+            .as_deref()
+            .is_some_and(|regime| {
+                !matches!(regime, "range" | "trend" | "volatile" | "mixed")
+            })
         || outcome
             .strategy_parameters
             .values()
@@ -2521,6 +2538,7 @@ fn outcome_event(outcome: &ScoutOutcomeRequest, tested: &BTreeMap<String, f64>) 
         learning_context: (outcome.exit_scenario == "strategy")
         .then(|| scout_context_learning_key(&outcome.learning_context))
         .flatten(),
+        market_regime: outcome.market_regime.clone(),
         symbol: profile_symbol.to_owned(),
         strategy: outcome.strategy.clone(),
         profile_id: strategies::profile_id(profile_symbol, &outcome.strategy, &parameters),
@@ -2555,6 +2573,7 @@ fn paired_event(
     // mix observations from different markets or directions.
     if baseline.symbol != variant.symbol
         || baseline.strategy != variant.strategy
+        || baseline.market_regime != variant.market_regime
         || baseline.learning_context != variant.learning_context
         || baseline.signal_timestamp_ms.abs_diff(variant.signal_timestamp_ms) > 10_000
     {
@@ -2597,6 +2616,7 @@ fn paired_event(
             .evaluated_timestamp_ms
             .max(variant.evaluated_timestamp_ms),
         learning_context: None,
+        market_regime: baseline.market_regime.clone(),
         symbol: profile_symbol.to_owned(),
         strategy: variant.strategy.clone(),
         profile_id: strategies::profile_id(profile_symbol, &variant.strategy, &parameters),
@@ -3715,6 +3735,15 @@ async fn flush_scout_outbox(
             return Ok(());
         };
         if matches!(item, ScoutOutboxItem::Audit(_)) {
+            acknowledged += 1;
+            if acknowledged >= SCOUT_OUTBOX_ACK_BATCH_SIZE {
+                acknowledge_scout_outbox(scout, acknowledged).await?;
+                acknowledged = 0;
+            }
+            continue;
+        }
+        if matches!(&item, ScoutOutboxItem::Learning(FeedbackEvent::ScoutOutcome { symbol, .. }) if !is_liquid_scout_symbol(symbol)) {
+            eprintln!("WARN Discarding off-list Scout outcome from the persistent outbox");
             acknowledged += 1;
             if acknowledged >= SCOUT_OUTBOX_ACK_BATCH_SIZE {
                 acknowledge_scout_outbox(scout, acknowledged).await?;

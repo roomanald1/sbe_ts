@@ -58,6 +58,8 @@ struct LearningOutcome {
     evidence_group_id: Option<String>,
     #[serde(default)]
     learning_context: Option<String>,
+    #[serde(default)]
+    market_regime: Option<String>,
     source: LearningOutcomeSource,
     #[serde(default)]
     realized_pnl_usd: Option<f64>,
@@ -696,6 +698,12 @@ async fn accept_exit_timing_observation(
         return Err((
             StatusCode::BAD_REQUEST,
             "invalid exit-timing observation".into(),
+        ));
+    }
+    if !strategy::is_autotrader_symbol_allowed(observation["symbol"].as_str().unwrap_or_default()) {
+        return Err((
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "symbol is outside the AutoTrader allowlist".into(),
         ));
     }
     if serde_json::to_vec(&observation).map_or(true, |encoded| encoded.len() > 16 * 1024) {
@@ -1429,6 +1437,9 @@ mod tests {
                         event_id: format!("fixture-event-{symbol}-{sample}-{horizon}"),
                         observed_at_ms: now_ms() + symbol_index as u64 * 10 + sample,
                         learning_context: None,
+                        market_regime: Some(
+                            if symbol_index == 0 { "trend" } else { "range" }.into(),
+                        ),
                         symbol: symbol.into(),
                         strategy: "live-momentum".into(),
                         profile_id: profile_id.clone(),
@@ -1483,6 +1494,7 @@ mod tests {
                 event_id: format!("fixture-event-BTC-USDT-extra-{sample}"),
                 observed_at_ms: now_ms() + 100 + sample,
                 learning_context: None,
+                market_regime: Some("trend".into()),
                 symbol: "BTC-USDT".into(),
                 strategy: "live-momentum".into(),
                 profile_id: "BTC-USDT-candidate".into(),
@@ -1510,13 +1522,46 @@ mod tests {
             serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
                 .unwrap();
         assert_eq!(profiles.len(), 2);
-        assert_eq!(profiles[0].parameters["threshold"], 0.4);
+        assert!((profiles[0].parameters["threshold"] - 0.4).abs() < 1e-6);
         assert_eq!(profiles[1].parameters["threshold"], 0.5);
 
         let response = json_request(app.clone(), "GET", "/decision-snapshot", None).await;
         let snapshot: LearnedProfileSnapshot =
             serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
                 .unwrap();
+        assert!(
+            snapshot
+                .walk_forward_evidence
+                .contains_key("BTC-USDT|live-momentum")
+        );
+        assert!(
+            snapshot
+                .walk_forward_evidence
+                .contains_key("ETH-USDT|live-momentum")
+        );
+        assert!(!snapshot.walk_forward_evidence.contains_key("live-momentum"));
+        assert!(snapshot.walk_forward_evidence["BTC-USDT|live-momentum"].sample_count > 0);
+        assert!(snapshot.walk_forward_evidence["ETH-USDT|live-momentum"].sample_count > 0);
+        assert!(
+            snapshot
+                .walk_forward_evidence
+                .contains_key("BTC-USDT|live-momentum|regime:trend")
+        );
+        assert!(
+            snapshot
+                .walk_forward_evidence
+                .contains_key("ETH-USDT|live-momentum|regime:range")
+        );
+        assert!(
+            !snapshot
+                .walk_forward_evidence
+                .contains_key("BTC-USDT|live-momentum|regime:range")
+        );
+        assert!(
+            snapshot
+                .walk_forward_evidence
+                .contains_key("BTC-USDT-candidate|regime:trend")
+        );
         assert_eq!(snapshot.scout_parameter_variants.len(), 2);
         let btc = snapshot
             .scout_parameter_variants
@@ -1567,13 +1612,15 @@ mod tests {
         let profiles: Vec<StrategyProfile> =
             serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
                 .unwrap();
-        assert_eq!(
-            profiles
+        assert!(
+            (profiles
                 .iter()
                 .find(|profile| profile.symbol == "BTC-USDT")
                 .unwrap()
-                .parameters["threshold"],
-            0.4
+                .parameters["threshold"]
+                - 0.4)
+                .abs()
+                < 1e-6
         );
         let response = json_request(
             app.clone(),
@@ -1722,6 +1769,7 @@ mod tests {
             event_id: "e1".into(),
             observed_at_ms: 1,
             learning_context: None,
+            market_regime: None,
             symbol: "BTC-USDT".into(),
             strategy: "live-momentum".into(),
             profile_id: "p1".into(),
@@ -1781,6 +1829,7 @@ mod tests {
             event_id: "scout-probe-loss".into(),
             observed_at_ms: 1,
             learning_context: None,
+            market_regime: None,
             symbol: profile.symbol.clone(),
             strategy: profile.strategy.clone(),
             profile_id: profile.profile_id.clone(),
@@ -1821,6 +1870,7 @@ mod tests {
             event_id: "scout-id".into(),
             observed_at_ms: 1,
             learning_context: None,
+            market_regime: None,
             symbol: "BTC-USDT".into(),
             strategy: "momentum".into(),
             profile_id: "p1".into(),

@@ -2,6 +2,9 @@ async fn receive_scout_markout(
     State(service): State<ServiceState>,
     Json(markout): Json<ScoutMarkoutRequest>,
 ) -> Result<StatusCode, (StatusCode, String)> {
+    if !is_liquid_scout_symbol(&markout.symbol) {
+        return Ok(StatusCode::NO_CONTENT);
+    }
     let instance = {
         let mut state = service.scout.data.lock().await;
         ensure_scout_instance_loaded(&mut state, &service.scout.path, &markout.decision_id)
@@ -171,6 +174,7 @@ fn scout_outcome_from_markout(
         net_return_percent,
         signal_timestamp_ms: markout.signal_timestamp_ms,
         evaluated_timestamp_ms: markout.evaluated_timestamp_ms,
+        market_regime: canonical_market_regime(instance["market_regime"].as_str()),
         taker_fee_rate: markout.taker_fee_rate,
         symbol: markout.symbol,
         strategy: instance["strategy"].as_str().unwrap_or_default().to_owned(),
@@ -454,6 +458,17 @@ fn apply_scout_lifecycle_observation_with_changes(
         else {
             continue;
         };
+        if dated_carry_profile_symbol(&probe.candidate.spot_symbol).as_deref()
+            != Some(probe.profile_symbol.as_str())
+        {
+            state.scout_pending_samples.remove(&id);
+            state.scout_sample_active_scenarios.remove(&id);
+            state.scout_plan_profiles.remove(&id);
+            changed_records.insert(format!("scout_pending_samples@{id}"));
+            changed_records.insert(format!("scout_sample_active_scenarios@{id}"));
+            changed_records.insert(format!("scout_plan_profiles@{id}"));
+            continue;
+        }
         let age = request.now_ms.saturating_sub(probe.opened_at_ms);
         if age > 3 * 86_400_000 {
             if state.scout_pending_samples.remove(&id).is_some() {
@@ -499,6 +514,7 @@ fn apply_scout_lifecycle_observation_with_changes(
                 ),
                 observed_at_ms: request.now_ms,
                 learning_context: None,
+                market_regime: None,
                 symbol: probe.profile_symbol.clone(),
                 strategy: probe.strategy.clone(),
                 profile_id: strategies::profile_id(
@@ -527,6 +543,7 @@ fn apply_scout_lifecycle_observation_with_changes(
                 net_return_percent,
                 signal_timestamp_ms: probe.opened_at_ms,
                 evaluated_timestamp_ms: request.now_ms,
+                market_regime: None,
                 taker_fee_rate: 0.0,
                 symbol: probe.profile_symbol.clone(),
                 strategy: strategies::Strategy::DatedCarry.as_str().to_owned(),
@@ -643,6 +660,7 @@ async fn observe_scout_lifecycle(
         || request.candidates.iter().any(|candidate| {
             candidate.spot_symbol.is_empty()
                 || candidate.future_symbol.is_empty()
+                || dated_carry_profile_symbol(&candidate.spot_symbol).is_none()
                 || ![
                     candidate.quantity,
                     candidate.spot_ask,
@@ -687,7 +705,8 @@ fn valid_dated_carry_probe(
     if probe.sample_id != sample_group_id
         || probe.opened_at_ms > now_ms.saturating_add(5_000)
         || probe.strategy.is_empty()
-        || probe.profile_symbol.is_empty()
+        || dated_carry_profile_symbol(&probe.candidate.spot_symbol).as_deref()
+            != Some(probe.profile_symbol.as_str())
         || probe
             .parameters
             .values()
@@ -762,8 +781,16 @@ fn valid_dated_carry_probe(
 
 async fn create_scout_plan(
     State(service): State<ServiceState>,
-    Json(request): Json<ScoutPlanRequest>,
+    Json(mut request): Json<ScoutPlanRequest>,
 ) -> Result<Json<ScoutPlanResponse>, (StatusCode, String)> {
+    for candidate in &mut request.candidates {
+        for audit in &mut candidate.audit_plans {
+            attach_market_regime(audit);
+        }
+        for template in &mut candidate.audit_templates {
+            attach_market_regime(&mut template.base_audit);
+        }
+    }
     if request.request_id.is_empty()
         || request.request_id.len() > 240
         || request.candidates.len() > 512
@@ -788,7 +815,8 @@ async fn create_scout_plan(
         || request.max_active_variants_per_profile > 1_000
         || request.now_ms > scout_now_ms().saturating_add(5_000)
         || request.candidates.iter().any(|candidate| {
-            (candidate.sample_group_id.is_empty() && !candidate.generate_group_id)
+            !scout_plan_candidate_is_allowlisted(candidate)
+                || (candidate.sample_group_id.is_empty() && !candidate.generate_group_id)
                 || candidate.sample_group_id.len() > 512
                 || (candidate.cooldown_key.is_empty() && !candidate.generate_group_id)
                 || candidate.cooldown_key.len() > 512
@@ -1093,6 +1121,65 @@ async fn create_scout_plan(
     Ok(Json(response))
 }
 
+fn canonical_market_regime(value: Option<&str>) -> Option<String> {
+    value
+        .filter(|regime| matches!(*regime, "range" | "trend" | "volatile" | "mixed"))
+        .map(str::to_owned)
+}
+
+fn attach_market_regime(audit: &mut serde_json::Value) {
+    if canonical_market_regime(audit["market_regime"].as_str()).is_some() {
+        return;
+    }
+    let signal_regime = serde_json::from_value::<strategies::StrategyMarketSignal>(audit.clone())
+        .ok()
+        .and_then(|signal| strategies::market_regime(&signal).map(str::to_owned));
+    let regime = signal_regime.or_else(|| {
+        if audit["strategy_candidate"].as_bool().unwrap_or(false) {
+            return None;
+        }
+        let context_regime = audit["market_context"]
+            .as_str()
+            .and_then(|context| context.split(':').nth(1));
+        canonical_market_regime(context_regime)
+    });
+    if let Some(regime) = regime {
+        audit["market_regime"] = serde_json::json!(regime);
+    }
+}
+
+fn scout_plan_candidate_is_allowlisted(candidate: &ScoutPlanCandidate) -> bool {
+    let mut symbols = Vec::with_capacity(
+        candidate.audit_plans.len() + candidate.audit_templates.len() + 1,
+    );
+    for audit in &candidate.audit_plans {
+        let Some(symbol) = audit.get("symbol").and_then(serde_json::Value::as_str) else {
+            return false;
+        };
+        symbols.push(symbol);
+    }
+    for template in &candidate.audit_templates {
+        let Some(symbol) = template
+            .base_audit
+            .get("symbol")
+            .and_then(serde_json::Value::as_str)
+        else {
+            return false;
+        };
+        symbols.push(symbol);
+    }
+    if let Some(ScoutSamplePayload::DatedCarryProbe(probe)) = &candidate.sample_payload {
+        let Some(derived_symbol) = dated_carry_profile_symbol(&probe.candidate.spot_symbol) else {
+            return false;
+        };
+        if probe.profile_symbol != derived_symbol {
+            return false;
+        }
+        symbols.push(&probe.profile_symbol);
+    }
+    !symbols.is_empty() && symbols.into_iter().all(is_liquid_scout_symbol)
+}
+
 async fn forward_outcome(
     State(service): State<ServiceState>,
     Json(event): Json<FeedbackEvent>,
@@ -1105,6 +1192,14 @@ async fn forward_event(
     service: &ServiceState,
     event: &FeedbackEvent,
 ) -> Result<(), (StatusCode, String)> {
+    if let FeedbackEvent::ScoutOutcome { symbol, .. } = event {
+        if !is_liquid_scout_symbol(symbol) {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "Scout outcome symbol is outside the Scout allowlist".into(),
+            ));
+        }
+    }
     let acknowledgement = strategies::request_scout_feedback(
         &service.learning_rsocket_url,
         event,
@@ -1143,7 +1238,8 @@ impl ScoutSample {
         exit_price: f64,
         cost_percent: f64,
     ) -> Option<FeedbackEvent> {
-        if self.entry_price <= 0.0
+        if !is_liquid_scout_symbol(&self.symbol)
+            || self.entry_price <= 0.0
             || exit_price <= 0.0
             || !self.entry_price.is_finite()
             || !exit_price.is_finite()
@@ -1159,6 +1255,7 @@ impl ScoutSample {
             event_id: self.event_id,
             observed_at_ms: closed_at_ms,
             learning_context: None,
+            market_regime: canonical_market_regime(self.market_regime.as_deref()),
             symbol: self.symbol,
             strategy: self.strategy,
             profile_id: self.profile_id,
@@ -1258,6 +1355,10 @@ async fn generate_live_candidates(
 ) -> Result<Json<Vec<serde_json::Value>>, (StatusCode, String)> {
     if request.signals.len() > 2_000
         || request.profiles.len() > 100
+        || request
+            .profiles
+            .iter()
+            .any(|profile| !is_liquid_scout_symbol(&profile.symbol))
         || request
             .profiles
             .iter()
@@ -2062,6 +2163,27 @@ fn portfolio_strategy_walk_forward(
 mod strategy_walk_forward_tests {
     use super::*;
 
+    #[test]
+    fn scout_plan_audit_keeps_or_derives_only_canonical_regimes() {
+        let mut contextual = serde_json::json!({
+            "market_context": "long:volatile:BTC-USDT:live-momentum",
+            "market_regime": null
+        });
+        attach_market_regime(&mut contextual);
+        assert_eq!(contextual["market_regime"], "volatile");
+
+        let mut feature_derived = serde_json::json!({
+            "market_regime": "risk-on",
+            "ranging_probability": 0.8
+        });
+        attach_market_regime(&mut feature_derived);
+        assert_eq!(feature_derived["market_regime"], "range");
+
+        let mut unknown = serde_json::json!({"symbol":"BTC-USDT"});
+        attach_market_regime(&mut unknown);
+        assert!(unknown.get("market_regime").is_none());
+    }
+
     fn test_service(path: &std::path::Path, state: PersistedState) -> ServiceState {
         ServiceState {
             learning_rsocket_url: String::new(),
@@ -2147,6 +2269,7 @@ mod strategy_walk_forward_tests {
             net_return_percent: net,
             signal_timestamp_ms: signal_ms,
             evaluated_timestamp_ms: evaluated_ms,
+            market_regime: Some("trend".into()),
             taker_fee_rate: 0.001,
             symbol: "BTC-USDT".into(),
             strategy: "live-momentum".into(),
@@ -2190,6 +2313,7 @@ mod strategy_walk_forward_tests {
             profile_id,
             parameters: learned_parameters,
             comparison,
+            market_regime,
             net_return_percent,
             ..
         }) = &state.outbox[0]
@@ -2201,6 +2325,7 @@ mod strategy_walk_forward_tests {
             &strategies::profile_id("BTC-USDT", "live-momentum", &parameters)
         );
         assert_eq!(learned_parameters, &parameters);
+        assert_eq!(market_regime.as_deref(), Some("trend"));
         assert_eq!(
             comparison,
             &strategies::ScoutComparisonMetadata::Independent

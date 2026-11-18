@@ -23,6 +23,7 @@ mod scout_outcome_tests {
             net_return_percent: net,
             signal_timestamp_ms: scout_now_ms().saturating_sub(100),
             evaluated_timestamp_ms: scout_now_ms(),
+            market_regime: Some("trend".into()),
             taker_fee_rate: 0.001,
             symbol: "BTC-USDT".into(),
             strategy: "live-momentum".into(),
@@ -55,6 +56,7 @@ mod scout_outcome_tests {
             specs,
             learning_context,
             net_return_percent,
+            market_regime,
             ..
         } = outcome_event(&sample, &tested)
         else {
@@ -63,9 +65,24 @@ mod scout_outcome_tests {
         assert_eq!(parameters["minimum_momentum"], 0.7);
         assert_eq!(specs.len(), 1);
         assert_eq!(learning_context.as_deref(), Some("scout:BTC:trade"));
+        assert_eq!(market_regime.as_deref(), Some("trend"));
         assert_eq!(net_return_percent, 1.25);
         sample.scout_parameter_value = Some(0.75);
         assert!(validate_scout_outcome(&sample).is_err());
+        sample.scout_parameter_value = Some(0.7);
+        sample.market_regime = Some("risk-on".into());
+        assert!(validate_scout_outcome(&sample).is_err());
+    }
+
+    #[test]
+    fn scout_outcomes_reject_non_allowlisted_symbols_and_profiles() {
+        let mut sample = outcome("off-list-symbol", 1.25);
+        sample.symbol = "MON-USDT".into();
+        assert!(validate_scout_outcome(&sample).is_err());
+
+        let mut profile_mismatch = outcome("off-list-profile", 1.25);
+        profile_mismatch.scout_parameter_profile_symbol = Some("MON-USDT".into());
+        assert!(validate_scout_outcome(&profile_mismatch).is_err());
     }
 
     #[test]
@@ -82,6 +99,7 @@ mod scout_outcome_tests {
             comparison,
             learning_context,
             net_return_percent,
+            market_regime,
             ..
         } = event
         else {
@@ -93,6 +111,7 @@ mod scout_outcome_tests {
         assert_eq!(parameters, baseline.strategy_parameters);
         assert_eq!(comparison, strategies::ScoutComparisonMetadata::Independent);
         assert_eq!(learning_context.as_deref(), Some("scout:BTC:trade"));
+        assert_eq!(market_regime.as_deref(), Some("trend"));
         assert_eq!(net_return_percent, 0.4);
 
         baseline.exit_scenario = "tight".into();
@@ -124,6 +143,7 @@ mod scout_outcome_tests {
             specs,
             learning_context,
             net_return_percent,
+            market_regime,
             ..
         } = event
         else {
@@ -142,6 +162,22 @@ mod scout_outcome_tests {
         assert_eq!(specs.len(), 1);
         assert!(learning_context.is_none());
         assert!((net_return_percent - 0.7).abs() < 1e-9);
+        assert_eq!(market_regime.as_deref(), Some("trend"));
+    }
+
+    #[test]
+    fn paired_feedback_rejects_outcomes_from_different_regimes() {
+        let mut baseline = outcome("baseline-regime", 0.4);
+        baseline.scout_comparison_id = Some("cmp-regime".into());
+        baseline.scout_comparison_role = Some("baseline".into());
+        let mut variant = outcome("variant-regime", 1.1);
+        variant.scout_comparison_id = Some("cmp-regime".into());
+        variant.scout_comparison_role = Some("variant".into());
+        variant.scout_parameter_key = Some("minimum_momentum".into());
+        variant.scout_parameter_value = Some(0.7);
+        variant.market_regime = Some("range".into());
+
+        assert!(paired_event("cmp-regime", &baseline, &variant).is_none());
     }
 
     #[test]

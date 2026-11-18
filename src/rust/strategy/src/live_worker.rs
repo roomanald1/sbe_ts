@@ -270,6 +270,9 @@ impl LiveWorker {
                 Err(_) => continue,
             };
             signal.strategy_candidate = true;
+            if let Some(regime) = crate::market_regime(&signal) {
+                signal.market_regime = Some(regime.to_owned());
+            }
             signal.strategy_decision = Some(serde_json::json!({
                 "strategy": self.config.strategy.as_str(),
                 "strategy_parameters": profile.parameters,
@@ -306,7 +309,7 @@ impl LiveWorker {
             .await?;
             let walk_forward_evidence =
                 needs_walk_forward_evidence(has_open_position, response.decision)
-                    .then(|| profile.walk_forward_evidence)
+                    .then(|| walk_forward_evidence_for_signal(&profile, &signal))
                     .flatten();
             if walk_forward_evidence.is_some() {
                 response = live_insight_step(
@@ -742,7 +745,7 @@ impl LiveWorker {
                 let walk_forward_evidence = if is_open {
                     None
                 } else {
-                    profile.walk_forward_evidence
+                    walk_forward_evidence_for_signal(&profile, &signal)
                 };
                 signal.timestamp = update.event_time_ms;
                 signal.strategy = Some(self.config.strategy.as_str().to_owned());
@@ -1316,6 +1319,15 @@ fn needs_walk_forward_evidence(
     !has_open_position && decision == Some(crate::LiveStrategyDecision::Enter)
 }
 
+fn walk_forward_evidence_for_signal(
+    profile: &crate::LiveStrategyProfile,
+    signal: &crate::StrategyMarketSignal,
+) -> Option<crate::StrategyWalkForwardEvidence> {
+    crate::market_regime(signal)
+        .and_then(|regime| profile.walk_forward_evidence_by_regime.get(regime).copied())
+        .or(profile.walk_forward_evidence)
+}
+
 fn insight_update_key(update: &crate::StrategyInsightUpdate) -> String {
     if let Some(signal) = update.signal.as_ref() {
         return format!("signal:{}", signal.symbol);
@@ -1543,6 +1555,7 @@ mod tests {
             version: set_version,
             parameters,
             walk_forward_evidence: None,
+            walk_forward_evidence_by_regime: Default::default(),
         };
         crate::LiveStrategyProfileSet {
             contract_version: crate::LIVE_EVALUATION_CONTRACT_VERSION,
@@ -1610,6 +1623,43 @@ mod tests {
     }
 
     #[test]
+    fn profile_evidence_prefers_the_signal_regime_then_uses_unconditioned_fallback() {
+        let mut profile = pushed_profile_set(1, "BTC-USDT").profiles.remove(0);
+        profile.walk_forward_evidence = Some(crate::StrategyWalkForwardEvidence {
+            sample_count: 3,
+            positive_net_rate: Some(0.4),
+            average_net_return_percent: Some(-0.1),
+            last_sample_timestamp_ms: 1,
+        });
+        profile.walk_forward_evidence_by_regime.insert(
+            "trend".into(),
+            crate::StrategyWalkForwardEvidence {
+                sample_count: 8,
+                positive_net_rate: Some(0.7),
+                average_net_return_percent: Some(0.2),
+                last_sample_timestamp_ms: 2,
+            },
+        );
+        let signal = crate::StrategyMarketSignal {
+            market_regime: Some("trend".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            walk_forward_evidence_for_signal(&profile, &signal)
+                .unwrap()
+                .sample_count,
+            8
+        );
+        let unknown = crate::StrategyMarketSignal::default();
+        assert_eq!(
+            walk_forward_evidence_for_signal(&profile, &unknown)
+                .unwrap()
+                .sample_count,
+            3
+        );
+    }
+
+    #[test]
     fn pending_insight_updates_keep_only_the_latest_snapshot_per_symbol() {
         let make_update = |symbol: &str, event_id: &str, timestamp: u64| {
             let LiveEvaluationInput::Entry { mut signal, .. } = request().input else {
@@ -1664,6 +1714,7 @@ mod tests {
                 version: 0,
                 parameters,
                 walk_forward_evidence: None,
+                walk_forward_evidence_by_regime: Default::default(),
             },
             input: LiveEvaluationInput::Entry {
                 signal: StrategyMarketSignal {

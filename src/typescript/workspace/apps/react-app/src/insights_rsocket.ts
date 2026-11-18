@@ -92,7 +92,8 @@ async function performInsightsRpc(
   path: string,
   body?: unknown,
 ): Promise<Response> {
-  const client = await getSocket();
+  const clientPromise = getSocket();
+  const client = await clientPromise;
   const reply = await new Promise<Uint8Array>((resolve, reject) => {
     let settled = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -124,6 +125,10 @@ async function performInsightsRpc(
           settled = true;
           if (timer !== undefined) clearTimeout(timer);
           cancelRequest = undefined;
+          // A request can fail before the connection status observer reports
+          // CLOSED. Drop this client so the next GET retry creates a fresh one.
+          if (sharedSocket === clientPromise) sharedSocket = undefined;
+          client.close();
           reject(error);
         },
       });
@@ -158,13 +163,24 @@ export function insightsRpc(
   body?: unknown,
 ): Promise<Response> {
   const request = requestInsightsRpc;
-  return request(method, path, body).catch(async (error: unknown) => {
-    if (method.toUpperCase() !== 'GET' || request !== performInsightsRpc) {
-      throw error;
+  const attempts =
+    method.toUpperCase() === 'GET' && request === performInsightsRpc ? 3 : 1;
+  const run = async (): Promise<Response> => {
+    let lastError: unknown;
+    for (let attempt = 0; attempt < attempts; attempt += 1) {
+      try {
+        return await request(method, path, body);
+      } catch (error) {
+        lastError = error;
+        if (attempt + 1 < attempts)
+          await new Promise((resolve) =>
+            setTimeout(resolve, 250 * (attempt + 1)),
+          );
+      }
     }
-    await new Promise((resolve) => setTimeout(resolve, 250));
-    return request(method, path, body);
-  });
+    throw lastError;
+  };
+  return run();
 }
 
 export async function insightsRequestStream(

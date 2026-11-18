@@ -50,15 +50,65 @@ fn live_profile_from_api(
     let version = settings.learned_profiles
         .get(&format!("{}:{}", profile.symbol, strategy.as_str()))
         .map_or(0, |profile| profile.version);
+    let profile_id = strategy::profile_id(&profile.symbol, strategy.as_str(), &parameters);
     strategy::LiveStrategyProfile {
-        profile_id: strategy::profile_id(&profile.symbol, strategy.as_str(), &parameters),
-        walk_forward_evidence: settings.learned_walk_forward_evidence
-            .get(&strategy::profile_id(&profile.symbol, strategy.as_str(), &parameters))
-            .cloned(),
+        profile_id: profile_id.clone(),
+        walk_forward_evidence: walk_forward_evidence_for_profile(
+            settings,
+            &profile_id,
+            &profile.symbol,
+            strategy,
+        ),
+        walk_forward_evidence_by_regime: walk_forward_evidence_by_regime_for_profile(
+            settings,
+            &profile_id,
+            &profile.symbol,
+            strategy,
+        ),
         profile_symbol: profile.symbol,
         version,
         parameters,
     }
+}
+
+fn walk_forward_evidence_for_profile(
+    settings: &Settings,
+    profile_id: &str,
+    profile_symbol: &str,
+    strategy: Strategy,
+) -> Option<strategy::StrategyWalkForwardEvidence> {
+    settings
+        .learned_walk_forward_evidence
+        .get(profile_id)
+        .or_else(|| {
+            settings
+                .learned_walk_forward_evidence
+                .get(&format!("{profile_symbol}|{}", strategy.as_str()))
+        })
+        .cloned()
+}
+
+fn walk_forward_evidence_by_regime_for_profile(
+    settings: &Settings,
+    profile_id: &str,
+    profile_symbol: &str,
+    strategy: Strategy,
+) -> BTreeMap<String, strategy::StrategyWalkForwardEvidence> {
+    ["range", "trend", "volatile", "mixed"]
+        .into_iter()
+        .filter_map(|regime| {
+            settings
+                .learned_walk_forward_evidence
+                .get(&format!("{profile_id}|regime:{regime}"))
+                .or_else(|| {
+                    settings
+                        .learned_walk_forward_evidence
+                        .get(&format!("{profile_symbol}|{}|regime:{regime}", strategy.as_str()))
+                })
+                .cloned()
+                .map(|evidence| (regime.to_owned(), evidence))
+        })
+        .collect()
 }
 
 fn live_profile_for_symbol(
@@ -82,11 +132,20 @@ fn build_live_strategy_profile_set(
             .map(|profile| live_profile_from_api(settings, profile, strategy))
             .collect::<Vec<_>>()
     };
+    profiles.retain(|profile| strategy::is_autotrader_symbol_allowed(&profile.profile_symbol));
     for profile in &mut profiles {
-        profile.walk_forward_evidence = settings
-            .learned_walk_forward_evidence
-            .get(&profile.profile_id)
-            .cloned();
+        profile.walk_forward_evidence = walk_forward_evidence_for_profile(
+            settings,
+            &profile.profile_id,
+            &profile.profile_symbol,
+            strategy,
+        );
+        profile.walk_forward_evidence_by_regime = walk_forward_evidence_by_regime_for_profile(
+            settings,
+            &profile.profile_id,
+            &profile.profile_symbol,
+            strategy,
+        );
     }
     let open_positions = settings.strategy_positions.iter()
         .filter_map(|(symbol, strategies)| {
@@ -99,6 +158,11 @@ fn build_live_strategy_profile_set(
                     .or_else(|| value.get("scout_parameter_profile_symbol")))
                 .and_then(serde_json::Value::as_str)
                 .unwrap_or(symbol);
+            if !strategy::is_autotrader_symbol_allowed(symbol)
+                || !strategy::is_autotrader_symbol_allowed(profile_symbol)
+            {
+                return None;
+            }
             let profile_id = decision
                 .and_then(|value| value.get("learning_profile_id").or_else(|| value.get("profile_id")))
                 .and_then(serde_json::Value::as_str)
@@ -111,10 +175,18 @@ fn build_live_strategy_profile_set(
                     version: decision.and_then(|value| value.get("learning_profile_version"))
                         .and_then(serde_json::Value::as_u64).unwrap_or_default(),
                     parameters,
-                    walk_forward_evidence: settings
-                        .learned_walk_forward_evidence
-                        .get(&profile_id)
-                        .cloned(),
+                    walk_forward_evidence: walk_forward_evidence_for_profile(
+                        settings,
+                        &profile_id,
+                        profile_symbol,
+                        strategy,
+                    ),
+                    walk_forward_evidence_by_regime: walk_forward_evidence_by_regime_for_profile(
+                        settings,
+                        &profile_id,
+                        profile_symbol,
+                        strategy,
+                    ),
                 });
             }
             Some(strategy::LiveStrategyOpenPosition {
@@ -133,6 +205,19 @@ fn build_live_strategy_profile_set(
         profile.profile_id.hash(&mut hasher);
         profile.version.hash(&mut hasher);
         if let Some(evidence) = &profile.walk_forward_evidence {
+            evidence.sample_count.hash(&mut hasher);
+            evidence.last_sample_timestamp_ms.hash(&mut hasher);
+            evidence
+                .positive_net_rate
+                .map(f64::to_bits)
+                .hash(&mut hasher);
+            evidence
+                .average_net_return_percent
+                .map(f64::to_bits)
+                .hash(&mut hasher);
+        }
+        for (regime, evidence) in &profile.walk_forward_evidence_by_regime {
+            regime.hash(&mut hasher);
             evidence.sample_count.hash(&mut hasher);
             evidence.last_sample_timestamp_ms.hash(&mut hasher);
             evidence
@@ -195,25 +280,36 @@ impl AutoTraderSocketApi {
 async fn get_decision_parameters(
     State(state): State<AutoTraderState>,
 ) -> Json<DecisionParametersResponse> {
-    let (max_entries_per_auto_position, risk_appetite, settings_snapshot, symbols) = {
+    let (max_entries_per_auto_position, risk_appetite, thresholds, strategy_profiles) = {
         let settings = state.settings.lock().await;
-        // This endpoint needs learned profiles and parameter variants, not the
-        // full positions, orders, outboxes, and audit state. Cloning Settings
-        // here duplicated the trader's entire persisted state on every request.
-        let mut profile_settings = Settings::default();
-        profile_settings.learned_profiles = settings.learned_profiles.clone();
-        profile_settings.strategy_parameter_overrides =
-            settings.strategy_parameter_overrides.clone();
-        profile_settings.learned_scout_parameter_variants =
-            settings.learned_scout_parameter_variants.clone();
+        let symbols = strategy_profile_symbols(&settings);
+        let strategies = Strategy::all()
+            .filter(|strategy| !strategy.is_legacy_composite())
+            .collect::<Vec<_>>();
+        let mut strategy_profiles =
+            strategy_parameter_profiles_for(&settings, symbols, strategies);
+        for profile in &mut strategy_profiles {
+            let profile_strategy = Strategy::from_name(&profile.strategy).unwrap_or_default();
+            profile.walk_forward_evidence = walk_forward_evidence_for_profile(
+                &settings,
+                &profile.symbol,
+                &profile.symbol,
+                profile_strategy,
+            );
+            profile.walk_forward_evidence_by_regime = walk_forward_evidence_by_regime_for_profile(
+                &settings,
+                &profile.symbol,
+                &profile.symbol,
+                profile_strategy,
+            );
+        }
         (
             settings.max_entries_per_auto_position,
             settings.risk_appetite,
-            profile_settings,
-            strategy_profile_symbols(&settings),
+            settings.learned_context_thresholds.clone(),
+            strategy_profiles,
         )
     };
-    let thresholds = state.settings.lock().await.learned_context_thresholds.clone();
     let bands = state.latest_missed_opportunity_bands.lock().await.clone();
     let floor_scale = risk_floor_scale(risk_appetite);
     let contexts = thresholds
@@ -245,19 +341,12 @@ async fn get_decision_parameters(
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64;
-    let strategies = Strategy::all()
-        .filter(|strategy| !strategy.is_legacy_composite())
-        .collect::<Vec<_>>();
     Json(DecisionParametersResponse {
         refreshed_at,
         thresholds,
         contexts,
         latest_execution,
-        strategy_profiles: strategy_parameter_profiles_for(
-            &settings_snapshot,
-            symbols,
-            strategies,
-        ),
+        strategy_profiles,
     })
 }
 
@@ -270,8 +359,24 @@ async fn get_daily_strategy_parameters(
     State(state): State<AutoTraderState>,
 ) -> Json<DailyStrategyParametersResponse> {
     let settings = state.settings.lock().await;
+    let mut strategy_profiles = daily_strategy_parameter_profiles(&settings);
+    for profile in &mut strategy_profiles {
+        let profile_strategy = Strategy::from_name(&profile.strategy).unwrap_or_default();
+        profile.walk_forward_evidence = walk_forward_evidence_for_profile(
+            &settings,
+            &profile.symbol,
+            &profile.symbol,
+            profile_strategy,
+        );
+        profile.walk_forward_evidence_by_regime = walk_forward_evidence_by_regime_for_profile(
+            &settings,
+            &profile.symbol,
+            &profile.symbol,
+            profile_strategy,
+        );
+    }
     Json(DailyStrategyParametersResponse {
-        strategy_profiles: daily_strategy_parameter_profiles(&settings),
+        strategy_profiles,
     })
 }
 
@@ -362,15 +467,9 @@ fn strategy_parameter_profiles(settings: &Settings) -> Vec<StrategyParameterProf
 }
 
 fn strategy_profile_symbols(settings: &Settings) -> BTreeSet<String> {
-    let mut symbols = [
-        "BTC-USDT",
-        "ETH-USDT",
-        "BNB-USDT",
-        "XRP-USDT",
-        "SOL-USDT",
-        "ADA-USDT",
-        "DOGE-USDT",
-    ]
+    let mut symbols = strategy::autotrader_allowed_symbols()
+    .iter()
+    .copied()
     .into_iter()
     .map(str::to_owned)
     .collect::<BTreeSet<_>>();
@@ -401,37 +500,17 @@ fn strategy_profile_symbols(settings: &Settings) -> BTreeSet<String> {
             .keys()
             .filter_map(|key| key.split_once(':').map(|(symbol, _)| symbol.to_owned())),
     );
+    symbols.retain(|symbol| strategy::is_autotrader_symbol_allowed(symbol));
     symbols
 }
 
 fn daily_strategy_parameter_profiles(settings: &Settings) -> Vec<StrategyParameterProfile> {
-    const DAILY_SYMBOLS: [&str; 7] = [
-        "BTC-USDT",
-        "ETH-USDT",
-        "BNB-USDT",
-        "XRP-USDT",
-        "SOL-USDT",
-        "ADA-USDT",
-        "DOGE-USDT",
-    ];
-    const PORTFOLIO_SYMBOLS: [&str; 16] = [
-        "BTC-USDT",
-        "ETH-USDT",
-        "BNB-USDT",
-        "XRP-USDT",
-        "ADA-USDT",
-        "SOL-USDT",
-        "DOGE-USDT",
-        "LTC-USDT",
-        "TRX-USDT",
-        "LINK-USDT",
-        "BCH-USDT",
-        "XLM-USDT",
-        "ETC-USDT",
-        "FIL-USDT",
-        "AVAX-USDT",
-        "DOT-USDT",
-    ];
+    let allowed_symbols = strategy::autotrader_allowed_symbols()
+        .iter()
+        .copied()
+        .collect::<BTreeSet<_>>();
+    let daily_symbols = ["BTC-USDT", "ETH-USDT", "BNB-USDT", "XRP-USDT", "SOL-USDT", "ADA-USDT", "DOGE-USDT"];
+    let portfolio_symbols = ["BTC-USDT", "ETH-USDT", "BNB-USDT", "XRP-USDT", "ADA-USDT", "SOL-USDT", "DOGE-USDT", "LTC-USDT", "TRX-USDT", "LINK-USDT", "AVAX-USDT"];
     const NON_PORTFOLIO_STRATEGIES: [&str; 10] = [
         "donchian-55-btc200",
         "donchian-20-sma200",
@@ -444,14 +523,7 @@ fn daily_strategy_parameter_profiles(settings: &Settings) -> Vec<StrategyParamet
         "risk-adjusted-monthly-momentum",
         "rsi2-oversold-rebound",
     ];
-    let symbols = [
-        "BTC-USDT", "ETH-USDT", "BNB-USDT", "XRP-USDT", "SOL-USDT", "ADA-USDT",
-        "DOGE-USDT", "LTC-USDT", "TRX-USDT", "LINK-USDT", "BCH-USDT", "XLM-USDT",
-        "ETC-USDT", "FIL-USDT", "AVAX-USDT", "DOT-USDT",
-    ]
-    .into_iter()
-    .map(str::to_owned)
-    .collect::<BTreeSet<_>>();
+    let symbols = allowed_symbols.iter().map(|symbol| (*symbol).to_owned()).collect::<BTreeSet<_>>();
     let strategies = [
         Strategy::Donchian55Btc200,
         Strategy::Donchian20Sma200,
@@ -471,9 +543,9 @@ fn daily_strategy_parameter_profiles(settings: &Settings) -> Vec<StrategyParamet
         .into_iter()
         .filter(|profile| {
             if profile.strategy == "risk-adjusted-trend-portfolio" {
-                PORTFOLIO_SYMBOLS.contains(&profile.symbol.as_str())
+                portfolio_symbols.contains(&profile.symbol.as_str())
             } else {
-                DAILY_SYMBOLS.contains(&profile.symbol.as_str())
+                daily_symbols.contains(&profile.symbol.as_str())
                     && NON_PORTFOLIO_STRATEGIES.contains(&profile.strategy.as_str())
             }
         })
@@ -485,11 +557,35 @@ fn strategy_parameter_profiles_for(
     symbols: BTreeSet<String>,
     strategies: Vec<Strategy>,
 ) -> Vec<StrategyParameterProfile> {
+    let strategy_names = strategies
+        .iter()
+        .map(|strategy| strategy.as_str())
+        .collect::<BTreeSet<_>>();
+    let mut variants_by_profile = BTreeMap::new();
+    for variant in &settings.learned_scout_parameter_variants {
+        if !symbols.contains(&variant.symbol) || !strategy_names.contains(variant.strategy.as_str()) {
+            continue;
+        }
+        variants_by_profile
+            .entry((variant.symbol.clone(), variant.strategy.clone()))
+            .or_insert_with(Vec::new)
+            .push(variant);
+    }
+    let variants_by_profile = &variants_by_profile;
     symbols
         .into_iter()
         .flat_map(|symbol| {
-            strategies.iter().copied().into_iter().map(move |strategy| {
-                learned_strategy_parameter_profile(settings, &symbol, strategy)
+            strategies.iter().copied().map(move |strategy| {
+                let variants = variants_by_profile
+                    .get(&(symbol.clone(), strategy.as_str().to_owned()))
+                    .map(Vec::as_slice)
+                    .unwrap_or_default();
+                learned_strategy_parameter_profile_with_variants(
+                    settings,
+                    &symbol,
+                    strategy,
+                    variants,
+                )
             })
         })
         .collect()
@@ -498,6 +594,114 @@ fn strategy_parameter_profiles_for(
 #[cfg(test)]
 mod decision_profile_tests {
     use super::*;
+
+    fn evidence(samples: usize) -> strategy::StrategyWalkForwardEvidence {
+        strategy::StrategyWalkForwardEvidence {
+            sample_count: samples,
+            positive_net_rate: Some(0.5),
+            average_net_return_percent: Some(0.1),
+            last_sample_timestamp_ms: 10,
+        }
+    }
+
+    #[test]
+    fn live_profile_evidence_uses_exact_then_symbol_and_never_strategy_wide() {
+        let profile_id = strategy::profile_id(
+            "MON-USDT",
+            Strategy::LiveMomentum.as_str(),
+            &BTreeMap::new(),
+        );
+        let mut settings = Settings::default();
+        assert_eq!(
+            walk_forward_evidence_for_profile(
+                &settings,
+                &profile_id,
+                "MON-USDT",
+                Strategy::LiveMomentum,
+            ),
+            None
+        );
+
+        settings.learned_walk_forward_evidence.insert(
+            "MON-USDT|live-momentum".to_owned(),
+            evidence(20),
+        );
+        assert_eq!(
+            walk_forward_evidence_for_profile(
+                &settings,
+                &profile_id,
+                "MON-USDT",
+                Strategy::LiveMomentum,
+            )
+            .unwrap()
+            .sample_count,
+            20
+        );
+
+        settings
+            .learned_walk_forward_evidence
+            .insert(profile_id.clone(), evidence(10));
+        assert_eq!(
+            walk_forward_evidence_for_profile(
+                &settings,
+                &profile_id,
+                "MON-USDT",
+                Strategy::LiveMomentum,
+            )
+            .unwrap()
+            .sample_count,
+            10
+        );
+
+        settings
+            .learned_walk_forward_evidence
+            .insert(Strategy::LiveMomentum.as_str().to_owned(), evidence(30));
+        assert_eq!(
+            walk_forward_evidence_for_profile(
+                &settings,
+                "another-profile",
+                "OTHER-USDT",
+                Strategy::LiveMomentum,
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn live_profile_regime_evidence_prefers_exact_profile_then_symbol_and_strategy() {
+        let profile_id = strategy::profile_id(
+            "BTC-USDT",
+            Strategy::LiveMomentum.as_str(),
+            &BTreeMap::new(),
+        );
+        let mut settings = Settings::default();
+        settings.learned_walk_forward_evidence.insert(
+            "BTC-USDT|live-momentum|regime:trend".into(),
+            evidence(7),
+        );
+        settings.learned_walk_forward_evidence.insert(
+            format!("{profile_id}|regime:trend"),
+            evidence(11),
+        );
+        let by_regime = walk_forward_evidence_by_regime_for_profile(
+            &settings,
+            &profile_id,
+            "BTC-USDT",
+            Strategy::LiveMomentum,
+        );
+        assert_eq!(by_regime["trend"].sample_count, 11);
+
+        settings
+            .learned_walk_forward_evidence
+            .remove(&format!("{profile_id}|regime:trend"));
+        let by_regime = walk_forward_evidence_by_regime_for_profile(
+            &settings,
+            &profile_id,
+            "BTC-USDT",
+            Strategy::LiveMomentum,
+        );
+        assert_eq!(by_regime["trend"].sample_count, 7);
+    }
 
     #[test]
     fn live_profile_refresh_builds_only_the_requested_strategy_profiles() {

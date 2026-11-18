@@ -36,8 +36,14 @@ fn sync_registered_profile_ids(settings: &mut Settings, incoming: BTreeSet<Strin
 
 async fn apply_learning_snapshot(
     state: &AutoTraderState,
-    snapshot: strategy::LearnedProfileSnapshot,
+    mut snapshot: strategy::LearnedProfileSnapshot,
 ) {
+    snapshot.profiles.retain(|profile| strategy::is_autotrader_symbol_allowed(&profile.symbol));
+    snapshot.scout_parameter_variants.retain(|variant| strategy::is_autotrader_symbol_allowed(&variant.symbol));
+    let allowed_profile_ids = snapshot.profiles.iter().map(|profile| profile.profile_id.clone()).collect::<BTreeSet<_>>();
+    snapshot.walk_forward_evidence.retain(|key, _| key.split('|').next().is_some_and(strategy::is_autotrader_symbol_allowed));
+    snapshot.recent_profile_context_returns.retain(|key, _| key.split('|').next().is_some_and(|profile_id| allowed_profile_ids.contains(profile_id)));
+    snapshot.missed_opportunity_bands.retain(|band| band.symbol.as_deref().is_none_or(strategy::is_autotrader_symbol_allowed));
     let bands = snapshot
         .missed_opportunity_bands
         .iter()
@@ -1108,6 +1114,9 @@ async fn receive_strategy_decision(
     State(state): State<AutoTraderState>,
     Json(mut report): Json<strategy::LiveStrategyDecisionReport>,
 ) -> Result<StatusCode, (StatusCode, String)> {
+    if !strategy::is_autotrader_symbol_allowed(&report.symbol) {
+        return Ok(StatusCode::NO_CONTENT);
+    }
     if report.strategy == Strategy::DatedCarry {
         return receive_dated_carry_worker_report(state, report).await;
     }

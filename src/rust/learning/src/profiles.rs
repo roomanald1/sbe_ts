@@ -70,46 +70,10 @@ pub(super) async fn get_decision_snapshot(
         .values()
         .map(|variant| variant.profile.profile_id.clone())
         .collect();
-    let mut walk_forward_evidence: BTreeMap<String, StrategyWalkForwardEvidence> = state
-        .variants
-        .values()
-        .filter_map(|variant| {
-            let mut weighted_samples = 0.0;
-            let mut weighted_positive = 0.0;
-            let mut weighted_net_return = 0.0;
-            let mut last_sample_timestamp_ms = 0u64;
-            for outcome in &variant.outcomes {
-                if outcome.source != LearningOutcomeSource::Scout
-                    || !outcome.net_return_percent.is_finite()
-                {
-                    continue;
-                }
-                let weight = outcome_decay_weight(outcome.observed_at_ms, snapshot_now_ms);
-                weighted_samples += weight;
-                weighted_positive += if outcome.net_return_percent > 0.0 {
-                    weight
-                } else {
-                    0.0
-                };
-                weighted_net_return += weight * outcome.net_return_percent;
-                last_sample_timestamp_ms = last_sample_timestamp_ms.max(outcome.observed_at_ms);
-            }
-            (weighted_samples > 0.0).then(|| {
-                (
-                    variant.profile.profile_id.clone(),
-                    StrategyWalkForwardEvidence {
-                        sample_count: weighted_samples.round() as usize,
-                        positive_net_rate: Some(weighted_positive / weighted_samples),
-                        average_net_return_percent: Some(weighted_net_return / weighted_samples),
-                        last_sample_timestamp_ms,
-                    },
-                )
-            })
-        })
-        .collect();
-    // Keep profile evidence for exact parameter matches, and add progressively
-    // broader buckets so a new parameter profile can use prior evidence for its
-    // symbol before falling back to the strategy-wide history.
+    // Exact profile buckets remain regime-specific when a Scout carries a
+    // regime. Unconditioned evidence is retained only for legacy observations.
+    // Same-symbol aggregates remain available as a deliberate fallback; no
+    // evidence is ever pooled across symbols or strategies.
     let mut grouped = BTreeMap::<String, (f64, f64, f64, u64)>::new();
     for variant in state.variants.values() {
         for outcome in &variant.outcomes {
@@ -118,23 +82,49 @@ pub(super) async fn get_decision_snapshot(
             {
                 continue;
             }
-            let weight = outcome_decay_weight(outcome.observed_at_ms, snapshot_now_ms);
-            for key in [
-                format!("{}|{}", variant.profile.symbol, variant.profile.strategy),
-                variant.profile.strategy.clone(),
-            ] {
-                let bucket = grouped.entry(key).or_default();
-                bucket.0 += weight;
-                bucket.1 += if outcome.net_return_percent > 0.0 {
-                    weight
-                } else {
-                    0.0
-                };
-                bucket.2 += weight * outcome.net_return_percent;
-                bucket.3 = bucket.3.max(outcome.observed_at_ms);
-            }
+            let Some(regime) = outcome
+                .market_regime
+                .as_deref()
+                .filter(|value| matches!(*value, "range" | "trend" | "volatile" | "mixed"))
+            else {
+                accumulate_walk_forward(
+                    &mut grouped,
+                    &variant.profile.profile_id,
+                    outcome,
+                    snapshot_now_ms,
+                );
+                accumulate_walk_forward(
+                    &mut grouped,
+                    &format!("{}|{}", variant.profile.symbol, variant.profile.strategy),
+                    outcome,
+                    snapshot_now_ms,
+                );
+                continue;
+            };
+            accumulate_walk_forward(
+                &mut grouped,
+                &format!("{}|regime:{regime}", variant.profile.profile_id),
+                outcome,
+                snapshot_now_ms,
+            );
+            accumulate_walk_forward(
+                &mut grouped,
+                &format!(
+                    "{}|{}|regime:{regime}",
+                    variant.profile.symbol, variant.profile.strategy
+                ),
+                outcome,
+                snapshot_now_ms,
+            );
+            accumulate_walk_forward(
+                &mut grouped,
+                &format!("{}|{}", variant.profile.symbol, variant.profile.strategy),
+                outcome,
+                snapshot_now_ms,
+            );
         }
     }
+    let mut walk_forward_evidence = BTreeMap::new();
     for (key, (weight, positive, net_return, last_sample_timestamp_ms)) in grouped {
         if weight > 0.0 {
             walk_forward_evidence.insert(
@@ -202,6 +192,24 @@ pub(super) async fn get_decision_snapshot(
         walk_forward_evidence,
         scout_parameter_variants: scout_parameter_variant_snapshots(&state),
     })
+}
+
+fn accumulate_walk_forward(
+    grouped: &mut BTreeMap<String, (f64, f64, f64, u64)>,
+    key: &str,
+    outcome: &LearningOutcome,
+    now_ms: u64,
+) {
+    let weight = outcome_decay_weight(outcome.observed_at_ms, now_ms);
+    let bucket = grouped.entry(key.to_owned()).or_default();
+    bucket.0 += weight;
+    bucket.1 += if outcome.net_return_percent > 0.0 {
+        weight
+    } else {
+        0.0
+    };
+    bucket.2 += weight * outcome.net_return_percent;
+    bucket.3 = bucket.3.max(outcome.observed_at_ms);
 }
 
 const MIN_CONTEXTUAL_STOP_REPLAYS: usize = 5;
@@ -662,6 +670,7 @@ mod tests {
                     net_return_percent: *value,
                     evidence_group_id: None,
                     learning_context: None,
+                    market_regime: None,
                     source: LearningOutcomeSource::Scout,
                     realized_pnl_usd: None,
                     paired_comparison: false,
@@ -1012,6 +1021,12 @@ pub(super) async fn register_profile(
     State(service): State<ServiceState>,
     Json(request): Json<StrategyProfileRegistration>,
 ) -> Result<StatusCode, (StatusCode, String)> {
+    if !strategy::is_autotrader_symbol_allowed(&request.profile.symbol) {
+        return Err((
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "symbol is outside the AutoTrader allowlist".into(),
+        ));
+    }
     if serde_json::to_vec(&request).map_or(true, |encoded| encoded.len() > 16 * 1024) {
         return Err((
             StatusCode::PAYLOAD_TOO_LARGE,

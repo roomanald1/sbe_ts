@@ -108,6 +108,9 @@ pub enum FeedbackEvent {
         observed_at_ms: u64,
         #[serde(default)]
         learning_context: Option<String>,
+        /// Canonical market regime at the Scout signal timestamp, when known.
+        #[serde(default)]
+        market_regime: Option<String>,
         symbol: String,
         strategy: String,
         profile_id: String,

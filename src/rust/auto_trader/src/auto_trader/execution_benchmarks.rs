@@ -147,6 +147,118 @@ pub fn benchmark_signal_settings_snapshot_path(iterations: usize) -> Vec<(String
     results
 }
 
+/// Benchmark the decision-parameters route's learning-state snapshot, profile
+/// construction, walk-forward evidence lookup, and JSON encoding.
+pub fn benchmark_decision_parameters_path(
+    iterations: usize,
+    retained_variants: usize,
+) -> (f64, f64, f64, usize, usize) {
+    use std::{hint::black_box, time::Instant};
+
+    assert!(iterations > 0, "benchmark iterations must be positive");
+    assert!(retained_variants <= 20_000, "fixture supports at most 20,000 variants");
+    let mut settings = Settings::default();
+    // Model a persisted learning state with many historical evidence entries;
+    // only a small subset belongs to the profiles returned by this endpoint.
+    for index in 0..20_000 {
+        let symbol = format!("BENCH-{}-USDT", index % 16);
+        settings.learned_walk_forward_evidence.insert(
+            format!("historical-{index}|live-momentum"),
+            strategy::StrategyWalkForwardEvidence {
+                sample_count: index,
+                positive_net_rate: Some(0.51),
+                average_net_return_percent: Some(0.12),
+                last_sample_timestamp_ms: index as u64,
+            },
+        );
+        if index < retained_variants {
+            settings.learned_profiles.entry(format!("{symbol}:live-momentum")).or_insert_with(|| {
+                strategy::StrategyProfile {
+                    profile_id: format!("{symbol}:live-momentum"),
+                    version: 1,
+                    symbol: symbol.clone(),
+                    strategy: "live-momentum".into(),
+                    parameters: BTreeMap::new(),
+                    learning_samples: 0,
+                    positive_samples: 0,
+                    realized_pnl: 0.0,
+                }
+            });
+            settings.learned_scout_parameter_variants.push(strategy::ScoutParameterVariant {
+                symbol,
+                strategy: "live-momentum".into(),
+                parameter: "minimum_momentum".into(),
+                candidate_value: 0.01,
+                sample_count: index,
+                minimum_samples: 10,
+                average_net_improvement_percent: 0.02,
+                lower_90_one_sided_improvement_percent: Some(0.01),
+                upper_90_one_sided_improvement_percent: Some(0.03),
+                paired_baseline_increase_samples: 5,
+                paired_baseline_decrease_samples: 4,
+                paired_baseline_same_samples: 1,
+                paired_baseline_unknown_samples: 0,
+                paired_baseline_delta_mean: Some(0.02),
+                paired_baseline_delta_samples: 10,
+                promoted: false,
+                rejected: false,
+            });
+        }
+    }
+    let symbols = strategy_profile_symbols(&settings);
+    let strategies = Strategy::all()
+        .filter(|strategy| !strategy.is_legacy_composite())
+        .collect::<Vec<_>>();
+    let mut output_bytes = 0;
+    let mut output_variants = 0;
+    let snapshot_time = std::time::Duration::ZERO;
+    let mut profile_time = std::time::Duration::ZERO;
+    let mut json_time = std::time::Duration::ZERO;
+    for _ in 0..iterations {
+        let started = Instant::now();
+        let mut profiles = strategy_parameter_profiles_for(
+            black_box(&settings),
+            symbols.clone(),
+            strategies.clone(),
+        );
+        for profile in &mut profiles {
+            let profile_strategy = Strategy::from_name(&profile.strategy).unwrap_or_default();
+            profile.walk_forward_evidence = walk_forward_evidence_for_profile(
+                &settings,
+                &profile.symbol,
+                &profile.symbol,
+                profile_strategy,
+            );
+            profile.walk_forward_evidence_by_regime = walk_forward_evidence_by_regime_for_profile(
+                &settings,
+                &profile.symbol,
+                &profile.symbol,
+                profile_strategy,
+            );
+        }
+        output_variants = profiles
+            .iter()
+            .flat_map(|profile| &profile.parameters)
+            .map(|parameter| parameter.scout_variants.len())
+            .sum();
+        profile_time += started.elapsed();
+
+        let started = Instant::now();
+        let encoded = serde_json::to_vec(black_box(&profiles)).unwrap();
+        output_bytes = encoded.len();
+        black_box(encoded);
+        json_time += started.elapsed();
+    }
+    let to_us = |elapsed: std::time::Duration| elapsed.as_secs_f64() * 1_000_000.0 / iterations as f64;
+    (
+        to_us(snapshot_time),
+        to_us(profile_time),
+        to_us(json_time),
+        output_bytes,
+        output_variants,
+    )
+}
+
 fn benchmark_snapshot_state(settings: Settings) -> AutoTraderState {
     let (state_updates, _) = tokio::sync::broadcast::channel(1);
     let path = std::env::temp_dir().join(format!(

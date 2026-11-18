@@ -44,5 +44,8 @@ pub struct StrategyParameterProfile {
     pub learning_samples: usize,
     pub positive_rate: Option<f64>,
     pub realized_pnl: f64,
+    pub walk_forward_evidence: Option<crate::StrategyWalkForwardEvidence>,
+    pub walk_forward_evidence_by_regime:
+        std::collections::BTreeMap<String, crate::StrategyWalkForwardEvidence>,
     pub parameters: Vec<StrategyParameterValue>,
 }

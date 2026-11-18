@@ -17,8 +17,8 @@ if [[ "${SCOUT_WORKERS_ENABLED:-true}" == "true" ]]; then
   system_compose_args+=(--profile scout-workers)
 fi
 
-docker compose "${system_compose_args[@]}" up -d --build --force-recreate --remove-orphans
 docker compose -p sbe-infra -f monitoring/docker-compose.yml up -d --build --force-recreate --remove-orphans
+docker compose "${system_compose_args[@]}" up -d --build --force-recreate --remove-orphans
 
 echo "All system and infrastructure services rebuilt and restarted."
 echo "Service control: http://localhost:8080"

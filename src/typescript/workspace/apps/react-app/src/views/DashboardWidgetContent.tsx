@@ -131,8 +131,12 @@ function DashboardWidgetContentComponent(props: Props): ReactNode {
       return <DatedCarry />;
     case 'auto-trader-diagnostics':
       return <AutoTraderDiagnostics />;
-    case 'auto-trader-learning':
-      return <AutoTraderLearningWidget />;
+    case 'auto-trader-learning-decisions':
+      return <AutoTraderLearningWidget section="decisions" />;
+    case 'auto-trader-learning-realized':
+      return <AutoTraderLearningWidget section="realized" />;
+    case 'auto-trader-learning-scouts':
+      return <AutoTraderLearningWidget section="scouts" />;
     case 'auto-trader-outcomes':
       return <AutoTraderOutcomes ticks={prices.ticks} />;
     case 'auto-trader-strategy-performance':

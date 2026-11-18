@@ -123,7 +123,15 @@ export type AutoTraderStrategyProfile = {
   learning_samples: number;
   positive_rate?: number;
   realized_pnl: number;
+  walk_forward_evidence?: WalkForwardEvidence | null;
+  walk_forward_evidence_by_regime?: Record<string, WalkForwardEvidence>;
   parameters: AutoTraderStrategyParameter[];
+};
+export type WalkForwardEvidence = {
+  sample_count: number;
+  positive_net_rate?: number | null;
+  average_net_return_percent?: number | null;
+  last_sample_timestamp_ms: number;
 };
 export type AutoTraderPendingScoutParameter = {
   symbol: string;

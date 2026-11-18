@@ -100,6 +100,20 @@ mod tests {
         assert_eq!(candidates[0]["strategy"], "live-momentum");
     }
 
+    #[tokio::test]
+    async fn direct_live_candidate_route_rejects_profiles_outside_allowlist() {
+        let request = LiveScoutCandidatesRequest {
+            signals: Vec::new(),
+            profiles: vec![LiveScoutProfile {
+                symbol: "MON-USDT".into(),
+                strategy: "live-momentum".into(),
+                parameters: BTreeMap::from([("minimum_momentum".into(), 0.1)]),
+            }],
+        };
+        let result = generate_live_candidates(Json(request)).await;
+        assert!(matches!(result, Err((StatusCode::BAD_REQUEST, _))));
+    }
+
     fn specs() -> Vec<ParameterSpec> {
         vec![
             ParameterSpec {
@@ -272,6 +286,7 @@ mod tests {
             specs: vec![],
             entry_price: 100.0,
             side: 1,
+        market_regime: Some("trend".into()),
         };
         let event = sample.finalize(20, 102.0, 0.5).unwrap();
         let FeedbackEvent::ScoutOutcome {
@@ -279,6 +294,7 @@ mod tests {
             profile_id,
             parameters,
             net_return_percent,
+            market_regime,
             ..
         } = event
         else {
@@ -287,6 +303,7 @@ mod tests {
         assert_eq!(profile_id, "profile-7");
         assert_eq!(event_id, "scout-1");
         assert_eq!(parameters["minimum_momentum"], 0.4);
+        assert_eq!(market_regime.as_deref(), Some("trend"));
         assert!((net_return_percent - 1.5).abs() < 1e-12);
     }
 }

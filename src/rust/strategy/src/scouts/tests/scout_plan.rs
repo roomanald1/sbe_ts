@@ -43,7 +43,7 @@ mod scout_plan_tests {
             cooldown_ms: 300_000,
             audit_plans: vec![serde_json::json!({
                 "decision_id": format!("{group}-decision"), "scout_exit_scenario": "strategy",
-                "status": "scouted", "stage": "decision"
+                "status": "scouted", "stage": "decision", "symbol": "BTC-USDT"
             })],
             audit_templates: Vec::new(),
             sample_payload: None,
@@ -125,6 +125,28 @@ mod scout_plan_tests {
         .0;
         assert!(cooldown.selected_groups.is_empty());
         let _ = std::fs::remove_file(&service.scout.path);
+    }
+
+    #[tokio::test]
+    async fn direct_plan_rejects_scouts_for_symbols_outside_the_allowlist() {
+        let service = service();
+        let mut off_list = candidate("off-list-group", "live-momentum|MON-USDT");
+        off_list.audit_plans[0]["symbol"] = serde_json::json!("MON-USDT");
+        let result = create_scout_plan(
+            State(service.clone()),
+            Json(ScoutPlanRequest {
+                request_id: "off-list-plan".into(),
+                now_ms: scout_now_ms(),
+                max_active_batches: 10,
+                max_active_variants_per_profile: 10,
+                legacy_cooldowns: BTreeMap::new(),
+                legacy_comparisons: Vec::new(),
+                candidates: vec![off_list],
+            }),
+        )
+        .await;
+        assert_eq!(result.unwrap_err().0, StatusCode::BAD_REQUEST);
+        assert!(service.scout.data.lock().await.scout_instances.is_empty());
     }
 
     #[tokio::test]

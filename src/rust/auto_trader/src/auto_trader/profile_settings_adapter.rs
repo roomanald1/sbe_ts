@@ -348,6 +348,8 @@ fn strategy_parameter_profile(
         learning_samples: learning.samples,
         positive_rate,
         realized_pnl: learning.realized_pnl,
+        walk_forward_evidence: None,
+        walk_forward_evidence_by_regime: Default::default(),
         parameters,
     }
 }
@@ -359,6 +361,20 @@ fn learned_strategy_parameter_profile(
     settings: &Settings,
     symbol: &str,
     strategy: Strategy,
+) -> StrategyParameterProfile {
+    let profile_variants = settings
+        .learned_scout_parameter_variants
+        .iter()
+        .filter(|variant| variant.symbol == symbol && variant.strategy == strategy.as_str())
+        .collect::<Vec<_>>();
+    learned_strategy_parameter_profile_with_variants(settings, symbol, strategy, &profile_variants)
+}
+
+fn learned_strategy_parameter_profile_with_variants(
+    settings: &Settings,
+    symbol: &str,
+    strategy: Strategy,
+    profile_variants: &[&strategy::ScoutParameterVariant],
 ) -> StrategyParameterProfile {
     let specs = strategy.parameter_specs();
     let learned = settings.learned_profiles.get(&format!("{symbol}:{}", strategy.as_str()));
@@ -385,10 +401,8 @@ fn learned_strategy_parameter_profile(
             step: spec.step,
             unit: spec.unit.to_owned(),
             overridden: configured.is_some(),
-            scout_variants: settings.learned_scout_parameter_variants.iter()
-                .filter(|variant| variant.symbol == symbol
-                    && variant.strategy == strategy.as_str()
-                    && variant.parameter == spec.key.as_str())
+            scout_variants: profile_variants.iter()
+                .filter(|variant| variant.parameter == spec.key.as_str())
                 .map(|variant| strategy::StrategyParameterScoutVariant {
                     candidate_value: variant.candidate_value,
                     sample_count: variant.sample_count,
@@ -414,6 +428,8 @@ fn learned_strategy_parameter_profile(
         positive_rate: learned.and_then(|profile| (profile.learning_samples > 0)
             .then_some(profile.positive_samples as f64 / profile.learning_samples as f64)),
         realized_pnl: learned.map_or(0.0, |profile| profile.realized_pnl),
+        walk_forward_evidence: None,
+        walk_forward_evidence_by_regime: Default::default(),
         parameters,
     }
 }

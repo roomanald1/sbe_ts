@@ -305,6 +305,7 @@ mod strategy_cleanup_integration_tests {
             version: 7,
             parameters: parameters.clone(),
             walk_forward_evidence: None,
+            walk_forward_evidence_by_regime: Default::default(),
         };
         let mut settings = Settings::default();
         settings.strategies = vec![strategy];

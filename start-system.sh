@@ -16,6 +16,11 @@ for service in "${services[@]}"; do
   fi
 done
 compose_args=(-p sbe-system -f system/compose.yml)
+start_timeout="${SYSTEM_START_TIMEOUT_SECONDS:-900}"
+if ! [[ "$start_timeout" =~ ^[1-9][0-9]*$ ]]; then
+  echo "SYSTEM_START_TIMEOUT_SECONDS must be a positive integer" >&2
+  exit 2
+fi
 if [[ "${SCOUT_WORKERS_ENABLED:-true}" == "true" ]]; then
   compose_args+=(--profile scout-workers)
   if [[ " ${services[*]} " == *" learning "* ]]; then
@@ -25,8 +30,8 @@ if [[ "${SCOUT_WORKERS_ENABLED:-true}" == "true" ]]; then
   fi
 fi
 if [[ ${#services[@]} -eq 0 ]]; then
-  docker compose "${compose_args[@]}" up -d --remove-orphans
+  docker compose "${compose_args[@]}" up -d --wait --wait-timeout "$start_timeout" --remove-orphans
 else
-  docker compose "${compose_args[@]}" up -d "${services[@]}"
+  docker compose "${compose_args[@]}" up -d --wait --wait-timeout "$start_timeout" "${services[@]}"
 fi
-echo "System is running. App: http://localhost:5173"
+echo "System services are healthy. App: http://localhost:5173"

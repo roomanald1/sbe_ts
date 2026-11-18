@@ -105,6 +105,7 @@ function SignalReplayWidgetComponent({ paused = false }: { paused?: boolean }) {
           fromMs: String(fromMs),
           throughMs: String(throughMs),
           limit: '512',
+          newestFirst: 'true',
         });
         if (cursor) params.set('cursor', cursor);
         const response = await insightsFetch(
@@ -165,9 +166,7 @@ function SignalReplayWidgetComponent({ paused = false }: { paused?: boolean }) {
       replayHistory.daysBack === daysBack
         ? replayHistory.snapshots
         : [];
-    const selected = snapshots
-      .filter((item) => item.symbol === selectedSymbol)
-      .sort((a, b) => a.timestamp - b.timestamp);
+    const selected = snapshots.filter((item) => item.symbol === selectedSymbol);
     return selected.map((item) => {
       const windowed = item.components.trade_flow_by_window?.find(
         (feature) => feature.window_seconds === selectedFlowWindow,

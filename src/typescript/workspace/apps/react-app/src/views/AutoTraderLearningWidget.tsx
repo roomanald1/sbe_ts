@@ -272,7 +272,13 @@ const decisionColumns: ColDef<LearningDecision>[] = [
   },
 ];
 
-export function AutoTraderLearningWidget() {
+type LearningSection = 'decisions' | 'realized' | 'scouts';
+
+export function AutoTraderLearningWidget({
+  section,
+}: {
+  section: LearningSection;
+}) {
   const model = useMemo(() => new AutoTraderLearningWidgetModel(), []);
   const [symbolFilter, setSymbolFilter] = useState('OP-USDT');
   const [selectedDecision, setSelectedDecision] = useState<LearningDecision>();
@@ -306,302 +312,324 @@ export function AutoTraderLearningWidget() {
           .includes(symbolFilter.trim().toUpperCase()),
     )
     .sort((left, right) => (right.timestamp ?? 0) - (left.timestamp ?? 0));
+  const sectionTitles: Record<LearningSection, string> = {
+    decisions: 'Signal and entry decisions',
+    realized: 'Realized trade results',
+    scouts: 'Scout parameter experiments',
+  };
   return (
     <section
       className="auto-trader-strategy-parameters"
       aria-label="AutoTrader learning impact"
     >
-      <strong>Learning effectiveness · realized outcomes</strong>
-      <div className="auto-trader-learning-decisions-head">
-        <strong>Signal and entry decisions</strong>
-        <label>
-          Symbol{' '}
-          <input
-            value={symbolFilter}
-            onChange={(event) => setSymbolFilter(event.target.value)}
-            placeholder="All symbols"
-          />
-        </label>
-        <small>
-          Last 7 days · {filteredDecisions.length} decisions · select a row to
-          inspect recorded evidence
-        </small>
-      </div>
-      {decisionError && (
-        <p className="auto-trader-learning-error" role="alert">
-          Decision history unavailable: {decisionError}
-        </p>
-      )}
-      {!decisionError && decisions.length === 0 ? (
-        <p>Loading recent strategy decisions…</p>
-      ) : (
-        <div className="data-grid-wrap auto-trader-learning-grid auto-trader-decision-grid">
-          <AgGridReact<LearningDecision>
-            rowData={filteredDecisions}
-            columnDefs={decisionColumns}
-            getRowId={({ data }) =>
-              `${data.decision_id ?? ''}:${data.timestamp ?? 0}:${data.status ?? ''}`
-            }
-            defaultColDef={{
-              sortable: true,
-              resizable: true,
-              filter: true,
-              minWidth: 70,
-            }}
-            onRowClicked={({ data }) => setSelectedDecision(data)}
-            rowSelection={{ mode: 'singleRow', enableClickSelection: true }}
-            theme={learningGridTheme}
-            domLayout="normal"
-            rowHeight={30}
-            headerHeight={28}
-          />
-        </div>
-      )}
-      {selectedDecision && (
-        <details className="auto-trader-learning-decision-detail" open>
-          <summary>
-            {selectedDecision.symbol} · {selectedDecision.strategy} ·{' '}
-            {selectedDecision.status} → final:{' '}
-            {selectedDecision.final_outcome?.status ?? 'pending'} ·{' '}
-            {selectedDecision.final_outcome?.reason ??
-              selectedDecision.reason ??
-              selectedDecision.entry_gate?.rejection_reasons?.join(', ') ??
-              'No reason recorded'}
-          </summary>
-          <div className="auto-trader-learning-detail-grid">
-            <div>
-              <strong>Final outcome and execution</strong>
-              <pre>
-                {JSON.stringify(
-                  selectedDecision.final_outcome ?? {
-                    status: 'No final outcome recorded',
-                    reason:
-                      'No entry order or downstream decision outcome was recorded for this selection.',
-                  },
-                  null,
-                  2,
-                )}
-              </pre>
-            </div>
-            <div>
-              <strong>Gate checks</strong>
-              <pre>
-                {JSON.stringify(
-                  selectedDecision.entry_gate ?? 'No entry gate captured',
-                  null,
-                  2,
-                )}
-              </pre>
-            </div>
-            <div>
-              <strong>Strategy decision and parameters</strong>
-              <pre>
-                {JSON.stringify(
-                  selectedDecision.strategy_decision ??
-                    'No strategy decision captured',
-                  null,
-                  2,
-                )}
-              </pre>
-            </div>
-            <div>
-              <strong>Signal components</strong>
-              <pre>
-                {JSON.stringify(
-                  selectedDecision.signal_components ??
-                    'No signal components captured',
-                  null,
-                  2,
-                )}
-              </pre>
-            </div>
-          </div>
-        </details>
-      )}
-      <p>
-        This compares actual closed-trade returns from the currently active
-        learned parameter profiles with actual trades taken under other
-        parameter profiles over the last seven days. It answers whether live
-        realized results are moving in the right direction; the comparison is
-        descriptive, not a controlled causal test.
-      </p>
-      <div
-        className="auto-trader-learning-overview"
-        aria-label="Realized trade performance over the last seven days"
-      >
-        <div>
-          <span>Current learned profile · actual trades</span>
-          <strong>
-            {learningSummary == null
-              ? '—'
-              : `${effectiveness.activeProfileTrades.toLocaleString()} trades`}
-          </strong>
-          <small>
-            {effectiveness.activeProfilePositiveRate == null
-              ? '—'
-              : `${(effectiveness.activeProfilePositiveRate * 100).toFixed(0)}% positive`}
-            {' · mean net '}
-            {signedPercentPoints(effectiveness.activeProfileReturn)}
-          </small>
-        </div>
-        <div>
-          <span>Other parameter profiles · actual trades</span>
-          <strong>
-            {learningSummary == null
-              ? '—'
-              : `${effectiveness.otherProfileTrades.toLocaleString()} trades`}
-          </strong>
-          <small>
-            {effectiveness.otherProfilePositiveRate == null
-              ? '—'
-              : `${(effectiveness.otherProfilePositiveRate * 100).toFixed(0)}% positive`}
-            {' · mean net '}
-            {signedPercentPoints(effectiveness.otherProfileReturn)}
-          </small>
-        </div>
-        <div>
-          <span>Active profile minus other profiles</span>
-          <strong>{signedPercentPoints(profileReturnDifference)}</strong>
-          <small>
-            {effectiveness.activeProfileTrades === 0 ||
-            effectiveness.otherProfileTrades === 0
-              ? 'Need trades in both groups to compare'
-              : 'Difference in mean realized net return'}
-          </small>
-        </div>
-        <div>
-          <span>Actual trade coverage · 7d</span>
-          <strong>
-            {learningSummary == null
-              ? '—'
-              : `${effectiveness.closedTrades.toLocaleString()} trades`}
-          </strong>
-          <small>Across active and other parameter profiles</small>
-        </div>
-      </div>
-      <p className="auto-trader-learning-caveat">
-        {!effectiveness.activeProfileTrades || !effectiveness.otherProfileTrades
-          ? 'There is not enough realized-trade evidence in both groups to judge effectiveness yet.'
-          : 'This is an observed comparison, not proof that Learning caused the difference. Trade count, market conditions, and risk-adjusted return matter; Scout simulations are excluded from these realized results.'}
-      </p>
-      {learningSummaryError && (
-        <p className="auto-trader-learning-error" role="alert">
-          Learning summary unavailable: {learningSummaryError}
-        </p>
-      )}
-      {learningSummary == null ? (
-        <p>
-          {learningSummaryError
-            ? 'Actual trade results could not be loaded.'
-            : 'Loading actual trade results…'}
-        </p>
-      ) : actualTradeRows.length === 0 ? (
-        <p>No closed-trade results are available for the last seven days.</p>
-      ) : (
-        <div className="data-grid-wrap auto-trader-learning-grid">
-          <AgGridReact<TradeEffectivenessRow>
-            rowData={actualTradeRows}
-            columnDefs={tradeEffectivenessColumns}
-            getRowId={({ data }) => data.strategy}
-            defaultColDef={{
-              sortable: true,
-              resizable: true,
-              filter: true,
-              minWidth: 65,
-            }}
-            theme={learningGridTheme}
-            domLayout="normal"
-            rowHeight={30}
-            headerHeight={28}
-          />
-        </div>
-      )}
-      <details className="auto-trader-learning-experiments">
-        <summary>Scout parameter experiments · simulated evidence</summary>
-        <p>
-          Paired scout results show whether each tested parameter value beat its
-          baseline in simulation. “Qualified” means the configured sample
-          minimum and positive one-sided 90% Student-t lower bound are met;
-          “Active” means the current profile uses that candidate. “Avoid” means
-          the upper bound is below zero. These results guide profile selection
-          but are not realized trading performance.
-        </p>
-        <div className="auto-trader-learning-overview">
-          <div>
-            <span>Paired Scout evidence · 7d</span>
-            <strong>
-              {learningSummary == null
-                ? '—'
-                : `${effectiveness.pairedSamples.toLocaleString()} samples`}
-            </strong>
+      <strong>{sectionTitles[section]}</strong>
+      {section === 'decisions' && (
+        <>
+          <div className="auto-trader-learning-decisions-head">
+            <strong>Signal and entry decisions</strong>
+            <label>
+              Symbol{' '}
+              <input
+                value={symbolFilter}
+                onChange={(event) => setSymbolFilter(event.target.value)}
+                placeholder="All symbols"
+              />
+            </label>
             <small>
-              Mean variant-vs-control lift{' '}
-              {signedPercentPoints(effectiveness.pairedLift)}
+              Last 7 days · {filteredDecisions.length} decisions · select a row
+              to inspect recorded evidence
             </small>
           </div>
-          <div>
-            <span>Parameter decisions</span>
-            <strong>
-              {activeCandidates} active · {rejectedCandidates} avoided
-            </strong>
-            <small>
-              {qualifiedCandidates} qualified, not active ·{' '}
-              {collectingCandidates} still collecting evidence
-            </small>
-          </div>
-          <div>
-            <span>Scout outcomes · 7d</span>
-            <strong>
-              {learningSummary == null
-                ? '—'
-                : `${effectiveness.scoutOutcomes.toLocaleString()} observations`}
-            </strong>
-            <small>
-              Mean counterfactual return{' '}
-              {signedPercentPoints(effectiveness.scoutReturn)}
-            </small>
-          </div>
-        </div>
-        {rows.length === 0 ? (
-          <p>
-            {state.loading
-              ? 'Loading scout parameter results…'
-              : 'No paired scout parameter results are available yet.'}
-          </p>
-        ) : (
-          <>
-            <button
-              className="auto-trader-learning-filter"
-              type="button"
-              aria-pressed={promotedOnly}
-              onClick={() => model.setPromotedOnly(!promotedOnly)}
-            >
-              {promotedOnly ? 'Show all tests' : 'Active only'}
-            </button>
-            {visibleRows.length === 0 ? (
-              <p>No parameter variants are active yet.</p>
-            ) : (
-              <div className="data-grid-wrap auto-trader-learning-grid">
-                <AgGridReact<LearningRow>
-                  rowData={visibleRows}
-                  columnDefs={columns}
-                  getRowId={({ data }) => data.id}
-                  defaultColDef={{
-                    sortable: true,
-                    resizable: true,
-                    filter: true,
-                    minWidth: 65,
-                  }}
-                  theme={learningGridTheme}
-                  domLayout="normal"
-                  rowHeight={30}
-                  headerHeight={28}
-                />
+          {decisionError && (
+            <p className="auto-trader-learning-error" role="alert">
+              Decision history unavailable: {decisionError}
+            </p>
+          )}
+          {!decisionError && decisions.length === 0 ? (
+            <p>Loading recent strategy decisions…</p>
+          ) : (
+            <div className="data-grid-wrap auto-trader-learning-grid auto-trader-decision-grid">
+              <AgGridReact<LearningDecision>
+                rowData={filteredDecisions}
+                columnDefs={decisionColumns}
+                getRowId={({ data }) =>
+                  `${data.decision_id ?? ''}:${data.timestamp ?? 0}:${data.status ?? ''}`
+                }
+                defaultColDef={{
+                  sortable: true,
+                  resizable: true,
+                  filter: true,
+                  minWidth: 70,
+                }}
+                onRowClicked={({ data }) => setSelectedDecision(data)}
+                rowSelection={{ mode: 'singleRow', enableClickSelection: true }}
+                theme={learningGridTheme}
+                domLayout="normal"
+                rowHeight={30}
+                headerHeight={28}
+              />
+            </div>
+          )}
+          {selectedDecision && (
+            <details className="auto-trader-learning-decision-detail" open>
+              <summary>
+                {selectedDecision.symbol} · {selectedDecision.strategy} ·{' '}
+                {selectedDecision.status} → final:{' '}
+                {selectedDecision.final_outcome?.status ?? 'pending'} ·{' '}
+                {selectedDecision.final_outcome?.reason ??
+                  selectedDecision.reason ??
+                  selectedDecision.entry_gate?.rejection_reasons?.join(', ') ??
+                  'No reason recorded'}
+              </summary>
+              <div className="auto-trader-learning-detail-grid">
+                <div>
+                  <strong>Final outcome and execution</strong>
+                  <pre>
+                    {JSON.stringify(
+                      selectedDecision.final_outcome ?? {
+                        status: 'No final outcome recorded',
+                        reason:
+                          'No entry order or downstream decision outcome was recorded for this selection.',
+                      },
+                      null,
+                      2,
+                    )}
+                  </pre>
+                </div>
+                <div>
+                  <strong>Gate checks</strong>
+                  <pre>
+                    {JSON.stringify(
+                      selectedDecision.entry_gate ?? 'No entry gate captured',
+                      null,
+                      2,
+                    )}
+                  </pre>
+                </div>
+                <div>
+                  <strong>Strategy decision and parameters</strong>
+                  <pre>
+                    {JSON.stringify(
+                      selectedDecision.strategy_decision ??
+                        'No strategy decision captured',
+                      null,
+                      2,
+                    )}
+                  </pre>
+                </div>
+                <div>
+                  <strong>Signal components</strong>
+                  <pre>
+                    {JSON.stringify(
+                      selectedDecision.signal_components ??
+                        'No signal components captured',
+                      null,
+                      2,
+                    )}
+                  </pre>
+                </div>
               </div>
+            </details>
+          )}
+        </>
+      )}
+      {section === 'realized' && (
+        <>
+          <p>
+            This compares actual closed-trade returns from the currently active
+            learned parameter profiles with actual trades taken under other
+            parameter profiles over the last seven days. It answers whether live
+            realized results are moving in the right direction; the comparison
+            is descriptive, not a controlled causal test.
+          </p>
+          <div
+            className="auto-trader-learning-overview"
+            aria-label="Realized trade performance over the last seven days"
+          >
+            <div>
+              <span>Current learned profile · actual trades</span>
+              <strong>
+                {learningSummary == null
+                  ? '—'
+                  : `${effectiveness.activeProfileTrades.toLocaleString()} trades`}
+              </strong>
+              <small>
+                {effectiveness.activeProfilePositiveRate == null
+                  ? '—'
+                  : `${(effectiveness.activeProfilePositiveRate * 100).toFixed(0)}% positive`}
+                {' · mean net '}
+                {signedPercentPoints(effectiveness.activeProfileReturn)}
+              </small>
+            </div>
+            <div>
+              <span>Other parameter profiles · actual trades</span>
+              <strong>
+                {learningSummary == null
+                  ? '—'
+                  : `${effectiveness.otherProfileTrades.toLocaleString()} trades`}
+              </strong>
+              <small>
+                {effectiveness.otherProfilePositiveRate == null
+                  ? '—'
+                  : `${(effectiveness.otherProfilePositiveRate * 100).toFixed(0)}% positive`}
+                {' · mean net '}
+                {signedPercentPoints(effectiveness.otherProfileReturn)}
+              </small>
+            </div>
+            <div>
+              <span>Active profile minus other profiles</span>
+              <strong>{signedPercentPoints(profileReturnDifference)}</strong>
+              <small>
+                {effectiveness.activeProfileTrades === 0 ||
+                effectiveness.otherProfileTrades === 0
+                  ? 'Need trades in both groups to compare'
+                  : 'Difference in mean realized net return'}
+              </small>
+            </div>
+            <div>
+              <span>Actual trade coverage · 7d</span>
+              <strong>
+                {learningSummary == null
+                  ? '—'
+                  : `${effectiveness.closedTrades.toLocaleString()} trades`}
+              </strong>
+              <small>Across active and other parameter profiles</small>
+            </div>
+          </div>
+          <p className="auto-trader-learning-caveat">
+            {!effectiveness.activeProfileTrades ||
+            !effectiveness.otherProfileTrades
+              ? 'There is not enough realized-trade evidence in both groups to judge effectiveness yet.'
+              : 'This is an observed comparison, not proof that Learning caused the difference. Trade count, market conditions, and risk-adjusted return matter; Scout simulations are excluded from these realized results.'}
+          </p>
+          {learningSummaryError && (
+            <p className="auto-trader-learning-error" role="alert">
+              Learning summary unavailable: {learningSummaryError}
+            </p>
+          )}
+          {learningSummary == null ? (
+            <p>
+              {learningSummaryError
+                ? 'Actual trade results could not be loaded.'
+                : 'Loading actual trade results…'}
+            </p>
+          ) : actualTradeRows.length === 0 ? (
+            <p>
+              No closed-trade results are available for the last seven days.
+            </p>
+          ) : (
+            <div className="data-grid-wrap auto-trader-learning-grid">
+              <AgGridReact<TradeEffectivenessRow>
+                rowData={actualTradeRows}
+                columnDefs={tradeEffectivenessColumns}
+                getRowId={({ data }) => data.strategy}
+                defaultColDef={{
+                  sortable: true,
+                  resizable: true,
+                  filter: true,
+                  minWidth: 65,
+                }}
+                theme={learningGridTheme}
+                domLayout="normal"
+                rowHeight={30}
+                headerHeight={28}
+              />
+            </div>
+          )}
+        </>
+      )}
+      {section === 'scouts' && (
+        <>
+          <section
+            className="auto-trader-learning-experiments"
+            aria-label="Scout simulated evidence"
+          >
+            <p>
+              Paired scout results show whether each tested parameter value beat
+              its baseline in simulation. “Qualified” means the configured
+              sample minimum and positive one-sided 90% Student-t lower bound
+              are met; “Active” means the current profile uses that candidate.
+              “Avoid” means the upper bound is below zero. These results guide
+              profile selection but are not realized trading performance.
+            </p>
+            <div className="auto-trader-learning-overview">
+              <div>
+                <span>Paired Scout evidence · 7d</span>
+                <strong>
+                  {learningSummary == null
+                    ? '—'
+                    : `${effectiveness.pairedSamples.toLocaleString()} samples`}
+                </strong>
+                <small>
+                  Mean variant-vs-control lift{' '}
+                  {signedPercentPoints(effectiveness.pairedLift)}
+                </small>
+              </div>
+              <div>
+                <span>Parameter decisions</span>
+                <strong>
+                  {activeCandidates} active · {rejectedCandidates} avoided
+                </strong>
+                <small>
+                  {qualifiedCandidates} qualified, not active ·{' '}
+                  {collectingCandidates} still collecting evidence
+                </small>
+              </div>
+              <div>
+                <span>Scout outcomes · 7d</span>
+                <strong>
+                  {learningSummary == null
+                    ? '—'
+                    : `${effectiveness.scoutOutcomes.toLocaleString()} observations`}
+                </strong>
+                <small>
+                  Mean counterfactual return{' '}
+                  {signedPercentPoints(effectiveness.scoutReturn)}
+                </small>
+              </div>
+            </div>
+            {rows.length === 0 ? (
+              <p>
+                {state.loading
+                  ? 'Loading scout parameter results…'
+                  : 'No paired scout parameter results are available yet.'}
+              </p>
+            ) : (
+              <>
+                <button
+                  className="auto-trader-learning-filter"
+                  type="button"
+                  aria-pressed={promotedOnly}
+                  onClick={() => model.setPromotedOnly(!promotedOnly)}
+                >
+                  {promotedOnly ? 'Show all tests' : 'Active only'}
+                </button>
+                {visibleRows.length === 0 ? (
+                  <p>No parameter variants are active yet.</p>
+                ) : (
+                  <div className="data-grid-wrap auto-trader-learning-grid">
+                    <AgGridReact<LearningRow>
+                      rowData={visibleRows}
+                      columnDefs={columns}
+                      getRowId={({ data }) => data.id}
+                      defaultColDef={{
+                        sortable: true,
+                        resizable: true,
+                        filter: true,
+                        minWidth: 65,
+                      }}
+                      theme={learningGridTheme}
+                      domLayout="normal"
+                      rowHeight={30}
+                      headerHeight={28}
+                    />
+                  </div>
+                )}
+              </>
             )}
-          </>
-        )}
-      </details>
+          </section>
+        </>
+      )}
     </section>
   );
 }

@@ -132,6 +132,11 @@ pub struct LiveStrategyProfile {
     /// Updated by Learning and delivered through AutoTrader's profile push.
     #[serde(default)]
     pub walk_forward_evidence: Option<StrategyWalkForwardEvidence>,
+    /// Regime-conditioned Scout evidence. The live worker selects the bucket
+    /// matching the incoming signal and otherwise uses the unconditioned value.
+    #[serde(default)]
+    pub walk_forward_evidence_by_regime:
+        std::collections::BTreeMap<String, StrategyWalkForwardEvidence>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]

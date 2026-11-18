@@ -41,7 +41,7 @@ Donchian-10/20/55, trend-50-200, relative-strength-90, rsi2-oversold-rebound, tr
 - `recent_net_pnl_edge()` uses exponentially weighted PnL with half-life
 - Scouts test parameter variants (`MIN_LIVE_SCOUT_PARAMETER_VARIANT_SAMPLES = 6`)
 - Scout params include risk parameters (stop, target, profit-protection) and entry thresholds
-- `StrategyWalkForwardEvidence` is a flat aggregate: `{sample_count, positive_net_rate, average_net_return_percent, last_sample_timestamp_ms}` — **no symbol, regime, or condition breakdown**
+- `StrategyWalkForwardEvidence` values are flat per bucket; Learning keys Scout buckets by exact profile and by symbol + strategy, with an additional regime dimension whenever the source signal has a canonical regime
 
 ### Research Backtests (2021-03 to 2026-10)
 
@@ -137,7 +137,7 @@ Add exponential decay to learned parameter values and profile stats so the syste
 | 1 | Walk-forward gate fix | `src/rust/strategy/src/lib.rs` | **DONE** |
 | 2 | Signal strength minimum | `contracts.rs`, `parameter_catalog.rs`, evaluators | **DONE** |
 | 3 | Scout min samples | `learning/src/feedback.rs`, `learning/src/lib.rs`, `learning/src/profiles.rs` | **DONE** |
-| 4 | Symbol-conditioned evidence | `input.rs`, `lib.rs`, `cycle_entry.rs` | **Pending** |
+| 4 | Symbol-conditioned evidence | `learning/src/profiles.rs`, `auto_trader/api/decision_status_api.rs`, `cycle_entry.rs` | **DONE** (symbol and regime scoped) |
 | 5 | Regime-conditioned thresholds | `contracts.rs`, `parameter_catalog.rs`, evaluators, learning | **DONE** |
 | 6 | Per-symbol stops/targets | `learning/src/profiles.rs`, `position_exit_rules.rs` | **DONE** |
 | 7 | Scout liquid symbols | `scouts/service.rs` | **DONE** |
@@ -156,7 +156,7 @@ Add exponential decay to learned parameter values and profile stats so the syste
 | 1 | Walk-forward gate fix (dead spiral prevention) | **DONE** |
 | 2 | Signal strength minimum (noise filtering) | **DONE** |
 | 3 | Scout minimum samples (noise prevention) | **DONE** |
-| 4 | Symbol-conditioned evidence | **Pending** |
+| 4 | Symbol-conditioned evidence | **DONE** (symbol and regime scoped) |
 | 5 | Regime-conditioned thresholds | **DONE** |
 | 6 | Per-symbol stops/targets | **DONE** |
 | 7 | Scout liquid symbols | **DONE** |
@@ -173,3 +173,7 @@ Protective stop and target values are part of each strategy's parameter profile 
 ### Priority 7 implementation note
 
 Live and daily scout inputs are limited to BTC, ETH, and major USDT pairs; dated-carry scouts use the same allowlist. Horizon markouts remain observation-only measurements. Actual live scout probes use the trade-outcome path and are not converted into horizon observations.
+
+### Priority 4 implementation note
+
+Scout plans preserve the canonical regime from their source audit; Scout outcomes carry it through Learning persistence. Learning publishes exact-profile and symbol/strategy/regime buckets, and AutoTrader prefers the matching regime bucket before using legacy exact-profile or same-symbol fallback evidence. Strategy-wide pooling is excluded because symbols have different execution costs and outcome distributions. Signals without a canonical regime remain unconditioned rather than being assigned a guessed label. Daily, live, and dated-carry Scout generation plus plan and outcome routes enforce the liquid-symbol allowlist.

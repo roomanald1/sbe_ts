@@ -406,10 +406,21 @@ async fn attach_strategy_walk_forward_evidence(
             .and_then(serde_json::Value::as_str)
             .map(str::to_owned)
             .unwrap_or_else(|| strategy::profile_id(&signal.symbol, strategy.as_str(), &parameters));
+        let profile_symbol = signal
+            .strategy_decision
+            .as_ref()
+            .and_then(|decision| decision.get("learning_profile_symbol"))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or(&signal.symbol);
         let evidence = evidence_by_profile
-            .get(&profile_id)
-            .or_else(|| evidence_by_profile.get(&format!("{}|{}", signal.symbol, strategy.as_str())))
-            .or_else(|| evidence_by_profile.get(strategy.as_str()));
+            .get(&format!("{profile_id}|regime:{}", strategy::market_regime(signal).unwrap_or("mixed")))
+            .or_else(|| {
+                evidence_by_profile.get(&format!("{profile_symbol}|{}|regime:{}", strategy.as_str(), strategy::market_regime(signal).unwrap_or("mixed")))
+            })
+            .or_else(|| evidence_by_profile.get(&profile_id))
+            .or_else(|| {
+                evidence_by_profile.get(&format!("{profile_symbol}|{}", strategy.as_str()))
+            });
         let Some(evidence) = evidence else {
             continue;
         };
@@ -654,6 +665,10 @@ async fn run_cycle_inner(
     state: &AutoTraderState,
     mut dashboard: Dashboard,
 ) -> Result<CycleResult, (StatusCode, String)> {
+    dashboard.best.retain(|signal| strategy::is_autotrader_symbol_allowed(&signal.symbol));
+    let mut missed_bands = (*dashboard.missed_opportunity_bands).clone();
+    missed_bands.retain(|band| band.symbol.as_deref().is_none_or(strategy::is_autotrader_symbol_allowed));
+    dashboard.missed_opportunity_bands = Arc::new(missed_bands);
     let cycle_started_at = Instant::now();
     {
         let mut settings = state.settings.lock().await;

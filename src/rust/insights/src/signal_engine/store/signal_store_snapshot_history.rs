@@ -14,6 +14,8 @@ pub struct StrategySnapshotHistoryQuery {
     pub through_ms: u64,
     pub cursor: Option<String>,
     pub limit: Option<usize>,
+    #[serde(default)]
+    pub newest_first: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -70,9 +72,12 @@ impl SignalStore {
     ) -> Result<StrategySnapshotHistoryPage> {
         let connection = Self::open_database_path(&path.to_path_buf())?;
         let scan_rows = {
-            let mut statement = connection.prepare(
-                "SELECT id, timestamp, payload FROM signal_records WHERE kind = 0 AND timestamp >= ?1 AND timestamp <= ?2 AND (?3 IS NULL OR timestamp > ?3 OR (timestamp = ?3 AND id > ?4)) ORDER BY timestamp ASC, id ASC LIMIT ?5",
-            )?;
+            let sql = if query.newest_first {
+                "SELECT id, timestamp, payload FROM signal_records WHERE kind = 0 AND timestamp >= ?1 AND timestamp <= ?2 AND (?3 IS NULL OR timestamp < ?3 OR (timestamp = ?3 AND id < ?4)) ORDER BY timestamp DESC, id DESC LIMIT ?5"
+            } else {
+                "SELECT id, timestamp, payload FROM signal_records WHERE kind = 0 AND timestamp >= ?1 AND timestamp <= ?2 AND (?3 IS NULL OR timestamp > ?3 OR (timestamp = ?3 AND id > ?4)) ORDER BY timestamp ASC, id ASC LIMIT ?5"
+            };
+            let mut statement = connection.prepare(sql)?;
             let rows = statement.query_map(
                 params![query.from_ms as i64, query.through_ms as i64, cursor.map(|value| value.0 as i64), cursor.map(|value| value.1).unwrap_or(0), (SNAPSHOT_HISTORY_MAX_SCAN + 1) as i64],
                 |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?, row.get::<_, Vec<u8>>(2)?)),
@@ -111,8 +116,14 @@ impl SignalStore {
             let timestamp = timestamp.max(0) as u64;
             let previous_cursor = page.next_cursor.clone();
             page.next_cursor = Some(format!("{timestamp}:{id}"));
-            page.coverage_start_ms.get_or_insert(timestamp);
-            page.coverage_through_ms = Some(timestamp);
+            page.coverage_start_ms = Some(
+                page.coverage_start_ms
+                    .map_or(timestamp, |start| start.min(timestamp)),
+            );
+            page.coverage_through_ms = Some(
+                page.coverage_through_ms
+                    .map_or(timestamp, |through| through.max(timestamp)),
+            );
             let decoded = decode_strategy_snapshot_history_record(&compressed);
             let Ok(snapshot) = decoded else { corrupt_records += 1; continue; };
             if snapshot.timestamp < query.from_ms || snapshot.timestamp > query.through_ms || snapshot.symbol != query.symbol {
@@ -157,12 +168,14 @@ impl SignalStore {
     fn attach_snapshot_history_book_marks(connection: &Connection, page: &mut StrategySnapshotHistoryPage) -> Result<()> {
         let Some(first) = page.records.first().map(|record| record.snapshot.timestamp) else { return Ok(()); };
         let Some(last) = page.records.last().map(|record| record.snapshot.timestamp) else { return Ok(()); };
+        let range_start = first.min(last);
+        let range_end = first.max(last);
         let scan_rows = {
             let mut statement = connection.prepare(
                 "SELECT id, timestamp, payload FROM signal_records WHERE kind = 3 AND timestamp >= ?1 AND timestamp <= ?2 ORDER BY timestamp DESC, id DESC LIMIT ?3",
             )?;
             let rows = statement.query_map(
-                params![first.saturating_sub(10_000) as i64, last as i64, (SNAPSHOT_HISTORY_MAX_BOOK_SCAN + 1) as i64],
+                params![range_start.saturating_sub(10_000) as i64, range_end as i64, (SNAPSHOT_HISTORY_MAX_BOOK_SCAN + 1) as i64],
                 |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?, row.get::<_, Vec<u8>>(2)?)),
             )?;
             rows.collect::<rusqlite::Result<Vec<_>>>()?
@@ -263,7 +276,7 @@ mod snapshot_history_tests {
     #[test]
     fn snapshot_history_filters_symbol_and_paginates_in_order() {
         let database = database(&[("BTC-USDT", 100), ("ETH-USDT", 110), ("BTC-USDT", 120)]);
-        let query = |cursor| StrategySnapshotHistoryQuery { symbol: "BTC-USDT".into(), from_ms: 0, through_ms: 200, cursor, limit: Some(1) };
+        let query = |cursor| StrategySnapshotHistoryQuery { symbol: "BTC-USDT".into(), from_ms: 0, through_ms: 200, cursor, limit: Some(1), newest_first: false };
         let first = SignalStore::strategy_snapshot_history_sync(&database.path, query(None), None, 1).unwrap();
         assert_eq!(first.records[0].snapshot.timestamp, 100);
         assert_eq!(first.next_cursor.as_deref(), Some("110:2"));
@@ -278,7 +291,7 @@ mod snapshot_history_tests {
         let rows = (0..SNAPSHOT_HISTORY_MAX_SCAN + 1).map(|index| ("ETH-USDT", index as u64 + 1)).collect::<Vec<_>>();
         let database = database(&rows);
         let page = SignalStore::strategy_snapshot_history_sync(&database.path, StrategySnapshotHistoryQuery {
-            symbol: "BTC-USDT".into(), from_ms: 0, through_ms: i64::MAX as u64, cursor: None, limit: Some(1),
+            symbol: "BTC-USDT".into(), from_ms: 0, through_ms: i64::MAX as u64, cursor: None, limit: Some(1), newest_first: false,
         }, None, 1).unwrap();
         assert_eq!(page.scanned_records, SNAPSHOT_HISTORY_MAX_SCAN);
         assert!(page.more_available);

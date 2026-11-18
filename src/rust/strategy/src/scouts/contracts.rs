@@ -154,6 +154,8 @@ pub struct ScoutSample {
     pub specs: Vec<ParameterSpec>,
     pub entry_price: f64,
     pub side: i8,
+    #[serde(default)]
+    pub market_regime: Option<String>,
 }
 
 /// Fee-aware markout produced by Insights. This intentionally remains wire
@@ -174,6 +176,8 @@ pub struct ScoutOutcomeRequest {
     pub net_return_percent: f64,
     pub signal_timestamp_ms: u64,
     pub evaluated_timestamp_ms: u64,
+    #[serde(default)]
+    pub market_regime: Option<String>,
     pub taker_fee_rate: f64,
     pub symbol: String,
     pub strategy: String,

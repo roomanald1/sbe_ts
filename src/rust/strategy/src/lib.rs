@@ -33,7 +33,7 @@ pub use input::{
     AbsorptionPressureValue, DailyStrategySignalFeatures, DatedCarryCandidate,
     DatedCarrySettlementSource, DepthSignalValue, Signal, SignalComponents, SignalDirection,
     StrategyInput, StrategyInputLike, StrategyMarketSignal, StrategySignal, StrategySpecificSignal,
-    StrategyWalkForwardEvidence, WindowedSignalValue, prepare_live_strategy_signal,
+    StrategyWalkForwardEvidence, WindowedSignalValue, market_regime, prepare_live_strategy_signal,
     regime_conditioned_parameter_value, strategy_parameter_value,
 };
 pub use live_evaluation::{
@@ -71,6 +71,39 @@ pub use scout_work::{request_learning_snapshot_push, request_live_strategy_socke
 pub use scout_worker::{ScoutWorkerConfig, serve_strategy_worker};
 #[cfg(feature = "service")]
 pub use scouts::router;
+pub fn is_autotrader_symbol_allowed(symbol: &str) -> bool {
+    autotrader_allowed_symbols().contains(&symbol)
+}
+/// Canonical symbol universe accepted by AutoTrader, Learning, and Scout workers.
+pub const AUTOTRADER_ALLOWED_SYMBOLS: &[&str] = &[
+    "BTC-USDT",
+    "ETH-USDT",
+    "SOL-USDT",
+    "BNB-USDT",
+    "XRP-USDT",
+    "ADA-USDT",
+    "DOGE-USDT",
+    "TRX-USDT",
+    "LINK-USDT",
+    "LTC-USDT",
+    "AVAX-USDT",
+];
+
+pub fn autotrader_allowed_symbols() -> &'static [&'static str] {
+    AUTOTRADER_ALLOWED_SYMBOLS
+}
+
+#[cfg(test)]
+mod autotrader_symbol_allowlist_tests {
+    #[test]
+    fn shared_allowlist_is_the_scout_symbol_source() {
+        for symbol in crate::autotrader_allowed_symbols() {
+            assert!(crate::is_autotrader_symbol_allowed(symbol));
+        }
+        assert!(!crate::is_autotrader_symbol_allowed("XMSTR-USDT"));
+        assert!(!crate::is_autotrader_symbol_allowed("BTC-USDC"));
+    }
+}
 
 #[derive(Clone, Copy, Debug)]
 pub struct StrategyParameterSpec {

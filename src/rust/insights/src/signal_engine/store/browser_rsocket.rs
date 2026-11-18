@@ -142,6 +142,9 @@ impl InsightsBrowserResponder {
                     through_ms: number(&query, "throughMs").unwrap_or_default(),
                     cursor: query.get("cursor").cloned(),
                     limit: usize_number(&query, "limit"),
+                    newest_first: query
+                        .get("newestFirst")
+                        .is_some_and(|value| value == "true"),
                 };
                 serde_json::to_value(self.store.strategy_snapshot_history(query).await?)?
             }
