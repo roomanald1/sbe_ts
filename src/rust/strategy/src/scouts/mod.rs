@@ -676,6 +676,132 @@ mod tests {
     }
 
     #[test]
+    fn scout_search_ledger_retries_are_immutable_and_retain_all_candidates() {
+        let path = std::env::temp_dir().join(format!(
+            "scouts-search-ledger-idempotency-{}-{}.sqlite",
+            std::process::id(),
+            scout_now_ms()
+        ));
+        let candidates = (0..64)
+            .map(|index| ScoutSearchCandidateRecord {
+                candidate_id: format!("candidate-{index}"),
+                candidate_index: index,
+                selection_result: if index == 17 {
+                    "selected"
+                } else {
+                    "not_selected"
+                }
+                .into(),
+                parameter_map: Some(BTreeMap::from([("lookback".into(), index as f64)])),
+                parameter_map_status: "recorded".into(),
+                candidate: serde_json::json!({"lookback": index}),
+            })
+            .collect::<Vec<_>>();
+        let response = ScoutPlanResponse {
+            audits: Vec::new(),
+            selected_groups: vec!["candidate-17".into()],
+        };
+        let ledger = ScoutSearchLedger {
+            request_id: "search-retry".into(),
+            as_of_timestamp_ms: 500,
+            outcome_cutoff_timestamp_ms: 500,
+            selection_metric: None,
+            selection_metric_status: "unknown".into(),
+            selected_candidate_ids: vec!["candidate-17".into()],
+            selected_candidates: vec![serde_json::json!({"lookback": 17})],
+            candidates,
+            response,
+        };
+        let mut state = PersistedState::default();
+        state
+            .scout_search_ledger
+            .insert(ledger.request_id.clone(), ledger.clone());
+        persist_scout_state(&path, &state, &["scout_search_ledger@search-retry"]).unwrap();
+
+        let mut retry_state = PersistedState::default();
+        let mut retried = ledger.clone();
+        retried.as_of_timestamp_ms = 999;
+        retried.candidates.clear();
+        retry_state
+            .scout_search_ledger
+            .insert(retried.request_id.clone(), retried);
+        persist_scout_state(&path, &retry_state, &["scout_search_ledger@search-retry"]).unwrap();
+
+        let persisted =
+            load_scout_record::<ScoutSearchLedger>(&path, "scout_search_ledger", "search-retry")
+                .unwrap()
+                .unwrap();
+        assert_eq!(persisted.as_of_timestamp_ms, 500);
+        assert_eq!(persisted.candidates.len(), 64);
+        assert_eq!(persisted.selected_candidate_ids, ["candidate-17"]);
+        assert_eq!(persisted.selection_metric, None);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("sqlite-wal"));
+        let _ = std::fs::remove_file(path.with_extension("sqlite-shm"));
+    }
+
+    #[test]
+    fn scout_search_ledger_runtime_cache_is_bounded_but_sqlite_history_is_complete() {
+        let path = std::env::temp_dir().join(format!(
+            "scouts-search-ledger-history-{}-{}.sqlite",
+            std::process::id(),
+            scout_now_ms()
+        ));
+        let mut state = PersistedState::default();
+        for index in 0..(MAX_CACHED_SCOUT_SEARCH_LEDGER + 5) {
+            let request_id = format!("search-{index:03}");
+            let ledger = ScoutSearchLedger {
+                request_id: request_id.clone(),
+                as_of_timestamp_ms: index as u64,
+                outcome_cutoff_timestamp_ms: index as u64,
+                selection_metric: None,
+                selection_metric_status: "unknown".into(),
+                candidates: vec![ScoutSearchCandidateRecord {
+                    candidate_id: format!("candidate-{index}"),
+                    candidate_index: 0,
+                    selection_result: "not_selected".into(),
+                    parameter_map: None,
+                    parameter_map_status: "unknown".into(),
+                    candidate: serde_json::json!({"index": index}),
+                }],
+                selected_candidate_ids: Vec::new(),
+                selected_candidates: Vec::new(),
+                response: ScoutPlanResponse::default(),
+            };
+            state.scout_search_ledger.insert(request_id.clone(), ledger);
+            trim_scout_search_ledger_cache(&mut state);
+            persist_scout_state(
+                &path,
+                &state,
+                &[&format!("scout_search_ledger@{request_id}")],
+            )
+            .unwrap();
+        }
+        let runtime = load_scout_state(&path).unwrap();
+        assert_eq!(
+            runtime.scout_search_ledger.len(),
+            MAX_CACHED_SCOUT_SEARCH_LEDGER
+        );
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        let durable_count = connection
+            .query_row(
+                "SELECT COUNT(*) FROM scout_records WHERE collection='scout_search_ledger'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap();
+        assert_eq!(durable_count as usize, MAX_CACHED_SCOUT_SEARCH_LEDGER + 5);
+        assert!(
+            load_scout_record::<ScoutSearchLedger>(&path, "scout_search_ledger", "search-000")
+                .unwrap()
+                .is_some()
+        );
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("sqlite-wal"));
+        let _ = std::fs::remove_file(path.with_extension("sqlite-shm"));
+    }
+
+    #[test]
     fn active_audit_replay_builds_registrations_from_loaded_state() {
         let path = std::env::temp_dir().join(format!(
             "scouts-audit-replay-{}-{}.sqlite",

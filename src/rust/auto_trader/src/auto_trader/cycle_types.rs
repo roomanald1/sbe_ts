@@ -107,4 +107,14 @@ struct CycleResult {
     quantity: Option<f64>,
     order_type: Option<String>,
     order_response: Option<serde_json::Value>,
+    filled_quantity: Option<f64>,
+    entry_diagnostic: Option<LatestEntryDiagnostic>,
+}
+
+fn with_entry_diagnostic(
+    mut result: CycleResult,
+    diagnostic: LatestEntryDiagnostic,
+) -> CycleResult {
+    result.entry_diagnostic = Some(diagnostic);
+    result
 }

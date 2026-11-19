@@ -201,6 +201,23 @@ export function DashboardWidgetFrame(props: Props) {
             role="separator"
             aria-label={'Resize width of ' + description + ' widget'}
             title="Drag to resize width"
+            style={{
+              position: 'absolute',
+              zIndex: 20,
+              top: '50%',
+              right: 0,
+              boxSizing: 'border-box',
+              width: 14,
+              height: 40,
+              border: '1px solid #9bbce0',
+              borderRight: 0,
+              borderRadius: '5px 0 0 5px',
+              backgroundColor: '#34506f',
+              boxShadow: '0 0 5px rgb(105 174 252 / 55%)',
+              cursor: 'ew-resize',
+              touchAction: 'none',
+              transform: 'translateY(-50%)',
+            }}
             onPointerDown={(event) => startResize(event, true)}
           />
         </>

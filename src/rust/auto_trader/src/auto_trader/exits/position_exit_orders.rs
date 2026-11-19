@@ -238,6 +238,8 @@ async fn submit_position_exit_order(
         quantity: Some(quantity),
         order_type: Some("Ioc exit".into()),
         order_response: Some(response),
+        filled_quantity: Some(quantity),
+        entry_diagnostic: None,
     }))
 }
 

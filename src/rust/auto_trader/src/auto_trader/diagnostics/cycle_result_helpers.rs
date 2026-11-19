@@ -13,6 +13,8 @@ fn skipped(reason: &str) -> CycleResult {
         quantity: None,
         order_type: None,
         order_response: None,
+        filled_quantity: None,
+        entry_diagnostic: None,
     }
 }
 #[cfg(test)]
@@ -37,5 +39,68 @@ mod cycle_result_helper_tests {
         let generic = skipped("generic");
         assert_eq!(generic.reason.as_deref(), Some("generic"));
         assert!(generic.symbol.is_none());
+    }
+
+    #[test]
+    fn entry_diagnostic_serializes_typed_outcome_and_blocker_details() {
+        let result = with_entry_diagnostic(
+            skipped("two candidates rejected"),
+            LatestEntryDiagnostic {
+                cycle_id: "cycle-1".into(),
+                timestamp_ms: 123,
+                outcome: EntryCycleOutcome::CandidatesRejected,
+                raw_signal_count: 5,
+                allowed_signal_count: 5,
+                strategy_candidate_count: 2,
+                eligible_candidate_count: 2,
+                rejected_candidate_count: 2,
+                selected_candidate_count: 0,
+                order_attempt_count: 0,
+                submitted_order_count: 0,
+                fill_confirmed: false,
+                primary_gate_id: Some("candidate_selection_gates".into()),
+                primary_blocker: Some("walk_forward_expectancy_not_proven".into()),
+                detail: "lower 95% bound -0.120% requires > 0%".into(),
+            },
+        );
+        let payload = serde_json::to_value(result).unwrap();
+        let diagnostic = &payload["entry_diagnostic"];
+        assert_eq!(diagnostic["outcome"], "candidates_rejected");
+        assert_eq!(diagnostic["strategyCandidateCount"], 2);
+        assert_eq!(diagnostic["primaryGateId"], "candidate_selection_gates");
+        assert_eq!(diagnostic["primaryBlocker"], "walk_forward_expectancy_not_proven");
+        assert_eq!(diagnostic["detail"], "lower 95% bound -0.120% requires > 0%");
+    }
+
+    #[test]
+    fn symbol_entry_result_serializes_backend_decision_and_identity() {
+        let result = SymbolEntryResult {
+            strategy: "live-momentum".into(),
+            symbol: "ADA-USDT".into(),
+            decision: Some(strategy::LiveStrategyDecision::Reject),
+            reason: "Strength 0.111 < 0.300".into(),
+            timestamp_ms: Some(123),
+        };
+        let payload = serde_json::to_value(result).unwrap();
+        assert_eq!(payload["strategy"], "live-momentum");
+        assert_eq!(payload["symbol"], "ADA-USDT");
+        assert_eq!(payload["decision"], "reject");
+        assert_eq!(payload["reason"], "Strength 0.111 < 0.300");
+        assert_eq!(payload["timestamp_ms"], 123);
+    }
+
+    #[test]
+    fn symbol_entry_result_can_explain_missing_worker_evaluation() {
+        let result = SymbolEntryResult {
+            strategy: "live-momentum".into(),
+            symbol: "ADA-USDT".into(),
+            decision: None,
+            reason: "No worker result recorded".into(),
+            timestamp_ms: None,
+        };
+        let payload = serde_json::to_value(result).unwrap();
+        assert_eq!(payload["decision"], serde_json::Value::Null);
+        assert_eq!(payload["reason"], "No worker result recorded");
+        assert_eq!(payload["timestamp_ms"], serde_json::Value::Null);
     }
 }

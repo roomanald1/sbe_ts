@@ -208,6 +208,16 @@ fn strategy_profile_snapshot(
             .then_with(|| left["parameter"].as_str().cmp(&right["parameter"].as_str()))
     });
     variants.truncate(MAX_WORKER_SCOUT_VARIANTS);
+    let walk_forward_evidence = snapshot["walk_forward_evidence"]
+        .as_object()
+        .into_iter()
+        .flat_map(|evidence| evidence.iter())
+        .filter(|(key, _)| {
+            key.rsplit_once('|')
+                .is_some_and(|(_, strategy_name)| strategy_name == name)
+        })
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect::<BTreeMap<_, _>>();
     serde_json::json!({
         "profiles": snapshot["profiles"]
             .as_array()
@@ -217,6 +227,7 @@ fn strategy_profile_snapshot(
             .cloned()
             .collect::<Vec<_>>(),
         "scout_parameter_variants": variants,
+        "walk_forward_evidence": walk_forward_evidence,
     })
 }
 
@@ -1598,8 +1609,19 @@ impl ScoutCoordinator {
                         .any(|strategy| strategy == &variant.strategy)
             })
             .collect::<Vec<_>>();
+        let walk_forward_evidence =
+            crate::profiles::walk_forward_priority_snapshot(&state, crate::now_ms())
+                .into_iter()
+                .filter(|(key, _)| {
+                    profile_symbols.iter().any(|symbol| {
+                        strategies
+                            .iter()
+                            .any(|strategy| key == &format!("{symbol}|{strategy}"))
+                    })
+                })
+                .collect::<BTreeMap<_, _>>();
         Ok(
-            serde_json::json!({"profiles": profiles, "scout_parameter_variants": scout_parameter_variants}),
+            serde_json::json!({"profiles": profiles, "scout_parameter_variants": scout_parameter_variants, "walk_forward_evidence": walk_forward_evidence}),
         )
     }
 
@@ -2151,6 +2173,7 @@ fn walk_forward_evidence(
             && registered.profile.strategy == profile.strategy
             && registered.profile.parameters == profile.parameters
     })?;
+    let mut seen_groups = BTreeSet::new();
     let mut samples = registered
         .outcomes
         .iter()
@@ -2158,62 +2181,36 @@ fn walk_forward_evidence(
             outcome.observed_at_ms < signal_timestamp_ms
                 && outcome.net_return_percent.is_finite()
                 && matches!(outcome.source, crate::LearningOutcomeSource::Scout)
+                && outcome
+                    .evidence_group_id
+                    .as_deref()
+                    .is_none_or(|group| seen_groups.insert(group.to_owned()))
         })
+        .map(
+            |outcome| crate::walk_forward_statistics::WalkForwardSample {
+                observed_at_ms: outcome.observed_at_ms,
+                net_return_percent: outcome.net_return_percent,
+                weight: 1.0,
+            },
+        )
         .collect::<Vec<_>>();
     if samples.is_empty() {
         return None;
     }
     samples.sort_by_key(|outcome| outcome.observed_at_ms);
-    let sample_count = samples.len();
-    let positive_rate = samples
-        .iter()
-        .filter(|outcome| outcome.net_return_percent > 0.0)
-        .count() as f64
-        / sample_count as f64;
-    let average_return = samples
-        .iter()
-        .map(|outcome| outcome.net_return_percent)
-        .sum::<f64>()
-        / sample_count as f64;
-    let mut cluster_residuals = BTreeMap::<String, f64>::new();
-    let mut day_windows = BTreeSet::new();
-    let mut equity = 1.0_f64;
-    let mut peak = 1.0_f64;
-    let mut max_drawdown: f64 = 0.0;
-    let mut losses = Vec::new();
-    for outcome in &samples {
-        let cluster = outcome
-            .evidence_group_id
-            .clone()
-            .unwrap_or_else(|| format!("event:{}", outcome.observed_at_ms));
-        *cluster_residuals.entry(cluster).or_default() +=
-            outcome.net_return_percent - average_return;
-        day_windows.insert(outcome.observed_at_ms / (24 * 60 * 60 * 1_000));
-        if outcome.net_return_percent < 0.0 {
-            losses.push(-outcome.net_return_percent);
-        }
-        equity *= (1.0 + outcome.net_return_percent / 100.0).max(0.0);
-        peak = peak.max(equity);
-        max_drawdown = max_drawdown.max((peak - equity) / peak * 100.0);
-    }
-    let standard_error = cluster_residuals
-        .values()
-        .map(|residual| residual * residual)
-        .sum::<f64>()
-        .sqrt()
-        / sample_count as f64;
+    let last_sample_timestamp_ms = samples.last()?.observed_at_ms;
+    let statistics = crate::walk_forward_statistics::summarize_walk_forward_samples(samples);
     Some(strategy::StrategyWalkForwardEvidence {
-        sample_count,
-        positive_net_rate: Some(positive_rate),
-        average_net_return_percent: Some(average_return),
-        last_sample_timestamp_ms: samples.last()?.observed_at_ms,
-        expectancy_ci_low_percent: Some(average_return - 1.96 * standard_error),
-        expectancy_ci_high_percent: Some(average_return + 1.96 * standard_error),
-        effective_sample_size: Some(sample_count as f64),
-        window_count: day_windows.len(),
-        max_drawdown_percent: Some(max_drawdown),
-        downside_loss_percent: (!losses.is_empty())
-            .then(|| losses.iter().sum::<f64>() / losses.len() as f64),
+        sample_count: statistics.sample_count,
+        positive_net_rate: Some(statistics.positive_net_rate),
+        average_net_return_percent: Some(statistics.average_net_return_percent),
+        last_sample_timestamp_ms,
+        expectancy_ci_low_percent: statistics.expectancy_ci_low_percent,
+        expectancy_ci_high_percent: statistics.expectancy_ci_high_percent,
+        effective_sample_size: Some(statistics.effective_sample_size),
+        window_count: statistics.window_count,
+        max_drawdown_percent: statistics.max_drawdown_percent,
+        downside_loss_percent: statistics.downside_loss_percent,
     })
 }
 

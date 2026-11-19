@@ -325,6 +325,55 @@ fn status(state: &AutoTraderState, settings: &Settings) -> StatusResponse {
             .lock()
             .map(|summary| summary.latest_detail.clone())
             .unwrap_or_default(),
+        latest_entry_diagnostic: state
+            .gap_summary
+            .lock()
+            .ok()
+            .and_then(|summary| summary.latest_entry_diagnostic.clone()),
+        latest_symbol_entry_results: {
+            let reports = state
+                .latest_worker_decisions
+                .try_lock()
+                .ok()
+                .map(|decisions| {
+                    decisions
+                        .values()
+                        .filter(|report| settings.strategies.contains(&report.strategy))
+                        .map(|report| {
+                            (
+                                (report.strategy.as_str().to_owned(), report.symbol.clone()),
+                                SymbolEntryResult {
+                                    strategy: report.strategy.as_str().to_owned(),
+                                    symbol: report.symbol.clone(),
+                                    decision: Some(report.decision),
+                                    reason: report.reason.clone().unwrap_or_default(),
+                                    timestamp_ms: Some(report.event_time_ms),
+                                },
+                            )
+                        })
+                        .collect::<BTreeMap<_, _>>()
+                })
+                .unwrap_or_default();
+            let mut results = reports;
+            for kind in Strategy::live_strategies() {
+                let enabled = settings.strategies.contains(&kind);
+                for symbol in strategy::autotrader_allowed_symbols() {
+                    let key = (kind.as_str().to_owned(), (*symbol).to_owned());
+                    results.entry(key).or_insert_with(|| SymbolEntryResult {
+                        strategy: kind.as_str().to_owned(),
+                        symbol: (*symbol).to_owned(),
+                        decision: None,
+                        reason: if enabled {
+                            "No worker result recorded".to_owned()
+                        } else {
+                            "Strategy disabled".to_owned()
+                        },
+                        timestamp_ms: None,
+                    });
+                }
+            }
+            results.into_values().collect()
+        },
         strategy_diagnostics: state
             .strategy_diagnostic
             .lock()

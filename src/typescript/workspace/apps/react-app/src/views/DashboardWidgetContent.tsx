@@ -20,6 +20,7 @@ import { AutoTraderOutcomes } from './AutoTraderOutcomes';
 import { AutoTraderStrategyPerformanceWidget } from './AutoTraderStrategyPerformanceWidget';
 import { AutoTraderExecutionCheck } from './AutoTraderExecutionCheck';
 import { AutoTraderScouts } from './AutoTraderScouts';
+import { AutoTraderScoutReplay } from './AutoTraderScoutReplay';
 import { ExecutionFees } from './ExecutionFees';
 import { OrderBookPopup } from './OrderBookPopup';
 import { TradesView } from './TradesView';
@@ -150,6 +151,8 @@ function DashboardWidgetContentComponent(props: Props): ReactNode {
       return <AutoTraderOutcomes ticks={prices.ticks} liveOnly />;
     case 'auto-trader-scout-positions':
       return <AutoTraderScouts />;
+    case 'auto-trader-scout-replay':
+      return <AutoTraderScoutReplay />;
     case 'execution-fees':
       return <ExecutionFees />;
     case 'walk-forward':

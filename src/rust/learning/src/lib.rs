@@ -31,6 +31,7 @@ mod profiles;
 mod retention;
 mod scout_coordinator;
 mod thresholds;
+mod walk_forward_statistics;
 
 use context::*;
 use execution::*;
@@ -38,6 +39,7 @@ use feedback::*;
 use profiles::*;
 pub use scout_coordinator::ScoutCoordinator;
 use thresholds::*;
+use walk_forward_statistics::*;
 
 #[derive(Clone, Serialize, Deserialize)]
 struct RegisteredProfile {
@@ -1696,7 +1698,9 @@ mod tests {
         .await;
         assert_eq!(response.status(), StatusCode::ACCEPTED);
 
-        for index in 0..70_u64 {
+        // Two rolling development folds plus the final confirmation holdout
+        // each need ten candidate-passing validation outcomes.
+        for index in 0..150_u64 {
             let (feature_value, net_return_percent) = if index % 2 == 0 {
                 (0.025, -0.2)
             } else {

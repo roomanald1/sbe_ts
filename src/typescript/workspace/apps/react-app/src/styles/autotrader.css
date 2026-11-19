@@ -552,7 +552,8 @@
   border: 3px solid #151d29;
   border-radius: 8px;
 }
-.dashboard-widget .auto-trader-strategy-parameters::-webkit-scrollbar-thumb:hover,
+.dashboard-widget
+  .auto-trader-strategy-parameters::-webkit-scrollbar-thumb:hover,
 .auto-trader-learning-decision-detail::-webkit-scrollbar-thumb:hover,
 .auto-trader-learning-detail-grid pre::-webkit-scrollbar-thumb:hover {
   background: #9aacc2;
@@ -585,15 +586,20 @@
   background: #101419;
   color: var(--ink);
 }
-.auto-trader-learning-decisions-head small { color: var(--muted); font-size: 9px; }
-.dashboard-widget .auto-trader-decision-grid {
-  flex: 0 1 42%;
-  height: auto;
-  min-height: 180px;
-  max-height: 48%;
+.auto-trader-learning-decisions-head small {
+  color: var(--muted);
+  font-size: 9px;
+}
+.dashboard-widget .data-grid-wrap.auto-trader-decision-grid {
+  flex: 1 1 55%;
+  width: 100%;
+  height: 0;
+  min-height: 0;
+  max-height: none;
 }
 .auto-trader-learning-decision-detail {
-  flex: 1 1 0;
+  flex: 1 1 45%;
+  width: 100%;
   min-height: 0;
   max-height: none;
   overflow: auto;
@@ -749,4 +755,33 @@
 }
 .auto-trader-gate-delta-zero {
   color: #a0a6ad;
+}
+.scout-replay-history .scout-replay-coverage {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+  align-items: center;
+  margin: 8px 0;
+  padding: 8px 10px;
+  border: 1px solid var(--vscode-panel-border, #242a31);
+  border-radius: 4px;
+  color: var(--vscode-descriptionForeground, #a0a6ad);
+  font-size: 12px;
+}
+
+.scout-replay-history .scout-replay-coverage strong {
+  color: var(--vscode-foreground, #e7e7e7);
+}
+
+.scout-replay-history .scout-replay-coverage.is-complete {
+  border-color: color-mix(in srgb, #45c989 45%, transparent);
+}
+
+.scout-replay-history .scout-replay-coverage.is-incomplete {
+  border-color: color-mix(in srgb, #e7aa58 55%, transparent);
+}
+
+.scout-replay-history .scout-replay-grid {
+  height: min(68vh, 720px);
+  min-height: 280px;
 }

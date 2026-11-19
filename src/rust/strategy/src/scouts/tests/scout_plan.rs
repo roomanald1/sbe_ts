@@ -128,6 +128,45 @@ mod scout_plan_tests {
     }
 
     #[tokio::test]
+    async fn plan_prioritizes_the_cohort_with_the_larger_effective_sample_gap() {
+        let service = service();
+        service.live_profile_snapshot_cache.lock().await.insert(
+            "BTC-USDT".into(),
+            (
+                std::time::Instant::now(),
+                serde_json::json!({
+                    "walk_forward_evidence": {
+                        "BTC-USDT|live-momentum": {"sampleCount": 40, "effectiveSampleSize": 9.0},
+                        "ETH-USDT|live-momentum": {"sampleCount": 196, "effectiveSampleSize": 4.8}
+                    }
+                }),
+            ),
+        );
+        let mut well_sampled = candidate("well-sampled", "BTC:trend");
+        well_sampled.audit_plans[0]["strategy"] = serde_json::json!("live-momentum");
+        let mut undersampled = candidate("undersampled", "ETH:trend");
+        undersampled.audit_plans[0]["symbol"] = serde_json::json!("ETH-USDT");
+        undersampled.audit_plans[0]["strategy"] = serde_json::json!("live-momentum");
+        let response = create_scout_plan(
+            State(service.clone()),
+            Json(ScoutPlanRequest {
+                request_id: "effective-n-priority".into(),
+                now_ms: scout_now_ms(),
+                max_active_batches: 1,
+                max_active_variants_per_profile: 1,
+                legacy_cooldowns: BTreeMap::new(),
+                legacy_comparisons: Vec::new(),
+                candidates: vec![well_sampled, undersampled],
+            }),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(response.selected_groups, vec!["undersampled"]);
+        let _ = std::fs::remove_file(&service.scout.path);
+    }
+
+    #[tokio::test]
     async fn direct_plan_rejects_scouts_for_symbols_outside_the_allowlist() {
         let service = service();
         let mut off_list = candidate("off-list-group", "live-momentum|MON-USDT");

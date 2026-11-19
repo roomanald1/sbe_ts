@@ -874,7 +874,26 @@ async fn create_scout_plan(
             "Invalid Scout scout-plan request".into(),
         ));
     }
+    let learning_snapshot = cached_learning_profile_snapshot(&service).await;
     let mut state = service.scout.data.lock().await;
+    let persisted_ledger = match state.scout_search_ledger.get(&request.request_id).cloned() {
+        Some(ledger) => Some(ledger),
+        None => load_scout_record::<ScoutSearchLedger>(
+            &service.scout.path,
+            "scout_search_ledger",
+            &request.request_id,
+        )
+        .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?,
+    };
+    if let Some(ledger) = persisted_ledger {
+        let response = ledger.response.clone();
+        state
+            .scout_search_ledger
+            .insert(request.request_id.clone(), ledger);
+        trim_scout_search_ledger_cache(&mut state);
+        drop(state);
+        return Ok(Json(response));
+    }
     for (key, timestamp) in &request.legacy_cooldowns {
         state
             .scout_sample_at_ms
@@ -932,23 +951,49 @@ async fn create_scout_plan(
         .map(str::to_owned)
         .collect::<BTreeSet<_>>();
     let cooldowns_at_request_start = state.scout_sample_at_ms.clone();
-    let start = if request.candidates.is_empty() {
+    let expanded_candidates = expand_daily_scout_candidates(&request.candidates);
+    // Prefer candidates whose Learning walk-forward evidence has the largest
+    // gap to the effective-sample target. Keep the existing rotation as a
+    // stable tie-breaker so equally supported cohorts still get turns.
+    const EFFECTIVE_SAMPLE_TARGET: f64 = 10.0;
+    let start = if expanded_candidates.is_empty() {
         0
     } else {
-        state.scout_variant_rotation_cursor % request.candidates.len()
+        state.scout_variant_rotation_cursor % expanded_candidates.len()
     };
-    if !request.candidates.is_empty() {
-        state.scout_variant_rotation_cursor = (start + 1) % request.candidates.len();
+    if !expanded_candidates.is_empty() {
+        state.scout_variant_rotation_cursor = (start + 1) % expanded_candidates.len();
     }
-    let expanded_candidates = expand_daily_scout_candidates(&request.candidates);
+    let mut candidate_order = (0..expanded_candidates.len()).collect::<Vec<_>>();
+    candidate_order.sort_by(|left, right| {
+        let left_gap =
+            (EFFECTIVE_SAMPLE_TARGET
+                - scout_candidate_effective_sample_size(
+                    &expanded_candidates[*left],
+                    &learning_snapshot["walk_forward_evidence"],
+                ))
+                .max(0.0);
+        let right_gap =
+            (EFFECTIVE_SAMPLE_TARGET
+                - scout_candidate_effective_sample_size(
+                    &expanded_candidates[*right],
+                    &learning_snapshot["walk_forward_evidence"],
+                ))
+                .max(0.0);
+        right_gap.total_cmp(&left_gap).then_with(|| {
+            let left_rotation = (left + expanded_candidates.len() - start) % expanded_candidates.len();
+            let right_rotation = (right + expanded_candidates.len() - start) % expanded_candidates.len();
+            left_rotation.cmp(&right_rotation)
+        })
+    });
     let mut response = ScoutPlanResponse::default();
     let mut changed_instance_ids = BTreeSet::new();
     let mut changed_group_ids = BTreeSet::new();
     let mut changed_cooldown_keys = BTreeSet::new();
     let mut changed_pending_sample_ids = BTreeSet::new();
-    for offset in 0..expanded_candidates.len() {
-        let mut candidate =
-            expanded_candidates[(start + offset) % expanded_candidates.len()].clone();
+    let mut selected_candidate_indices = BTreeSet::new();
+    for candidate_index in candidate_order {
+        let mut candidate = expanded_candidates[candidate_index].clone();
         if candidate.generate_group_id {
             let Some((group_id, cooldown_key)) = generated_scout_group_and_cooldown(&candidate)
             else {
@@ -1083,6 +1128,7 @@ async fn create_scout_plan(
         response
             .selected_groups
             .push(candidate.sample_group_id.clone());
+        selected_candidate_indices.insert(candidate_index);
         changed_group_ids.insert(candidate.sample_group_id.clone());
         changed_cooldown_keys.insert(candidate.cooldown_key.clone());
         active_batch_keys.insert(batch_key);
@@ -1104,6 +1150,62 @@ async fn create_scout_plan(
         }
     }
     let _evicted_audit_cache_groups = trim_active_scout_audits(&mut state);
+    let ledger_candidates = expanded_candidates
+        .iter()
+        .enumerate()
+        .map(|(candidate_index, candidate)| {
+            let group_id = if candidate.generate_group_id {
+                generated_scout_group_and_cooldown(candidate)
+                    .map(|(group_id, _)| group_id)
+                    .unwrap_or_else(|| format!("candidate:{candidate_index}"))
+            } else if candidate.sample_group_id.is_empty() {
+                format!("candidate:{candidate_index}")
+            } else {
+                candidate.sample_group_id.clone()
+            };
+            let candidate_id = format!("{group_id}#{candidate_index}");
+            let parameter_map = scout_candidate_parameter_map(candidate);
+            ScoutSearchCandidateRecord {
+                selection_result: if selected_candidate_indices.contains(&candidate_index) {
+                    "selected".to_owned()
+                } else {
+                    "not_selected".to_owned()
+                },
+                candidate: serde_json::to_value(candidate).unwrap_or(serde_json::Value::Null),
+                parameter_map_status: if parameter_map.is_some() {
+                    "recorded".to_owned()
+                } else {
+                    "unknown".to_owned()
+                },
+                parameter_map,
+                candidate_id,
+                candidate_index,
+            }
+        })
+        .collect::<Vec<_>>();
+    let selected_candidates = ledger_candidates
+        .iter()
+        .filter(|candidate| candidate.selection_result == "selected")
+        .map(|candidate| candidate.candidate.clone())
+        .collect::<Vec<_>>();
+    let ledger = ScoutSearchLedger {
+        request_id: request.request_id.clone(),
+        as_of_timestamp_ms: request.now_ms,
+        outcome_cutoff_timestamp_ms: request.now_ms,
+        selection_metric: None,
+        selection_metric_status: "unknown".to_owned(),
+        selected_candidate_ids: ledger_candidates
+            .iter()
+            .filter(|candidate| candidate.selection_result == "selected")
+            .map(|candidate| candidate.candidate_id.clone())
+            .collect(),
+        candidates: ledger_candidates,
+        selected_candidates,
+        response: response.clone(),
+    };
+    state
+        .scout_search_ledger
+        .insert(request.request_id.clone(), ledger);
     let mut changed_sections = vec!["outbox".to_owned()];
     changed_sections.extend(changed_instance_ids.into_iter().map(|key| format!("scout_instances@{key}")));
     changed_sections.extend(changed_group_ids.iter().flat_map(|key| [
@@ -1114,8 +1216,10 @@ async fn create_scout_plan(
     changed_sections.extend(changed_cooldown_keys.into_iter().map(|key| format!("scout_sample_at_ms@{key}")));
     changed_sections.extend(changed_pending_sample_ids.into_iter().map(|key| format!("scout_pending_samples@{key}")));
     changed_sections.push(format!("scout_plan_results@{}", request.request_id));
+    changed_sections.push(format!("scout_search_ledger@{}", request.request_id));
     let changed_sections = changed_sections.iter().map(String::as_str).collect::<Vec<_>>();
     persist_scout_state(&service.scout.path, &state, &changed_sections)?;
+    trim_scout_search_ledger_cache(&mut state);
     drop(state);
     schedule_scout_outbox_flush(&service);
     Ok(Json(response))
@@ -1125,6 +1229,50 @@ fn canonical_market_regime(value: Option<&str>) -> Option<String> {
     value
         .filter(|regime| matches!(*regime, "range" | "trend" | "volatile" | "mixed"))
         .map(str::to_owned)
+}
+
+fn scout_candidate_effective_sample_size(
+    candidate: &ScoutPlanCandidate,
+    walk_forward_evidence: &serde_json::Value,
+) -> f64 {
+    let read_evidence = |audit: &serde_json::Value| {
+        let evidence = &audit["strategy_decision"]["strategy_walk_forward"];
+        evidence["effectiveSampleSize"]
+            .as_f64()
+            .or_else(|| evidence["effective_sample_size"].as_f64())
+            .or_else(|| {
+                evidence["sampleCount"]
+                    .as_u64()
+                    .or_else(|| evidence["sample_count"].as_u64())
+                    .map(|count| count as f64)
+            })
+    };
+    let attached = candidate
+        .audit_plans
+        .iter()
+        .find_map(read_evidence)
+        .or_else(|| {
+            candidate
+                .audit_templates
+                .iter()
+                .find_map(|template| read_evidence(&template.base_audit))
+        });
+    attached
+        .or_else(|| {
+            let audit = candidate
+                .audit_plans
+                .first()
+                .or_else(|| candidate.audit_templates.first().map(|template| &template.base_audit))?;
+            let symbol = audit.get("symbol")?.as_str()?;
+            let strategy = audit
+                .get("strategy")
+                .and_then(serde_json::Value::as_str)
+                .or_else(|| audit["strategy_decision"]["strategy"].as_str())?;
+            walk_forward_evidence[format!("{symbol}|{strategy}")]["effectiveSampleSize"]
+                .as_f64()
+        })
+        .filter(|value| value.is_finite() && *value >= 0.0)
+        .unwrap_or(0.0)
 }
 
 fn attach_market_regime(audit: &mut serde_json::Value) {
@@ -1178,6 +1326,46 @@ fn scout_plan_candidate_is_allowlisted(candidate: &ScoutPlanCandidate) -> bool {
         symbols.push(&probe.profile_symbol);
     }
     !symbols.is_empty() && symbols.into_iter().all(is_liquid_scout_symbol)
+}
+
+fn scout_candidate_parameter_map(
+    candidate: &ScoutPlanCandidate,
+) -> Option<BTreeMap<String, f64>> {
+    let from_value = |value: &serde_json::Value| {
+        serde_json::from_value::<BTreeMap<String, f64>>(value.clone()).ok()
+    };
+    if let Some(ScoutSamplePayload::DatedCarryProbe(probe)) = &candidate.sample_payload {
+        if !probe.parameters.is_empty() {
+            return Some(probe.parameters.clone());
+        }
+    }
+    if let Some(values) = candidate
+        .audit_plans
+        .iter()
+        .find_map(|audit| from_value(&audit["strategy_parameters"]))
+    {
+        return Some(values);
+    }
+    if let Some(values) = candidate
+        .audit_templates
+        .iter()
+        .find_map(|template| from_value(&template.base_audit["strategy_parameters"]))
+    {
+        return Some(values);
+    }
+    candidate
+        .daily_policy
+        .as_ref()
+        .and_then(|policy| Some((policy.parameter_key.clone()?, policy.parameter_value?)))
+        .map(|(key, value)| BTreeMap::from([(key, value)]))
+}
+
+fn trim_scout_search_ledger_cache(state: &mut PersistedState) {
+    while state.scout_search_ledger.len() > MAX_CACHED_SCOUT_SEARCH_LEDGER {
+        if let Some(oldest) = state.scout_search_ledger.keys().next().cloned() {
+            state.scout_search_ledger.remove(&oldest);
+        }
+    }
 }
 
 async fn forward_outcome(
@@ -2203,6 +2391,60 @@ mod strategy_walk_forward_tests {
                 flush_scheduled: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             },
         }
+    }
+
+    #[tokio::test]
+    async fn scout_plan_retry_after_restart_returns_original_search_result() {
+        let path = std::env::temp_dir().join(format!(
+            "scout-plan-ledger-retry-{}-{}.sqlite",
+            std::process::id(),
+            scout_now_ms()
+        ));
+        let request_id = "idempotent-search".to_owned();
+        let first = ScoutPlanRequest {
+            request_id: request_id.clone(),
+            now_ms: scout_now_ms(),
+            max_active_batches: 1,
+            max_active_variants_per_profile: 1,
+            legacy_cooldowns: BTreeMap::new(),
+            legacy_comparisons: Vec::new(),
+            candidates: Vec::new(),
+        };
+        let first_response = create_scout_plan(
+            State(test_service(&path, PersistedState::default())),
+            Json(first),
+        )
+        .await
+        .unwrap()
+        .0;
+        let loaded = load_scout_state(&path).unwrap();
+        let second = ScoutPlanRequest {
+            request_id: request_id.clone(),
+            now_ms: scout_now_ms(),
+            max_active_batches: 99,
+            max_active_variants_per_profile: 99,
+            legacy_cooldowns: BTreeMap::new(),
+            legacy_comparisons: Vec::new(),
+            candidates: Vec::new(),
+        };
+        let second_response = create_scout_plan(State(test_service(&path, loaded)), Json(second))
+            .await
+            .unwrap()
+            .0;
+        assert_eq!(first_response.selected_groups, second_response.selected_groups);
+        let ledger = load_scout_record::<ScoutSearchLedger>(
+            &path,
+            "scout_search_ledger",
+            &request_id,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(ledger.response.selected_groups, first_response.selected_groups);
+        assert_eq!(ledger.outcome_cutoff_timestamp_ms, ledger.as_of_timestamp_ms);
+        assert_eq!(ledger.selection_metric_status, "unknown");
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("sqlite-wal"));
+        let _ = std::fs::remove_file(path.with_extension("sqlite-shm"));
     }
 
     #[test]

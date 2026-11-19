@@ -296,6 +296,8 @@ struct PersistedState {
     scout_plan_profiles: BTreeMap<String, String>,
     #[serde(default, alias = "shadow_plan_results")]
     scout_plan_results: BTreeMap<String, ScoutPlanResponse>,
+    #[serde(default)]
+    scout_search_ledger: BTreeMap<String, ScoutSearchLedger>,
     #[serde(default, alias = "shadow_pending_samples")]
     scout_pending_samples: BTreeMap<String, ScoutSamplePayload>,
     #[serde(default, alias = "shadow_observation_results")]

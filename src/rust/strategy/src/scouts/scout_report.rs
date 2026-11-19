@@ -543,6 +543,70 @@ async fn get_scout_outcomes(
         .expect("valid Scout outcomes response")
 }
 
+/// Read the complete durable Scout outcome collection for analytical replay.
+/// This intentionally bypasses the bounded 4,096-row runtime hydration cache.
+async fn get_scout_replay_outcomes(
+    State(service): State<ServiceState>,
+) -> Result<axum::Json<Value>, (axum::http::StatusCode, String)> {
+    let (outcomes, total_records, malformed_records) =
+        load_all_scout_outcomes(&service.scout.path)
+            .map_err(|error| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
+    let coverage_complete = malformed_records == 0 && outcomes.len() == total_records;
+    let first_timestamp_ms = outcomes
+        .first()
+        .map(|outcome| outcome.evaluated_timestamp_ms);
+    let last_timestamp_ms = outcomes
+        .last()
+        .map(|outcome| outcome.evaluated_timestamp_ms);
+    Ok(axum::Json(json!({
+        "datasetVersion": 1,
+        "source": "scout_records.outcomes",
+        "ordering": "evaluated_timestamp_ms_asc_then_record_key_asc",
+        "coverage": {
+            "status": if coverage_complete { "complete" } else { "incomplete" },
+            "complete": coverage_complete,
+            "totalDurableRecords": total_records,
+            "returnedRecords": outcomes.len(),
+            "malformedRecords": malformed_records,
+            "firstEvaluatedTimestampMs": first_timestamp_ms,
+            "lastEvaluatedTimestampMs": last_timestamp_ms,
+            "runtimeHydrationLimit": MAX_CACHED_SCOUT_OUTCOMES,
+        },
+        "outcomes": outcomes,
+    })))
+}
+
+fn load_all_scout_outcomes(
+    path: &std::path::Path,
+) -> anyhow::Result<(Vec<ScoutOutcomeRequest>, usize, usize)> {
+    let connection = open_scout_read_connection(path)?;
+    let total_records: usize = connection.query_row(
+        "SELECT COUNT(*) FROM scout_records WHERE collection='outcomes'",
+        [],
+        |row| row.get::<_, i64>(0),
+    )?.max(0) as usize;
+    let mut statement = connection.prepare(
+        "SELECT payload FROM scout_records WHERE collection='outcomes' ORDER BY CASE WHEN json_valid(payload) THEN CAST(json_extract(payload, '$.evaluated_timestamp_ms') AS INTEGER) ELSE 0 END, record_key",
+    )?;
+    let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+    let mut outcomes = Vec::with_capacity(total_records);
+    let mut malformed_records = 0;
+    for row in rows {
+        match row.and_then(|payload| {
+            serde_json::from_str::<ScoutOutcomeRequest>(&payload)
+                .map_err(|error| rusqlite::Error::FromSqlConversionFailure(
+                    0,
+                    rusqlite::types::Type::Text,
+                    Box::new(error),
+                ))
+        }) {
+            Ok(outcome) => outcomes.push(outcome),
+            Err(_) => malformed_records += 1,
+        }
+    }
+    Ok((outcomes, total_records, malformed_records))
+}
+
 const MAX_CACHED_SCOUT_OUTCOMES_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
 const MAX_CACHED_SCOUT_OUTCOMES_BYTES: usize = 8 * 1024 * 1024;
 const MAX_CACHED_SCOUT_OUTCOMES_RESPONSES: usize = 4;

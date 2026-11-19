@@ -1046,6 +1046,13 @@ fn insight_daily_batch(
                 Some(insight_rsi(bars, period))
             } else if strategy == "risk-adjusted-trend-portfolio" {
                 evaluation.strategy_order_size_multiplier
+            } else if strategy == "risk-adjusted-monthly-momentum" {
+                monthly_selection.as_ref().and_then(|selection| selection.ranked_candidates.iter()
+                    .find(|candidate| candidate.symbol == symbol).map(|candidate| candidate.score))
+            } else if strategy == "relative-strength-90-sma200" {
+                let rotation_days = insight_parameter(&parameters, "relative_strength_days", 90.0).round().max(1.0) as usize;
+                bars.len().checked_sub(rotation_days + 1).and_then(|index| bars.get(index))
+                    .map(|reference| (close / reference.close - 1.0) * 100.0)
             } else { None };
             let (cross_sectional_metric_value, cross_sectional_threshold) = match strategy.as_str() {
                 "risk-adjusted-monthly-momentum" => (
@@ -1063,8 +1070,19 @@ fn insight_daily_batch(
                 Some("RSI")
             } else if strategy == "risk-adjusted-trend-portfolio" {
                 Some("target weight")
+            } else if strategy == "risk-adjusted-monthly-momentum" {
+                Some("score")
+            } else if strategy == "relative-strength-90-sma200" {
+                Some("%")
             } else { None };
-            let distance = if evaluation.primary_level > 0.0 {
+            let metric_level = match strategy.as_str() {
+                "risk-adjusted-monthly-momentum" => cross_sectional_threshold,
+                "relative-strength-90-sma200" => cross_sectional_threshold.map(|value| value * 100.0),
+                _ => None,
+            };
+            let distance = if let (Some(value), Some(level)) = (primary_metric_value, metric_level) {
+                if level.abs() > f64::EPSILON { (value / level - 1.0) * 100.0 } else { 0.0 }
+            } else if evaluation.primary_level > 0.0 {
                 match primary_metric_value {
                     Some(value) => (value / evaluation.primary_level - 1.0) * 100.0,
                     None => (close / evaluation.primary_level - 1.0) * 100.0,
@@ -1107,7 +1125,7 @@ fn insight_daily_batch(
                 "bar_close_timestamp": bars.last().map(|bar| bar.close_time_ms),
                 "observed_close": close,
                 "primary_rule": evaluation.primary_rule,
-                "primary_level": evaluation.primary_level,
+                "primary_level": metric_level.unwrap_or(evaluation.primary_level),
                 "primary_distance_percent": distance,
                 "primary_metric_value": primary_metric_value,
                 "primary_metric_unit": primary_metric_unit,
@@ -1147,7 +1165,7 @@ fn insight_daily_batch(
                 "maximum_hold_days": (strategy == "rsi2-oversold-rebound").then(|| insight_parameter(&parameters, "maximum_hold_days", 5.0)),
                 "minimum_hold_days": (strategy == "donchian-20-btc200-hold3").then(|| insight_parameter(&parameters, "minimum_hold_days", 3.0)),
                 "primary_rule": evaluation.primary_rule,
-                "primary_level": evaluation.primary_level,
+                "primary_level": metric_level.unwrap_or(evaluation.primary_level),
                 "primary_distance_percent": distance,
                 "primary_metric_value": primary_metric_value,
                 "primary_metric_unit": primary_metric_unit,
@@ -1236,6 +1254,9 @@ fn insight_daily_batch(
                     Some(insight_rsi(bars, period))
                 } else if strategy == "risk-adjusted-trend-portfolio" {
                     probe_evaluation.strategy_order_size_multiplier
+                } else if strategy == "risk-adjusted-monthly-momentum" {
+                    // Filled from the probe's cross-sectional ranking below.
+                    None
                 } else { None };
                 let probe_btc = probe_evaluation.btc_regime.as_ref();
                 let (probe_cross_metric, probe_cross_threshold) = match strategy.as_str() {
@@ -1250,7 +1271,12 @@ fn insight_daily_batch(
                     "relative-strength-90-sma200" => {
                         let ranking = insight_relative_strength_ranking(candles, &probe_profiles);
                         (
-                            ranking.iter().find(|(candidate, _)| candidate == symbol).map(|(_, score)| *score),
+                            {
+                                let probe_parameters = insight_profile_parameters(&probe_profiles, symbol, strategy);
+                                let rotation_days = insight_parameter(&probe_parameters, "relative_strength_days", 90.0).round().max(1.0) as usize;
+                                bars.len().checked_sub(rotation_days + 1).and_then(|index| bars.get(index))
+                                    .map(|reference| close / reference.close - 1.0)
+                            },
                             ranking.first().map(|(_, score)| *score),
                         )
                     }
@@ -1261,10 +1287,28 @@ fn insight_daily_batch(
                     (Some(level), _) => Some(close > level),
                     _ => None,
                 };
+                let probe_metric = probe_metric.or_else(|| match strategy.as_str() {
+                    "risk-adjusted-monthly-momentum" => probe_cross_metric,
+                    "relative-strength-90-sma200" => probe_cross_metric.map(|value| value * 100.0),
+                    _ => None,
+                });
+                let probe_metric_level = match strategy.as_str() {
+                    "risk-adjusted-monthly-momentum" => probe_cross_threshold,
+                    "relative-strength-90-sma200" => probe_cross_threshold.map(|value| value * 100.0),
+                    _ => None,
+                };
+                let probe_distance = match (probe_metric, probe_metric_level) {
+                    (Some(value), Some(level)) if level.abs() > f64::EPSILON => Some((value / level - 1.0) * 100.0),
+                    (Some(_), Some(_)) => Some(0.0),
+                    _ => Some(if probe_evaluation.primary_level > 0.0 {
+                        (probe_metric.unwrap_or(close) / probe_evaluation.primary_level - 1.0) * 100.0
+                    } else { 0.0 }),
+                };
                 let mut probe_signal = base_signal.clone();
                 let mut probe_decision = decision.clone();
                 probe_decision["primary_rule"] = serde_json::json!(probe_evaluation.primary_rule);
-                probe_decision["primary_level"] = serde_json::json!(probe_evaluation.primary_level);
+                probe_decision["primary_level"] = serde_json::json!(probe_metric_level.unwrap_or(probe_evaluation.primary_level));
+                probe_decision["primary_distance_percent"] = serde_json::json!(probe_distance);
                 probe_decision["primary_passed"] = serde_json::json!(probe_evaluation.primary_passed);
                 probe_decision["secondary_rule"] = serde_json::json!(probe_evaluation.secondary_rule);
                 probe_decision["secondary_level"] = serde_json::json!(probe_evaluation.secondary_level);
@@ -1272,6 +1316,13 @@ fn insight_daily_batch(
                 probe_decision["cross_sectional_metric_value"] = serde_json::json!(probe_cross_metric);
                 probe_decision["cross_sectional_threshold"] = serde_json::json!(probe_cross_threshold);
                 probe_decision["primary_metric_value"] = serde_json::json!(probe_metric);
+                probe_decision["primary_metric_unit"] = serde_json::json!(match strategy.as_str() {
+                    "risk-adjusted-monthly-momentum" => Some("score"),
+                    "relative-strength-90-sma200" => Some("%"),
+                    "rsi2-oversold-rebound" => Some("RSI"),
+                    "risk-adjusted-trend-portfolio" => Some("target weight"),
+                    _ => None,
+                });
                 probe_decision["strategy_order_size_multiplier"] = serde_json::json!(probe_evaluation.strategy_order_size_multiplier);
                 probe_decision["monthly_anchor_close_time_ms"] = serde_json::json!(probe_evaluation.monthly_anchor_close_time_ms);
                 probe_decision["strategy_parameters"] = serde_json::to_value(probe_parameters).unwrap_or_default();

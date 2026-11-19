@@ -187,6 +187,8 @@ async fn execute_portfolio_hedge(
         quantity: Some(quantity),
         order_type: Some("Ioc hedge".into()),
         order_response: Some(response),
+        filled_quantity: Some(quantity),
+        entry_diagnostic: None,
     }))
 }
 

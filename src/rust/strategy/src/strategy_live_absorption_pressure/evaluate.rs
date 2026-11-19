@@ -55,7 +55,7 @@ pub(crate) fn entry_rejection_reason(insight: &StrategySignal<'_>) -> Option<Str
             "non-finite".to_owned()
         };
         return Some(format!(
-            "Signal strength {observed} is below the required minimum {:.3}",
+            "Strength {observed} < {:.3}",
             minimum_strength
         ));
     }

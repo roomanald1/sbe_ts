@@ -241,6 +241,40 @@ export type StrategyBlocker = {
   reason: string;
   timestamp_ms: number;
 };
+export type SymbolEntryResult = {
+  strategy: Strategy;
+  symbol: string;
+  decision?: 'enter' | 'hold' | 'exit' | 'rebalance' | 'reject' | null;
+  reason: string;
+  timestamp_ms?: number | null;
+};
+export type LatestEntryDiagnostic = {
+  cycleId: string;
+  timestampMs: number;
+  outcome:
+    | 'no_signals'
+    | 'no_eligible_candidates'
+    | 'no_fresh_candidates'
+    | 'candidates_rejected'
+    | 'execution_blocked'
+    | 'order_queued'
+    | 'order_submitted'
+    | 'waiting_for_strategy_signals'
+    | 'global_risk_block'
+    | 'cycle_error';
+  rawSignalCount: number;
+  allowedSignalCount: number;
+  strategyCandidateCount: number;
+  eligibleCandidateCount: number;
+  rejectedCandidateCount: number;
+  selectedCandidateCount: number;
+  orderAttemptCount: number;
+  submittedOrderCount: number;
+  fillConfirmed: boolean;
+  primaryGateId?: string | null;
+  primaryBlocker?: string | null;
+  detail: string;
+};
 export type AutoTraderState = {
   enabled: boolean;
   auditHealthy: boolean;
@@ -302,6 +336,8 @@ export type AutoTraderState = {
     distance_to_pass: number | null;
   }>;
   latestSignalDiagnostic: string;
+  latestEntryDiagnostic: LatestEntryDiagnostic | null;
+  latestSymbolEntryResults: SymbolEntryResult[];
   strategyDiagnostics: StrategyDiagnostic[];
   latestStrategyBlockers: StrategyBlocker[];
   orders: AutoTraderOrder[];
@@ -443,6 +479,8 @@ type TraderStatus = {
     distance_to_pass?: number | null;
   }>;
   latest_signal_diagnostic?: string;
+  latest_entry_diagnostic?: LatestEntryDiagnostic | null;
+  latest_symbol_entry_results?: SymbolEntryResult[];
   strategy_diagnostics?: StrategyDiagnostic[];
   latest_strategy_blockers?: StrategyBlocker[];
 };
@@ -501,6 +539,8 @@ export class AutoTraderModel {
     gateHits: [],
     symbolGateHits: [],
     latestSignalDiagnostic: '',
+    latestEntryDiagnostic: null,
+    latestSymbolEntryResults: [],
     strategyDiagnostics: [],
     latestStrategyBlockers: [],
     orders: [],
@@ -1181,6 +1221,8 @@ export class AutoTraderModel {
             distance_to_pass: hit.distance_to_pass ?? null,
           })) ?? [],
         latestSignalDiagnostic: status.latest_signal_diagnostic ?? '',
+        latestEntryDiagnostic: status.latest_entry_diagnostic ?? null,
+        latestSymbolEntryResults: status.latest_symbol_entry_results ?? [],
         strategyDiagnostics: status.strategy_diagnostics ?? [],
         latestStrategyBlockers: status.latest_strategy_blockers ?? [],
         orders,

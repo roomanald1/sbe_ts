@@ -6,12 +6,16 @@ This plan targets Scout strategy/profile evidence used by the Strategy live-entr
 
 ## Milestone 1: Make the historical data complete and auditable
 
-1. Inventory the Scout SQLite collections and Learning outcome store. Verify which fields are present for signal/evaluation time, costs, strategy/profile parameters, regime, outcome group, baseline, and candidate selection.
-2. Make analytical replay read all durable outcomes in timestamp order. The runtime replay index hydrates only the latest 4,096 Scout outcomes; SQLite is the durable source and eviction only removes the runtime copy. Report missing or truncated history as coverage, never as a complete sample.
+1. [x] Inventory the Scout SQLite collections and Learning outcome store. Verify which fields are present for signal/evaluation time, costs, strategy/profile parameters, regime, outcome group, baseline, and candidate selection.
+2. [x] Make analytical replay read all durable outcomes in timestamp order. The runtime replay index hydrates only the latest 4,096 Scout outcomes; SQLite is the durable source and eviction only removes the runtime copy. Report missing or truncated history as coverage, never as a complete sample.
 3. Audit `scout_plan_results`: it stores selected groups/audits and is cached separately, but may not record every candidate tried or the selection process. Add a durable append-only search record containing search ID, as-of cutoff, all candidates and parameter sets considered, baseline, selection metric, selected candidate, and evaluation window.
 4. Give outcomes a stable identity and eligibility rules: completed before the evaluation origin, fee-aware, exact profile and symbol, explicit regime, and grouped when they share an opportunity/portfolio decision. Keep missing marks/costs and any broader-profile fallback explicit.
 
 **Deliverable:** a versioned, point-in-time dataset contract plus durable outcome/search readers with coverage diagnostics.
+
+**Inventory findings (2026-11-19):** Scout outcomes are durably stored in `scout_records.outcomes`; the replay reader orders them by `evaluated_timestamp_ms` and record key, bypasses the 4,096-row runtime cache, and reports malformed/missing-row coverage. Outcome payloads include decision identity, signal/evaluation timestamps, symbol/strategy/profile context, strategy parameters, fee rate and net result, optional regime, sample group, and comparison/baseline role and IDs. Learning's outcome details are persisted inside variant payloads, but its working history is bounded to seven days and 512 outcomes per variant (plus global memory limits), so it is not a complete historical replay source. The fields do not include an explicit cost breakdown, and the Scout plan-result cache is not a complete candidate-search ledger; those remain gaps for steps 2–3 below and Milestone 3's SPA test. The audit step is complete; the durable dataset/search contract is not.
+
+**Replay-reader verification (2026-11-19):** `GET /replay/outcomes` reads directly from SQLite, orders by evaluation timestamp and record key, returns the full durable collection, and reports total, returned, and malformed row counts plus timestamp bounds. A persistence test verifies that outcomes outside the 4,096-row hydration cache remain in SQLite and are visible to durable history reads. Its `complete` flag describes successful reading of the current database; it cannot establish that historical records were never lost before being written.
 
 ## Milestone 2: Generate rolling-origin out-of-sample returns
 
@@ -27,7 +31,7 @@ Rolling-origin evaluation is the primary deployment-style estimate ([Tashman, 20
 ## Milestone 3: Add dependence-aware inference
 
 1. Calculate selected-candidate net expectancy against the baseline from the out-of-sample stream. Keep positive-return rate and non-overlap count as diagnostics.
-2. Calculate a one-sided lower confidence bound using a stationary/block bootstrap over synchronized time blocks or complete outcome groups. Predeclare bootstrap count, block-length method, confidence level, and random seed; report block-length sensitivity and effective sample size.
+2. Calculate a one-sided lower confidence bound using a deterministic stationary bootstrap over chronological UTC-day clusters (512 replicates, seven-day expected blocks). Report the effective number of independent day clusters; multiple outcomes on one day count as one dependent cluster.
 3. Report fold/window coverage, drawdown and downside summaries alongside the interval. Flag regime instability and sparse regimes; do not let one aggregate interval hide them.
 4. After the full search ledger is available, run Hansen’s SPA test on the searched candidate family versus baseline using a dependence-aware bootstrap. Preserve the full tried set, including failed candidates. SPA is a family-level test for superior performance, not a guarantee that a selected candidate will remain profitable ([Hansen, 2005](https://citeseerx.ist.psu.edu/document?doi=3fc027710d7a2bab33abe3ee33e93c765190394f&repid=rep1&type=pdf)).
 5. Add Sharpe/DSR or PBO/CSCV only if a separate Sharpe-selection or search-fragility question warrants it; neither replaces forward evaluation ([DSR](https://davidhbailey.com/dhbpapers/deflated-sharpe.pdf), [PBO/CSCV](https://escholarship.org/uc/item/4w1110bb)).
@@ -40,14 +44,14 @@ The stationary bootstrap supports inference for weakly dependent stationary seri
 
 1. Version the evidence contract across Learning’s decision snapshot, AutoTrader profile payload, and Strategy gate. Include evidence status, point-in-time cutoff, profile/regime, sample and effective counts, window coverage, estimate/interval, and search/SPA metadata.
 2. Validate replay offline across symbols, regimes, windows, sparse-data cases, and missing-data cases. Confirm determinism and strict time cutoffs; replay saved inputs to verify the new estimator and its decisions.
-3. Set acceptance thresholds before evaluating the final holdout. Replace the average-return/positive-rate gate directly with the new expectancy-based rule. If the replacement fails validation, revise the replacement before cutover; do not retain the old rule as a fallback or run both gates against live decisions.
-4. Define how insufficient or stale evidence affects a new entry before implementation. Keep this distinct from evidence of negative expectancy, and preserve immutable entry-time evidence for trade attribution and audit.
+3. Replace the average-return/positive-rate gate directly. When evidence is mature and fresh, require the 95% lower confidence bound on net expectancy to exceed 0%. New or sparse profiles continue through the existing capped exploration path; learned-paused profiles report missing, stale, or inadequate evidence as the reason they remain paused.
+4. Set acceptance thresholds before evaluating the final holdout. If the replacement fails validation, revise it before cutover; do not retain the old rule as a fallback or run both gates against live decisions. Preserve immutable entry-time evidence for attribution and audit.
 
 **Deliverable:** offline validation report and a directly replacing expectancy-based entry gate.
 
 ## Milestone 5: Make every entry blocker obvious
 
-1. Replace reason-string classification with structured gate IDs and results. Each result records pass/fail/indeterminate, a stable reason code, observed value, required threshold, and relevant evidence identity/as-of time.
+1. Publish a typed latest-cycle diagnostic with outcome, cycle/time identity, signal/candidate/selection/order counts, primary gate ID, blocker detail, and confirmed fill count. Keep reason text for reading; the UI must not infer the cycle outcome from it.
 2. Carry a decision/cycle ID through signal eligibility, strategy evaluation, walk-forward gating, candidate selection, position/risk checks, execution checks, and order submission. Record all applicable failures, not only the last error or first rejection.
 3. Publish an entry funnel per cycle: signals received, fresh/directional candidates, candidates passing strategy and evidence checks, candidates passing portfolio/risk/execution checks, selected orders, and submitted orders. Distinguish “no eligible signal” from “candidate rejected” and “order failed after selection.”
 4. Expose the current cycle’s primary blocker and counts by gate, symbol, and strategy in the AutoTrader UI/API, with drill-down to each candidate’s full reasons and the concrete values that failed. Mark gates that are informational or indeterminate so they are not confused with blockers.

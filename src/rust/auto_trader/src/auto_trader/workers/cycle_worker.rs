@@ -100,6 +100,7 @@ fn record_cycle_gap_summary(
     result: &Result<CycleResult, (StatusCode, String)>,
 ) {
     let traded = matches!(&result, Ok(cycle) if cycle.status == "order_submitted" || cycle.status == "hedge_submitted");
+    let order_queued = matches!(&result, Ok(cycle) if cycle.status == "order_submitting");
     if let Ok(mut summary) = state.gap_summary.lock() {
         let day = utc_day();
         if summary.utc_day != day {
@@ -108,11 +109,47 @@ fn record_cycle_gap_summary(
                 ..GapSummary::default()
             };
         }
+        if let Ok(cycle) = &result {
+            if let Some(diagnostic) = &cycle.entry_diagnostic {
+                summary.latest_entry_diagnostic = Some(diagnostic.clone());
+            }
+        }
         if traded {
+            let previous_diagnostic = summary.latest_entry_diagnostic.clone();
+            let entry_order = matches!(&result, Ok(cycle)
+                if cycle.status == "order_submitted"
+                    && !matches!(cycle.order_type.as_deref(), Some("Ioc exit" | "Ioc hedge")));
+            let filled_quantity = if entry_order {
+                result
+                    .as_ref()
+                    .ok()
+                    .and_then(|cycle| cycle.filled_quantity)
+                    .unwrap_or_default()
+            } else {
+                0.0
+            };
             *summary = GapSummary {
                 utc_day: day,
                 ..GapSummary::default()
             };
+            summary.latest_entry_diagnostic = previous_diagnostic.map(|mut diagnostic| {
+                if entry_order {
+                    diagnostic.outcome = EntryCycleOutcome::OrderSubmitted;
+                    diagnostic.fill_confirmed = filled_quantity > 0.0;
+                    diagnostic.timestamp_ms = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_millis() as u64;
+                    diagnostic.primary_gate_id = None;
+                    diagnostic.primary_blocker = None;
+                    diagnostic.detail = if filled_quantity > 0.0 {
+                        format!("Trade fill confirmed: {filled_quantity:.8} units")
+                    } else {
+                        "Order was submitted, but the execution response confirms no fill yet".into()
+                    };
+                }
+                diagnostic
+            });
             if let Ok(cycle) = &result {
                 if cycle.status == "order_submitted"
                     && cycle.order_type.as_deref() != Some("Ioc exit")
@@ -136,7 +173,7 @@ fn record_cycle_gap_summary(
                     }
                 }
             }
-        } else {
+        } else if !order_queued {
             summary
                 .symbol_gate_hits
                 .retain(|(_, _, gate), _| gate != "Readiness");
@@ -176,6 +213,29 @@ fn record_cycle_gap_summary(
                 }
             }
             summary.latest_detail = raw_reason.to_owned();
+        }
+        if let Err((_, error)) = result {
+            let timestamp_ms = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64;
+            summary.latest_entry_diagnostic = Some(LatestEntryDiagnostic {
+                cycle_id: format!("autotrader-{timestamp_ms}"),
+                timestamp_ms,
+                outcome: EntryCycleOutcome::CycleError,
+                raw_signal_count: 0,
+                allowed_signal_count: 0,
+                strategy_candidate_count: 0,
+                eligible_candidate_count: 0,
+                rejected_candidate_count: 0,
+                selected_candidate_count: 0,
+                order_attempt_count: 0,
+                submitted_order_count: 0,
+                fill_confirmed: false,
+                primary_gate_id: Some("cycle_error".into()),
+                primary_blocker: Some(error.clone()),
+                detail: error.clone(),
+            });
         }
     }
 

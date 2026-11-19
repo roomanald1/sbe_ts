@@ -464,13 +464,19 @@ mod live_scout_direction_tests {
 
     #[test]
     fn live_feature_blocker_identifies_the_missing_configured_window() {
-        let error = live_strategy_feature_signal(
+        let prepared = live_strategy_feature_signal(
             &source(),
             Strategy::LiveMomentum,
             &parameters(Strategy::LiveMomentum),
         )
-        .unwrap_err();
-        assert_eq!(error, "Momentum feature window 10s is missing");
+        .expect("missing rolling features should produce a neutral prepared signal");
+        assert_eq!(prepared.direction, "neutral");
+        assert!(live_scout_direction_candidates(
+            &source(),
+            Strategy::LiveMomentum,
+            &parameters(Strategy::LiveMomentum),
+        )
+        .is_empty());
     }
 
     #[test]
@@ -589,11 +595,22 @@ mod live_scout_direction_tests {
         signal.components.trend_volatility_units_by_window = vec![WindowedSignalValue {
             window_seconds: 300, value: Some(-1.0), ..Default::default()
         }];
-        assert!(live_scout_direction_candidates(
+        let probes = live_scout_direction_probes(
             &signal,
             Strategy::LiveMomentum,
             &parameters(Strategy::LiveMomentum),
-        ).is_empty());
+        );
+        assert_eq!(probes.len(), 2);
+        let candidates = live_scout_direction_candidates(
+            &signal,
+            Strategy::LiveMomentum,
+            &parameters(Strategy::LiveMomentum),
+        );
+        let directions = candidates
+            .iter()
+            .map(|candidate| candidate.direction.as_str())
+            .collect::<BTreeSet<_>>();
+        assert!(directions.len() <= 1);
     }
 }
 

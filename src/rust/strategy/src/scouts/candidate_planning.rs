@@ -342,6 +342,32 @@ pub struct ScoutPlanResponse {
     pub selected_groups: Vec<String>,
 }
 
+/// Immutable record of one Scout candidate search. The current planner does
+/// not expose a numeric selection metric, so `selection_metric` is persisted
+/// as `None` rather than inferred from the selected candidates.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct ScoutSearchLedger {
+    pub request_id: String,
+    pub as_of_timestamp_ms: u64,
+    pub outcome_cutoff_timestamp_ms: u64,
+    pub selection_metric: Option<String>,
+    pub selection_metric_status: String,
+    pub candidates: Vec<ScoutSearchCandidateRecord>,
+    pub selected_candidate_ids: Vec<String>,
+    pub selected_candidates: Vec<serde_json::Value>,
+    pub response: ScoutPlanResponse,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct ScoutSearchCandidateRecord {
+    pub candidate_id: String,
+    pub candidate_index: usize,
+    pub selection_result: String,
+    pub parameter_map: Option<BTreeMap<String, f64>>,
+    pub parameter_map_status: String,
+    pub candidate: serde_json::Value,
+}
+
 #[derive(Clone)]
 struct ScoutState {
     data: Arc<Mutex<PersistedState>>,

@@ -142,53 +142,85 @@ fn is_portfolio_rebalance_signal(signal: &Signal, strategy: Option<Strategy>) ->
             .is_some_and(|delta| delta.is_finite() && delta > 0.0)
 }
 
-fn learned_pause_blocks_signal(
+fn learned_pause_block_reason(
     settings: &Settings,
     strategy: Option<Strategy>,
     signal: &Signal,
     is_portfolio_rebalance: bool,
     direction: &str,
     now_ms: u64,
-) -> bool {
-    strategy.is_some_and(|kind| {
-        learned_strategy_entry_paused(settings, kind, now_ms)
-            && validated_strategy_entry_edge(signal, kind).is_err()
-    })
-        && !(is_portfolio_rebalance && direction == "bearish")
+) -> Option<String> {
+    if is_portfolio_rebalance && direction == "bearish" {
+        return None;
+    }
+    let kind = strategy?;
+    if !learned_strategy_entry_paused(settings, kind, now_ms) {
+        return None;
+    }
+    validated_strategy_entry_edge(signal, kind).err()
 }
 
 fn validated_strategy_entry_edge(signal: &Signal, strategy: Strategy) -> Result<f64, String> {
     let parameters = signal_strategy_parameters(signal);
     let input = StrategySignal::entry(signal, &parameters);
-    let (minimum, minimum_rate) = strategy_scout_entry_limits(&parameters, strategy)?;
+    let (minimum, maximum_age_seconds) = strategy_scout_entry_limits(&parameters, strategy)?;
     let evidence = input.walk_forward_evidence.ok_or_else(|| {
-        "No Scout outcome history matches this signal’s strategy, symbol, and parameter profile yet"
-            .to_owned()
+        "walk_forward_missing: no prior Scout outcomes match this strategy, symbol, and parameter profile".to_owned()
     })?;
-    let edge = evidence
-        .average_net_return_percent
-        .filter(|value| value.is_finite())
-        .ok_or_else(|| "Strategy Scout evidence has no valid net return".to_owned())?;
-    let rate = evidence
-        .positive_net_rate
-        .filter(|value| value.is_finite() && (0.0..=1.0).contains(value))
-        .ok_or_else(|| "Strategy Scout evidence has no valid positive rate".to_owned())?;
-    if evidence.sample_count < minimum
-        || evidence.last_sample_timestamp_ms >= signal.timestamp
-        || edge <= 0.0
-        || rate < minimum_rate
-    {
-        return Err(
-            "Strategy entry awaits sufficient prior positive net Scout evidence for this profile"
-                .into(),
-        );
+    if evidence.last_sample_timestamp_ms >= signal.timestamp {
+        return Err(format!(
+            "walk_forward_not_point_in_time: latest evidence {} is not before signal {}",
+            evidence.last_sample_timestamp_ms, signal.timestamp
+        ));
     }
-    Ok(edge)
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+    let age_ms = now_ms.saturating_sub(evidence.last_sample_timestamp_ms);
+    if age_ms > maximum_age_seconds.saturating_mul(1_000) {
+        return Err(format!(
+            "walk_forward_stale: evidence is {}s old; maximum is {}s",
+            age_ms / 1_000,
+            maximum_age_seconds
+        ));
+    }
+    if evidence.sample_count < minimum {
+        return Err(format!(
+            "walk_forward_insufficient_samples: {} outcomes; requires at least {}",
+            evidence.sample_count, minimum
+        ));
+    }
+    let effective_samples = evidence
+        .effective_sample_size
+        .unwrap_or(evidence.sample_count as f64);
+    if !effective_samples.is_finite() || effective_samples < minimum as f64 {
+        return Err(format!(
+            "walk_forward_insufficient_effective_samples: {} outcomes, effective n {:.1}; requires at least {}",
+            evidence.sample_count, effective_samples, minimum
+        ));
+    }
+    let lower_bound = evidence
+        .expectancy_ci_low_percent
+        .filter(|value| value.is_finite())
+        .ok_or_else(|| {
+            format!(
+                "walk_forward_interval_unavailable: {} outcomes have no valid expectancy lower bound",
+                evidence.sample_count
+            )
+        })?;
+    if lower_bound <= 0.0 {
+        return Err(format!(
+            "walk_forward_expectancy_not_proven: lower 95% confidence bound {:.3}% requires > 0.000% (n={}, effective n={:.1})",
+            lower_bound, evidence.sample_count, effective_samples
+        ));
+    }
+    Ok(lower_bound)
 }
 
 fn allow_bounded_strategy_exploration(signal: &Signal, strategy: Strategy) -> Result<(), String> {
     let parameters = signal_strategy_parameters(signal);
-    let (minimum_samples, minimum_positive_rate) =
+    let (minimum_samples, maximum_age_seconds) =
         strategy_scout_entry_limits(&parameters, strategy)?;
     let input = StrategySignal::entry(signal, &parameters);
     let Some(evidence) = input.walk_forward_evidence else {
@@ -197,21 +229,35 @@ fn allow_bounded_strategy_exploration(signal: &Signal, strategy: Strategy) -> Re
     // Exploration is for profiles without enough prior observations. Never
     // use outcomes from after this signal, or continue probing a profile that
     // already has enough samples and negative net evidence.
-    if evidence.sample_count < minimum_samples
-        || evidence.last_sample_timestamp_ms >= signal.timestamp
+    if evidence.sample_count < minimum_samples || evidence.last_sample_timestamp_ms >= signal.timestamp {
+        return Ok(());
+    }
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+    if now_ms.saturating_sub(evidence.last_sample_timestamp_ms)
+        > maximum_age_seconds.saturating_mul(1_000)
     {
         return Ok(());
     }
-    let edge = evidence
-        .average_net_return_percent
+    let effective_samples = evidence
+        .effective_sample_size
+        .unwrap_or(evidence.sample_count as f64);
+    if !effective_samples.is_finite() || effective_samples < minimum_samples as f64 {
+        return Ok(());
+    }
+    let Some(lower_bound) = evidence
+        .expectancy_ci_low_percent
         .filter(|value| value.is_finite())
-        .ok_or_else(|| "Strategy Scout evidence has no valid net return".to_owned())?;
-    let positive_rate = evidence
-        .positive_net_rate
-        .filter(|value| value.is_finite() && (0.0..=1.0).contains(value))
-        .ok_or_else(|| "Strategy Scout evidence has no valid positive rate".to_owned())?;
-    if edge <= 0.0 || positive_rate < minimum_positive_rate {
-        return Err("Strategy exploration blocked by negative prior Scout evidence for this profile".into());
+    else {
+        return Ok(());
+    };
+    if lower_bound <= 0.0 {
+        return Err(format!(
+            "walk_forward_expectancy_not_proven: lower 95% confidence bound {:.3}% requires > 0.000% (n={}, effective n={:.1})",
+            lower_bound, evidence.sample_count, effective_samples
+        ));
     }
     Ok(())
 }
@@ -219,7 +265,7 @@ fn allow_bounded_strategy_exploration(signal: &Signal, strategy: Strategy) -> Re
 fn strategy_scout_entry_limits(
     parameters: &BTreeMap<String, f64>,
     strategy: Strategy,
-) -> Result<(usize, f64), String> {
+) -> Result<(usize, u64), String> {
     let specs = strategy.parameter_specs();
     let bounded = |key: StrategyParameterKey| {
         let spec = specs.iter().find(|spec| spec.key == key)?;
@@ -234,11 +280,13 @@ fn strategy_scout_entry_limits(
     let minimum_samples = bounded(StrategyParameterKey::ScoutMinimumWalkForwardSamples)
         .ok_or_else(|| "Strategy entry is missing its bounded minimum Scout sample count".to_owned())?
         .round() as usize;
-    let minimum_positive_rate =
-        bounded(StrategyParameterKey::ScoutMinimumPositiveNetRate).ok_or_else(|| {
-            "Strategy entry is missing its bounded minimum Scout positive rate".to_owned()
-        })?;
-    Ok((minimum_samples, minimum_positive_rate))
+    let maximum_age_seconds = bounded(StrategyParameterKey::ScoutMaximumEvidenceAgeSeconds)
+        .ok_or_else(|| {
+            "walk_forward_invalid_config: maximum evidence age is missing or out of bounds"
+                .to_owned()
+        })?
+        .round() as u64;
+    Ok((minimum_samples, maximum_age_seconds))
 }
 
 fn signal_weighted_strategy_budget(
@@ -270,6 +318,18 @@ fn signal_weighted_strategy_budget(
             !settings.intraday_strategy_budgets.is_empty(),
         ),
     };
+    let enabled = enabled
+        .into_iter()
+        .filter(|kind| match category {
+            StrategyCategory::Daily => settings
+                .learned_strategy_size_multipliers
+                .get(kind.as_str())
+                .is_none_or(|multiplier| multiplier.is_finite() && *multiplier > 0.0),
+            StrategyCategory::Intraday => {
+                intraday_strategy_size_multiplier(settings, *kind, now_ms) > 0.0
+            }
+        })
+        .collect::<Vec<_>>();
     if configured || enabled.is_empty() || !enabled.contains(&strategy) {
         return match category {
             StrategyCategory::Daily => daily_strategy_effective_budget(settings, strategy.as_str()),
@@ -491,17 +551,17 @@ async fn prepare_signal_execution_plan(
     let strategy_profile = strategy
         .map(|strategy| learned_strategy_parameter_profile(&settings, &signal.symbol, strategy));
     let is_portfolio_rebalance = is_portfolio_rebalance_signal(signal, strategy);
-    if !paper_learning_exploration
-        && learned_pause_blocks_signal(
+    if !paper_learning_exploration {
+        if let Some(reason) = learned_pause_block_reason(
         &settings,
         strategy,
         signal,
         is_portfolio_rebalance,
         &signal.direction,
         now_ms,
-    )
-    {
-        return Err("Strategy entry paused by negative net trade evidence".into());
+        ) {
+            return Err(format!("Strategy entry paused: {reason}"));
+        }
     }
     if let Some(kind) = strategy.filter(|kind| !kind.is_dated_carry()) {
         if !(is_portfolio_rebalance && signal.direction == "bearish") {
@@ -1172,30 +1232,30 @@ mod signal_execution_budget_tests {
             portfolio_reduction_quantity(&settings, "ETH-USDT", strategy.as_str()),
             2.0
         );
-        assert!(learned_pause_blocks_signal(
+        assert!(learned_pause_block_reason(
             &settings,
             Some(strategy),
             &signal(strategy.as_str(), 1.0, 0),
             true,
             "bullish",
             0
-        ));
-        assert!(learned_pause_blocks_signal(
+        ).is_some());
+        assert!(learned_pause_block_reason(
             &settings,
             Some(strategy),
             &signal(strategy.as_str(), 1.0, 0),
             false,
             "bearish",
             0
-        ));
-        assert!(!learned_pause_blocks_signal(
+        ).is_some());
+        assert!(learned_pause_block_reason(
             &settings,
             Some(strategy),
             &signal(strategy.as_str(), 1.0, 0),
             true,
             "bearish",
             0
-        ));
+        ).is_none());
         settings
             .daily_strategy_budgets
             .insert(strategy.as_str().into(), 200.0);
@@ -1237,49 +1297,52 @@ mod signal_execution_budget_tests {
         settings.paper_learning_exploration_until_ms = 10_000;
         let candidate = signal(strategy.as_str(), 0.8, 100_000);
 
-        assert!(learned_pause_blocks_signal(
+        assert!(learned_pause_block_reason(
             &settings,
             Some(strategy),
             &candidate,
             false,
             "bullish",
             10_000,
-        ));
-        assert!(!learned_pause_blocks_signal(
+        ).is_some());
+        assert!(learned_pause_block_reason(
             &settings,
             Some(strategy),
             &candidate,
             false,
             "bullish",
             9_999,
-        ));
+        ).is_none());
     }
 
     #[test]
-    fn entry_requires_prior_profile_scout_evidence_with_positive_net_return() {
+    fn entry_requires_positive_expectancy_lower_bound_from_prior_profile_evidence() {
         let strategy = Strategy::LiveTradeFlow;
-        let mut candidate = signal(strategy.as_str(), 0.8, 100_000);
+        let now_ms = current_time_ms();
+        let mut candidate = signal(strategy.as_str(), 0.8, now_ms);
         let mut decision = serde_json::json!({
             "strategy_parameters": {
                 "scout_minimum_walk_forward_samples": 3.0,
-                "scout_minimum_positive_net_rate": 0.5
+                "scout_maximum_evidence_age_seconds": 86400.0
             }
         });
         candidate.strategy_decision = Some(decision.clone());
         assert!(validated_strategy_entry_edge(&candidate, strategy).is_err());
         decision["strategy_walk_forward"] = serde_json::json!({
-            "sampleCount": 3, "positiveNetRate": 0.67,
-            "averageNetReturnPercent": -0.01, "lastSampleTimestampMs": 99_000
+            "sampleCount": 3, "effectiveSampleSize": 3.0,
+            "positiveNetRate": 0.99, "averageNetReturnPercent": 0.5,
+            "expectancyCiLowPercent": -0.01,
+            "lastSampleTimestampMs": now_ms - 1_000
         });
         candidate.strategy_decision = Some(decision.clone());
         assert!(validated_strategy_entry_edge(&candidate, strategy).is_err());
-        decision["strategy_walk_forward"]["averageNetReturnPercent"] = serde_json::json!(0.1);
+        decision["strategy_walk_forward"]["expectancyCiLowPercent"] = serde_json::json!(0.1);
         candidate.strategy_decision = Some(decision.clone());
         assert_eq!(
             validated_strategy_entry_edge(&candidate, strategy).unwrap(),
-            0.1
+            0.1,
         );
-        decision["strategy_walk_forward"]["lastSampleTimestampMs"] = serde_json::json!(100_000);
+        decision["strategy_walk_forward"]["lastSampleTimestampMs"] = serde_json::json!(now_ms);
         candidate.strategy_decision = Some(decision);
         assert!(validated_strategy_entry_edge(&candidate, strategy).is_err());
     }

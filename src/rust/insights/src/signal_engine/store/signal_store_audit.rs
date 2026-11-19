@@ -455,7 +455,7 @@ mod decision_audit_window_tests {
             "symbol": "LINK-USDT",
             "strategy": "live-order-book",
             "status": "rejected",
-            "reason": "Signal strength 0.12 is below the required minimum 0.30"
+            "reason": "Strength 0.12 < 0.30"
         });
         let mut expired_payload = payload.clone();
         expired_payload["decision_id"] = serde_json::json!("expired-rejection");

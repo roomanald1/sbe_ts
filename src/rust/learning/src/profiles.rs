@@ -9,6 +9,65 @@ fn outcome_decay_weight(observed_at_ms: u64, now_ms: u64) -> f64 {
     0.5_f64.powf(age_ms as f64 / OUTCOME_HALF_LIFE_MS as f64)
 }
 
+/// Compact Scout evidence for workers that need to schedule additional
+/// observations. Keys match the symbol/strategy aggregate used by AutoTrader.
+pub(crate) fn walk_forward_priority_snapshot(
+    state: &LearningState,
+    now_ms: u64,
+) -> BTreeMap<String, serde_json::Value> {
+    let mut cohorts = BTreeMap::<String, BTreeMap<u64, f64>>::new();
+    let mut counts = BTreeMap::<String, usize>::new();
+    let mut seen = BTreeSet::<String>::new();
+    for variant in state.variants.values() {
+        let symbol = &variant.profile.symbol;
+        let strategy_name = &variant.profile.strategy;
+        if !walk_forward_identity_allowed(symbol, strategy_name) {
+            continue;
+        }
+        let cohort = format!("{symbol}|{strategy_name}");
+        for outcome in &variant.outcomes {
+            if outcome.source != LearningOutcomeSource::Scout
+                || !outcome.net_return_percent.is_finite()
+                || outcome.observed_at_ms >= now_ms
+            {
+                continue;
+            }
+            if let Some(group) = outcome.evidence_group_id.as_deref()
+                && !seen.insert(format!("{cohort}|{group}"))
+            {
+                continue;
+            }
+            let day = outcome.observed_at_ms / 86_400_000;
+            *counts.entry(cohort.clone()).or_default() += 1;
+            *cohorts
+                .entry(cohort.clone())
+                .or_default()
+                .entry(day)
+                .or_default() += outcome_decay_weight(outcome.observed_at_ms, now_ms);
+        }
+    }
+    cohorts
+        .into_iter()
+        .map(|(key, days)| {
+            let sample_count = counts.get(&key).copied().unwrap_or_default();
+            let weight_sum = days.values().sum::<f64>();
+            let squared_weight_sum = days.values().map(|weight| weight * weight).sum::<f64>();
+            let effective_sample_size = if squared_weight_sum > 0.0 {
+                weight_sum * weight_sum / squared_weight_sum
+            } else {
+                0.0
+            };
+            (
+                key,
+                serde_json::json!({
+                    "sampleCount": sample_count,
+                    "effectiveSampleSize": effective_sample_size,
+                }),
+            )
+        })
+        .collect()
+}
+
 fn decayed_profile(
     profile: &StrategyProfile,
     state: &LearningState,
@@ -75,7 +134,7 @@ pub(super) async fn get_decision_snapshot(
     // Same-symbol aggregates remain available as a deliberate fallback; no
     // evidence is ever pooled across symbols or strategies.
     let mut grouped = BTreeMap::<String, (f64, f64, f64, u64)>::new();
-    let mut risk_samples = BTreeMap::<String, Vec<(u64, f64, f64, String)>>::new();
+    let mut risk_samples = BTreeMap::<String, Vec<WalkForwardSample>>::new();
     let mut seen_evidence = BTreeSet::<String>::new();
     for variant in state.variants.values() {
         if !walk_forward_identity_allowed(&variant.profile.symbol, &variant.profile.strategy) {
@@ -175,12 +234,12 @@ pub(super) async fn get_decision_snapshot(
                     positive_net_rate: Some(positive / weight),
                     average_net_return_percent: Some(net_return / weight),
                     last_sample_timestamp_ms,
-                    expectancy_ci_low_percent: risk.ci_low,
-                    expectancy_ci_high_percent: risk.ci_high,
+                    expectancy_ci_low_percent: risk.expectancy_ci_low_percent,
+                    expectancy_ci_high_percent: risk.expectancy_ci_high_percent,
                     effective_sample_size: Some(risk.effective_sample_size),
                     window_count: risk.window_count,
-                    max_drawdown_percent: risk.max_drawdown,
-                    downside_loss_percent: risk.downside_loss,
+                    max_drawdown_percent: risk.max_drawdown_percent,
+                    downside_loss_percent: risk.downside_loss_percent,
                 },
             );
         }
@@ -286,80 +345,23 @@ fn accumulate_walk_forward(
 }
 
 fn accumulate_risk_sample(
-    samples: &mut BTreeMap<String, Vec<(u64, f64, f64, String)>>,
+    samples: &mut BTreeMap<String, Vec<WalkForwardSample>>,
     key: &str,
     outcome: &LearningOutcome,
     now_ms: u64,
 ) {
-    let cluster = outcome
-        .evidence_group_id
-        .clone()
-        .unwrap_or_else(|| format!("event:{}", outcome.observed_at_ms));
-    samples.entry(key.to_owned()).or_default().push((
-        outcome.observed_at_ms,
-        outcome.net_return_percent,
-        outcome_decay_weight(outcome.observed_at_ms, now_ms),
-        cluster,
-    ));
+    samples
+        .entry(key.to_owned())
+        .or_default()
+        .push(WalkForwardSample {
+            observed_at_ms: outcome.observed_at_ms,
+            net_return_percent: outcome.net_return_percent,
+            weight: outcome_decay_weight(outcome.observed_at_ms, now_ms),
+        });
 }
 
-#[derive(Default)]
-struct WalkForwardRisk {
-    ci_low: Option<f64>,
-    ci_high: Option<f64>,
-    sample_count: usize,
-    effective_sample_size: f64,
-    window_count: usize,
-    max_drawdown: Option<f64>,
-    downside_loss: Option<f64>,
-}
-
-fn walk_forward_risk(mut samples: Vec<(u64, f64, f64, String)>) -> WalkForwardRisk {
-    if samples.is_empty() {
-        return WalkForwardRisk::default();
-    }
-    samples.sort_by_key(|sample| sample.0);
-    let weight_sum: f64 = samples.iter().map(|sample| sample.2).sum();
-    let squared_weight_sum: f64 = samples.iter().map(|sample| sample.2 * sample.2).sum();
-    let mean = samples
-        .iter()
-        .map(|sample| sample.1 * sample.2)
-        .sum::<f64>()
-        / weight_sum;
-    let mut cluster_residuals = BTreeMap::<String, f64>::new();
-    let mut days = BTreeSet::new();
-    let mut equity = 1.0_f64;
-    let mut peak = 1.0_f64;
-    let mut max_drawdown: f64 = 0.0;
-    let mut negative_weight = 0.0;
-    let mut downside_total = 0.0;
-    for (timestamp, value, weight, cluster) in &samples {
-        *cluster_residuals.entry(cluster.clone()).or_default() += weight * (value - mean);
-        days.insert(timestamp / (24 * 60 * 60 * 1_000));
-        if *value < 0.0 {
-            negative_weight += weight;
-            downside_total += -value * weight;
-        }
-        equity *= (1.0 + value / 100.0).max(0.0);
-        peak = peak.max(equity);
-        max_drawdown = max_drawdown.max((peak - equity) / peak * 100.0);
-    }
-    // Cluster sums preserve dependence among outcomes sharing an evidence group.
-    let standard_error = cluster_residuals
-        .values()
-        .map(|residual| residual * residual)
-        .sum::<f64>()
-        .sqrt()
-        / weight_sum;
-    WalkForwardRisk {
-        ci_low: Some(mean - 1.96 * standard_error),
-        ci_high: Some(mean + 1.96 * standard_error),
-        sample_count: samples.len(),
-        effective_sample_size: weight_sum * weight_sum / squared_weight_sum,
-        window_count: days.len(),
-        max_drawdown: Some(max_drawdown),
-        downside_loss: (negative_weight > 0.0).then_some(downside_total / negative_weight),
-    }
+fn walk_forward_risk(samples: Vec<WalkForwardSample>) -> WalkForwardStatistics {
+    summarize_walk_forward_samples(samples)
 }
 
 const MIN_CONTEXTUAL_STOP_REPLAYS: usize = 5;
@@ -801,6 +803,26 @@ mod tests {
             10,
             &mut seen,
         ));
+    }
+
+    #[test]
+    fn scout_priority_snapshot_counts_independent_weighted_day_clusters() {
+        let now = 10 * 86_400_000;
+        let mut variant = scout_variant("BTC-USDT", &[0.1, 0.2, 0.3]);
+        variant.profile.strategy = "live-momentum".into();
+        variant.outcomes[0].observed_at_ms = now - 86_400_000 - 1;
+        variant.outcomes[0].evidence_group_id = Some("same-replay".into());
+        variant.outcomes[1].observed_at_ms = now - 86_400_000 - 2;
+        variant.outcomes[1].evidence_group_id = Some("same-replay".into());
+        variant.outcomes[2].observed_at_ms = now - 2 * 86_400_000 - 1;
+
+        let mut state = LearningState::default();
+        state.variants.insert("btc-profile".into(), variant);
+        let snapshot = walk_forward_priority_snapshot(&state, now);
+        let evidence = &snapshot["BTC-USDT|live-momentum"];
+        assert_eq!(evidence["sampleCount"], 2);
+        let effective_n = evidence["effectiveSampleSize"].as_f64().unwrap();
+        assert!(effective_n > 1.0 && effective_n < 2.0);
     }
 
     #[test]

@@ -56,10 +56,11 @@ fn validated_strategy_evidence(signal: &Signal) -> bool {
         .copied()
         .filter(|value| value.is_finite() && *value >= 1.0)
         .map(|value| value.round() as usize);
-    let minimum_positive_rate = parameters
-        .get(StrategyParameterKey::ScoutMinimumPositiveNetRate.as_str())
+    let maximum_evidence_age_seconds = parameters
+        .get(StrategyParameterKey::ScoutMaximumEvidenceAgeSeconds.as_str())
         .copied()
-        .filter(|value| value.is_finite() && (0.0..=1.0).contains(value));
+        .filter(|value| value.is_finite() && *value > 0.0)
+        .map(|value| value as u64);
     let Some(decision) = signal.strategy_decision.as_ref() else {
         return false;
     };
@@ -69,11 +70,11 @@ fn validated_strategy_evidence(signal: &Signal) -> bool {
     let sample_count = evidence
         .get("sampleCount")
         .and_then(serde_json::Value::as_u64);
-    let positive_rate = evidence
-        .get("positiveNetRate")
+    let effective_samples = evidence
+        .get("effectiveSampleSize")
         .and_then(serde_json::Value::as_f64);
-    let average_net = evidence
-        .get("averageNetReturnPercent")
+    let expectancy_lower_bound = evidence
+        .get("expectancyCiLowPercent")
         .and_then(serde_json::Value::as_f64);
     let last_sample = evidence
         .get("lastSampleTimestampMs")
@@ -85,10 +86,16 @@ fn validated_strategy_evidence(signal: &Signal) -> bool {
         && sample_count.is_some_and(|samples| {
             minimum_samples.is_some_and(|minimum| samples as usize >= minimum)
         })
-        && positive_rate
-            .is_some_and(|rate| minimum_positive_rate.is_some_and(|minimum| rate >= minimum))
-        && average_net.is_some_and(|net| net.is_finite() && net > 0.0)
-        && last_sample.is_some_and(|timestamp| timestamp < signal.timestamp);
+        && effective_samples.is_some_and(|samples| {
+            minimum_samples.is_some_and(|minimum| samples.is_finite() && samples >= minimum as f64)
+        })
+        && expectancy_lower_bound.is_some_and(|lower| lower.is_finite() && lower > 0.0)
+        && last_sample.is_some_and(|timestamp| {
+            maximum_evidence_age_seconds.is_some_and(|max_age| {
+                timestamp < signal.timestamp
+                    && signal.timestamp.saturating_sub(timestamp) <= max_age * 1_000
+            })
+        });
     if !strategy_validated {
         return false;
     }
@@ -400,11 +407,12 @@ mod signal_selection_behavior_tests {
         let attributed_evidence = serde_json::json!({
             "strategy_parameters": {
                 "scout_minimum_walk_forward_samples": 3.0,
-                "scout_minimum_positive_net_rate": 0.55
+                "scout_maximum_evidence_age_seconds": 86400.0
             },
             "strategy_walk_forward": {
-                "sampleCount": 7, "positiveNetRate": 0.57,
-                "averageNetReturnPercent": 0.101, "lastSampleTimestampMs": 99
+                "sampleCount": 7, "effectiveSampleSize": 7.0,
+                "positiveNetRate": 0.0, "averageNetReturnPercent": -0.5,
+                "expectancyCiLowPercent": 0.01, "lastSampleTimestampMs": 99
             }
         });
         let signals = vec![mixed.clone()];
@@ -429,12 +437,14 @@ mod signal_selection_behavior_tests {
         candidate.strategy_decision = Some(serde_json::json!({
             "strategy_parameters": {
                 "scout_minimum_walk_forward_samples": 3.0,
-                "scout_minimum_positive_net_rate": 0.55
+                "scout_maximum_evidence_age_seconds": 86400.0
             },
             "strategy_walk_forward": {
                 "sampleCount": 7,
-                "positiveNetRate": 0.57,
-                "averageNetReturnPercent": 0.101,
+                "effectiveSampleSize": 7.0,
+                "positiveNetRate": 0.0,
+                "averageNetReturnPercent": -0.5,
+                "expectancyCiLowPercent": 0.01,
                 "lastSampleTimestampMs": 99
             }
         }));

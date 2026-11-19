@@ -453,6 +453,7 @@ fn router_with_state(state_path: PathBuf, worker_strategy: strategies::Strategy)
         .route("/configuration", get(get_scout_configuration).post(set_scout_configuration))
         .route("/status", get(get_scout_status))
         .route("/outcomes", get(get_scout_outcomes).post(forward_outcome))
+        .route("/replay/outcomes", get(get_scout_replay_outcomes))
         .route("/samples", post(finalize_sample))
         .route("/scout-outcome", post(receive_scout_outcome))
         .route("/scout-markout", post(receive_scout_markout))
@@ -527,6 +528,7 @@ async fn cache_learning_snapshot(
         .chain(variants.iter())
         .filter_map(|value| value["symbol"].as_str())
         .map(str::to_owned)
+        .chain(snapshot["walk_forward_evidence"].as_object().into_iter().flat_map(|evidence| evidence.keys().filter_map(|key| key.split_once('|').map(|(symbol, _)| symbol.to_owned()))))
         .collect::<BTreeSet<_>>();
     let now = std::time::Instant::now();
     let mut cache = service.live_profile_snapshot_cache.lock().await;
@@ -535,6 +537,7 @@ async fn cache_learning_snapshot(
         let scoped = serde_json::json!({
             "profiles": profiles.iter().filter(|profile| profile["symbol"].as_str() == Some(symbol.as_str())).cloned().collect::<Vec<_>>(),
             "scout_parameter_variants": variants.iter().filter(|variant| variant["symbol"].as_str() == Some(symbol.as_str())).cloned().collect::<Vec<_>>(),
+            "walk_forward_evidence": snapshot["walk_forward_evidence"].as_object().into_iter().flat_map(|evidence| evidence.iter()).filter(|(key, _)| key.starts_with(&format!("{symbol}|"))).map(|(key, value)| (key.clone(), value.clone())).collect::<BTreeMap<_, _>>(),
         });
         cache.insert(symbol, (now, scoped));
     }
@@ -1508,6 +1511,7 @@ async fn cached_learning_profile_snapshot(service: &ServiceState) -> serde_json:
     cache.retain(|_, (updated_at, _)| now.duration_since(*updated_at) < std::time::Duration::from_secs(24 * 60 * 60));
     let mut profiles = BTreeMap::<String, serde_json::Value>::new();
     let mut variants = BTreeMap::<String, serde_json::Value>::new();
+    let mut walk_forward_evidence = BTreeMap::<String, serde_json::Value>::new();
     for (_, snapshot) in cache.values() {
         for profile in snapshot["profiles"].as_array().into_iter().flatten() {
             let key = format!("{}:{}:{}", profile["symbol"].as_str().unwrap_or_default(), profile["strategy"].as_str().unwrap_or_default(), profile["profile_id"].as_str().unwrap_or_default());
@@ -1517,10 +1521,14 @@ async fn cached_learning_profile_snapshot(service: &ServiceState) -> serde_json:
             let key = serde_json::to_string(variant).unwrap_or_default();
             variants.insert(key, variant.clone());
         }
+        for (key, evidence) in snapshot["walk_forward_evidence"].as_object().into_iter().flatten() {
+            walk_forward_evidence.insert(key.clone(), evidence.clone());
+        }
     }
     serde_json::json!({
         "profiles": profiles.into_values().collect::<Vec<_>>(),
         "scout_parameter_variants": variants.into_values().collect::<Vec<_>>(),
+        "walk_forward_evidence": walk_forward_evidence,
     })
 }
 
@@ -1567,11 +1575,13 @@ async fn receive_live_scout_inputs(
         .map_err(|error| (StatusCode::BAD_GATEWAY, error.to_string()))?;
         let profiles = response["profiles"].as_array().cloned().unwrap_or_default();
         let variants = response["scout_parameter_variants"].as_array().cloned().unwrap_or_default();
+        let evidence = response["walk_forward_evidence"].as_object().cloned().unwrap_or_default();
         let mut cache = service.live_profile_snapshot_cache.lock().await;
         for symbol in missing {
             let scoped = serde_json::json!({
                 "profiles": profiles.iter().filter(|profile| profile["symbol"].as_str() == Some(symbol.as_str())).cloned().collect::<Vec<_>>(),
                 "scout_parameter_variants": variants.iter().filter(|variant| variant["symbol"].as_str() == Some(symbol.as_str())).cloned().collect::<Vec<_>>(),
+                "walk_forward_evidence": evidence.iter().filter(|(key, _)| key.starts_with(&format!("{symbol}|"))).map(|(key, value)| (key.clone(), value.clone())).collect::<BTreeMap<_, _>>(),
             });
             if cache.len() >= 512 && !cache.contains_key(&symbol) {
                 if let Some(oldest) = cache.iter().min_by_key(|(_, (updated_at, _))| *updated_at).map(|(key, _)| key.clone()) {
@@ -2117,11 +2127,13 @@ async fn receive_dated_carry_scout_inputs(
         .map_err(|error| (StatusCode::BAD_GATEWAY, error.to_string()))?;
         let profiles = response["profiles"].as_array().cloned().unwrap_or_default();
         let variants = response["scout_parameter_variants"].as_array().cloned().unwrap_or_default();
+        let evidence = response["walk_forward_evidence"].as_object().cloned().unwrap_or_default();
         let mut cache = service.live_profile_snapshot_cache.lock().await;
         for symbol in missing {
             let scoped = serde_json::json!({
                 "profiles": profiles.iter().filter(|profile| profile["symbol"].as_str() == Some(symbol.as_str())).cloned().collect::<Vec<_>>(),
                 "scout_parameter_variants": variants.iter().filter(|variant| variant["symbol"].as_str() == Some(symbol.as_str())).cloned().collect::<Vec<_>>(),
+                "walk_forward_evidence": evidence.iter().filter(|(key, _)| key.starts_with(&format!("{symbol}|"))).map(|(key, value)| (key.clone(), value.clone())).collect::<BTreeMap<_, _>>(),
             });
             if cache.len() >= 512 && !cache.contains_key(&symbol) {
                 if let Some(oldest) = cache.iter().min_by_key(|(_, (updated_at, _))| *updated_at).map(|(key, _)| key.clone()) {
@@ -3155,6 +3167,7 @@ fn scout_state_record(
 ) -> Result<serde_json::Value, (StatusCode, String)> {
     let value = match collection {
         "scout_plan_results" => state.scout_plan_results.get(key).map(serde_json::to_value).transpose(),
+        "scout_search_ledger" => state.scout_search_ledger.get(key).map(serde_json::to_value).transpose(),
         "scout_instances" => state.scout_instances.get(key).map(serde_json::to_value).transpose(),
         "scout_pending_samples" => state.scout_pending_samples.get(key).map(serde_json::to_value).transpose(),
         "scout_sample_at_ms" => state.scout_sample_at_ms.get(key).map(serde_json::to_value).transpose(),
@@ -3235,12 +3248,21 @@ fn sync_record(
     key: &str,
     current: &serde_json::Value,
 ) -> Result<(), (StatusCode, String)> {
-    if current.is_null() {
+    if current.is_null() && collection == "scout_search_ledger" {
+        // Search history is append-only; cache eviction must never delete it.
+    } else if current.is_null() {
         tx.execute("DELETE FROM scout_records WHERE collection=?1 AND record_key=?2", rusqlite::params![collection, key])
             .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
     } else {
-        tx.execute("INSERT INTO scout_records(collection,record_key,payload) VALUES(?1,?2,?3) ON CONFLICT(collection,record_key) DO UPDATE SET payload=excluded.payload", rusqlite::params![collection, key, current.to_string()])
-            .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
+        if collection == "scout_search_ledger" {
+            tx.execute(
+                "INSERT OR IGNORE INTO scout_records(collection,record_key,payload) VALUES(?1,?2,?3)",
+                rusqlite::params![collection, key, current.to_string()],
+            )
+        } else {
+            tx.execute("INSERT INTO scout_records(collection,record_key,payload) VALUES(?1,?2,?3) ON CONFLICT(collection,record_key) DO UPDATE SET payload=excluded.payload", rusqlite::params![collection, key, current.to_string()])
+        }
+        .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
     }
     Ok(())
 }
@@ -3365,6 +3387,12 @@ fn load_scout_state(path: &std::path::Path) -> anyhow::Result<PersistedState> {
         MAX_CACHED_SCOUT_PLAN_RESULTS,
         |payload| Ok(serde_json::from_str(payload)?),
     )?;
+    state.scout_search_ledger = load_recent_scout_map(
+        &connection,
+        "scout_search_ledger",
+        MAX_CACHED_SCOUT_SEARCH_LEDGER,
+        |payload| Ok(serde_json::from_str(payload)?),
+    )?;
     state.scout_pending_samples = load_scout_collection(&connection, "scout_pending_samples", |_, payload| {
         Ok(serde_json::from_str(payload)?)
     })?;
@@ -3389,6 +3417,7 @@ fn load_scout_state(path: &std::path::Path) -> anyhow::Result<PersistedState> {
 
 const MAX_CACHED_SCOUT_OUTCOMES: usize = 4_096;
 const MAX_CACHED_SCOUT_PLAN_RESULTS: usize = 32;
+const MAX_CACHED_SCOUT_SEARCH_LEDGER: usize = 32;
 
 fn load_recent_scout_outcomes(
     connection: &rusqlite::Connection,

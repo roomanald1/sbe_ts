@@ -58,6 +58,7 @@ const signed = {
     typeof p.value === 'number' && p.value < 0,
 };
 type OutcomeGridRow = AutoTraderOutcome & { markPrice?: number };
+const OUTCOMES_COLUMN_STATE_KEY = 'auto-trader-outcomes-column-state';
 const outcomeGridDefaultColDef = {
   sortable: true,
   resizable: true,
@@ -164,6 +165,42 @@ function AutoTraderOutcomesComponent({
   const model = useMemo(() => sharedOutcomesModel, []);
   const state = useBehaviorSnapshot(model.state$);
   const outcomesGridApi = useRef<GridApi<OutcomeGridRow> | null>(null);
+  const columnWidths = useRef(new Map<string, number>());
+  const columnStateKey = `${OUTCOMES_COLUMN_STATE_KEY}:${liveOnly ? 'live' : closedOnly ? 'closed' : 'all'}`;
+  const rememberColumnWidths = (api: GridApi<OutcomeGridRow>) => {
+    for (const { colId, width } of api.getColumnState()) {
+      if (width != null) columnWidths.current.set(colId, width);
+    }
+    try {
+      localStorage.setItem(
+        columnStateKey,
+        JSON.stringify(api.getColumnState()),
+      );
+    } catch {
+      // Keep the current grid usable when browser storage is unavailable.
+    }
+  };
+  const restoreColumnWidths = (api: GridApi<OutcomeGridRow>) => {
+    try {
+      const saved = localStorage.getItem(columnStateKey);
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed))
+          api.applyColumnState({ state: parsed, applyOrder: true });
+      }
+    } catch {
+      // Ignore invalid or unavailable saved grid state.
+    }
+    api.applyColumnState({
+      state: [...columnWidths.current].map(([colId, width]) => ({
+        colId,
+        width,
+      })),
+    });
+    for (const { colId, width } of api.getColumnState()) {
+      if (width != null) columnWidths.current.set(colId, width);
+    }
+  };
   const [expandedLedgerGroups, setExpandedLedgerGroups] = useState<Set<string>>(
     () => new Set(),
   );
@@ -1685,6 +1722,15 @@ function AutoTraderOutcomesComponent({
             ),
     [closedOnly, columns, expandedLedgerGroups, liveOnly],
   );
+  const gridColumns = useMemo(
+    () =>
+      visibleColumns.map((column, index) =>
+        index === visibleColumns.length - 1
+          ? { ...column, flex: 1, maxWidth: undefined }
+          : column,
+      ),
+    [visibleColumns],
+  );
   return (
     <section
       className={
@@ -1806,11 +1852,22 @@ function AutoTraderOutcomesComponent({
       >
         <AgGridReact<OutcomeGridRow>
           rowData={rows}
-          columnDefs={visibleColumns}
+          columnDefs={gridColumns}
           onGridReady={(event) => {
             outcomesGridApi.current = event.api;
+            rememberColumnWidths(event.api);
             if (closedOnly) sortClosedGridByCloseTime(event.api);
           }}
+          onColumnResized={({ api, finished }) => {
+            if (finished) rememberColumnWidths(api);
+          }}
+          onColumnMoved={({ api, finished }) => {
+            if (finished) rememberColumnWidths(api);
+          }}
+          onColumnVisible={({ api }) => rememberColumnWidths(api)}
+          onColumnPinned={({ api }) => rememberColumnWidths(api)}
+          onSortChanged={({ api }) => rememberColumnWidths(api)}
+          onNewColumnsLoaded={({ api }) => restoreColumnWidths(api)}
           getRowId={outcomeGridGetRowId}
           maintainColumnOrder
           getRowHeight={() => (closedOnly ? 30 : liveOnly ? 52 : 48)}

@@ -95,7 +95,7 @@ describe('AutoTraderLearningWidgetModel', () => {
         {
           strategy: 'live-order-book' as const,
           symbol: 'LINK-USDT',
-          reason: 'Signal strength 0.12 is below the required minimum 0.30',
+          reason: 'Strength 0.12 < 0.30',
           timestamp_ms: now,
         },
       ],
@@ -124,7 +124,7 @@ describe('AutoTraderLearningWidgetModel', () => {
     );
     assert.equal(
       widget.state$.value.decisionCoverage.blockers[0]?.reason,
-      'Signal strength 0.12 is below the required minimum 0.30',
+      'Strength 0.12 < 0.30',
     );
     decisions = [
       {

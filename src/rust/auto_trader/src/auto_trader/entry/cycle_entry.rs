@@ -685,6 +685,8 @@ fn daily_strategy_batch_result(
         quantity: None,
         order_type: None,
         order_response: None,
+        filled_quantity: None,
+        entry_diagnostic: None,
     }
 }
 
@@ -706,11 +708,37 @@ async fn request_learning_context_thresholds(
         .collect()
 }
 
+fn candidate_cycle_blocker(
+    raw_signal_count: usize,
+    candidate_count: usize,
+    fresh_candidate_count: usize,
+    strategy_rejected_count: usize,
+) -> (EntryCycleOutcome, &'static str) {
+    if raw_signal_count == 0 {
+        (EntryCycleOutcome::NoSignals, "signal_source")
+    } else if strategy_rejected_count > 0 {
+        (EntryCycleOutcome::CandidatesRejected, "strategy_entry_gate")
+    } else if candidate_count == 0 {
+        (EntryCycleOutcome::NoEligibleCandidates, "candidate_filter")
+    } else if fresh_candidate_count == 0 {
+        (EntryCycleOutcome::NoFreshCandidates, "signal_freshness_or_direction")
+    } else {
+        (EntryCycleOutcome::CandidatesRejected, "candidate_selection_gates")
+    }
+}
+
 async fn run_cycle_inner(
     state: &AutoTraderState,
     mut dashboard: Dashboard,
 ) -> Result<CycleResult, (StatusCode, String)> {
+    let raw_signal_count = dashboard.best.len();
     dashboard.best.retain(|signal| strategy::is_autotrader_symbol_allowed(&signal.symbol));
+    let allowed_signal_count = dashboard.best.len();
+    let strategy_candidate_count = dashboard
+        .best
+        .iter()
+        .filter(|signal| signal.strategy_candidate || signal.strategy.is_some())
+        .count();
     let mut missed_bands = (*dashboard.missed_opportunity_bands).clone();
     missed_bands.retain(|band| band.symbol.as_deref().is_none_or(strategy::is_autotrader_symbol_allowed));
     dashboard.missed_opportunity_bands = Arc::new(missed_bands);
@@ -731,8 +759,34 @@ async fn run_cycle_inner(
             )
         })?
         .as_secs();
+    let timestamp_ms = now.saturating_mul(1_000);
+    let mut entry_diagnostic = LatestEntryDiagnostic {
+        cycle_id: format!("autotrader-{timestamp_ms}"),
+        timestamp_ms,
+        outcome: if raw_signal_count == 0 {
+            EntryCycleOutcome::NoSignals
+        } else {
+            EntryCycleOutcome::NoEligibleCandidates
+        },
+        raw_signal_count,
+        allowed_signal_count,
+        strategy_candidate_count,
+        eligible_candidate_count: 0,
+        rejected_candidate_count: 0,
+        selected_candidate_count: 0,
+        order_attempt_count: 0,
+        submitted_order_count: 0,
+        fill_confirmed: false,
+        primary_gate_id: None,
+        primary_blocker: None,
+        detail: String::new(),
+    };
     if let Some(result) = enforce_daily_realized_loss_limit(state).await? {
-        return Ok(result);
+        entry_diagnostic.outcome = EntryCycleOutcome::GlobalRiskBlock;
+        entry_diagnostic.primary_gate_id = Some("daily_realized_loss_limit".to_owned());
+        entry_diagnostic.primary_blocker = result.reason.clone();
+        entry_diagnostic.detail = result.reason.clone().unwrap_or_else(|| result.status.into());
+        return Ok(with_entry_diagnostic(result, entry_diagnostic));
     }
     let (live_strategies, strategies_enabled, strategy_settings) = {
         let settings = state.settings.lock().await;
@@ -860,6 +914,7 @@ async fn run_cycle_inner(
         }
     }
     let mut strategy_filter_details = Vec::new();
+    let mut strategy_rejected_count = 0_usize;
     if has_daily_strategy_signals {
         let daily_decisions = evaluate_daily_strategy_signals(
             &dashboard.best,
@@ -891,6 +946,7 @@ async fn run_cycle_inner(
             }) {
                 Ok(StrategyDecision::Enter) => retained.push(signal),
                 Ok(_) => {
+                    strategy_rejected_count = strategy_rejected_count.saturating_add(1);
                     let timestamp_ms = now.saturating_mul(1000);
                     let reason = strategy_entry_rejection_reason(
                         &signal,
@@ -930,6 +986,7 @@ async fn run_cycle_inner(
                     );
                 }
                 Err(error) => {
+                    strategy_rejected_count = strategy_rejected_count.saturating_add(1);
                     let timestamp_ms = now.saturating_mul(1000);
                     let reason = format!("Strategy evaluation error: {error}");
                     let blocker = StrategyBlocker {
@@ -995,6 +1052,7 @@ async fn run_cycle_inner(
             update_latest_strategy_blocker(state, strategy.as_str(), now.saturating_mul(1000), None);
             live_strategy_signals.push(signal.clone());
         } else {
+            strategy_rejected_count = strategy_rejected_count.saturating_add(1);
             let timestamp_ms = now.saturating_mul(1000);
             let parameters = signal_strategy_parameters(signal);
             let reason = strategy_entry_rejection_reason(signal, strategy, &parameters);
@@ -1009,6 +1067,12 @@ async fn run_cycle_inner(
                     timestamp_ms,
                 }),
             );
+            if strategy_filter_details.len() < 20 {
+                strategy_filter_details.push(format!(
+                    "{} {} [{}] · {}",
+                    signal.symbol, signal.direction, strategy.as_str(), reason
+                ));
+            }
             queue_strategy_rejection_audit(
                 state,
                 signal,
@@ -1069,7 +1133,11 @@ async fn run_cycle_inner(
         dashboard.best = live_strategy_signals;
         dashboard.best.append(&mut stale_live_source_signals);
     } else if strategies_enabled {
-        return Ok(CycleResult {
+        entry_diagnostic.outcome = EntryCycleOutcome::WaitingForStrategySignals;
+        entry_diagnostic.primary_gate_id = Some("insights_strategy_feed".to_owned());
+        entry_diagnostic.primary_blocker = Some("Waiting for Insights daily strategy signals".into());
+        entry_diagnostic.detail = "No daily strategy signal arrived in the latest cycle".into();
+        return Ok(with_entry_diagnostic(CycleResult {
             status: "skipped",
             reason: Some("Waiting for Insights daily strategy signals".into()),
             symbol: None,
@@ -1077,7 +1145,9 @@ async fn run_cycle_inner(
             quantity: None,
             order_type: None,
             order_response: None,
-        });
+            filled_quantity: None,
+            entry_diagnostic: None,
+        }, entry_diagnostic));
     }
     let selection_started = Instant::now();
     let PreparedSignals {
@@ -1154,6 +1224,8 @@ async fn run_cycle_inner(
         &strategy_positions,
         max_entries_per_auto_position,
     );
+    entry_diagnostic.eligible_candidate_count = fresh_directional.len();
+    entry_diagnostic.rejected_candidate_count = strategy_rejected_count;
     if stale_signal_count > 0 {
         state
             .stale_signal_candidates_total
@@ -1175,6 +1247,17 @@ async fn run_cycle_inner(
                 "No daily strategy candidate passed entry checks; {} blocked by existing positions; {} stale",
                 position_blocked_count, stale_signal_count,
             );
+            entry_diagnostic.outcome = if evaluated == 0 {
+                EntryCycleOutcome::NoEligibleCandidates
+            } else {
+                EntryCycleOutcome::CandidatesRejected
+            };
+            entry_diagnostic.rejected_candidate_count = entry_diagnostic
+                .rejected_candidate_count
+                .saturating_add(evaluated);
+            entry_diagnostic.primary_gate_id = Some("daily_strategy_entry_gates".into());
+            entry_diagnostic.primary_blocker = Some(reason.clone());
+            entry_diagnostic.detail = reason.clone();
             daily_batch_result = Some(skipped(&reason));
         } else {
             let candidate_dashboard = prefetch_daily_candidate_market_books(
@@ -1235,14 +1318,29 @@ async fn run_cycle_inner(
                 {
                     Ok(result) => result,
                     Err((status, error)) => {
+                        entry_diagnostic.order_attempt_count = entry_diagnostic
+                            .order_attempt_count
+                            .saturating_add(1);
+                        entry_diagnostic.rejected_candidate_count = entry_diagnostic
+                            .rejected_candidate_count
+                            .saturating_add(1);
                         details.push(format!("{strategy_name}: request error {status}: {error}"));
                         continue;
                     }
                 };
+                entry_diagnostic.order_attempt_count = entry_diagnostic
+                    .order_attempt_count
+                    .saturating_add(1);
                 if result.status == "order_submitting" {
                     submitted += 1;
+                    entry_diagnostic.submitted_order_count = entry_diagnostic
+                        .submitted_order_count
+                        .saturating_add(1);
                     last_order = Some(result);
                 } else {
+                    entry_diagnostic.rejected_candidate_count = entry_diagnostic
+                        .rejected_candidate_count
+                        .saturating_add(1);
                     let reason = result.reason.as_deref().unwrap_or(result.status);
                     details.push(format!("{strategy_name}: {reason}"));
                     queue_strategy_rejection_audit(
@@ -1260,6 +1358,23 @@ async fn run_cycle_inner(
             daily_batch_result = Some(daily_strategy_batch_result(
                 last_order, evaluated, submitted, &details,
             ));
+            if submitted > 0 {
+                entry_diagnostic.outcome = EntryCycleOutcome::OrderQueued;
+                entry_diagnostic.selected_candidate_count = submitted;
+            } else if !details.is_empty() {
+                entry_diagnostic.outcome = EntryCycleOutcome::ExecutionBlocked;
+                entry_diagnostic.primary_gate_id = Some("daily_strategy_execution".into());
+                entry_diagnostic.primary_blocker = details.first().cloned();
+                entry_diagnostic.detail = details.join("; ");
+            } else if rebalance_candidates.is_empty() {
+                entry_diagnostic.outcome = EntryCycleOutcome::ExecutionBlocked;
+                entry_diagnostic.primary_gate_id =
+                    Some("portfolio_rebalance_threshold".into());
+                entry_diagnostic.primary_blocker = Some(
+                    "Portfolio candidate did not cross its rebalance band".into(),
+                );
+                entry_diagnostic.detail = entry_diagnostic.primary_blocker.clone().unwrap();
+            }
         }
     }
     let live_signals = if has_daily_strategy_signals {
@@ -1405,7 +1520,49 @@ async fn run_cycle_inner(
                 now,
                 &cycle_reason,
             );
-            return Ok(daily_batch_result.unwrap_or(result));
+            if entry_diagnostic.primary_gate_id.is_none()
+                && entry_diagnostic.submitted_order_count == 0
+            {
+                let candidate_count = selection_signals
+                    .iter()
+                    .filter(|candidate| {
+                        candidate.strategy_candidate || candidate.strategy.is_some()
+                    })
+                    .count();
+                let (outcome, gate_id) = candidate_cycle_blocker(
+                    entry_diagnostic.raw_signal_count,
+                    candidate_count,
+                    selection_fresh_directional.len(),
+                    strategy_rejected_count,
+                );
+                entry_diagnostic.outcome = outcome;
+                entry_diagnostic.primary_gate_id = Some(gate_id.into());
+                entry_diagnostic.primary_blocker = strategy_filter_details
+                    .first()
+                    .cloned()
+                    .or_else(|| Some(cycle_reason.clone()));
+                entry_diagnostic.detail = if strategy_filter_details.is_empty() {
+                    cycle_reason
+                } else {
+                    format!(
+                        "{} · {}",
+                        strategy_filter_details.join("; "),
+                        cycle_reason
+                    )
+                };
+                entry_diagnostic.rejected_candidate_count = entry_diagnostic
+                    .rejected_candidate_count
+                    .saturating_add(
+                        selection_signals
+                            .iter()
+                            .filter(|candidate| {
+                                candidate.strategy_candidate || candidate.strategy.is_some()
+                            })
+                            .count(),
+                    );
+            }
+            let result = daily_batch_result.unwrap_or(result);
+            return Ok(with_entry_diagnostic(result, entry_diagnostic));
         }
     };
     record_cycle_candidate_blockers(
@@ -1461,6 +1618,30 @@ async fn run_cycle_inner(
         now,
     )
     .await?;
+    entry_diagnostic.selected_candidate_count = entry_diagnostic
+        .selected_candidate_count
+        .saturating_add(1);
+    entry_diagnostic.order_attempt_count = entry_diagnostic.order_attempt_count.saturating_add(1);
+    if signal_result.status == "order_submitting" {
+        entry_diagnostic.submitted_order_count = entry_diagnostic
+            .submitted_order_count
+            .saturating_add(1);
+        entry_diagnostic.outcome = EntryCycleOutcome::OrderQueued;
+        entry_diagnostic.primary_gate_id = None;
+        entry_diagnostic.primary_blocker = None;
+        entry_diagnostic.detail = "Candidate passed selection and was queued for execution".into();
+    } else if entry_diagnostic.submitted_order_count == 0 {
+        entry_diagnostic.outcome = EntryCycleOutcome::ExecutionBlocked;
+        entry_diagnostic.primary_gate_id = Some("execution_or_risk_gate".into());
+        entry_diagnostic.primary_blocker = signal_result.reason.clone();
+        entry_diagnostic.detail = signal_result
+            .reason
+            .clone()
+            .unwrap_or_else(|| signal_result.status.to_owned());
+        entry_diagnostic.rejected_candidate_count = entry_diagnostic
+            .rejected_candidate_count
+            .saturating_add(1);
+    }
     if signal_result.status != "order_submitting" {
         queue_auto_trader_audit(
             state,
@@ -1492,16 +1673,50 @@ async fn run_cycle_inner(
             );
         }
     }
-    if signal_result.status == "order_submitting" || daily_batch_result.is_none() {
-        Ok(signal_result)
+    let result = if signal_result.status == "order_submitting" || daily_batch_result.is_none() {
+        signal_result
     } else {
-        Ok(daily_batch_result.unwrap())
-    }
+        daily_batch_result.unwrap()
+    };
+    Ok(with_entry_diagnostic(result, entry_diagnostic))
 }
 
 #[cfg(test)]
 mod parallel_daily_cycle_tests {
     use super::*;
+
+    #[test]
+    fn entry_diagnostic_distinguishes_missing_candidates_from_gate_rejections() {
+        assert!(matches!(
+            candidate_cycle_blocker(0, 0, 0, 0),
+            (EntryCycleOutcome::NoSignals, "signal_source")
+        ));
+        assert!(matches!(
+            candidate_cycle_blocker(8, 0, 0, 0),
+            (EntryCycleOutcome::NoEligibleCandidates, "candidate_filter")
+        ));
+        assert!(matches!(
+            candidate_cycle_blocker(8, 2, 0, 0),
+            (
+                EntryCycleOutcome::NoFreshCandidates,
+                "signal_freshness_or_direction"
+            )
+        ));
+        assert!(matches!(
+            candidate_cycle_blocker(8, 2, 2, 0),
+            (
+                EntryCycleOutcome::CandidatesRejected,
+                "candidate_selection_gates"
+            )
+        ));
+        assert!(matches!(
+            candidate_cycle_blocker(8, 2, 0, 2),
+            (
+                EntryCycleOutcome::CandidatesRejected,
+                "strategy_entry_gate"
+            )
+        ));
+    }
 
     fn signal(strategy: &str) -> Signal {
         Signal {
@@ -1550,7 +1765,7 @@ mod parallel_daily_cycle_tests {
         let first_audit = strategy_rejection_audit_payload(
             &first,
             "live-order-book",
-            "Signal strength 0.12 is below the required minimum 0.30",
+            "Strength 0.12 < 0.30",
             11_000,
             0.5,
             0.8,
@@ -1570,7 +1785,7 @@ mod parallel_daily_cycle_tests {
         assert_eq!(first_audit["status"], "rejected");
         assert_eq!(
             first_audit["reason"],
-            "Signal strength 0.12 is below the required minimum 0.30"
+            "Strength 0.12 < 0.30"
         );
         assert_eq!(
             first_audit["entry_gate"]["selection_mode"],

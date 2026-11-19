@@ -1,4 +1,4 @@
-import { useEffect, useMemo } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { AgGridReact } from 'ag-grid-react';
 import {
   ClientSideRowModelModule,
@@ -7,7 +7,10 @@ import {
   type ColDef,
   type ICellRendererParams,
 } from 'ag-grid-community';
-import type { StrategyDiagnostic } from '../models/AutoTraderModel';
+import type {
+  LatestEntryDiagnostic,
+  StrategyDiagnostic,
+} from '../models/AutoTraderModel';
 import { useBehaviorSnapshot } from '@workspace/ui-platform';
 import { FeedToolbar } from './FeedToolbar';
 import {
@@ -26,6 +29,52 @@ const diagnosticsGridTheme = themeQuartz.withParams({
   rowHoverColor: '#141b24',
 });
 type StrategyDiagnosticRow = StrategyDiagnostic['symbols'][number];
+const ENTRY_DIAGNOSTIC_STALE_AFTER_MS = 60_000;
+
+function entryOutcomeLabel(outcome: LatestEntryDiagnostic['outcome']): string {
+  switch (outcome) {
+    case 'no_signals':
+      return 'No signals received';
+    case 'no_eligible_candidates':
+      return 'No eligible candidates';
+    case 'no_fresh_candidates':
+      return 'No fresh candidates';
+    case 'candidates_rejected':
+      return 'Candidates rejected by entry gates';
+    case 'execution_blocked':
+      return 'Selected candidate blocked during execution';
+    case 'global_risk_block':
+      return 'Blocked by global risk limit';
+    case 'order_queued':
+      return 'Order queued';
+    case 'order_submitted':
+      return 'Order accepted by execution service';
+    case 'waiting_for_strategy_signals':
+      return 'Waiting for strategy signals';
+    case 'cycle_error':
+      return 'Entry cycle failed';
+  }
+}
+
+function entryDiagnosticFreshness(
+  timestampMs: number,
+  nowMs: number,
+): {
+  label: string;
+  stale: boolean;
+} {
+  const ageMs = nowMs - timestampMs;
+  if (!Number.isFinite(timestampMs) || timestampMs <= 0 || ageMs < 0)
+    return { label: 'Timestamp unavailable', stale: true };
+  if (ageMs > ENTRY_DIAGNOSTIC_STALE_AFTER_MS)
+    return {
+      label: `Stale · last update ${Math.floor(ageMs / 1000)}s ago`,
+      stale: true,
+    };
+  if (ageMs < 1_000) return { label: 'Updated just now', stale: false };
+  return { label: `Updated ${Math.floor(ageMs / 1000)}s ago`, stale: false };
+}
+
 type GateColumnParams = ICellRendererParams<DiagnosticsRow> & {
   onToggle: (symbol: string, direction: string) => void;
 };
@@ -59,7 +108,20 @@ export function AutoTraderDiagnostics() {
     return () => model.stop();
   }, [model]);
   const state = useBehaviorSnapshot(model.state$);
+  const [nowMs, setNowMs] = useState(() => Date.now());
+  useEffect(() => {
+    const timer = window.setInterval(() => setNowMs(Date.now()), 5_000);
+    return () => window.clearInterval(timer);
+  }, []);
   const { diagnosticRows: gridRows, symbolGroupCount } = state;
+  const entryDiagnostic = state.latestEntryDiagnostic;
+  const entryFreshness = entryDiagnostic
+    ? entryDiagnosticFreshness(entryDiagnostic.timestampMs, nowMs)
+    : null;
+  const primaryGates = state.gateHits
+    .slice()
+    .sort((a, b) => b.count - a.count)
+    .slice(0, 5);
   const strategyColumns = useMemo<ColDef<StrategyDiagnosticRow>[]>(
     () => [
       { field: 'symbol', headerName: 'Symbol', minWidth: 110, flex: 0.7 },
@@ -225,6 +287,113 @@ export function AutoTraderDiagnostics() {
     >
       <FeedToolbar title="Auto Trader diagnostics" />
       <div className="auto-trader-diagnostics-content">
+        <section
+          className="auto-trader-diagnostics-block"
+          aria-label="Latest entry outcome"
+          aria-live="polite"
+        >
+          <div className="auto-trader-diagnostics-heading">
+            <strong>Latest entry outcome</strong>
+            {entryDiagnostic && entryFreshness && (
+              <span
+                role={entryFreshness.stale ? 'alert' : undefined}
+                aria-label={`Diagnostic freshness: ${entryFreshness.label}`}
+              >
+                {entryFreshness.label}
+              </span>
+            )}
+          </div>
+          {entryDiagnostic ? (
+            <>
+              <h3>{entryOutcomeLabel(entryDiagnostic.outcome)}</h3>
+              <p className="auto-trader-diagnostics-note">
+                <strong>Primary blocker: </strong>
+                {entryDiagnostic.primaryBlocker || 'None reported'}
+                {entryDiagnostic.primaryGateId
+                  ? ` · Gate: ${entryDiagnostic.primaryGateId}`
+                  : ''}
+              </p>
+              {entryDiagnostic.detail &&
+                entryDiagnostic.detail !== entryDiagnostic.primaryBlocker && (
+                  <p className="auto-trader-diagnostics-note">
+                    <strong>Cycle detail: </strong>
+                    {entryDiagnostic.detail}
+                  </p>
+                )}
+              <dl className="auto-trader-entry-funnel">
+                <div>
+                  <dt>Signals</dt>
+                  <dd>{entryDiagnostic.rawSignalCount}</dd>
+                </div>
+                <div>
+                  <dt>Allowed</dt>
+                  <dd>{entryDiagnostic.allowedSignalCount}</dd>
+                </div>
+                <div>
+                  <dt>Strategy candidates</dt>
+                  <dd>{entryDiagnostic.strategyCandidateCount}</dd>
+                </div>
+                <div>
+                  <dt>Eligible</dt>
+                  <dd>{entryDiagnostic.eligibleCandidateCount}</dd>
+                </div>
+                <div>
+                  <dt>Rejected</dt>
+                  <dd>{entryDiagnostic.rejectedCandidateCount}</dd>
+                </div>
+                <div>
+                  <dt>Selected</dt>
+                  <dd>{entryDiagnostic.selectedCandidateCount}</dd>
+                </div>
+                <div>
+                  <dt>Order attempts</dt>
+                  <dd>{entryDiagnostic.orderAttemptCount}</dd>
+                </div>
+                <div>
+                  <dt>Orders submitted</dt>
+                  <dd>{entryDiagnostic.submittedOrderCount}</dd>
+                </div>
+                <div>
+                  <dt>Trade fill</dt>
+                  <dd>
+                    {entryDiagnostic.fillConfirmed
+                      ? 'Confirmed'
+                      : 'Not confirmed'}
+                  </dd>
+                </div>
+              </dl>
+              <p className="auto-trader-diagnostics-note">
+                Cycle {entryDiagnostic.cycleId} ·{' '}
+                {new Date(entryDiagnostic.timestampMs).toLocaleString()}
+              </p>
+            </>
+          ) : (
+            <p className="auto-trader-diagnostics-empty" role="status">
+              {state.loading
+                ? 'Loading entry diagnostics…'
+                : state.latestSignalDiagnostic
+                  ? `No entry cycle was reached. Latest signal blocker: ${state.latestSignalDiagnostic}`
+                  : 'No entry-cycle diagnostic has been recorded yet.'}
+            </p>
+          )}
+          <div className="auto-trader-diagnostics-heading">
+            <strong>Most frequent blocked gates</strong>
+          </div>
+          {primaryGates.length ? (
+            <ul className="auto-trader-gate-list">
+              {primaryGates.map((item) => (
+                <li key={item.gate}>
+                  <span>{item.gate}</span>
+                  <strong>{item.count.toLocaleString()} scans</strong>
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <p className="auto-trader-diagnostics-empty">
+              No blocked gates are recorded in the current diagnostic window.
+            </p>
+          )}
+        </section>
         <p className="auto-trader-diagnostics-note">
           Gate hit counts are blocked decision scans since the current UTC day
           began; each gate is counted at most once per scan, even when several

@@ -54,10 +54,6 @@ const reasonAge = (timestamp: number | undefined) => {
   if (ageSeconds < 86400) return Math.floor(ageSeconds / 3600) + 'h ago';
   return 'stale · ' + Math.floor(ageSeconds / 86400) + 'd ago';
 };
-const reasonTimestamp = (timestamp: number | undefined) =>
-  timestamp && Number.isFinite(timestamp)
-    ? new Date(timestamp).toLocaleString()
-    : 'Timestamp unavailable';
 const entryEvaluationReason = (
   evaluation:
     | {
@@ -78,8 +74,9 @@ const entryEvaluationReason = (
         };
       }
     | undefined,
+  fallbackReason?: string,
 ) => {
-  if (!evaluation) return 'No symbol-specific evaluation recorded';
+  if (!evaluation) return fallbackReason ?? 'No blocker recorded';
   if (evaluation.reason?.trim()) return evaluation.reason;
   const decision = evaluation.decision;
   if (decision.btc_gate_required && decision.btc_gate_passed === false)
@@ -150,6 +147,8 @@ type StrategyWinRateRow = {
   feesUsd?: number;
   netPnlUsd?: number;
   todayRealizedUsd?: number;
+  todayWinRate?: number;
+  todayAverageReturn?: number;
   winRate?: number;
   averageReturn?: number;
   averageNetWinUsd?: number;
@@ -215,6 +214,7 @@ const colorStrategyColumns = (
 ) =>
   columns.map((column, index) => ({
     ...column,
+    maxWidth: undefined,
     headerClass: [
       'strategy-column-' + group + '-header',
       index === 0 && 'strategy-group-start',
@@ -232,6 +232,61 @@ const colorStrategyColumns = (
     cellStyle: { backgroundColor: strategyCellTints[group] },
   }));
 const HIDE_DISABLED_STRATEGIES_KEY = 'autotrader-hide-disabled-strategies-v1';
+const STRATEGY_COLUMN_GROUPS = [
+  {
+    id: 'performance',
+    label: 'Performance',
+    children: ['todayRealizedUsd', 'todayWinRate', 'todayAverageReturn'],
+  },
+  {
+    id: 'entryEvidence',
+    label: 'Entry evidence',
+    children: [
+      'entryAverageNetReturn',
+      'entryPositiveRate',
+      'entrySampleCount',
+      'entryWhyNoEntry',
+    ],
+  },
+  {
+    id: 'sample',
+    label: 'Fully closed trades',
+    children: ['trades', 'wins', 'losses'],
+  },
+  {
+    id: 'status',
+    label: 'Strategy status',
+    children: ['enabled', 'scoutEnabled'],
+  },
+  {
+    id: 'profile',
+    label: 'Trade profile',
+    children: ['medianHoldingMs', 'averageEntrySizeUsd'],
+  },
+  {
+    id: 'learning',
+    label: 'Learning',
+    children: [
+      'learningAverageNet',
+      'learningSamples',
+      'feedbackMultiplier',
+      'effectiveSizeMultiplier',
+      'scoutOutcomeAverageNet',
+      'pairedScoutAverageLift',
+      'pairedScoutSamples',
+    ],
+  },
+];
+const STRATEGY_COLUMN_GROUPS_KEY = 'autotrader-strategy-column-groups-v1';
+const STRATEGY_GRID_STATE_KEY = 'autotrader-strategy-grid-state-v1';
+const readStrategyColumnGroups = (): Record<string, boolean> => {
+  try {
+    const stored = localStorage.getItem(STRATEGY_COLUMN_GROUPS_KEY);
+    return stored ? JSON.parse(stored) : {};
+  } catch {
+    return {};
+  }
+};
 function scrollPageFromStrategyGrid(event: globalThis.WheelEvent) {
   if (!event.deltaY) return;
   let pageScroller: HTMLElement | null = (event.currentTarget as HTMLElement)
@@ -258,6 +313,26 @@ export function AutoTraderStrategyPerformanceWidget() {
   const settings = useBehaviorSnapshot(settingsModel.state$);
   const scoutState = useBehaviorSnapshot(autoTraderScoutModel.state$);
   const strategyGridApi = useRef<GridApi<StrategyWinRateRow> | null>(null);
+  const saveStrategyGridState = (api: GridApi<StrategyWinRateRow>) => {
+    try {
+      localStorage.setItem(
+        STRATEGY_GRID_STATE_KEY,
+        JSON.stringify(api.getColumnState()),
+      );
+    } catch {
+      // Keep the grid usable when browser storage is unavailable.
+    }
+  };
+  const fillLastVisibleColumn = (api: GridApi<StrategyWinRateRow>) => {
+    const displayed = api.getAllDisplayedColumns();
+    const last = displayed[displayed.length - 1];
+    api.applyColumnState({
+      state: displayed.map((column) => ({
+        colId: column.getColId(),
+        flex: column === last ? 1 : 0,
+      })),
+    });
+  };
   const strategyGridWrapper = useRef<HTMLDivElement | null>(null);
   useEffect(() => {
     void model.start();
@@ -280,17 +355,6 @@ export function AutoTraderStrategyPerformanceWidget() {
     return () =>
       wrapper.removeEventListener('wheel', scrollPageFromStrategyGrid);
   }, []);
-  useEffect(() => {
-    const timer = setInterval(
-      () =>
-        strategyGridApi.current?.refreshCells({
-          columns: ['runReason'],
-          force: true,
-        }),
-      15_000,
-    );
-    return () => clearInterval(timer);
-  }, []);
   const [hideDisabledStrategies, setHideDisabledStrategies] = useState(() => {
     try {
       return localStorage.getItem(HIDE_DISABLED_STRATEGIES_KEY) === 'true';
@@ -298,6 +362,37 @@ export function AutoTraderStrategyPerformanceWidget() {
       return false;
     }
   });
+  const [visibleColumnGroups, setVisibleColumnGroups] = useState(() => {
+    const stored = readStrategyColumnGroups();
+    return Object.fromEntries(
+      STRATEGY_COLUMN_GROUPS.map(({ id }) => [id, stored[id] !== false]),
+    ) as Record<(typeof STRATEGY_COLUMN_GROUPS)[number]['id'], boolean>;
+  });
+  const updateColumnGroupVisibility = (
+    id: (typeof STRATEGY_COLUMN_GROUPS)[number]['id'],
+    visible: boolean,
+  ) => {
+    setVisibleColumnGroups((previous) => {
+      const next = { ...previous, [id]: visible };
+      try {
+        localStorage.setItem(STRATEGY_COLUMN_GROUPS_KEY, JSON.stringify(next));
+      } catch {
+        /* The grid still updates if browser storage is unavailable. */
+      }
+      strategyGridApi.current?.setColumnsVisible(
+        STRATEGY_COLUMN_GROUPS.find((group) => group.id === id)?.children ?? [],
+        visible,
+      );
+      return next;
+    });
+  };
+  useEffect(() => {
+    const api = strategyGridApi.current;
+    if (!api) return;
+    for (const group of STRATEGY_COLUMN_GROUPS) {
+      api.setColumnsVisible(group.children, visibleColumnGroups[group.id]);
+    }
+  }, [visibleColumnGroups]);
   const updateHideDisabledStrategies = (value: boolean) => {
     setHideDisabledStrategies(value);
     try {
@@ -360,6 +455,19 @@ export function AutoTraderStrategyPerformanceWidget() {
     return strategyNames
       .map((strategy) => {
         const trades = grouped.get(strategy) ?? [];
+        const now = new Date();
+        const todayStart = new Date(
+          now.getFullYear(),
+          now.getMonth(),
+          now.getDate(),
+        ).getTime();
+        const todayEnd = todayStart + 24 * 60 * 60 * 1000;
+        const todayTrades = trades.filter(
+          (trade) =>
+            typeof trade.closedAt === 'number' &&
+            trade.closedAt >= todayStart &&
+            trade.closedAt < todayEnd,
+        );
         const enabled = settings.loading
           ? undefined
           : settings.strategies.includes(strategy as Strategy);
@@ -517,6 +625,27 @@ export function AutoTraderStrategyPerformanceWidget() {
                 0,
               ) / trades.length
           : undefined;
+        const todayWins = todayTrades.filter((trade) => {
+          const value =
+            typeof trade.netPnlUsd === 'number' &&
+            Number.isFinite(trade.netPnlUsd)
+              ? trade.netPnlUsd
+              : trade.pnl;
+          return value > 0;
+        }).length;
+        const todayAverageReturn = todayTrades.length
+          ? todayTrades.reduce((sum, trade) => {
+              const value =
+                typeof trade.netPnlUsd === 'number' &&
+                Number.isFinite(trade.netPnlUsd)
+                  ? trade.netPnlUsd
+                  : trade.pnl * (trade.quoteUsdRate ?? 1);
+              const capital =
+                trade.entryNotionalUsd ??
+                trade.quantity * trade.entryPrice * (trade.quoteUsdRate ?? 1);
+              return sum + (capital > 0 ? (value / capital) * 100 : 0);
+            }, 0) / todayTrades.length
+          : undefined;
         const closedTimes = trades
           .map((row) => row.closedAt ?? row.openedAt)
           .filter((value) => value > 0 && Number.isFinite(value));
@@ -543,6 +672,10 @@ export function AutoTraderStrategyPerformanceWidget() {
           todayRealizedUsd:
             state.todayStrategyRealizedUsd?.[strategy] ??
             (state.todayStrategyRealizedUsd ? 0 : undefined),
+          todayWinRate: todayTrades.length
+            ? (todayWins / todayTrades.length) * 100
+            : undefined,
+          todayAverageReturn,
           feesUsd:
             trades.length > 0 &&
             fees.every(
@@ -603,9 +736,7 @@ export function AutoTraderStrategyPerformanceWidget() {
           scoutable,
         };
       })
-      .sort(
-        (a, b) => b.trades - a.trades || a.strategy.localeCompare(b.strategy),
-      );
+      .sort((a, b) => a.strategy.localeCompare(b.strategy));
   }, [
     closedRows,
     state.learningSummary,
@@ -654,7 +785,45 @@ export function AutoTraderStrategyPerformanceWidget() {
     () =>
       visibleStrategyWinRates.flatMap((row) => {
         const profiles = entryReturnProfilesByStrategy.get(row.strategy) ?? [];
-        const master = { ...row, rowType: 'strategy' as const };
+        const evidenceProfiles = profiles.flatMap((profile) => {
+          const evidence = profile.walk_forward_evidence;
+          const samples = evidence?.sampleCount;
+          return evidence && typeof samples === 'number' && samples > 0
+            ? [{ evidence, samples }]
+            : [];
+        });
+        const evidenceSampleCount = evidenceProfiles.reduce(
+          (sum, item) => sum + item.samples,
+          0,
+        );
+        const master = {
+          ...row,
+          rowType: 'strategy' as const,
+          entryAverageNetReturn:
+            evidenceSampleCount > 0 &&
+            evidenceProfiles.every(
+              ({ evidence }) =>
+                typeof evidence.averageNetReturnPercent === 'number',
+            )
+              ? evidenceProfiles.reduce(
+                  (sum, { evidence, samples }) =>
+                    sum + evidence.averageNetReturnPercent! * samples,
+                  0,
+                ) / evidenceSampleCount
+              : undefined,
+          entryPositiveRate:
+            evidenceSampleCount > 0 &&
+            evidenceProfiles.every(
+              ({ evidence }) => typeof evidence.positiveNetRate === 'number',
+            )
+              ? evidenceProfiles.reduce(
+                  (sum, { evidence, samples }) =>
+                    sum + evidence.positiveNetRate! * samples,
+                  0,
+                ) / evidenceSampleCount
+              : undefined,
+          entrySampleCount: evidenceSampleCount || undefined,
+        };
         if (!expandedEntryStrategies.has(row.strategy) || profiles.length === 0)
           return [master];
         return [
@@ -664,6 +833,37 @@ export function AutoTraderStrategyPerformanceWidget() {
               state.latestStrategyEvaluationsByPosition[
                 `${row.strategy}:${profile.symbol}`
               ];
+            const strategyBlocker = settings.latestStrategyBlockers.find(
+              (blocker) =>
+                blocker.strategy === row.strategy &&
+                blocker.symbol === profile.symbol,
+            );
+            const workerResult = settings.latestSymbolEntryResults.find(
+              (result) =>
+                result.strategy === row.strategy &&
+                result.symbol === profile.symbol,
+            );
+            const symbolBlockers = settings.symbolGateHits
+              .filter((hit) => hit.symbol === profile.symbol)
+              .sort((a, b) => b.count - a.count)
+              .slice(0, 2);
+            const workerReason = workerResult
+              ? workerResult.reason ||
+                (workerResult.decision
+                  ? `Strategy: ${workerResult.decision}`
+                  : 'No worker result recorded')
+              : undefined;
+            const fallbackReason = strategyBlocker
+              ? `${strategyBlocker.reason} · ${reasonAge(strategyBlocker.timestamp_ms)}`
+              : symbolBlockers.length
+                ? symbolBlockers
+                    .map((hit) => `${hit.direction}: ${hit.last_detail}`)
+                    .join('; ')
+                : workerResult
+                  ? workerResult.timestamp_ms
+                    ? `${workerReason} · ${reasonAge(workerResult.timestamp_ms)}`
+                    : workerReason
+                  : 'No worker result recorded';
             return {
               rowType: 'symbol' as const,
               strategy: row.strategy,
@@ -672,7 +872,10 @@ export function AutoTraderStrategyPerformanceWidget() {
                 profile.walk_forward_evidence?.averageNetReturnPercent,
               entryPositiveRate: profile.walk_forward_evidence?.positiveNetRate,
               entrySampleCount: profile.walk_forward_evidence?.sampleCount,
-              entryWhyNoEntry: entryEvaluationReason(evaluation),
+              entryWhyNoEntry: entryEvaluationReason(
+                evaluation,
+                fallbackReason,
+              ),
             } as StrategyWinRateRow;
           }),
         ];
@@ -682,17 +885,20 @@ export function AutoTraderStrategyPerformanceWidget() {
       entryReturnProfilesByStrategy,
       expandedEntryStrategies,
       state.latestStrategyEvaluationsByPosition,
+      settings.latestStrategyBlockers,
+      settings.latestSymbolEntryResults,
+      settings.symbolGateHits,
     ],
   );
   const entryEvidenceGroup: ColGroupDef<StrategyWinRateRow> = {
-    headerName: 'Entry evidence · per symbol',
+    headerName: 'Entry evidence · strategy aggregate / per symbol',
     headerClass: 'strategy-group-learning',
     children: [
       {
         colId: 'entryAverageNetReturn',
         headerName: 'Net avg',
         headerTooltip:
-          'Scout walk-forward average net return for this strategy, symbol, and active parameter profile. This is the same evidence value checked by entry decisions.',
+          'Strategy rows show the sample-weighted aggregate across symbol profiles. Expanded symbol rows show Scout walk-forward average net return for that symbol and active parameter profile.',
         field: 'entryAverageNetReturn',
         cellClassRules: signed,
         valueFormatter: ({ value }) => pct(value),
@@ -704,6 +910,8 @@ export function AutoTraderStrategyPerformanceWidget() {
       {
         colId: 'entryPositiveRate',
         headerName: 'Positive%',
+        headerTooltip:
+          'Sample-weighted positive net rate across symbol profiles on strategy rows; per-symbol rate on expanded rows.',
         field: 'entryPositiveRate',
         valueFormatter: ({ value }) =>
           typeof value === 'number' && Number.isFinite(value)
@@ -717,6 +925,8 @@ export function AutoTraderStrategyPerformanceWidget() {
       {
         colId: 'entrySampleCount',
         headerName: 'Samples',
+        headerTooltip:
+          'Total walk-forward samples across symbol profiles on strategy rows; per-symbol count on expanded rows.',
         field: 'entrySampleCount',
         valueFormatter: ({ value }) =>
           typeof value === 'number' && Number.isFinite(value)
@@ -731,7 +941,7 @@ export function AutoTraderStrategyPerformanceWidget() {
         colId: 'entryWhyNoEntry',
         headerName: 'Why no entry?',
         headerTooltip:
-          'Latest recorded evaluation reason for this specific strategy and symbol. The reason may be unavailable if no symbol-level evaluation has been recorded.',
+          'Latest blocker for this symbol. Uses its walk-forward evidence when no evaluation is recorded.',
         field: 'entryWhyNoEntry',
         tooltipField: 'entryWhyNoEntry',
         width: 300,
@@ -796,24 +1006,6 @@ export function AutoTraderStrategyPerformanceWidget() {
         children: colorStrategyColumns(
           [
             {
-              field: 'feesUsd',
-              headerName: 'Fees',
-              headerTooltip:
-                'Entry and exit fees for fully closed trades, converted using the latest quote currency rate.',
-              cellClassRules: {
-                'pnl-negative': (p) =>
-                  typeof p.value === 'number' && p.value > 0,
-              },
-              valueFormatter: ({ value }) =>
-                typeof value === 'number' && Number.isFinite(value)
-                  ? usd.format(value)
-                  : '—',
-              width: 64,
-              minWidth: 64,
-              maxWidth: 72,
-              flex: 0,
-            },
-            {
               field: 'todayRealizedUsd',
               headerName: 'Today P&L',
               headerTooltip:
@@ -829,23 +1021,9 @@ export function AutoTraderStrategyPerformanceWidget() {
               flex: 0,
             },
             {
-              field: 'netPnlUsd',
-              headerName: 'Closed net',
-              headerTooltip:
-                'Realized P&L after fees for fully closed, audited trades in the available strategy sample. Partial exits from open trades are excluded.',
-              cellClassRules: signed,
-              valueFormatter: ({ value }) =>
-                typeof value === 'number' && Number.isFinite(value)
-                  ? usd.format(value)
-                  : '—',
-              width: 78,
-              minWidth: 78,
-              maxWidth: 86,
-              flex: 0,
-            },
-            {
-              field: 'winRate',
-              headerName: 'Win%',
+              field: 'todayWinRate',
+              headerName: 'Today Win%',
+              headerTooltip: 'Win rate for fully closed trades closed today.',
               valueFormatter: ({ value }) =>
                 typeof value === 'number' ? value.toFixed(1) + '%' : '—',
               width: 55,
@@ -854,8 +1032,10 @@ export function AutoTraderStrategyPerformanceWidget() {
               flex: 0,
             },
             {
-              field: 'averageReturn',
-              headerName: 'Ret%',
+              field: 'todayAverageReturn',
+              headerName: 'Today Ret%',
+              headerTooltip:
+                'Average net return for fully closed trades closed today.',
               cellClassRules: signed,
               valueFormatter: ({ value }) => pct(value),
               width: 58,
@@ -969,32 +1149,6 @@ export function AutoTraderStrategyPerformanceWidget() {
               width: 52,
               minWidth: 52,
               maxWidth: 58,
-              flex: 0,
-            },
-            {
-              field: 'runReason',
-              headerName: 'Why no entry?',
-              headerTooltip:
-                'The latest rejection or entry evaluation explanation reported for this strategy.',
-              valueFormatter: ({ value, data }) =>
-                value
-                  ? data?.runReasonAt
-                    ? value + ' · ' + reasonAge(data.runReasonAt)
-                    : value
-                  : '—',
-              tooltipValueGetter: ({ data }) =>
-                data
-                  ? data.runReasonAt
-                    ? data.runReason +
-                      ' · recorded ' +
-                      reasonTimestamp(data.runReasonAt) +
-                      ' (' +
-                      reasonAge(data.runReasonAt) +
-                      ')'
-                    : data.runReason
-                  : '',
-              width: 300,
-              minWidth: 240,
               flex: 0,
             },
           ],
@@ -1173,6 +1327,23 @@ export function AutoTraderStrategyPerformanceWidget() {
           Hide disabled strategies
         </label>
       </div>
+      <div
+        className="auto-trader-strategy-column-group-controls"
+        aria-label="Visible column groups"
+      >
+        {STRATEGY_COLUMN_GROUPS.map(({ id, label }) => (
+          <label key={id}>
+            <input
+              type="checkbox"
+              checked={visibleColumnGroups[id]}
+              onChange={(event) =>
+                updateColumnGroupVisibility(id, event.target.checked)
+              }
+            />{' '}
+            {label}
+          </label>
+        ))}
+      </div>
       <p className="auto-trader-strategy-winrate-note">
         Today P&amp;L includes all realized exits today, including partial exits
         on positions still open. Wins, losses, and Closed net use fully closed
@@ -1225,7 +1396,36 @@ export function AutoTraderStrategyPerformanceWidget() {
           }}
           onGridReady={({ api }) => {
             strategyGridApi.current = api;
+            try {
+              const saved = localStorage.getItem(STRATEGY_GRID_STATE_KEY);
+              if (saved) {
+                const parsed = JSON.parse(saved);
+                if (Array.isArray(parsed))
+                  api.applyColumnState({ state: parsed, applyOrder: true });
+              }
+            } catch {
+              // Ignore invalid or unavailable saved grid state.
+            }
+            for (const group of STRATEGY_COLUMN_GROUPS) {
+              api.setColumnsVisible(
+                group.children,
+                visibleColumnGroups[group.id],
+              );
+            }
+            fillLastVisibleColumn(api);
           }}
+          onColumnResized={({ api, finished }) => {
+            if (finished) saveStrategyGridState(api);
+          }}
+          onColumnMoved={({ api, finished }) => {
+            if (finished) saveStrategyGridState(api);
+          }}
+          onColumnVisible={({ api }) => {
+            fillLastVisibleColumn(api);
+            saveStrategyGridState(api);
+          }}
+          onColumnPinned={({ api }) => saveStrategyGridState(api)}
+          onSortChanged={({ api }) => saveStrategyGridState(api)}
           getRowId={strategyGridGetRowId}
           defaultColDef={strategyGridDefaultColDef}
           maintainColumnOrder

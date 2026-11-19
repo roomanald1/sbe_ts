@@ -48,6 +48,8 @@ struct StatusResponse {
     stale_signal_cycles_total: u64,
     symbol_gate_hits: Vec<SymbolGateHit>,
     latest_signal_diagnostic: String,
+    latest_entry_diagnostic: Option<LatestEntryDiagnostic>,
+    latest_symbol_entry_results: Vec<SymbolEntryResult>,
     strategy_diagnostics: Vec<StrategyDiagnostic>,
     latest_strategy_blockers: Vec<StrategyBlocker>,
 }
@@ -57,6 +59,14 @@ struct StrategyBlocker {
     symbol: String,
     reason: String,
     timestamp_ms: u64,
+}
+#[derive(Clone, Serialize)]
+struct SymbolEntryResult {
+    strategy: String,
+    symbol: String,
+    decision: Option<strategy::LiveStrategyDecision>,
+    reason: String,
+    timestamp_ms: Option<u64>,
 }
 #[derive(Serialize)]
 struct StrategyBudgetStatus {
@@ -88,6 +98,39 @@ struct SymbolGateHit {
     count: u64,
     last_detail: String,
     distance_to_pass: Option<f64>,
+}
+#[derive(Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum EntryCycleOutcome {
+    NoSignals,
+    NoEligibleCandidates,
+    NoFreshCandidates,
+    CandidatesRejected,
+    ExecutionBlocked,
+    OrderQueued,
+    OrderSubmitted,
+    WaitingForStrategySignals,
+    GlobalRiskBlock,
+    CycleError,
+}
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LatestEntryDiagnostic {
+    cycle_id: String,
+    timestamp_ms: u64,
+    outcome: EntryCycleOutcome,
+    raw_signal_count: usize,
+    allowed_signal_count: usize,
+    strategy_candidate_count: usize,
+    eligible_candidate_count: usize,
+    rejected_candidate_count: usize,
+    selected_candidate_count: usize,
+    order_attempt_count: usize,
+    submitted_order_count: usize,
+    fill_confirmed: bool,
+    primary_gate_id: Option<String>,
+    primary_blocker: Option<String>,
+    detail: String,
 }
 #[derive(Default)]
 struct SymbolGateCount {
@@ -208,4 +251,5 @@ struct GapSummary {
     gate_hits: BTreeMap<String, u64>,
     symbol_gate_hits: BTreeMap<(String, String, String), SymbolGateCount>,
     latest_detail: String,
+    latest_entry_diagnostic: Option<LatestEntryDiagnostic>,
 }

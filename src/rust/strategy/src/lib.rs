@@ -490,6 +490,87 @@ pub mod strategy_dated_futures_carry {
         include!("strategy_dated_futures_carry/contract.rs");
     }
 }
+fn walk_forward_rejection_reason(strategy: Strategy, input: &StrategySignal<'_>) -> Option<String> {
+    let evidence = input.walk_forward_evidence?;
+    let specs = strategy.parameter_specs();
+    let bounded_parameter = |key: StrategyParameterKey| {
+        let spec = specs.iter().find(|spec| spec.key == key)?;
+        let value = input.parameters.get(key.as_str()).copied()?;
+        let step_position = (value - spec.min) / spec.step;
+        (value.is_finite()
+            && value >= spec.min
+            && value <= spec.max
+            && spec.step > 0.0
+            && (step_position - step_position.round()).abs() <= 1e-6)
+            .then_some(value)
+    };
+    let Some(minimum_samples) =
+        bounded_parameter(StrategyParameterKey::ScoutMinimumWalkForwardSamples)
+            .map(|value| value.round() as usize)
+    else {
+        return Some(
+            "walk_forward_invalid_config: minimum sample count is missing or out of bounds".into(),
+        );
+    };
+    let Some(max_evidence_age_seconds) =
+        bounded_parameter(StrategyParameterKey::ScoutMaximumEvidenceAgeSeconds)
+            .map(|value| value as u64)
+    else {
+        return Some(
+            "walk_forward_invalid_config: maximum evidence age is missing or out of bounds".into(),
+        );
+    };
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+    let age_ms = now_ms.saturating_sub(evidence.last_sample_timestamp_ms);
+
+    // New and sparsely sampled profiles remain eligible for the separately
+    // bounded exploration path. The quality gate activates only once enough
+    // fresh evidence exists to estimate expectancy.
+    if evidence.sample_count < minimum_samples || age_ms > max_evidence_age_seconds * 1_000 {
+        return None;
+    }
+    if input
+        .signal
+        .is_some_and(|signal| evidence.last_sample_timestamp_ms >= signal.timestamp)
+    {
+        return Some(format!(
+            "walk_forward_not_point_in_time: evidence timestamp {} is not before the candidate",
+            evidence.last_sample_timestamp_ms
+        ));
+    }
+
+    let effective_samples = evidence
+        .effective_sample_size
+        .unwrap_or(evidence.sample_count as f64);
+    if !effective_samples.is_finite() || effective_samples < minimum_samples as f64 {
+        return Some(format!(
+            "walk_forward_insufficient_effective_samples: {} outcomes, effective n {:.1}, requires at least {}",
+            evidence.sample_count, effective_samples, minimum_samples
+        ));
+    }
+    let Some(lower_bound) = evidence
+        .expectancy_ci_low_percent
+        .filter(|value| value.is_finite())
+    else {
+        return Some(format!(
+            "walk_forward_interval_unavailable: {} outcomes, lower confidence bound is missing",
+            evidence.sample_count
+        ));
+    };
+    (lower_bound <= 0.0).then(|| {
+        format!(
+            "walk_forward_expectancy_not_proven: lower 95% confidence bound {:.3}% requires > 0.000% (n={}, effective n={:.1}, age={}s)",
+            lower_bound,
+            evidence.sample_count,
+            effective_samples,
+            age_ms / 1_000
+        )
+    })
+}
+
 impl Strategy {
     pub fn all() -> impl Iterator<Item = Strategy> {
         STRATEGY_DEFINITIONS
@@ -568,51 +649,7 @@ impl Strategy {
             if decision != StrategyDecision::Enter {
                 return Ok(decision);
             }
-            let Some(evidence) = input.walk_forward_evidence else {
-                return Ok(decision);
-            };
-            let specs = self.parameter_specs();
-            let bounded_parameter = |key: StrategyParameterKey| {
-                let spec = specs.iter().find(|spec| spec.key == key)?;
-                let value = input.parameters.get(key.as_str()).copied()?;
-                let step_position = (value - spec.min) / spec.step;
-                (value.is_finite()
-                    && value >= spec.min
-                    && value <= spec.max
-                    && spec.step > 0.0
-                    && (step_position - step_position.round()).abs() <= 1e-6)
-                    .then_some(value)
-            };
-            let Some(minimum_samples) =
-                bounded_parameter(StrategyParameterKey::ScoutMinimumWalkForwardSamples)
-            else {
-                return Ok(StrategyDecision::Reject);
-            };
-            let Some(minimum_positive_rate) =
-                bounded_parameter(StrategyParameterKey::ScoutMinimumPositiveNetRate)
-            else {
-                return Ok(StrategyDecision::Reject);
-            };
-            let Some(max_evidence_age_seconds) =
-                bounded_parameter(StrategyParameterKey::ScoutMaximumEvidenceAgeSeconds)
-            else {
-                return Ok(StrategyDecision::Reject);
-            };
-            let now_ms = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_millis() as u64;
-            let evidence_age_ms = now_ms.saturating_sub(evidence.last_sample_timestamp_ms);
-            let evidence_is_stale = evidence_age_ms > max_evidence_age_seconds as u64 * 1000;
-            if evidence.sample_count >= minimum_samples.round() as usize
-                && !evidence_is_stale
-                && (evidence
-                    .average_net_return_percent
-                    .is_none_or(|average| average <= 0.0)
-                    || evidence
-                        .positive_net_rate
-                        .is_none_or(|rate| rate < minimum_positive_rate))
-            {
+            if walk_forward_rejection_reason(self, input).is_some() {
                 return Ok(StrategyDecision::Reject);
             }
             Ok(decision)
@@ -642,84 +679,7 @@ impl Strategy {
         if (self.definition().evaluate)(input).ok()? != StrategyDecision::Enter {
             return Some("Live strategy evaluator rejected the signal".to_owned());
         }
-        let evidence = input.walk_forward_evidence?;
-        let specs = self.parameter_specs();
-        let bounded_parameter = |key: StrategyParameterKey| {
-            let spec = specs.iter().find(|spec| spec.key == key)?;
-            let value = input.parameters.get(key.as_str()).copied()?;
-            let step_position = (value - spec.min) / spec.step;
-            (value.is_finite()
-                && value >= spec.min
-                && value <= spec.max
-                && spec.step > 0.0
-                && (step_position - step_position.round()).abs() <= 1e-6)
-                .then_some(value)
-        };
-        let Some(minimum_samples) =
-            bounded_parameter(StrategyParameterKey::ScoutMinimumWalkForwardSamples)
-        else {
-            return Some(
-                "Walk-forward gate parameter scout_minimum_walk_forward_samples is missing or out of bounds"
-                    .to_owned(),
-            );
-        };
-        let Some(minimum_positive_rate) =
-            bounded_parameter(StrategyParameterKey::ScoutMinimumPositiveNetRate)
-        else {
-            return Some(
-                "Walk-forward gate parameter scout_minimum_positive_net_rate is missing or out of bounds"
-                    .to_owned(),
-            );
-        };
-        let Some(max_evidence_age_seconds) =
-            bounded_parameter(StrategyParameterKey::ScoutMaximumEvidenceAgeSeconds)
-        else {
-            return Some(
-                "Walk-forward gate parameter scout_maximum_evidence_age_seconds is missing or out of bounds"
-                    .to_owned(),
-            );
-        };
-        let now_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as u64;
-        let evidence_age_ms = now_ms.saturating_sub(evidence.last_sample_timestamp_ms);
-        let evidence_is_stale = evidence_age_ms > max_evidence_age_seconds as u64 * 1000;
-        if evidence.sample_count < minimum_samples.round() as usize || evidence_is_stale {
-            return None;
-        }
-
-        let mut failed_checks = Vec::new();
-        if evidence
-            .average_net_return_percent
-            .is_none_or(|average| average <= 0.0)
-        {
-            let observed = evidence
-                .average_net_return_percent
-                .map(|value| format!("{value:.3}%"))
-                .unwrap_or_else(|| "unavailable".to_owned());
-            failed_checks.push(format!("average net return {observed} (requires > 0%)"));
-        }
-        if evidence
-            .positive_net_rate
-            .is_none_or(|rate| rate < minimum_positive_rate)
-        {
-            let observed = evidence
-                .positive_net_rate
-                .map(|value| format!("{:.1}%", value * 100.0))
-                .unwrap_or_else(|| "unavailable".to_owned());
-            failed_checks.push(format!(
-                "positive net rate {observed} (requires at least {:.1}%)",
-                minimum_positive_rate * 100.0
-            ));
-        }
-        (!failed_checks.is_empty()).then(|| {
-            format!(
-                "Walk-forward evidence failed with {} samples: {}",
-                evidence.sample_count,
-                failed_checks.join("; ")
-            )
-        })
+        walk_forward_rejection_reason(self, input)
     }
     pub fn contract(self) -> StrategyContract {
         (self.definition().contract)()
@@ -1159,7 +1119,7 @@ mod strategy_signal_contract_tests {
             symbol: "XRP-USDC".to_owned(),
             direction: "bullish".to_owned(),
             strength: 1.0,
-            timestamp: 1,
+            timestamp: now_ms,
             stale: false,
             score: 1.0,
             ranging_probability: None,
@@ -1172,9 +1132,11 @@ mod strategy_signal_contract_tests {
             strategy_decision: Some(serde_json::json!({
                 "strategy_walk_forward": {
                     "sampleCount": 10000,
+                    "effectiveSampleSize": 10000.0,
                     "positiveNetRate": 0.6,
-                    "averageNetReturnPercent": -0.1,
-                    "lastSampleTimestampMs": now_ms
+                    "averageNetReturnPercent": 0.1,
+                    "expectancyCiLowPercent": -0.1,
+                    "lastSampleTimestampMs": now_ms - 1000
                 }
             })),
             market_regime: None,
@@ -1190,8 +1152,9 @@ mod strategy_signal_contract_tests {
 
         assert_eq!(strategy.evaluate(&input).unwrap(), StrategyDecision::Reject);
         let reason = strategy.entry_rejection_reason(&input).unwrap();
-        assert!(reason.contains("10000 samples"));
-        assert!(reason.contains("average net return -0.100%"));
+        assert!(reason.contains("n=10000"));
+        assert!(reason.contains("walk_forward_expectancy_not_proven"));
+        assert!(reason.contains("lower 95% confidence bound -0.100%"));
     }
 
     #[test]

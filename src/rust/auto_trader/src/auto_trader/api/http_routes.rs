@@ -235,9 +235,11 @@ mod strategy_pause_snapshot_tests {
         assert_eq!(merged["live-momentum"], 1.0);
         assert_eq!(merged["live-trade-flow"], 1.2);
         assert_eq!(
-            preserve_paused_strategy_multipliers(&merged, BTreeMap::new())["live-momentum"],
+            preserve_paused_strategy_multipliers(&prior, BTreeMap::new())["live-momentum"],
             0.0
         );
+        assert!(!preserve_paused_strategy_multipliers(&merged, BTreeMap::new())
+            .contains_key("live-momentum"));
         assert_eq!(
             preserve_paused_strategy_multipliers(&BTreeMap::new(), incoming)["live-momentum"],
             1.0

@@ -416,5 +416,7 @@ async fn submit_and_record_selected_order(
         quantity: Some(quantity),
         order_type: Some(format!("{order_type:?}")),
         order_response: Some(response),
+        filled_quantity: Some(filled),
+        entry_diagnostic: None,
     })
 }

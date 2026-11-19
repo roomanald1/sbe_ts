@@ -1757,6 +1757,23 @@
 .auto-trader-strategy-winrate-heading input {
   accent-color: #8296ad;
 }
+.auto-trader-strategy-column-group-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+  margin: 0 0 6px;
+}
+.auto-trader-strategy-column-group-controls label {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: #9ba5af;
+  font: 10px/1.2 var(--mono);
+  cursor: pointer;
+}
+.auto-trader-strategy-column-group-controls input {
+  accent-color: #8296ad;
+}
 .auto-trader-strategy-winrate-note {
   margin: 0 0 6px;
   color: #9ba5af;
@@ -1774,7 +1791,7 @@
 .auto-trader-strategy-winrate-grid
   .ag-row.auto-trader-entry-evidence-symbol-row
   .ag-cell:first-child {
-  padding-left: 24px;
+  padding-left: 28px;
 }
 .auto-trader-entry-evidence-expander-button {
   display: inline-flex;
@@ -1790,6 +1807,10 @@
   cursor: pointer;
 }
 .auto-trader-entry-evidence-expander-button > span {
+  display: inline-flex;
+  flex: 0 0 12px;
+  align-items: center;
+  justify-content: center;
   width: 9px;
   color: #8296ad;
 }
