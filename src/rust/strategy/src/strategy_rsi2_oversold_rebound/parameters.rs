@@ -18,7 +18,7 @@ pub(super) fn parameters() -> Vec<StrategyParameterSpec> {
             "RSI entry ceiling",
             10.0,
             2.0,
-            30.0,
+            50.0,
             1.0,
             "RSI",
             -1.0,

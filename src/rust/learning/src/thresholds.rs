@@ -6,6 +6,22 @@ const MIN_FOLDS: usize = 2;
 const MAX_FOLDS: usize = 4;
 const MIN_VALIDATION_GAIN_PERCENT: f64 = 0.05;
 
+fn lower_threshold_is_stricter(parameter_key: &str) -> bool {
+    matches!(
+        parameter_key,
+        "rsi_entry_max" | "breakout_entry_distance_percent"
+    )
+}
+
+fn threshold_includes_feature(parameter_key: &str, feature: f64, threshold: f64) -> bool {
+    match parameter_key {
+        "rsi_entry_max" => feature <= threshold,
+        "breakout_entry_distance_percent" => feature <= threshold,
+        "minimum_momentum" => feature > threshold,
+        _ => feature >= threshold,
+    }
+}
+
 pub(super) fn walk_forward_threshold(
     spec: &ParameterSpec,
     base: f64,
@@ -74,7 +90,7 @@ pub(super) fn walk_forward_threshold(
         .iter()
         .flat_map(|(train, _)| train.iter())
         .collect::<Vec<_>>();
-    let supported_boundary = if spec.key == "rsi_entry_max" {
+    let supported_boundary = if lower_threshold_is_stricter(&spec.key) {
         training_samples
             .iter()
             .map(|sample| sample.threshold)
@@ -89,7 +105,7 @@ pub(super) fn walk_forward_threshold(
     let mut best: Option<(f64, f64)> = None;
     for index in 0..=step_count {
         let candidate = (spec.min + index as f64 * spec.step).clamp(spec.min, spec.max);
-        let tighter_than_observed = if spec.key == "rsi_entry_max" {
+        let tighter_than_observed = if lower_threshold_is_stricter(&spec.key) {
             candidate <= supported_boundary
         } else {
             candidate >= supported_boundary
@@ -144,18 +160,13 @@ fn threshold_return_stats(
     let outcomes = samples
         .iter()
         .filter_map(|sample| {
-            let tighter_than_sample = if parameter_key == "rsi_entry_max" {
+            let tighter_than_sample = if lower_threshold_is_stricter(parameter_key) {
                 threshold <= sample.threshold
             } else {
                 threshold >= sample.threshold
             };
-            let feature_passes = if parameter_key == "rsi_entry_max" {
-                sample.feature_value <= threshold
-            } else if parameter_key == "minimum_momentum" {
-                sample.feature_value > threshold
-            } else {
-                sample.feature_value >= threshold
-            };
+            let feature_passes =
+                threshold_includes_feature(parameter_key, sample.feature_value, threshold);
             (tighter_than_sample && feature_passes).then_some(sample.net_return_percent)
         })
         .collect::<Vec<_>>();

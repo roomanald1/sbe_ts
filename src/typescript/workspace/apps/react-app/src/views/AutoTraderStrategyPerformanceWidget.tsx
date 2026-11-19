@@ -82,17 +82,24 @@ const entryEvaluationReason = (
   if (decision.btc_gate_required && decision.btc_gate_passed === false)
     return `BTC trend gate not passed${decision.btc_window_days ? ` (SMA${decision.btc_window_days})` : ''}`;
   if (decision.primary_passed === false && decision.primary_rule) {
+    const isRelativeStrength = /return vs eligible assets/i.test(
+      decision.primary_rule,
+    );
     const observed =
       typeof decision.primary_metric_value === 'number'
         ? `observed ${decision.primary_metric_value.toFixed(2)}${decision.primary_metric_unit ? ` ${decision.primary_metric_unit}` : ''}`
         : 'observed value unavailable';
     const required =
       typeof decision.primary_level === 'number'
-        ? `; required ${decision.primary_level.toFixed(2)}${decision.primary_metric_unit ? ` ${decision.primary_metric_unit}` : ''}`
+        ? isRelativeStrength
+          ? `; leader return ${decision.primary_level.toFixed(2)}${decision.primary_metric_unit ? ` ${decision.primary_metric_unit}` : ''}`
+          : `; required ${decision.primary_level.toFixed(2)}${decision.primary_metric_unit ? ` ${decision.primary_metric_unit}` : ''}`
         : '';
     const distance =
       typeof decision.primary_distance_percent === 'number'
-        ? `; distance ${decision.primary_distance_percent.toFixed(2)}%`
+        ? isRelativeStrength
+          ? `; gap ${decision.primary_distance_percent.toFixed(2)} pp`
+          : `; distance ${decision.primary_distance_percent.toFixed(2)}%`
         : '';
     return `${decision.primary_rule} not met (${observed}${required}${distance})`;
   }
@@ -322,16 +329,6 @@ export function AutoTraderStrategyPerformanceWidget() {
     } catch {
       // Keep the grid usable when browser storage is unavailable.
     }
-  };
-  const fillLastVisibleColumn = (api: GridApi<StrategyWinRateRow>) => {
-    const displayed = api.getAllDisplayedColumns();
-    const last = displayed[displayed.length - 1];
-    api.applyColumnState({
-      state: displayed.map((column) => ({
-        colId: column.getColId(),
-        flex: column === last ? 1 : 0,
-      })),
-    });
   };
   const strategyGridWrapper = useRef<HTMLDivElement | null>(null);
   useEffect(() => {
@@ -770,7 +767,47 @@ export function AutoTraderStrategyPerformanceWidget() {
     settings.decisionParameters?.strategy_profiles ?? [];
   const entryReturnProfilesByStrategy = useMemo(() => {
     const groups = new Map<string, AutoTraderStrategyProfile[]>();
+    const dailySymbols = new Set([
+      'BTC-USDT',
+      'ETH-USDT',
+      'BNB-USDT',
+      'XRP-USDT',
+      'SOL-USDT',
+      'ADA-USDT',
+      'DOGE-USDT',
+    ]);
+    const portfolioSymbols = new Set([
+      ...dailySymbols,
+      'LTC-USDT',
+      'TRX-USDT',
+      'LINK-USDT',
+      'AVAX-USDT',
+    ]);
+    const allowedSymbols = new Set(portfolioSymbols);
     for (const profile of entryReturnProfiles) {
+      // Learning retains profiles beyond a strategy's evaluation universe.
+      // Keep the expanded rows aligned with the symbol sets each strategy uses.
+      const symbols =
+        profile.strategy === 'trend-sleeves-btc200'
+          ? new Set(['BTC-USDT', 'ETH-USDT', 'BNB-USDT'])
+          : profile.strategy === 'risk-adjusted-trend-portfolio'
+            ? portfolioSymbols
+            : profile.strategy === 'dated-futures-carry'
+              ? new Set(['BTC-USDT', 'ETH-USDT'])
+              : [
+                    'donchian-55-btc200',
+                    'donchian-20-sma200',
+                    'donchian-20-btc200',
+                    'donchian-10-btc200',
+                    'donchian-20-btc200-hold3',
+                    'trend-50-200',
+                    'relative-strength-90-sma200',
+                    'risk-adjusted-monthly-momentum',
+                    'rsi2-oversold-rebound',
+                  ].includes(profile.strategy)
+                ? dailySymbols
+                : allowedSymbols;
+      if (!symbols.has(profile.symbol)) continue;
       groups.set(profile.strategy, [
         ...(groups.get(profile.strategy) ?? []),
         profile,
@@ -781,6 +818,14 @@ export function AutoTraderStrategyPerformanceWidget() {
   const [expandedEntryStrategies, setExpandedEntryStrategies] = useState<
     Set<string>
   >(() => new Set());
+  // Keep column definitions stable across live settings and evidence updates.
+  // AG Grid can otherwise reapply definition widths and visibly resize columns.
+  const settingsRef = useRef(settings);
+  settingsRef.current = settings;
+  const entryProfilesByStrategyRef = useRef(entryReturnProfilesByStrategy);
+  entryProfilesByStrategyRef.current = entryReturnProfilesByStrategy;
+  const expandedEntryStrategiesRef = useRef(expandedEntryStrategies);
+  expandedEntryStrategiesRef.current = expandedEntryStrategies;
   const strategyGridRows = useMemo(
     () =>
       visibleStrategyWinRates.flatMap((row) => {
@@ -961,10 +1006,10 @@ export function AutoTraderStrategyPerformanceWidget() {
           if (!data) return '';
           if (data.rowType === 'symbol') return '↳ ' + (data.symbol ?? '');
           const hasEvidence = Boolean(
-            entryReturnProfilesByStrategy.get(data.strategy)?.length,
+            entryProfilesByStrategyRef.current.get(data.strategy)?.length,
           );
           const expander = hasEvidence
-            ? expandedEntryStrategies.has(data.strategy)
+            ? expandedEntryStrategiesRef.current.has(data.strategy)
               ? '▾ '
               : '▸ '
             : '';
@@ -980,9 +1025,11 @@ export function AutoTraderStrategyPerformanceWidget() {
             );
           }
           const label = strategyLabel(data.strategy);
-          if (!entryReturnProfilesByStrategy.get(data.strategy)?.length)
+          if (!entryProfilesByStrategyRef.current.get(data.strategy)?.length)
             return label;
-          const expanded = expandedEntryStrategies.has(data.strategy);
+          const expanded = expandedEntryStrategiesRef.current.has(
+            data.strategy,
+          );
           return (
             <button
               type="button"
@@ -998,7 +1045,9 @@ export function AutoTraderStrategyPerformanceWidget() {
         headerClass: 'strategy-column-strategy-header strategy-group-end',
         cellClass: 'strategy-column-strategy-cell strategy-group-end',
         cellStyle: { backgroundColor: '#15181d' },
+        width: 240,
         minWidth: 170,
+        flex: 0,
       },
       {
         headerName: 'Performance',
@@ -1097,12 +1146,18 @@ export function AutoTraderStrategyPerformanceWidget() {
                     type="checkbox"
                     aria-label={'Enable ' + strategyLabel(data.strategy)}
                     checked={data.enabled === true}
-                    disabled={settings.loading || settings.busy}
+                    disabled={
+                      settingsRef.current.loading || settingsRef.current.busy
+                    }
                     onClick={(event) => event.stopPropagation()}
                     onChange={(event) => {
+                      const currentSettings = settingsRef.current;
                       const strategies = event.target.checked
-                        ? [...settings.strategies, data.strategy as Strategy]
-                        : settings.strategies.filter(
+                        ? [
+                            ...currentSettings.strategies,
+                            data.strategy as Strategy,
+                          ]
+                        : currentSettings.strategies.filter(
                             (item) => item !== data.strategy,
                           );
                       settingsModel.setStrategies(strategies);
@@ -1129,16 +1184,19 @@ export function AutoTraderStrategyPerformanceWidget() {
                     }
                     checked={data.scoutEnabled === true}
                     disabled={
-                      !data.scoutable || settings.loading || settings.busy
+                      !data.scoutable ||
+                      settingsRef.current.loading ||
+                      settingsRef.current.busy
                     }
                     onClick={(event) => event.stopPropagation()}
                     onChange={(event) => {
+                      const currentSettings = settingsRef.current;
                       const strategies = event.target.checked
                         ? [
-                            ...settings.scoutStrategies,
+                            ...currentSettings.scoutStrategies,
                             data.strategy as Strategy,
                           ]
-                        : settings.scoutStrategies.filter(
+                        : currentSettings.scoutStrategies.filter(
                             (item) => item !== data.strategy,
                           );
                       settingsModel.setScoutStrategies(strategies);
@@ -1297,15 +1355,7 @@ export function AutoTraderStrategyPerformanceWidget() {
         ),
       },
     ],
-    [
-      settings.busy,
-      settings.loading,
-      settings.scoutStrategies,
-      settings.strategies,
-      settingsModel,
-      expandedEntryStrategies,
-      entryReturnProfilesByStrategy,
-    ],
+    [settingsModel],
   );
   return (
     <section
@@ -1401,7 +1451,10 @@ export function AutoTraderStrategyPerformanceWidget() {
               if (saved) {
                 const parsed = JSON.parse(saved);
                 if (Array.isArray(parsed))
-                  api.applyColumnState({ state: parsed, applyOrder: true });
+                  api.applyColumnState({
+                    state: parsed.map((column) => ({ ...column, flex: 0 })),
+                    applyOrder: true,
+                  });
               }
             } catch {
               // Ignore invalid or unavailable saved grid state.
@@ -1412,7 +1465,6 @@ export function AutoTraderStrategyPerformanceWidget() {
                 visibleColumnGroups[group.id],
               );
             }
-            fillLastVisibleColumn(api);
           }}
           onColumnResized={({ api, finished }) => {
             if (finished) saveStrategyGridState(api);
@@ -1421,7 +1473,6 @@ export function AutoTraderStrategyPerformanceWidget() {
             if (finished) saveStrategyGridState(api);
           }}
           onColumnVisible={({ api }) => {
-            fillLastVisibleColumn(api);
             saveStrategyGridState(api);
           }}
           onColumnPinned={({ api }) => saveStrategyGridState(api)}

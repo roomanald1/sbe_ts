@@ -8,14 +8,20 @@ This plan targets Scout strategy/profile evidence used by the Strategy live-entr
 
 1. [x] Inventory the Scout SQLite collections and Learning outcome store. Verify which fields are present for signal/evaluation time, costs, strategy/profile parameters, regime, outcome group, baseline, and candidate selection.
 2. [x] Make analytical replay read all durable outcomes in timestamp order. The runtime replay index hydrates only the latest 4,096 Scout outcomes; SQLite is the durable source and eviction only removes the runtime copy. Report missing or truncated history as coverage, never as a complete sample.
-3. Audit `scout_plan_results`: it stores selected groups/audits and is cached separately, but may not record every candidate tried or the selection process. Add a durable append-only search record containing search ID, as-of cutoff, all candidates and parameter sets considered, baseline, selection metric, selected candidate, and evaluation window.
-4. Give outcomes a stable identity and eligibility rules: completed before the evaluation origin, fee-aware, exact profile and symbol, explicit regime, and grouped when they share an opportunity/portfolio decision. Keep missing marks/costs and any broader-profile fallback explicit.
+3. [x] Audit `scout_plan_results`: it stores selected groups/audits and is cached separately, but may not record every candidate tried or the selection process. Add a durable append-only search record containing search ID, as-of cutoff, all candidates and parameter sets considered, baseline, selection metric, selected candidate, and evaluation window.
+4. [x] Give outcomes a stable identity and eligibility rules: completed before the evaluation origin, fee-aware, exact profile and symbol, explicit regime, and grouped when they share an opportunity/portfolio decision. Keep missing marks/costs and any broader-profile fallback explicit.
 
 **Deliverable:** a versioned, point-in-time dataset contract plus durable outcome/search readers with coverage diagnostics.
 
-**Inventory findings (2026-11-19):** Scout outcomes are durably stored in `scout_records.outcomes`; the replay reader orders them by `evaluated_timestamp_ms` and record key, bypasses the 4,096-row runtime cache, and reports malformed/missing-row coverage. Outcome payloads include decision identity, signal/evaluation timestamps, symbol/strategy/profile context, strategy parameters, fee rate and net result, optional regime, sample group, and comparison/baseline role and IDs. Learning's outcome details are persisted inside variant payloads, but its working history is bounded to seven days and 512 outcomes per variant (plus global memory limits), so it is not a complete historical replay source. The fields do not include an explicit cost breakdown, and the Scout plan-result cache is not a complete candidate-search ledger; those remain gaps for steps 2–3 below and Milestone 3's SPA test. The audit step is complete; the durable dataset/search contract is not.
+**Inventory findings (2026-11-19):** Scout outcomes are durably stored in `scout_records.outcomes`; the replay reader orders them by `evaluated_timestamp_ms` and record key, bypasses the 4,096-row runtime cache, and reports malformed/missing-row coverage. Outcome payloads include decision identity, signal/evaluation timestamps, symbol/strategy/profile context, strategy parameters, fee rate and net result, optional regime, sample group, and comparison/baseline role and IDs. Learning's outcome details are persisted inside variant payloads, but its working history is bounded to seven days and 512 outcomes per variant (plus global memory limits), so it is not a complete historical replay source. The outcome fields still lack an explicit cost breakdown. The legacy `scout_plan_results` collection is not a complete search ledger; step 3 adds a separate append-only `scout_search_ledger` collection, which is the source for full search history.
 
 **Replay-reader verification (2026-11-19):** `GET /replay/outcomes` reads directly from SQLite, orders by evaluation timestamp and record key, returns the full durable collection, and reports total, returned, and malformed row counts plus timestamp bounds. A persistence test verifies that outcomes outside the 4,096-row hydration cache remain in SQLite and are visible to durable history reads. Its `complete` flag describes successful reading of the current database; it cannot establish that historical records were never lost before being written.
+
+**Search-ledger verification (2026-11-19):** Each plan request is persisted by request ID as an immutable SQLite record. It captures the as-of/outcome cutoff, every original input plus each expanded candidate and parameter map, baseline audits (or an explicit `not_provided` status), selected candidates, effective-sample shortfall scores and ranks, the target of 10, and the rotation tie-break order. The evaluation window is recorded as starting at the plan timestamp and ending when each selected candidate's configured outcome scenario completes; the current planner has no fixed end horizon. Runtime cache eviction does not delete ledger rows. Focused persistence, cache-retention, candidate-priority, worker-route, and cross-worker replay aggregation tests pass. The metric records evidence-acquisition priority; it is not a return-based candidate-selection objective.
+
+**Eligibility-contract verification (2026-11-19):** Replay version 2 exposes the SQLite record key as `outcome_id`, reconstructs `profile_id` from the exact profile symbol, strategy, and recorded parameters, and reports eligibility against an optional strict `origin_at_ms` cutoff. Each row marks profile-symbol fallback, canonical or missing regime, fee-rate/net-return availability, cost-breakdown availability, and the evidence-group ID/source. Coverage includes open instances and expired instances without outcomes. AutoTrader's walk-forward evidence now carries an `evidenceScope` distinguishing exact-profile evidence from symbol/strategy fallback at profile and regime scope. The contract reports cost breakdown as unavailable rather than treating the fee-rate/net-return pair as a full cost ledger. The origin must be supplied by the rolling-origin replay caller; without it, rows explicitly report `origin_not_supplied`.
+
+**Search-reader verification (2026-11-19):** `GET /replay/searches` reads every durable `scout_search_ledger` row in as-of/request order and reports total, returned, and malformed counts. Learning routes it to every configured Scout worker, qualifies search IDs by worker strategy, and merges rows in deterministic global order. The persistence/cache and cross-worker reader tests pass.
 
 ## Milestone 2: Generate rolling-origin out-of-sample returns
 
@@ -27,6 +33,12 @@ This plan targets Scout strategy/profile evidence used by the Strategy live-entr
 Rolling-origin evaluation is the primary deployment-style estimate ([Tashman, 2000](https://doi.org/10.1016/S0169-2070(00)00065-0)).
 
 **Deliverable:** deterministic replay output that can reproduce each fold and explain each included/excluded observation.
+
+**Predeclared replay defaults (config version 1, 2026-11-19):** use an expanding training window with at least 30 independent UTC-day clusters and effective sample size 10; place origins every 7 days; assign the next 7 days of candidates to each evaluation fold by signal time; reserve the final 28 days as a single untouched holdout; select candidates by aligned net portfolio expectancy versus baseline, including established cash periods. Training remains strictly `evaluated_at < origin_at`; evaluation outcomes may mature after the 7-day signal window. The typed configuration has a deterministic hash. The step remains open until replay outputs persist this hash and the final fold/holdout assignment is verified.
+
+**Return-stream implementation note (2026-11-19):** the Learning route `/scout-replay/paired-returns` emits matched baseline/variant outcome pairs with opportunity IDs, candidate-search linkage, modeled notional/weight, markout cost details, and UTC signal day. It deliberately returns `status: incomplete`, emits no cash-period zeros, and disables selection because the current durable outcome/search collections do not establish the full position/candidate timeline needed to prove flat periods. It now emits deterministic expanding-window fold and final-holdout assignments with the config hash, strict training cutoff audit, and each fold's pair IDs. These are assignment diagnostics only: results are not durably persisted, candidates are not selected, and final-holdout returns are not used to confirm a selected candidate. A complete portfolio/cash timeline remains required before selection or deployment estimates are available.
+
+**Milestone 2 implementation status (2026-11-19):** step 1's settings are defined and version-hashed; fold responses carry that hash. Steps 2–4 remain incomplete because the paired outcome/search data does not identify every candidate opportunity or establish held-versus-flat portfolio intervals. No missing interval is converted to a zero, and no candidate selection is run from these partial assignments.
 
 ## Milestone 3: Add dependence-aware inference
 
@@ -40,6 +52,8 @@ The stationary bootstrap supports inference for weakly dependent stationary seri
 
 **Deliverable:** a reproducible evidence summary with expectancy interval, SPA result when eligible, diagnostics, and explicit evidence status/coverage.
 
+**Current implementation audit (2026-11-19):** Learning has a deterministic stationary bootstrap over UTC-day clusters for its existing walk-forward outcome summaries. Milestone 3 is not complete: this is not yet run over rolling-origin out-of-sample portfolio streams, and there is no searched-family Hansen SPA result, fold/regime coverage summary, or replay evidence report.
+
 ## Milestone 4: Validate the replacement and cut over
 
 1. Version the evidence contract across Learning’s decision snapshot, AutoTrader profile payload, and Strategy gate. Include evidence status, point-in-time cutoff, profile/regime, sample and effective counts, window coverage, estimate/interval, and search/SPA metadata.
@@ -48,6 +62,8 @@ The stationary bootstrap supports inference for weakly dependent stationary seri
 4. Set acceptance thresholds before evaluating the final holdout. If the replacement fails validation, revise it before cutover; do not retain the old rule as a fallback or run both gates against live decisions. Preserve immutable entry-time evidence for attribution and audit.
 
 **Deliverable:** offline validation report and a directly replacing expectancy-based entry gate.
+
+**Current implementation audit (2026-11-19):** Strategy's live gate currently requires the one-sided expectancy lower bound to clear zero for mature evidence, with sparse profiles following exploration behavior. The cutover is not accepted as complete: the rolling-origin portfolio replay and untouched holdout confirmation are unavailable, and no offline validation report has checked determinism, cutoff behavior, sparse/missing cases, regimes, or saved-input decisions. Do not treat the current gate change as validated for deployment.
 
 ## Milestone 5: Make every entry blocker obvious
 
@@ -58,6 +74,8 @@ The stationary bootstrap supports inference for weakly dependent stationary seri
 5. Keep a bounded recent history and timestamp so an empty or stale diagnostics panel is itself visible. Avoid a dashboard that reports zero trades without a corresponding reason or an explicit diagnostics-unavailable state.
 
 **Deliverable:** an end-to-end “Why no entry?” view that identifies the dominant blocker and lets the user inspect every candidate and gate decision.
+
+**Current implementation audit (2026-11-19):** the AutoTrader API/UI exposes a typed latest-cycle outcome, counts, primary blocker, and candidate-level decision detail. Milestone 5 remains open pending per-cycle gate-count reconciliation through the full entry funnel, structured observed-versus-required values for all applicable blockers, and a bounded timestamped history with an explicit diagnostics-unavailable state.
 
 ## Acceptance criteria
 

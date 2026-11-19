@@ -142,6 +142,62 @@ async function performLearningRpc(
   });
 }
 
+async function performScoutWorkerRpc(
+  method: string,
+  path: string,
+  body?: unknown,
+): Promise<Response> {
+  const socket = getSocket();
+  const client = await socket;
+  let reply: Uint8Array;
+  try {
+    reply = await new Promise<Uint8Array>((resolve, reject) => {
+      client
+        .requestResponse({
+          data: Buffer.from(
+            JSON.stringify({
+              operation: 'worker_route',
+              request: {
+                request_id: `${Date.now()}:${Math.random()}`,
+                strategy: null,
+                method: method.toLowerCase(),
+                path,
+                payload: body ?? null,
+              },
+            }),
+          ),
+        })
+        .subscribe({
+          onComplete: (payload) => resolve(payload.data as Uint8Array),
+          onError: reject,
+        });
+    });
+  } catch (error) {
+    if (sharedSocket === socket) sharedSocket = undefined;
+    client.close();
+    throw error;
+  }
+  const envelope = JSON.parse(Buffer.from(reply).toString()) as {
+    operation?: string;
+    response?: { status: number; body: unknown };
+  };
+  if (envelope.operation !== 'worker_route' || !envelope.response)
+    throw new Error(
+      'Learning returned an invalid Scout worker route response.',
+    );
+  const { status, body: responseBody } = envelope.response;
+  const text =
+    typeof responseBody === 'string'
+      ? responseBody
+      : responseBody === null
+        ? ''
+        : JSON.stringify(responseBody);
+  return new Response(text, {
+    status,
+    headers: { 'content-type': 'application/json' },
+  });
+}
+
 export function learningRpc(
   method: string,
   path: string,
@@ -154,5 +210,18 @@ export function learningRpc(
   return requestLearning(method, path, body).catch(async () => {
     await new Promise((resolve) => setTimeout(resolve, 250));
     return requestLearning(method, path, body);
+  });
+}
+
+export function scoutWorkerRpc(
+  method: string,
+  path: string,
+  body?: unknown,
+): Promise<Response> {
+  if (method.toUpperCase() !== 'GET')
+    return performScoutWorkerRpc(method, path, body);
+  return performScoutWorkerRpc(method, path, body).catch(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    return performScoutWorkerRpc(method, path, body);
   });
 }

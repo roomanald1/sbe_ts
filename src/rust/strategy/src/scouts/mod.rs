@@ -686,12 +686,19 @@ mod tests {
             .map(|index| ScoutSearchCandidateRecord {
                 candidate_id: format!("candidate-{index}"),
                 candidate_index: index,
+                sample_group_id: format!("group-{index}"),
+                source_candidate_index: index,
+                stage: "expanded".into(),
                 selection_result: if index == 17 {
                     "selected"
                 } else {
                     "not_selected"
                 }
                 .into(),
+                effective_sample_size: Some(3.0),
+                selection_metric_value: Some(7.0),
+                priority_rank: Some(index),
+                rotation_order: Some(index),
                 parameter_map: Some(BTreeMap::from([("lookback".into(), index as f64)])),
                 parameter_map_status: "recorded".into(),
                 candidate: serde_json::json!({"lookback": index}),
@@ -705,8 +712,17 @@ mod tests {
             request_id: "search-retry".into(),
             as_of_timestamp_ms: 500,
             outcome_cutoff_timestamp_ms: 500,
-            selection_metric: None,
-            selection_metric_status: "unknown".into(),
+            selection_metric: Some("effective_sample_shortfall_to_10_then_rotation".into()),
+            selection_metric_status: "recorded".into(),
+            selection_target_effective_sample_size: Some(10.0),
+            baseline_candidates: vec![serde_json::json!({"parameters":{"lookback":0.0}})],
+            baseline_status: "recorded".into(),
+            evaluation_window: ScoutSearchEvaluationWindow {
+                start_timestamp_ms: 500,
+                end_timestamp_ms: None,
+                end_rule: "outcome completion".into(),
+                fixed_horizon: false,
+            },
             selected_candidate_ids: vec!["candidate-17".into()],
             selected_candidates: vec![serde_json::json!({"lookback": 17})],
             candidates,
@@ -734,7 +750,13 @@ mod tests {
         assert_eq!(persisted.as_of_timestamp_ms, 500);
         assert_eq!(persisted.candidates.len(), 64);
         assert_eq!(persisted.selected_candidate_ids, ["candidate-17"]);
-        assert_eq!(persisted.selection_metric, None);
+        assert_eq!(
+            persisted.selection_metric.as_deref(),
+            Some("effective_sample_shortfall_to_10_then_rotation")
+        );
+        assert_eq!(persisted.baseline_candidates.len(), 1);
+        assert_eq!(persisted.baseline_status, "recorded");
+        assert_eq!(persisted.evaluation_window.start_timestamp_ms, 500);
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(path.with_extension("sqlite-wal"));
         let _ = std::fs::remove_file(path.with_extension("sqlite-shm"));
@@ -754,12 +776,28 @@ mod tests {
                 request_id: request_id.clone(),
                 as_of_timestamp_ms: index as u64,
                 outcome_cutoff_timestamp_ms: index as u64,
-                selection_metric: None,
-                selection_metric_status: "unknown".into(),
+                selection_metric: Some("effective_sample_shortfall_to_10_then_rotation".into()),
+                selection_metric_status: "recorded".into(),
+                selection_target_effective_sample_size: Some(10.0),
+                baseline_candidates: Vec::new(),
+                baseline_status: "not_provided".into(),
+                evaluation_window: ScoutSearchEvaluationWindow {
+                    start_timestamp_ms: index as u64,
+                    end_timestamp_ms: None,
+                    end_rule: "outcome completion".into(),
+                    fixed_horizon: false,
+                },
                 candidates: vec![ScoutSearchCandidateRecord {
                     candidate_id: format!("candidate-{index}"),
                     candidate_index: 0,
+                    sample_group_id: format!("group-{index}"),
+                    source_candidate_index: 0,
+                    stage: "expanded".into(),
                     selection_result: "not_selected".into(),
+                    effective_sample_size: Some(0.0),
+                    selection_metric_value: Some(10.0),
+                    priority_rank: Some(0),
+                    rotation_order: Some(0),
                     parameter_map: None,
                     parameter_map_status: "unknown".into(),
                     candidate: serde_json::json!({"index": index}),

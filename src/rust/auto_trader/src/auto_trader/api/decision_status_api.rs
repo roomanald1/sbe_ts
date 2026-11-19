@@ -77,15 +77,23 @@ fn walk_forward_evidence_for_profile(
     profile_symbol: &str,
     strategy: Strategy,
 ) -> Option<strategy::StrategyWalkForwardEvidence> {
-    settings
+    if let Some(mut evidence) = settings
         .learned_walk_forward_evidence
         .get(profile_id)
-        .or_else(|| {
-            settings
-                .learned_walk_forward_evidence
-                .get(&format!("{profile_symbol}|{}", strategy.as_str()))
-        })
         .cloned()
+    {
+        evidence.evidence_scope = strategy::StrategyWalkForwardEvidenceScope::ExactProfileUnconditioned;
+        return Some(evidence);
+    }
+    settings
+        .learned_walk_forward_evidence
+        .get(&format!("{profile_symbol}|{}", strategy.as_str()))
+        .cloned()
+        .map(|mut evidence| {
+            evidence.evidence_scope =
+                strategy::StrategyWalkForwardEvidenceScope::SymbolStrategyUnconditionedFallback;
+            evidence
+        })
 }
 
 fn walk_forward_evidence_by_regime_for_profile(
@@ -97,16 +105,27 @@ fn walk_forward_evidence_by_regime_for_profile(
     ["range", "trend", "volatile", "mixed"]
         .into_iter()
         .filter_map(|regime| {
-            settings
+            let exact = settings
                 .learned_walk_forward_evidence
                 .get(&format!("{profile_id}|regime:{regime}"))
-                .or_else(|| {
-                    settings
-                        .learned_walk_forward_evidence
-                        .get(&format!("{profile_symbol}|{}|regime:{regime}", strategy.as_str()))
-                })
-                .cloned()
-                .map(|evidence| (regime.to_owned(), evidence))
+                .cloned();
+            let evidence = exact.or_else(|| {
+                settings
+                    .learned_walk_forward_evidence
+                    .get(&format!("{profile_symbol}|{}|regime:{regime}", strategy.as_str()))
+                    .cloned()
+                    .map(|mut evidence| {
+                        evidence.evidence_scope = strategy::StrategyWalkForwardEvidenceScope::SymbolStrategyRegimeFallback;
+                        evidence
+                    })
+            })?;
+            if exact.is_some() {
+                let mut evidence = evidence;
+                evidence.evidence_scope = strategy::StrategyWalkForwardEvidenceScope::ExactProfileRegime;
+                Some((regime.to_owned(), evidence))
+            } else {
+                Some((regime.to_owned(), evidence))
+            }
         })
         .collect()
 }
@@ -786,6 +805,10 @@ mod decision_profile_tests {
             Strategy::LiveMomentum,
         );
         assert_eq!(by_regime["trend"].sample_count, 11);
+        assert_eq!(
+            by_regime["trend"].evidence_scope,
+            strategy::StrategyWalkForwardEvidenceScope::ExactProfileRegime
+        );
 
         settings
             .learned_walk_forward_evidence
@@ -797,6 +820,41 @@ mod decision_profile_tests {
             Strategy::LiveMomentum,
         );
         assert_eq!(by_regime["trend"].sample_count, 7);
+        assert_eq!(
+            by_regime["trend"].evidence_scope,
+            strategy::StrategyWalkForwardEvidenceScope::SymbolStrategyRegimeFallback
+        );
+
+        settings.learned_walk_forward_evidence.insert(
+            "BTC-USDT|live-momentum".into(),
+            evidence(4),
+        );
+        let fallback = walk_forward_evidence_for_profile(
+            &settings,
+            &profile_id,
+            "BTC-USDT",
+            Strategy::LiveMomentum,
+        )
+        .unwrap();
+        assert_eq!(
+            fallback.evidence_scope,
+            strategy::StrategyWalkForwardEvidenceScope::SymbolStrategyUnconditionedFallback
+        );
+        settings.learned_walk_forward_evidence.insert(
+            profile_id.clone(),
+            evidence(12),
+        );
+        let exact = walk_forward_evidence_for_profile(
+            &settings,
+            &profile_id,
+            "BTC-USDT",
+            Strategy::LiveMomentum,
+        )
+        .unwrap();
+        assert_eq!(
+            exact.evidence_scope,
+            strategy::StrategyWalkForwardEvidenceScope::ExactProfileUnconditioned
+        );
     }
 
     #[test]

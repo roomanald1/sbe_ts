@@ -11,6 +11,11 @@ struct ScoutOutcomesQuery {
     sort_direction: Option<String>,
 }
 
+#[derive(Deserialize, Default)]
+struct ScoutReplayQuery {
+    origin_at_ms: Option<u64>,
+}
+
 #[derive(Default)]
 struct ScoutCounts {
     total: usize,
@@ -547,19 +552,57 @@ async fn get_scout_outcomes(
 /// This intentionally bypasses the bounded 4,096-row runtime hydration cache.
 async fn get_scout_replay_outcomes(
     State(service): State<ServiceState>,
+    query: axum::extract::Query<ScoutReplayQuery>,
 ) -> Result<axum::Json<Value>, (axum::http::StatusCode, String)> {
     let (outcomes, total_records, malformed_records) =
         load_all_scout_outcomes(&service.scout.path)
             .map_err(|error| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
     let coverage_complete = malformed_records == 0 && outcomes.len() == total_records;
-    let first_timestamp_ms = outcomes
-        .first()
-        .map(|outcome| outcome.evaluated_timestamp_ms);
-    let last_timestamp_ms = outcomes
-        .last()
-        .map(|outcome| outcome.evaluated_timestamp_ms);
+    let first_timestamp_ms = outcomes.first().map(|(_, outcome)| outcome.evaluated_timestamp_ms);
+    let last_timestamp_ms = outcomes.last().map(|(_, outcome)| outcome.evaluated_timestamp_ms);
+    let instance_rows = load_scout_instances_since(&service.scout.path, 0)
+        .map_err(|error| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
+    let now = scout_now_ms();
+    let mut open_instances = 0;
+    let mut unavailable_instances = 0;
+    for instance in instance_rows.values().filter_map(|audit| instance_row(audit, now)) {
+        match instance["status"].as_str() {
+            Some("Open") => open_instances += 1,
+            Some("Outcome unavailable") => unavailable_instances += 1,
+            _ => {}
+        }
+    }
+    let replay_outcomes = outcomes
+        .iter()
+        .map(|(record_key, outcome)| {
+            replay_outcome_payload(
+                record_key,
+                outcome,
+                query.origin_at_ms,
+                instance_rows.get(&outcome.decision_id),
+            )
+        })
+        .collect::<Vec<_>>();
+    let before_origin_records = query.origin_at_ms.map(|origin| {
+        outcomes.iter().filter(|(_, outcome)| outcome.evaluated_timestamp_ms < origin).count()
+    });
+    let at_or_after_origin_records = query.origin_at_ms.map(|origin| {
+        outcomes.iter().filter(|(_, outcome)| outcome.evaluated_timestamp_ms >= origin).count()
+    });
+    let missing_regime_records = outcomes.iter().filter(|(_, outcome)| {
+        canonical_market_regime(outcome.market_regime.as_deref()).is_none()
+    }).count();
+    let fee_rate_and_net_return_records = outcomes.iter().filter(|(_, outcome)| {
+        outcome.taker_fee_rate.is_finite()
+            && outcome.taker_fee_rate >= 0.0
+            && outcome.net_return_percent.is_finite()
+    }).count();
+    let explicit_cost_breakdown_records = replay_outcomes
+        .iter()
+        .filter(|outcome| outcome["cost_breakdown"].is_object())
+        .count();
     Ok(axum::Json(json!({
-        "datasetVersion": 1,
+        "datasetVersion": 2,
         "source": "scout_records.outcomes",
         "ordering": "evaluated_timestamp_ms_asc_then_record_key_asc",
         "coverage": {
@@ -571,14 +614,62 @@ async fn get_scout_replay_outcomes(
             "firstEvaluatedTimestampMs": first_timestamp_ms,
             "lastEvaluatedTimestampMs": last_timestamp_ms,
             "runtimeHydrationLimit": MAX_CACHED_SCOUT_OUTCOMES,
+            "originAtMs": query.origin_at_ms,
+            "completedBeforeOriginRecords": before_origin_records,
+            "atOrAfterOriginRecords": at_or_after_origin_records,
+            "missingRegimeRecords": missing_regime_records,
+            "feeRateAndNetReturnReportedRecords": fee_rate_and_net_return_records,
+            "explicitCostBreakdownRecords": explicit_cost_breakdown_records,
+            "explicitCostBreakdown": explicit_cost_breakdown_records == replay_outcomes.len(),
+            "openScoutInstances": open_instances,
+            "expiredInstancesWithoutOutcome": unavailable_instances,
         },
-        "outcomes": outcomes,
+        "outcomes": replay_outcomes,
+    })))
+}
+
+async fn get_scout_replay_searches(
+    State(service): State<ServiceState>,
+) -> Result<axum::Json<Value>, (axum::http::StatusCode, String)> {
+    let (searches, total_records, malformed_records) =
+        load_all_scout_searches(&service.scout.path)
+            .map_err(|error| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
+    let complete = malformed_records == 0 && searches.len() == total_records;
+    let first_as_of_timestamp_ms = searches
+        .first()
+        .map(|(_, search)| search.as_of_timestamp_ms);
+    let last_as_of_timestamp_ms = searches
+        .last()
+        .map(|(_, search)| search.as_of_timestamp_ms);
+    let searches = searches
+        .into_iter()
+        .map(|(record_key, search)| {
+            let mut value = serde_json::to_value(search).unwrap_or(Value::Null);
+            value["search_id"] = json!(record_key);
+            value
+        })
+        .collect::<Vec<_>>();
+    Ok(axum::Json(json!({
+        "datasetVersion": 1,
+        "source": "scout_records.scout_search_ledger",
+        "ordering": "as_of_timestamp_ms_asc_then_record_key_asc",
+        "coverage": {
+            "status": if complete { "complete" } else { "incomplete" },
+            "complete": complete,
+            "totalDurableRecords": total_records,
+            "returnedRecords": searches.len(),
+            "malformedRecords": malformed_records,
+            "firstAsOfTimestampMs": first_as_of_timestamp_ms,
+            "lastAsOfTimestampMs": last_as_of_timestamp_ms,
+            "runtimeCacheLimit": MAX_CACHED_SCOUT_SEARCH_LEDGER,
+        },
+        "searches": searches,
     })))
 }
 
 fn load_all_scout_outcomes(
     path: &std::path::Path,
-) -> anyhow::Result<(Vec<ScoutOutcomeRequest>, usize, usize)> {
+) -> anyhow::Result<(Vec<(String, ScoutOutcomeRequest)>, usize, usize)> {
     let connection = open_scout_read_connection(path)?;
     let total_records: usize = connection.query_row(
         "SELECT COUNT(*) FROM scout_records WHERE collection='outcomes'",
@@ -586,25 +677,198 @@ fn load_all_scout_outcomes(
         |row| row.get::<_, i64>(0),
     )?.max(0) as usize;
     let mut statement = connection.prepare(
-        "SELECT payload FROM scout_records WHERE collection='outcomes' ORDER BY CASE WHEN json_valid(payload) THEN CAST(json_extract(payload, '$.evaluated_timestamp_ms') AS INTEGER) ELSE 0 END, record_key",
+        "SELECT record_key, payload FROM scout_records WHERE collection='outcomes' ORDER BY CASE WHEN json_valid(payload) THEN CAST(json_extract(payload, '$.evaluated_timestamp_ms') AS INTEGER) ELSE 0 END, record_key",
     )?;
-    let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+    let rows = statement.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?;
     let mut outcomes = Vec::with_capacity(total_records);
     let mut malformed_records = 0;
     for row in rows {
-        match row.and_then(|payload| {
+        match row.and_then(|(record_key, payload)| {
             serde_json::from_str::<ScoutOutcomeRequest>(&payload)
                 .map_err(|error| rusqlite::Error::FromSqlConversionFailure(
                     0,
                     rusqlite::types::Type::Text,
                     Box::new(error),
                 ))
+                .map(|outcome| (record_key, outcome))
         }) {
             Ok(outcome) => outcomes.push(outcome),
             Err(_) => malformed_records += 1,
         }
     }
     Ok((outcomes, total_records, malformed_records))
+}
+
+fn load_all_scout_searches(
+    path: &std::path::Path,
+) -> anyhow::Result<(Vec<(String, ScoutSearchLedger)>, usize, usize)> {
+    let connection = open_scout_read_connection(path)?;
+    let total_records: usize = connection
+        .query_row(
+            "SELECT COUNT(*) FROM scout_records WHERE collection='scout_search_ledger'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )?
+        .max(0) as usize;
+    let mut statement = connection.prepare(
+        "SELECT record_key, payload FROM scout_records WHERE collection='scout_search_ledger' ORDER BY CASE WHEN json_valid(payload) THEN CAST(json_extract(payload, '$.as_of_timestamp_ms') AS INTEGER) ELSE 0 END, record_key",
+    )?;
+    let rows = statement.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })?;
+    let mut searches = Vec::with_capacity(total_records);
+    let mut malformed_records = 0;
+    for row in rows {
+        match row.and_then(|(record_key, payload)| {
+            serde_json::from_str::<ScoutSearchLedger>(&payload)
+                .map(|search| (record_key, search))
+                .map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        1,
+                        rusqlite::types::Type::Text,
+                        Box::new(error),
+                    )
+                })
+        }) {
+            Ok(search) => searches.push(search),
+            Err(_) => malformed_records += 1,
+        }
+    }
+    Ok((searches, total_records, malformed_records))
+}
+
+fn replay_outcome_payload(
+    record_key: &str,
+    outcome: &ScoutOutcomeRequest,
+    origin_at_ms: Option<u64>,
+    instance: Option<&Value>,
+) -> Value {
+    let profile_symbol = outcome
+        .scout_parameter_profile_symbol
+        .as_deref()
+        .or(outcome.scout_comparison_parameter_profile_symbol.as_deref());
+    let profile_symbol_used = profile_symbol.unwrap_or(&outcome.symbol);
+    let mut parameters = outcome.strategy_parameters.clone();
+    let tested_parameters = parameter_keys(outcome);
+    if let Some(tested) = &tested_parameters {
+        parameters.extend(tested.clone());
+    }
+    let profile_identity_complete = is_liquid_scout_symbol(profile_symbol_used)
+        && is_liquid_scout_symbol(&outcome.symbol)
+        && strategies::Strategy::from_name(&outcome.strategy).is_some()
+        && outcome.strategy_parameters.values().all(|value| value.is_finite())
+        && tested_parameters.is_some();
+    let profile_id = profile_identity_complete.then(|| {
+        strategies::profile_id(profile_symbol_used, &outcome.strategy, &parameters)
+    });
+    let regime_status = match canonical_market_regime(outcome.market_regime.as_deref()) {
+        Some(_) => "canonical_regime_recorded",
+        None => "regime_missing_or_legacy_unconditioned",
+    };
+    let fee_status = if outcome.taker_fee_rate.is_finite()
+        && outcome.taker_fee_rate >= 0.0
+        && outcome.net_return_percent.is_finite()
+    {
+        "net_return_and_fee_rate_reported"
+    } else {
+        "fee_or_net_return_missing_or_invalid"
+    };
+    let (evidence_group_id, evidence_group_source) = if !outcome.sample_group_id.is_empty() {
+        (outcome.sample_group_id.clone(), "sample_group_id")
+    } else if let Some(comparison_id) = outcome
+        .scout_comparison_id
+        .as_deref()
+        .or_else(|| outcome.scout_comparison_ids.first().map(String::as_str))
+    {
+        (comparison_id.to_owned(), "comparison_id")
+    } else {
+        (outcome.decision_id.clone(), "decision_id_fallback")
+    };
+    let eligible_before_origin = origin_at_ms.map(|origin| outcome.evaluated_timestamp_ms < origin);
+    let eligibility_status = match (eligible_before_origin, profile_identity_complete, fee_status) {
+        (None, _, _) => "origin_not_supplied",
+        (Some(false), _, _) => "outcome_not_completed_before_origin",
+        (Some(true), false, _) => "profile_identity_incomplete",
+        (Some(true), _, "fee_or_net_return_missing_or_invalid") => "fee_or_return_incomplete",
+        (Some(true), true, _) => "eligible_before_origin",
+    };
+    let cost_breakdown = scout_replay_cost_breakdown(outcome, instance);
+    let mut payload = serde_json::to_value(outcome).unwrap_or(Value::Null);
+    payload["outcome_id"] = json!(record_key);
+    payload["profile_id"] = json!(profile_id);
+    payload["profile_symbol"] = json!(profile_symbol_used);
+    payload["profile_symbol_source"] = json!(if profile_symbol.is_some() {
+        "explicit_profile_symbol"
+    } else {
+        "market_symbol_fallback"
+    });
+    payload["evidence_group_id"] = json!(evidence_group_id);
+    payload["evidence_group_source"] = json!(evidence_group_source);
+    payload["notional_usd"] = instance.and_then(|audit| audit["scout_notional_usd"].as_f64()).into();
+    payload["portfolio_weight"] = instance
+        .and_then(|audit| {
+            audit["strategy_order_size_multiplier"]
+                .as_f64()
+                .or_else(|| audit["strategy_decision"]["strategy_order_size_multiplier"].as_f64())
+        })
+        .into();
+    payload["cost_breakdown"] = cost_breakdown.clone().unwrap_or(Value::Null);
+    payload["eligibility"] = json!({
+        "status": eligibility_status,
+        "eligibleBeforeOrigin": eligible_before_origin,
+        "profileIdentity": if profile_identity_complete { "reconstructed" } else { "incomplete" },
+        "marketSymbol": if is_liquid_scout_symbol(&outcome.symbol) { "allowed" } else { "missing_or_disallowed" },
+        "profileSymbol": if is_liquid_scout_symbol(profile_symbol_used) { "allowed" } else { "missing_or_disallowed" },
+        "regime": regime_status,
+        "cost": fee_status,
+        "costBreakdown": if cost_breakdown.is_some() { "recorded_on_scout_markout" } else { "not_recorded" },
+        "evidenceGroup": evidence_group_source,
+    });
+    payload
+}
+
+fn scout_replay_cost_breakdown(
+    outcome: &ScoutOutcomeRequest,
+    instance: Option<&Value>,
+) -> Option<Value> {
+    let observations = instance?.get("scout_markout_observations")?.as_array()?;
+    let observation = if let Some(horizon) = outcome
+        .exit_scenario
+        .strip_prefix("horizon-")
+        .and_then(|seconds| seconds.parse::<u64>().ok())
+    {
+        observations.iter().find(|observation| {
+            observation["kind"] == "horizon" && observation["horizon_seconds"].as_u64() == Some(horizon)
+        })?
+    } else {
+        observations
+            .iter()
+            .find(|observation| observation["kind"] == "strategy_exit")?
+    };
+    let (gross_return_percent, net_return_percent) = match instance?["direction"].as_str()? {
+        "bullish" => (
+            observation["long_gross_percent"].as_f64(),
+            observation["long_net_percent"].as_f64(),
+        ),
+        "bearish" => (
+            observation["short_gross_percent"].as_f64(),
+            observation["short_net_percent"].as_f64(),
+        ),
+        _ => return None,
+    };
+    Some(json!({
+        "takerFeeRate": observation["taker_fee_rate"],
+        "grossReturnPercent": gross_return_percent,
+        "markoutNetReturnPercent": net_return_percent,
+        "outcomeNetReturnPercent": outcome.net_return_percent,
+        "executionCostPercent": gross_return_percent.zip(net_return_percent).map(|(gross, net)| gross - net),
+        "referenceEntryPrice": observation["reference_entry_price"],
+        "referenceExitPrice": observation["reference_exit_price"],
+        "entryBid": observation["entry_bid"],
+        "entryAsk": observation["entry_ask"],
+        "exitBid": observation["exit_bid"],
+        "exitAsk": observation["exit_ask"],
+    }))
 }
 
 const MAX_CACHED_SCOUT_OUTCOMES_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
@@ -642,6 +906,143 @@ mod scout_report_tests {
 
     fn audit() -> Value {
         json!({"decision_id":"sample-1","symbol":"BTC-USDT","strategy":"live-trade-flow","direction":"bullish","timestamp":1000,"strength":0.8,"scout_entry_price":100.0,"scout_exit_scenario":"strategy","scout":true})
+    }
+
+    #[test]
+    fn replay_outcome_identity_and_origin_cutoff_are_explicit() {
+        let outcome: ScoutOutcomeRequest = serde_json::from_value(json!({
+            "decision_id":"decision-1",
+            "learning_context":"scout:trend",
+            "simulated_net_pnl_usd":1.0,
+            "net_return_percent":0.5,
+            "signal_timestamp_ms":100,
+            "evaluated_timestamp_ms":200,
+            "taker_fee_rate":0.001,
+            "symbol":"BTC-USDT",
+            "strategy":"live-momentum",
+            "strategy_parameters":{},
+            "exit_scenario":"strategy"
+        }))
+        .unwrap();
+
+        let at_origin = replay_outcome_payload("decision-1|strategy|single", &outcome, Some(200), None);
+        assert_eq!(at_origin["outcome_id"], "decision-1|strategy|single");
+        assert_eq!(at_origin["eligibility"]["eligibleBeforeOrigin"], false);
+        assert_eq!(at_origin["eligibility"]["status"], "outcome_not_completed_before_origin");
+        assert_eq!(at_origin["eligibility"]["regime"], "regime_missing_or_legacy_unconditioned");
+        assert_eq!(at_origin["eligibility"]["costBreakdown"], "not_recorded");
+        assert!(at_origin["cost_breakdown"].is_null());
+        assert_eq!(at_origin["evidence_group_id"], "decision-1");
+        assert_eq!(at_origin["evidence_group_source"], "decision_id_fallback");
+
+        let after_origin = replay_outcome_payload("decision-1|strategy|single", &outcome, Some(201), None);
+        assert_eq!(after_origin["eligibility"]["eligibleBeforeOrigin"], true);
+        assert_eq!(after_origin["eligibility"]["status"], "eligible_before_origin");
+    }
+
+    #[test]
+    fn replay_exposes_modeled_gross_net_and_execution_cost_when_markout_exists() {
+        let outcome: ScoutOutcomeRequest = serde_json::from_value(json!({
+            "decision_id":"decision-cost",
+            "learning_context":"scout:trend",
+            "simulated_net_pnl_usd":0.8,
+            "net_return_percent":0.8,
+            "signal_timestamp_ms":100,
+            "evaluated_timestamp_ms":200,
+            "taker_fee_rate":0.001,
+            "symbol":"BTC-USDT",
+            "strategy":"live-momentum",
+            "strategy_parameters":{},
+            "exit_scenario":"strategy"
+        }))
+        .unwrap();
+        let instance = json!({
+            "direction":"bullish",
+            "scout_notional_usd":100.0,
+            "strategy_order_size_multiplier":0.5,
+            "scout_markout_observations":[{
+                "kind":"strategy_exit",
+                "taker_fee_rate":0.001,
+                "long_gross_percent":1.0,
+                "long_net_percent":0.8,
+                "reference_entry_price":100.0,
+                "reference_exit_price":100.8
+            }]
+        });
+        let replay = replay_outcome_payload("decision-cost|strategy|single", &outcome, Some(300), Some(&instance));
+        assert_eq!(replay["notional_usd"], 100.0);
+        assert_eq!(replay["portfolio_weight"], 0.5);
+        assert_eq!(replay["cost_breakdown"]["grossReturnPercent"], 1.0);
+        assert_eq!(replay["cost_breakdown"]["markoutNetReturnPercent"], 0.8);
+        assert!(
+            (replay["cost_breakdown"]["executionCostPercent"]
+                .as_f64()
+                .unwrap()
+                - 0.2)
+                .abs()
+                < 1e-12
+        );
+        assert_eq!(replay["eligibility"]["costBreakdown"], "recorded_on_scout_markout");
+    }
+
+    #[test]
+    fn replay_search_reader_returns_all_durable_rows_in_as_of_order() {
+        let path = std::env::temp_dir().join(format!(
+            "scout-replay-search-reader-{}-{}.sqlite",
+            std::process::id(),
+            scout_now_ms()
+        ));
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE scout_records (collection TEXT NOT NULL, record_key TEXT NOT NULL, payload TEXT NOT NULL, PRIMARY KEY(collection, record_key));",
+            )
+            .unwrap();
+        let search = |request_id: &str, as_of_timestamp_ms| ScoutSearchLedger {
+            request_id: request_id.into(),
+            as_of_timestamp_ms,
+            outcome_cutoff_timestamp_ms: as_of_timestamp_ms,
+            selection_metric: Some("effective_sample_shortfall_to_10_then_rotation".into()),
+            selection_metric_status: "recorded".into(),
+            selection_target_effective_sample_size: Some(10.0),
+            baseline_candidates: Vec::new(),
+            baseline_status: "not_provided".into(),
+            evaluation_window: ScoutSearchEvaluationWindow {
+                start_timestamp_ms: as_of_timestamp_ms,
+                end_timestamp_ms: None,
+                end_rule: "outcome completion".into(),
+                fixed_horizon: false,
+            },
+            candidates: Vec::new(),
+            selected_candidate_ids: Vec::new(),
+            selected_candidates: Vec::new(),
+            response: ScoutPlanResponse::default(),
+        };
+        for (key, value) in [
+            ("later", serde_json::to_string(&search("later", 200)).unwrap()),
+            ("earlier", serde_json::to_string(&search("earlier", 100)).unwrap()),
+            ("malformed", "not-json".into()),
+        ] {
+            connection
+                .execute(
+                    "INSERT INTO scout_records(collection, record_key, payload) VALUES('scout_search_ledger', ?1, ?2)",
+                    rusqlite::params![key, value],
+                )
+                .unwrap();
+        }
+        drop(connection);
+
+        let (searches, total, malformed) = load_all_scout_searches(&path).unwrap();
+        assert_eq!(total, 3);
+        assert_eq!(malformed, 1);
+        assert_eq!(searches.len(), 2);
+        assert_eq!(searches[0].0, "earlier");
+        assert_eq!(searches[0].1.as_of_timestamp_ms, 100);
+        assert_eq!(searches[1].0, "later");
+        assert_eq!(searches[1].1.as_of_timestamp_ms, 200);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("sqlite-wal"));
+        let _ = std::fs::remove_file(path.with_extension("sqlite-shm"));
     }
 
     #[test]

@@ -30,6 +30,8 @@ mod feedback;
 mod profiles;
 mod retention;
 mod scout_coordinator;
+mod scout_replay;
+mod scout_replay_config;
 mod thresholds;
 mod walk_forward_statistics;
 
@@ -38,6 +40,9 @@ use execution::*;
 use feedback::*;
 use profiles::*;
 pub use scout_coordinator::ScoutCoordinator;
+pub use scout_replay_config::{
+    ScoutReplaySelectionObjective, ScoutReplayTrainingWindow, ScoutWalkForwardReplayConfig,
+};
 use thresholds::*;
 use walk_forward_statistics::*;
 

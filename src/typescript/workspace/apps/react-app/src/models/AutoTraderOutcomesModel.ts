@@ -83,16 +83,27 @@ export type AutoTraderOutcome = {
 export function applyInstanceTodayPnl(
   rows: AutoTraderOutcome[],
   totals: Record<string, number | null>,
+  usdRates: Record<string, number>,
 ): AutoTraderOutcome[] {
   return rows.map((row) => {
-    const total = totals[row.decisionId];
-    return total === undefined || row.rowId.startsWith('ledger-trade:')
-      ? row
-      : {
-          ...row,
-          netPnlUsd: total ?? undefined,
-          todayRealizedUsd: total ?? undefined,
-        };
+    if (row.rowId.startsWith('ledger-trade:')) return row;
+    const todayTotal = totals[row.decisionId];
+    const quote = row.pnlQuoteCurrency || quoteCurrency(row.symbol);
+    const rate = quote === 'USD' ? 1 : usdRates[quote];
+    const totalNetUsd =
+      typeof row.netPnlUsd === 'number' && Number.isFinite(row.netPnlUsd)
+        ? row.netPnlUsd
+        : typeof row.pnl === 'number' &&
+            Number.isFinite(row.pnl) &&
+            typeof rate === 'number' &&
+            Number.isFinite(rate)
+          ? row.pnl * rate
+          : undefined;
+    return {
+      ...row,
+      netPnlUsd: totalNetUsd,
+      todayRealizedUsd: todayTotal ?? undefined,
+    };
   });
 }
 
@@ -1361,7 +1372,8 @@ export class AutoTraderOutcomesModel {
                 ? initialEntryNotional * quoteUsdRate
                 : entryQuantity * (entryPrice ?? 0) * quoteUsdRate
               : undefined;
-          const netPnlUsd = todayInstanceRealizedUsd[decisionId] ?? pnlUsd;
+          // Canonical exit P&L already includes allocated entry and exit fees.
+          const netPnlUsd = pnlUsd;
           return [
             {
               rowId: (fullyClosed ? 'closed:' : 'partial:') + decisionId,
@@ -1507,6 +1519,7 @@ export class AutoTraderOutcomesModel {
       this.ledgerRowsCache = applyInstanceTodayPnl(
         closedLedgerRows,
         todayInstanceRealizedUsd,
+        usdRates,
       );
       const aggregatePositions = new Map(
         (positionsData.positions ?? []).map((position) => [

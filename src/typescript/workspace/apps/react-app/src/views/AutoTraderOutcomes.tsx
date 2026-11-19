@@ -599,6 +599,11 @@ function AutoTraderOutcomesComponent({
               ? (data.markPrice / data.entryPrice - 1) *
                 (data.signedQuantity >= 0 ? 100 : -100)
               : undefined;
+          const distanceFromEntry =
+            data.entryPrice > 0 && typeof currentAssetPrice === 'number'
+              ? (currentAssetPrice / data.entryPrice - 1) *
+                (data.signedQuantity >= 0 ? 100 : -100)
+              : undefined;
           const exitFacts: Array<{
             label: string;
             value: string;
@@ -606,6 +611,21 @@ function AutoTraderOutcomesComponent({
             tone?: string;
             detail?: string;
           }> = [];
+          if (isMonthlyMomentum && distanceFromEntry !== undefined) {
+            exitFacts.push({
+              label: 'Since entry',
+              value:
+                (distanceFromEntry >= 0 ? '+' : '') +
+                distanceFromEntry.toFixed(2) +
+                '%',
+              detail:
+                'Entry ' +
+                formatForSymbol(data.entryPrice, data.symbol, 'price') +
+                ' · current ' +
+                formatForSymbol(currentAssetPrice, data.symbol, 'price'),
+              tone: distanceFromEntry > 0 ? 'is-positive' : undefined,
+            });
+          }
           if (data.entryOrderExpiresAt !== undefined) {
             const remaining = Math.max(0, data.entryOrderExpiresAt - now);
             if (remaining > 0)
@@ -1483,9 +1503,9 @@ function AutoTraderOutcomesComponent({
       },
       {
         field: 'netPnlUsd',
-        headerName: 'Net today (USD)',
+        headerName: 'Net USD',
         headerTooltip:
-          'Net realized P&L from this strategy instance during the current UTC day. Matches the position ledger Realized today total.',
+          'Total net realized P&L for this closed trade, including fees, converted to USD.',
         cellClassRules: signed,
         valueFormatter: ({ value }) =>
           typeof value === 'number' && Number.isFinite(value)
@@ -1684,7 +1704,7 @@ function AutoTraderOutcomesComponent({
                     'Quantity',
                     'Entry',
                     'Closed',
-                    'Net today (USD)',
+                    'Net USD',
                   ].includes(String(column.headerName ?? '')),
                 )
                 .map((column) => {
@@ -1697,13 +1717,16 @@ function AutoTraderOutcomesComponent({
                     Quantity: 105,
                     Entry: 105,
                     Closed: 155,
-                    'Net today (USD)': 135,
+                    'Net USD': 135,
                   };
                   const originalHeader = String(column.headerName ?? '');
                   const width = widths[originalHeader] ?? 100;
                   return {
                     ...column,
                     sortable: originalHeader === 'Closed',
+                    ...(originalHeader === 'Closed'
+                      ? { sort: 'desc' as const, sortIndex: 0 }
+                      : {}),
                     ...(originalHeader === 'Closed'
                       ? { headerName: 'Trade time' }
                       : {}),
@@ -1775,10 +1798,10 @@ function AutoTraderOutcomesComponent({
       )}
       {closedOnly && (
         <p className="signal-info-note">
-          Today’s realized P&amp;L by strategy instance · total{' '}
-          {money.format(loadedOutcomesTodayUsd)}. Expand an instance to see
-          today’s individual fills. Totals use the same UTC-day ledger
-          calculation as Realized today.
+          Today’s realized P&amp;L by strategy instance · closed rows show total
+          net per trade · total {money.format(loadedOutcomesTodayUsd)}. Expand
+          an instance to see today’s individual fills. Totals use the same
+          UTC-day ledger calculation as Realized today.
         </p>
       )}
       {state.error && <div className="positions-error">{state.error}</div>}

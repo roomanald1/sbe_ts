@@ -42,6 +42,18 @@ async fn fetch_closed_ledger_rows(
     let body = crate::service_rpc::position_get("/positions/trades?source=auto")
         .await
         .unwrap_or_else(|_| serde_json::json!({ "trades": [] }));
+    let realized_by_parent = crate::service_rpc::position_get(
+        "/positions/realized-pnl?source=auto&since_ms=0",
+    )
+    .await
+    .ok()
+    .and_then(|value| {
+        serde_json::from_value::<BTreeMap<String, f64>>(
+            value["realized_pnl_all_time_by_parent_order"].clone(),
+        )
+        .ok()
+    })
+    .unwrap_or_default();
     let mut order_by_id = BTreeMap::<String, &TraderOrder>::new();
     for order in orders {
         order_by_id.insert(order.timestamp.to_string(), order);
@@ -198,19 +210,38 @@ async fn fetch_closed_ledger_rows(
         } else {
             first["execution_price"].as_f64().unwrap_or_default()
         };
-        let realized_pnl = trades
+        let parent_orders = trades
             .iter()
-            .map(|trade| {
-                let notional = trade["quantity"].as_f64().unwrap_or_default()
-                    * trade["execution_price"].as_f64().unwrap_or_default();
-                let cashflow = if trade["side"].as_str() == Some("buy") {
-                    -notional
-                } else {
-                    notional
-                };
-                cashflow + trade["fee"].as_f64().unwrap_or_default()
-            })
-            .sum::<f64>();
+            .filter_map(|trade| trade["parent_order_id"].as_str())
+            .collect::<std::collections::BTreeSet<_>>();
+        let realized_pnl = if parent_orders
+            .iter()
+            .any(|parent| realized_by_parent.contains_key(*parent))
+        {
+            parent_orders
+                .iter()
+                .filter_map(|parent| realized_by_parent.get(*parent))
+                .sum::<f64>()
+        } else if net.abs() <= 1e-12 {
+            // Fallback only for complete round trips when the ledger P&L
+            // endpoint is unavailable. Partial cash flows resemble notional,
+            // so they must never be shown as realized P&L.
+            trades
+                .iter()
+                .map(|trade| {
+                    let notional = trade["quantity"].as_f64().unwrap_or_default()
+                        * trade["execution_price"].as_f64().unwrap_or_default();
+                    let cashflow = if trade["side"].as_str() == Some("buy") {
+                        -notional
+                    } else {
+                        notional
+                    };
+                    cashflow + trade["fee"].as_f64().unwrap_or_default()
+                })
+                .sum::<f64>()
+        } else {
+            0.0
+        };
         let manually_closed =
             manual_close_groups.contains(&(strategy.clone(), decision_id.clone(), symbol.clone()));
         let key = format!("{strategy}:{decision_id}:{symbol}");

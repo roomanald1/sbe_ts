@@ -128,7 +128,7 @@ pub(super) async fn get_decision_snapshot(
         .variants
         .values()
         .map(|variant| variant.profile.profile_id.clone())
-        .collect();
+        .collect::<BTreeSet<_>>();
     // Exact profile buckets remain regime-specific when a Scout carries a
     // regime. Unconditioned evidence is retained only for legacy observations.
     // Same-symbol aggregates remain available as a deliberate fallback; no
@@ -227,6 +227,23 @@ pub(super) async fn get_decision_snapshot(
     for (key, (weight, positive, net_return, last_sample_timestamp_ms)) in grouped {
         if weight > 0.0 {
             let risk = walk_forward_risk(risk_samples.remove(&key).unwrap_or_default());
+            let profile_key = key
+                .split_once("|regime:")
+                .map_or(key.as_str(), |(profile, _)| profile);
+            let regime_scoped = key.contains("|regime:");
+            let profile_exact = registered_profile_ids.contains(profile_key);
+            let evidence_scope = match (profile_exact, regime_scoped) {
+                (true, true) => strategy::StrategyWalkForwardEvidenceScope::ExactProfileRegime,
+                (true, false) => {
+                    strategy::StrategyWalkForwardEvidenceScope::ExactProfileUnconditioned
+                }
+                (false, true) => {
+                    strategy::StrategyWalkForwardEvidenceScope::SymbolStrategyRegimeFallback
+                }
+                (false, false) => {
+                    strategy::StrategyWalkForwardEvidenceScope::SymbolStrategyUnconditionedFallback
+                }
+            };
             walk_forward_evidence.insert(
                 key,
                 StrategyWalkForwardEvidence {
@@ -240,6 +257,7 @@ pub(super) async fn get_decision_snapshot(
                     window_count: risk.window_count,
                     max_drawdown_percent: risk.max_drawdown_percent,
                     downside_loss_percent: risk.downside_loss_percent,
+                    evidence_scope,
                 },
             );
         }

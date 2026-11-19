@@ -52,7 +52,7 @@ struct VwapRunsResponse {
     runs: Vec<VwapRunStatus>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 enum TradeSide {
     Buy,
@@ -120,6 +120,8 @@ struct DatedCarryLedgerPosition {
     future_mark_ask: Option<f64>,
     #[serde(default)]
     marked_net_pnl_usdt: Option<f64>,
+    #[serde(default)]
+    closed_at_ms: Option<u64>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -259,6 +261,7 @@ struct RealizedPnlResponse {
     realized_pnl_usd: Option<f64>,
     realized_pnl_by_parent_order: BTreeMap<String, f64>,
     realized_pnl_by_barrier_created_at: BTreeMap<String, f64>,
+    realized_pnl_all_time_by_parent_order: BTreeMap<String, f64>,
     realized_pnl_all_time_by_quote: BTreeMap<String, f64>,
     realized_pnl_all_time_usd: Option<f64>,
 }

@@ -19,6 +19,10 @@ rebuild-scouts:
 rebuild-services:
     ./rebuild-services.sh
 
+# Rebuild only services whose build inputs differ from the last recorded deployment.
+rebuild-changed-services +args:
+    ./rebuild-changed-services.sh {{args}}
+
 # Rebuild infrastructure first, then every system service.
 rebuild-all:
     ./rebuild-all.sh

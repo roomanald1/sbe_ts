@@ -33,8 +33,9 @@ pub use input::{
     AbsorptionPressureValue, DailyStrategySignalFeatures, DatedCarryCandidate,
     DatedCarrySettlementSource, DepthSignalValue, Signal, SignalComponents, SignalDirection,
     StrategyInput, StrategyInputLike, StrategyMarketSignal, StrategySignal, StrategySpecificSignal,
-    StrategyWalkForwardEvidence, WindowedSignalValue, market_regime, prepare_live_strategy_signal,
-    regime_conditioned_parameter_value, strategy_parameter_value,
+    StrategyWalkForwardEvidence, StrategyWalkForwardEvidenceScope, WindowedSignalValue,
+    market_regime, prepare_live_strategy_signal, regime_conditioned_parameter_value,
+    strategy_parameter_value,
 };
 pub use live_evaluation::{
     DatedCarryScanUpdate, DatedCarrySettlementUpdate, LIVE_EVALUATION_CONTRACT_VERSION,

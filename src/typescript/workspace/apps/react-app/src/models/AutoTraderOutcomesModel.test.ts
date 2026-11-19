@@ -71,7 +71,7 @@ describe('AutoTraderOutcomesModel', () => {
     });
   });
 
-  it('applies today P&L to server-built ledger rows by strategy instance', () => {
+  it('keeps total net P&L and exposes today P&L separately', () => {
     const row = {
       rowId: 'ledger-summary:1',
       status: 'Closed' as const,
@@ -82,7 +82,7 @@ describe('AutoTraderOutcomesModel', () => {
       quantity: 2,
       signedQuantity: -2,
       entryPrice: 1,
-      pnl: 0,
+      pnl: 2,
       entryFees: 0,
       estimatedExitFeeRate: 0,
       estimatedExitSlippageBps: 0,
@@ -94,8 +94,12 @@ describe('AutoTraderOutcomesModel', () => {
       source: 'unknown' as const,
       components: {},
     };
-    const [updated] = applyInstanceTodayPnl([row], { 'instance-1': 4.25 });
-    assert.equal(updated.netPnlUsd, 4.25);
+    const [updated] = applyInstanceTodayPnl(
+      [row],
+      { 'instance-1': 4.25 },
+      { USDT: 1 },
+    );
+    assert.equal(updated.netPnlUsd, 2);
     assert.equal(updated.todayRealizedUsd, 4.25);
   });
 
@@ -131,7 +135,11 @@ describe('AutoTraderOutcomesModel', () => {
         timestamp: 1,
       },
     };
-    const [updated] = applyInstanceTodayPnl([row], { 'instance-1': -0.4 });
+    const [updated] = applyInstanceTodayPnl(
+      [row],
+      { 'instance-1': -0.4 },
+      { USDT: 1 },
+    );
     assert.equal(updated.netPnlUsd, -0.12);
   });
 

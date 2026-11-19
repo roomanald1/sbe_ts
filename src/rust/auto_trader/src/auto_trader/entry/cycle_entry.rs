@@ -492,7 +492,16 @@ fn daily_candidate_priority(settings: &Settings, signal: &Signal) -> (u8, f64, f
         .get(strategy.as_str())
         .copied()
         .unwrap_or(1.0);
-    (0, multiplier - 1.0, 0.0)
+    let is_probe = is_daily_parameter_exploration_probe(signal);
+    let probe_value = signal
+        .strategy_decision
+        .as_ref()
+        .and_then(|decision| decision.get("scout_parameter_value"))
+        .and_then(serde_json::Value::as_f64)
+        .unwrap_or_default();
+    // Prefer a normal rule pass; when only probe candidates qualify, choose
+    // the least permissive threshold that reaches this observation.
+    (u8::from(is_probe), multiplier - 1.0, if is_probe { -probe_value } else { 0.0 })
 }
 
 fn daily_strategy_candidates<'a>(signals: &[&'a Signal], settings: &Settings) -> Vec<&'a Signal> {
@@ -873,6 +882,8 @@ async fn run_cycle_inner(
     for signal in &mut dashboard.best {
         if daily_signal_candidate(signal) {
             inject_learned_parameters(&strategy_settings, signal);
+            normalize_rsi_entry_parameter_probe(signal);
+            normalize_donchian_breakout_parameter_probe(signal);
         }
     }
     let has_daily_strategy_signals = dashboard.best.iter().any(|signal| {
@@ -1298,7 +1309,12 @@ async fn run_cycle_inner(
                     );
                 }
                 sized_signal.entry_gate = Some(serde_json::json!({
-                    "selection_mode": "daily_strategy",
+                    "selection_mode": if is_daily_parameter_exploration_probe(signal) {
+                        "daily_strategy_parameter_exploration"
+                    } else {
+                        "daily_strategy"
+                    },
+                    "exploratory": is_daily_parameter_exploration_probe(signal),
                     "strategy": strategy_name,
                     "strategy_decision": sized_signal.strategy_decision.clone(),
                 }));
@@ -1306,7 +1322,7 @@ async fn run_cycle_inner(
                     state,
                     &candidate_dashboard,
                     &sized_signal,
-                    false,
+                    is_daily_parameter_exploration_probe(signal),
                     counterfactual_stop_loss_percent,
                     counterfactual_take_profit_percent,
                     signal_selection_ms,

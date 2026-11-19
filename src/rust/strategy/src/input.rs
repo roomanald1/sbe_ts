@@ -277,6 +277,17 @@ pub struct DailyStrategySignalFeatures {
     pub cross_sectional_threshold: Option<f64>,
 }
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StrategyWalkForwardEvidenceScope {
+    ExactProfileRegime,
+    ExactProfileUnconditioned,
+    SymbolStrategyRegimeFallback,
+    SymbolStrategyUnconditionedFallback,
+    #[default]
+    Unknown,
+}
+
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, serde::Serialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct StrategyWalkForwardEvidence {
@@ -295,6 +306,8 @@ pub struct StrategyWalkForwardEvidence {
     pub max_drawdown_percent: Option<f64>,
     /// Mean loss magnitude across negative net outcomes.
     pub downside_loss_percent: Option<f64>,
+    /// Identifies exact-profile evidence versus a broader symbol/strategy fallback.
+    pub evidence_scope: StrategyWalkForwardEvidenceScope,
 }
 impl DailyStrategySignalFeatures {
     pub fn close_above(&self, level: Option<f64>) -> bool {

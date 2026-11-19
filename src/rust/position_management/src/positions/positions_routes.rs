@@ -161,6 +161,66 @@ async fn sync_dated_carry_ledger(
     }
     let mut ledger = store.ledger.lock().await;
     ledger.dated_carry_positions = positions;
+    let completed_carries = ledger.dated_carry_positions.iter().filter(|position| {
+        position.status.starts_with("closed")
+            && position.net_pnl_usdt.is_some_and(f64::is_finite)
+            && position.closed_at_ms.is_some()
+    }).cloned().collect::<Vec<_>>();
+    let mut carry_fills_changed = false;
+    for position in &completed_carries {
+        let Some((spot_symbol, quote)) = carry_ledger_symbol(&position.spot_symbol, None) else {
+            continue;
+        };
+        let future_symbol = if position.future_symbol.contains('-') {
+            position.future_symbol.clone()
+        } else {
+            format!("{}-{quote}", position.future_symbol)
+        };
+        let Some(spot_exit) = position.spot_exit_twap.filter(|price| price.is_finite() && *price > 0.0) else {
+            continue;
+        };
+        let Some(future_exit) = position.settlement_price.filter(|price| price.is_finite() && *price > 0.0) else {
+            continue;
+        };
+        let spot_entry_fee = position.quantity * position.spot_entry_price * 0.001;
+        let future_entry_fee = (position.entry_fees - spot_entry_fee).max(0.0);
+        let spot_exit_fee = position.quantity * spot_exit * 0.001;
+        let future_exit_fee = position.quantity * future_exit * 0.0005;
+        let parent = format!("dated-carry:{}:{}", position.future_symbol, position.entry_ms);
+        let fills = [
+            dated_carry_fill(position, "spot-entry", &spot_symbol, TradeSide::Buy,
+                position.spot_entry_price, spot_entry_fee, 0.001, position.entry_ms, &parent, &quote),
+            dated_carry_fill(position, "future-entry", &future_symbol, TradeSide::Sell,
+                position.future_entry_price, future_entry_fee, 0.0005, position.entry_ms, &parent, &quote),
+            dated_carry_fill(position, "spot-exit", &spot_symbol, TradeSide::Sell,
+                spot_exit, spot_exit_fee, 0.001, position.closed_at_ms.unwrap(), &parent, &quote),
+            dated_carry_fill(position, "future-exit", &future_symbol, TradeSide::Buy,
+                future_exit, future_exit_fee, 0.0005, position.closed_at_ms.unwrap(), &parent, &quote),
+        ];
+        for fill in fills {
+            if let Some(existing) = ledger.trades.iter_mut().find(|trade| trade.id == fill.id) {
+                if existing.symbol != fill.symbol
+                    || existing.side != fill.side
+                    || existing.quantity != fill.quantity
+                    || existing.execution_price != fill.execution_price
+                    || existing.fee != fill.fee
+                {
+                    *existing = fill;
+                    carry_fills_changed = true;
+                }
+            } else {
+                ledger.trades.push(fill);
+                carry_fills_changed = true;
+            }
+        }
+    }
+    if carry_fills_changed {
+        // Carry fill symbols may be migrated without changing the fill count;
+        // rebuild the append-only index so realized P&L no longer mixes the
+        // paired spot leg with ordinary spot trades.
+        *store.trade_index.lock().unwrap_or_else(|p| p.into_inner()) = LedgerTradeIndex::default();
+        *store.realized_pnl_cache.lock().unwrap_or_else(|p| p.into_inner()) = None;
+    }
     store.persist(&ledger).await.map_err(|error| {
         (StatusCode::INTERNAL_SERVER_ERROR, format!("Could not persist dated-carry ledger: {error}"))
     })?;
@@ -168,6 +228,53 @@ async fn sync_dated_carry_ledger(
         "status": "recorded",
         "positions": ledger.dated_carry_positions.len(),
     })))
+}
+
+fn carry_ledger_symbol(symbol: &str, quote_hint: Option<&str>) -> Option<(String, String)> {
+    if let Some((base, quote)) = symbol.split_once('-') {
+        if !base.is_empty() && !quote.is_empty() {
+            return Some((format!("CARRY{base}-{quote}"), quote.to_owned()));
+        }
+    }
+    let quote = quote_hint.or_else(|| ["USDT", "USDC", "USD"].iter()
+        .find(|quote| symbol.ends_with(**quote)).copied())?;
+    let base = symbol.strip_suffix(quote).unwrap_or(symbol);
+    (!base.is_empty()).then(|| (format!("CARRY{base}-{quote}"), quote.to_owned()))
+}
+
+fn dated_carry_fill(
+    position: &DatedCarryLedgerPosition,
+    leg: &str,
+    symbol: &str,
+    side: TradeSide,
+    price: f64,
+    fee: f64,
+    fee_rate: f64,
+    timestamp: u64,
+    parent: &str,
+    quote: &str,
+) -> PositionTrade {
+    PositionTrade {
+        id: format!("dated-carry:{}:{}:{leg}", position.future_symbol, position.entry_ms),
+        symbol: symbol.to_owned(),
+        side,
+        quantity: position.quantity,
+        execution_price: price,
+        reference_price: None,
+        timestamp,
+        source: "auto".into(),
+        parent_order_id: Some(parent.to_owned()),
+        fee: -fee.abs(),
+        fee_currency: quote.to_owned(),
+        fee_rate,
+        fee_liquidity: "taker".into(),
+        resting_order_id: None,
+        decision_timestamp: Some(position.entry_ms),
+        decision_price: None,
+        decision_mid_price: None,
+        slippage: None,
+        slippage_bps: None,
+    }
 }
 
 fn position_ui_events(

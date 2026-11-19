@@ -85,6 +85,7 @@ struct RealizedPnlLedgerSnapshot {
     today_by_quote: BTreeMap<String, f64>,
     today_by_parent_order: BTreeMap<String, f64>,
     today_by_barrier_created_at: BTreeMap<String, f64>,
+    all_time_by_parent_order: BTreeMap<String, f64>,
     all_time_by_quote: BTreeMap<String, f64>,
 }
 
@@ -138,6 +139,7 @@ async fn get_realized_pnl(
             let mut today_by_quote = BTreeMap::<String, f64>::new();
             let mut today_by_parent_order = BTreeMap::<String, f64>::new();
             let mut today_by_barrier_created_at = BTreeMap::<String, f64>::new();
+            let mut all_time_by_parent_order = BTreeMap::<String, f64>::new();
             let mut all_time_by_quote = BTreeMap::<String, f64>::new();
             for trade in &trades {
                 let position = positions.entry(trade.symbol.clone()).or_insert(Position {
@@ -162,6 +164,11 @@ async fn get_realized_pnl(
                     .map(|(_, quote)| quote)
                     .unwrap_or("USD");
                 *all_time_by_quote.entry(quote.to_owned()).or_default() += realized_delta;
+                if let Some(parent_order_id) = trade.parent_order_id.as_deref() {
+                    *all_time_by_parent_order
+                        .entry(parent_order_id.to_owned())
+                        .or_default() += realized_delta;
+                }
                 if trade.timestamp >= since_ms {
                     *today_by_quote.entry(quote.to_owned()).or_default() += realized_delta;
                     if let Some(parent_order_id) = trade.parent_order_id.as_deref() {
@@ -184,6 +191,7 @@ async fn get_realized_pnl(
                 today_by_quote,
                 today_by_parent_order,
                 today_by_barrier_created_at,
+                all_time_by_parent_order,
                 all_time_by_quote,
             });
         } else {
@@ -205,6 +213,7 @@ async fn get_realized_pnl(
         realized_pnl_by_quote: snapshot.today_by_quote,
         realized_pnl_by_parent_order: snapshot.today_by_parent_order,
         realized_pnl_by_barrier_created_at: snapshot.today_by_barrier_created_at,
+        realized_pnl_all_time_by_parent_order: snapshot.all_time_by_parent_order,
         realized_pnl_all_time_usd: convert_usd(&snapshot.all_time_by_quote),
         realized_pnl_all_time_by_quote: snapshot.all_time_by_quote,
     }))

@@ -5,6 +5,7 @@ import {
   ModuleRegistry,
   themeQuartz,
   type ColDef,
+  type ICellRendererParams,
 } from 'ag-grid-community';
 import { AutoTraderLearningWidgetModel } from '../models/AutoTraderLearningWidgetModel';
 import type {
@@ -12,6 +13,7 @@ import type {
   LearningDecision,
   TradeEffectivenessRow,
 } from '../models/AutoTraderLearningWidgetModel';
+import { AutoTraderLearningDecisionDetails } from './AutoTraderLearningDecisionDetails';
 import { useBehaviorSnapshot } from '@workspace/ui-platform';
 
 ModuleRegistry.registerModules([ClientSideRowModelModule]);
@@ -270,6 +272,30 @@ const decisionColumns: ColDef<LearningDecision>[] = [
       return reason ?? 'No reason recorded';
     },
   },
+  {
+    colId: 'details',
+    headerName: '',
+    width: 92,
+    sortable: false,
+    filter: false,
+    resizable: false,
+    cellRenderer: (params: ICellRendererParams<LearningDecision>) => {
+      const data = params.data;
+      const context = params.context as {
+        onDetails?: (decision: LearningDecision) => void;
+      };
+      return data ? (
+        <button
+          type="button"
+          className="auto-trader-learning-details-button"
+          aria-label={`Details for ${data.symbol ?? 'decision'} ${data.strategy ?? ''}`}
+          onClick={() => context.onDetails?.(data)}
+        >
+          Details
+        </button>
+      ) : null;
+    },
+  },
 ];
 
 type LearningSection = 'decisions' | 'realized' | 'scouts';
@@ -337,8 +363,8 @@ export function AutoTraderLearningWidget({
               />
             </label>
             <small>
-              Last hour · {filteredDecisions.length} decisions · select a row to
-              inspect recorded evidence
+              Last hour · {filteredDecisions.length} decisions · open a row's
+              details to inspect recorded evidence
             </small>
           </div>
           {decisionError && (
@@ -373,6 +399,7 @@ export function AutoTraderLearningWidget({
               <AgGridReact<LearningDecision>
                 rowData={filteredDecisions}
                 columnDefs={decisionColumns}
+                context={{ onDetails: setSelectedDecision }}
                 getRowId={({ data }) =>
                   `${data.decision_id ?? ''}:${data.timestamp ?? 0}:${data.status ?? ''}`
                 }
@@ -382,8 +409,6 @@ export function AutoTraderLearningWidget({
                   filter: true,
                   minWidth: 70,
                 }}
-                onRowClicked={({ data }) => setSelectedDecision(data)}
-                rowSelection={{ mode: 'singleRow', enableClickSelection: true }}
                 theme={learningGridTheme}
                 domLayout="normal"
                 rowHeight={30}
@@ -392,65 +417,10 @@ export function AutoTraderLearningWidget({
             </div>
           )}
           {selectedDecision && (
-            <details className="auto-trader-learning-decision-detail" open>
-              <summary>
-                {selectedDecision.symbol} · {selectedDecision.strategy} ·{' '}
-                {selectedDecision.status} → final:{' '}
-                {selectedDecision.final_outcome?.status ?? 'pending'} ·{' '}
-                {selectedDecision.final_outcome?.reason ??
-                  selectedDecision.reason ??
-                  selectedDecision.entry_gate?.rejection_reasons?.join(', ') ??
-                  'No reason recorded'}
-              </summary>
-              <div className="auto-trader-learning-detail-grid">
-                <div>
-                  <strong>Final outcome and execution</strong>
-                  <pre>
-                    {JSON.stringify(
-                      selectedDecision.final_outcome ?? {
-                        status: 'No final outcome recorded',
-                        reason:
-                          'No entry order or downstream decision outcome was recorded for this selection.',
-                      },
-                      null,
-                      2,
-                    )}
-                  </pre>
-                </div>
-                <div>
-                  <strong>Gate checks</strong>
-                  <pre>
-                    {JSON.stringify(
-                      selectedDecision.entry_gate ?? 'No entry gate captured',
-                      null,
-                      2,
-                    )}
-                  </pre>
-                </div>
-                <div>
-                  <strong>Strategy decision and parameters</strong>
-                  <pre>
-                    {JSON.stringify(
-                      selectedDecision.strategy_decision ??
-                        'No strategy decision captured',
-                      null,
-                      2,
-                    )}
-                  </pre>
-                </div>
-                <div>
-                  <strong>Signal components</strong>
-                  <pre>
-                    {JSON.stringify(
-                      selectedDecision.signal_components ??
-                        'No signal components captured',
-                      null,
-                      2,
-                    )}
-                  </pre>
-                </div>
-              </div>
-            </details>
+            <AutoTraderLearningDecisionDetails
+              decision={selectedDecision}
+              onClose={() => setSelectedDecision(undefined)}
+            />
           )}
         </>
       )}

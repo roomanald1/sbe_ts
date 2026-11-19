@@ -5,12 +5,152 @@ fn is_daily_strategy_signal(signal: &Signal) -> bool {
 
 fn daily_signal_candidate(signal: &Signal) -> bool {
     let is_daily_candidate = is_daily_strategy_signal(signal);
-    // Defense in depth: RSI entries must still satisfy the primary rule when queued.
+    // A rejected RSI rule can only proceed as a validated parameter probe that
+    // raises the entry ceiling enough to include the observed RSI. This makes
+    // the exploratory fill attributable to the tested threshold variant.
+    let rsi_entry_probe = rsi_entry_parameter_probe(signal);
     let failed_rsi_entry_gate = signal.strategy.as_deref() == Some("rsi2-oversold-rebound")
         && signal.strategy_decision.as_ref()
             .and_then(|decision| decision.get("primary_passed"))
             .and_then(serde_json::Value::as_bool) == Some(false);
-    is_daily_candidate && !failed_rsi_entry_gate
+    let failed_donchian_entry_gate = is_explored_donchian_strategy(signal)
+        && signal.strategy_decision.as_ref()
+            .and_then(|decision| decision.get("primary_passed"))
+            .and_then(serde_json::Value::as_bool) == Some(false);
+    is_daily_candidate
+        && (!failed_rsi_entry_gate || rsi_entry_probe)
+        && (!failed_donchian_entry_gate || donchian_breakout_parameter_probe(signal))
+}
+
+fn is_explored_donchian_strategy(signal: &Signal) -> bool {
+    matches!(
+        signal.strategy.as_deref(),
+        Some("donchian-20-sma200" | "donchian-55-btc200")
+    )
+}
+
+fn donchian_breakout_parameter_probe(signal: &Signal) -> bool {
+    if !is_explored_donchian_strategy(signal) {
+        return false;
+    }
+    let Some(decision) = signal.strategy_decision.as_ref() else {
+        return false;
+    };
+    let distance = decision
+        .get("primary_distance_percent")
+        .and_then(serde_json::Value::as_f64);
+    let probe_value = decision
+        .get("scout_parameter_value")
+        .and_then(serde_json::Value::as_f64);
+    let strategy = if signal.strategy.as_deref() == Some("donchian-20-sma200") {
+        Strategy::Donchian20Sma200
+    } else {
+        Strategy::Donchian55Btc200
+    };
+    let required_gate_passed = if strategy == Strategy::Donchian20Sma200 {
+        decision.get("secondary_passed").and_then(serde_json::Value::as_bool) == Some(true)
+    } else {
+        decision.get("btc_gate_passed").and_then(serde_json::Value::as_bool) == Some(true)
+    };
+    decision
+        .get("scout_parameter_key")
+        .and_then(serde_json::Value::as_str)
+        == Some("breakout_entry_distance_percent")
+        && decision
+            .get("scout_parameter_probe")
+            .and_then(serde_json::Value::as_bool)
+            == Some(true)
+        && required_gate_passed
+        && distance.zip(probe_value).is_some_and(|(distance, probe)| {
+            distance.is_finite() && distance <= 0.0 && probe.is_finite() && probe >= -distance
+        })
+        && strategy::daily::valid_scout_parameter_probe(signal, strategy)
+}
+
+fn rsi_entry_parameter_probe(signal: &Signal) -> bool {
+    if signal.strategy.as_deref() != Some("rsi2-oversold-rebound") {
+        return false;
+    }
+    let Some(decision) = signal.strategy_decision.as_ref() else {
+        return false;
+    };
+    let observed = decision
+        .get("primary_metric_value")
+        .and_then(serde_json::Value::as_f64);
+    let probe_value = decision
+        .get("scout_parameter_value")
+        .and_then(serde_json::Value::as_f64);
+    decision.get("scout_parameter_key").and_then(serde_json::Value::as_str)
+        == Some("rsi_entry_max")
+        && decision.get("scout_parameter_probe").and_then(serde_json::Value::as_bool)
+            == Some(true)
+        && decision.get("secondary_passed").and_then(serde_json::Value::as_bool)
+            == Some(true)
+        && observed.zip(probe_value).is_some_and(|(observed, ceiling)| {
+            observed.is_finite() && ceiling.is_finite() && ceiling >= observed
+        })
+        && strategy::daily::valid_scout_parameter_probe(
+            signal,
+            Strategy::Rsi2OversoldRebound,
+        )
+}
+
+fn normalize_rsi_entry_parameter_probe(signal: &mut Signal) {
+    if !rsi_entry_parameter_probe(signal) {
+        return;
+    }
+    let Some(decision) = signal
+        .strategy_decision
+        .as_mut()
+        .and_then(serde_json::Value::as_object_mut)
+    else {
+        return;
+    };
+    let Some(probe_value) = decision
+        .get("scout_parameter_value")
+        .and_then(serde_json::Value::as_f64)
+    else {
+        return;
+    };
+    decision.insert("primary_level".into(), serde_json::json!(probe_value));
+    decision.insert("primary_passed".into(), serde_json::json!(true));
+    decision.insert(
+        "entry_exploration".into(),
+        serde_json::json!({
+            "kind": "rsi_entry_max_parameter_probe",
+            "tested_ceiling": probe_value,
+        }),
+    );
+}
+
+fn normalize_donchian_breakout_parameter_probe(signal: &mut Signal) {
+    if !donchian_breakout_parameter_probe(signal) {
+        return;
+    }
+    let Some(decision) = signal
+        .strategy_decision
+        .as_mut()
+        .and_then(serde_json::Value::as_object_mut)
+    else {
+        return;
+    };
+    let Some(probe_value) = decision
+        .get("scout_parameter_value")
+        .and_then(serde_json::Value::as_f64)
+    else {
+        return;
+    };
+    decision.insert(
+        "entry_exploration".into(),
+        serde_json::json!({
+            "kind": "donchian_breakout_distance_parameter_probe",
+            "tested_entry_distance_percent": probe_value,
+        }),
+    );
+}
+
+fn is_daily_parameter_exploration_probe(signal: &Signal) -> bool {
+    rsi_entry_parameter_probe(signal) || donchian_breakout_parameter_probe(signal)
 }
 
 fn is_fallback_signal_candidate(signal: &Signal) -> bool {

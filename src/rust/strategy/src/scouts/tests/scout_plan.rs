@@ -144,6 +144,9 @@ mod scout_plan_tests {
         );
         let mut well_sampled = candidate("well-sampled", "BTC:trend");
         well_sampled.audit_plans[0]["strategy"] = serde_json::json!("live-momentum");
+        well_sampled.audit_plans[0]["scout_comparison_role"] = serde_json::json!("baseline");
+        well_sampled.audit_plans[0]["strategy_parameters"] =
+            serde_json::json!({"lookback": 21.0});
         let mut undersampled = candidate("undersampled", "ETH:trend");
         undersampled.audit_plans[0]["symbol"] = serde_json::json!("ETH-USDT");
         undersampled.audit_plans[0]["strategy"] = serde_json::json!("live-momentum");
@@ -163,6 +166,37 @@ mod scout_plan_tests {
         .unwrap()
         .0;
         assert_eq!(response.selected_groups, vec!["undersampled"]);
+        let ledger = load_scout_record::<ScoutSearchLedger>(
+            &service.scout.path,
+            "scout_search_ledger",
+            "effective-n-priority",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            ledger.selection_metric.as_deref(),
+            Some("effective_sample_shortfall_to_10_then_rotation")
+        );
+        assert_eq!(ledger.selection_target_effective_sample_size, Some(10.0));
+        assert_eq!(ledger.baseline_status, "recorded");
+        assert_eq!(ledger.baseline_candidates.len(), 1);
+        assert_eq!(ledger.baseline_candidates[0]["strategy_parameters"]["lookback"], 21.0);
+        assert_eq!(ledger.candidates.len(), 4, "inputs and expanded candidates are retained");
+        let expanded = ledger
+            .candidates
+            .iter()
+            .filter(|candidate| candidate.stage == "expanded")
+            .collect::<Vec<_>>();
+        assert_eq!(expanded.len(), 2);
+        let selected = expanded
+            .iter()
+            .find(|candidate| candidate.selection_result == "selected")
+            .unwrap();
+        assert_eq!(selected.effective_sample_size, Some(4.8));
+        assert_eq!(selected.selection_metric_value, Some(5.2));
+        assert_eq!(selected.priority_rank, Some(0));
+        assert_eq!(ledger.evaluation_window.start_timestamp_ms, ledger.as_of_timestamp_ms);
+        assert_eq!(ledger.evaluation_window.end_timestamp_ms, None);
         let _ = std::fs::remove_file(&service.scout.path);
     }
 

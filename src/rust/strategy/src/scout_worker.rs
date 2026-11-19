@@ -1,6 +1,6 @@
 use crate::worker_metrics::{WorkerMetrics, serve_metrics};
 use anyhow::{Context, bail};
-use axum::{Router, body::Body};
+use axum::{Router, body::Body, extract::DefaultBodyLimit};
 use futures_util::{Stream, StreamExt, stream};
 use http_body_util::BodyExt;
 use rsocket_rust::{prelude::*, utils::EchoRSocket};
@@ -126,7 +126,10 @@ impl StrategyWorker {
             router: crate::scouts::strategy_worker_router(
                 config.strategy,
                 config.state_path.clone(),
-            ),
+            )
+            // Insights batches are intentionally allowed up to the worker limit;
+            // Axum's default JSON extractor limit is smaller than that setting.
+            .layer(DefaultBodyLimit::max(config.max_payload_bytes)),
             metrics: WorkerMetrics::new(
                 "scout",
                 config.strategy.as_str(),
@@ -598,6 +601,8 @@ fn worker_route_allowed(path: &str) -> bool {
             | "/internal/learning-snapshot"
             | "/status"
             | "/outcomes"
+            | "/replay/outcomes"
+            | "/replay/searches"
             | "/samples"
             | "/scout-outcome"
             | "/scout-markout"
@@ -1141,6 +1146,12 @@ mod tests {
     use serde_json::json;
     use std::collections::BTreeMap;
     use tokio::time::sleep;
+
+    #[test]
+    fn replay_outcomes_is_allowed_on_strategy_worker_routes() {
+        assert!(worker_route_allowed("/replay/outcomes"));
+        assert!(worker_route_allowed("/replay/searches"));
+    }
 
     #[test]
     fn replay_accepts_a_continuation_chunk_beyond_actual_exit() {

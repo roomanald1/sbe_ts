@@ -10,5 +10,6 @@ if [[ "${SCOUT_WORKERS_ENABLED:-true}" == "true" ]]; then
 fi
 
 docker compose "${system_compose_args[@]}" up -d --build --force-recreate --remove-orphans
+./rebuild-changed-services.sh --record-all
 
 echo "All system services rebuilt and restarted."

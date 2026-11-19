@@ -175,6 +175,7 @@ pub fn benchmark_decision_parameters_path(
                 window_count: 0,
                 max_drawdown_percent: None,
                 downside_loss_percent: None,
+                evidence_scope: strategy::StrategyWalkForwardEvidenceScope::Unknown,
             },
         );
         if index < retained_variants {

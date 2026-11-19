@@ -446,6 +446,9 @@ fn threshold_observation(
         Strategy::LiveVwapDislocation => StrategyParameterKey::MinimumVwapDislocationBps,
         Strategy::LiveAbsorptionPressure => StrategyParameterKey::MinimumAbsorptionPressure,
         Strategy::Rsi2OversoldRebound => StrategyParameterKey::RsiEntryMax,
+        Strategy::Donchian20Sma200 | Strategy::Donchian55Btc200 => {
+            StrategyParameterKey::BreakoutEntryDistancePercent
+        }
         _ => return None,
     };
     let threshold = decision
@@ -457,6 +460,8 @@ fn threshold_observation(
     }
     let feature = if key == StrategyParameterKey::RsiEntryMax {
         decision.get("primary_metric_value")?.as_f64()?
+    } else if key == StrategyParameterKey::BreakoutEntryDistancePercent {
+        -decision.get("primary_distance_percent")?.as_f64()?
     } else {
         let side = match strategy::SignalDirection::from_wire(decision.get("direction")?.as_str()?)? {
             strategy::SignalDirection::Long => 1.0,

@@ -498,6 +498,7 @@ pub struct ScoutCoordinator {
     auto_trader_rsocket_url: String,
     replay_gate: Arc<AsyncMutex<()>>,
     scout_updates: Arc<ScoutUpdateHub>,
+    recent_scout_activity: Arc<AsyncMutex<Vec<serde_json::Value>>>,
 }
 
 impl ScoutCoordinator {
@@ -544,6 +545,7 @@ impl ScoutCoordinator {
                 .unwrap_or_else(|_| "ws://auto-trader:10006".into()),
             replay_gate: Arc::new(AsyncMutex::new(())),
             scout_updates: ScoutUpdateHub::new(),
+            recent_scout_activity: Arc::new(AsyncMutex::new(Vec::new())),
         })
     }
 
@@ -845,6 +847,68 @@ impl ScoutCoordinator {
             result.walk_forward_evidence = evidence;
             results.push(result);
         }
+        let completed_at_ms = crate::now_ms();
+        let mut activity = self.recent_scout_activity.lock().await;
+        for result in &results {
+            let mut row = serde_json::to_value(result)?;
+            if let Some(object) = row.as_object_mut() {
+                object.insert(
+                    "request_id".into(),
+                    serde_json::json!(request.request_id.clone()),
+                );
+                object.insert("evaluated_at_ms".into(), serde_json::json!(completed_at_ms));
+                object.insert("mode".into(), serde_json::to_value(request.mode)?);
+                let evidence_count = result
+                    .walk_forward_evidence
+                    .as_ref()
+                    .map_or(0, |e| e.sample_count);
+                object.insert(
+                    "rank_basis".into(),
+                    serde_json::json!("decision_then_prior_scout_samples"),
+                );
+                object.insert(
+                    "evidence_sample_count".into(),
+                    serde_json::json!(evidence_count),
+                );
+            }
+            activity.push(row);
+        }
+        activity.sort_by(|left, right| {
+            right["evaluated_at_ms"]
+                .as_u64()
+                .cmp(&left["evaluated_at_ms"].as_u64())
+        });
+        activity.truncate(500);
+        // Rank within each request: actionable decisions first, then profiles
+        // with more prior Scout evidence. This is a transparency ordering only.
+        let request_ids = results
+            .iter()
+            .map(|_| request.request_id.as_str())
+            .collect::<BTreeSet<_>>();
+        for request_id in request_ids {
+            let mut batch = activity
+                .iter_mut()
+                .filter(|row| row["request_id"].as_str() == Some(request_id))
+                .collect::<Vec<_>>();
+            batch.sort_by(|left, right| {
+                scout_decision_rank(&left["decision"])
+                    .cmp(&scout_decision_rank(&right["decision"]))
+                    .then_with(|| {
+                        right["evidence_sample_count"]
+                            .as_u64()
+                            .cmp(&left["evidence_sample_count"].as_u64())
+                    })
+                    .then_with(|| {
+                        left["assignment_id"]
+                            .as_str()
+                            .cmp(&right["assignment_id"].as_str())
+                    })
+            });
+            for (index, row) in batch.into_iter().enumerate() {
+                row["rank"] = serde_json::json!(index + 1);
+            }
+        }
+        drop(activity);
         Ok(ScoutCandidateBatchResult {
             request_id: request.request_id,
             assignments: results,
@@ -1700,7 +1764,12 @@ impl ScoutCoordinator {
             .filter(|strategy| self.worker_endpoints.contains_key(strategy.as_str()))
             .collect::<Vec<_>>();
         let path = command.path.split('?').next().unwrap_or(&command.path);
-        if path == "/outcomes" || path == "/status" || path == "/configuration" {
+        if path == "/outcomes"
+            || path == "/replay/outcomes"
+            || path == "/replay/searches"
+            || path == "/status"
+            || path == "/configuration"
+        {
             strategies = self
                 .worker_endpoints
                 .keys()
@@ -1717,6 +1786,16 @@ impl ScoutCoordinator {
         command: ScoutCoordinatorRouteCommand,
     ) -> anyhow::Result<ScoutCoordinatorRouteResult> {
         let path = command.path.split('?').next().unwrap_or(&command.path);
+        if path == "/scout-activity" && command.method == ScoutWorkerHttpMethod::Get {
+            return Ok(ScoutCoordinatorRouteResult {
+                request_id: command.request_id,
+                status: 200,
+                body: serde_json::json!({"items": self.recent_scout_activity.lock().await.clone()}),
+            });
+        }
+        if path == "/scout-replay/paired-returns" && command.method == ScoutWorkerHttpMethod::Get {
+            return self.scout_paired_return_stream(&command.request_id).await;
+        }
         let feedback = (path == "/feedback")
             .then(|| {
                 serde_json::from_value::<strategy::FeedbackEvent>(command.payload.clone()).ok()
@@ -1765,14 +1844,59 @@ impl ScoutCoordinator {
             body,
         })
     }
+
+    async fn scout_paired_return_stream(
+        &self,
+        request_id: &str,
+    ) -> anyhow::Result<ScoutCoordinatorRouteResult> {
+        let outcomes = self
+            .route_worker_command(ScoutCoordinatorRouteCommand {
+                request_id: format!("{request_id}:outcomes"),
+                strategy: None,
+                method: ScoutWorkerHttpMethod::Get,
+                path: "/replay/outcomes".into(),
+                payload: serde_json::Value::Null,
+            })
+            .await?;
+        if !(200..300).contains(&outcomes.status) {
+            return Ok(ScoutCoordinatorRouteResult {
+                request_id: request_id.to_owned(),
+                status: outcomes.status,
+                body: outcomes.body,
+            });
+        }
+        let searches = self
+            .route_worker_command(ScoutCoordinatorRouteCommand {
+                request_id: format!("{request_id}:searches"),
+                strategy: None,
+                method: ScoutWorkerHttpMethod::Get,
+                path: "/replay/searches".into(),
+                payload: serde_json::Value::Null,
+            })
+            .await?;
+        if !(200..300).contains(&searches.status) {
+            return Ok(ScoutCoordinatorRouteResult {
+                request_id: request_id.to_owned(),
+                status: searches.status,
+                body: searches.body,
+            });
+        }
+        Ok(ScoutCoordinatorRouteResult {
+            request_id: request_id.to_owned(),
+            status: 200,
+            body: crate::scout_replay::build_paired_return_stream(&outcomes.body, &searches.body),
+        })
+    }
 }
 
 fn learning_route_allowed(path: &str, method: ScoutWorkerHttpMethod) -> bool {
     matches!(
         (method, path),
         (ScoutWorkerHttpMethod::Get, "/profiles")
+            | (ScoutWorkerHttpMethod::Get, "/scout-activity")
             | (ScoutWorkerHttpMethod::Get, "/decision-snapshot")
             | (ScoutWorkerHttpMethod::Get, "/summary")
+            | (ScoutWorkerHttpMethod::Get, "/scout-replay/paired-returns")
             | (ScoutWorkerHttpMethod::Post, "/profiles")
             | (ScoutWorkerHttpMethod::Post, "/feedback")
             | (ScoutWorkerHttpMethod::Post, "/exit-timing")
@@ -1883,6 +2007,8 @@ fn aggregate_route_results(
             configuration
         }
         "/outcomes" => aggregate_outcomes(&bodies, &command.path),
+        "/replay/outcomes" => aggregate_replay_outcomes(&bodies),
+        "/replay/searches" => aggregate_replay_searches(&bodies),
         "/status" => aggregate_status(&bodies),
         _ => serde_json::json!({"by_strategy": bodies}),
     };
@@ -1891,6 +2017,180 @@ fn aggregate_route_results(
         status: 200,
         body,
     }
+}
+
+fn aggregate_replay_outcomes(bodies: &BTreeMap<String, serde_json::Value>) -> serde_json::Value {
+    let mut outcomes = Vec::new();
+    let mut total_durable_records = 0_u64;
+    let mut returned_records = 0_u64;
+    let mut malformed_records = 0_u64;
+    let mut runtime_hydration_limit = 0_u64;
+    let mut completed_before_origin_records = 0_u64;
+    let mut at_or_after_origin_records = 0_u64;
+    let mut missing_regime_records = 0_u64;
+    let mut fee_rate_and_net_return_reported_records = 0_u64;
+    let mut explicit_cost_breakdown_records = 0_u64;
+    let mut explicit_cost_breakdown = true;
+    let mut open_scout_instances = 0_u64;
+    let mut expired_instances_without_outcome = 0_u64;
+    let mut origin_at_ms = None;
+    let mut origin_was_requested = false;
+    let mut complete = true;
+    for (strategy, body) in bodies {
+        let coverage = &body["coverage"];
+        total_durable_records += coverage["totalDurableRecords"].as_u64().unwrap_or_default();
+        returned_records += coverage["returnedRecords"].as_u64().unwrap_or_default();
+        malformed_records += coverage["malformedRecords"].as_u64().unwrap_or_default();
+        runtime_hydration_limit = runtime_hydration_limit.max(
+            coverage["runtimeHydrationLimit"]
+                .as_u64()
+                .unwrap_or_default(),
+        );
+        origin_was_requested |= coverage["originAtMs"].is_u64();
+        origin_at_ms = origin_at_ms.or_else(|| coverage["originAtMs"].as_u64());
+        completed_before_origin_records += coverage["completedBeforeOriginRecords"]
+            .as_u64()
+            .unwrap_or_default();
+        at_or_after_origin_records += coverage["atOrAfterOriginRecords"]
+            .as_u64()
+            .unwrap_or_default();
+        missing_regime_records += coverage["missingRegimeRecords"]
+            .as_u64()
+            .unwrap_or_default();
+        fee_rate_and_net_return_reported_records += coverage["feeRateAndNetReturnReportedRecords"]
+            .as_u64()
+            .unwrap_or_default();
+        explicit_cost_breakdown_records += coverage["explicitCostBreakdownRecords"]
+            .as_u64()
+            .unwrap_or_default();
+        explicit_cost_breakdown &= coverage["explicitCostBreakdown"].as_bool().unwrap_or(false);
+        open_scout_instances += coverage["openScoutInstances"].as_u64().unwrap_or_default();
+        expired_instances_without_outcome += coverage["expiredInstancesWithoutOutcome"]
+            .as_u64()
+            .unwrap_or_default();
+        complete &= coverage["complete"].as_bool().unwrap_or(false);
+        if let Some(rows) = body["outcomes"].as_array() {
+            outcomes.extend(rows.iter().cloned().map(|mut row| {
+                if let Some(outcome_id) = row["outcome_id"].as_str() {
+                    row["outcome_id"] = serde_json::json!(format!("{strategy}|{outcome_id}"));
+                }
+                (strategy, row)
+            }));
+        }
+    }
+    outcomes.sort_by(|(left_strategy, left), (right_strategy, right)| {
+        left["evaluated_timestamp_ms"]
+            .as_u64()
+            .unwrap_or_default()
+            .cmp(&right["evaluated_timestamp_ms"].as_u64().unwrap_or_default())
+            .then_with(|| left_strategy.cmp(right_strategy))
+            .then_with(|| {
+                left["decision_id"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .cmp(right["decision_id"].as_str().unwrap_or_default())
+            })
+    });
+    let first_timestamp_ms = outcomes
+        .first()
+        .and_then(|(_, outcome)| outcome["evaluated_timestamp_ms"].as_u64());
+    let last_timestamp_ms = outcomes
+        .last()
+        .and_then(|(_, outcome)| outcome["evaluated_timestamp_ms"].as_u64());
+    let outcomes = outcomes
+        .into_iter()
+        .map(|(_, outcome)| outcome)
+        .collect::<Vec<_>>();
+    serde_json::json!({
+        "datasetVersion": 2,
+        "source": "scout_records.outcomes",
+        "ordering": "evaluated_timestamp_ms_asc_then_strategy_then_decision_id",
+        "coverage": {
+            "status": if complete { "complete" } else { "incomplete" },
+            "complete": complete,
+            "totalDurableRecords": total_durable_records,
+            "returnedRecords": returned_records,
+            "malformedRecords": malformed_records,
+            "firstEvaluatedTimestampMs": first_timestamp_ms,
+            "lastEvaluatedTimestampMs": last_timestamp_ms,
+            "runtimeHydrationLimit": runtime_hydration_limit,
+            "originAtMs": if origin_was_requested { serde_json::json!(origin_at_ms) } else { serde_json::Value::Null },
+            "completedBeforeOriginRecords": if origin_was_requested { serde_json::json!(completed_before_origin_records) } else { serde_json::Value::Null },
+            "atOrAfterOriginRecords": if origin_was_requested { serde_json::json!(at_or_after_origin_records) } else { serde_json::Value::Null },
+            "missingRegimeRecords": missing_regime_records,
+            "feeRateAndNetReturnReportedRecords": fee_rate_and_net_return_reported_records,
+            "explicitCostBreakdownRecords": explicit_cost_breakdown_records,
+            "explicitCostBreakdown": explicit_cost_breakdown,
+            "openScoutInstances": open_scout_instances,
+            "expiredInstancesWithoutOutcome": expired_instances_without_outcome,
+        },
+        "outcomes": outcomes,
+    })
+}
+
+fn aggregate_replay_searches(bodies: &BTreeMap<String, serde_json::Value>) -> serde_json::Value {
+    let mut searches = Vec::new();
+    let mut total_durable_records = 0_u64;
+    let mut returned_records = 0_u64;
+    let mut malformed_records = 0_u64;
+    let mut runtime_cache_limit = 0_u64;
+    let mut complete = true;
+    for (strategy, body) in bodies {
+        let coverage = &body["coverage"];
+        total_durable_records += coverage["totalDurableRecords"].as_u64().unwrap_or_default();
+        returned_records += coverage["returnedRecords"].as_u64().unwrap_or_default();
+        malformed_records += coverage["malformedRecords"].as_u64().unwrap_or_default();
+        runtime_cache_limit =
+            runtime_cache_limit.max(coverage["runtimeCacheLimit"].as_u64().unwrap_or_default());
+        complete &= coverage["complete"].as_bool().unwrap_or(false);
+        if let Some(rows) = body["searches"].as_array() {
+            searches.extend(rows.iter().cloned().map(|mut row| {
+                if let Some(search_id) = row["search_id"].as_str() {
+                    row["search_id"] = serde_json::json!(format!("{strategy}|{search_id}"));
+                }
+                (strategy, row)
+            }));
+        }
+    }
+    searches.sort_by(|(left_strategy, left), (right_strategy, right)| {
+        left["as_of_timestamp_ms"]
+            .as_u64()
+            .unwrap_or_default()
+            .cmp(&right["as_of_timestamp_ms"].as_u64().unwrap_or_default())
+            .then_with(|| left_strategy.cmp(right_strategy))
+            .then_with(|| {
+                left["search_id"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .cmp(right["search_id"].as_str().unwrap_or_default())
+            })
+    });
+    let first_as_of_timestamp_ms = searches
+        .first()
+        .and_then(|(_, search)| search["as_of_timestamp_ms"].as_u64());
+    let last_as_of_timestamp_ms = searches
+        .last()
+        .and_then(|(_, search)| search["as_of_timestamp_ms"].as_u64());
+    let searches = searches
+        .into_iter()
+        .map(|(_, search)| search)
+        .collect::<Vec<_>>();
+    serde_json::json!({
+        "datasetVersion": 1,
+        "source": "scout_records.scout_search_ledger",
+        "ordering": "as_of_timestamp_ms_asc_then_strategy_then_search_id",
+        "coverage": {
+            "status": if complete { "complete" } else { "incomplete" },
+            "complete": complete,
+            "totalDurableRecords": total_durable_records,
+            "returnedRecords": returned_records,
+            "malformedRecords": malformed_records,
+            "firstAsOfTimestampMs": first_as_of_timestamp_ms,
+            "lastAsOfTimestampMs": last_as_of_timestamp_ms,
+            "runtimeCacheLimit": runtime_cache_limit,
+        },
+        "searches": searches,
+    })
 }
 
 fn aggregate_outcomes(
@@ -2036,6 +2336,18 @@ fn signal_timestamp_ms(signal: &serde_json::Value) -> u64 {
         .as_u64()
         .or_else(|| signal["timestamp"].as_u64())
         .unwrap_or_default()
+}
+
+fn scout_decision_rank(decision: &serde_json::Value) -> u8 {
+    match decision.as_str().unwrap_or_default() {
+        "enter" => 0,
+        "rebalance" => 1,
+        "scout" => 2,
+        "hold" => 3,
+        "exit" => 4,
+        "not_evaluated" => 5,
+        _ => 6,
+    }
 }
 
 fn selected_profiles(
@@ -2211,6 +2523,7 @@ fn walk_forward_evidence(
         window_count: statistics.window_count,
         max_drawdown_percent: statistics.max_drawdown_percent,
         downside_loss_percent: statistics.downside_loss_percent,
+        evidence_scope: strategy::StrategyWalkForwardEvidenceScope::ExactProfileUnconditioned,
     })
 }
 
@@ -2469,6 +2782,138 @@ mod tests {
     use std::sync::{Arc, Mutex as StdMutex};
     use strategy::StrategyProfile;
     use tokio::sync::Mutex;
+
+    #[tokio::test]
+    async fn replay_outcomes_route_targets_all_configured_workers() {
+        let service = ServiceState {
+            state: Arc::new(Mutex::new(LearningState::default())),
+            path: PathBuf::new(),
+            state_updates: Arc::new(tokio::sync::Notify::new()),
+        };
+        let coordinator = ScoutCoordinator::new(
+            service,
+            "live-momentum=ws://momentum:10200;dated-futures-carry=ws://carry:10200",
+            Router::new(),
+        )
+        .unwrap();
+        let command = ScoutCoordinatorRouteCommand {
+            request_id: "replay-route-test".into(),
+            strategy: None,
+            method: ScoutWorkerHttpMethod::Get,
+            path: "/replay/outcomes".into(),
+            payload: serde_json::Value::Null,
+        };
+        let targets = coordinator.route_targets(&command).await.unwrap();
+        assert_eq!(targets, vec![Strategy::DatedCarry, Strategy::LiveMomentum]);
+        let search_command = ScoutCoordinatorRouteCommand {
+            path: "/replay/searches".into(),
+            ..command
+        };
+        let search_targets = coordinator.route_targets(&search_command).await.unwrap();
+        assert_eq!(
+            search_targets,
+            vec![Strategy::DatedCarry, Strategy::LiveMomentum]
+        );
+    }
+
+    #[test]
+    fn paired_return_stream_is_an_allowed_learning_route() {
+        assert!(learning_route_allowed(
+            "/scout-replay/paired-returns",
+            ScoutWorkerHttpMethod::Get
+        ));
+    }
+
+    #[test]
+    fn replay_outcomes_aggregate_coverage_and_sort_across_workers() {
+        let body = |decision_id: &str, timestamp: u64| {
+            serde_json::json!({
+                "datasetVersion": 1,
+                "source": "scout_records.outcomes",
+                "ordering": "evaluated_timestamp_ms_asc_then_record_key_asc",
+                "coverage": {
+                    "complete": true,
+                    "totalDurableRecords": 1,
+                    "returnedRecords": 1,
+                    "malformedRecords": 0,
+                    "runtimeHydrationLimit": 4096,
+                    "originAtMs": 150,
+                    "completedBeforeOriginRecords": if timestamp < 150 { 1 } else { 0 },
+                    "atOrAfterOriginRecords": if timestamp < 150 { 0 } else { 1 },
+                    "missingRegimeRecords": 0,
+                    "feeRateAndNetReturnReportedRecords": 1,
+                    "explicitCostBreakdownRecords": 1,
+                    "explicitCostBreakdown": false,
+                    "openScoutInstances": 2,
+                    "expiredInstancesWithoutOutcome": 1
+                },
+                "outcomes": [{"decision_id": decision_id, "outcome_id": decision_id, "evaluated_timestamp_ms": timestamp}]
+            })
+        };
+        let bodies = BTreeMap::from([
+            ("live-momentum".to_owned(), body("later", 200)),
+            ("dated-futures-carry".to_owned(), body("earlier", 100)),
+        ]);
+        let aggregate = aggregate_replay_outcomes(&bodies);
+        assert_eq!(aggregate["datasetVersion"], 2);
+        assert_eq!(aggregate["coverage"]["complete"], true);
+        assert_eq!(aggregate["coverage"]["totalDurableRecords"], 2);
+        assert_eq!(aggregate["coverage"]["returnedRecords"], 2);
+        assert_eq!(aggregate["coverage"]["firstEvaluatedTimestampMs"], 100);
+        assert_eq!(aggregate["coverage"]["lastEvaluatedTimestampMs"], 200);
+        assert_eq!(aggregate["coverage"]["originAtMs"], 150);
+        assert_eq!(aggregate["coverage"]["completedBeforeOriginRecords"], 1);
+        assert_eq!(aggregate["coverage"]["atOrAfterOriginRecords"], 1);
+        assert_eq!(aggregate["coverage"]["explicitCostBreakdownRecords"], 2);
+        assert_eq!(aggregate["coverage"]["explicitCostBreakdown"], false);
+        assert_eq!(aggregate["coverage"]["openScoutInstances"], 4);
+        assert_eq!(aggregate["coverage"]["expiredInstancesWithoutOutcome"], 2);
+        assert_eq!(aggregate["outcomes"][0]["decision_id"], "earlier");
+        assert_eq!(aggregate["outcomes"][1]["decision_id"], "later");
+        assert_eq!(
+            aggregate["outcomes"][0]["outcome_id"],
+            "dated-futures-carry|earlier"
+        );
+    }
+
+    #[test]
+    fn replay_searches_aggregate_complete_history_and_qualify_ids() {
+        let body = |search_id: &str, as_of_timestamp_ms: u64| {
+            serde_json::json!({
+                "datasetVersion": 1,
+                "coverage": {
+                    "complete": true,
+                    "totalDurableRecords": 1,
+                    "returnedRecords": 1,
+                    "malformedRecords": 0,
+                    "runtimeCacheLimit": 32
+                },
+                "searches": [{"search_id": search_id, "as_of_timestamp_ms": as_of_timestamp_ms}]
+            })
+        };
+        let bodies = BTreeMap::from([
+            ("live-momentum".to_owned(), body("search-later", 200)),
+            (
+                "dated-futures-carry".to_owned(),
+                body("search-earlier", 100),
+            ),
+        ]);
+        let aggregate = aggregate_replay_searches(&bodies);
+        assert_eq!(aggregate["datasetVersion"], 1);
+        assert_eq!(aggregate["coverage"]["complete"], true);
+        assert_eq!(aggregate["coverage"]["totalDurableRecords"], 2);
+        assert_eq!(aggregate["coverage"]["returnedRecords"], 2);
+        assert_eq!(aggregate["coverage"]["firstAsOfTimestampMs"], 100);
+        assert_eq!(aggregate["coverage"]["lastAsOfTimestampMs"], 200);
+        assert_eq!(
+            aggregate["searches"][0]["search_id"],
+            "dated-futures-carry|search-earlier"
+        );
+        assert_eq!(
+            aggregate["searches"][1]["search_id"],
+            "live-momentum|search-later"
+        );
+    }
 
     #[test]
     fn autotrader_snapshot_drops_unallowed_symbol_data_before_transport() {

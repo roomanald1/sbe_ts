@@ -898,9 +898,9 @@ impl LiveWorker {
             crate::LiveStrategyDecision::Enter
             | crate::LiveStrategyDecision::Exit
             | crate::LiveStrategyDecision::Rebalance => 5_000,
-            // Repeated rejects only refresh profile feedback and blocker text.
-            // Keep those reports sparse so they cannot crowd out entry callbacks.
-            crate::LiveStrategyDecision::Reject => 5 * 60_000,
+            // Refresh every rejection so the dashboard reflects each fresh
+            // evaluation instead of displaying a stale blocker for five minutes.
+            crate::LiveStrategyDecision::Reject => 0,
             crate::LiveStrategyDecision::Hold => 30_000,
         };
         let should_report = previous.is_none_or(|(previous_decision, previous_at)| {

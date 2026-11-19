@@ -1,7 +1,33 @@
 import { BehaviorSubject } from 'rxjs';
-import { learningRpc } from '../learning_rsocket';
+import { scoutWorkerRpc } from '../learning_rsocket';
 
 export type ScoutReplayOutcome = {
+  outcome_id: string;
+  profile_id?: string | null;
+  profile_symbol?: string;
+  profile_symbol_source?: string;
+  evidence_group_id?: string;
+  evidence_group_source?: string;
+  notional_usd?: number | null;
+  portfolio_weight?: number | null;
+  cost_breakdown?: {
+    takerFeeRate?: number | null;
+    grossReturnPercent?: number | null;
+    markoutNetReturnPercent?: number | null;
+    outcomeNetReturnPercent?: number | null;
+    executionCostPercent?: number | null;
+  } | null;
+  eligibility?: {
+    status: string;
+    eligibleBeforeOrigin: boolean | null;
+    profileIdentity: string;
+    marketSymbol: string;
+    profileSymbol: string;
+    regime: string;
+    cost: string;
+    costBreakdown: string;
+    evidenceGroup: string;
+  };
   decision_id: string;
   learning_context: string;
   simulated_net_pnl_usd: number;
@@ -26,6 +52,15 @@ export type ScoutReplayCoverage = {
   firstEvaluatedTimestampMs: number | null;
   lastEvaluatedTimestampMs: number | null;
   runtimeHydrationLimit: number;
+  originAtMs?: number | null;
+  completedBeforeOriginRecords?: number | null;
+  atOrAfterOriginRecords?: number | null;
+  missingRegimeRecords?: number;
+  feeRateAndNetReturnReportedRecords?: number;
+  explicitCostBreakdownRecords?: number;
+  explicitCostBreakdown?: boolean;
+  openScoutInstances?: number;
+  expiredInstancesWithoutOutcome?: number;
 };
 
 type ScoutReplayResponse = {
@@ -43,9 +78,9 @@ type ScoutReplayState = ScoutReplayResponse & {
 };
 
 const emptyResponse: ScoutReplayResponse = {
-  datasetVersion: 1,
+  datasetVersion: 2,
   source: 'scout_records.outcomes',
-  ordering: 'evaluated_timestamp_ms_asc_then_record_key_asc',
+  ordering: 'evaluated_timestamp_ms_asc_then_strategy_then_decision_id',
   coverage: {
     status: 'incomplete',
     complete: false,
@@ -98,7 +133,7 @@ export class AutoTraderScoutReplayModel {
     this.refreshing = true;
     this.state$.next({ ...this.state$.value, loading: true, error: undefined });
     try {
-      const response = await learningRpc('GET', '/replay/outcomes');
+      const response = await scoutWorkerRpc('GET', '/replay/outcomes');
       if (!response.ok)
         throw new Error(`Scout replay request failed (${response.status}).`);
       const data = (await response.json()) as ScoutReplayResponse;

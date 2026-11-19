@@ -1,7 +1,17 @@
+#[cfg(test)]
 fn expand_daily_scout_candidates(candidates: &[ScoutPlanCandidate]) -> Vec<ScoutPlanCandidate> {
+    expand_daily_scout_candidates_with_source(candidates)
+        .into_iter()
+        .map(|(_, candidate)| candidate)
+        .collect()
+}
+
+fn expand_daily_scout_candidates_with_source(
+    candidates: &[ScoutPlanCandidate],
+) -> Vec<(usize, ScoutPlanCandidate)> {
     const LEVELS: &[f64] = &[0.25, 0.5, 1.0, 2.0, 3.0, 5.0, 7.5, 10.0];
     let mut expanded = Vec::new();
-    for candidate in candidates {
+    for (source_candidate_index, candidate) in candidates.iter().enumerate() {
         let Some(policy) = candidate.daily_policy.as_ref() else {
             let mut candidate = candidate.clone();
             if let Some(policy) = candidate.live_policy.as_ref() {
@@ -27,7 +37,7 @@ fn expand_daily_scout_candidates(candidates: &[ScoutPlanCandidate]) -> Vec<Scout
                     }
                 }
             }
-            expanded.push(candidate);
+            expanded.push((source_candidate_index, candidate));
             continue;
         };
         let Some(template) = candidate.audit_templates.first() else {
@@ -122,7 +132,7 @@ fn expand_daily_scout_candidates(candidates: &[ScoutPlanCandidate]) -> Vec<Scout
                     first.learning_context = format!("scout:{context}:level:{level:.2}:scenario");
                 }
             }
-            expanded.push(selected);
+            expanded.push((source_candidate_index, selected));
         }
     }
     expanded
@@ -342,9 +352,8 @@ pub struct ScoutPlanResponse {
     pub selected_groups: Vec<String>,
 }
 
-/// Immutable record of one Scout candidate search. The current planner does
-/// not expose a numeric selection metric, so `selection_metric` is persisted
-/// as `None` rather than inferred from the selected candidates.
+/// Immutable record of one Scout candidate search, including the priority
+/// metric and the event-driven outcome window used by the current planner.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ScoutSearchLedger {
     pub request_id: String,
@@ -352,17 +361,48 @@ pub struct ScoutSearchLedger {
     pub outcome_cutoff_timestamp_ms: u64,
     pub selection_metric: Option<String>,
     pub selection_metric_status: String,
+    #[serde(default)]
+    pub selection_target_effective_sample_size: Option<f64>,
+    #[serde(default)]
+    pub baseline_candidates: Vec<serde_json::Value>,
+    #[serde(default)]
+    pub baseline_status: String,
+    #[serde(default)]
+    pub evaluation_window: ScoutSearchEvaluationWindow,
     pub candidates: Vec<ScoutSearchCandidateRecord>,
     pub selected_candidate_ids: Vec<String>,
     pub selected_candidates: Vec<serde_json::Value>,
     pub response: ScoutPlanResponse,
 }
 
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub struct ScoutSearchEvaluationWindow {
+    pub start_timestamp_ms: u64,
+    #[serde(default)]
+    pub end_timestamp_ms: Option<u64>,
+    pub end_rule: String,
+    pub fixed_horizon: bool,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ScoutSearchCandidateRecord {
     pub candidate_id: String,
     pub candidate_index: usize,
+    #[serde(default)]
+    pub sample_group_id: String,
+    #[serde(default)]
+    pub source_candidate_index: usize,
+    #[serde(default)]
+    pub stage: String,
     pub selection_result: String,
+    #[serde(default)]
+    pub effective_sample_size: Option<f64>,
+    #[serde(default)]
+    pub selection_metric_value: Option<f64>,
+    #[serde(default)]
+    pub priority_rank: Option<usize>,
+    #[serde(default)]
+    pub rotation_order: Option<usize>,
     pub parameter_map: Option<BTreeMap<String, f64>>,
     pub parameter_map_status: String,
     pub candidate: serde_json::Value,

@@ -41,19 +41,17 @@ fn account_snapshot_with_rates(
         + ledger
             .dated_carry_positions
             .iter()
+            .filter(|position| position.status == "open")
             .map(|position| {
-                if position.status.starts_with("closed") {
-                    position.net_pnl_usdt.unwrap_or_default()
-                } else {
-                    position.quantity * (position.future_entry_price - position.spot_entry_price)
-                        - position.entry_fees
-                }
+                position.quantity * (position.future_entry_price - position.spot_entry_price)
+                    - position.entry_fees
             })
             .sum::<f64>();
     let fees_paid = snapshot.fees_paid
         + ledger
             .dated_carry_positions
             .iter()
+            .filter(|position| position.status == "open")
             .map(|position| position.entry_fees)
             .sum::<f64>();
     let mut equity_available = snapshot.equity_available;
@@ -134,17 +132,6 @@ fn account_snapshot_with_rates(
                 * (spot_mark - position.spot_entry_price + position.future_entry_price - future_mark);
             equity += gross_mark * rate;
             unrealized_pnl += marked_pnl * rate;
-        }
-    }
-    for position in ledger
-        .dated_carry_positions
-        .iter()
-        .filter(|position| position.status.starts_with("closed"))
-    {
-        if let Some(pnl) = position.net_pnl_usdt.filter(|pnl| pnl.is_finite()) {
-            realized_pnl += pnl * rates.get("USDT").copied().unwrap_or(0.0);
-        } else {
-            equity_available = false;
         }
     }
     Ok(AccountResponse {
