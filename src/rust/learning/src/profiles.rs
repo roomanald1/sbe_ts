@@ -247,6 +247,16 @@ pub(super) async fn get_decision_snapshot(
             walk_forward_evidence.insert(
                 key,
                 StrategyWalkForwardEvidence {
+                    evidence_contract_version: 2,
+                    estimator: strategy::StrategyWalkForwardEstimator::CompletedOutcomeClusters,
+                    history_coverage: strategy::StrategyWalkForwardCoverage::Partial,
+                    cost_coverage: strategy::StrategyWalkForwardCoverage::Unknown,
+                    search_family_coverage: strategy::StrategyWalkForwardCoverage::Unknown,
+                    point_in_time_cutoff_timestamp_ms: Some(snapshot_now_ms),
+                    final_holdout_status:
+                        strategy::StrategyWalkForwardValidationStatus::NotValidated,
+                    oos_fold_count: 0,
+                    spa_p_value: None,
                     sample_count: risk.sample_count,
                     positive_net_rate: Some(positive / weight),
                     average_net_return_percent: Some(net_return / weight),

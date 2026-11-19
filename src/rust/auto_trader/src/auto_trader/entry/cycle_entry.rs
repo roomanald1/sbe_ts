@@ -1,3 +1,5 @@
+static NEXT_ENTRY_CYCLE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
 fn strategy_entry_rejection_reason(
     signal: &Signal,
     strategy: Strategy,
@@ -736,6 +738,196 @@ fn candidate_cycle_blocker(
     }
 }
 
+fn update_entry_candidate_diagnostic(
+    diagnostic: &mut LatestEntryDiagnostic,
+    signal: &Signal,
+    stage: &str,
+    reason: Option<&str>,
+) {
+    let decision_id = signal_decision_id(signal);
+    let candidate_index = diagnostic
+        .candidate_details
+        .iter()
+        .position(|candidate| candidate.decision_id == decision_id)
+        .unwrap_or_else(|| {
+            diagnostic.candidate_details.push(EntryCandidateDiagnostic {
+                decision_id: decision_id.clone(),
+                worker_event_id: signal
+                    .strategy_decision
+                    .as_ref()
+                    .and_then(|decision| decision.get("live_worker_event_id"))
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned),
+                profile_id: signal
+                    .strategy_decision
+                    .as_ref()
+                    .and_then(|decision| {
+                        decision
+                            .get("learning_profile_id")
+                            .or_else(|| decision.get("scout_parameter_profile_id"))
+                    })
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned),
+                symbol: signal.symbol.clone(),
+                strategy: signal.strategy.clone(),
+                stage: stage.to_owned(),
+                observed: serde_json::json!({
+                    "score": signal.score,
+                    "strength": signal.strength,
+                    "direction": signal.direction,
+                }),
+                required: serde_json::json!({}),
+                checks: serde_json::json!({}),
+                evidence_contract: serde_json::Value::Null,
+                measurements: Vec::new(),
+                reasons: Vec::new(),
+            });
+            diagnostic.candidate_details.len() - 1
+        });
+    let candidate = &mut diagnostic.candidate_details[candidate_index];
+    candidate.stage = stage.to_owned();
+    if let Some(reason) = reason.filter(|reason| !reason.trim().is_empty()) {
+        if !candidate.reasons.iter().any(|existing| existing == reason) {
+            candidate.reasons.push(reason.to_owned());
+        }
+        candidate
+            .measurements
+            .extend(parse_reported_gate_measurements(stage, reason));
+    }
+    recompute_entry_candidate_gate_counts(diagnostic);
+}
+
+fn parse_reported_gate_measurements(
+    gate_id: &str,
+    detail: &str,
+) -> Vec<EntryGateMeasurement> {
+    fn parse_number(token: &str) -> Option<f64> {
+        let numeric = token.trim_matches(|character: char| {
+            !character.is_ascii_digit() && character != '.' && character != '-'
+        });
+        let value = numeric.parse::<f64>().ok()?;
+        value.is_finite().then_some(value)
+    }
+
+    detail
+        .split([';', '|', '·', ','])
+        .filter_map(|segment| {
+            [">=", "<=", ">", "<"]
+                .into_iter()
+                .find_map(|operator| {
+                    let (left, right) = segment.split_once(operator)?;
+                    let observed = left.split_whitespace().rev().find_map(parse_number)?;
+                    let required_token = right.split_whitespace().find(|token| {
+                        token.chars().any(|character| character.is_ascii_digit())
+                    })?;
+                    let required = parse_number(required_token)?;
+                    let numeric_end = required_token
+                        .find(|character: char| {
+                            !character.is_ascii_digit() && character != '.' && character != '-'
+                        })
+                        .unwrap_or(required_token.len());
+                    let unit = if numeric_end < required_token.len() {
+                        Some(required_token[numeric_end..].to_owned())
+                    } else {
+                        right
+                            .split_whitespace()
+                            .skip_while(|token| *token != required_token)
+                            .nth(1)
+                            .filter(|unit| {
+                                unit.chars().any(|character| character.is_ascii_alphabetic() || character == '%')
+                            })
+                            .map(|unit| unit.trim_matches(|character: char| !character.is_ascii_alphabetic() && character != '%').to_owned())
+                    };
+                    Some(EntryGateMeasurement {
+                        gate_id: gate_id.to_owned(),
+                        observed: Some(observed),
+                        operator: Some(operator.to_owned()),
+                        required: Some(required),
+                        unit,
+                        status: "reported_comparison".into(),
+                        detail: segment.trim().to_owned(),
+                    })
+                })
+        })
+        .collect()
+}
+
+fn candidate_threshold_measurements(audit: &serde_json::Value) -> Vec<EntryGateMeasurement> {
+    [
+        (
+            "strength_floor",
+            "strength",
+            "strength_floor",
+            "strength_pass",
+        ),
+        (
+            "raw_score_floor",
+            "absolute_score",
+            "exploration_score_absolute_floor",
+            "exploration_score_pass",
+        ),
+    ]
+    .into_iter()
+    .filter_map(|(gate_id, observed_key, required_key, check_key)| {
+        let observed = audit["observed"][observed_key].as_f64()?;
+        let required = audit["thresholds"][required_key].as_f64()?;
+        let passed = audit["checks"][check_key].as_bool()?;
+        Some(EntryGateMeasurement {
+            gate_id: gate_id.into(),
+            observed: Some(observed),
+            operator: Some(">=".into()),
+            required: Some(required),
+            unit: None,
+            status: if passed { "passed" } else { "failed" }.into(),
+            detail: format!("observed {observed:.6}; required at least {required:.6}"),
+        })
+    })
+    .collect()
+}
+
+fn recompute_entry_candidate_gate_counts(diagnostic: &mut LatestEntryDiagnostic) {
+    let mut counts = BTreeMap::<(String, String, Option<String>), u64>::new();
+    for candidate in &diagnostic.candidate_details {
+        let mut gates = BTreeSet::new();
+        if candidate.checks["strength_pass"] == false {
+            gates.insert("strength_floor");
+        }
+        if candidate.checks["exploration_score_pass"] == false {
+            gates.insert("raw_score_floor");
+        }
+        if candidate.checks["exploration_context_pass"] == false {
+            gates.insert("exploration_context");
+        }
+        match candidate.stage.as_str() {
+            "selection_rejected" => {
+                gates.insert("candidate_selection_gates");
+            }
+            "execution_failed" | "execution_blocked" => {
+                gates.insert("execution_or_risk_gate");
+            }
+            _ => {}
+        }
+        for gate_id in gates {
+            *counts
+                .entry((
+                    gate_id.to_owned(),
+                    candidate.symbol.clone(),
+                    candidate.strategy.clone(),
+                ))
+                .or_default() += 1;
+        }
+    }
+    diagnostic.candidate_gate_counts = counts
+        .into_iter()
+        .map(|((gate_id, symbol, strategy), count)| EntryGateCandidateCount {
+            gate_id,
+            symbol,
+            strategy,
+            count,
+        })
+        .collect();
+}
+
 async fn run_cycle_inner(
     state: &AutoTraderState,
     mut dashboard: Dashboard,
@@ -759,7 +951,7 @@ async fn run_cycle_inner(
     }
     *state.latest_missed_opportunity_bands.lock().await =
         Arc::clone(&dashboard.missed_opportunity_bands);
-    let now = SystemTime::now()
+    let timestamp_ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|_| {
             (
@@ -767,11 +959,31 @@ async fn run_cycle_inner(
                 "System clock is before Unix epoch".into(),
             )
         })?
-        .as_secs();
-    let timestamp_ms = now.saturating_mul(1_000);
+        .as_millis() as u64;
+    let now = timestamp_ms / 1_000;
+    let cycle_id = format!(
+        "autotrader-{timestamp_ms}-{}",
+        NEXT_ENTRY_CYCLE_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+    );
     let mut entry_diagnostic = LatestEntryDiagnostic {
-        cycle_id: format!("autotrader-{timestamp_ms}"),
+        cycle_id,
         timestamp_ms,
+        worker_event_ids: dashboard
+            .best
+            .iter()
+            .filter_map(|signal| {
+                signal
+                    .strategy_decision
+                    .as_ref()
+                    .and_then(|decision| decision.get("live_worker_event_id"))
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned)
+            })
+            .collect(),
+        candidate_decision_ids: Vec::new(),
+        gate_counts: Vec::new(),
+        candidate_gate_counts: Vec::new(),
+        candidate_details: Vec::new(),
         outcome: if raw_signal_count == 0 {
             EntryCycleOutcome::NoSignals
         } else {
@@ -780,6 +992,12 @@ async fn run_cycle_inner(
         raw_signal_count,
         allowed_signal_count,
         strategy_candidate_count,
+        fresh_directional_candidate_count: 0,
+        stale_candidate_count: 0,
+        non_directional_candidate_count: 0,
+        position_blocked_candidate_count: 0,
+        strategy_rejected_candidate_count: 0,
+        evidence_present_candidate_count: 0,
         eligible_candidate_count: 0,
         rejected_candidate_count: 0,
         selected_candidate_count: 0,
@@ -790,6 +1008,22 @@ async fn run_cycle_inner(
         primary_blocker: None,
         detail: String::new(),
     };
+    for signal in &mut dashboard.best {
+        let decision = signal
+            .strategy_decision
+            .get_or_insert_with(|| serde_json::json!({}));
+        if let Some(decision) = decision.as_object_mut() {
+            decision.insert(
+                "entry_cycle_id".into(),
+                serde_json::json!(entry_diagnostic.cycle_id.clone()),
+            );
+        }
+    }
+    entry_diagnostic.candidate_decision_ids = dashboard
+        .best
+        .iter()
+        .map(signal_decision_id)
+        .collect();
     if let Some(result) = enforce_daily_realized_loss_limit(state).await? {
         entry_diagnostic.outcome = EntryCycleOutcome::GlobalRiskBlock;
         entry_diagnostic.primary_gate_id = Some("daily_realized_loss_limit".to_owned());
@@ -1184,6 +1418,54 @@ async fn run_cycle_inner(
         &learning_signals,
     )
     .await;
+    entry_diagnostic.candidate_details = learning_signals
+        .iter()
+        .map(|signal| {
+            let audit = candidate_entry_audit_value(
+                signal,
+                &dashboard,
+                &learning_thresholds,
+                risk_appetite,
+                "audit",
+                timestamp_ms,
+            );
+            EntryCandidateDiagnostic {
+                decision_id: signal_decision_id(signal),
+                worker_event_id: signal
+                    .strategy_decision
+                    .as_ref()
+                    .and_then(|decision| decision.get("live_worker_event_id"))
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned),
+                profile_id: signal
+                    .strategy_decision
+                    .as_ref()
+                    .and_then(|decision| {
+                        decision
+                            .get("learning_profile_id")
+                            .or_else(|| decision.get("scout_parameter_profile_id"))
+                    })
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned),
+                symbol: signal.symbol.clone(),
+                strategy: signal.strategy.clone(),
+                stage: "prepared_candidate".into(),
+                observed: audit["observed"].clone(),
+                required: audit["thresholds"].clone(),
+                checks: audit["checks"].clone(),
+                evidence_contract: audit["evidence_contract"].clone(),
+                measurements: candidate_threshold_measurements(&audit),
+                reasons: audit["rejection_reasons"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(serde_json::Value::as_str)
+                    .map(str::to_owned)
+                    .collect(),
+            }
+        })
+        .collect();
+    recompute_entry_candidate_gate_counts(&mut entry_diagnostic);
     let context_threshold_refresh_ms = threshold_refresh_started.elapsed().as_secs_f64() * 1_000.0;
     let (open_positions, strategy_positions, max_entries_per_auto_position) = {
         let settings = state.settings.lock().await;
@@ -1222,6 +1504,7 @@ async fn run_cycle_inner(
         .as_secs();
     let FreshSignalCandidates {
         fresh_directional,
+        fresh_directional_count,
         stale_signal_count,
         stalest_signal_age_seconds,
         stale_symbols,
@@ -1235,6 +1518,16 @@ async fn run_cycle_inner(
         &strategy_positions,
         max_entries_per_auto_position,
     );
+    entry_diagnostic.fresh_directional_candidate_count = fresh_directional_count;
+    entry_diagnostic.stale_candidate_count = stale_signal_count;
+    entry_diagnostic.non_directional_candidate_count = non_directional_count;
+    entry_diagnostic.position_blocked_candidate_count = position_blocked_count;
+    entry_diagnostic.strategy_rejected_candidate_count = strategy_rejected_count;
+    entry_diagnostic.evidence_present_candidate_count = entry_diagnostic
+        .candidate_details
+        .iter()
+        .filter(|candidate| candidate.checks["strategy_walk_forward_evidence_present"] == true)
+        .count();
     entry_diagnostic.eligible_candidate_count = fresh_directional.len();
     entry_diagnostic.rejected_candidate_count = strategy_rejected_count;
     if stale_signal_count > 0 {
@@ -1291,6 +1584,12 @@ async fn run_cycle_inner(
             };
             for signal in &rebalance_candidates {
                 let strategy_name = signal.strategy.as_deref().unwrap_or("unknown-strategy");
+                update_entry_candidate_diagnostic(
+                    &mut entry_diagnostic,
+                    signal,
+                    "selected_for_rebalance",
+                    None,
+                );
                 let mut sized_signal = signal.clone();
                 let decision = sized_signal
                     .strategy_decision
@@ -1334,6 +1633,12 @@ async fn run_cycle_inner(
                 {
                     Ok(result) => result,
                     Err((status, error)) => {
+                        update_entry_candidate_diagnostic(
+                            &mut entry_diagnostic,
+                            signal,
+                            "execution_failed",
+                            Some(&error),
+                        );
                         entry_diagnostic.order_attempt_count = entry_diagnostic
                             .order_attempt_count
                             .saturating_add(1);
@@ -1348,12 +1653,24 @@ async fn run_cycle_inner(
                     .order_attempt_count
                     .saturating_add(1);
                 if result.status == "order_submitting" {
+                    update_entry_candidate_diagnostic(
+                        &mut entry_diagnostic,
+                        signal,
+                        "order_queued",
+                        None,
+                    );
                     submitted += 1;
                     entry_diagnostic.submitted_order_count = entry_diagnostic
                         .submitted_order_count
                         .saturating_add(1);
                     last_order = Some(result);
                 } else {
+                    update_entry_candidate_diagnostic(
+                        &mut entry_diagnostic,
+                        signal,
+                        "execution_blocked",
+                        result.reason.as_deref(),
+                    );
                     entry_diagnostic.rejected_candidate_count = entry_diagnostic
                         .rejected_candidate_count
                         .saturating_add(1);
@@ -1476,6 +1793,12 @@ async fn run_cycle_inner(
                 let reason = rejection_details.map_or_else(
                     || cycle_reason.clone(),
                     |details| format!("{cycle_reason}; candidate checks: {details}"),
+                );
+                update_entry_candidate_diagnostic(
+                    &mut entry_diagnostic,
+                    &audited_candidate,
+                    "selection_rejected",
+                    Some(&reason),
                 );
                 let strategy = audited_candidate
                     .strategy
@@ -1600,6 +1923,12 @@ async fn run_cycle_inner(
     }) {
         let strategy = candidate.strategy.as_deref().unwrap_or("unknown-strategy");
         let reason = format!("Not selected this cycle; another candidate ranked higher");
+        update_entry_candidate_diagnostic(
+            &mut entry_diagnostic,
+            candidate,
+            "not_selected",
+            Some(&reason),
+        );
         queue_strategy_rejection_audit(
             state,
             candidate,
@@ -1612,6 +1941,7 @@ async fn run_cycle_inner(
         );
     }
     let signal_selection_ms = selection_started.elapsed().as_secs_f64() * 1000.0;
+    update_entry_candidate_diagnostic(&mut entry_diagnostic, &signal, "selected", None);
     let mut audited_signal = signal.clone();
     audited_signal.entry_gate = Some(candidate_entry_audit_value(
         &signal,
@@ -1634,6 +1964,16 @@ async fn run_cycle_inner(
         now,
     )
     .await?;
+    update_entry_candidate_diagnostic(
+        &mut entry_diagnostic,
+        &signal,
+        if signal_result.status == "order_submitting" {
+            "order_queued"
+        } else {
+            "execution_blocked"
+        },
+        signal_result.reason.as_deref(),
+    );
     entry_diagnostic.selected_candidate_count = entry_diagnostic
         .selected_candidate_count
         .saturating_add(1);
@@ -1732,6 +2072,21 @@ mod parallel_daily_cycle_tests {
                 "strategy_entry_gate"
             )
         ));
+    }
+
+    #[test]
+    fn gate_measurement_parser_preserves_observed_required_values_and_units() {
+        let measurements = parse_reported_gate_measurements(
+            "execution_blocked",
+            "estimated impact 20 bps > 10 bps; lower 95% bound -0.120% requires > 0.000%",
+        );
+        assert_eq!(measurements.len(), 2);
+        assert_eq!(measurements[0].observed, Some(20.0));
+        assert_eq!(measurements[0].required, Some(10.0));
+        assert_eq!(measurements[0].unit.as_deref(), Some("bps"));
+        assert_eq!(measurements[1].observed, Some(-0.12));
+        assert_eq!(measurements[1].required, Some(0.0));
+        assert_eq!(measurements[1].unit.as_deref(), Some("%"));
     }
 
     fn signal(strategy: &str) -> Signal {

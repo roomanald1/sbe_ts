@@ -105,6 +105,32 @@ impl RSocket for AutoTraderResponder {
                         detail: "AutoTrader decision handler is unavailable".into(),
                     },
                 },
+                strategy::LiveStrategySocketRequest::ReportDiagnostic(diagnostic) => {
+                    match &self.1 {
+                        Some(socket_api) => match socket_api
+                            .report_worker_diagnostic(diagnostic)
+                            .await
+                        {
+                            Ok(status) if (200..300).contains(&status) => {
+                                strategy::LiveStrategySocketResponse::DecisionAccepted {
+                                    status,
+                                    detail: None,
+                                }
+                            }
+                            Ok(status) => strategy::LiveStrategySocketResponse::Rejected {
+                                status,
+                                detail: "AutoTrader rejected the worker diagnostic".into(),
+                            },
+                            Err((status, detail)) => {
+                                strategy::LiveStrategySocketResponse::Rejected { status, detail }
+                            }
+                        },
+                        None => strategy::LiveStrategySocketResponse::Rejected {
+                            status: StatusCode::SERVICE_UNAVAILABLE.as_u16(),
+                            detail: "AutoTrader worker diagnostic handler is unavailable".into(),
+                        },
+                    }
+                }
                 strategy::LiveStrategySocketRequest::UpdateLearningSnapshot(snapshot) => {
                     match &self.1 {
                         Some(socket_api) => {

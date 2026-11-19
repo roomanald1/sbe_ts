@@ -203,6 +203,7 @@ type StrategyGateDecision = {
   primary_metric_value?: number | null;
   primary_metric_unit?: string | null;
   primary_distance_percent?: number | null;
+  primary_distance_unit?: string | null;
   primary_passed?: boolean;
   secondary_rule?: string | null;
   secondary_level?: number | null;
@@ -308,8 +309,9 @@ type StrategySymbolDiagnostic = {
   }>;
   eligible: boolean;
   primary_rule: string;
-  primary_level: number;
-  primary_distance_percent: number;
+  primary_level: number | null;
+  primary_distance_percent: number | null;
+  primary_distance_unit?: string | null;
   primary_metric_value?: number | null;
   primary_metric_unit?: string | null;
   primary_passed: boolean;

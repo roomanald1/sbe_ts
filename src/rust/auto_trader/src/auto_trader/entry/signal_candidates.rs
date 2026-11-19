@@ -390,6 +390,7 @@ fn collect_signal_candidates<'a>(
     let mut stale_symbols = Vec::new();
     let mut non_directional_count = 0;
     let mut position_blocked_count = 0;
+    let mut fresh_directional_count = 0;
     let mut position_block_details = Vec::new();
     let fresh_directional = signals
         .iter()
@@ -414,6 +415,7 @@ fn collect_signal_candidates<'a>(
                 }
                 return false;
             }
+            fresh_directional_count += 1;
             let block_reason = signal_candidate_position_block_reason(
                 signal, open_positions, strategy_positions, max_entries_per_auto_position,
             );
@@ -435,6 +437,7 @@ fn collect_signal_candidates<'a>(
         .collect::<Vec<_>>();
     FreshSignalCandidates {
         fresh_directional,
+        fresh_directional_count,
         stale_signal_count,
         stalest_signal_age_seconds,
         stale_symbols,

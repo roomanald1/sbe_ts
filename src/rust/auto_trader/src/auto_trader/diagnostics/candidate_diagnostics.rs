@@ -49,11 +49,21 @@ fn candidate_entry_audit_value(
         learning_thresholds,
         risk_appetite,
     );
-    let failures = if selection_mode == "rejected" {
+    let failures = if matches!(selection_mode, "rejected" | "audit") {
         candidate_entry_failures(candidate, &review)
     } else {
         Vec::new()
     };
+    let evidence_contract = candidate
+        .strategy_decision
+        .as_ref()
+        .and_then(|decision| {
+            decision
+                .get("strategy_walk_forward")
+                .or_else(|| decision.get("walk_forward_evidence"))
+        })
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
     serde_json::json!({
         "selection_mode": selection_mode,
         "market_context": review.context,
@@ -72,6 +82,7 @@ fn candidate_entry_audit_value(
             "exploration_score_pass": !review.score_weak,
             "exploration_context_pass": !review.mixed_context,
         },
+        "evidence_contract": evidence_contract,
         "rejection_reasons": failures,
     })
 }

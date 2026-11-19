@@ -32,12 +32,60 @@ export function LearningScoutActivityWidget() {
   }, [model]);
   const state = useBehaviorSnapshot(model.state$);
   const rows = state.rows;
+  const profiles = state.profiles;
 
   return (
     <section
       className="auto-trader-strategy-parameters learning-scout-activity"
       aria-label="Learning Scout activity"
     >
+      <header className="auto-trader-learning-decisions-head">
+        <strong>Configured Scout profiles</strong>
+        <small>
+          {profiles.length} symbol and strategy profiles currently supplied by
+          Auto Trader.
+        </small>
+      </header>
+      {state.profilesError && (
+        <p className="auto-trader-learning-error" role="alert">
+          Could not load Scout profiles: {state.profilesError}
+        </p>
+      )}
+      {!state.loading && !state.profilesError && profiles.length === 0 && (
+        <p>No Scout profiles are currently configured.</p>
+      )}
+      {profiles.length > 0 && (
+        <div className="auto-trader-learning-decisions-table-wrap">
+          <table className="auto-trader-learning-decisions-table">
+            <thead>
+              <tr>
+                <th>Profile</th>
+                <th>Symbol</th>
+                <th>Strategy</th>
+                <th>Parameters</th>
+                <th>Learning samples</th>
+              </tr>
+            </thead>
+            <tbody>
+              {profiles.map((profile) => {
+                const parameters =
+                  profile.parameters
+                    .map((parameter) => `${parameter.key}: ${parameter.value}`)
+                    .join(' · ') || 'Default parameters';
+                return (
+                  <tr key={`${profile.symbol}:${profile.strategy}`}>
+                    <td>{`${profile.symbol} · ${profile.strategy}`}</td>
+                    <td>{profile.symbol}</td>
+                    <td>{profile.strategy}</td>
+                    <td title={parameters}>{parameters}</td>
+                    <td>{profile.learning_samples}</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
       <header className="auto-trader-learning-decisions-head">
         <strong>Learning Scout runs and rankings</strong>
         <small>
@@ -59,8 +107,8 @@ export function LearningScoutActivityWidget() {
       )}
       {!state.loading && !state.error && rows.length === 0 && (
         <p>
-          No Learning Scout evaluations have been recorded since this service
-          started.
+          No recent Scout evaluations have been recorded since this service
+          started. The configured profiles above are available for scouting.
         </p>
       )}
       {rows.length > 0 && (

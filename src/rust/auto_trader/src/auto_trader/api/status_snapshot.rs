@@ -20,6 +20,26 @@ fn diagnostic_strategy_blocker(diagnostic: &StrategyDiagnostic) -> Option<Strate
             if !item.evaluated || item.signal_active {
                 return None;
             }
+            if diagnostic.strategy == "relative-strength-90-sma200"
+                && item.secondary_passed == Some(false)
+            {
+                let rule = item.secondary_rule.as_deref().unwrap_or("Own SMA200 gate");
+                let threshold = item
+                    .secondary_level
+                    .map(|value| format!("{value:.8}"))
+                    .unwrap_or_else(|| "unavailable".to_owned());
+                let distance = item
+                    .secondary_distance_percent
+                    .map(|value| format!("{value:.2}%"))
+                    .unwrap_or_else(|| "unavailable".to_owned());
+                return Some((
+                    item.symbol.clone(),
+                    format!(
+                        "{rule} not met: close {:.8}, threshold {threshold}; distance {distance}",
+                        item.close
+                    ),
+                ));
+            }
             if !item.eligible {
                 return Some((
                     item.symbol.clone(),
@@ -32,15 +52,27 @@ fn diagnostic_strategy_blocker(diagnostic: &StrategyDiagnostic) -> Option<Strate
                     .primary_metric_value
                     .map(|value| format!("{value:.2} {unit}"))
                     .unwrap_or_else(|| "unavailable".to_owned());
+                let threshold = item
+                    .primary_level
+                    .map(|value| format!("{value:.2} {unit}"))
+                    .unwrap_or_else(|| "unavailable".to_owned());
+                let distance = item
+                    .primary_distance_percent
+                    .map(|value| {
+                        format!(
+                            "{value:.2} {}",
+                            item.primary_distance_unit.as_deref().unwrap_or("%")
+                        )
+                    })
+                    .unwrap_or_else(|| "unavailable".to_owned());
                 return Some((
                     item.symbol.clone(),
                     format!(
-                        "{} not met: observed {}, threshold {:.2} {}; distance {:.2}%",
+                        "{} not met: observed {}, threshold {}; distance {}",
                         item.primary_rule,
                         observed,
-                        item.primary_level,
-                        unit,
-                        item.primary_distance_percent
+                        threshold,
+                        distance,
                     ),
                 ));
             }
@@ -87,8 +119,9 @@ mod strategy_blocker_tests {
                 close: 90.0,
                 eligible: true,
                 primary_rule: "price above SMA50".to_owned(),
-                primary_level: 100.0,
-                primary_distance_percent: -10.0,
+                primary_level: Some(100.0),
+                primary_distance_percent: Some(-10.0),
+                primary_distance_unit: Some("%".to_owned()),
                 primary_metric_value: Some(90.0),
                 primary_metric_unit: Some("price".to_owned()),
                 primary_passed: false,
@@ -123,8 +156,10 @@ fn status(state: &AutoTraderState, settings: &Settings) -> StatusResponse {
     if let Ok(mut summary) = state.gap_summary.lock() {
         let day = utc_day();
         if summary.utc_day != day {
+            let entry_diagnostic_history = std::mem::take(&mut summary.entry_diagnostic_history);
             *summary = GapSummary {
                 utc_day: day,
+                entry_diagnostic_history,
                 ..GapSummary::default()
             };
         }
@@ -330,6 +365,11 @@ fn status(state: &AutoTraderState, settings: &Settings) -> StatusResponse {
             .lock()
             .ok()
             .and_then(|summary| summary.latest_entry_diagnostic.clone()),
+        entry_diagnostic_history: state
+            .gap_summary
+            .lock()
+            .map(|summary| summary.entry_diagnostic_history.clone())
+            .unwrap_or_default(),
         latest_symbol_entry_results: {
             let reports = state
                 .latest_worker_decisions
@@ -341,10 +381,16 @@ fn status(state: &AutoTraderState, settings: &Settings) -> StatusResponse {
                         .filter(|report| settings.strategies.contains(&report.strategy))
                         .map(|report| {
                             (
-                                (report.strategy.as_str().to_owned(), report.symbol.clone()),
+                                (
+                                    report.strategy.as_str().to_owned(),
+                                    report.symbol.clone(),
+                                    report.profile_id.clone(),
+                                ),
                                 SymbolEntryResult {
                                     strategy: report.strategy.as_str().to_owned(),
                                     symbol: report.symbol.clone(),
+                                    profile_id: Some(report.profile_id.clone()),
+                                    event_id: Some(report.event_id.clone()),
                                     decision: Some(report.decision),
                                     reason: report.reason.clone().unwrap_or_default(),
                                     timestamp_ms: Some(report.event_time_ms),
@@ -355,21 +401,77 @@ fn status(state: &AutoTraderState, settings: &Settings) -> StatusResponse {
                 })
                 .unwrap_or_default();
             let mut results = reports;
+            let diagnostics = state
+                .latest_worker_diagnostics
+                .try_lock()
+                .ok()
+                .map(|diagnostics| diagnostics.values().cloned().collect::<Vec<_>>())
+                .unwrap_or_default();
+            for diagnostic in diagnostics {
+                let key = (
+                    diagnostic.strategy.as_str().to_owned(),
+                    diagnostic.symbol.clone(),
+                    diagnostic.profile_id.clone().unwrap_or_default(),
+                );
+                if now_ms.saturating_sub(diagnostic.event_time_ms) > 10 * 60_000 {
+                    continue;
+                }
+                let newer_decision_exists = results
+                    .get(&key)
+                    .and_then(|result| result.timestamp_ms)
+                    .is_some_and(|timestamp| timestamp >= diagnostic.event_time_ms);
+                if !newer_decision_exists {
+                    results.insert(
+                        key,
+                        SymbolEntryResult {
+                            strategy: diagnostic.strategy.as_str().to_owned(),
+                            symbol: diagnostic.symbol,
+                            profile_id: diagnostic.profile_id,
+                            event_id: Some(diagnostic.event_id),
+                            decision: None,
+                            reason: diagnostic.reason,
+                            timestamp_ms: Some(diagnostic.event_time_ms),
+                        },
+                    );
+                }
+            }
             for kind in Strategy::live_strategies() {
                 let enabled = settings.strategies.contains(&kind);
                 for symbol in strategy::autotrader_allowed_symbols() {
-                    let key = (kind.as_str().to_owned(), (*symbol).to_owned());
-                    results.entry(key).or_insert_with(|| SymbolEntryResult {
-                        strategy: kind.as_str().to_owned(),
-                        symbol: (*symbol).to_owned(),
-                        decision: None,
-                        reason: if enabled {
-                            "No worker result recorded".to_owned()
-                        } else {
-                            "Strategy disabled".to_owned()
-                        },
-                        timestamp_ms: None,
-                    });
+                    let configured_profiles = settings
+                        .active_live_strategy_profiles
+                        .get(kind.as_str())
+                        .map(|profiles| {
+                            profiles
+                                .iter()
+                                .filter(|profile| profile.profile_symbol == *symbol)
+                                .map(|profile| profile.profile_id.clone())
+                                .collect::<Vec<_>>()
+                        })
+                        .filter(|profiles| !profiles.is_empty())
+                        .unwrap_or_else(|| {
+                            vec![live_profile_for_symbol(&settings, symbol, kind).profile_id]
+                        });
+                    for profile_id in configured_profiles {
+                        let key = (
+                            kind.as_str().to_owned(),
+                            (*symbol).to_owned(),
+                            profile_id.clone(),
+                        );
+                        results.entry(key).or_insert_with(|| SymbolEntryResult {
+                            strategy: kind.as_str().to_owned(),
+                            symbol: (*symbol).to_owned(),
+                            profile_id: Some(profile_id),
+                            event_id: None,
+                            decision: None,
+                            reason: if enabled {
+                                "No worker decision or skip report received for this profile".to_owned()
+                            } else {
+                                "Strategy disabled".to_owned()
+                            },
+                            timestamp_ms: None,
+                        });
+                    }
                 }
             }
             results.into_values().collect()

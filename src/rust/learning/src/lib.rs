@@ -41,7 +41,8 @@ use feedback::*;
 use profiles::*;
 pub use scout_coordinator::ScoutCoordinator;
 pub use scout_replay_config::{
-    ScoutReplaySelectionObjective, ScoutReplayTrainingWindow, ScoutWalkForwardReplayConfig,
+    ScoutReplayBootstrapMethod, ScoutReplaySelectionObjective, ScoutReplayTrainingWindow,
+    ScoutWalkForwardReplayConfig,
 };
 use thresholds::*;
 use walk_forward_statistics::*;
@@ -140,6 +141,8 @@ struct LearningState {
     strategy_replay_jobs: BTreeMap<String, StrategyReplayJob>,
     #[serde(default)]
     missed_opportunity_jobs: BTreeMap<String, MissedOpportunityJob>,
+    #[serde(default)]
+    scout_replay_runs: BTreeMap<String, serde_json::Value>,
     seen_event_ids: BTreeSet<String>,
     accepted_events: u64,
     #[serde(skip)]
@@ -184,6 +187,7 @@ impl Default for LearningState {
             exit_timing_observations: BTreeMap::new(),
             strategy_replay_jobs: BTreeMap::new(),
             missed_opportunity_jobs: BTreeMap::new(),
+            scout_replay_runs: BTreeMap::new(),
             seen_event_ids: BTreeSet::new(),
             accepted_events: 0,
             outcome_history_truncated: false,
@@ -523,6 +527,7 @@ fn open_state_db(path: &Path) -> Result<rusqlite::Connection, String> {
              CREATE TABLE IF NOT EXISTS learning_seen_execution_event_ids (id TEXT PRIMARY KEY);
              CREATE TABLE IF NOT EXISTS learning_exit_timing_observations (id TEXT PRIMARY KEY, payload TEXT NOT NULL);
              CREATE TABLE IF NOT EXISTS learning_strategy_replay_jobs (id TEXT PRIMARY KEY, payload TEXT NOT NULL);
+             CREATE TABLE IF NOT EXISTS learning_scout_replay_runs (id TEXT PRIMARY KEY, payload TEXT NOT NULL);
              CREATE TABLE IF NOT EXISTS learning_missed_opportunity_jobs (id TEXT PRIMARY KEY, payload TEXT NOT NULL);
              CREATE TABLE IF NOT EXISTS learning_missed_opportunity_bands (id INTEGER PRIMARY KEY, payload TEXT NOT NULL);",
         )
@@ -908,6 +913,11 @@ fn load_state(path: &Path) -> Result<LearningState, String> {
         )?;
         load_map(
             &connection,
+            "learning_scout_replay_runs",
+            &mut state.scout_replay_runs,
+        )?;
+        load_map(
+            &connection,
             "learning_missed_opportunity_jobs",
             &mut state.missed_opportunity_jobs,
         )?;
@@ -1068,6 +1078,11 @@ pub(crate) fn persist_normalized(
         &transaction,
         "learning_strategy_replay_jobs",
         &state.strategy_replay_jobs,
+    )?;
+    write_map(
+        &transaction,
+        "learning_scout_replay_runs",
+        &state.scout_replay_runs,
     )?;
     write_map(
         &transaction,

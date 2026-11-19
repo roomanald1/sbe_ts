@@ -655,6 +655,7 @@ pub fn router_with_socket() -> (Router, AutoTraderSocketApi) {
         strategy_diagnostic: Arc::new(std::sync::Mutex::new(Vec::new())),
         latest_strategy_blockers: Arc::new(std::sync::Mutex::new(BTreeMap::new())),
         latest_worker_decisions: Arc::new(Mutex::new(BTreeMap::new())),
+        latest_worker_diagnostics: Arc::new(Mutex::new(BTreeMap::new())),
         seen_worker_decision_events: Arc::new(Mutex::new(BTreeMap::new())),
         enabled: Arc::new(AtomicBool::new(enabled)),
         settings: Arc::new(Mutex::new(settings)),
@@ -910,6 +911,10 @@ pub fn router_with_socket() -> (Router, AutoTraderSocketApi) {
         .route(
             "/internal/strategy/daily-scan-parameters",
             get(get_daily_strategy_parameters),
+        )
+        .route(
+            "/internal/strategy/daily-diagnostics",
+            axum::routing::post(update_daily_strategy_diagnostics),
         )
         .route(
             "/positions/auto-trader/missed-opportunity-bands",
@@ -1211,6 +1216,7 @@ async fn receive_strategy_decision(
         report.event_id.clone(),
         report.symbol.clone(),
         report.strategy.as_str().to_owned(),
+        report.profile_id.clone(),
     );
     let mut selected = state.seen_worker_decision_events.lock().await;
     selected.retain(|_, timestamp| now_ms.saturating_sub(*timestamp) <= 60_000);
@@ -1228,7 +1234,12 @@ async fn receive_strategy_decision(
     }
     selected.insert(event_key, now_ms);
     drop(selected);
-    let decision_key = (report.symbol.clone(), report.strategy.as_str().to_owned());
+    let decision_key = (
+        report.symbol.clone(),
+        report.strategy.as_str().to_owned(),
+        report.profile_id.clone(),
+    );
+    let signal_key = (report.symbol.clone(), report.strategy.as_str().to_owned());
     {
         let mut decisions = state.latest_worker_decisions.lock().await;
         decisions
@@ -1245,13 +1256,22 @@ async fn receive_strategy_decision(
         decisions.insert(decision_key.clone(), report.clone());
     }
     {
+        let mut diagnostics = state.latest_worker_diagnostics.lock().await;
+        if diagnostics
+            .get(&decision_key)
+            .is_some_and(|diagnostic| diagnostic.event_time_ms <= report.event_time_ms)
+        {
+            diagnostics.remove(&decision_key);
+        }
+    }
+    {
         let mut signals = state.latest_live_strategy_signals.lock().await;
-        if signals.len() >= 512 && !signals.contains_key(&decision_key) {
+        if signals.len() >= 512 && !signals.contains_key(&signal_key) {
             if let Some(oldest) = signals.keys().next().cloned() {
                 signals.remove(&oldest);
             }
         }
-        signals.insert(decision_key, vec![report.signal.clone()]);
+        signals.insert(signal_key, vec![report.signal.clone()]);
     }
     if report.decision != strategy::LiveStrategyDecision::Enter {
         if report.decision == strategy::LiveStrategyDecision::Reject {
@@ -1422,6 +1442,99 @@ async fn receive_strategy_decision(
             max_pending_live_signal_items(),
         );
         state.live_signal_notify.notify_one();
+    }
+    Ok(StatusCode::ACCEPTED)
+}
+
+async fn receive_strategy_worker_diagnostic(
+    State(state): State<AutoTraderState>,
+    Json(diagnostic): Json<strategy::LiveStrategyWorkerDiagnostic>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    if !diagnostic.strategy.is_live_insight()
+        || !strategy::is_autotrader_symbol_allowed(&diagnostic.symbol)
+    {
+        return Ok(StatusCode::NO_CONTENT);
+    }
+    if diagnostic.contract_version != strategy::LIVE_EVALUATION_CONTRACT_VERSION
+        || diagnostic.event_id.is_empty()
+        || diagnostic.reason.trim().is_empty()
+        || diagnostic.reason.len() > 512
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Invalid live worker diagnostic".into(),
+        ));
+    }
+    let now_ms = current_time_ms();
+    if now_ms.saturating_sub(diagnostic.event_time_ms) > 10_000
+        || diagnostic.event_time_ms > now_ms + 5_000
+    {
+        return Err((
+            StatusCode::CONFLICT,
+            "Live worker diagnostic is stale".into(),
+        ));
+    }
+    let (enabled, profile_is_known) = {
+        let settings = state.settings.lock().await;
+        let enabled = settings.strategies.contains(&diagnostic.strategy);
+        let profile_is_known = diagnostic.profile_id.as_ref().is_none_or(|profile_id| {
+            build_live_strategy_profile_set(
+                &settings,
+                state.enabled.load(Ordering::Relaxed),
+                diagnostic.strategy,
+            )
+            .profiles
+            .iter()
+            .any(|profile| &profile.profile_id == profile_id)
+        });
+        (enabled, profile_is_known)
+    };
+    if !enabled {
+        return Ok(StatusCode::NO_CONTENT);
+    }
+    if !profile_is_known {
+        return Err((
+            StatusCode::CONFLICT,
+            "Live worker diagnostic profile is no longer enabled".into(),
+        ));
+    }
+
+    let key = (
+        diagnostic.symbol.clone(),
+        diagnostic.strategy.as_str().to_owned(),
+        diagnostic.profile_id.clone().unwrap_or_default(),
+    );
+    let mut diagnostics = state.latest_worker_diagnostics.lock().await;
+    diagnostics.retain(|_, previous| {
+        now_ms.saturating_sub(previous.event_time_ms) <= 10 * 60_000
+    });
+    if state
+        .latest_worker_decisions
+        .lock()
+        .await
+        .get(&(
+            key.0.clone(),
+            key.1.clone(),
+            key.2.clone(),
+        ))
+        .is_some_and(|report| report.event_time_ms >= diagnostic.event_time_ms)
+    {
+        return Ok(StatusCode::ACCEPTED);
+    }
+    if diagnostics.len() >= 512 && !diagnostics.contains_key(&key) {
+        if let Some(oldest) = diagnostics
+            .iter()
+            .min_by_key(|(_, report)| report.event_time_ms)
+            .map(|(key, _)| key.clone())
+        {
+            diagnostics.remove(&oldest);
+        }
+    }
+    if diagnostics
+        .get(&key)
+        .is_none_or(|previous| previous.event_time_ms <= diagnostic.event_time_ms)
+    {
+        diagnostics.insert(key, diagnostic);
     }
     Ok(StatusCode::ACCEPTED)
 }

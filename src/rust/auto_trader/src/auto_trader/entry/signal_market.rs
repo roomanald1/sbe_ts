@@ -56,6 +56,7 @@ async fn load_signal_market_snapshot(
 
 struct FreshSignalCandidates<'a> {
     fresh_directional: Vec<&'a Signal>,
+    fresh_directional_count: usize,
     stale_signal_count: usize,
     stalest_signal_age_seconds: u64,
     stale_symbols: Vec<String>,

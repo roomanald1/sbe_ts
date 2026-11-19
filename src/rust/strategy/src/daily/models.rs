@@ -21,8 +21,10 @@ pub struct StrategySymbolDiagnostic {
     pub close: f64,
     pub eligible: bool,
     pub primary_rule: String,
-    pub primary_level: f64,
-    pub primary_distance_percent: f64,
+    pub primary_level: Option<f64>,
+    pub primary_distance_percent: Option<f64>,
+    #[serde(default)]
+    pub primary_distance_unit: Option<String>,
     pub primary_metric_value: Option<f64>,
     pub primary_metric_unit: Option<String>,
     pub primary_passed: bool,

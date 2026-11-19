@@ -48,10 +48,21 @@ mod cycle_result_helper_tests {
             LatestEntryDiagnostic {
                 cycle_id: "cycle-1".into(),
                 timestamp_ms: 123,
+                worker_event_ids: vec!["worker-event-1".into()],
+                candidate_decision_ids: vec!["decision-1".into()],
+                gate_counts: vec![],
+                candidate_gate_counts: vec![],
+                candidate_details: vec![],
                 outcome: EntryCycleOutcome::CandidatesRejected,
                 raw_signal_count: 5,
                 allowed_signal_count: 5,
                 strategy_candidate_count: 2,
+                fresh_directional_candidate_count: 3,
+                stale_candidate_count: 1,
+                non_directional_candidate_count: 1,
+                position_blocked_candidate_count: 1,
+                strategy_rejected_candidate_count: 1,
+                evidence_present_candidate_count: 2,
                 eligible_candidate_count: 2,
                 rejected_candidate_count: 2,
                 selected_candidate_count: 0,
@@ -67,6 +78,9 @@ mod cycle_result_helper_tests {
         let diagnostic = &payload["entry_diagnostic"];
         assert_eq!(diagnostic["outcome"], "candidates_rejected");
         assert_eq!(diagnostic["strategyCandidateCount"], 2);
+        assert_eq!(diagnostic["freshDirectionalCandidateCount"], 3);
+        assert_eq!(diagnostic["positionBlockedCandidateCount"], 1);
+        assert_eq!(diagnostic["evidencePresentCandidateCount"], 2);
         assert_eq!(diagnostic["primaryGateId"], "candidate_selection_gates");
         assert_eq!(diagnostic["primaryBlocker"], "walk_forward_expectancy_not_proven");
         assert_eq!(diagnostic["detail"], "lower 95% bound -0.120% requires > 0%");
@@ -77,6 +91,8 @@ mod cycle_result_helper_tests {
         let result = SymbolEntryResult {
             strategy: "live-momentum".into(),
             symbol: "ADA-USDT".into(),
+            profile_id: Some("profile-1".into()),
+            event_id: Some("event-1".into()),
             decision: Some(strategy::LiveStrategyDecision::Reject),
             reason: "Strength 0.111 < 0.300".into(),
             timestamp_ms: Some(123),
@@ -84,6 +100,8 @@ mod cycle_result_helper_tests {
         let payload = serde_json::to_value(result).unwrap();
         assert_eq!(payload["strategy"], "live-momentum");
         assert_eq!(payload["symbol"], "ADA-USDT");
+        assert_eq!(payload["profile_id"], "profile-1");
+        assert_eq!(payload["event_id"], "event-1");
         assert_eq!(payload["decision"], "reject");
         assert_eq!(payload["reason"], "Strength 0.111 < 0.300");
         assert_eq!(payload["timestamp_ms"], 123);
@@ -94,6 +112,8 @@ mod cycle_result_helper_tests {
         let result = SymbolEntryResult {
             strategy: "live-momentum".into(),
             symbol: "ADA-USDT".into(),
+            profile_id: None,
+            event_id: None,
             decision: None,
             reason: "No worker result recorded".into(),
             timestamp_ms: None,

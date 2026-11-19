@@ -396,6 +396,8 @@ pub struct ScoutSearchCandidateRecord {
     pub stage: String,
     pub selection_result: String,
     #[serde(default)]
+    pub selection_reasons: Vec<String>,
+    #[serde(default)]
     pub effective_sample_size: Option<f64>,
     #[serde(default)]
     pub selection_metric_value: Option<f64>,

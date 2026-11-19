@@ -17,6 +17,8 @@ import { autoTraderFetch, autoTraderRpc } from '../auto_trader_rsocket';
 import { learningRpc } from '../learning_rsocket';
 import { sharedGet } from '../shared_get';
 
+const WORKER_DECISION_STATUS_POLL_MS = 2_000;
+
 export type AutoTraderOrder = {
   timestamp: number;
   triggered_at?: number;
@@ -128,6 +130,18 @@ export type AutoTraderStrategyProfile = {
   parameters: AutoTraderStrategyParameter[];
 };
 export type WalkForwardEvidence = {
+  evidenceContractVersion?: number;
+  estimator?:
+    | 'completed_outcome_clusters'
+    | 'rolling_origin_portfolio'
+    | 'unspecified';
+  historyCoverage?: 'partial' | 'complete' | 'unknown';
+  costCoverage?: 'partial' | 'complete' | 'unknown';
+  searchFamilyCoverage?: 'partial' | 'complete' | 'unknown';
+  pointInTimeCutoffTimestampMs?: number | null;
+  finalHoldoutStatus?: 'validated' | 'failed' | 'not_validated';
+  oosFoldCount?: number;
+  spaPValue?: number | null;
   sampleCount: number;
   positiveNetRate?: number | null;
   averageNetReturnPercent?: number | null;
@@ -220,8 +234,9 @@ export type StrategyDiagnostic = {
     close: number;
     eligible: boolean;
     primary_rule: string;
-    primary_level: number;
-    primary_distance_percent: number;
+    primary_level: number | null;
+    primary_distance_percent: number | null;
+    primary_distance_unit?: string | null;
     primary_metric_value?: number | null;
     primary_metric_unit?: string | null;
     primary_passed: boolean;
@@ -244,6 +259,8 @@ export type StrategyBlocker = {
 export type SymbolEntryResult = {
   strategy: Strategy;
   symbol: string;
+  profile_id?: string | null;
+  event_id?: string | null;
   decision?: 'enter' | 'hold' | 'exit' | 'rebalance' | 'reject' | null;
   reason: string;
   timestamp_ms?: number | null;
@@ -265,6 +282,12 @@ export type LatestEntryDiagnostic = {
   rawSignalCount: number;
   allowedSignalCount: number;
   strategyCandidateCount: number;
+  freshDirectionalCandidateCount?: number;
+  staleCandidateCount?: number;
+  nonDirectionalCandidateCount?: number;
+  positionBlockedCandidateCount?: number;
+  strategyRejectedCandidateCount?: number;
+  evidencePresentCandidateCount?: number;
   eligibleCandidateCount: number;
   rejectedCandidateCount: number;
   selectedCandidateCount: number;
@@ -273,6 +296,36 @@ export type LatestEntryDiagnostic = {
   fillConfirmed: boolean;
   primaryGateId?: string | null;
   primaryBlocker?: string | null;
+  workerEventIds?: string[];
+  candidateDecisionIds?: string[];
+  gateCounts?: Array<{ gate: string; count: number }>;
+  candidateGateCounts?: Array<{
+    gateId: string;
+    symbol: string;
+    strategy?: string | null;
+    count: number;
+  }>;
+  candidateDetails?: Array<{
+    decisionId: string;
+    workerEventId?: string | null;
+    profileId?: string | null;
+    symbol: string;
+    strategy?: string | null;
+    stage: string;
+    observed: Record<string, unknown>;
+    required: Record<string, unknown>;
+    checks: Record<string, unknown>;
+    evidenceContract: Record<string, unknown> | null;
+    measurements?: Array<{
+      gateId: string;
+      observed: number;
+      comparator: string;
+      required: number;
+      unit?: string | null;
+      passed?: boolean | null;
+    }>;
+    reasons: string[];
+  }>;
   detail: string;
 };
 export type AutoTraderState = {
@@ -337,6 +390,7 @@ export type AutoTraderState = {
   }>;
   latestSignalDiagnostic: string;
   latestEntryDiagnostic: LatestEntryDiagnostic | null;
+  entryDiagnosticHistory: LatestEntryDiagnostic[];
   latestSymbolEntryResults: SymbolEntryResult[];
   strategyDiagnostics: StrategyDiagnostic[];
   latestStrategyBlockers: StrategyBlocker[];
@@ -480,6 +534,7 @@ type TraderStatus = {
   }>;
   latest_signal_diagnostic?: string;
   latest_entry_diagnostic?: LatestEntryDiagnostic | null;
+  entry_diagnostic_history?: LatestEntryDiagnostic[];
   latest_symbol_entry_results?: SymbolEntryResult[];
   strategy_diagnostics?: StrategyDiagnostic[];
   latest_strategy_blockers?: StrategyBlocker[];
@@ -540,6 +595,7 @@ export class AutoTraderModel {
     symbolGateHits: [],
     latestSignalDiagnostic: '',
     latestEntryDiagnostic: null,
+    entryDiagnosticHistory: [],
     latestSymbolEntryResults: [],
     strategyDiagnostics: [],
     latestStrategyBlockers: [],
@@ -590,12 +646,14 @@ export class AutoTraderModel {
     strategyParameterOverrides: {},
   });
   private timer?: ReturnType<typeof setInterval>;
+  private workerDecisionStatusTimer?: ReturnType<typeof setInterval>;
   private startUsers = 0;
   private limitsDirty = false;
   private categoryLimitsDirty = false;
   private executionParametersDirty = false;
   private strategyParametersDirty = false;
   private refreshInFlight = false;
+  private workerDecisionStatusRefreshInFlight = false;
   private usdRates: Record<string, number> = {};
   private stopPositionStream?: () => void;
   private stopAutoTraderStream?: () => void;
@@ -682,12 +740,19 @@ export class AutoTraderModel {
       if (!isAutoTraderSnapshotFresh(this.autoTraderSnapshotAt))
         void this.refresh();
     }, 30_000);
+    void this.refreshWorkerDecisionStatus();
+    this.workerDecisionStatusTimer = setInterval(() => {
+      void this.refreshWorkerDecisionStatus();
+    }, WORKER_DECISION_STATUS_POLL_MS);
   }
   stop() {
     this.startUsers = Math.max(0, this.startUsers - 1);
     if (this.startUsers > 0) return;
     if (this.timer) clearInterval(this.timer);
     this.timer = undefined;
+    if (this.workerDecisionStatusTimer)
+      clearInterval(this.workerDecisionStatusTimer);
+    this.workerDecisionStatusTimer = undefined;
     if (this.streamRefreshTimer) clearTimeout(this.streamRefreshTimer);
     this.streamRefreshTimer = undefined;
     this.stopPositionStream?.();
@@ -1222,6 +1287,7 @@ export class AutoTraderModel {
           })) ?? [],
         latestSignalDiagnostic: status.latest_signal_diagnostic ?? '',
         latestEntryDiagnostic: status.latest_entry_diagnostic ?? null,
+        entryDiagnosticHistory: status.entry_diagnostic_history ?? [],
         latestSymbolEntryResults: status.latest_symbol_entry_results ?? [],
         strategyDiagnostics: status.strategy_diagnostics ?? [],
         latestStrategyBlockers: status.latest_strategy_blockers ?? [],
@@ -1420,6 +1486,73 @@ export class AutoTraderModel {
       this.lastStreamRefreshAt = Date.now();
       void this.refresh();
     }, delay);
+  }
+
+  private async refreshWorkerDecisionStatus() {
+    if (this.workerDecisionStatusRefreshInFlight) return;
+    this.workerDecisionStatusRefreshInFlight = true;
+    try {
+      const response = await autoTraderRpc('GET', '/positions/auto-trader');
+      if (!response.ok) return;
+      const status = (await response.json()) as Pick<
+        TraderStatus,
+        'latest_symbol_entry_results' | 'latest_strategy_blockers'
+      >;
+      const current = this.state$.value;
+      const resultsChanged =
+        status.latest_symbol_entry_results?.some((result, index) => {
+          const previous = current.latestSymbolEntryResults[index];
+          return (
+            !previous ||
+            result.strategy !== previous.strategy ||
+            result.symbol !== previous.symbol ||
+            result.profile_id !== previous.profile_id ||
+            result.event_id !== previous.event_id ||
+            result.decision !== previous.decision ||
+            result.reason !== previous.reason ||
+            result.timestamp_ms !== previous.timestamp_ms
+          );
+        }) ?? false;
+      const resultCountChanged =
+        status.latest_symbol_entry_results !== undefined &&
+        status.latest_symbol_entry_results.length !==
+          current.latestSymbolEntryResults.length;
+      const blockersChanged =
+        status.latest_strategy_blockers?.some((blocker, index) => {
+          const previous = current.latestStrategyBlockers[index];
+          return (
+            !previous ||
+            blocker.strategy !== previous.strategy ||
+            blocker.symbol !== previous.symbol ||
+            blocker.reason !== previous.reason ||
+            blocker.timestamp_ms !== previous.timestamp_ms
+          );
+        }) ?? false;
+      const blockerCountChanged =
+        status.latest_strategy_blockers !== undefined &&
+        status.latest_strategy_blockers.length !==
+          current.latestStrategyBlockers.length;
+      if (
+        !resultsChanged &&
+        !resultCountChanged &&
+        !blockersChanged &&
+        !blockerCountChanged
+      )
+        return;
+      this.state$.next({
+        ...current,
+        latestSymbolEntryResults:
+          status.latest_symbol_entry_results ??
+          current.latestSymbolEntryResults,
+        latestStrategyBlockers:
+          status.latest_strategy_blockers ?? current.latestStrategyBlockers,
+      });
+    } catch {
+      // The normal refresh path reports broader service errors; retry this
+      // lightweight status request on the next two-second tick.
+    } finally {
+      this.workerDecisionStatusRefreshInFlight = false;
+    }
   }
 
   private async responseError(

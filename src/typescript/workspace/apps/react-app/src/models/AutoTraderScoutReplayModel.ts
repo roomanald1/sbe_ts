@@ -48,6 +48,7 @@ export type ScoutReplayCoverage = {
   complete: boolean;
   totalDurableRecords: number;
   returnedRecords: number;
+  hasMore: boolean;
   malformedRecords: number;
   firstEvaluatedTimestampMs: number | null;
   lastEvaluatedTimestampMs: number | null;
@@ -69,6 +70,7 @@ type ScoutReplayResponse = {
   ordering: string;
   coverage: ScoutReplayCoverage;
   outcomes: ScoutReplayOutcome[];
+  workerErrors?: Array<{ strategy: string; status: number; error: string }>;
 };
 
 type ScoutReplayState = ScoutReplayResponse & {
@@ -86,6 +88,7 @@ const emptyResponse: ScoutReplayResponse = {
     complete: false,
     totalDurableRecords: 0,
     returnedRecords: 0,
+    hasMore: false,
     malformedRecords: 0,
     firstEvaluatedTimestampMs: null,
     lastEvaluatedTimestampMs: null,
@@ -103,6 +106,7 @@ export class AutoTraderScoutReplayModel {
   private timer?: ReturnType<typeof setTimeout>;
   private consumers = 0;
   private refreshing = false;
+  private page = 0;
 
   start() {
     this.consumers += 1;
@@ -123,24 +127,64 @@ export class AutoTraderScoutReplayModel {
     void this.refreshAndSchedule();
   }
 
+  loadMore() {
+    if (this.refreshing || !this.state$.value.coverage.hasMore) return;
+    void this.refresh(false);
+  }
+
   private async refreshAndSchedule() {
-    await this.refresh();
+    await this.refresh(true);
     if (this.consumers === 0) return;
     this.timer = setTimeout(() => void this.refreshAndSchedule(), 60_000);
   }
 
-  private async refresh() {
+  private async refresh(reset = true) {
     this.refreshing = true;
     this.state$.next({ ...this.state$.value, loading: true, error: undefined });
+    const page = reset ? 0 : this.page + 1;
     try {
-      const response = await scoutWorkerRpc('GET', '/replay/outcomes');
+      const response = await scoutWorkerRpc(
+        'GET',
+        `/replay/outcomes?page=${page}&page_size=25`,
+      );
       if (!response.ok)
         throw new Error(`Scout replay request failed (${response.status}).`);
       const data = (await response.json()) as ScoutReplayResponse;
       if (!Array.isArray(data.outcomes) || !data.coverage)
         throw new Error('Scout replay response is missing coverage data.');
+      const previous = this.state$.value;
+      const outcomes = reset
+        ? data.outcomes
+        : [...previous.outcomes, ...data.outcomes].sort(
+            (left, right) =>
+              left.evaluated_timestamp_ms - right.evaluated_timestamp_ms ||
+              left.strategy.localeCompare(right.strategy) ||
+              left.decision_id.localeCompare(right.decision_id),
+          );
+      const returnedRecords = reset
+        ? data.coverage.returnedRecords
+        : previous.coverage.returnedRecords + data.coverage.returnedRecords;
+      const malformedRecords = reset
+        ? data.coverage.malformedRecords
+        : previous.coverage.malformedRecords + data.coverage.malformedRecords;
+      const hasMore = data.coverage.hasMore;
+      const complete =
+        !hasMore &&
+        returnedRecords + malformedRecords >=
+          data.coverage.totalDurableRecords &&
+        !data.workerErrors?.length;
+      this.page = page;
       this.state$.next({
         ...data,
+        outcomes,
+        coverage: {
+          ...data.coverage,
+          returnedRecords,
+          malformedRecords,
+          hasMore,
+          complete,
+          status: complete ? 'complete' : 'incomplete',
+        },
         loading: false,
         updatedAt: Date.now(),
       });

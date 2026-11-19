@@ -14,45 +14,70 @@ pub(crate) fn build_paired_return_stream(outcomes: &Value, searches: &Value) -> 
         .filter(|row| row["scout_comparison_role"].as_str() == Some("variant"))
         .collect::<Vec<_>>();
     let mut paired_variants = BTreeSet::new();
+    let mut ambiguous_variant_matches = 0usize;
     let mut pairs = Vec::new();
     for variant in &variant_rows {
         let Some(comparison_id) = variant["scout_comparison_id"].as_str() else {
             continue;
         };
-        for baseline in &baseline_rows {
-            let baseline_has_comparison = baseline["scout_comparison_id"].as_str()
-                == Some(comparison_id)
-                || baseline["scout_comparison_ids"]
-                    .as_array()
-                    .is_some_and(|ids| ids.iter().any(|id| id.as_str() == Some(comparison_id)));
-            let same_opportunity = baseline["symbol"] == variant["symbol"]
-                && baseline["strategy"] == variant["strategy"]
-                && baseline["market_regime"] == variant["market_regime"]
-                && baseline["learning_context"] == variant["learning_context"]
-                && baseline["exit_scenario"] == variant["exit_scenario"]
-                && baseline["signal_timestamp_ms"]
-                    .as_u64()
-                    .zip(variant["signal_timestamp_ms"].as_u64())
-                    .is_some_and(|(left, right)| left.abs_diff(right) <= 10_000);
-            if !baseline_has_comparison || !same_opportunity {
-                continue;
+        let matches = baseline_rows
+            .iter()
+            .filter(|baseline| {
+                let baseline_has_comparison = baseline["scout_comparison_id"].as_str()
+                    == Some(comparison_id)
+                    || baseline["scout_comparison_ids"]
+                        .as_array()
+                        .is_some_and(|ids| ids.iter().any(|id| id.as_str() == Some(comparison_id)));
+                let has_exact_profile_identity = baseline["profile_id"].as_str().is_some()
+                    && variant["profile_id"].as_str().is_some();
+                let same_opportunity = has_exact_profile_identity
+                    && baseline["symbol"] == variant["symbol"]
+                    && baseline["strategy"] == variant["strategy"]
+                    && baseline["market_regime"] == variant["market_regime"]
+                    && baseline["learning_context"] == variant["learning_context"]
+                    && baseline["exit_scenario"] == variant["exit_scenario"]
+                    && baseline["signal_timestamp_ms"]
+                        .as_u64()
+                        .zip(variant["signal_timestamp_ms"].as_u64())
+                        .is_some_and(|(left, right)| left.abs_diff(right) <= 10_000);
+                baseline_has_comparison && same_opportunity
+            })
+            .collect::<Vec<_>>();
+        if matches.len() != 1 {
+            if matches.len() > 1 {
+                ambiguous_variant_matches += 1;
             }
-            let baseline_id = baseline["outcome_id"].as_str().unwrap_or_default();
-            let variant_id = variant["outcome_id"].as_str().unwrap_or_default();
-            let baseline_return = baseline["net_return_percent"].as_f64();
-            let candidate_return = variant["net_return_percent"].as_f64();
-            let signal_timestamp_ms = variant["signal_timestamp_ms"].as_u64();
-            let sample_group_id = variant["sample_group_id"].as_str().unwrap_or_default();
-            let candidate_search_found = selected_search_contains_group(searches, sample_group_id);
-            let baseline_cost_complete = baseline["cost_breakdown"].is_object();
-            let candidate_cost_complete = variant["cost_breakdown"].is_object();
-            pairs.push(json!({
+            continue;
+        }
+        let baseline = matches[0];
+        let baseline_id = baseline["outcome_id"].as_str().unwrap_or_default();
+        let variant_id = variant["outcome_id"].as_str().unwrap_or_default();
+        let baseline_return = baseline["net_return_percent"].as_f64();
+        let candidate_return = variant["net_return_percent"].as_f64();
+        let baseline_evaluated_at_ms = baseline["evaluated_timestamp_ms"].as_u64();
+        let candidate_evaluated_at_ms = variant["evaluated_timestamp_ms"].as_u64();
+        let label_window_end_timestamp_ms = baseline_evaluated_at_ms
+            .zip(candidate_evaluated_at_ms)
+            .map(|(baseline_end, candidate_end)| baseline_end.max(candidate_end));
+        let signal_timestamp_ms = variant["signal_timestamp_ms"].as_u64();
+        let sample_group_id = variant["sample_group_id"].as_str().unwrap_or_default();
+        let candidate_search_found = selected_search_contains_group(searches, sample_group_id);
+        let baseline_cost_complete =
+            baseline["cost_breakdown"]["includesAllExecutionCosts"].as_bool() == Some(true);
+        let candidate_cost_complete =
+            variant["cost_breakdown"]["includesAllExecutionCosts"].as_bool() == Some(true);
+        let both_cost_breakdowns_present =
+            baseline["cost_breakdown"].is_object() && variant["cost_breakdown"].is_object();
+        pairs.push(json!({
                 "pair_id": format!("{comparison_id}|{}|{baseline_id}|{variant_id}", variant["exit_scenario"].as_str().unwrap_or_default()),
                 "comparison_id": comparison_id,
                 "evidence_group_id": if sample_group_id.is_empty() { comparison_id } else { sample_group_id },
                 "sample_group_id": if sample_group_id.is_empty() { Value::Null } else { json!(sample_group_id) },
                 "signal_timestamp_ms": signal_timestamp_ms,
                 "evaluated_timestamp_ms": variant["evaluated_timestamp_ms"],
+                "label_window_start_timestamp_ms": variant["signal_timestamp_ms"],
+                "label_window_end_timestamp_ms": label_window_end_timestamp_ms,
+                "label_window_status": if label_window_end_timestamp_ms.is_some() { "observed_for_both_arms" } else { "missing_for_one_or_both_arms" },
                 "utc_day": signal_timestamp_ms.map(|timestamp| timestamp / 86_400_000),
                 "symbol": variant["symbol"],
                 "strategy": variant["strategy"],
@@ -76,10 +101,9 @@ pub(crate) fn build_paired_return_stream(outcomes: &Value, searches: &Value) -> 
                     "cost_breakdown": variant["cost_breakdown"],
                 },
                 "net_return_delta_percent": candidate_return.zip(baseline_return).map(|(candidate, baseline)| candidate - baseline),
-                "cost_status": if baseline_cost_complete && candidate_cost_complete { "both_arms_have_markout_costs" } else { "one_or_both_arms_missing_cost_breakdown" },
+                "cost_status": if baseline_cost_complete && candidate_cost_complete { "complete_for_both_arms" } else if both_cost_breakdowns_present { "partial_for_both_arms" } else { "one_or_both_arms_missing_cost_breakdown" },
             }));
-            paired_variants.insert(variant_id.to_owned());
-        }
+        paired_variants.insert(variant_id.to_owned());
     }
     pairs.sort_by(|left, right| {
         left["signal_timestamp_ms"]
@@ -94,11 +118,31 @@ pub(crate) fn build_paired_return_stream(outcomes: &Value, searches: &Value) -> 
     });
     let cost_complete_pairs = pairs
         .iter()
-        .filter(|pair| pair["cost_status"] == "both_arms_have_markout_costs")
+        .filter(|pair| pair["cost_status"] == "complete_for_both_arms")
         .count();
     let config = crate::ScoutWalkForwardReplayConfig::default();
+    let dataset_hash = replay_dataset_hash(outcomes, searches, &config.config_hash());
+    let run_id = format!("scout-replay-v{}-{dataset_hash}", config.config_version);
     let rolling_origin = build_rolling_origin_folds(&pairs, &config);
+    let out_of_sample_inference = crate::walk_forward_statistics::summarize_oos_candidate(
+        &[],
+        "",
+        false,
+        false,
+        config.bootstrap_replicates,
+        config.expected_block_length_days,
+    );
+    let spa_inference = crate::walk_forward_statistics::stationary_bootstrap_spa(
+        &[],
+        false,
+        false,
+        config.bootstrap_replicates,
+        config.expected_block_length_days,
+        config.spa_minimum_day_clusters,
+    );
     json!({
+        "runId": run_id,
+        "datasetHash": dataset_hash,
         "datasetVersion": 1,
         "configVersion": config.config_version,
         "configHash": config.config_hash(),
@@ -110,13 +154,42 @@ pub(crate) fn build_paired_return_stream(outcomes: &Value, searches: &Value) -> 
             "searchesRead": searches["coverage"]["returnedRecords"],
             "matchedPairs": pairs.len(),
             "unpairedVariantOutcomes": variant_rows.len().saturating_sub(paired_variants.len()),
+            "ambiguousVariantMatches": ambiguous_variant_matches,
             "pairsWithCostBreakdowns": cost_complete_pairs,
+            "pairsWithPartialCostBreakdowns": pairs
+                .iter()
+                .filter(|pair| pair["cost_status"] == "partial_for_both_arms")
+                .count(),
             "cashPeriodStatus": "not_inferred_from_outcome_or_search_rows",
             "cashPeriodsEmitted": 0,
+        },
+        "dependenceAwareInference": {
+            "status": "unavailable_until_complete_portfolio_timeline",
+            "bootstrapMethod": config.bootstrap_method,
+            "bootstrapReplicates": config.bootstrap_replicates,
+            "expectedBlockLengthDays": config.expected_block_length_days,
+            "spaMinimumDayClusters": config.spa_minimum_day_clusters,
+            "selectedCandidate": out_of_sample_inference,
+            "searchedFamilySpa": spa_inference,
         },
         "rollingOrigin": rolling_origin,
         "pairedObservations": pairs,
     })
+}
+
+fn replay_dataset_hash(outcomes: &Value, searches: &Value, config_hash: &str) -> String {
+    let bytes = serde_json::to_vec(&json!({
+        "outcomes": outcomes,
+        "searches": searches,
+        "configHash": config_hash,
+    }))
+    .expect("Scout replay inputs are serializable");
+    let hash = bytes
+        .into_iter()
+        .fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
+            (hash ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3)
+        });
+    format!("fnv1a64:{hash:016x}")
 }
 
 /// Assign durable matched observations to chronological training, evaluation,
@@ -168,8 +241,19 @@ fn build_rolling_origin_folds(
                 pair["evaluated_timestamp_ms"]
                     .as_u64()
                     .is_some_and(|at| at < origin_at_ms)
+                    && pair["label_window_end_timestamp_ms"]
+                        .as_u64()
+                        .is_some_and(|end| end < origin_at_ms)
             })
             .collect::<Vec<_>>();
+        let training_candidates = pairs
+            .iter()
+            .filter(|pair| {
+                pair["evaluated_timestamp_ms"]
+                    .as_u64()
+                    .is_some_and(|at| at < origin_at_ms)
+            })
+            .count();
         let training_days = training
             .iter()
             .filter_map(|pair| pair["evaluated_timestamp_ms"].as_u64())
@@ -197,6 +281,7 @@ fn build_rolling_origin_folds(
             "evaluationStartAtMs": origin_at_ms,
             "evaluationEndAtMs": evaluation_end_ms,
             "trainingObservationCount": training.len(),
+            "purgedOrUnverifiableTrainingObservationCount": training_candidates.saturating_sub(training.len()),
             "trainingDayClusters": training_days.len(),
             "trainingEffectiveDayClusterCount": training_days.len(),
             "historyMeetsMinimumDayClusters": training_days.len() >= config.minimum_history_day_clusters,
@@ -270,6 +355,7 @@ mod tests {
                     "scout_comparison_ids":["pair-1"],
                     "symbol":"BTC-USDT",
                     "strategy":"live-momentum",
+                    "profile_id":"baseline-profile",
                     "market_regime":"trend",
                     "learning_context":"scout:trend",
                     "exit_scenario":"strategy",
@@ -287,6 +373,7 @@ mod tests {
                     "scout_comparison_id":"pair-1",
                     "symbol":"BTC-USDT",
                     "strategy":"live-momentum",
+                    "profile_id":"variant-profile",
                     "market_regime":"trend",
                     "learning_context":"scout:trend",
                     "exit_scenario":"strategy",
@@ -310,6 +397,9 @@ mod tests {
         });
 
         let stream = build_paired_return_stream(&outcomes, &searches);
+        let repeated = build_paired_return_stream(&outcomes, &searches);
+        assert_eq!(stream["runId"], repeated["runId"]);
+        assert_eq!(stream["datasetHash"], repeated["datasetHash"]);
         assert_eq!(stream["pairedObservations"].as_array().unwrap().len(), 1);
         assert!(
             (stream["pairedObservations"][0]["net_return_delta_percent"]
@@ -322,6 +412,20 @@ mod tests {
         assert_eq!(
             stream["pairedObservations"][0]["candidate_search_found"],
             true
+        );
+        assert_eq!(
+            stream["pairedObservations"][0]["cost_status"],
+            "partial_for_both_arms"
+        );
+        assert_eq!(stream["coverage"]["pairsWithCostBreakdowns"], 0);
+        assert_eq!(stream["coverage"]["pairsWithPartialCostBreakdowns"], 1);
+        assert_eq!(
+            stream["dependenceAwareInference"]["status"],
+            "unavailable_until_complete_portfolio_timeline"
+        );
+        assert_eq!(
+            stream["dependenceAwareInference"]["searchedFamilySpa"]["status"],
+            "source_history_incomplete"
         );
         assert_eq!(stream["coverage"]["cashPeriodsEmitted"], 0);
         assert_eq!(stream["status"], "incomplete");
@@ -338,6 +442,7 @@ mod tests {
                     "utc_day": day,
                     "signal_timestamp_ms": day * day_ms + 1,
                     "evaluated_timestamp_ms": (day + 1) * day_ms,
+                    "label_window_end_timestamp_ms": (day + 1) * day_ms,
                 })
             })
             .collect::<Vec<_>>();

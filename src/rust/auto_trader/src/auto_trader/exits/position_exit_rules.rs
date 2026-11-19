@@ -329,6 +329,23 @@ async fn evaluate_position_exit(
         });
         (enabled, position.strategy.clone())
     };
+    let expected_profile_id = position
+        .strategy
+        .as_deref()
+        .map(|strategy_name| {
+            let parameters = position_strategy_parameters(&position);
+            let profile_symbol = position
+                .strategy_decision
+                .as_ref()
+                .and_then(|decision| {
+                    decision
+                        .get("learning_profile_symbol")
+                        .or_else(|| decision.get("scout_parameter_profile_symbol"))
+                })
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or(&symbol);
+            strategy::profile_id(profile_symbol, strategy_name, &parameters)
+        });
     let minimum_hold_days = position.strategy_decision.as_ref()
         .and_then(|decision| decision.get("strategy_parameters"))
         .and_then(|parameters| parameters.get("minimum_hold_days"))
@@ -348,18 +365,10 @@ async fn evaluate_position_exit(
         StrategyDecision::Hold
     } else if let Some(strategy_name) = strategy_no_longer_eligible.as_deref() {
         if let Some(strategy) = Strategy::from_name(strategy_name) {
-            let parameters = position_strategy_parameters(&position);
-            let profile_symbol = position.strategy_decision.as_ref()
-                .and_then(|decision| decision.get("learning_profile_symbol")
-                    .or_else(|| decision.get("scout_parameter_profile_symbol")))
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or(&symbol)
-                .to_owned();
-            let expected_profile_id = strategy::profile_id(&profile_symbol, strategy_name, &parameters);
             let maximum_age_ms = if strategy.is_live_insight() { 10_000 } else { 90_000 };
-            state.latest_worker_decisions.lock().await
-                .get(&(symbol.clone(), strategy_name.to_owned()))
-                .filter(|report| report.profile_id == expected_profile_id
+        state.latest_worker_decisions.lock().await
+            .get(&(symbol.clone(), strategy_name.to_owned(), expected_profile_id.clone().unwrap_or_default()))
+                .filter(|report| expected_profile_id.as_ref().is_some_and(|profile_id| &report.profile_id == profile_id)
                     && observed_at.saturating_sub(report.event_time_ms) <= maximum_age_ms)
                 .map(|report| match report.decision {
                     strategy::LiveStrategyDecision::Exit => StrategyDecision::Exit,
@@ -376,8 +385,16 @@ async fn evaluate_position_exit(
         StrategyDecision::Hold
     };
     let strategy_disabled = strategy_decision == StrategyDecision::Exit && !strategy_enabled;
-    let latest_worker_report = state.latest_worker_decisions.lock().await
-        .get(&(symbol.clone(), strategy_key.clone())).cloned();
+    let latest_worker_report = if let Some(profile_id) = expected_profile_id.as_ref() {
+        state
+            .latest_worker_decisions
+            .lock()
+            .await
+            .get(&(symbol.clone(), strategy_key.clone(), profile_id.clone()))
+            .cloned()
+    } else {
+        None
+    };
     let research_signal_active = latest_worker_report.as_ref().map(|report| {
         report.decision != strategy::LiveStrategyDecision::Exit
     });

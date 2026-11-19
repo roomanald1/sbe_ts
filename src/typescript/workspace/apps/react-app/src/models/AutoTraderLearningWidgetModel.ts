@@ -8,6 +8,8 @@ import {
 import { autoTraderRpc } from '../auto_trader_rsocket';
 import { insightsFetch } from '../insights_rsocket';
 
+export const LEARNING_DECISION_WINDOW_MS = 10 * 60_000;
+
 export type LearningDecision = {
   decision_id?: string;
   stage?: string;
@@ -52,7 +54,10 @@ export function decisionAuditCoverage(
   nowMs = Date.now(),
 ): DecisionAuditCoverage {
   const latestAuditAt = decisions.reduce(
-    (latest, decision) => Math.max(latest, decision.timestamp ?? 0),
+    (latest, decision) =>
+      decision.stage === 'strategy:evaluation'
+        ? latest
+        : Math.max(latest, decision.timestamp ?? 0),
     0,
   );
   const latestCycleAt = source.lastDecisionAt;
@@ -134,7 +139,7 @@ type GetSummary = () => Promise<LearningSummary[]>;
 type GetDecisions = () => Promise<LearningDecision[]>;
 
 const requestLearningDecisions: GetDecisions = async () => {
-  const since = Date.now() - 60 * 60_000;
+  const since = Date.now() - LEARNING_DECISION_WINDOW_MS;
   const readStage = async (stage: string) => {
     const items: LearningDecision[] = [];
     let cursor: number | undefined;
@@ -161,13 +166,21 @@ const requestLearningDecisions: GetDecisions = async () => {
     } while (cursor != null);
     return items;
   };
-  const [decisions, rejections] = await Promise.all([
+  const [decisions, rejections, strategyEvaluations] = await Promise.all([
     readStage('decision'),
     readStage('strategy_rejection'),
+    readStage('strategy:evaluation'),
   ]);
-  return [...decisions, ...rejections].sort(
-    (left, right) => (left.timestamp ?? 0) - (right.timestamp ?? 0),
-  );
+  return [...decisions, ...rejections, ...strategyEvaluations]
+    .map((decision) => ({
+      ...decision,
+      strategy:
+        decision.strategy ??
+        (typeof decision.strategy_decision?.strategy === 'string'
+          ? decision.strategy_decision.strategy
+          : undefined),
+    }))
+    .sort((left, right) => (left.timestamp ?? 0) - (right.timestamp ?? 0));
 };
 
 export function projectLearningWidgetState(

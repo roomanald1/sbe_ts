@@ -695,6 +695,7 @@ mod tests {
                     "not_selected"
                 }
                 .into(),
+                selection_reasons: Vec::new(),
                 effective_sample_size: Some(3.0),
                 selection_metric_value: Some(7.0),
                 priority_rank: Some(index),
@@ -794,6 +795,7 @@ mod tests {
                     source_candidate_index: 0,
                     stage: "expanded".into(),
                     selection_result: "not_selected".into(),
+                    selection_reasons: Vec::new(),
                     effective_sample_size: Some(0.0),
                     selection_metric_value: Some(10.0),
                     priority_rank: Some(0),

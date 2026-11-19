@@ -138,6 +138,20 @@ pub struct LiveStrategyDecisionReport {
     pub dated_carry_settlement: Option<DatedCarrySettlementUpdate>,
 }
 
+/// A per-symbol worker skip or preparation failure that explains why no
+/// decision report was produced for an Insights update.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct LiveStrategyWorkerDiagnostic {
+    pub contract_version: u16,
+    pub event_id: String,
+    pub strategy: Strategy,
+    pub symbol: String,
+    #[serde(default)]
+    pub profile_id: Option<String>,
+    pub event_time_ms: u64,
+    pub reason: String,
+}
+
 /// Typed AutoTrader/worker RSocket operations. Profile sets flow from
 /// AutoTrader to workers; decisions flow from workers back to AutoTrader.
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -146,6 +160,7 @@ pub enum LiveStrategySocketRequest {
     UpdateProfiles(LiveStrategyProfileSet),
     UpdateLearningSnapshot(crate::LearnedProfileSnapshot),
     ReportDecision(LiveStrategyDecisionReport),
+    ReportDiagnostic(LiveStrategyWorkerDiagnostic),
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
@@ -171,6 +186,9 @@ pub struct LiveStrategyProfile {
     pub profile_id: String,
     pub profile_symbol: String,
     pub version: u64,
+    /// Optional live routing label. `None` is the backward-compatible fallback profile.
+    #[serde(default)]
+    pub market_regime: Option<String>,
     pub parameters: BTreeMap<String, f64>,
     /// Updated by Learning and delivered through AutoTrader's profile push.
     #[serde(default)]

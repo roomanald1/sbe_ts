@@ -1,7 +1,8 @@
 use super::*;
 
-const MIN_TRAIN_SAMPLES: usize = 20;
-const MIN_VALIDATION_SAMPLES: usize = 10;
+const FOUR_HOUR_WINDOW_MS: u64 = 4 * 60 * 60 * 1_000;
+const MIN_TRAIN_WINDOWS: usize = 5;
+const MIN_VALIDATION_WINDOWS: usize = 3;
 const MIN_FOLDS: usize = 2;
 const MAX_FOLDS: usize = 4;
 const MIN_VALIDATION_GAIN_PERCENT: f64 = 0.05;
@@ -28,9 +29,6 @@ pub(super) fn walk_forward_threshold(
     strategy: &str,
     history: &[ThresholdTrainingSample],
 ) -> Option<f64> {
-    if history.len() < MIN_TRAIN_SAMPLES + MIN_VALIDATION_SAMPLES {
-        return None;
-    }
     let mut samples = history
         .iter()
         .filter(|sample| {
@@ -43,16 +41,30 @@ pub(super) fn walk_forward_threshold(
         .cloned()
         .collect::<Vec<_>>();
     samples.sort_by_key(|sample| sample.observed_at_ms);
-    if samples.len() < MIN_TRAIN_SAMPLES + MIN_VALIDATION_SAMPLES {
+    // Keep outcomes from the same four-hour market interval together. This
+    // lets tuning react before a large raw-trade count accumulates while
+    // avoiding the fiction that a burst of correlated trades is many samples.
+    let mut windows = Vec::<Vec<ThresholdTrainingSample>>::new();
+    for sample in samples {
+        let window = sample.observed_at_ms / FOUR_HOUR_WINDOW_MS;
+        if windows
+            .last()
+            .is_none_or(|bucket| bucket[0].observed_at_ms / FOUR_HOUR_WINDOW_MS != window)
+        {
+            windows.push(Vec::new());
+        }
+        windows.last_mut()?.push(sample);
+    }
+    if windows.len() < MIN_TRAIN_WINDOWS + MIN_VALIDATION_WINDOWS {
         return None;
     }
     // Reserve the newest observations for a final confirmation holdout. Candidate
     // selection and rolling validation never inspect this tail.
-    let holdout_len = (samples.len() / 5).max(MIN_VALIDATION_SAMPLES);
-    let holdout_start = samples.len().saturating_sub(holdout_len);
-    let (development, holdout) = samples.split_at(holdout_start);
-    if development.len() < MIN_TRAIN_SAMPLES + MIN_VALIDATION_SAMPLES
-        || holdout.len() < MIN_VALIDATION_SAMPLES
+    let holdout_len = (windows.len() / 5).max(MIN_VALIDATION_WINDOWS);
+    let holdout_start = windows.len().saturating_sub(holdout_len);
+    let (development, holdout) = windows.split_at(holdout_start);
+    if development.len() < MIN_TRAIN_WINDOWS + MIN_VALIDATION_WINDOWS
+        || holdout.len() < MIN_VALIDATION_WINDOWS
     {
         return None;
     }
@@ -60,13 +72,13 @@ pub(super) fn walk_forward_threshold(
     // Build expanding train windows followed by disjoint validation windows.
     // The final development window ends exactly where the untouched holdout begins.
     let available_folds =
-        development.len().saturating_sub(2 * MIN_TRAIN_SAMPLES) / MIN_VALIDATION_SAMPLES;
+        development.len().saturating_sub(2 * MIN_TRAIN_WINDOWS) / MIN_VALIDATION_WINDOWS;
     let fold_count = available_folds.min(MAX_FOLDS);
     if fold_count < MIN_FOLDS {
         return None;
     }
-    let validation_len = (development.len().saturating_sub(2 * MIN_TRAIN_SAMPLES) / fold_count)
-        .max(MIN_VALIDATION_SAMPLES);
+    let validation_len = (development.len().saturating_sub(2 * MIN_TRAIN_WINDOWS) / fold_count)
+        .max(MIN_VALIDATION_WINDOWS);
     let first_validation = development
         .len()
         .saturating_sub(fold_count * validation_len);
@@ -78,7 +90,7 @@ pub(super) fn walk_forward_threshold(
         })
         .collect::<Vec<_>>();
     if folds.iter().any(|(train, validation)| {
-        train.len() < MIN_TRAIN_SAMPLES || validation.len() < MIN_VALIDATION_SAMPLES
+        train.len() < MIN_TRAIN_WINDOWS || validation.len() < MIN_VALIDATION_WINDOWS
     }) {
         return None;
     }
@@ -89,6 +101,7 @@ pub(super) fn walk_forward_threshold(
     let training_samples = folds
         .iter()
         .flat_map(|(train, _)| train.iter())
+        .flat_map(|window| window.iter())
         .collect::<Vec<_>>();
     let supported_boundary = if lower_threshold_is_stricter(&spec.key) {
         training_samples
@@ -116,7 +129,7 @@ pub(super) fn walk_forward_threshold(
         let training_scores = folds
             .iter()
             .filter_map(|(train, _)| threshold_return_stats(train, &spec.key, candidate))
-            .filter(|(count, _, _)| *count >= MIN_TRAIN_SAMPLES)
+            .filter(|(count, _, _)| *count >= MIN_TRAIN_WINDOWS)
             .map(|(_, mean, _)| mean)
             .collect::<Vec<_>>();
         if training_scores.len() == folds.len() {
@@ -144,8 +157,8 @@ pub(super) fn walk_forward_threshold(
             else {
                 return false;
             };
-            candidate_count >= MIN_VALIDATION_SAMPLES
-                && baseline_count >= MIN_VALIDATION_SAMPLES
+            candidate_count >= MIN_VALIDATION_WINDOWS
+                && baseline_count >= MIN_VALIDATION_WINDOWS
                 && candidate_mean > 0.0
                 && candidate_bound >= baseline_bound + MIN_VALIDATION_GAIN_PERCENT
         });
@@ -153,21 +166,27 @@ pub(super) fn walk_forward_threshold(
 }
 
 fn threshold_return_stats(
-    samples: &[ThresholdTrainingSample],
+    windows: &[Vec<ThresholdTrainingSample>],
     parameter_key: &str,
     threshold: f64,
 ) -> Option<(usize, f64, f64)> {
-    let outcomes = samples
+    let outcomes = windows
         .iter()
-        .filter_map(|sample| {
-            let tighter_than_sample = if lower_threshold_is_stricter(parameter_key) {
-                threshold <= sample.threshold
-            } else {
-                threshold >= sample.threshold
-            };
-            let feature_passes =
-                threshold_includes_feature(parameter_key, sample.feature_value, threshold);
-            (tighter_than_sample && feature_passes).then_some(sample.net_return_percent)
+        .filter_map(|window| {
+            let eligible = window
+                .iter()
+                .filter_map(|sample| {
+                    let tighter_than_sample = if lower_threshold_is_stricter(parameter_key) {
+                        threshold <= sample.threshold
+                    } else {
+                        threshold >= sample.threshold
+                    };
+                    let feature_passes =
+                        threshold_includes_feature(parameter_key, sample.feature_value, threshold);
+                    (tighter_than_sample && feature_passes).then_some(sample.net_return_percent)
+                })
+                .collect::<Vec<_>>();
+            (!eligible.is_empty()).then(|| eligible.iter().sum::<f64>() / eligible.len() as f64)
         })
         .collect::<Vec<_>>();
     if outcomes.is_empty() {
@@ -213,7 +232,7 @@ mod tests {
                     symbol: "BTC-USDT".into(),
                     strategy: "live-trade-flow".into(),
                     parameter_key: spec.key.clone(),
-                    observed_at_ms: index,
+                    observed_at_ms: index * FOUR_HOUR_WINDOW_MS,
                     threshold: 0.02,
                     feature_value: feature,
                     net_return_percent: return_percent,
@@ -253,7 +272,7 @@ mod tests {
                     symbol: "BTC-USDT".into(),
                     strategy: "live-trade-flow".into(),
                     parameter_key: spec.key.clone(),
-                    observed_at_ms: index,
+                    observed_at_ms: index * FOUR_HOUR_WINDOW_MS,
                     threshold: 0.02,
                     feature_value,
                     net_return_percent,

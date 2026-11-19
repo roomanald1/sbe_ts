@@ -588,7 +588,7 @@ function AutoTraderOutcomesComponent({
             (item) => item.symbol === data.symbol,
           );
           const currentAssetPrice = data.markPrice ?? symbolDiagnostic?.close;
-          const distanceFromPriceLevel = (level: number | undefined) =>
+          const distanceFromPriceLevel = (level: number | null | undefined) =>
             typeof level === 'number' &&
             level > 0 &&
             typeof currentAssetPrice === 'number'

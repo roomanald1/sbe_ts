@@ -14,6 +14,12 @@ pub enum ScoutReplaySelectionObjective {
     MaximizeNetPortfolioExpectancyVersusBaseline,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScoutReplayBootstrapMethod {
+    Stationary,
+}
+
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ScoutWalkForwardReplayConfig {
@@ -27,12 +33,16 @@ pub struct ScoutWalkForwardReplayConfig {
     pub origin_time_zone: String,
     pub selection_objective: ScoutReplaySelectionObjective,
     pub period_assignment: String,
+    pub bootstrap_method: ScoutReplayBootstrapMethod,
+    pub bootstrap_replicates: usize,
+    pub expected_block_length_days: f64,
+    pub spa_minimum_day_clusters: usize,
 }
 
 impl Default for ScoutWalkForwardReplayConfig {
     fn default() -> Self {
         Self {
-            config_version: 1,
+            config_version: 2,
             training_window: ScoutReplayTrainingWindow::Expanding,
             minimum_history_day_clusters: 30,
             minimum_effective_sample_size: 10.0,
@@ -43,6 +53,10 @@ impl Default for ScoutWalkForwardReplayConfig {
             selection_objective:
                 ScoutReplaySelectionObjective::MaximizeNetPortfolioExpectancyVersusBaseline,
             period_assignment: "assign candidates by signal timestamp; train only on outcomes with evaluated timestamp strictly before the origin; allow evaluation outcomes to mature after the evaluation window".into(),
+            bootstrap_method: ScoutReplayBootstrapMethod::Stationary,
+            bootstrap_replicates: crate::walk_forward_statistics::BOOTSTRAP_REPLICATES,
+            expected_block_length_days: crate::walk_forward_statistics::MEAN_BLOCK_LENGTH_DAYS,
+            spa_minimum_day_clusters: crate::walk_forward_statistics::MINIMUM_SPA_DAY_CLUSTERS,
         }
     }
 }
@@ -69,12 +83,20 @@ mod tests {
     fn default_replay_config_is_predeclared_and_hash_is_deterministic() {
         let first = ScoutWalkForwardReplayConfig::default();
         let second = ScoutWalkForwardReplayConfig::default();
+        assert_eq!(first.config_version, 2);
         assert_eq!(first.training_window, ScoutReplayTrainingWindow::Expanding);
         assert_eq!(first.minimum_history_day_clusters, 30);
         assert_eq!(first.minimum_effective_sample_size, 10.0);
         assert_eq!(first.origin_cadence_days, 7);
         assert_eq!(first.evaluation_window_days, 7);
         assert_eq!(first.final_holdout_days, 28);
+        assert_eq!(
+            first.bootstrap_method,
+            ScoutReplayBootstrapMethod::Stationary
+        );
+        assert_eq!(first.bootstrap_replicates, 512);
+        assert_eq!(first.expected_block_length_days, 7.0);
+        assert_eq!(first.spa_minimum_day_clusters, 30);
         assert_eq!(first.config_hash(), second.config_hash());
 
         let mut changed = first.clone();

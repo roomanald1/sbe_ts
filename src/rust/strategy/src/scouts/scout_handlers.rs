@@ -997,6 +997,7 @@ async fn create_scout_plan(
         })
     });
     let mut priority_ranks = vec![None; expanded_candidates.len()];
+    let mut selection_reasons = vec![Vec::<String>::new(); expanded_candidates.len()];
     let rotation_orders = (0..expanded_candidates.len())
         .map(|index| (index + expanded_candidates.len() - start) % expanded_candidates.len())
         .collect::<Vec<_>>();
@@ -1006,30 +1007,43 @@ async fn create_scout_plan(
     let mut changed_cooldown_keys = BTreeSet::new();
     let mut changed_pending_sample_ids = BTreeSet::new();
     let mut selected_candidate_indices = BTreeSet::new();
-    for (priority_rank, candidate_index) in candidate_order.into_iter().enumerate() {
+    for (priority_rank, candidate_index) in candidate_order.iter().copied().enumerate() {
         priority_ranks[candidate_index] = Some(priority_rank);
         let mut candidate = expanded_candidates[candidate_index].clone();
         if candidate.generate_group_id {
             let Some((group_id, cooldown_key)) = generated_scout_group_and_cooldown(&candidate)
             else {
+                selection_reasons[candidate_index]
+                    .push("sample_group_could_not_be_generated".into());
                 continue;
             };
             candidate.sample_group_id = group_id;
             candidate.cooldown_key = cooldown_key;
         }
-        if !candidate.eligible
-            || (candidate.audit_plans.is_empty()
-                && candidate.audit_templates.is_empty()
-                && candidate.sample_payload.is_none())
-            || state
-                .scout_sample_active_scenarios
-                .contains_key(&candidate.sample_group_id)
-            || cooldowns_at_request_start
-                .get(&candidate.cooldown_key)
-                .is_some_and(|previous| {
-                    request.now_ms.saturating_sub(*previous) < candidate.cooldown_ms
-                })
+        if !candidate.eligible {
+            selection_reasons[candidate_index].push("candidate_marked_ineligible".into());
+        }
+        if candidate.audit_plans.is_empty()
+            && candidate.audit_templates.is_empty()
+            && candidate.sample_payload.is_none()
         {
+            selection_reasons[candidate_index].push("candidate_has_no_audit_or_sample_payload".into());
+        }
+        if state
+            .scout_sample_active_scenarios
+            .contains_key(&candidate.sample_group_id)
+        {
+            selection_reasons[candidate_index].push("sample_group_already_active".into());
+        }
+        if cooldowns_at_request_start
+            .get(&candidate.cooldown_key)
+            .is_some_and(|previous| {
+                request.now_ms.saturating_sub(*previous) < candidate.cooldown_ms
+            })
+        {
+            selection_reasons[candidate_index].push("candidate_cooldown_active".into());
+        }
+        if !selection_reasons[candidate_index].is_empty() {
             continue;
         }
         if candidate
@@ -1041,6 +1055,7 @@ async fn create_scout_plan(
                 }
             })
         {
+            selection_reasons[candidate_index].push("dated_carry_probe_invalid_or_expired".into());
             continue;
         }
         if candidate
@@ -1052,12 +1067,15 @@ async fn create_scout_plan(
                 }
             })
         {
+            selection_reasons[candidate_index].push("dated_carry_probe_already_pending".into());
             continue;
         }
         if !candidate.parameter_variant
             && !candidate.cooldown_key.starts_with("daily|")
             && !scout_comparison_changes_exit(&candidate)
         {
+            selection_reasons[candidate_index]
+                .push("candidate_is_not_a_parameter_or_exit_comparison_probe".into());
             continue;
         }
         if candidate.parameter_variant && !candidate.profile_key.is_empty() {
@@ -1067,6 +1085,7 @@ async fn create_scout_plan(
                 .filter(|profile| *profile == &candidate.profile_key)
                 .count();
             if active_variants >= request.max_active_variants_per_profile {
+                selection_reasons[candidate_index].push("active_variant_limit_reached".into());
                 continue;
             }
         }
@@ -1079,6 +1098,10 @@ async fn create_scout_plan(
         if !active_batch_keys.contains(&batch_key)
             && active_batch_keys.len() >= request.max_active_batches
         {
+            for remaining_index in candidate_order.iter().skip(priority_rank).copied() {
+                selection_reasons[remaining_index]
+                    .push("active_batch_limit_reached".into());
+            }
             break;
         }
         let mut tokens = BTreeSet::new();
@@ -1183,6 +1206,11 @@ async fn create_scout_plan(
                 } else {
                     "filtered_during_expansion".to_owned()
                 },
+                selection_reasons: if expanded_sources.contains(&source_candidate_index) {
+                    Vec::new()
+                } else {
+                    vec!["filtered_during_expansion".into()]
+                },
                 effective_sample_size: None,
                 selection_metric_value: None,
                 priority_rank: None,
@@ -1227,6 +1255,7 @@ async fn create_scout_plan(
                 } else {
                     "not_selected".to_owned()
                 },
+                selection_reasons: selection_reasons[candidate_index].clone(),
                 candidate: serde_json::to_value(candidate).unwrap_or(serde_json::Value::Null),
                 parameter_map_status: if parameter_map.is_some() {
                     "recorded".to_owned()

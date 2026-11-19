@@ -31,6 +31,9 @@
 ## Docker Operations
 
 - Never start, stop, restart, recreate or redeploy services without explicit permission. Read-only inspection is allowed.
+- Before running Docker or Compose CLI commands, call `containerToolsConfig` and use its reported base command.
+- The live AutoTrader and Position Management SQLite databases are in the shared Docker named volume `sbe-position-management-data`, mounted at `/data` in both services by `system/compose.yml`. The database files are `/data/auto_trader_state.sqlite` and `/data/positions.sqlite`; repository-local files under `src/rust/auto_trader/` and `src/rust/position_management/` may be stale and must not be assumed to reflect live service state.
+- For live database investigation, resolve the current container and volume from Compose, then use read-only inspection or copy the database into `/tmp/` before querying. If SQLite WAL sidecar files exist, include them or use SQLite's backup API to get a consistent snapshot. Never edit the live database directly.
 - For authorised deployments, prefer `docker compose --progress quiet`; verify with `rtk docker compose ps`.
 - Prefer continuous `docker compose logs --follow` over overlapping polling windows.
 - Capture long-running logs to `/tmp/`; return bounded summaries while retaining complete evidence.

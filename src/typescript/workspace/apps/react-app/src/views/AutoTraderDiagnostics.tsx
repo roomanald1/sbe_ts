@@ -115,6 +115,11 @@ export function AutoTraderDiagnostics() {
   }, []);
   const { diagnosticRows: gridRows, symbolGroupCount } = state;
   const entryDiagnostic = state.latestEntryDiagnostic;
+  const workerResults = state.latestSymbolEntryResults
+    .slice()
+    .sort(
+      (left, right) => (right.timestamp_ms ?? 0) - (left.timestamp_ms ?? 0),
+    );
   const entryFreshness = entryDiagnostic
     ? entryDiagnosticFreshness(entryDiagnostic.timestampMs, nowMs)
     : null;
@@ -149,11 +154,9 @@ export function AutoTraderDiagnostics() {
         field: 'primary_distance_percent',
         headerName: 'Distance to primary',
         minWidth: 150,
-        valueFormatter: ({ value }) =>
+        valueFormatter: ({ value, data }) =>
           typeof value === 'number'
-            ? Math.abs(value).toFixed(2) +
-              '% ' +
-              (value >= 0 ? 'above' : 'below')
+            ? `${Math.abs(value).toFixed(2)} ${data?.primary_distance_unit ?? '%'} ${value >= 0 ? 'above' : 'below'}`
             : '—',
       },
       {
@@ -334,6 +337,38 @@ export function AutoTraderDiagnostics() {
                   <dd>{entryDiagnostic.strategyCandidateCount}</dd>
                 </div>
                 <div>
+                  <dt>Fresh directional</dt>
+                  <dd>
+                    {entryDiagnostic.freshDirectionalCandidateCount ?? '—'}
+                  </dd>
+                </div>
+                <div>
+                  <dt>Stale</dt>
+                  <dd>{entryDiagnostic.staleCandidateCount ?? '—'}</dd>
+                </div>
+                <div>
+                  <dt>Non directional</dt>
+                  <dd>{entryDiagnostic.nonDirectionalCandidateCount ?? '—'}</dd>
+                </div>
+                <div>
+                  <dt>Position blocked</dt>
+                  <dd>
+                    {entryDiagnostic.positionBlockedCandidateCount ?? '—'}
+                  </dd>
+                </div>
+                <div>
+                  <dt>Strategy rejected</dt>
+                  <dd>
+                    {entryDiagnostic.strategyRejectedCandidateCount ?? '—'}
+                  </dd>
+                </div>
+                <div>
+                  <dt>Evidence present</dt>
+                  <dd>
+                    {entryDiagnostic.evidencePresentCandidateCount ?? '—'}
+                  </dd>
+                </div>
+                <div>
                   <dt>Eligible</dt>
                   <dd>{entryDiagnostic.eligibleCandidateCount}</dd>
                 </div>
@@ -362,6 +397,78 @@ export function AutoTraderDiagnostics() {
                   </dd>
                 </div>
               </dl>
+              {(entryDiagnostic.gateCounts?.length ?? 0) > 0 && (
+                <p className="auto-trader-diagnostics-note">
+                  <strong>Gate counts this cycle: </strong>
+                  {entryDiagnostic
+                    .gateCounts!.map(({ gate, count }) => `${gate} (${count})`)
+                    .join(' · ')}
+                </p>
+              )}
+              {(entryDiagnostic.candidateGateCounts?.length ?? 0) > 0 && (
+                <ul className="auto-trader-gate-list">
+                  {entryDiagnostic.candidateGateCounts!.map((item) => (
+                    <li
+                      key={`${item.gateId}:${item.symbol}:${item.strategy ?? ''}`}
+                    >
+                      <span>
+                        {item.gateId} · {item.symbol}
+                        {item.strategy ? ` · ${item.strategy}` : ''}
+                      </span>
+                      <strong>
+                        {item.count} candidate{item.count === 1 ? '' : 's'}
+                      </strong>
+                    </li>
+                  ))}
+                </ul>
+              )}
+              {(entryDiagnostic.candidateDetails?.length ?? 0) > 0 && (
+                <details className="auto-trader-diagnostics-block">
+                  <summary className="auto-trader-diagnostics-heading">
+                    <strong>Candidate checks</strong>
+                    <span>
+                      {entryDiagnostic.candidateDetails!.length} candidates
+                    </span>
+                  </summary>
+                  <ul className="auto-trader-gate-list">
+                    {entryDiagnostic.candidateDetails!.map((candidate) => (
+                      <li key={candidate.decisionId}>
+                        <span>
+                          <strong>
+                            {candidate.strategy ?? 'Unattributed'}
+                          </strong>
+                          {' · '}
+                          {candidate.symbol}
+                          {candidate.profileId
+                            ? ` · profile ${candidate.profileId}`
+                            : ''}
+                          {candidate.workerEventId
+                            ? ` · event ${candidate.workerEventId}`
+                            : ''}
+                        </span>
+                        <strong>
+                          {candidate.reasons.length
+                            ? candidate.reasons.join('; ')
+                            : 'No preparation-stage threshold failure'}
+                        </strong>
+                        <pre>
+                          {JSON.stringify(
+                            {
+                              observed: candidate.observed,
+                              required: candidate.required,
+                              checks: candidate.checks,
+                              measurements: candidate.measurements ?? [],
+                              evidenceContract: candidate.evidenceContract,
+                            },
+                            null,
+                            2,
+                          )}
+                        </pre>
+                      </li>
+                    ))}
+                  </ul>
+                </details>
+              )}
               <p className="auto-trader-diagnostics-note">
                 Cycle {entryDiagnostic.cycleId} ·{' '}
                 {new Date(entryDiagnostic.timestampMs).toLocaleString()}
@@ -373,9 +480,64 @@ export function AutoTraderDiagnostics() {
                 ? 'Loading entry diagnostics…'
                 : state.latestSignalDiagnostic
                   ? `No entry cycle was reached. Latest signal blocker: ${state.latestSignalDiagnostic}`
-                  : 'No entry-cycle diagnostic has been recorded yet.'}
+                  : 'Diagnostics unavailable: no entry-cycle report has been recorded yet.'}
             </p>
           )}
+          {state.entryDiagnosticHistory.length > 1 && (
+            <details className="auto-trader-diagnostics-block">
+              <summary className="auto-trader-diagnostics-heading">
+                <strong>Recent entry cycles</strong>
+                <span>{state.entryDiagnosticHistory.length} retained</span>
+              </summary>
+              <ol>
+                {state.entryDiagnosticHistory
+                  .slice(-10)
+                  .reverse()
+                  .map((cycle) => (
+                    <li key={cycle.cycleId}>
+                      <strong>{entryOutcomeLabel(cycle.outcome)}</strong>
+                      {' · '}
+                      {new Date(cycle.timestampMs).toLocaleString()}
+                      {cycle.primaryBlocker ? ` · ${cycle.primaryBlocker}` : ''}
+                    </li>
+                  ))}
+              </ol>
+            </details>
+          )}
+          <details className="auto-trader-diagnostics-block">
+            <summary className="auto-trader-diagnostics-heading">
+              <strong>Worker profile decisions and skips</strong>
+              <span>{workerResults.length} rows</span>
+            </summary>
+            {workerResults.length ? (
+              <ul className="auto-trader-gate-list">
+                {workerResults.slice(0, 30).map((result) => (
+                  <li
+                    key={`${result.strategy}:${result.symbol}:${result.profile_id ?? 'unscoped'}`}
+                  >
+                    <span>
+                      <strong>{result.strategy}</strong> · {result.symbol}
+                      {result.profile_id
+                        ? ` · profile ${result.profile_id}`
+                        : ''}
+                      {result.event_id ? ` · event ${result.event_id}` : ''}
+                      {result.timestamp_ms
+                        ? ` · ${entryDiagnosticFreshness(result.timestamp_ms, nowMs).label}`
+                        : ' · no report received'}
+                    </span>
+                    <strong>
+                      {result.decision ?? 'Skipped'} · {result.reason}
+                    </strong>
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              <p className="auto-trader-diagnostics-empty" role="status">
+                Worker diagnostics unavailable: no profile decision or skip
+                report has been received.
+              </p>
+            )}
+          </details>
           <div className="auto-trader-diagnostics-heading">
             <strong>Most frequent blocked gates</strong>
           </div>

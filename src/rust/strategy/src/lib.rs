@@ -33,7 +33,8 @@ pub use input::{
     AbsorptionPressureValue, DailyStrategySignalFeatures, DatedCarryCandidate,
     DatedCarrySettlementSource, DepthSignalValue, Signal, SignalComponents, SignalDirection,
     StrategyInput, StrategyInputLike, StrategyMarketSignal, StrategySignal, StrategySpecificSignal,
-    StrategyWalkForwardEvidence, StrategyWalkForwardEvidenceScope, WindowedSignalValue,
+    StrategyWalkForwardCoverage, StrategyWalkForwardEstimator, StrategyWalkForwardEvidence,
+    StrategyWalkForwardEvidenceScope, StrategyWalkForwardValidationStatus, WindowedSignalValue,
     market_regime, prepare_live_strategy_signal, regime_conditioned_parameter_value,
     strategy_parameter_value,
 };
@@ -42,8 +43,9 @@ pub use live_evaluation::{
     LiveEvaluationError, LiveEvaluationErrorCode, LiveEvaluationInput, LiveEvaluationRequest,
     LiveEvaluationResponse, LivePositionContext, LiveStrategyDecision, LiveStrategyDecisionReport,
     LiveStrategyOpenPosition, LiveStrategyProfile, LiveStrategyProfileSet,
-    LiveStrategySocketRequest, LiveStrategySocketResponse, STRATEGY_INSIGHT_UPDATE_VERSION,
-    StrategyInsightUpdate, decode_learning_snapshot_payload, encode_learning_snapshot_payload,
+    LiveStrategySocketRequest, LiveStrategySocketResponse, LiveStrategyWorkerDiagnostic,
+    STRATEGY_INSIGHT_UPDATE_VERSION, StrategyInsightUpdate, decode_learning_snapshot_payload,
+    encode_learning_snapshot_payload,
 };
 #[cfg(feature = "service")]
 pub use live_worker::{LiveWorkerConfig, serve_live_worker};
@@ -954,7 +956,7 @@ mod strategy_signal_contract_tests {
             );
             let rejection = strategy.entry_rejection_reason(&weak_input).unwrap();
             assert!(
-                rejection.contains("Signal strength 0.100") && rejection.contains("minimum 0.300"),
+                rejection.contains("Strength 0.100 < 0.300"),
                 "{} returned unexpected strength rejection: {rejection}",
                 strategy.as_str()
             );

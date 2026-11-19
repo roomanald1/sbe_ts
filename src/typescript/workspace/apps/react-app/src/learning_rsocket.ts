@@ -32,6 +32,10 @@ function getSocket() {
     const generation = ++socketGeneration;
     sharedSocket = connectLearningRSocket()
       .then((client) => {
+        const invalidate = () => {
+          if (socketGeneration === generation) sharedSocket = undefined;
+          client.close();
+        };
         client.connectionStatus().subscribe({
           onSubscribe: (subscription) =>
             subscription.request(Number.MAX_SAFE_INTEGER),
@@ -44,10 +48,8 @@ function getSocket() {
               client.close();
             }
           },
-          onError: () => {
-            if (socketGeneration === generation) sharedSocket = undefined;
-            client.close();
-          },
+          onError: invalidate,
+          onComplete: invalidate,
         });
         return client;
       })

@@ -121,6 +121,7 @@ mod strategy_cleanup_integration_tests {
             strategy_diagnostic: Arc::new(std::sync::Mutex::new(Vec::new())),
             latest_strategy_blockers: Arc::new(std::sync::Mutex::new(BTreeMap::new())),
             latest_worker_decisions: Arc::new(Mutex::new(BTreeMap::new())),
+            latest_worker_diagnostics: Arc::new(Mutex::new(BTreeMap::new())),
             seen_worker_decision_events: Arc::new(Mutex::new(BTreeMap::new())),
             enabled: Arc::new(AtomicBool::new(true)),
             settings: Arc::new(Mutex::new(settings)),
@@ -445,13 +446,32 @@ mod strategy_cleanup_integration_tests {
             version: 7,
             parameters: parameters.clone(),
             walk_forward_evidence: None,
+            market_regime: None,
+            walk_forward_evidence_by_regime: Default::default(),
+        };
+        let first_spec = &strategy.parameter_specs()[0];
+        let mut second_parameters = parameters.clone();
+        let second_value = if (first_spec.default - first_spec.min).abs() > f64::EPSILON {
+            first_spec.min
+        } else {
+            first_spec.max
+        };
+        second_parameters.insert(first_spec.key.as_str().to_owned(), second_value);
+        let second_profile = strategy::LiveStrategyProfile {
+            profile_id: strategy::profile_id("BTC-USDT", strategy.as_str(), &second_parameters),
+            profile_symbol: "BTC-USDT".into(),
+            version: 8,
+            parameters: second_parameters.clone(),
+            walk_forward_evidence: None,
+            market_regime: None,
             walk_forward_evidence_by_regime: Default::default(),
         };
         let mut settings = Settings::default();
         settings.strategies = vec![strategy];
-        settings
-            .active_live_strategy_profiles
-            .insert(strategy.as_str().to_owned(), vec![profile.clone()]);
+        settings.active_live_strategy_profiles.insert(
+            strategy.as_str().to_owned(),
+            vec![profile.clone(), second_profile.clone()],
+        );
         let state = test_state(settings);
         let socket_api = AutoTraderSocketApi {
             state: state.clone(),
@@ -463,8 +483,19 @@ mod strategy_cleanup_integration_tests {
             .find(|set| set.strategy == strategy)
             .expect("AutoTrader publishes a set for each live worker");
         assert!(profile_set.enabled);
-        assert_eq!(profile_set.profiles.len(), 1);
-        assert_eq!(profile_set.profiles[0].profile_id, profile.profile_id);
+        assert_eq!(profile_set.profiles.len(), 2);
+        assert!(
+            profile_set
+                .profiles
+                .iter()
+                .any(|configured| configured.profile_id == profile.profile_id)
+        );
+        assert!(
+            profile_set
+                .profiles
+                .iter()
+                .any(|configured| configured.profile_id == second_profile.profile_id)
+        );
 
         let timestamp = current_time_ms();
         let mut signal = strategy::StrategyMarketSignal::default();
@@ -485,7 +516,7 @@ mod strategy_cleanup_integration_tests {
                 symbol: "BTC-USDT".into(),
                 profile_id: profile.profile_id.clone(),
                 profile_version: profile.version,
-                parameter_hash: profile.profile_id,
+                parameter_hash: profile.profile_id.clone(),
                 event_time_ms: timestamp,
                 decision: strategy::LiveStrategyDecision::Reject,
                 reason: Some("test rejection".into()),
@@ -498,13 +529,68 @@ mod strategy_cleanup_integration_tests {
             .await
             .unwrap();
         assert_eq!(status, axum::http::StatusCode::ACCEPTED.as_u16());
-        assert!(
-            state
-                .latest_worker_decisions
-                .lock()
-                .await
-                .contains_key(&("BTC-USDT".into(), strategy.as_str().into()))
-        );
+        let mut second_signal = strategy::StrategyMarketSignal::default();
+        second_signal.symbol = "BTC-USDT".into();
+        second_signal.strategy = Some(strategy.as_str().into());
+        second_signal.timestamp = timestamp;
+        second_signal.strategy_decision = Some(serde_json::json!({
+            "strategy_parameters": second_parameters,
+            "learning_profile_id": second_profile.profile_id,
+            "learning_profile_symbol": second_profile.profile_symbol,
+            "learning_profile_version": second_profile.version,
+        }));
+        let second_status = socket_api
+            .report_decision(strategy::LiveStrategyDecisionReport {
+                contract_version: strategy::LIVE_EVALUATION_CONTRACT_VERSION,
+                event_id: "socket-decision-test".into(),
+                strategy,
+                symbol: "BTC-USDT".into(),
+                profile_id: second_profile.profile_id.clone(),
+                profile_version: second_profile.version,
+                parameter_hash: second_profile.profile_id.clone(),
+                event_time_ms: timestamp,
+                decision: strategy::LiveStrategyDecision::Reject,
+                reason: Some("second profile rejection".into()),
+                walk_forward_evidence: None,
+                signal: second_signal,
+                dated_carry_scan: None,
+                dated_carry_candidate: None,
+                dated_carry_settlement: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(second_status, axum::http::StatusCode::ACCEPTED.as_u16());
+        let decisions = state.latest_worker_decisions.lock().await;
+        assert_eq!(decisions.len(), 2);
+        assert!(decisions.contains_key(&(
+            "BTC-USDT".into(),
+            strategy.as_str().into(),
+            profile.profile_id.clone(),
+        )));
+        assert!(decisions.contains_key(&(
+            "BTC-USDT".into(),
+            strategy.as_str().into(),
+            second_profile.profile_id.clone(),
+        )));
+        drop(decisions);
+        let diagnostic_status = socket_api
+            .report_worker_diagnostic(strategy::LiveStrategyWorkerDiagnostic {
+                contract_version: strategy::LIVE_EVALUATION_CONTRACT_VERSION,
+                event_id: "socket-worker-skip-test".into(),
+                strategy,
+                symbol: "BTC-USDT".into(),
+                profile_id: Some(second_profile.profile_id.clone()),
+                event_time_ms: timestamp + 1,
+                reason: "Feature preparation skipped this profile".into(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(diagnostic_status, axum::http::StatusCode::ACCEPTED.as_u16());
+        assert!(state.latest_worker_diagnostics.lock().await.contains_key(&(
+            "BTC-USDT".into(),
+            strategy.as_str().into(),
+            second_profile.profile_id,
+        )));
     }
 }
 

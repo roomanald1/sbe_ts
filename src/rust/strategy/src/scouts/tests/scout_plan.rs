@@ -195,6 +195,13 @@ mod scout_plan_tests {
         assert_eq!(selected.effective_sample_size, Some(4.8));
         assert_eq!(selected.selection_metric_value, Some(5.2));
         assert_eq!(selected.priority_rank, Some(0));
+        let not_selected = expanded
+            .iter()
+            .find(|candidate| candidate.selection_result == "not_selected")
+            .unwrap();
+        assert!(not_selected
+            .selection_reasons
+            .contains(&"active_batch_limit_reached".to_owned()));
         assert_eq!(ledger.evaluation_window.start_timestamp_ms, ledger.as_of_timestamp_ms);
         assert_eq!(ledger.evaluation_window.end_timestamp_ms, None);
         let _ = std::fs::remove_file(&service.scout.path);

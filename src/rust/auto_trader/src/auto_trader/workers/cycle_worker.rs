@@ -104,18 +104,27 @@ fn record_cycle_gap_summary(
     if let Ok(mut summary) = state.gap_summary.lock() {
         let day = utc_day();
         if summary.utc_day != day {
+            let entry_diagnostic_history = std::mem::take(&mut summary.entry_diagnostic_history);
             *summary = GapSummary {
                 utc_day: day.clone(),
+                entry_diagnostic_history,
                 ..GapSummary::default()
             };
         }
         if let Ok(cycle) = &result {
             if let Some(diagnostic) = &cycle.entry_diagnostic {
-                summary.latest_entry_diagnostic = Some(diagnostic.clone());
+                let reason = cycle.reason.as_deref().unwrap_or_default();
+                let mut diagnostic = diagnostic.clone();
+                diagnostic.gate_counts = gate_hits_for_reason(reason)
+                    .into_iter()
+                    .map(|gate| GateHit { gate, count: 1 })
+                    .collect();
+                summary.latest_entry_diagnostic = Some(diagnostic);
             }
         }
         if traded {
             let previous_diagnostic = summary.latest_entry_diagnostic.clone();
+            let entry_diagnostic_history = std::mem::take(&mut summary.entry_diagnostic_history);
             let entry_order = matches!(&result, Ok(cycle)
                 if cycle.status == "order_submitted"
                     && !matches!(cycle.order_type.as_deref(), Some("Ioc exit" | "Ioc hedge")));
@@ -130,6 +139,7 @@ fn record_cycle_gap_summary(
             };
             *summary = GapSummary {
                 utc_day: day,
+                entry_diagnostic_history,
                 ..GapSummary::default()
             };
             summary.latest_entry_diagnostic = previous_diagnostic.map(|mut diagnostic| {
@@ -222,10 +232,21 @@ fn record_cycle_gap_summary(
             summary.latest_entry_diagnostic = Some(LatestEntryDiagnostic {
                 cycle_id: format!("autotrader-{timestamp_ms}"),
                 timestamp_ms,
+                worker_event_ids: Vec::new(),
+                candidate_decision_ids: Vec::new(),
+                gate_counts: Vec::new(),
+                candidate_gate_counts: Vec::new(),
+                candidate_details: Vec::new(),
                 outcome: EntryCycleOutcome::CycleError,
                 raw_signal_count: 0,
                 allowed_signal_count: 0,
                 strategy_candidate_count: 0,
+                fresh_directional_candidate_count: 0,
+                stale_candidate_count: 0,
+                non_directional_candidate_count: 0,
+                position_blocked_candidate_count: 0,
+                strategy_rejected_candidate_count: 0,
+                evidence_present_candidate_count: 0,
                 eligible_candidate_count: 0,
                 rejected_candidate_count: 0,
                 selected_candidate_count: 0,
@@ -236,6 +257,22 @@ fn record_cycle_gap_summary(
                 primary_blocker: Some(error.clone()),
                 detail: error.clone(),
             });
+        }
+        if let Some(diagnostic) = summary.latest_entry_diagnostic.clone() {
+            const MAX_ENTRY_DIAGNOSTIC_HISTORY: usize = 100;
+            if summary
+                .entry_diagnostic_history
+                .last()
+                .is_none_or(|previous| previous.cycle_id != diagnostic.cycle_id)
+            {
+                summary.entry_diagnostic_history.push(diagnostic);
+                if summary.entry_diagnostic_history.len() > MAX_ENTRY_DIAGNOSTIC_HISTORY {
+                    let excess = summary.entry_diagnostic_history.len() - MAX_ENTRY_DIAGNOSTIC_HISTORY;
+                    summary.entry_diagnostic_history.drain(..excess);
+                }
+            } else if let Some(previous) = summary.entry_diagnostic_history.last_mut() {
+                *previous = diagnostic;
+            }
         }
     }
 

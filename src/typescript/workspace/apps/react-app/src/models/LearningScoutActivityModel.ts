@@ -1,5 +1,7 @@
 import { BehaviorSubject } from 'rxjs';
 import { learningRpc } from '../learning_rsocket';
+import { autoTraderRpc } from '../auto_trader_rsocket';
+import type { AutoTraderStrategyProfile } from './AutoTraderModel';
 
 export type LearningScoutActivity = {
   assignment_id: string;
@@ -24,10 +26,12 @@ export type LearningScoutActivity = {
 export class LearningScoutActivityModel {
   readonly state$ = new BehaviorSubject<{
     rows: LearningScoutActivity[];
+    profiles: AutoTraderStrategyProfile[];
     loading: boolean;
     error?: string;
+    profilesError?: string;
     updatedAt?: number;
-  }>({ rows: [], loading: false });
+  }>({ rows: [], profiles: [], loading: false });
 
   private timer?: ReturnType<typeof setInterval>;
   private stopped = true;
@@ -47,25 +51,51 @@ export class LearningScoutActivityModel {
   async refresh() {
     if (this.stopped) return;
     this.state$.next({ ...this.state$.value, loading: true, error: undefined });
-    try {
-      const response = await learningRpc('GET', '/scout-activity');
-      if (!response.ok) throw new Error(`Learning returned ${response.status}`);
-      const payload = (await response.json()) as {
+    const [activityResult, profilesResult] = await Promise.allSettled([
+      learningRpc('GET', '/scout-activity'),
+      autoTraderRpc('GET', '/positions/auto-trader/parameters'),
+    ]);
+    if (this.stopped) return;
+
+    const current = this.state$.value;
+    let rows = current.rows;
+    let error: string | undefined;
+    if (activityResult.status === 'rejected') {
+      error =
+        activityResult.reason instanceof Error
+          ? activityResult.reason.message
+          : String(activityResult.reason);
+    } else if (!activityResult.value.ok) {
+      error = `Learning returned ${activityResult.value.status}`;
+    } else {
+      const payload = (await activityResult.value.json()) as {
         items?: LearningScoutActivity[];
       };
-      if (!this.stopped)
-        this.state$.next({
-          rows: payload.items ?? [],
-          loading: false,
-          updatedAt: Date.now(),
-        });
-    } catch (error) {
-      if (!this.stopped)
-        this.state$.next({
-          ...this.state$.value,
-          loading: false,
-          error: error instanceof Error ? error.message : String(error),
-        });
+      rows = payload.items ?? [];
     }
+
+    let profiles = current.profiles;
+    let profilesError: string | undefined;
+    if (profilesResult.status === 'rejected') {
+      profilesError =
+        profilesResult.reason instanceof Error
+          ? profilesResult.reason.message
+          : String(profilesResult.reason);
+    } else if (!profilesResult.value.ok) {
+      profilesError = `Auto Trader returned ${profilesResult.value.status}`;
+    } else {
+      const payload = (await profilesResult.value.json()) as {
+        strategy_profiles?: AutoTraderStrategyProfile[];
+      };
+      profiles = payload.strategy_profiles ?? [];
+    }
+    this.state$.next({
+      rows,
+      profiles,
+      loading: false,
+      error,
+      profilesError,
+      updatedAt: Date.now(),
+    });
   }
 }

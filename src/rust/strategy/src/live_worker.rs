@@ -121,7 +121,9 @@ impl LiveWorker {
         Self {
             in_flight: Arc::new(Semaphore::new(config.max_in_flight)),
             entry_callbacks: Arc::new(Semaphore::new(2)),
-            feedback_callbacks: Arc::new(Semaphore::new(1)),
+            // Match the four coalesced Insights update lanes so feedback callbacks
+            // can make progress concurrently without dropping most lane results.
+            feedback_callbacks: Arc::new(Semaphore::new(4)),
             metrics: WorkerMetrics::new("live", config.strategy.as_str(), None),
             config,
             profiles: RwLock::new(None),
@@ -208,6 +210,63 @@ impl LiveWorker {
         }
     }
 
+    async fn report_worker_diagnostic(
+        &self,
+        update: &crate::StrategyInsightUpdate,
+        profile: Option<&crate::LiveStrategyProfile>,
+        reason: String,
+    ) -> anyhow::Result<()> {
+        let Some(signal) = update.signal.as_ref() else {
+            return Ok(());
+        };
+        let diagnostic = crate::LiveStrategyWorkerDiagnostic {
+            contract_version: crate::LIVE_EVALUATION_CONTRACT_VERSION,
+            event_id: update.event_id.clone(),
+            strategy: self.config.strategy,
+            symbol: signal.symbol.clone(),
+            profile_id: profile.map(|profile| profile.profile_id.clone()),
+            event_time_ms: update.event_time_ms,
+            reason,
+        };
+        let response = live_insight_step(
+            "AutoTrader worker diagnostic callback",
+            Duration::from_secs(3),
+            crate::request_live_strategy_socket(
+                &self.config.auto_trader_rsocket_url,
+                &crate::LiveStrategySocketRequest::ReportDiagnostic(diagnostic),
+            ),
+        )
+        .await?;
+        match response {
+            crate::LiveStrategySocketResponse::DecisionAccepted { status, .. }
+                if (200..300).contains(&status) =>
+            {
+                Ok(())
+            }
+            crate::LiveStrategySocketResponse::Rejected { status, detail } => {
+                anyhow::bail!(
+                    "AutoTrader rejected live worker diagnostic with status {status}: {detail}"
+                )
+            }
+            crate::LiveStrategySocketResponse::DecisionAccepted { status, detail } => {
+                anyhow::bail!(
+                    "AutoTrader returned non-success status {status} for worker diagnostic: {}",
+                    detail.unwrap_or_else(|| "no detail".into())
+                )
+            }
+            crate::LiveStrategySocketResponse::ProfilesApplied { .. } => {
+                anyhow::bail!(
+                    "AutoTrader returned a profile acknowledgement for a worker diagnostic"
+                )
+            }
+            crate::LiveStrategySocketResponse::LearningSnapshotApplied => {
+                anyhow::bail!(
+                    "AutoTrader returned a Learning acknowledgement for a worker diagnostic"
+                )
+            }
+        }
+    }
+
     async fn evaluate_insight_update(
         &self,
         update: crate::StrategyInsightUpdate,
@@ -227,7 +286,7 @@ impl LiveWorker {
             }
             return self.evaluate_daily_snapshot(update, snapshot).await;
         }
-        let Some(input_signal) = update.signal else {
+        let Some(input_signal) = update.signal.clone() else {
             return Ok(());
         };
         if update.contract_version != crate::STRATEGY_INSIGHT_UPDATE_VERSION
@@ -242,9 +301,24 @@ impl LiveWorker {
         }
         self.metrics.record_insight_update(update.event_time_ms);
         let profile_set = self.profiles.read().await.clone();
-        let Some(profile_set) = profile_set.filter(|set| set.enabled) else {
+        let Some(profile_set) = profile_set else {
+            self.report_worker_diagnostic(
+                &update,
+                None,
+                "AutoTrader has not installed a live profile set on this worker".into(),
+            )
+            .await?;
             return Ok(());
         };
+        if !profile_set.enabled {
+            self.report_worker_diagnostic(
+                &update,
+                None,
+                "AutoTrader has disabled live evaluation for this strategy".into(),
+            )
+            .await?;
+            return Ok(());
+        }
         let open_profile_ids = profile_set
             .open_positions
             .iter()
@@ -252,22 +326,53 @@ impl LiveWorker {
             .map(|position| position.profile_id.as_str())
             .collect::<std::collections::BTreeSet<_>>();
         let symbol_has_open_position = !open_profile_ids.is_empty();
-        for profile in profile_set
+        let matching_profiles = profile_set
             .profiles
             .into_iter()
             .filter(|profile| profile.profile_symbol == input_signal.symbol)
-        {
+            .collect::<Vec<_>>();
+        if matching_profiles.is_empty() {
+            self.report_worker_diagnostic(
+                &update,
+                None,
+                "No active live profile is installed for this symbol".into(),
+            )
+            .await?;
+            return Ok(());
+        }
+        let eligible_profiles = matching_profiles
+            .into_iter()
+            .filter(|profile| {
+                !symbol_has_open_position || open_profile_ids.contains(profile.profile_id.as_str())
+            })
+            .collect::<Vec<_>>();
+        if eligible_profiles.is_empty() {
+            self.report_worker_diagnostic(
+                &update,
+                None,
+                "An open position is assigned to a different profile; this profile was skipped"
+                    .into(),
+            )
+            .await?;
+            return Ok(());
+        }
+        for profile in eligible_profiles {
             let has_open_position = open_profile_ids.contains(profile.profile_id.as_str());
-            if symbol_has_open_position && !has_open_position {
-                continue;
-            }
             let mut signal = match crate::prepare_live_strategy_signal(
                 &input_signal,
                 self.config.strategy,
                 &profile.parameters,
             ) {
                 Ok(signal) => signal,
-                Err(_) => continue,
+                Err(error) => {
+                    self.report_worker_diagnostic(
+                        &update,
+                        Some(&profile),
+                        format!("Not evaluated: {error}"),
+                    )
+                    .await?;
+                    continue;
+                }
             };
             signal.strategy_candidate = true;
             if let Some(regime) = crate::market_regime(&signal) {
@@ -301,25 +406,73 @@ impl LiveWorker {
             };
             // Learning evidence arrives with the pushed profile set. The live
             // signal path never calls back into Learning while evaluating.
-            let mut response = live_insight_step(
+            let evaluation = live_insight_step(
                 "local live strategy evaluation",
                 Duration::from_secs(1),
                 self.evaluate(&serde_json::to_vec(&make_entry_request(None))?),
             )
-            .await?;
+            .await;
+            let mut response = match evaluation {
+                Ok(response) => response,
+                Err(error) => {
+                    self.report_worker_diagnostic(
+                        &update,
+                        Some(&profile),
+                        format!("Strategy evaluation failed: {error:#}"),
+                    )
+                    .await?;
+                    return Err(error);
+                }
+            };
+            if let Some(error) = response.error.as_ref() {
+                self.report_worker_diagnostic(
+                    &update,
+                    Some(&profile),
+                    format!(
+                        "Strategy evaluation failed [{:?}]: {}",
+                        error.code, error.message
+                    ),
+                )
+                .await?;
+                continue;
+            }
             let walk_forward_evidence =
                 needs_walk_forward_evidence(has_open_position, response.decision)
                     .then(|| walk_forward_evidence_for_signal(&profile, &signal))
                     .flatten();
             if walk_forward_evidence.is_some() {
-                response = live_insight_step(
+                let evaluation = live_insight_step(
                     "local live strategy evidence evaluation",
                     Duration::from_secs(1),
                     self.evaluate(&serde_json::to_vec(&make_entry_request(
                         walk_forward_evidence,
                     ))?),
                 )
-                .await?;
+                .await;
+                response = match evaluation {
+                    Ok(response) => response,
+                    Err(error) => {
+                        self.report_worker_diagnostic(
+                            &update,
+                            Some(&profile),
+                            format!("Strategy evidence evaluation failed: {error:#}"),
+                        )
+                        .await?;
+                        return Err(error);
+                    }
+                };
+                if let Some(error) = response.error.as_ref() {
+                    self.report_worker_diagnostic(
+                        &update,
+                        Some(&profile),
+                        format!(
+                            "Strategy evidence evaluation failed [{:?}]: {}",
+                            error.code, error.message
+                        ),
+                    )
+                    .await?;
+                    continue;
+                }
             }
             signal.strategy_decision = Some(serde_json::json!({
                 "strategy": self.config.strategy.as_str(),
@@ -355,18 +508,62 @@ impl LiveWorker {
                         },
                     },
                 };
-                live_insight_step(
+                let position_response = live_insight_step(
                     "local open-position strategy evaluation",
                     Duration::from_secs(1),
                     self.evaluate(&serde_json::to_vec(&position_request)?),
                 )
-                .await?
-                .decision
-                .unwrap_or(crate::LiveStrategyDecision::Hold)
+                .await;
+                match position_response {
+                    Ok(response) => {
+                        if let Some(error) = response.error.as_ref() {
+                            self.report_worker_diagnostic(
+                                &update,
+                                Some(&profile),
+                                format!(
+                                    "Open-position evaluation failed [{:?}]: {}",
+                                    error.code, error.message
+                                ),
+                            )
+                            .await?;
+                            continue;
+                        }
+                        match response.decision {
+                            Some(decision) => decision,
+                            None => {
+                                self.report_worker_diagnostic(
+                                    &update,
+                                    Some(&profile),
+                                    "Open-position evaluation returned no decision or error".into(),
+                                )
+                                .await?;
+                                continue;
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        self.report_worker_diagnostic(
+                            &update,
+                            Some(&profile),
+                            format!("Open-position evaluation failed: {error:#}"),
+                        )
+                        .await?;
+                        return Err(error);
+                    }
+                }
             } else {
-                response
-                    .decision
-                    .unwrap_or(crate::LiveStrategyDecision::Reject)
+                match response.decision {
+                    Some(decision) => decision,
+                    None => {
+                        self.report_worker_diagnostic(
+                            &update,
+                            Some(&profile),
+                            "Entry evaluation returned no decision or error".into(),
+                        )
+                        .await?;
+                        continue;
+                    }
+                }
             };
             if (has_open_position
                 && !matches!(
@@ -402,7 +599,15 @@ impl LiveWorker {
             } else {
                 match Arc::clone(&self.feedback_callbacks).try_acquire_owned() {
                     Ok(slot) => Some(slot),
-                    Err(_) => continue,
+                    Err(_) => {
+                        self.report_worker_diagnostic(
+                            &update,
+                            Some(&profile),
+                            "Decision callback capacity is full; worker skipped this update".into(),
+                        )
+                        .await?;
+                        continue;
+                    }
                 }
             };
             let report = crate::LiveStrategyDecisionReport {
@@ -454,6 +659,19 @@ impl LiveWorker {
                         .await;
                     self.metrics
                         .record_decision_report(update.event_time_ms, false);
+                    if let Err(diagnostic_error) = self
+                        .report_worker_diagnostic(
+                            &update,
+                            Some(&profile),
+                            format!("AutoTrader rejected or did not receive the decision report: {error:#}"),
+                        )
+                        .await
+                    {
+                        eprintln!(
+                            "WARN {} could not report decision callback failure: {diagnostic_error:#}",
+                            self.config.strategy.as_str()
+                        );
+                    }
                     return Err(error);
                 }
             }
@@ -1218,6 +1436,12 @@ impl RSocket for Responder {
                         detail: "live workers accept profile updates, not decision reports".into(),
                     }
                 }
+                crate::LiveStrategySocketRequest::ReportDiagnostic(_) => {
+                    crate::LiveStrategySocketResponse::Rejected {
+                        status: 400,
+                        detail: "live workers cannot accept worker diagnostics".into(),
+                    }
+                }
             };
             return Ok(Some(
                 Payload::builder()
@@ -1555,6 +1779,7 @@ mod tests {
             version: set_version,
             parameters,
             walk_forward_evidence: None,
+            market_regime: None,
             walk_forward_evidence_by_regime: Default::default(),
         };
         crate::LiveStrategyProfileSet {
@@ -1716,7 +1941,8 @@ mod tests {
                 version: 0,
                 parameters,
                 walk_forward_evidence: None,
-                walk_forward_evidence_by_regime: Default::default(),
+                market_regime: None,
+            walk_forward_evidence_by_regime: Default::default(),
             },
             input: LiveEvaluationInput::Entry {
                 signal: StrategyMarketSignal {

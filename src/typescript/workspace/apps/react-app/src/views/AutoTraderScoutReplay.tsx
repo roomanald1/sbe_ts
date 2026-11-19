@@ -144,9 +144,28 @@ function AutoTraderScoutReplayComponent() {
         )}
       </div>
 
+      {state.coverage.hasMore && (
+        <button
+          type="button"
+          className="control-button"
+          onClick={() => autoTraderScoutReplayModel.loadMore()}
+          disabled={state.loading}
+        >
+          {state.loading ? 'Loading…' : 'Load more history'}
+        </button>
+      )}
+
       {state.error && (
         <div className="book-popup-message" role="alert">
           {state.error}
+        </div>
+      )}
+      {state.workerErrors && state.workerErrors.length > 0 && (
+        <div className="book-popup-message" role="alert">
+          Replay history is partial. Failed Scout workers:{' '}
+          {state.workerErrors
+            .map(({ strategy, error }) => `${strategy}: ${error}`)
+            .join('; ')}
         </div>
       )}
       {!state.loading && !state.error && state.outcomes.length === 0 && (

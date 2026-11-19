@@ -210,9 +210,43 @@ fn apply_strategy_position_fill(
 }
 
 fn signal_decision_id(signal: &Signal) -> String {
+    let worker_event_id = signal
+        .strategy_decision
+        .as_ref()
+        .and_then(|decision| decision.get("live_worker_event_id"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    let profile_id = signal
+        .strategy_decision
+        .as_ref()
+        .and_then(|decision| {
+            decision
+                .get("learning_profile_id")
+                .or_else(|| decision.get("scout_parameter_profile_id"))
+        })
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    let cycle_id = signal
+        .strategy_decision
+        .as_ref()
+        .and_then(|decision| decision.get("entry_cycle_id"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    if worker_event_id.is_empty() && profile_id.is_empty() && cycle_id.is_empty() {
+        return format!(
+            "{}|{}|{}",
+            signal.timestamp, signal.symbol, signal.direction
+        );
+    }
     format!(
-        "{}|{}|{}",
-        signal.timestamp, signal.symbol, signal.direction
+        "{}|{}|{}|{}|{}|{}|{}",
+        cycle_id,
+        signal.timestamp,
+        signal.symbol,
+        signal.direction,
+        signal.strategy.as_deref().unwrap_or_default(),
+        profile_id,
+        worker_event_id,
     )
 }
 

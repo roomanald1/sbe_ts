@@ -41,9 +41,7 @@ const strategyGridDefaultColDef: ColDef<StrategyWinRateRow> = {
   minWidth: 48,
 };
 const strategyGridGetRowId = ({ data }: { data: StrategyWinRateRow }) =>
-  data.rowType === 'symbol'
-    ? `symbol:${data.strategy}:${data.symbol}`
-    : `strategy:${data.strategy}`;
+  data.rowId;
 const pct = (v: unknown) =>
   typeof v === 'number' && Number.isFinite(v) ? v.toFixed(3) + '%' : '—';
 const reasonAge = (timestamp: number | undefined) => {
@@ -140,6 +138,7 @@ const durationLabel = (value: unknown) => {
   return Math.floor(value / 1_000) + 's';
 };
 type StrategyWinRateRow = {
+  rowId: string;
   strategy: string;
   enabled?: boolean;
   scoutEnabled?: boolean;
@@ -657,6 +656,7 @@ export function AutoTraderStrategyPerformanceWidget() {
             : undefined;
         const learning = state.learningSummary[strategy];
         return {
+          rowId: `strategy:${strategy}`,
           strategy,
           trades: trades.length,
           wins,
@@ -826,7 +826,7 @@ export function AutoTraderStrategyPerformanceWidget() {
   entryProfilesByStrategyRef.current = entryReturnProfilesByStrategy;
   const expandedEntryStrategiesRef = useRef(expandedEntryStrategies);
   expandedEntryStrategiesRef.current = expandedEntryStrategies;
-  const strategyGridRows = useMemo(
+  const computedStrategyGridRows = useMemo(
     () =>
       visibleStrategyWinRates.flatMap((row) => {
         const profiles = entryReturnProfilesByStrategy.get(row.strategy) ?? [];
@@ -843,6 +843,7 @@ export function AutoTraderStrategyPerformanceWidget() {
         );
         const master = {
           ...row,
+          rowId: `strategy:${row.strategy}`,
           rowType: 'strategy' as const,
           entryAverageNetReturn:
             evidenceSampleCount > 0 &&
@@ -883,11 +884,16 @@ export function AutoTraderStrategyPerformanceWidget() {
                 blocker.strategy === row.strategy &&
                 blocker.symbol === profile.symbol,
             );
-            const workerResult = settings.latestSymbolEntryResults.find(
-              (result) =>
-                result.strategy === row.strategy &&
-                result.symbol === profile.symbol,
-            );
+            const workerResult = settings.latestSymbolEntryResults
+              .filter(
+                (result) =>
+                  result.strategy === row.strategy &&
+                  result.symbol === profile.symbol,
+              )
+              .sort(
+                (left, right) =>
+                  (right.timestamp_ms ?? 0) - (left.timestamp_ms ?? 0),
+              )[0];
             const symbolBlockers = settings.symbolGateHits
               .filter((hit) => hit.symbol === profile.symbol)
               .sort((a, b) => b.count - a.count)
@@ -896,20 +902,31 @@ export function AutoTraderStrategyPerformanceWidget() {
               ? workerResult.reason ||
                 (workerResult.decision
                   ? `Strategy: ${workerResult.decision}`
-                  : 'No worker result recorded')
+                  : 'No worker decision or skip report received for this symbol')
               : undefined;
-            const fallbackReason = strategyBlocker
-              ? `${strategyBlocker.reason} · ${reasonAge(strategyBlocker.timestamp_ms)}`
-              : symbolBlockers.length
-                ? symbolBlockers
-                    .map((hit) => `${hit.direction}: ${hit.last_detail}`)
-                    .join('; ')
-                : workerResult
-                  ? workerResult.timestamp_ms
-                    ? `${workerReason} · ${reasonAge(workerResult.timestamp_ms)}`
-                    : workerReason
-                  : 'No worker result recorded';
+            const workerDiagnosticAge =
+              workerResult &&
+              (workerResult.decision === undefined ||
+                workerResult.decision === null) &&
+              workerResult.timestamp_ms !== undefined &&
+              workerResult.timestamp_ms !== null
+                ? reasonAge(workerResult.timestamp_ms)
+                : undefined;
+            const fallbackReason = workerDiagnosticAge
+              ? `${workerReason} · ${workerDiagnosticAge}`
+              : strategyBlocker
+                ? `${strategyBlocker.reason} · ${reasonAge(strategyBlocker.timestamp_ms)}`
+                : symbolBlockers.length
+                  ? symbolBlockers
+                      .map((hit) => `${hit.direction}: ${hit.last_detail}`)
+                      .join('; ')
+                  : workerResult
+                    ? workerResult.timestamp_ms
+                      ? `${workerReason} · ${reasonAge(workerResult.timestamp_ms)}`
+                      : workerReason
+                    : 'No worker decision or skip report received for this symbol';
             return {
+              rowId: `symbol:${row.strategy}:${profile.symbol}`,
               rowType: 'symbol' as const,
               strategy: row.strategy,
               symbol: profile.symbol,
@@ -917,10 +934,9 @@ export function AutoTraderStrategyPerformanceWidget() {
                 profile.walk_forward_evidence?.averageNetReturnPercent,
               entryPositiveRate: profile.walk_forward_evidence?.positiveNetRate,
               entrySampleCount: profile.walk_forward_evidence?.sampleCount,
-              entryWhyNoEntry: entryEvaluationReason(
-                evaluation,
-                fallbackReason,
-              ),
+              entryWhyNoEntry: workerDiagnosticAge
+                ? fallbackReason
+                : entryEvaluationReason(evaluation, fallbackReason),
             } as StrategyWinRateRow;
           }),
         ];
@@ -935,6 +951,31 @@ export function AutoTraderStrategyPerformanceWidget() {
       settings.symbolGateHits,
     ],
   );
+  // Preserve object identity for rows whose values did not change. AG Grid
+  // uses getRowId plus row object identity to reconcile immutable rowData;
+  // recreating every object here makes frequent snapshots look like updates
+  // to the whole grid and can disrupt expanded rows.
+  const previousStrategyRows = useRef(new Map<string, StrategyWinRateRow>());
+  const strategyGridRows = useMemo(() => {
+    const previous = previousStrategyRows.current;
+    const next = new Map<string, StrategyWinRateRow>();
+    const rows = computedStrategyGridRows.map((row) => {
+      const prior = previous.get(row.rowId);
+      const unchanged =
+        prior &&
+        Object.keys(row).length === Object.keys(prior).length &&
+        Object.keys(row).every(
+          (key) =>
+            row[key as keyof StrategyWinRateRow] ===
+            prior[key as keyof StrategyWinRateRow],
+        );
+      const stableRow = unchanged ? prior : row;
+      next.set(row.rowId, stableRow);
+      return stableRow;
+    });
+    previousStrategyRows.current = next;
+    return rows;
+  }, [computedStrategyGridRows]);
   const entryEvidenceGroup: ColGroupDef<StrategyWinRateRow> = {
     headerName: 'Entry evidence · strategy aggregate / per symbol',
     headerClass: 'strategy-group-learning',

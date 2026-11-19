@@ -14,6 +14,8 @@ struct ScoutOutcomesQuery {
 #[derive(Deserialize, Default)]
 struct ScoutReplayQuery {
     origin_at_ms: Option<u64>,
+    page: Option<usize>,
+    page_size: Option<usize>,
 }
 
 #[derive(Default)]
@@ -548,32 +550,28 @@ async fn get_scout_outcomes(
         .expect("valid Scout outcomes response")
 }
 
-/// Read the complete durable Scout outcome collection for analytical replay.
-/// This intentionally bypasses the bounded 4,096-row runtime hydration cache.
+/// Read one bounded page from the durable Scout outcome collection. This
+/// bypasses the runtime cache while keeping each RSocket response bounded.
 async fn get_scout_replay_outcomes(
     State(service): State<ServiceState>,
     query: axum::extract::Query<ScoutReplayQuery>,
 ) -> Result<axum::Json<Value>, (axum::http::StatusCode, String)> {
-    let (outcomes, total_records, malformed_records) =
-        load_all_scout_outcomes(&service.scout.path)
-            .map_err(|error| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
-    let coverage_complete = malformed_records == 0 && outcomes.len() == total_records;
-    let first_timestamp_ms = outcomes.first().map(|(_, outcome)| outcome.evaluated_timestamp_ms);
-    let last_timestamp_ms = outcomes.last().map(|(_, outcome)| outcome.evaluated_timestamp_ms);
-    let instance_rows = load_scout_instances_since(&service.scout.path, 0)
+    const DEFAULT_PAGE_SIZE: usize = 25;
+    const MAX_PAGE_SIZE: usize = 100;
+    let page = query.page.unwrap_or_default();
+    let page_size = query.page_size.unwrap_or(DEFAULT_PAGE_SIZE).clamp(1, MAX_PAGE_SIZE);
+    let (outcomes, total_records, malformed_records, first_timestamp_ms, last_timestamp_ms) =
+        load_scout_replay_outcome_page(&service.scout.path, page, page_size)
         .map_err(|error| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
-    let now = scout_now_ms();
-    let mut open_instances = 0;
-    let mut unavailable_instances = 0;
-    for instance in instance_rows.values().filter_map(|audit| instance_row(audit, now)) {
-        match instance["status"].as_str() {
-            Some("Open") => open_instances += 1,
-            Some("Outcome unavailable") => unavailable_instances += 1,
-            _ => {}
-        }
-    }
+    let decision_ids = outcomes.iter().map(|(_, outcome)| outcome.decision_id.as_str()).collect::<Vec<_>>();
+    let instance_rows = load_scout_replay_instances(
+        &service.scout.path,
+        &decision_ids,
+    ).map_err(|error| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
+    let page_start = page.saturating_mul(page_size).min(total_records);
     let replay_outcomes = outcomes
         .iter()
+        .take(page_size)
         .map(|(record_key, outcome)| {
             replay_outcome_payload(
                 record_key,
@@ -606,10 +604,13 @@ async fn get_scout_replay_outcomes(
         "source": "scout_records.outcomes",
         "ordering": "evaluated_timestamp_ms_asc_then_record_key_asc",
         "coverage": {
-            "status": if coverage_complete { "complete" } else { "incomplete" },
-            "complete": coverage_complete,
+            "status": if malformed_records == 0 && page == 0 && replay_outcomes.len() == total_records { "complete" } else { "incomplete" },
+            "complete": malformed_records == 0 && page == 0 && replay_outcomes.len() == total_records,
             "totalDurableRecords": total_records,
-            "returnedRecords": outcomes.len(),
+            "returnedRecords": replay_outcomes.len(),
+            "page": page,
+            "pageSize": page_size,
+            "hasMore": page_start.saturating_add(page_size) < total_records,
             "malformedRecords": malformed_records,
             "firstEvaluatedTimestampMs": first_timestamp_ms,
             "lastEvaluatedTimestampMs": last_timestamp_ms,
@@ -621,8 +622,6 @@ async fn get_scout_replay_outcomes(
             "feeRateAndNetReturnReportedRecords": fee_rate_and_net_return_records,
             "explicitCostBreakdownRecords": explicit_cost_breakdown_records,
             "explicitCostBreakdown": explicit_cost_breakdown_records == replay_outcomes.len(),
-            "openScoutInstances": open_instances,
-            "expiredInstancesWithoutOutcome": unavailable_instances,
         },
         "outcomes": replay_outcomes,
     })))
@@ -667,20 +666,36 @@ async fn get_scout_replay_searches(
     })))
 }
 
-fn load_all_scout_outcomes(
+fn load_scout_replay_outcome_page(
     path: &std::path::Path,
-) -> anyhow::Result<(Vec<(String, ScoutOutcomeRequest)>, usize, usize)> {
+    page: usize,
+    page_size: usize,
+) -> anyhow::Result<(
+    Vec<(String, ScoutOutcomeRequest)>,
+    usize,
+    usize,
+    Option<u64>,
+    Option<u64>,
+)> {
     let connection = open_scout_read_connection(path)?;
     let total_records: usize = connection.query_row(
         "SELECT COUNT(*) FROM scout_records WHERE collection='outcomes'",
         [],
         |row| row.get::<_, i64>(0),
     )?.max(0) as usize;
-    let mut statement = connection.prepare(
-        "SELECT record_key, payload FROM scout_records WHERE collection='outcomes' ORDER BY CASE WHEN json_valid(payload) THEN CAST(json_extract(payload, '$.evaluated_timestamp_ms') AS INTEGER) ELSE 0 END, record_key",
+    let (first_timestamp_ms, last_timestamp_ms): (Option<i64>, Option<i64>) = connection.query_row(
+        "SELECT MIN(CASE WHEN json_valid(payload) THEN CAST(json_extract(payload, '$.evaluated_timestamp_ms') AS INTEGER) END), MAX(CASE WHEN json_valid(payload) THEN CAST(json_extract(payload, '$.evaluated_timestamp_ms') AS INTEGER) END) FROM scout_records WHERE collection='outcomes'",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?)),
     )?;
-    let rows = statement.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?;
-    let mut outcomes = Vec::with_capacity(total_records);
+    let mut statement = connection.prepare(
+        "SELECT record_key, payload FROM scout_records WHERE collection='outcomes' ORDER BY CASE WHEN json_valid(payload) THEN CAST(json_extract(payload, '$.evaluated_timestamp_ms') AS INTEGER) ELSE 0 END, record_key LIMIT ?1 OFFSET ?2",
+    )?;
+    let offset = page.saturating_mul(page_size).min(i64::MAX as usize) as i64;
+    let rows = statement.query_map(rusqlite::params![page_size as i64, offset], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })?;
+    let mut outcomes = Vec::with_capacity(page_size);
     let mut malformed_records = 0;
     for row in rows {
         match row.and_then(|(record_key, payload)| {
@@ -696,7 +711,33 @@ fn load_all_scout_outcomes(
             Err(_) => malformed_records += 1,
         }
     }
-    Ok((outcomes, total_records, malformed_records))
+    Ok((
+        outcomes,
+        total_records,
+        malformed_records,
+        first_timestamp_ms.map(|value| value.max(0) as u64),
+        last_timestamp_ms.map(|value| value.max(0) as u64),
+    ))
+}
+
+fn load_scout_replay_instances(
+    path: &std::path::Path,
+    decision_ids: &[&str],
+) -> anyhow::Result<BTreeMap<String, Value>> {
+    let connection = open_scout_read_connection(path)?;
+    let mut statement = connection.prepare(
+        "SELECT payload FROM scout_records WHERE collection='scout_instances' AND record_key=?1",
+    )?;
+    let mut instances = BTreeMap::new();
+    for decision_id in decision_ids {
+        let payload = statement
+            .query_row([decision_id], |row| row.get::<_, String>(0))
+            .optional()?;
+        if let Some(payload) = payload {
+            instances.insert((*decision_id).to_owned(), serde_json::from_str(&payload)?);
+        }
+    }
+    Ok(instances)
 }
 
 fn load_all_scout_searches(
@@ -795,6 +836,15 @@ fn replay_outcome_payload(
     let cost_breakdown = scout_replay_cost_breakdown(outcome, instance);
     let mut payload = serde_json::to_value(outcome).unwrap_or(Value::Null);
     payload["outcome_id"] = json!(record_key);
+    payload["label_window_start_timestamp_ms"] = json!(outcome.signal_timestamp_ms);
+    payload["label_window_end_timestamp_ms"] = json!(outcome.evaluated_timestamp_ms);
+    payload["label_window_status"] = json!(
+        if outcome.evaluated_timestamp_ms >= outcome.signal_timestamp_ms {
+            "observed_signal_to_outcome_completion"
+        } else {
+            "invalid_timestamp_order"
+        }
+    );
     payload["profile_id"] = json!(profile_id);
     payload["profile_symbol"] = json!(profile_symbol_used);
     payload["profile_symbol_source"] = json!(if profile_symbol.is_some() {
@@ -857,6 +907,9 @@ fn scout_replay_cost_breakdown(
         _ => return None,
     };
     Some(json!({
+        "coverageStatus": "partial",
+        "includesAllExecutionCosts": false,
+        "missingCostComponents": ["itemized_entry_fee", "itemized_exit_fee", "funding", "borrow", "carry", "historical_portfolio_valuation"],
         "takerFeeRate": observation["taker_fee_rate"],
         "grossReturnPercent": gross_return_percent,
         "markoutNetReturnPercent": net_return_percent,
@@ -972,8 +1025,12 @@ mod scout_report_tests {
         let replay = replay_outcome_payload("decision-cost|strategy|single", &outcome, Some(300), Some(&instance));
         assert_eq!(replay["notional_usd"], 100.0);
         assert_eq!(replay["portfolio_weight"], 0.5);
+        assert_eq!(replay["label_window_start_timestamp_ms"], 100);
+        assert_eq!(replay["label_window_end_timestamp_ms"], 200);
         assert_eq!(replay["cost_breakdown"]["grossReturnPercent"], 1.0);
         assert_eq!(replay["cost_breakdown"]["markoutNetReturnPercent"], 0.8);
+        assert_eq!(replay["cost_breakdown"]["coverageStatus"], "partial");
+        assert_eq!(replay["cost_breakdown"]["includesAllExecutionCosts"], false);
         assert!(
             (replay["cost_breakdown"]["executionCostPercent"]
                 .as_f64()

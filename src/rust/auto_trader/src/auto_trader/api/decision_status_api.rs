@@ -39,6 +39,57 @@ async fn get_missed_opportunity_bands(
     )
 }
 
+async fn update_daily_strategy_diagnostics(
+    State(state): State<AutoTraderState>,
+    Json(update): Json<DailyStrategyDiagnosticsUpdate>,
+) -> StatusCode {
+    let now_ms = current_time_ms();
+    if update.as_of_ms == 0
+        || update.as_of_ms > now_ms.saturating_add(60_000)
+        || now_ms.saturating_sub(update.as_of_ms) > 36 * 60 * 60 * 1_000
+    {
+        return StatusCode::BAD_REQUEST;
+    }
+    let enabled_strategies = {
+        let settings = state.settings.lock().await;
+        settings
+            .strategies
+            .iter()
+            .map(|strategy| strategy.as_str().to_owned())
+            .collect::<BTreeSet<_>>()
+    };
+    let mut diagnostics = update
+        .diagnostics
+        .into_iter()
+        .filter(|diagnostic| {
+            diagnostic.as_of_ms > 0
+                && diagnostic.as_of_ms <= now_ms.saturating_add(60_000)
+                && now_ms.saturating_sub(diagnostic.as_of_ms) <= 36 * 60 * 60 * 1_000
+                && enabled_strategies.contains(&diagnostic.strategy)
+                && Strategy::from_name(&diagnostic.strategy)
+                    .is_some_and(|strategy| !strategy.is_live_insight() && !strategy.is_dated_carry())
+        })
+        .collect::<Vec<_>>();
+    for diagnostic in &mut diagnostics {
+        diagnostic
+            .symbols
+            .retain(|symbol| strategy::is_autotrader_symbol_allowed(&symbol.symbol));
+    }
+    let mut current = state
+        .strategy_diagnostic
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let latest_current_timestamp = current
+        .iter()
+        .map(|diagnostic| diagnostic.as_of_ms)
+        .max()
+        .unwrap_or_default();
+    if update.as_of_ms >= latest_current_timestamp {
+        *current = diagnostics;
+    }
+    StatusCode::NO_CONTENT
+}
+
 fn live_profile_from_api(
     settings: &Settings,
     profile: StrategyParameterProfile,
@@ -59,6 +110,7 @@ fn live_profile_from_api(
             &profile.symbol,
             strategy,
         ),
+        market_regime: None,
         walk_forward_evidence_by_regime: walk_forward_evidence_by_regime_for_profile(
             settings,
             &profile_id,
@@ -200,7 +252,8 @@ fn build_live_strategy_profile_set(
                         profile_symbol,
                         strategy,
                     ),
-                    walk_forward_evidence_by_regime: walk_forward_evidence_by_regime_for_profile(
+                    market_regime: None,
+        walk_forward_evidence_by_regime: walk_forward_evidence_by_regime_for_profile(
                         settings,
                         &profile_id,
                         profile_symbol,
@@ -291,6 +344,17 @@ impl AutoTraderSocketApi {
             .map(|status| status.as_u16())
             .map_err(|(status, message)| (status.as_u16(), message))
     }
+
+    pub async fn report_worker_diagnostic(
+        &self,
+        diagnostic: strategy::LiveStrategyWorkerDiagnostic,
+    ) -> Result<u16, (u16, String)> {
+        receive_strategy_worker_diagnostic(State(self.state.clone()), Json(diagnostic))
+            .await
+            .map(|status| status.as_u16())
+            .map_err(|(status, message)| (status.as_u16(), message))
+    }
+
     pub async fn apply_learning_snapshot(&self, snapshot: strategy::LearnedProfileSnapshot) {
         apply_learning_snapshot(&self.state, snapshot).await;
     }
@@ -438,7 +502,8 @@ async fn get_compact_decision_parameters(
                 positive_rate: learned.and_then(|profile| (profile.learning_samples > 0).then_some(profile.positive_samples as f64 / profile.learning_samples as f64)),
                 realized_pnl: learned.map_or(0.0, |profile| profile.realized_pnl),
                 walk_forward_evidence: walk_forward_evidence_for_profile(&settings, &symbol, &symbol, *strategy),
-                walk_forward_evidence_by_regime: walk_forward_evidence_by_regime_for_profile(&settings, &symbol, &symbol, *strategy),
+                market_regime: None,
+        walk_forward_evidence_by_regime: walk_forward_evidence_by_regime_for_profile(&settings, &symbol, &symbol, *strategy),
                 parameters });
           }
         }

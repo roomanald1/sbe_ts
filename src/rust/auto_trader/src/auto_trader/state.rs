@@ -4,8 +4,10 @@ struct AutoTraderState {
     strategy_diagnostic: Arc<std::sync::Mutex<Vec<StrategyDiagnostic>>>,
     latest_strategy_blockers: Arc<std::sync::Mutex<BTreeMap<String, StrategyBlocker>>>,
     latest_worker_decisions:
-        Arc<Mutex<BTreeMap<(String, String), strategy::LiveStrategyDecisionReport>>>,
-    seen_worker_decision_events: Arc<Mutex<BTreeMap<(String, String, String), u64>>>,
+        Arc<Mutex<BTreeMap<(String, String, String), strategy::LiveStrategyDecisionReport>>>,
+    latest_worker_diagnostics:
+        Arc<Mutex<BTreeMap<(String, String, String), strategy::LiveStrategyWorkerDiagnostic>>>,
+    seen_worker_decision_events: Arc<Mutex<BTreeMap<(String, String, String, String), u64>>>,
     enabled: Arc<AtomicBool>,
     settings: Arc<Mutex<Settings>>,
     settings_persist_notify: Arc<Notify>,

@@ -29,6 +29,7 @@ const DAILY_STRATEGIES: [&str; 11] = [
     "risk-adjusted-trend-portfolio",
     "donchian-10-btc200",
 ];
+const DAILY_AUDIT_REFRESH_INTERVAL_MS: u64 = 30 * 60 * 1_000;
 // A >10x 90-day move in this fixed large-cap universe is treated as a bad
 // candle history (for example, a stale near-zero close) rather than a ranking
 // signal. This keeps corrupted reference prices from becoming the rotation gate.
@@ -1096,6 +1097,13 @@ fn insight_daily_batch(
             if let Some(regime) = btc {
                 strategy_btc = Some(regime.clone());
             }
+            let relative_strength_days = if strategy == "relative-strength-90-sma200" {
+                insight_parameter(&parameters, "relative_strength_days", 90.0)
+                    .round()
+                    .max(1.0) as usize
+            } else {
+                0
+            };
             let primary_metric_value = if strategy == "rsi2-oversold-rebound" {
                 let period = insight_parameter(&parameters, "rsi_period_days", 2.0).round().max(2.0) as usize;
                 Some(insight_rsi(bars, period))
@@ -1110,8 +1118,7 @@ fn insight_daily_batch(
                 monthly_selection.as_ref().and_then(|selection| selection.ranked_candidates.iter()
                     .find(|candidate| candidate.symbol == symbol).map(|candidate| candidate.score))
             } else if strategy == "relative-strength-90-sma200" {
-                let rotation_days = insight_parameter(&parameters, "relative_strength_days", 90.0).round().max(1.0) as usize;
-                bars.len().checked_sub(rotation_days + 1).and_then(|index| bars.get(index))
+                bars.len().checked_sub(relative_strength_days + 1).and_then(|index| bars.get(index))
                     .map(|reference| (close / reference.close - 1.0) * 100.0)
             } else { None };
             let (cross_sectional_metric_value, cross_sectional_threshold) = match strategy.as_str() {
@@ -1140,20 +1147,46 @@ fn insight_daily_batch(
                 "relative-strength-90-sma200" => cross_sectional_threshold.map(|value| value * 100.0),
                 _ => None,
             };
-            let distance = if let (Some(value), Some(level)) = (primary_metric_value, metric_level) {
-                if strategy == "relative-strength-90-sma200" {
-                    // Both values are already percentages. A relative ratio becomes
-                    // unbounded when the leader's return is close to zero, so report
-                    // the actual return gap in percentage points instead.
-                    value - level
-                } else if level.abs() > f64::EPSILON { (value / level - 1.0) * 100.0 } else { 0.0 }
-            } else if evaluation.primary_level > 0.0 {
-                match primary_metric_value {
-                    Some(value) => (value / evaluation.primary_level - 1.0) * 100.0,
-                    None => (close / evaluation.primary_level - 1.0) * 100.0,
-                }
+            let relative_strength_without_leader =
+                strategy == "relative-strength-90-sma200" && relative_strength_ranking.is_empty();
+            let primary_rule = if relative_strength_without_leader {
+                let trend_days = insight_parameter(&parameters, "trend_sma_days", 200.0)
+                    .round()
+                    .max(1.0) as usize;
+                format!(
+                    "No eligible {relative_strength_days}-day leader (requires an asset above its own SMA{trend_days})"
+                )
             } else {
-                0.0
+                evaluation.primary_rule.clone()
+            };
+            // For relative strength, the ranking threshold is a return percentage.
+            // If the ranking is empty, the evaluator's primary_level is a reference
+            // price, so leave the diagnostic threshold unavailable instead of
+            // labeling that price as a percentage.
+            let primary_level = if strategy == "relative-strength-90-sma200" {
+                metric_level
+            } else {
+                Some(metric_level.unwrap_or(evaluation.primary_level))
+            };
+            let (distance, distance_unit) = if strategy == "relative-strength-90-sma200" {
+                (
+                    primary_metric_value.zip(metric_level).map(|(value, level)| value - level),
+                    Some("pp"),
+                )
+            } else if let (Some(value), Some(level)) = (primary_metric_value, metric_level) {
+                (
+                    Some(if level.abs() > f64::EPSILON {
+                        (value / level - 1.0) * 100.0
+                    } else {
+                        0.0
+                    }),
+                    Some("%"),
+                )
+            } else if evaluation.primary_level > 0.0 {
+                let value = primary_metric_value.unwrap_or(close);
+                (Some((value / evaluation.primary_level - 1.0) * 100.0), Some("%"))
+            } else {
+                (Some(0.0), Some("%"))
             };
             let (secondary_distance, secondary_passed) = match (
                 strategy.as_str(),
@@ -1197,9 +1230,10 @@ fn insight_daily_batch(
                 "symbol": symbol,
                 "bar_close_timestamp": bars.last().map(|bar| bar.close_time_ms),
                 "observed_close": close,
-                "primary_rule": evaluation.primary_rule,
-                "primary_level": metric_level.unwrap_or(evaluation.primary_level),
+                "primary_rule": primary_rule,
+                "primary_level": primary_level,
                 "primary_distance_percent": distance,
+                "primary_distance_unit": distance_unit,
                 "primary_metric_value": primary_metric_value,
                 "primary_metric_unit": primary_metric_unit,
                 "primary_passed": evaluation.primary_passed,
@@ -1238,9 +1272,10 @@ fn insight_daily_batch(
                 "rsi_exit_level": (strategy == "rsi2-oversold-rebound").then(|| insight_parameter(&parameters, "rsi_exit_level", 70.0)),
                 "maximum_hold_days": (strategy == "rsi2-oversold-rebound").then(|| insight_parameter(&parameters, "maximum_hold_days", 5.0)),
                 "minimum_hold_days": (strategy == "donchian-20-btc200-hold3").then(|| insight_parameter(&parameters, "minimum_hold_days", 3.0)),
-                "primary_rule": evaluation.primary_rule,
-                "primary_level": metric_level.unwrap_or(evaluation.primary_level),
+                "primary_rule": primary_rule,
+                "primary_level": primary_level,
                 "primary_distance_percent": distance,
+                "primary_distance_unit": distance_unit,
                 "primary_metric_value": primary_metric_value,
                 "primary_metric_unit": primary_metric_unit,
                 "primary_passed": evaluation.primary_passed,
@@ -1456,7 +1491,7 @@ async fn poll_daily_strategy_signals(
         .unwrap_or_else(|_| "ws://127.0.0.1:10006".into());
     let learning = std::env::var("LEARNING_RSOCKET_URL")
         .unwrap_or_else(|_| "ws://127.0.0.1:10010".into());
-    let mut audited = std::collections::BTreeSet::<String>::new();
+    let mut audited = std::collections::BTreeMap::<String, u64>::new();
     let mut ticker = tokio::time::interval(Duration::from_secs(30));
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
@@ -1538,6 +1573,23 @@ async fn poll_daily_strategy_signals(
         if let Ok(mut daily_snapshot) = serde_json::from_value::<strategy::daily::DailyStrategySnapshot>(snapshot) {
             daily_snapshot.diagnostics = serde_json::from_value(diagnostics).unwrap_or_default();
             populate_daily_snapshot_symbol_status(&mut daily_snapshot);
+            if let Err(error) = auto_trader_rpc(
+                &auto,
+                format!("insights-daily-diagnostics:{}", daily_snapshot.as_of_ms),
+                strategy::ScoutWorkerHttpMethod::Post,
+                "/internal/strategy/daily-diagnostics",
+                serde_json::json!({
+                    "as_of_ms": daily_snapshot.as_of_ms,
+                    "diagnostics": daily_snapshot.diagnostics.clone(),
+                }),
+            )
+            .await
+            {
+                crate::service_log!(
+                    "WARN",
+                    "Insights daily strategy diagnostics delivery failed: {error}"
+                );
+            }
             let update = strategy::StrategyInsightUpdate {
                 contract_version: strategy::STRATEGY_INSIGHT_UPDATE_VERSION,
                 event_id: format!("daily:{}:{event_time_ms}", strategy::probe_id(&sweep_signature)),
@@ -1564,26 +1616,38 @@ async fn poll_daily_strategy_signals(
             let Some(key) = audit.get("decision_id").and_then(serde_json::Value::as_str) else {
                 continue;
             };
-            if !audited.contains(key) {
-                let key = key.to_owned();
-                match store.save_auto_trader_audit(audit).await {
-                    Ok(()) => {
-                        audited.insert(key);
-                    }
-                    Err(error) => {
-                        crate::service_log!("WARN", "Insights daily strategy audit failed: {error}")
-                    }
+            let key = key.to_owned();
+            let timestamp = audit
+                .get("timestamp")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or_else(now_ms);
+            let last_audited_at = audited.get(&key).copied();
+            if !daily_audit_refresh_due(last_audited_at, timestamp) {
+                continue;
+            }
+            match store.save_auto_trader_audit(audit).await {
+                Ok(()) => {
+                    audited.insert(key, timestamp);
+                }
+                Err(error) => {
+                    crate::service_log!("WARN", "Insights daily strategy audit failed: {error}")
                 }
             }
         }
         let now = now_ms();
-        audited.retain(|key| {
+        audited.retain(|key, _| {
             key.rsplit(':')
                 .next()
                 .and_then(|value| value.parse::<u64>().ok())
                 .is_some_and(|time| now.saturating_sub(time) <= 30 * 86_400_000)
         });
     }
+}
+
+fn daily_audit_refresh_due(last_audited_at: Option<u64>, now_ms: u64) -> bool {
+    last_audited_at.is_none_or(|last| {
+        now_ms.saturating_sub(last) >= DAILY_AUDIT_REFRESH_INTERVAL_MS
+    })
 }
 
 fn append_learning_strategies(
@@ -1603,6 +1667,20 @@ fn append_learning_strategies(
 #[cfg(test)]
 mod daily_strategy_configuration_tests {
     use super::*;
+
+    #[test]
+    fn daily_evaluation_audits_refresh_before_the_ui_window_expires() {
+        assert!(daily_audit_refresh_due(None, 1_000_000));
+        assert!(!daily_audit_refresh_due(
+            Some(1_000_000),
+            1_000_000 + DAILY_AUDIT_REFRESH_INTERVAL_MS - 1,
+        ));
+        assert!(daily_audit_refresh_due(
+            Some(1_000_000),
+            1_000_000 + DAILY_AUDIT_REFRESH_INTERVAL_MS,
+        ));
+        assert!(!daily_audit_refresh_due(Some(2_000_000), 1_000_000));
+    }
 
     #[test]
     fn learning_route_failure_keeps_autotrader_strategies_for_daily_scan() {
@@ -1677,8 +1755,9 @@ mod daily_snapshot_status_tests {
                 close: 1.0,
                 eligible: true,
                 primary_rule: "test".to_owned(),
-                primary_level: 1.0,
-                primary_distance_percent: 0.0,
+                primary_level: Some(1.0),
+                primary_distance_percent: Some(0.0),
+                primary_distance_unit: Some("%".to_owned()),
                 primary_metric_value: None,
                 primary_metric_unit: None,
                 primary_passed: signal_active,

@@ -106,13 +106,19 @@ pub fn prepare_live_strategy_signal(
             );
         }
         Strategy::LiveTradeFlow => {
-            let window = parameter(StrategyParameterKey::TradeFlowWindowSeconds)? as u16;
+            let configured_window = parameter(StrategyParameterKey::TradeFlowWindowSeconds)?;
+            // Learned values can be fractional while Insights exposes discrete
+            // windows; use the nearest supported feature instead of skipping the symbol.
             configured.components.trade_flow_imbalance = signal
                 .components
                 .trade_flow_by_window
                 .iter()
-                .find(|feature| feature.window_seconds == window)
-                .ok_or_else(|| format!("Trade-flow feature window {window}s is missing"))?
+                .min_by(|left, right| {
+                    (f64::from(left.window_seconds) - configured_window)
+                        .abs()
+                        .total_cmp(&(f64::from(right.window_seconds) - configured_window).abs())
+                })
+                .ok_or_else(|| "Insights supplied no trade-flow windows".to_owned())?
                 .value;
         }
         Strategy::LiveOrderBook => {
@@ -190,13 +196,17 @@ pub fn prepare_live_strategy_signal(
                         && (feature.touch_tolerance_bps - tolerance).abs() < 1e-6
                 })
                 .and_then(|feature| feature.value);
-            let flow_window = parameter(StrategyParameterKey::TradeFlowWindowSeconds)? as u16;
+            let flow_window = parameter(StrategyParameterKey::TradeFlowWindowSeconds)?;
             let minimum_flow = parameter(StrategyParameterKey::AbsorptionMinimumFlowImbalance)?;
             let flow_fallback = signal
                 .components
                 .trade_flow_by_window
                 .iter()
-                .find(|feature| feature.window_seconds == flow_window)
+                .min_by(|left, right| {
+                    (f64::from(left.window_seconds) - flow_window)
+                        .abs()
+                        .total_cmp(&(f64::from(right.window_seconds) - flow_window).abs())
+                })
                 .and_then(|feature| feature.value)
                 .filter(|flow| flow.abs() >= minimum_flow)
                 .map(|flow| -flow);
@@ -288,9 +298,48 @@ pub enum StrategyWalkForwardEvidenceScope {
     Unknown,
 }
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StrategyWalkForwardEstimator {
+    /// Legacy bootstrap over completed outcomes, not an OOS portfolio stream.
+    CompletedOutcomeClusters,
+    RollingOriginPortfolio,
+    #[default]
+    Unspecified,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StrategyWalkForwardCoverage {
+    Partial,
+    Complete,
+    #[default]
+    Unknown,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StrategyWalkForwardValidationStatus {
+    Validated,
+    Failed,
+    #[default]
+    NotValidated,
+}
+
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, serde::Serialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct StrategyWalkForwardEvidence {
+    /// Contract version carried with Learning snapshots, AutoTrader profiles,
+    /// and Strategy decisions. Version zero identifies pre-contract payloads.
+    pub evidence_contract_version: u16,
+    pub estimator: StrategyWalkForwardEstimator,
+    pub history_coverage: StrategyWalkForwardCoverage,
+    pub cost_coverage: StrategyWalkForwardCoverage,
+    pub search_family_coverage: StrategyWalkForwardCoverage,
+    pub point_in_time_cutoff_timestamp_ms: Option<u64>,
+    pub final_holdout_status: StrategyWalkForwardValidationStatus,
+    pub oos_fold_count: usize,
+    pub spa_p_value: Option<f64>,
     pub sample_count: usize,
     pub positive_net_rate: Option<f64>,
     pub average_net_return_percent: Option<f64>,
@@ -581,6 +630,45 @@ mod market_regime_tests {
         };
         assert_eq!(market_regime(&volatile), Some("volatile"));
         assert_eq!(market_regime(&StrategyMarketSignal::default()), None);
+    }
+}
+
+#[cfg(test)]
+mod walk_forward_evidence_contract_tests {
+    use super::*;
+
+    #[test]
+    fn evidence_contract_is_versioned_and_legacy_payloads_are_unvalidated() {
+        let legacy: StrategyWalkForwardEvidence = serde_json::from_value(serde_json::json!({
+            "sampleCount": 40,
+            "expectancyCiLowPercent": 0.1
+        }))
+        .unwrap();
+        assert_eq!(legacy.evidence_contract_version, 0);
+        assert_eq!(legacy.estimator, StrategyWalkForwardEstimator::Unspecified);
+        assert_eq!(
+            legacy.final_holdout_status,
+            StrategyWalkForwardValidationStatus::NotValidated
+        );
+
+        let versioned = StrategyWalkForwardEvidence {
+            evidence_contract_version: 2,
+            estimator: StrategyWalkForwardEstimator::RollingOriginPortfolio,
+            history_coverage: StrategyWalkForwardCoverage::Complete,
+            cost_coverage: StrategyWalkForwardCoverage::Complete,
+            search_family_coverage: StrategyWalkForwardCoverage::Complete,
+            point_in_time_cutoff_timestamp_ms: Some(123),
+            final_holdout_status: StrategyWalkForwardValidationStatus::Validated,
+            oos_fold_count: 8,
+            spa_p_value: Some(0.02),
+            ..Default::default()
+        };
+        let payload = serde_json::to_value(versioned).unwrap();
+        assert_eq!(payload["evidenceContractVersion"], 2);
+        assert_eq!(payload["estimator"], "rolling_origin_portfolio");
+        assert_eq!(payload["pointInTimeCutoffTimestampMs"], 123);
+        assert_eq!(payload["finalHoldoutStatus"], "validated");
+        assert_eq!(payload["spaPValue"], 0.02);
     }
 }
 pub type Signal = StrategyMarketSignal;

@@ -165,6 +165,15 @@ pub fn benchmark_decision_parameters_path(
         settings.learned_walk_forward_evidence.insert(
             format!("historical-{index}|live-momentum"),
             strategy::StrategyWalkForwardEvidence {
+                evidence_contract_version: 2,
+                estimator: strategy::StrategyWalkForwardEstimator::CompletedOutcomeClusters,
+                history_coverage: strategy::StrategyWalkForwardCoverage::Unknown,
+                cost_coverage: strategy::StrategyWalkForwardCoverage::Unknown,
+                search_family_coverage: strategy::StrategyWalkForwardCoverage::Unknown,
+                point_in_time_cutoff_timestamp_ms: None,
+                final_holdout_status: strategy::StrategyWalkForwardValidationStatus::NotValidated,
+                oos_fold_count: 0,
+                spa_p_value: None,
                 sample_count: index,
                 positive_net_rate: Some(0.51),
                 average_net_return_percent: Some(0.12),
@@ -292,6 +301,7 @@ fn benchmark_snapshot_state(settings: Settings) -> AutoTraderState {
         strategy_diagnostic: Arc::new(std::sync::Mutex::new(Vec::new())),
         latest_strategy_blockers: Arc::new(std::sync::Mutex::new(BTreeMap::new())),
         latest_worker_decisions: Arc::new(Mutex::new(BTreeMap::new())),
+            latest_worker_diagnostics: Arc::new(Mutex::new(BTreeMap::new())),
         seen_worker_decision_events: Arc::new(Mutex::new(BTreeMap::new())),
         enabled: Arc::new(AtomicBool::new(true)),
         settings: Arc::new(Mutex::new(settings)),

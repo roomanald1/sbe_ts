@@ -7,7 +7,10 @@ import {
   type ColDef,
   type ICellRendererParams,
 } from 'ag-grid-community';
-import { AutoTraderLearningWidgetModel } from '../models/AutoTraderLearningWidgetModel';
+import {
+  AutoTraderLearningWidgetModel,
+  LEARNING_DECISION_WINDOW_MS,
+} from '../models/AutoTraderLearningWidgetModel';
 import type {
   LearningRow,
   LearningDecision,
@@ -198,11 +201,20 @@ const decisionColumns: ColDef<LearningDecision>[] = [
       value ? new Date(value).toLocaleString() : '—',
   },
   { field: 'symbol', headerName: 'Symbol', width: 115 },
-  { field: 'strategy', headerName: 'Strategy', width: 190 },
+  {
+    colId: 'strategy',
+    headerName: 'Strategy',
+    width: 190,
+    valueGetter: ({ data }) =>
+      data?.strategy ??
+      (typeof data?.strategy_decision?.strategy === 'string'
+        ? data.strategy_decision.strategy
+        : '—'),
+  },
   { field: 'direction', headerName: 'Direction', width: 95 },
   {
     field: 'status',
-    headerName: 'Selection',
+    headerName: 'Stage / status',
     width: 155,
     valueGetter: ({ data }) => {
       if (!data) return '—';
@@ -212,6 +224,7 @@ const decisionColumns: ColDef<LearningDecision>[] = [
       if (data.status === 'selected') return 'Selected · strict';
       if (data.status === 'skipped' && data.exploratory)
         return 'Exploratory · skipped';
+      if (data.stage === 'strategy:evaluation') return 'Evaluated';
       return data.status ?? '—';
     },
   },
@@ -260,6 +273,19 @@ const decisionColumns: ColDef<LearningDecision>[] = [
         data.final_outcome?.reason ??
         data.reason ??
         data.entry_gate?.rejection_reasons?.join(', ');
+      if (data.stage === 'strategy:evaluation' && data.strategy_decision) {
+        const evaluation = data.strategy_decision;
+        const primaryRule = evaluation.primary_rule;
+        if (typeof primaryRule === 'string') {
+          const primaryResult =
+            evaluation.primary_passed === true
+              ? 'passed'
+              : evaluation.primary_passed === false
+                ? 'not met'
+                : 'unavailable';
+          return `${primaryRule}: ${primaryResult}`;
+        }
+      }
       if (data.final_outcome?.entry && !data.final_outcome.reason)
         return `Entry recorded with status: ${data.final_outcome.status}`;
       if (
@@ -306,7 +332,7 @@ export function AutoTraderLearningWidget({
   section: LearningSection;
 }) {
   const model = useMemo(() => new AutoTraderLearningWidgetModel(), []);
-  const [symbolFilter, setSymbolFilter] = useState('OP-USDT');
+  const [symbolFilter, setSymbolFilter] = useState('');
   const [selectedDecision, setSelectedDecision] = useState<LearningDecision>();
   useEffect(() => {
     model.start();
@@ -330,17 +356,19 @@ export function AutoTraderLearningWidget({
     decisionCoverage,
     decisionError,
   } = useBehaviorSnapshot(model.state$);
+  const recentDecisionCutoff = Date.now() - LEARNING_DECISION_WINDOW_MS;
   const filteredDecisions = decisions
     .filter(
       (decision) =>
-        !symbolFilter ||
-        decision.symbol
-          ?.toUpperCase()
-          .includes(symbolFilter.trim().toUpperCase()),
+        (decision.timestamp ?? 0) >= recentDecisionCutoff &&
+        (!symbolFilter ||
+          decision.symbol
+            ?.toUpperCase()
+            .includes(symbolFilter.trim().toUpperCase())),
     )
     .sort((left, right) => (right.timestamp ?? 0) - (left.timestamp ?? 0));
   const sectionTitles: Record<LearningSection, string> = {
-    decisions: 'Signal and entry decisions',
+    decisions: 'Strategy evaluations and entry decisions',
     realized: 'Realized trade results',
     scouts: 'Scout parameter experiments',
   };
@@ -353,7 +381,7 @@ export function AutoTraderLearningWidget({
       {section === 'decisions' && (
         <>
           <div className="auto-trader-learning-decisions-head">
-            <strong>Signal and entry decisions</strong>
+            <strong>Strategy evaluations and entry decisions</strong>
             <label>
               Symbol{' '}
               <input
@@ -363,8 +391,8 @@ export function AutoTraderLearningWidget({
               />
             </label>
             <small>
-              Last hour · {filteredDecisions.length} decisions · open a row's
-              details to inspect recorded evidence
+              Last 10 minutes · {filteredDecisions.length} evaluations and
+              decisions · open a row's details to inspect recorded evidence
             </small>
           </div>
           {decisionError && (

@@ -49,9 +49,15 @@ struct StatusResponse {
     symbol_gate_hits: Vec<SymbolGateHit>,
     latest_signal_diagnostic: String,
     latest_entry_diagnostic: Option<LatestEntryDiagnostic>,
+    entry_diagnostic_history: Vec<LatestEntryDiagnostic>,
     latest_symbol_entry_results: Vec<SymbolEntryResult>,
     strategy_diagnostics: Vec<StrategyDiagnostic>,
     latest_strategy_blockers: Vec<StrategyBlocker>,
+}
+#[derive(Deserialize)]
+struct DailyStrategyDiagnosticsUpdate {
+    as_of_ms: u64,
+    diagnostics: Vec<StrategyDiagnostic>,
 }
 #[derive(Clone, Serialize)]
 struct StrategyBlocker {
@@ -64,6 +70,8 @@ struct StrategyBlocker {
 struct SymbolEntryResult {
     strategy: String,
     symbol: String,
+    profile_id: Option<String>,
+    event_id: Option<String>,
     decision: Option<strategy::LiveStrategyDecision>,
     reason: String,
     timestamp_ms: Option<u64>,
@@ -85,7 +93,7 @@ struct GapReason {
     reason: String,
     count: u64,
 }
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 struct GateHit {
     gate: String,
     count: u64,
@@ -118,10 +126,21 @@ enum EntryCycleOutcome {
 struct LatestEntryDiagnostic {
     cycle_id: String,
     timestamp_ms: u64,
+    worker_event_ids: Vec<String>,
+    candidate_decision_ids: Vec<String>,
+    gate_counts: Vec<GateHit>,
+    candidate_gate_counts: Vec<EntryGateCandidateCount>,
+    candidate_details: Vec<EntryCandidateDiagnostic>,
     outcome: EntryCycleOutcome,
     raw_signal_count: usize,
     allowed_signal_count: usize,
     strategy_candidate_count: usize,
+    fresh_directional_candidate_count: usize,
+    stale_candidate_count: usize,
+    non_directional_candidate_count: usize,
+    position_blocked_candidate_count: usize,
+    strategy_rejected_candidate_count: usize,
+    evidence_present_candidate_count: usize,
     eligible_candidate_count: usize,
     rejected_candidate_count: usize,
     selected_candidate_count: usize,
@@ -131,6 +150,41 @@ struct LatestEntryDiagnostic {
     primary_gate_id: Option<String>,
     primary_blocker: Option<String>,
     detail: String,
+}
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct EntryCandidateDiagnostic {
+    decision_id: String,
+    worker_event_id: Option<String>,
+    profile_id: Option<String>,
+    symbol: String,
+    strategy: Option<String>,
+    stage: String,
+    observed: serde_json::Value,
+    required: serde_json::Value,
+    checks: serde_json::Value,
+    evidence_contract: serde_json::Value,
+    measurements: Vec<EntryGateMeasurement>,
+    reasons: Vec<String>,
+}
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct EntryGateMeasurement {
+    gate_id: String,
+    observed: Option<f64>,
+    operator: Option<String>,
+    required: Option<f64>,
+    unit: Option<String>,
+    status: String,
+    detail: String,
+}
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct EntryGateCandidateCount {
+    gate_id: String,
+    symbol: String,
+    strategy: Option<String>,
+    count: u64,
 }
 #[derive(Default)]
 struct SymbolGateCount {
@@ -252,4 +306,5 @@ struct GapSummary {
     symbol_gate_hits: BTreeMap<(String, String, String), SymbolGateCount>,
     latest_detail: String,
     latest_entry_diagnostic: Option<LatestEntryDiagnostic>,
+    entry_diagnostic_history: Vec<LatestEntryDiagnostic>,
 }
