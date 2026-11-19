@@ -272,6 +272,11 @@ mod strategy_cleanup_integration_tests {
             .iter()
             .find(|profile| profile.symbol == symbol && profile.strategy == strategy.as_str())
             .expect("live parameter API includes the sampled live strategy");
+        let api_profile = serde_json::to_value(profile).unwrap();
+        assert_eq!(
+            api_profile["walk_forward_evidence"]["sampleCount"],
+            serde_json::json!(1)
+        );
         let evidence = profile
             .walk_forward_evidence
             .as_ref()

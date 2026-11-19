@@ -18,14 +18,29 @@ fn strategy_entry_rejection_reason(
             signal.symbol
         );
     };
+    if !signal.strategy_candidate {
+        return format!(
+            "{} rejected {}: the signal was not marked as a strategy candidate",
+            strategy.as_str(),
+            signal.symbol
+        );
+    }
+    let btc_gate_failed = details
+        .get("btc_gate_passed")
+        .and_then(serde_json::Value::as_bool)
+        == Some(false)
+        || matches!(
+            (
+                details.get("btc_close").and_then(serde_json::Value::as_f64),
+                details.get("btc_sma").and_then(serde_json::Value::as_f64),
+            ),
+            (Some(close), Some(sma)) if close.is_finite() && sma.is_finite() && close <= sma
+        );
     if details
         .get("btc_gate_required")
         .and_then(serde_json::Value::as_bool)
         == Some(true)
-        && details
-            .get("btc_gate_passed")
-            .and_then(serde_json::Value::as_bool)
-            == Some(false)
+        && btc_gate_failed
     {
         let window = details
             .get("btc_window_days")
@@ -84,6 +99,33 @@ fn strategy_entry_rejection_reason(
             .map(|value| format!(" (distance {value:.2}%)"))
             .unwrap_or_default();
         return format!("{rule} not met{distance}");
+    }
+    if matches!(
+        strategy,
+        Strategy::Donchian10Btc200
+            | Strategy::Donchian20Btc200
+            | Strategy::Donchian20Btc200Hold3
+            | Strategy::Donchian20Sma200
+            | Strategy::Donchian55Btc200
+    ) {
+        if let (Some(close), Some(level)) = (
+            details.get("observed_close").and_then(serde_json::Value::as_f64),
+            details.get("primary_level").and_then(serde_json::Value::as_f64),
+        ) {
+            if close.is_finite() && close > 0.0 && level.is_finite() && level > 0.0 {
+                let distance_percent = (close / level - 1.0) * 100.0;
+                let allowed_distance_percent = parameters
+                    .get("breakout_entry_distance_percent")
+                    .copied()
+                    .unwrap_or_default();
+                if distance_percent < -allowed_distance_percent {
+                    return format!(
+                        "{} Donchian breakout entry rule not met: close {close:.2} is {distance_percent:.2}% from breakout level {level:.2}; allowed distance is {allowed_distance_percent:.2}%",
+                        strategy.as_str()
+                    );
+                }
+            }
+        }
     }
     if let Some(reason) = strategy.entry_rejection_reason(&StrategySignal::entry(signal, parameters)) {
         return reason;
@@ -345,16 +387,19 @@ fn selected_signal_outcome_audit_payload(
         .reason
         .as_deref()
         .unwrap_or("No order submitted; no reason was provided");
-    signal_audit_payload(
+    let strategy = signal.strategy.as_deref().unwrap_or("generic_signal");
+    let mut payload = strategy_rejection_audit_payload(
         signal,
-        "decision",
+        strategy,
+        reason,
         timestamp_ms,
-        result.status,
-        Some(reason),
-        Some(exploratory),
         stop_loss_percent,
         take_profit_percent,
-    )
+        "final_entry",
+    );
+    payload["exploratory"] = serde_json::json!(exploratory);
+    payload["status"] = serde_json::json!(result.status);
+    payload
 }
 
 async fn evaluate_daily_strategy_signals(
@@ -721,6 +766,14 @@ async fn run_cycle_inner(
             settings.clone(),
         )
     };
+    let (risk_appetite, counterfactual_stop_loss_percent, counterfactual_take_profit_percent) = {
+        let settings = state.settings.lock().await;
+        (
+            settings.risk_appetite,
+            settings.stop_loss_percent,
+            settings.take_profit_percent,
+        )
+    };
     let daily_signal_strategies = dashboard
         .best
         .iter()
@@ -1027,14 +1080,6 @@ async fn run_cycle_inner(
         });
     }
     let selection_started = Instant::now();
-    let (risk_appetite, counterfactual_stop_loss_percent, counterfactual_take_profit_percent) = {
-        let settings = state.settings.lock().await;
-        (
-            settings.risk_appetite,
-            settings.stop_loss_percent,
-            settings.take_profit_percent,
-        )
-    };
     let PreparedSignals {
         signals,
         inferred_direction_count,
@@ -1271,7 +1316,10 @@ async fn run_cycle_inner(
                 .reason
                 .clone()
                 .unwrap_or_else(|| result.status.to_owned());
-            for candidate in selection_signals {
+            for candidate in selection_signals
+                .iter()
+                .filter(|candidate| candidate.strategy_candidate || candidate.strategy.is_some())
+            {
                 let mut audited_candidate = candidate.clone();
                 audited_candidate.entry_gate = Some(candidate_entry_audit_value(
                     candidate,
@@ -1298,15 +1346,18 @@ async fn run_cycle_inner(
                     || cycle_reason.clone(),
                     |details| format!("{cycle_reason}; candidate checks: {details}"),
                 );
-                let payload = signal_audit_payload(
+                let strategy = audited_candidate
+                    .strategy
+                    .as_deref()
+                    .unwrap_or("generic_signal");
+                let payload = strategy_rejection_audit_payload(
                     &audited_candidate,
-                    "decision",
+                    strategy,
+                    &reason,
                     audit_timestamp,
-                    "skipped",
-                    Some(&reason),
-                    None,
                     counterfactual_stop_loss_percent,
                     counterfactual_take_profit_percent,
+                    "cycle_selection",
                 );
                 queue_auto_trader_audit(state, payload);
             }
@@ -1481,12 +1532,15 @@ mod parallel_daily_cycle_tests {
         let result = skipped_for_signal(&candidate, "Waiting for a fresh subscribed local order book");
         let audit = selected_signal_outcome_audit_payload(&candidate, &result, true, 11_000, 0.5, 0.8);
 
-        assert_eq!(audit["stage"], "decision");
+        assert_eq!(audit["stage"], "strategy_rejection");
         assert_eq!(audit["status"], "skipped");
         assert_eq!(audit["reason"], "Waiting for a fresh subscribed local order book");
         assert_eq!(audit["exploratory"], true);
         assert_eq!(audit["entry_gate"]["checks"]["strength_pass"], false);
-        assert_eq!(audit["decision_id"], "10|ETH-USDT|bullish");
+        assert_eq!(
+            audit["decision_id"],
+            "10|ETH-USDT|bullish|strategy:live-order-book|phase:final_entry|audit:11000"
+        );
     }
 
     #[test]
@@ -1523,6 +1577,32 @@ mod parallel_daily_cycle_tests {
             "strategy_rejection"
         );
         assert_ne!(first_audit["decision_id"], second_audit["decision_id"]);
+    }
+
+    #[tokio::test]
+    async fn rejected_strategy_candidate_reaches_the_persistence_queue() {
+        let candidate = signal("live-order-book");
+        let queue = AuditQueue::new(8, 64 * 1024);
+        let result = enqueue_strategy_rejection_audit(
+            &queue,
+            &candidate,
+            "live-order-book",
+            "Directional order-book imbalance 0.12; requires at least 0.16",
+            11_000,
+            0.5,
+            0.8,
+            "live_worker",
+        );
+
+        assert_eq!(result, AuditEnqueueResult::Queued);
+        let persisted = queue.recv().await;
+        assert_eq!(persisted["stage"], "strategy_rejection");
+        assert_eq!(persisted["status"], "rejected");
+        assert_eq!(
+            persisted["reason"],
+            "Directional order-book imbalance 0.12; requires at least 0.16"
+        );
+        assert_eq!(queue.depth(), 0);
     }
 
     #[test]

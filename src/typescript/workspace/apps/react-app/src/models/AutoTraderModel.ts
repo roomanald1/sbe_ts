@@ -128,10 +128,16 @@ export type AutoTraderStrategyProfile = {
   parameters: AutoTraderStrategyParameter[];
 };
 export type WalkForwardEvidence = {
-  sample_count: number;
-  positive_net_rate?: number | null;
-  average_net_return_percent?: number | null;
-  last_sample_timestamp_ms: number;
+  sampleCount: number;
+  positiveNetRate?: number | null;
+  averageNetReturnPercent?: number | null;
+  expectancyCiLowPercent?: number | null;
+  expectancyCiHighPercent?: number | null;
+  effectiveSampleSize?: number | null;
+  windowCount?: number;
+  maxDrawdownPercent?: number | null;
+  downsideLossPercent?: number | null;
+  lastSampleTimestampMs: number;
 };
 export type AutoTraderPendingScoutParameter = {
   symbol: string;

@@ -542,10 +542,12 @@ pub async fn request_learning_snapshot_push(
     )
     .await
     .context("AutoTrader RSocket connection timed out")??;
-    let request = crate::LiveStrategySocketRequest::UpdateLearningSnapshot(snapshot.clone());
-    let payload = Payload::builder()
-        .set_data(serde_json::to_vec(&request)?)
-        .build();
+    let payload_data = crate::encode_learning_snapshot_payload(snapshot)?;
+    eprintln!(
+        "Compressed Learning snapshot RSocket payload to {} bytes",
+        payload_data.len()
+    );
+    let payload = Payload::builder().set_data(payload_data).build();
     let response = match tokio::time::timeout(
         std::time::Duration::from_secs(30),
         client.request_response(payload),

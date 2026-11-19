@@ -1,14 +1,37 @@
 .dashboard-widget-resize {
   position: absolute;
   z-index: 5;
-  right: 2px;
-  bottom: 2px;
-  width: 16px;
-  height: 16px;
+  right: 1px;
+  bottom: 1px;
+  box-sizing: border-box;
+  width: 8px;
+  height: 8px;
   border-right: 2px solid #63758a;
   border-bottom: 2px solid #63758a;
   cursor: nwse-resize;
   touch-action: none;
+}
+
+.dashboard-widget-resize-side {
+  position: absolute;
+  z-index: 5;
+  top: 50%;
+  right: 0;
+  box-sizing: border-box;
+  width: 14px;
+  height: 40px;
+  border: 1px solid #9bbce0;
+  border-right: 0;
+  border-radius: 5px 0 0 5px;
+  background:
+    linear-gradient(#c6ddf5, #c6ddf5) center 12px / 5px 2px no-repeat,
+    linear-gradient(#c6ddf5, #c6ddf5) center 19px / 5px 2px no-repeat,
+    linear-gradient(#c6ddf5, #c6ddf5) center 26px / 5px 2px no-repeat,
+    #34506f;
+  box-shadow: 0 0 5px rgb(105 174 252 / 55%);
+  cursor: ew-resize;
+  touch-action: none;
+  transform: translateY(-50%);
 }
 
 .dashboard-widget-remove:hover {

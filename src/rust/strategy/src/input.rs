@@ -284,6 +284,17 @@ pub struct StrategyWalkForwardEvidence {
     pub positive_net_rate: Option<f64>,
     pub average_net_return_percent: Option<f64>,
     pub last_sample_timestamp_ms: u64,
+    /// Cluster-robust 95% interval around net expectancy, in percent.
+    pub expectancy_ci_low_percent: Option<f64>,
+    pub expectancy_ci_high_percent: Option<f64>,
+    /// Kish effective sample size after outcome-age weighting.
+    pub effective_sample_size: Option<f64>,
+    /// Number of distinct UTC outcome-date windows represented.
+    pub window_count: usize,
+    /// Peak-to-trough drawdown of chronological compounded net returns.
+    pub max_drawdown_percent: Option<f64>,
+    /// Mean loss magnitude across negative net outcomes.
+    pub downside_loss_percent: Option<f64>,
 }
 impl DailyStrategySignalFeatures {
     pub fn close_above(&self, level: Option<f64>) -> bool {

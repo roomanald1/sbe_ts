@@ -1851,6 +1851,7 @@ name = "strategy"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "flate2",
  "rsocket_rust",
  "rsocket_rust_transport_websocket",
  "serde",

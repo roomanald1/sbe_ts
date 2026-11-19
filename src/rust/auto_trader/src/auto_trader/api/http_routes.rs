@@ -1253,16 +1253,24 @@ async fn receive_strategy_decision(
     }
     if report.decision != strategy::LiveStrategyDecision::Enter {
         if report.decision == strategy::LiveStrategyDecision::Reject {
+            let evaluated_reason = strategy_entry_rejection_reason(
+                &report.signal,
+                report.strategy,
+                &signal_strategy_parameters(&report.signal),
+            );
             let reason = report
                 .reason
                 .clone()
-                .unwrap_or_else(|| {
-                    format!(
-                        "{} rejected entry for {}: the strategy evaluator did not provide a rule explanation",
-                        report.strategy.as_str(),
-                        report.symbol
-                    )
-                });
+                .filter(|reason| {
+                    !reason.contains("no rule explanation")
+                        && !reason.contains("did not provide a rule explanation")
+                        && !reason.contains("did not satisfy its entry rules")
+                        && !reason.contains("the signal did not satisfy its entry rules")
+                        && !reason.contains("entry conditions were not met")
+                        && !reason.contains("Live strategy evaluator rejected the signal")
+                })
+                .unwrap_or(evaluated_reason);
+            let audit_reason = reason.clone();
             let blocker = StrategyBlocker {
                 strategy: report.strategy.as_str().to_owned(),
                 symbol: report.symbol.clone(),
@@ -1295,6 +1303,19 @@ async fn receive_strategy_decision(
                 settings.last_decision = reason;
                 settings.last_decision_at = now_ms;
             }
+            let (stop_loss_percent, take_profit_percent) =
+                (settings.stop_loss_percent, settings.take_profit_percent);
+            drop(settings);
+            queue_strategy_rejection_audit(
+                &state,
+                &report.signal,
+                report.strategy.as_str(),
+                &audit_reason,
+                report.event_time_ms,
+                stop_loss_percent,
+                take_profit_percent,
+                "live_worker",
+            );
         }
         if report.decision == strategy::LiveStrategyDecision::Reject
             && report.strategy.is_live_insight()

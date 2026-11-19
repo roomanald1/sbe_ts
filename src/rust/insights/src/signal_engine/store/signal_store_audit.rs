@@ -155,6 +155,16 @@ impl SignalStore {
         limit: usize,
         stage: Option<String>,
     ) -> Result<AuditPage> {
+        let since = if stage.as_deref() == Some("strategy_rejection") {
+            let now_ms = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64;
+            let cutoff = now_ms.saturating_sub(60 * 60 * 1_000);
+            Some(since.unwrap_or(cutoff).max(cutoff))
+        } else {
+            since
+        };
         let path = self.path.clone();
         tokio::task::spawn_blocking(move || {
             let limit = limit.clamp(1, 10_000);
@@ -447,11 +457,17 @@ mod decision_audit_window_tests {
             "status": "rejected",
             "reason": "Signal strength 0.12 is below the required minimum 0.30"
         });
+        let mut expired_payload = payload.clone();
+        expired_payload["decision_id"] = serde_json::json!("expired-rejection");
+        expired_payload["timestamp"] = serde_json::json!(
+            timestamp.saturating_sub(2 * 60 * 60 * 1_000)
+        );
+        store.save_auto_trader_audit(expired_payload).await.unwrap();
         store.save_auto_trader_audit(payload.clone()).await.unwrap();
 
         let page = store
             .load_auto_trader_audit_page(
-                Some(timestamp.saturating_sub(60 * 60 * 1_000)),
+                Some(0),
                 None,
                 100,
                 Some("strategy_rejection".to_owned()),

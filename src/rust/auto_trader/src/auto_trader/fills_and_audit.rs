@@ -318,8 +318,8 @@ fn strategy_rejection_audit_payload(
         take_profit_percent,
     );
     payload["decision_id"] = serde_json::json!(format!(
-        "{}|strategy:{strategy}|phase:{phase}",
-        signal_decision_id(signal)
+        "{}|strategy:{strategy}|phase:{phase}|audit:{timestamp_ms}",
+        signal_decision_id(signal),
     ));
     let mut entry_gate = signal
         .entry_gate
@@ -342,7 +342,8 @@ fn queue_strategy_rejection_audit(
     take_profit_percent: f64,
     phase: &str,
 ) {
-    let payload = strategy_rejection_audit_payload(
+    enqueue_strategy_rejection_audit(
+        &state.audit_tx,
         signal,
         strategy,
         reason,
@@ -351,7 +352,27 @@ fn queue_strategy_rejection_audit(
         take_profit_percent,
         phase,
     );
-    queue_auto_trader_audit(state, payload);
+}
+
+fn enqueue_strategy_rejection_audit(
+    queue: &AuditQueue,
+    signal: &Signal,
+    strategy: &str,
+    reason: &str,
+    timestamp_ms: u64,
+    stop_loss_percent: f64,
+    take_profit_percent: f64,
+    phase: &str,
+) -> AuditEnqueueResult {
+    queue.enqueue(strategy_rejection_audit_payload(
+        signal,
+        strategy,
+        reason,
+        timestamp_ms,
+        stop_loss_percent,
+        take_profit_percent,
+        phase,
+    ))
 }
 
 fn queue_auto_trader_audit(state: &AutoTraderState, payload: serde_json::Value) {

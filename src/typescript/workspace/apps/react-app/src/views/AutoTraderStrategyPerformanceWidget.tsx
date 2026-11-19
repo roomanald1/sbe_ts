@@ -7,6 +7,7 @@ import {
   type ColDef,
   type ColGroupDef,
   type GridApi,
+  type ICellRendererParams,
 } from 'ag-grid-community';
 import {
   AutoTraderOutcomesModel,
@@ -16,6 +17,7 @@ import {
 import { autoTraderScoutModel } from '../models/AutoTraderScoutModel';
 import {
   sharedAutoTraderSettingsModel,
+  type AutoTraderStrategyProfile,
   type Strategy,
 } from '../models/AutoTraderModel';
 import { useBehaviorSnapshot } from '@workspace/ui-platform';
@@ -39,7 +41,9 @@ const strategyGridDefaultColDef: ColDef<StrategyWinRateRow> = {
   minWidth: 48,
 };
 const strategyGridGetRowId = ({ data }: { data: StrategyWinRateRow }) =>
-  data.strategy;
+  data.rowType === 'symbol'
+    ? `symbol:${data.strategy}:${data.symbol}`
+    : `strategy:${data.strategy}`;
 const pct = (v: unknown) =>
   typeof v === 'number' && Number.isFinite(v) ? v.toFixed(3) + '%' : '—';
 const reasonAge = (timestamp: number | undefined) => {
@@ -54,6 +58,51 @@ const reasonTimestamp = (timestamp: number | undefined) =>
   timestamp && Number.isFinite(timestamp)
     ? new Date(timestamp).toLocaleString()
     : 'Timestamp unavailable';
+const entryEvaluationReason = (
+  evaluation:
+    | {
+        reason?: string;
+        decision: {
+          btc_gate_required?: boolean;
+          btc_gate_passed?: boolean | null;
+          btc_window_days?: number | null;
+          primary_passed?: boolean;
+          primary_rule?: string;
+          primary_metric_value?: number | null;
+          primary_metric_unit?: string | null;
+          primary_level?: number | null;
+          primary_distance_percent?: number | null;
+          secondary_passed?: boolean | null;
+          secondary_rule?: string | null;
+          secondary_distance_percent?: number | null;
+        };
+      }
+    | undefined,
+) => {
+  if (!evaluation) return 'No symbol-specific evaluation recorded';
+  if (evaluation.reason?.trim()) return evaluation.reason;
+  const decision = evaluation.decision;
+  if (decision.btc_gate_required && decision.btc_gate_passed === false)
+    return `BTC trend gate not passed${decision.btc_window_days ? ` (SMA${decision.btc_window_days})` : ''}`;
+  if (decision.primary_passed === false && decision.primary_rule) {
+    const observed =
+      typeof decision.primary_metric_value === 'number'
+        ? `observed ${decision.primary_metric_value.toFixed(2)}${decision.primary_metric_unit ? ` ${decision.primary_metric_unit}` : ''}`
+        : 'observed value unavailable';
+    const required =
+      typeof decision.primary_level === 'number'
+        ? `; required ${decision.primary_level.toFixed(2)}${decision.primary_metric_unit ? ` ${decision.primary_metric_unit}` : ''}`
+        : '';
+    const distance =
+      typeof decision.primary_distance_percent === 'number'
+        ? `; distance ${decision.primary_distance_percent.toFixed(2)}%`
+        : '';
+    return `${decision.primary_rule} not met (${observed}${required}${distance})`;
+  }
+  if (decision.secondary_passed === false)
+    return `${decision.secondary_rule ?? 'Secondary rule'} not met${typeof decision.secondary_distance_percent === 'number' ? ` (distance ${decision.secondary_distance_percent.toFixed(2)}%)` : ''}`;
+  return 'No rejection recorded in the latest symbol evaluation';
+};
 const usd = new Intl.NumberFormat(undefined, {
   style: 'currency',
   currency: 'USD',
@@ -126,6 +175,12 @@ type StrategyWinRateRow = {
   strictEntryGate?: StrictEntryGateSummary;
   strictBaseStrengthFloor?: number;
   strictGateApplies?: boolean;
+  rowType?: 'strategy' | 'symbol';
+  symbol?: string;
+  entryAverageNetReturn?: number | null;
+  entryPositiveRate?: number | null;
+  entrySampleCount?: number;
+  entryWhyNoEntry?: string;
 };
 const allStrategies: Strategy[] = [
   'live-momentum',
@@ -580,6 +635,111 @@ export function AutoTraderStrategyPerformanceWidget() {
         : strategyWinRates,
     [strategyWinRates, hideDisabledStrategies],
   );
+  const entryReturnProfiles =
+    settings.decisionParameters?.strategy_profiles ?? [];
+  const entryReturnProfilesByStrategy = useMemo(() => {
+    const groups = new Map<string, AutoTraderStrategyProfile[]>();
+    for (const profile of entryReturnProfiles) {
+      groups.set(profile.strategy, [
+        ...(groups.get(profile.strategy) ?? []),
+        profile,
+      ]);
+    }
+    return groups;
+  }, [entryReturnProfiles]);
+  const [expandedEntryStrategies, setExpandedEntryStrategies] = useState<
+    Set<string>
+  >(() => new Set());
+  const strategyGridRows = useMemo(
+    () =>
+      visibleStrategyWinRates.flatMap((row) => {
+        const profiles = entryReturnProfilesByStrategy.get(row.strategy) ?? [];
+        const master = { ...row, rowType: 'strategy' as const };
+        if (!expandedEntryStrategies.has(row.strategy) || profiles.length === 0)
+          return [master];
+        return [
+          master,
+          ...profiles.map((profile) => {
+            const evaluation =
+              state.latestStrategyEvaluationsByPosition[
+                `${row.strategy}:${profile.symbol}`
+              ];
+            return {
+              rowType: 'symbol' as const,
+              strategy: row.strategy,
+              symbol: profile.symbol,
+              entryAverageNetReturn:
+                profile.walk_forward_evidence?.averageNetReturnPercent,
+              entryPositiveRate: profile.walk_forward_evidence?.positiveNetRate,
+              entrySampleCount: profile.walk_forward_evidence?.sampleCount,
+              entryWhyNoEntry: entryEvaluationReason(evaluation),
+            } as StrategyWinRateRow;
+          }),
+        ];
+      }),
+    [
+      visibleStrategyWinRates,
+      entryReturnProfilesByStrategy,
+      expandedEntryStrategies,
+      state.latestStrategyEvaluationsByPosition,
+    ],
+  );
+  const entryEvidenceGroup: ColGroupDef<StrategyWinRateRow> = {
+    headerName: 'Entry evidence · per symbol',
+    headerClass: 'strategy-group-learning',
+    children: [
+      {
+        colId: 'entryAverageNetReturn',
+        headerName: 'Net avg',
+        headerTooltip:
+          'Scout walk-forward average net return for this strategy, symbol, and active parameter profile. This is the same evidence value checked by entry decisions.',
+        field: 'entryAverageNetReturn',
+        cellClassRules: signed,
+        valueFormatter: ({ value }) => pct(value),
+        width: 72,
+        minWidth: 72,
+        maxWidth: 82,
+        flex: 0,
+      },
+      {
+        colId: 'entryPositiveRate',
+        headerName: 'Positive%',
+        field: 'entryPositiveRate',
+        valueFormatter: ({ value }) =>
+          typeof value === 'number' && Number.isFinite(value)
+            ? (value * 100).toFixed(1) + '%'
+            : '—',
+        width: 78,
+        minWidth: 72,
+        maxWidth: 86,
+        flex: 0,
+      },
+      {
+        colId: 'entrySampleCount',
+        headerName: 'Samples',
+        field: 'entrySampleCount',
+        valueFormatter: ({ value }) =>
+          typeof value === 'number' && Number.isFinite(value)
+            ? value.toLocaleString()
+            : '—',
+        width: 62,
+        minWidth: 58,
+        maxWidth: 68,
+        flex: 0,
+      },
+      {
+        colId: 'entryWhyNoEntry',
+        headerName: 'Why no entry?',
+        headerTooltip:
+          'Latest recorded evaluation reason for this specific strategy and symbol. The reason may be unavailable if no symbol-level evaluation has been recorded.',
+        field: 'entryWhyNoEntry',
+        tooltipField: 'entryWhyNoEntry',
+        width: 300,
+        minWidth: 240,
+        flex: 0,
+      },
+    ],
+  };
   const strategyColumns = useMemo<
     (ColDef<StrategyWinRateRow> | ColGroupDef<StrategyWinRateRow>)[]
   >(
@@ -587,7 +747,44 @@ export function AutoTraderStrategyPerformanceWidget() {
       {
         field: 'strategy',
         headerName: 'Strategy',
-        valueFormatter: ({ value }) => strategyLabel(value),
+        valueGetter: ({ data }) => {
+          if (!data) return '';
+          if (data.rowType === 'symbol') return '↳ ' + (data.symbol ?? '');
+          const hasEvidence = Boolean(
+            entryReturnProfilesByStrategy.get(data.strategy)?.length,
+          );
+          const expander = hasEvidence
+            ? expandedEntryStrategies.has(data.strategy)
+              ? '▾ '
+              : '▸ '
+            : '';
+          return expander + strategyLabel(data.strategy);
+        },
+        cellRenderer: ({ data }: ICellRendererParams<StrategyWinRateRow>) => {
+          if (!data) return null;
+          if (data.rowType === 'symbol') {
+            return (
+              <span className="auto-trader-entry-evidence-symbol-label">
+                ↳ {data.symbol}
+              </span>
+            );
+          }
+          const label = strategyLabel(data.strategy);
+          if (!entryReturnProfilesByStrategy.get(data.strategy)?.length)
+            return label;
+          const expanded = expandedEntryStrategies.has(data.strategy);
+          return (
+            <button
+              type="button"
+              className="auto-trader-entry-evidence-expander-button"
+              aria-expanded={expanded}
+              aria-label={`${expanded ? 'Collapse' : 'Expand'} ${label} symbol entry evidence`}
+            >
+              <span aria-hidden="true">{expanded ? '▾' : '▸'}</span>
+              {label}
+            </button>
+          );
+        },
         headerClass: 'strategy-column-strategy-header strategy-group-end',
         cellClass: 'strategy-column-strategy-cell strategy-group-end',
         cellStyle: { backgroundColor: '#15181d' },
@@ -649,7 +846,6 @@ export function AutoTraderStrategyPerformanceWidget() {
             {
               field: 'winRate',
               headerName: 'Win%',
-              sort: 'desc',
               valueFormatter: ({ value }) =>
                 typeof value === 'number' ? value.toFixed(1) + '%' : '—',
               width: 55,
@@ -671,6 +867,7 @@ export function AutoTraderStrategyPerformanceWidget() {
           'performance',
         ),
       },
+      entryEvidenceGroup,
       {
         headerName: 'Fully closed trades',
         headerClass: 'strategy-group-sample',
@@ -952,6 +1149,8 @@ export function AutoTraderStrategyPerformanceWidget() {
       settings.scoutStrategies,
       settings.strategies,
       settingsModel,
+      expandedEntryStrategies,
+      entryReturnProfilesByStrategy,
     ],
   );
   return (
@@ -985,8 +1184,45 @@ export function AutoTraderStrategyPerformanceWidget() {
         className="data-grid-wrap signal-info-grid auto-trader-strategy-winrate-grid"
       >
         <AgGridReact<StrategyWinRateRow>
-          rowData={visibleStrategyWinRates}
+          rowData={strategyGridRows}
           columnDefs={strategyColumns}
+          onRowClicked={({ data }) => {
+            if (!data || data.rowType === 'symbol') return;
+            if (!entryReturnProfilesByStrategy.get(data.strategy)?.length)
+              return;
+            setExpandedEntryStrategies((previous) => {
+              const next = new Set(previous);
+              if (next.has(data.strategy)) next.delete(data.strategy);
+              else next.add(data.strategy);
+              return next;
+            });
+          }}
+          postSortRows={({ nodes }) => {
+            const symbolRowsByStrategy = new Map<string, typeof nodes>();
+            for (const node of nodes) {
+              if (node.data?.rowType !== 'symbol') continue;
+              const strategyRows =
+                symbolRowsByStrategy.get(node.data.strategy) ?? [];
+              strategyRows.push(node);
+              symbolRowsByStrategy.set(node.data.strategy, strategyRows);
+            }
+            const rowsInMasterDetailOrder = nodes
+              .filter((node) => node.data?.rowType !== 'symbol')
+              .flatMap((node) => [
+                node,
+                ...(node.data
+                  ? (symbolRowsByStrategy.get(node.data.strategy) ?? [])
+                  : []),
+              ]);
+            nodes.splice(0, nodes.length, ...rowsInMasterDetailOrder);
+          }}
+          rowClassRules={{
+            'auto-trader-entry-evidence-master-row': ({ data }) =>
+              data?.rowType === 'strategy' &&
+              Boolean(entryReturnProfilesByStrategy.get(data.strategy)?.length),
+            'auto-trader-entry-evidence-symbol-row': ({ data }) =>
+              data?.rowType === 'symbol',
+          }}
           onGridReady={({ api }) => {
             strategyGridApi.current = api;
           }}
@@ -994,7 +1230,7 @@ export function AutoTraderStrategyPerformanceWidget() {
           defaultColDef={strategyGridDefaultColDef}
           maintainColumnOrder
           theme={theme}
-          domLayout="autoHeight"
+          domLayout="normal"
           rowHeight={26}
           headerHeight={28}
         />

@@ -6,7 +6,7 @@ use rsocket_rust::{Client, prelude::*, utils::EchoRSocket};
 use rsocket_rust_transport_websocket::{WebsocketClientTransport, WebsocketServerTransport};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap},
     pin::Pin,
     sync::{Arc, Mutex as StdMutex, OnceLock},
     time::Duration,
@@ -221,6 +221,9 @@ fn strategy_profile_snapshot(
 }
 
 fn trim_autotrader_variant_snapshot(snapshot: &mut strategy::LearnedProfileSnapshot) {
+    snapshot
+        .scout_parameter_variants
+        .retain(|variant| strategy::is_autotrader_symbol_allowed(&variant.symbol));
     snapshot.scout_parameter_variants.sort_by(|left, right| {
         right
             .promoted
@@ -235,6 +238,77 @@ fn trim_autotrader_variant_snapshot(snapshot: &mut strategy::LearnedProfileSnaps
     snapshot
         .scout_parameter_variants
         .truncate(MAX_AUTOTRADER_SCOUT_VARIANTS);
+}
+
+fn trim_autotrader_snapshot(
+    snapshot: &mut strategy::LearnedProfileSnapshot,
+    allowed_profile_ids: &std::collections::BTreeSet<String>,
+) {
+    snapshot
+        .profiles
+        .retain(|profile| strategy::is_autotrader_symbol_allowed(&profile.symbol));
+    snapshot.registered_profile_ids = allowed_profile_ids.clone();
+    snapshot.walk_forward_evidence.retain(|key, _| {
+        let identity = key.split('|').next().unwrap_or_default();
+        strategy::is_autotrader_symbol_allowed(identity) || allowed_profile_ids.contains(identity)
+    });
+    snapshot.recent_profile_context_returns.retain(|key, _| {
+        key.split('|')
+            .next()
+            .is_some_and(|profile_id| allowed_profile_ids.contains(profile_id))
+    });
+    snapshot.missed_opportunity_bands.retain(|band| {
+        band.symbol
+            .as_deref()
+            .is_none_or(strategy::is_autotrader_symbol_allowed)
+    });
+    trim_autotrader_variant_snapshot(snapshot);
+}
+
+fn snapshot_section_sizes(snapshot: &strategy::LearnedProfileSnapshot) -> String {
+    let sizes = [
+        (
+            "profiles",
+            serde_json::to_vec(&snapshot.profiles).map_or(0, |v| v.len()),
+        ),
+        (
+            "registered_profile_ids",
+            serde_json::to_vec(&snapshot.registered_profile_ids).map_or(0, |v| v.len()),
+        ),
+        (
+            "walk_forward_evidence",
+            serde_json::to_vec(&snapshot.walk_forward_evidence).map_or(0, |v| v.len()),
+        ),
+        (
+            "recent_profile_context_returns",
+            serde_json::to_vec(&snapshot.recent_profile_context_returns).map_or(0, |v| v.len()),
+        ),
+        (
+            "context_learning",
+            serde_json::to_vec(&snapshot.context_learning).map_or(0, |v| v.len()),
+        ),
+        (
+            "context_thresholds",
+            serde_json::to_vec(&snapshot.context_thresholds).map_or(0, |v| v.len()),
+        ),
+        (
+            "missed_opportunity_bands",
+            serde_json::to_vec(&snapshot.missed_opportunity_bands).map_or(0, |v| v.len()),
+        ),
+        (
+            "execution_learning",
+            serde_json::to_vec(&snapshot.execution_learning).map_or(0, |v| v.len()),
+        ),
+        (
+            "scout_parameter_variants",
+            serde_json::to_vec(&snapshot.scout_parameter_variants).map_or(0, |v| v.len()),
+        ),
+    ];
+    sizes
+        .into_iter()
+        .map(|(name, bytes)| format!("{name}={bytes}"))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn merge_profile_snapshots(
@@ -502,7 +576,19 @@ impl ScoutCoordinator {
                         )),
                     );
                 }
-                trim_autotrader_variant_snapshot(&mut snapshot);
+                let unfiltered_bytes = serde_json::to_vec(&snapshot).map_or(0, |bytes| bytes.len());
+                let allowed_profile_ids = {
+                    let state = snapshot_publisher.state.state.lock().await;
+                    state
+                        .variants
+                        .values()
+                        .filter(|variant| {
+                            strategy::is_autotrader_symbol_allowed(&variant.profile.symbol)
+                        })
+                        .map(|variant| variant.profile.profile_id.clone())
+                        .collect::<std::collections::BTreeSet<_>>()
+                };
+                trim_autotrader_snapshot(&mut snapshot, &allowed_profile_ids);
                 let encoded = serde_json::to_vec(&snapshot).unwrap_or_default();
                 let mut hasher = std::collections::hash_map::DefaultHasher::new();
                 std::hash::Hash::hash(&encoded, &mut hasher);
@@ -511,8 +597,10 @@ impl ScoutCoordinator {
                     .is_none_or(|last| last.elapsed() >= Duration::from_secs(5 * 60));
                 if last_trader_snapshot_hash != Some(snapshot_hash) || trader_sync_due {
                     eprintln!(
-                        "Publishing Learning decision snapshot to AutoTrader ({} bytes)",
-                        encoded.len()
+                        "Publishing Learning decision snapshot to AutoTrader ({} bytes after symbol filtering, {} before; {})",
+                        encoded.len(),
+                        unfiltered_bytes,
+                        snapshot_section_sizes(&snapshot)
                     );
                     match strategy::request_learning_snapshot_push(
                         &snapshot_publisher.auto_trader_rsocket_url,
@@ -633,6 +721,9 @@ impl ScoutCoordinator {
                 .as_str()
                 .filter(|symbol| !symbol.is_empty())
                 .context("Scout signal is missing its symbol")?;
+            if !strategy::is_autotrader_symbol_allowed(symbol) {
+                continue;
+            }
             let mut profiles = selected_profiles(&state, symbol, signal)?;
             if request.mode == ScoutWorkMode::EvidenceOnly {
                 let Some(parameters) = requested_profile_parameters(signal) else {
@@ -1455,6 +1546,7 @@ impl ScoutCoordinator {
         let profiles = state
             .active_profiles
             .values()
+            .filter(|profile| strategy::is_autotrader_symbol_allowed(&profile.symbol))
             .map(serde_json::to_value)
             .collect::<Result<Vec<_>, _>>()?;
         Ok(serde_json::json!({"profiles": profiles}))
@@ -1477,7 +1569,7 @@ impl ScoutCoordinator {
         let mut profile_symbols = std::collections::BTreeSet::new();
         for symbol in symbols
             .into_iter()
-            .filter(|symbol| !symbol.trim().is_empty() && symbol.len() <= 32)
+            .filter(|symbol| strategy::is_autotrader_symbol_allowed(symbol))
         {
             profile_symbols.insert(symbol.clone());
             for strategy_name in &strategies {
@@ -2059,7 +2151,7 @@ fn walk_forward_evidence(
             && registered.profile.strategy == profile.strategy
             && registered.profile.parameters == profile.parameters
     })?;
-    let samples = registered
+    let mut samples = registered
         .outcomes
         .iter()
         .filter(|outcome| {
@@ -2071,6 +2163,7 @@ fn walk_forward_evidence(
     if samples.is_empty() {
         return None;
     }
+    samples.sort_by_key(|outcome| outcome.observed_at_ms);
     let sample_count = samples.len();
     let positive_rate = samples
         .iter()
@@ -2082,11 +2175,45 @@ fn walk_forward_evidence(
         .map(|outcome| outcome.net_return_percent)
         .sum::<f64>()
         / sample_count as f64;
+    let mut cluster_residuals = BTreeMap::<String, f64>::new();
+    let mut day_windows = BTreeSet::new();
+    let mut equity = 1.0_f64;
+    let mut peak = 1.0_f64;
+    let mut max_drawdown: f64 = 0.0;
+    let mut losses = Vec::new();
+    for outcome in &samples {
+        let cluster = outcome
+            .evidence_group_id
+            .clone()
+            .unwrap_or_else(|| format!("event:{}", outcome.observed_at_ms));
+        *cluster_residuals.entry(cluster).or_default() +=
+            outcome.net_return_percent - average_return;
+        day_windows.insert(outcome.observed_at_ms / (24 * 60 * 60 * 1_000));
+        if outcome.net_return_percent < 0.0 {
+            losses.push(-outcome.net_return_percent);
+        }
+        equity *= (1.0 + outcome.net_return_percent / 100.0).max(0.0);
+        peak = peak.max(equity);
+        max_drawdown = max_drawdown.max((peak - equity) / peak * 100.0);
+    }
+    let standard_error = cluster_residuals
+        .values()
+        .map(|residual| residual * residual)
+        .sum::<f64>()
+        .sqrt()
+        / sample_count as f64;
     Some(strategy::StrategyWalkForwardEvidence {
         sample_count,
         positive_net_rate: Some(positive_rate),
         average_net_return_percent: Some(average_return),
         last_sample_timestamp_ms: samples.last()?.observed_at_ms,
+        expectancy_ci_low_percent: Some(average_return - 1.96 * standard_error),
+        expectancy_ci_high_percent: Some(average_return + 1.96 * standard_error),
+        effective_sample_size: Some(sample_count as f64),
+        window_count: day_windows.len(),
+        max_drawdown_percent: Some(max_drawdown),
+        downside_loss_percent: (!losses.is_empty())
+            .then(|| losses.iter().sum::<f64>() / losses.len() as f64),
     })
 }
 
@@ -2347,6 +2474,59 @@ mod tests {
     use tokio::sync::Mutex;
 
     #[test]
+    fn autotrader_snapshot_drops_unallowed_symbol_data_before_transport() {
+        let allowed_id = "allowed-profile".to_owned();
+        let excluded_id = "excluded-profile".to_owned();
+        let mut snapshot = strategy::LearnedProfileSnapshot {
+            profiles: vec![
+                StrategyProfile {
+                    profile_id: allowed_id.clone(),
+                    version: 1,
+                    symbol: "BTC-USDT".into(),
+                    strategy: "example".into(),
+                    parameters: BTreeMap::new(),
+                    learning_samples: 0,
+                    positive_samples: 0,
+                    realized_pnl: 0.0,
+                },
+                StrategyProfile {
+                    profile_id: excluded_id.clone(),
+                    version: 1,
+                    symbol: "XMSTR-USDT".into(),
+                    strategy: "example".into(),
+                    parameters: BTreeMap::new(),
+                    learning_samples: 0,
+                    positive_samples: 0,
+                    realized_pnl: 0.0,
+                },
+            ],
+            walk_forward_evidence: BTreeMap::from([
+                ("BTC-USDT|example".into(), Default::default()),
+                (format!("{excluded_id}|regime:trend"), Default::default()),
+            ]),
+            registered_profile_ids: [allowed_id.clone(), excluded_id].into(),
+            strategy_size_multipliers: BTreeMap::new(),
+            recent_profile_context_returns: BTreeMap::from([
+                (format!("{allowed_id}|context"), Vec::new()),
+                ("excluded-profile|context".into(), Vec::new()),
+            ]),
+            contextual_stop_loss_percents: BTreeMap::new(),
+            context_learning: BTreeMap::new(),
+            context_thresholds: BTreeMap::new(),
+            missed_opportunity_bands: Vec::new(),
+            execution_learning: BTreeMap::new(),
+            scout_parameter_variants: Vec::new(),
+        };
+
+        trim_autotrader_snapshot(&mut snapshot, &[allowed_id.clone()].into());
+
+        assert_eq!(snapshot.profiles.len(), 1);
+        assert_eq!(snapshot.registered_profile_ids, [allowed_id.clone()].into());
+        assert_eq!(snapshot.walk_forward_evidence.len(), 1);
+        assert_eq!(snapshot.recent_profile_context_returns.len(), 1);
+    }
+
+    #[test]
     fn rsocket_allows_profile_registration_but_rejects_other_mutations() {
         assert!(learning_route_allowed(
             "/profiles",
@@ -2489,7 +2669,10 @@ mod tests {
             ScoutCoordinator::new(service, "live-momentum=ws://127.0.0.1:1", Router::new())
                 .unwrap();
         let snapshot = coordinator
-            .profile_snapshot_for(vec!["DOGE-USDT".into()], vec!["live-momentum".into()])
+            .profile_snapshot_for(
+                vec!["DOGE-USDT".into(), "XMSTR-USDT".into()],
+                vec!["live-momentum".into()],
+            )
             .await
             .unwrap();
         let profiles = snapshot["profiles"].as_array().unwrap();

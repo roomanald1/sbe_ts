@@ -194,6 +194,7 @@ mod strategy_walk_forward_tests {
             positive_net_rate: Some(0.0),
             average_net_return_percent: Some(-0.1),
             last_sample_timestamp_ms: now_ms,
+            ..Default::default()
         });
         let immature = no_evidence.clone();
         assert_eq!(Strategy::LiveTradeFlow.evaluate(&immature).unwrap(), StrategyDecision::Enter);
@@ -203,6 +204,7 @@ mod strategy_walk_forward_tests {
             positive_net_rate: Some(0.0),
             average_net_return_percent: Some(-0.1),
             last_sample_timestamp_ms: now_ms,
+            ..Default::default()
         });
         let mature_negative = no_evidence;
         assert_eq!(Strategy::LiveTradeFlow.evaluate(&mature_negative).unwrap(), StrategyDecision::Reject);

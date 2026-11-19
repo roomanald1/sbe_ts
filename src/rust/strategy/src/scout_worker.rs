@@ -183,8 +183,8 @@ impl StrategyWorker {
         self.dispatch_local_route(command, true).await
     }
 
-    /// Insights updates are consumed serially by the one subscription task and
-    /// must not compete with Learning's bounded assignment lane.
+    /// Dispatch local Insights routes without consuming Learning's bounded
+    /// assignment lane. Live stream updates are batched by the subscription.
     async fn route_insight_update(
         &self,
         command: ScoutWorkerRouteCommand,
@@ -374,62 +374,12 @@ impl StrategyWorker {
             }
             return Ok(());
         }
-        let Some(source_signal) = update.signal else {
+        let Some(signal) = live_scout_signal(update.clone())? else {
             return Ok(());
         };
-        if update.contract_version != crate::STRATEGY_INSIGHT_UPDATE_VERSION
-            || update.event_time_ms != source_signal.timestamp
-            || source_signal.stale
-        {
-            return Ok(());
-        }
-        let Some(market) = update.market else {
-            return Ok(());
-        };
-        let bid = market
-            .get("bids")
-            .and_then(serde_json::Value::as_array)
-            .and_then(|levels| levels.first())
-            .and_then(|level| level.get("price"))
-            .and_then(serde_json::Value::as_f64);
-        let ask = market
-            .get("asks")
-            .and_then(serde_json::Value::as_array)
-            .and_then(|levels| levels.first())
-            .and_then(|level| level.get("price"))
-            .and_then(serde_json::Value::as_f64);
-        let updated_at = market
-            .get("updated_at_ms")
-            .and_then(serde_json::Value::as_u64);
-        let Some((bid, ask, updated_at)) = bid
-            .zip(ask)
-            .zip(updated_at)
-            .map(|((bid, ask), updated_at)| (bid, ask, updated_at))
-            .filter(|(bid, ask, updated_at)| {
-                bid.is_finite()
-                    && ask.is_finite()
-                    && *bid > 0.0
-                    && *ask >= *bid
-                    && update.event_time_ms.saturating_sub(*updated_at) <= 5_000
-                    && *updated_at <= update.event_time_ms.saturating_add(5_000)
-            })
-        else {
-            return Ok(());
-        };
-        let mut signal = serde_json::to_value(source_signal.clone())?;
-        signal["best_bid"] = serde_json::json!(bid);
-        signal["best_ask"] = serde_json::json!(ask);
-        signal["price"] = serde_json::json!(bid + (ask - bid) / 2.0);
-        signal["book_updated_at_ms"] = serde_json::json!(updated_at);
-        if let Some(fee) = update
-            .taker_fee_rate
-            .filter(|fee| fee.is_finite() && *fee >= 0.0)
-        {
-            signal["scout_taker_fee_rate"] = serde_json::json!(fee);
-        }
         let response = self
             .route_insight_update(ScoutWorkerRouteCommand {
-                request_id: format!("insights-live:{}:{}", source_signal.symbol, update.event_id),
+                request_id: format!("insights-live:{}", update.event_id),
                 strategy: self.config.strategy,
                 method: ScoutWorkerHttpMethod::Post,
                 path: "/live-inputs".into(),
@@ -443,6 +393,101 @@ impl StrategyWorker {
         );
         Ok(())
     }
+
+    async fn consume_live_insight_batch(
+        &self,
+        updates: Vec<crate::StrategyInsightUpdate>,
+    ) -> anyhow::Result<()> {
+        let mut signals = Vec::with_capacity(updates.len());
+        let mut last_event_id = None;
+        for update in updates {
+            last_event_id = Some(update.event_id.clone());
+            if let Some(signal) = live_scout_signal(update)? {
+                signals.push(signal);
+            }
+        }
+        if signals.is_empty() {
+            return Ok(());
+        }
+        let response = self
+            .route_insight_update(ScoutWorkerRouteCommand {
+                request_id: format!(
+                    "insights-live-batch:{}:{}",
+                    self.config.strategy.as_str(),
+                    last_event_id.as_deref().unwrap_or("empty")
+                ),
+                strategy: self.config.strategy,
+                method: ScoutWorkerHttpMethod::Post,
+                path: "/live-inputs".into(),
+                payload: serde_json::json!({"signals": signals}),
+            })
+            .await?;
+        anyhow::ensure!(
+            (200..300).contains(&response.status),
+            "local Scout live-input batch route returned {}",
+            response.status
+        );
+        Ok(())
+    }
+}
+
+fn live_scout_signal(
+    update: crate::StrategyInsightUpdate,
+) -> anyhow::Result<Option<serde_json::Value>> {
+    let Some(source_signal) = update.signal else {
+        return Ok(None);
+    };
+    if update.contract_version != crate::STRATEGY_INSIGHT_UPDATE_VERSION
+        || update.event_time_ms != source_signal.timestamp
+        || source_signal.stale
+    {
+        return Ok(None);
+    }
+    let Some(market) = update.market else {
+        return Ok(None);
+    };
+    let bid = market
+        .get("bids")
+        .and_then(serde_json::Value::as_array)
+        .and_then(|levels| levels.first())
+        .and_then(|level| level.get("price"))
+        .and_then(serde_json::Value::as_f64);
+    let ask = market
+        .get("asks")
+        .and_then(serde_json::Value::as_array)
+        .and_then(|levels| levels.first())
+        .and_then(|level| level.get("price"))
+        .and_then(serde_json::Value::as_f64);
+    let updated_at = market
+        .get("updated_at_ms")
+        .and_then(serde_json::Value::as_u64);
+    let Some((bid, ask, updated_at)) = bid
+        .zip(ask)
+        .zip(updated_at)
+        .map(|((bid, ask), updated_at)| (bid, ask, updated_at))
+        .filter(|(bid, ask, updated_at)| {
+            bid.is_finite()
+                && ask.is_finite()
+                && *bid > 0.0
+                && *ask >= *bid
+                && update.event_time_ms.saturating_sub(*updated_at) <= 5_000
+                && *updated_at <= update.event_time_ms.saturating_add(5_000)
+        })
+    else {
+        return Ok(None);
+    };
+    let mut signal = serde_json::to_value(source_signal)?;
+    signal["best_bid"] = serde_json::json!(bid);
+    signal["best_ask"] = serde_json::json!(ask);
+    signal["price"] = serde_json::json!(bid + (ask - bid) / 2.0);
+    signal["book_updated_at_ms"] = serde_json::json!(updated_at);
+    if let Some(fee) = update
+        .taker_fee_rate
+        .filter(|fee| fee.is_finite() && *fee >= 0.0)
+    {
+        signal["scout_taker_fee_rate"] = serde_json::json!(fee);
+    }
+    Ok(Some(signal))
 }
 
 fn evaluate_strategy_replay(
@@ -964,36 +1009,93 @@ async fn run_scout_insights_subscription(worker: Arc<StrategyWorker>) -> anyhow:
                     worker.config.strategy.as_str()
                 );
                 retry_delay = std::time::Duration::from_millis(500);
+                let (update_sender, mut update_receiver) = tokio::sync::mpsc::channel::<
+                    anyhow::Result<crate::StrategyInsightUpdate>,
+                >(4_096);
+                let reader_metrics = Arc::clone(&worker.metrics);
+                let live_stream = worker.config.strategy.is_live_insight();
+                tokio::spawn(async move {
+                    loop {
+                        let next_update = if live_stream {
+                            match tokio::time::timeout(
+                                std::time::Duration::from_secs(90),
+                                updates.next(),
+                            )
+                            .await
+                            {
+                                Ok(update) => update,
+                                Err(_) => {
+                                    reader_metrics.set_insights_connected(false);
+                                    let _ = update_sender
+                                        .send(Err(anyhow::anyhow!(
+                                            "Insights stream idle for 90 seconds"
+                                        )))
+                                        .await;
+                                    return;
+                                }
+                            }
+                        } else {
+                            updates.next().await
+                        };
+                        let Some(update) = next_update else {
+                            return;
+                        };
+                        match update {
+                            Ok(update) => {
+                                reader_metrics.record_insight_update(update.event_time_ms);
+                                if update_sender.send(Ok(update)).await.is_err() {
+                                    return;
+                                }
+                            }
+                            Err(error) => {
+                                reader_metrics.set_insights_connected(false);
+                                let _ = update_sender.send(Err(error)).await;
+                                return;
+                            }
+                        }
+                    }
+                });
                 loop {
-                    // Live signal streams should continuously receive snapshots. A
-                    // half-open RSocket stream can otherwise remain marked as
-                    // connected forever while Scouts stop advancing.
-                    let next_update = if worker.config.strategy.is_live_insight() {
-                        match tokio::time::timeout(
-                            std::time::Duration::from_secs(90),
-                            updates.next(),
-                        )
-                        .await
-                        {
-                            Ok(update) => update,
-                            Err(_) => {
-                                worker.metrics.set_insights_connected(false);
+                    let Some(next_update) = update_receiver.recv().await else {
+                        break;
+                    };
+                    match next_update {
+                        Ok(update) if worker.config.strategy.is_live_insight() => {
+                            let mut batch = vec![update];
+                            let batch_deadline =
+                                tokio::time::Instant::now() + std::time::Duration::from_millis(50);
+                            let mut stream_error = None;
+                            while batch.len() < 128 {
+                                let remaining = batch_deadline
+                                    .saturating_duration_since(tokio::time::Instant::now());
+                                if remaining.is_zero() {
+                                    break;
+                                }
+                                match tokio::time::timeout(remaining, update_receiver.recv()).await
+                                {
+                                    Ok(Some(Ok(update))) => batch.push(update),
+                                    Ok(Some(Err(error))) => {
+                                        stream_error = Some(error);
+                                        break;
+                                    }
+                                    Ok(None) | Err(_) => break,
+                                }
+                            }
+                            if let Err(error) = worker.consume_live_insight_batch(batch).await {
                                 eprintln!(
-                                    "WARN Scout {} Insights stream idle for 90 seconds; reconnecting",
+                                    "WARN Scout {} failed to consume Insights update batch: {error}",
+                                    worker.config.strategy.as_str()
+                                );
+                            }
+                            if let Some(error) = stream_error {
+                                eprintln!(
+                                    "WARN Scout {} Insights stream needs resubscribe after update gap: {error}",
                                     worker.config.strategy.as_str()
                                 );
                                 break;
                             }
                         }
-                    } else {
-                        updates.next().await
-                    };
-                    let Some(update) = next_update else {
-                        break;
-                    };
-                    match update {
                         Ok(update) => {
-                            worker.metrics.record_insight_update(update.event_time_ms);
                             if let Err(error) = worker.consume_insight_update(update).await {
                                 eprintln!(
                                     "WARN Scout {} failed to consume Insights update: {error}",

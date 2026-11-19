@@ -228,7 +228,11 @@ async fn fetch_closed_ledger_rows(
                 let pnl = position.net_pnl_usdt.filter(|value| value.is_finite())?;
         let closed_at = position.closed_at_ms?;
                 Some(serde_json::json!({
-                    "rowId": format!("dated-carry:{}", position.future_symbol),
+                    "rowId": format!(
+                        "ledger-summary:dated-futures-carry:dated-carry:{}:{}",
+                        position.future_symbol,
+                        position.spot_symbol.replace("USDT", "-USDT"),
+                    ),
                     "status": "Closed",
                     "decisionId": format!("dated-carry:{}", position.future_symbol),
                     "strategyInstanceId": format!("dated-carry:{}", position.future_symbol),

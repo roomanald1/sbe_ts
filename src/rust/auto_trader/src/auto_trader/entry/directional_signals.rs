@@ -49,17 +49,14 @@ fn prepare_directional_signal_candidates(
             "bearish"
         }
         .into();
-        let payload = signal_audit_payload(
+        let payload = strategy_rejection_audit_payload(
             &scout,
-            "decision",
+            scout.strategy.as_deref().unwrap_or("generic_signal"),
+            "No tradeable bias: scout-only neutral score probe below live direction floor; no order submitted",
             now.saturating_mul(1000),
-            "skipped",
-            Some(
-                "No tradeable bias: scout-only neutral score probe below live direction floor; no order submitted",
-            ),
-            Some(true),
             counterfactual_stop_loss_percent,
             counterfactual_take_profit_percent,
+            "neutral_probe",
         );
         queue_auto_trader_audit(state, payload);
         if let Some(market) = dashboard.markets.get(&scout.symbol) {

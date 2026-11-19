@@ -546,6 +546,10 @@ export class AutoTraderOutcomesModel {
     latestStrategyBlockers: StrategyBlocker[];
     latestSignalDiagnostic: string;
     latestStrategyEvaluations: Record<string, LatestStrategyEvaluation>;
+    latestStrategyEvaluationsByPosition: Record<
+      string,
+      { timestamp: number; decision: StrategyGateDecision; reason?: string }
+    >;
     strategyOrders: StrategyOrder[];
     strictEntryGates: Record<string, StrictEntryGateSummary>;
     strictBaseStrengthFloor?: number;
@@ -574,6 +578,7 @@ export class AutoTraderOutcomesModel {
     latestStrategyBlockers: [],
     latestSignalDiagnostic: '',
     latestStrategyEvaluations: {},
+    latestStrategyEvaluationsByPosition: {},
     strategyOrders: [],
     strictEntryGates: {},
     strictBaseStrengthFloor: undefined,
@@ -1130,7 +1135,7 @@ export class AutoTraderOutcomesModel {
       const adverseSlippageBySymbol = this.adverseSlippageBySymbol;
       const latestStrategyEvaluationByPosition = new Map<
         string,
-        { timestamp: number; decision: StrategyGateDecision }
+        { timestamp: number; decision: StrategyGateDecision; reason?: string }
       >();
       for (const record of strategyEvaluationRecords) {
         const decision = record.strategy_decision;
@@ -1147,7 +1152,11 @@ export class AutoTraderOutcomesModel {
         const timestamp = record.timestamp ?? 0;
         const existing = latestStrategyEvaluationByPosition.get(key);
         if (!existing || timestamp >= existing.timestamp)
-          latestStrategyEvaluationByPosition.set(key, { timestamp, decision });
+          latestStrategyEvaluationByPosition.set(key, {
+            timestamp,
+            decision,
+            reason: record.reason,
+          });
       }
       const latestStrategyEvaluation = (strategy: string, symbol: string) =>
         latestStrategyEvaluationByPosition.get(`${strategy}:${symbol}`)
@@ -1726,6 +1735,9 @@ export class AutoTraderOutcomesModel {
         latestStrategyBlockers: learningData.latest_strategy_blockers ?? [],
         latestSignalDiagnostic: learningData.latest_signal_diagnostic ?? '',
         latestStrategyEvaluations: latestStrategyEvaluationsWithDecisions,
+        latestStrategyEvaluationsByPosition: Object.fromEntries(
+          latestStrategyEvaluationByPosition,
+        ),
         strategyOrders: activityData.orders ?? [],
         strictEntryGates,
         strictBaseStrengthFloor,

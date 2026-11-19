@@ -2,7 +2,50 @@
 //! Scout assignments intentionally use their separate contracts.
 
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::{
+    collections::BTreeMap,
+    io::{Read, Write},
+};
+
+const LEARNING_SNAPSHOT_GZIP_MAGIC: &[u8] = b"SBE-LS-GZIP-1\0";
+const MAX_DECOMPRESSED_LEARNING_SNAPSHOT_BYTES: u64 = 64 * 1024 * 1024;
+
+/// Encode a Learning snapshot as a compact private RSocket payload.
+pub fn encode_learning_snapshot_payload(
+    snapshot: &crate::LearnedProfileSnapshot,
+) -> anyhow::Result<Vec<u8>> {
+    use flate2::{Compression, write::GzEncoder};
+
+    let json = serde_json::to_vec(snapshot)?;
+    let mut encoder = GzEncoder::new(Vec::new(), Compression::fast());
+    encoder.write_all(&json)?;
+    let compressed = encoder.finish()?;
+    let mut payload = Vec::with_capacity(LEARNING_SNAPSHOT_GZIP_MAGIC.len() + compressed.len());
+    payload.extend_from_slice(LEARNING_SNAPSHOT_GZIP_MAGIC);
+    payload.extend_from_slice(&compressed);
+    Ok(payload)
+}
+
+/// Decode the compressed snapshot payload; return `None` for legacy JSON messages.
+pub fn decode_learning_snapshot_payload(
+    payload: &[u8],
+) -> anyhow::Result<Option<crate::LearnedProfileSnapshot>> {
+    use flate2::read::GzDecoder;
+
+    let Some(compressed) = payload.strip_prefix(LEARNING_SNAPSHOT_GZIP_MAGIC) else {
+        return Ok(None);
+    };
+    let decoder = GzDecoder::new(compressed);
+    let mut json = Vec::new();
+    decoder
+        .take(MAX_DECOMPRESSED_LEARNING_SNAPSHOT_BYTES + 1)
+        .read_to_end(&mut json)?;
+    anyhow::ensure!(
+        json.len() as u64 <= MAX_DECOMPRESSED_LEARNING_SNAPSHOT_BYTES,
+        "decompressed Learning snapshot exceeds the 64 MiB limit"
+    );
+    Ok(Some(serde_json::from_slice(&json)?))
+}
 
 use crate::{
     DailyStrategySignalFeatures, DatedCarryCandidate, DatedCarrySettlementSource, Strategy,
@@ -230,6 +273,37 @@ pub struct LiveEvaluationResponse {
 #[cfg(test)]
 mod socket_contract_tests {
     use super::*;
+
+    #[test]
+    fn compressed_learning_snapshot_round_trips_and_is_smaller() {
+        let context_returns = (0..1_000)
+            .map(|index| {
+                (
+                    format!("profile-{index}|long:trend:BTC-USDT:live-momentum"),
+                    vec![(1_700_000_000_000_u64, -0.0123); 5],
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        let snapshot: crate::LearnedProfileSnapshot = serde_json::from_value(serde_json::json!({
+            "profiles": [],
+            "strategy_size_multipliers": {},
+            "recent_profile_context_returns": context_returns,
+        }))
+        .unwrap();
+        let plain = serde_json::to_vec(&snapshot).unwrap();
+
+        let compressed = encode_learning_snapshot_payload(&snapshot).unwrap();
+        let decoded = decode_learning_snapshot_payload(&compressed)
+            .unwrap()
+            .unwrap();
+
+        assert!(compressed.len() < plain.len() / 5);
+        assert_eq!(
+            serde_json::to_value(decoded).unwrap(),
+            serde_json::to_value(snapshot).unwrap()
+        );
+        assert!(decode_learning_snapshot_payload(&plain).unwrap().is_none());
+    }
 
     #[test]
     fn profile_push_and_decision_report_use_distinct_typed_socket_operations() {

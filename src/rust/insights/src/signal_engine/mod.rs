@@ -180,7 +180,7 @@ fn run_database_writer(mut connection: Connection, mut receiver: mpsc::Receiver<
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_millis()
-                .saturating_sub(STRATEGY_REJECTION_AUDIT_RETENTION_MS) as i64;
+                .saturating_sub(STRATEGY_REJECTION_AUDIT_RETENTION_MS as u128) as i64;
             transaction.execute(
                 "DELETE FROM auto_trader_audit WHERE stage = 'strategy_rejection' AND timestamp < ?1",
                 [rejection_audit_cutoff],
@@ -198,6 +198,9 @@ fn run_database_writer(mut connection: Connection, mut receiver: mpsc::Receiver<
                     "INSERT INTO auto_trader_audit(decision_id, stage, timestamp, symbol, payload) VALUES (?1, ?2, ?3, ?4, ?5) ON CONFLICT(decision_id, stage) DO UPDATE SET timestamp=excluded.timestamp, symbol=excluded.symbol, payload=excluded.payload",
                 )?;
                 for (decision_id, stage, timestamp, symbol, payload) in audit_rows {
+                    if stage == "strategy_rejection" && *timestamp < rejection_audit_cutoff {
+                        continue;
+                    }
                     insert.execute(params![decision_id, stage, timestamp, symbol, payload])?;
                 }
             }

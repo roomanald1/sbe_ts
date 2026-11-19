@@ -1630,6 +1630,7 @@ mod tests {
             positive_net_rate: Some(0.4),
             average_net_return_percent: Some(-0.1),
             last_sample_timestamp_ms: 1,
+            ..Default::default()
         });
         profile.walk_forward_evidence_by_regime.insert(
             "trend".into(),
@@ -1638,6 +1639,7 @@ mod tests {
                 positive_net_rate: Some(0.7),
                 average_net_return_percent: Some(0.2),
                 last_sample_timestamp_ms: 2,
+                ..Default::default()
             },
         );
         let signal = crate::StrategyMarketSignal {

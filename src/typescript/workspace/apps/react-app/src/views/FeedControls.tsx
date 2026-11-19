@@ -356,7 +356,7 @@ export function FeedControls({
                     submenu.style.maxHeight = `${window.innerHeight - 16}px`;
                     submenu.style.setProperty('--submenu-width', `${width}px`);
                     submenu.style.top = `${Math.max(8, Math.min(rect.top, window.innerHeight - submenu.offsetHeight - 8))}px`;
-                    submenu.style.left = `${rect.right + width + 8 <= window.innerWidth ? rect.right + 6 : Math.max(8, rect.left - width - 6)}px`;
+                    submenu.style.left = `${rect.right + width <= window.innerWidth ? rect.right : Math.max(8, rect.left - width)}px`;
                   }}
                   onFocus={(event) => {
                     const item = event.currentTarget;
@@ -369,7 +369,7 @@ export function FeedControls({
                     submenu.style.maxHeight = `${window.innerHeight - 16}px`;
                     submenu.style.setProperty('--submenu-width', `${width}px`);
                     submenu.style.top = `${Math.max(8, Math.min(rect.top, window.innerHeight - submenu.offsetHeight - 8))}px`;
-                    submenu.style.left = `${rect.right + width + 8 <= window.innerWidth ? rect.right + 6 : Math.max(8, rect.left - width - 6)}px`;
+                    submenu.style.left = `${rect.right + width <= window.innerWidth ? rect.right : Math.max(8, rect.left - width)}px`;
                   }}
                 >
                   <button

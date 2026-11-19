@@ -53,6 +53,23 @@ impl RSocket for AutoTraderResponder {
 
     async fn request_response(&self, request: Payload) -> anyhow::Result<Option<Payload>> {
         let bytes = request.data().context("empty AutoTrader route request")?;
+        if let Some(snapshot) = strategy::decode_learning_snapshot_payload(bytes)? {
+            let response = match &self.1 {
+                Some(socket_api) => {
+                    socket_api.apply_learning_snapshot(snapshot).await;
+                    strategy::LiveStrategySocketResponse::LearningSnapshotApplied
+                }
+                None => strategy::LiveStrategySocketResponse::Rejected {
+                    status: StatusCode::SERVICE_UNAVAILABLE.as_u16(),
+                    detail: "AutoTrader learning snapshot handler is unavailable".into(),
+                },
+            };
+            return Ok(Some(
+                Payload::builder()
+                    .set_data(serde_json::to_vec(&response)?)
+                    .build(),
+            ));
+        }
         let value: Value =
             serde_json::from_slice(bytes).context("invalid AutoTrader RSocket route request")?;
         if value.get("route").and_then(Value::as_str) == Some("autotrader:snapshot") {

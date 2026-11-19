@@ -1,4 +1,8 @@
-import type { PointerEvent as ReactPointerEvent, ReactNode } from 'react';
+import {
+  useRef,
+  type PointerEvent as ReactPointerEvent,
+  type ReactNode,
+} from 'react';
 import { DASHBOARD_COLUMNS, type DashboardWidget } from './dashboard_layout.js';
 
 type Props = {
@@ -19,6 +23,7 @@ type Props = {
 };
 
 export function DashboardWidgetFrame(props: Props) {
+  const dragAllowed = useRef(true);
   const {
     widget,
     layout,
@@ -33,7 +38,10 @@ export function DashboardWidgetFrame(props: Props) {
     onResize,
     onResizePreview,
   } = props;
-  const startResize = (event: ReactPointerEvent<HTMLDivElement>) => {
+  const startResize = (
+    event: ReactPointerEvent<HTMLDivElement>,
+    horizontalOnly = false,
+  ) => {
     event.preventDefault();
     const startX = event.clientX;
     const startY = event.clientY;
@@ -60,10 +68,11 @@ export function DashboardWidgetFrame(props: Props) {
           startW + Math.round((pointerEvent.clientX - startX) / unitW),
         ),
       );
-      nextH = Math.max(
-        4,
-        startH + Math.round((pointerEvent.clientY - startY) / unitH),
-      );
+      if (!horizontalOnly)
+        nextH = Math.max(
+          4,
+          startH + Math.round((pointerEvent.clientY - startY) / unitH),
+        );
       onResizePreview({
         id: widget.id,
         x: Math.min(widget.x, DASHBOARD_COLUMNS - nextW),
@@ -104,31 +113,47 @@ export function DashboardWidgetFrame(props: Props) {
       data-dragging={dragging || undefined}
       data-collapsed={widget.collapsed || undefined}
     >
-      <div className="dashboard-widget-header">
-        <button
-          className="dashboard-widget-drag"
-          type="button"
-          draggable
-          aria-label={'Drag ' + description + ' widget'}
-          title="Drag to rearrange"
-          onDragStart={(event) => {
-            event.dataTransfer.setData('text/widget-id', widget.id);
-            event.dataTransfer.setData('text/plain', widget.id);
-            event.dataTransfer.effectAllowed = 'move';
-            const ghost = document.createElement('div');
-            ghost.className = 'dashboard-drag-ghost';
-            ghost.dataset.collapsed = String(widget.collapsed);
-            ghost.textContent = description;
-            document.body.appendChild(ghost);
-            event.dataTransfer.setDragImage(ghost, 18, 18);
-            window.setTimeout(() => ghost.remove(), 0);
-            onDragStart(widget);
-          }}
-          onDragEnd={onDragEnd}
-        >
-          <span className="dashboard-widget-drag-icon" aria-hidden="true" />
-        </button>
-        <span className="dashboard-widget-title">{description}</span>
+      <div
+        className="dashboard-widget-header"
+        draggable={true}
+        aria-label={'Drag ' + description + ' widget'}
+        title="Drag to rearrange"
+        onPointerDown={(event) => {
+          dragAllowed.current = !(event.target as HTMLElement).closest(
+            '.dashboard-widget-remove',
+          );
+        }}
+        onPointerUp={() => {
+          dragAllowed.current = true;
+        }}
+        onPointerCancel={() => {
+          dragAllowed.current = true;
+        }}
+        onDragStart={(event) => {
+          if (
+            !dragAllowed.current ||
+            (event.target as HTMLElement).closest('.dashboard-widget-remove')
+          ) {
+            event.preventDefault();
+            return;
+          }
+          event.dataTransfer.setData('text/widget-id', widget.id);
+          event.dataTransfer.setData('text/plain', widget.id);
+          event.dataTransfer.effectAllowed = 'move';
+          const ghost = document.createElement('div');
+          ghost.className = 'dashboard-drag-ghost';
+          ghost.dataset.collapsed = String(widget.collapsed);
+          ghost.textContent = description;
+          document.body.appendChild(ghost);
+          event.dataTransfer.setDragImage(ghost, 18, 18);
+          window.setTimeout(() => ghost.remove(), 0);
+          onDragStart(widget);
+        }}
+        onDragEnd={onDragEnd}
+      >
+        <span className="dashboard-widget-title" draggable={true}>
+          {description}
+        </span>
         <button
           className="dashboard-widget-collapse"
           type="button"
@@ -163,13 +188,22 @@ export function DashboardWidgetFrame(props: Props) {
         </section>
       )}
       {!widget.collapsed && (
-        <div
-          className="dashboard-widget-resize"
-          role="separator"
-          aria-label={'Resize ' + description + ' widget'}
-          title="Drag to resize"
-          onPointerDown={startResize}
-        />
+        <>
+          <div
+            className="dashboard-widget-resize"
+            role="separator"
+            aria-label={'Resize ' + description + ' widget'}
+            title="Drag to resize"
+            onPointerDown={startResize}
+          />
+          <div
+            className="dashboard-widget-resize-side"
+            role="separator"
+            aria-label={'Resize width of ' + description + ' widget'}
+            title="Drag to resize width"
+            onPointerDown={(event) => startResize(event, true)}
+          />
+        </>
       )}
     </div>
   );

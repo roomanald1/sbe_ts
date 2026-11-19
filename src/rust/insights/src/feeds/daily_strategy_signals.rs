@@ -1343,18 +1343,12 @@ async fn poll_daily_strategy_signals(
             let mut strategies = status.get("strategies").and_then(serde_json::Value::as_array)
                 .into_iter().flatten().filter_map(|item| item.as_str().map(str::to_owned))
                 .collect::<Vec<_>>();
-            match strategy::request_scout_worker_route(&learning, &strategy::ScoutCoordinatorRouteCommand {
+            let learning_configuration = strategy::request_scout_worker_route(&learning, &strategy::ScoutCoordinatorRouteCommand {
                 request_id: format!("insights-daily:{}", now_ms()), strategy: None,
                 method: strategy::ScoutWorkerHttpMethod::Get, path: "/configuration".into(),
                 payload: serde_json::Value::Null,
-            }).await {
-                Ok(response) if response.status < 400 => {
-                    strategies.extend(response.body.get("strategies").and_then(serde_json::Value::as_array)
-                        .into_iter().flatten().filter_map(|item| item.as_str().map(str::to_owned)));
-                }
-                Ok(response) => crate::service_log!("WARN", "Learning Scout configuration route returned {}; continuing with AutoTrader strategy list", response.status),
-                Err(error) => crate::service_log!("WARN", "Learning Scout configuration unavailable; continuing with AutoTrader strategy list: {error}"),
-            }
+            }).await;
+            append_learning_strategies(&mut strategies, learning_configuration);
             strategies.sort();
             strategies.dedup();
             let symbols = if strategies.iter().any(|strategy| strategy == "risk-adjusted-trend-portfolio") {
@@ -1463,6 +1457,53 @@ async fn poll_daily_strategy_signals(
                 .and_then(|value| value.parse::<u64>().ok())
                 .is_some_and(|time| now.saturating_sub(time) <= 30 * 86_400_000)
         });
+    }
+}
+
+fn append_learning_strategies(
+    strategies: &mut Vec<String>,
+    configuration: anyhow::Result<strategy::ScoutCoordinatorRouteResult>,
+) {
+    match configuration {
+        Ok(response) if response.status < 400 => {
+            strategies.extend(response.body.get("strategies").and_then(serde_json::Value::as_array)
+                .into_iter().flatten().filter_map(|item| item.as_str().map(str::to_owned)));
+        }
+        Ok(response) => crate::service_log!("WARN", "Learning Scout configuration route returned {}; continuing with AutoTrader strategy list", response.status),
+        Err(error) => crate::service_log!("WARN", "Learning Scout configuration unavailable; continuing with AutoTrader strategy list: {error}"),
+    }
+}
+
+#[cfg(test)]
+mod daily_strategy_configuration_tests {
+    use super::*;
+
+    #[test]
+    fn learning_route_failure_keeps_autotrader_strategies_for_daily_scan() {
+        let mut strategies = vec!["donchian-20-btc200".to_owned()];
+
+        append_learning_strategies(
+            &mut strategies,
+            Err(anyhow::anyhow!("Learning coordinator is unavailable")),
+        );
+
+        assert_eq!(strategies, ["donchian-20-btc200"]);
+    }
+
+    #[test]
+    fn successful_learning_configuration_adds_daily_strategies() {
+        let mut strategies = vec!["donchian-20-btc200".to_owned()];
+
+        append_learning_strategies(
+            &mut strategies,
+            Ok(strategy::ScoutCoordinatorRouteResult {
+                request_id: "test".into(),
+                status: 200,
+                body: serde_json::json!({"strategies": ["trend-50-200"]}),
+            }),
+        );
+
+        assert_eq!(strategies, ["donchian-20-btc200", "trend-50-200"]);
     }
 }
 

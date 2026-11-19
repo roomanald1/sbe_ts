@@ -101,7 +101,12 @@ describe('AutoTraderLearningWidgetModel', () => {
       ],
     });
     let decisions = [
-      { stage: 'decision', timestamp: now - 6 * 60_000, status: 'skipped' },
+      {
+        stage: 'strategy_rejection',
+        timestamp: now - 6 * 60_000,
+        status: 'rejected',
+        reason: 'Signal strength below the entry floor',
+      },
     ];
     const widget = new AutoTraderLearningWidgetModel(
       { state$: autoTrader.state$, start() {}, stop() {} },
@@ -112,6 +117,7 @@ describe('AutoTraderLearningWidgetModel', () => {
     await widget.refreshDecisions();
 
     assert.equal(widget.state$.value.decisionCoverage.stalled, true);
+    assert.equal(widget.state$.value.decisions[0]?.stage, 'strategy_rejection');
     assert.equal(
       widget.state$.value.decisionCoverage.latestAuditAt,
       now - 6 * 60_000,
@@ -121,7 +127,12 @@ describe('AutoTraderLearningWidgetModel', () => {
       'Signal strength 0.12 is below the required minimum 0.30',
     );
     decisions = [
-      { stage: 'decision', timestamp: now - 60_000, status: 'skipped' },
+      {
+        stage: 'decision',
+        timestamp: now - 60_000,
+        status: 'skipped',
+        reason: 'Current decision recorded',
+      },
     ];
     await widget.refreshDecisions();
     assert.equal(widget.state$.value.decisionCoverage.stalled, false);

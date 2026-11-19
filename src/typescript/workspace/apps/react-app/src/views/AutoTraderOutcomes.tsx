@@ -65,37 +65,11 @@ const outcomeGridDefaultColDef = {
   minWidth: 80,
 };
 const outcomeGridGetRowId = ({ data }: { data: OutcomeGridRow }) => data.rowId;
-const CLOSED_GRID_SORT_KEY = 'autotrader-closed-position-grid-sort-v1';
-function restoreClosedGridSort(api: GridApi<OutcomeGridRow>) {
-  try {
-    const stored = localStorage.getItem(CLOSED_GRID_SORT_KEY);
-    const saved = stored
-      ? (JSON.parse(stored) as Array<{
-          colId: string;
-          sort: 'asc' | 'desc';
-          sortIndex?: number;
-        }>)
-      : [];
-    const state = saved.length
-      ? saved
-      : [{ colId: 'openedAt', sort: 'desc' as const, sortIndex: 0 }];
-    api.applyColumnState({ state, defaultState: { sort: null } });
-  } catch {
-    api.applyColumnState({
-      state: [{ colId: 'openedAt', sort: 'desc', sortIndex: 0 }],
-    });
-  }
-}
-function persistClosedGridSort(api: GridApi<OutcomeGridRow>) {
-  try {
-    const state = api
-      .getColumnState()
-      .filter((column) => column.sort === 'asc' || column.sort === 'desc')
-      .map(({ colId, sort, sortIndex }) => ({ colId, sort, sortIndex }));
-    localStorage.setItem(CLOSED_GRID_SORT_KEY, JSON.stringify(state));
-  } catch {
-    /* Sorting still works if browser storage is unavailable. */
-  }
+function sortClosedGridByCloseTime(api: GridApi<OutcomeGridRow>) {
+  api.applyColumnState({
+    state: [{ colId: 'closedAt', sort: 'desc', sortIndex: 0 }],
+    defaultState: { sort: null },
+  });
 }
 function keepLedgerGroupsTogether(nodes: IRowNode<OutcomeGridRow>[]) {
   const groups = new Map<string, IRowNode<OutcomeGridRow>[]>();
@@ -248,7 +222,11 @@ function AutoTraderOutcomesComponent({
         ]),
     );
     for (const row of rowSource) {
-      if (row.rowId.startsWith('ledger-summary:')) visible.push(row);
+      if (
+        row.rowId.startsWith('ledger-summary:') ||
+        row.rowId.startsWith('dated-carry:')
+      )
+        visible.push(row);
       else if (row.rowId.startsWith('ledger-trade:')) {
         const groupId = groupByTradeKey.get(
           (row.strategyInstanceId ?? '') + ':' + row.symbol,
@@ -261,7 +239,11 @@ function AutoTraderOutcomesComponent({
   const loadedOutcomesTodayUsd = useMemo(
     () =>
       rowSource
-        .filter((row) => row.rowId.startsWith('ledger-summary:'))
+        .filter(
+          (row) =>
+            row.rowId.startsWith('ledger-summary:') ||
+            row.rowId.startsWith('dated-carry:'),
+        )
         .reduce((sum, row) => sum + (row.todayRealizedUsd ?? 0), 0),
     [rowSource],
   );
@@ -984,7 +966,9 @@ function AutoTraderOutcomesComponent({
         maxWidth: 84,
         cellRenderer: ({ data }: { data?: OutcomeGridRow }) =>
           (liveOnly && data?.status === 'Open') ||
-          (closedOnly && data?.rowId.startsWith('ledger-summary:')) ? (
+          (closedOnly &&
+            data?.rowId.startsWith('ledger-summary:') &&
+            data.source !== 'paper-carry') ? (
             <button
               type="button"
               className="auto-trader-parameters-button"
@@ -1617,6 +1601,7 @@ function AutoTraderOutcomesComponent({
                 sortable: false,
                 resizable: false,
                 cellRenderer: ({ data }: { data?: OutcomeGridRow }) => {
+                  if (data?.source === 'paper-carry') return null;
                   if (!data?.rowId.startsWith('ledger-summary:'))
                     return (
                       <span
@@ -1661,7 +1646,7 @@ function AutoTraderOutcomesComponent({
                     'Side',
                     'Quantity',
                     'Entry',
-                    'Opened',
+                    'Closed',
                     'Net today (USD)',
                   ].includes(String(column.headerName ?? '')),
                 )
@@ -1674,14 +1659,15 @@ function AutoTraderOutcomesComponent({
                     Side: 80,
                     Quantity: 105,
                     Entry: 105,
-                    Opened: 155,
+                    Closed: 155,
                     'Net today (USD)': 135,
                   };
                   const originalHeader = String(column.headerName ?? '');
                   const width = widths[originalHeader] ?? 100;
                   return {
                     ...column,
-                    ...(originalHeader === 'Opened'
+                    sortable: originalHeader === 'Closed',
+                    ...(originalHeader === 'Closed'
                       ? { headerName: 'Trade time' }
                       : {}),
                     width,
@@ -1823,10 +1809,7 @@ function AutoTraderOutcomesComponent({
           columnDefs={visibleColumns}
           onGridReady={(event) => {
             outcomesGridApi.current = event.api;
-            if (closedOnly) restoreClosedGridSort(event.api);
-          }}
-          onSortChanged={(event) => {
-            if (closedOnly) persistClosedGridSort(event.api);
+            if (closedOnly) sortClosedGridByCloseTime(event.api);
           }}
           getRowId={outcomeGridGetRowId}
           maintainColumnOrder
@@ -1847,18 +1830,16 @@ function AutoTraderOutcomesComponent({
               : undefined
           }
           theme={theme}
-          domLayout={closedOnly ? 'normal' : 'autoHeight'}
+          domLayout={closedOnly || liveOnly ? 'normal' : 'autoHeight'}
           rowHeight={closedOnly ? 30 : liveOnly ? 52 : 48}
           headerHeight={closedOnly || liveOnly ? 24 : 28}
         />
       </div>
-      {!state.loading && rows.length === 0 && !state.error && (
+      {!liveOnly && !state.loading && rows.length === 0 && !state.error && (
         <p className="positions-empty">
-          {liveOnly
-            ? 'No live AutoTrader positions are open.'
-            : closedOnly
-              ? 'No AutoTrader position-ledger trades are available yet.'
-              : 'No open AutoTrader positions or fully closed audited trades are available yet.'}
+          {closedOnly
+            ? 'No AutoTrader position-ledger trades are available yet.'
+            : 'No open AutoTrader positions or fully closed audited trades are available yet.'}
         </p>
       )}
       {gatePosition &&

@@ -117,7 +117,9 @@ pub async fn run_maintenance_service() -> anyhow::Result<()> {
             .await;
             status.heartbeat_at_ms = now_ms();
             persist_maintenance_status(&status_path, &status);
-            if let Err(error) = prune_expired_strategy_rejection_audits(status.heartbeat_at_ms).await {
+            if let Err(error) =
+                prune_expired_strategy_rejection_audits(status.heartbeat_at_ms).await
+            {
                 eprintln!("Could not prune expired strategy rejection audits: {error:#}");
             }
         }

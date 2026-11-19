@@ -169,6 +169,12 @@ pub fn benchmark_decision_parameters_path(
                 positive_net_rate: Some(0.51),
                 average_net_return_percent: Some(0.12),
                 last_sample_timestamp_ms: index as u64,
+                expectancy_ci_low_percent: None,
+                expectancy_ci_high_percent: None,
+                effective_sample_size: Some(index as f64),
+                window_count: 0,
+                max_drawdown_percent: None,
+                downside_loss_percent: None,
             },
         );
         if index < retained_variants {

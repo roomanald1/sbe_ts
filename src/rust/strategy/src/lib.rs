@@ -42,7 +42,7 @@ pub use live_evaluation::{
     LiveEvaluationResponse, LivePositionContext, LiveStrategyDecision, LiveStrategyDecisionReport,
     LiveStrategyOpenPosition, LiveStrategyProfile, LiveStrategyProfileSet,
     LiveStrategySocketRequest, LiveStrategySocketResponse, STRATEGY_INSIGHT_UPDATE_VERSION,
-    StrategyInsightUpdate,
+    StrategyInsightUpdate, decode_learning_snapshot_payload, encode_learning_snapshot_payload,
 };
 #[cfg(feature = "service")]
 pub use live_worker::{LiveWorkerConfig, serve_live_worker};

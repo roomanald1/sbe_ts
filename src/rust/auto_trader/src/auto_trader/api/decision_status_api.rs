@@ -282,12 +282,7 @@ async fn get_decision_parameters(
 ) -> Json<DecisionParametersResponse> {
     let (max_entries_per_auto_position, risk_appetite, thresholds, strategy_profiles) = {
         let settings = state.settings.lock().await;
-        let symbols = strategy_profile_symbols(&settings);
-        let strategies = Strategy::all()
-            .filter(|strategy| !strategy.is_legacy_composite())
-            .collect::<Vec<_>>();
-        let mut strategy_profiles =
-            strategy_parameter_profiles_for(&settings, symbols, strategies);
+        let mut strategy_profiles = strategy_parameter_profiles(&settings);
         for profile in &mut strategy_profiles {
             let profile_strategy = Strategy::from_name(&profile.strategy).unwrap_or_default();
             profile.walk_forward_evidence = walk_forward_evidence_for_profile(
@@ -581,7 +576,10 @@ fn build_decision_thresholds(
 }
 
 fn strategy_parameter_profiles(settings: &Settings) -> Vec<StrategyParameterProfile> {
-    let strategies = Strategy::all()
+    let strategies = settings
+        .strategies
+        .iter()
+        .copied()
         .filter(|strategy| !strategy.is_legacy_composite())
         .collect::<Vec<_>>();
     strategy_parameter_profiles_for(settings, strategy_profile_symbols(settings), strategies)
@@ -698,6 +696,7 @@ mod decision_profile_tests {
             positive_net_rate: Some(0.5),
             average_net_return_percent: Some(0.1),
             last_sample_timestamp_ms: 10,
+            ..Default::default()
         }
     }
 
@@ -840,6 +839,27 @@ mod decision_profile_tests {
             .expect("allowed symbol profile");
         assert_eq!(profile.learning_samples, 3);
         assert_eq!(profile.positive_rate, Some(1.0 / 3.0));
+    }
+
+    #[test]
+    fn walk_forward_profiles_include_only_allowed_symbols_and_configured_strategies() {
+        let mut settings = Settings::default();
+        settings.strategies = vec![Strategy::LiveMomentum];
+        settings.learned_walk_forward_evidence.insert(
+            "XMSTR-USDT|live-momentum".into(),
+            evidence(99),
+        );
+        settings.learned_walk_forward_evidence.insert(
+            "BTC-USDT|unknown-strategy".into(),
+            evidence(99),
+        );
+
+        let profiles = strategy_parameter_profiles(&settings);
+        assert!(!profiles.is_empty());
+        assert!(profiles.iter().all(|profile| {
+            strategy::is_autotrader_symbol_allowed(&profile.symbol)
+                && profile.strategy == Strategy::LiveMomentum.as_str()
+        }));
     }
 
     #[test]
