@@ -1011,6 +1011,7 @@ mod signal_execution_budget_tests {
             strategy: Some(strategy.into()),
             strategy_decision: None,
             market_regime: None,
+            market_state: None,
             news_attribution: None,
             entry_gate: None,
         }

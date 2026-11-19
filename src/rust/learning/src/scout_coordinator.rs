@@ -31,7 +31,7 @@ const DEFAULT_MAX_SCOUT_ASSIGNMENTS: usize = 512;
 const DEFAULT_MAX_SCOUT_BATCH_BYTES: usize = 8 * 1024 * 1024;
 const PROFILE_SNAPSHOT_PUBLISH_INTERVAL: Duration = Duration::from_secs(120);
 const DEFAULT_WORKER_TIMEOUT_MS: usize = 3_000;
-const DEFAULT_REPLAY_WORKER_TIMEOUT_MS: usize = 10_000;
+const DEFAULT_REPLAY_WORKER_TIMEOUT_MS: usize = 30_000;
 const MAX_REPLAY_TOTAL_SIGNALS: usize = 10_000;
 const MAX_REPLAY_TOTAL_PAGES: usize = 128;
 const MAX_REPLAY_TOTAL_RECORDS_SCANNED: usize = 524_288;
@@ -1537,6 +1537,21 @@ impl ScoutCoordinator {
     ) -> anyhow::Result<ScoutCoordinatorRouteResult> {
         if !self.enabled {
             bail!("Scout execution is disabled");
+        }
+        // Insights only needs the coordinator's configured strategy names.
+        // Fetching /configuration from every worker serially made this
+        // lightweight discovery request fail whenever any one worker was
+        // slow or restarting.
+        if command.strategy.is_none()
+            && command.method == ScoutWorkerHttpMethod::Get
+            && command.path.split('?').next() == Some("/configuration")
+        {
+            let strategies = self.worker_endpoints.keys().collect::<Vec<_>>();
+            return Ok(ScoutCoordinatorRouteResult {
+                request_id: command.request_id,
+                status: 200,
+                body: serde_json::json!({"strategies": strategies}),
+            });
         }
         let targets = self.route_targets(&command).await?;
         if targets.is_empty() {

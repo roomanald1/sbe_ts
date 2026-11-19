@@ -28,6 +28,7 @@ mod cycle_result_helper_tests {
             timestamp: 1, stale: false, score: 0.8, ranging_probability: None,
             components: SignalComponents::default(), strategy_candidate: false,
             strategy: None, strategy_decision: None, market_regime: None,
+            market_state: None,
             news_attribution: None, entry_gate: None,
         };
         let result = skipped_for_signal(&signal, "test reason");

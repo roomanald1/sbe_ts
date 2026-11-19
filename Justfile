@@ -2,7 +2,16 @@
 rebuild +services:
     #!/usr/bin/env bash
     set -euo pipefail
-    docker compose -p sbe-system -f system/compose.yml --profile scout-workers up -d --build --force-recreate --no-deps {{services}}
+    compose_args=(-p sbe-system -f system/compose.yml --profile scout-workers)
+    services=({{services}})
+    compose_json="$(docker compose "${compose_args[@]}" config --format json)"
+    build_output="$(printf '%s' "$compose_json" | python3 rebuild-service-fingerprints.py build-once - "${services[@]}")"
+    build_services=()
+    if [[ -n "$build_output" ]]; then mapfile -t build_services <<< "$build_output"; fi
+    if ((${#build_services[@]} > 0)); then
+      docker compose "${compose_args[@]}" build --progress quiet "${build_services[@]}"
+    fi
+    docker compose "${compose_args[@]}" up -d --no-build --force-recreate --no-deps "${services[@]}"
 
 # Rebuild all 17 Scout worker services.
 rebuild-scouts:
@@ -13,7 +22,15 @@ rebuild-scouts:
       echo "No Scout worker services found in system/compose.yml" >&2
       exit 1
     fi
-    docker compose -p sbe-system -f system/compose.yml --profile scout-workers up -d --build --force-recreate --no-deps "${services[@]}"
+    compose_args=(-p sbe-system -f system/compose.yml --profile scout-workers)
+    compose_json="$(docker compose "${compose_args[@]}" config --format json)"
+    build_output="$(printf '%s' "$compose_json" | python3 rebuild-service-fingerprints.py build-once - "${services[@]}")"
+    build_services=()
+    if [[ -n "$build_output" ]]; then mapfile -t build_services <<< "$build_output"; fi
+    if ((${#build_services[@]} > 0)); then
+      docker compose "${compose_args[@]}" build --progress quiet "${build_services[@]}"
+    fi
+    docker compose "${compose_args[@]}" up -d --no-build --force-recreate --no-deps "${services[@]}"
 
 # Rebuild only the system Compose project.
 rebuild-services:

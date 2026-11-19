@@ -272,6 +272,7 @@ mod live_signal_freshness_tests {
             strategy: Some("live-vwap-dislocation".into()),
             strategy_decision: None,
             market_regime: None,
+            market_state: None,
             news_attribution: None,
             entry_gate: None,
         }
@@ -593,6 +594,7 @@ mod live_scout_direction_tests {
             strategy: None,
             strategy_decision: None,
             market_regime: None,
+            market_state: None,
             news_attribution: None,
             entry_gate: None,
         }
@@ -775,6 +777,7 @@ mod parallel_daily_candidate_tests {
             strategy: Some(strategy.into()),
             strategy_decision: None,
             market_regime: None,
+            market_state: None,
             news_attribution: None,
             entry_gate: None,
         }
@@ -853,6 +856,7 @@ mod signal_freshness_tests {
             strategy: strategy.map(str::to_owned),
             strategy_decision: None,
             market_regime: None,
+            market_state: None,
             news_attribution: None,
             entry_gate: None,
         }

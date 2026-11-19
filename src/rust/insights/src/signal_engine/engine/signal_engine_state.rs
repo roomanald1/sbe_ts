@@ -1,4 +1,30 @@
 impl SignalEngine {
+    /// Keep momentum history advancing from both ticker updates and trades.
+    /// Ticker and trade streams can arrive out of timestamp order, so insert
+    /// each one-second sample into the time-ordered history instead of
+    /// discarding older trade marks.
+    fn record_price_sample(&mut self, timestamp: u64, price: f64) -> bool {
+        if !price.is_finite() || price <= 0.0 {
+            return false;
+        }
+        let bucket = timestamp / SIGNAL_PRICE_SAMPLE_INTERVAL_MS;
+        let index = self
+            .prices
+            .partition_point(|sample| sample.0 / SIGNAL_PRICE_SAMPLE_INTERVAL_MS < bucket);
+        if let Some(existing) = self
+            .prices
+            .get_mut(index)
+            .filter(|sample| sample.0 / SIGNAL_PRICE_SAMPLE_INTERVAL_MS == bucket)
+        {
+            if timestamp >= existing.0 {
+                *existing = (timestamp, price);
+            }
+        } else {
+            self.prices.insert(index, (timestamp, price));
+        }
+        true
+    }
+
     pub fn price_state(&self) -> (usize, Option<(u64, f64)>) {
         (self.prices.len(), self.prices.back().copied())
     }

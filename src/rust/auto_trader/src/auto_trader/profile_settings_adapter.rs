@@ -561,7 +561,7 @@ mod strategy_parameter_bounds_tests {
             components: SignalComponents::default(), strategy_candidate: true,
             strategy: Some("live-momentum".into()),
             strategy_decision: Some(serde_json::json!({ "strategy_parameters": { "minimum_momentum": 0.0 } })),
-            market_regime: None, news_attribution: None, entry_gate: None,
+            market_regime: None, market_state: None, news_attribution: None, entry_gate: None,
         };
         inject_learned_parameters(&settings, &mut signal);
         assert_eq!(signal_strategy_parameters(&signal)["minimum_momentum"], 0.003);
@@ -850,6 +850,7 @@ mod threshold_profile_source_tests {
                 "strategy_parameters": { "minimum_flow_imbalance": 0.02 }
             })),
             market_regime: None,
+            market_state: None,
             news_attribution: None,
             entry_gate: None,
         };

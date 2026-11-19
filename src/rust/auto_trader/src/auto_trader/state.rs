@@ -789,6 +789,7 @@ mod pending_signal_queue_tests {
                 strategy: None,
                 strategy_decision: None,
                 market_regime: None,
+                market_state: None,
                 news_attribution: None,
                 entry_gate: None,
             }],
@@ -813,6 +814,7 @@ mod pending_signal_queue_tests {
             strategy: Some("live-momentum".into()),
             strategy_decision: None,
             market_regime: None,
+            market_state: None,
             news_attribution: None,
             entry_gate: None,
         }

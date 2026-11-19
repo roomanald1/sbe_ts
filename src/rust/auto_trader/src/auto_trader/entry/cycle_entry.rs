@@ -2103,6 +2103,7 @@ mod parallel_daily_cycle_tests {
             strategy: Some(strategy.into()),
             strategy_decision: None,
             market_regime: None,
+            market_state: None,
             news_attribution: None,
             entry_gate: None,
         }

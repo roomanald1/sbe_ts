@@ -111,6 +111,7 @@ fn live_profile_from_api(
             strategy,
         ),
         market_regime: None,
+        market_state_key: None,
         walk_forward_evidence_by_regime: walk_forward_evidence_by_regime_for_profile(
             settings,
             &profile_id,
@@ -253,6 +254,7 @@ fn build_live_strategy_profile_set(
                         strategy,
                     ),
                     market_regime: None,
+        market_state_key: None,
         walk_forward_evidence_by_regime: walk_forward_evidence_by_regime_for_profile(
                         settings,
                         &profile_id,
@@ -502,8 +504,7 @@ async fn get_compact_decision_parameters(
                 positive_rate: learned.and_then(|profile| (profile.learning_samples > 0).then_some(profile.positive_samples as f64 / profile.learning_samples as f64)),
                 realized_pnl: learned.map_or(0.0, |profile| profile.realized_pnl),
                 walk_forward_evidence: walk_forward_evidence_for_profile(&settings, &symbol, &symbol, *strategy),
-                market_regime: None,
-        walk_forward_evidence_by_regime: walk_forward_evidence_by_regime_for_profile(&settings, &symbol, &symbol, *strategy),
+                walk_forward_evidence_by_regime: walk_forward_evidence_by_regime_for_profile(&settings, &symbol, &symbol, *strategy),
                 parameters });
           }
         }

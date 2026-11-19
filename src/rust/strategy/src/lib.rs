@@ -31,12 +31,13 @@ mod scouts;
 mod worker_metrics;
 pub use input::{
     AbsorptionPressureValue, DailyStrategySignalFeatures, DatedCarryCandidate,
-    DatedCarrySettlementSource, DepthSignalValue, Signal, SignalComponents, SignalDirection,
-    StrategyInput, StrategyInputLike, StrategyMarketSignal, StrategySignal, StrategySpecificSignal,
+    DatedCarrySettlementSource, DepthSignalValue, LIVE_MARKET_STATE_VERSION,
+    LiveMarketStateClassification, Signal, SignalComponents, SignalDirection, StrategyInput,
+    StrategyInputLike, StrategyMarketSignal, StrategySignal, StrategySpecificSignal,
     StrategyWalkForwardCoverage, StrategyWalkForwardEstimator, StrategyWalkForwardEvidence,
     StrategyWalkForwardEvidenceScope, StrategyWalkForwardValidationStatus, WindowedSignalValue,
-    market_regime, prepare_live_strategy_signal, regime_conditioned_parameter_value,
-    strategy_parameter_value,
+    classify_live_market_state, market_regime, prepare_live_strategy_signal,
+    regime_conditioned_parameter_value, strategy_parameter_value,
 };
 pub use live_evaluation::{
     DatedCarryScanUpdate, DatedCarrySettlementUpdate, LIVE_EVALUATION_CONTRACT_VERSION,
@@ -935,6 +936,7 @@ mod strategy_signal_contract_tests {
                 strategy: None,
                 strategy_decision: None,
                 market_regime: None,
+                market_state: None,
                 news_attribution: None,
                 entry_gate: None,
             };
@@ -1082,6 +1084,7 @@ mod strategy_signal_contract_tests {
                 strategy: None,
                 strategy_decision: None,
                 market_regime: None,
+                market_state: None,
                 news_attribution: None,
                 entry_gate: None,
             };
@@ -1143,6 +1146,7 @@ mod strategy_signal_contract_tests {
                 }
             })),
             market_regime: None,
+            market_state: None,
             news_attribution: None,
             entry_gate: None,
         };

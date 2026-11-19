@@ -27,6 +27,114 @@ fn live_worker_now_ms() -> u64 {
         .as_millis() as u64
 }
 
+fn route_live_profiles(
+    eligible_profiles: Vec<crate::LiveStrategyProfile>,
+    market_state: Option<&crate::LiveMarketStateClassification>,
+    symbol_has_open_position: bool,
+) -> Vec<crate::LiveStrategyProfile> {
+    if symbol_has_open_position {
+        return eligible_profiles;
+    }
+    let exact = market_state
+        .filter(|state| state.confidence >= LIVE_REGIME_PROFILE_MIN_CONFIDENCE)
+        .and_then(|state| {
+            eligible_profiles
+                .iter()
+                .filter(|profile| {
+                    let key_match =
+                        profile.market_state_key.as_deref() == Some(state.profile_key.as_str());
+                    let legacy_match = profile.market_state_key.is_none()
+                        && profile.market_regime.as_deref() == Some(state.evidence_regime.as_str());
+                    (key_match || legacy_match)
+                        && profile
+                            .walk_forward_evidence_by_regime
+                            .get(state.evidence_regime.as_str())
+                            .is_some_and(|evidence| {
+                                evidence.sample_count >= LIVE_REGIME_PROFILE_MIN_SAMPLES
+                            })
+                })
+                .min_by_key(|profile| profile.profile_id.as_str())
+                .cloned()
+        });
+    if let Some(profile) = exact {
+        return vec![profile];
+    }
+    let fallback = eligible_profiles
+        .iter()
+        .filter(|profile| profile.market_regime.is_none() && profile.market_state_key.is_none())
+        .min_by_key(|profile| profile.profile_id.as_str())
+        .cloned();
+    fallback.into_iter().collect()
+}
+
+const LIVE_REGIME_PROFILE_MIN_CONFIDENCE: f64 = 0.6;
+const LIVE_REGIME_PROFILE_MIN_SAMPLES: usize = 8;
+const LIVE_REGIME_HYSTERESIS_CONFIRMATIONS: u8 = 2;
+const LIVE_REGIME_HYSTERESIS_MAX_GAP_MS: u64 = 30_000;
+
+#[derive(Clone, Debug, Default)]
+struct MarketStateTransition {
+    active: Option<crate::LiveMarketStateClassification>,
+    pending_key: Option<String>,
+    pending_count: u8,
+    pending_since_ms: u64,
+    pending_last_ms: u64,
+}
+
+impl MarketStateTransition {
+    fn observe(
+        &mut self,
+        candidate: Option<crate::LiveMarketStateClassification>,
+    ) -> (Option<crate::LiveMarketStateClassification>, &'static str) {
+        let Some(candidate) =
+            candidate.filter(|state| state.confidence >= LIVE_REGIME_PROFILE_MIN_CONFIDENCE)
+        else {
+            return (None, "uncertain_fallback");
+        };
+        let Some(active) = self.active.clone() else {
+            self.active = Some(candidate.clone());
+            self.clear_pending();
+            return (Some(candidate), "initialized");
+        };
+        if candidate.observed_at_ms < active.observed_at_ms {
+            return (Some(active), "out_of_order_held");
+        }
+        if candidate.profile_key == active.profile_key {
+            self.active = Some(candidate.clone());
+            self.clear_pending();
+            return (Some(candidate), "stable");
+        }
+        if self.pending_key.as_deref() == Some(candidate.profile_key.as_str())
+            && candidate
+                .observed_at_ms
+                .saturating_sub(self.pending_since_ms)
+                <= LIVE_REGIME_HYSTERESIS_MAX_GAP_MS
+            && candidate.observed_at_ms > self.pending_last_ms
+        {
+            self.pending_count = self.pending_count.saturating_add(1);
+            self.pending_last_ms = candidate.observed_at_ms;
+        } else {
+            self.pending_key = Some(candidate.profile_key.clone());
+            self.pending_count = 1;
+            self.pending_since_ms = candidate.observed_at_ms;
+            self.pending_last_ms = candidate.observed_at_ms;
+        }
+        if self.pending_count >= LIVE_REGIME_HYSTERESIS_CONFIRMATIONS {
+            self.active = Some(candidate.clone());
+            self.clear_pending();
+            return (Some(candidate), "transitioned");
+        }
+        (Some(active), "transition_pending")
+    }
+
+    fn clear_pending(&mut self) {
+        self.pending_key = None;
+        self.pending_count = 0;
+        self.pending_since_ms = 0;
+        self.pending_last_ms = 0;
+    }
+}
+
 fn carry_placeholder_signal(
     symbol: &str,
     timestamp: u64,
@@ -105,6 +213,7 @@ struct LiveWorker {
     feedback_callbacks: Arc<Semaphore>,
     metrics: Arc<WorkerMetrics>,
     profiles: RwLock<Option<crate::LiveStrategyProfileSet>>,
+    market_state_transitions: RwLock<BTreeMap<String, MarketStateTransition>>,
     last_insight_events: RwLock<BTreeMap<String, String>>,
     last_reported_decisions: RwLock<BTreeMap<(String, String), (crate::LiveStrategyDecision, u64)>>,
     decision_report_failures: RwLock<BTreeMap<(String, String), Instant>>,
@@ -127,6 +236,7 @@ impl LiveWorker {
             metrics: WorkerMetrics::new("live", config.strategy.as_str(), None),
             config,
             profiles: RwLock::new(None),
+            market_state_transitions: RwLock::new(BTreeMap::new()),
             last_insight_events: RwLock::new(BTreeMap::new()),
             last_reported_decisions: RwLock::new(BTreeMap::new()),
             decision_report_failures: RwLock::new(BTreeMap::new()),
@@ -163,6 +273,13 @@ impl LiveWorker {
                         &profile.parameters,
                     ) == profile.profile_id,
                 "pushed profile set contains an invalid or duplicate profile"
+            );
+            anyhow::ensure!(
+                profile
+                    .market_state_key
+                    .as_deref()
+                    .map_or(true, crate::LiveMarketStateClassification::key_is_supported),
+                "pushed profile set contains an unsupported market-state key"
             );
         }
         anyhow::ensure!(
@@ -326,6 +443,14 @@ impl LiveWorker {
             .map(|position| position.profile_id.as_str())
             .collect::<std::collections::BTreeSet<_>>();
         let symbol_has_open_position = !open_profile_ids.is_empty();
+        let candidate_market_state = crate::classify_live_market_state(&input_signal);
+        let (market_state, market_state_transition) = self
+            .market_state_transitions
+            .write()
+            .await
+            .entry(input_signal.symbol.clone())
+            .or_default()
+            .observe(candidate_market_state.clone());
         let matching_profiles = profile_set
             .profiles
             .into_iter()
@@ -356,7 +481,30 @@ impl LiveWorker {
             .await?;
             return Ok(());
         }
-        for profile in eligible_profiles {
+        // Open positions stay pinned to their opening profile. New entries
+        // require a confident exact state and enough regime-scoped evidence;
+        // otherwise only an unconditioned fallback is safe.
+        let routed_profiles = route_live_profiles(
+            eligible_profiles,
+            market_state.as_ref(),
+            symbol_has_open_position,
+        );
+        if routed_profiles.is_empty() {
+            self.report_worker_diagnostic(
+                &update,
+                None,
+                if candidate_market_state.is_none() {
+                    "Market state is unavailable and no unconditioned profile is installed".into()
+                } else if market_state.is_none() {
+                    "Market state is uncertain and no unconditioned profile is installed".into()
+                } else {
+                    "Regime profile is missing or under-sampled and no unconditioned profile is installed".into()
+                },
+            )
+            .await?;
+            return Ok(());
+        }
+        for profile in routed_profiles {
             let has_open_position = open_profile_ids.contains(profile.profile_id.as_str());
             let mut signal = match crate::prepare_live_strategy_signal(
                 &input_signal,
@@ -375,9 +523,10 @@ impl LiveWorker {
                 }
             };
             signal.strategy_candidate = true;
-            if let Some(regime) = crate::market_regime(&signal) {
-                signal.market_regime = Some(regime.to_owned());
+            if let Some(state) = market_state.as_ref() {
+                signal.market_regime = Some(state.evidence_regime.to_owned());
             }
+            signal.market_state = market_state.clone();
             signal.strategy_decision = Some(serde_json::json!({
                 "strategy": self.config.strategy.as_str(),
                 "strategy_parameters": profile.parameters,
@@ -386,6 +535,12 @@ impl LiveWorker {
                 "learning_profile_version": profile.version,
                 "strategy_walk_forward": null,
                 "direction_source": "insights_subscription",
+                "market_state_candidate": candidate_market_state,
+                "market_state": market_state,
+                "market_state_transition": market_state_transition,
+                "profile_regime": profile.market_regime,
+                "profile_state_key": profile.market_state_key,
+                "profile_fallback_reason": if profile.market_regime.is_none() && profile.market_state_key.is_none() && !symbol_has_open_position { Some(if market_state.is_none() { "market_state_uncertain" } else { "matching_regime_profile_missing_or_under_sampled" }) } else { None },
             }));
             let make_entry_request = |walk_forward_evidence| crate::LiveEvaluationRequest {
                 contract_version: crate::LIVE_EVALUATION_CONTRACT_VERSION,
@@ -483,6 +638,7 @@ impl LiveWorker {
                 "strategy_walk_forward": walk_forward_evidence,
                 "direction_source": "insights_subscription",
             }));
+            let missing_entry_decision = !has_open_position && response.decision.is_none();
             let decision = if has_open_position {
                 let position_request = crate::LiveEvaluationRequest {
                     contract_version: crate::LIVE_EVALUATION_CONTRACT_VERSION,
@@ -528,18 +684,11 @@ impl LiveWorker {
                             .await?;
                             continue;
                         }
-                        match response.decision {
-                            Some(decision) => decision,
-                            None => {
-                                self.report_worker_diagnostic(
-                                    &update,
-                                    Some(&profile),
-                                    "Open-position evaluation returned no decision or error".into(),
-                                )
-                                .await?;
-                                continue;
-                            }
-                        }
+                        // A missing evaluator result must not silently drop an
+                        // open-position update. Hold is the safe explicit outcome.
+                        response
+                            .decision
+                            .unwrap_or(crate::LiveStrategyDecision::Hold)
                     }
                     Err(error) => {
                         self.report_worker_diagnostic(
@@ -552,18 +701,11 @@ impl LiveWorker {
                     }
                 }
             } else {
-                match response.decision {
-                    Some(decision) => decision,
-                    None => {
-                        self.report_worker_diagnostic(
-                            &update,
-                            Some(&profile),
-                            "Entry evaluation returned no decision or error".into(),
-                        )
-                        .await?;
-                        continue;
-                    }
-                }
+                // Preserve the evaluation in the decision stream even if an
+                // older or malformed responder returns an empty result.
+                response
+                    .decision
+                    .unwrap_or(crate::LiveStrategyDecision::Reject)
             };
             if (has_open_position
                 && !matches!(
@@ -621,6 +763,9 @@ impl LiveWorker {
                 event_time_ms: update.event_time_ms,
                 decision,
                 reason: (decision == crate::LiveStrategyDecision::Reject).then(|| {
+                    if missing_entry_decision {
+                        return "Entry evaluator returned neither a decision nor an error".into();
+                    }
                     let mut input = crate::StrategySignal::entry(&signal, &profile.parameters);
                     input.walk_forward_evidence = walk_forward_evidence;
                     self.config
@@ -1780,6 +1925,7 @@ mod tests {
             parameters,
             walk_forward_evidence: None,
             market_regime: None,
+            market_state_key: None,
             walk_forward_evidence_by_regime: Default::default(),
         };
         crate::LiveStrategyProfileSet {
@@ -1790,6 +1936,313 @@ mod tests {
             profiles: vec![profile],
             open_positions: Vec::new(),
         }
+    }
+
+    struct DecisionCapture(Arc<Mutex<Vec<crate::LiveStrategyDecisionReport>>>);
+
+    #[rsocket_rust::async_trait]
+    impl RSocket for DecisionCapture {
+        async fn metadata_push(&self, _request: Payload) -> anyhow::Result<()> {
+            bail!("unsupported")
+        }
+
+        async fn fire_and_forget(&self, _request: Payload) -> anyhow::Result<()> {
+            bail!("unsupported")
+        }
+
+        async fn request_response(&self, request: Payload) -> anyhow::Result<Option<Payload>> {
+            let request: crate::LiveStrategySocketRequest =
+                serde_json::from_slice(request.data().context("empty test request")?)?;
+            let response = match request {
+                crate::LiveStrategySocketRequest::ReportDecision(report) => {
+                    self.0.lock().await.push(report);
+                    crate::LiveStrategySocketResponse::DecisionAccepted {
+                        status: 204,
+                        detail: None,
+                    }
+                }
+                crate::LiveStrategySocketRequest::ReportDiagnostic(_) => {
+                    crate::LiveStrategySocketResponse::DecisionAccepted {
+                        status: 204,
+                        detail: None,
+                    }
+                }
+                _ => crate::LiveStrategySocketResponse::Rejected {
+                    status: 400,
+                    detail: "unexpected request in routing integration test".into(),
+                },
+            };
+            Ok(Some(
+                Payload::builder()
+                    .set_data(serde_json::to_vec(&response)?)
+                    .build(),
+            ))
+        }
+
+        fn request_stream(&self, _request: Payload) -> Flux<rsocket_rust::Result<Payload>> {
+            Box::pin(futures_util::stream::empty())
+        }
+
+        fn request_channel(
+            &self,
+            requests: Flux<rsocket_rust::Result<Payload>>,
+        ) -> Flux<rsocket_rust::Result<Payload>> {
+            requests
+        }
+    }
+
+    #[tokio::test]
+    async fn insight_update_reports_the_matching_regime_profile() {
+        let reports = Arc::new(Mutex::new(Vec::new()));
+        let reports_for_server = Arc::clone(&reports);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        drop(listener);
+        let server = RSocketFactory::receive()
+            .transport(WebsocketServerTransport::from(address.to_string()))
+            .acceptor(Box::new(move |_setup, _socket| {
+                Ok(Box::new(DecisionCapture(Arc::clone(&reports_for_server))))
+            }))
+            .serve();
+        let server_task = tokio::spawn(server);
+        sleep(std::time::Duration::from_millis(20)).await;
+
+        let worker_config = LiveWorkerConfig {
+            strategy: Strategy::LiveMomentum,
+            listen_addr: "127.0.0.1:0".into(),
+            max_in_flight: 1,
+            max_payload_bytes: 64 * 1024,
+            metrics_listen_addr: "127.0.0.1:0".into(),
+            insights_stream_url: "ws://127.0.0.1:1".into(),
+            auto_trader_rsocket_url: format!("ws://{address}"),
+        };
+        let worker = LiveWorker::new(worker_config.clone());
+
+        let mut fallback = pushed_profile_set(1, "BTC-USDT").profiles.remove(0);
+        let parameter_spec = Strategy::LiveMomentum.parameter_specs()[0].clone();
+        let mut regime_profile = fallback.clone();
+        let selected_value = if parameter_spec.default + parameter_spec.step <= parameter_spec.max {
+            parameter_spec.default + parameter_spec.step
+        } else {
+            parameter_spec.default - parameter_spec.step
+        };
+        regime_profile
+            .parameters
+            .insert(parameter_spec.key.as_str().into(), selected_value);
+        regime_profile.profile_id = crate::profile_id(
+            "BTC-USDT",
+            Strategy::LiveMomentum.as_str(),
+            &regime_profile.parameters,
+        );
+        regime_profile.market_state_key = Some("v2:range:unknown".into());
+        regime_profile.walk_forward_evidence_by_regime.insert(
+            "range".into(),
+            crate::StrategyWalkForwardEvidence {
+                sample_count: LIVE_REGIME_PROFILE_MIN_SAMPLES,
+                ..Default::default()
+            },
+        );
+        fallback.market_regime = None;
+        fallback.market_state_key = None;
+        let selected_profile_id = regime_profile.profile_id.clone();
+        let profile_set = crate::LiveStrategyProfileSet {
+            contract_version: crate::LIVE_EVALUATION_CONTRACT_VERSION,
+            set_version: 5,
+            strategy: Strategy::LiveMomentum,
+            enabled: true,
+            profiles: vec![fallback, regime_profile],
+            open_positions: Vec::new(),
+        };
+        worker.apply_profile_set(profile_set.clone()).await.unwrap();
+        let mut invalid_replacement = profile_set;
+        invalid_replacement.set_version = 6;
+        invalid_replacement.profiles[0].market_state_key = Some("v3:range:unknown".into());
+        assert!(worker.apply_profile_set(invalid_replacement).await.is_err());
+        assert_eq!(
+            worker.profiles.read().await.as_ref().unwrap().set_version,
+            5
+        );
+
+        let now = live_worker_now_ms();
+        let update = crate::StrategyInsightUpdate {
+            contract_version: crate::STRATEGY_INSIGHT_UPDATE_VERSION,
+            event_id: "regime-route-integration".into(),
+            event_time_ms: now,
+            signal: Some(StrategyMarketSignal {
+                symbol: "BTC-USDT".into(),
+                direction: "bullish".into(),
+                timestamp: now,
+                ranging_probability: Some(0.9),
+                ..Default::default()
+            }),
+            market: None,
+            taker_fee_rate: None,
+            daily_snapshot: None,
+            dated_carry_scan: None,
+            dated_carry_candidate: None,
+            dated_carry_settlement: None,
+        };
+        worker
+            .evaluate_insight_update(update.clone())
+            .await
+            .unwrap();
+
+        let mut stale_update = update;
+        stale_update.event_id = "regime-route-stale-input".into();
+        let stale_signal = stale_update.signal.as_mut().unwrap();
+        stale_signal.stale = true;
+        stale_signal.components.trend_5m_volatility_units = Some(2.0);
+        stale_signal.components.volatility_1m_percent = Some(1.2);
+        worker.evaluate_insight_update(stale_update).await.unwrap();
+
+        let reports = reports.lock().await;
+        assert_eq!(reports.len(), 1, "only one profile should be evaluated");
+        assert_eq!(reports[0].profile_id, selected_profile_id);
+        assert_eq!(reports[0].signal.market_regime.as_deref(), Some("range"));
+        assert_eq!(
+            worker.market_state_transitions.read().await["BTC-USDT"]
+                .active
+                .as_ref()
+                .unwrap()
+                .profile_key,
+            "v2:range:unknown",
+            "a stale trend update must not alter the active regime"
+        );
+        server_task.abort();
+    }
+
+    #[test]
+    fn new_entries_select_exact_regime_profile_and_uncertain_states_use_fallback() {
+        let fallback = pushed_profile_set(1, "BTC-USDT").profiles.remove(0);
+        let mut range = fallback.clone();
+        range.profile_id.push_str("-range");
+        range.market_state_key = Some("v2:range:unknown".into());
+        range.walk_forward_evidence_by_regime.insert(
+            "range".into(),
+            crate::StrategyWalkForwardEvidence {
+                sample_count: 8,
+                ..Default::default()
+            },
+        );
+        let mut trend = fallback.clone();
+        trend.profile_id.push_str("-trend");
+        trend.market_state_key = Some("v2:trend_up:unknown".into());
+        trend.walk_forward_evidence_by_regime.insert(
+            "trend".into(),
+            crate::StrategyWalkForwardEvidence {
+                sample_count: 8,
+                ..Default::default()
+            },
+        );
+        let state = crate::classify_live_market_state(&StrategyMarketSignal {
+            ranging_probability: Some(0.9),
+            ..Default::default()
+        })
+        .unwrap();
+
+        let routed = route_live_profiles(
+            vec![fallback.clone(), trend, range.clone()],
+            Some(&state),
+            false,
+        );
+        assert_eq!(routed.len(), 1);
+        assert_eq!(
+            routed[0].market_state_key.as_deref(),
+            Some("v2:range:unknown")
+        );
+
+        let routed = route_live_profiles(vec![range.clone(), fallback.clone()], None, false);
+        assert_eq!(routed.len(), 1);
+        assert_eq!(routed[0].profile_id, fallback.profile_id);
+
+        range.walk_forward_evidence_by_regime.insert(
+            "range".into(),
+            crate::StrategyWalkForwardEvidence {
+                sample_count: 2,
+                ..Default::default()
+            },
+        );
+        let routed = route_live_profiles(vec![range], Some(&state), false);
+        assert!(routed.is_empty(), "under-sampled regime must not route");
+    }
+
+    #[test]
+    fn open_positions_keep_their_pinned_profiles_during_regime_changes() {
+        let mut pinned = pushed_profile_set(1, "BTC-USDT").profiles.remove(0);
+        pinned.market_state_key = Some("v2:range:unknown".into());
+        let state = crate::classify_live_market_state(&StrategyMarketSignal {
+            components: SignalComponents {
+                trend_5m_volatility_units: Some(2.0),
+                ..Default::default()
+            },
+            ..Default::default()
+        })
+        .unwrap();
+        let routed = route_live_profiles(vec![pinned.clone()], Some(&state), true);
+        assert_eq!(routed[0].profile_id, pinned.profile_id);
+    }
+
+    #[test]
+    fn market_state_hysteresis_transitions_after_two_fresh_confirmations() {
+        let classify = |timestamp, trend| {
+            crate::classify_live_market_state(&StrategyMarketSignal {
+                timestamp,
+                components: SignalComponents {
+                    trend_5m_volatility_units: Some(trend),
+                    volatility_1m_percent: Some(1.2),
+                    ..Default::default()
+                },
+                ..Default::default()
+            })
+            .unwrap()
+        };
+        let mut state = MarketStateTransition::default();
+        let (active, transition) = state.observe(Some(classify(1_000, -2.0)));
+        assert_eq!(transition, "initialized");
+        assert_eq!(active.unwrap().profile_key, "v2:trend_down:high");
+
+        let (active, transition) = state.observe(Some(classify(2_000, 2.0)));
+        assert_eq!(transition, "transition_pending");
+        assert_eq!(active.unwrap().profile_key, "v2:trend_down:high");
+
+        let (active, transition) = state.observe(Some(classify(2_000, 2.0)));
+        assert_eq!(transition, "transition_pending");
+        assert_eq!(active.unwrap().profile_key, "v2:trend_down:high");
+
+        let (active, transition) = state.observe(Some(classify(3_000, 2.0)));
+        assert_eq!(transition, "transitioned");
+        assert_eq!(active.unwrap().profile_key, "v2:trend_up:high");
+
+        let (active, transition) = state.observe(None);
+        assert_eq!(transition, "uncertain_fallback");
+        assert!(active.is_none());
+        assert_eq!(
+            state.active.as_ref().unwrap().profile_key,
+            "v2:trend_up:high"
+        );
+    }
+
+    #[test]
+    fn market_state_replay_resets_pending_transition_after_a_large_gap() {
+        let classify = |timestamp, trend| {
+            crate::classify_live_market_state(&StrategyMarketSignal {
+                timestamp,
+                components: SignalComponents {
+                    trend_5m_volatility_units: Some(trend),
+                    volatility_1m_percent: Some(0.4),
+                    ..Default::default()
+                },
+                ..Default::default()
+            })
+            .unwrap()
+        };
+        let mut state = MarketStateTransition::default();
+        state.observe(Some(classify(1_000, -2.0)));
+        let (_, transition) = state.observe(Some(classify(2_000, 2.0)));
+        assert_eq!(transition, "transition_pending");
+        let (active, transition) = state.observe(Some(classify(60_000, 2.0)));
+        assert_eq!(transition, "transition_pending");
+        assert_eq!(active.unwrap().structure, "trend_down");
     }
 
     #[tokio::test]
@@ -1942,7 +2395,8 @@ mod tests {
                 parameters,
                 walk_forward_evidence: None,
                 market_regime: None,
-            walk_forward_evidence_by_regime: Default::default(),
+                market_state_key: None,
+                walk_forward_evidence_by_regime: Default::default(),
             },
             input: LiveEvaluationInput::Entry {
                 signal: StrategyMarketSignal {

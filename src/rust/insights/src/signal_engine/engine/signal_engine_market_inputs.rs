@@ -338,6 +338,9 @@ impl SignalEngine {
         if !price.is_finite() || price <= 0.0 || !size.is_finite() || size <= 0.0 {
             return;
         }
+        // Fill short-term mark history from active trade streams when ticker
+        // updates are sparse. The sampler handles cross-stream reordering.
+        self.record_price_sample(timestamp, price);
         let aggressor_cost_bps = self
             .best_quote
             .filter(|(quote_time, bid, ask)| {
@@ -470,6 +473,26 @@ impl SignalEngine {
 #[cfg(test)]
 mod scout_tests {
     use super::*;
+
+    #[test]
+    fn trade_prices_fill_momentum_history_when_ticker_updates_are_sparse_and_reordered() {
+        let mut engine = SignalEngine::default();
+        // A newer ticker can be processed before the trade stream catches up.
+        engine.on_price(12_000, 100.12, 0.0);
+        for second in 0_u32..=11 {
+            let price = 100.0 + f64::from(second) * 0.01;
+            engine.on_trade(u64::from(second) * 1_000, price, 1.0, true);
+        }
+
+        let snapshot = engine.snapshot("BTC-USDT", 12_000).unwrap();
+        let momentum = snapshot
+            .components
+            .momentum_by_window
+            .iter()
+            .find(|feature| feature.window_seconds == 10)
+            .and_then(|feature| feature.value);
+        assert!(momentum.is_some());
+    }
 
     #[test]
     fn scout_creates_independent_fee_aware_horizon_observations() {

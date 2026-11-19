@@ -306,6 +306,7 @@ fn is_allowed_route(method: &Method, path: &str) -> bool {
             | (&Method::POST, "/positions/auto-trader/dated-carry")
             | (&Method::GET, "/positions/auto-trader/parameters")
             | (&Method::GET, "/internal/strategy/daily-scan-parameters")
+            | (&Method::POST, "/internal/strategy/daily-diagnostics")
             | (
                 &Method::GET,
                 "/positions/auto-trader/missed-opportunity-bands"

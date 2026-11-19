@@ -91,26 +91,8 @@ impl SignalEngine {
         price: f64,
         volatility_1m: f64,
     ) -> Vec<CompletedSignalOutcome> {
-        if !price.is_finite() || price <= 0.0 {
+        if !self.record_price_sample(timestamp, price) {
             return Vec::new();
-        }
-        if self
-            .prices
-            .back()
-            .is_some_and(|sample| timestamp < sample.0)
-        {
-            return Vec::new();
-        }
-        // Keep the signal feature history proportional to elapsed time rather
-        // than exchange tick rate. Outcome/scout checks below still process
-        // every accepted price tick; snapshots only need 1-second samples for
-        // their 5-second through 1-hour windows.
-        if self.prices.back().is_some_and(|(last_timestamp, _)| {
-            timestamp.saturating_sub(*last_timestamp) < SIGNAL_PRICE_SAMPLE_INTERVAL_MS
-        }) {
-            *self.prices.back_mut().expect("price history has a back") = (timestamp, price);
-        } else {
-            self.prices.push_back((timestamp, price));
         }
         self.volatility_1m = volatility_1m.is_finite().then_some(volatility_1m);
         self.prune(timestamp);

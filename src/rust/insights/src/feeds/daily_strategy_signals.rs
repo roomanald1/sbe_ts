@@ -1586,7 +1586,7 @@ async fn poll_daily_strategy_signals(
             .await
             {
                 crate::service_log!(
-                    "WARN",
+                    "ERROR",
                     "Insights daily strategy diagnostics delivery failed: {error}"
                 );
             }
@@ -1659,8 +1659,8 @@ fn append_learning_strategies(
             strategies.extend(response.body.get("strategies").and_then(serde_json::Value::as_array)
                 .into_iter().flatten().filter_map(|item| item.as_str().map(str::to_owned)));
         }
-        Ok(response) => crate::service_log!("WARN", "Learning Scout configuration route returned {}; continuing with AutoTrader strategy list", response.status),
-        Err(error) => crate::service_log!("WARN", "Learning Scout configuration unavailable; continuing with AutoTrader strategy list: {error}"),
+        Ok(response) => crate::service_log!("ERROR", "Learning Scout configuration route returned {}; continuing with AutoTrader strategy list", response.status),
+        Err(error) => crate::service_log!("ERROR", "Learning Scout configuration unavailable; continuing with AutoTrader strategy list: {error}"),
     }
 }
 

@@ -605,14 +605,14 @@ async fn publish_scout_markouts(
                     break;
                 }
                 Ok(response) if attempt == 2 => crate::service_log!(
-                    "WARN",
+                    "ERROR",
                     "Could not deliver scout markout sample_id={} symbol={}: status {}",
                     decision_id,
                     evaluation.symbol,
                     response.status
                 ),
                 Err(error) if attempt == 2 => crate::service_log!(
-                    "WARN",
+                    "ERROR",
                     "Could not deliver scout markout sample_id={} symbol={}: {error}",
                     decision_id,
                     evaluation.symbol

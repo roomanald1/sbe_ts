@@ -80,8 +80,18 @@ pub fn effective_parameter_values(
         .into_iter()
         .map(|spec| (spec.key.as_str().to_owned(), spec.default))
         .collect::<BTreeMap<_, _>>();
-    parameters.extend(learned.clone());
-    for spec in strategy.parameter_specs() {
+    let specs = strategy.parameter_specs();
+    // Learned profiles can outlive parameter catalog changes. Keep the safe
+    // catalog default when an older profile contains a value the live worker
+    // would reject.
+    for spec in &specs {
+        if let Some(value) = learned.get(spec.key.as_str()).copied()
+            && parameter_value_is_valid(value, spec.min, spec.max, spec.step)
+        {
+            parameters.insert(spec.key.as_str().to_owned(), value);
+        }
+    }
+    for spec in &specs {
         let key = strategy_parameter_key(profile_symbol, strategy, spec.key.as_str());
         let configured = overrides.get(&key).copied().or_else(|| {
             legacy_strategy_parameter_name(spec.key.as_str()).and_then(|legacy| {
@@ -90,8 +100,8 @@ pub fn effective_parameter_values(
                     .copied()
             })
         });
-        if let Some(value) =
-            configured.filter(|value| value.is_finite() && *value >= spec.min && *value <= spec.max)
+        if let Some(value) = configured
+            .filter(|value| parameter_value_is_valid(*value, spec.min, spec.max, spec.step))
         {
             parameters.insert(spec.key.as_str().to_owned(), value);
         }
@@ -134,10 +144,22 @@ pub fn effective_parameter_values(
                 parameters.extend(variant);
             }
         } else {
-            parameters.insert(key.to_owned(), value);
+            if let Some(spec) = specs.iter().find(|spec| spec.key.as_str() == key)
+                && parameter_value_is_valid(value, spec.min, spec.max, spec.step)
+            {
+                parameters.insert(key.to_owned(), value);
+            }
         }
     }
     parameters
+}
+
+fn parameter_value_is_valid(value: f64, min: f64, max: f64, step: f64) -> bool {
+    if !value.is_finite() || step <= 0.0 || value < min || value > max {
+        return false;
+    }
+    let step_position = (value - min) / step;
+    (step_position - step_position.round()).abs() <= 1e-6
 }
 
 pub fn scout_parameter_specs(strategy: Strategy) -> Vec<ParameterSpec> {

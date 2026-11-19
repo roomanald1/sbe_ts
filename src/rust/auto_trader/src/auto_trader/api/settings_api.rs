@@ -346,6 +346,7 @@ mod active_live_profile_tests {
             parameters,
             walk_forward_evidence: None,
             market_regime: None,
+            market_state_key: None,
             walk_forward_evidence_by_regime: Default::default(),
         }
     }

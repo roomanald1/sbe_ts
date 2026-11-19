@@ -216,6 +216,14 @@ const decisionColumns: ColDef<LearningDecision>[] = [
     field: 'status',
     headerName: 'Stage / status',
     width: 155,
+    cellClass: ({ data }) =>
+      data?.status === 'selected'
+        ? 'decision-status-selected'
+        : data?.status === 'rejected'
+          ? 'decision-status-rejected'
+          : data?.status === 'skipped'
+            ? 'decision-status-skipped'
+            : 'decision-status-evaluated',
     valueGetter: ({ data }) => {
       if (!data) return '—';
       const selectionMode = data.entry_gate?.selection_mode;

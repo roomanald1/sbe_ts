@@ -189,6 +189,9 @@ pub struct LiveStrategyProfile {
     /// Optional live routing label. `None` is the backward-compatible fallback profile.
     #[serde(default)]
     pub market_regime: Option<String>,
+    /// Versioned direction/structure plus volatility routing key.
+    #[serde(default)]
+    pub market_state_key: Option<String>,
     pub parameters: BTreeMap<String, f64>,
     /// Updated by Learning and delivered through AutoTrader's profile push.
     #[serde(default)]

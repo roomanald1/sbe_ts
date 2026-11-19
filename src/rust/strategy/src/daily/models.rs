@@ -194,6 +194,7 @@ mod risk_adjusted_monthly_momentum_tests {
                 "cross_sectional_threshold": 5.0
             })),
             market_regime: None,
+            market_state: None,
             news_attribution: None,
             entry_gate: None,
         }

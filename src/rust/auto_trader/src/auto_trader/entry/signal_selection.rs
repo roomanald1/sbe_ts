@@ -279,6 +279,7 @@ mod signal_selection_behavior_tests {
             strategy: strategy.map(str::to_owned),
             strategy_decision: None,
             market_regime: None,
+            market_state: None,
             news_attribution: None,
             entry_gate: None,
         }

@@ -447,6 +447,7 @@ mod strategy_cleanup_integration_tests {
             parameters: parameters.clone(),
             walk_forward_evidence: None,
             market_regime: None,
+            market_state_key: None,
             walk_forward_evidence_by_regime: Default::default(),
         };
         let first_spec = &strategy.parameter_specs()[0];
@@ -464,6 +465,7 @@ mod strategy_cleanup_integration_tests {
             parameters: second_parameters.clone(),
             walk_forward_evidence: None,
             market_regime: None,
+            market_state_key: None,
             walk_forward_evidence_by_regime: Default::default(),
         };
         let mut settings = Settings::default();

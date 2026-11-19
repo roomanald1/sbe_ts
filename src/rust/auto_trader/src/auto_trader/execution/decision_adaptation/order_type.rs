@@ -278,6 +278,7 @@ mod order_type_selection_behavior_tests {
             timestamp: 10, stale: false, score: 1.0, ranging_probability: None,
             components: SignalComponents::default(), strategy_candidate: false,
             strategy: None, strategy_decision: None, market_regime: None,
+            market_state: None,
             news_attribution: None, entry_gate: None,
         }
     }

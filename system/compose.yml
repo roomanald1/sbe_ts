@@ -11,6 +11,8 @@ x-strategy-scout-env: &strategy-scout-env
   INSIGHTS_STRATEGY_STREAM_URL: ws://insights:10004
   AUTO_TRADER_RSOCKET_URL: ws://auto-trader:10006
 x-strategy-scout-base: &strategy-scout-base
+  image: sbe-system-strategy-worker:local
+  pull_policy: never
   build: { context: .., dockerfile: system/Dockerfile.rust, args: { CRATE: strategy, BIN: strategy, FEATURES: service } }
   profiles: [scout-workers]
   volumes: ["strategy-x-state:/data"]
@@ -29,6 +31,8 @@ x-strategy-live-env: &strategy-live-env
   AUTO_TRADER_RSOCKET_URL: ws://auto-trader:10006
   LEARNING_RSOCKET_URL: ws://learning:10010
 x-strategy-live-base: &strategy-live-base
+  image: sbe-system-strategy-worker:local
+  pull_policy: never
   build: { context: .., dockerfile: system/Dockerfile.rust, args: { CRATE: strategy, BIN: strategy, FEATURES: service } }
   restart: unless-stopped
   deploy:
@@ -141,7 +145,7 @@ services:
       SCOUT_COORDINATOR_MAX_BATCH_SIGNALS: ${SCOUT_COORDINATOR_MAX_BATCH_SIGNALS:-64}
       SCOUT_COORDINATOR_MAX_ASSIGNMENTS: ${SCOUT_COORDINATOR_MAX_ASSIGNMENTS:-512}
       SCOUT_COORDINATOR_MAX_BATCH_BYTES: ${SCOUT_COORDINATOR_MAX_BATCH_BYTES:-8388608}
-      SCOUT_COORDINATOR_WORKER_TIMEOUT_MS: ${SCOUT_COORDINATOR_WORKER_TIMEOUT_MS:-3000}
+      SCOUT_COORDINATOR_WORKER_TIMEOUT_MS: ${SCOUT_COORDINATOR_WORKER_TIMEOUT_MS:-10000}
       SCOUT_WORKER_ENDPOINTS: "live-momentum=ws://strategy-scout-live-momentum:10200;live-trade-flow=ws://strategy-scout-live-trade-flow:10200;live-order-book=ws://strategy-scout-live-order-book:10200;live-vwap-dislocation=ws://strategy-scout-live-vwap-dislocation:10200;live-absorption-pressure=ws://strategy-scout-live-absorption-pressure:10200;donchian-55-btc200=ws://strategy-scout-donchian-55-btc200:10200;donchian-20-sma200=ws://strategy-scout-donchian-20-sma200:10200;donchian-20-btc200=ws://strategy-scout-donchian-20-btc200:10200;donchian-10-btc200=ws://strategy-scout-donchian-10-btc200:10200;donchian-20-btc200-hold3=ws://strategy-scout-donchian-20-btc200-hold3:10200;risk-adjusted-trend-portfolio=ws://strategy-scout-risk-adjusted-trend-portfolio:10200;trend-sleeves-btc200=ws://strategy-scout-trend-sleeves-btc200:10200;trend-50-200=ws://strategy-scout-trend-50-200:10200;relative-strength-90-sma200=ws://strategy-scout-relative-strength-90-sma200:10200;risk-adjusted-monthly-momentum=ws://strategy-scout-risk-adjusted-monthly-momentum:10200;rsi2-oversold-rebound=ws://strategy-scout-rsi2-oversold-rebound:10200;dated-futures-carry=ws://strategy-scout-dated-futures-carry:10200"
     volumes: ["learning-data:/data"]
     ports: ["3010:3010", "10010:10010"]

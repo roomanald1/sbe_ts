@@ -508,6 +508,20 @@
 .auto-trader-learning-grid .learning-paired-neutral {
   color: #a0a6ad;
 }
+.auto-trader-decision-grid .decision-status-selected {
+  color: #83c995;
+  font-weight: 600;
+}
+.auto-trader-decision-grid .decision-status-rejected {
+  color: #e59b9b;
+  font-weight: 600;
+}
+.auto-trader-decision-grid .decision-status-skipped {
+  color: #d8b878;
+}
+.auto-trader-decision-grid .decision-status-evaluated {
+  color: #aeb7c1;
+}
 .auto-trader-learning-filter {
   align-self: flex-start;
   margin-top: 3px;

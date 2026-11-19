@@ -28,6 +28,7 @@ pub(crate) fn benchmark_signal(strategy: &str, candidate: bool) -> Signal {
             "cross_sectional_threshold": 5.0
         })),
         market_regime: None,
+        market_state: None,
         news_attribution: None,
         entry_gate: None,
     }

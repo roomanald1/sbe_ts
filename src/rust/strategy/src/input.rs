@@ -26,6 +26,8 @@ pub struct StrategyMarketSignal {
     pub strategy: Option<String>,
     pub strategy_decision: Option<serde_json::Value>,
     pub market_regime: Option<String>,
+    #[serde(default)]
+    pub market_state: Option<LiveMarketStateClassification>,
     pub news_attribution: Option<serde_json::Value>,
     pub entry_gate: Option<serde_json::Value>,
 }
@@ -66,6 +68,131 @@ pub fn market_regime(signal: &StrategyMarketSignal) -> Option<&'static str> {
         || signal.components.trend_5m_volatility_units.is_some()
         || signal.components.volatility_1m_percent.is_some();
     has_regime_features.then_some("mixed")
+}
+
+/// Versioned live classifier. Confidence describes separation from the
+/// decision boundary; missing or non-finite features remain uncertain.
+pub const LIVE_MARKET_STATE_VERSION: u16 = 2;
+
+#[derive(Clone, Debug, Deserialize, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LiveMarketStateClassification {
+    pub version: u16,
+    /// Direction and structure combined: trend_up, trend_down, range or mixed.
+    pub structure: String,
+    /// Independent volatility dimension: low, normal, high or unknown.
+    pub volatility_overlay: String,
+    /// Legacy coarse label retained for existing Learning evidence attribution.
+    pub evidence_regime: String,
+    pub profile_key: String,
+    pub confidence: f64,
+    pub observed_at_ms: u64,
+}
+
+impl LiveMarketStateClassification {
+    pub fn key_is_supported(key: &str) -> bool {
+        let Some((version, dimensions)) = key.split_once(':') else {
+            return false;
+        };
+        if version != "v2" {
+            return false;
+        }
+        matches!(
+            dimensions,
+            "trend_up:low"
+                | "trend_up:normal"
+                | "trend_up:high"
+                | "trend_up:unknown"
+                | "trend_down:low"
+                | "trend_down:normal"
+                | "trend_down:high"
+                | "trend_down:unknown"
+                | "range:low"
+                | "range:normal"
+                | "range:high"
+                | "range:unknown"
+                | "mixed:low"
+                | "mixed:normal"
+                | "mixed:high"
+                | "mixed:unknown"
+        )
+    }
+}
+
+pub fn classify_live_market_state(
+    signal: &StrategyMarketSignal,
+) -> Option<LiveMarketStateClassification> {
+    let range_probability = signal.ranging_probability.filter(|value| value.is_finite());
+    let trend = signal
+        .components
+        .trend_5m_volatility_units
+        .filter(|value| value.is_finite());
+    let volatility = signal
+        .components
+        .volatility_1m_percent
+        .filter(|value| value.is_finite())
+        .map(f64::abs);
+
+    let (structure, evidence_regime, structural_confidence) =
+        if let Some(probability) = range_probability.filter(|value| *value >= 0.65) {
+            (
+                "range",
+                "range",
+                ((probability - 0.5) * 2.0).clamp(0.0, 1.0),
+            )
+        } else if let Some(trend) = trend.filter(|value| value.abs() >= 1.5) {
+            if trend.is_sign_positive() {
+                (
+                    "trend_up",
+                    "trend",
+                    ((trend.abs() - 1.0) / 1.0).clamp(0.0, 1.0),
+                )
+            } else {
+                (
+                    "trend_down",
+                    "trend",
+                    ((trend.abs() - 1.0) / 1.0).clamp(0.0, 1.0),
+                )
+            }
+        } else if range_probability.is_some() || trend.is_some() || volatility.is_some() {
+            let legacy = market_regime(signal);
+            let direction = match signal.direction.to_ascii_lowercase().as_str() {
+                "bullish" | "long" => "trend_up",
+                "bearish" | "short" => "trend_down",
+                _ => "mixed",
+            };
+            match legacy {
+                Some("range") => ("range", "range", 0.5),
+                Some("trend") if direction != "mixed" => (direction, "trend", 0.5),
+                Some("trend") => ("mixed", "trend", 0.5),
+                Some("volatile") | Some("mixed") | None => ("mixed", "mixed", 0.5),
+                _ => ("mixed", "mixed", 0.5),
+            }
+        } else {
+            return None;
+        };
+    let volatility_overlay = match volatility {
+        Some(value) if value >= 1.0 => "high",
+        Some(value) if value <= 0.2 => "low",
+        Some(_) => "normal",
+        None => "unknown",
+    };
+    let evidence_regime =
+        if volatility.is_some_and(|value| value >= 1.0) && evidence_regime == "mixed" {
+            "volatile"
+        } else {
+            evidence_regime
+        };
+    let completeness = if volatility.is_some() { 1.0 } else { 0.85 };
+    Some(LiveMarketStateClassification {
+        version: LIVE_MARKET_STATE_VERSION,
+        evidence_regime: evidence_regime.to_owned(),
+        profile_key: format!("v2:{structure}:{volatility_overlay}"),
+        structure: structure.to_owned(),
+        volatility_overlay: volatility_overlay.to_owned(),
+        confidence: (structural_confidence * completeness).clamp(0.0, 1.0),
+        observed_at_ms: signal.timestamp,
+    })
 }
 
 /// Select strategy-specific inputs from one shared Insights snapshot.
@@ -610,7 +737,10 @@ mod signal_direction_tests {
 
 #[cfg(test)]
 mod market_regime_tests {
-    use super::{StrategyMarketSignal, market_regime};
+    use super::{
+        LiveMarketStateClassification, StrategyMarketSignal, classify_live_market_state,
+        market_regime,
+    };
 
     #[test]
     fn uses_canonical_regime_then_derives_it_from_market_features() {
@@ -630,6 +760,62 @@ mod market_regime_tests {
         };
         assert_eq!(market_regime(&volatile), Some("volatile"));
         assert_eq!(market_regime(&StrategyMarketSignal::default()), None);
+    }
+
+    #[test]
+    fn live_market_state_reports_confidence_and_uncertainty() {
+        let range = StrategyMarketSignal {
+            ranging_probability: Some(0.9),
+            ..Default::default()
+        };
+        let state = classify_live_market_state(&range).unwrap();
+        assert_eq!(state.version, 2);
+        assert_eq!(state.structure, "range");
+        assert_eq!(state.volatility_overlay, "unknown");
+        assert_eq!(state.evidence_regime, "range");
+        assert_eq!(state.profile_key, "v2:range:unknown");
+        assert_eq!(state.confidence, 0.68);
+        assert_eq!(state.observed_at_ms, 0);
+        let missing = StrategyMarketSignal::default();
+        assert!(classify_live_market_state(&missing).is_none());
+    }
+
+    #[test]
+    fn live_market_state_keeps_direction_and_volatility_as_orthogonal_dimensions() {
+        let bullish = StrategyMarketSignal {
+            timestamp: 123,
+            components: super::SignalComponents {
+                trend_5m_volatility_units: Some(2.0),
+                volatility_1m_percent: Some(1.2),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let state = classify_live_market_state(&bullish).unwrap();
+        assert_eq!(state.structure, "trend_up");
+        assert_eq!(state.volatility_overlay, "high");
+        assert_eq!(state.evidence_regime, "trend");
+        assert_eq!(state.profile_key, "v2:trend_up:high");
+        assert_eq!(state.observed_at_ms, 123);
+
+        let bearish = StrategyMarketSignal {
+            components: super::SignalComponents {
+                trend_5m_volatility_units: Some(-2.0),
+                volatility_1m_percent: Some(0.1),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let state = classify_live_market_state(&bearish).unwrap();
+        assert_eq!(state.structure, "trend_down");
+        assert_eq!(state.volatility_overlay, "low");
+        assert_eq!(state.profile_key, "v2:trend_down:low");
+        assert!(LiveMarketStateClassification::key_is_supported(
+            &state.profile_key
+        ));
+        assert!(!LiveMarketStateClassification::key_is_supported(
+            "v3:trend_down:low"
+        ));
     }
 }
 

@@ -167,6 +167,7 @@ mod strategy_walk_forward_tests {
             strategy: Some("live-trade-flow".into()),
             strategy_decision: None,
             market_regime: None,
+            market_state: None,
             news_attribution: None,
             entry_gate: None,
         }

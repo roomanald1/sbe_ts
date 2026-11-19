@@ -154,6 +154,7 @@ mod tests {
             strategy: Some(strategy.into()),
             strategy_decision: Some(decision),
             market_regime: None,
+            market_state: None,
             news_attribution: None,
             entry_gate: None,
         }
