@@ -37,6 +37,44 @@ export type LearningDecision = {
   signal_components?: Record<string, unknown>;
 };
 
+export type DecisionAuditCoverage = {
+  latestAuditAt: number;
+  latestCycleAt: number;
+  stalled: boolean;
+  blockers: AutoTraderState['latestStrategyBlockers'];
+};
+
+const DECISION_AUDIT_GAP_MS = 5 * 60_000;
+
+export function decisionAuditCoverage(
+  source: AutoTraderState,
+  decisions: LearningDecision[],
+  nowMs = Date.now(),
+): DecisionAuditCoverage {
+  const latestAuditAt = decisions.reduce(
+    (latest, decision) => Math.max(latest, decision.timestamp ?? 0),
+    0,
+  );
+  const latestCycleAt = source.lastDecisionAt;
+  const blockers = source.latestStrategyBlockers
+    .filter(
+      (blocker) =>
+        blocker.timestamp_ms >= latestCycleAt - DECISION_AUDIT_GAP_MS,
+    )
+    .sort((left, right) => right.timestamp_ms - left.timestamp_ms);
+  return {
+    latestAuditAt,
+    latestCycleAt,
+    stalled:
+      source.enabled &&
+      latestCycleAt > 0 &&
+      nowMs - latestCycleAt < DECISION_AUDIT_GAP_MS &&
+      latestCycleAt - latestAuditAt >= DECISION_AUDIT_GAP_MS &&
+      blockers.length > 0,
+    blockers,
+  };
+}
+
 export type LearningRow = {
   id: string;
   symbol: string;
@@ -87,6 +125,7 @@ export type AutoTraderLearningWidgetState = {
   qualifiedCandidates: number;
   collectingCandidates: number;
   decisions: LearningDecision[];
+  decisionCoverage: DecisionAuditCoverage;
   decisionError?: string;
 };
 
@@ -95,13 +134,40 @@ type GetSummary = () => Promise<LearningSummary[]>;
 type GetDecisions = () => Promise<LearningDecision[]>;
 
 const requestLearningDecisions: GetDecisions = async () => {
-  const response = await insightsFetch(
-    `/signals/auto-trader-audit?since=${Date.now() - 7 * 24 * 60 * 60_000}&limit=10000&stage=decision`,
+  const since = Date.now() - 60 * 60_000;
+  const readStage = async (stage: string) => {
+    const items: LearningDecision[] = [];
+    let cursor: number | undefined;
+    do {
+      const query = new URLSearchParams({
+        since: String(since),
+        limit: '10000',
+        stage,
+        ...(cursor == null ? {} : { cursor: String(cursor) }),
+      });
+      const response = await insightsFetch(
+        `/signals/auto-trader-audit?${query.toString()}`,
+      );
+      if (!response.ok)
+        throw new Error(
+          `Decision history request failed (${response.status}).`,
+        );
+      const page = (await response.json()) as {
+        items?: LearningDecision[];
+        nextCursor?: number | null;
+      };
+      items.push(...(page.items ?? []));
+      cursor = page.nextCursor ?? undefined;
+    } while (cursor != null);
+    return items;
+  };
+  const [decisions, rejections] = await Promise.all([
+    readStage('decision'),
+    readStage('strategy_rejection'),
+  ]);
+  return [...decisions, ...rejections].sort(
+    (left, right) => (left.timestamp ?? 0) - (right.timestamp ?? 0),
   );
-  if (!response.ok)
-    throw new Error(`Decision history request failed (${response.status}).`);
-  const page = (await response.json()) as { items?: LearningDecision[] };
-  return (page.items ?? []).filter((item) => item.stage === 'decision');
 };
 
 export function projectLearningWidgetState(
@@ -256,6 +322,7 @@ export function projectLearningWidgetState(
       row.status.startsWith('Collecting'),
     ).length,
     decisions,
+    decisionCoverage: decisionAuditCoverage(source, decisions),
     decisionError,
   };
 }

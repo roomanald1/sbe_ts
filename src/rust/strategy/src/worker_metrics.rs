@@ -25,6 +25,7 @@ pub(crate) struct WorkerMetrics {
     in_flight: AtomicUsize,
     insights_connected: AtomicUsize,
     last_insight_timestamp_ms: AtomicU64,
+    last_insight_received_at_ms: AtomicU64,
     insight_update_failures: AtomicU64,
     insight_update_timeouts: AtomicU64,
     decision_report_successes: AtomicU64,
@@ -61,6 +62,7 @@ impl WorkerMetrics {
             in_flight: AtomicUsize::new(0),
             insights_connected: AtomicUsize::new(0),
             last_insight_timestamp_ms: AtomicU64::new(0),
+            last_insight_received_at_ms: AtomicU64::new(0),
             insight_update_failures: AtomicU64::new(0),
             insight_update_timeouts: AtomicU64::new(0),
             decision_report_successes: AtomicU64::new(0),
@@ -92,6 +94,13 @@ impl WorkerMetrics {
     pub(crate) fn record_insight_update(&self, timestamp_ms: u64) {
         self.last_insight_timestamp_ms
             .store(timestamp_ms, Ordering::Relaxed);
+        let received_at_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis()
+            .min(u64::MAX as u128) as u64;
+        self.last_insight_received_at_ms
+            .store(received_at_ms, Ordering::Relaxed);
     }
 
     pub(crate) fn record_insight_update_failure(&self, timed_out: bool) {
@@ -228,12 +237,19 @@ impl WorkerMetrics {
             &labels,
             self.insights_connected.load(Ordering::Relaxed),
         );
-        output.push_str("# HELP app_strategy_worker_last_insight_timestamp_ms Timestamp of the most recent Insights update consumed.\n# TYPE app_strategy_worker_last_insight_timestamp_ms gauge\n");
+        output.push_str("# HELP app_strategy_worker_last_insight_timestamp_ms Source event timestamp of the most recent Insights update observed by the worker.\n# TYPE app_strategy_worker_last_insight_timestamp_ms gauge\n");
         metric(
             &mut output,
             "app_strategy_worker_last_insight_timestamp_ms",
             &labels,
             self.last_insight_timestamp_ms.load(Ordering::Relaxed),
+        );
+        output.push_str("# HELP app_strategy_worker_last_insight_received_at_ms Local timestamp when the most recent Insights update was received by the worker.\n# TYPE app_strategy_worker_last_insight_received_at_ms gauge\n");
+        metric(
+            &mut output,
+            "app_strategy_worker_last_insight_received_at_ms",
+            &labels,
+            self.last_insight_received_at_ms.load(Ordering::Relaxed),
         );
         output.push_str("# HELP app_strategy_worker_insight_update_failures_total Insights updates that failed during evaluation or reporting.\n# TYPE app_strategy_worker_insight_update_failures_total counter\n");
         metric(

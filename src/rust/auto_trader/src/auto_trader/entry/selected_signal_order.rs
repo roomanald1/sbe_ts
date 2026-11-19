@@ -314,14 +314,16 @@ async fn submit_selected_signal(
         let order_reservation_started = Instant::now();
         reset_daily_budget(&mut settings);
         let strategy = signal.strategy.as_deref().and_then(Strategy::from_name);
-        if learned_pause_blocks_signal(
+        if !paper_learning_exploration_active(&settings, now)
+            && learned_pause_blocks_signal(
             &settings,
             strategy,
             signal,
             reducing_rebalance,
             &signal.direction,
             now,
-        ) {
+        )
+        {
             return Ok(skipped_for_signal(signal, "Strategy entry paused by negative net trade evidence"));
         }
         if let Some(reason) =

@@ -301,6 +301,7 @@ export function AutoTraderLearningWidget({
     qualifiedCandidates,
     collectingCandidates,
     decisions,
+    decisionCoverage,
     decisionError,
   } = useBehaviorSnapshot(model.state$);
   const filteredDecisions = decisions
@@ -336,14 +337,34 @@ export function AutoTraderLearningWidget({
               />
             </label>
             <small>
-              Last 7 days · {filteredDecisions.length} decisions · select a row
-              to inspect recorded evidence
+              Last hour · {filteredDecisions.length} decisions · select a row to
+              inspect recorded evidence
             </small>
           </div>
           {decisionError && (
             <p className="auto-trader-learning-error" role="alert">
               Decision history unavailable: {decisionError}
             </p>
+          )}
+          {decisionCoverage.stalled && (
+            <div className="auto-trader-audit-alert" role="status">
+              <strong>
+                {decisionCoverage.latestAuditAt > 0
+                  ? `No new entry decisions have been recorded since ${new Date(decisionCoverage.latestAuditAt).toLocaleString()}.`
+                  : 'No entry decisions have been recorded in the recent history window.'}
+              </strong>
+              <span>
+                AutoTrader is still evaluating signals. Latest strategy
+                blockers:{' '}
+                {decisionCoverage.blockers
+                  .slice(0, 5)
+                  .map(
+                    (blocker) =>
+                      `${blocker.strategy} (${blocker.symbol}): ${blocker.reason}`,
+                  )
+                  .join(' · ')}
+              </span>
+            </div>
           )}
           {!decisionError && decisions.length === 0 ? (
             <p>Loading recent strategy decisions…</p>

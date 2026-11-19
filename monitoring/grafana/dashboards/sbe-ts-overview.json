@@ -3251,7 +3251,7 @@
         "type": "prometheus",
         "uid": "prometheus"
       },
-      "description": "Seconds since each live Scout consumed a real Insights update. Fresh input should remain below 90 seconds; maintenance strategies are excluded because their updates are scheduled.",
+      "description": "Time since each Scout worker received its newest Insights update. Compare with source event age to separate stream gaps from stale event timestamps.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -3335,12 +3335,109 @@
       "pluginVersion": "12.1.1",
       "targets": [
         {
+          "expr": "clamp_min(time() - app_strategy_worker_last_insight_received_at_ms{role=\"scout\",strategy=~\"live-.*\"} / 1000, 0)",
+          "legendFormat": "{{strategy}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Live Scout last input receipt age",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "description": "Age of the newest market event timestamp consumed by each Scout worker. A high value with low receipt age indicates stale timestamps upstream; high values in both panels indicate an input delivery gap.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "barWidthFactor": 0.6,
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "auto",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": 0
+              },
+              {
+                "color": "yellow",
+                "value": 90
+              },
+              {
+                "color": "red",
+                "value": 180
+              }
+            ]
+          },
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 8,
+        "x": 16,
+        "y": 89
+      },
+      "id": 226,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "hideZeros": false,
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "pluginVersion": "12.1.1",
+      "targets": [
+        {
           "expr": "clamp_min(time() - app_strategy_worker_last_insight_timestamp_ms{role=\"scout\",strategy=~\"live-.*\"} / 1000, 0)",
           "legendFormat": "{{strategy}}",
           "refId": "A"
         }
       ],
-      "title": "Live Scout last input age",
+      "title": "Live Scout source event age",
       "type": "timeseries"
     },
     {

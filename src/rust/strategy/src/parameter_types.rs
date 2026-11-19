@@ -2,6 +2,7 @@ use serde::Serialize;
 
 /// One parameter value in an evaluated strategy profile.
 #[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct StrategyParameterValue {
     pub key: String,
     pub label: String,
@@ -14,6 +15,7 @@ pub struct StrategyParameterValue {
     pub step: f64,
     pub unit: String,
     pub overridden: bool,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub scout_variants: Vec<StrategyParameterScoutVariant>,
 }
 

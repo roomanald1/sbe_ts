@@ -38,6 +38,8 @@ struct DatedCarryPosition {
     marked_net_pnl_usdt: Option<f64>,
     #[serde(default)]
     mark_checked_at_ms: Option<u64>,
+    #[serde(default)]
+    closed_at_ms: Option<u64>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -188,6 +190,7 @@ async fn close_dated_carry(
     position.settlement_price = Some(future_exit);
     position.settlement_source = Some("manual_mark".into());
     position.net_pnl_usdt = Some(net);
+    position.closed_at_ms = Some(carry_now_ms());
     position.status = "closed_manual".into();
     let audit = serde_json::json!({
         "decision_id": format!("dated-carry:{}", position.future_symbol),
@@ -369,6 +372,7 @@ async fn receive_dated_carry_signal(
                         estimated_exit_slippage_usdt: None,
                         marked_net_pnl_usdt: None,
                         mark_checked_at_ms: None,
+                        closed_at_ms: None,
                     };
                     update_dated_carry_mark(&mut position, candidate.spot_bid, candidate.future_ask, emitted_at_ms);
                     book.positions.push(position);
@@ -415,6 +419,7 @@ async fn receive_dated_carry_signal(
                 position.settlement_price = Some(settlement_price);
                 position.settlement_source = Some(settlement_source.as_str().into());
                 position.net_pnl_usdt = Some(net);
+                position.closed_at_ms = Some(now_ms);
                 audit_payload = Some(serde_json::json!({
                     "decision_id": format!("dated-carry:{}", position.future_symbol),
                     "stage": "dated_carry_exit",

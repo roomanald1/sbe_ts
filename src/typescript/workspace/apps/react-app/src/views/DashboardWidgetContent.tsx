@@ -25,6 +25,7 @@ import { OrderBookPopup } from './OrderBookPopup';
 import { TradesView } from './TradesView';
 import { NewsTicker } from './NewsTicker';
 import { MarketLiquidity } from './MarketLiquidity';
+import { WalkForwardWidget } from './WalkForwardWidget';
 import {
   BestSignalsView,
   MissedOpportunityBandsView,
@@ -151,6 +152,8 @@ function DashboardWidgetContentComponent(props: Props): ReactNode {
       return <AutoTraderScouts />;
     case 'execution-fees':
       return <ExecutionFees />;
+    case 'walk-forward':
+      return <WalkForwardWidget />;
     case 'trades':
       return feedSource === 'okx' ? (
         <TradesView

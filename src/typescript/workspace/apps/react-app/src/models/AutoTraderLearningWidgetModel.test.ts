@@ -83,6 +83,50 @@ describe('AutoTraderLearningWidgetModel', () => {
     );
   });
 
+  it('integrates live AutoTrader blockers with a stale decision history', async () => {
+    const autoTrader = new AutoTraderModel();
+    const initial = autoTrader.state$.value;
+    const now = Date.now();
+    autoTrader.state$.next({
+      ...initial,
+      enabled: true,
+      lastDecisionAt: now,
+      latestStrategyBlockers: [
+        {
+          strategy: 'live-order-book' as const,
+          symbol: 'LINK-USDT',
+          reason: 'Signal strength 0.12 is below the required minimum 0.30',
+          timestamp_ms: now,
+        },
+      ],
+    });
+    let decisions = [
+      { stage: 'decision', timestamp: now - 6 * 60_000, status: 'skipped' },
+    ];
+    const widget = new AutoTraderLearningWidgetModel(
+      { state$: autoTrader.state$, start() {}, stop() {} },
+      async () => [],
+      30_000,
+      async () => decisions,
+    );
+    await widget.refreshDecisions();
+
+    assert.equal(widget.state$.value.decisionCoverage.stalled, true);
+    assert.equal(
+      widget.state$.value.decisionCoverage.latestAuditAt,
+      now - 6 * 60_000,
+    );
+    assert.equal(
+      widget.state$.value.decisionCoverage.blockers[0]?.reason,
+      'Signal strength 0.12 is below the required minimum 0.30',
+    );
+    decisions = [
+      { stage: 'decision', timestamp: now - 60_000, status: 'skipped' },
+    ];
+    await widget.refreshDecisions();
+    assert.equal(widget.state$.value.decisionCoverage.stalled, false);
+  });
+
   it('publishes summary refresh success and error state and can recover', async () => {
     const autoTrader = new AutoTraderModel();
     const source = {

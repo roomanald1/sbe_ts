@@ -76,6 +76,7 @@ async fn main() -> anyhow::Result<()> {
         signal_store.clone(),
         signal_runtime.strategy_maintenance_events.clone(),
         signal_runtime.legacy_strategy_signal_events.clone(),
+        signal_runtime.strategy_signal_events.clone(),
         Arc::clone(&latest_daily_strategy_update),
     ));
     tokio::spawn(run_dated_carry_signal_worker(

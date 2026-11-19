@@ -8,13 +8,14 @@ use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque},
     path::PathBuf,
     sync::Arc,
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use tokio::sync::{Mutex, mpsc, oneshot};
 
 const PRICE_WINDOW_MS: u64 = 3_610_000;
 const TRADE_WINDOW_MS: u64 = 300_000;
 const ABSORPTION_WINDOW_MS: u64 = 60_000;
+const STRATEGY_REJECTION_AUDIT_RETENTION_MS: u64 = 60 * 60 * 1_000;
 const MAX_BOOK_AGE_MS: u64 = 5_000;
 const MAX_PRICE_LOOKBACK_GAP_MS: u64 = 5_000;
 /// Heavy research capture is sampled independently from live signal generation.
@@ -175,6 +176,15 @@ fn run_database_writer(mut connection: Connection, mut receiver: mpsc::Receiver<
                 }
             }
             let transaction = connection.transaction()?;
+            let rejection_audit_cutoff = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis()
+                .saturating_sub(STRATEGY_REJECTION_AUDIT_RETENTION_MS) as i64;
+            transaction.execute(
+                "DELETE FROM auto_trader_audit WHERE stage = 'strategy_rejection' AND timestamp < ?1",
+                [rejection_audit_cutoff],
+            )?;
             {
                 let mut insert = transaction.prepare(
                     "INSERT INTO signal_records(timestamp, kind, payload) VALUES (?1, ?2, ?3)",

@@ -36,10 +36,19 @@ fn ensure_dated_carry_schema(connection: &rusqlite::Connection) -> rusqlite::Res
             settlement_price REAL, net_pnl_usdt REAL, settlement_source TEXT, spot_mark_bid REAL,
             future_mark_ask REAL, spot_leg_pnl_usdt REAL, future_leg_pnl_usdt REAL,
             estimated_exit_fees_usdt REAL, estimated_exit_slippage_usdt REAL,
-            marked_net_pnl_usdt REAL, mark_checked_at_ms INTEGER
+            marked_net_pnl_usdt REAL, mark_checked_at_ms INTEGER, closed_at_ms INTEGER
          );
          ",
-    )
+    )?;
+    let has_closed_at: bool = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('dated_carry_positions') WHERE name='closed_at_ms')",
+        [],
+        |row| row.get(0),
+    )?;
+    if !has_closed_at {
+        connection.execute("ALTER TABLE dated_carry_positions ADD COLUMN closed_at_ms INTEGER", [])?;
+    }
+    Ok(())
 }
 
 fn replace_dated_carry_rows(
@@ -61,8 +70,8 @@ fn replace_dated_carry_rows(
             rusqlite::params![item.future_symbol,item.spot_symbol,item.expiry_ms as i64,item.days_to_expiry,item.quantity,item.spot_ask,item.future_bid,item.spot_bid,item.future_ask,item.basis_percent,item.net_after_budget_percent,item.eligible as i64,item.reason])?;
     }
     for item in &book.positions {
-        transaction.execute("INSERT INTO dated_carry_positions(future_symbol,spot_symbol,expiry_ms,entry_ms,quantity,spot_entry_price,future_entry_price,entry_fees,status,spot_exit_twap,settlement_price,net_pnl_usdt,settlement_source,spot_mark_bid,future_mark_ask,spot_leg_pnl_usdt,future_leg_pnl_usdt,estimated_exit_fees_usdt,estimated_exit_slippage_usdt,marked_net_pnl_usdt,mark_checked_at_ms) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21)",
-            rusqlite::params![item.future_symbol,item.spot_symbol,item.expiry_ms as i64,item.entry_ms as i64,item.quantity,item.spot_entry_price,item.future_entry_price,item.entry_fees,item.status,item.spot_exit_twap,item.settlement_price,item.net_pnl_usdt,item.settlement_source,item.spot_mark_bid,item.future_mark_ask,item.spot_leg_pnl_usdt,item.future_leg_pnl_usdt,item.estimated_exit_fees_usdt,item.estimated_exit_slippage_usdt,item.marked_net_pnl_usdt,item.mark_checked_at_ms.map(|v|v as i64)])?;
+        transaction.execute("INSERT INTO dated_carry_positions(future_symbol,spot_symbol,expiry_ms,entry_ms,quantity,spot_entry_price,future_entry_price,entry_fees,status,spot_exit_twap,settlement_price,net_pnl_usdt,settlement_source,spot_mark_bid,future_mark_ask,spot_leg_pnl_usdt,future_leg_pnl_usdt,estimated_exit_fees_usdt,estimated_exit_slippage_usdt,marked_net_pnl_usdt,mark_checked_at_ms,closed_at_ms) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22)",
+            rusqlite::params![item.future_symbol,item.spot_symbol,item.expiry_ms as i64,item.entry_ms as i64,item.quantity,item.spot_entry_price,item.future_entry_price,item.entry_fees,item.status,item.spot_exit_twap,item.settlement_price,item.net_pnl_usdt,item.settlement_source,item.spot_mark_bid,item.future_mark_ask,item.spot_leg_pnl_usdt,item.future_leg_pnl_usdt,item.estimated_exit_fees_usdt,item.estimated_exit_slippage_usdt,item.marked_net_pnl_usdt,item.mark_checked_at_ms.map(|v|v as i64),item.closed_at_ms.map(|v|v as i64)])?;
     }
     Ok(())
 }
@@ -107,7 +116,7 @@ fn read_dated_carry_database(path: &PathBuf) -> rusqlite::Result<Option<DatedCar
         .collect::<rusqlite::Result<Vec<_>>>()?
     };
     book.positions = {
-        let mut stmt = transaction.prepare("SELECT future_symbol,spot_symbol,expiry_ms,entry_ms,quantity,spot_entry_price,future_entry_price,entry_fees,status,spot_exit_twap,settlement_price,net_pnl_usdt,settlement_source,spot_mark_bid,future_mark_ask,spot_leg_pnl_usdt,future_leg_pnl_usdt,estimated_exit_fees_usdt,estimated_exit_slippage_usdt,marked_net_pnl_usdt,mark_checked_at_ms FROM dated_carry_positions ORDER BY id")?;
+        let mut stmt = transaction.prepare("SELECT future_symbol,spot_symbol,expiry_ms,entry_ms,quantity,spot_entry_price,future_entry_price,entry_fees,status,spot_exit_twap,settlement_price,net_pnl_usdt,settlement_source,spot_mark_bid,future_mark_ask,spot_leg_pnl_usdt,future_leg_pnl_usdt,estimated_exit_fees_usdt,estimated_exit_slippage_usdt,marked_net_pnl_usdt,mark_checked_at_ms,closed_at_ms FROM dated_carry_positions ORDER BY id")?;
         stmt.query_map([], |r| {
             Ok(DatedCarryPosition {
                 future_symbol: r.get(0)?,
@@ -131,6 +140,7 @@ fn read_dated_carry_database(path: &PathBuf) -> rusqlite::Result<Option<DatedCar
                 estimated_exit_slippage_usdt: r.get(18)?,
                 marked_net_pnl_usdt: r.get(19)?,
                 mark_checked_at_ms: r.get::<_, Option<i64>>(20)?.map(|v| v as u64),
+                closed_at_ms: r.get::<_, Option<i64>>(21)?.map(|v| v as u64),
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?
@@ -392,6 +402,7 @@ mod sqlite_state_tests {
                 estimated_exit_slippage_usdt: Some(1.01),
                 marked_net_pnl_usdt: Some(-4.55),
                 mark_checked_at_ms: Some(1_700_000_100_000),
+                closed_at_ms: None,
             }],
             checked_at_ms: 1_700_000_100_000,
             last_error: Some("recoverable scan warning".into()),

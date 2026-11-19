@@ -5,12 +5,20 @@ async fn apply_protection_order_failure_reasons(
     let ledger_open_symbols = crate::service_rpc::position_get("/positions?source=auto")
         .await
         .ok()
-        .and_then(|body| body["positions"].as_array().map(|positions| {
-            positions.iter().filter(|position| {
-                position["quantity"].as_f64().is_some_and(|quantity| quantity.abs() > 1e-12)
-            }).filter_map(|position| position["symbol"].as_str().map(str::to_owned)).collect::<BTreeSet<_>>()
-        }))
-    .unwrap_or_else(|| fallback_open_symbols.iter().cloned().collect());
+        .and_then(|body| {
+            body["positions"].as_array().map(|positions| {
+                positions
+                    .iter()
+                    .filter(|position| {
+                        position["quantity"]
+                            .as_f64()
+                            .is_some_and(|quantity| quantity.abs() > 1e-12)
+                    })
+                    .filter_map(|position| position["symbol"].as_str().map(str::to_owned))
+                    .collect::<BTreeSet<_>>()
+            })
+        })
+        .unwrap_or_else(|| fallback_open_symbols.iter().cloned().collect());
 
     for order in orders.iter_mut().filter(|order| {
         order.failure_reason.is_none()
@@ -20,7 +28,8 @@ async fn apply_protection_order_failure_reasons(
         order.failure_reason = Some(if ledger_open_symbols.contains(&order.symbol) {
             "Stop triggered, but the position manager reported no fill.".into()
         } else {
-            "Stop triggered after the position was closed; no open quantity remained to reduce.".into()
+            "Stop triggered after the position was closed; no open quantity remained to reduce."
+                .into()
         });
     }
 }
@@ -38,10 +47,12 @@ async fn get_activity(State(state): State<AutoTraderState>) -> Json<ActivityResp
         snapshot_activity_positions(&settings, today_start)
     };
     let carry_positions = state.dated_carry.lock().await.positions.clone();
-    strategy_positions.extend(carry_positions.clone().into_iter()
-        .filter(|position| position.status.eq_ignore_ascii_case("open"))
-        .map(|position| {
-            OpenStrategyPosition {
+    strategy_positions.extend(
+        carry_positions
+            .clone()
+            .into_iter()
+            .filter(|position| position.status.eq_ignore_ascii_case("open"))
+            .map(|position| OpenStrategyPosition {
                 symbol: position.future_symbol.clone(),
                 strategy: "dated-futures-carry".into(),
                 decision_id: Some(format!("dated-carry:{}", position.future_symbol)),
@@ -57,18 +68,38 @@ async fn get_activity(State(state): State<AutoTraderState>) -> Json<ActivityResp
                 stop_loss_active: false,
                 take_profit_active: false,
                 carry_details: Some(position),
-            }
-        }));
-    apply_protection_order_failure_reasons(
-        &mut orders,
-        &open_position_symbols,
-    )
-    .await;
-    let (realized_pnl, realized_pnl_by_quote, pnl_breakdown) =
+            }),
+    );
+    apply_protection_order_failure_reasons(&mut orders, &open_position_symbols).await;
+    let (mut realized_pnl, mut realized_pnl_by_quote, mut pnl_breakdown) =
         await_activity_realized_pnl(&mut orders).await;
     // Closed-position ledger rows are supplied by the backend activity contract
     // so the client does not have to infer strategy ownership from fill history.
-    let closed_ledger_rows = fetch_closed_ledger_rows(&orders, &strategy_positions).await;
+    let closed_ledger_rows =
+        fetch_closed_ledger_rows(&orders, &strategy_positions, &carry_positions).await;
+    for position in carry_positions.iter().filter(|position| {
+        position.status.starts_with("closed")
+            && position.closed_at_ms.is_some_and(|closed_at| closed_at >= today_start)
+    }) {
+        let Some(net) = position.net_pnl_usdt.filter(|value| value.is_finite()) else {
+            continue;
+        };
+        let symbol = position.spot_symbol.replace("USDT", "-USDT");
+        *realized_pnl_by_quote
+            .get_or_insert_with(BTreeMap::new)
+            .entry("USDT".into())
+            .or_default() += net;
+        pnl_breakdown.push(PnlBreakdown {
+            symbol,
+            direction: "LONG".into(),
+            purpose: "dated-carry-close".into(),
+            strategy: "dated-futures-carry".into(),
+            decision_id: Some(format!("dated-carry:{}", position.future_symbol)),
+            realized_pnl: net,
+            outcomes: 1,
+        });
+        realized_pnl = None;
+    }
     let unrealized_pnl = calculate_auto_unrealized_pnl(&auto_positions, &carry_positions).await;
     let learning = {
         let settings = state.settings.lock().await;
@@ -121,9 +152,7 @@ async fn get_activity(State(state): State<AutoTraderState>) -> Json<ActivityResp
         .map(|samples| samples.clone())
         .unwrap_or_default()
         .into_iter()
-        .filter_map(|(phase, values)| {
-            summarize_lock_wait(&values).map(|summary| (phase, summary))
-        })
+        .filter_map(|(phase, values)| summarize_lock_wait(&values).map(|summary| (phase, summary)))
         .collect();
     let (unrealized_pnl, unrealized_pnl_by_quote) = unrealized_pnl
         .map(|(total, by_quote)| (Some(total), Some(by_quote)))
@@ -131,11 +160,14 @@ async fn get_activity(State(state): State<AutoTraderState>) -> Json<ActivityResp
     Json(ActivityResponse {
         orders,
         open_position_symbols,
-        open_positions: auto_positions.iter().map(|(symbol, position)| OpenPositionAttribution {
-            symbol: symbol.clone(),
-            strategy: position.strategy.clone(),
-            decision_id: position.entry_decision_id.clone(),
-        }).collect(),
+        open_positions: auto_positions
+            .iter()
+            .map(|(symbol, position)| OpenPositionAttribution {
+                symbol: symbol.clone(),
+                strategy: position.strategy.clone(),
+                decision_id: position.entry_decision_id.clone(),
+            })
+            .collect(),
         strategy_positions,
         position_exit_policies,
         pnl_breakdown,

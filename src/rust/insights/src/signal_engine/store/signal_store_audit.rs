@@ -353,6 +353,22 @@ pub struct AuditPage {
 mod decision_audit_window_tests {
     use super::*;
 
+    fn test_store(path: PathBuf) -> SignalStore {
+        let connection = SignalStore::open_database_at(&path).unwrap();
+        let (writer, receiver) = mpsc::channel(128);
+        tokio::task::spawn_blocking(move || run_database_writer(connection, receiver));
+        SignalStore {
+            path,
+            writer,
+            recent_cache: Arc::new(Mutex::new(None)),
+            best_cache: Arc::new(Mutex::new(None)),
+            performance_cache: Arc::new(Mutex::new(None)),
+            execution_quality_cache: Arc::new(Mutex::new(None)),
+            decision_quality_cache: Arc::new(Mutex::new(None)),
+            calibration_records_cache: Arc::new(Mutex::new(None)),
+        }
+    }
+
     #[test]
     fn scans_recent_decision_records_in_pages_and_skips_other_stages() {
         let unique = std::time::SystemTime::now()
@@ -405,5 +421,47 @@ mod decision_audit_window_tests {
         assert_eq!(records[0]["timestamp"], 6_000);
 
         std::fs::remove_file(path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn strategy_rejection_audit_round_trips_through_persisted_history() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "insights-strategy-rejection-audit-{}-{unique}.sqlite",
+            std::process::id()
+        ));
+        let store = test_store(path.clone());
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        let payload = serde_json::json!({
+            "decision_id": "signal-1|strategy:live-order-book|phase:live_worker",
+            "stage": "strategy_rejection",
+            "timestamp": timestamp,
+            "symbol": "LINK-USDT",
+            "strategy": "live-order-book",
+            "status": "rejected",
+            "reason": "Signal strength 0.12 is below the required minimum 0.30"
+        });
+        store.save_auto_trader_audit(payload.clone()).await.unwrap();
+
+        let page = store
+            .load_auto_trader_audit_page(
+                Some(timestamp.saturating_sub(60 * 60 * 1_000)),
+                None,
+                100,
+                Some("strategy_rejection".to_owned()),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(page.items, vec![payload]);
+        drop(store);
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        let _ = std::fs::remove_file(path);
     }
 }

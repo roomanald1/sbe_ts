@@ -1323,6 +1323,7 @@ async fn poll_daily_strategy_signals(
     store: SignalStore,
     strategy_signal_events: tokio::sync::broadcast::Sender<bytes::Bytes>,
     legacy_strategy_signal_events: tokio::sync::broadcast::Sender<bytes::Bytes>,
+    strategy_maintenance_events: tokio::sync::broadcast::Sender<bytes::Bytes>,
     latest_daily_strategy_update: Arc<std::sync::RwLock<Option<bytes::Bytes>>>,
 ) {
     let auto = std::env::var("AUTO_TRADER_RSOCKET_URL")
@@ -1335,24 +1336,25 @@ async fn poll_daily_strategy_signals(
     loop {
         ticker.tick().await;
         let result: anyhow::Result<(serde_json::Value, Vec<serde_json::Value>, String)> = async {
-            let (status, parameters, configuration) = tokio::try_join!(
+            let (status, parameters) = tokio::try_join!(
                 auto_trader_rpc(&auto, format!("insights-daily:{}", now_ms()), strategy::ScoutWorkerHttpMethod::Get, "/positions/auto-trader", serde_json::Value::Null),
                 auto_trader_rpc(&auto, format!("insights-daily:{}", now_ms()), strategy::ScoutWorkerHttpMethod::Get, "/internal/strategy/daily-scan-parameters", serde_json::Value::Null),
-                async {
-                    let response = strategy::request_scout_worker_route(&learning, &strategy::ScoutCoordinatorRouteCommand {
-                        request_id: format!("insights-daily:{}", now_ms()), strategy: None,
-                        method: strategy::ScoutWorkerHttpMethod::Get, path: "/configuration".into(),
-                        payload: serde_json::Value::Null,
-                    }).await?;
-                    if response.status >= 400 { anyhow::bail!("Learning Scout configuration route returned {}", response.status); }
-                    Ok::<_, anyhow::Error>(response.body)
-                }
             )?;
             let mut strategies = status.get("strategies").and_then(serde_json::Value::as_array)
                 .into_iter().flatten().filter_map(|item| item.as_str().map(str::to_owned))
                 .collect::<Vec<_>>();
-            strategies.extend(configuration.get("strategies").and_then(serde_json::Value::as_array)
-                .into_iter().flatten().filter_map(|item| item.as_str().map(str::to_owned)));
+            match strategy::request_scout_worker_route(&learning, &strategy::ScoutCoordinatorRouteCommand {
+                request_id: format!("insights-daily:{}", now_ms()), strategy: None,
+                method: strategy::ScoutWorkerHttpMethod::Get, path: "/configuration".into(),
+                payload: serde_json::Value::Null,
+            }).await {
+                Ok(response) if response.status < 400 => {
+                    strategies.extend(response.body.get("strategies").and_then(serde_json::Value::as_array)
+                        .into_iter().flatten().filter_map(|item| item.as_str().map(str::to_owned)));
+                }
+                Ok(response) => crate::service_log!("WARN", "Learning Scout configuration route returned {}; continuing with AutoTrader strategy list", response.status),
+                Err(error) => crate::service_log!("WARN", "Learning Scout configuration unavailable; continuing with AutoTrader strategy list: {error}"),
+            }
             strategies.sort();
             strategies.dedup();
             let symbols = if strategies.iter().any(|strategy| strategy == "risk-adjusted-trend-portfolio") {
@@ -1429,12 +1431,13 @@ async fn poll_daily_strategy_signals(
                 dated_carry_settlement: None,
             };
             if let Ok(encoded) = serde_json::to_vec(&update) {
-                let encoded = bytes::Bytes::from(encoded);
-                if let Ok(mut latest) = latest_daily_strategy_update.write() {
-                    *latest = Some(encoded.clone());
-                }
-                let _ = strategy_signal_events.send(encoded.clone());
-                let _ = legacy_strategy_signal_events.send(encoded);
+                publish_daily_strategy_update(
+                    bytes::Bytes::from(encoded),
+                    &strategy_signal_events,
+                    &strategy_maintenance_events,
+                    &legacy_strategy_signal_events,
+                    &latest_daily_strategy_update,
+                );
             }
         }
         for audit in audits {
@@ -1461,6 +1464,21 @@ async fn poll_daily_strategy_signals(
                 .is_some_and(|time| now.saturating_sub(time) <= 30 * 86_400_000)
         });
     }
+}
+
+fn publish_daily_strategy_update(
+    encoded: bytes::Bytes,
+    strategy_signal_events: &tokio::sync::broadcast::Sender<bytes::Bytes>,
+    strategy_maintenance_events: &tokio::sync::broadcast::Sender<bytes::Bytes>,
+    legacy_strategy_signal_events: &tokio::sync::broadcast::Sender<bytes::Bytes>,
+    latest_daily_strategy_update: &Arc<std::sync::RwLock<Option<bytes::Bytes>>>,
+) {
+    if let Ok(mut latest) = latest_daily_strategy_update.write() {
+        *latest = Some(encoded.clone());
+    }
+    let _ = strategy_signal_events.send(encoded.clone());
+    let _ = strategy_maintenance_events.send(encoded.clone());
+    let _ = legacy_strategy_signal_events.send(encoded);
 }
 
 fn populate_daily_snapshot_symbol_status(

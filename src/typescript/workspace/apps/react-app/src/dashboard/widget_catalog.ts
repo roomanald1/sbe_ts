@@ -33,6 +33,7 @@ export const DASHBOARD_WIDGET_TYPES = [
   'auto-trader-completed-positions',
   'auto-trader-live-positions',
   'auto-trader-scout-positions',
+  'walk-forward',
   'execution-fees',
 ] as const;
 
@@ -85,6 +86,7 @@ export const DASHBOARD_WIDGET_GROUPS: {
       'auto-trader-completed-positions',
       'auto-trader-live-positions',
       'auto-trader-scout-positions',
+      'walk-forward',
     ],
   },
 ];
@@ -130,6 +132,7 @@ export const WIDGET_LABELS: Record<DashboardWidgetType, string> = {
   'auto-trader-completed-positions': 'AutoTrader closed positions',
   'auto-trader-live-positions': 'AutoTrader live positions',
   'auto-trader-scout-positions': 'AutoTrader scout positions',
+  'walk-forward': 'Walk-forward data',
   'execution-fees': 'Execution fees',
 };
 

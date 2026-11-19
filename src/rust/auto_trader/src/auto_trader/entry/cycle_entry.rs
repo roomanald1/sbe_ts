@@ -865,13 +865,24 @@ async fn run_cycle_inner(
                             reason
                         ));
                     }
+                    queue_strategy_rejection_audit(
+                        state,
+                        &signal,
+                        &strategy.as_str(),
+                        &reason,
+                        timestamp_ms,
+                        counterfactual_stop_loss_percent,
+                        counterfactual_take_profit_percent,
+                        "daily_evaluator",
+                    );
                 }
                 Err(error) => {
                     let timestamp_ms = now.saturating_mul(1000);
+                    let reason = format!("Strategy evaluation error: {error}");
                     let blocker = StrategyBlocker {
                         strategy: strategy.as_str().to_owned(),
                         symbol: signal.symbol.clone(),
-                        reason: format!("Strategy evaluation error: {error}"),
+                        reason: reason.clone(),
                         timestamp_ms,
                     };
                     update_latest_strategy_blocker(
@@ -889,6 +900,16 @@ async fn run_cycle_inner(
                             error
                         ));
                     }
+                    queue_strategy_rejection_audit(
+                        state,
+                        &signal,
+                        &strategy.as_str(),
+                        &reason,
+                        timestamp_ms,
+                        counterfactual_stop_loss_percent,
+                        counterfactual_take_profit_percent,
+                        "daily_evaluator_error",
+                    );
                 }
             }
         }
@@ -922,6 +943,8 @@ async fn run_cycle_inner(
             live_strategy_signals.push(signal.clone());
         } else {
             let timestamp_ms = now.saturating_mul(1000);
+            let parameters = signal_strategy_parameters(signal);
+            let reason = strategy_entry_rejection_reason(signal, strategy, &parameters);
             update_latest_strategy_blocker(
                 state,
                 strategy.as_str(),
@@ -929,9 +952,19 @@ async fn run_cycle_inner(
                 Some(StrategyBlocker {
                     strategy: strategy.as_str().to_owned(),
                     symbol: signal.symbol.clone(),
-                    reason: "Strategy worker did not approve entry".into(),
+                    reason: reason.clone(),
                     timestamp_ms,
                 }),
+            );
+            queue_strategy_rejection_audit(
+                state,
+                signal,
+                strategy.as_str(),
+                &reason,
+                timestamp_ms,
+                counterfactual_stop_loss_percent,
+                counterfactual_take_profit_percent,
+                "live_worker",
             );
         }
     }
@@ -1167,6 +1200,16 @@ async fn run_cycle_inner(
                 } else {
                     let reason = result.reason.as_deref().unwrap_or(result.status);
                     details.push(format!("{strategy_name}: {reason}"));
+                    queue_strategy_rejection_audit(
+                        state,
+                        &sized_signal,
+                        strategy_name,
+                        reason,
+                        now.saturating_mul(1_000),
+                        counterfactual_stop_loss_percent,
+                        counterfactual_take_profit_percent,
+                        "daily_execution",
+                    );
                 }
             }
             daily_batch_result = Some(daily_strategy_batch_result(
@@ -1325,6 +1368,25 @@ async fn run_cycle_inner(
         now,
         "another candidate ranked higher",
     );
+    for candidate in selection_signals.iter().filter(|candidate| {
+        candidate.strategy.as_deref().and_then(Strategy::from_name)
+            .is_some_and(|kind| kind.is_live_insight())
+            && (signal_decision_id(candidate) != signal_decision_id(&signal)
+                || candidate.strategy != signal.strategy)
+    }) {
+        let strategy = candidate.strategy.as_deref().unwrap_or("unknown-strategy");
+        let reason = format!("Not selected this cycle; another candidate ranked higher");
+        queue_strategy_rejection_audit(
+            state,
+            candidate,
+            strategy,
+            &reason,
+            now.saturating_mul(1_000),
+            counterfactual_stop_loss_percent,
+            counterfactual_take_profit_percent,
+            "auto_trader_selection",
+        );
+    }
     let signal_selection_ms = selection_started.elapsed().as_secs_f64() * 1000.0;
     let mut audited_signal = signal.clone();
     audited_signal.entry_gate = Some(candidate_entry_audit_value(
@@ -1425,6 +1487,42 @@ mod parallel_daily_cycle_tests {
         assert_eq!(audit["exploratory"], true);
         assert_eq!(audit["entry_gate"]["checks"]["strength_pass"], false);
         assert_eq!(audit["decision_id"], "10|ETH-USDT|bullish");
+    }
+
+    #[test]
+    fn strategy_rejection_audit_preserves_the_strategy_and_gate_reason() {
+        let first = signal("live-order-book");
+        let second = signal("live-trade-flow");
+        let first_audit = strategy_rejection_audit_payload(
+            &first,
+            "live-order-book",
+            "Signal strength 0.12 is below the required minimum 0.30",
+            11_000,
+            0.5,
+            0.8,
+            "live_worker",
+        );
+        let second_audit = strategy_rejection_audit_payload(
+            &second,
+            "live-trade-flow",
+            "Directional flow imbalance was below threshold",
+            11_000,
+            0.5,
+            0.8,
+            "live_worker",
+        );
+
+        assert_eq!(first_audit["stage"], "strategy_rejection");
+        assert_eq!(first_audit["status"], "rejected");
+        assert_eq!(
+            first_audit["reason"],
+            "Signal strength 0.12 is below the required minimum 0.30"
+        );
+        assert_eq!(
+            first_audit["entry_gate"]["selection_mode"],
+            "strategy_rejection"
+        );
+        assert_ne!(first_audit["decision_id"], second_audit["decision_id"]);
     }
 
     #[test]

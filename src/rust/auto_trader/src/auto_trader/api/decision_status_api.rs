@@ -351,6 +351,127 @@ async fn get_decision_parameters(
 }
 
 #[derive(Serialize)]
+struct ParameterCatalogEntry {
+    key: String,
+    label: String,
+    default_value: f64,
+    min: f64,
+    max: f64,
+    step: f64,
+    unit: String,
+}
+
+#[derive(Serialize)]
+struct CompactParameterValue {
+    value: f64,
+    learned_value: f64,
+    configured_value: Option<f64>,
+    overridden: bool,
+}
+
+#[derive(Serialize)]
+struct CompactStrategyProfile {
+    symbol: String,
+    strategy: String,
+    learning_samples: usize,
+    positive_rate: Option<f64>,
+    realized_pnl: f64,
+    walk_forward_evidence: Option<strategy::StrategyWalkForwardEvidence>,
+    walk_forward_evidence_by_regime: BTreeMap<String, strategy::StrategyWalkForwardEvidence>,
+    parameters: BTreeMap<String, CompactParameterValue>,
+}
+
+#[derive(Serialize)]
+struct CompactDecisionParametersResponse {
+    version: u8,
+    refreshed_at: u64,
+    thresholds: Vec<DecisionParameter>,
+    contexts: Vec<ContextDecisionParameters>,
+    latest_execution: Option<LatestExecutionParameters>,
+    catalog: BTreeMap<String, Vec<ParameterCatalogEntry>>,
+    strategy_profiles: Vec<CompactStrategyProfile>,
+}
+
+async fn get_compact_decision_parameters(
+    State(state): State<AutoTraderState>,
+) -> Json<CompactDecisionParametersResponse> {
+    let (max_entries, risk_appetite, thresholds, catalog, strategy_profiles) = {
+        let settings = state.settings.lock().await;
+        let symbols = strategy_profile_symbols(&settings);
+        let strategies = Strategy::all().filter(|strategy| !strategy.is_legacy_composite()).collect::<Vec<_>>();
+        let schemas = strategies.iter().map(|strategy| (strategy.as_str().to_owned(),
+            strategy.parameter_specs().iter().map(|spec| ParameterCatalogEntry {
+                key: spec.key.as_str().to_owned(), label: spec.label.to_owned(), default_value: spec.default,
+                min: spec.min, max: spec.max, step: spec.step, unit: spec.unit.to_owned(),
+            }).collect::<Vec<_>>())).collect::<BTreeMap<_, _>>();
+        let mut profiles = Vec::new();
+        for symbol in symbols {
+          for strategy in &strategies {
+            let learned = settings.learned_profiles.get(&format!("{symbol}:{}", strategy.as_str()));
+            let parameters = strategy.parameter_specs().iter().map(|spec| {
+                let key = strategy_parameter_key(&symbol, *strategy, spec.key.as_str());
+                let configured = settings.strategy_parameter_overrides.get(&key).copied()
+                    .or_else(|| legacy_strategy_parameter_name(spec.key.as_str()).and_then(|name|
+                        settings.strategy_parameter_overrides.get(&strategy_parameter_key(&symbol, *strategy, name)).copied()))
+                    .filter(|value| value.is_finite() && *value >= spec.min && *value <= spec.max);
+                let learned_value = learned.and_then(|profile| profile.parameters.get(spec.key.as_str()).copied())
+                    .filter(|value| value.is_finite() && *value >= spec.min && *value <= spec.max).unwrap_or(spec.default);
+                let value = configured.unwrap_or(learned_value);
+                (spec.key.as_str().to_owned(), CompactParameterValue { value, learned_value, configured_value: configured, overridden: configured.is_some() })
+            }).collect();
+            profiles.push(CompactStrategyProfile { symbol: symbol.clone(), strategy: strategy.as_str().to_owned(),
+                learning_samples: learned.map_or(0, |profile| profile.learning_samples),
+                positive_rate: learned.and_then(|profile| (profile.learning_samples > 0).then_some(profile.positive_samples as f64 / profile.learning_samples as f64)),
+                realized_pnl: learned.map_or(0.0, |profile| profile.realized_pnl),
+                walk_forward_evidence: walk_forward_evidence_for_profile(&settings, &symbol, &symbol, *strategy),
+                walk_forward_evidence_by_regime: walk_forward_evidence_by_regime_for_profile(&settings, &symbol, &symbol, *strategy),
+                parameters });
+          }
+        }
+        (settings.max_entries_per_auto_position, settings.risk_appetite, settings.learned_context_thresholds.clone(), schemas, profiles)
+    };
+    let bands = state.latest_missed_opportunity_bands.lock().await.clone();
+    let floor_scale = risk_floor_scale(risk_appetite);
+    let contexts = thresholds.into_iter().map(|(context, thresholds)| ContextDecisionParameters {
+        exploration_allowed: !is_mixed_market_context(&context), context,
+        learning_samples: thresholds.learning_samples, positive_rate: thresholds.positive_rate,
+        scout_learning_samples: thresholds.scout_outcome_samples, scout_positive_rate: thresholds.scout_outcome_positive_rate,
+        strength_floor: (adaptive_missed_opportunity_floor(thresholds.strength_floor, MissedOpportunityGate::Strength, &bands) * floor_scale).clamp(0.0, 1.0),
+        exploration_score_floor: (adaptive_missed_opportunity_floor(thresholds.exploration_score_floor, MissedOpportunityGate::Score, &bands) * floor_scale).max(0.0),
+    }).collect();
+    let thresholds = build_decision_thresholds(risk_appetite, max_entries);
+    let latest_execution = state.latest_execution_parameters.lock().await.clone();
+    let refreshed_at = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64;
+    Json(CompactDecisionParametersResponse {
+        version: 1, refreshed_at, thresholds,
+        contexts, latest_execution,
+        catalog, strategy_profiles,
+    })
+}
+
+#[derive(Serialize)]
+struct ScoutVariantsResponse {
+    scout_variants: BTreeMap<String, Vec<strategy::StrategyParameterScoutVariant>>,
+}
+
+async fn get_scout_parameter_variants(
+    State(state): State<AutoTraderState>,
+) -> Json<ScoutVariantsResponse> {
+    let settings = state.settings.lock().await;
+    let symbols = strategy_profile_symbols(&settings);
+    let strategies = Strategy::all().filter(|strategy| !strategy.is_legacy_composite()).collect::<Vec<_>>();
+    let mut variants = BTreeMap::new();
+    for profile in strategy_parameter_profiles_for(&settings, symbols, strategies) {
+        for parameter in profile.parameters {
+            if !parameter.scout_variants.is_empty() {
+                variants.insert(format!("{}:{}:{}", profile.symbol, profile.strategy, parameter.key), parameter.scout_variants);
+            }
+        }
+    }
+    Json(ScoutVariantsResponse { scout_variants: variants })
+}
+
+#[derive(Serialize)]
 struct DailyStrategyParametersResponse {
     strategy_profiles: Vec<StrategyParameterProfile>,
 }
@@ -466,7 +587,7 @@ fn strategy_parameter_profiles(settings: &Settings) -> Vec<StrategyParameterProf
     strategy_parameter_profiles_for(settings, strategy_profile_symbols(settings), strategies)
 }
 
-fn strategy_profile_symbols(settings: &Settings) -> BTreeSet<String> {
+fn strategy_profile_symbols(_settings: &Settings) -> BTreeSet<String> {
     let mut symbols = strategy::autotrader_allowed_symbols()
     .iter()
     .copied()
@@ -475,31 +596,7 @@ fn strategy_profile_symbols(settings: &Settings) -> BTreeSet<String> {
     .collect::<BTreeSet<_>>();
     // Include symbols with actual profile/outcome state so the audit can show
     // what the strategy used for long-tail assets and non-USDT quote pairs.
-    symbols.extend(settings.positions.keys().cloned());
-    symbols.extend(
-        settings
-            .strategy_positions
-            .values()
-            .flat_map(|by_symbol| by_symbol.keys().cloned()),
-    );
-    symbols.extend(
-        settings
-            .learned_profiles
-            .values()
-            .map(|profile| profile.symbol.clone()),
-    );
-    symbols.extend(settings.learned_context_stats.keys().filter_map(|key| {
-        let key = key.strip_prefix("scout:").unwrap_or(key);
-        let key = key.strip_suffix(":trade").unwrap_or(key);
-        let parts = key.split(':').collect::<Vec<_>>();
-        (parts.len() >= 3).then(|| parts[2].to_owned())
-    }));
-    symbols.extend(
-        settings
-            .strategy_parameter_overrides
-            .keys()
-            .filter_map(|key| key.split_once(':').map(|(symbol, _)| symbol.to_owned())),
-    );
+    // The snapshot contract only includes symbols accepted by AutoTrader.
     symbols.retain(|symbol| strategy::is_autotrader_symbol_allowed(symbol));
     symbols
 }
@@ -719,15 +816,15 @@ mod decision_profile_tests {
     }
 
     #[test]
-    fn profiles_include_symbols_with_learned_trade_history() {
+    fn profiles_include_only_symbols_allowed_by_autotrader() {
         let mut settings = Settings::default();
         let parameters = BTreeMap::new();
         settings.learned_profiles.insert(
-            "XRP-USDC:live-momentum".into(),
+            "BTC-USDT:live-momentum".into(),
             strategy::StrategyProfile {
-                profile_id: strategy::profile_id("XRP-USDC", "live-momentum", &parameters),
+                profile_id: strategy::profile_id("BTC-USDT", "live-momentum", &parameters),
                 version: 1,
-                symbol: "XRP-USDC".into(),
+                symbol: "BTC-USDT".into(),
                 strategy: "live-momentum".into(),
                 parameters,
                 learning_samples: 3,
@@ -739,8 +836,8 @@ mod decision_profile_tests {
         let profiles = strategy_parameter_profiles(&settings);
         let profile = profiles
             .iter()
-            .find(|profile| profile.symbol == "XRP-USDC" && profile.strategy == "live-momentum")
-            .expect("learned non-default symbol profile");
+            .find(|profile| profile.symbol == "BTC-USDT" && profile.strategy == "live-momentum")
+            .expect("allowed symbol profile");
         assert_eq!(profile.learning_samples, 3);
         assert_eq!(profile.positive_rate, Some(1.0 / 3.0));
     }

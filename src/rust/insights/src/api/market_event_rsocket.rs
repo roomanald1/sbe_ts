@@ -425,6 +425,65 @@ mod market_event_rsocket_tests {
         assert!(replayed.iter().all(|update| update.signal.is_none()));
     }
 
+    #[tokio::test]
+    async fn maintenance_stream_receives_new_daily_snapshots_after_subscribing() {
+        let (strategy_maintenance_events, _) = broadcast::channel(4);
+        let latest_daily_strategy = Arc::new(std::sync::RwLock::new(None));
+        let responder = InsightsMarketEventResponder {
+            events: broadcast::channel(4).0,
+            strategy_signals: broadcast::channel(4).0,
+            strategy_maintenance_events: strategy_maintenance_events.clone(),
+            legacy_strategy_signals: broadcast::channel(4).0,
+            latest_strategy_signals: Arc::new(DashMap::new()),
+            latest_daily_strategy: Arc::clone(&latest_daily_strategy),
+            scout_router: None,
+        };
+        let mut stream = responder.request_stream(
+            Payload::builder()
+                .set_data_utf8("strategy-signals:maintenance")
+                .build(),
+        );
+        let daily_update = strategy::StrategyInsightUpdate {
+            contract_version: strategy::STRATEGY_INSIGHT_UPDATE_VERSION,
+            event_id: "daily:new-snapshot".into(),
+            event_time_ms: 456,
+            signal: None,
+            market: None,
+            taker_fee_rate: None,
+            daily_snapshot: Some(strategy::daily::DailyStrategySnapshot {
+                as_of_ms: 456,
+                sweep_id: "daily-test".into(),
+                active_strategy_symbols: Default::default(),
+                generated_signals: Vec::new(),
+                evaluated_strategy_symbols: Default::default(),
+                diagnostics: Vec::new(),
+            }),
+            dated_carry_scan: None,
+            dated_carry_candidate: None,
+            dated_carry_settlement: None,
+        };
+        publish_daily_strategy_update(
+            Bytes::from(serde_json::to_vec(&daily_update).unwrap()),
+            &responder.strategy_signals,
+            &strategy_maintenance_events,
+            &responder.legacy_strategy_signals,
+            &latest_daily_strategy,
+        );
+
+        let payload = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            stream.next(),
+        )
+        .await
+        .expect("daily snapshot should reach an already subscribed maintenance stream")
+        .expect("maintenance stream should remain open")
+        .expect("maintenance stream item should be valid");
+        let received: strategy::StrategyInsightUpdate =
+            serde_json::from_slice(payload.data().unwrap()).unwrap();
+        assert_eq!(received.event_id, "daily:new-snapshot");
+        assert!(received.daily_snapshot.is_some());
+    }
+
     #[test]
     fn enriched_price_uses_its_typed_sbe_template_and_preserves_values() {
         let mut raw = vec![0; 56];

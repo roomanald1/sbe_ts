@@ -18,6 +18,10 @@ strategy = { path = "../strategy" }
 tokio = { version = "1.53.1", features = ["fs", "io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
 tower = { version = "0.5.2", features = ["util"] }
 
+[dev-dependencies]
+http-body-util = "0.1.5"
+learning = { path = "../learning" }
+
 [[bench]]
 name = "strategy_evaluation"
 harness = false

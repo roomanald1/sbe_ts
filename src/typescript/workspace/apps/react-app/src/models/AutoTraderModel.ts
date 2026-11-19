@@ -150,6 +150,18 @@ export type AutoTraderDecisionParameters = {
     take_profit_percent: number;
   };
   latest_execution?: AutoTraderLatestExecutionParameters;
+  catalog?: Record<
+    string,
+    Omit<
+      AutoTraderStrategyParameter,
+      | 'value'
+      | 'learned_value'
+      | 'configured_value'
+      | 'overridden'
+      | 'scout_variants'
+    >[]
+  >;
+  version?: number;
 };
 export type Strategy =
   | 'live-momentum'
@@ -217,6 +229,12 @@ export type StrategyDiagnostic = {
     relative_strength_gap_pp?: number | null;
   }>;
 };
+export type StrategyBlocker = {
+  strategy: Strategy;
+  symbol: string;
+  reason: string;
+  timestamp_ms: number;
+};
 export type AutoTraderState = {
   enabled: boolean;
   auditHealthy: boolean;
@@ -279,6 +297,7 @@ export type AutoTraderState = {
   }>;
   latestSignalDiagnostic: string;
   strategyDiagnostics: StrategyDiagnostic[];
+  latestStrategyBlockers: StrategyBlocker[];
   orders: AutoTraderOrder[];
   openPositionSymbols: string[];
   ledgerOpenPositionSymbols: string[];
@@ -419,6 +438,7 @@ type TraderStatus = {
   }>;
   latest_signal_diagnostic?: string;
   strategy_diagnostics?: StrategyDiagnostic[];
+  latest_strategy_blockers?: StrategyBlocker[];
 };
 type TraderActivity = {
   orders: AutoTraderOrder[];
@@ -476,6 +496,7 @@ export class AutoTraderModel {
     symbolGateHits: [],
     latestSignalDiagnostic: '',
     strategyDiagnostics: [],
+    latestStrategyBlockers: [],
     orders: [],
     openPositionSymbols: [],
     ledgerOpenPositionSymbols: [],
@@ -1155,6 +1176,7 @@ export class AutoTraderModel {
           })) ?? [],
         latestSignalDiagnostic: status.latest_signal_diagnostic ?? '',
         strategyDiagnostics: status.strategy_diagnostics ?? [],
+        latestStrategyBlockers: status.latest_strategy_blockers ?? [],
         orders,
         openPositionSymbols: activity.open_position_symbols ?? [],
         ledgerOpenPositionSymbols,
@@ -1208,27 +1230,58 @@ export class AutoTraderModel {
       const [response, scoutResponse] = await Promise.all([
         streamedParameters
           ? Promise.resolve(undefined)
-          : autoTraderRpc('GET', '/positions/auto-trader/parameters'),
-        learningRpc(
-          'GET',
-          '/outcomes?source=all&status=open&page=0&page_size=1',
-        ).catch(() => undefined),
+          : autoTraderRpc('GET', '/positions/auto-trader/parameters/v1'),
+        this.state$.value.decisionParameters
+          ? Promise.resolve(undefined)
+          : autoTraderRpc(
+              'GET',
+              '/positions/auto-trader/parameters/scout-variants',
+            ).catch(() => undefined),
       ]);
       if (!streamedParameters && !response?.ok) {
         if (response)
           throw await this.responseError('decision parameters', response);
         throw new Error('Could not load Auto Trader decision parameters.');
       }
-      const decisionParameters =
+      const receivedParameters =
         streamedParameters ??
         ((await response!.json()) as AutoTraderDecisionParameters);
-      let pendingScoutParameters = this.state$.value.pendingScoutParameters;
+      const decisionParameters =
+        this.expandCompactParameters(receivedParameters);
+      const previousScoutDetails =
+        this.state$.value.decisionParameters?.strategy_profiles;
       if (scoutResponse?.ok) {
-        const scoutSnapshot = (await scoutResponse.json()) as {
-          pendingParameterProbes?: AutoTraderPendingScoutParameter[];
+        const scoutDetails = (await scoutResponse.json()) as {
+          scout_variants?: Record<string, AutoTraderStrategyScoutVariant[]>;
         };
-        pendingScoutParameters = scoutSnapshot.pendingParameterProbes ?? [];
+        for (const profile of decisionParameters.strategy_profiles)
+          for (const parameter of profile.parameters) {
+            parameter.scout_variants =
+              scoutDetails.scout_variants?.[
+                `${profile.symbol}:${profile.strategy}:${parameter.key}`
+              ] ?? [];
+          }
+      } else if (previousScoutDetails) {
+        const previous = new Map(
+          previousScoutDetails.flatMap((profile) =>
+            profile.parameters.map(
+              (parameter) =>
+                [
+                  `${profile.symbol}:${profile.strategy}:${parameter.key}`,
+                  parameter.scout_variants,
+                ] as const,
+            ),
+          ),
+        );
+        for (const profile of decisionParameters.strategy_profiles)
+          for (const parameter of profile.parameters) {
+            parameter.scout_variants =
+              previous.get(
+                `${profile.symbol}:${profile.strategy}:${parameter.key}`,
+              ) ?? [];
+          }
       }
+      const pendingScoutParameters = this.state$.value.pendingScoutParameters;
       const savedOverrides = Object.fromEntries(
         decisionParameters.strategy_profiles.flatMap((profile) =>
           profile.parameters
@@ -1266,6 +1319,46 @@ export class AutoTraderModel {
     } finally {
       this.decisionParametersRefreshInFlight = false;
     }
+  }
+
+  private expandCompactParameters(
+    parameters: AutoTraderDecisionParameters,
+  ): AutoTraderDecisionParameters {
+    if (parameters.version !== 1 || !parameters.catalog) return parameters;
+    return {
+      ...parameters,
+      strategy_profiles: parameters.strategy_profiles.map((profile) => {
+        const schema = parameters.catalog?.[profile.strategy] ?? [];
+        return {
+          ...profile,
+          parameters: Object.entries(
+            profile.parameters as unknown as Record<
+              string,
+              {
+                value: number;
+                learned_value: number;
+                configured_value?: number | null;
+                overridden: boolean;
+              }
+            >,
+          ).map(([key, value]) => {
+            const entry = schema.find((item) => item.key === key);
+            return {
+              ...entry,
+              ...value,
+              key,
+              label: entry?.label ?? key,
+              default_value: entry?.default_value ?? value.value,
+              min: entry?.min ?? value.value,
+              max: entry?.max ?? value.value,
+              step: entry?.step ?? 0,
+              unit: entry?.unit ?? '',
+              scout_variants: [],
+            };
+          }),
+        };
+      }),
+    };
   }
 
   private scheduleStreamRefresh() {

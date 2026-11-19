@@ -97,7 +97,15 @@ fn paper_learning_exploration_active(settings: &Settings, now_ms: u64) -> bool {
 
 fn intraday_strategy_size_multiplier(settings: &Settings, strategy: Strategy, now_ms: u64) -> f64 {
     if strategy.is_live_insight() && paper_learning_exploration_active(settings, now_ms) {
-        return 1.0;
+        // A temporary recovery window must stay small enough to gather fresh
+        // evidence without restoring the normal allocation of a paused strategy.
+        let learned = settings
+            .learned_strategy_size_multipliers
+            .get(strategy.as_str())
+            .copied()
+            .unwrap_or(1.0)
+            .min(1.0);
+        return if learned <= 0.0 { 0.20 } else { learned };
     }
     let learned = settings
         .learned_strategy_size_multipliers
@@ -106,8 +114,8 @@ fn intraday_strategy_size_multiplier(settings: &Settings, strategy: Strategy, no
         .unwrap_or(1.0)
         .min(1.0);
     if learned <= 0.0 {
-        // A paused live strategy can only use this recovery allocation when
-        // the current signal independently passes its profile-specific Scout gate.
+        // A paused live strategy uses a capped recovery allocation while its
+        // profile-specific Scout evidence is gathered and evaluated.
         0.20
     } else {
         learned
@@ -483,14 +491,16 @@ async fn prepare_signal_execution_plan(
     let strategy_profile = strategy
         .map(|strategy| learned_strategy_parameter_profile(&settings, &signal.symbol, strategy));
     let is_portfolio_rebalance = is_portfolio_rebalance_signal(signal, strategy);
-    if learned_pause_blocks_signal(
+    if !paper_learning_exploration
+        && learned_pause_blocks_signal(
         &settings,
         strategy,
         signal,
         is_portfolio_rebalance,
         &signal.direction,
         now_ms,
-    ) {
+    )
+    {
         return Err("Strategy entry paused by negative net trade evidence".into());
     }
     if let Some(kind) = strategy.filter(|kind| !kind.is_dated_carry()) {
@@ -1199,6 +1209,50 @@ mod signal_execution_budget_tests {
             ),
             0.0
         );
+    }
+
+    #[test]
+    fn paused_live_strategy_gets_small_allocation_only_during_recovery_window() {
+        let strategy = Strategy::LiveTradeFlow;
+        let mut settings = Settings::default();
+        settings
+            .learned_strategy_size_multipliers
+            .insert(strategy.as_str().to_owned(), 0.0);
+        settings.paper_learning_exploration_until_ms = 10_000;
+
+        assert_eq!(intraday_strategy_size_multiplier(&settings, strategy, 9_999), 0.20);
+        assert_eq!(intraday_strategy_size_multiplier(&settings, strategy, 10_000), 0.20);
+        assert_eq!(intraday_strategy_size_multiplier(&settings, strategy, 10_001), 0.20);
+        assert!(learned_strategy_entry_paused(&settings, strategy, 10_000));
+        assert!(!learned_strategy_entry_paused(&settings, strategy, 9_999));
+    }
+
+    #[test]
+    fn recovery_window_bypasses_old_negative_evidence_pause() {
+        let strategy = Strategy::LiveTradeFlow;
+        let mut settings = Settings::default();
+        settings
+            .learned_strategy_size_multipliers
+            .insert(strategy.as_str().to_owned(), 0.0);
+        settings.paper_learning_exploration_until_ms = 10_000;
+        let candidate = signal(strategy.as_str(), 0.8, 100_000);
+
+        assert!(learned_pause_blocks_signal(
+            &settings,
+            Some(strategy),
+            &candidate,
+            false,
+            "bullish",
+            10_000,
+        ));
+        assert!(!learned_pause_blocks_signal(
+            &settings,
+            Some(strategy),
+            &candidate,
+            false,
+            "bullish",
+            9_999,
+        ));
     }
 
     #[test]

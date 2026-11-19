@@ -40,8 +40,13 @@ async fn apply_learning_snapshot(
 ) {
     snapshot.profiles.retain(|profile| strategy::is_autotrader_symbol_allowed(&profile.symbol));
     snapshot.scout_parameter_variants.retain(|variant| strategy::is_autotrader_symbol_allowed(&variant.symbol));
-    let allowed_profile_ids = snapshot.profiles.iter().map(|profile| profile.profile_id.clone()).collect::<BTreeSet<_>>();
-    snapshot.walk_forward_evidence.retain(|key, _| key.split('|').next().is_some_and(strategy::is_autotrader_symbol_allowed));
+    let allowed_profile_ids = snapshot.registered_profile_ids.clone();
+    snapshot.walk_forward_evidence.retain(|key, _| {
+        key.split('|').next().is_some_and(|identity| {
+            strategy::is_autotrader_symbol_allowed(identity)
+                || allowed_profile_ids.contains(identity)
+        })
+    });
     snapshot.recent_profile_context_returns.retain(|key, _| key.split('|').next().is_some_and(|profile_id| allowed_profile_ids.contains(profile_id)));
     snapshot.missed_opportunity_bands.retain(|band| band.symbol.as_deref().is_none_or(strategy::is_autotrader_symbol_allowed));
     let bands = snapshot
@@ -891,6 +896,14 @@ pub fn router_with_socket() -> (Router, AutoTraderSocketApi) {
         .route(
             "/positions/auto-trader/parameters",
             get(get_decision_parameters),
+        )
+        .route(
+            "/positions/auto-trader/parameters/v1",
+            get(get_compact_decision_parameters),
+        )
+        .route(
+            "/positions/auto-trader/parameters/scout-variants",
+            get(get_scout_parameter_variants),
         )
         .route(
             "/internal/strategy/daily-scan-parameters",

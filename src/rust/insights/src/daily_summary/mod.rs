@@ -12,6 +12,7 @@ use std::{
 const DAY_MS: i64 = 86_400_000;
 const RAW_RETENTION_DAYS: i64 = 1;
 const DETAIL_RETENTION_DAYS: i64 = 90;
+const STRATEGY_REJECTION_RETENTION_MS: i64 = 60 * 60 * 1_000;
 const MAINTENANCE_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
 
 #[derive(Clone, Default, Deserialize, Serialize)]
@@ -116,8 +117,31 @@ pub async fn run_maintenance_service() -> anyhow::Result<()> {
             .await;
             status.heartbeat_at_ms = now_ms();
             persist_maintenance_status(&status_path, &status);
+            if let Err(error) = prune_expired_strategy_rejection_audits(status.heartbeat_at_ms).await {
+                eprintln!("Could not prune expired strategy rejection audits: {error:#}");
+            }
         }
     }
+}
+
+async fn prune_expired_strategy_rejection_audits(now: i64) -> anyhow::Result<i64> {
+    let path = database_path();
+    tokio::task::spawn_blocking(move || {
+        let connection = open_database(&path)?;
+        prune_expired_strategy_rejection_audits_from(&connection, now)
+    })
+    .await
+    .map_err(|error| anyhow::anyhow!("strategy rejection audit retention task failed: {error}"))?
+}
+
+fn prune_expired_strategy_rejection_audits_from(
+    connection: &Connection,
+    now: i64,
+) -> anyhow::Result<i64> {
+    Ok(connection.execute(
+        "DELETE FROM auto_trader_audit WHERE stage = 'strategy_rejection' AND timestamp < ?1",
+        [now.saturating_sub(STRATEGY_REJECTION_RETENTION_MS)],
+    )? as i64)
 }
 
 async fn summarize_missing_days() -> anyhow::Result<MaintenanceRunStats> {
@@ -604,6 +628,50 @@ mod training_archive_tests {
             .unwrap());
         drop(connection);
         std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn strategy_rejection_details_are_purged_after_one_hour_without_touching_decisions() {
+        let connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute(
+                "CREATE TABLE auto_trader_audit (decision_id TEXT NOT NULL, stage TEXT NOT NULL, timestamp INTEGER NOT NULL, symbol TEXT, payload BLOB NOT NULL, PRIMARY KEY(decision_id, stage))",
+                [],
+            )
+            .unwrap();
+        let now = 5 * DAY_MS;
+        let cutoff = now - STRATEGY_REJECTION_RETENTION_MS;
+        connection
+            .execute(
+                "INSERT INTO auto_trader_audit (decision_id, stage, timestamp, symbol, payload) VALUES ('expired-rejection', 'strategy_rejection', ?1, 'BTC-USDT', X'01'), ('current-rejection', 'strategy_rejection', ?2, 'ETH-USDT', X'02'), ('historical-decision', 'decision', ?3, 'SOL-USDT', X'03')",
+                params![cutoff - 1, cutoff + 1, cutoff - DAY_MS],
+            )
+            .unwrap();
+
+        assert_eq!(
+            prune_expired_strategy_rejection_audits_from(&connection, now).unwrap(),
+            1
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM auto_trader_audit WHERE stage = 'strategy_rejection'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM auto_trader_audit WHERE decision_id = 'historical-decision'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            1
+        );
     }
 }
 

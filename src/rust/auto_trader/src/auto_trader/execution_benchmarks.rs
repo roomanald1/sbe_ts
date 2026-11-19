@@ -210,6 +210,7 @@ pub fn benchmark_decision_parameters_path(
         .filter(|strategy| !strategy.is_legacy_composite())
         .collect::<Vec<_>>();
     let mut output_bytes = 0;
+    let mut compact_bytes = 0;
     let mut output_variants = 0;
     let snapshot_time = std::time::Duration::ZERO;
     let mut profile_time = std::time::Duration::ZERO;
@@ -248,13 +249,27 @@ pub fn benchmark_decision_parameters_path(
         output_bytes = encoded.len();
         black_box(encoded);
         json_time += started.elapsed();
+
+        let compact_started = Instant::now();
+        let catalog = strategies.iter().map(|strategy| (strategy.as_str().to_owned(),
+            strategy.parameter_specs().iter().map(|spec| (spec.key.as_str(), spec.label, spec.default, spec.min, spec.max, spec.step, spec.unit)).collect::<Vec<_>>()))
+            .collect::<BTreeMap<_, _>>();
+        let values = profiles.iter().map(|profile| (&profile.symbol, &profile.strategy,
+            profile.learning_samples, profile.positive_rate, profile.realized_pnl,
+            profile.walk_forward_evidence.as_ref(), &profile.walk_forward_evidence_by_regime,
+            profile.parameters.iter().map(|parameter| (&parameter.key, parameter.value, parameter.learned_value, parameter.configured_value, parameter.overridden)).collect::<Vec<_>>()))
+            .collect::<Vec<_>>();
+        let compact = serde_json::to_vec(black_box(&(catalog, values))).unwrap();
+        compact_bytes = compact.len();
+        black_box(compact);
+        black_box(compact_started.elapsed());
     }
     let to_us = |elapsed: std::time::Duration| elapsed.as_secs_f64() * 1_000_000.0 / iterations as f64;
     (
         to_us(snapshot_time),
         to_us(profile_time),
         to_us(json_time),
-        output_bytes,
+        output_bytes.saturating_sub(compact_bytes),
         output_variants,
     )
 }

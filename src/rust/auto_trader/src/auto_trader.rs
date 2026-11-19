@@ -154,6 +154,141 @@ mod strategy_cleanup_integration_tests {
         }
     }
 
+    #[tokio::test]
+    async fn scout_feedback_flows_through_learning_snapshot_into_live_parameter_api() {
+        use axum::{body::Body, http::Request};
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+
+        let learning_path = std::env::temp_dir().join(format!(
+            "walk-forward-integration-{}-{}.sqlite",
+            std::process::id(),
+            current_time_ms()
+        ));
+        let learning_app = learning::router(learning_path.clone()).unwrap();
+        let strategy = Strategy::LiveMomentum;
+        let symbol = "BTC-USDT";
+        let specs = strategy
+            .parameter_specs()
+            .into_iter()
+            .map(|spec| strategy::ParameterSpec {
+                key: spec.key.as_str().to_owned(),
+                label: spec.label.to_owned(),
+                default: spec.default,
+                min: spec.min,
+                max: spec.max,
+                step: spec.step,
+                unit: spec.unit.to_owned(),
+                learning_direction: spec.learning_direction,
+            })
+            .collect::<Vec<_>>();
+        let parameters = specs
+            .iter()
+            .map(|spec| (spec.key.clone(), spec.default))
+            .collect::<BTreeMap<_, _>>();
+        let profile_id = strategy::profile_id(symbol, strategy.as_str(), &parameters);
+        let event = FeedbackEvent::ScoutOutcome {
+            event_id: "walk-forward-integration-scout-1".into(),
+            observed_at_ms: current_time_ms(),
+            learning_context: Some("scout:BTC:trade".into()),
+            market_regime: Some("trend".into()),
+            symbol: symbol.into(),
+            strategy: strategy.as_str().into(),
+            profile_id: profile_id.clone(),
+            parameters,
+            baseline_parameters: BTreeMap::new(),
+            comparison: strategy::ScoutComparisonMetadata::Independent,
+            specs,
+            net_return_percent: 0.25,
+        };
+        let feedback_response = learning_app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/feedback")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&event).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(feedback_response.status(), axum::http::StatusCode::OK);
+
+        let snapshot_response = learning_app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/decision-snapshot")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(snapshot_response.status(), axum::http::StatusCode::OK);
+        let snapshot = serde_json::from_slice::<strategy::LearnedProfileSnapshot>(
+            &snapshot_response
+                .into_body()
+                .collect()
+                .await
+                .unwrap()
+                .to_bytes(),
+        )
+        .unwrap();
+        assert_eq!(
+            snapshot.walk_forward_evidence[&format!("{symbol}|{}", strategy.as_str())].sample_count,
+            1
+        );
+        let exact_regime_key = format!("{profile_id}|regime:trend");
+        assert_eq!(
+            snapshot.walk_forward_evidence[&exact_regime_key].sample_count,
+            1
+        );
+
+        let state = test_state(Settings::default());
+        AutoTraderSocketApi {
+            state: state.clone(),
+        }
+        .apply_learning_snapshot(snapshot)
+        .await;
+        let Json(daily_scan) = get_daily_strategy_parameters(State(state.clone())).await;
+        assert!(
+            daily_scan
+                .strategy_profiles
+                .iter()
+                .all(|profile| profile.strategy != strategy.as_str())
+        );
+        assert!(
+            state
+                .settings
+                .lock()
+                .await
+                .learned_walk_forward_evidence
+                .contains_key(&exact_regime_key)
+        );
+        let Json(response) = get_decision_parameters(State(state.clone())).await;
+        let profile = response
+            .strategy_profiles
+            .iter()
+            .find(|profile| profile.symbol == symbol && profile.strategy == strategy.as_str())
+            .expect("live parameter API includes the sampled live strategy");
+        let evidence = profile
+            .walk_forward_evidence
+            .as_ref()
+            .expect("AutoTrader exposes Learning walk-forward evidence");
+        assert_eq!(evidence.sample_count, 1);
+        assert_eq!(evidence.positive_net_rate, Some(1.0));
+        assert_eq!(evidence.average_net_return_percent, Some(0.25));
+        assert_eq!(
+            profile.walk_forward_evidence_by_regime["trend"].sample_count,
+            1
+        );
+
+        let _ = std::fs::remove_file(&learning_path);
+        let _ = std::fs::remove_file(learning_path.with_extension("sqlite-wal"));
+        let _ = std::fs::remove_file(learning_path.with_extension("sqlite-shm"));
+    }
+
     pub(super) fn order(strategy: &str, timestamp: u64) -> TraderOrder {
         TraderOrder {
             timestamp,

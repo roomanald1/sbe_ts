@@ -21,7 +21,7 @@ export function WalkForwardWidget() {
       try {
         const response = await autoTraderRpc(
           'GET',
-          '/internal/strategy/daily-scan-parameters',
+          '/positions/auto-trader/parameters',
         );
         if (!response.ok)
           throw new Error(`Walk-forward request failed (${response.status}).`);

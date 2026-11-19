@@ -260,6 +260,7 @@ fn is_allowed_route(method: &Method, path: &str) -> bool {
             | (&Method::PUT, "/positions/auto-trader/settings")
             | (&Method::GET, "/positions/auto-trader/dated-carry")
             | (&Method::PUT, "/positions/auto-trader/dated-carry")
+            | (&Method::POST, "/positions/auto-trader/dated-carry")
             | (&Method::GET, "/positions/auto-trader/parameters")
             | (&Method::GET, "/internal/strategy/daily-scan-parameters")
             | (
@@ -358,6 +359,25 @@ mod tests {
             &router,
             "PUT",
             "/positions/auto-trader/settings",
+            Some(payload.clone()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.status, 200);
+        assert_eq!(response.body, payload);
+    }
+
+    #[tokio::test]
+    async fn dispatches_dated_carry_close_post() {
+        let router = Router::new().route(
+            "/positions/auto-trader/dated-carry",
+            axum::routing::post(echo_payload),
+        );
+        let payload = serde_json::json!({ "future_symbol": "BTCUSDT_270326" });
+        let response = dispatch_route(
+            &router,
+            "POST",
+            "/positions/auto-trader/dated-carry",
             Some(payload.clone()),
         )
         .await
