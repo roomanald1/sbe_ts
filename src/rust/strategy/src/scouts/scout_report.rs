@@ -214,6 +214,9 @@ fn instance_row(audit: &Value, now: u64) -> Option<Value> {
     let net_return_label = display_return.map(|value| format!("{}{value:.3}%", if value > 0.0 { "+" } else { "" }));
     Some(json!({
         "decisionId": decision_id, "symbol": symbol, "strategy": strategy, "source": "Scout",
+        "profileSymbol": string(audit, "scout_parameter_profile_symbol")
+            .or_else(|| string(audit, "scout_comparison_parameter_profile_symbol")),
+        "strategyParameters": audit.get("strategy_parameters").cloned().unwrap_or_else(|| json!({})),
         "scoutLevelPercent": number(audit,"scout_level_percent"),
         "scoutParameterKey": string(audit,"scout_parameter_key"),
         "scoutParameterValue": number(audit,"scout_parameter_value"),

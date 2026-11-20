@@ -91,7 +91,9 @@ struct EvaluationQuery {
 #[derive(Clone)]
 pub struct SignalStore {
     path: PathBuf,
+    audit_path: PathBuf,
     writer: mpsc::Sender<WriteRequest>,
+    audit_writer: mpsc::Sender<WriteRequest>,
     recent_cache: Arc<Mutex<Option<(Instant, Vec<SignalSnapshot>)>>>,
     best_cache: Arc<Mutex<Option<(Instant, Vec<SignalSnapshot>)>>>,
     performance_cache: Arc<Mutex<Option<(Instant, Vec<SignalPerformance>)>>>,

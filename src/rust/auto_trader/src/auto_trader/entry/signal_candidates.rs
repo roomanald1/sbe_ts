@@ -153,6 +153,105 @@ fn is_daily_parameter_exploration_probe(signal: &Signal) -> bool {
     rsi_entry_parameter_probe(signal) || donchian_breakout_parameter_probe(signal)
 }
 
+fn is_daily_cold_start_exploration_candidate(signal: &Signal) -> bool {
+    if is_daily_parameter_exploration_probe(signal) {
+        return false;
+    }
+    let is_daily_strategy = signal
+        .strategy
+        .as_deref()
+        .and_then(Strategy::from_name)
+        .is_some_and(|kind| !kind.is_live_insight() && !kind.is_dated_carry());
+    if !is_daily_strategy {
+        return false;
+    }
+    let decision = signal
+        .strategy_decision
+        .as_ref()
+        .or_else(|| {
+            signal
+                .entry_gate
+                .as_ref()
+                .and_then(|gate| gate.get("strategy_decision"))
+        });
+    let Some(decision) = decision else {
+        return false;
+    };
+    let Some(rule_evidence) = decision
+        .get("candidate_evidence")
+        .or_else(|| {
+            signal
+                .entry_gate
+                .as_ref()
+                .and_then(|gate| gate.get("strategy_decision"))
+                .and_then(|decision| decision.get("candidate_evidence"))
+        })
+    else {
+        return false;
+    };
+    if rule_evidence.get("available").and_then(serde_json::Value::as_bool) != Some(true)
+        || rule_evidence.get("eligible").and_then(serde_json::Value::as_bool) != Some(true)
+    {
+        return false;
+    }
+    let sample_count = decision
+        .get("strategy_walk_forward")
+        .filter(|evidence| !evidence.is_null())
+        .and_then(|evidence| {
+            evidence
+                .get("sampleCount")
+                .or_else(|| evidence.get("sample_count"))
+        })
+        .and_then(|value| {
+            value.as_u64().or_else(|| {
+                value
+                    .as_f64()
+                    .filter(|value| value.is_finite() && *value >= 0.0)
+                    .map(|value| value.floor() as u64)
+            })
+        })
+        .unwrap_or_default();
+    let required_samples = decision
+        .get("strategy_parameters")
+        .and_then(|parameters| parameters.get("scout_minimum_walk_forward_samples"))
+        .and_then(serde_json::Value::as_f64)
+        .filter(|value| value.is_finite() && *value >= 1.0)
+        .map(|value| value.ceil() as u64)
+        .unwrap_or(1);
+    sample_count < required_samples
+}
+
+fn daily_cold_start_exploration_checks(signal: &Signal) -> (bool, bool, bool) {
+    let decision = signal.strategy_decision.as_ref().or_else(|| {
+        signal
+            .entry_gate
+            .as_ref()
+            .and_then(|gate| gate.get("strategy_decision"))
+    });
+    let Some(decision) = decision else {
+        return (false, false, false);
+    };
+    let evidence = decision.get("candidate_evidence").or_else(|| {
+        signal
+            .entry_gate
+            .as_ref()
+            .and_then(|gate| gate.get("strategy_decision"))
+            .and_then(|decision| decision.get("candidate_evidence"))
+    });
+    let rule_available = evidence
+        .and_then(|evidence| evidence.get("available"))
+        .and_then(serde_json::Value::as_bool)
+        == Some(true);
+    let rule_eligible = evidence
+        .and_then(|evidence| evidence.get("eligible"))
+        .and_then(serde_json::Value::as_bool)
+        == Some(true);
+    let walk_forward_present = decision
+        .get("strategy_walk_forward")
+        .is_some_and(serde_json::Value::is_object);
+    (rule_available, rule_eligible, walk_forward_present)
+}
+
 fn is_fallback_signal_candidate(signal: &Signal) -> bool {
     !is_daily_strategy_signal(signal)
 }

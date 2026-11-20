@@ -66,7 +66,7 @@ export async function connectInsightsRSocket() {
     (import.meta.env.DEV ||
     (typeof window !== 'undefined' &&
       ['localhost', '127.0.0.1'].includes(window.location.hostname))
-      ? 'ws://localhost:10011'
+      ? 'ws://localhost:10111'
       : 'wss://sbe-ts.onrender.com');
   const websocketModule = WebSocketClient as unknown as {
     default: { default: typeof WebSocketClient.default };

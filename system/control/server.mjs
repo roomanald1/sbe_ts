@@ -185,7 +185,7 @@ async function runLivenessChecks() {
     return `All ${required.length} required service containers running`;
   });
   await check('React web app', async () => {
-    const html = await getHtml(5173);
+    const html = await getHtml(5174);
     if (!html.includes('<div id="root">') || !html.includes('vite')) throw new Error('Web app shell is malformed');
     return 'React app shell served successfully';
   });
@@ -204,7 +204,7 @@ async function runLivenessChecks() {
     return `Connected · price ${Math.round(status.last_price_age_ms / 1000)}s ago · ${status.price_events.toLocaleString()} price events received`;
   });
   await check('RSocket WebSocket listeners', async () => {
-    const ports = [10001, 10004, 10005, 10006, 10008, 10010, 10011];
+    const ports = [10001, 10004, 10005, 10006, 10009, 10010, 10011];
     await Promise.all(ports.map(checkTcp));
     await compose('sbe-system', 'system/compose.yml', ['exec', '-T', 'insights', 'bash', '-c', '</dev/tcp/127.0.0.1/10007']);
     await compose('sbe-system', 'system/compose.yml', ['exec', '-T', 'news-sentiment', 'python', '-c', "import socket; socket.create_connection(('127.0.0.1', 10012), timeout=2).close()"]);

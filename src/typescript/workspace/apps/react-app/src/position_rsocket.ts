@@ -26,7 +26,7 @@ function positionUrl() {
     (import.meta.env.DEV ||
     (typeof window !== 'undefined' &&
       ['localhost', '127.0.0.1'].includes(window.location.hostname))
-      ? 'ws://localhost:10005'
+      ? 'ws://localhost:10105'
       : 'wss://sbe-ts.onrender.com')
   );
 }
@@ -37,7 +37,7 @@ function paperExchangeUrl() {
     (import.meta.env.DEV ||
     (typeof window !== 'undefined' &&
       ['localhost', '127.0.0.1'].includes(window.location.hostname))
-      ? 'ws://localhost:10006'
+      ? 'ws://localhost:10106'
       : 'wss://sbe-ts.onrender.com')
   );
 }

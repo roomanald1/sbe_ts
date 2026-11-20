@@ -165,6 +165,22 @@ fn validated_strategy_entry_edge(signal: &Signal, strategy: Strategy) -> Result<
     let input = StrategySignal::entry(signal, &parameters);
     let (minimum, maximum_age_seconds) = strategy_scout_entry_limits(&parameters, strategy)?;
     let evidence = input.walk_forward_evidence.ok_or_else(|| {
+        crate::service_log!(
+            "INFO",
+            "Walk-forward missing trace: strategy={} strategy_candidate={} daily_cold_start={} parameter_probe={} rule_evidence_available={} rule_evidence_eligible={} selection_mode={}",
+            strategy.as_str(),
+            signal.strategy_candidate,
+            is_daily_cold_start_exploration_candidate(signal),
+            is_daily_parameter_exploration_probe(signal),
+            daily_cold_start_exploration_checks(signal).0,
+            daily_cold_start_exploration_checks(signal).1,
+            signal
+                .entry_gate
+                .as_ref()
+                .and_then(|gate| gate.get("selection_mode"))
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("missing"),
+        );
         "walk_forward_missing: no prior Scout outcomes match this strategy, symbol, and parameter profile".to_owned()
     })?;
     if evidence.last_sample_timestamp_ms >= signal.timestamp {
@@ -551,7 +567,19 @@ async fn prepare_signal_execution_plan(
     let strategy_profile = strategy
         .map(|strategy| learned_strategy_parameter_profile(&settings, &signal.symbol, strategy));
     let is_portfolio_rebalance = is_portfolio_rebalance_signal(signal, strategy);
-    if !paper_learning_exploration {
+    if let Some(kind) = strategy.filter(|kind| !kind.is_live_insight() && !kind.is_dated_carry()) {
+        if !is_portfolio_rebalance && daily_strategy_effective_budget(&settings, kind.as_str()) <= 0.0 {
+            return Err(format!(
+                "Daily strategy has no allocated notional budget: {}",
+                kind.as_str()
+            ));
+        }
+    }
+    // An explicitly selected exploratory entry is bounded by the exploration
+    // notional cap and its own evidence/context checks below. Do not let a
+    // learned-pause walk-forward freshness check veto that capped probe after
+    // candidate selection has already authorized it.
+    if !exploratory {
         if let Some(reason) = learned_pause_block_reason(
         &settings,
         strategy,
@@ -808,7 +836,15 @@ async fn prepare_signal_execution_plan(
             settings.trailing_distance_percent
         },
     };
-    let minimum_book_order = MIN_DEEP_BOOK_ORDER_NOTIONAL;
+    // Cold-start paper probes are intentionally smaller than normal entries.
+    // Let their actual capped notional define the minimum; otherwise the
+    // $10 deep-book floor rejects a $2.50–$5 exploratory order before the
+    // slippage and cost gates can evaluate it.
+    let minimum_book_order = if exploratory {
+        notional.min(MIN_DEEP_BOOK_ORDER_NOTIONAL)
+    } else {
+        MIN_DEEP_BOOK_ORDER_NOTIONAL
+    };
     let deep_book_started = Instant::now();
     let deep_book = assess_deep_book(
         market,

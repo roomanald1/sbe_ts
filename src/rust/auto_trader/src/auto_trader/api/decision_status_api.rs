@@ -370,15 +370,25 @@ async fn get_decision_parameters(
         let mut strategy_profiles = strategy_parameter_profiles(&settings);
         for profile in &mut strategy_profiles {
             let profile_strategy = Strategy::from_name(&profile.strategy).unwrap_or_default();
+            let parameters = profile
+                .parameters
+                .iter()
+                .map(|parameter| (parameter.key.clone(), parameter.value))
+                .collect::<BTreeMap<_, _>>();
+            let profile_id = strategy::profile_id(
+                &profile.symbol,
+                profile_strategy.as_str(),
+                &parameters,
+            );
             profile.walk_forward_evidence = walk_forward_evidence_for_profile(
                 &settings,
-                &profile.symbol,
+                &profile_id,
                 &profile.symbol,
                 profile_strategy,
             );
             profile.walk_forward_evidence_by_regime = walk_forward_evidence_by_regime_for_profile(
                 &settings,
-                &profile.symbol,
+                &profile_id,
                 &profile.symbol,
                 profile_strategy,
             );

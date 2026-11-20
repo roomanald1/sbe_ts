@@ -45,6 +45,18 @@ async fn submit_and_record_selected_order(
         }
         settings.used_notional_today = allocated_notional(&settings);
         request_settings_persist(state)?;
+        if let Some(strategy) = signal.strategy.as_deref() {
+            queue_strategy_rejection_audit(
+                state,
+                signal,
+                strategy,
+                "Auto Trader was disabled before order submission",
+                timestamp,
+                counterfactual_stop_loss_percent,
+                counterfactual_take_profit_percent,
+                "async_submission",
+            );
+        }
         return Ok(skipped_for_signal(
             signal,
             "Auto Trader was disabled before order submission",
@@ -84,6 +96,18 @@ async fn submit_and_record_selected_order(
                 record_execution_order_quality(execution_feedback_outbox, execution_learning_order_ids, &order);
             }
             request_settings_persist(state)?;
+            if let Some(strategy) = signal.strategy.as_deref() {
+                queue_strategy_rejection_audit(
+                    state,
+                    signal,
+                    strategy,
+                    &format!("Asynchronous order submission failed: {}", error.1),
+                    timestamp,
+                    counterfactual_stop_loss_percent,
+                    counterfactual_take_profit_percent,
+                    "async_submission",
+                );
+            }
             return Err(error);
         }
     };

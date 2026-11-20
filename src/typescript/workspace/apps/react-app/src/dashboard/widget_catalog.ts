@@ -136,7 +136,7 @@ export const WIDGET_LABELS: Record<DashboardWidgetType, string> = {
   'auto-trader-execution-check': 'Execution check',
   'auto-trader-completed-positions': 'AutoTrader closed positions',
   'auto-trader-live-positions': 'AutoTrader live positions',
-  'auto-trader-scout-positions': 'AutoTrader scout positions',
+  'auto-trader-scout-positions': 'Scout outcomes',
   'auto-trader-scout-replay': 'Scout replay history',
   'walk-forward': 'Walk-forward data',
   'execution-fees': 'Execution fees',

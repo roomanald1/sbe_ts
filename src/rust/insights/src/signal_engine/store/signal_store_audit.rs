@@ -3,7 +3,7 @@ impl SignalStore {
         &self,
         since: u64,
     ) -> Result<Vec<serde_json::Value>> {
-        let path = self.path.clone();
+        let path = self.audit_path.clone();
         tokio::task::spawn_blocking(move || {
             Self::load_auto_trader_decision_audit_window_sync(&path, since)
         })
@@ -73,7 +73,7 @@ impl SignalStore {
         since: Option<u64>,
         limit: usize,
     ) -> Result<AuditPage> {
-        let path = self.path.clone();
+        let path = self.audit_path.clone();
         tokio::task::spawn_blocking(move || {
             Self::load_auto_trader_execution_audit_page_sync(&path, before_id, since, limit)
         })
@@ -138,7 +138,7 @@ impl SignalStore {
             .and_then(|value| value.as_str())
             .unwrap_or("");
         let json = serde_json::to_vec(&payload)?;
-        self.send_write(WriteOperation::Audit {
+        self.send_audit_write(WriteOperation::Audit {
             decision_id: decision_id.to_owned(),
             stage: stage.to_owned(),
             timestamp: timestamp as i64,
@@ -165,7 +165,7 @@ impl SignalStore {
         } else {
             since
         };
-        let path = self.path.clone();
+        let path = self.audit_path.clone();
         tokio::task::spawn_blocking(move || {
             let limit = limit.clamp(1, 10_000);
             let include_final_outcome = stage.as_deref() == Some("decision");
@@ -232,7 +232,7 @@ impl SignalStore {
         since: Option<u64>,
         limit: usize,
     ) -> Result<Vec<serde_json::Value>> {
-        let path = self.path.clone();
+        let path = self.audit_path.clone();
         tokio::task::spawn_blocking(move || {
             Self::load_auto_trader_execution_audit_sync(&path, since, limit)
         })
@@ -273,7 +273,7 @@ impl SignalStore {
     }
 
     async fn count_auto_trader_decisions(&self, since: Option<u64>) -> Result<usize> {
-        let path = self.path.clone();
+        let path = self.audit_path.clone();
         tokio::task::spawn_blocking(move || {
             let connection = Self::open_database_path(&path)?;
             let count = connection.query_row(
@@ -296,6 +296,14 @@ fn attach_final_decision_outcomes(
     let mut statement = connection.prepare(
         "SELECT payload FROM auto_trader_audit WHERE decision_id = ?1 AND stage = 'entry'",
     )?;
+    let mut skipped_statement = connection.prepare(
+        "SELECT payload FROM auto_trader_audit
+         WHERE stage = 'strategy_rejection' AND (
+             substr(decision_id, 1, length(?1)) = ?1
+             OR substr(decision_id, 1, length(?2)) = ?2
+             OR substr(decision_id, 1, length(?3)) = ?3
+         ) ORDER BY timestamp DESC LIMIT 1",
+    )?;
 
     for decision in decisions {
         if decision.get("stage").and_then(serde_json::Value::as_str) != Some("decision") {
@@ -315,12 +323,12 @@ fn attach_final_decision_outcomes(
             continue;
         }
 
-        let entry = if let Some(decision_id) = decision
+        let (entry, skipped_outcome) = if let Some(decision_id) = decision
             .get("decision_id")
             .and_then(serde_json::Value::as_str)
         {
             let mut rows = statement.query(params![decision_id])?;
-            rows.next()?
+            let entry = rows.next()?
                 .map(|row| row.get::<_, Vec<u8>>(0))
                 .transpose()?
                 .map(|compressed| -> Result<serde_json::Value> {
@@ -329,22 +337,137 @@ fn attach_final_decision_outcomes(
                     decoder.read_to_end(&mut json)?;
                     Ok(serde_json::from_slice(&json)?)
                 })
-                .transpose()?
+                .transpose()?;
+            if entry.is_some() {
+                (entry, None)
+            } else {
+                let strategy = decision
+                    .get("strategy")
+                    .or_else(|| decision.get("strategy_decision").and_then(|value| value.get("strategy")))
+                    .and_then(serde_json::Value::as_str);
+                if let Some(strategy) = strategy {
+                    let prefixes = ["final_entry", "daily_execution", "async_submission"]
+                        .map(|phase| format!("{decision_id}|strategy:{strategy}|phase:{phase}|audit:"));
+                    let mut rows = skipped_statement.query(params![
+                        prefixes[0], prefixes[1], prefixes[2],
+                    ])?;
+                    let skipped_outcome = rows
+                        .next()?
+                        .map(|row| row.get::<_, Vec<u8>>(0))
+                        .transpose()?
+                        .map(|compressed| -> Result<serde_json::Value> {
+                            let mut decoder = MultiGzDecoder::new(compressed.as_slice());
+                            let mut json = Vec::new();
+                            decoder.read_to_end(&mut json)?;
+                            Ok(serde_json::from_slice(&json)?)
+                        })
+                        .transpose()?;
+                    (None, skipped_outcome)
+                } else {
+                    (None, None)
+                }
+            }
         } else {
-            None
+            (None, None)
         };
 
-        let final_outcome = match entry {
-            Some(entry) => serde_json::json!({
+        let final_outcome = if let Some(entry) = entry {
+            serde_json::json!({
                 "status": entry.get("status"),
                 "reason": entry.get("reason"),
                 "entry": entry,
-            }),
-            None => serde_json::json!({
+                "execution_gate": {
+                    "gate_id": "order_submission",
+                    "stage": "post_selection_execution",
+                    "status": entry.get("status"),
+                    "order_submitted": true,
+                    "reason": entry.get("reason"),
+                },
+                "gate_path": [
+                    {
+                        "stage": "candidate_selection",
+                        "status": "selected",
+                        "selection_mode": decision.get("entry_gate").and_then(|gate| gate.get("selection_mode")),
+                        "gate": decision.get("entry_gate"),
+                    },
+                    {
+                        "stage": "execution",
+                        "status": entry.get("status"),
+                        "gate_id": "order_submission",
+                        "order_submitted": true,
+                        "entry": entry,
+                    }
+                ],
+            })
+        } else if let Some(outcome) = skipped_outcome {
+            let selection_gate = decision.get("entry_gate");
+            let execution_gate = outcome.get("execution_gate").cloned().unwrap_or_else(|| {
+                serde_json::json!({
+                    "gate_id": "execution_or_risk_gate",
+                    "stage": "post_selection_execution",
+                    "status": "blocked",
+                    "result_status": outcome.get("status"),
+                    "reason": outcome.get("reason"),
+                    "evaluated": true,
+                    "order_submitted": false,
+                    "short_circuited": true,
+                    "subsequent_checks": "not_evaluated_after_block",
+                })
+            });
+            let gate_path = outcome.get("gate_path").cloned().unwrap_or_else(|| {
+                serde_json::json!([
+                    {
+                        "stage": "candidate_selection",
+                        "status": "selected",
+                        "selection_mode": selection_gate.and_then(|gate| gate.get("selection_mode")),
+                        "gate": selection_gate,
+                    },
+                    {
+                        "stage": "execution",
+                        "status": "blocked",
+                        "gate_id": "execution_or_risk_gate",
+                        "reason": outcome.get("reason"),
+                        "evaluated": true,
+                        "short_circuited": true,
+                        "subsequent_checks": "not_evaluated_after_block",
+                    }
+                ])
+            });
+            serde_json::json!({
+                "status": outcome.get("status"),
+                "reason": outcome.get("reason"),
+                "entry": null,
+                "execution_gate": execution_gate,
+                "gate_path": gate_path,
+            })
+        } else {
+            serde_json::json!({
                 "status": "pending",
                 "reason": null,
                 "entry": null,
-            }),
+                "execution_gate": {
+                    "gate_id": "order_submission",
+                    "stage": "post_selection_execution",
+                    "status": "pending",
+                    "order_submitted": null,
+                    "reason": "No entry or final-entry gate audit is linked to this decision yet.",
+                },
+                "gate_path": [
+                    {
+                        "stage": "candidate_selection",
+                        "status": "selected",
+                        "selection_mode": decision.get("entry_gate").and_then(|gate| gate.get("selection_mode")),
+                        "gate": decision.get("entry_gate"),
+                    },
+                    {
+                        "stage": "execution",
+                        "status": "pending",
+                        "gate_id": "order_submission",
+                        "order_submitted": null,
+                        "reason": "No downstream execution result has been recorded.",
+                    }
+                ],
+            })
         };
         decision["final_outcome"] = final_outcome;
     }
@@ -367,9 +490,16 @@ mod decision_audit_window_tests {
         let connection = SignalStore::open_database_at(&path).unwrap();
         let (writer, receiver) = mpsc::channel(128);
         tokio::task::spawn_blocking(move || run_database_writer(connection, receiver));
+        let audit_path = audit_database_path(&path);
+        let audit_connection = SignalStore::open_audit_database_at(&audit_path).unwrap();
+        migrate_legacy_audit_tables(&path, &audit_path).unwrap();
+        let (audit_writer, audit_receiver) = mpsc::channel(128);
+        tokio::task::spawn_blocking(move || run_database_writer(audit_connection, audit_receiver));
         SignalStore {
             path,
+            audit_path,
             writer,
+            audit_writer,
             recent_cache: Arc::new(Mutex::new(None)),
             best_cache: Arc::new(Mutex::new(None)),
             performance_cache: Arc::new(Mutex::new(None)),

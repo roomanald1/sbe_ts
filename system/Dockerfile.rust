@@ -10,6 +10,14 @@ FROM debian:bookworm-slim
 ARG CRATE
 ARG BIN
 ARG FEATURES=
+ARG SOURCE_REVISION=unknown
+ARG SOURCE_DIRTY=unknown
+ARG SOURCE_BUILT_AT=unknown
+LABEL org.opencontainers.image.revision="${SOURCE_REVISION}" \
+      org.opencontainers.image.source-dirty="${SOURCE_DIRTY}" \
+      org.opencontainers.image.created="${SOURCE_BUILT_AT}" \
+      com.sbe.build.crate="${CRATE}" \
+      com.sbe.build.binary="${BIN}"
 COPY --from=build /usr/bin/bash /usr/bin/bash
 COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 COPY --from=build /lib/x86_64-linux-gnu/libssl.so.3 /lib/x86_64-linux-gnu/libssl.so.3

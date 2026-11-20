@@ -10,6 +10,22 @@
 - Strategy entry and open-position decisions belong in `evaluate.rs`. Preserve learned parameter bounds and feedback attribution.
 - Avoid editing generated SBE codecs unless protocols change. Update both trade-ticket and Orders flows for VWAP API changes.
 
+### Beads Memory — Required Navigation Step
+
+Before searching unfamiliar repository code:
+
+1. Identify the component or feature involved.
+2. Query relevant saved knowledge using `bd memories <topic>`.
+3. Use matching remembered paths and symbols as starting points.
+4. If no relevant memory exists, discover paths using `rg --files` before searching contents.
+5. If a remembered path is invalid, verify its replacement and correct the stale memory.
+
+After discovering a reusable file location, symbol or architectural relationship, save it using `bd remember` if it is not already documented.
+
+Do not save speculative findings, duplicate memories or task-specific investigation notes.
+
+Memory retrieval is required once per unfamiliar component or feature, not before every `rg` command. Do not repeat lookups when the relevant knowledge is already available in the current session.
+
 ## Tools and Navigation
 
 - Follow `RTK.md`. Use RTK for supported commands; run `sed`, `cat`, `bd` and `./nx` directly.

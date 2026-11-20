@@ -1,3 +1,5 @@
+#![recursion_limit = "256"]
+
 use serde::{Deserialize, Serialize};
 extern crate self as strategies;
 #[cfg(test)]

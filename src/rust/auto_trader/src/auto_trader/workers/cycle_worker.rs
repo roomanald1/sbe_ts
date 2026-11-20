@@ -99,6 +99,10 @@ fn record_cycle_gap_summary(
     state: &AutoTraderState,
     result: &Result<CycleResult, (StatusCode, String)>,
 ) {
+    let observed_at_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
     let traded = matches!(&result, Ok(cycle) if cycle.status == "order_submitted" || cycle.status == "hedge_submitted");
     let order_queued = matches!(&result, Ok(cycle) if cycle.status == "order_submitting");
     if let Ok(mut summary) = state.gap_summary.lock() {
@@ -177,6 +181,7 @@ fn record_cycle_gap_summary(
                                 last_detail:
                                     "All entry, risk, and execution gates passed; order submitted."
                                         .to_owned(),
+                                last_seen_ms: observed_at_ms,
                                 distance_to_pass: Some(0.0),
                             },
                         );
@@ -206,6 +211,7 @@ fn record_cycle_gap_summary(
                     .or_default();
                 entry.count = entry.count.saturating_add(1);
                 entry.last_detail = detail;
+                entry.last_seen_ms = observed_at_ms;
                 entry.distance_to_pass = distance_to_pass;
             }
             if let Ok(cycle) = &result {
@@ -218,6 +224,7 @@ fn record_cycle_gap_summary(
                             .or_default();
                         entry.count = entry.count.saturating_add(1);
                         entry.last_detail = raw_reason.to_owned();
+                        entry.last_seen_ms = observed_at_ms;
                         entry.distance_to_pass = distance_to_pass;
                     }
                 }

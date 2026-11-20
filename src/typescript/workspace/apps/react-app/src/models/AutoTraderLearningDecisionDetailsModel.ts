@@ -20,8 +20,22 @@ export class AutoTraderLearningDecisionDetailsModel {
     const decision = this.decision;
     return [
       {
-        title: 'Eligibility evidence',
-        value: decision.strategy_decision?.candidate_evidence,
+        title: 'Gate path',
+        value: decision.final_outcome?.gate_path ?? [
+          {
+            stage: 'candidate_selection',
+            status: decision.status ?? 'unknown',
+            selection_mode: decision.entry_gate?.selection_mode,
+            gate: decision.entry_gate,
+          },
+          {
+            stage: 'execution',
+            status: decision.final_outcome?.status ?? 'pending',
+            gate_id: decision.final_outcome?.execution_gate?.gate_id,
+            reason: decision.final_outcome?.reason,
+            execution_gate: decision.final_outcome?.execution_gate,
+          },
+        ],
       },
       {
         title: 'Final outcome and execution',
@@ -30,10 +44,6 @@ export class AutoTraderLearningDecisionDetailsModel {
           reason:
             'No entry order or downstream decision outcome was recorded for this selection.',
         },
-      },
-      {
-        title: 'Gate checks',
-        value: decision.entry_gate ?? 'No entry gate captured',
       },
       {
         title: 'Strategy decision and parameters',

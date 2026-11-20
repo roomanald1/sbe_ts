@@ -79,14 +79,14 @@ services:
     environment:
       STRATEGY_LIVE_MEMORY_LIMIT: ${STRATEGY_LIVE_MEMORY_LIMIT:-256M}
       STRATEGY_SCOUT_MEMORY_LIMIT: ${SCOUT_WORKER_MEMORY_LIMIT:-1536M}
-      POSITION_MANAGEMENT_URL: http://host.docker.internal:3002
-      AUTO_TRADER_URL: http://host.docker.internal:3005
-      FEED_HANDLERS_URL: http://host.docker.internal:3001
-      BINANCE_FEED_HEALTH_URL: http://host.docker.internal:3012
-      PAPER_EXCHANGE_URL: http://host.docker.internal:3003
-      INSIGHTS_URL: http://host.docker.internal:3004
-      NEWS_SENTIMENT_URL: http://host.docker.internal:3006
-      LEARNING_SERVICE_URL: http://host.docker.internal:3010
+      POSITION_MANAGEMENT_URL: http://position-management:3002
+      AUTO_TRADER_URL: http://auto-trader:3005
+      FEED_HANDLERS_URL: http://feed-handlers:3001
+      BINANCE_FEED_HEALTH_URL: http://binance-feed:3012
+      PAPER_EXCHANGE_URL: http://paper-exchange:3003
+      INSIGHTS_URL: http://insights:3004
+      NEWS_SENTIMENT_URL: http://news-sentiment:3006
+      LEARNING_SERVICE_URL: http://learning:3010
       POSITION_MANAGEMENT_RSOCKET_URL: ws://position-management:10005
       AUTO_TRADER_RSOCKET_URL: ws://auto-trader:10006
       LEARNING_RSOCKET_URL: ws://learning:10010

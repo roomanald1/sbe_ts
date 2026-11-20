@@ -386,6 +386,7 @@ export type AutoTraderState = {
     gate: string;
     count: number;
     last_detail: string;
+    last_seen_ms?: number;
     distance_to_pass: number | null;
   }>;
   latestSignalDiagnostic: string;
@@ -530,6 +531,7 @@ type TraderStatus = {
     gate: string;
     count: number;
     last_detail: string;
+    last_seen_ms?: number;
     distance_to_pass?: number | null;
   }>;
   latest_signal_diagnostic?: string;
@@ -615,7 +617,7 @@ export class AutoTraderModel {
     closedTradeLosses: 0,
     closedTradeFlat: 0,
     dailyRealizedLossLimit: '10',
-    explorationPercent: '10',
+    explorationPercent: '2',
     riskAppetite: '50',
     maxOpenPositions: '20',
     maxConcurrentScoutSamples: '5000',

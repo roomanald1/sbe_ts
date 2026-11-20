@@ -13,7 +13,7 @@ The Learning RSocket endpoint accepts candidate batches, worker-route requests, 
 
 - `LEARNING_STATE_FILE`: normalized SQLite state file; defaults to `learning_state.sqlite`.
 - `SCOUT_WORKERS_ENABLED`: enables worker dispatch; defaults to `true`.
-- `SCOUT_WORKER_ENDPOINTS`: semicolon-separated `strategy=ws://host:port` entries for Scout-role workers (Compose service names `strategy-scout-<strategy>`, port `10200`).
+- `SCOUT_WORKER_ENDPOINTS`: semicolon-separated `strategy=ws://host:port` entries for Scout-role workers (Compose service names `strategy-scout-<strategy>`, port `10200`). Compose uses Docker service DNS by default; set this variable in the Compose environment when Learning must reach workers through localhost or another host address.
 - `SCOUT_COORDINATOR_MAX_BATCH_SIGNALS`: maximum signals in a batch; defaults to `64`.
 - `SCOUT_COORDINATOR_MAX_ASSIGNMENTS`: maximum assignments in a batch; defaults to `512`.
 - `LEARNING_REPLAY_HORIZONS_<STRATEGY>`: four increasing comma-separated millisecond horizons for live-strategy trade replay and missed-candidate markouts; defaults to `300000,1800000,7200000,28800000` (5m, 30m, 2h, 8h). The maximum horizon is 24 hours.

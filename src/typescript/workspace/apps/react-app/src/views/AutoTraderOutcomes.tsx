@@ -2282,6 +2282,17 @@ function AutoTraderOutcomesComponent({
                         : ''}
                     </small>
                   </li>
+                  {!positionStillOpen && gatePosition.exitReason && (
+                    <li>
+                      <strong>Closed</strong>
+                      <span>Exit reason</span>
+                      <small>
+                        {gatePosition.exitReason
+                          .replace(/[-_]+/g, ' ')
+                          .replace(/\b\w/g, (letter) => letter.toUpperCase())}
+                      </small>
+                    </li>
+                  )}
                 </ul>
                 {!carry && (
                   <>

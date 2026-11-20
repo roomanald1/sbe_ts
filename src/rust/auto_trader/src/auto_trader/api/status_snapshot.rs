@@ -350,6 +350,7 @@ fn status(state: &AutoTraderState, settings: &Settings) -> StatusResponse {
                         gate: gate.clone(),
                         count: count.count,
                         last_detail: count.last_detail.clone(),
+                        last_seen_ms: count.last_seen_ms,
                         distance_to_pass: count.distance_to_pass,
                     })
                     .collect()

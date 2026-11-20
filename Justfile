@@ -2,6 +2,10 @@
 rebuild +services:
     #!/usr/bin/env bash
     set -euo pipefail
+    export SOURCE_REVISION="$(git rev-parse HEAD)"
+    if [[ -n "$(git status --porcelain)" ]]; then SOURCE_DIRTY=true; else SOURCE_DIRTY=false; fi
+    export SOURCE_DIRTY
+    export SOURCE_BUILT_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     compose_args=(-p sbe-system -f system/compose.yml --profile scout-workers)
     services=({{services}})
     compose_json="$(docker compose "${compose_args[@]}" config --format json)"
@@ -9,7 +13,7 @@ rebuild +services:
     build_services=()
     if [[ -n "$build_output" ]]; then mapfile -t build_services <<< "$build_output"; fi
     if ((${#build_services[@]} > 0)); then
-      docker compose "${compose_args[@]}" build --progress quiet "${build_services[@]}"
+      docker compose --progress quiet "${compose_args[@]}" build "${build_services[@]}"
     fi
     docker compose "${compose_args[@]}" up -d --no-build --force-recreate --no-deps "${services[@]}"
 
@@ -17,6 +21,10 @@ rebuild +services:
 rebuild-scouts:
     #!/usr/bin/env bash
     set -euo pipefail
+    export SOURCE_REVISION="$(git rev-parse HEAD)"
+    if [[ -n "$(git status --porcelain)" ]]; then SOURCE_DIRTY=true; else SOURCE_DIRTY=false; fi
+    export SOURCE_DIRTY
+    export SOURCE_BUILT_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     mapfile -t services < <(docker compose -p sbe-system -f system/compose.yml --profile scout-workers config --services | grep '^strategy-scout-')
     if (( ${#services[@]} == 0 )); then
       echo "No Scout worker services found in system/compose.yml" >&2
@@ -28,7 +36,7 @@ rebuild-scouts:
     build_services=()
     if [[ -n "$build_output" ]]; then mapfile -t build_services <<< "$build_output"; fi
     if ((${#build_services[@]} > 0)); then
-      docker compose "${compose_args[@]}" build --progress quiet "${build_services[@]}"
+      docker compose --progress quiet "${compose_args[@]}" build "${build_services[@]}"
     fi
     docker compose "${compose_args[@]}" up -d --no-build --force-recreate --no-deps "${services[@]}"
 

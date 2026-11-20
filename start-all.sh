@@ -9,7 +9,7 @@ fi
 ./start-system.sh
 ./start-infra.sh
 echo "Service control: http://localhost:8080"
-echo "App:            http://localhost:5173"
+echo "App:            http://localhost:5174"
 echo "Coverage:       http://localhost:8080/coverage/"
 echo "Grafana:        http://localhost:3000/d/sbe-ts-overview/sbe-ts-system-and-trading"
 echo "Prometheus:     http://localhost:9090"

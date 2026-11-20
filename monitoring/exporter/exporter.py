@@ -25,7 +25,7 @@ RSOCKET_SERVICES = {
     "position_management": os.getenv(
         "POSITION_MANAGEMENT_RSOCKET_URL", "ws://127.0.0.1:10005"
     ),
-    "auto_trader": os.getenv("AUTO_TRADER_RSOCKET_URL", "ws://127.0.0.1:10008"),
+    "auto_trader": os.getenv("AUTO_TRADER_RSOCKET_URL", "ws://127.0.0.1:10009"),
     "learning": os.getenv("LEARNING_RSOCKET_URL", "ws://127.0.0.1:10010"),
 }
 STRATEGY_WORKER_STRATEGIES = (

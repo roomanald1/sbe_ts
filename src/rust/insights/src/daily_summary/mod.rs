@@ -127,9 +127,9 @@ pub async fn run_maintenance_service() -> anyhow::Result<()> {
 }
 
 async fn prune_expired_strategy_rejection_audits(now: i64) -> anyhow::Result<i64> {
-    let path = database_path();
+    let path = audit_database_path();
     tokio::task::spawn_blocking(move || {
-        let connection = open_database(&path)?;
+        let connection = open_audit_database(&path)?;
         prune_expired_strategy_rejection_audits_from(&connection, now)
     })
     .await
@@ -274,9 +274,12 @@ fn summarize_missing_days_sync(path: &PathBuf) -> anyhow::Result<MaintenanceRunS
         transaction.commit()?;
     }
     let retention_stats = apply_retention(&connection, today_start)?;
-    stats.compacted_audit_records = retention_stats.compacted_audit_records;
-    stats.purged_audit_records = retention_stats.purged_audit_records;
     stats.expired_training_archives = retention_stats.expired_training_archives;
+    let audit_connection = open_audit_database(&audit_database_path())?;
+    initialize_audit_schema(&audit_connection)?;
+    let audit_retention_stats = apply_audit_retention(&audit_connection, today_start)?;
+    stats.compacted_audit_records = audit_retention_stats.compacted_audit_records;
+    stats.purged_audit_records = audit_retention_stats.purged_audit_records;
     // Do not VACUUM after retention cleanup: rebuilding a multi-gigabyte
     // database takes an exclusive lock and blocks the live signal writer.
     // SQLite can reuse the freed pages for future inserts.
@@ -285,9 +288,13 @@ fn summarize_missing_days_sync(path: &PathBuf) -> anyhow::Result<MaintenanceRunS
 
 #[derive(Default)]
 struct RetentionStats {
+    expired_training_archives: i64,
+}
+
+#[derive(Default)]
+struct AuditRetentionStats {
     compacted_audit_records: i64,
     purged_audit_records: i64,
-    expired_training_archives: i64,
 }
 
 fn apply_retention(connection: &Connection, today_start: i64) -> anyhow::Result<RetentionStats> {
@@ -297,6 +304,18 @@ fn apply_retention(connection: &Connection, today_start: i64) -> anyhow::Result<
         "UPDATE signal_daily_summary SET training_payload = NULL WHERE day_start_ms < ?1 AND training_payload IS NOT NULL",
         [detail_cutoff],
     )? as i64;
+    transaction.commit()?;
+    Ok(RetentionStats {
+        expired_training_archives,
+    })
+}
+
+fn apply_audit_retention(
+    connection: &Connection,
+    today_start: i64,
+) -> anyhow::Result<AuditRetentionStats> {
+    let detail_cutoff = today_start - DETAIL_RETENTION_DAYS * DAY_MS;
+    let transaction = connection.unchecked_transaction()?;
     let compacted_audit_records = transaction.query_row(
         "SELECT COALESCE(SUM(1), 0) FROM auto_trader_audit WHERE timestamp < ?1",
         [detail_cutoff],
@@ -317,15 +336,18 @@ fn apply_retention(connection: &Connection, today_start: i64) -> anyhow::Result<
         [detail_cutoff],
     )? as i64;
     transaction.commit()?;
-    Ok(RetentionStats {
+    Ok(AuditRetentionStats {
         compacted_audit_records,
         purged_audit_records,
-        expired_training_archives,
     })
 }
 
 fn maintenance_status_path() -> PathBuf {
     database_path().with_file_name("maintenance_status.json")
+}
+
+fn audit_database_path() -> PathBuf {
+    database_path().with_file_name("auto_trader_audit.sqlite")
 }
 
 fn read_maintenance_status(path: &PathBuf) -> MaintenanceStatus {
@@ -516,6 +538,15 @@ mod training_archive_tests {
             .unwrap();
 
         apply_retention(&connection, 120 * DAY_MS).unwrap();
+        let audit_connection = Connection::open_in_memory().unwrap();
+        initialize_audit_schema(&audit_connection).unwrap();
+        audit_connection
+            .execute(
+                "INSERT INTO auto_trader_audit (decision_id, stage, timestamp, symbol, payload) VALUES ('old-1', 'decision', ?1, 'BTC', X'01'), ('old-2', 'decision', ?1, 'BTC', X'02'), ('recent', 'decision', ?2, 'BTC', X'03')",
+                params![old_day + 1, recent_day + 1],
+            )
+            .unwrap();
+        apply_audit_retention(&audit_connection, 120 * DAY_MS).unwrap();
 
         assert_eq!(
             connection
@@ -538,14 +569,14 @@ mod training_archive_tests {
             2
         );
         assert_eq!(
-            connection
+            audit_connection
                 .query_row("SELECT COUNT(*) FROM auto_trader_audit", [], |row| row
                     .get::<_, i64>(0))
                 .unwrap(),
             1
         );
         assert_eq!(
-            connection
+            audit_connection
                 .query_row(
                     "SELECT record_count FROM auto_trader_audit_daily_summary WHERE day_start_ms = ?1 AND stage = 'decision' AND symbol = 'BTC'",
                     [old_day],
@@ -715,12 +746,27 @@ fn open_database(path: &PathBuf) -> anyhow::Result<Connection> {
     Ok(connection)
 }
 
+fn open_audit_database(path: &PathBuf) -> anyhow::Result<Connection> {
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        std::fs::create_dir_all(parent)?;
+    }
+    let connection = Connection::open(path)?;
+    connection.busy_timeout(Duration::from_secs(30))?;
+    connection.execute_batch("PRAGMA synchronous=FULL;")?;
+    Ok(connection)
+}
+
 pub async fn initialize() -> anyhow::Result<()> {
     let path = database_path();
     tokio::task::spawn_blocking(move || {
         let connection = Connection::open(&path)?;
         connection.busy_timeout(Duration::from_secs(5))?;
-        initialize_schema(&connection)
+        initialize_schema(&connection)?;
+        let audit = open_audit_database(&audit_database_path())?;
+        initialize_audit_schema(&audit)
     })
     .await
     .map_err(|error| anyhow::anyhow!("daily summary initialization failed: {error}"))?
@@ -741,13 +787,6 @@ fn initialize_schema(connection: &Connection) -> anyhow::Result<()> {
          CREATE TABLE IF NOT EXISTS signal_daily_summary_runs (
            day_start_ms INTEGER PRIMARY KEY,
            summarized_at_ms INTEGER NOT NULL
-         );
-         CREATE TABLE IF NOT EXISTS auto_trader_audit_daily_summary (
-           day_start_ms INTEGER NOT NULL,
-           stage TEXT NOT NULL,
-           symbol TEXT NOT NULL,
-           record_count INTEGER NOT NULL,
-           PRIMARY KEY(day_start_ms, stage, symbol)
          );"#,
     )?;
     let columns = {
@@ -762,6 +801,31 @@ fn initialize_schema(connection: &Connection) -> anyhow::Result<()> {
             [],
         )?;
     }
+    Ok(())
+}
+
+fn initialize_audit_schema(connection: &Connection) -> anyhow::Result<()> {
+    connection.execute_batch(
+        "PRAGMA journal_mode=WAL;
+         PRAGMA synchronous=FULL;
+         CREATE TABLE IF NOT EXISTS auto_trader_audit (
+           decision_id TEXT NOT NULL,
+           stage TEXT NOT NULL,
+           timestamp INTEGER NOT NULL,
+           symbol TEXT,
+           payload BLOB NOT NULL,
+           PRIMARY KEY(decision_id, stage)
+         );
+         CREATE INDEX IF NOT EXISTS auto_trader_audit_timestamp ON auto_trader_audit(timestamp);
+         CREATE INDEX IF NOT EXISTS auto_trader_audit_stage_timestamp ON auto_trader_audit(stage, timestamp DESC);
+         CREATE TABLE IF NOT EXISTS auto_trader_audit_daily_summary (
+           day_start_ms INTEGER NOT NULL,
+           stage TEXT NOT NULL,
+           symbol TEXT NOT NULL,
+           record_count INTEGER NOT NULL,
+           PRIMARY KEY(day_start_ms, stage, symbol)
+         );",
+    )?;
     Ok(())
 }
 

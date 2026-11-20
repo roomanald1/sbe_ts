@@ -120,12 +120,22 @@ impl MarketData {
                                 })
                             })
                         });
-                        while let Some(Ok(bytes)) = stream.next().await {
-                            if let Some(book) = decode_book(&bytes) {
-                                data.books
-                                    .write()
-                                    .unwrap_or_else(|p| p.into_inner())
-                                    .insert(symbol.clone(), Arc::new(book));
+                        while let Some(item) = stream.next().await {
+                            match item {
+                                Ok(bytes) => {
+                                    if let Some(book) = decode_book(&bytes) {
+                                        data.books
+                                            .write()
+                                            .unwrap_or_else(|p| p.into_inner())
+                                            .insert(symbol.clone(), Arc::new(book));
+                                    }
+                                }
+                                Err(error) => {
+                                    eprintln!(
+                                        "Paper Exchange book stream failed for {symbol}: {error:#}"
+                                    );
+                                    break;
+                                }
                             }
                         }
                         data.invalidate_client(&client).await;

@@ -67,7 +67,7 @@ export async function connectLearningRSocket() {
     (import.meta.env.DEV ||
     (typeof window !== 'undefined' &&
       ['localhost', '127.0.0.1'].includes(window.location.hostname))
-      ? 'ws://localhost:10010'
+      ? 'ws://localhost:10110'
       : 'wss://sbe-ts.onrender.com');
   const websocketModule = WebSocketClient as unknown as {
     default: { default: typeof WebSocketClient.default };

@@ -28,6 +28,8 @@ export type LearningDecision = {
     status?: string;
     reason?: string | null;
     entry?: Record<string, unknown> | null;
+    execution_gate?: Record<string, unknown> | null;
+    gate_path?: Array<Record<string, unknown>>;
   };
   entry_gate?: {
     selection_mode?: string;

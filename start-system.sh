@@ -34,4 +34,4 @@ if [[ ${#services[@]} -eq 0 ]]; then
 else
   docker compose "${compose_args[@]}" up -d --wait --wait-timeout "$start_timeout" "${services[@]}"
 fi
-echo "System services are healthy. App: http://localhost:5173"
+echo "System services are healthy. App: http://localhost:5174"

@@ -4,19 +4,10 @@ pub async fn serve() -> Result<()> {
         .into_iter()
         .map(Arc::<str>::from)
         .collect::<Vec<_>>();
-    let all_spot_instruments = match get_all_spot_instruments().await {
-        Ok(symbols) => symbols,
-        Err(error) => {
-            crate::service_log!("ERROR", 
-                "Unable to load full spot instrument lookup: {error:#}; using top ticker symbols"
-            );
-            instrument_data.iter().map(ToString::to_string).collect()
-        }
-    };
     let instrument_lookup = Arc::new(
-        all_spot_instruments
-            .into_iter()
-            .map(Arc::<str>::from)
+        strategy::autotrader_allowed_symbols()
+            .iter()
+            .map(|symbol| Arc::<str>::from(*symbol))
             .collect::<HashSet<_>>(),
     );
     let (price_updates, _) = broadcast::channel::<Bytes>(PRICE_UPDATE_CAPACITY);

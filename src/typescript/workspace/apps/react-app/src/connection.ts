@@ -56,7 +56,7 @@ export class Connection {
     (import.meta.env.DEV ||
     (typeof window !== 'undefined' &&
       ['localhost', '127.0.0.1'].includes(window.location.hostname))
-      ? 'ws://localhost:10001'
+      ? 'ws://localhost:10101'
       : 'wss://sbe-ts.onrender.com');
   private cancelled: boolean = false;
   private lifecycleGeneration = 0;
@@ -271,7 +271,7 @@ export class Connection {
       (import.meta.env.DEV ||
       (typeof window !== 'undefined' &&
         ['localhost', '127.0.0.1'].includes(window.location.hostname))
-        ? 'ws://localhost:10004'
+        ? 'ws://localhost:10104'
         : 'wss://sbe-ts.onrender.com');
     try {
       const client = await this.createClientForUrl(url);

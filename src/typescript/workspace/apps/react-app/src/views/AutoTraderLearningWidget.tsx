@@ -341,6 +341,9 @@ export function AutoTraderLearningWidget({
 }) {
   const model = useMemo(() => new AutoTraderLearningWidgetModel(), []);
   const [symbolFilter, setSymbolFilter] = useState('');
+  const [selectedMode, setSelectedMode] = useState<
+    'all' | 'strict' | 'exploratory'
+  >('all');
   const [selectedDecision, setSelectedDecision] = useState<LearningDecision>();
   useEffect(() => {
     model.start();
@@ -369,6 +372,11 @@ export function AutoTraderLearningWidget({
     .filter(
       (decision) =>
         (decision.timestamp ?? 0) >= recentDecisionCutoff &&
+        (selectedMode === 'all' ||
+          (decision.status === 'selected' &&
+            (selectedMode === 'exploratory'
+              ? decision.entry_gate?.selection_mode === 'exploratory'
+              : decision.entry_gate?.selection_mode !== 'exploratory'))) &&
         (!symbolFilter ||
           decision.symbol
             ?.toUpperCase()
@@ -398,6 +406,30 @@ export function AutoTraderLearningWidget({
                 placeholder="All symbols"
               />
             </label>
+            <div
+              className="auto-trader-decision-filter-group"
+              role="radiogroup"
+              aria-label="Decision status filter"
+            >
+              {(
+                [
+                  ['all', 'All'],
+                  ['strict', 'Selected strict'],
+                  ['exploratory', 'Selected exploratory'],
+                ] as const
+              ).map(([mode, label]) => (
+                <button
+                  key={mode}
+                  type="button"
+                  role="radio"
+                  aria-checked={selectedMode === mode}
+                  className="auto-trader-decision-filter-button"
+                  onClick={() => setSelectedMode(mode)}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
             <small>
               Last 10 minutes · {filteredDecisions.length} evaluations and
               decisions · open a row's details to inspect recorded evidence

@@ -176,16 +176,7 @@ fn run_database_writer(mut connection: Connection, mut receiver: mpsc::Receiver<
                 }
             }
             let transaction = connection.transaction()?;
-            let rejection_audit_cutoff = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_millis()
-                .saturating_sub(STRATEGY_REJECTION_AUDIT_RETENTION_MS as u128) as i64;
-            transaction.execute(
-                "DELETE FROM auto_trader_audit WHERE stage = 'strategy_rejection' AND timestamp < ?1",
-                [rejection_audit_cutoff],
-            )?;
-            {
+            if !signal_rows.is_empty() {
                 let mut insert = transaction.prepare(
                     "INSERT INTO signal_records(timestamp, kind, payload) VALUES (?1, ?2, ?3)",
                 )?;
@@ -193,7 +184,16 @@ fn run_database_writer(mut connection: Connection, mut receiver: mpsc::Receiver<
                     insert.execute(params![timestamp, kind, payload])?;
                 }
             }
-            {
+            if !audit_rows.is_empty() {
+                let rejection_audit_cutoff = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis()
+                    .saturating_sub(STRATEGY_REJECTION_AUDIT_RETENTION_MS as u128) as i64;
+                transaction.execute(
+                    "DELETE FROM auto_trader_audit WHERE stage = 'strategy_rejection' AND timestamp < ?1",
+                    [rejection_audit_cutoff],
+                )?;
                 let mut insert = transaction.prepare(
                     "INSERT INTO auto_trader_audit(decision_id, stage, timestamp, symbol, payload) VALUES (?1, ?2, ?3, ?4, ?5) ON CONFLICT(decision_id, stage) DO UPDATE SET timestamp=excluded.timestamp, symbol=excluded.symbol, payload=excluded.payload",
                 )?;

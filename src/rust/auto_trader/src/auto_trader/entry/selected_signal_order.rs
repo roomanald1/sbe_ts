@@ -163,6 +163,30 @@ async fn submit_selected_signal(
             "Cannot estimate execution slippage because the order book is unavailable",
         ));
     };
+    // `assess_deep_book` uses infinity when the visible book cannot fill the
+    // planned order. Reject that condition before calculating/formatting the
+    // spread-and-sweep threshold, otherwise the UI reports a misleading
+    // `inf%` execution cost instead of the actual book-capacity failure.
+    if !assessment.impact_bps.is_finite() {
+        return Ok(skipped_for_signal(
+            signal,
+            &format!(
+                "Deep book cannot fill a {} {side} order: available capacity {:.2} USD; minimum order {:.2} USD",
+                signal.symbol,
+                assessment.notional_cap / quote_rate,
+                minimum_book_order
+            ),
+        ));
+    }
+    if assessment.impact_bps > DEEP_BOOK_BAND_BPS {
+        return Ok(skipped_for_signal(
+            signal,
+            &format!(
+                "Deep book cannot support a {} {side} order: estimated impact {:.2} bps exceeds {:.0} bps",
+                signal.symbol, assessment.impact_bps, DEEP_BOOK_BAND_BPS
+            ),
+        ));
+    }
     let spread_bps = (ask - bid) / mid * 10_000.0;
     let strategy_edge = signal.strategy.as_deref().and_then(Strategy::from_name)
         .filter(|kind| !kind.is_dated_carry())
@@ -196,12 +220,6 @@ async fn submit_selected_signal(
         ));
     }
     let deep_book_note = if let Some(assessment) = deep_book {
-        if !assessment.impact_bps.is_finite() || assessment.impact_bps > DEEP_BOOK_BAND_BPS {
-            return Ok(skipped(&format!(
-                "Deep book cannot support a {} {side} order: estimated impact {:.2} bps exceeds {:.0} bps",
-                signal.symbol, assessment.impact_bps, DEEP_BOOK_BAND_BPS
-            )));
-        }
         if !matches!(order_type, AutoOrderType::Vwap | AutoOrderType::Twap) {
             notional = notional.min(assessment.notional_cap / quote_rate);
         }
@@ -314,7 +332,7 @@ async fn submit_selected_signal(
         let order_reservation_started = Instant::now();
         reset_daily_budget(&mut settings);
         let strategy = signal.strategy.as_deref().and_then(Strategy::from_name);
-        if !paper_learning_exploration_active(&settings, now) {
+        if !paper_learning_exploration_active(&settings, now) && !exploratory {
             if let Some(reason) = learned_pause_block_reason(
             &settings,
             strategy,

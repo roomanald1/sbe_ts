@@ -105,6 +105,7 @@ struct SymbolGateHit {
     gate: String,
     count: u64,
     last_detail: String,
+    last_seen_ms: u64,
     distance_to_pass: Option<f64>,
 }
 #[derive(Clone, Copy, Serialize)]
@@ -190,6 +191,7 @@ struct EntryGateCandidateCount {
 struct SymbolGateCount {
     count: u64,
     last_detail: String,
+    last_seen_ms: u64,
     distance_to_pass: Option<f64>,
 }
 #[derive(Clone, Deserialize)]

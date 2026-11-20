@@ -13,7 +13,7 @@ x-strategy-scout-env: &strategy-scout-env
 x-strategy-scout-base: &strategy-scout-base
   image: sbe-system-strategy-worker:local
   pull_policy: never
-  build: { context: .., dockerfile: system/Dockerfile.rust, args: { CRATE: strategy, BIN: strategy, FEATURES: service } }
+  build: { context: .., dockerfile: system/Dockerfile.rust, args: { CRATE: strategy, BIN: strategy, FEATURES: service, SOURCE_REVISION: "${SOURCE_REVISION:-unknown}", SOURCE_DIRTY: "${SOURCE_DIRTY:-unknown}", SOURCE_BUILT_AT: "${SOURCE_BUILT_AT:-unknown}" } }
   profiles: [scout-workers]
   volumes: ["strategy-x-state:/data"]
   depends_on: [learning, insights, auto-trader]
@@ -33,7 +33,7 @@ x-strategy-live-env: &strategy-live-env
 x-strategy-live-base: &strategy-live-base
   image: sbe-system-strategy-worker:local
   pull_policy: never
-  build: { context: .., dockerfile: system/Dockerfile.rust, args: { CRATE: strategy, BIN: strategy, FEATURES: service } }
+  build: { context: .., dockerfile: system/Dockerfile.rust, args: { CRATE: strategy, BIN: strategy, FEATURES: service, SOURCE_REVISION: "${SOURCE_REVISION:-unknown}", SOURCE_DIRTY: "${SOURCE_DIRTY:-unknown}", SOURCE_BUILT_AT: "${SOURCE_BUILT_AT:-unknown}" } }
   restart: unless-stopped
   deploy:
     resources:
@@ -44,59 +44,59 @@ x-strategy-live-base: &strategy-live-base
   healthcheck: { test: ["CMD", "bash", "-c", "</dev/tcp/127.0.0.1/10202"], interval: 10s, timeout: 3s, retries: 5 }
 services:
   feed-handlers:
-    build: { context: .., dockerfile: system/Dockerfile.rust, args: { CRATE: feed_handlers, BIN: feed_handlers } }
+    build: { context: .., dockerfile: system/Dockerfile.rust, args: { CRATE: feed_handlers, BIN: feed_handlers, SOURCE_REVISION: "${SOURCE_REVISION:-unknown}", SOURCE_DIRTY: "${SOURCE_DIRTY:-unknown}", SOURCE_BUILT_AT: "${SOURCE_BUILT_AT:-unknown}" } }
     deploy: { resources: { limits: { memory: "${FEED_HANDLERS_MEMORY_LIMIT:-512M}" } } }
     environment: { SERVICE_LOG_DIR: /var/log/app }
     volumes: ["../logs:/var/log/app"]
-    ports: ["3001:3001", "10001:10001"]
+    ports: ["11001:3001", "10101:10001"]
     restart: unless-stopped
     healthcheck: { test: ["CMD", "bash", "-c", "</dev/tcp/127.0.0.1/3001"], interval: 15s, timeout: 3s, retries: 5 }
   binance-feed:
-    build: { context: .., dockerfile: system/Dockerfile.rust, args: { CRATE: binance_feed, BIN: binance_feed } }
+    build: { context: .., dockerfile: system/Dockerfile.rust, args: { CRATE: binance_feed, BIN: binance_feed, SOURCE_REVISION: "${SOURCE_REVISION:-unknown}", SOURCE_DIRTY: "${SOURCE_DIRTY:-unknown}", SOURCE_BUILT_AT: "${SOURCE_BUILT_AT:-unknown}" } }
     deploy: { resources: { limits: { memory: "${BINANCE_FEED_MEMORY_LIMIT:-256M}" } } }
     environment: { SERVICE_LOG_DIR: /var/log/app, PORT: 3012, RSOCKET_PORT: 10002 }
     volumes: ["../logs:/var/log/app"]
-    ports: ["3012:3012"]
+    ports: ["11012:3012"]
     restart: unless-stopped
     healthcheck: { test: ["CMD", "bash", "-c", "</dev/tcp/127.0.0.1/3012"], interval: 15s, timeout: 3s, retries: 5 }
   position-management:
-    build: { context: .., dockerfile: system/Dockerfile.rust, args: { CRATE: position_management, BIN: position_management } }
+    build: { context: .., dockerfile: system/Dockerfile.rust, args: { CRATE: position_management, BIN: position_management, SOURCE_REVISION: "${SOURCE_REVISION:-unknown}", SOURCE_DIRTY: "${SOURCE_DIRTY:-unknown}", SOURCE_BUILT_AT: "${SOURCE_BUILT_AT:-unknown}" } }
     deploy: { resources: { limits: { memory: "${POSITION_MANAGEMENT_MEMORY_LIMIT:-8G}" } } }
     environment: { SERVICE_LOG_DIR: /var/log/app, FEED_HANDLERS_RSOCKET_URL: ws://feed-handlers:10001, PAPER_EXCHANGE_RSOCKET_URL: ws://paper-exchange:10006, POSITION_MANAGEMENT_RSOCKET_PORT: 10005, POSITIONS_FILE: /data/positions.json }
     volumes: ["../logs:/var/log/app", "position-management-data:/data"]
-    ports: ["3002:3002", "10005:10005"]
+    ports: ["11002:3002", "10105:10005"]
     restart: unless-stopped
     healthcheck: { test: ["CMD", "bash", "-c", "</dev/tcp/127.0.0.1/3002"], interval: 15s, timeout: 3s, retries: 5 }
     depends_on:
       paper-exchange: { condition: service_healthy }
   paper-exchange:
-    build: { context: .., dockerfile: system/Dockerfile.rust, args: { CRATE: paper_exchange, BIN: paper_exchange } }
+    build: { context: .., dockerfile: system/Dockerfile.rust, args: { CRATE: paper_exchange, BIN: paper_exchange, SOURCE_REVISION: "${SOURCE_REVISION:-unknown}", SOURCE_DIRTY: "${SOURCE_DIRTY:-unknown}", SOURCE_BUILT_AT: "${SOURCE_BUILT_AT:-unknown}" } }
     deploy: { resources: { limits: { memory: "${PAPER_EXCHANGE_MEMORY_LIMIT:-256M}" } } }
     environment: { SERVICE_LOG_DIR: /var/log/app, FEED_HANDLERS_RSOCKET_URL: ws://feed-handlers:10001, POSITION_MANAGEMENT_RSOCKET_URL: ws://position-management:10005, PAPER_EXCHANGE_RSOCKET_PORT: 10006 }
     volumes: ["../logs:/var/log/app"]
-    ports: ["3003:3003", "10006:10006"]
+    ports: ["11003:3003", "10106:10006"]
     restart: unless-stopped
     healthcheck: { test: ["CMD", "bash", "-c", "</dev/tcp/127.0.0.1/3003"], interval: 15s, timeout: 3s, retries: 5 }
     depends_on:
       feed-handlers: { condition: service_healthy }
   insights:
-    build: { context: .., dockerfile: system/Dockerfile.rust, args: { CRATE: insights, BIN: insights } }
+    build: { context: .., dockerfile: system/Dockerfile.rust, args: { CRATE: insights, BIN: insights, SOURCE_REVISION: "${SOURCE_REVISION:-unknown}", SOURCE_DIRTY: "${SOURCE_DIRTY:-unknown}", SOURCE_BUILT_AT: "${SOURCE_BUILT_AT:-unknown}" } }
     deploy: { resources: { limits: { memory: "${INSIGHTS_MEMORY_LIMIT:-4G}" } } }
     environment: { SERVICE_LOG_DIR: /var/log/app, MALLOC_ARENA_MAX: "${INSIGHTS_MALLOC_ARENA_MAX:-4}", BINANCE_FEED_RSOCKET_URL: ws://binance-feed:10002, FEED_HANDLERS_RSOCKET_URL: ws://feed-handlers:10001, POSITION_MANAGEMENT_RSOCKET_URL: ws://position-management:10005, PAPER_EXCHANGE_RSOCKET_URL: ws://paper-exchange:10006, AUTO_TRADER_RSOCKET_URL: ws://auto-trader:10006, INSIGHTS_RPC_RSOCKET_PORT: 10007, INSIGHTS_BROWSER_RSOCKET_PORT: 10011, NEWS_SENTIMENT_RSOCKET_URL: ws://news-sentiment:10012/rsocket, LEARNING_RSOCKET_URL: ws://learning:10010, SIGNALS_FILE: /data/signals.jsonl }
     volumes: ["../logs:/var/log/app", "insights-data:/data"]
     depends_on: [binance-feed, news-sentiment, paper-exchange]
-    ports: ["3004:3004", "10004:10004", "10011:10011"]
+    ports: ["11004:3004", "10104:10004", "10111:10011"]
     restart: unless-stopped
     healthcheck: { test: ["CMD", "bash", "-c", "</dev/tcp/127.0.0.1/3004"], interval: 15s, timeout: 3s, retries: 5, start_period: 5m }
   insights-maintenance:
-    build: { context: .., dockerfile: system/Dockerfile.rust, args: { CRATE: insights, BIN: insights-maintenance } }
+    build: { context: .., dockerfile: system/Dockerfile.rust, args: { CRATE: insights, BIN: insights-maintenance, SOURCE_REVISION: "${SOURCE_REVISION:-unknown}", SOURCE_DIRTY: "${SOURCE_DIRTY:-unknown}", SOURCE_BUILT_AT: "${SOURCE_BUILT_AT:-unknown}" } }
     deploy: { resources: { limits: { memory: "${INSIGHTS_MAINTENANCE_MEMORY_LIMIT:-256M}" } } }
     environment: { SERVICE_LOG_DIR: /var/log/app, SIGNALS_FILE: /data/signals.jsonl }
     volumes: ["../logs:/var/log/app", "insights-data:/data"]
     depends_on: { insights: { condition: service_healthy } }
     restart: unless-stopped
   auto-trader:
-    build: { context: .., dockerfile: system/Dockerfile.rust, args: { CRATE: auto_trader, BIN: auto_trader } }
+    build: { context: .., dockerfile: system/Dockerfile.rust, args: { CRATE: auto_trader, BIN: auto_trader, SOURCE_REVISION: "${SOURCE_REVISION:-unknown}", SOURCE_DIRTY: "${SOURCE_DIRTY:-unknown}", SOURCE_BUILT_AT: "${SOURCE_BUILT_AT:-unknown}" } }
     deploy: { resources: { limits: { memory: "${AUTO_TRADER_MEMORY_LIMIT:-3G}" } } }
     environment: { SERVICE_LOG_DIR: /var/log/app, MALLOC_ARENA_MAX: "4", AUTO_TRADER_RSOCKET_PORT: 10006, AUTO_TRADER_LIVE_CONTEXT_REFRESH_SECONDS: "${AUTO_TRADER_LIVE_CONTEXT_REFRESH_SECONDS:-30}", AUTO_TRADER_MAX_PENDING_LIVE_SIGNAL_ITEMS: "${AUTO_TRADER_MAX_PENDING_LIVE_SIGNAL_ITEMS:-256}", POSITION_MANAGEMENT_RSOCKET_URL: ws://position-management:10005, PAPER_EXCHANGE_RSOCKET_URL: ws://paper-exchange:10006, INSIGHTS_RPC_RSOCKET_URL: ws://insights:10007, INSIGHTS_BROWSER_RSOCKET_URL: ws://insights:10011, LEARNING_RSOCKET_URL: ws://learning:10010, AUTO_TRADER_STATE_FILE: /data/auto_trader_state.json }
     volumes: ["../logs:/var/log/app", "position-management-data:/data"]
@@ -121,7 +121,7 @@ services:
       strategy-live-risk-adjusted-monthly-momentum: { condition: service_healthy }
       strategy-live-rsi2-oversold-rebound: { condition: service_healthy }
       strategy-live-dated-futures-carry: { condition: service_healthy }
-    ports: ["3005:3005", "10008:10006"]
+    ports: ["11005:3005", "10009:10006"]
     restart: unless-stopped
     healthcheck: { test: ["CMD", "bash", "-c", "</dev/tcp/127.0.0.1/3005"], interval: 15s, timeout: 3s, retries: 5 }
   news-sentiment:
@@ -129,11 +129,11 @@ services:
     deploy: { resources: { limits: { memory: "${NEWS_SENTIMENT_MEMORY_LIMIT:-512M}" } } }
     environment: { NEWS_SENTIMENT_HOST: 0.0.0.0, NEWS_SENTIMENT_OPS_PORT: 3006, NEWS_SENTIMENT_RSOCKET_PORT: 10012, HF_HOME: /models }
     volumes: ["news-models:/models"]
-    ports: ["3006:3006"]
+    ports: ["11006:3006"]
     restart: unless-stopped
     healthcheck: { test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:3006/health')"], interval: 30s, timeout: 5s, retries: 5, start_period: 120s }
   learning:
-    build: { context: .., dockerfile: system/Dockerfile.rust, args: { CRATE: learning, BIN: learning } }
+    build: { context: .., dockerfile: system/Dockerfile.rust, args: { CRATE: learning, BIN: learning, SOURCE_REVISION: "${SOURCE_REVISION:-unknown}", SOURCE_DIRTY: "${SOURCE_DIRTY:-unknown}", SOURCE_BUILT_AT: "${SOURCE_BUILT_AT:-unknown}" } }
     deploy: { resources: { limits: { memory: "${LEARNING_MEMORY_LIMIT:-10G}" } } }
     environment:
       LEARNING_LISTEN_ADDR: 0.0.0.0:3010
@@ -146,9 +146,10 @@ services:
       SCOUT_COORDINATOR_MAX_ASSIGNMENTS: ${SCOUT_COORDINATOR_MAX_ASSIGNMENTS:-512}
       SCOUT_COORDINATOR_MAX_BATCH_BYTES: ${SCOUT_COORDINATOR_MAX_BATCH_BYTES:-8388608}
       SCOUT_COORDINATOR_WORKER_TIMEOUT_MS: ${SCOUT_COORDINATOR_WORKER_TIMEOUT_MS:-10000}
-      SCOUT_WORKER_ENDPOINTS: "live-momentum=ws://strategy-scout-live-momentum:10200;live-trade-flow=ws://strategy-scout-live-trade-flow:10200;live-order-book=ws://strategy-scout-live-order-book:10200;live-vwap-dislocation=ws://strategy-scout-live-vwap-dislocation:10200;live-absorption-pressure=ws://strategy-scout-live-absorption-pressure:10200;donchian-55-btc200=ws://strategy-scout-donchian-55-btc200:10200;donchian-20-sma200=ws://strategy-scout-donchian-20-sma200:10200;donchian-20-btc200=ws://strategy-scout-donchian-20-btc200:10200;donchian-10-btc200=ws://strategy-scout-donchian-10-btc200:10200;donchian-20-btc200-hold3=ws://strategy-scout-donchian-20-btc200-hold3:10200;risk-adjusted-trend-portfolio=ws://strategy-scout-risk-adjusted-trend-portfolio:10200;trend-sleeves-btc200=ws://strategy-scout-trend-sleeves-btc200:10200;trend-50-200=ws://strategy-scout-trend-50-200:10200;relative-strength-90-sma200=ws://strategy-scout-relative-strength-90-sma200:10200;risk-adjusted-monthly-momentum=ws://strategy-scout-risk-adjusted-monthly-momentum:10200;rsi2-oversold-rebound=ws://strategy-scout-rsi2-oversold-rebound:10200;dated-futures-carry=ws://strategy-scout-dated-futures-carry:10200"
+      SCOUT_COORDINATOR_OUTCOMES_WORKER_TIMEOUT_MS: ${SCOUT_COORDINATOR_OUTCOMES_WORKER_TIMEOUT_MS:-60000}
+      SCOUT_WORKER_ENDPOINTS: "${SCOUT_WORKER_ENDPOINTS:-live-momentum=ws://strategy-scout-live-momentum:10200;live-trade-flow=ws://strategy-scout-live-trade-flow:10200;live-order-book=ws://strategy-scout-live-order-book:10200;live-vwap-dislocation=ws://strategy-scout-live-vwap-dislocation:10200;live-absorption-pressure=ws://strategy-scout-live-absorption-pressure:10200;donchian-55-btc200=ws://strategy-scout-donchian-55-btc200:10200;donchian-20-sma200=ws://strategy-scout-donchian-20-sma200:10200;donchian-20-btc200=ws://strategy-scout-donchian-20-btc200:10200;donchian-10-btc200=ws://strategy-scout-donchian-10-btc200:10200;donchian-20-btc200-hold3=ws://strategy-scout-donchian-20-btc200-hold3:10200;risk-adjusted-trend-portfolio=ws://strategy-scout-risk-adjusted-trend-portfolio:10200;trend-sleeves-btc200=ws://strategy-scout-trend-sleeves-btc200:10200;trend-50-200=ws://strategy-scout-trend-50-200:10200;relative-strength-90-sma200=ws://strategy-scout-relative-strength-90-sma200:10200;risk-adjusted-monthly-momentum=ws://strategy-scout-risk-adjusted-monthly-momentum:10200;rsi2-oversold-rebound=ws://strategy-scout-rsi2-oversold-rebound:10200;dated-futures-carry=ws://strategy-scout-dated-futures-carry:10200}"
     volumes: ["learning-data:/data"]
-    ports: ["3010:3010", "10010:10010"]
+    ports: ["11010:3010", "10110:10010"]
     restart: unless-stopped
     healthcheck: { test: ["CMD", "bash", "-c", "</dev/tcp/127.0.0.1/3010"], interval: 15s, timeout: 3s, retries: 5 }
   strategy-live-momentum:
@@ -263,14 +264,14 @@ services:
       - /app/apps/react-app/node_modules
     environment:
       NODE_OPTIONS: --max-old-space-size=768
-      VITE_RSOCKET_URL: ws://localhost:10001
-      VITE_INSIGHTS_RSOCKET_URL: ws://localhost:10004
-      VITE_INSIGHTS_BROWSER_RSOCKET_URL: ws://localhost:10011
-      VITE_POSITION_RSOCKET_URL: ws://localhost:10005
-      VITE_PAPER_EXCHANGE_RSOCKET_URL: ws://localhost:10006
-      VITE_AUTO_TRADER_RSOCKET_URL: ws://localhost:10008
-      VITE_LEARNING_RSOCKET_URL: ws://localhost:10010
-    ports: ["5173:5173"]
+      VITE_RSOCKET_URL: ws://localhost:5174/__rsocket/feed
+      VITE_INSIGHTS_RSOCKET_URL: ws://localhost:5174/__rsocket/insights-rpc
+      VITE_INSIGHTS_BROWSER_RSOCKET_URL: ws://localhost:5174/__rsocket/insights-browser
+      VITE_POSITION_RSOCKET_URL: ws://localhost:5174/__rsocket/position
+      VITE_PAPER_EXCHANGE_RSOCKET_URL: ws://localhost:5174/__rsocket/paper-exchange
+      VITE_AUTO_TRADER_RSOCKET_URL: ws://localhost:5174/__rsocket/auto-trader
+      VITE_LEARNING_RSOCKET_URL: ws://localhost:5174/__rsocket/learning
+    ports: ["5174:5173"]
     restart: unless-stopped
 volumes:
   news-models:

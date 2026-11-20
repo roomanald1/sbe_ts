@@ -3,6 +3,10 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$ROOT"
 export REPO_ROOT="$ROOT"
+export SOURCE_REVISION="$(git rev-parse HEAD)"
+if [[ -n "$(git status --porcelain)" ]]; then SOURCE_DIRTY=true; else SOURCE_DIRTY=false; fi
+export SOURCE_DIRTY
+export SOURCE_BUILT_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
 system_compose_args=(-p sbe-system -f system/compose.yml)
 if [[ "${SCOUT_WORKERS_ENABLED:-true}" == "true" ]]; then
@@ -48,7 +52,7 @@ if [[ -n "$build_output" ]]; then
   mapfile -t build_services <<< "$build_output"
 fi
 if ((${#build_services[@]} > 0)); then
-  docker compose "${system_compose_args[@]}" build --progress quiet "${build_services[@]}"
+  docker compose --progress quiet "${system_compose_args[@]}" build "${build_services[@]}"
 fi
 docker compose "${system_compose_args[@]}" up -d --no-build --force-recreate --no-deps --wait --wait-timeout "$start_timeout" "${services[@]}"
 printf '%s' "$compose_json" | python3 rebuild-service-fingerprints.py record "$state_file" "${services[@]}"

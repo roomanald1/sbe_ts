@@ -1680,6 +1680,11 @@ async fn connect_insights_strategy_stream(
 }
 
 const INSIGHTS_UPDATE_SHARD_COUNT: usize = 32;
+// Insights publishes live snapshots continuously. A quiet stream for this long
+// almost always means the RSocket connection survived an Insights restart but
+// no longer has a live publisher behind it. Break the stream so the outer loop
+// reconnects and receives the server's latest-signal replay.
+const INSIGHTS_STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(10);
 
 fn needs_walk_forward_evidence(
     has_open_position: bool,
@@ -1837,7 +1842,22 @@ async fn run_insights_subscription(worker: Arc<LiveWorker>) -> anyhow::Result<()
                     worker.pending_insight_notifies[shard].notify_one();
                 }
                 loop {
-                    let update = match stream.next().await {
+                    let next_update =
+                        match tokio::time::timeout(INSIGHTS_STREAM_IDLE_TIMEOUT, stream.next())
+                            .await
+                        {
+                            Ok(next_update) => next_update,
+                            Err(_) => {
+                                worker.metrics.set_insights_connected(false);
+                                eprintln!(
+                                    "WARN {} Insights strategy stream idle for {:?}; reconnecting",
+                                    worker.config.strategy.as_str(),
+                                    INSIGHTS_STREAM_IDLE_TIMEOUT
+                                );
+                                break;
+                            }
+                        };
+                    let update = match next_update {
                         Some(Ok(update))
                             if update.contract_version
                                 == crate::STRATEGY_INSIGHT_UPDATE_VERSION =>

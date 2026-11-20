@@ -308,6 +308,8 @@ fn signal_audit_payload(
         "direction": signal.direction,
         "score": signal.score,
         "strength": signal.strength,
+        "signal_strategy_candidate": signal.strategy_candidate,
+        "daily_cold_start_candidate_eligible": is_daily_cold_start_exploration_candidate(signal),
         "strength_size_multiplier": signal_strength_size_multiplier(signal.strength),
         "ranging_probability": signal.ranging_probability,
         "market_context": market_context(signal),
@@ -363,6 +365,41 @@ fn strategy_rejection_audit_payload(
     entry_gate["selection_mode"] = serde_json::json!("strategy_rejection");
     entry_gate["rejection_reasons"] = serde_json::json!([reason]);
     payload["entry_gate"] = entry_gate;
+    if phase == "daily_execution" || phase == "async_submission" {
+        let gate_id = if phase == "daily_execution" {
+            "daily_strategy_execution"
+        } else {
+            "async_order_submission"
+        };
+        payload["execution_gate"] = serde_json::json!({
+            "gate_id": gate_id,
+            "stage": "post_selection_execution",
+            "status": "blocked",
+            "result_status": "rejected",
+            "reason": reason,
+            "evaluated": true,
+            "order_submitted": false,
+            "short_circuited": true,
+            "subsequent_checks": "not_evaluated_after_block",
+        });
+        payload["gate_path"] = serde_json::json!([
+            {
+                "stage": "candidate_selection",
+                "status": "selected",
+                "selection_mode": signal.entry_gate.as_ref().and_then(|gate| gate.get("selection_mode")),
+                "gate": signal.entry_gate.as_ref(),
+            },
+            {
+                "stage": "execution",
+                "status": "blocked",
+                "gate_id": gate_id,
+                "reason": reason,
+                "evaluated": true,
+                "short_circuited": true,
+                "subsequent_checks": "not_evaluated_after_block",
+            }
+        ]);
+    }
     payload
 }
 

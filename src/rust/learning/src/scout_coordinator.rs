@@ -31,7 +31,10 @@ const DEFAULT_MAX_SCOUT_ASSIGNMENTS: usize = 512;
 const DEFAULT_MAX_SCOUT_BATCH_BYTES: usize = 8 * 1024 * 1024;
 const PROFILE_SNAPSHOT_PUBLISH_INTERVAL: Duration = Duration::from_secs(120);
 const DEFAULT_WORKER_TIMEOUT_MS: usize = 3_000;
-const DEFAULT_REPLAY_WORKER_TIMEOUT_MS: usize = 30_000;
+const DEFAULT_OUTCOMES_WORKER_TIMEOUT_MS: usize = 60_000;
+// Replay reads walk durable per-worker SQLite history and can be much slower
+// than the small live coordinator routes, especially during concurrent scans.
+const DEFAULT_REPLAY_WORKER_TIMEOUT_MS: usize = 120_000;
 const MAX_REPLAY_TOTAL_SIGNALS: usize = 10_000;
 const MAX_REPLAY_TOTAL_PAGES: usize = 128;
 const MAX_REPLAY_TOTAL_RECORDS_SCANNED: usize = 524_288;
@@ -492,6 +495,7 @@ pub struct ScoutCoordinator {
     max_assignments: usize,
     max_batch_bytes: usize,
     worker_timeout: Duration,
+    outcomes_worker_timeout: Duration,
     replay_worker_timeout: Duration,
     enabled: bool,
     insights_rsocket_url: String,
@@ -531,6 +535,10 @@ impl ScoutCoordinator {
             worker_timeout: Duration::from_millis(env_limit(
                 "SCOUT_COORDINATOR_WORKER_TIMEOUT_MS",
                 DEFAULT_WORKER_TIMEOUT_MS,
+            )? as u64),
+            outcomes_worker_timeout: Duration::from_millis(env_limit(
+                "SCOUT_COORDINATOR_OUTCOMES_WORKER_TIMEOUT_MS",
+                DEFAULT_OUTCOMES_WORKER_TIMEOUT_MS,
             )? as u64),
             replay_worker_timeout: Duration::from_millis(env_limit(
                 "LEARNING_REPLAY_WORKER_TIMEOUT_MS",
@@ -1561,12 +1569,20 @@ impl ScoutCoordinator {
                 body: serde_json::Value::Null,
             });
         }
-        let replay_route = matches!(
+        let parallel_route = matches!(
             command.path.split('?').next(),
-            Some("/replay/outcomes" | "/replay/searches")
+            Some("/outcomes" | "/replay/outcomes" | "/replay/searches")
         );
-        if replay_route {
+        if parallel_route {
             let coordinator = self.clone();
+            let route_path = command.path.split('?').next();
+            let timeout = if matches!(route_path, Some("/replay/outcomes" | "/replay/searches")) {
+                self.replay_worker_timeout
+            } else if route_path == Some("/outcomes") {
+                self.outcomes_worker_timeout
+            } else {
+                self.worker_timeout
+            };
             let results = futures_util::future::join_all(targets.into_iter().map(|strategy| {
                 let coordinator = coordinator.clone();
                 let endpoint = self.worker_endpoints.get(strategy.as_str()).cloned();
@@ -1588,7 +1604,7 @@ impl ScoutCoordinator {
                                         path,
                                         payload,
                                     },
-                                    coordinator.replay_worker_timeout,
+                                    timeout,
                                 )
                                 .await
                         }

@@ -56,6 +56,7 @@ const entryEvaluationReason = (
   evaluation:
     | {
         reason?: string;
+        timestamp?: number;
         decision: {
           btc_gate_required?: boolean;
           btc_gate_passed?: boolean | null;
@@ -75,10 +76,14 @@ const entryEvaluationReason = (
   fallbackReason?: string,
 ) => {
   if (!evaluation) return fallbackReason ?? 'No blocker recorded';
-  if (evaluation.reason?.trim()) return evaluation.reason;
+  const withAge = (reason: string) =>
+    `${reason} · ${reasonAge(evaluation.timestamp)}`;
+  if (evaluation.reason?.trim()) return withAge(evaluation.reason);
   const decision = evaluation.decision;
   if (decision.btc_gate_required && decision.btc_gate_passed === false)
-    return `BTC trend gate not passed${decision.btc_window_days ? ` (SMA${decision.btc_window_days})` : ''}`;
+    return withAge(
+      `BTC trend gate not passed${decision.btc_window_days ? ` (SMA${decision.btc_window_days})` : ''}`,
+    );
   if (decision.primary_passed === false && decision.primary_rule) {
     const isRelativeStrength = /return vs eligible assets/i.test(
       decision.primary_rule,
@@ -99,11 +104,15 @@ const entryEvaluationReason = (
           ? `; gap ${decision.primary_distance_percent.toFixed(2)} pp`
           : `; distance ${decision.primary_distance_percent.toFixed(2)}%`
         : '';
-    return `${decision.primary_rule} not met (${observed}${required}${distance})`;
+    return withAge(
+      `${decision.primary_rule} not met (${observed}${required}${distance})`,
+    );
   }
   if (decision.secondary_passed === false)
-    return `${decision.secondary_rule ?? 'Secondary rule'} not met${typeof decision.secondary_distance_percent === 'number' ? ` (distance ${decision.secondary_distance_percent.toFixed(2)}%)` : ''}`;
-  return 'No rejection recorded in the latest symbol evaluation';
+    return withAge(
+      `${decision.secondary_rule ?? 'Secondary rule'} not met${typeof decision.secondary_distance_percent === 'number' ? ` (distance ${decision.secondary_distance_percent.toFixed(2)}%)` : ''}`,
+    );
+  return withAge('No rejection recorded in the latest symbol evaluation');
 };
 const usd = new Intl.NumberFormat(undefined, {
   style: 'currency',
@@ -896,8 +905,8 @@ export function AutoTraderStrategyPerformanceWidget() {
               )[0];
             const symbolBlockers = settings.symbolGateHits
               .filter((hit) => hit.symbol === profile.symbol)
-              .sort((a, b) => b.count - a.count)
-              .slice(0, 2);
+              .sort((a, b) => (b.last_seen_ms ?? 0) - (a.last_seen_ms ?? 0))
+              .slice(0, 1);
             const workerReason = workerResult
               ? workerResult.reason ||
                 (workerResult.decision
@@ -1067,7 +1076,12 @@ export function AutoTraderStrategyPerformanceWidget() {
           }
           const label = strategyLabel(data.strategy);
           if (!entryProfilesByStrategyRef.current.get(data.strategy)?.length)
-            return label;
+            return (
+              <span className="auto-trader-strategy-label">
+                <span aria-hidden="true" />
+                {label}
+              </span>
+            );
           const expanded = expandedEntryStrategiesRef.current.has(
             data.strategy,
           );

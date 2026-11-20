@@ -1,10 +1,12 @@
 import { BehaviorSubject } from 'rxjs';
-import { learningRpc } from '../learning_rsocket';
+import { scoutWorkerRpc } from '../learning_rsocket';
 
 export type AutoTraderScoutPosition = {
   decisionId: string;
   symbol: string;
   strategy: string;
+  profileSymbol?: string;
+  strategyParameters?: Record<string, unknown>;
   source: 'Scout';
   scoutLevelPercent?: number;
   scoutParameterKey?: string;
@@ -296,7 +298,7 @@ export class AutoTraderScoutModel {
         sort_by: filters.sortBy,
         sort_direction: filters.sortDirection,
       });
-      const response = await learningRpc(
+      const response = await scoutWorkerRpc(
         'GET',
         '/outcomes?' + query.toString(),
       );

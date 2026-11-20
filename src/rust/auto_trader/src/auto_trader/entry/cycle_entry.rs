@@ -310,6 +310,131 @@ async fn submit_cycle_signal(
     cycle_started_at: Instant,
     now: u64,
 ) -> Result<CycleResult, (StatusCode, String)> {
+    let daily_rule_checks = daily_cold_start_exploration_checks(signal);
+    let daily_strategy_classification = signal
+        .strategy
+        .as_deref()
+        .and_then(Strategy::from_name)
+        .is_some_and(|kind| !kind.is_live_insight() && !kind.is_dated_carry());
+    // Daily candidates with an eligible strategy rule but no walk-forward
+    // sample are the bounded paper cold-start path. Keep this contract explicit
+    // at the execution handoff, even if the signal entered the cycle through a
+    // different upstream selection path.
+    let daily_cold_start = daily_strategy_classification
+        && daily_rule_checks.0
+        && daily_rule_checks.1
+        && !daily_rule_checks.2
+        || is_daily_cold_start_exploration_candidate(signal);
+    let daily_cold_start = !exploratory && daily_cold_start;
+    eprintln!(
+        "COLD_START_TRACE strategy={:?} candidate={} exploratory_input={} daily_classification={} parameter_probe={} rule_checks={:?} cold_start={}",
+        signal.strategy,
+        signal.strategy_candidate,
+        exploratory,
+        signal
+            .strategy
+            .as_deref()
+            .and_then(Strategy::from_name)
+            .is_some_and(|kind| !kind.is_live_insight() && !kind.is_dated_carry()),
+        is_daily_parameter_exploration_probe(signal),
+        daily_rule_checks,
+        daily_cold_start,
+    );
+    if signal
+        .strategy
+        .as_deref()
+        .is_some_and(|strategy| strategy.contains("monthly"))
+    {
+        let (rule_evidence_available, rule_evidence_eligible, walk_forward_present) =
+            daily_cold_start_exploration_checks(signal);
+        let decision = signal.strategy_decision.as_ref();
+        let walk_forward_samples = decision
+            .and_then(|decision| decision.get("strategy_walk_forward"))
+            .and_then(|evidence| evidence.get("sampleCount"))
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or_default();
+        let required_samples = decision
+            .and_then(|decision| decision.get("strategy_parameters"))
+            .and_then(|parameters| parameters.get("scout_minimum_walk_forward_samples"))
+            .and_then(serde_json::Value::as_f64)
+            .unwrap_or(1.0);
+        crate::service_log!(
+            "INFO",
+            "Daily cold-start trace: strategy_candidate={} parameter_probe={} rule_evidence_available={} rule_evidence_eligible={} walk_forward_present={} walk_forward_samples={} required_samples={} exploratory_input={} cold_start={}",
+            signal.strategy_candidate,
+            is_daily_parameter_exploration_probe(signal),
+            rule_evidence_available,
+            rule_evidence_eligible,
+            walk_forward_present,
+            walk_forward_samples,
+            required_samples,
+            exploratory,
+            daily_cold_start,
+        );
+    }
+    let mut selected_signal = signal.clone();
+    if daily_cold_start {
+        let gate = selected_signal
+            .entry_gate
+            .get_or_insert_with(|| serde_json::json!({}));
+        if let Some(gate) = gate.as_object_mut() {
+            gate.insert(
+                "selection_mode".into(),
+                serde_json::json!("daily_strategy_cold_start_exploration"),
+            );
+            gate.insert("exploratory".into(), serde_json::json!(true));
+            let checks = gate
+                .entry("checks")
+                .or_insert_with(|| serde_json::json!({}));
+            if let Some(checks) = checks.as_object_mut() {
+                checks.insert("cold_start_exploration_pass".into(), serde_json::json!(true));
+            }
+        }
+    }
+    if daily_strategy_classification {
+        let (rule_evidence_available, rule_evidence_eligible, walk_forward_present) =
+            daily_cold_start_exploration_checks(signal);
+        let gate = selected_signal
+            .entry_gate
+            .get_or_insert_with(|| serde_json::json!({}));
+        if let Some(gate) = gate.as_object_mut() {
+            let checks = gate
+                .entry("checks")
+                .or_insert_with(|| serde_json::json!({}));
+            if let Some(checks) = checks.as_object_mut() {
+                checks.insert(
+                    "daily_rule_evidence_available".into(),
+                    serde_json::json!(rule_evidence_available),
+                );
+                checks.insert(
+                    "daily_rule_evidence_eligible".into(),
+                    serde_json::json!(rule_evidence_eligible),
+                );
+                checks.insert(
+                    "strategy_walk_forward_evidence_present".into(),
+                    serde_json::json!(walk_forward_present),
+                );
+                checks.insert(
+                    "cold_start_exploration_pass".into(),
+                    serde_json::json!(daily_cold_start),
+                );
+                checks.insert(
+                    "daily_strategy_classification_pass".into(),
+                    serde_json::json!(daily_strategy_classification),
+                );
+                checks.insert(
+                    "strategy_candidate_flag".into(),
+                    serde_json::json!(signal.strategy_candidate),
+                );
+                checks.insert(
+                    "daily_parameter_probe".into(),
+                    serde_json::json!(is_daily_parameter_exploration_probe(signal)),
+                );
+            }
+        }
+    }
+    let signal = &selected_signal;
+    let exploratory = exploratory || daily_cold_start;
     if state.audit_health.load(Ordering::Relaxed) != 3
         || state.audit_failure_latched.load(Ordering::Relaxed)
     {
@@ -390,6 +515,7 @@ fn selected_signal_outcome_audit_payload(
         .as_deref()
         .unwrap_or("No order submitted; no reason was provided");
     let strategy = signal.strategy.as_deref().unwrap_or("generic_signal");
+    let gate_id = final_entry_gate_id(reason);
     let mut payload = strategy_rejection_audit_payload(
         signal,
         strategy,
@@ -401,7 +527,61 @@ fn selected_signal_outcome_audit_payload(
     );
     payload["exploratory"] = serde_json::json!(exploratory);
     payload["status"] = serde_json::json!(result.status);
+    if let Some(selection_gate) = signal.entry_gate.clone() {
+        payload["entry_gate"] = selection_gate.clone();
+        payload["gate_path"] = serde_json::json!([
+            {
+                "stage": "candidate_selection",
+                "status": "selected",
+                "selection_mode": selection_gate.get("selection_mode"),
+                "gate": selection_gate,
+            },
+            {
+                "stage": "execution",
+                "status": "blocked",
+                "gate_id": gate_id,
+                "reason": reason,
+                "evaluated": true,
+                "short_circuited": true,
+                "subsequent_checks": "not_evaluated_after_block",
+            }
+        ]);
+    }
+    payload["execution_gate"] = serde_json::json!({
+        "gate_id": gate_id,
+        "stage": "post_selection_execution",
+        "status": "blocked",
+        "result_status": result.status,
+        "reason": reason,
+        "evaluated": true,
+        "order_submitted": false,
+        "short_circuited": true,
+        "subsequent_checks": "not_evaluated_after_block",
+    });
     payload
+}
+
+fn final_entry_gate_id(reason: &str) -> &'static str {
+    let reason = reason.to_ascii_lowercase();
+    if reason.contains("estimated spread, sweep, and fee cost") {
+        "execution_cost_vs_edge"
+    } else if reason.contains("walk_forward") {
+        "walk_forward_evidence"
+    } else if reason.contains("cannot estimate execution slippage") {
+        "order_book_unavailable"
+    } else if reason.contains("deep book") || reason.contains("deep-book") {
+        "deep_book_liquidity"
+    } else if reason.contains("strategy entry paused") {
+        "learned_strategy_pause"
+    } else if reason.contains("daily") || reason.contains("notional") || reason.contains("budget") {
+        "notional_budget"
+    } else if reason.contains("position") || reason.contains("open order") {
+        "position_or_order_limit"
+    } else if reason.contains("stop") || reason.contains("loss") {
+        "protective_risk_limit"
+    } else {
+        "execution_or_risk_gate"
+    }
 }
 
 async fn evaluate_daily_strategy_signals(
@@ -1607,13 +1787,27 @@ async fn run_cycle_inner(
                         }),
                     );
                 }
+                let daily_parameter_probe = is_daily_parameter_exploration_probe(signal);
+                let daily_cold_start = is_daily_cold_start_exploration_candidate(signal);
+                let (daily_rule_evidence_available, daily_rule_evidence_eligible, daily_walk_forward_present) =
+                    daily_cold_start_exploration_checks(signal);
+                let exploratory = daily_parameter_probe || daily_cold_start;
                 sized_signal.entry_gate = Some(serde_json::json!({
-                    "selection_mode": if is_daily_parameter_exploration_probe(signal) {
+                    "selection_mode": if daily_parameter_probe {
                         "daily_strategy_parameter_exploration"
+                    } else if daily_cold_start {
+                        "daily_strategy_cold_start_exploration"
                     } else {
                         "daily_strategy"
                     },
-                    "exploratory": is_daily_parameter_exploration_probe(signal),
+                    "exploratory": exploratory,
+                    "checks": {
+                        "daily_rule_evidence_available": daily_rule_evidence_available,
+                        "daily_rule_evidence_eligible": daily_rule_evidence_eligible,
+                        "strategy_walk_forward_evidence_present": daily_walk_forward_present,
+                        "daily_parameter_probe": daily_parameter_probe,
+                        "cold_start_exploration_pass": daily_cold_start,
+                    },
                     "strategy": strategy_name,
                     "strategy_decision": sized_signal.strategy_decision.clone(),
                 }));
@@ -1621,7 +1815,7 @@ async fn run_cycle_inner(
                     state,
                     &candidate_dashboard,
                     &sized_signal,
-                    is_daily_parameter_exploration_probe(signal),
+                    exploratory,
                     counterfactual_stop_loss_percent,
                     counterfactual_take_profit_percent,
                     signal_selection_ms,
@@ -1633,11 +1827,12 @@ async fn run_cycle_inner(
                 {
                     Ok(result) => result,
                     Err((status, error)) => {
+                        let reason = format!("Execution request failed ({status}): {error}");
                         update_entry_candidate_diagnostic(
                             &mut entry_diagnostic,
                             signal,
                             "execution_failed",
-                            Some(&error),
+                            Some(&reason),
                         );
                         entry_diagnostic.order_attempt_count = entry_diagnostic
                             .order_attempt_count
@@ -1646,6 +1841,16 @@ async fn run_cycle_inner(
                             .rejected_candidate_count
                             .saturating_add(1);
                         details.push(format!("{strategy_name}: request error {status}: {error}"));
+                        queue_strategy_rejection_audit(
+                            state,
+                            &sized_signal,
+                            strategy_name,
+                            &reason,
+                            now.saturating_mul(1_000),
+                            counterfactual_stop_loss_percent,
+                            counterfactual_take_profit_percent,
+                            "daily_execution",
+                        );
                         continue;
                     }
                 };
@@ -1951,7 +2156,7 @@ async fn run_cycle_inner(
         if exploratory { "exploratory" } else { "strict" },
         now.saturating_mul(1000),
     ));
-    let signal_result = submit_cycle_signal(
+    let signal_result = match submit_cycle_signal(
         state,
         &dashboard,
         &audited_signal,
@@ -1963,7 +2168,24 @@ async fn run_cycle_inner(
         cycle_started_at,
         now,
     )
-    .await?;
+    .await
+    {
+        Ok(result) => result,
+        Err((status, error)) => {
+            let reason = format!("Execution request failed ({status}): {error}");
+            queue_strategy_rejection_audit(
+                state,
+                &audited_signal,
+                audited_signal.strategy.as_deref().unwrap_or("unknown-strategy"),
+                &reason,
+                now.saturating_mul(1_000),
+                counterfactual_stop_loss_percent,
+                counterfactual_take_profit_percent,
+                "final_entry",
+            );
+            skipped_for_signal(&audited_signal, &reason)
+        }
+    };
     update_entry_candidate_diagnostic(
         &mut entry_diagnostic,
         &signal,

@@ -10,9 +10,16 @@ impl SignalStore {
         let connection = Self::open_database_at(&path)?;
         let (writer, receiver) = mpsc::channel(4096);
         tokio::task::spawn_blocking(move || run_database_writer(connection, receiver));
+        let audit_path = audit_database_path(&path);
+        let audit_connection = Self::open_audit_database_at(&audit_path)?;
+        migrate_legacy_audit_tables(&path, &audit_path)?;
+        let (audit_writer, audit_receiver) = mpsc::channel(4096);
+        tokio::task::spawn_blocking(move || run_database_writer(audit_connection, audit_receiver));
         Ok(Self {
             path,
+            audit_path,
             writer,
+            audit_writer,
             recent_cache: Arc::new(Mutex::new(None)),
             best_cache: Arc::new(Mutex::new(None)),
             performance_cache: Arc::new(Mutex::new(None)),
@@ -28,8 +35,30 @@ impl SignalStore {
         }
         let connection = Connection::open(path)?;
         connection.busy_timeout(Duration::from_secs(5))?;
-        connection.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA wal_autocheckpoint=1000; CREATE TABLE IF NOT EXISTS signal_records (id INTEGER PRIMARY KEY, timestamp INTEGER NOT NULL, kind INTEGER NOT NULL, payload BLOB NOT NULL); CREATE INDEX IF NOT EXISTS signal_records_timestamp ON signal_records(timestamp); CREATE INDEX IF NOT EXISTS signal_records_kind_timestamp ON signal_records(kind, timestamp); CREATE TABLE IF NOT EXISTS auto_trader_audit (decision_id TEXT NOT NULL, stage TEXT NOT NULL, timestamp INTEGER NOT NULL, symbol TEXT, payload BLOB NOT NULL, PRIMARY KEY(decision_id, stage)); CREATE INDEX IF NOT EXISTS auto_trader_audit_timestamp ON auto_trader_audit(timestamp); CREATE INDEX IF NOT EXISTS auto_trader_audit_stage_timestamp ON auto_trader_audit(stage, timestamp DESC);")?;
+        connection.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA wal_autocheckpoint=1000; CREATE TABLE IF NOT EXISTS signal_records (id INTEGER PRIMARY KEY, timestamp INTEGER NOT NULL, kind INTEGER NOT NULL, payload BLOB NOT NULL); CREATE INDEX IF NOT EXISTS signal_records_timestamp ON signal_records(timestamp); CREATE INDEX IF NOT EXISTS signal_records_kind_timestamp ON signal_records(kind, timestamp);")?;
         Ok(connection)
+    }
+
+    fn open_audit_database_at(path: &PathBuf) -> Result<Connection> {
+        if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+            std::fs::create_dir_all(parent)?;
+        }
+        let connection = Connection::open(path)?;
+        connection.busy_timeout(Duration::from_secs(30))?;
+        connection.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA wal_autocheckpoint=1000; CREATE TABLE IF NOT EXISTS auto_trader_audit (decision_id TEXT NOT NULL, stage TEXT NOT NULL, timestamp INTEGER NOT NULL, symbol TEXT, payload BLOB NOT NULL, PRIMARY KEY(decision_id, stage)); CREATE INDEX IF NOT EXISTS auto_trader_audit_timestamp ON auto_trader_audit(timestamp); CREATE INDEX IF NOT EXISTS auto_trader_audit_stage_timestamp ON auto_trader_audit(stage, timestamp DESC); CREATE TABLE IF NOT EXISTS auto_trader_audit_daily_summary (day_start_ms INTEGER NOT NULL, stage TEXT NOT NULL, symbol TEXT NOT NULL, record_count INTEGER NOT NULL, PRIMARY KEY(day_start_ms, stage, symbol)); CREATE TABLE IF NOT EXISTS insights_migrations (migration TEXT PRIMARY KEY, completed_at_ms INTEGER NOT NULL);")?;
+        Ok(connection)
+    }
+
+    async fn send_audit_write(&self, operation: WriteOperation) -> Result<()> {
+        let (ack, result) = oneshot::channel();
+        self.audit_writer
+            .send(WriteRequest { operation, ack })
+            .await
+            .map_err(|_| anyhow::anyhow!("audit database writer stopped"))?;
+        result
+            .await
+            .map_err(|_| anyhow::anyhow!("audit database writer dropped acknowledgement"))?
+            .map_err(|error| anyhow::anyhow!(error))
     }
 
     fn open_database_path(path: &PathBuf) -> Result<Connection> {
@@ -262,6 +291,67 @@ impl SignalStore {
         *cache = Some((Instant::now(), Arc::clone(&records)));
         Ok(records)
     }
+}
+
+fn audit_database_path(signal_path: &PathBuf) -> PathBuf {
+    signal_path.with_file_name("auto_trader_audit.sqlite")
+}
+
+fn migrate_legacy_audit_tables(signal_path: &PathBuf, audit_path: &PathBuf) -> Result<()> {
+    let legacy = Connection::open(signal_path)?;
+    legacy.busy_timeout(Duration::from_secs(30))?;
+    let has_audit: bool = legacy.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='auto_trader_audit')",
+        [],
+        |row| row.get(0),
+    )?;
+    if !has_audit {
+        return Ok(());
+    }
+    let has_summary: bool = legacy.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='auto_trader_audit_daily_summary')",
+        [],
+        |row| row.get(0),
+    )?;
+    let audit = Connection::open(audit_path)?;
+    audit.busy_timeout(Duration::from_secs(30))?;
+    audit.execute_batch("PRAGMA journal_mode=WAL; CREATE TABLE IF NOT EXISTS auto_trader_audit (decision_id TEXT NOT NULL, stage TEXT NOT NULL, timestamp INTEGER NOT NULL, symbol TEXT, payload BLOB NOT NULL, PRIMARY KEY(decision_id, stage)); CREATE INDEX IF NOT EXISTS auto_trader_audit_timestamp ON auto_trader_audit(timestamp); CREATE INDEX IF NOT EXISTS auto_trader_audit_stage_timestamp ON auto_trader_audit(stage, timestamp DESC); CREATE TABLE IF NOT EXISTS auto_trader_audit_daily_summary (day_start_ms INTEGER NOT NULL, stage TEXT NOT NULL, symbol TEXT NOT NULL, record_count INTEGER NOT NULL, PRIMARY KEY(day_start_ms, stage, symbol)); CREATE TABLE IF NOT EXISTS insights_migrations (migration TEXT PRIMARY KEY, completed_at_ms INTEGER NOT NULL);")?;
+    let migration_complete: bool = audit.query_row(
+        "SELECT EXISTS(SELECT 1 FROM insights_migrations WHERE migration = 'split_auto_trader_audit_v1')",
+        [],
+        |row| row.get(0),
+    )?;
+    if migration_complete {
+        return Ok(());
+    }
+    let already_populated: bool = audit.query_row(
+        "SELECT EXISTS(SELECT 1 FROM auto_trader_audit LIMIT 1) OR EXISTS(SELECT 1 FROM auto_trader_audit_daily_summary LIMIT 1)",
+        [],
+        |row| row.get(0),
+    )?;
+    if already_populated {
+        audit.execute(
+            "INSERT OR IGNORE INTO insights_migrations(migration, completed_at_ms) VALUES ('split_auto_trader_audit_v1', ?1)",
+            [std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis().min(i64::MAX as u128) as i64],
+        )?;
+        return Ok(());
+    }
+    audit.execute(
+        "ATTACH DATABASE ?1 AS legacy",
+        [signal_path.to_string_lossy().as_ref()],
+    )?;
+    let transaction = audit.unchecked_transaction()?;
+    transaction.execute_batch("INSERT OR IGNORE INTO main.auto_trader_audit(rowid, decision_id, stage, timestamp, symbol, payload) SELECT rowid, decision_id, stage, timestamp, symbol, payload FROM legacy.auto_trader_audit;")?;
+    if has_summary {
+        transaction.execute_batch("INSERT OR IGNORE INTO main.auto_trader_audit_daily_summary SELECT * FROM legacy.auto_trader_audit_daily_summary;")?;
+    }
+    transaction.execute(
+        "INSERT OR IGNORE INTO insights_migrations(migration, completed_at_ms) VALUES ('split_auto_trader_audit_v1', ?1)",
+        [std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis().min(i64::MAX as u128) as i64],
+    )?;
+    transaction.commit()?;
+    audit.execute("DETACH DATABASE legacy", [])?;
+    Ok(())
 }
 
 /// Read only the newest `limit` records from a daily archive. Archives are

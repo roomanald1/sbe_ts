@@ -36,7 +36,7 @@ not sent to AutoTrader.
 ## Listeners and state
 
 - AutoTrader's service RSocket listener is configured by
-  `AUTO_TRADER_RSOCKET_PORT` (Compose port `10006`; host port `10008`).
+  `AUTO_TRADER_RSOCKET_PORT` (Compose port `10006`; host port `10009`).
 - Its operations HTTP listener is available on port `3005`.
 - `AUTO_TRADER_STATE_FILE` points to the persisted AutoTrader state file.
 

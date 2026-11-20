@@ -1,4 +1,4 @@
-import { memo, useEffect, useMemo } from 'react';
+import { memo, useEffect, useMemo, useState } from 'react';
 import { AgGridReact } from 'ag-grid-react';
 import {
   ClientSideRowModelModule,
@@ -67,6 +67,9 @@ function horizonMarkoutColumn(
 }
 
 function AutoTraderScoutsComponent() {
+  const [detailRow, setDetailRow] = useState<AutoTraderScoutPosition | null>(
+    null,
+  );
   const state = useBehaviorSnapshot(autoTraderScoutModel.state$);
   useEffect(() => {
     autoTraderScoutModel.start();
@@ -83,6 +86,13 @@ function AutoTraderScoutsComponent() {
   const columns = useMemo<ColDef<AutoTraderScoutPosition>[]>(
     () => [
       { field: 'symbol', headerName: 'Symbol', width: 85, minWidth: 75 },
+      {
+        field: 'profileSymbol',
+        headerName: 'Profile',
+        valueFormatter: ({ value }) => value ?? 'Baseline / unavailable',
+        width: 155,
+        minWidth: 125,
+      },
       {
         field: 'strategy',
         headerName: 'Strategy',
@@ -258,6 +268,25 @@ function AutoTraderScoutsComponent() {
           typeof value === 'number' ? `${(value * 100).toFixed(0)}%` : '—',
         minWidth: 115,
       },
+      {
+        colId: 'parameters',
+        headerName: 'Details',
+        sortable: false,
+        filter: false,
+        width: 90,
+        cellRenderer: ({
+          data,
+        }: ICellRendererParams<AutoTraderScoutPosition>) =>
+          data ? (
+            <button
+              type="button"
+              className="auto-trader-audit-more"
+              onClick={() => setDetailRow(data)}
+            >
+              View
+            </button>
+          ) : null,
+      },
     ],
     [],
   );
@@ -363,7 +392,7 @@ function AutoTraderScoutsComponent() {
       className="feed-section signal-info-panel"
       aria-label="AutoTrader scout outcomes"
     >
-      <FeedToolbar title="Scout scout outcomes" />
+      <FeedToolbar title="Scout outcomes" />
       <p className="signal-info-note">
         Simulated outcomes from the last 7 days; these do not represent filled
         trades. Paired baseline/variant rows show the variant return delta
@@ -395,7 +424,10 @@ function AutoTraderScoutsComponent() {
         </div>
       )}
       <div className="auto-trader-scout-summary" aria-live="polite">
-        <span>{displayCount(summary.open)} open</span>
+        <span>{displayCount(summary.open)} live</span>
+        <span>
+          {displayCount(summary.resolved + summary.unavailable)} completed
+        </span>
         <span>{displayCount(summary.wins)} wins</span>
         <span>{displayCount(summary.losses)} losses</span>
         <span>{displayCount(summary.flats)} flat</span>
@@ -408,13 +440,13 @@ function AutoTraderScoutsComponent() {
         aria-label="Scout outcomes by source"
       >
         <span>
-          Scouts · {displayCount(all.open)} open · {displayCount(all.resolved)}{' '}
-          resolved
+          Scouts · {displayCount(all.open)} live ·{' '}
+          {displayCount(all.resolved + all.unavailable)} completed
           {all.unavailable ? ' · ' + all.unavailable + ' unavailable' : ''}
         </span>
         <span>
-          Live strategy Scouts · {displayCount(live.open)} open ·{' '}
-          {displayCount(live.resolved)} resolved
+          Live strategy Scouts · {displayCount(live.open)} live ·{' '}
+          {displayCount(live.resolved + live.unavailable)} completed
         </span>
       </div>
       <div
@@ -567,6 +599,88 @@ function AutoTraderScoutsComponent() {
             rowHeight={34}
             headerHeight={30}
           />
+        </div>
+      )}
+      {detailRow && (
+        <div
+          className="auto-trader-gates-backdrop"
+          role="presentation"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) setDetailRow(null);
+          }}
+        >
+          <section
+            className="auto-trader-gates-popup"
+            role="dialog"
+            aria-modal="true"
+            aria-label="Scout details"
+          >
+            <header>
+              <h2>
+                {strategyLabel(detailRow.strategy)} · {detailRow.symbol}
+              </h2>
+              <button
+                type="button"
+                aria-label="Close"
+                onClick={() => setDetailRow(null)}
+              >
+                ×
+              </button>
+            </header>
+            <p>
+              {detailRow.status} ·{' '}
+              {detailRow.profileSymbol ?? 'Profile unavailable'} · Net{' '}
+              {percent(detailRow.displayNetReturnPercent)}
+            </p>
+            <details className="auto-trader-gate-parameters" open>
+              <summary>Parameters used</summary>
+              {Object.keys(detailRow.strategyParameters ?? {}).length > 0 ||
+              detailRow.scoutParameterKey ? (
+                <ul>
+                  {Object.entries(detailRow.strategyParameters ?? {})
+                    .sort(([a], [b]) => a.localeCompare(b))
+                    .map(([key, value]) => (
+                      <li key={key}>
+                        <strong>Used</strong>
+                        <span>{key}</span>
+                        <small>
+                          {typeof value === 'string'
+                            ? value
+                            : JSON.stringify(value)}
+                        </small>
+                      </li>
+                    ))}
+                  {detailRow.scoutParameterKey && (
+                    <li>
+                      <strong>Probe</strong>
+                      <span>{detailRow.scoutParameterKey}</span>
+                      <small>
+                        {detailRow.scoutParameterValue ?? '—'} ·{' '}
+                        {detailRow.scoutParameterEntryEligible === undefined
+                          ? 'eligibility unavailable'
+                          : detailRow.scoutParameterEntryEligible
+                            ? 'entry eligible'
+                            : 'not entry eligible'}
+                      </small>
+                    </li>
+                  )}
+                  {detailRow.scoutLevelPercent !== undefined && (
+                    <li>
+                      <strong>Entry distance</strong>
+                      <span>Scout level</span>
+                      <small>
+                        {detailRow.scoutLevelPercent}% below breakout
+                      </small>
+                    </li>
+                  )}
+                </ul>
+              ) : (
+                <p>
+                  Parameter details were not retained for this Scout record.
+                </p>
+              )}
+            </details>
+          </section>
         </div>
       )}
       {!state.loading && !state.error && state.totalRows === 0 && (

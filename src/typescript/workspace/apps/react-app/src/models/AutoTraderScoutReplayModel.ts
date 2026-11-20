@@ -147,8 +147,31 @@ export class AutoTraderScoutReplayModel {
         'GET',
         `/replay/outcomes?page=${page}&page_size=25`,
       );
-      if (!response.ok)
-        throw new Error(`Scout replay request failed (${response.status}).`);
+      if (!response.ok) {
+        let detail = `Scout replay request failed (${response.status}).`;
+        try {
+          const failure = (await response.json()) as {
+            error?: string;
+            workerErrors?: Array<{
+              strategy?: string;
+              status?: number;
+              error?: string;
+            }>;
+          };
+          const workerDetails = failure.workerErrors
+            ?.map(
+              (worker) =>
+                `${worker.strategy ?? 'Scout'} (${worker.status ?? 'error'}): ${worker.error ?? 'request failed'}`,
+            )
+            .join('; ');
+          detail = workerDetails
+            ? `${failure.error ?? detail} ${workerDetails}`
+            : (failure.error ?? detail);
+        } catch {
+          // Keep the status message when the failure response is not JSON.
+        }
+        throw new Error(detail);
+      }
       const data = (await response.json()) as ScoutReplayResponse;
       if (!Array.isArray(data.outcomes) || !data.coverage)
         throw new Error('Scout replay response is missing coverage data.');

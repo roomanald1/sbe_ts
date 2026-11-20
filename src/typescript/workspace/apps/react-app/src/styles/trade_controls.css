@@ -1793,20 +1793,26 @@
   .ag-cell:first-child {
   padding-left: 28px;
 }
-.auto-trader-entry-evidence-expander-button {
+.auto-trader-entry-evidence-expander-button,
+.auto-trader-strategy-label {
   display: inline-flex;
   align-items: center;
   gap: 5px;
   width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+  font: inherit;
+  text-align: left;
+}
+.auto-trader-entry-evidence-expander-button {
   padding: 0;
   border: 0;
   background: transparent;
   color: inherit;
-  font: inherit;
-  text-align: left;
   cursor: pointer;
 }
-.auto-trader-entry-evidence-expander-button > span {
+.auto-trader-entry-evidence-expander-button > span,
+.auto-trader-strategy-label > span {
   display: inline-flex;
   flex: 0 0 12px;
   align-items: center;
