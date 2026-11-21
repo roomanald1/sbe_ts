@@ -1866,6 +1866,18 @@ impl ScoutCoordinator {
                 .filter_map(|name| Strategy::from_name(name))
                 .collect();
         }
+        if path == "/outcomes" {
+            let all_sources = command
+                .path
+                .split_once('?')
+                .map(|(_, query)| query.split('&').any(|part| part == "source=all"))
+                .unwrap_or(false);
+            if !all_sources {
+                strategies = Strategy::live_strategies()
+                    .filter(|strategy| self.worker_endpoints.contains_key(strategy.as_str()))
+                    .collect();
+            }
+        }
         strategies.sort_by_key(|strategy| strategy.as_str());
         strategies.dedup();
         Ok(strategies)
@@ -2119,6 +2131,37 @@ fn aggregate_route_results(
     results: Vec<ScoutWorkerRouteResult>,
 ) -> ScoutCoordinatorRouteResult {
     let path = command.path.split('?').next().unwrap_or(&command.path);
+    if path == "/outcomes" {
+        let errors = results
+            .iter()
+            .filter(|result| result.status >= 400)
+            .map(|result| {
+                serde_json::json!({
+                    "strategy": result.strategy.as_str(),
+                    "status": result.status,
+                    "error": result.body["error"].as_str().unwrap_or("Scout worker route failed"),
+                })
+            })
+            .collect::<Vec<_>>();
+        let successful = results
+            .into_iter()
+            .filter(|result| result.status < 400)
+            .collect::<Vec<_>>();
+        if successful.is_empty() {
+            return ScoutCoordinatorRouteResult {
+                request_id: command.request_id,
+                status: 503,
+                body: serde_json::json!({"error": "No Scout workers returned outcomes", "workerErrors": errors}),
+            };
+        }
+        let mut aggregated = aggregate_route_results_without_replay_failures(command, successful);
+        if !errors.is_empty() {
+            aggregated.body["coverage"] =
+                serde_json::json!({"complete": false, "status": "incomplete"});
+            aggregated.body["workerErrors"] = serde_json::Value::Array(errors);
+        }
+        return aggregated;
+    }
     if matches!(path, "/replay/outcomes" | "/replay/searches") {
         let errors = results
             .iter()

@@ -81,6 +81,53 @@ impl SignalStore {
         .map_err(|error| anyhow::anyhow!("execution audit page read task failed: {error}"))?
     }
 
+    pub async fn load_auto_trader_entry_audits(
+        &self,
+        decision_ids: Vec<String>,
+    ) -> Result<Vec<serde_json::Value>> {
+        let path = self.audit_path.clone();
+        tokio::task::spawn_blocking(move || {
+            Self::load_auto_trader_entry_audits_sync(&path, decision_ids)
+        })
+        .await
+        .map_err(|error| anyhow::anyhow!("entry audit lookup task failed: {error}"))?
+    }
+
+    fn load_auto_trader_entry_audits_sync(
+        path: &PathBuf,
+        decision_ids: Vec<String>,
+    ) -> Result<Vec<serde_json::Value>> {
+        const MAX_DECISION_IDS: usize = 500;
+        let decision_ids = decision_ids
+            .into_iter()
+            .filter(|id| !id.is_empty())
+            .take(MAX_DECISION_IDS)
+            .collect::<Vec<_>>();
+        if decision_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let placeholders = std::iter::repeat("?")
+            .take(decision_ids.len())
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = format!(
+            "SELECT payload FROM auto_trader_audit WHERE stage = 'entry' AND decision_id IN ({placeholders})"
+        );
+        let connection = Self::open_database_path(path)?;
+        let mut statement = connection.prepare(&sql)?;
+        let rows = statement.query_map(rusqlite::params_from_iter(decision_ids.iter()), |row| {
+            row.get::<_, Vec<u8>>(0)
+        })?;
+        rows.map(|compressed| {
+            let compressed = compressed?;
+            let mut decoder = MultiGzDecoder::new(compressed.as_slice());
+            let mut json = Vec::new();
+            decoder.read_to_end(&mut json)?;
+            Ok(serde_json::from_slice(&json)?)
+        })
+        .collect()
+    }
+
     fn load_auto_trader_execution_audit_page_sync(
         path: &PathBuf,
         before_id: Option<i64>,
@@ -297,11 +344,22 @@ fn attach_final_decision_outcomes(
         "SELECT payload FROM auto_trader_audit WHERE decision_id = ?1 AND stage = 'entry'",
     )?;
     let mut skipped_statement = connection.prepare(
-        "SELECT payload FROM auto_trader_audit
-         WHERE stage = 'strategy_rejection' AND (
-             substr(decision_id, 1, length(?1)) = ?1
-             OR substr(decision_id, 1, length(?2)) = ?2
-             OR substr(decision_id, 1, length(?3)) = ?3
+        "WITH final_entry AS (
+             SELECT payload, timestamp FROM auto_trader_audit
+             WHERE stage = 'strategy_rejection' AND decision_id >= ?1 AND decision_id < ?2
+             ORDER BY timestamp DESC LIMIT 1
+         ), daily_execution AS (
+             SELECT payload, timestamp FROM auto_trader_audit
+             WHERE stage = 'strategy_rejection' AND decision_id >= ?3 AND decision_id < ?4
+             ORDER BY timestamp DESC LIMIT 1
+         ), async_submission AS (
+             SELECT payload, timestamp FROM auto_trader_audit
+             WHERE stage = 'strategy_rejection' AND decision_id >= ?5 AND decision_id < ?6
+             ORDER BY timestamp DESC LIMIT 1
+         ) SELECT payload FROM (
+             SELECT * FROM final_entry
+             UNION ALL SELECT * FROM daily_execution
+             UNION ALL SELECT * FROM async_submission
          ) ORDER BY timestamp DESC LIMIT 1",
     )?;
 
@@ -346,10 +404,24 @@ fn attach_final_decision_outcomes(
                     .or_else(|| decision.get("strategy_decision").and_then(|value| value.get("strategy")))
                     .and_then(serde_json::Value::as_str);
                 if let Some(strategy) = strategy {
-                    let prefixes = ["final_entry", "daily_execution", "async_submission"]
-                        .map(|phase| format!("{decision_id}|strategy:{strategy}|phase:{phase}|audit:"));
+                    let ranges = ["final_entry", "daily_execution", "async_submission"]
+                        .map(|phase| {
+                            let prefix = format!(
+                                "{decision_id}|strategy:{strategy}|phase:{phase}|audit:"
+                            );
+                            let mut upper_bound = prefix.as_bytes().to_vec();
+                            *upper_bound.last_mut().expect("audit prefix is nonempty") += 1;
+                            let upper_bound = String::from_utf8(upper_bound)
+                                .expect("incremented audit prefix remains valid UTF-8");
+                            (prefix, upper_bound)
+                        });
                     let mut rows = skipped_statement.query(params![
-                        prefixes[0], prefixes[1], prefixes[2],
+                        ranges[0].0,
+                        ranges[0].1,
+                        ranges[1].0,
+                        ranges[1].1,
+                        ranges[2].0,
+                        ranges[2].1,
                     ])?;
                     let skipped_outcome = rows
                         .next()?

@@ -163,8 +163,17 @@ export function insightsRpc(
   body?: unknown,
 ): Promise<Response> {
   const request = requestInsightsRpc;
+  const isAuditHistoryRead =
+    method.toUpperCase() === 'GET' &&
+    path.split('?', 1)[0] === '/signals/auto-trader-audit';
+  // A timed-out audit scan can keep running in the server's blocking SQLite
+  // worker. Retrying it would start duplicate scans against the same database.
   const attempts =
-    method.toUpperCase() === 'GET' && request === performInsightsRpc ? 3 : 1;
+    method.toUpperCase() === 'GET' &&
+    request === performInsightsRpc &&
+    !isAuditHistoryRead
+      ? 3
+      : 1;
   const run = async (): Promise<Response> => {
     let lastError: unknown;
     for (let attempt = 0; attempt < attempts; attempt += 1) {

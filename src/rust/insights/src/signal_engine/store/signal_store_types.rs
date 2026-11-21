@@ -86,6 +86,7 @@ struct EvaluationQuery {
     cursor: Option<i64>,
     horizons: Option<String>,
     stage: Option<String>,
+    decision_ids: Option<String>,
 }
 
 #[derive(Clone)]

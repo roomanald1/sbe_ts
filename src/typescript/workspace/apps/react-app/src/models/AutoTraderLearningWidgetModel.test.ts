@@ -112,7 +112,7 @@ describe('AutoTraderLearningWidgetModel', () => {
       { state$: autoTrader.state$, start() {}, stop() {} },
       async () => [],
       30_000,
-      async () => decisions,
+      async () => ({ decisions, errors: [] }),
     );
     await widget.refreshDecisions();
 

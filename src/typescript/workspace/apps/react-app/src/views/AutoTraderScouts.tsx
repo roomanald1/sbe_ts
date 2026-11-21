@@ -423,6 +423,14 @@ function AutoTraderScoutsComponent() {
           </button>
         </div>
       )}
+      {state.coverage?.complete === false && (
+        <div className="auto-trader-scout-coverage" role="status">
+          Partial Scout outcomes. Missing workers:{' '}
+          {state.workerErrors?.map((worker) => worker.strategy).join(', ') ||
+            'some workers'}
+          .
+        </div>
+      )}
       <div className="auto-trader-scout-summary" aria-live="polite">
         <span>{displayCount(summary.open)} live</span>
         <span>

@@ -132,6 +132,7 @@ type AuditRecord = {
   effective_take_profit_percent?: number;
   net_return_percent?: number;
   exit_rule_trace?: {
+    reason?: string;
     profit_protection?: {
       activation_percent?: number;
       giveback_percent?: number;
@@ -1432,92 +1433,149 @@ export class AutoTraderOutcomesModel {
           ];
         },
       );
-      const closedLedgerRows = (activityData.closed_ledger_rows ?? []).map(
-        (row) => {
-          const entryAudit = this.auditRows.find(
-            (record) =>
-              record.decision_id === row.decisionId && record.stage === 'entry',
-          );
-          if (entryAudit) {
-            const components = { ...(entryAudit.signal_components ?? {}) };
-            const parameters =
-              entryAudit.strategy_decision?.strategy_parameters;
-            const floorKeys = [
-              'minimum_momentum',
-              'minimum_flow_imbalance',
-              'minimum_book_imbalance',
-              'minimum_vwap_dislocation_bps',
-              'minimum_absorption_pressure',
-            ];
-            for (const key of floorKeys) {
-              const value = parameters?.[key];
-              if (typeof value === 'number' && Number.isFinite(value))
-                components[`${key}_floor`] = value;
-            }
-            const latestExit = this.auditRows
-              .filter(
-                (record) =>
-                  record.decision_id === row.decisionId &&
-                  record.stage?.startsWith('exit') &&
-                  !record.stage.startsWith('exit:post:'),
-              )
-              .sort(
-                (left, right) => (right.timestamp ?? 0) - (left.timestamp ?? 0),
-              )[0];
-            const postExit = this.auditRows
-              .filter(
-                (record) =>
-                  record.decision_id === row.decisionId &&
-                  record.stage?.startsWith('exit:post:'),
-              )
-              .sort(
-                (left, right) => (right.timestamp ?? 0) - (left.timestamp ?? 0),
-              )[0]?.post_exit_observation;
-            return {
-              ...row,
-              components,
-              signalDirection:
-                entryAudit.strategy_decision?.direction ?? entryAudit.direction,
-              entryStrategyDecision: entryAudit.strategy_decision,
-              latestStrategyEvaluation: latestStrategyEvaluation(
-                entryAudit.strategy ?? 'unattributed',
-                entryAudit.symbol ?? row.symbol,
-              ),
-              stopLossPercent: latestExit?.effective_stop_loss_percent,
-              takeProfitPercent: latestExit?.effective_take_profit_percent,
-              exitReason: latestExit?.reason,
-              profitProtection: latestExit?.exit_rule_trace?.profit_protection
-                ? {
-                    activationPercent:
-                      latestExit.exit_rule_trace.profit_protection
-                        .activation_percent,
-                    givebackPercent:
-                      latestExit.exit_rule_trace.profit_protection
-                        .giveback_percent,
-                    minimumLockPercent:
-                      latestExit.exit_rule_trace.profit_protection
-                        .minimum_lock_percent,
-                    peakReturnPercent:
-                      latestExit.exit_rule_trace.profit_protection
-                        .peak_return_percent ?? undefined,
-                    exitReturnPercent: latestExit.net_return_percent,
-                    triggered:
-                      latestExit.exit_rule_trace.profit_protection.triggered,
-                  }
-                : undefined,
-              postExitMissedReturnPercent: postExit?.missed_return_percent,
-              postExitMissedPnlQuote: postExit?.missed_pnl_quote,
-              postExitBestReturnPercent:
-                postExit?.best_post_exit_return_percent,
-              postExitWorstReturnPercent:
-                postExit?.worst_post_exit_return_percent,
-              postExitObservedAt: postExit?.observed_at_ms,
-              postExitHorizonMs: postExit?.horizon_ms,
-            };
-          }
-          return row;
-        },
+      const closedLedgerSource = activityData.closed_ledger_rows ?? [];
+      const knownEntryDecisionIds = new Set(
+        this.auditRows
+          .filter((record) => record.stage === 'entry')
+          .map((record) => record.decision_id)
+          .filter((id): id is string => typeof id === 'string'),
       );
+      const missingEntryDecisionIds = [
+        ...new Set(
+          closedLedgerSource
+            .map((row) => row.decisionId)
+            .filter(
+              (id): id is string =>
+                typeof id === 'string' && !knownEntryDecisionIds.has(id),
+            ),
+        ),
+      ];
+      for (
+        let offset = 0;
+        offset < missingEntryDecisionIds.length;
+        offset += 100
+      ) {
+        const decisionIds = missingEntryDecisionIds.slice(offset, offset + 100);
+        const auditResponse = await insightsFetch(
+          '/signals/auto-trader-execution-audit?decision_ids=' +
+            encodeURIComponent(decisionIds.join(',')),
+        ).catch(() => undefined);
+        if (!auditResponse?.ok) continue;
+        try {
+          const page = (await auditResponse.json()) as {
+            items?: AuditRecord[];
+          };
+          const auditsByKey = new Map(
+            this.auditRows.map((record) => [
+              `${record.decision_id ?? ''}:${record.stage ?? ''}`,
+              record,
+            ]),
+          );
+          for (const record of page.items ?? [])
+            auditsByKey.set(
+              `${record.decision_id ?? ''}:${record.stage ?? ''}`,
+              record,
+            );
+          this.auditRows = [...auditsByKey.values()].sort(
+            (left, right) => (left.timestamp ?? 0) - (right.timestamp ?? 0),
+          );
+        } catch {
+          /* Preserve existing audit rows when a targeted lookup is malformed. */
+        }
+      }
+      const closedLedgerRows = closedLedgerSource.map((row) => {
+        const entryAudit = this.auditRows.find(
+          (record) =>
+            record.decision_id === row.decisionId && record.stage === 'entry',
+        );
+        if (entryAudit) {
+          const components = { ...(entryAudit.signal_components ?? {}) };
+          const parameters = entryAudit.strategy_decision?.strategy_parameters;
+          const floorKeys = [
+            'minimum_momentum',
+            'minimum_flow_imbalance',
+            'minimum_book_imbalance',
+            'minimum_vwap_dislocation_bps',
+            'minimum_absorption_pressure',
+          ];
+          for (const key of floorKeys) {
+            const value = parameters?.[key];
+            if (typeof value === 'number' && Number.isFinite(value))
+              components[`${key}_floor`] = value;
+          }
+          const latestExit = this.auditRows
+            .filter(
+              (record) =>
+                record.decision_id === row.decisionId &&
+                record.stage?.startsWith('exit') &&
+                !record.stage.startsWith('exit:post:'),
+            )
+            .sort(
+              (left, right) => (right.timestamp ?? 0) - (left.timestamp ?? 0),
+            )[0];
+          const postExit = this.auditRows
+            .filter(
+              (record) =>
+                record.decision_id === row.decisionId &&
+                record.stage?.startsWith('exit:post:'),
+            )
+            .sort(
+              (left, right) => (right.timestamp ?? 0) - (left.timestamp ?? 0),
+            )[0]?.post_exit_observation;
+          const source: AutoTraderOutcome['source'] =
+            entryAudit.scout === true
+              ? 'scout'
+              : entryAudit.exploratory === true
+                ? 'exploratory'
+                : entryAudit.exploratory === false
+                  ? 'strict'
+                  : 'unknown';
+          return {
+            ...row,
+            scout: entryAudit.scout === true,
+            source,
+            components,
+            signalDirection:
+              entryAudit.strategy_decision?.direction ?? entryAudit.direction,
+            entryStrategyDecision: entryAudit.strategy_decision,
+            latestStrategyEvaluation: latestStrategyEvaluation(
+              entryAudit.strategy ?? 'unattributed',
+              entryAudit.symbol ?? row.symbol,
+            ),
+            stopLossPercent: latestExit?.effective_stop_loss_percent,
+            takeProfitPercent: latestExit?.effective_take_profit_percent,
+            exitReason:
+              latestExit?.reason ?? latestExit?.exit_rule_trace?.reason,
+            profitProtection: latestExit?.exit_rule_trace?.profit_protection
+              ? {
+                  activationPercent:
+                    latestExit.exit_rule_trace.profit_protection
+                      .activation_percent,
+                  givebackPercent:
+                    latestExit.exit_rule_trace.profit_protection
+                      .giveback_percent,
+                  minimumLockPercent:
+                    latestExit.exit_rule_trace.profit_protection
+                      .minimum_lock_percent,
+                  peakReturnPercent:
+                    latestExit.exit_rule_trace.profit_protection
+                      .peak_return_percent ?? undefined,
+                  exitReturnPercent: latestExit.net_return_percent,
+                  triggered:
+                    latestExit.exit_rule_trace.profit_protection.triggered,
+                }
+              : undefined,
+            postExitMissedReturnPercent: postExit?.missed_return_percent,
+            postExitMissedPnlQuote: postExit?.missed_pnl_quote,
+            postExitBestReturnPercent: postExit?.best_post_exit_return_percent,
+            postExitWorstReturnPercent:
+              postExit?.worst_post_exit_return_percent,
+            postExitObservedAt: postExit?.observed_at_ms,
+            postExitHorizonMs: postExit?.horizon_ms,
+          };
+        }
+        return row;
+      });
       this.ledgerRowsCache = applyInstanceTodayPnl(
         closedLedgerRows,
         todayInstanceRealizedUsd,

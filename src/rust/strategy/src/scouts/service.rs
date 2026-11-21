@@ -3075,6 +3075,8 @@ fn persist_scout_state(
     connection.execute_batch(
         "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;\
          CREATE TABLE IF NOT EXISTS scout_records (collection TEXT NOT NULL, record_key TEXT NOT NULL, payload TEXT NOT NULL, PRIMARY KEY(collection, record_key));\
+         CREATE INDEX IF NOT EXISTS scout_instances_by_timestamp ON scout_records (CAST(json_extract(payload, '$.timestamp') AS INTEGER), record_key) WHERE collection='scout_instances';\
+         CREATE INDEX IF NOT EXISTS scout_outcomes_by_evaluated_at ON scout_records (CAST(json_extract(payload, '$.evaluated_timestamp_ms') AS INTEGER), record_key) WHERE collection='outcomes';\
          CREATE TABLE IF NOT EXISTS scout_configuration (id INTEGER PRIMARY KEY CHECK(id=1), strategies TEXT NOT NULL, max_active_samples INTEGER NOT NULL, max_active_positions INTEGER NOT NULL, max_sample_notional REAL NOT NULL, stop_loss_percent REAL NOT NULL, take_profit_percent REAL NOT NULL);\
          CREATE TABLE IF NOT EXISTS scout_metadata (id INTEGER PRIMARY KEY CHECK(id=1), variant_rotation_cursor INTEGER NOT NULL, lifecycle_updated_at_ms INTEGER NOT NULL);",
     ).map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;

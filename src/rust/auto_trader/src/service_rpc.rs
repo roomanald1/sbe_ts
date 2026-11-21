@@ -30,27 +30,54 @@ pub struct RpcResponse {
 }
 
 pub async fn request(endpoint: &str, request: &RpcRequest) -> anyhow::Result<RpcResponse> {
+    request_with_timeouts(
+        endpoint,
+        request,
+        Duration::from_secs(5),
+        Duration::from_secs(10),
+    )
+    .await
+}
+
+async fn request_with_timeouts(
+    endpoint: &str,
+    request: &RpcRequest,
+    connect_timeout: Duration,
+    response_timeout: Duration,
+) -> anyhow::Result<RpcResponse> {
     anyhow::ensure!(
         endpoint.starts_with("ws://") || endpoint.starts_with("wss://"),
         "RSocket endpoint must use ws or wss"
     );
-    let client = pooled_client(endpoint).await?;
-    let payload = match client
-        .request_response(
+    let client = tokio::time::timeout(connect_timeout, pooled_client(endpoint))
+        .await
+        .with_context(|| {
+            format!("application service connection timed out after {connect_timeout:?}")
+        })??;
+    let response = tokio::time::timeout(
+        response_timeout,
+        client.request_response(
             Payload::builder()
                 .set_data(serde_json::to_vec(request)?)
                 .build(),
-        )
-        .await
-    {
-        Ok(Some(payload)) => payload,
-        Ok(None) => {
+        ),
+    )
+    .await;
+    let payload = match response {
+        Ok(Ok(Some(payload))) => payload,
+        Ok(Ok(None)) => {
             invalidate_client(endpoint, &client);
             anyhow::bail!("application service returned an empty RSocket response");
         }
-        Err(error) => {
+        Ok(Err(error)) => {
             invalidate_client(endpoint, &client);
             return Err(error).context("application service RSocket request failed");
+        }
+        Err(_) => {
+            invalidate_client(endpoint, &client);
+            anyhow::bail!(
+                "application service RSocket request timed out after {response_timeout:?}"
+            );
         }
     };
     let bytes = payload
@@ -445,6 +472,100 @@ mod tests {
             assert_eq!(response.body["path"], path);
         }
         assert_eq!(connections.load(Ordering::Relaxed), 1);
+        server_task.abort();
+    }
+
+    #[tokio::test]
+    async fn rsocket_timeout_discards_stalled_connection_and_reconnects() {
+        use rsocket_rust_transport_websocket::WebsocketServerTransport;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct Responder {
+            connection: usize,
+        }
+
+        #[rsocket_rust::async_trait]
+        impl RSocket for Responder {
+            async fn metadata_push(&self, _request: Payload) -> rsocket_rust::Result<()> {
+                anyhow::bail!("unsupported")
+            }
+
+            async fn fire_and_forget(&self, _request: Payload) -> rsocket_rust::Result<()> {
+                anyhow::bail!("unsupported")
+            }
+
+            async fn request_response(
+                &self,
+                _request: Payload,
+            ) -> rsocket_rust::Result<Option<Payload>> {
+                if self.connection == 1 {
+                    return std::future::pending().await;
+                }
+                let response = RpcResponse {
+                    status: 204,
+                    body: Value::Null,
+                    headers: std::collections::BTreeMap::new(),
+                };
+                Ok(Some(
+                    Payload::builder()
+                        .set_data(serde_json::to_vec(&response).unwrap())
+                        .build(),
+                ))
+            }
+
+            fn request_stream(&self, _request: Payload) -> Flux<rsocket_rust::Result<Payload>> {
+                Box::pin(futures_util::stream::empty())
+            }
+
+            fn request_channel(
+                &self,
+                _requests: Flux<rsocket_rust::Result<Payload>>,
+            ) -> Flux<rsocket_rust::Result<Payload>> {
+                Box::pin(futures_util::stream::empty())
+            }
+        }
+
+        let connections = Arc::new(AtomicUsize::new(0));
+        let accepted = Arc::clone(&connections);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        drop(listener);
+        let server = RSocketFactory::receive()
+            .transport(WebsocketServerTransport::from(address.to_string()))
+            .acceptor(Box::new(move |_, _| {
+                let connection = accepted.fetch_add(1, Ordering::Relaxed) + 1;
+                Ok(Box::new(Responder { connection }))
+            }))
+            .serve();
+        let server_task = tokio::spawn(server);
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        let endpoint = format!("ws://{address}");
+        let request = RpcRequest {
+            method: "POST".into(),
+            path: "/signals/auto-trader-audit".into(),
+            body: Some(serde_json::json!({ "decision_id": "audit-timeout-test" })),
+        };
+        let timed_out = request_with_timeouts(
+            &endpoint,
+            &request,
+            Duration::from_secs(1),
+            Duration::from_millis(50),
+        )
+        .await
+        .unwrap_err();
+        assert!(timed_out.to_string().contains("timed out"));
+
+        let recovered = request_with_timeouts(
+            &endpoint,
+            &request,
+            Duration::from_secs(1),
+            Duration::from_secs(1),
+        )
+        .await
+        .unwrap();
+        assert_eq!(recovered.status, 204);
+        assert_eq!(connections.load(Ordering::Relaxed), 2);
         server_task.abort();
     }
 }

@@ -107,6 +107,8 @@ type ScoutOutcomesResponse = {
   hasNext: boolean;
   sortBy: string;
   sortDirection: 'asc' | 'desc';
+  coverage?: { complete: boolean; status: string };
+  workerErrors?: Array<{ strategy: string; status: number; error: string }>;
 };
 
 type ScoutComparisonOutcome = {
@@ -302,8 +304,17 @@ export class AutoTraderScoutModel {
         'GET',
         '/outcomes?' + query.toString(),
       );
-      if (!response.ok) throw new Error('Scout outcome data unavailable');
       const data = (await response.json()) as ScoutOutcomesResponse;
+      if (!response.ok) {
+        const failedWorkers = data.workerErrors
+          ?.map((worker) => worker.strategy)
+          .join(', ');
+        throw new Error(
+          failedWorkers
+            ? `Scout outcome workers timed out: ${failedWorkers}`
+            : 'Scout outcome data unavailable',
+        );
+      }
       if (requestId !== this.requestId) return;
       this.state$.next({ ...data, loading: false, error: undefined });
     } catch (error) {

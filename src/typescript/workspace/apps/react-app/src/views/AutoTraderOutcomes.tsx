@@ -1699,6 +1699,7 @@ function AutoTraderOutcomesComponent({
                     'Symbol',
                     'Live gates',
                     'Strategy',
+                    'Source',
                     'Strategy instance ID',
                     'Side',
                     'Quantity',
@@ -1712,6 +1713,7 @@ function AutoTraderOutcomesComponent({
                     Symbol: 90,
                     'Live gates': 84,
                     Strategy: 170,
+                    'Entry mode': 105,
                     'Strategy instance ID': 230,
                     Side: 80,
                     Quantity: 105,
@@ -1719,10 +1721,16 @@ function AutoTraderOutcomesComponent({
                     Closed: 155,
                     'Net USD': 135,
                   };
-                  const originalHeader = String(column.headerName ?? '');
+                  const originalHeader =
+                    column.headerName === 'Source'
+                      ? 'Entry mode'
+                      : String(column.headerName ?? '');
                   const width = widths[originalHeader] ?? 100;
                   return {
                     ...column,
+                    ...(originalHeader === 'Entry mode'
+                      ? { headerName: 'Entry mode' }
+                      : {}),
                     sortable: originalHeader === 'Closed',
                     ...(originalHeader === 'Closed'
                       ? { sort: 'desc' as const, sortIndex: 0 }
@@ -2282,14 +2290,18 @@ function AutoTraderOutcomesComponent({
                         : ''}
                     </small>
                   </li>
-                  {!positionStillOpen && gatePosition.exitReason && (
+                  {!positionStillOpen && (
                     <li>
                       <strong>Closed</strong>
                       <span>Exit reason</span>
                       <small>
                         {gatePosition.exitReason
-                          .replace(/[-_]+/g, ' ')
-                          .replace(/\b\w/g, (letter) => letter.toUpperCase())}
+                          ? gatePosition.exitReason
+                              .replace(/[-_]+/g, ' ')
+                              .replace(/\b\w/g, (letter) =>
+                                letter.toUpperCase(),
+                              )
+                          : 'Unavailable in recorded exit data'}
                       </small>
                     </li>
                   )}

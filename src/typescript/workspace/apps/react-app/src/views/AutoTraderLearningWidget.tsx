@@ -9,6 +9,7 @@ import {
 } from 'ag-grid-community';
 import {
   AutoTraderLearningWidgetModel,
+  LEARNING_DECISION_LOOKBACKS,
   LEARNING_DECISION_WINDOW_MS,
 } from '../models/AutoTraderLearningWidgetModel';
 import type {
@@ -344,6 +345,9 @@ export function AutoTraderLearningWidget({
   const [selectedMode, setSelectedMode] = useState<
     'all' | 'strict' | 'exploratory'
   >('all');
+  const [decisionLookbackMs, setDecisionLookbackMs] = useState(
+    LEARNING_DECISION_WINDOW_MS,
+  );
   const [selectedDecision, setSelectedDecision] = useState<LearningDecision>();
   useEffect(() => {
     model.start();
@@ -367,7 +371,7 @@ export function AutoTraderLearningWidget({
     decisionCoverage,
     decisionError,
   } = useBehaviorSnapshot(model.state$);
-  const recentDecisionCutoff = Date.now() - LEARNING_DECISION_WINDOW_MS;
+  const recentDecisionCutoff = Date.now() - decisionLookbackMs;
   const filteredDecisions = decisions
     .filter(
       (decision) =>
@@ -406,6 +410,24 @@ export function AutoTraderLearningWidget({
                 placeholder="All symbols"
               />
             </label>
+            <label>
+              Look back{' '}
+              <select
+                aria-label="Decision history lookback"
+                value={decisionLookbackMs}
+                onChange={(event) => {
+                  const lookbackMs = Number(event.target.value);
+                  setDecisionLookbackMs(lookbackMs);
+                  model.setDecisionLookback(lookbackMs);
+                }}
+              >
+                {LEARNING_DECISION_LOOKBACKS.map((option) => (
+                  <option key={option.milliseconds} value={option.milliseconds}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
+            </label>
             <div
               className="auto-trader-decision-filter-group"
               role="radiogroup"
@@ -431,13 +453,21 @@ export function AutoTraderLearningWidget({
               ))}
             </div>
             <small>
-              Last 10 minutes · {filteredDecisions.length} evaluations and
-              decisions · open a row's details to inspect recorded evidence
+              Last{' '}
+              {LEARNING_DECISION_LOOKBACKS.find(
+                (option) => option.milliseconds === decisionLookbackMs,
+              )?.label.toLowerCase()}{' '}
+              · {filteredDecisions.length} evaluations and decisions · newest
+              500 audit rows per stage · open a row's details to inspect
+              recorded evidence
             </small>
           </div>
           {decisionError && (
             <p className="auto-trader-learning-error" role="alert">
-              Decision history unavailable: {decisionError}
+              {decisions.length > 0
+                ? 'Some decision history is unavailable:'
+                : 'Decision history unavailable:'}{' '}
+              {decisionError}
             </p>
           )}
           {decisionCoverage.stalled && (

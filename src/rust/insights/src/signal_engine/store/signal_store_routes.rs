@@ -170,17 +170,33 @@ impl SignalStore {
                 get(move |axum::extract::Query(query): axum::extract::Query<EvaluationQuery>| {
                     let store = execution_audit_store.clone();
                     async move {
-                        match store
-                            .load_auto_trader_execution_audit_page(
-                                query.cursor,
-                                query.since,
-                                query.limit.unwrap_or(500),
-                            )
-                            .await
-                        {
-                            Ok(items) => Ok(Json(items)),
-                            Err(error) => {
-                                Err((StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))
+                        if let Some(decision_ids) = query.decision_ids {
+                            match store
+                                .load_auto_trader_entry_audits(
+                                    decision_ids.split(',').map(str::to_owned).collect(),
+                                )
+                                .await
+                            {
+                                Ok(items) => Ok(Json(serde_json::json!({ "items": items }))),
+                                Err(error) => Err((
+                                    StatusCode::INTERNAL_SERVER_ERROR,
+                                    error.to_string(),
+                                )),
+                            }
+                        } else {
+                            match store
+                                .load_auto_trader_execution_audit_page(
+                                    query.cursor,
+                                    query.since,
+                                    query.limit.unwrap_or(500),
+                                )
+                                .await
+                            {
+                                Ok(items) => Ok(Json(serde_json::json!(items))),
+                                Err(error) => Err((
+                                    StatusCode::INTERNAL_SERVER_ERROR,
+                                    error.to_string(),
+                                )),
                             }
                         }
                     }

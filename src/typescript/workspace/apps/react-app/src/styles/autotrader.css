@@ -55,6 +55,15 @@
   margin: 0;
   padding: 8px;
 }
+.auto-trader-scout-coverage {
+  margin: 8px 0;
+  padding: 8px 10px;
+  border: 1px solid #725a2d;
+  border-radius: 6px;
+  color: #f0d08a;
+  background: #282116;
+  font-size: 12px;
+}
 .auto-trader-scout-scenario {
   display: flex;
   flex-direction: column;
@@ -829,7 +838,8 @@
   color: var(--muted);
   font-size: 10px;
 }
-.auto-trader-learning-decisions-head input {
+.auto-trader-learning-decisions-head input,
+.auto-trader-learning-decisions-head select {
   width: 120px;
   min-width: 0;
   border: 1px solid #303d4d;

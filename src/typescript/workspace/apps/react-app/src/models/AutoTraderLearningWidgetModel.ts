@@ -9,6 +9,13 @@ import { autoTraderRpc } from '../auto_trader_rsocket';
 import { insightsFetch } from '../insights_rsocket';
 
 export const LEARNING_DECISION_WINDOW_MS = 10 * 60_000;
+export const LEARNING_DECISION_LOOKBACKS = [
+  { label: '10 minutes', milliseconds: LEARNING_DECISION_WINDOW_MS },
+  { label: '1 hour', milliseconds: 60 * 60_000 },
+  { label: '6 hours', milliseconds: 6 * 60 * 60_000 },
+  { label: '24 hours', milliseconds: 24 * 60 * 60_000 },
+] as const;
+const LEARNING_DECISION_STAGE_LIMIT = 500;
 
 export type LearningDecision = {
   decision_id?: string;
@@ -138,51 +145,67 @@ export type AutoTraderLearningWidgetState = {
 
 type SourceModel = Pick<AutoTraderModel, 'state$' | 'start' | 'stop'>;
 type GetSummary = () => Promise<LearningSummary[]>;
-type GetDecisions = () => Promise<LearningDecision[]>;
+type DecisionHistoryResult = {
+  decisions: LearningDecision[];
+  errors: string[];
+};
+type GetDecisions = (lookbackMs?: number) => Promise<DecisionHistoryResult>;
 
-const requestLearningDecisions: GetDecisions = async () => {
-  const since = Date.now() - LEARNING_DECISION_WINDOW_MS;
+const requestLearningDecisions: GetDecisions = async (
+  lookbackMs = LEARNING_DECISION_WINDOW_MS,
+) => {
+  const since = Date.now() - lookbackMs;
   const readStage = async (stage: string) => {
-    const items: LearningDecision[] = [];
-    let cursor: number | undefined;
-    do {
-      const query = new URLSearchParams({
-        since: String(since),
-        limit: '10000',
-        stage,
-        ...(cursor == null ? {} : { cursor: String(cursor) }),
-      });
-      const response = await insightsFetch(
-        `/signals/auto-trader-audit?${query.toString()}`,
-      );
-      if (!response.ok)
-        throw new Error(
-          `Decision history request failed (${response.status}).`,
-        );
-      const page = (await response.json()) as {
-        items?: LearningDecision[];
-        nextCursor?: number | null;
-      };
-      items.push(...(page.items ?? []));
-      cursor = page.nextCursor ?? undefined;
-    } while (cursor != null);
-    return items;
+    const query = new URLSearchParams({
+      since: String(since),
+      limit: String(LEARNING_DECISION_STAGE_LIMIT),
+      stage,
+    });
+    const response = await insightsFetch(
+      `/signals/auto-trader-audit?${query.toString()}`,
+    );
+    if (!response.ok)
+      throw new Error(`Decision history request failed (${response.status}).`);
+    const page = (await response.json()) as {
+      items?: LearningDecision[];
+    };
+    return page.items ?? [];
   };
-  const [decisions, rejections, strategyEvaluations] = await Promise.all([
-    readStage('decision'),
-    readStage('strategy_rejection'),
-    readStage('strategy:evaluation'),
-  ]);
-  return [...decisions, ...rejections, ...strategyEvaluations]
-    .map((decision) => ({
-      ...decision,
-      strategy:
-        decision.strategy ??
-        (typeof decision.strategy_decision?.strategy === 'string'
-          ? decision.strategy_decision.strategy
-          : undefined),
-    }))
-    .sort((left, right) => (left.timestamp ?? 0) - (right.timestamp ?? 0));
+  const stages = [
+    ['decisions', readStage('decision')],
+    ['strategy rejections', readStage('strategy_rejection')],
+    ['strategy evaluations', readStage('strategy:evaluation')],
+  ] as const;
+  const results = await Promise.allSettled(
+    stages.map(([, request]) => request),
+  );
+  const decisions: LearningDecision[] = [];
+  const errors: string[] = [];
+  results.forEach((result, index) => {
+    if (result.status === 'fulfilled') {
+      decisions.push(...result.value);
+    } else {
+      const label = stages[index][0];
+      const reason =
+        result.reason instanceof Error
+          ? result.reason.message
+          : 'request failed';
+      errors.push(`${label}: ${reason}`);
+    }
+  });
+  return {
+    decisions: decisions
+      .map((decision) => ({
+        ...decision,
+        strategy:
+          decision.strategy ??
+          (typeof decision.strategy_decision?.strategy === 'string'
+            ? decision.strategy_decision.strategy
+            : undefined),
+      }))
+      .sort((left, right) => (left.timestamp ?? 0) - (right.timestamp ?? 0)),
+    errors,
+  };
 };
 
 export function projectLearningWidgetState(
@@ -363,6 +386,8 @@ export class AutoTraderLearningWidgetModel {
   private decisions: LearningDecision[] = [];
   private decisionError?: string;
   private running = false;
+  private decisionLookbackMs = LEARNING_DECISION_WINDOW_MS;
+  private decisionRequestId = 0;
   private readonly source: SourceModel;
   private readonly getSummary: GetSummary;
   private readonly getDecisions: GetDecisions;
@@ -427,16 +452,35 @@ export class AutoTraderLearningWidgetModel {
   }
 
   async refreshDecisions() {
+    const requestId = ++this.decisionRequestId;
     try {
-      this.decisions = await this.getDecisions();
-      this.decisionError = undefined;
+      const result = await this.getDecisions(this.decisionLookbackMs);
+      if (requestId !== this.decisionRequestId) return;
+      this.decisions = result.decisions;
+      this.decisionError = result.errors.length
+        ? result.errors.join(' · ')
+        : undefined;
     } catch (reason) {
+      if (requestId !== this.decisionRequestId) return;
       this.decisionError =
         reason instanceof Error
           ? reason.message
           : 'Could not load decision history.';
     }
     this.publish(this.source.state$.value);
+  }
+
+  setDecisionLookback(lookbackMs: number) {
+    if (
+      !LEARNING_DECISION_LOOKBACKS.some(
+        (option) => option.milliseconds === lookbackMs,
+      ) ||
+      lookbackMs === this.decisionLookbackMs
+    ) {
+      return;
+    }
+    this.decisionLookbackMs = lookbackMs;
+    void this.refreshDecisions();
   }
 
   private publish(source: AutoTraderState) {

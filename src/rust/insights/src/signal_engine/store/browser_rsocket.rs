@@ -57,15 +57,25 @@ impl InsightsBrowserResponder {
                     .auto_trader_execution_quality(number(&query, "since"))
                     .await?,
             )?,
-            ("GET", "/signals/auto-trader-execution-audit") => serde_json::to_value(
-                self.store
-                    .load_auto_trader_execution_audit_page(
-                        signed_number(&query, "cursor"),
-                        number(&query, "since"),
-                        usize_number(&query, "limit").unwrap_or(500),
-                    )
-                    .await?,
-            )?,
+            ("GET", "/signals/auto-trader-execution-audit") => {
+                if let Some(decision_ids) = query.get("decision_ids") {
+                    serde_json::json!({
+                        "items": self.store.load_auto_trader_entry_audits(
+                            decision_ids.split(',').map(str::to_owned).collect(),
+                        ).await?
+                    })
+                } else {
+                    serde_json::to_value(
+                        self.store
+                            .load_auto_trader_execution_audit_page(
+                                signed_number(&query, "cursor"),
+                                number(&query, "since"),
+                                usize_number(&query, "limit").unwrap_or(500),
+                            )
+                            .await?,
+                    )?
+                }
+            }
             ("GET", "/signals/auto-trader-audit") => serde_json::to_value(
                 self.store
                     .load_auto_trader_audit_page(
