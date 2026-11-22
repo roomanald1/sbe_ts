@@ -94,6 +94,17 @@ export function applyInstanceTodayPnl(
   totals: Record<string, number | null>,
   usdRates: Record<string, number>,
 ): AutoTraderOutcome[] {
+  const individualFeesUsd = (row: AutoTraderOutcome) => {
+    const trade = row.ledgerTrade;
+    const fee = trade?.fee;
+    if (typeof fee !== 'number' || !Number.isFinite(fee)) return undefined;
+    const currency =
+      trade.fee_currency || row.pnlQuoteCurrency || quoteCurrency(row.symbol);
+    const rate = currency === 'USD' ? 1 : usdRates[currency];
+    return typeof rate === 'number' && Number.isFinite(rate)
+      ? Math.abs(fee) * rate
+      : undefined;
+  };
   const ledgerFeesByTrade = new Map<string, number>();
   for (const fill of rows) {
     if (!fill.rowId.startsWith('ledger-trade:') || !fill.ledgerTrade) continue;
@@ -106,7 +117,8 @@ export function applyInstanceTodayPnl(
     );
   }
   return rows.map((row) => {
-    if (row.rowId.startsWith('ledger-trade:')) return row;
+    if (row.rowId.startsWith('ledger-trade:'))
+      return { ...row, feesUsd: individualFeesUsd(row) };
     const todayTotal = totals[row.decisionId];
     const quote = row.pnlQuoteCurrency || quoteCurrency(row.symbol);
     const rate = quote === 'USD' ? 1 : usdRates[quote];

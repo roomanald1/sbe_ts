@@ -1445,14 +1445,18 @@ function AutoTraderOutcomesComponent({
         headerTooltip:
           'Total entry and exit fees paid for a closed trade. Open positions show entry fees paid so far.',
         valueGetter: ({ data }) =>
-          data?.status === 'Open'
-            ? Math.abs(data.entryFees)
-            : data?.status === 'Closed'
-              ? data.totalFees
-              : undefined,
+          data?.ledgerTrade
+            ? Math.abs(data.ledgerTrade.fee ?? data.entryFees)
+            : data?.status === 'Open'
+              ? Math.abs(data.entryFees)
+              : data?.status === 'Closed'
+                ? data.totalFees
+                : undefined,
         valueFormatter: ({ value, data }) =>
           typeof value === 'number'
-            ? (data?.pnlQuoteCurrency ?? '') +
+            ? (data?.ledgerTrade?.fee_currency ??
+                data?.pnlQuoteCurrency ??
+                '') +
               ' ' +
               value.toFixed(4) +
               (typeof data?.feesUsd === 'number' &&

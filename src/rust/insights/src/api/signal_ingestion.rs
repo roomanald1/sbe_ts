@@ -200,6 +200,101 @@ async fn update_scout_strategy_status(
     StatusCode::NO_CONTENT
 }
 
+// Keep this conversion structural instead of serializing SignalSnapshot into a
+// generic JSON value and deserializing it again for every live feed update.
+fn strategy_signal_from_snapshot(
+    snapshot: &SignalSnapshot,
+) -> strategy::StrategyMarketSignal {
+    let components = &snapshot.components;
+    strategy::StrategyMarketSignal {
+        symbol: snapshot.symbol.clone(),
+        direction: snapshot.direction.clone(),
+        strength: snapshot.strength,
+        timestamp: snapshot.timestamp,
+        stale: snapshot.stale,
+        score: snapshot.score,
+        ranging_probability: snapshot.ranging_probability,
+        components: strategy::SignalComponents {
+            momentum_10s_percent: components.momentum_10s_percent,
+            trend_5m_volatility_units: components.trend_5m_volatility_units,
+            trade_flow_imbalance: components.trade_flow_imbalance,
+            book_imbalance: components.book_imbalance,
+            volatility_1m_percent: components.volatility_1m_percent,
+            mispricing_vs_vwap_bps: components.mispricing_vs_vwap_bps,
+            pressure_without_price_move: components.pressure_without_price_move,
+            aggressor_cost_bps: components.aggressor_cost_bps,
+            momentum_by_window: components
+                .momentum_by_window
+                .iter()
+                .map(|value| strategy::WindowedSignalValue {
+                    window_seconds: value.window_seconds,
+                    value: value.value,
+                    sample_count: value.sample_count,
+                    span_ms: value.span_ms,
+                })
+                .collect(),
+            trend_volatility_units_by_window: components
+                .trend_volatility_units_by_window
+                .iter()
+                .map(|value| strategy::WindowedSignalValue {
+                    window_seconds: value.window_seconds,
+                    value: value.value,
+                    sample_count: value.sample_count,
+                    span_ms: value.span_ms,
+                })
+                .collect(),
+            trade_flow_by_window: components
+                .trade_flow_by_window
+                .iter()
+                .map(|value| strategy::WindowedSignalValue {
+                    window_seconds: value.window_seconds,
+                    value: value.value,
+                    sample_count: value.sample_count,
+                    span_ms: value.span_ms,
+                })
+                .collect(),
+            book_imbalance_by_depth: components
+                .book_imbalance_by_depth
+                .iter()
+                .map(|value| strategy::DepthSignalValue {
+                    depth_levels: value.depth_levels,
+                    value: value.value,
+                })
+                .collect(),
+            vwap_dislocation_by_window: components
+                .vwap_dislocation_by_window
+                .iter()
+                .map(|value| strategy::WindowedSignalValue {
+                    window_seconds: value.window_seconds,
+                    value: value.value,
+                    sample_count: value.sample_count,
+                    span_ms: value.span_ms,
+                })
+                .collect(),
+            absorption_pressure_by_window: components
+                .absorption_pressure_by_window
+                .iter()
+                .map(|value| strategy::AbsorptionPressureValue {
+                    window_seconds: value.window_seconds,
+                    replenishment_window_ms: value.replenishment_window_ms,
+                    touch_tolerance_bps: value.touch_tolerance_bps,
+                    value: value.value,
+                })
+                .collect(),
+        },
+        strategy_candidate: false,
+        strategy: None,
+        strategy_decision: None,
+        market_regime: None,
+        market_state: None,
+        news_attribution: snapshot
+            .news_attribution
+            .as_ref()
+            .and_then(|value| serde_json::to_value(value).ok()),
+        entry_gate: None,
+    }
+}
+
 async fn ingest_signal_event(
     axum::extract::State(runtime): axum::extract::State<Arc<SignalRuntime>>,
     Json(request): Json<SignalEventRequest>,
@@ -514,27 +609,23 @@ async fn ingest_signal_event(
                     &cached.ask_levels,
                 )
             });
-        if let Ok(signal) = serde_json::from_value::<strategy::StrategyMarketSignal>(
-            serde_json::to_value(snapshot).unwrap_or(serde_json::Value::Null),
-        ) {
-            let update = strategy::StrategyInsightUpdate {
-                contract_version: strategy::STRATEGY_INSIGHT_UPDATE_VERSION,
-                event_id: format!("{}:{}", snapshot.symbol, snapshot.timestamp),
-                event_time_ms: snapshot.timestamp,
-                signal: Some(signal),
-                market: market_value,
-                taker_fee_rate: Some(insights::signals::configured_signal_taker_fee_rate()),
-                daily_snapshot: None,
-                dated_carry_scan: None,
-                dated_carry_candidate: None,
-                dated_carry_settlement: None,
-            };
-            if let Ok(encoded) = serde_json::to_vec(&update) {
-                let encoded = Bytes::from(encoded);
-                runtime.latest_strategy_signal_updates.insert(snapshot.symbol.clone(), encoded.clone());
-                let _ = runtime.strategy_signal_events.send(encoded.clone());
-                let _ = runtime.legacy_strategy_signal_events.send(encoded);
-            }
+        let update = strategy::StrategyInsightUpdate {
+            contract_version: strategy::STRATEGY_INSIGHT_UPDATE_VERSION,
+            event_id: format!("{}:{}", snapshot.symbol, snapshot.timestamp),
+            event_time_ms: snapshot.timestamp,
+            signal: Some(strategy_signal_from_snapshot(snapshot)),
+            market: market_value,
+            taker_fee_rate: Some(insights::signals::configured_signal_taker_fee_rate()),
+            daily_snapshot: None,
+            dated_carry_scan: None,
+            dated_carry_candidate: None,
+            dated_carry_settlement: None,
+        };
+        if let Ok(encoded) = serde_json::to_vec(&update) {
+            let encoded = Bytes::from(encoded);
+            runtime.latest_strategy_signal_updates.insert(snapshot.symbol.clone(), encoded.clone());
+            let _ = runtime.strategy_signal_events.send(encoded.clone());
+            let _ = runtime.legacy_strategy_signal_events.send(encoded);
         }
         let mut ui_snapshot = snapshot.clone();
         ui_snapshot.components.momentum_by_window.clear();
