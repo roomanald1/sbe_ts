@@ -91,9 +91,9 @@ type ScoutOutcomesResponse = {
   learningSymbol: string | null;
   learningOutcomes: Array<{
     strategy: string;
-    netReturnPercent: number;
-    parameterKey?: string;
-    parameterValue?: number;
+    count: number;
+    positive: number;
+    returnTotal: number;
   }>;
   updatedAt: number;
   source: ScoutSourceFilter;
@@ -291,7 +291,10 @@ export class AutoTraderScoutModel {
     this.refreshing = true;
     try {
       const filters = this.state$.value;
+      const localDayStart = new Date();
+      localDayStart.setHours(0, 0, 0, 0);
       const query = new URLSearchParams({
+        since_ms: String(localDayStart.getTime()),
         source: filters.source,
         status: filters.status,
         page: String(filters.page),

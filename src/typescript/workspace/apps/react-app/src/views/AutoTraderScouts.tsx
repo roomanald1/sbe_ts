@@ -394,11 +394,11 @@ function AutoTraderScoutsComponent() {
     >
       <FeedToolbar title="Scout outcomes" />
       <p className="signal-info-note">
-        Simulated outcomes from the last 7 days; these do not represent filled
-        trades. Paired baseline/variant rows show the variant return delta
-        against the same signal. A variant can be a raw loss and still improve
-        on its baseline. Parameter promotion uses that paired delta; unpaired
-        Scout outcomes remain separate. The 1m/5m/15m/60m markouts are
+        Simulated outcomes from today in your local time; these do not represent
+        filled trades. Paired baseline/variant rows show the variant return
+        delta against the same signal. A variant can be a raw loss and still
+        improve on its baseline. Parameter promotion uses that paired delta;
+        unpaired Scout outcomes remain separate. The 1m/5m/15m/60m markouts are
         additional fee- and spread-aware observations for each Scout, not
         additional trades or independent learning samples.
       </p>
@@ -583,7 +583,7 @@ function AutoTraderScoutsComponent() {
           </div>
         ) : (
           <p className="positions-empty">
-            No Scout learning outcomes recorded in the last 7 days.
+            No Scout learning outcomes recorded today.
           </p>
         )}
       </details>
@@ -693,7 +693,7 @@ function AutoTraderScoutsComponent() {
       )}
       {!state.loading && !state.error && state.totalRows === 0 && (
         <p className="positions-empty">
-          No Scout records match these filters in the last 7 days.
+          No Scout records match these filters today.
         </p>
       )}
     </section>

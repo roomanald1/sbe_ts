@@ -210,6 +210,10 @@ async fn fetch_closed_ledger_rows(
         } else {
             first["execution_price"].as_f64().unwrap_or_default()
         };
+        let total_fees = trades
+            .iter()
+            .map(|trade| trade["fee"].as_f64().unwrap_or_default().abs())
+            .sum::<f64>();
         let parent_orders = trades
             .iter()
             .filter_map(|trade| trade["parent_order_id"].as_str())
@@ -236,7 +240,7 @@ async fn fetch_closed_ledger_rows(
                     } else {
                         notional
                     };
-                    cashflow + trade["fee"].as_f64().unwrap_or_default()
+                    cashflow - trade["fee"].as_f64().unwrap_or_default().abs()
                 })
                 .sum::<f64>()
         } else {
@@ -245,7 +249,7 @@ async fn fetch_closed_ledger_rows(
         let manually_closed =
             manual_close_groups.contains(&(strategy.clone(), decision_id.clone(), symbol.clone()));
         let key = format!("{strategy}:{decision_id}:{symbol}");
-        rows.push(serde_json::json!({"rowId":format!("ledger-summary:{key}"),"status":"Closed","decisionId":decision_id,"strategyInstanceId":decision_id,"symbol":symbol,"side":entry_side,"openedAt":first["timestamp"],"closedAt":last["timestamp"],"quantity":quantity,"signedQuantity":if entry_side == "buy" {quantity} else {-quantity},"entryPrice":entry_price,"pnl":realized_pnl,"entryFees":0,"estimatedExitFeeRate":0,"estimatedExitSlippageBps":0,"pnlQuoteCurrency":symbol.split_once('-').map(|(_,q)|q).unwrap_or("USD"),"strategy":strategy,"direction":if entry_side == "buy" {"LONG"} else {"SHORT"},"strength":null,"scout":false,"source":"unknown","manuallyClosed":manually_closed,"components":{}}));
+        rows.push(serde_json::json!({"rowId":format!("ledger-summary:{key}"),"status":"Closed","decisionId":decision_id,"strategyInstanceId":decision_id,"symbol":symbol,"side":entry_side,"openedAt":first["timestamp"],"closedAt":last["timestamp"],"quantity":quantity,"signedQuantity":if entry_side == "buy" {quantity} else {-quantity},"entryPrice":entry_price,"pnl":realized_pnl,"entryFees":0,"totalFees":total_fees,"estimatedExitFeeRate":0,"estimatedExitSlippageBps":0,"pnlQuoteCurrency":symbol.split_once('-').map(|(_,q)|q).unwrap_or("USD"),"strategy":strategy,"direction":if entry_side == "buy" {"LONG"} else {"SHORT"},"strength":null,"scout":false,"source":"unknown","manuallyClosed":manually_closed,"components":{}}));
         for trade in trades {
             let trade_source = trade["source"].as_str().unwrap_or("auto");
             rows.push(serde_json::json!({"rowId":format!("ledger-trade:{}",trade["id"].as_str().unwrap_or_default()),"status":"Closed","decisionId":decision_id,"strategyInstanceId":decision_id,"symbol":symbol,"side":trade["side"],"openedAt":trade["timestamp"],"closedAt":trade["timestamp"],"quantity":trade["quantity"],"signedQuantity":if trade["side"].as_str()==Some("buy"){trade["quantity"].as_f64().unwrap_or_default()}else{-trade["quantity"].as_f64().unwrap_or_default()},"entryPrice":trade["execution_price"],"pnl":0,"entryFees":trade["fee"],"estimatedExitFeeRate":trade["fee_rate"],"estimatedExitSlippageBps":0,"pnlQuoteCurrency":symbol.split_once('-').map(|(_,q)|q).unwrap_or("USD"),"strategy":strategy,"direction":trade["side"],"strength":null,"scout":false,"source":"unknown","components":{},"ledgerTrade":trade,"ledgerSource":trade_source}));

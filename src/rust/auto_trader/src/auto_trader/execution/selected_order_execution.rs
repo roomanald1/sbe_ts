@@ -17,6 +17,7 @@ struct SelectedOrderExecution {
     timestamp: u64,
     decision_id: String,
     learning_context: String,
+    exploration_risk_adjustment: ExplorationRiskAdjustment,
     horizon_take_profit_percent: Option<f64>,
     stage_timings_ms: BTreeMap<String, f64>,
     deep_book: Option<DeepBookAssessment>,

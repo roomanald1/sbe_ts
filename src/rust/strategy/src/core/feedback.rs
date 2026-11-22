@@ -36,6 +36,31 @@ pub struct LearnedProfileSnapshot {
     pub execution_learning: BTreeMap<String, ExecutionLearningStat>,
     #[serde(default)]
     pub scout_parameter_variants: Vec<ScoutParameterVariant>,
+    /// Exit-protection parameters selected by chronological post-exit replay.
+    /// Empty means Learning lacks enough evidence and consumers must keep the
+    /// current profile/defaults.
+    #[serde(default)]
+    pub exit_protection_policies: Vec<LearnedExitProtectionPolicy>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct LearnedExitProtectionPolicy {
+    pub symbol: String,
+    pub strategy: String,
+    pub activation_percent: f64,
+    pub giveback_percent: f64,
+    pub minimum_lock_percent: f64,
+    pub sample_count: usize,
+    pub training_count: usize,
+    pub validation_count: usize,
+    pub baseline_validation_mean_percent: f64,
+    pub selected_validation_mean_percent: f64,
+    pub validation_gain_percent: f64,
+    pub validation_positive_rate: f64,
+    pub validation_negative_difference_rate: f64,
+    pub validation_tenth_percentile_difference_percent: f64,
+    pub validation_worst_difference_percent: f64,
+    pub as_of_ms: u64,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]

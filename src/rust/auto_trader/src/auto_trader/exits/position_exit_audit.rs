@@ -90,6 +90,12 @@ fn position_exit_audit_payload(
         "minimum_lock_percent": protection.minimum_lock_percent,
         "peak_return_percent": position.profit_protection_peak_return_percent,
         "triggered": reason == "profit-protection",
+        "learning_profile_id": position.strategy_decision.as_ref()
+            .and_then(|decision| decision.get("learning_profile_id")),
+        "learning_profile_version": position.strategy_decision.as_ref()
+            .and_then(|decision| decision.get("learning_profile_version")),
+        "learned_exit_protection_policy": position.strategy_decision.as_ref()
+            .and_then(|decision| decision.get("learned_exit_protection_policy")),
     });
     payload
 

@@ -169,7 +169,6 @@ def learning_get(endpoint, path):
 
 
 METRIC_HEADERS = set()
-LAST_EXPORTED_ORDER_STAGE_TIMESTAMP = {}
 
 
 def sample(name, help_text, value, labels=None, kind="gauge", timestamp_ms=None):
@@ -383,7 +382,7 @@ def metrics():
         pass
     try:
         activity = rsocket_get(
-            RSOCKET_SERVICES["auto_trader"], "/positions/auto-trader/activity"
+            RSOCKET_SERVICES["auto_trader"], "/internal/monitoring-metrics"
         )
         value = activity.get("insight_processing_latest_ms")
         if isinstance(value, (int, float)):
@@ -484,15 +483,13 @@ def metrics():
                 if isinstance(latency, (int, float)) and latency >= 0:
                     stage_values.setdefault(stage, []).append((int(order.get("timestamp", 0)), latency))
         for stage, samples in stage_values.items():
-            # Emit each order-stage observation once. Re-exporting the latest
-            # value on every scrape makes event timings look like repeated data.
+            # Publish the latest observation as a gauge at scrape time. Keeping
+            # the original event time makes Prometheus mark it stale after the
+            # first scrape and leaves sparse latency panels empty.
             metric_stage = "source_signal_age" if stage == "signal_age_at_order_record" else stage
             description = "Latest milliseconds per AutoTrader stage; source_signal_age is signal age, not processing time."
-            last_timestamp = LAST_EXPORTED_ORDER_STAGE_TIMESTAMP.get(metric_stage, -1)
-            new_samples = sorted((timestamp, value) for timestamp, value in samples if timestamp > last_timestamp)
-            for event_timestamp, value in new_samples:
-                output.append(sample("app_autotrader_stage_latency_ms", description, value, {"stage": metric_stage, "stat": "latest"}))
-                LAST_EXPORTED_ORDER_STAGE_TIMESTAMP[metric_stage] = event_timestamp
+            _, value = max(samples, key=lambda item: item[0])
+            output.append(sample("app_autotrader_stage_latency_ms", description, value, {"stage": metric_stage, "stat": "latest"}))
 
     except (OSError, URLError, ValueError, TypeError):
         pass

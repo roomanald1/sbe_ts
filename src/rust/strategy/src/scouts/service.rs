@@ -142,7 +142,36 @@ fn schedule_scout_outbox_flush_with(
             .flush_scheduled
             .store(false, std::sync::atomic::Ordering::Release);
         if let Err((_, error)) = result {
-            eprintln!("WARN Scout outbox delivery deferred: {error}");
+            let state = scout.data.lock().await;
+            let pending_learning = state
+                .outbox
+                .iter()
+                .filter(|item| matches!(item, ScoutOutboxItem::Learning(_)))
+                .count();
+            let pending_registration = state
+                .outbox
+                .iter()
+                .filter(|item| matches!(item, ScoutOutboxItem::Registration(_)))
+                .count();
+            let now_ms = scout_now_ms();
+            let oldest_learning_age_ms = state
+                .outbox
+                .iter()
+                .filter_map(|item| match item {
+                    ScoutOutboxItem::Learning(FeedbackEvent::ScoutOutcome {
+                        observed_at_ms,
+                        ..
+                    }) => Some(now_ms.saturating_sub(*observed_at_ms)),
+                    _ => None,
+                })
+                .max()
+                .unwrap_or(0);
+            eprintln!(
+                "WARN Scout outbox delivery deferred: {error}; pending_total={} pending_learning={} pending_registration={} oldest_learning_age_ms={oldest_learning_age_ms}",
+                state.outbox.len(),
+                pending_learning,
+                pending_registration,
+            );
             return;
         }
         let pending = !scout.data.lock().await.outbox.is_empty();
@@ -3163,6 +3192,42 @@ fn sync_outbox_delta(
     Ok(())
 }
 
+fn persist_scout_outbox_order(
+    path: &std::path::Path,
+    outbox: &[ScoutOutboxItem],
+) -> Result<(), (StatusCode, String)> {
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        std::fs::create_dir_all(parent)
+            .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
+    }
+    let mut connection = rusqlite::Connection::open(path)
+        .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
+    connection
+        .execute_batch(
+            "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; CREATE TABLE IF NOT EXISTS scout_records (collection TEXT NOT NULL, record_key TEXT NOT NULL, payload TEXT NOT NULL, PRIMARY KEY(collection, record_key));",
+        )
+        .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
+    let tx = connection
+        .transaction()
+        .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
+    tx.execute("DELETE FROM scout_records WHERE collection='outbox'", [])
+        .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
+    for (index, item) in outbox.iter().enumerate() {
+        let payload = serde_json::to_string(item)
+            .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
+        tx.execute(
+            "INSERT INTO scout_records(collection,record_key,payload) VALUES('outbox',?1,?2)",
+            rusqlite::params![format!("{index:020}"), payload],
+        )
+        .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
+    }
+    tx.commit()
+        .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))
+}
+
 fn scout_state_record(
     state: &PersistedState,
     collection: &str,
@@ -3759,12 +3824,28 @@ async fn flush_scout_outbox(
     insights_rsocket_url: &str,
 ) -> Result<(), (StatusCode, String)> {
     let _flush = scout.flush_lock.lock().await;
+    prioritize_learning_outbox(scout).await?;
     let mut acknowledged = 0usize;
     loop {
         let item = scout.data.lock().await.outbox.get(acknowledged).cloned();
         let Some(item) = item else {
             acknowledge_scout_outbox(scout, acknowledged).await?;
             return Ok(());
+        };
+        let delivery_context = match &item {
+            ScoutOutboxItem::Learning(event) => format!(
+                "Learning event {} ({} bytes)",
+                feedback_event_id(event),
+                serde_json::to_vec(event).map_or(0, |payload| payload.len()),
+            ),
+            ScoutOutboxItem::Registration(registration) => format!(
+                "registration {}",
+                registration["decision_id"]
+                    .as_str()
+                    .or_else(|| registration["id"].as_str())
+                    .unwrap_or("unknown")
+            ),
+            ScoutOutboxItem::Audit(_) => "audit".into(),
         };
         if matches!(item, ScoutOutboxItem::Audit(_)) {
             acknowledged += 1;
@@ -3816,7 +3897,7 @@ async fn flush_scout_outbox(
                 acknowledge_scout_outbox(scout, acknowledged).await?;
                 return Err((
                     StatusCode::BAD_GATEWAY,
-                    format!("Scout outbox RSocket delivery failed: {error}"),
+                    format!("Scout outbox {delivery_context} delivery failed: {error:#}"),
                 ));
             }
         };
@@ -3845,6 +3926,35 @@ async fn flush_scout_outbox(
             acknowledge_scout_outbox(scout, acknowledged).await?;
             acknowledged = 0;
         }
+    }
+}
+
+async fn prioritize_learning_outbox(scout: &ScoutState) -> Result<(), (StatusCode, String)> {
+    let mut state = scout.data.lock().await;
+    let previous = state.outbox.clone();
+    let has_lower_priority_before_learning = state.outbox.windows(2).any(|pair| {
+        outbox_delivery_priority(&pair[0]) > outbox_delivery_priority(&pair[1])
+    });
+    if !has_lower_priority_before_learning {
+        return Ok(());
+    }
+    state.outbox.sort_by_key(|item| match item {
+        ScoutOutboxItem::Learning(_) => 0,
+        ScoutOutboxItem::Audit(_) => 1,
+        ScoutOutboxItem::Registration(_) => 2,
+    });
+    if let Err(error) = persist_scout_outbox_order(&scout.path, &state.outbox) {
+        state.outbox = previous;
+        return Err(error);
+    }
+    Ok(())
+}
+
+fn outbox_delivery_priority(item: &ScoutOutboxItem) -> u8 {
+    match item {
+        ScoutOutboxItem::Learning(_) => 0,
+        ScoutOutboxItem::Audit(_) => 1,
+        ScoutOutboxItem::Registration(_) => 2,
     }
 }
 

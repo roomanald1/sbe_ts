@@ -10,13 +10,14 @@ use std::{
 };
 
 const LATENCY_BUCKETS_SECONDS: [f64; 8] = [0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.5, 1.0];
+const SCOUT_OUTCOME_TTL_MS: u64 = 7 * 86_400_000;
 
 #[derive(Debug)]
 pub(crate) struct WorkerMetrics {
     role: &'static str,
     strategy: String,
     scout_state_path: Option<PathBuf>,
-    scout_counts_cache: Mutex<Option<(Instant, u64, u64)>>,
+    scout_counts_cache: Mutex<Option<(Instant, u64, u64, u64)>>,
     requests: AtomicU64,
     errors: AtomicU64,
     timeouts: AtomicU64,
@@ -351,9 +352,9 @@ impl WorkerMetrics {
             self.insight_route_latency_count.load(Ordering::Relaxed)
         ));
         if self.role == "scout"
-            && let Some((open, closed)) = self.scout_instance_counts()
+            && let Some((open, closed, unavailable)) = self.scout_instance_counts()
         {
-            output.push_str("# HELP app_scout_instances Scout instances in the current persisted state, by lifecycle status.\n# TYPE app_scout_instances gauge\n");
+            output.push_str("# HELP app_scout_instances Scout instances in the current persisted state, by lifecycle status. Unresolved instances older than seven days are unavailable, not active.\n# TYPE app_scout_instances gauge\n");
             metric(
                 &mut output,
                 "app_scout_instances",
@@ -365,6 +366,12 @@ impl WorkerMetrics {
                 "app_scout_instances",
                 &format!("{labels},status=\"closed\""),
                 closed,
+            );
+            metric(
+                &mut output,
+                "app_scout_instances",
+                &format!("{labels},status=\"unavailable\""),
+                unavailable,
             );
         }
         if let Some((rss, cpu_seconds)) = process_usage() {
@@ -383,39 +390,52 @@ impl WorkerMetrics {
         output
     }
 
-    fn scout_instance_counts(&self) -> Option<(u64, u64)> {
+    fn scout_instance_counts(&self) -> Option<(u64, u64, u64)> {
         let path = self.scout_state_path.as_ref()?;
         let mut cache = self.scout_counts_cache.lock().ok()?;
-        if let Some((updated, open, closed)) = cache.as_ref()
+        if let Some((updated, open, closed, unavailable)) = cache.as_ref()
             && updated.elapsed() < Duration::from_secs(60)
         {
-            return Some((*open, *closed));
+            return Some((*open, *closed, *unavailable));
         }
         let counts = read_scout_instance_counts(path)?;
-        *cache = Some((Instant::now(), counts.0, counts.1));
+        *cache = Some((Instant::now(), counts.0, counts.1, counts.2));
         Some(counts)
     }
 }
 
-fn read_scout_instance_counts(path: &std::path::Path) -> Option<(u64, u64)> {
+fn read_scout_instance_counts(path: &std::path::Path) -> Option<(u64, u64, u64)> {
     let connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY).ok()?;
     connection.busy_timeout(Duration::from_millis(250)).ok()?;
     connection
         .execute_batch("PRAGMA query_only=ON; PRAGMA cache_size=-512; PRAGMA mmap_size=0; PRAGMA temp_store=FILE;")
         .ok()?;
-    let (instances, open): (i64, i64) = connection
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .min(u64::MAX as u128) as u64;
+    let open_since_ms = now_ms.saturating_sub(SCOUT_OUTCOME_TTL_MS);
+    let (open, closed, unavailable): (i64, i64, i64) = connection
         .query_row(
-            "SELECT COUNT(*), COALESCE(SUM(CASE WHEN
-                json_extract(payload, '$.scout_net_return_percent') IS NULL
-                AND (COALESCE(json_extract(payload, '$.strategy'), 'unattributed') NOT LIKE 'live-%'
-                     OR COALESCE(json_extract(payload, '$.scout_entry_price'), json_extract(payload, '$.price'), json_extract(payload, '$.strategy_decision.observed_close')) IS NOT NULL)
-                THEN 1 ELSE 0 END), 0)
+            "SELECT
+                COALESCE(SUM(CASE WHEN json_extract(payload, '$.scout_net_return_percent') IS NULL
+                    AND COALESCE(CAST(json_extract(payload, '$.timestamp') AS INTEGER), CAST(json_extract(payload, '$.signal_timestamp') AS INTEGER), 0) >= ?1
+                    AND (COALESCE(json_extract(payload, '$.strategy'), 'unattributed') NOT LIKE 'live-%'
+                         OR COALESCE(json_extract(payload, '$.scout_entry_price'), json_extract(payload, '$.price'), json_extract(payload, '$.strategy_decision.observed_close')) IS NOT NULL)
+                    THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN json_extract(payload, '$.scout_net_return_percent') IS NOT NULL THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN json_extract(payload, '$.scout_net_return_percent') IS NULL
+                    AND (COALESCE(CAST(json_extract(payload, '$.timestamp') AS INTEGER), CAST(json_extract(payload, '$.signal_timestamp') AS INTEGER), 0) < ?1
+                         OR (COALESCE(json_extract(payload, '$.strategy'), 'unattributed') LIKE 'live-%'
+                             AND COALESCE(json_extract(payload, '$.scout_entry_price'), json_extract(payload, '$.price'), json_extract(payload, '$.strategy_decision.observed_close')) IS NULL))
+                    THEN 1 ELSE 0 END), 0)
              FROM scout_records
              WHERE collection='scout_instances'
                AND COALESCE(json_extract(payload, '$.symbol'), '') != ''
                AND COALESCE(json_extract(payload, '$.direction'), 'unknown') IN ('bullish', 'bearish', 'unknown')",
-            [],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            [open_since_ms as i64],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .ok()?;
     let orphaned_outcomes: i64 = connection
@@ -431,8 +451,12 @@ fn read_scout_instance_counts(path: &std::path::Path) -> Option<(u64, u64)> {
             |row| row.get(0),
         )
         .ok()?;
-    let total = instances.max(0).saturating_add(orphaned_outcomes.max(0));
-    Some((open.max(0) as u64, total.saturating_sub(open.max(0)) as u64))
+    let completed = closed.max(0).saturating_add(orphaned_outcomes.max(0));
+    Some((
+        open.max(0) as u64,
+        completed as u64,
+        unavailable.max(0) as u64,
+    ))
 }
 
 fn metric(output: &mut String, name: &str, labels: &str, value: impl std::fmt::Display) {
@@ -489,7 +513,7 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
-    fn scout_metrics_count_open_and_closed_rows_without_a_history_window() {
+    fn scout_metrics_separate_active_completed_and_stale_rows() {
         let path =
             std::env::temp_dir().join(format!("scout-metric-counts-{}.sqlite", std::process::id()));
         let _ = std::fs::remove_file(&path);
@@ -535,14 +559,17 @@ mod tests {
         }
         drop(connection);
 
-        assert_eq!(read_scout_instance_counts(&path), Some((2, 2)));
+        assert_eq!(read_scout_instance_counts(&path), Some((1, 2, 1)));
         let metrics = WorkerMetrics::new("scout", "live-momentum", Some(path.clone()));
         let text = metrics.render();
         assert!(text.contains(
-            "app_scout_instances{role=\"scout\",strategy=\"live-momentum\",status=\"open\"} 2"
+            "app_scout_instances{role=\"scout\",strategy=\"live-momentum\",status=\"open\"} 1"
         ));
         assert!(text.contains(
             "app_scout_instances{role=\"scout\",strategy=\"live-momentum\",status=\"closed\"} 2"
+        ));
+        assert!(text.contains(
+            "app_scout_instances{role=\"scout\",strategy=\"live-momentum\",status=\"unavailable\"} 1"
         ));
         let _ = std::fs::remove_file(path);
     }

@@ -1198,14 +1198,21 @@ function AutoTraderOutcomesComponent({
         headerName: 'Trade type',
         headerTooltip:
           'Shows whether AutoTrader or an operator closed the strategy instance; otherwise shows the execution order type.',
+        valueGetter: ({ data }) =>
+          data?.ledgerTrade
+            ? data.ledgerOrderType
+            : data?.entryOrderTypes?.length
+              ? data.entryOrderTypes
+              : (data?.entryOrderType ?? data?.ledgerOrderType),
         valueFormatter: ({ value, data }) =>
-          data?.status === 'Closed' && !data.ledgerTrade
-            ? '—'
-            : data?.manuallyClosed
-              ? 'Manual close'
-              : typeof value === 'string' && value
-                ? entryOrderTypeLabel(value) || '—'
-                : '—',
+          data?.manuallyClosed
+            ? 'Manual close'
+            : (Array.isArray(value) ? value : [value])
+                .filter((item): item is string => typeof item === 'string')
+                .map(entryOrderTypeLabel)
+                .filter(Boolean)
+                .filter((item, index, items) => items.indexOf(item) === index)
+                .join(', ') || '—',
         minWidth: 88,
       },
       {
@@ -1434,14 +1441,26 @@ function AutoTraderOutcomesComponent({
         minWidth: 150,
       },
       {
-        headerName: 'Entry fees',
+        headerName: 'Fees',
+        headerTooltip:
+          'Total entry and exit fees paid for a closed trade. Open positions show entry fees paid so far.',
         valueGetter: ({ data }) =>
-          data?.status === 'Open' ? Math.abs(data.entryFees) : undefined,
+          data?.status === 'Open'
+            ? Math.abs(data.entryFees)
+            : data?.status === 'Closed'
+              ? data.totalFees
+              : undefined,
         valueFormatter: ({ value, data }) =>
           typeof value === 'number'
-            ? (data?.pnlQuoteCurrency ?? '') + ' ' + value.toFixed(4)
+            ? (data?.pnlQuoteCurrency ?? '') +
+              ' ' +
+              value.toFixed(4) +
+              (typeof data?.feesUsd === 'number' &&
+              Number.isFinite(data.feesUsd)
+                ? ' (' + money.format(data.feesUsd) + ')'
+                : '')
             : '—',
-        minWidth: 110,
+        minWidth: 150,
       },
       {
         headerName: 'Est. exit fee',
@@ -1701,10 +1720,12 @@ function AutoTraderOutcomesComponent({
                     'Strategy',
                     'Source',
                     'Strategy instance ID',
+                    'Trade type',
                     'Side',
                     'Quantity',
                     'Entry',
                     'Closed',
+                    'Fees',
                     'Net USD',
                   ].includes(String(column.headerName ?? '')),
                 )
@@ -1715,10 +1736,12 @@ function AutoTraderOutcomesComponent({
                     Strategy: 170,
                     'Entry mode': 105,
                     'Strategy instance ID': 230,
+                    'Trade type': 105,
                     Side: 80,
                     Quantity: 105,
                     Entry: 105,
                     Closed: 155,
+                    Fees: 155,
                     'Net USD': 135,
                   };
                   const originalHeader =

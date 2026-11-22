@@ -492,14 +492,25 @@ impl DuplexSocket {
                             .set_code(error::ERR_APPLICATION)
                             .set_data(Bytes::from(format!("{}", e)))
                             .build();
-                        tx.send(sending).expect("Send stream response failed");
+                        if let Err(send_error) = tx.send(sending) {
+                            // The peer may have disconnected while the
+                            // responder was producing the stream error. A
+                            // failed write is a normal transport teardown,
+                            // not a server-fatal condition.
+                            error!("Send stream response failed: {}", send_error);
+                            abort_handles.remove(&sid);
+                            return;
+                        }
                     }
                 };
             }
             abort_handles.remove(&sid);
             let complete = frame::Payload::builder(sid, Frame::FLAG_COMPLETE).build();
-            tx.send(complete)
-                .expect("Send stream complete response failed");
+            if let Err(send_error) = tx.send(complete) {
+                // Do not panic when a request stream is completed after the
+                // WebSocket peer has already gone away.
+                error!("Send stream complete response failed: {}", send_error);
+            }
         });
     }
 
@@ -547,7 +558,10 @@ impl DuplexSocket {
                         .set_data(Bytes::from(format!("{}", e)))
                         .build(),
                 };
-                tx.send(sending).expect("Send failed!");
+                if let Err(send_error) = tx.send(sending) {
+                    error!("Send request-channel response failed: {}", send_error);
+                    break;
+                }
             }
             abort_handles.remove(&sid);
             let complete = frame::Payload::builder(sid, Frame::FLAG_COMPLETE).build();

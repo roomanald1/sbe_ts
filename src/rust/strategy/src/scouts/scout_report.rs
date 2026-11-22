@@ -2,6 +2,7 @@ use serde_json::{Value, json};
 
 #[derive(Deserialize)]
 struct ScoutOutcomesQuery {
+    since_ms: Option<u64>,
     page: Option<usize>,
     page_size: Option<usize>,
     source: Option<String>,
@@ -354,7 +355,8 @@ async fn get_scout_outcomes(
     query: axum::extract::Query<ScoutOutcomesQuery>,
 ) -> axum::response::Response {
     let cache_key = format!(
-        "{}|{}|{}|{}|{}|{}|{}",
+        "{}|{}|{}|{}|{}|{}|{}|{}",
+        query.since_ms.unwrap_or_default(),
         query.source.as_deref().unwrap_or(""),
         query.status.as_deref().unwrap_or(""),
         query.page.unwrap_or_default(),
@@ -373,7 +375,10 @@ async fn get_scout_outcomes(
             .expect("valid cached Scout outcomes response");
     }
     let now = scout_now_ms();
-    let since = now.saturating_sub(7 * 86_400_000);
+    let since = query
+        .since_ms
+        .filter(|since| *since <= now)
+        .unwrap_or_else(|| now.saturating_sub(7 * 86_400_000));
     let instances = match load_scout_instances_since(&service.scout.path, since) {
         Ok(instances) => instances,
         Err(error) => {
@@ -453,9 +458,20 @@ async fn get_scout_outcomes(
     let symbols=all_learning_rows.iter().filter_map(|row| row["symbol"].as_str().map(str::to_owned)).collect::<BTreeSet<_>>();
     let requested_symbol=query.learning_symbol.as_deref().filter(|symbol| symbols.contains(*symbol));
     let visible_learning_rows=all_learning_rows.into_iter().filter(|row| requested_symbol.is_none_or(|symbol| row["symbol"].as_str()==Some(symbol))).collect::<Vec<_>>();
-    let learning_outcomes=rows.iter().filter(|row| requested_symbol.is_none_or(|symbol| row["symbol"].as_str()==Some(symbol)))
+    let mut learning_outcomes = BTreeMap::<String, (usize, usize, f64)>::new();
+    for row in rows.iter()
+        .filter(|row| requested_symbol.is_none_or(|symbol| row["symbol"].as_str()==Some(symbol)))
         .filter(|row| row["status"]!="Open" && row.get("scoutComparisonId").is_none_or(Value::is_null))
-        .filter_map(|row| number(row,"netReturnPercent").map(|value|json!({"strategy":row["strategy"],"netReturnPercent":value,"parameterKey":row["scoutParameterKey"],"parameterValue":row["scoutParameterValue"]}))).collect::<Vec<_>>();
+    {
+        let (Some(strategy), Some(value)) = (string(row, "strategy"), number(row, "netReturnPercent")) else { continue; };
+        let aggregate = learning_outcomes.entry(strategy).or_default();
+        aggregate.0 += 1;
+        aggregate.1 += usize::from(value > 0.0);
+        aggregate.2 += value;
+    }
+    let learning_outcomes = learning_outcomes.into_iter().map(|(strategy, (count, positive, return_total))| {
+        json!({"strategy": strategy, "count": count, "positive": positive, "returnTotal": return_total})
+    }).collect::<Vec<_>>();
     let source=if query.source.as_deref()==Some("all"){"all"}else{"live"};
     let status=query.status.as_deref().filter(|status|matches!(*status,"open"|"closed"));
     let mut filtered=rows.into_iter().filter(|row| source=="all" || row["strategy"].as_str().is_some_and(|strategy|strategy.starts_with("live-")))
@@ -1108,6 +1124,7 @@ mod scout_report_tests {
         let response = get_scout_outcomes(
             State(service),
             axum::extract::Query(ScoutOutcomesQuery {
+                since_ms: None,
                 page: Some(0),
                 page_size: Some(50),
                 source: Some("all".into()),

@@ -32,6 +32,7 @@ export type AutoTraderOutcome = {
   entryPrice: number;
   pnl: number;
   entryFees: number;
+  totalFees?: number;
   estimatedExitFeeRate: number;
   estimatedExitSlippageBps: number;
   feesUsd?: number;
@@ -69,6 +70,14 @@ export type AutoTraderOutcome = {
   postExitWorstReturnPercent?: number;
   postExitObservedAt?: number;
   postExitHorizonMs?: number;
+  explorationRisk?: {
+    scale: number;
+    sampleCount: number;
+    weightedNetReturnPercent?: number;
+    regimeScoped: boolean;
+    direction?: string;
+    marketRegime?: string;
+  };
   entryStrategyDecision?: StrategyGateDecision;
   latestStrategyEvaluation?: StrategyGateDecision;
   carryDetails?: DatedCarryPosition;
@@ -99,9 +108,19 @@ export function applyInstanceTodayPnl(
             Number.isFinite(rate)
           ? row.pnl * rate
           : undefined;
+    const feeQuote = row.totalFees;
+    const feeRate = quote === 'USD' ? 1 : usdRates[quote];
+    const feesUsd =
+      typeof feeQuote === 'number' &&
+      Number.isFinite(feeQuote) &&
+      typeof feeRate === 'number' &&
+      Number.isFinite(feeRate)
+        ? feeQuote * feeRate
+        : row.feesUsd;
     return {
       ...row,
       netPnlUsd: totalNetUsd,
+      feesUsd,
       todayRealizedUsd: todayTotal ?? undefined,
     };
   });
@@ -166,6 +185,13 @@ type AuditRecord = {
     observed_at_ms?: number;
     horizon_ms?: number;
   };
+  exploration_risk?: {
+    scale?: number;
+    sample_count?: number;
+    weighted_net_return_percent?: number | null;
+    regime_scoped?: boolean;
+  };
+  market_regime?: string;
   strength?: number;
   score?: number;
   scout?: boolean;
@@ -180,6 +206,25 @@ type AuditRecord = {
     rejection_reasons?: string[];
   };
 };
+function explorationRiskFromAudit(
+  entry?: AuditRecord,
+): AutoTraderOutcome['explorationRisk'] {
+  const risk = entry?.exploration_risk;
+  if (
+    entry?.exploratory !== true ||
+    typeof risk?.scale !== 'number' ||
+    !Number.isFinite(risk.scale)
+  )
+    return undefined;
+  return {
+    scale: risk.scale,
+    sampleCount: risk.sample_count ?? 0,
+    weightedNetReturnPercent: risk.weighted_net_return_percent ?? undefined,
+    regimeScoped: risk.regime_scoped ?? false,
+    direction: entry.direction,
+    marketRegime: entry.market_regime,
+  };
+}
 type StrategyGateDecision = {
   strategy?: string;
   symbol?: string;
@@ -627,6 +672,7 @@ export class AutoTraderOutcomesModel {
     refreshedAt: number;
   } = { records: [], refreshedAt: 0 };
   private auditRows: AuditRecord[] = [];
+  private entryAuditLookupsInFlight = new Set<string>();
   private auditRefreshInFlight = false;
   private auditLastAttemptAt = 0;
   private ledgerRowsCache: AutoTraderOutcome[] = [];
@@ -943,10 +989,13 @@ export class AutoTraderOutcomesModel {
         trades: [...ledgerTradeMap.values()],
         has_older: this.state$.value.hasOlderLedgerTrades,
       };
+      const streamedActivity = autoSnapshot?.activity as
+        | ActivityResponse
+        | undefined;
       const activityData = activityResponse?.ok
         ? ((await activityResponse.json()) as ActivityResponse)
-        : useStreamSnapshot
-          ? ((autoSnapshot?.activity as ActivityResponse) ?? {})
+        : streamedActivity && Object.keys(streamedActivity).length > 0
+          ? streamedActivity
           : {};
       const streamedRates = streamSnapshot?.usd_rates?.rates;
       const usdRatesData =
@@ -1401,6 +1450,7 @@ export class AutoTraderOutcomesModel {
               entryPrice,
               pnl,
               entryFees: 0,
+              totalFees: fees,
               estimatedExitFeeRate: 0,
               estimatedExitSlippageBps: 0,
               feesUsd,
@@ -1425,6 +1475,7 @@ export class AutoTraderOutcomesModel {
                       : 'unknown',
               components: entry.signal_components ?? {},
               entryStrategyDecision: entry.strategy_decision,
+              explorationRisk: explorationRiskFromAudit(entry),
               latestStrategyEvaluation: latestStrategyEvaluation(
                 entry.strategy ?? 'unattributed',
                 entry.symbol ?? '',
@@ -1433,7 +1484,63 @@ export class AutoTraderOutcomesModel {
           ];
         },
       );
-      const closedLedgerSource = activityData.closed_ledger_rows ?? [];
+      // A failed activity request must not replace a populated closed grid
+      // with an empty result. Keep the last successful snapshot until a newer
+      // activity snapshot arrives; an explicit empty array remains valid.
+      const hasClosedLedgerSnapshot = Array.isArray(
+        activityData.closed_ledger_rows,
+      );
+      const rawClosedLedgerSource = hasClosedLedgerSnapshot
+        ? activityData.closed_ledger_rows!
+        : this.ledgerRowsCache;
+      const activityOrders = activityData.orders ?? [];
+      const ordersByLedgerId = new Map<string, StrategyOrder>();
+      for (const order of activityOrders) {
+        ordersByLedgerId.set(String(order.timestamp), order);
+        if (order.execution_order_id)
+          ordersByLedgerId.set(order.execution_order_id, order);
+      }
+      const orderTypeByTradeId = new Map<string, string>();
+      for (const row of rawClosedLedgerSource) {
+        const trade = row.ledgerTrade;
+        if (!trade) continue;
+        const order = resolveLedgerOrder(
+          trade,
+          ordersByLedgerId,
+          activityOrders,
+        );
+        const orderType = row.ledgerOrderType ?? order?.order_type;
+        if (orderType) orderTypeByTradeId.set(trade.id, orderType);
+      }
+      const closedLedgerSource = rawClosedLedgerSource.map((row) => {
+        if (row.ledgerTrade) {
+          return {
+            ...row,
+            ledgerOrderType:
+              row.ledgerOrderType ?? orderTypeByTradeId.get(row.ledgerTrade.id),
+          };
+        }
+        if (row.entryOrderTypes?.length) return row;
+        const entryOrderTypes = [
+          ...new Set(
+            rawClosedLedgerSource
+              .filter(
+                (candidate) =>
+                  candidate.decisionId === row.decisionId &&
+                  candidate.symbol === row.symbol &&
+                  candidate.side === row.side &&
+                  candidate.ledgerTrade,
+              )
+              .map((candidate) =>
+                candidate.ledgerTrade
+                  ? orderTypeByTradeId.get(candidate.ledgerTrade.id)
+                  : undefined,
+              )
+              .filter((orderType): orderType is string => Boolean(orderType)),
+          ),
+        ];
+        return entryOrderTypes.length ? { ...row, entryOrderTypes } : row;
+      });
       const knownEntryDecisionIds = new Set(
         this.auditRows
           .filter((record) => record.stage === 'entry')
@@ -1450,39 +1557,7 @@ export class AutoTraderOutcomesModel {
             ),
         ),
       ];
-      for (
-        let offset = 0;
-        offset < missingEntryDecisionIds.length;
-        offset += 100
-      ) {
-        const decisionIds = missingEntryDecisionIds.slice(offset, offset + 100);
-        const auditResponse = await insightsFetch(
-          '/signals/auto-trader-execution-audit?decision_ids=' +
-            encodeURIComponent(decisionIds.join(',')),
-        ).catch(() => undefined);
-        if (!auditResponse?.ok) continue;
-        try {
-          const page = (await auditResponse.json()) as {
-            items?: AuditRecord[];
-          };
-          const auditsByKey = new Map(
-            this.auditRows.map((record) => [
-              `${record.decision_id ?? ''}:${record.stage ?? ''}`,
-              record,
-            ]),
-          );
-          for (const record of page.items ?? [])
-            auditsByKey.set(
-              `${record.decision_id ?? ''}:${record.stage ?? ''}`,
-              record,
-            );
-          this.auditRows = [...auditsByKey.values()].sort(
-            (left, right) => (left.timestamp ?? 0) - (right.timestamp ?? 0),
-          );
-        } catch {
-          /* Preserve existing audit rows when a targeted lookup is malformed. */
-        }
-      }
+      void this.loadMissingEntryAudits(missingEntryDecisionIds);
       const closedLedgerRows = closedLedgerSource.map((row) => {
         const entryAudit = this.auditRows.find(
           (record) =>
@@ -1538,6 +1613,7 @@ export class AutoTraderOutcomesModel {
             signalDirection:
               entryAudit.strategy_decision?.direction ?? entryAudit.direction,
             entryStrategyDecision: entryAudit.strategy_decision,
+            explorationRisk: explorationRiskFromAudit(entryAudit),
             latestStrategyEvaluation: latestStrategyEvaluation(
               entryAudit.strategy ?? 'unattributed',
               entryAudit.symbol ?? row.symbol,
@@ -1777,6 +1853,7 @@ export class AutoTraderOutcomesModel {
           carryDetails,
           components: entry?.signal_components ?? {},
           entryStrategyDecision: entry?.strategy_decision,
+          explorationRisk: explorationRiskFromAudit(entry),
           latestStrategyEvaluation: latestStrategyEvaluation(
             strategyLabel,
             symbol,
@@ -1833,6 +1910,52 @@ export class AutoTraderOutcomesModel {
       });
     } finally {
       this.refreshing = false;
+    }
+  }
+
+  private async loadMissingEntryAudits(decisionIds: string[]) {
+    const missing = decisionIds.filter(
+      (decisionId) => !this.entryAuditLookupsInFlight.has(decisionId),
+    );
+    if (!missing.length) return;
+    for (const decisionId of missing)
+      this.entryAuditLookupsInFlight.add(decisionId);
+    let loadedAny = false;
+    try {
+      for (let offset = 0; offset < missing.length; offset += 100) {
+        const batch = missing.slice(offset, offset + 100);
+        const auditResponse = await insightsFetch(
+          '/signals/auto-trader-execution-audit?decision_ids=' +
+            encodeURIComponent(batch.join(',')),
+        ).catch(() => undefined);
+        if (!auditResponse?.ok) continue;
+        try {
+          const page = (await auditResponse.json()) as {
+            items?: AuditRecord[];
+          };
+          const auditsByKey = new Map(
+            this.auditRows.map((record) => [
+              `${record.decision_id ?? ''}:${record.stage ?? ''}`,
+              record,
+            ]),
+          );
+          for (const record of page.items ?? [])
+            auditsByKey.set(
+              `${record.decision_id ?? ''}:${record.stage ?? ''}`,
+              record,
+            );
+          this.auditRows = [...auditsByKey.values()].sort(
+            (left, right) => (left.timestamp ?? 0) - (right.timestamp ?? 0),
+          );
+          loadedAny ||= (page.items?.length ?? 0) > 0;
+        } catch {
+          /* Preserve existing audit rows when a targeted lookup is malformed. */
+        }
+      }
+    } finally {
+      for (const decisionId of missing)
+        this.entryAuditLookupsInFlight.delete(decisionId);
+      if (loadedAny && this.consumers > 0) this.scheduleRefresh(true);
     }
   }
 

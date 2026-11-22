@@ -1961,7 +1961,7 @@ async fn run_cycle_inner(
         open_positions: &open_positions,
         max_entries_per_auto_position,
     });
-    let (signal, exploratory) = match selection_result {
+    let (mut signal, mut exploratory) = match selection_result {
         Ok((signal, exploratory)) => (signal.clone(), exploratory),
         Err(result) => {
             let audit_timestamp = now.saturating_mul(1000);
@@ -2109,42 +2109,6 @@ async fn run_cycle_inner(
             return Ok(with_entry_diagnostic(result, entry_diagnostic));
         }
     };
-    record_cycle_candidate_blockers(
-        state,
-        selection_signals,
-        &live_strategies,
-        Some(&signal),
-        &dashboard,
-        &learning_thresholds,
-        risk_appetite,
-        now,
-        "another candidate ranked higher",
-    );
-    for candidate in selection_signals.iter().filter(|candidate| {
-        candidate.strategy.as_deref().and_then(Strategy::from_name)
-            .is_some_and(|kind| kind.is_live_insight())
-            && (signal_decision_id(candidate) != signal_decision_id(&signal)
-                || candidate.strategy != signal.strategy)
-    }) {
-        let strategy = candidate.strategy.as_deref().unwrap_or("unknown-strategy");
-        let reason = format!("Not selected this cycle; another candidate ranked higher");
-        update_entry_candidate_diagnostic(
-            &mut entry_diagnostic,
-            candidate,
-            "not_selected",
-            Some(&reason),
-        );
-        queue_strategy_rejection_audit(
-            state,
-            candidate,
-            strategy,
-            &reason,
-            now.saturating_mul(1_000),
-            counterfactual_stop_loss_percent,
-            counterfactual_take_profit_percent,
-            "auto_trader_selection",
-        );
-    }
     let signal_selection_ms = selection_started.elapsed().as_secs_f64() * 1000.0;
     update_entry_candidate_diagnostic(&mut entry_diagnostic, &signal, "selected", None);
     let mut audited_signal = signal.clone();
@@ -2156,7 +2120,8 @@ async fn run_cycle_inner(
         if exploratory { "exploratory" } else { "strict" },
         now.saturating_mul(1000),
     ));
-    let signal_result = match submit_cycle_signal(
+    let mut submission_error = false;
+    let mut signal_result = match submit_cycle_signal(
         state,
         &dashboard,
         &audited_signal,
@@ -2172,11 +2137,15 @@ async fn run_cycle_inner(
     {
         Ok(result) => result,
         Err((status, error)) => {
+            submission_error = true;
             let reason = format!("Execution request failed ({status}): {error}");
             queue_strategy_rejection_audit(
                 state,
                 &audited_signal,
-                audited_signal.strategy.as_deref().unwrap_or("unknown-strategy"),
+                audited_signal
+                    .strategy
+                    .as_deref()
+                    .unwrap_or("unknown-strategy"),
                 &reason,
                 now.saturating_mul(1_000),
                 counterfactual_stop_loss_percent,
@@ -2186,6 +2155,152 @@ async fn run_cycle_inner(
             skipped_for_signal(&audited_signal, &reason)
         }
     };
+    let mut attempted_ids = BTreeSet::from([signal_decision_id(&signal)]);
+    // A deterministic rejection before reservation should not consume the
+    // opportunity when another eligible candidate is already available.
+    while !submission_error && signal_result.status == "skipped" && attempted_ids.len() < 3 {
+        let remaining_fresh = selection_fresh_directional
+            .iter()
+            .copied()
+            .filter(|candidate| !attempted_ids.contains(&signal_decision_id(candidate)))
+            .collect::<Vec<_>>();
+        let Ok((next, next_exploratory)) = select_cycle_signal(SignalSelectionInput {
+            dashboard: &dashboard,
+            signals: selection_signals,
+            fresh_directional: &remaining_fresh,
+            now,
+            inferred_direction_count,
+            neutral_direction_floor,
+            stale_signal_count,
+            stalest_signal_age_seconds,
+            stale_symbols: &stale_symbols,
+            non_directional_count,
+            position_blocked_count,
+            position_block_details: &position_block_details,
+            learning_thresholds: &learning_thresholds,
+            risk_appetite,
+            open_positions: &open_positions,
+            max_entries_per_auto_position,
+        }) else {
+            break;
+        };
+        let next_signal = next.clone();
+        update_entry_candidate_diagnostic(
+            &mut entry_diagnostic,
+            &signal,
+            "execution_blocked",
+            signal_result.reason.as_deref(),
+        );
+        entry_diagnostic.selected_candidate_count += 1;
+        entry_diagnostic.order_attempt_count += 1;
+        entry_diagnostic.rejected_candidate_count += 1;
+        queue_auto_trader_audit(
+            state,
+            selected_signal_outcome_audit_payload(
+                &audited_signal,
+                &signal_result,
+                exploratory,
+                now.saturating_mul(1_000),
+                counterfactual_stop_loss_percent,
+                counterfactual_take_profit_percent,
+            ),
+        );
+        if let Some(strategy) = audited_signal.strategy.as_deref() {
+            update_latest_strategy_blocker(
+                state,
+                strategy,
+                now.saturating_mul(1_000),
+                Some(StrategyBlocker {
+                    strategy: strategy.to_owned(),
+                    symbol: audited_signal.symbol.clone(),
+                    reason: signal_result.reason.clone().unwrap_or_else(|| signal_result.status.to_owned()),
+                    timestamp_ms: now.saturating_mul(1_000),
+                }),
+            );
+        }
+        signal = next_signal;
+        exploratory = next_exploratory;
+        attempted_ids.insert(signal_decision_id(&signal));
+        update_entry_candidate_diagnostic(&mut entry_diagnostic, &signal, "selected", None);
+        audited_signal = signal.clone();
+        audited_signal.entry_gate = Some(candidate_entry_audit_value(
+            &signal,
+            &dashboard,
+            &learning_thresholds,
+            risk_appetite,
+            if exploratory { "exploratory" } else { "strict" },
+            now.saturating_mul(1_000),
+        ));
+        signal_result = match submit_cycle_signal(
+            state,
+            &dashboard,
+            &audited_signal,
+            exploratory,
+            counterfactual_stop_loss_percent,
+            counterfactual_take_profit_percent,
+            signal_selection_ms,
+            context_threshold_refresh_ms,
+            cycle_started_at,
+            now,
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err((status, error)) => {
+                submission_error = true;
+                skipped_for_signal(
+                    &audited_signal,
+                    &format!("Execution request failed ({status}): {error}"),
+                )
+            }
+        };
+    }
+    let remaining_for_audit = selection_signals
+        .iter()
+        .filter(|candidate| {
+            let id = signal_decision_id(candidate);
+            !attempted_ids.contains(&id) || id == signal_decision_id(&signal)
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    record_cycle_candidate_blockers(
+        state,
+        &remaining_for_audit,
+        &live_strategies,
+        Some(&signal),
+        &dashboard,
+        &learning_thresholds,
+        risk_appetite,
+        now,
+        "another candidate ranked higher",
+    );
+    for candidate in remaining_for_audit.iter().filter(|candidate| {
+        candidate
+            .strategy
+            .as_deref()
+            .and_then(Strategy::from_name)
+            .is_some_and(|kind| kind.is_live_insight())
+            && signal_decision_id(candidate) != signal_decision_id(&signal)
+    }) {
+        let strategy = candidate.strategy.as_deref().unwrap_or("unknown-strategy");
+        let reason = "Not selected this cycle; another candidate ranked higher";
+        update_entry_candidate_diagnostic(
+            &mut entry_diagnostic,
+            candidate,
+            "not_selected",
+            Some(reason),
+        );
+        queue_strategy_rejection_audit(
+            state,
+            candidate,
+            strategy,
+            reason,
+            now.saturating_mul(1_000),
+            counterfactual_stop_loss_percent,
+            counterfactual_take_profit_percent,
+            "auto_trader_selection",
+        );
+    }
     update_entry_candidate_diagnostic(
         &mut entry_diagnostic,
         &signal,

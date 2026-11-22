@@ -218,6 +218,7 @@ struct NewsLearning {
     correct: usize,
     weight: f64,
     pending: HashMap<(String, u64), (f64, u64)>,
+    last_pending_prune_at_ms: u64,
 }
 
 #[derive(Clone, Serialize)]
@@ -325,6 +326,15 @@ async fn admit_runtime_symbol(runtime: &SignalRuntime, symbol: &str) -> Result<(
 }
 
 fn prune_news_pending(learning: &mut NewsLearning, now_ms: u64) {
+    // Price events can generate research snapshots for many symbols at once.
+    // The pending map is already bounded, so scan it at most once per second
+    // instead of once per snapshot; attribution is a weak signal, so a delayed
+    // cleanup is acceptable while the count cap keeps memory bounded.
+    const PENDING_PRUNE_INTERVAL_MS: u64 = 60_000;
+    if now_ms.saturating_sub(learning.last_pending_prune_at_ms) < PENDING_PRUNE_INTERVAL_MS {
+        return;
+    }
+    learning.last_pending_prune_at_ms = now_ms;
     learning.pending.retain(|_, (_, inserted_at_ms)| {
         now_ms.saturating_sub(*inserted_at_ms) <= NEWS_PENDING_MAX_AGE_MS
     });

@@ -96,33 +96,27 @@ fn paper_learning_exploration_active(settings: &Settings, now_ms: u64) -> bool {
 }
 
 fn intraday_strategy_size_multiplier(settings: &Settings, strategy: Strategy, now_ms: u64) -> f64 {
-    if strategy.is_live_insight() && paper_learning_exploration_active(settings, now_ms) {
-        // A temporary recovery window must stay small enough to gather fresh
-        // evidence without restoring the normal allocation of a paused strategy.
-        let learned = settings
-            .learned_strategy_size_multipliers
-            .get(strategy.as_str())
-            .copied()
-            .unwrap_or(1.0)
-            .min(1.0);
-        return if learned <= 0.0 { 0.20 } else { learned };
+    if strategy.is_live_insight() {
+        // Live strategies use symbol/direction risk at the entry, while strict
+        // promotion still requires validated Scout evidence.
+        return if paper_learning_exploration_active(settings, now_ms) {
+            0.20
+        } else {
+            1.0
+        };
     }
-    let learned = settings
+    settings
         .learned_strategy_size_multipliers
         .get(strategy.as_str())
         .copied()
         .unwrap_or(1.0)
-        .min(1.0);
-    if learned <= 0.0 {
-        // A paused live strategy uses a capped recovery allocation while its
-        // profile-specific Scout evidence is gathered and evaluated.
-        0.20
-    } else {
-        learned
-    }
+        .min(1.0)
 }
 
 fn learned_strategy_entry_paused(settings: &Settings, strategy: Strategy, now_ms: u64) -> bool {
+    if strategy.is_live_insight() {
+        return false;
+    }
     if strategy.is_live_insight() && paper_learning_exploration_active(settings, now_ms) {
         return false;
     }
@@ -488,6 +482,7 @@ struct SignalExecutionPlan {
     learning_context: String,
     execution_learning_ms: f64,
     imported_execution_learning: bool,
+    exploration_risk_adjustment: ExplorationRiskAdjustment,
 }
 
 fn execution_learning_decision(
@@ -603,15 +598,6 @@ async fn prepare_signal_execution_plan(
             }
         }
     }
-    let (post_exit_target_increase, post_exit_trailing_increase, post_exit_sample_count) = strategy
-        .map_or((0.0, 0.0, 0), |kind| {
-            post_exit_policy_adjustments(
-                &settings.post_exit_adaptation_history,
-                &signal.symbol,
-                kind.as_str(),
-                &signal.direction,
-            )
-        });
     let strategy_order_size_multiplier = if is_portfolio_rebalance {
         1.0
     } else {
@@ -634,34 +620,13 @@ async fn prepare_signal_execution_plan(
                 "stop_loss_percent",
             ))
     });
-    let explicit_target = strategy.is_some_and(|kind| {
-        settings
-            .strategy_parameter_overrides
-            .contains_key(&strategy_parameter_key(
-                &signal.symbol,
-                kind,
-                "take_profit_percent",
-            ))
-    });
     let baseline_stop = stop_parameter.unwrap_or(counterfactual_stop_loss_percent);
     let baseline_target = target_parameter.unwrap_or(counterfactual_take_profit_percent);
     // Generic signal walk-forward is no longer an exit-policy source. Stop and
     // target values come from the selected strategy profile or configured
     // defaults, with Learning-owned post-exit feedback applied below.
     let configured_stop = baseline_stop;
-    let mut configured_target = baseline_target;
-    if !explicit_target && post_exit_sample_count >= MIN_POST_EXIT_ADAPTATION_SAMPLES {
-        let strategy_target_max = strategy
-            .and_then(|kind| {
-                kind.parameter_specs()
-                    .iter()
-                    .find(|spec| spec.key.as_str() == "take_profit_percent")
-                    .map(|spec| spec.max)
-            })
-            .unwrap_or(MAX_TAKE_PROFIT_PERCENT);
-        configured_target =
-            (configured_target + post_exit_target_increase).min(strategy_target_max);
-    }
+    let configured_target = baseline_target;
     let contextual_stop = (!explicit_stop)
         .then(|| {
             let kind = strategy?;
@@ -686,7 +651,11 @@ async fn prepare_signal_execution_plan(
         learned_or_configured_stop,
         signal.components.volatility_1m_percent,
     );
-    let baseline_type = choose_order_type(&signal, settings.risk_appetite);
+    let baseline_type = if exploratory {
+        AutoOrderType::PostOnlyLimit
+    } else {
+        choose_order_type(&signal, settings.risk_appetite)
+    };
     let risk_fraction = if settings.risk_limited_sizing {
         0.25
     } else {
@@ -735,18 +704,25 @@ async fn prepare_signal_execution_plan(
         .and_then(|decision| decision.get("portfolio_rebalance_delta_usd"))
         .and_then(serde_json::Value::as_f64)
         .filter(|delta| delta.is_finite() && *delta > 0.0);
+    let exploration_risk_adjustment = if exploratory {
+        contextual_exploration_risk_adjustment(signal, &settings, now_ms)
+    } else {
+        ExplorationRiskAdjustment::neutral()
+    };
+    let loss_cluster_scale = if !(is_portfolio_rebalance && signal.direction == "bearish")
+        && has_recent_profile_loss_cluster(signal, &settings, now_ms)
+    {
+        LOSS_CLUSTER_SIZE_MULTIPLIER
+    } else {
+        1.0
+    };
+    let entry_risk_scale = exploration_risk_adjustment.scale.min(loss_cluster_scale);
     let risk_order_cap = (exploration_cap
         .min(settings.max_order_notional)
         .min(settings.max_order_notional * risk_fraction)
         * signal_strength_size_multiplier(signal.strength)
         * learned_size_multiplier
-        * if !(is_portfolio_rebalance && signal.direction == "bearish")
-            && has_recent_profile_loss_cluster(signal, &settings, now_ms)
-        {
-            LOSS_CLUSTER_SIZE_MULTIPLIER
-        } else {
-            1.0
-        }
+        * entry_risk_scale
         * strategy_order_size_multiplier
         * if rebalance_delta.is_some() {
             1.0
@@ -830,11 +806,7 @@ async fn prepare_signal_execution_plan(
         vwap_participation_rate: settings.vwap_participation_percent / 100.0,
         limit_offset_bps: settings.limit_offset_bps,
         trigger_offset_bps: settings.trigger_offset_bps,
-        trailing_distance_percent: if post_exit_trailing_increase > 0.0 {
-            (settings.trailing_distance_percent + post_exit_trailing_increase).clamp(0.05, 1.0)
-        } else {
-            settings.trailing_distance_percent
-        },
+        trailing_distance_percent: settings.trailing_distance_percent,
     };
     // Cold-start paper probes are intentionally smaller than normal entries.
     // Let their actual capped notional define the minimum; otherwise the
@@ -896,23 +868,22 @@ async fn prepare_signal_execution_plan(
     let schedule_depth_threshold = execution_learning.schedule_depth_threshold;
     let schedule_threshold_samples = execution_learning.schedule_threshold_samples;
     let depth_ratio_bucket = schedule_depth_ratio_bucket(depth_ratio);
-    let learned_order_type = score_execution_order_type(
-        signal,
-        settings.risk_appetite,
-        notional * quote_rate,
-        baseline_type,
-        learned_type,
-        deep_book,
-        schedule_depth_threshold,
-    );
-    // Exploratory paper entries are deliberately small and should resolve
-    // against the current book instead of occupying the open-order cap as a
-    // passive maker quote that may never trade.
-    let order_type = if exploratory {
-        AutoOrderType::Ioc
+    let learned_order_type = if exploratory {
+        // Exploration measures a small passive maker entry; urgency signals
+        // must not turn these samples into taker executions.
+        AutoOrderType::PostOnlyLimit
     } else {
-        learned_order_type
+        score_execution_order_type(
+            signal,
+            settings.risk_appetite,
+            notional * quote_rate,
+            baseline_type,
+            learned_type,
+            deep_book,
+            schedule_depth_threshold,
+        )
     };
+    let order_type = learned_order_type;
     let order_type_name = serde_json::to_value(order_type)
         .ok()
         .and_then(|value| value.as_str().map(str::to_owned))
@@ -962,6 +933,10 @@ async fn prepare_signal_execution_plan(
         learning_context,
         execution_learning_ms,
         imported_execution_learning,
+        exploration_risk_adjustment: ExplorationRiskAdjustment {
+            scale: entry_risk_scale,
+            ..exploration_risk_adjustment
+        },
     })
 }
 
@@ -1309,7 +1284,7 @@ mod signal_execution_budget_tests {
     }
 
     #[test]
-    fn paused_live_strategy_gets_small_allocation_only_during_recovery_window() {
+    fn live_strategy_ignores_legacy_zero_outside_recovery_window() {
         let strategy = Strategy::LiveTradeFlow;
         let mut settings = Settings::default();
         settings
@@ -1318,14 +1293,14 @@ mod signal_execution_budget_tests {
         settings.paper_learning_exploration_until_ms = 10_000;
 
         assert_eq!(intraday_strategy_size_multiplier(&settings, strategy, 9_999), 0.20);
-        assert_eq!(intraday_strategy_size_multiplier(&settings, strategy, 10_000), 0.20);
-        assert_eq!(intraday_strategy_size_multiplier(&settings, strategy, 10_001), 0.20);
-        assert!(learned_strategy_entry_paused(&settings, strategy, 10_000));
+        assert_eq!(intraday_strategy_size_multiplier(&settings, strategy, 10_000), 1.0);
+        assert_eq!(intraday_strategy_size_multiplier(&settings, strategy, 10_001), 1.0);
+        assert!(!learned_strategy_entry_paused(&settings, strategy, 10_000));
         assert!(!learned_strategy_entry_paused(&settings, strategy, 9_999));
     }
 
     #[test]
-    fn recovery_window_bypasses_old_negative_evidence_pause() {
+    fn live_entry_does_not_use_strategy_wide_pause() {
         let strategy = Strategy::LiveTradeFlow;
         let mut settings = Settings::default();
         settings
@@ -1341,7 +1316,7 @@ mod signal_execution_budget_tests {
             false,
             "bullish",
             10_000,
-        ).is_some());
+        ).is_none());
         assert!(learned_pause_block_reason(
             &settings,
             Some(strategy),

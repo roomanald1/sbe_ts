@@ -103,11 +103,15 @@ struct Settings {
     #[serde(default)]
     exit_timing_feedback_outbox: Vec<serde_json::Value>,
     #[serde(default)]
+    exit_timing_history_backfill_version: u32,
+    #[serde(default)]
     profile_registration_outbox: Vec<strategy::StrategyProfileRegistration>,
     #[serde(default)]
     registered_profile_ids: BTreeSet<String>,
     #[serde(default)]
     learned_profiles: BTreeMap<String, strategy::StrategyProfile>,
+    #[serde(default)]
+    learned_exit_protection_policies: BTreeMap<String, strategy::LearnedExitProtectionPolicy>,
     #[serde(default)]
     learned_walk_forward_evidence:
         BTreeMap<String, strategy::StrategyWalkForwardEvidence>,
@@ -313,9 +317,11 @@ impl Default for Settings {
             post_exit_observations: Vec::new(),
             post_exit_adaptation_history: Vec::new(),
             exit_timing_feedback_outbox: Vec::new(),
+            exit_timing_history_backfill_version: 0,
             profile_registration_outbox: Vec::new(),
             registered_profile_ids: BTreeSet::new(),
             learned_profiles: BTreeMap::new(),
+            learned_exit_protection_policies: BTreeMap::new(),
             learned_walk_forward_evidence: BTreeMap::new(),
             learned_context_thresholds: BTreeMap::new(),
             active_live_strategy_profiles: BTreeMap::new(),

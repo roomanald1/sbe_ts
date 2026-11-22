@@ -1,5 +1,9 @@
 fn market_context(signal: &Signal) -> String {
-    let regime = if signal.strategy_candidate {
+    let regime = if let Some(regime) = signal.market_regime.as_deref()
+        .filter(|regime| matches!(*regime, "range" | "trend" | "volatile" | "mixed"))
+    {
+        regime
+    } else if signal.strategy_candidate {
         "trend"
     } else if signal.ranging_probability.unwrap_or(0.0) >= CONTEXT_RANGE_MIN_PROBABILITY {
         "range"
@@ -218,5 +222,18 @@ mod scout_floor_tests {
 
         assert!(adaptive_strength_floor(&learning, context) > MIN_STRENGTH);
         assert!(adaptive_exploration_score_floor(&learning, context, &[]) > MIN_EXPLORATION_SCORE);
+    }
+
+    #[test]
+    fn strategy_candidate_uses_observed_market_regime() {
+        let signal = Signal {
+            symbol: "BTC-USDT".into(), direction: "bullish".into(), strength: 0.5,
+            timestamp: 10, stale: false, score: 0.5, ranging_probability: None,
+            components: SignalComponents::default(), strategy_candidate: true,
+            strategy: Some("live-vwap-dislocation".into()), strategy_decision: None,
+            market_regime: Some("range".into()), market_state: None,
+            news_attribution: None, entry_gate: None,
+        };
+        assert_eq!(market_context(&signal), "long:range:BTC-USDT:live-vwap-dislocation");
     }
 }

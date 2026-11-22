@@ -178,6 +178,17 @@ impl SignalEngine {
                     >= pending
                         .timestamp
                         .saturating_add(pending.horizon_seconds * 1000);
+            // A dormant symbol can receive its next price hours after a Scout
+            // horizon. That price is not a measurement of the requested horizon.
+            if fixed_horizon_exit && pending.scout_observation_only {
+                let due_at = pending
+                    .timestamp
+                    .saturating_add(pending.horizon_seconds.saturating_mul(1_000));
+                let maximum_delay_ms = pending.horizon_seconds.max(30).saturating_mul(1_000);
+                if timestamp.saturating_sub(due_at) > maximum_delay_ms {
+                    continue;
+                }
+            }
             if scout_exit || fixed_horizon_exit {
                 let evaluation_horizon_seconds = if is_scout {
                     timestamp

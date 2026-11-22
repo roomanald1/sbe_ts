@@ -67,6 +67,37 @@ fn route_live_profiles(
     fallback.into_iter().collect()
 }
 
+/// Old persisted Learning profiles can predate the current parameter catalog.
+/// Keep their learned values where they still fit, but supply new defaults and
+/// discard obsolete keys before the strict evaluator validates the request.
+/// The caller keeps the original profile for Learning attribution.
+fn evaluation_profile(
+    profile: &crate::LiveStrategyProfile,
+    strategy: Strategy,
+) -> crate::LiveStrategyProfile {
+    let specs = strategy.parameter_specs();
+    let parameters = specs
+        .into_iter()
+        .map(|spec| {
+            let value = profile.parameters.get(spec.key.as_str()).copied();
+            let normalized = value
+                .filter(|value| value.is_finite())
+                .map(|value| {
+                    let step_position =
+                        ((value.clamp(spec.min, spec.max) - spec.min) / spec.step).round();
+                    (spec.min + step_position * spec.step).clamp(spec.min, spec.max)
+                })
+                .unwrap_or(spec.default);
+            (spec.key.as_str().to_owned(), normalized)
+        })
+        .collect::<BTreeMap<_, _>>();
+    let mut normalized = profile.clone();
+    normalized.profile_id =
+        crate::profile_id(&profile.profile_symbol, strategy.as_str(), &parameters);
+    normalized.parameters = parameters;
+    normalized
+}
+
 const LIVE_REGIME_PROFILE_MIN_CONFIDENCE: f64 = 0.6;
 const LIVE_REGIME_PROFILE_MIN_SAMPLES: usize = 8;
 const LIVE_REGIME_HYSTERESIS_CONFIRMATIONS: u8 = 2;
@@ -506,10 +537,11 @@ impl LiveWorker {
         }
         for profile in routed_profiles {
             let has_open_position = open_profile_ids.contains(profile.profile_id.as_str());
+            let evaluation_profile = evaluation_profile(&profile, self.config.strategy);
             let mut signal = match crate::prepare_live_strategy_signal(
                 &input_signal,
                 self.config.strategy,
-                &profile.parameters,
+                &evaluation_profile.parameters,
             ) {
                 Ok(signal) => signal,
                 Err(error) => {
@@ -548,11 +580,11 @@ impl LiveWorker {
                     "{}:{}:{}",
                     update.event_id,
                     self.config.strategy.as_str(),
-                    profile.profile_id
+                    evaluation_profile.profile_id
                 ),
                 strategy: self.config.strategy,
                 symbol: signal.symbol.clone(),
-                profile: profile.clone(),
+                profile: evaluation_profile.clone(),
                 input: crate::LiveEvaluationInput::Entry {
                     signal: signal.clone(),
                     daily_features: None,
@@ -650,7 +682,10 @@ impl LiveWorker {
                     ),
                     strategy: self.config.strategy,
                     symbol: signal.symbol.clone(),
-                    profile: profile.clone(),
+                    // Persisted profiles can predate the current catalog. The
+                    // entry request is normalized above; open-position checks
+                    // must use the same safe parameter set.
+                    profile: evaluation_profile.clone(),
                     input: crate::LiveEvaluationInput::OpenPosition {
                         position: crate::LivePositionContext {
                             is_open: true,
@@ -886,12 +921,13 @@ impl LiveWorker {
             else {
                 return Ok(());
             };
+            let eval_profile = evaluation_profile(&profile, Strategy::DatedCarry);
             let request = crate::LiveEvaluationRequest {
                 contract_version: crate::LIVE_EVALUATION_CONTRACT_VERSION,
                 request_id: format!("{}:{}:entry", update.event_id, profile.profile_id),
                 strategy: Strategy::DatedCarry,
                 symbol: candidate.spot_symbol.clone(),
-                profile: profile.clone(),
+                profile: eval_profile.clone(),
                 input: crate::LiveEvaluationInput::DatedCarryEntry {
                     emitted_at_ms: update.event_time_ms,
                     evaluated_at_ms: live_worker_now_ms(),
@@ -906,7 +942,7 @@ impl LiveWorker {
             let signal = carry_placeholder_signal(
                 &candidate.spot_symbol,
                 update.event_time_ms,
-                Some(&profile),
+                Some(&eval_profile),
             );
             let report = crate::LiveStrategyDecisionReport {
                 contract_version: crate::LIVE_EVALUATION_CONTRACT_VERSION,
@@ -940,12 +976,13 @@ impl LiveWorker {
             else {
                 return Ok(());
             };
+            let eval_profile = evaluation_profile(&profile, Strategy::DatedCarry);
             let request = crate::LiveEvaluationRequest {
                 contract_version: crate::LIVE_EVALUATION_CONTRACT_VERSION,
                 request_id: format!("{}:{}:settlement", update.event_id, profile.profile_id),
                 strategy: Strategy::DatedCarry,
                 symbol: settlement.spot_symbol.clone(),
-                profile: profile.clone(),
+                profile: eval_profile.clone(),
                 input: crate::LiveEvaluationInput::Settlement {
                     emitted_at_ms: settlement.emitted_at_ms,
                     evaluated_at_ms: live_worker_now_ms(),
@@ -968,7 +1005,7 @@ impl LiveWorker {
             let signal = carry_placeholder_signal(
                 &settlement.spot_symbol,
                 update.event_time_ms,
-                Some(&profile),
+                Some(&eval_profile),
             );
             let report = crate::LiveStrategyDecisionReport {
                 contract_version: crate::LIVE_EVALUATION_CONTRACT_VERSION,
@@ -1680,11 +1717,11 @@ async fn connect_insights_strategy_stream(
 }
 
 const INSIGHTS_UPDATE_SHARD_COUNT: usize = 32;
-// Insights publishes live snapshots continuously. A quiet stream for this long
-// almost always means the RSocket connection survived an Insights restart but
-// no longer has a live publisher behind it. Break the stream so the outer loop
-// reconnects and receives the server's latest-signal replay.
-const INSIGHTS_STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(10);
+// Keep a watchdog for half-open RSocket connections, but allow a longer quiet
+// interval before reconnecting. Closed streams still reconnect immediately.
+// Ten seconds caused every live worker to churn its RSocket connection during
+// quiet periods, creating synchronized connection bursts against Insights.
+const INSIGHTS_STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 
 fn needs_walk_forward_evidence(
     has_open_position: bool,

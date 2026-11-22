@@ -443,6 +443,128 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn learning_outcomes_are_delivered_before_retrying_registrations() {
+        use anyhow::Context;
+        use rsocket_rust::prelude::*;
+        use rsocket_rust_transport_websocket::WebsocketServerTransport;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use strategies::{
+            ScoutCoordinatorRequest, ScoutCoordinatorResponse, ScoutFeedbackAcknowledgement,
+        };
+
+        struct FeedbackResponder(Arc<AtomicUsize>);
+
+        #[rsocket_rust::async_trait]
+        impl RSocket for FeedbackResponder {
+            async fn metadata_push(&self, _request: Payload) -> anyhow::Result<()> {
+                anyhow::bail!("unsupported")
+            }
+            async fn fire_and_forget(&self, _request: Payload) -> anyhow::Result<()> {
+                anyhow::bail!("unsupported")
+            }
+            async fn request_response(&self, request: Payload) -> anyhow::Result<Option<Payload>> {
+                let ScoutCoordinatorRequest::Feedback(event) =
+                    serde_json::from_slice(request.data().context("missing feedback request")?)?
+                else {
+                    anyhow::bail!("expected Learning feedback event")
+                };
+                let event_id = match event {
+                    FeedbackEvent::ScoutOutcome { event_id, .. }
+                    | FeedbackEvent::TradeOutcome { event_id, .. }
+                    | FeedbackEvent::MissedOpportunityCandidate { event_id, .. } => event_id,
+                };
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Ok(Some(
+                    Payload::builder()
+                        .set_data(serde_json::to_vec(&ScoutCoordinatorResponse::Feedback(
+                            ScoutFeedbackAcknowledgement {
+                                event_id,
+                                accepted: true,
+                                duplicate: false,
+                                status: 200,
+                                detail: None,
+                            },
+                        ))?)
+                        .build(),
+                ))
+            }
+            fn request_stream(&self, _request: Payload) -> Flux<anyhow::Result<Payload>> {
+                Box::pin(futures_util::stream::empty())
+            }
+            fn request_channel(
+                &self,
+                requests: Flux<anyhow::Result<Payload>>,
+            ) -> Flux<anyhow::Result<Payload>> {
+                requests
+            }
+        }
+
+        let path = std::env::temp_dir().join(format!(
+            "scouts-outbox-priority-{}-{}.sqlite",
+            std::process::id(),
+            scout_now_ms()
+        ));
+        let mut persisted = PersistedState::default();
+        persisted
+            .outbox
+            .push(ScoutOutboxItem::Registration(serde_json::json!({
+                "decision_id":"registration-1"
+            })));
+        persisted
+            .outbox
+            .push(ScoutOutboxItem::Learning(FeedbackEvent::ScoutOutcome {
+                event_id: "outcome-1".into(),
+                observed_at_ms: scout_now_ms(),
+                learning_context: None,
+                market_regime: None,
+                symbol: "BTC-USDT".into(),
+                strategy: "live-momentum".into(),
+                profile_id: "profile".into(),
+                parameters: BTreeMap::new(),
+                baseline_parameters: BTreeMap::new(),
+                comparison: strategies::ScoutComparisonMetadata::Independent,
+                specs: Vec::new(),
+                net_return_percent: -0.1,
+            }));
+        persist_scout_state(&path, &persisted, &["outbox"]).unwrap();
+        let scout = ScoutState {
+            data: Arc::new(Mutex::new(persisted)),
+            path: path.clone(),
+            flush_lock: Arc::new(Mutex::new(())),
+            flush_scheduled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        };
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        drop(listener);
+        let delivered = Arc::new(AtomicUsize::new(0));
+        let responder_deliveries = delivered.clone();
+        let server = RSocketFactory::receive()
+            .transport(WebsocketServerTransport::from(address.to_string()))
+            .acceptor(Box::new(move |_setup, _socket| {
+                Ok(Box::new(FeedbackResponder(responder_deliveries.clone())))
+            }))
+            .serve();
+        let server = tokio::spawn(async move { server.await });
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+
+        assert!(
+            flush_scout_outbox(&scout, &format!("ws://{address}"), "ws://127.0.0.1:1")
+                .await
+                .is_err()
+        );
+        assert_eq!(delivered.load(Ordering::SeqCst), 1);
+        let pending = load_scout_state(&path).unwrap().outbox;
+        assert_eq!(pending.len(), 1);
+        assert!(matches!(pending[0], ScoutOutboxItem::Registration(_)));
+
+        server.abort();
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("sqlite-wal"));
+        let _ = std::fs::remove_file(path.with_extension("sqlite-shm"));
+    }
+
+    #[tokio::test]
     async fn failed_outbox_persistence_keeps_delivered_items_for_retry() {
         let mut persisted = PersistedState::default();
         persisted

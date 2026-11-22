@@ -194,6 +194,8 @@ type StrategyWinRateRow = {
   entryAverageNetReturn?: number | null;
   entryPositiveRate?: number | null;
   entrySampleCount?: number;
+  entryRiskMultiplier?: number;
+  entryRiskContext?: string;
   entryWhyNoEntry?: string;
 };
 const allStrategies: Strategy[] = [
@@ -260,6 +262,7 @@ const STRATEGY_COLUMN_GROUPS = [
       'entryAverageNetReturn',
       'entryPositiveRate',
       'entrySampleCount',
+      'entryRiskMultiplier',
       'entryWhyNoEntry',
     ],
   },
@@ -421,15 +424,11 @@ export function AutoTraderStrategyPerformanceWidget() {
       { positive: number; count: number; returnTotal: number }
     >();
     for (const outcome of scoutState.learningOutcomes) {
-      const cohort = cohorts.get(outcome.strategy) ?? {
-        positive: 0,
-        count: 0,
-        returnTotal: 0,
-      };
-      cohort.count += 1;
-      cohort.returnTotal += outcome.netReturnPercent;
-      if (outcome.netReturnPercent > 0) cohort.positive += 1;
-      cohorts.set(outcome.strategy, cohort);
+      cohorts.set(outcome.strategy, {
+        positive: outcome.positive,
+        count: outcome.count,
+        returnTotal: outcome.returnTotal,
+      });
     }
     return new Map(
       [...cohorts].map(([strategy, cohort]) => [
@@ -824,6 +823,36 @@ export function AutoTraderStrategyPerformanceWidget() {
     }
     return groups;
   }, [entryReturnProfiles]);
+  const latestProbeRiskByStrategySymbol = useMemo(() => {
+    const latest = new Map<
+      string,
+      {
+        openedAt: number;
+        scale: number;
+        sampleCount: number;
+        direction?: string;
+        regime?: string;
+        regimeScoped: boolean;
+      }
+    >();
+    for (const row of [...state.rows, ...state.closedLedgerRows]) {
+      const risk = row.explorationRisk;
+      if (row.source !== 'exploratory' || !risk || !Number.isFinite(risk.scale))
+        continue;
+      const key = `${row.strategy}:${row.symbol}`;
+      const prior = latest.get(key);
+      if (!prior || row.openedAt >= prior.openedAt)
+        latest.set(key, {
+          openedAt: row.openedAt,
+          scale: risk.scale,
+          sampleCount: risk.sampleCount,
+          direction: risk.direction ?? row.direction,
+          regime: risk.marketRegime,
+          regimeScoped: risk.regimeScoped,
+        });
+    }
+    return latest;
+  }, [state.rows, state.closedLedgerRows]);
   const [expandedEntryStrategies, setExpandedEntryStrategies] = useState<
     Set<string>
   >(() => new Set());
@@ -850,6 +879,12 @@ export function AutoTraderStrategyPerformanceWidget() {
           (sum, item) => sum + item.samples,
           0,
         );
+        const probeRisks = profiles.flatMap((profile) => {
+          const risk = latestProbeRiskByStrategySymbol.get(
+            `${row.strategy}:${profile.symbol}`,
+          );
+          return risk ? [risk] : [];
+        });
         const master = {
           ...row,
           rowId: `strategy:${row.strategy}`,
@@ -878,6 +913,13 @@ export function AutoTraderStrategyPerformanceWidget() {
                 ) / evidenceSampleCount
               : undefined,
           entrySampleCount: evidenceSampleCount || undefined,
+          entryRiskMultiplier: probeRisks.length
+            ? probeRisks.reduce((sum, value) => sum + value.scale, 0) /
+              probeRisks.length
+            : undefined,
+          entryRiskContext: probeRisks.length
+            ? `Average across ${probeRisks.length} symbols with a recent exploratory entry.`
+            : undefined,
         };
         if (!expandedEntryStrategies.has(row.strategy) || profiles.length === 0)
           return [master];
@@ -934,6 +976,9 @@ export function AutoTraderStrategyPerformanceWidget() {
                       ? `${workerReason} · ${reasonAge(workerResult.timestamp_ms)}`
                       : workerReason
                     : 'No worker decision or skip report received for this symbol';
+            const probeRisk = latestProbeRiskByStrategySymbol.get(
+              `${row.strategy}:${profile.symbol}`,
+            );
             return {
               rowId: `symbol:${row.strategy}:${profile.symbol}`,
               rowType: 'symbol' as const,
@@ -943,6 +988,10 @@ export function AutoTraderStrategyPerformanceWidget() {
                 profile.walk_forward_evidence?.averageNetReturnPercent,
               entryPositiveRate: profile.walk_forward_evidence?.positiveNetRate,
               entrySampleCount: profile.walk_forward_evidence?.sampleCount,
+              entryRiskMultiplier: probeRisk?.scale,
+              entryRiskContext: probeRisk
+                ? `Latest probe: ${probeRisk.direction ?? 'direction unavailable'} · ${probeRisk.regime ?? 'regime unavailable'} regime · n=${probeRisk.sampleCount}${probeRisk.regimeScoped ? ' (regime scoped)' : ' (symbol fallback)'}.`
+                : undefined,
               entryWhyNoEntry: workerDiagnosticAge
                 ? fallbackReason
                 : entryEvaluationReason(evaluation, fallbackReason),
@@ -953,6 +1002,7 @@ export function AutoTraderStrategyPerformanceWidget() {
     [
       visibleStrategyWinRates,
       entryReturnProfilesByStrategy,
+      latestProbeRiskByStrategySymbol,
       expandedEntryStrategies,
       state.latestStrategyEvaluationsByPosition,
       settings.latestStrategyBlockers,
@@ -1030,6 +1080,22 @@ export function AutoTraderStrategyPerformanceWidget() {
         width: 62,
         minWidth: 58,
         maxWidth: 68,
+        flex: 0,
+      },
+      {
+        colId: 'entryRiskMultiplier',
+        headerName: 'Probe ×',
+        headerTooltip:
+          'Latest contextual exploratory size multiplier. Symbol rows show that strategy-symbol’s latest probe; strategy rows average the latest multiplier for each visible symbol. Strict entries remain governed by Scout evidence.',
+        field: 'entryRiskMultiplier',
+        tooltipField: 'entryRiskContext',
+        valueFormatter: ({ value }) =>
+          typeof value === 'number' && Number.isFinite(value)
+            ? value.toFixed(2) + '×'
+            : '—',
+        width: 72,
+        minWidth: 66,
+        maxWidth: 78,
         flex: 0,
       },
       {
@@ -1371,7 +1437,7 @@ export function AutoTraderStrategyPerformanceWidget() {
               field: 'scoutOutcomeAverageNet',
               headerName: 'Scout net',
               headerTooltip:
-                'Average Scout outcome return in the last 7 days, including paired parameter comparisons. Paired comparison returns are also summarized separately.',
+                'Average Scout outcome return for today, including paired parameter comparisons. Paired comparison returns are also summarized separately.',
               cellClassRules: signed,
               valueFormatter: ({ value }) => pct(value),
               width: 72,
@@ -1383,7 +1449,7 @@ export function AutoTraderStrategyPerformanceWidget() {
               field: 'pairedScoutAverageLift',
               headerName: 'Paired lift',
               headerTooltip:
-                'Average Scout variant-minus-baseline net return for paired parameter comparisons in the last 7 days.',
+                'Average Scout variant-minus-baseline net return for paired parameter comparisons today.',
               cellClassRules: signed,
               valueFormatter: ({ value }) => pct(value),
               width: 76,
@@ -1395,7 +1461,7 @@ export function AutoTraderStrategyPerformanceWidget() {
               field: 'pairedScoutSamples',
               headerName: 'Pairs n',
               headerTooltip:
-                'Paired Scout parameter comparison outcomes in the last 7 days, pooled across symbols.',
+                'Paired Scout parameter comparison outcomes today, pooled across symbols.',
               valueFormatter: ({ value }) =>
                 typeof value === 'number' && Number.isFinite(value)
                   ? value.toLocaleString()

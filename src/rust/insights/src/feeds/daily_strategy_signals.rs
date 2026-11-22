@@ -910,6 +910,39 @@ async fn auto_trader_rpc(
     Ok(response.body)
 }
 
+const DAILY_DIAGNOSTICS_DELIVERY_ATTEMPTS: usize = 3;
+const DAILY_DIAGNOSTICS_RETRY_BASE_MS: u64 = 250;
+
+async fn retry_daily_diagnostics_delivery<F, Fut>(mut deliver: F) -> anyhow::Result<serde_json::Value>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = anyhow::Result<serde_json::Value>>,
+{
+    for attempt in 0..DAILY_DIAGNOSTICS_DELIVERY_ATTEMPTS {
+        match deliver().await {
+            Ok(response) => return Ok(response),
+            Err(error) if attempt + 1 == DAILY_DIAGNOSTICS_DELIVERY_ATTEMPTS => {
+                return Err(error).context(format!(
+                    "daily diagnostics delivery failed after {} attempts",
+                    DAILY_DIAGNOSTICS_DELIVERY_ATTEMPTS
+                ));
+            }
+            Err(error) => {
+                let delay_ms = DAILY_DIAGNOSTICS_RETRY_BASE_MS * (1 << attempt);
+                crate::service_log!(
+                    "WARN",
+                    "Insights daily strategy diagnostics delivery attempt {} of {} failed; retrying in {} ms: {error}",
+                    attempt + 1,
+                    DAILY_DIAGNOSTICS_DELIVERY_ATTEMPTS,
+                    delay_ms,
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+            }
+        }
+    }
+    unreachable!("the final delivery attempt returns or succeeds")
+}
+
 fn prior_paired_lift(
     profiles: &serde_json::Value,
     profile_symbol: &str,
@@ -1573,16 +1606,20 @@ async fn poll_daily_strategy_signals(
         if let Ok(mut daily_snapshot) = serde_json::from_value::<strategy::daily::DailyStrategySnapshot>(snapshot) {
             daily_snapshot.diagnostics = serde_json::from_value(diagnostics).unwrap_or_default();
             populate_daily_snapshot_symbol_status(&mut daily_snapshot);
-            if let Err(error) = auto_trader_rpc(
-                &auto,
-                format!("insights-daily-diagnostics:{}", daily_snapshot.as_of_ms),
-                strategy::ScoutWorkerHttpMethod::Post,
-                "/internal/strategy/daily-diagnostics",
-                serde_json::json!({
-                    "as_of_ms": daily_snapshot.as_of_ms,
-                    "diagnostics": daily_snapshot.diagnostics.clone(),
-                }),
-            )
+            let request_id = format!("insights-daily-diagnostics:{}", daily_snapshot.as_of_ms);
+            let payload = serde_json::json!({
+                "as_of_ms": daily_snapshot.as_of_ms,
+                "diagnostics": daily_snapshot.diagnostics.clone(),
+            });
+            if let Err(error) = retry_daily_diagnostics_delivery(|| {
+                auto_trader_rpc(
+                    &auto,
+                    request_id.clone(),
+                    strategy::ScoutWorkerHttpMethod::Post,
+                    "/internal/strategy/daily-diagnostics",
+                    payload.clone(),
+                )
+            })
             .await
             {
                 crate::service_log!(
@@ -2110,5 +2147,52 @@ mod strategy_parameter_probe_tests {
         assert_eq!(down.1, 19.0);
         assert_eq!(up.2["breakout_lookback_days"], 17.0);
         assert_eq!(up.3[0]["parameters"][0]["value"], 17.0);
+    }
+}
+
+#[cfg(test)]
+mod daily_diagnostics_delivery_tests {
+    use super::*;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    #[tokio::test]
+    async fn retries_a_transient_diagnostics_route_failure() {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let attempt_counter = Arc::clone(&attempts);
+        let response = retry_daily_diagnostics_delivery(|| {
+            let attempt = attempt_counter.fetch_add(1, Ordering::Relaxed);
+            async move {
+                if attempt == 0 {
+                    anyhow::bail!("temporary route failure");
+                }
+                Ok(serde_json::json!({"accepted": true}))
+            }
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(response["accepted"], true);
+        assert_eq!(attempts.load(Ordering::Relaxed), 2);
+    }
+
+    #[tokio::test]
+    async fn stops_after_the_configured_diagnostics_delivery_attempts() {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let attempt_counter = Arc::clone(&attempts);
+        let error = retry_daily_diagnostics_delivery(|| {
+            attempt_counter.fetch_add(1, Ordering::Relaxed);
+            async { anyhow::bail!("route unavailable") }
+        })
+        .await
+        .unwrap_err();
+
+        assert!(error.to_string().contains("after 3 attempts"));
+        assert_eq!(
+            attempts.load(Ordering::Relaxed),
+            DAILY_DIAGNOSTICS_DELIVERY_ATTEMPTS
+        );
     }
 }

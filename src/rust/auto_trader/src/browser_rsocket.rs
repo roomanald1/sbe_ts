@@ -312,6 +312,7 @@ fn is_allowed_route(method: &Method, path: &str) -> bool {
                 "/positions/auto-trader/missed-opportunity-bands"
             )
             | (&Method::GET, "/positions/auto-trader/activity")
+            | (&Method::GET, "/internal/monitoring-metrics")
             | (&Method::GET, "/internal/strategy/open-position-counts")
             | (&Method::GET, "/positions/auto-trader/hedge-candidates")
             | (&Method::GET, "/positions/auto-trader/learning-summary")

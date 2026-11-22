@@ -1,10 +1,19 @@
-// Preserve a pause while a snapshot has no value for its strategy. A fresh
-// positive multiplier is allowed through after time-decayed evidence recovers.
+// Keep daily-strategy pauses, while clearing legacy strategy-wide zeros for
+// live strategies. Their risk now belongs to the entry's local context.
 fn preserve_paused_strategy_multipliers(
     previous: &BTreeMap<String, f64>,
     mut incoming: BTreeMap<String, f64>,
 ) -> BTreeMap<String, f64> {
+    for (strategy, multiplier) in &mut incoming {
+        if Strategy::from_name(strategy).is_some_and(|kind| kind.is_live_insight()) {
+            *multiplier = 1.0;
+        }
+    }
     for (strategy, multiplier) in previous {
+        if Strategy::from_name(strategy).is_some_and(|kind| kind.is_live_insight()) {
+            incoming.insert(strategy.clone(), 1.0);
+            continue;
+        }
         if multiplier.is_finite()
             && *multiplier <= 0.0
             && !incoming
@@ -38,6 +47,8 @@ async fn apply_learning_snapshot(
     state: &AutoTraderState,
     mut snapshot: strategy::LearnedProfileSnapshot,
 ) {
+    let exit_protection_policies =
+        apply_exit_protection_policies(snapshot.exit_protection_policies, current_time_ms());
     snapshot.profiles.retain(|profile| strategy::is_autotrader_symbol_allowed(&profile.symbol));
     snapshot.scout_parameter_variants.retain(|variant| strategy::is_autotrader_symbol_allowed(&variant.symbol));
     let allowed_profile_ids = snapshot.registered_profile_ids.clone();
@@ -81,6 +92,10 @@ async fn apply_learning_snapshot(
     changed |= sync_registered_profile_ids(&mut settings, snapshot.registered_profile_ids);
     if settings.learned_scout_parameter_variants != snapshot.scout_parameter_variants {
         settings.learned_scout_parameter_variants = snapshot.scout_parameter_variants;
+        changed = true;
+    }
+    if settings.learned_exit_protection_policies != exit_protection_policies {
+        settings.learned_exit_protection_policies = exit_protection_policies;
         changed = true;
     }
     for profile in snapshot.profiles {
@@ -222,7 +237,7 @@ mod strategy_pause_snapshot_tests {
     use super::*;
 
     #[test]
-    fn pause_survives_missing_snapshot_but_decayed_positive_evidence_clears_it() {
+    fn live_strategy_zeros_are_cleared_from_learning_snapshots() {
         let prior = BTreeMap::from([
             ("live-momentum".to_owned(), 0.0),
             ("live-trade-flow".to_owned(), 0.8),
@@ -233,13 +248,15 @@ mod strategy_pause_snapshot_tests {
         ]);
         let merged = preserve_paused_strategy_multipliers(&prior, incoming.clone());
         assert_eq!(merged["live-momentum"], 1.0);
-        assert_eq!(merged["live-trade-flow"], 1.2);
+        assert_eq!(merged["live-trade-flow"], 1.0);
         assert_eq!(
             preserve_paused_strategy_multipliers(&prior, BTreeMap::new())["live-momentum"],
-            0.0
+            1.0
         );
-        assert!(!preserve_paused_strategy_multipliers(&merged, BTreeMap::new())
-            .contains_key("live-momentum"));
+        assert_eq!(
+            preserve_paused_strategy_multipliers(&merged, BTreeMap::new())["live-momentum"],
+            1.0
+        );
         assert_eq!(
             preserve_paused_strategy_multipliers(&BTreeMap::new(), incoming)["live-momentum"],
             1.0
@@ -925,6 +942,7 @@ pub fn router_with_socket() -> (Router, AutoTraderSocketApi) {
             axum::routing::put(update_settings),
         )
         .route("/positions/auto-trader/activity", get(get_activity))
+        .route("/internal/monitoring-metrics", get(get_monitoring_metrics))
         .route(
             "/internal/strategy/open-position-counts",
             get(get_strategy_open_position_counts),

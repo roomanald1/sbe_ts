@@ -8,3 +8,4 @@ include!("activity_positions.rs");
 include!("activity_pnl.rs");
 include!("activity_learning.rs");
 include!("activity_response.rs");
+include!("monitoring_metrics.rs");

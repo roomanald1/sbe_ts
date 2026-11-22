@@ -171,9 +171,13 @@ pub(super) async fn accept_feedback(
         positive_samples: 0,
         realized_pnl: 0.0,
     };
+    let full_persist_required = matches!(&event, FeedbackEvent::ScoutOutcome { .. })
+        && !state.variants.contains_key(&variant_key(&source_profile))
+        && state.variants.len() >= retention::MAX_VARIANTS_IN_MEMORY;
     register_feedback_variant(&mut state, &event, source_profile, parameters, &profile_id)?;
     register_scout_baseline_if_missing(&mut state, &event, symbol, strategy);
-    let update = append_profile_outcome(&mut state, &event, symbol, strategy, parameters)?;
+    let (update, outcome_history_compacted) =
+        append_profile_outcome(&mut state, &event, symbol, strategy, parameters)?;
     update_active_profile(
         &mut state,
         &event,
@@ -190,7 +194,14 @@ pub(super) async fn accept_feedback(
     train_threshold_parameters(&mut state, &event, symbol, strategy, &profile_key, &update);
     enqueue_strategy_replay(&mut state, &event);
     finalize_feedback(&mut state, &event, event_id);
-    persist(&service.path, &state)?;
+    if matches!(&event, FeedbackEvent::ScoutOutcome { .. })
+        && !full_persist_required
+        && !outcome_history_compacted
+    {
+        super::persist_scout_outcome_delta(&service.path, &state, &event)?;
+    } else {
+        persist(&service.path, &state)?;
+    }
     Ok(Json(FeedbackResult {
         accepted: true,
         duplicate: false,
@@ -658,7 +669,7 @@ fn append_profile_outcome(
     symbol: &str,
     strategy: &str,
     parameters: &BTreeMap<String, f64>,
-) -> Result<ProfileOutcomeUpdate, (StatusCode, String)> {
+) -> Result<(ProfileOutcomeUpdate, bool), (StatusCode, String)> {
     let (_, _, _, _, profile_id) = event_parts(event);
     let variant = StrategyProfile {
         profile_id,
@@ -688,11 +699,12 @@ fn append_profile_outcome(
         registered_specs: registered.specs.clone(),
         registered_profile: registered.profile.clone(),
     };
-    if retention::compact_outcome_working_set(&mut state.variants) {
+    let outcome_history_compacted = retention::compact_outcome_working_set(&mut state.variants);
+    if outcome_history_compacted {
         state.outcome_history_truncated = true;
         rebuild_trade_profile_metrics(state, now_ms());
     }
-    Ok(update)
+    Ok((update, outcome_history_compacted))
 }
 
 fn record_learning_outcome(registered: &mut RegisteredProfile, event: &FeedbackEvent) {

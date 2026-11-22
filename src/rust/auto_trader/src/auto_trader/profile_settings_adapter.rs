@@ -6,7 +6,21 @@ fn inject_learned_parameters(settings: &Settings, signal: &mut Signal) {
         .and_then(serde_json::Value::as_str)
         .unwrap_or(&signal.symbol)
         .to_owned();
-    let Some(profile) = settings.learned_profiles.get(&format!("{profile_symbol}:{strategy_name}")) else { return; };
+    let profile = settings.learned_profiles.get(&format!("{profile_symbol}:{strategy_name}"));
+    let policy = active_exit_protection_policy(settings, &profile_symbol, strategy_name);
+    if profile.is_none() && policy.is_none() { return; }
+    let mut learned_parameters = profile.map(|profile| profile.parameters.clone()).unwrap_or_else(|| {
+        signal.strategy_decision.as_ref()
+            .and_then(|decision| decision.get("strategy_parameters"))
+            .and_then(serde_json::Value::as_object)
+            .map(|parameters| parameters.iter().filter_map(|(key, value)| {
+                Some((key.clone(), value.as_f64()?))
+            }).collect())
+            .unwrap_or_default()
+    });
+    if let Some(policy) = policy {
+        learned_parameters.extend(exit_protection_policy_parameters(policy));
+    }
     let probe = signal.strategy_decision.as_ref().and_then(|decision| {
         Some((
             decision.get("scout_parameter_key")?.as_str()?,
@@ -16,16 +30,37 @@ fn inject_learned_parameters(settings: &Settings, signal: &mut Signal) {
     let parameters = effective_parameter_values(
         strategy,
         &profile_symbol,
-        &profile.parameters,
+        &learned_parameters,
         &settings.strategy_parameter_overrides,
         probe,
     );
     let profile_id = strategy::profile_id(&profile_symbol, strategy_name, &parameters);
-    let Some(decision) = signal.strategy_decision.as_mut().and_then(serde_json::Value::as_object_mut) else { return; };
+    let version = profile.map(|profile| profile.version).or_else(|| {
+        signal.strategy_decision.as_ref()
+            .and_then(|decision| decision.get("learning_profile_version"))
+            .and_then(serde_json::Value::as_u64)
+    }).unwrap_or_default();
+    let decision = signal.strategy_decision.get_or_insert_with(|| serde_json::json!({}));
+    let Some(decision) = decision.as_object_mut() else { return; };
     decision.insert("strategy_parameters".into(), serde_json::json!(parameters));
     decision.insert("learning_profile_id".into(), serde_json::json!(profile_id));
     decision.insert("learning_profile_symbol".into(), serde_json::json!(profile_symbol));
-    decision.insert("learning_profile_version".into(), serde_json::json!(profile.version));
+    decision.insert("learning_profile_version".into(), serde_json::json!(version));
+    if let Some(policy) = policy {
+        let effective = exit_protection_policy_parameters(policy).into_iter()
+            .filter_map(|(key, _)| decision.get("strategy_parameters")
+                .and_then(|parameters| parameters.get(&key))
+                .cloned().map(|value| (key, value)))
+            .collect::<serde_json::Map<_, _>>();
+        decision.insert("learned_exit_protection_policy".into(),
+            serde_json::to_value(policy).unwrap_or(serde_json::Value::Null));
+        decision.insert("effective_exit_protection_parameters".into(), effective.into());
+        decision.insert("exit_protection_policy_as_of_ms".into(), serde_json::json!(policy.as_of_ms));
+    } else {
+        decision.remove("learned_exit_protection_policy");
+        decision.remove("effective_exit_protection_parameters");
+        decision.remove("exit_protection_policy_as_of_ms");
+    }
 }
 
 #[cfg(test)]
@@ -385,7 +420,10 @@ fn learned_strategy_parameter_profile_with_variants(
                 settings.strategy_parameter_overrides.get(&strategy_parameter_key(symbol, strategy, legacy)).copied()
             }))
             .filter(|value| value.is_finite() && *value >= spec.min && *value <= spec.max);
-        let learned_value = learned.and_then(|profile| profile.parameters.get(spec.key.as_str()).copied())
+        let policy_value = active_exit_protection_policy(settings, symbol, strategy.as_str())
+            .and_then(|policy| exit_protection_policy_parameters(policy).get(spec.key.as_str()).copied());
+        let learned_value = policy_value
+            .or_else(|| learned.and_then(|profile| profile.parameters.get(spec.key.as_str()).copied()))
             .filter(|value| value.is_finite() && *value >= spec.min && *value <= spec.max)
             .unwrap_or(spec.default);
         let value = configured.unwrap_or(learned_value);

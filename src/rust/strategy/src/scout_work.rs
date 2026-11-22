@@ -434,38 +434,24 @@ pub async fn request_scout_service_route(
     request: &ScoutCoordinatorRouteCommand,
 ) -> anyhow::Result<ScoutCoordinatorRouteResult> {
     validate_learning_rsocket_url(service_rsocket_url)?;
-    let client = pooled_rsocket_client(service_rsocket_url).await?;
     let payload = Payload::builder()
         .set_data(serde_json::to_vec(&ScoutCoordinatorRequest::WorkerRoute(
             request.clone(),
         ))?)
         .build();
-    #[cfg(feature = "service")]
-    let result = match tokio::time::timeout(
+    #[cfg(feature = "live_socket_client")]
+    let response = pooled_request_with_timeouts(
+        service_rsocket_url,
+        payload,
         std::time::Duration::from_secs(2),
-        client.request_response(payload),
+        std::time::Duration::from_secs(2),
     )
     .await
-    {
-        Ok(result) => result,
-        Err(_) => {
-            invalidate_pooled_rsocket_client(service_rsocket_url, &client);
-            bail!("Scout service route request to {} timed out", request.path);
-        }
-    };
-    #[cfg(not(feature = "service"))]
-    let result = client.request_response(payload).await;
-    let response = match result {
-        Ok(Some(response)) => response,
-        Ok(None) => {
-            invalidate_pooled_rsocket_client(service_rsocket_url, &client);
-            bail!("Scout service route returned an empty response");
-        }
-        Err(error) => {
-            invalidate_pooled_rsocket_client(service_rsocket_url, &client);
-            return Err(error).context("Scout service route request failed");
-        }
-    };
+    .with_context(|| format!("Scout service route request to {} failed", request.path))?;
+    #[cfg(not(feature = "live_socket_client"))]
+    let response = pooled_request(service_rsocket_url, payload)
+        .await
+        .context("Scout service route request failed")?;
     match serde_json::from_slice::<ScoutCoordinatorResponse>(
         response
             .data()
@@ -644,21 +630,63 @@ async fn pooled_request(service_rsocket_url: &str, request: Payload) -> anyhow::
     }
 }
 
+#[cfg(feature = "live_socket_client")]
+async fn pooled_request_with_timeouts(
+    service_rsocket_url: &str,
+    request: Payload,
+    connection_timeout: std::time::Duration,
+    request_timeout: std::time::Duration,
+) -> anyhow::Result<Payload> {
+    let client = match tokio::time::timeout(
+        connection_timeout,
+        pooled_rsocket_client(service_rsocket_url),
+    )
+    .await
+    {
+        Ok(Ok(client)) => client,
+        Ok(Err(error)) => return Err(error),
+        Err(_) => bail!("RSocket endpoint connection timed out"),
+    };
+    match tokio::time::timeout(request_timeout, client.request_response(request)).await {
+        Ok(Ok(Some(response))) => Ok(response),
+        Ok(Ok(None)) => {
+            invalidate_pooled_rsocket_client(service_rsocket_url, &client);
+            bail!("RSocket endpoint returned an empty response");
+        }
+        Ok(Err(error)) => {
+            invalidate_pooled_rsocket_client(service_rsocket_url, &client);
+            Err(error).context("RSocket endpoint request failed")
+        }
+        Err(_) => {
+            invalidate_pooled_rsocket_client(service_rsocket_url, &client);
+            bail!("RSocket endpoint request timed out");
+        }
+    }
+}
+
 pub async fn request_scout_feedback(
     learning_rsocket_url: &str,
     event: &crate::FeedbackEvent,
 ) -> anyhow::Result<ScoutFeedbackAcknowledgement> {
     validate_learning_rsocket_url(learning_rsocket_url)?;
-    let response = pooled_request(
+    let payload = Payload::builder()
+        .set_data(serde_json::to_vec(&ScoutCoordinatorRequest::Feedback(
+            event.clone(),
+        ))?)
+        .build();
+    #[cfg(feature = "live_socket_client")]
+    let response = pooled_request_with_timeouts(
         learning_rsocket_url,
-        Payload::builder()
-            .set_data(serde_json::to_vec(&ScoutCoordinatorRequest::Feedback(
-                event.clone(),
-            ))?)
-            .build(),
+        payload,
+        std::time::Duration::from_secs(2),
+        std::time::Duration::from_secs(60),
     )
     .await
     .context("Learning Scout feedback request failed")?;
+    #[cfg(not(feature = "live_socket_client"))]
+    let response = pooled_request(learning_rsocket_url, payload)
+        .await
+        .context("Learning Scout feedback request failed")?;
     match serde_json::from_slice::<ScoutCoordinatorResponse>(
         response
             .data()
@@ -856,6 +884,76 @@ mod tests {
 
         assert_eq!(accepted_connections.load(Ordering::Relaxed), 1);
         rsocket_client_pool().lock().unwrap().remove(&endpoint);
+        server_task.abort();
+    }
+
+    #[cfg(feature = "service")]
+    #[tokio::test]
+    async fn timed_out_learning_requests_invalidate_the_pooled_connection() {
+        use rsocket_rust_transport_websocket::WebsocketServerTransport;
+
+        struct SlowResponder;
+
+        #[rsocket_rust::async_trait]
+        impl RSocket for SlowResponder {
+            async fn metadata_push(&self, _request: Payload) -> rsocket_rust::Result<()> {
+                bail!("unsupported")
+            }
+
+            async fn fire_and_forget(&self, _request: Payload) -> rsocket_rust::Result<()> {
+                bail!("unsupported")
+            }
+
+            async fn request_response(
+                &self,
+                _request: Payload,
+            ) -> rsocket_rust::Result<Option<Payload>> {
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                Ok(None)
+            }
+
+            fn request_stream(&self, _request: Payload) -> Flux<rsocket_rust::Result<Payload>> {
+                Box::pin(futures_util::stream::empty())
+            }
+
+            fn request_channel(
+                &self,
+                requests: Flux<rsocket_rust::Result<Payload>>,
+            ) -> Flux<rsocket_rust::Result<Payload>> {
+                requests
+            }
+        }
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        drop(listener);
+        let server = RSocketFactory::receive()
+            .transport(WebsocketServerTransport::from(address.to_string()))
+            .acceptor(Box::new(|_setup, _socket| Ok(Box::new(SlowResponder))))
+            .serve();
+        let server_task = tokio::spawn(async move { server.await });
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+
+        let endpoint = format!("ws://{address}");
+        rsocket_client_pool().lock().unwrap().remove(&endpoint);
+        let request = Payload::builder().set_data(b"test".to_vec()).build();
+        assert!(
+            pooled_request_with_timeouts(
+                &endpoint,
+                request,
+                std::time::Duration::from_secs(2),
+                std::time::Duration::from_millis(10),
+            )
+            .await
+            .is_err()
+        );
+        assert!(
+            !rsocket_client_pool()
+                .lock()
+                .unwrap()
+                .contains_key(&endpoint)
+        );
+
         server_task.abort();
     }
 

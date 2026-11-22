@@ -20,6 +20,7 @@ async fn submit_and_record_selected_order(
         timestamp,
         decision_id,
         learning_context,
+        exploration_risk_adjustment,
         horizon_take_profit_percent,
         mut stage_timings_ms,
         deep_book,
@@ -337,6 +338,18 @@ async fn submit_and_record_selected_order(
         let Settings { execution_feedback_outbox, execution_learning_order_ids, .. } = &mut *settings;
         record_execution_order_quality(execution_feedback_outbox, execution_learning_order_ids, &order);
     }
+    // Keep realized trade calibration separate from Scout walk-forward
+    // evidence so a selected strict entry can be evaluated against both.
+    let realized_trade_calibration = signal.strategy.as_deref().and_then(|strategy| {
+        settings
+            .learned_profiles
+            .get(&format!("{}:{strategy}", signal.symbol))
+            .map(|profile| serde_json::json!({
+                "samples": profile.learning_samples,
+                "positive": profile.positive_samples,
+                "realized_pnl": profile.realized_pnl,
+            }))
+    });
     request_settings_persist(state)?;
     drop(settings);
     drop(cycle_guard);
@@ -351,6 +364,14 @@ async fn submit_and_record_selected_order(
         counterfactual_take_profit_percent,
     );
     audit_payload["trade_id"] = serde_json::json!(position_trade_id);
+    audit_payload["exploration_risk"] = serde_json::json!({
+        "scale": exploration_risk_adjustment.scale,
+        "sample_count": exploration_risk_adjustment.sample_count,
+        "weighted_net_return_percent": exploration_risk_adjustment.weighted_net_return_percent,
+        "regime_scoped": exploration_risk_adjustment.regime_scoped,
+    });
+    audit_payload["realized_trade_calibration"] =
+        serde_json::json!(realized_trade_calibration);
     audit_payload["effective_stop_loss_percent"] = serde_json::json!(effective_stop_loss_percent);
     audit_payload["effective_take_profit_percent"] =
         serde_json::json!(effective_take_profit_percent);
@@ -400,6 +421,20 @@ async fn submit_and_record_selected_order(
         serde_json::json!(deep_book.map(|assessment| assessment.ask_depth_10bps));
     audit_payload["book_depth_imbalance_10bps"] =
         serde_json::json!(deep_book.map(|assessment| assessment.depth_imbalance_10bps));
+    // Observe this candidate risk scale before applying it to live sizing.
+    // Wide spreads and opposing depth had weaker net outcomes in the recent
+    // trade audit, but both groups still contained winners.
+    let spread_bps = (ask - bid) / mid * 10_000.0;
+    let opposed_depth = deep_book.is_some_and(|assessment| {
+        (side == "buy" && assessment.depth_imbalance_10bps < 0.0)
+            || (side == "sell" && assessment.depth_imbalance_10bps > 0.0)
+    });
+    let shadow_microstructure_size_scale =
+        if spread_bps > 3.0 || opposed_depth { 0.5 } else { 1.0 };
+    audit_payload["shadow_microstructure_size_scale"] =
+        serde_json::json!(shadow_microstructure_size_scale);
+    audit_payload["shadow_microstructure_notional"] =
+        serde_json::json!(notional * shadow_microstructure_size_scale);
     audit_payload["estimated_sweep_bps"] =
         serde_json::json!(deep_book.map(|assessment| assessment.impact_bps));
     audit_payload["estimated_ioc_all_in_bps"] = serde_json::json!(estimated_ioc_all_in_bps);

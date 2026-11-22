@@ -529,11 +529,11 @@
       "targets": [
         {
           "expr": "sum(app_scout_instances{role=\"scout\",status=\"open\"})",
-          "legendFormat": "Live Scout Count",
+          "legendFormat": "Active Scouts · 7d",
           "refId": "A"
         }
       ],
-      "title": "Live Scout Count",
+      "title": "Active Scout Count · 7d",
       "type": "stat"
     },
     {
@@ -1057,6 +1057,9 @@
           "mappings": [
             {
               "options": {
+                "0": {
+                  "text": "NO ERROR"
+                },
                 "1": {
                   "text": "ERROR"
                 }
@@ -1107,7 +1110,7 @@
       "pluginVersion": "12.1.1",
       "targets": [
         {
-          "expr": "app_insights_maintenance_last_error_info",
+          "expr": "app_insights_maintenance_last_error_info or app_insights_maintenance_last_error_present * 0",
           "legendFormat": "{{error}}",
           "queryType": "instant",
           "refId": "A"
@@ -1293,7 +1296,7 @@
           "refId": "B"
         }
       ],
-      "title": "Autotrader P&L",
+      "title": "AutoTrader P&L · today UTC",
       "type": "timeseries"
     },
     {
@@ -2103,7 +2106,7 @@
       "pluginVersion": "12.1.1",
       "targets": [
         {
-          "expr": "sum by (channel) (rate(app_feed_messages_total[1m]))",
+          "expr": "sum by (channel) (rate(app_feed_messages_total[5m]))",
           "legendFormat": "{{channel}}",
           "refId": "A"
         }
@@ -2638,7 +2641,7 @@
           "refId": "A"
         }
       ],
-      "title": "AutoTrader order latency (local + network)",
+      "title": "AutoTrader order latency · latest observed",
       "type": "timeseries"
     },
     {
@@ -2933,17 +2936,17 @@
       "pluginVersion": "12.1.1",
       "targets": [
         {
-          "expr": "app_autotrader_latest_stale_signals",
+          "expr": "app_autotrader_latest_stale_signals or vector(0)",
           "legendFormat": "Stale in latest decision",
           "refId": "A"
         },
         {
-          "expr": "round(increase(app_autotrader_stale_signal_candidates_total[5m]))",
+          "expr": "round(increase(app_autotrader_stale_signal_candidates_total[5m])) or vector(0)",
           "legendFormat": "Stale candidates · last 5m",
           "refId": "B"
         },
         {
-          "expr": "round(increase(app_autotrader_stale_signal_cycles_total[5m]))",
+          "expr": "round(increase(app_autotrader_stale_signal_cycles_total[5m])) or vector(0)",
           "legendFormat": "Cycles with stale candidates · last 5m",
           "refId": "C"
         }
@@ -4748,6 +4751,65 @@
       ],
       "title": "🚨 ALL Interprocess RSocket Queue Saturation — RED at 90%",
       "type": "bargauge"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": 0
+              }
+            ]
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 3,
+        "w": 4,
+        "x": 16,
+        "y": 16
+      },
+      "id": 229,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "horizontal",
+        "percentChangeColorMode": "standard",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showPercentChange": false,
+        "textMode": "value",
+        "wideLayout": true
+      },
+      "pluginVersion": "12.1.1",
+      "targets": [
+        {
+          "expr": "sum(app_scout_instances{role=\"scout\",status=\"unavailable\"}) or vector(0)",
+          "legendFormat": "Unavailable Scout Count",
+          "refId": "A"
+        }
+      ],
+      "title": "Unavailable Scout Count",
+      "type": "stat"
     }
   ],
   "preload": false,

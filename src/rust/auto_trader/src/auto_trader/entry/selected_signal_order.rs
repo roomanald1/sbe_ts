@@ -140,6 +140,7 @@ async fn submit_selected_signal(
         learning_context,
         execution_learning_ms,
         imported_execution_learning,
+        exploration_risk_adjustment,
     } = plan;
     if exploratory || imported_execution_learning {
         let mut settings = state.settings.lock().await;
@@ -199,8 +200,8 @@ async fn submit_selected_signal(
         } else {
             (
                 effective_take_profit_percent,
-                "strategy take-profit target",
-                configured_taker_fee_rate() * 10_000.0,
+                "strategy take-profit payoff ceiling (not a measured edge)",
+                2.0 * configured_taker_fee_rate() * 10_000.0,
             )
         };
     let incremental_cost_percent = (spread_bps + 2.0 * assessment.impact_bps + fee_bps) / 100.0;
@@ -487,6 +488,7 @@ async fn submit_selected_signal(
         timestamp,
         decision_id: decision_id.clone(),
         learning_context: learning_context.clone(),
+        exploration_risk_adjustment,
         horizon_take_profit_percent,
         stage_timings_ms,
         deep_book,

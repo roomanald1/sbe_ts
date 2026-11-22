@@ -209,10 +209,7 @@ export function learningRpc(
   // not retry mutations, whose outcome may be unknown when the socket closes.
   if (method.toUpperCase() !== 'GET')
     return requestLearning(method, path, body);
-  return requestLearning(method, path, body).catch(async () => {
-    await new Promise((resolve) => setTimeout(resolve, 250));
-    return requestLearning(method, path, body);
-  });
+  return retryRead(() => requestLearning(method, path, body));
 }
 
 export function scoutWorkerRpc(
@@ -222,8 +219,21 @@ export function scoutWorkerRpc(
 ): Promise<Response> {
   if (method.toUpperCase() !== 'GET')
     return performScoutWorkerRpc(method, path, body);
-  return performScoutWorkerRpc(method, path, body).catch(async () => {
-    await new Promise((resolve) => setTimeout(resolve, 250));
-    return performScoutWorkerRpc(method, path, body);
-  });
+  return retryRead(() => performScoutWorkerRpc(method, path, body));
+}
+
+async function retryRead(request: () => Promise<Response>): Promise<Response> {
+  const retryDelaysMs = [250, 750];
+  let lastError: unknown;
+  for (let attempt = 0; attempt <= retryDelaysMs.length; attempt += 1) {
+    try {
+      return await request();
+    } catch (error) {
+      lastError = error;
+      const delay = retryDelaysMs[attempt];
+      if (delay === undefined) break;
+      await new Promise((resolve) => setTimeout(resolve, delay));
+    }
+  }
+  throw lastError;
 }

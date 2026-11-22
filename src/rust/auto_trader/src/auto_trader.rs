@@ -39,6 +39,7 @@ include!("auto_trader/constants.rs");
 include!("auto_trader/market_data.rs");
 
 include!("auto_trader/settings.rs");
+include!("auto_trader/exit_protection_policy.rs");
 include!("auto_trader/profile_settings_adapter.rs");
 include!("auto_trader/api_types.rs");
 include!("auto_trader/dated_carry.rs");

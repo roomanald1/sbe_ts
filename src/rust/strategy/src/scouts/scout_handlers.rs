@@ -30,6 +30,15 @@ async fn receive_scout_markout(
     receive_scout_outcome(State(service), Json(outcome)).await
 }
 
+fn scout_horizon_is_timely(markout: &ScoutMarkoutRequest) -> bool {
+    let due_at = markout
+        .signal_timestamp_ms
+        .saturating_add(markout.horizon_seconds.saturating_mul(1_000));
+    let maximum_delay_ms = markout.horizon_seconds.max(30).saturating_mul(1_000);
+    markout.evaluated_timestamp_ms >= due_at
+        && markout.evaluated_timestamp_ms.saturating_sub(due_at) <= maximum_delay_ms
+}
+
 fn scout_markout_observation(
     instance: &serde_json::Value,
     markout: &ScoutMarkoutRequest,
@@ -43,10 +52,7 @@ fn scout_markout_observation(
         || markout.taker_fee_rate < 0.0
         || (markout.observation_only
             && (!matches!(markout.horizon_seconds, 60 | 300 | 900 | 3_600)
-                || markout
-                    .evaluated_timestamp_ms
-                    .saturating_sub(markout.signal_timestamp_ms)
-                    < markout.horizon_seconds.saturating_mul(1_000)))
+                || !scout_horizon_is_timely(markout)))
         || [
             markout.long_net_percent,
             markout.short_net_percent,
@@ -142,6 +148,7 @@ fn scout_outcome_from_markout(
             timestamp.abs_diff(markout.signal_timestamp_ms) > 10_000
         })
         || markout.evaluated_timestamp_ms < markout.signal_timestamp_ms
+        || (markout.observation_only && !scout_horizon_is_timely(&markout))
         || (!markout.observation_only && instance["scout_net_return_percent"].is_number())
         || !markout.taker_fee_rate.is_finite()
         || markout.taker_fee_rate < 0.0

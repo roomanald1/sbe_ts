@@ -102,6 +102,17 @@ fn validated_strategy_evidence(signal: &Signal) -> bool {
     true
 }
 
+fn validated_scout_lower_bound(signal: &Signal) -> f64 {
+    signal
+        .strategy_decision
+        .as_ref()
+        .and_then(|decision| decision.get("strategy_walk_forward"))
+        .and_then(|evidence| evidence.get("expectancyCiLowPercent"))
+        .and_then(serde_json::Value::as_f64)
+        .filter(|value| value.is_finite())
+        .unwrap_or(0.0)
+}
+
 fn select_cycle_signal<'a>(
     input: SignalSelectionInput<'a>,
 ) -> Result<(&'a Signal, bool), CycleResult> {
@@ -112,7 +123,7 @@ fn select_cycle_signal<'a>(
         risk_appetite,
         ..
     } = input;
-    if let Some(signal) = fresh_directional
+    let eligible_candidates = fresh_directional
         .iter()
         .copied()
         .filter(|signal| {
@@ -134,8 +145,41 @@ fn select_cycle_signal<'a>(
                     .and_then(serde_json::Value::as_bool)
                     != Some(true)
         })
-        .max_by(|a, b| a.strength.total_cmp(&b.strength))
-    {
+        .collect::<Vec<_>>();
+    let strongest_other = eligible_candidates
+        .iter()
+        .copied()
+        .filter(|signal| {
+            !signal
+                .strategy
+                .as_deref()
+                .and_then(Strategy::from_name)
+                .is_some_and(Strategy::is_live_insight)
+        })
+        .max_by(|a, b| a.strength.total_cmp(&b.strength));
+    let best_live = eligible_candidates
+        .iter()
+        .copied()
+        .filter(|signal| {
+            signal
+                .strategy
+                .as_deref()
+                .and_then(Strategy::from_name)
+                .is_some_and(Strategy::is_live_insight)
+        })
+        .max_by(|a, b| {
+            validated_scout_lower_bound(a)
+                .total_cmp(&validated_scout_lower_bound(b))
+                .then_with(|| a.strength.total_cmp(&b.strength))
+        });
+    let preferred = match (strongest_other, best_live) {
+        (Some(other), Some(live)) if other.strength >= live.strength => Some(other),
+        (Some(_), Some(live)) => Some(live),
+        (Some(other), None) => Some(other),
+        (None, Some(live)) => Some(live),
+        (None, None) => None,
+    };
+    if let Some(signal) = preferred {
         return Ok((signal, false));
     }
     let strength_qualified = fresh_directional
@@ -236,7 +280,10 @@ fn select_cycle_signal<'a>(
                     ) * risk_floor_scale(risk_appetite))
                     .max(0.0)
                 && (!is_mixed_market_context(&context)
-                    || validated_strategy_evidence(signal))
+                    || validated_strategy_evidence(signal)
+                    || (signal.strategy_candidate
+                        && signal.strategy.as_deref().and_then(Strategy::from_name)
+                            .is_some_and(|strategy| strategy.is_live_insight())))
         })
         .max_by(|a, b| (a.strength * a.score.abs()).total_cmp(&(b.strength * b.score.abs())))
     {

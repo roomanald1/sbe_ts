@@ -298,13 +298,46 @@ pub(super) async fn get_decision_snapshot(
     }
     for returns in recent_profile_context_returns.values_mut() {
         returns.sort_unstable_by_key(|sample| std::cmp::Reverse(sample.0));
-        returns.truncate(5);
+        // Keep enough recent realized trades for the entry risk controller to
+        // distinguish a persistent losing cohort from a short streak.
+        returns.truncate(32);
     }
     let contextual_stop_loss_percents = contextual_stop_loss_percents(&state, cutoff);
+    let exit_protection_policies = profiles
+        .iter()
+        .filter_map(|profile| {
+            let evidence = crate::exit_policy::select_exit_policy(
+                state.exit_timing_observations.values(),
+                &profile.symbol,
+                &profile.strategy,
+                snapshot_now_ms,
+            )?;
+            Some(strategy::LearnedExitProtectionPolicy {
+                symbol: profile.symbol.clone(),
+                strategy: profile.strategy.clone(),
+                activation_percent: evidence.parameters.activation_percent,
+                giveback_percent: evidence.parameters.giveback_percent,
+                minimum_lock_percent: evidence.parameters.minimum_lock_percent,
+                sample_count: evidence.sample_count,
+                training_count: evidence.training_count,
+                validation_count: evidence.validation_count,
+                baseline_validation_mean_percent: evidence.baseline_validation_mean_percent,
+                selected_validation_mean_percent: evidence.selected_validation_mean_percent,
+                validation_gain_percent: evidence.validation_gain_percent,
+                validation_positive_rate: evidence.validation_positive_rate,
+                validation_negative_difference_rate: evidence.validation_negative_difference_rate,
+                validation_tenth_percentile_difference_percent: evidence
+                    .validation_tenth_percentile_difference_percent,
+                validation_worst_difference_percent: evidence.validation_worst_difference_percent,
+                as_of_ms: evidence.as_of_ms,
+            })
+        })
+        .collect();
     let strategy_size_multipliers = totals
         .into_iter()
         .map(|(strategy, returns)| {
-            let multiplier = strategy_size_multiplier(&returns, snapshot_now_ms);
+            let multiplier =
+                snapshot_strategy_size_multiplier(&strategy, &returns, snapshot_now_ms);
             (strategy, multiplier)
         })
         .collect();
@@ -325,6 +358,7 @@ pub(super) async fn get_decision_snapshot(
         execution_learning: state.execution_learning.clone(),
         walk_forward_evidence,
         scout_parameter_variants: scout_parameter_variant_snapshots(&state),
+        exit_protection_policies,
     })
 }
 
@@ -564,6 +598,16 @@ fn market_context_from_learning_context(value: Option<&str>) -> Option<String> {
 
 const MIN_TRADES_FOR_NEGATIVE_EDGE_PAUSE: usize = 20;
 
+fn snapshot_strategy_size_multiplier(strategy: &str, returns: &[(u64, f64)], now_ms: u64) -> f64 {
+    // Live strategies use contextual entry risk and validated Scout evidence.
+    // A strategy-wide zero hides symbol/direction winners.
+    if strategy::Strategy::from_name(strategy).is_some_and(|kind| kind.is_live_insight()) {
+        1.0
+    } else {
+        strategy_size_multiplier(returns, now_ms)
+    }
+}
+
 fn strategy_size_multiplier(net_returns: &[(u64, f64)], now_ms: u64) -> f64 {
     let (samples, positive, weighted_net_return) = net_returns.iter().fold(
         (0.0, 0.0, 0.0),
@@ -778,7 +822,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn sufficiently_sampled_negative_net_trades_pause_strategy_sizing() {
+    fn sufficiently_sampled_negative_net_trades_pause_daily_strategy_sizing() {
         let now = now_ms();
         let losing = vec![(now, -0.01); MIN_TRADES_FOR_NEGATIVE_EDGE_PAUSE];
         assert_eq!(strategy_size_multiplier(&losing, now), 0.0);
@@ -790,6 +834,20 @@ mod tests {
             .map(|index| (now, if index < 18 { 0.01 } else { -0.30 }))
             .collect::<Vec<_>>();
         assert_eq!(strategy_size_multiplier(&mostly_winning, now), 0.0);
+    }
+
+    #[test]
+    fn live_strategy_losses_do_not_create_strategy_wide_pause() {
+        let now = now_ms();
+        let losing = vec![(now, -0.01); MIN_TRADES_FOR_NEGATIVE_EDGE_PAUSE];
+        assert_eq!(
+            snapshot_strategy_size_multiplier("live-momentum", &losing, now),
+            1.0
+        );
+        assert_eq!(
+            snapshot_strategy_size_multiplier("donchian-20-btc200", &losing, now),
+            0.0
+        );
     }
 
     #[test]

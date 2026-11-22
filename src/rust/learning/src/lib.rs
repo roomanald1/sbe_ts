@@ -26,6 +26,7 @@ use tokio::sync::Mutex;
 
 mod context;
 mod execution;
+mod exit_policy;
 mod feedback;
 mod profiles;
 mod retention;
@@ -724,23 +725,66 @@ async fn accept_exit_timing_observation(
             "exit-timing observation exceeds the 16 KiB limit".into(),
         ));
     }
+    let duplicate = persist_exit_timing_observation(&service.path, event_id, &observation)?;
     let mut state = service.state.lock().await;
-    let duplicate = state.exit_timing_observations.contains_key(event_id);
     if !duplicate {
         state
             .exit_timing_observations
             .insert(event_id.to_owned(), observation);
         while state.exit_timing_observations.len() > 10_000 {
-            //TODO remove hardcoding
-            if let Some(oldest) = state.exit_timing_observations.keys().next().cloned() {
+            if let Some(oldest) = state
+                .exit_timing_observations
+                .iter()
+                .min_by_key(|(id, value)| {
+                    (
+                        value["observed_at_ms"].as_u64().unwrap_or_default(),
+                        id.as_str(),
+                    )
+                })
+                .map(|(id, _)| id.clone())
+            {
                 state.exit_timing_observations.remove(&oldest);
             }
         }
-        persist(&service.path, &state)?;
+        if let Some(updates) = &state.state_updates {
+            updates.notify_one();
+        }
     }
     Ok(Json(
         serde_json::json!({"accepted": true, "duplicate": duplicate}),
     ))
+}
+
+fn persist_exit_timing_observation(
+    path: &Path,
+    event_id: &str,
+    observation: &serde_json::Value,
+) -> Result<bool, (StatusCode, String)> {
+    let connection =
+        open_state_db(path).map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error))?;
+    let transaction = connection
+        .unchecked_transaction()
+        .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
+    let payload = serde_json::to_string(observation)
+        .map_err(|error| (StatusCode::BAD_REQUEST, error.to_string()))?;
+    let inserted = transaction
+        .execute(
+            "INSERT OR IGNORE INTO learning_exit_timing_observations (id, payload) VALUES (?1, ?2)",
+            rusqlite::params![event_id, payload],
+        )
+        .map_err(|error| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("could not durably accept exit-timing observation: {error}"),
+            )
+        })?;
+    transaction.commit().map_err(|error| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("could not commit exit-timing observation: {error}"),
+        )
+    })?;
+    Ok(inserted == 0)
 }
 
 async fn get_strategy_replays(State(service): State<ServiceState>) -> Json<Vec<StrategyReplayJob>> {
@@ -1069,7 +1113,7 @@ pub(crate) fn persist_normalized(
         "learning_seen_event_ids",
         &state.seen_event_ids,
     )?;
-    write_map(
+    write_map_preserving_history(
         &transaction,
         "learning_exit_timing_observations",
         &state.exit_timing_observations,
@@ -1102,6 +1146,123 @@ pub(crate) fn persist_normalized(
         &state.seen_execution_event_ids,
     )?;
     transaction.commit()
+}
+
+fn persist_scout_outcome_delta(
+    path: &Path,
+    state: &LearningState,
+    event: &FeedbackEvent,
+) -> Result<(), (StatusCode, String)> {
+    let FeedbackEvent::ScoutOutcome {
+        event_id,
+        symbol,
+        strategy,
+        profile_id,
+        parameters,
+        ..
+    } = event
+    else {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "incremental persistence requires a ScoutOutcome".into(),
+        ));
+    };
+    let profile = StrategyProfile {
+        profile_id: profile_id.clone(),
+        version: 0,
+        symbol: symbol.clone(),
+        strategy: strategy.clone(),
+        parameters: parameters.clone(),
+        learning_samples: 0,
+        positive_samples: 0,
+        realized_pnl: 0.0,
+    };
+    let variant_id = variant_key(&profile);
+    let variant = state.variants.get(&variant_id).ok_or_else(|| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Scout feedback variant {variant_id} is missing from Learning state"),
+        )
+    })?;
+
+    let connection =
+        open_state_db(path).map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error))?;
+    let transaction = connection
+        .unchecked_transaction()
+        .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
+    transaction
+        .execute(
+            "INSERT INTO learning_metadata (id, accepted_events) VALUES (1, ?1)
+             ON CONFLICT(id) DO UPDATE SET accepted_events = excluded.accepted_events
+             WHERE accepted_events != excluded.accepted_events",
+            [state.accepted_events.min(i64::MAX as u64) as i64],
+        )
+        .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
+    if state.outcome_history_truncated {
+        transaction
+            .execute(
+                "INSERT INTO learning_config (key, value) VALUES ('outcome_history_truncated', 1)
+                 ON CONFLICT(key) DO UPDATE SET value = MAX(value, excluded.value)",
+                [],
+            )
+            .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
+    }
+    if state.seen_event_ids_overflowed {
+        transaction
+            .execute(
+                "INSERT INTO learning_config (key, value) VALUES ('seen_event_ids_overflowed', 1)
+                 ON CONFLICT(key) DO UPDATE SET value = MAX(value, excluded.value)",
+                [],
+            )
+            .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
+    }
+
+    write_map_preserving_history(
+        &transaction,
+        "learning_variants",
+        &BTreeMap::from([(variant_id.clone(), variant.clone())]),
+    )
+    .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
+    transaction
+        .execute(
+            "INSERT INTO learning_variant_recency (id, last_seen_ms) VALUES (?1, ?2)
+             ON CONFLICT(id) DO UPDATE SET last_seen_ms = MAX(last_seen_ms, excluded.last_seen_ms)",
+            rusqlite::params![variant_id, now_ms() as i64],
+        )
+        .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
+
+    let active_profile_key = key(symbol, strategy);
+    if let Some(active_profile) = state.active_profiles.get(&active_profile_key) {
+        write_map_preserving_history(
+            &transaction,
+            "learning_active_profiles",
+            &BTreeMap::from([(active_profile_key, active_profile.clone())]),
+        )
+        .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
+    }
+    if let Some(context_key) = event_context(event) {
+        if let Some(context_stat) = state.context_learning.get(&context_key) {
+            write_map_preserving_history(
+                &transaction,
+                "learning_context_stats",
+                &BTreeMap::from([(context_key, context_stat.clone())]),
+            )
+            .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
+        }
+    }
+    transaction
+        .execute(
+            "INSERT OR IGNORE INTO learning_seen_event_ids (id) VALUES (?1)",
+            [event_id],
+        )
+        .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
+    transaction
+        .commit()
+        .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
+    if let Some(updates) = &state.state_updates {
+        updates.notify_one();
+    }
+    Ok(())
 }
 
 fn write_map<T: Serialize>(
@@ -1269,6 +1430,425 @@ mod tests {
         app.oneshot(builder.body(Body::from(body.unwrap_or_default())).unwrap())
             .await
             .unwrap()
+    }
+
+    #[tokio::test]
+    async fn exit_timing_ack_follows_durable_insert_and_retries_after_failure_and_restart() {
+        let path = std::env::temp_dir().join(format!(
+            "learning-exit-timing-durable-{}-{}.sqlite",
+            std::process::id(),
+            now_ms()
+        ));
+        let event_id = "exit-timing-durable-retry-event";
+        let observation = serde_json::json!({
+            "event_id": event_id,
+            "symbol": "BTC-USDT",
+            "strategy": "live-momentum",
+            "exit_return_percent": 0.2,
+            "post_exit_return_percent": 0.1,
+            "missed_return_percent": 0.1,
+            "observed_at_ms": now_ms()
+        });
+        let app = router(path.clone()).unwrap();
+        let connection = open_state_db(&path).unwrap();
+        connection
+            .execute_batch(&format!(
+                "CREATE TRIGGER reject_exit_timing_insert BEFORE INSERT ON learning_exit_timing_observations
+                 WHEN NEW.id = '{event_id}' BEGIN SELECT RAISE(ABORT, 'injected persistence failure'); END;"
+            ))
+            .unwrap();
+        drop(connection);
+
+        let failed = json_request(
+            app,
+            "POST",
+            "/exit-timing",
+            Some(serde_json::to_vec(&observation).unwrap()),
+        )
+        .await;
+        assert_eq!(failed.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let connection = open_state_db(&path).unwrap();
+        let missing_after_failure = connection
+            .query_row(
+                "SELECT COUNT(*) FROM learning_exit_timing_observations WHERE id=?1",
+                [event_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap();
+        assert_eq!(missing_after_failure, 0);
+        connection
+            .execute_batch("DROP TRIGGER reject_exit_timing_insert")
+            .unwrap();
+
+        let app = router(path.clone()).unwrap();
+        let accepted = json_request(
+            app,
+            "POST",
+            "/exit-timing",
+            Some(serde_json::to_vec(&observation).unwrap()),
+        )
+        .await;
+        assert_eq!(accepted.status(), StatusCode::OK);
+        let accepted: serde_json::Value =
+            serde_json::from_slice(&accepted.into_body().collect().await.unwrap().to_bytes())
+                .unwrap();
+        assert_eq!(accepted["accepted"], true);
+        assert_eq!(accepted["duplicate"], false);
+
+        let old_id = "older-exit-timing-event-outside-working-set";
+        let connection = open_state_db(&path).unwrap();
+        let transaction = connection.unchecked_transaction().unwrap();
+        transaction
+            .execute(
+                "INSERT INTO learning_exit_timing_observations (id, payload) VALUES (?1, ?2)",
+                rusqlite::params![
+                    old_id,
+                    serde_json::to_string(&serde_json::json!({
+                        "event_id": old_id,
+                        "symbol": "BTC-USDT",
+                        "strategy": "live-momentum",
+                        "exit_return_percent": 0.0,
+                        "post_exit_return_percent": 0.0,
+                        "missed_return_percent": 0.0,
+                        "observed_at_ms": 1
+                    }))
+                    .unwrap()
+                ],
+            )
+            .unwrap();
+        for index in 2..=10_001 {
+            let id = format!("exit-timing-history-{index:05}");
+            let payload = serde_json::json!({
+                "event_id": id,
+                "symbol": "BTC-USDT",
+                "strategy": "live-momentum",
+                "exit_return_percent": 0.0,
+                "post_exit_return_percent": 0.0,
+                "missed_return_percent": 0.0,
+                "observed_at_ms": index
+            });
+            transaction
+                .execute(
+                    "INSERT INTO learning_exit_timing_observations (id, payload) VALUES (?1, ?2)",
+                    rusqlite::params![id, serde_json::to_string(&payload).unwrap()],
+                )
+                .unwrap();
+        }
+        transaction.commit().unwrap();
+        let state = LearningState::default();
+        persist_normalized(&connection, &state).unwrap();
+        let retained = connection
+            .query_row(
+                "SELECT COUNT(*) FROM learning_exit_timing_observations WHERE id=?1",
+                [old_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap();
+        assert_eq!(retained, 1);
+        drop(connection);
+
+        let restarted_service = service_state(path.clone()).unwrap();
+        assert!(
+            !restarted_service
+                .state
+                .lock()
+                .await
+                .exit_timing_observations
+                .contains_key(old_id)
+        );
+        let restarted = service_router(restarted_service);
+        for duplicate_event in [
+            observation,
+            serde_json::json!({
+                "event_id": old_id,
+                "symbol": "BTC-USDT",
+                "strategy": "live-momentum",
+                "exit_return_percent": 0.0,
+                "post_exit_return_percent": 0.0,
+                "missed_return_percent": 0.0,
+                "observed_at_ms": 1
+            }),
+        ] {
+            let response = json_request(
+                restarted.clone(),
+                "POST",
+                "/exit-timing",
+                Some(serde_json::to_vec(&duplicate_event).unwrap()),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::OK);
+            let result: serde_json::Value =
+                serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                    .unwrap();
+            assert_eq!(result["accepted"], true);
+            assert_eq!(result["duplicate"], true);
+        }
+
+        drop(restarted);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("sqlite-wal"));
+        let _ = std::fs::remove_file(path.with_extension("sqlite-shm"));
+    }
+
+    #[tokio::test]
+    async fn scout_outcome_delta_is_durable_and_deduplicated_after_restart() {
+        let path = std::env::temp_dir().join(format!(
+            "learning-scout-delta-{}-{}.sqlite",
+            std::process::id(),
+            now_ms()
+        ));
+        let event = FeedbackEvent::ScoutOutcome {
+            event_id: "scout-delta-restart-event".into(),
+            observed_at_ms: now_ms(),
+            learning_context: Some("long:trend:BTC-USDT:live-momentum".into()),
+            market_regime: Some("trend".into()),
+            symbol: "BTC-USDT".into(),
+            strategy: "live-momentum".into(),
+            profile_id: "scout-delta-profile".into(),
+            parameters: BTreeMap::from([("threshold".into(), 0.5)]),
+            baseline_parameters: BTreeMap::new(),
+            comparison: ScoutComparisonMetadata::Independent,
+            specs: Vec::new(),
+            net_return_percent: -0.25,
+        };
+
+        let first_app = router(path.clone()).unwrap();
+        let first = json_request(
+            first_app,
+            "POST",
+            "/feedback",
+            Some(serde_json::to_vec(&event).unwrap()),
+        )
+        .await;
+        assert_eq!(first.status(), StatusCode::OK);
+        let first_result: FeedbackResult =
+            serde_json::from_slice(&first.into_body().collect().await.unwrap().to_bytes()).unwrap();
+        assert!(first_result.accepted);
+        assert!(!first_result.duplicate);
+
+        let app_after_restart = router(path.clone()).unwrap();
+        let duplicate = json_request(
+            app_after_restart,
+            "POST",
+            "/feedback",
+            Some(serde_json::to_vec(&event).unwrap()),
+        )
+        .await;
+        assert_eq!(duplicate.status(), StatusCode::OK);
+        let duplicate_result: FeedbackResult =
+            serde_json::from_slice(&duplicate.into_body().collect().await.unwrap().to_bytes())
+                .unwrap();
+        assert!(duplicate_result.accepted);
+        assert!(duplicate_result.duplicate);
+
+        let connection = open_state_db(&path).unwrap();
+        let accepted_events = connection
+            .query_row(
+                "SELECT accepted_events FROM learning_metadata WHERE id=1",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap();
+        let event_rows = connection
+            .query_row(
+                "SELECT COUNT(*) FROM learning_seen_event_ids WHERE id=?1",
+                ["scout-delta-restart-event"],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap();
+        assert_eq!(accepted_events, 1);
+        assert_eq!(event_rows, 1);
+
+        drop(connection);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("sqlite-wal"));
+        let _ = std::fs::remove_file(path.with_extension("sqlite-shm"));
+    }
+
+    #[test]
+    fn scout_outcome_delta_latency_tracks_changed_records_not_history_size() {
+        let suffix = format!("{}-{}", std::process::id(), now_ms());
+        let full_path = std::env::temp_dir().join(format!("learning-scout-full-{suffix}.sqlite"));
+        let delta_path = std::env::temp_dir().join(format!("learning-scout-delta-{suffix}.sqlite"));
+        let mut baseline = LearningState {
+            accepted_events: 100_000,
+            seen_event_ids_overflowed: true,
+            ..LearningState::default()
+        };
+        for index in 0..5_000 {
+            let profile = StrategyProfile {
+                profile_id: format!("historical-profile-{index}"),
+                version: 0,
+                symbol: format!("TEST-{index}-USDT"),
+                strategy: "live-momentum".into(),
+                parameters: BTreeMap::from([("threshold".into(), index as f64)]),
+                learning_samples: 0,
+                positive_samples: 0,
+                realized_pnl: 0.0,
+            };
+            let id = variant_key(&profile);
+            baseline.variants.insert(
+                id,
+                RegisteredProfile {
+                    profile,
+                    specs: Vec::new(),
+                    samples: 0,
+                    positive: 0,
+                    realized_pnl: 0.0,
+                    outcomes: Vec::new(),
+                },
+            );
+        }
+        baseline.seen_event_ids = (0..100_000)
+            .map(|index| format!("historical-event-{index:06}"))
+            .collect();
+
+        let context = "long:trend:BTC-USDT:live-momentum".to_owned();
+        let profile = StrategyProfile {
+            profile_id: "scout-delta-profile".into(),
+            version: 0,
+            symbol: "BTC-USDT".into(),
+            strategy: "live-momentum".into(),
+            parameters: BTreeMap::from([("threshold".into(), 0.5)]),
+            learning_samples: 0,
+            positive_samples: 0,
+            realized_pnl: 0.0,
+        };
+        let variant_id = variant_key(&profile);
+        baseline.variants.insert(
+            variant_id.clone(),
+            RegisteredProfile {
+                profile: profile.clone(),
+                specs: Vec::new(),
+                samples: 0,
+                positive: 0,
+                realized_pnl: 0.0,
+                outcomes: Vec::new(),
+            },
+        );
+        baseline
+            .active_profiles
+            .insert(key("BTC-USDT", "live-momentum"), profile);
+
+        let event = FeedbackEvent::ScoutOutcome {
+            event_id: "scout-delta-large-state-event".into(),
+            observed_at_ms: now_ms(),
+            learning_context: Some(context.clone()),
+            market_regime: Some("trend".into()),
+            symbol: "BTC-USDT".into(),
+            strategy: "live-momentum".into(),
+            profile_id: "scout-delta-profile".into(),
+            parameters: BTreeMap::from([("threshold".into(), 0.5)]),
+            baseline_parameters: BTreeMap::new(),
+            comparison: ScoutComparisonMetadata::Independent,
+            specs: Vec::new(),
+            net_return_percent: -0.25,
+        };
+        let mut updated = baseline.clone();
+        updated.accepted_events += 1;
+        updated
+            .seen_event_ids
+            .insert("scout-delta-large-state-event".into());
+        updated.context_learning.insert(
+            context.clone(),
+            ContextLearningStat {
+                samples: 1,
+                positive: 0,
+                realized_pnl: -0.25,
+                updated_at_ms: now_ms(),
+            },
+        );
+        updated
+            .variants
+            .get_mut(&variant_id)
+            .unwrap()
+            .outcomes
+            .push(LearningOutcome {
+                observed_at_ms: event_observed_at(&event),
+                net_return_percent: event_net_return_percent(&event),
+                evidence_group_id: None,
+                learning_context: None,
+                market_regime: Some("trend".into()),
+                source: LearningOutcomeSource::Scout,
+                realized_pnl_usd: None,
+                paired_comparison: false,
+                tested_parameter_keys: Vec::new(),
+                baseline_parameters: BTreeMap::new(),
+            });
+
+        let full_connection = open_state_db(&full_path).unwrap();
+        persist_normalized(&full_connection, &baseline).unwrap();
+        drop(full_connection);
+        let delta_connection = open_state_db(&delta_path).unwrap();
+        persist_normalized(&delta_connection, &baseline).unwrap();
+        drop(delta_connection);
+
+        let full_started = std::time::Instant::now();
+        let full_connection = open_state_db(&full_path).unwrap();
+        persist_normalized(&full_connection, &updated).unwrap();
+        drop(full_connection);
+        let full_elapsed = full_started.elapsed();
+
+        let delta_started = std::time::Instant::now();
+        persist_scout_outcome_delta(&delta_path, &updated, &event).unwrap();
+        let delta_elapsed = delta_started.elapsed();
+
+        eprintln!(
+            "ScoutOutcome persistence benchmark: full={full_elapsed:?}, delta={delta_elapsed:?}"
+        );
+        assert!(
+            delta_elapsed < full_elapsed,
+            "incremental persistence {delta_elapsed:?} should beat full-state persistence {full_elapsed:?}"
+        );
+
+        let full_connection = open_state_db(&full_path).unwrap();
+        let delta_connection = open_state_db(&delta_path).unwrap();
+        let full_variant: String = full_connection
+            .query_row(
+                "SELECT payload FROM learning_variants WHERE id=?1",
+                [&variant_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let delta_variant: String = delta_connection
+            .query_row(
+                "SELECT payload FROM learning_variants WHERE id=?1",
+                [&variant_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(delta_variant, full_variant);
+        let full_context: String = full_connection
+            .query_row(
+                "SELECT payload FROM learning_context_stats WHERE id=?1",
+                [&context],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let delta_context: String = delta_connection
+            .query_row(
+                "SELECT payload FROM learning_context_stats WHERE id=?1",
+                [&context],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(delta_context, full_context);
+        let delta_event_exists: bool = delta_connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM learning_seen_event_ids WHERE id=?1)",
+                ["scout-delta-large-state-event"],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(delta_event_exists);
+
+        drop(full_connection);
+        drop(delta_connection);
+        for path in [&full_path, &delta_path] {
+            let _ = std::fs::remove_file(path);
+            let _ = std::fs::remove_file(path.with_extension("sqlite-wal"));
+            let _ = std::fs::remove_file(path.with_extension("sqlite-shm"));
+        }
     }
 
     #[tokio::test]

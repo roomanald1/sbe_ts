@@ -195,6 +195,131 @@ const LOSS_CLUSTER_SIZE: usize = 3;
 const LOSS_CLUSTER_WINDOW_MS: u64 = 6 * 60 * 60 * 1_000;
 const LOSS_CLUSTER_SIZE_MULTIPLIER: f64 = 0.5;
 
+#[derive(Clone, Copy)]
+struct ExplorationRiskAdjustment {
+    scale: f64,
+    sample_count: usize,
+    weighted_net_return_percent: Option<f64>,
+    regime_scoped: bool,
+}
+
+fn weighted_exploration_risk_scale(samples: &[(u64, f64)], now_ms: u64) -> (f64, f64) {
+    const LOSS_HALF_LIFE_MS: f64 = 3.0 * 60.0 * 60.0 * 1_000.0;
+    const WIN_HALF_LIFE_MS: f64 = 60.0 * 60.0 * 1_000.0;
+    let (weight, loss_weight, weighted_return) = samples.iter().fold((0.0, 0.0, 0.0), |(weight, loss_weight, total), (timestamp, net)| {
+        let age = now_ms.saturating_sub(*timestamp) as f64;
+        // Loss evidence decays more slowly than wins, so recovery requires
+        // sustained positive realized outcomes.
+        let half_life = if *net < 0.0 { LOSS_HALF_LIFE_MS } else { WIN_HALF_LIFE_MS };
+        let sample_weight = 0.5_f64.powf(age / half_life);
+        (weight + sample_weight, loss_weight + if *net < 0.0 { sample_weight } else { 0.0 }, total + sample_weight * net)
+    });
+    if weight <= 0.0 {
+        return (1.0, 0.0);
+    }
+    let mean = weighted_return / weight;
+    let confidence = ((loss_weight - 1.0) / 7.0).clamp(0.0, 1.0);
+    let shortfall = (-mean / 0.50).clamp(0.0, 1.0);
+    ((1.0 - 0.65 * confidence * shortfall).clamp(0.35, 1.0), mean)
+}
+
+impl ExplorationRiskAdjustment {
+    fn neutral() -> Self {
+        Self { scale: 1.0, sample_count: 0, weighted_net_return_percent: None, regime_scoped: false }
+    }
+}
+
+fn contextual_exploration_risk_adjustment(
+    signal: &Signal,
+    settings: &Settings,
+    now_ms: u64,
+) -> ExplorationRiskAdjustment {
+    let Some(strategy) = signal.strategy.as_deref().and_then(Strategy::from_name)
+        .filter(|strategy| strategy.is_live_insight())
+    else {
+        return ExplorationRiskAdjustment::neutral();
+    };
+    let direction = match signal.direction.as_str() {
+        "bullish" => "long",
+        "bearish" => "short",
+        _ => return ExplorationRiskAdjustment::neutral(),
+    };
+    const WINDOW_MS: u64 = 6 * 60 * 60 * 1_000;
+    let mut samples = Vec::<(u64, f64, String)>::new();
+    for (key, returns) in &settings.recent_profile_context_returns {
+        let Some((_, context)) = key.split_once('|') else { continue; };
+        let mut parts = context.split(':');
+        let (Some(side), Some(regime), Some(symbol), Some(kind)) =
+            (parts.next(), parts.next(), parts.next(), parts.next())
+        else { continue; };
+        if side != direction || symbol != signal.symbol || kind != strategy.as_str() {
+            continue;
+        }
+        for &(timestamp, net_return) in returns {
+            if timestamp <= now_ms && now_ms.saturating_sub(timestamp) <= WINDOW_MS
+                && net_return.is_finite()
+            {
+                samples.push((timestamp, net_return, regime.to_owned()));
+            }
+        }
+    }
+    let requested_regime = signal.market_regime.as_deref()
+        .filter(|regime| matches!(*regime, "range" | "trend" | "volatile" | "mixed"));
+    let regime_samples = requested_regime.map(|regime| {
+        samples.iter().filter(|(_, _, sample_regime)| sample_regime == regime)
+            .cloned().collect::<Vec<_>>()
+    });
+    let regime_scoped = regime_samples.as_ref().is_some_and(|subset| subset.len() >= 6);
+    if regime_scoped {
+        samples = regime_samples.unwrap_or_default();
+    }
+    samples.sort_unstable_by_key(|sample| std::cmp::Reverse(sample.0));
+    samples.dedup_by_key(|sample| sample.0);
+    samples.truncate(64);
+    if samples.len() < 3 {
+        return ExplorationRiskAdjustment::neutral();
+    }
+    let risk_samples = samples.iter().map(|(timestamp, net, _)| (*timestamp, *net)).collect::<Vec<_>>();
+    let (scale, mean) = weighted_exploration_risk_scale(&risk_samples, now_ms);
+    ExplorationRiskAdjustment {
+        scale,
+        sample_count: samples.len(),
+        weighted_net_return_percent: Some(mean),
+        regime_scoped,
+    }
+}
+
+#[cfg(test)]
+mod exploration_risk_tests {
+    use super::*;
+
+    #[test]
+    fn large_supported_net_losses_cut_risk_and_keep_a_probe_floor() {
+        let now = 20_000_000;
+        let losses = vec![(now, -0.5); 12];
+        let (scale, mean) = weighted_exploration_risk_scale(&losses, now);
+        assert!(mean <= -0.25);
+        assert_eq!(scale, 0.35);
+    }
+
+    #[test]
+    fn risk_recovery_is_slower_than_a_fresh_win() {
+        let now = 20_000_000;
+        let prior_losses = vec![(now - 4 * 60 * 60 * 1_000, -0.5); 8];
+        let (loss_scale, _) = weighted_exploration_risk_scale(&prior_losses, now);
+        let mut with_one_win = prior_losses.clone();
+        with_one_win.push((now, 0.2));
+        let (one_win_scale, _) = weighted_exploration_risk_scale(&with_one_win, now);
+        let mut with_sustained_recovery = prior_losses;
+        with_sustained_recovery.extend(vec![(now, 0.2); 8]);
+        let (recovered_scale, _) = weighted_exploration_risk_scale(&with_sustained_recovery, now);
+        assert!(loss_scale < 1.0);
+        assert!(one_win_scale > loss_scale);
+        assert!(one_win_scale < recovered_scale);
+        assert!(recovered_scale <= 1.0);
+    }
+}
+
 fn has_recent_profile_loss_cluster(signal: &Signal, settings: &Settings, now_ms: u64) -> bool {
     let Some(strategy) = signal.strategy.as_deref().and_then(Strategy::from_name) else { return false; };
     let parameters = signal_strategy_parameters(signal);

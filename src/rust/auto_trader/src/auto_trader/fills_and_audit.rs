@@ -326,6 +326,24 @@ fn signal_audit_payload(
         "status": status,
         "reason": reason,
     });
+    if let Some(decision) = signal.strategy_decision.as_ref() {
+        payload["learning_profile_id"] = decision
+            .get("learning_profile_id")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
+        payload["learning_profile_version"] = decision
+            .get("learning_profile_version")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
+        payload["effective_exit_protection_parameters"] = decision
+            .get("effective_exit_protection_parameters")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
+        payload["learned_exit_protection_policy"] = decision
+            .get("learned_exit_protection_policy")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
+    }
     if stage == "entry"
         || (stage == "decision" && matches!(status, "selected" | "scouted"))
     {
@@ -512,6 +530,41 @@ async fn store_execution_audit_until_saved(
 #[cfg(test)]
 mod strategy_lot_pnl_tests {
     use super::*;
+
+    #[test]
+    fn add_on_fill_keeps_the_original_entry_exit_policy_and_profile_trace() {
+        let mut lots = BTreeMap::new();
+        let mut aggregate = BTreeMap::new();
+        let captured = serde_json::json!({
+            "strategy_parameters": {
+                "profit_protection_activation_percent": 0.20,
+                "profit_protection_giveback_percent": 0.15,
+                "profit_protection_minimum_lock_percent": 0.10
+            },
+            "learning_profile_id": "entry-profile",
+            "learning_profile_version": 17,
+            "learned_exit_protection_policy": { "as_of_ms": 1234 }
+        });
+        apply_strategy_position_fill(
+            &mut lots, &mut aggregate, "BTC-USDT", "live-momentum", "buy", 1.0,
+            100.0, 0.0, "Limit", "live-momentum:strict", true, None,
+            Some("entry-1"), Some(&captured), Some(0.5), Some(0.8),
+        );
+        let refreshed = serde_json::json!({
+            "strategy_parameters": { "profit_protection_activation_percent": 0.50 },
+            "learning_profile_id": "later-profile",
+            "learning_profile_version": 18
+        });
+        apply_strategy_position_fill(
+            &mut lots, &mut aggregate, "BTC-USDT", "live-momentum", "buy", 0.5,
+            101.0, 0.0, "Limit", "live-momentum:strict", true, None,
+            Some("entry-2"), Some(&refreshed), Some(0.7), Some(1.2),
+        );
+        let position = &lots["BTC-USDT"]["live-momentum"];
+        assert_eq!(position.strategy_decision.as_ref(), Some(&captured));
+        assert_eq!(position.stop_loss_percent, Some(0.5));
+        assert_eq!(position.take_profit_percent, Some(0.8));
+    }
 
     #[test]
     fn real_fill_turns_scout_only_aggregate_into_real_position() {

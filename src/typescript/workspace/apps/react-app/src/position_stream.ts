@@ -27,6 +27,7 @@ let streamSubscription:
   | { cancel: () => void; request: (n: number) => void }
   | undefined;
 let retryTimer: ReturnType<typeof setTimeout> | undefined;
+let idleTimer: ReturnType<typeof setTimeout> | undefined;
 let retryDelay = 1000;
 let subscribers = 0;
 let firstSnapshot: Promise<PositionUiSnapshot> | undefined;
@@ -42,6 +43,18 @@ function connect() {
       }
       socket = next;
       retryDelay = 1000;
+      const armIdleWatchdog = () => {
+        if (idleTimer) clearTimeout(idleTimer);
+        idleTimer = setTimeout(() => {
+          idleTimer = undefined;
+          if (socket !== next || subscribers === 0) return;
+          streamSubscription?.cancel();
+          streamSubscription = undefined;
+          resetPositionRSocket(next);
+          socket = undefined;
+          scheduleReconnect();
+        }, 45_000);
+      };
       next.requestStream({ data: Buffer.from('position-ui:*') }).subscribe({
         onSubscribe: (subscription) => {
           if (!subscribers) {
@@ -51,6 +64,7 @@ function connect() {
           }
           streamSubscription = subscription;
           subscription.request(32);
+          armIdleWatchdog();
         },
         onNext: (payload) => {
           try {
@@ -90,6 +104,7 @@ function connect() {
               Array.isArray(value.auto_trades?.trades)
             ) {
               snapshot$.next(value);
+              armIdleWatchdog();
               resolveFirstSnapshot?.(value);
               resolveFirstSnapshot = undefined;
             }
@@ -99,12 +114,16 @@ function connect() {
           streamSubscription?.request(1);
         },
         onError: () => {
+          if (idleTimer) clearTimeout(idleTimer);
+          idleTimer = undefined;
           if (socket === next) socket = undefined;
           streamSubscription = undefined;
           resetPositionRSocket(next);
           scheduleReconnect();
         },
         onComplete: () => {
+          if (idleTimer) clearTimeout(idleTimer);
+          idleTimer = undefined;
           if (socket === next) socket = undefined;
           streamSubscription = undefined;
           resetPositionRSocket(next);
@@ -138,6 +157,8 @@ export function subscribePositionStream(
     if (subscribers === 0) {
       if (retryTimer) clearTimeout(retryTimer);
       retryTimer = undefined;
+      if (idleTimer) clearTimeout(idleTimer);
+      idleTimer = undefined;
       streamSubscription?.cancel();
       streamSubscription = undefined;
       if (socket) resetPositionRSocket(socket);

@@ -276,6 +276,9 @@ fn trim_autotrader_snapshot(
             .as_deref()
             .is_none_or(strategy::is_autotrader_symbol_allowed)
     });
+    snapshot
+        .exit_protection_policies
+        .retain(|policy| strategy::is_autotrader_symbol_allowed(&policy.symbol));
     trim_autotrader_variant_snapshot(snapshot);
 }
 
@@ -316,6 +319,10 @@ fn snapshot_section_sizes(snapshot: &strategy::LearnedProfileSnapshot) -> String
         (
             "scout_parameter_variants",
             serde_json::to_vec(&snapshot.scout_parameter_variants).map_or(0, |v| v.len()),
+        ),
+        (
+            "exit_protection_policies",
+            serde_json::to_vec(&snapshot.exit_protection_policies).map_or(0, |v| v.len()),
         ),
     ];
     sizes
@@ -2321,6 +2328,12 @@ fn aggregate_replay_outcomes(bodies: &BTreeMap<String, serde_json::Value>) -> se
         }
         if let Some(rows) = body["outcomes"].as_array() {
             outcomes.extend(rows.iter().cloned().map(|mut row| {
+                if let Some(timestamp) = row["evaluated_timestamp_ms"].as_u64() {
+                    first_timestamp_ms =
+                        Some(first_timestamp_ms.map_or(timestamp, |value| value.min(timestamp)));
+                    last_timestamp_ms =
+                        Some(last_timestamp_ms.map_or(timestamp, |value| value.max(timestamp)));
+                }
                 if let Some(outcome_id) = row["outcome_id"].as_str() {
                     row["outcome_id"] = serde_json::json!(format!("{strategy}|{outcome_id}"));
                 }
@@ -3273,6 +3286,7 @@ mod tests {
             missed_opportunity_bands: Vec::new(),
             execution_learning: BTreeMap::new(),
             scout_parameter_variants: Vec::new(),
+            exit_protection_policies: Vec::new(),
         };
 
         trim_autotrader_snapshot(&mut snapshot, &[allowed_id.clone()].into());
