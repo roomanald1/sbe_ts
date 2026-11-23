@@ -163,6 +163,7 @@ fn new_protective_stop_order(
         side: side.to_owned(),
         order_type: "StopMarket".into(),
         purpose: "stop-loss".into(),
+        exploratory: false,
         strategy: Some(strategy),
         decision_id,
         quantity,

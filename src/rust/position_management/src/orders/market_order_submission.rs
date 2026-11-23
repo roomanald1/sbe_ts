@@ -253,6 +253,7 @@ async fn submit_order(
             post_only: is_post_only,
             source: request.source.clone(),
             parent_order_id: request.client_order_id.clone(),
+            reduce_only: request.reduce_only,
         };
         ledger.orders.push(order.clone());
         Some(order)

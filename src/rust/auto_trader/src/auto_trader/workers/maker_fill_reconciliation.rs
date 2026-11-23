@@ -100,7 +100,7 @@ async fn reconcile_maker_fills(
             {
                 continue;
             }
-            let count_entry = order.filled_quantity <= 1e-12;
+            let count_entry = order.purpose == "signal" && order.filled_quantity <= 1e-12;
             let execution_kind = order
                 .order_type
                 .split(" · ")
@@ -143,6 +143,17 @@ async fn reconcile_maker_fills(
                 None,
                 None,
             );
+            if order.exploratory && order.purpose == "signal" {
+                if let Some(position) = strategy_positions
+                    .get_mut(&order.symbol)
+                    .and_then(|lots| lots.get_mut(order.strategy.as_deref().unwrap_or("unattributed")))
+                {
+                    position.exploratory = true;
+                }
+                if let Some(position) = positions.get_mut(&order.symbol) {
+                    position.exploratory = true;
+                }
+            }
             if attribution_changed {
                 if let Some(position) = positions.get_mut(&order.symbol) {
                     position.entry_decision_id = order.decision_id.clone();
@@ -201,10 +212,12 @@ async fn reconcile_maker_fills(
             queue_auto_trader_audit(state, serde_json::json!({
                 "decision_id": order.decision_id,
                 "trade_id": order.decision_id,
-                "stage": "entry_fill",
+                "stage": if order.purpose == "signal" { "entry_fill" } else { "exit_fill" },
                 "timestamp": current_time_ms(),
                 "symbol": order.symbol,
                 "strategy": order.strategy,
+                "purpose": order.purpose,
+                "exploratory": order.exploratory,
                 "side": order.side,
                 "status": order.status,
                 "order_type": order.order_type,

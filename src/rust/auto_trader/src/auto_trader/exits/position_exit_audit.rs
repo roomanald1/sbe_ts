@@ -171,8 +171,13 @@ fn new_position_exit_order(
         triggered_at: None,
         symbol: symbol.to_owned(),
         side: side.to_owned(),
-        order_type: "Ioc".into(),
+        order_type: if position.exploratory && matches!(reason, "take-profit" | "profit-protection") {
+            "PostOnlyLimit · exit".into()
+        } else {
+            "Ioc".into()
+        },
         purpose: reason.into(),
+        exploratory: position.exploratory,
         strategy: Some(
             position
                 .strategy

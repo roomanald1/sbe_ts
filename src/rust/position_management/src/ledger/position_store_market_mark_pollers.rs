@@ -58,24 +58,34 @@ impl PositionStore {
         }
         // Post-only is checked when accepting the order. Once resting, a
         // later crossing book is a fill opportunity, not a reason to cancel.
-        let orders = self
-            .ledger
-            .lock()
-            .await
-            .orders
-            .iter()
-            .filter(|order| order.symbol == symbol)
-            .cloned()
-            .collect::<Vec<_>>();
+        let orders = {
+            let ledger = self.ledger.lock().await;
+            ledger.orders.iter().filter(|order| order.symbol == symbol)
+                .cloned().collect::<Vec<_>>()
+        };
         if orders.is_empty() {
             return Ok(());
         }
         let mut matches = Vec::with_capacity(orders.len());
+        let mut stale_reduce_only_orders = Vec::new();
         for order in orders {
+            let match_quantity = if order.reduce_only {
+                let ledger = self.ledger.lock().await;
+                let current_quantity = indexed_position_summary(self, &ledger, Some(&order.source))
+                    .positions.into_iter().find(|position| position.symbol == symbol)
+                    .map(|position| position.quantity).unwrap_or(0.0);
+                let closes = (matches!(&order.side, TradeSide::Sell) && current_quantity > EPSILON)
+                    || (matches!(&order.side, TradeSide::Buy) && current_quantity < -EPSILON);
+                if !closes { 0.0 } else { order.remaining_quantity.min(current_quantity.abs()) }
+            } else { order.remaining_quantity };
+            if match_quantity <= EPSILON {
+                if order.reduce_only { stale_reduce_only_orders.push(order.id); }
+                continue;
+            }
             let mut response = paper_exchange_match(
                 &order.symbol,
                 &order.side,
-                order.remaining_quantity,
+                match_quantity,
                 Some(order.limit_price),
             )
             .await
@@ -90,10 +100,33 @@ impl PositionStore {
             matches.push((order.id, response));
         }
         let mut ledger = self.ledger.lock().await;
+        let original_order_count = ledger.orders.len();
+        for order in &mut ledger.orders {
+            if stale_reduce_only_orders.iter().any(|id| id == &order.id) {
+                order.remaining_quantity = 0.0;
+            }
+        }
         let mut fills = Vec::new();
         for (id, result) in matches {
+            let reduce_allowance = ledger.orders.iter().find(|order| order.id == id)
+                .filter(|order| order.reduce_only).map(|order| {
+                    let current_quantity = indexed_position_summary(self, &ledger, Some(&order.source))
+                        .positions.into_iter().find(|position| position.symbol == symbol)
+                        .map(|position| position.quantity).unwrap_or(0.0);
+                    let closes = (matches!(&order.side, TradeSide::Sell) && current_quantity > EPSILON)
+                        || (matches!(&order.side, TradeSide::Buy) && current_quantity < -EPSILON);
+                    if closes { current_quantity.abs() } else { 0.0 }
+                });
             if let Some(order) = ledger.orders.iter_mut().find(|order| order.id == id) {
-                order.remaining_quantity = result.remaining_quantity.max(0.0);
+                let mut result = result;
+                if let Some(allowance) = reduce_allowance {
+                    limit_match_quantity(&mut result, allowance.min(order.remaining_quantity));
+                    if allowance <= EPSILON {
+                        order.remaining_quantity = 0.0;
+                    }
+                }
+                let prior_remaining = order.remaining_quantity;
+                order.remaining_quantity = (prior_remaining - result.filled_quantity).max(0.0);
                 order.estimated_fee =
                     order.remaining_quantity * order.limit_price * -order.maker_fee_rate;
                 let fee_rate = if order.maker_fee_rate == 0.0 {
@@ -150,6 +183,8 @@ impl PositionStore {
                     slippage_bps: None,
                 });
             }
+            self.persist(&ledger).await?;
+        } else if ledger.orders.len() != original_order_count {
             self.persist(&ledger).await?;
         }
         Ok(())

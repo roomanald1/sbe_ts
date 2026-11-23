@@ -33,6 +33,7 @@ const pct = (v: unknown) =>
 const preciseUsd = new Intl.NumberFormat(undefined, {
   minimumFractionDigits: 5,
   maximumFractionDigits: 5,
+  signDisplay: 'always',
 });
 const entryOrderTypeLabel = (value: string) => {
   const type = value.split(' · ')[0];
@@ -63,6 +64,22 @@ const signed = {
 };
 type OutcomeGridRow = AutoTraderOutcome & { markPrice?: number };
 const OUTCOMES_COLUMN_STATE_KEY = 'auto-trader-outcomes-column-state';
+const CLOSED_OUTCOMES_COLUMN_WIDTHS: Record<string, number> = {
+  Symbol: 72,
+  'Live gates': 64,
+  Strategy: 118,
+  Source: 80,
+  'Entry mode': 80,
+  'Strategy instance ID': 115,
+  'Trade type': 82,
+  Side: 48,
+  Quantity: 72,
+  Entry: 84,
+  Closed: 112,
+  'Pre-fee P&L (USD)': 112,
+  'Fees (USD)': 90,
+  'Net USD': 88,
+};
 const outcomeGridDefaultColDef = {
   sortable: true,
   resizable: true,
@@ -189,17 +206,53 @@ function AutoTraderOutcomesComponent({
       const saved = localStorage.getItem(columnStateKey);
       if (saved) {
         const parsed = JSON.parse(saved);
-        if (Array.isArray(parsed))
-          api.applyColumnState({ state: parsed, applyOrder: true });
+        if (Array.isArray(parsed)) {
+          let restoredState = parsed;
+          if (closedOnly) {
+            const trailingHeaders = [
+              'Entry',
+              'Pre-fee P&L (USD)',
+              'Fees (USD)',
+              'Net USD',
+            ];
+            const trailingColumns = new Map<string, (typeof parsed)[number]>();
+            restoredState = parsed.filter((columnState) => {
+              const headerName = api
+                .getColumn(columnState.colId)
+                ?.getColDef().headerName;
+              if (trailingHeaders.includes(String(headerName ?? ''))) {
+                trailingColumns.set(String(headerName), columnState);
+                return false;
+              }
+              const cap =
+                CLOSED_OUTCOMES_COLUMN_WIDTHS[String(headerName ?? '')];
+              if (typeof cap === 'number' && columnState.width > cap)
+                columnState.width = cap;
+              return true;
+            });
+            restoredState.push(
+              ...trailingHeaders
+                .map((header) => trailingColumns.get(header))
+                .filter((columnState) => columnState !== undefined),
+            );
+          }
+          api.applyColumnState({ state: restoredState, applyOrder: true });
+        }
       }
     } catch {
       // Ignore invalid or unavailable saved grid state.
     }
     api.applyColumnState({
-      state: [...columnWidths.current].map(([colId, width]) => ({
-        colId,
-        width,
-      })),
+      state: [...columnWidths.current].map(([colId, width]) => {
+        const headerName = api.getColumn(colId)?.getColDef().headerName;
+        const cap = closedOnly
+          ? CLOSED_OUTCOMES_COLUMN_WIDTHS[String(headerName ?? '')]
+          : undefined;
+        return {
+          colId,
+          width: typeof cap === 'number' ? Math.min(width, cap) : width,
+        };
+      }),
     });
     for (const { colId, width } of api.getColumnState()) {
       if (width != null) columnWidths.current.set(colId, width);
@@ -1194,7 +1247,7 @@ function AutoTraderOutcomesComponent({
       {
         field: 'strategyInstanceId',
         headerName: 'Strategy instance ID',
-        minWidth: 190,
+        minWidth: 150,
       },
       { field: 'ledgerSource', headerName: 'Ledger source', minWidth: 100 },
       {
@@ -1445,7 +1498,41 @@ function AutoTraderOutcomesComponent({
         minWidth: 150,
       },
       {
-        headerName: 'Fees',
+        headerName: 'Pre-fee P&L (USD)',
+        headerTooltip:
+          'Closed trades show realized P&L before fees. Open positions show marked P&L before estimated exit fees and slippage.',
+        valueGetter: ({ data }) => {
+          if (!data) return undefined;
+          if (data.status === 'Closed')
+            return typeof data.netPnlUsd === 'number' &&
+              Number.isFinite(data.netPnlUsd) &&
+              typeof data.feesUsd === 'number' &&
+              Number.isFinite(data.feesUsd)
+              ? data.netPnlUsd + data.feesUsd
+              : undefined;
+          if (
+            data.status === 'Open' &&
+            !data.carryDetails &&
+            data.markPrice !== undefined &&
+            typeof data.quoteUsdRate === 'number' &&
+            Number.isFinite(data.quoteUsdRate)
+          )
+            return (
+              (data.markPrice - data.entryPrice) *
+              data.signedQuantity *
+              data.quoteUsdRate
+            );
+          return undefined;
+        },
+        cellClassRules: signed,
+        valueFormatter: ({ value }) =>
+          typeof value === 'number' && Number.isFinite(value)
+            ? preciseUsd.format(value)
+            : '—',
+        minWidth: 155,
+      },
+      {
+        headerName: 'Fees (USD)',
         headerTooltip:
           'Total entry and exit fees paid for a closed trade. Open positions show entry fees paid so far.',
         valueGetter: ({ data }) =>
@@ -1458,7 +1545,7 @@ function AutoTraderOutcomesComponent({
                 : undefined,
         valueFormatter: ({ data }) =>
           typeof data?.feesUsd === 'number' && Number.isFinite(data.feesUsd)
-            ? 'USD ' + preciseUsd.format(data.feesUsd)
+            ? preciseUsd.format(-Math.abs(data.feesUsd))
             : '—',
         minWidth: 150,
       },
@@ -1724,25 +1811,15 @@ function AutoTraderOutcomesComponent({
                     'Side',
                     'Quantity',
                     'Entry',
-                    'Closed',
-                    'Fees',
+                    'Pre-fee P&L (USD)',
+                    'Fees (USD)',
                     'Net USD',
+                    'Closed',
                   ].includes(String(column.headerName ?? '')),
                 )
                 .map((column) => {
                   const widths: Record<string, number> = {
-                    Symbol: 90,
-                    'Live gates': 84,
-                    Strategy: 170,
-                    'Entry mode': 105,
-                    'Strategy instance ID': 230,
-                    'Trade type': 105,
-                    Side: 80,
-                    Quantity: 105,
-                    Entry: 105,
-                    Closed: 155,
-                    Fees: 155,
-                    'Net USD': 135,
+                    ...CLOSED_OUTCOMES_COLUMN_WIDTHS,
                   };
                   const originalHeader =
                     column.headerName === 'Source'
@@ -1779,11 +1856,13 @@ function AutoTraderOutcomesComponent({
   const gridColumns = useMemo(
     () =>
       visibleColumns.map((column, index) =>
-        index === visibleColumns.length - 1
-          ? { ...column, flex: 1, maxWidth: undefined }
-          : column,
+        closedOnly
+          ? { ...column, flex: 0 }
+          : index === visibleColumns.length - 1
+            ? { ...column, flex: 1, maxWidth: undefined }
+            : column,
       ),
-    [visibleColumns],
+    [closedOnly, visibleColumns],
   );
   return (
     <section

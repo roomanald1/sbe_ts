@@ -248,6 +248,7 @@ fn external_close_order(payload: &serde_json::Value) -> Option<TraderOrder> {
         side: payload["side"].as_str()?.to_owned(),
         order_type: "ExternalLedgerClose".into(),
         purpose: "external-close".into(),
+        exploratory: false,
         strategy: Some(strategy),
         decision_id,
         quantity,

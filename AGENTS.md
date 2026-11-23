@@ -1,79 +1,42 @@
 # Project Guidance
 
 ## Architecture
-
 - React: `src/typescript/workspace/apps/react-app`; shared UI: `src/typescript/workspace/packages/ui-platform`.
 - Rust services: `src/rust/` (`feed_handlers`, `insights`, `auto_trader`, `strategy`, `learning`, `position_management`, `paper_exchange`).
 - Signal flow: `feed_handlers` → `insights` → `auto_trader` via `StrategySignal`; evaluators consume signals and position management handles execution.
-- Scouts live in `src/rust/strategy/src/scouts/`, not a standalone crate.
-- Keep business logic in Rust; frontend models manage UI state and views handle rendering.
-- Strategy entry and open-position decisions belong in `evaluate.rs`. Preserve learned parameter bounds and feedback attribution.
-- Avoid editing generated SBE codecs unless protocols change. Update both trade-ticket and Orders flows for VWAP API changes.
+- Scouts: `src/rust/strategy/src/scouts/`, not a standalone crate.
+- Keep business logic in Rust; frontend models manage state and views render UI.
+- Strategy entry/open-position decisions belong in `evaluate.rs`; preserve learned bounds and feedback attribution.
+- Avoid editing generated SBE codecs unless protocols change. Update trade-ticket and Orders flows together for VWAP API changes.
 
-### Beads Memory — Required Navigation Step
+## Navigation and Efficiency
+- Use memories injected by `bd prime` before searching. Query `bd memories <topic>` only when additional detail is needed; save verified, reusable discoveries with `bd remember`. Avoid duplicates and restore context after compaction.
+- Follow `RTK.md` without repeatedly rereading it. Use RTK for supported commands; run `sed`, `cat`, `bd` and `./nx` directly.
+- Prefer repository `Justfile` recipes; inspect `just --list` when needed.
+- Search likely crates/directories first. Never run unrestricted root searches for ports, timestamps, numbers or common identifiers.
+- Discover uncertain paths with `rg --files`; use `rg -l`, targeted `rg`, ast-grep and bounded excerpts. Exclude generated/build trees and large logs unless relevant.
+- Reuse confirmed findings; avoid speculative paths, repeated reads and overlapping searches without new evidence.
+- Keep command output under ~20K characters where practical. Capture large output in `/tmp/`, inspect summaries and preserve complete diagnostics.
+- Use Context7 for unfamiliar/version-specific APIs; Python for suitable transformations.
+- Delegate only independent, bounded work. Avoid overlapping investigations and competing Cargo builds.
+- Stay within the requested scope; make the smallest correct change and stop once verified.
 
-Before searching unfamiliar repository code:
-
-1. Identify the component or feature involved.
-2. Query relevant saved knowledge using `bd memories <topic>`.
-3. Use matching remembered paths and symbols as starting points.
-4. If no relevant memory exists, discover paths using `rg --files` before searching contents.
-5. If a remembered path is invalid, verify its replacement and correct the stale memory.
-
-After discovering a reusable file location, symbol or architectural relationship, save it using `bd remember` if it is not already documented.
-
-Do not save speculative findings, duplicate memories or task-specific investigation notes.
-
-Memory retrieval is required once per unfamiliar component or feature, not before every `rg` command. Do not repeat lookups when the relevant knowledge is already available in the current session.
-
-## Tools and Navigation
-
-- Follow `RTK.md`. Use RTK for supported commands; run `sed`, `cat`, `bd` and `./nx` directly.
-- Use the repository `Justfile` for recurring development and service commands; inspect `just --list` and prefer the matching `just` recipe over memorized direct commands.
-- Check relevant `bd remember` knowledge before exploring unfamiliar code. Save confirmed, reusable file locations, symbols and architectural relationships using `bd remember`; correct stale entries after refactors.
-- Search likely crates first using targeted `rg`, `rg -l` and ast-grep. Discover uncertain paths with `rg --files` before searching contents.
-- Reuse confirmed findings; avoid repeated or overlapping searches without new evidence.
-- Use Context7 for unfamiliar or version-specific APIs.
-- Use Python for suitable transformations; verify changes and inspect diffs.
-- Parallelise independent reads and checks when safe; avoid competing Cargo builds.
-
-## Output Management
-
-- Keep command output below 20K characters where practical.
-- Narrow searches and inspect relevant file sections rather than dumping entire files, diffs or test logs.
-- Capture large outputs in `/tmp/`, then inspect targeted excerpts, counts or summaries.
-- Preserve complete diagnostics and evidence needed for correctness; never silently truncate essential data.
-
-## Docker Operations
-
+## Docker and Live Data
 - Never start, stop, restart, recreate or redeploy services without explicit permission. Read-only inspection is allowed.
-- Before running Docker or Compose CLI commands, call `containerToolsConfig` and use its reported base command.
-- The live AutoTrader and Position Management SQLite databases are in the shared Docker named volume `sbe-position-management-data`, mounted at `/data` in both services by `system/compose.yml`. The database files are `/data/auto_trader_state.sqlite` and `/data/positions.sqlite`; repository-local files under `src/rust/auto_trader/` and `src/rust/position_management/` may be stale and must not be assumed to reflect live service state.
-- For live database investigation, resolve the current container and volume from Compose, then use read-only inspection or copy the database into `/tmp/` before querying. If SQLite WAL sidecar files exist, include them or use SQLite's backup API to get a consistent snapshot. Never edit the live database directly.
+- Call `containerToolsConfig` before Docker/Compose commands; use its reported base command.
+- Live AutoTrader and Position Management SQLite databases are in Docker volume `sbe-position-management-data`, mounted at `/data`: `auto_trader_state.sqlite` and `positions.sqlite`. Repository-local copies may be stale.
+- Resolve the current container/volume before inspection. Query read-only or copy a consistent snapshot to `/tmp/`; preserve WAL sidecars or use SQLite backup. Never edit live databases.
 - For authorised deployments, prefer `docker compose --progress quiet`; verify with `rtk docker compose ps`.
-- Prefer continuous `docker compose logs --follow` over overlapping polling windows.
-- Capture long-running logs to `/tmp/`; return bounded summaries while retaining complete evidence.
-- Preserve relevant entry, candidate, signal, rejection, skip and gate diagnostics when investigating trading behaviour.
+- Prefer continuous logs over overlapping polling; capture long-running logs to `/tmp/` and inspect bounded summaries. Preserve entry, candidate, signal, rejection, skip and gate evidence.
 
-## SQLite Queries
-
-- Inspect unfamiliar schemas before querying.
-- Prefer filtered queries, explicit columns and SQL aggregation over large dumps.
-- Use `LIMIT` for exploration, never when complete results are required.
-- Extract relevant JSON fields instead of printing large values.
-- Save large results to `/tmp/` and inspect targeted subsets without losing information needed for calculations or trading decisions.
-
-## Development and Validation
-
-- Start with focused checks and tests; expand when changes cross components or affect dependencies.
-- Rust: use `just test <crate> [filter ...]`, `just check <crate>`, and `just fmt <crate>`; use `just fmt-rust` when formatting all frequently edited Rust crates.
-- React: use `just typecheck` for the app typecheck; format changed files.
-- Use `just diff-check` to verify whitespace before completion.
-- Reuse valid test results when code and configuration remain unchanged; avoid redundant expensive checks.
-- For performance changes, consult `research/BENCHMARK_BASELINE.md`.
+## Queries and Validation
+- Inspect unfamiliar SQLite schemas. Prefer explicit columns, filters, aggregation and selected JSON fields over large dumps; use `LIMIT` only for exploration.
+- Validate narrowly first, expanding for shared contracts or cross-component changes. Don't repeat successful checks without relevant changes.
+- Rust: `just test <crate> [filter ...]`, `just check <crate>`, `just fmt <crate>`; `just fmt-rust` for broader formatting.
+- React: `just typecheck`; format changed files.
+- Run `just diff-check` before completion. Consult `research/BENCHMARK_BASELINE.md` for performance changes.
 
 ## Beads and Completion
-
-- Use Beads issues for multi-step tasks, progress and outstanding work; use `bd remember` for reusable cross-task knowledge.
-- Run relevant quality checks and final `git status` before completion.
-- Never commit, push or sync unless explicitly requested.
+- Use Beads issues for multi-step tasks; close verified work. Use `bd remember` for reusable cross-task knowledge, not task-specific notes.
+- Inspect final `git status` and report changes, checks and outstanding issues.
+- Never commit, push or sync without explicit permission.

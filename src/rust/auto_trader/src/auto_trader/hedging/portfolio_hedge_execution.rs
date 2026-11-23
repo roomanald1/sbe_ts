@@ -76,6 +76,7 @@ async fn execute_portfolio_hedge(
         AutoOrderType::Ioc,
         ExecutionParameters::default(),
         timestamp.to_string(),
+        false,
     )
     .await
     {
@@ -207,6 +208,7 @@ fn new_portfolio_hedge_order(
         side: side.to_owned(),
         order_type: "Ioc".into(),
         purpose: "portfolio-hedge".into(),
+        exploratory: false,
         strategy: Some("portfolio-hedge".into()),
         decision_id: None,
         quantity,

@@ -132,6 +132,14 @@ fn configured_taker_fee_rate() -> f64 {
         .unwrap_or(0.001)
 }
 
+fn configured_maker_fee_rate() -> f64 {
+    std::env::var("PAPER_OKX_SPOT_MAKER_FEE_RATE")
+        .ok()
+        .and_then(|value| value.parse::<f64>().ok())
+        .filter(|value| value.is_finite() && *value >= 0.0 && *value <= 0.1)
+        .unwrap_or(0.0008)
+}
+
 #[cfg(test)]
 const STRATEGY_SIZING_RECENT_TRADES: usize = 5_000;
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]

@@ -13,6 +13,8 @@ async fn submit_position_exit_order(
     exit_decision_context: serde_json::Value,
 ) -> Result<Option<CycleResult>, (StatusCode, String)> {
     let is_long = position.quantity > 0.0;
+    let passive_profit_exit = position.exploratory
+        && matches!(reason, "take-profit" | "profit-protection");
     let entry_notional = position.quantity.abs() * position.average_entry_price;
     let entry_decision_id = position.entry_decision_id.clone();
     let protected_quantity = position
@@ -24,7 +26,9 @@ async fn submit_position_exit_order(
         // The server-side barrier is already watching this price; don't race it with a second IOC.
         return Ok(None);
     }
-    let stops_cancelled = match cancel_protective_stops(state, &symbol, Some(&strategy_key)).await {
+    let stops_cancelled = if passive_profit_exit {
+        true
+    } else { match cancel_protective_stops(state, &symbol, Some(&strategy_key)).await {
         Ok(cancelled) => cancelled,
         Err(error) => {
             let mut settings = state.settings.lock().await;
@@ -34,7 +38,7 @@ async fn submit_position_exit_order(
             request_settings_persist(state)?;
             return Err(error);
         }
-    };
+    }};
     if !stops_cancelled {
         // A stop is already triggering or could not be cancelled. Let its server-side execution settle.
         let mut settings = state.settings.lock().await;
@@ -55,9 +59,10 @@ async fn submit_position_exit_order(
         notional,
         bid,
         ask,
-        AutoOrderType::Ioc,
+        if passive_profit_exit { AutoOrderType::PostOnlyLimit } else { AutoOrderType::Ioc },
         ExecutionParameters::default(),
         timestamp.to_string(),
+        true,
     )
     .await
     {
@@ -90,7 +95,7 @@ async fn submit_position_exit_order(
                     filled,
                     price,
                     fee,
-                    "Ioc",
+                    if passive_profit_exit { "PostOnlyLimit" } else { "Ioc" },
                     reason,
                     false,
                     None,
@@ -113,7 +118,7 @@ async fn submit_position_exit_order(
                 filled,
                 price,
                 fee,
-                "Ioc",
+                if passive_profit_exit { "PostOnlyLimit" } else { "Ioc" },
                 reason,
                 false,
                 None,
@@ -197,11 +202,18 @@ async fn submit_position_exit_order(
         order.average_price = average_price;
         order.fees_paid = fee;
         order.realized_pnl = realized_pnl;
+        if passive_profit_exit {
+            order.order_type = "PostOnlyLimit · exit".into();
+            order.execution_order_id = response["order"]["id"].as_str().map(str::to_owned);
+            order.expires_at = response["order"]["expires_at"].as_u64();
+        }
         record_strategy_order_realized_pnl(order, strategy_realized_pnl);
         order.status = if filled + 1e-12 >= quantity {
             "filled"
         } else if filled > 0.0 {
-            "partially_filled_closed"
+            if passive_profit_exit { "partially_filled" } else { "partially_filled_closed" }
+        } else if passive_profit_exit && response["order"].is_object() {
+            "resting"
         } else {
             "expired_or_cancelled"
         }
@@ -229,7 +241,7 @@ async fn submit_position_exit_order(
         queue_auto_trader_audit(state, payload);
     }
     Ok(Some(CycleResult {
-        status: "order_submitted",
+        status: if passive_profit_exit && filled + 1e-12 < quantity { "order_resting" } else { "order_submitted" },
         reason: Some(format!(
             "Auto-trader {reason} at {:.4}%",
             return_fraction * 100.0
@@ -237,9 +249,9 @@ async fn submit_position_exit_order(
         symbol: Some(symbol),
         side: Some(side.into()),
         quantity: Some(quantity),
-        order_type: Some("Ioc exit".into()),
+        order_type: Some(if passive_profit_exit { "Post-only exit" } else { "Ioc exit" }.into()),
         order_response: Some(response),
-        filled_quantity: Some(quantity),
+        filled_quantity: Some(filled),
         entry_diagnostic: None,
     }))
 }

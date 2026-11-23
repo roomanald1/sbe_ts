@@ -147,6 +147,8 @@ struct RestingOrder {
     source: String,
     #[serde(default)]
     parent_order_id: Option<String>,
+    #[serde(default)]
+    reduce_only: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]

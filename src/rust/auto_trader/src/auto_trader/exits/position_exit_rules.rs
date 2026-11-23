@@ -204,7 +204,7 @@ async fn evaluate_position_exit(
         let already_exiting = settings.orders.iter().any(|order| {
             order.symbol == symbol
                 && order.strategy.as_deref() == Some(strategy_key.as_str())
-                && order.order_type == "Ioc"
+                && order.purpose != "signal"
                 && matches!(order.status.as_str(), "submitting" | "accepted" | "resting" | "partially_filled")
         });
         !already_exiting && settings
@@ -566,7 +566,7 @@ async fn evaluate_position_exit(
     let already_exiting = settings.orders.iter().any(|order| {
         order.symbol == symbol
             && order.strategy.as_deref() == Some(strategy_key.as_str())
-            && order.order_type == "Ioc"
+            && order.purpose != "signal"
             && matches!(order.status.as_str(), "submitting" | "accepted" | "resting" | "partially_filled")
     });
     let position_is_current = !already_exiting && settings

@@ -363,6 +363,8 @@ struct TraderOrder {
     #[serde(default)]
     purpose: String,
     #[serde(default)]
+    exploratory: bool,
+    #[serde(default)]
     #[serde(alias = "research_strategy")]
     strategy: Option<String>,
     #[serde(default)]
@@ -458,6 +460,8 @@ struct TraderPosition {
     strategy_decision: Option<serde_json::Value>,
     #[serde(default)]
     scout_entry: bool,
+    #[serde(default)]
+    exploratory: bool,
     #[serde(default)]
     horizon_take_profit_percent: Option<f64>,
     #[serde(default)]

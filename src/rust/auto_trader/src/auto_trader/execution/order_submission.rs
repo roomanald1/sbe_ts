@@ -73,6 +73,7 @@ async fn submit_and_record_selected_order(
         order_type,
         execution_params,
         timestamp.to_string(),
+        false,
     )
     .await
     {
@@ -203,8 +204,17 @@ async fn submit_and_record_selected_order(
                 Some(effective_stop_loss_percent),
                 Some(effective_take_profit_percent),
             );
-            position_trade_id = settings
-                .strategy_positions
+            if exploratory {
+                if let Some(position) = strategy_positions.get_mut(&signal.symbol)
+                    .and_then(|lots| lots.get_mut(signal.strategy.as_deref().unwrap_or("unattributed")))
+                {
+                    position.exploratory = true;
+                }
+                if let Some(position) = positions.get_mut(&signal.symbol) {
+                    position.exploratory = true;
+                }
+            }
+            position_trade_id = strategy_positions
                 .get(&signal.symbol)
                 .and_then(|lots| lots.get(strategy_key))
                 .and_then(|position| position.trade_id.clone())

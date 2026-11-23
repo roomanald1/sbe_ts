@@ -70,6 +70,7 @@ fn build_order_request(
     params: ExecutionParameters,
     client_order_id: &str,
     now_ms: u64,
+    reduce_only: bool,
 ) -> (&'static str, serde_json::Value) {
     let mut body = serde_json::json!({
         "symbol": symbol,
@@ -78,6 +79,7 @@ fn build_order_request(
         "measure_execution_quality": true,
         "source": "auto",
         "client_order_id": client_order_id,
+        "reduce_only": reduce_only,
     });
     let endpoint = match kind {
         AutoOrderType::Vwap | AutoOrderType::Twap => {
@@ -113,7 +115,11 @@ fn build_order_request(
                 }
                 AutoOrderType::PostOnlyLimit => {
                     body["limit_price"] = serde_json::json!(if side == "buy" { bid } else { ask });
-                    body["expires_at"] = serde_json::json!(now_ms + params.post_only_timeout_minutes * 60_000);
+                    if reduce_only {
+                        body["time_in_force"] = serde_json::json!("gtc");
+                    } else {
+                        body["expires_at"] = serde_json::json!(now_ms + params.post_only_timeout_minutes * 60_000);
+                    }
                 }
                 AutoOrderType::Barrier | AutoOrderType::StopMarket => {
                     body["trigger_price"] = serde_json::json!(if side == "buy" {
@@ -158,6 +164,7 @@ async fn submit_configured_order(
     kind: AutoOrderType,
     params: ExecutionParameters,
     client_order_id: String,
+    reduce_only: bool,
 ) -> Result<serde_json::Value, (StatusCode, String)> {
     let request_prepare_started = Instant::now();
     let now_ms = std::time::SystemTime::now()
@@ -166,6 +173,7 @@ async fn submit_configured_order(
         .as_millis() as u64;
     let (endpoint, body) = build_order_request(
         symbol, side, quantity, bid, ask, kind, params, &client_order_id, now_ms,
+        reduce_only,
     );
     let request_prepare_ms = request_prepare_started.elapsed().as_secs_f64() * 1_000.0;
     let request_started = Instant::now();
@@ -231,7 +239,7 @@ mod order_request_tests {
     }
 
     fn request(kind: AutoOrderType, side: &str) -> (&'static str, serde_json::Value) {
-        build_order_request("BTC-USDT", side, 2.0, 99.0, 101.0, kind, params(), "client-1", 1_000)
+        build_order_request("BTC-USDT", side, 2.0, 99.0, 101.0, kind, params(), "client-1", 1_000, false)
     }
 
     #[test]
@@ -273,7 +281,7 @@ mod order_request_tests {
         configured.post_only_timeout_minutes = 9;
         let (_, body) = build_order_request(
             "BTC-USDT", "buy", 2.0, 99.0, 101.0,
-            AutoOrderType::PostOnlyLimit, configured, "client-2", 1_000,
+            AutoOrderType::PostOnlyLimit, configured, "client-2", 1_000, false,
         );
         assert_eq!(body["expires_at"], 541_000);
     }

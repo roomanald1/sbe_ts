@@ -410,6 +410,7 @@ async fn submit_selected_signal(
             side: side.to_owned(),
             order_type: format!("{order_type:?} · P{profile}"),
             purpose: "signal".into(),
+            exploratory,
             strategy: Some(
                 signal
                     .strategy

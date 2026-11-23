@@ -72,6 +72,7 @@ pub fn benchmark_autotrader_paths(iterations: usize) -> Vec<(String, f64)> {
             parameters,
             "bench-order",
             index as u64,
+            false,
         ));
     }
     results.push((
