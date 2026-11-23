@@ -194,14 +194,22 @@ async fn submit_selected_signal(
         .and_then(|kind| validated_strategy_entry_edge(signal, kind).ok());
     let reducing_rebalance = signal.direction == "bearish"
         && is_portfolio_rebalance_signal(signal, signal.strategy.as_deref().and_then(Strategy::from_name));
-    let (edge_percent, edge_source, fee_bps) =
+    let (edge_percent, edge_source, fee_bps, fee_assumption) =
         if let Some(edge) = strategy_edge {
-            (edge, "measured strategy Scout net edge", 0.0)
+            (edge, "measured strategy Scout net edge", 0.0, "realized net edge already includes fees")
+        } else if exploratory {
+            (
+                effective_take_profit_percent,
+                "strategy take-profit payoff ceiling (not a measured edge)",
+                exploratory_round_trip_fee_bps(configured_maker_fee_rate(), configured_taker_fee_rate()),
+                "exploratory: maker entry; 50% maker profit exit / 50% taker immediate exit",
+            )
         } else {
             (
                 effective_take_profit_percent,
                 "strategy take-profit payoff ceiling (not a measured edge)",
                 2.0 * configured_taker_fee_rate() * 10_000.0,
+                "strict/urgent: taker entry and taker exit",
             )
         };
     let incremental_cost_percent = (spread_bps + 2.0 * assessment.impact_bps + fee_bps) / 100.0;
@@ -214,9 +222,11 @@ async fn submit_selected_signal(
         return Ok(skipped_for_signal(
             signal,
             &format!(
-                "{edge_source} ({edge_percent:.3}%) is below the {:.1}x estimated spread, sweep, and fee cost ({:.3}%)",
+                "{edge_source} ({edge_percent:.3}%) is below the {:.1}x estimated spread, sweep, and fee cost ({:.3}%; fee assumption: {fee_assumption}, maker {:.2} bps, taker {:.2} bps)",
                 execution_cost_cushion,
-                incremental_cost_percent * execution_cost_cushion
+                incremental_cost_percent * execution_cost_cushion,
+                configured_maker_fee_rate() * 10_000.0,
+                configured_taker_fee_rate() * 10_000.0,
             ),
         ));
     }
@@ -535,5 +545,38 @@ fn time_adjusted_edge_cost_cushion(now_seconds: u64, base: f64) -> f64 {
         base.max(2.0)
     } else {
         base
+    }
+}
+
+fn exploratory_round_trip_fee_bps(maker_rate: f64, taker_rate: f64) -> f64 {
+    // The post-only entry is maker. Profit exits are passive/maker and stop-loss
+    // or other immediate exits are taker. Without reliable outcome counts, use
+    // an even exit mix: it accounts for immediate-exit exposure while not
+    // charging every candidate as if both legs were taker.
+    (maker_rate + (maker_rate + taker_rate) / 2.0) * 10_000.0
+}
+
+#[cfg(test)]
+mod selected_signal_order_fee_tests {
+    use super::*;
+
+    #[test]
+    fn exploratory_fee_uses_maker_entry_and_mixed_exit_paths() {
+        assert!((exploratory_round_trip_fee_bps(0.0008, 0.001) - 17.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn immediate_stop_loss_exit_costs_taker_fee() {
+        let maker_entry_and_stop_exit_bps: f64 = (0.0008 + 0.001) * 10_000.0;
+        assert!((maker_entry_and_stop_exit_bps - 18.0).abs() < 1e-9);
+        assert!(maker_entry_and_stop_exit_bps > 2.0 * 0.0008 * 10_000.0);
+    }
+
+    #[test]
+    fn strict_or_urgent_path_keeps_two_taker_fees_and_measured_edge_adds_none() {
+        let strict_taker_fee_bps = 2.0 * configured_taker_fee_rate() * 10_000.0;
+        let measured_edge_fee_bps = 0.0;
+        assert!((strict_taker_fee_bps - 20.0).abs() < 1e-9);
+        assert_eq!(measured_edge_fee_bps, 0.0);
     }
 }

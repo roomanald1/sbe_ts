@@ -304,6 +304,7 @@ mod strategy_cleanup_integration_tests {
             side: "sell".into(),
             order_type: "stop-market".into(),
             purpose: "stop-loss".into(),
+            exploratory: false,
             strategy: Some(strategy.into()),
             decision_id: None,
             quantity: 1.0,

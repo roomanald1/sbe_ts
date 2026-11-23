@@ -80,6 +80,18 @@ const CLOSED_OUTCOMES_COLUMN_WIDTHS: Record<string, number> = {
   'Fees (USD)': 90,
   'Net USD': 88,
 };
+const LIVE_OUTCOMES_COLUMN_WIDTHS: Record<string, number> = {
+  Symbol: 80,
+  'Live gates': 72,
+  'Carry contract': 120,
+  Strategy: 130,
+  Side: 54,
+  'Entry order types': 116,
+  'Open for': 56,
+  Entry: 100,
+  'Net exposure USD': 105,
+  'Manual close': 112,
+};
 const outcomeGridDefaultColDef = {
   sortable: true,
   resizable: true,
@@ -224,10 +236,6 @@ function AutoTraderOutcomesComponent({
                 trailingColumns.set(String(headerName), columnState);
                 return false;
               }
-              const cap =
-                CLOSED_OUTCOMES_COLUMN_WIDTHS[String(headerName ?? '')];
-              if (typeof cap === 'number' && columnState.width > cap)
-                columnState.width = cap;
               return true;
             });
             restoredState.push(
@@ -235,6 +243,19 @@ function AutoTraderOutcomesComponent({
                 .map((header) => trailingColumns.get(header))
                 .filter((columnState) => columnState !== undefined),
             );
+          }
+          const widthCaps = closedOnly
+            ? CLOSED_OUTCOMES_COLUMN_WIDTHS
+            : liveOnly
+              ? LIVE_OUTCOMES_COLUMN_WIDTHS
+              : {};
+          for (const columnState of restoredState) {
+            const headerName = api
+              .getColumn(columnState.colId)
+              ?.getColDef().headerName;
+            const cap = widthCaps[String(headerName ?? '')];
+            if (typeof cap === 'number' && columnState.width > cap)
+              columnState.width = cap;
           }
           api.applyColumnState({ state: restoredState, applyOrder: true });
         }
@@ -245,9 +266,13 @@ function AutoTraderOutcomesComponent({
     api.applyColumnState({
       state: [...columnWidths.current].map(([colId, width]) => {
         const headerName = api.getColumn(colId)?.getColDef().headerName;
-        const cap = closedOnly
-          ? CLOSED_OUTCOMES_COLUMN_WIDTHS[String(headerName ?? '')]
-          : undefined;
+        const cap = (
+          closedOnly
+            ? CLOSED_OUTCOMES_COLUMN_WIDTHS
+            : liveOnly
+              ? LIVE_OUTCOMES_COLUMN_WIDTHS
+              : {}
+        )[String(headerName ?? '')];
         return {
           colId,
           width: typeof cap === 'number' ? Math.min(width, cap) : width,
@@ -349,6 +374,8 @@ function AutoTraderOutcomesComponent({
     () => (closedOnly ? [] : rows.filter((row) => row.status === 'Open')),
     [rows, closedOnly],
   );
+  const liveColumnContext = useRef({ state, rows, now });
+  liveColumnContext.current = { state, rows, now };
   const summary = useMemo(
     () => ({
       wins: closedRows.filter((row) => row.pnl > 0).length,
@@ -388,8 +415,13 @@ function AutoTraderOutcomesComponent({
                   className="auto-trader-carry-settlement"
                   title="At expiry, the spot leg is sold using TWAP over the settlement window and the future is cash-settled."
                 >
-                  {durationLabel(Math.max(0, carry.expiry_ms - now))} ·{' '}
-                  {utcDateLabel(carry.expiry_ms)} · NEXT SETTLEMENT
+                  {durationLabel(
+                    Math.max(
+                      0,
+                      carry.expiry_ms - liveColumnContext.current.now,
+                    ),
+                  )}{' '}
+                  · {utcDateLabel(carry.expiry_ms)} · NEXT SETTLEMENT
                 </div>
               );
             const carryNotional = carry.quantity * carry.spot_entry_price;
@@ -432,7 +464,9 @@ function AutoTraderOutcomesComponent({
             const carryResultLabel =
               net > 0 ? 'Profit' : net < 0 ? 'Loss' : 'Breakeven';
             const carrySignalExit =
-              durationLabel(Math.max(0, carry.expiry_ms - now)) +
+              durationLabel(
+                Math.max(0, carry.expiry_ms - liveColumnContext.current.now),
+              ) +
               ' · ' +
               utcDateLabel(carry.expiry_ms) +
               ' · NEXT SETTLEMENT';
@@ -525,7 +559,7 @@ function AutoTraderOutcomesComponent({
             'risk-adjusted-trend-portfolio',
           ].includes(data.strategy);
           const btcSignal = hasBtcRegimeExit
-            ? state.strategyDiagnostics.find(
+            ? liveColumnContext.current.state.strategyDiagnostics.find(
                 (diagnostic) =>
                   diagnostic.strategy === data.strategy &&
                   typeof diagnostic.btc_sma === 'number',
@@ -533,7 +567,7 @@ function AutoTraderOutcomesComponent({
             : undefined;
           const trendSignal =
             data.strategy === 'risk-adjusted-trend-portfolio'
-              ? state.strategyDiagnostics
+              ? liveColumnContext.current.state.strategyDiagnostics
                   .find((diagnostic) => diagnostic.strategy === data.strategy)
                   ?.symbols.find((item) => item.symbol === data.symbol)
               : undefined;
@@ -638,9 +672,10 @@ function AutoTraderOutcomesComponent({
           const targetPosition = hasTarget
             ? positionForReturn(data.takeProfitPercent!)
             : undefined;
-          const strategyDiagnostic = state.strategyDiagnostics.find(
-            (diagnostic) => diagnostic.strategy === data.strategy,
-          );
+          const strategyDiagnostic =
+            liveColumnContext.current.state.strategyDiagnostics.find(
+              (diagnostic) => diagnostic.strategy === data.strategy,
+            );
           const symbolDiagnostic = strategyDiagnostic?.symbols.find(
             (item) => item.symbol === data.symbol,
           );
@@ -684,7 +719,10 @@ function AutoTraderOutcomesComponent({
             });
           }
           if (data.entryOrderExpiresAt !== undefined) {
-            const remaining = Math.max(0, data.entryOrderExpiresAt - now);
+            const remaining = Math.max(
+              0,
+              data.entryOrderExpiresAt - liveColumnContext.current.now,
+            );
             if (remaining > 0)
               exitFacts.push({
                 label: 'Post-only entry',
@@ -727,13 +765,15 @@ function AutoTraderOutcomesComponent({
               : undefined;
           if (isRiskAdjustedTrend) {
             const nextDailyCheck = Date.UTC(
-              new Date(now).getUTCFullYear(),
-              new Date(now).getUTCMonth(),
-              new Date(now).getUTCDate() + 1,
+              new Date(liveColumnContext.current.now).getUTCFullYear(),
+              new Date(liveColumnContext.current.now).getUTCMonth(),
+              new Date(liveColumnContext.current.now).getUTCDate() + 1,
             );
             exitFacts.push({
               label:
-                durationLabel(Math.max(0, nextDailyCheck - now)) +
+                durationLabel(
+                  Math.max(0, nextDailyCheck - liveColumnContext.current.now),
+                ) +
                 ' · ' +
                 utcDateLabel(nextDailyCheck),
               value: '· NEXT DAILY REBALANCE CHECK',
@@ -766,13 +806,18 @@ function AutoTraderOutcomesComponent({
             });
           } else if (isMonthlyMomentum) {
             const nextMonthlyRebalance = Date.UTC(
-              new Date(now).getUTCFullYear(),
-              new Date(now).getUTCMonth() + 1,
+              new Date(liveColumnContext.current.now).getUTCFullYear(),
+              new Date(liveColumnContext.current.now).getUTCMonth() + 1,
               1,
             );
             exitFacts.push({
               label:
-                durationLabel(Math.max(0, nextMonthlyRebalance - now)) +
+                durationLabel(
+                  Math.max(
+                    0,
+                    nextMonthlyRebalance - liveColumnContext.current.now,
+                  ),
+                ) +
                 ' · ' +
                 utcDateLabel(nextMonthlyRebalance),
               value: '· NEXT MONTHLY REBALANCE',
@@ -839,7 +884,7 @@ function AutoTraderOutcomesComponent({
               const maximumHoldMs = maximumHoldDays * 86_400_000;
               const maximumHoldRemaining = Math.max(
                 0,
-                maximumHoldMs - (now - data.openedAt),
+                maximumHoldMs - (liveColumnContext.current.now - data.openedAt),
               );
               const maximumHoldDate = data.openedAt + maximumHoldMs;
               exitFacts.push({
@@ -860,7 +905,8 @@ function AutoTraderOutcomesComponent({
             if (data.strategy === 'donchian-20-btc200-hold3') {
               const minimumHoldRemaining = Math.max(
                 0,
-                3 * 86_400_000 - (now - data.openedAt),
+                3 * 86_400_000 -
+                  (liveColumnContext.current.now - data.openedAt),
               );
               exitFacts.push({
                 label: '72h minimum hold',
@@ -1106,7 +1152,7 @@ function AutoTraderOutcomesComponent({
         headerName: 'Open for',
         valueGetter: ({ data }) =>
           data?.status === 'Open'
-            ? Math.max(0, now - data.openedAt)
+            ? Math.max(0, liveColumnContext.current.now - data.openedAt)
             : undefined,
         valueFormatter: ({ value }) => durationLabel(value),
         minWidth: 95,
@@ -1126,8 +1172,13 @@ function AutoTraderOutcomesComponent({
           Boolean(event.target.closest('button')),
         cellRenderer: ({ data }: { data?: OutcomeGridRow }) => {
           if (!liveOnly || !data || data.status !== 'Open') return null;
-          const confirming = state.confirmingCloseSymbols.has(data.symbol);
-          const closing = state.closingSymbols.has(data.symbol);
+          const confirming =
+            liveColumnContext.current.state.confirmingCloseSymbols.has(
+              data.symbol,
+            );
+          const closing = liveColumnContext.current.state.closingSymbols.has(
+            data.symbol,
+          );
           if (data.carryDetails) {
             if (closing)
               return (
@@ -1176,7 +1227,7 @@ function AutoTraderOutcomesComponent({
               </button>
             );
           }
-          const firstForSymbol = rows.find(
+          const firstForSymbol = liveColumnContext.current.rows.find(
             (row) => row.status === 'Open' && row.symbol === data.symbol,
           );
           if (firstForSymbol && firstForSymbol.rowId !== data.rowId) {
@@ -1701,16 +1752,7 @@ function AutoTraderOutcomesComponent({
         minWidth: 130,
       },
     ],
-    [
-      now,
-      liveOnly,
-      model,
-      rows,
-      state.confirmingCloseSymbols,
-      state.closingSymbols,
-      state.datedCarryDiagnostics,
-      state.strategyDiagnostics,
-    ],
+    [liveOnly, model],
   );
   const visibleColumns = useMemo(
     () =>
@@ -1732,19 +1774,10 @@ function AutoTraderOutcomesComponent({
               .filter((column) => column.headerName === headerName)
               .map((column) => {
                 const widths: Record<string, number> = {
-                  Symbol: 92,
-                  'Live gates': 84,
-                  'Carry contract': 150,
-                  Strategy: 146,
-                  Side: 112,
-                  'Entry order types': 112,
-                  'Open for': 68,
-                  Entry: 148,
-                  'Net exposure USD': 120,
-                  'Manual close': 96,
+                  ...LIVE_OUTCOMES_COLUMN_WIDTHS,
                 };
                 if (headerName === 'Net vs breakeven')
-                  return { ...column, width: 420, minWidth: 420, flex: 1 };
+                  return { ...column, width: 420, minWidth: 360, flex: 1 };
                 return {
                   ...column,
                   width: widths[headerName] ?? 100,
@@ -1858,9 +1891,11 @@ function AutoTraderOutcomesComponent({
       visibleColumns.map((column, index) =>
         closedOnly
           ? { ...column, flex: 0 }
-          : index === visibleColumns.length - 1
-            ? { ...column, flex: 1, maxWidth: undefined }
-            : column,
+          : liveOnly
+            ? column
+            : index === visibleColumns.length - 1
+              ? { ...column, flex: 1, maxWidth: undefined }
+              : column,
       ),
     [closedOnly, visibleColumns],
   );
