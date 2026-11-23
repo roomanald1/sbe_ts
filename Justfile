@@ -17,7 +17,7 @@ rebuild +services:
     fi
     docker compose "${compose_args[@]}" up -d --no-build --force-recreate --no-deps "${services[@]}"
 
-# Rebuild all 17 Scout worker services.
+# Rebuild all 18 Scout worker services.
 rebuild-scouts:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -45,8 +45,8 @@ rebuild-services:
     ./rebuild-services.sh
 
 # Rebuild only services whose build inputs differ from the last recorded deployment.
-rebuild-changed-services +args:
-    ./rebuild-changed-services.sh {{args}}
+rebuild-changed-services:
+    ./rebuild-changed-services.sh
 
 # Rebuild infrastructure first, then every system service.
 rebuild-all:

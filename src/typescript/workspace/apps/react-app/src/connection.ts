@@ -32,6 +32,7 @@ export type BookFeed = {
 
 export type SignalFeed = BookFeed;
 const REQUEST_BATCH_SIZE = 500;
+const INSIGHTS_TICKER_IDLE_TIMEOUT_MS = 45_000;
 
 const BufferDataEncoder: Encoder<Buffer> = {
   ...BufferEncoder,
@@ -69,6 +70,7 @@ export class Connection {
     | { cancel: () => void; request: (n: number) => void }
     | undefined;
   private insightsRetryTimer: ReturnType<typeof setTimeout> | undefined;
+  private insightsIdleTimer: ReturnType<typeof setTimeout> | undefined;
   private insightsRetryAttempt = 0;
   private readonly bookFeeds = this.createBookManager('book');
   private readonly tradeFeeds = this.createTradeManager();
@@ -294,12 +296,14 @@ export class Connection {
           this.insightsRetryAttempt = 0;
           this.insights_connection_state.next('connected');
           this.insights_error_message.next(undefined);
+          this.resetInsightsIdleTimer(generation);
           sub.request(REQUEST_BATCH_SIZE);
         },
         onNext: (payload) => {
           if (this.cancelled || generation !== this.lifecycleGeneration) return;
           if (Buffer.isBuffer(payload.data)) {
             this.data.next(payload.data);
+            this.resetInsightsIdleTimer(generation);
             this.insightsSubscription?.request(1);
           }
         },
@@ -347,7 +351,23 @@ export class Connection {
     }, delay);
   }
 
+  private resetInsightsIdleTimer(generation: number): void {
+    if (this.insightsIdleTimer !== undefined)
+      clearTimeout(this.insightsIdleTimer);
+    this.insightsIdleTimer = setTimeout(() => {
+      this.insightsIdleTimer = undefined;
+      this.scheduleInsightsReconnect(
+        generation,
+        'Ticker stream idle; reconnecting',
+      );
+    }, INSIGHTS_TICKER_IDLE_TIMEOUT_MS);
+  }
+
   private closeInsightsSocket(): void {
+    if (this.insightsIdleTimer !== undefined) {
+      clearTimeout(this.insightsIdleTimer);
+      this.insightsIdleTimer = undefined;
+    }
     if (this.insightsRetryTimer !== undefined) {
       clearTimeout(this.insightsRetryTimer);
       this.insightsRetryTimer = undefined;

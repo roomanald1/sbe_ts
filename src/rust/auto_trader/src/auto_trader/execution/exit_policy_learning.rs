@@ -73,6 +73,7 @@ fn age_adjusted_take_profit_percent(
                 | Strategy::LiveOrderBook
                 | Strategy::LiveVwapDislocation
                 | Strategy::LiveAbsorptionPressure
+                | Strategy::LiveRangeMeanReversion
         )
     {
         return target_percent;

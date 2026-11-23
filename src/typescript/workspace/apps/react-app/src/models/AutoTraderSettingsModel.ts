@@ -6,6 +6,10 @@ const intradayStrategyLabels: Array<{ strategy: Strategy; label: string }> = [
   { strategy: 'live-order-book', label: 'Live order book' },
   { strategy: 'live-vwap-dislocation', label: 'Live VWAP dislocation' },
   { strategy: 'live-absorption-pressure', label: 'Live absorption pressure' },
+  {
+    strategy: 'live-range-mean-reversion',
+    label: 'Live range mean reversion',
+  },
 ];
 const dailyStrategyLabels: Array<{ strategy: Strategy; label: string }> = [
   { strategy: 'donchian-55-btc200', label: '55-day Donchian breakout' },

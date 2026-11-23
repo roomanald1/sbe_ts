@@ -19,6 +19,8 @@ pub struct StrategyMarketSignal {
     pub stale: bool,
     pub score: f64,
     pub ranging_probability: Option<f64>,
+    #[serde(default)]
+    pub range_location: Option<f64>,
     pub components: SignalComponents,
     #[serde(alias = "research_strategy_candidate")]
     pub strategy_candidate: bool,
@@ -338,6 +340,27 @@ pub fn prepare_live_strategy_signal(
                 .filter(|flow| flow.abs() >= minimum_flow)
                 .map(|flow| -flow);
             configured.components.pressure_without_price_move = pressure.or(flow_fallback);
+        }
+        Strategy::LiveRangeMeanReversion => {
+            let direction = if signal
+                .ranging_probability
+                .is_some_and(|probability| probability.is_finite() && probability >= 0.70)
+            {
+                signal.range_location.and_then(|value| {
+                    if !value.is_finite() {
+                        None
+                    } else if value <= 0.12 {
+                        Some("bullish")
+                    } else if value >= 0.88 {
+                        Some("bearish")
+                    } else {
+                        None
+                    }
+                })
+            } else {
+                None
+            };
+            configured.direction = direction.unwrap_or("ranging").to_owned();
         }
         _ => {
             return Err(format!(

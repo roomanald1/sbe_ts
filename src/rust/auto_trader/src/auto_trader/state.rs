@@ -10,6 +10,7 @@ struct AutoTraderState {
     seen_worker_decision_events: Arc<Mutex<BTreeMap<(String, String, String, String), u64>>>,
     enabled: Arc<AtomicBool>,
     settings: Arc<Mutex<Settings>>,
+    activity_snapshot: Arc<Mutex<Option<axum::body::Bytes>>>,
     settings_persist_notify: Arc<Notify>,
     price_path_last_checkpoint_requested_at: Arc<std::sync::Mutex<Option<Instant>>>,
     state_updates: broadcast::Sender<()>,
@@ -369,6 +370,10 @@ struct TraderOrder {
     strategy: Option<String>,
     #[serde(default)]
     decision_id: Option<String>,
+    #[serde(default)]
+    strength: f64,
+    #[serde(default)]
+    ioc_fallback_for: Option<u64>,
     quantity: f64,
     filled_quantity: f64,
     #[serde(default)]

@@ -153,6 +153,7 @@ pub enum LiveInsightField {
     OrderBook,
     VwapDislocation,
     AbsorptionPressure,
+    RangeLocation,
 }
 impl LiveInsightField {
     fn is_present(self, signal: &Signal) -> bool {
@@ -163,6 +164,7 @@ impl LiveInsightField {
             Self::OrderBook => signal.components.book_imbalance.is_some(),
             Self::VwapDislocation => signal.components.mispricing_vs_vwap_bps.is_some(),
             Self::AbsorptionPressure => signal.components.pressure_without_price_move.is_some(),
+            Self::RangeLocation => signal.range_location.is_some(),
         }
     }
 }
@@ -180,6 +182,8 @@ pub enum Strategy {
     LiveVwapDislocation,
     #[serde(rename = "live-absorption-pressure")]
     LiveAbsorptionPressure,
+    #[serde(rename = "live-range-mean-reversion")]
+    LiveRangeMeanReversion,
     #[default]
     #[serde(rename = "donchian-55-btc200")]
     Donchian55Btc200,
@@ -378,6 +382,20 @@ pub mod strategy_live_absorption_pressure {
     }
     pub mod parameters {
         include!("strategy_live_absorption_pressure/parameters.rs");
+    }
+}
+pub mod strategy_live_range_mean_reversion {
+    pub mod evaluate {
+        include!("strategy_live_range_mean_reversion/evaluate.rs");
+    }
+    pub mod data {
+        include!("strategy_live_range_mean_reversion/data.rs");
+    }
+    pub mod definition {
+        include!("strategy_live_range_mean_reversion/contract.rs");
+    }
+    pub mod parameters {
+        include!("strategy_live_range_mean_reversion/parameters.rs");
     }
 }
 pub mod strategy_donchian_55_btc200 {
@@ -677,6 +695,9 @@ impl Strategy {
             Self::LiveAbsorptionPressure => {
                 strategy_live_absorption_pressure::evaluate::entry_rejection_reason(input)
             }
+            Self::LiveRangeMeanReversion => {
+                strategy_live_range_mean_reversion::evaluate::entry_rejection_reason(input)
+            }
             _ => return strategy_decision_rejection_reason(self, input),
         };
         if reason.is_some() {
@@ -734,12 +755,13 @@ impl Strategy {
     }
 }
 
-static STRATEGY_DEFINITIONS: [&StrategyDefinition; 17] = [
+static STRATEGY_DEFINITIONS: [&StrategyDefinition; 18] = [
     &strategy_live_momentum::definition::DEFINITION,
     &strategy_live_trade_flow::definition::DEFINITION,
     &strategy_live_order_book::definition::DEFINITION,
     &strategy_live_vwap_dislocation::definition::DEFINITION,
     &strategy_live_absorption_pressure::definition::DEFINITION,
+    &strategy_live_range_mean_reversion::definition::DEFINITION,
     &strategy_donchian_55_btc200::definition::DEFINITION,
     &strategy_donchian_20_sma200::definition::DEFINITION,
     &strategy_donchian_20_btc200::definition::DEFINITION,

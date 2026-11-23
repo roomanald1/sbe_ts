@@ -272,6 +272,8 @@ export function strategyProfile(strategy?: string): string {
       'Entry: fresh aligned VWAP-dislocation signal passing configured gates. Exit: protective stop, take-profit, or strategy signal/position-management rules. Data freshness, order type, fees, and slippage affect realized results.',
     'live-absorption-pressure':
       'Entry: fresh aligned absorption/pressure signal passing configured gates. Exit: protective stop, take-profit, or strategy signal/position-management rules. Signal expiry and execution quality can affect entry and exit timing.',
+    'live-range-mean-reversion':
+      'Entry: fade a five-minute range edge when range probability is at least 0.70 and price is within 12% of that edge. Exit: shared protective stop, take-profit, and position-management rules; fees and slippage affect net P&L.',
     'generic-insight-signals':
       'Legacy Insights-driven entry. Exit behavior depends on the stored position policy and available signal state; verify the position row for active stop/target values.',
     'portfolio-hedge':
@@ -302,6 +304,7 @@ export function strategyLabel(strategy?: string): string {
     'live-order-book': 'Live order book',
     'live-vwap-dislocation': 'Live VWAP dislocation',
     'live-absorption-pressure': 'Live absorption',
+    'live-range-mean-reversion': 'Live range mean reversion',
     'generic-insight-signals': 'Unattributed Insights order',
     'portfolio-hedge': 'Portfolio hedge',
   };

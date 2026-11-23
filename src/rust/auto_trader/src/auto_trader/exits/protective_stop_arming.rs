@@ -166,6 +166,8 @@ fn new_protective_stop_order(
         exploratory: false,
         strategy: Some(strategy),
         decision_id,
+        strength: 0.0,
+        ioc_fallback_for: None,
         quantity,
         filled_quantity: 0.0,
         fill_rate: 0.0,

@@ -8,7 +8,7 @@ use futures_util::{Stream, stream};
 use rsocket_rust::prelude::*;
 use rsocket_rust_transport_websocket::WebsocketServerTransport;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Value, value::RawValue};
 use std::pin::Pin;
 use tower::ServiceExt;
 
@@ -33,7 +33,7 @@ struct BrowserRouteRequest {
 #[derive(Debug, Serialize)]
 struct BrowserRouteResponse {
     status: u16,
-    body: Value,
+    body: Box<RawValue>,
 }
 
 struct AutoTraderResponder(
@@ -185,7 +185,7 @@ impl RSocket for AutoTraderResponder {
                     strategy::ScoutCoordinatorRouteResult {
                         request_id: command.request_id,
                         status: result.status,
-                        body: result.body,
+                        body: serde_json::from_str(result.body.get())?,
                     },
                 ))?
             }
@@ -247,7 +247,9 @@ async fn dispatch_route(
     if body.len() > MAX_REQUEST_BODY_BYTES {
         return Ok(BrowserRouteResponse {
             status: StatusCode::PAYLOAD_TOO_LARGE.as_u16(),
-            body: Value::String("AutoTrader request body is too large".into()),
+            body: RawValue::from_string(serde_json::to_string(
+                "AutoTrader request body is too large",
+            )?)?,
         });
     }
     let response = router
@@ -262,8 +264,11 @@ async fn dispatch_route(
         .await?;
     let status = response.status().as_u16();
     let bytes = to_bytes(response.into_body(), MAX_RESPONSE_BODY_BYTES).await?;
-    let body = serde_json::from_slice(&bytes)
-        .unwrap_or_else(|_| Value::String(String::from_utf8_lossy(&bytes).into_owned()));
+    let body = serde_json::from_slice::<Box<RawValue>>(&bytes).unwrap_or_else(|_| {
+        let encoded = serde_json::to_string(&String::from_utf8_lossy(&bytes))
+            .expect("a string can always be serialized as JSON");
+        RawValue::from_string(encoded).expect("serialized JSON strings are valid raw JSON")
+    });
     let elapsed = started_at.elapsed();
     if elapsed >= std::time::Duration::from_millis(250) {
         ::auto_trader::service_log!(
@@ -286,10 +291,10 @@ async fn build_snapshot(router: &Router) -> anyhow::Result<Value> {
     let dated_carry =
         dispatch_route(router, "GET", "/positions/auto-trader/dated-carry", None).await?;
     Ok(serde_json::json!({
-        "status": status.body,
-        "activity": activity.body,
-        "parameters": parameters.body,
-        "dated_carry": dated_carry.body,
+        "status": serde_json::from_str::<Value>(status.body.get())?,
+        "activity": serde_json::from_str::<Value>(activity.body.get())?,
+        "parameters": serde_json::from_str::<Value>(parameters.body.get())?,
+        "dated_carry": serde_json::from_str::<Value>(dated_carry.body.get())?,
         "execution_audit": { "items": [], "nextCursor": null },
     }))
 }
@@ -313,6 +318,7 @@ fn is_allowed_route(method: &Method, path: &str) -> bool {
             )
             | (&Method::GET, "/positions/auto-trader/activity")
             | (&Method::GET, "/internal/monitoring-metrics")
+            | (&Method::GET, "/internal/learning-feedback-queues")
             | (&Method::GET, "/internal/strategy/open-position-counts")
             | (&Method::GET, "/positions/auto-trader/hedge-candidates")
             | (&Method::GET, "/positions/auto-trader/learning-summary")
@@ -359,7 +365,10 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status, 200);
-        assert_eq!(response.body, serde_json::json!({ "enabled": true }));
+        assert_eq!(
+            serde_json::from_str::<Value>(response.body.get()).unwrap(),
+            serde_json::json!({ "enabled": true })
+        );
     }
 
     #[tokio::test]
@@ -375,7 +384,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status, StatusCode::OK.as_u16());
-        assert_eq!(response.body.as_str().unwrap().len(), RESPONSE_BYTES);
+        assert_eq!(response.body.get().len(), RESPONSE_BYTES);
     }
 
     #[tokio::test]
@@ -409,7 +418,10 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(response.status, 200);
-        assert_eq!(response.body, payload);
+        assert_eq!(
+            serde_json::from_str::<Value>(response.body.get()).unwrap(),
+            payload
+        );
     }
 
     #[tokio::test]

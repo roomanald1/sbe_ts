@@ -5,6 +5,7 @@ fn position_exit_audit_payload(
     symbol: &str,
     reason: &str,
     side: &str,
+    order_type: &str,
     response: &serde_json::Value,
     position: &TraderPosition,
     quantity: f64,
@@ -33,7 +34,7 @@ fn position_exit_audit_payload(
         "symbol": symbol,
         "status": exit_fill_status(filled, quantity),
         "reason": reason,
-        "exit_order_type": "Ioc",
+        "exit_order_type": order_type,
         "exit_order_quantity": quantity,
         "exit_filled_quantity": filled,
         "exit_average_price": average_price,
@@ -186,6 +187,8 @@ fn new_position_exit_order(
         ),
         // Link the protective exit to the decision that opened this position.
         decision_id: position.entry_decision_id.clone(),
+        strength: 0.0,
+        ioc_fallback_for: None,
         quantity,
         filled_quantity: 0.0,
         fill_rate: 0.0,
@@ -237,7 +240,7 @@ mod tests {
         };
         let payload = position_exit_audit_payload(
             "decision-1", 2_000, 1_800, "BTC-USDT", "take-profit", "sell",
-            &serde_json::json!({"ok": true}), &position, 2.0, 2.0, Some(110.0),
+            "PostOnlyLimit", &serde_json::json!({"ok": true}), &position, 2.0, 2.0, Some(110.0),
             0.1, 19.7, 200.0, 0.0985, 109.0, 111.0, 2.0, 5.0, 10.0,
             &serde_json::json!({"signal_active": true}),
         );
@@ -248,6 +251,7 @@ mod tests {
         assert_eq!(payload["entry_context"]["duration_ms"], 1_000);
         assert_eq!(payload["price_path"][0]["timestamp"], 1_500);
         assert_eq!(payload["exit_rule_trace"]["reason"], "take-profit");
+        assert_eq!(payload["exit_order_type"], "PostOnlyLimit");
         assert_eq!(payload["exit_decision_context"]["signal_active"], true);
     }
 
@@ -255,7 +259,7 @@ mod tests {
     fn position_exit_audit_handles_zero_quantity_metrics() {
         let payload = position_exit_audit_payload(
             "decision-2", 2, 1, "ETH-USDT", "stop-loss", "buy",
-            &serde_json::Value::Null, &TraderPosition::default(), 0.0, 0.0,
+            "Ioc", &serde_json::Value::Null, &TraderPosition::default(), 0.0, 0.0,
             None, 0.0, 0.0, 0.0, 0.0, 99.0, 101.0, 0.0, 5.0, 10.0,
             &serde_json::Value::Null,
         );

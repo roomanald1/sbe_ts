@@ -2,6 +2,13 @@ async fn apply_protection_order_failure_reasons(
     orders: &mut [TraderOrder],
     fallback_open_symbols: &[String],
 ) {
+    if !orders.iter().any(|order| {
+        order.failure_reason.is_none()
+            && order.purpose.to_lowercase().contains("stop")
+            && order.status == "unfilled"
+    }) {
+        return;
+    }
     let ledger_open_symbols = crate::service_rpc::position_get("/positions?source=auto")
         .await
         .ok()
@@ -34,7 +41,69 @@ async fn apply_protection_order_failure_reasons(
     }
 }
 
-async fn get_activity(State(state): State<AutoTraderState>) -> Json<ActivityResponse> {
+const ACTIVITY_SNAPSHOT_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
+
+fn start_activity_snapshot_worker(state: &AutoTraderState) {
+    let worker_state = state.clone();
+    tokio::spawn(async move {
+        let mut ticker = interval(ACTIVITY_SNAPSHOT_REFRESH_INTERVAL);
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            ticker.tick().await;
+            let started = Instant::now();
+            let activity = match build_activity_response(&worker_state).await {
+                Ok(activity) => activity,
+                Err(error) => {
+                    crate::service_log!(
+                        "WARN",
+                        "AutoTrader background activity snapshot refresh failed: {error}"
+                    );
+                    continue;
+                }
+            };
+            let serialized = match serde_json::to_vec(&activity) {
+                Ok(serialized) => serialized,
+                Err(error) => {
+                    crate::service_log!("ERROR", "AutoTrader activity snapshot serialization failed: {error}");
+                    continue;
+                }
+            };
+            *worker_state.activity_snapshot.lock().await =
+                Some(axum::body::Bytes::from(serialized));
+            let elapsed_ms = started.elapsed().as_secs_f64() * 1_000.0;
+            if elapsed_ms >= 500.0 {
+                crate::service_log!(
+                    "WARN",
+                    "AutoTrader background activity snapshot refresh completed in {:.1} ms",
+                    elapsed_ms,
+                );
+            }
+        }
+    });
+}
+
+async fn get_activity(State(state): State<AutoTraderState>) -> axum::response::Response {
+    let cached = state.activity_snapshot.lock().await.clone();
+    let mut response = match cached {
+        Some(cached) => axum::response::Response::new(axum::body::Body::from(cached)),
+        None => {
+            let mut response = axum::response::Response::new(axum::body::Body::from(
+                "AutoTrader activity snapshot is warming",
+            ));
+            *response.status_mut() = StatusCode::SERVICE_UNAVAILABLE;
+            return response;
+        }
+    };
+    response.headers_mut().insert(
+        axum::http::header::CONTENT_TYPE,
+        axum::http::HeaderValue::from_static("application/json"),
+    );
+    response
+}
+
+async fn build_activity_response(
+    state: &AutoTraderState,
+) -> Result<ActivityResponse, String> {
     let today_start = utc_day_start_ms();
     let ActivityPositionSnapshot {
         mut orders,
@@ -71,12 +140,40 @@ async fn get_activity(State(state): State<AutoTraderState>) -> Json<ActivityResp
             }),
     );
     apply_protection_order_failure_reasons(&mut orders, &open_position_symbols).await;
+    // Read the fill ledger and realized P&L once per background snapshot. The
+    // browser route serves the cached JSON and never opens ledger queries.
+    let ledger_trades = crate::service_rpc::position_get("/positions/trades?source=auto")
+        .await
+        .map_err(|error| format!("fetching Auto position fills: {error}"))?;
+    if !ledger_trades["trades"].is_array() {
+        return Err("Position Manager fills response has no trades array".into());
+    }
+    let ledger_pnl = fetch_ledger_realized_pnl()
+        .await
+        .map_err(|(_, error)| format!("fetching Auto realized P&L: {error}"))?;
+    let realized_by_parent = crate::service_rpc::position_get(
+        "/positions/realized-pnl?source=auto&since_ms=0",
+    )
+    .await
+    .ok()
+    .and_then(|value| {
+        serde_json::from_value::<BTreeMap<String, f64>>(
+            value["realized_pnl_all_time_by_parent_order"].clone(),
+        )
+        .ok()
+    });
     let (mut realized_pnl, mut realized_pnl_by_quote, mut pnl_breakdown) =
-        await_activity_realized_pnl(&mut orders).await;
+        activity_realized_pnl(&mut orders, Some(&ledger_pnl));
     // Closed-position ledger rows are supplied by the backend activity contract
     // so the client does not have to infer strategy ownership from fill history.
-    let closed_ledger_rows =
-        fetch_closed_ledger_rows(&orders, &strategy_positions, &carry_positions).await;
+    let realized_by_parent = realized_by_parent.as_ref();
+    let closed_ledger_rows = build_closed_ledger_rows(
+        &orders,
+        &strategy_positions,
+        &carry_positions,
+        &ledger_trades,
+        realized_by_parent,
+    );
     for position in carry_positions.iter().filter(|position| {
         position.status.starts_with("closed")
             && position.closed_at_ms.is_some_and(|closed_at| closed_at >= today_start)
@@ -157,7 +254,7 @@ async fn get_activity(State(state): State<AutoTraderState>) -> Json<ActivityResp
     let (unrealized_pnl, unrealized_pnl_by_quote) = unrealized_pnl
         .map(|(total, by_quote)| (Some(total), Some(by_quote)))
         .unwrap_or((None, None));
-    Json(ActivityResponse {
+    Ok(ActivityResponse {
         orders,
         open_position_symbols,
         open_positions: auto_positions

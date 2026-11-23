@@ -211,6 +211,8 @@ fn new_portfolio_hedge_order(
         exploratory: false,
         strategy: Some("portfolio-hedge".into()),
         decision_id: None,
+        strength: 0.0,
+        ioc_fallback_for: None,
         quantity,
         filled_quantity: 0.0,
         fill_rate: 0.0,

@@ -355,47 +355,14 @@ pub async fn request_scout_worker_route(
     learning_rsocket_url: &str,
     request: &ScoutCoordinatorRouteCommand,
 ) -> anyhow::Result<ScoutCoordinatorRouteResult> {
-    validate_learning_rsocket_url(learning_rsocket_url)?;
-    let response = pooled_request(
+    request_scout_service_route_with_timeouts(
         learning_rsocket_url,
-        Payload::builder()
-            .set_data(serde_json::to_vec(&ScoutCoordinatorRequest::WorkerRoute(
-                request.clone(),
-            ))?)
-            .build(),
+        request,
+        std::time::Duration::from_secs(2),
+        std::time::Duration::from_secs(2),
     )
     .await
-    .context("Learning Scout worker route request failed")?;
-    match serde_json::from_slice::<ScoutCoordinatorResponse>(
-        response
-            .data()
-            .context("Learning coordinator response had no data")?,
-    )
-    .context("Learning coordinator response was not a valid result")?
-    {
-        ScoutCoordinatorResponse::WorkerRoute(response) => Ok(response),
-        ScoutCoordinatorResponse::CandidateBatch(_) => {
-            bail!("Learning returned the wrong Scout operation response")
-        }
-        ScoutCoordinatorResponse::StrategyReplay(_) => {
-            bail!("Learning returned the wrong Scout operation response")
-        }
-        ScoutCoordinatorResponse::Feedback(_) => {
-            bail!("Learning returned the wrong Scout operation response")
-        }
-        ScoutCoordinatorResponse::ProfileSnapshot(_) => {
-            bail!("Learning returned the wrong Scout operation response")
-        }
-        ScoutCoordinatorResponse::LearningRoute(_) => {
-            bail!("Learning returned the wrong Scout operation response")
-        }
-        ScoutCoordinatorResponse::AssignmentAcknowledged { .. } => {
-            bail!("Learning returned the wrong Scout operation response")
-        }
-        ScoutCoordinatorResponse::ReplayAcknowledged { .. } => {
-            bail!("Learning returned the wrong Scout operation response")
-        }
-    }
+    .context("Learning Scout worker route request failed")
 }
 
 /// Calls Learning-owned application APIs through its RSocket listener. The

@@ -245,6 +245,7 @@ where
                 Strategy::LiveOrderBook,
                 Strategy::LiveVwapDislocation,
                 Strategy::LiveAbsorptionPressure,
+                Strategy::LiveRangeMeanReversion,
             ]);
         } else {
             strategies.push(serde_json::from_value(value).map_err(D::Error::custom)?);
@@ -449,6 +450,7 @@ mod strategy_settings_migration_tests {
                 Strategy::LiveOrderBook,
                 Strategy::LiveVwapDislocation,
                 Strategy::LiveAbsorptionPressure,
+                Strategy::LiveRangeMeanReversion,
             ]
         );
     }

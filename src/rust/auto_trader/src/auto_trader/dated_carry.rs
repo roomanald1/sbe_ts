@@ -111,8 +111,12 @@ fn dated_carry_legacy_path(settings_path: &PathBuf) -> PathBuf {
     settings_path.with_extension("dated_carry.json")
 }
 
-fn save_dated_carry(path: &PathBuf, book: &DatedCarryBook) -> Result<(), String> {
-    persist_dated_carry_book(path, book)
+async fn save_dated_carry(path: &PathBuf, book: &DatedCarryBook) -> Result<(), String> {
+    let path = path.clone();
+    let book = book.clone();
+    tokio::task::spawn_blocking(move || persist_dated_carry_book(&path, &book))
+        .await
+        .map_err(|error| error.to_string())?
 }
 
 async fn sync_dated_carry_ledger(book: &DatedCarryBook) -> Result<(), String> {
@@ -153,10 +157,11 @@ async fn update_dated_carry(
     let _work = state.dated_carry_work_lock.lock().await;
     let mut book = state.dated_carry.lock().await;
     book.max_spot_notional_usdt = update.max_spot_notional_usdt;
-    save_dated_carry(&state.dated_carry_path, &book)
-        .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error))?;
     let mut response = book.clone();
     drop(book);
+    save_dated_carry(&state.dated_carry_path, &response)
+        .await
+        .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error))?;
     let settings = state.settings.lock().await;
     response.enabled = state.enabled.load(Ordering::Relaxed) && settings.strategies.contains(&Strategy::DatedCarry);
     Ok(Json(response))
@@ -205,14 +210,15 @@ async fn close_dated_carry(
         "net_pnl_usdt": net,
         "reason": "manual_close",
     });
-    save_dated_carry(&state.dated_carry_path, &book)
-        .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error))?;
-    sync_dated_carry_ledger(&book).await
-        .map_err(|error| (StatusCode::SERVICE_UNAVAILABLE, error))?;
-    let response = book.clone();
+    let updated_book = book.clone();
     drop(book);
+    save_dated_carry(&state.dated_carry_path, &updated_book)
+        .await
+        .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error))?;
+    sync_dated_carry_ledger(&updated_book).await
+        .map_err(|error| (StatusCode::SERVICE_UNAVAILABLE, error))?;
     queue_auto_trader_audit(&state, audit);
-    Ok(Json(response))
+    Ok(Json(updated_book))
 }
 
 #[derive(Deserialize)]
@@ -439,13 +445,17 @@ async fn receive_dated_carry_signal(
         }
     }
     if changed {
-        save_dated_carry(&state.dated_carry_path, &book)
+        let updated_book = book.clone();
+        drop(book);
+        save_dated_carry(&state.dated_carry_path, &updated_book)
+            .await
             .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error))?;
-        sync_dated_carry_ledger(&book)
+        sync_dated_carry_ledger(&updated_book)
             .await
             .map_err(|error| (StatusCode::SERVICE_UNAVAILABLE, error))?;
+    } else {
+        drop(book);
     }
-    drop(book);
     if let Some(payload) = audit_payload {
         queue_auto_trader_audit(&state, payload);
     }

@@ -10,14 +10,43 @@ fn outcome_decay_weight(observed_at_ms: u64, now_ms: u64) -> f64 {
 }
 
 /// Compact Scout evidence for workers that need to schedule additional
-/// observations. Keys match the symbol/strategy aggregate used by AutoTrader.
+/// observations. Keys include symbol/strategy aggregates and exact profiles.
 pub(crate) fn walk_forward_priority_snapshot(
     state: &LearningState,
     now_ms: u64,
 ) -> BTreeMap<String, serde_json::Value> {
+    const DEFAULT_MAX_EVIDENCE_AGE_MS: u64 = 24 * 60 * 60 * 1_000;
     let mut cohorts = BTreeMap::<String, BTreeMap<u64, f64>>::new();
     let mut counts = BTreeMap::<String, usize>::new();
+    let mut last_samples = BTreeMap::<String, u64>::new();
+    let mut max_age_ms_by_cohort = BTreeMap::<String, u64>::new();
     let mut seen = BTreeSet::<String>::new();
+    let profile_max_age_ms = |profile: &StrategyProfile| {
+        profile
+            .parameters
+            .get("scout_maximum_evidence_age_seconds")
+            .copied()
+            .filter(|seconds| seconds.is_finite() && *seconds > 0.0)
+            .map(|seconds| (seconds.min(u64::MAX as f64 / 1_000.0) as u64) * 1_000)
+            .unwrap_or(DEFAULT_MAX_EVIDENCE_AGE_MS)
+    };
+    // Seed active profiles even when no Scout outcome has ever been recorded.
+    // Otherwise an empty cohort is indistinguishable from a cohort that does
+    // not need coverage, and downstream workers cannot prioritize it.
+    for profile in state.active_profiles.values() {
+        if !walk_forward_identity_allowed(&profile.symbol, &profile.strategy) {
+            continue;
+        }
+        let cohort = format!("{}|{}", profile.symbol, profile.strategy);
+        cohorts.entry(cohort.clone()).or_default();
+        max_age_ms_by_cohort.insert(cohort, profile_max_age_ms(profile));
+        let exact_profile = format!(
+            "{}|{}|profile:{}",
+            profile.symbol, profile.strategy, profile.profile_id
+        );
+        cohorts.entry(exact_profile.clone()).or_default();
+        max_age_ms_by_cohort.insert(exact_profile, profile_max_age_ms(profile));
+    }
     for variant in state.variants.values() {
         let symbol = &variant.profile.symbol;
         let strategy_name = &variant.profile.strategy;
@@ -25,6 +54,16 @@ pub(crate) fn walk_forward_priority_snapshot(
             continue;
         }
         let cohort = format!("{symbol}|{strategy_name}");
+        let exact_profile = format!(
+            "{symbol}|{strategy_name}|profile:{}",
+            variant.profile.profile_id
+        );
+        let max_age_ms = profile_max_age_ms(&variant.profile);
+        max_age_ms_by_cohort
+            .entry(cohort.clone())
+            .or_insert(max_age_ms);
+        max_age_ms_by_cohort.insert(exact_profile.clone(), max_age_ms);
+        cohorts.entry(exact_profile.clone()).or_default();
         for outcome in &variant.outcomes {
             if outcome.source != LearningOutcomeSource::Scout
                 || !outcome.net_return_percent.is_finite()
@@ -32,18 +71,24 @@ pub(crate) fn walk_forward_priority_snapshot(
             {
                 continue;
             }
-            if let Some(group) = outcome.evidence_group_id.as_deref()
-                && !seen.insert(format!("{cohort}|{group}"))
-            {
-                continue;
-            }
             let day = outcome.observed_at_ms / 86_400_000;
-            *counts.entry(cohort.clone()).or_default() += 1;
-            *cohorts
-                .entry(cohort.clone())
-                .or_default()
-                .entry(day)
-                .or_default() += outcome_decay_weight(outcome.observed_at_ms, now_ms);
+            for key in [&cohort, &exact_profile] {
+                if let Some(group) = outcome.evidence_group_id.as_deref()
+                    && !seen.insert(format!("{key}|{group}"))
+                {
+                    continue;
+                }
+                *counts.entry(key.clone()).or_default() += 1;
+                last_samples
+                    .entry(key.clone())
+                    .and_modify(|latest| *latest = (*latest).max(outcome.observed_at_ms))
+                    .or_insert(outcome.observed_at_ms);
+                *cohorts
+                    .entry(key.clone())
+                    .or_default()
+                    .entry(day)
+                    .or_default() += outcome_decay_weight(outcome.observed_at_ms, now_ms);
+            }
         }
     }
     cohorts
@@ -57,11 +102,26 @@ pub(crate) fn walk_forward_priority_snapshot(
             } else {
                 0.0
             };
+            let last_sample_timestamp_ms = last_samples.get(&key).copied().unwrap_or_default();
+            let freshness_status = if sample_count == 0 {
+                "missing"
+            } else if now_ms.saturating_sub(last_sample_timestamp_ms)
+                > max_age_ms_by_cohort
+                    .get(&key)
+                    .copied()
+                    .unwrap_or(DEFAULT_MAX_EVIDENCE_AGE_MS)
+            {
+                "stale"
+            } else {
+                "fresh"
+            };
             (
                 key,
                 serde_json::json!({
                     "sampleCount": sample_count,
                     "effectiveSampleSize": effective_sample_size,
+                    "lastSampleTimestampMs": last_sample_timestamp_ms,
+                    "freshnessStatus": freshness_status,
                 }),
             )
         })
@@ -685,7 +745,7 @@ pub(super) fn rebuild_trade_profile_metrics(state: &mut LearningState, now: u64)
 pub(super) fn scout_parameter_variant_snapshots(
     state: &LearningState,
 ) -> Vec<strategy::ScoutParameterVariant> {
-    type CandidateKey = (String, String, String, String);
+    type CandidateKey = (String, String, String, String, Option<String>, String);
     let mut outcomes = BTreeMap::<CandidateKey, BTreeMap<String, Vec<f64>>>::new();
     let mut baseline_directions = BTreeMap::<CandidateKey, [usize; 4]>::new();
     let mut baseline_deltas = BTreeMap::<CandidateKey, (f64, usize)>::new();
@@ -707,6 +767,20 @@ pub(super) fn scout_parameter_variant_snapshots(
                 variant.profile.strategy.clone(),
                 parameter.clone(),
                 format!("{value:.8}"),
+                outcome
+                    .market_regime
+                    .as_deref()
+                    .filter(|regime| matches!(*regime, "range" | "trend" | "volatile" | "mixed"))
+                    .map(str::to_owned),
+                if outcome.baseline_parameters.is_empty() {
+                    String::new()
+                } else {
+                    strategy::profile_id(
+                        &variant.profile.symbol,
+                        &variant.profile.strategy,
+                        &outcome.baseline_parameters,
+                    )
+                },
             );
             outcomes
                 .entry(key.clone())
@@ -750,7 +824,8 @@ pub(super) fn scout_parameter_variant_snapshots(
 
     let mut snapshots = Vec::new();
     for (key, grouped_observations) in outcomes {
-        let (symbol, strategy, parameter, value_string) = key.clone();
+        let (symbol, strategy, parameter, value_string, market_regime, baseline_profile_id) =
+            key.clone();
         let Ok(candidate_value) = value_string.parse::<f64>() else {
             continue;
         };
@@ -793,6 +868,8 @@ pub(super) fn scout_parameter_variant_snapshots(
         snapshots.push(strategy::ScoutParameterVariant {
             symbol,
             strategy,
+            market_regime,
+            baseline_profile_id,
             parameter,
             candidate_value,
             sample_count,

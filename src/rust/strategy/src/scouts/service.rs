@@ -702,6 +702,26 @@ fn ranked_parameter_variants(
     specs: &[ParameterSpec],
     day: u64,
 ) -> Vec<ParameterVariant> {
+    ranked_parameter_variants_for_case(
+        snapshot,
+        profile_symbol,
+        strategy,
+        parameters,
+        specs,
+        day,
+        None,
+    )
+}
+
+fn ranked_parameter_variants_for_case(
+    snapshot: &serde_json::Value,
+    profile_symbol: &str,
+    strategy: &str,
+    parameters: &BTreeMap<String, f64>,
+    specs: &[ParameterSpec],
+    day: u64,
+    market_regime: Option<&str>,
+) -> Vec<ParameterVariant> {
     let baseline_losses_are_obvious =
         baseline_losses_are_obvious(snapshot, profile_symbol, strategy, parameters);
     let candidates = single_parameter_variants(parameters, specs, day)
@@ -716,6 +736,7 @@ fn ranked_parameter_variants(
             })
         })
         .collect::<Vec<_>>();
+    let baseline_profile_id = strategies::profile_id(profile_symbol, strategy, parameters);
     let mut known = Vec::<(f64, ParameterVariant)>::new();
     let mut unexplored = Vec::<ParameterVariant>::new();
     for candidate in candidates {
@@ -736,6 +757,12 @@ fn ranked_parameter_variants(
                         == Some(candidate.key.as_str())
                     && variant.get("candidate_value").and_then(serde_json::Value::as_f64)
                         .is_some_and(|value| (value - candidate.value).abs() <= 1e-8)
+                    && market_regime.is_none_or(|regime| {
+                        variant.get("market_regime").and_then(serde_json::Value::as_str)
+                            == Some(regime)
+                            && variant.get("baseline_profile_id").and_then(serde_json::Value::as_str)
+                                == Some(baseline_profile_id.as_str())
+                    })
             });
         match evidence {
             Some(variant)
@@ -851,6 +878,139 @@ fn ranked_parameter_variants(
         }
     }
     selected
+}
+
+fn live_scout_evidence_regime(signal: &serde_json::Value) -> Option<&'static str> {
+    let canonical = |value: Option<&str>| match value {
+        Some("range") => Some("range"),
+        Some("trend") => Some("trend"),
+        Some("volatile") => Some("volatile"),
+        Some("mixed") => Some("mixed"),
+        _ => None,
+    };
+    canonical(signal.get("market_regime").and_then(serde_json::Value::as_str))
+        .or_else(|| {
+            canonical(
+                signal
+                    .get("market_state")
+                    .and_then(|state| state.get("evidenceRegime"))
+                    .and_then(serde_json::Value::as_str),
+            )
+        })
+        .or_else(|| {
+            let structure = signal
+                .get("market_state")
+                .and_then(|state| state.get("structure"))
+                .and_then(serde_json::Value::as_str);
+            match structure {
+                Some("range") => Some("range"),
+                Some("trend_up" | "trend_down") => Some("trend"),
+                Some("mixed") => Some("mixed"),
+                _ => None,
+            }
+        })
+}
+
+fn live_scout_market_state_key(signal: &serde_json::Value) -> String {
+    if let Some(profile_key) = signal
+        .get("market_state")
+        .and_then(|state| state.get("profileKey"))
+        .and_then(serde_json::Value::as_str)
+        .filter(|key| strategies::LiveMarketStateClassification::key_is_supported(key))
+    {
+        return profile_key.to_owned();
+    }
+    live_scout_evidence_regime(signal)
+        .map_or_else(|| "unknown".to_owned(), |regime| format!("legacy:{regime}"))
+}
+
+fn attach_live_scout_market_regime(signal: &mut serde_json::Value) {
+    if live_scout_evidence_regime(signal).is_some() {
+        if signal
+            .get("market_regime")
+            .and_then(serde_json::Value::as_str)
+            .is_none()
+        {
+            if let Some(regime) = signal
+                .get("market_state")
+                .and_then(|state| state.get("evidenceRegime"))
+                .and_then(serde_json::Value::as_str)
+                .and_then(|regime| match regime {
+                    "range" => Some("range"),
+                    "trend" => Some("trend"),
+                    "volatile" => Some("volatile"),
+                    "mixed" => Some("mixed"),
+                    _ => None,
+                })
+            {
+                signal["market_regime"] = serde_json::json!(regime);
+            }
+        }
+    }
+}
+
+fn live_scout_learning_context(
+    strategy: &str,
+    symbol: &str,
+    direction: &str,
+    market_state_key: &str,
+    profile_id: &str,
+    stage: &str,
+) -> String {
+    format!(
+        "scout:live:{strategy}:{symbol}:{direction}:{market_state_key}:profile:{profile_id}:{stage}"
+    )
+}
+
+fn live_scout_case_cooldown_ms(
+    snapshot: &serde_json::Value,
+    symbol: &str,
+    strategy: &str,
+    parameters: &BTreeMap<String, f64>,
+    market_regime: Option<&str>,
+    now_ms: u64,
+) -> u64 {
+    const UNDER_COVERED_COOLDOWN_MS: u64 = 5 * 60 * 1_000;
+    const COVERED_COOLDOWN_MS: u64 = 60 * 60 * 1_000;
+    let profile_id = strategies::profile_id(symbol, strategy, parameters);
+    let evidence_key = market_regime.map_or_else(
+        || profile_id.clone(),
+        |regime| format!("{profile_id}|regime:{regime}"),
+    );
+    let Some(evidence) = snapshot
+        .get("walk_forward_evidence")
+        .and_then(|values| values.get(&evidence_key))
+    else {
+        return UNDER_COVERED_COOLDOWN_MS;
+    };
+    let minimum_samples = parameters
+        .get(strategies::StrategyParameterKey::ScoutMinimumWalkForwardSamples.as_str())
+        .copied()
+        .filter(|value| value.is_finite() && *value >= 1.0)
+        .map(|value| value.round() as usize)
+        .unwrap_or(10);
+    let maximum_age_ms = parameters
+        .get(strategies::StrategyParameterKey::ScoutMaximumEvidenceAgeSeconds.as_str())
+        .copied()
+        .filter(|value| value.is_finite() && *value > 0.0)
+        .map(|value| (value as u64).saturating_mul(1_000))
+        .unwrap_or(24 * 60 * 60 * 1_000);
+    let samples = evidence
+        .get("sampleCount")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or_default() as usize;
+    let last_sample = evidence
+        .get("lastSampleTimestampMs")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or_default();
+    if samples < minimum_samples
+        || last_sample == 0
+        || now_ms.saturating_sub(last_sample) > maximum_age_ms
+    {
+        UNDER_COVERED_COOLDOWN_MS
+    } else {
+        COVERED_COOLDOWN_MS
+    }
 }
 
 fn daily_parameter_batch_key(signal: &serde_json::Value) -> String {
@@ -1222,10 +1382,11 @@ struct LiveScoutProbeBatch {
 
 fn live_profile_arm_key(profile: &LiveScoutProfile) -> String {
     format!(
-        "{}|{}|{}",
+        "{}|{}|{}|regime:{}",
         profile.strategy,
         profile.symbol,
-        serde_json::to_string(&profile.parameters).unwrap_or_default()
+        serde_json::to_string(&profile.parameters).unwrap_or_default(),
+        profile.market_regime.as_deref().unwrap_or("unknown")
     )
 }
 
@@ -1741,7 +1902,7 @@ async fn receive_live_scout_inputs(
         return Ok(StatusCode::NO_CONTENT);
     }
     let now_ms = scout_now_ms();
-    let signals = request.signals.into_iter().filter(|signal| {
+    let mut signals = request.signals.into_iter().filter(|signal| {
         signal.get("symbol").and_then(serde_json::Value::as_str)
             .is_some_and(is_liquid_scout_symbol)
     }).filter(|signal| {
@@ -1754,6 +1915,9 @@ async fn receive_live_scout_inputs(
             && price.is_some_and(|price| price.is_finite() && price > 0.0)
     }).collect::<Vec<_>>();
     if signals.is_empty() { return Ok(StatusCode::NO_CONTENT); }
+    for signal in &mut signals {
+        attach_live_scout_market_regime(signal);
+    }
     let symbols = signals.iter()
         .filter_map(|signal| signal.get("symbol").and_then(serde_json::Value::as_str).map(str::to_owned))
         .collect::<BTreeSet<_>>();
@@ -1798,23 +1962,40 @@ async fn receive_live_scout_inputs(
         if !symbols.contains(symbol) || !configuration.strategies.iter().any(|selected| selected == strategy) { continue; }
         let parameters = profile.get("parameters").cloned()
             .and_then(|value| serde_json::from_value::<BTreeMap<String, f64>>(value).ok()).unwrap_or_default();
-        profiles.push(LiveScoutProfile { symbol: symbol.to_owned(), strategy: strategy.to_owned(), parameters });
+        profiles.push(LiveScoutProfile {
+            symbol: symbol.to_owned(),
+            strategy: strategy.to_owned(),
+            parameters,
+            market_regime: None,
+        });
     }
     if profiles.is_empty() { return Ok(StatusCode::NO_CONTENT); }
     let day = now_ms / 86_400_000;
     let mut expanded_profiles = Vec::new();
     let mut arm_metadata = BTreeMap::<String, (LiveScoutProfile, Option<ParameterVariant>)>::new();
     let mut selected_variants_by_profile = BTreeMap::<String, Vec<ParameterVariant>>::new();
-    for baseline in profiles {
+    for mut baseline in profiles {
+        baseline.market_regime = signals
+            .iter()
+            .filter(|signal| signal["symbol"].as_str() == Some(baseline.symbol.as_str()))
+            .max_by_key(|signal| {
+                signal["book_updated_at_ms"]
+                    .as_u64()
+                    .or_else(|| signal["timestamp"].as_u64())
+                    .unwrap_or_default()
+            })
+            .and_then(live_scout_evidence_regime)
+            .map(str::to_owned);
         let Some(strategy_kind) = strategies::Strategy::from_name(&baseline.strategy) else { continue; };
         let specs = strategies::scout_parameter_specs(strategy_kind);
-        let variants = ranked_parameter_variants(
+        let variants = ranked_parameter_variants_for_case(
             &snapshot,
             &baseline.symbol,
             &baseline.strategy,
             &baseline.parameters,
             &specs,
             day,
+            baseline.market_regime.as_deref(),
         );
         let baseline_key = live_profile_arm_key(&baseline);
         selected_variants_by_profile.insert(baseline_key.clone(), variants.clone());
@@ -1848,6 +2029,7 @@ async fn receive_live_scout_inputs(
                 strategy: strategy.to_owned(),
                 symbol: symbol.to_owned(),
                 parameters,
+                market_regime: signal.get("market_regime").and_then(serde_json::Value::as_str).map(str::to_owned),
             });
             arm_metadata
                 .get(&arm_key)
@@ -1890,26 +2072,30 @@ async fn receive_live_scout_inputs(
             symbol: symbol.clone(),
             strategy: strategy.clone(),
             parameters: parameters.clone(),
+            market_regime: signal.get("market_regime").and_then(serde_json::Value::as_str).map(str::to_owned),
         });
         let Some((baseline, variant)) = arm_metadata.get(&arm_key).cloned() else { continue; };
         let signal_timestamp_ms = signal.get("book_updated_at_ms").and_then(serde_json::Value::as_u64)
             .or_else(|| signal.get("timestamp").and_then(serde_json::Value::as_u64))
             .unwrap_or(now_ms);
+        let market_state_key = live_scout_market_state_key(&signal);
         let batch_key = format!(
-            "{}|{}|{}|{}|{}",
+            "{}|{}|{}|{}|{}|{}",
             strategy,
             symbol,
             direction,
+            market_state_key,
             signal_timestamp_ms,
             serde_json::to_string(&baseline.parameters).unwrap_or_default()
         );
-        if variant.is_none() && ranked_parameter_variants(
+        if variant.is_none() && ranked_parameter_variants_for_case(
             &snapshot,
             &baseline.symbol,
             &baseline.strategy,
             &baseline.parameters,
             &strategies::scout_parameter_specs(strategies::Strategy::from_name(&baseline.strategy).unwrap()),
             day,
+            baseline.market_regime.as_deref(),
         ).is_empty() {
             unpaired.push((signal, baseline));
             continue;
@@ -1938,7 +2124,16 @@ async fn receive_live_scout_inputs(
     });
     let mut selected_live_profiles = BTreeMap::<String, usize>::new();
     for (batch_key, mut batch) in ordered_batches {
-        let symbol_direction_key = format!("{}|{}|{}", batch.strategy, batch.symbol, batch.direction);
+        let market_state_key = batch
+            .baseline_signal
+            .as_ref()
+            .or_else(|| batch.variants.values().next().map(|(signal, _)| signal))
+            .map(live_scout_market_state_key)
+            .unwrap_or_else(|| "unknown".to_owned());
+        let symbol_direction_key = format!(
+            "{}|{}|{}|{}",
+            batch.strategy, batch.symbol, batch.direction, market_state_key
+        );
         let selected_count = selected_live_profiles.entry(symbol_direction_key).or_default();
         if *selected_count >= MAX_LIVE_PROFILES_PER_SYMBOL_DIRECTION {
             continue;
@@ -1950,10 +2145,15 @@ async fn receive_live_scout_inputs(
             .unwrap_or_default();
         if selected_variants.is_empty() {
             if let Some(baseline_signal) = batch.baseline_signal.take() {
+                let market_regime = baseline_signal
+                    .get("market_regime")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned);
                 unpaired.push((baseline_signal, LiveScoutProfile {
                     symbol: batch.symbol,
                     strategy: batch.strategy,
                     parameters: batch.baseline_parameters,
+                    market_regime,
                 }));
             }
             continue;
@@ -1961,6 +2161,41 @@ async fn receive_live_scout_inputs(
         let Some(mut baseline_signal) = batch.baseline_signal.take()
             .or_else(|| batch.variants.values().next().map(|(signal, _)| signal.clone()))
         else { continue; };
+        let market_state_key = live_scout_market_state_key(&baseline_signal);
+        let baseline_profile_id = strategies::profile_id(
+            &batch.symbol,
+            &batch.strategy,
+            &batch.baseline_parameters,
+        );
+        let market_regime = live_scout_evidence_regime(&baseline_signal);
+        let sample_cooldown_ms = live_scout_case_cooldown_ms(
+            &snapshot,
+            &batch.symbol,
+            &batch.strategy,
+            &batch.baseline_parameters,
+            market_regime,
+            now_ms,
+        );
+        let learning_context = live_scout_learning_context(
+            &batch.strategy,
+            &batch.symbol,
+            &batch.direction,
+            &market_state_key,
+            &baseline_profile_id,
+            "scenario",
+        );
+        let trade_learning_context = live_scout_learning_context(
+            &batch.strategy,
+            &batch.symbol,
+            &batch.direction,
+            &market_state_key,
+            &baseline_profile_id,
+            "trade",
+        );
+        let cooldown_key = format!(
+            "live-parameter|{}|{}|{}|{}|{}",
+            batch.strategy, batch.symbol, batch.direction, market_state_key, baseline_profile_id
+        );
         let baseline_eligible = live_strategy_enters(
             &batch.strategy,
             baseline_signal.clone(),
@@ -1999,8 +2234,6 @@ async fn receive_live_scout_inputs(
             format!("scout-pair:{}", probe_id(&format!("{batch_id}|{}|{:.8}", variant.key, variant.value)))
         }).collect::<Vec<_>>();
         let sample_group_id = format!("live-parameter-batch:{batch_id}");
-        let cooldown_key = format!("live-parameter|{}|{}|{}", batch.strategy, batch.symbol, batch.direction);
-        let learning_context = format!("scout:live:{}:{}:{}:scenario", batch.strategy, batch.symbol, batch.direction);
         let base_stop = batch.baseline_parameters.get("stop_loss_percent").copied().unwrap_or(configuration.stop_loss_percent);
         let base_target = batch.baseline_parameters.get("take_profit_percent").copied().unwrap_or(configuration.take_profit_percent);
         let maximum_scout_duration_ms = service
@@ -2034,7 +2267,7 @@ async fn receive_live_scout_inputs(
             .get("best_ask")
             .cloned()
             .unwrap_or(serde_json::Value::Null);
-        baseline_signal["scout_learning_context"] = serde_json::json!(format!("scout:live:{}:{}:{}:trade", batch.strategy, batch.symbol, batch.direction));
+        baseline_signal["scout_learning_context"] = serde_json::json!(trade_learning_context);
         baseline_signal["scout_sample_group_id"] = serde_json::json!(sample_group_id);
         baseline_signal["scout_maximum_duration_ms"] = serde_json::json!(maximum_scout_duration_ms);
         baseline_signal["scout_cooldown_key"] = serde_json::json!(cooldown_key);
@@ -2098,7 +2331,7 @@ async fn receive_live_scout_inputs(
                 .get("best_ask")
                 .cloned()
                 .unwrap_or(serde_json::Value::Null);
-            variant_signal["scout_learning_context"] = serde_json::json!(format!("scout:live:{}:{}:{}:trade", batch.strategy, batch.symbol, batch.direction));
+            variant_signal["scout_learning_context"] = serde_json::json!(trade_learning_context);
             variant_signal["scout_sample_group_id"] = serde_json::json!(sample_group_id);
             variant_signal["scout_maximum_duration_ms"] = serde_json::json!(maximum_scout_duration_ms);
             variant_signal["scout_cooldown_key"] = serde_json::json!(cooldown_key);
@@ -2139,10 +2372,10 @@ async fn receive_live_scout_inputs(
             generate_group_id: false,
             sample_group_id,
             cooldown_key,
-            profile_key: format!("{}|{}", batch.strategy, batch.symbol),
+            profile_key: format!("{}|{}|{}|{}", batch.strategy, batch.symbol, batch.direction, market_state_key),
             eligible: true,
             parameter_variant: true,
-            cooldown_ms: 300_000,
+            cooldown_ms: sample_cooldown_ms,
             audit_plans: Vec::new(),
             audit_templates: templates,
             sample_payload: None,
@@ -2155,6 +2388,33 @@ async fn receive_live_scout_inputs(
         let symbol = profile.symbol;
         let direction = signal.get("direction").and_then(serde_json::Value::as_str).unwrap_or("bullish").to_owned();
         let parameters = profile.parameters;
+        let market_state_key = live_scout_market_state_key(&signal);
+        let market_regime = live_scout_evidence_regime(&signal);
+        let profile_id = strategies::profile_id(&symbol, &strategy, &parameters);
+        let sample_cooldown_ms = live_scout_case_cooldown_ms(
+            &snapshot,
+            &symbol,
+            &strategy,
+            &parameters,
+            market_regime,
+            now_ms,
+        );
+        let trade_learning_context = live_scout_learning_context(
+            &strategy,
+            &symbol,
+            &direction,
+            &market_state_key,
+            &profile_id,
+            "trade",
+        );
+        let scenario_learning_context = live_scout_learning_context(
+            &strategy,
+            &symbol,
+            &direction,
+            &market_state_key,
+            &profile_id,
+            "scenario",
+        );
         let maximum_scout_duration_ms = service
             .live_scout_maximum_duration_ms
             .read()
@@ -2172,7 +2432,7 @@ async fn receive_live_scout_inputs(
         signal["status"] = serde_json::json!("scouted");
         signal["scout"] = serde_json::json!(true);
         signal["scout_notional_usd"] = serde_json::json!(configuration.max_sample_notional);
-        signal["scout_learning_context"] = serde_json::json!(format!("scout:live:{strategy}:{symbol}:{direction}:trade"));
+        signal["scout_learning_context"] = serde_json::json!(trade_learning_context);
         signal["scout_entry_price"] = signal.get("price").cloned()
             .or_else(|| signal.get("observed_close").cloned())
             .or_else(|| signal.get("strategy_decision").and_then(|decision| decision.get("observed_close")).cloned())
@@ -2185,7 +2445,7 @@ async fn receive_live_scout_inputs(
             .get("best_ask")
             .cloned()
             .unwrap_or(serde_json::Value::Null);
-        let group = format!("live-scout:{strategy}|{symbol}|{direction}");
+        let group = format!("live-scout:{strategy}|{symbol}|{direction}|{market_state_key}|{profile_id}");
         signal["scout_sample_group_id"] = serde_json::json!(group);
         signal["scout_maximum_duration_ms"] = serde_json::json!(maximum_scout_duration_ms);
         signal["scout_cooldown_key"] = serde_json::json!(group);
@@ -2199,15 +2459,15 @@ async fn receive_live_scout_inputs(
             generate_group_id: false,
             sample_group_id: group.clone(),
             cooldown_key: group,
-            profile_key: format!("{strategy}|{symbol}"),
+            profile_key: format!("{strategy}|{symbol}|{direction}|{market_state_key}"),
             eligible: true,
             parameter_variant: false,
-            cooldown_ms: 300_000,
+            cooldown_ms: sample_cooldown_ms,
             audit_plans: vec![signal.clone()],
             audit_templates: vec![ScoutAuditTemplate {
                 base_audit: signal,
                 notional_usd: configuration.max_sample_notional,
-                learning_context: format!("scout:live:{strategy}:{symbol}:{direction}:scenario"),
+                learning_context: scenario_learning_context,
                 stop_loss_percent: stop,
                 take_profit_percent: target,
                 level_percent: 0.0,
@@ -2250,7 +2510,7 @@ fn auto_trader_live_profiles(
             let strategy = profile.get("strategy")?.as_str()?;
             if !symbols.contains(symbol)
                 || !enabled_strategies.iter().any(|enabled| enabled == strategy)
-                || !matches!(strategy, "live-momentum" | "live-trade-flow" | "live-order-book" | "live-vwap-dislocation" | "live-absorption-pressure")
+                || !matches!(strategy, "live-momentum" | "live-trade-flow" | "live-order-book" | "live-vwap-dislocation" | "live-absorption-pressure" | "live-range-mean-reversion")
             {
                 return None;
             }
@@ -2264,6 +2524,7 @@ fn auto_trader_live_profiles(
                 symbol: symbol.to_owned(),
                 strategy: strategy.to_owned(),
                 parameters,
+                market_regime: None,
             })
         })
         .collect()

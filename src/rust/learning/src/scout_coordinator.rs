@@ -216,8 +216,7 @@ fn strategy_profile_snapshot(
         .into_iter()
         .flat_map(|evidence| evidence.iter())
         .filter(|(key, _)| {
-            key.rsplit_once('|')
-                .is_some_and(|(_, strategy_name)| strategy_name == name)
+            key.ends_with(&format!("|{name}")) || key.contains(&format!("|{name}|profile:"))
         })
         .map(|(key, value)| (key.clone(), value.clone()))
         .collect::<BTreeMap<_, _>>();
@@ -385,6 +384,7 @@ fn strategy_replay_horizons_ms(strategy: &str) -> Option<Vec<u64>> {
             | "live-order-book"
             | "live-vwap-dislocation"
             | "live-absorption-pressure"
+            | "live-range-mean-reversion"
     ) {
         return None;
     }
@@ -1805,17 +1805,61 @@ impl ScoutCoordinator {
                         .any(|strategy| strategy == &variant.strategy)
             })
             .collect::<Vec<_>>();
-        let walk_forward_evidence =
+        let mut walk_forward_evidence =
             crate::profiles::walk_forward_priority_snapshot(&state, crate::now_ms())
                 .into_iter()
                 .filter(|(key, _)| {
                     profile_symbols.iter().any(|symbol| {
-                        strategies
-                            .iter()
-                            .any(|strategy| key == &format!("{symbol}|{strategy}"))
+                        strategies.iter().any(|strategy| {
+                            key == &format!("{symbol}|{strategy}")
+                                || key.starts_with(&format!("{symbol}|{strategy}|profile:"))
+                        })
                     })
                 })
                 .collect::<BTreeMap<_, _>>();
+        // Include the requested coverage universe, including profiles that
+        // have never produced a Scout outcome. Those are actionable data gaps
+        // for the workers, not absent keys that look like completed coverage.
+        for symbol in &profile_symbols {
+            for strategy_name in &strategies {
+                if Strategy::from_name(strategy_name)
+                    .is_none_or(|strategy| strategy.is_legacy_composite())
+                {
+                    continue;
+                }
+                if !strategy::is_autotrader_symbol_allowed(symbol) {
+                    continue;
+                }
+                walk_forward_evidence
+                    .entry(format!("{symbol}|{strategy_name}"))
+                    .or_insert_with(|| {
+                        serde_json::json!({
+                            "sampleCount": 0,
+                            "effectiveSampleSize": 0.0,
+                            "lastSampleTimestampMs": 0,
+                            "freshnessStatus": "missing",
+                        })
+                    });
+                for profile in profiles.iter().filter(|profile| {
+                    profile["symbol"].as_str() == Some(symbol.as_str())
+                        && profile["strategy"].as_str() == Some(strategy_name.as_str())
+                }) {
+                    let Some(profile_id) = profile["profile_id"].as_str() else {
+                        continue;
+                    };
+                    walk_forward_evidence
+                        .entry(format!("{symbol}|{strategy_name}|profile:{profile_id}"))
+                        .or_insert_with(|| {
+                            serde_json::json!({
+                                "sampleCount": 0,
+                                "effectiveSampleSize": 0.0,
+                                "lastSampleTimestampMs": 0,
+                                "freshnessStatus": "missing",
+                            })
+                        });
+                }
+            }
+        }
         Ok(
             serde_json::json!({"profiles": profiles, "scout_parameter_variants": scout_parameter_variants, "walk_forward_evidence": walk_forward_evidence}),
         )

@@ -25,9 +25,17 @@ async fn get_monitoring_metrics(State(state): State<AutoTraderState>) -> Json<se
     drop(settings);
 
     let carry_positions = state.dated_carry.lock().await.positions.clone();
-    let unrealized_pnl = calculate_auto_unrealized_pnl(&snapshot.auto_positions, &carry_positions)
-        .await
-        .map(|(total, _)| total);
+    // Keep the lightweight monitoring endpoint responsive when market inputs
+    // for an open position are slow or unavailable. The other metrics do not
+    // depend on this best-effort mark-to-market calculation.
+    let unrealized_pnl = tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        calculate_auto_unrealized_pnl(&snapshot.auto_positions, &carry_positions),
+    )
+    .await
+    .ok()
+    .flatten()
+    .map(|(total, _)| total);
     let processing_times = state.insight_processing_ms.lock().await.clone();
     let insight_processing_latest_ms = processing_times.last().copied();
     let mut sorted_processing_times = processing_times;

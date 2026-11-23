@@ -32,28 +32,13 @@ fn external_close_order_for_trade<'a>(
         .map(|(index, _)| index)
 }
 
-async fn fetch_closed_ledger_rows(
+fn build_closed_ledger_rows(
     orders: &[TraderOrder],
     open_positions: &[OpenStrategyPosition],
     carry_positions: &[DatedCarryPosition],
+    body: &serde_json::Value,
+    realized_by_parent: Option<&BTreeMap<String, f64>>,
 ) -> Vec<serde_json::Value> {
-    // Manual Auto entries may predate today and close today. Load the full Auto
-    // fill history so a close is paired with its actual entry fill.
-    let body = crate::service_rpc::position_get("/positions/trades?source=auto")
-        .await
-        .unwrap_or_else(|_| serde_json::json!({ "trades": [] }));
-    let realized_by_parent = crate::service_rpc::position_get(
-        "/positions/realized-pnl?source=auto&since_ms=0",
-    )
-    .await
-    .ok()
-    .and_then(|value| {
-        serde_json::from_value::<BTreeMap<String, f64>>(
-            value["realized_pnl_all_time_by_parent_order"].clone(),
-        )
-        .ok()
-    })
-    .unwrap_or_default();
     let mut order_by_id = BTreeMap::<String, &TraderOrder>::new();
     for order in orders {
         order_by_id.insert(order.timestamp.to_string(), order);
@@ -218,10 +203,12 @@ async fn fetch_closed_ledger_rows(
             .iter()
             .filter_map(|trade| trade["parent_order_id"].as_str())
             .collect::<std::collections::BTreeSet<_>>();
-        let realized_pnl = if parent_orders
-            .iter()
-            .any(|parent| realized_by_parent.contains_key(*parent))
-        {
+        let realized_pnl = if realized_by_parent.is_some_and(|realized| {
+            parent_orders
+                .iter()
+                .any(|parent| realized.contains_key(*parent))
+        }) {
+            let realized_by_parent = realized_by_parent.expect("availability checked above");
             parent_orders
                 .iter()
                 .filter_map(|parent| realized_by_parent.get(*parent))
@@ -558,14 +545,14 @@ fn snapshot_activity_positions(settings: &Settings, today_start: u64) -> Activit
     }
 }
 
-async fn await_activity_realized_pnl(
+fn activity_realized_pnl(
     orders: &mut [TraderOrder],
+    ledger_pnl: Option<&LedgerRealizedPnl>,
 ) -> (
     Option<f64>,
     Option<BTreeMap<String, f64>>,
     Vec<PnlBreakdown>,
 ) {
-    let ledger_pnl = fetch_ledger_realized_pnl().await.ok();
     let (realized_pnl, realized_pnl_by_quote, pnl_breakdown) = if let Some(pnl) = ledger_pnl {
         for order in orders.iter_mut() {
             let realized = if order.purpose == "stop-loss" {
@@ -647,7 +634,7 @@ async fn await_activity_realized_pnl(
             .sort_by(|left, right| right.realized_pnl.abs().total_cmp(&left.realized_pnl.abs()));
         (
             pnl.realized_pnl_all_time_usd,
-            Some(pnl.realized_pnl_by_quote),
+            Some(pnl.realized_pnl_by_quote.clone()),
             breakdown,
         )
     } else {

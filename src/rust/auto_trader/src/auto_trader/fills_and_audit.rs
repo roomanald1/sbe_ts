@@ -341,7 +341,8 @@ fn signal_audit_payload(
         "strength": signal.strength,
         "signal_strategy_candidate": signal.strategy_candidate,
         "daily_cold_start_candidate_eligible": is_daily_cold_start_exploration_candidate(signal),
-        "strength_size_multiplier": signal_strength_size_multiplier(signal.strength),
+        "strength_size_multiplier": signal_confidence_size_multiplier(signal),
+        "confidence_size_multiplier": signal_confidence_size_multiplier(signal),
         "ranging_probability": signal.ranging_probability,
         "market_context": market_context(signal),
         // Keep execution audit strategy aligned with the entry order fallback.

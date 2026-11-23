@@ -343,6 +343,9 @@ fn attach_final_decision_outcomes(
     let mut statement = connection.prepare(
         "SELECT payload FROM auto_trader_audit WHERE decision_id = ?1 AND stage = 'entry'",
     )?;
+    let mut entry_status_statement = connection.prepare(
+        "SELECT payload FROM auto_trader_audit WHERE decision_id = ?1 AND stage = 'entry_status'",
+    )?;
     // The stage/timestamp index makes SQLite scan every retained rejection to
     // satisfy the time ordering. These prefix ranges are selective by
     // decision_id, so use the existing (decision_id, stage) primary-key index.
@@ -384,7 +387,7 @@ fn attach_final_decision_outcomes(
             continue;
         }
 
-        let (entry, skipped_outcome) = if let Some(decision_id) = decision
+        let (mut entry, skipped_outcome) = if let Some(decision_id) = decision
             .get("decision_id")
             .and_then(serde_json::Value::as_str)
         {
@@ -446,7 +449,93 @@ fn attach_final_decision_outcomes(
             (None, None)
         };
 
-        let final_outcome = if let Some(entry) = entry {
+        if let (Some(decision_id), Some(entry)) = (
+            decision.get("decision_id").and_then(serde_json::Value::as_str),
+            entry.as_mut(),
+        ) {
+            let mut rows = entry_status_statement.query(params![decision_id])?;
+            let status = rows
+                .next()?
+                .map(|row| row.get::<_, Vec<u8>>(0))
+                .transpose()?
+                .map(|compressed| -> Result<serde_json::Value> {
+                    let mut decoder = MultiGzDecoder::new(compressed.as_slice());
+                    let mut json = Vec::new();
+                    decoder.read_to_end(&mut json)?;
+                    Ok(serde_json::from_slice(&json)?)
+                })
+                .transpose()?;
+            if let Some(status) = status {
+                for field in [
+                    "status",
+                    "reason",
+                    "execution_order_id",
+                    "order_type",
+                    "order_quantity",
+                    "filled_quantity",
+                    "average_price",
+                    "fees",
+                    "fill_rate",
+                ] {
+                    if let Some(value) = status.get(field) {
+                        entry[field] = value.clone();
+                    }
+                }
+                if let Some(execution_response) = entry
+                    .get_mut("execution_response")
+                    .and_then(serde_json::Value::as_object_mut)
+                {
+                    execution_response.insert(
+                        "status".into(),
+                        status.get("status").cloned().unwrap_or(serde_json::Value::Null),
+                    );
+                    execution_response.insert(
+                        "failure_reason".into(),
+                        status.get("reason").cloned().unwrap_or(serde_json::Value::Null),
+                    );
+                }
+            }
+
+            let now_ms = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64;
+            let still_active = matches!(
+                entry.get("status").and_then(serde_json::Value::as_str),
+                Some("submitting" | "accepted" | "resting" | "partially_filled")
+            );
+            let expired = entry
+                .get("expires_at")
+                .and_then(serde_json::Value::as_u64)
+                .is_some_and(|expires_at| expires_at <= now_ms);
+            if still_active && expired {
+                let partially_filled = entry
+                    .get("filled_quantity")
+                    .and_then(serde_json::Value::as_f64)
+                    .is_some_and(|quantity| quantity > 1e-12);
+                let status = if partially_filled {
+                    "partially_filled_closed"
+                } else {
+                    "expired_or_cancelled"
+                };
+                let reason = if partially_filled {
+                    "expired_with_partial_fill"
+                } else {
+                    "expired_without_full_fill"
+                };
+                entry["status"] = serde_json::json!(status);
+                entry["reason"] = serde_json::json!(reason);
+                if let Some(execution_response) = entry
+                    .get_mut("execution_response")
+                    .and_then(serde_json::Value::as_object_mut)
+                {
+                    execution_response.insert("status".into(), serde_json::json!(status));
+                    execution_response.insert("failure_reason".into(), serde_json::json!(reason));
+                }
+            }
+        }
+
+        let mut final_outcome = if let Some(entry) = entry {
             serde_json::json!({
                 "status": entry.get("status"),
                 "reason": entry.get("reason"),
@@ -544,6 +633,57 @@ fn attach_final_decision_outcomes(
                 ],
             })
         };
+        if let Some(entry) = final_outcome
+            .get_mut("entry")
+            .filter(|entry| !entry.is_null())
+        {
+            let now_ms = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64;
+            let still_active = matches!(
+                entry.get("status").and_then(serde_json::Value::as_str),
+                Some("submitting" | "accepted" | "resting" | "partially_filled")
+            );
+            let expired = entry
+                .get("expires_at")
+                .and_then(serde_json::Value::as_u64)
+                .is_some_and(|expires_at| expires_at <= now_ms);
+            if still_active && expired {
+                let partially_filled = entry
+                    .get("filled_quantity")
+                    .and_then(serde_json::Value::as_f64)
+                    .is_some_and(|quantity| quantity > 1e-12);
+                let status = if partially_filled {
+                    "partially_filled_closed"
+                } else {
+                    "expired_or_cancelled"
+                };
+                let reason = if partially_filled {
+                    "expired_with_partial_fill"
+                } else {
+                    "expired_without_full_fill"
+                };
+                entry["status"] = serde_json::json!(status);
+                entry["reason"] = serde_json::json!(reason);
+                final_outcome["status"] = serde_json::json!(status);
+                final_outcome["reason"] = serde_json::json!(reason);
+                final_outcome["execution_gate"]["status"] = serde_json::json!(status);
+                final_outcome["execution_gate"]["reason"] = serde_json::json!(reason);
+                if let Some(execution) = final_outcome
+                    .get_mut("gate_path")
+                    .and_then(serde_json::Value::as_array_mut)
+                    .and_then(|path| path.get_mut(1))
+                {
+                    execution["status"] = serde_json::json!(status);
+                    execution["reason"] = serde_json::json!(reason);
+                    if let Some(path_entry) = execution.get_mut("entry") {
+                        path_entry["status"] = serde_json::json!(status);
+                        path_entry["reason"] = serde_json::json!(reason);
+                    }
+                }
+            }
+        }
         decision["final_outcome"] = final_outcome;
     }
 

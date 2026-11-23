@@ -82,6 +82,10 @@ fn clears_temporary_entry_floor(signal: &Signal) -> bool {
                 .pressure_without_price_move
                 .map(|value| -side * value),
         ),
+        Strategy::LiveRangeMeanReversion => (
+            threshold(StrategyParameterKey::MinimumSignalStrength),
+            Some(signal.strength),
+        ),
         _ => return true,
     };
     directional
@@ -158,6 +162,7 @@ fn signal_position_block_reason(
     let pending_entries = settings.orders.iter().filter(|order| {
         order.symbol == signal_key
             && order.purpose == "signal"
+            && order.expires_at.is_none_or(|expires_at| expires_at > now_ms)
             && matches!(
             order.status.as_str(),
             "submitting" | "accepted" | "resting" | "partially_filled"
@@ -194,6 +199,31 @@ fn signal_position_block_reason(
         }
     }
     None
+}
+
+fn pending_maker_entry_for_signal(
+    settings: &Settings,
+    signal: &Signal,
+    signal_key: &str,
+    strategy_key: &str,
+    now_ms: u64,
+) -> Option<(u64, f64)> {
+    let side = if signal.direction == "bullish" { "buy" } else { "sell" };
+    settings.orders.iter().filter_map(|order| {
+        let eligible = order.symbol == signal_key
+            && order.strategy.as_deref() == Some(strategy_key)
+            && order.side == side
+            && order.purpose == "signal"
+            && order.order_type.starts_with("PostOnlyLimit")
+            && matches!(order.status.as_str(), "submitting" | "accepted" | "resting")
+            && order.expires_at.is_none_or(|expires_at| expires_at > now_ms)
+            && order.filled_quantity <= 1e-12
+            && order.quantity > 1e-12
+            && !settings.orders.iter().any(|candidate| {
+                candidate.ioc_fallback_for == Some(order.timestamp)
+            });
+        eligible.then_some((order.timestamp, order.strength))
+    }).max_by(|left, right| left.1.total_cmp(&right.1))
 }
 
 #[cfg(test)]

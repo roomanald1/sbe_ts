@@ -11,6 +11,7 @@ pub(crate) fn benchmark_signal(strategy: &str, candidate: bool) -> Signal {
         stale: false,
         score: 1.0,
         ranging_probability: None,
+        range_location: None,
         components: SignalComponents::default(),
         strategy_candidate: candidate,
         strategy: Some(strategy.into()),

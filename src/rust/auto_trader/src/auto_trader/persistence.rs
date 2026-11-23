@@ -10,6 +10,15 @@ fn persist_settings(path: &PathBuf, settings: &Settings) -> Result<(), (StatusCo
     persist_settings_snapshot(path, settings)
 }
 
+fn sqlite_write_guard() -> std::sync::MutexGuard<'static, ()> {
+    static SQLITE_WRITE_LOCK: std::sync::OnceLock<std::sync::Mutex<()>> =
+        std::sync::OnceLock::new();
+    SQLITE_WRITE_LOCK
+        .get_or_init(|| std::sync::Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+}
+
 fn settings_database_path(json_path: &PathBuf) -> PathBuf {
     json_path.with_extension("sqlite")
 }
@@ -150,6 +159,7 @@ fn read_dated_carry_database(path: &PathBuf) -> rusqlite::Result<Option<DatedCar
 }
 
 fn persist_dated_carry_book(path: &PathBuf, book: &DatedCarryBook) -> Result<(), String> {
+    let _sqlite_write_guard = sqlite_write_guard();
     if let Some(parent) = path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
@@ -252,6 +262,7 @@ fn persist_settings_snapshot(
     path: &PathBuf,
     settings: &Settings,
 ) -> Result<(), (StatusCode, String)> {
+    let _sqlite_write_guard = sqlite_write_guard();
     if let Some(parent) = path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
@@ -1017,11 +1028,13 @@ fn daily_strategy_open_position_count(settings: &Settings, strategy: &str) -> us
 }
 
 fn pending_entry_strategy_keys(settings: &Settings) -> BTreeSet<(String, String)> {
+    let now_ms = current_time_ms();
     settings
         .orders
         .iter()
         .filter(|order| {
             order.purpose == "signal"
+                && order.expires_at.is_none_or(|expires_at| expires_at > now_ms)
                 && matches!(
                     order.status.as_str(),
                     "submitting" | "accepted" | "resting" | "partially_filled"
@@ -1107,11 +1120,12 @@ async fn refresh_usd_rates(state: &AutoTraderState) -> Result<(), (StatusCode, S
         }
     }
     parsed.insert("USD".into(), 1.0);
-    let mut settings = state.settings.lock().await;
-    settings.usd_rates = parsed;
-    settings.used_notional_today = allocated_notional(&settings);
-    persist_settings(&state.settings_path, &settings)?;
-    Ok(())
+    {
+        let mut settings = state.settings.lock().await;
+        settings.usd_rates = parsed;
+        settings.used_notional_today = allocated_notional(&settings);
+    }
+    request_settings_persist(state)
 }
 
 fn reset_daily_budget(settings: &mut Settings) {

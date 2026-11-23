@@ -38,6 +38,7 @@ fn ui_snapshot_json(snapshot: &SignalSnapshot) -> serde_json::Value {
         "ranging_probability": snapshot.ranging_probability,
         "range_lower_bound": snapshot.range_lower_bound,
         "range_upper_bound": snapshot.range_upper_bound,
+        "range_location": snapshot.range_location,
         "evidence_coverage": snapshot.evidence_coverage,
         "estimated_accuracy": snapshot.estimated_accuracy,
     })
@@ -259,6 +260,7 @@ fn strategy_signal_from_snapshot(
         stale: snapshot.stale,
         score: snapshot.score,
         ranging_probability: snapshot.ranging_probability,
+        range_location: snapshot.range_location,
         components: strategy::SignalComponents {
             momentum_10s_percent: components.momentum_10s_percent,
             trend_5m_volatility_units: components.trend_5m_volatility_units,

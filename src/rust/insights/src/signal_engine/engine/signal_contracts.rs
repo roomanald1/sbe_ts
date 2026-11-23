@@ -45,6 +45,9 @@ pub struct SignalSnapshot {
     pub range_lower_bound: Option<f64>,
     #[serde(default)]
     pub range_upper_bound: Option<f64>,
+    /// Current price location within the observed range, normalized to 0..1.
+    #[serde(default)]
+    pub range_location: Option<f64>,
     /// Fraction of the engine's directional inputs that were available.
     #[serde(default)]
     pub evidence_coverage: Option<f64>,

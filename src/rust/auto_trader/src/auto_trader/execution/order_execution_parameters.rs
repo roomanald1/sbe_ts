@@ -115,10 +115,11 @@ fn build_order_request(
                 }
                 AutoOrderType::PostOnlyLimit => {
                     body["limit_price"] = serde_json::json!(if side == "buy" { bid } else { ask });
+                    body["expires_at"] = serde_json::json!(
+                        now_ms + params.post_only_timeout_minutes * 60_000
+                    );
                     if reduce_only {
-                        body["time_in_force"] = serde_json::json!("gtc");
-                    } else {
-                        body["expires_at"] = serde_json::json!(now_ms + params.post_only_timeout_minutes * 60_000);
+                        body["time_in_force"] = serde_json::json!("gtd");
                     }
                 }
                 AutoOrderType::Barrier | AutoOrderType::StopMarket => {
@@ -284,6 +285,27 @@ mod order_request_tests {
             AutoOrderType::PostOnlyLimit, configured, "client-2", 1_000, false,
         );
         assert_eq!(body["expires_at"], 541_000);
+    }
+
+    #[test]
+    fn reduce_only_post_only_exit_has_a_bounded_gtd_lifetime() {
+        let (endpoint, body) = build_order_request(
+            "BTC-USDT",
+            "sell",
+            2.0,
+            99.0,
+            101.0,
+            AutoOrderType::PostOnlyLimit,
+            params(),
+            "exit-client",
+            1_000,
+            true,
+        );
+        assert_eq!(endpoint, "/positions/orders");
+        assert_eq!(body["order_type"], "post-only-limit");
+        assert_eq!(body["reduce_only"], true);
+        assert_eq!(body["time_in_force"], "gtd");
+        assert_eq!(body["expires_at"], 301_000);
     }
 
     #[test]

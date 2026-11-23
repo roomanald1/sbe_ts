@@ -2026,6 +2026,13 @@ async fn run_cycle_inner(
             if let Some(candidate) = selection_signals.iter()
                 .filter(|signal| signal.strategy.as_deref().and_then(Strategy::from_name)
                     .is_some_and(|strategy| strategy.is_live_insight()))
+                .filter(|signal| {
+                    signal.strategy_candidate
+                        && strategy::is_autotrader_symbol_allowed(&signal.symbol)
+                        && matches!(signal.direction.as_str(), "bullish" | "bearish")
+                        && signal.strength.is_finite()
+                        && signal.score.is_finite()
+                })
                 .max_by(|left, right| left.strength.total_cmp(&right.strength))
             {
                 let strategy = candidate.strategy.as_deref().unwrap_or_default();

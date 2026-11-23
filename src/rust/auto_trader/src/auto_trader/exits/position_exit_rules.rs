@@ -139,6 +139,14 @@ fn profit_protection_parameters(position: &TraderPosition) -> ProfitProtectionPa
     }
 }
 
+fn position_exit_fee_rate(position: &TraderPosition, profit_exit: bool) -> f64 {
+    if position.exploratory && profit_exit {
+        configured_maker_fee_rate()
+    } else {
+        configured_taker_fee_rate()
+    }
+}
+
 fn profit_protection_state(
     position: &TraderPosition,
     current_return_percent: f64,
@@ -146,7 +154,7 @@ fn profit_protection_state(
 ) -> (Option<f64>, bool) {
     let long = position.quantity > 0.0;
     let mut peak = position.profit_protection_peak_return_percent;
-    let fee_rate = configured_taker_fee_rate();
+    let fee_rate = position_exit_fee_rate(position, true);
     let mut crossed_floor = false;
 
     // Seed persisted state from the already collected path, so positions that
@@ -265,11 +273,22 @@ async fn evaluate_position_exit(
     let is_long = position.quantity > 0.0;
     let exit_price = if is_long { bid } else { ask };
     let entry_notional = position.quantity.abs() * position.average_entry_price;
-    let net_open_pnl = (exit_price - position.average_entry_price) * position.quantity
-        - position.entry_fees
-        - position.quantity.abs() * exit_price * configured_taker_fee_rate();
-    let return_fraction = if entry_notional > 0.0 {
-        net_open_pnl / entry_notional
+    let gross_open_pnl = (exit_price - position.average_entry_price) * position.quantity;
+    let immediate_exit_fee_rate = position_exit_fee_rate(&position, false);
+    let immediate_exit_return_fraction = if entry_notional > 0.0 {
+        (gross_open_pnl
+            - position.entry_fees
+            - position.quantity.abs() * exit_price * immediate_exit_fee_rate)
+            / entry_notional
+    } else {
+        0.0
+    };
+    let profit_exit_fee_rate = position_exit_fee_rate(&position, true);
+    let profit_exit_return_fraction = if entry_notional > 0.0 {
+        (gross_open_pnl
+            - position.entry_fees
+            - position.quantity.abs() * exit_price * profit_exit_fee_rate)
+            / entry_notional
     } else {
         0.0
     };
@@ -311,10 +330,11 @@ async fn evaluate_position_exit(
         )
     };
     let protection_parameters = profit_protection_parameters(&position);
-    let net_return_percent = return_fraction * 100.0;
+    let immediate_net_return_percent = immediate_exit_return_fraction * 100.0;
+    let profit_exit_net_return_percent = profit_exit_return_fraction * 100.0;
     let previous_protection_peak = position.profit_protection_peak_return_percent;
     let (protection_peak, profit_protection_exit) =
-        profit_protection_state(&position, net_return_percent, protection_parameters);
+        profit_protection_state(&position, profit_exit_net_return_percent, protection_parameters);
     if protection_peak != previous_protection_peak {
         let mut settings = state.settings.lock().await;
         if let Some(current) = settings
@@ -409,7 +429,7 @@ async fn evaluate_position_exit(
     });
     let thesis_failure_parameters = thesis_failure_parameters(&position);
     let loss_activation_reached = thesis_failure_parameters
-        .is_some_and(|(activation, _, _)| net_return_percent <= -activation);
+        .is_some_and(|(activation, _, _)| immediate_net_return_percent <= -activation);
     let latest_live_signals = state
         .latest_live_strategy_signals
         .lock()
@@ -484,6 +504,10 @@ async fn evaluate_position_exit(
         "thesis_failure_confirmation_count": position.thesis_failure_confirmation_count,
         "thesis_failure_last_signal_timestamp_ms": position.thesis_failure_last_signal_timestamp_ms,
         "thesis_failure_confirmed": thesis_failure_confirmed,
+        "immediate_exit_net_return_percent": immediate_net_return_percent,
+        "profit_exit_net_return_percent": profit_exit_net_return_percent,
+        "immediate_exit_fee_rate": immediate_exit_fee_rate,
+        "profit_exit_fee_rate": profit_exit_fee_rate,
         "symbol_diagnostic": latest_worker_report
             .as_ref()
             .and_then(|report| report.signal.strategy_decision.clone()),
@@ -503,17 +527,22 @@ async fn evaluate_position_exit(
         Some("strategy-monthly-rebalance")
     } else if signal_managed_strategy {
         None
-    } else if return_fraction <= -stop_loss_percent / 100.0 {
+    } else if immediate_exit_return_fraction <= -stop_loss_percent / 100.0 {
         Some("stop-loss")
     } else if profit_protection_exit {
         Some("profit-protection")
-    } else if return_fraction >= take_profit_percent / 100.0 {
+    } else if profit_exit_return_fraction >= take_profit_percent / 100.0 {
         Some("take-profit")
     } else {
         None
     };
     let Some(reason) = reason else {
         return Ok(None);
+    };
+    let return_fraction = if matches!(reason, "take-profit" | "profit-protection") {
+        profit_exit_return_fraction
+    } else {
+        immediate_exit_return_fraction
     };
     if reason == "take-profit" {
         let probability = profitable_close_probability_5m(&market, &position);
@@ -653,6 +682,27 @@ async fn evaluate_position_exit(
 #[cfg(test)]
 mod position_exit_profit_protection_tests {
     use super::*;
+
+    #[test]
+    fn exploratory_profit_exits_use_maker_cost_but_immediate_exits_use_taker_cost() {
+        let exploratory = TraderPosition {
+            exploratory: true,
+            ..TraderPosition::default()
+        };
+        let strict = TraderPosition::default();
+        assert_eq!(
+            position_exit_fee_rate(&exploratory, true),
+            configured_maker_fee_rate()
+        );
+        assert_eq!(
+            position_exit_fee_rate(&exploratory, false),
+            configured_taker_fee_rate()
+        );
+        assert_eq!(
+            position_exit_fee_rate(&strict, true),
+            configured_taker_fee_rate()
+        );
+    }
 
     fn position(quantity: f64, decision: serde_json::Value, peak: Option<f64>) -> TraderPosition {
         serde_json::from_value(serde_json::json!({

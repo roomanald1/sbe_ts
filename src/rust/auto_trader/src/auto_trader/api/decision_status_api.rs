@@ -1005,6 +1005,8 @@ mod decision_profile_tests {
             .push(strategy::ScoutParameterVariant {
                 symbol: "BTC-USDT".into(),
                 strategy: Strategy::LiveMomentum.as_str().into(),
+                market_regime: None,
+                baseline_profile_id: String::new(),
                 parameter: spec.key.as_str().into(),
                 candidate_value: spec.default,
                 sample_count: 3,

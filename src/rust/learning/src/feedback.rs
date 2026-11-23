@@ -34,26 +34,35 @@ pub(super) async fn accept_feedback(
         learning_context,
     } = &event
     {
-        if event_id.trim().is_empty()
-            || event_id.len() > 256
-            || symbol.trim().is_empty()
-            || symbol.len() > 64
-            || strategy.is_empty()
-            || strategy.len() > 64
-            || profile_id.trim().is_empty()
-            || profile_id.len() > 128
-            || parameters.len() > 64
-            || parameters.keys().any(|key| key.len() > 128)
-            || !strategy.starts_with("live-")
-            || !matches!(direction.as_str(), "bullish" | "bearish")
-            || !strength.is_finite()
-            || !score.is_finite()
-            || parameters.values().any(|value| !value.is_finite())
-            || learning_context.len() > 256
-        {
+        let invalid_field = if event_id.trim().is_empty() || event_id.len() > 256 {
+            Some("event_id")
+        } else if symbol.trim().is_empty() || symbol.len() > 64 {
+            Some("symbol")
+        } else if strategy.is_empty() || strategy.len() > 64 || !strategy.starts_with("live-") {
+            Some("strategy")
+        } else if profile_id.trim().is_empty() || profile_id.len() > 128 {
+            Some("profile_id")
+        } else if parameters.len() > 64 {
+            Some("parameters.count")
+        } else if parameters.keys().any(|key| key.len() > 128) {
+            Some("parameters.key_length")
+        } else if parameters.values().any(|value| !value.is_finite()) {
+            Some("parameters.value")
+        } else if !matches!(direction.as_str(), "bullish" | "bearish") {
+            Some("direction")
+        } else if !strength.is_finite() {
+            Some("strength")
+        } else if !score.is_finite() {
+            Some("score")
+        } else if learning_context.len() > 256 {
+            Some("learning_context")
+        } else {
+            None
+        };
+        if let Some(invalid_field) = invalid_field {
             return Err((
                 StatusCode::BAD_REQUEST,
-                "invalid missed-opportunity candidate".into(),
+                format!("invalid missed-opportunity candidate: {invalid_field}"),
             ));
         }
         let mut state = service.state.lock().await;

@@ -227,7 +227,15 @@ async fn submit_position_exit_order(
             .unwrap_or_default()
             .as_millis() as u64;
         let payload = position_exit_audit_payload(
-            &decision_id, now, timestamp, &symbol, reason, side, &response, &position,
+            &decision_id,
+            now,
+            timestamp,
+            &symbol,
+            reason,
+            side,
+            if passive_profit_exit { "PostOnlyLimit" } else { "Ioc" },
+            &response,
+            &position,
             quantity, filled, average_price, fee, strategy_realized_pnl, entry_notional,
             return_fraction, bid, ask, submit_response_ms, stop_loss_percent,
             take_profit_percent,

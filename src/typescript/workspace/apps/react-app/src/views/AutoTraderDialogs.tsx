@@ -237,6 +237,11 @@ export function AutoTraderSettingsDialog({
                     'Live absorption · opposing pressure ≥ 0.2; configured entry order; shared protective stop/target',
                 },
                 {
+                  value: 'live-range-mean-reversion',
+                  label:
+                    'Live range mean reversion · range probability ≥ 0.70 and price within 12% of a range edge; configured entry order; shared protective stop/target',
+                },
+                {
                   value: 'donchian-55-btc200',
                   label:
                     '55-day Donchian breakout · trade highs only while BTC is above its SMA200',

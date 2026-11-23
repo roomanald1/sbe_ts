@@ -144,6 +144,7 @@ fn snapshot_from_extended(snapshot: ExtendedSignalSnapshot) -> SignalSnapshot {
         ranging_probability: snapshot.ranging_probability,
         range_lower_bound: snapshot.range_lower_bound,
         range_upper_bound: snapshot.range_upper_bound,
+        range_location: None,
     }
 }
 
@@ -161,6 +162,7 @@ fn snapshot_from_legacy(snapshot: LegacySignalSnapshotWithoutNews) -> SignalSnap
         ranging_probability: snapshot.ranging_probability,
         range_lower_bound: snapshot.range_lower_bound,
         range_upper_bound: snapshot.range_upper_bound,
+        range_location: None,
         evidence_coverage: None,
         estimated_accuracy: None,
     }
@@ -180,6 +182,7 @@ fn snapshot_from_scalar_legacy(snapshot: LegacySignalSnapshotWithoutVectors) -> 
         ranging_probability: Some(snapshot.ranging_probability),
         range_lower_bound: snapshot.range_lower_bound,
         range_upper_bound: snapshot.range_upper_bound,
+        range_location: None,
         evidence_coverage: None,
         estimated_accuracy: None,
     }
@@ -201,6 +204,7 @@ fn snapshot_from_scalar_legacy_without_upper_range(
         ranging_probability: snapshot.ranging_probability,
         range_lower_bound: snapshot.range_lower_bound,
         range_upper_bound: None,
+        range_location: None,
         evidence_coverage: None,
         estimated_accuracy: None,
     }
@@ -222,6 +226,7 @@ fn snapshot_from_scalar_legacy_with_optional_ranges(
         ranging_probability: snapshot.ranging_probability,
         range_lower_bound: snapshot.range_lower_bound,
         range_upper_bound: snapshot.range_upper_bound,
+        range_location: None,
         evidence_coverage: None,
         estimated_accuracy: None,
     }
@@ -436,6 +441,7 @@ mod tests {
             ranging_probability: None,
             range_lower_bound: None,
             range_upper_bound: None,
+            range_location: None,
         };
         let records = vec![StoredSignalRecord::Snapshot(snapshot.clone())];
 

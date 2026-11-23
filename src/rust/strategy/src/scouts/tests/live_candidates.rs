@@ -91,6 +91,7 @@ mod tests {
                 symbol: "BTC-USDT".into(),
                 strategy: "live-momentum".into(),
                 parameters,
+                market_regime: None,
             }],
         }))
         .await
@@ -108,6 +109,7 @@ mod tests {
                 symbol: "MON-USDT".into(),
                 strategy: "live-momentum".into(),
                 parameters: BTreeMap::from([("minimum_momentum".into(), 0.1)]),
+                market_regime: None,
             }],
         };
         let result = generate_live_candidates(Json(request)).await;

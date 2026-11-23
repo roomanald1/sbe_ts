@@ -30,6 +30,7 @@ struct SignalSettingsSnapshot {
     settings: Settings,
     quote_rate: f64,
     settings_lock_wait_ms: f64,
+    ioc_fallback_for: Option<u64>,
 }
 
 async fn snapshot_signal_settings(
@@ -45,11 +46,18 @@ async fn snapshot_signal_settings(
     reset_daily_budget(&mut settings);
     let quote_rate = quote_usd_rate(&settings, signal_key);
     let strategy_key = signal.strategy.as_deref().unwrap_or("unattributed");
-    if let Some(reason) =
-        signal_position_block_reason(&settings, signal, signal_key, strategy_key, now_ms)
-    {
-        return Err(reason);
-    }
+    let block_reason = signal_position_block_reason(&settings, signal, signal_key, strategy_key, now_ms);
+    let ioc_fallback_for = match block_reason {
+        Some(reason) if reason.starts_with("Entry already pending") => {
+            pending_maker_entry_for_signal(&settings, signal, signal_key, strategy_key, now_ms)
+                .filter(|(_, strength)| signal.strength.is_finite() && signal.strength > *strength)
+                .map(|(timestamp, _)| timestamp)
+                .map(Some)
+                .ok_or(reason)
+        }
+        Some(reason) => Err(reason),
+        None => Ok(None),
+    }?;
     if let Some(strategy) = signal.strategy.as_deref().and_then(Strategy::from_name) {
         let profile = learned_strategy_parameter_profile(&settings, signal_key, strategy);
         queue_strategy_profile_registration(&mut settings, signal_key, strategy, &profile);
@@ -60,6 +68,7 @@ async fn snapshot_signal_settings(
         settings: snapshot,
         quote_rate,
         settings_lock_wait_ms: settings_lock_wait,
+        ioc_fallback_for,
     })
 }
 
@@ -99,10 +108,22 @@ async fn submit_selected_signal(
         settings: settings_snapshot,
         quote_rate,
         settings_lock_wait_ms,
+        ioc_fallback_for,
     } = match snapshot_signal_settings(state, signal, now_ms).await {
         Ok(snapshot) => snapshot,
         Err(reason) => return Ok(skipped_for_signal(signal, &reason)),
     };
+    let recent_exploratory_exit_fee = signal
+        .strategy
+        .as_deref()
+        .and_then(|strategy| {
+            recent_exploratory_exit_fee_rate(
+                &settings_snapshot,
+                signal.symbol.as_str(),
+                strategy,
+                now_ms,
+            )
+        });
     let signal_key = signal.symbol.clone();
     let strategy_key = signal.strategy.as_deref().unwrap_or("unattributed");
     let execution_plan_started = Instant::now();
@@ -115,6 +136,7 @@ async fn submit_selected_signal(
         now_ms,
         quote_rate,
         exploratory,
+        ioc_fallback_for.is_some(),
         counterfactual_stop_loss_percent,
         counterfactual_take_profit_percent,
     )
@@ -192,42 +214,86 @@ async fn submit_selected_signal(
     let strategy_edge = signal.strategy.as_deref().and_then(Strategy::from_name)
         .filter(|kind| !kind.is_dated_carry())
         .and_then(|kind| validated_strategy_entry_edge(signal, kind).ok());
+    let contextual_net_edge = exploratory_contextual_net_edge(&exploration_risk_adjustment);
     let reducing_rebalance = signal.direction == "bearish"
         && is_portfolio_rebalance_signal(signal, signal.strategy.as_deref().and_then(Strategy::from_name));
-    let (edge_percent, edge_source, fee_bps, fee_assumption) =
+    let (edge_percent, edge_source, fee_bps, fee_assumption, edge_is_net) =
         if let Some(edge) = strategy_edge {
-            (edge, "measured strategy Scout net edge", 0.0, "realized net edge already includes fees")
+            (
+                edge,
+                "measured strategy Scout net edge",
+                0.0,
+                "walk-forward net edge already includes execution costs".to_owned(),
+                true,
+            )
+        } else if let Some(edge) = contextual_net_edge {
+            (
+                edge,
+                "recent contextual net expectancy lower bound",
+                0.0,
+                "realized contextual net returns already include execution costs".to_owned(),
+                true,
+            )
         } else if exploratory {
+            let (fee_bps, fee_assumption) = recent_exploratory_exit_fee
+                .map(|(exit_fee_rate, samples)| {
+                    (
+                        (configured_maker_fee_rate() + exit_fee_rate) * 10_000.0,
+                        format!("exploratory: maker entry; observed exit fee mix from {samples} completed trades"),
+                    )
+                })
+                .unwrap_or_else(|| {
+                    (
+                        exploratory_round_trip_fee_bps(
+                            configured_maker_fee_rate(),
+                            configured_taker_fee_rate(),
+                        ),
+                        "exploratory: maker entry; 50% maker / 50% taker exit prior".to_owned(),
+                    )
+                });
             (
                 effective_take_profit_percent,
                 "strategy take-profit payoff ceiling (not a measured edge)",
-                exploratory_round_trip_fee_bps(configured_maker_fee_rate(), configured_taker_fee_rate()),
-                "exploratory: maker entry; 50% maker profit exit / 50% taker immediate exit",
+                fee_bps,
+                fee_assumption,
+                false,
             )
         } else {
             (
                 effective_take_profit_percent,
                 "strategy take-profit payoff ceiling (not a measured edge)",
                 2.0 * configured_taker_fee_rate() * 10_000.0,
-                "strict/urgent: taker entry and taker exit",
+                "strict/urgent: taker entry and taker exit".to_owned(),
+                false,
             )
         };
     let incremental_cost_percent = (spread_bps + 2.0 * assessment.impact_bps + fee_bps) / 100.0;
     let execution_cost_cushion =
         time_adjusted_edge_cost_cushion(now, MIN_EDGE_TO_INCREMENTAL_COST_MULTIPLIER);
+    let edge_cost_threshold = if edge_is_net {
+        0.0
+    } else {
+        incremental_cost_percent * execution_cost_cushion
+    };
     if !reducing_rebalance && (!edge_percent.is_finite()
         || !incremental_cost_percent.is_finite()
-        || edge_percent < incremental_cost_percent * execution_cost_cushion)
+        || edge_percent <= edge_cost_threshold)
     {
-        return Ok(skipped_for_signal(
-            signal,
-            &format!(
-                "{edge_source} ({edge_percent:.3}%) is below the {:.1}x estimated spread, sweep, and fee cost ({:.3}%; fee assumption: {fee_assumption}, maker {:.2} bps, taker {:.2} bps)",
+        let rejection_reason = if edge_is_net {
+            format!(
+                "{edge_source} ({edge_percent:.3}%) is not positive after fees and execution costs ({fee_assumption})"
+            )
+        } else {
+            format!(
+                "{edge_source} ({edge_percent:.3}%) is below the {:.1}x estimated spread, sweep, and fee cost ({edge_cost_threshold:.3}%; fee assumption: {fee_assumption}, maker {:.2} bps, taker {:.2} bps)",
                 execution_cost_cushion,
-                incremental_cost_percent * execution_cost_cushion,
                 configured_maker_fee_rate() * 10_000.0,
                 configured_taker_fee_rate() * 10_000.0,
-            ),
+            )
+        };
+        return Ok(skipped_for_signal(
+            signal,
+            &rejection_reason,
         ));
     }
     let deep_book_note = if let Some(assessment) = deep_book {
@@ -355,10 +421,38 @@ async fn submit_selected_signal(
                 return Ok(skipped_for_signal(signal, &format!("Strategy entry paused: {reason}")));
             }
         }
-        if let Some(reason) =
-            signal_position_block_reason(&settings, signal, &signal.symbol, strategy_key, now_ms)
+        let current_pending_maker = pending_maker_entry_for_signal(
+            &settings,
+            signal,
+            &signal.symbol,
+            strategy_key,
+            now_ms,
+        );
+        if ioc_fallback_for.is_some()
+            && !current_pending_maker.is_some_and(|(timestamp, strength)| {
+                Some(timestamp) == ioc_fallback_for
+                    && signal.strength.is_finite()
+                    && signal.strength > strength
+            })
         {
-            return Ok(skipped_for_signal(signal, &reason));
+            return Ok(skipped_for_signal(
+                signal,
+                "Resting maker entry resolved before the stronger-signal IOC fallback",
+            ));
+        }
+        let block_reason = signal_position_block_reason(&settings, signal, &signal.symbol, strategy_key, now_ms);
+        if let Some(reason) = block_reason {
+            let fallback_still_valid = ioc_fallback_for.is_some_and(|pending_timestamp| {
+                reason.starts_with("Entry already pending")
+                    && current_pending_maker.is_some_and(|(timestamp, strength)| {
+                        timestamp == pending_timestamp
+                            && signal.strength.is_finite()
+                            && signal.strength > strength
+                    })
+            });
+            if !fallback_still_valid {
+                return Ok(skipped_for_signal(signal, &reason));
+            }
         }
         let allocated = allocated_notional(&settings);
         let category = strategy_category(signal.strategy.as_deref());
@@ -428,6 +522,8 @@ async fn submit_selected_signal(
                     .unwrap_or_else(|| "unattributed".into()),
             ),
             decision_id: Some(decision_id.clone()),
+            strength: signal.strength,
+            ioc_fallback_for,
             quantity,
             filled_quantity: 0.0,
             fill_rate: 0.0,
@@ -548,17 +644,105 @@ fn time_adjusted_edge_cost_cushion(now_seconds: u64, base: f64) -> f64 {
     }
 }
 
+fn exploratory_contextual_net_edge(
+    adjustment: &ExplorationRiskAdjustment,
+) -> Option<f64> {
+    const MIN_CONTEXT_EDGE_SAMPLES: usize = 6;
+    let samples = adjustment.sample_count;
+    let lower_bound = adjustment.weighted_net_return_lcb_percent?;
+    if samples < MIN_CONTEXT_EDGE_SAMPLES || !lower_bound.is_finite() {
+        return None;
+    }
+    Some(lower_bound)
+}
+
+fn recent_exploratory_exit_fee_rate(
+    settings: &Settings,
+    symbol: &str,
+    strategy: &str,
+    now_ms: u64,
+) -> Option<(f64, usize)> {
+    const FEE_HISTORY_WINDOW_MS: u64 = 30 * 24 * 60 * 60 * 1_000;
+    const MIN_COMPLETED_TRADES: usize = 5;
+    let mut completed_trades = BTreeSet::new();
+    let mut total_notional = 0.0;
+    let mut weighted_fee = 0.0;
+    for order in &settings.orders {
+        if !order.exploratory
+            || order.symbol != symbol
+            || order.strategy.as_deref() != Some(strategy)
+            || order.purpose == "signal"
+            || !matches!(
+                order.status.as_str(),
+                "filled" | "partially_filled_closed" | "expired_or_cancelled"
+            )
+            || order.timestamp > now_ms
+            || now_ms.saturating_sub(order.timestamp) > FEE_HISTORY_WINDOW_MS
+        {
+            continue;
+        }
+        let Some(decision_id) = order.decision_id.as_deref() else {
+            continue;
+        };
+        let Some(notional) = order
+            .average_price
+            .filter(|price| price.is_finite() && *price > 0.0)
+            .map(|price| order.filled_quantity * price)
+            .filter(|notional| notional.is_finite() && *notional > 0.0)
+        else {
+            continue;
+        };
+        let fee_rate = if order.order_type.starts_with("PostOnlyLimit")
+            || order.order_type.starts_with("Gtd")
+        {
+            configured_maker_fee_rate()
+        } else {
+            configured_taker_fee_rate()
+        };
+        completed_trades.insert(decision_id.to_owned());
+        total_notional += notional;
+        weighted_fee += notional * fee_rate;
+    }
+    if completed_trades.len() < MIN_COMPLETED_TRADES || total_notional <= 0.0 {
+        return None;
+    }
+    Some((weighted_fee / total_notional, completed_trades.len()))
+}
+
 fn exploratory_round_trip_fee_bps(maker_rate: f64, taker_rate: f64) -> f64 {
-    // The post-only entry is maker. Profit exits are passive/maker and stop-loss
-    // or other immediate exits are taker. Without reliable outcome counts, use
-    // an even exit mix: it accounts for immediate-exit exposure while not
-    // charging every candidate as if both legs were taker.
+    // Use a balanced prior until this strategy/symbol has enough completed
+    // exploratory exit paths to estimate its observed mix.
     (maker_rate + (maker_rate + taker_rate) / 2.0) * 10_000.0
 }
 
 #[cfg(test)]
 mod selected_signal_order_fee_tests {
     use super::*;
+
+    fn exploratory_exit_order(
+        timestamp: u64,
+        decision_id: &str,
+        order_type: &str,
+        quantity: f64,
+        average_price: f64,
+    ) -> TraderOrder {
+        serde_json::from_value(serde_json::json!({
+            "timestamp": timestamp,
+            "symbol": "BTC-USDT",
+            "side": "sell",
+            "order_type": order_type,
+            "purpose": "take-profit",
+            "exploratory": true,
+            "strategy": "live-momentum",
+            "decision_id": decision_id,
+            "quantity": quantity,
+            "filled_quantity": quantity,
+            "average_price": average_price,
+            "status": "filled",
+            "realized_pnl": 0.0
+        }))
+        .unwrap()
+    }
 
     #[test]
     fn exploratory_fee_uses_maker_entry_and_mixed_exit_paths() {
@@ -578,5 +762,55 @@ mod selected_signal_order_fee_tests {
         let measured_edge_fee_bps = 0.0;
         assert!((strict_taker_fee_bps - 20.0).abs() < 1e-9);
         assert_eq!(measured_edge_fee_bps, 0.0);
+    }
+
+    #[test]
+    fn contextual_exploration_net_edge_uses_lower_bound_and_requires_six_samples() {
+        let adjustment = ExplorationRiskAdjustment {
+            scale: 1.0,
+            sample_count: 6,
+            weighted_net_return_percent: Some(0.6),
+            weighted_net_return_lcb_percent: Some(0.4),
+            regime_scoped: false,
+        };
+        assert!(
+            (exploratory_contextual_net_edge(&adjustment).unwrap() - 0.4).abs() < 1e-12
+        );
+
+        let insufficient = ExplorationRiskAdjustment {
+            sample_count: 5,
+            ..adjustment
+        };
+        assert_eq!(exploratory_contextual_net_edge(&insufficient), None);
+    }
+
+    #[test]
+    fn recent_exit_fee_estimate_uses_completed_strategy_exit_mix() {
+        let now = 10 * 24 * 60 * 60 * 1_000;
+        let mut settings = Settings::default();
+        for (index, order_type, notional) in [
+            (0, "PostOnlyLimit · exit", 1.0),
+            (1, "Ioc", 3.0),
+            (2, "Ioc", 3.0),
+            (3, "Ioc", 3.0),
+            (4, "Ioc", 3.0),
+        ] {
+            settings.orders.push(exploratory_exit_order(
+                now - index * 1_000,
+                &format!("decision-{index}"),
+                order_type,
+                notional / 100.0,
+                100.0,
+            ));
+        }
+        let (exit_fee_rate, sample_count) = recent_exploratory_exit_fee_rate(
+            &settings,
+            "BTC-USDT",
+            "live-momentum",
+            now,
+        )
+        .unwrap();
+        assert_eq!(sample_count, 5);
+        assert!((exit_fee_rate - (0.0128 / 13.0)).abs() < 1e-12);
     }
 }

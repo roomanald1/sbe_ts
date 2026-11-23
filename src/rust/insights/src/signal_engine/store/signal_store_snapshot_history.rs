@@ -252,7 +252,7 @@ mod snapshot_history_tests {
             symbol: symbol.into(), timestamp, direction: "bullish".into(), score: 1.0,
             strength: 0.5, components: SignalComponents::default(), reasons: vec![],
             news_attribution: None, stale: false, ranging_probability: None,
-            range_lower_bound: None, range_upper_bound: None, evidence_coverage: Some(1.0),
+            range_lower_bound: None, range_upper_bound: None, range_location: None, evidence_coverage: Some(1.0),
             estimated_accuracy: None,
         }
     }

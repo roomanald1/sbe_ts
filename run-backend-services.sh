@@ -36,6 +36,7 @@ strategies=(
   live-order-book
   live-vwap-dislocation
   live-absorption-pressure
+  live-range-mean-reversion
   donchian-55-btc200
   donchian-20-sma200
   donchian-20-btc200

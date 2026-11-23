@@ -534,6 +534,7 @@ impl SignalEngine {
             ranging_probability,
             range_lower_bound: range_bounds.map(|(low, _)| low),
             range_upper_bound: range_bounds.map(|(_, high)| high),
+            range_location: range_bounds.map(|(low, high)| (latest.1 - low) / (high - low)),
         })
     }
 }

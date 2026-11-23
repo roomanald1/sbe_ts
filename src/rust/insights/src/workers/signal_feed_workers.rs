@@ -245,22 +245,60 @@ async fn run_feed_signal_consumer(event_sender: tokio::sync::mpsc::Sender<Signal
 
 async fn run_feed_ticker_consumer(event_sender: tokio::sync::mpsc::Sender<SignalEventRequest>) {
     let mut retry_delay = Duration::from_secs(1);
+    // The signal engine samples prices at 1s cadence. Keep only the newest
+    // pending ticker per symbol so raw bursts cannot backlog the shared queue.
+    const PRICE_FLUSH_INTERVAL: Duration = Duration::from_millis(250);
     loop {
         match feed_client::ticker_events().await {
             Ok(mut events) => {
                 crate::service_log!("INFO", "Connected to FeedHandlers raw ticker RSocket stream");
-                while let Some(event) = events.next().await {
-                    match event {
-                        Ok(bytes) => {
-                            for request in decode_ticker_batch(&bytes) {
-                                crate::latency::record_signal_feed_event("price");
-                                if event_sender.send(request).await.is_err() {
-                                    crate::service_log!("ERROR", "Signal event processing queue stopped");
-                                    return;
+                let mut pending = std::collections::BTreeMap::<String, SignalEventRequest>::new();
+                let is_at_least_as_new = |current: &SignalEventRequest, incoming: &SignalEventRequest| {
+                    match (&current.event, &incoming.event) {
+                        (SignalFeedEvent::Price { timestamp: old, .. }, SignalFeedEvent::Price { timestamp: new, .. }) => new >= old,
+                        _ => true,
+                    }
+                };
+                let mut flush = tokio::time::interval(PRICE_FLUSH_INTERVAL);
+                flush.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                flush.tick().await;
+                loop {
+                    tokio::select! {
+                        event = events.next() => {
+                            let Some(event) = event else { break };
+                            match event {
+                                Ok(bytes) => {
+                                    for request in decode_ticker_batch(&bytes) {
+                                        crate::latency::record_signal_feed_event("price");
+                                        let replace = pending.get(&request.symbol)
+                                            .is_none_or(|current| is_at_least_as_new(current, &request));
+                                        if replace {
+                                            pending.insert(request.symbol.clone(), request);
+                                        }
+                                    }
+                                }
+                                Err(error) => crate::service_log!("WARN", "Invalid FeedHandlers raw ticker batch: {error:#}"),
+                            }
+                        }
+                        _ = flush.tick() => {
+                            for (symbol, mut request) in std::mem::take(&mut pending) {
+                                request.queued_at = Some(Instant::now());
+                                match event_sender.try_send(request) {
+                                    Ok(()) => {}
+                                    Err(tokio::sync::mpsc::error::TrySendError::Full(mut request)) => {
+                                        // Keep reading feed updates while the shared ingress is full.
+                                        request.queued_at = None;
+                                        let replace = pending.get(&symbol)
+                                            .is_none_or(|current| is_at_least_as_new(current, &request));
+                                        if replace { pending.insert(symbol, request); }
+                                    }
+                                    Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                                        crate::service_log!("ERROR", "Signal event processing queue stopped");
+                                        return;
+                                    }
                                 }
                             }
                         }
-                        Err(error) => crate::service_log!("WARN", "Invalid FeedHandlers raw ticker batch: {error:#}"),
                     }
                 }
                 crate::service_log!("WARN", "FeedHandlers raw ticker RSocket stream disconnected; reconnecting in {}s", retry_delay.as_secs());

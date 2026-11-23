@@ -49,15 +49,39 @@ fn learned_strategy_size_multiplier(outcomes: &LearningStats) -> f64 {
     )
 }
 
-fn signal_strength_size_multiplier(strength: f64) -> f64 {
-    let normalized_strength = if strength.is_finite() {
-        strength.clamp(0.0, 1.0)
+fn signal_confidence_size_multiplier(signal: &Signal) -> f64 {
+    let strength = if signal.strength.is_finite() {
+        signal.strength.clamp(0.0, 1.0)
     } else {
         0.0
     };
+    let directionally_aligned_score = if signal.score.is_finite()
+        && ((signal.direction == "bullish" && signal.score >= 0.0)
+            || (signal.direction == "bearish" && signal.score <= 0.0))
+    {
+        signal.score.abs().clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    // Signal strength and score capture the setup itself. Market-state
+    // confidence adds case-specific context when the classifier has evidence;
+    // it must not replace the signal's own confidence.
+    let signal_confidence = (strength * directionally_aligned_score).sqrt();
+    let confidence = signal
+        .market_state
+        .as_ref()
+        .map(|state| {
+            let state_confidence = if state.confidence.is_finite() {
+                state.confidence.clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            0.75 * signal_confidence + 0.25 * state_confidence
+        })
+        .unwrap_or(signal_confidence);
     MIN_SIGNAL_STRENGTH_SIZE_MULTIPLIER
         + (MAX_SIGNAL_STRENGTH_SIZE_MULTIPLIER - MIN_SIGNAL_STRENGTH_SIZE_MULTIPLIER)
-            * normalized_strength
+            * confidence
 }
 
 fn strategy_learning_stats_across_symbols(
@@ -552,13 +576,36 @@ async fn prepare_signal_execution_plan(
     now_ms: u64,
     quote_rate: f64,
     exploratory: bool,
+    force_ioc_fallback: bool,
     counterfactual_stop_loss_percent: f64,
     counterfactual_take_profit_percent: f64,
 ) -> Result<SignalExecutionPlan, String> {
     let strategy = signal.strategy.as_deref().and_then(Strategy::from_name);
     let paper_learning_exploration = paper_learning_exploration_active(&settings, now_ms)
         && strategy.is_some_and(|kind| kind.is_live_insight());
-    let exploratory = exploratory || paper_learning_exploration;
+    let mut exploratory = exploratory || paper_learning_exploration;
+    // Stale walk-forward data cannot justify a full-size strict entry, but it
+    // should not veto a currently selected signal outright. Treat it as a
+    // bounded exploration so the strategy can keep trading while fresh
+    // outcomes are collected.
+    let stale_walk_forward_reason = (!exploratory)
+        .then(|| {
+            strategy
+                .filter(|kind| !kind.is_dated_carry())
+                .and_then(|kind| validated_strategy_entry_edge(signal, kind).err())
+                .filter(|reason| reason.starts_with("walk_forward_stale:"))
+        })
+        .flatten();
+    if let Some(reason) = stale_walk_forward_reason.as_deref() {
+        exploratory = true;
+        crate::service_log!(
+            "WARN",
+            "Stale walk-forward evidence downgraded selected signal to bounded exploration: symbol={} strategy={} reason={}",
+            signal.symbol,
+            strategy.map(Strategy::as_str).unwrap_or("unknown"),
+            reason,
+        );
+    }
     let strategy_profile = strategy
         .map(|strategy| learned_strategy_parameter_profile(&settings, &signal.symbol, strategy));
     let is_portfolio_rebalance = is_portfolio_rebalance_signal(signal, strategy);
@@ -654,7 +701,9 @@ async fn prepare_signal_execution_plan(
         learned_or_configured_stop,
         signal.components.volatility_1m_percent,
     );
-    let baseline_type = if exploratory {
+    let baseline_type = if force_ioc_fallback {
+        AutoOrderType::Ioc
+    } else if exploratory {
         AutoOrderType::PostOnlyLimit
     } else {
         choose_order_type(&signal, settings.risk_appetite)
@@ -723,7 +772,7 @@ async fn prepare_signal_execution_plan(
     let risk_order_cap = (exploration_cap
         .min(settings.max_order_notional)
         .min(settings.max_order_notional * risk_fraction)
-        * signal_strength_size_multiplier(signal.strength)
+        * signal_confidence_size_multiplier(&signal)
         * learned_size_multiplier
         * entry_risk_scale
         * strategy_order_size_multiplier
@@ -875,9 +924,11 @@ async fn prepare_signal_execution_plan(
     let schedule_depth_threshold = execution_learning.schedule_depth_threshold;
     let schedule_threshold_samples = execution_learning.schedule_threshold_samples;
     let depth_ratio_bucket = schedule_depth_ratio_bucket(depth_ratio);
-    let learned_order_type = if exploratory {
-        // Exploration measures a small passive maker entry; urgency signals
-        // must not turn these samples into taker executions.
+    let learned_order_type = if force_ioc_fallback {
+        AutoOrderType::Ioc
+    } else if exploratory {
+        // Exploratory entries stay passive unless a stronger selected signal
+        // supersedes its own still-unfilled maker order through IOC fallback.
         AutoOrderType::PostOnlyLimit
     } else {
         score_execution_order_type(
@@ -1035,6 +1086,23 @@ mod signal_execution_budget_tests {
         }
     }
 
+    #[test]
+    fn case_confidence_scales_size_and_respects_score_direction() {
+        let weak = signal("live-momentum", 0.2, 1);
+        let moderate = signal("live-momentum", 0.6, 1);
+        let strong = signal("live-momentum", 1.0, 1);
+
+        let weak_size = signal_confidence_size_multiplier(&weak);
+        let moderate_size = signal_confidence_size_multiplier(&moderate);
+        let strong_size = signal_confidence_size_multiplier(&strong);
+        assert!(weak_size < moderate_size && moderate_size < strong_size);
+        assert_eq!(strong_size, 1.0);
+
+        let mut contradictory = strong;
+        contradictory.score = -1.0;
+        assert_eq!(signal_confidence_size_multiplier(&contradictory), 0.25);
+    }
+
     fn dashboard(best: Vec<Signal>) -> Dashboard {
         Dashboard {
             best,
@@ -1081,19 +1149,6 @@ mod signal_execution_budget_tests {
             }),
             1.0
         );
-    }
-
-    #[test]
-    fn signal_strength_scales_order_size_monotonically_with_bounded_floor() {
-        let weak = signal_strength_size_multiplier(0.2);
-        let moderate = signal_strength_size_multiplier(0.6);
-        let strong = signal_strength_size_multiplier(1.0);
-
-        assert!(weak < moderate && moderate < strong);
-        assert_eq!(signal_strength_size_multiplier(0.0), 0.25);
-        assert_eq!(strong, 1.0);
-        assert_eq!(signal_strength_size_multiplier(1.5), 1.0);
-        assert_eq!(signal_strength_size_multiplier(f64::NAN), 0.25);
     }
 
     #[test]

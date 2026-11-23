@@ -109,6 +109,7 @@ services:
       strategy-live-order-book: { condition: service_healthy }
       strategy-live-vwap-dislocation: { condition: service_healthy }
       strategy-live-absorption-pressure: { condition: service_healthy }
+      strategy-live-range-mean-reversion: { condition: service_healthy }
       strategy-live-donchian-55-btc200: { condition: service_healthy }
       strategy-live-donchian-20-sma200: { condition: service_healthy }
       strategy-live-donchian-20-btc200: { condition: service_healthy }
@@ -147,7 +148,7 @@ services:
       SCOUT_COORDINATOR_MAX_BATCH_BYTES: ${SCOUT_COORDINATOR_MAX_BATCH_BYTES:-8388608}
       SCOUT_COORDINATOR_WORKER_TIMEOUT_MS: ${SCOUT_COORDINATOR_WORKER_TIMEOUT_MS:-10000}
       SCOUT_COORDINATOR_OUTCOMES_WORKER_TIMEOUT_MS: ${SCOUT_COORDINATOR_OUTCOMES_WORKER_TIMEOUT_MS:-60000}
-      SCOUT_WORKER_ENDPOINTS: "${SCOUT_WORKER_ENDPOINTS:-live-momentum=ws://strategy-scout-live-momentum:10200;live-trade-flow=ws://strategy-scout-live-trade-flow:10200;live-order-book=ws://strategy-scout-live-order-book:10200;live-vwap-dislocation=ws://strategy-scout-live-vwap-dislocation:10200;live-absorption-pressure=ws://strategy-scout-live-absorption-pressure:10200;donchian-55-btc200=ws://strategy-scout-donchian-55-btc200:10200;donchian-20-sma200=ws://strategy-scout-donchian-20-sma200:10200;donchian-20-btc200=ws://strategy-scout-donchian-20-btc200:10200;donchian-10-btc200=ws://strategy-scout-donchian-10-btc200:10200;donchian-20-btc200-hold3=ws://strategy-scout-donchian-20-btc200-hold3:10200;risk-adjusted-trend-portfolio=ws://strategy-scout-risk-adjusted-trend-portfolio:10200;trend-sleeves-btc200=ws://strategy-scout-trend-sleeves-btc200:10200;trend-50-200=ws://strategy-scout-trend-50-200:10200;relative-strength-90-sma200=ws://strategy-scout-relative-strength-90-sma200:10200;risk-adjusted-monthly-momentum=ws://strategy-scout-risk-adjusted-monthly-momentum:10200;rsi2-oversold-rebound=ws://strategy-scout-rsi2-oversold-rebound:10200;dated-futures-carry=ws://strategy-scout-dated-futures-carry:10200}"
+      SCOUT_WORKER_ENDPOINTS: "${SCOUT_WORKER_ENDPOINTS:-live-momentum=ws://strategy-scout-live-momentum:10200;live-trade-flow=ws://strategy-scout-live-trade-flow:10200;live-order-book=ws://strategy-scout-live-order-book:10200;live-vwap-dislocation=ws://strategy-scout-live-vwap-dislocation:10200;live-absorption-pressure=ws://strategy-scout-live-absorption-pressure:10200;live-range-mean-reversion=ws://strategy-scout-live-range-mean-reversion:10200;donchian-55-btc200=ws://strategy-scout-donchian-55-btc200:10200;donchian-20-sma200=ws://strategy-scout-donchian-20-sma200:10200;donchian-20-btc200=ws://strategy-scout-donchian-20-btc200:10200;donchian-10-btc200=ws://strategy-scout-donchian-10-btc200:10200;donchian-20-btc200-hold3=ws://strategy-scout-donchian-20-btc200-hold3:10200;risk-adjusted-trend-portfolio=ws://strategy-scout-risk-adjusted-trend-portfolio:10200;trend-sleeves-btc200=ws://strategy-scout-trend-sleeves-btc200:10200;trend-50-200=ws://strategy-scout-trend-50-200:10200;relative-strength-90-sma200=ws://strategy-scout-relative-strength-90-sma200:10200;risk-adjusted-monthly-momentum=ws://strategy-scout-risk-adjusted-monthly-momentum:10200;rsi2-oversold-rebound=ws://strategy-scout-rsi2-oversold-rebound:10200;dated-futures-carry=ws://strategy-scout-dated-futures-carry:10200}"
     volumes: ["learning-data:/data"]
     ports: ["11010:3010", "10110:10010"]
     restart: unless-stopped
@@ -179,9 +180,15 @@ services:
   strategy-live-absorption-pressure:
     <<: *strategy-live-base
     environment: { <<: *strategy-live-env, STRATEGY_WORKER_ROLE: live, STRATEGY_WORKER_STRATEGY: live-absorption-pressure, STRATEGY_LIVE_LISTEN_ADDR: 0.0.0.0:10201, STRATEGY_LIVE_MAX_IN_FLIGHT: "32", STRATEGY_LIVE_MAX_PAYLOAD_BYTES: "262144" }
+  strategy-live-range-mean-reversion:
+    <<: *strategy-live-base
+    environment: { <<: *strategy-live-env, STRATEGY_WORKER_ROLE: live, STRATEGY_WORKER_STRATEGY: live-range-mean-reversion, STRATEGY_LIVE_LISTEN_ADDR: 0.0.0.0:10201, STRATEGY_LIVE_MAX_IN_FLIGHT: "32", STRATEGY_LIVE_MAX_PAYLOAD_BYTES: "262144" }
   strategy-scout-live-absorption-pressure:
     <<: *strategy-scout-base
     environment: { <<: *strategy-scout-env, STRATEGY_WORKER_STRATEGY: live-absorption-pressure, SCOUT_WORKER_STATE_PATH: /data/workers/live-absorption-pressure.sqlite }
+  strategy-scout-live-range-mean-reversion:
+    <<: *strategy-scout-base
+    environment: { <<: *strategy-scout-env, STRATEGY_WORKER_STRATEGY: live-range-mean-reversion, SCOUT_WORKER_STATE_PATH: /data/workers/live-range-mean-reversion.sqlite }
   strategy-live-donchian-55-btc200:
     <<: *strategy-live-base
     environment: { <<: *strategy-live-env, STRATEGY_WORKER_ROLE: live, STRATEGY_WORKER_STRATEGY: donchian-55-btc200, STRATEGY_LIVE_LISTEN_ADDR: 0.0.0.0:10201, STRATEGY_LIVE_MAX_IN_FLIGHT: "32", STRATEGY_LIVE_MAX_PAYLOAD_BYTES: "262144" }

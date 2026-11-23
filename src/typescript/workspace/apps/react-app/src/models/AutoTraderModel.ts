@@ -44,6 +44,7 @@ const defaultScoutStrategies: Strategy[] = [
   'live-order-book',
   'live-vwap-dislocation',
   'live-absorption-pressure',
+  'live-range-mean-reversion',
   'donchian-55-btc200',
   'donchian-20-sma200',
   'donchian-20-btc200',
@@ -189,6 +190,7 @@ export type Strategy =
   | 'live-order-book'
   | 'live-vwap-dislocation'
   | 'live-absorption-pressure'
+  | 'live-range-mean-reversion'
   | 'donchian-55-btc200'
   | 'donchian-20-sma200'
   | 'donchian-20-btc200'
@@ -579,6 +581,7 @@ export class AutoTraderModel {
       'live-order-book',
       'live-vwap-dislocation',
       'live-absorption-pressure',
+      'live-range-mean-reversion',
     ],
     scoutStrategies: defaultScoutStrategies,
     loading: true,
@@ -1042,6 +1045,7 @@ export class AutoTraderModel {
           'live-order-book',
           'live-vwap-dislocation',
           'live-absorption-pressure',
+          'live-range-mean-reversion',
         );
       const ledgerOpenPositionSymbols = positions.positions
         .filter((position) => Math.abs(position.quantity) > 1e-12)

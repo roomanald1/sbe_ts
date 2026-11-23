@@ -42,6 +42,8 @@ pub struct LiveScoutProfile {
     pub symbol: String,
     pub strategy: String,
     pub parameters: BTreeMap<String, f64>,
+    #[serde(default)]
+    pub market_regime: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -70,6 +72,7 @@ impl Default for ScoutConfiguration {
                 "live-order-book".into(),
                 "live-vwap-dislocation".into(),
                 "live-absorption-pressure".into(),
+                "live-range-mean-reversion".into(),
                 "donchian-55-btc200".into(),
                 "donchian-20-sma200".into(),
                 "donchian-20-btc200".into(),

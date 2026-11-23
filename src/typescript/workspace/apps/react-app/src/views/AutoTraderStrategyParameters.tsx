@@ -7,6 +7,10 @@ export const scoutableStrategies: Array<{ strategy: Strategy; label: string }> =
     { strategy: 'live-order-book', label: 'Live order book' },
     { strategy: 'live-vwap-dislocation', label: 'Live VWAP dislocation' },
     { strategy: 'live-absorption-pressure', label: 'Live absorption pressure' },
+    {
+      strategy: 'live-range-mean-reversion',
+      label: 'Live range mean reversion',
+    },
     { strategy: 'donchian-55-btc200', label: '55-day Donchian breakout' },
     { strategy: 'donchian-20-sma200', label: '20-day Donchian · asset SMA200' },
     { strategy: 'donchian-20-btc200', label: '20-day Donchian · BTC SMA200' },

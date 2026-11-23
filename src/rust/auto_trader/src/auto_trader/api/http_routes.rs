@@ -851,6 +851,7 @@ pub fn router_with_socket() -> (Router, AutoTraderSocketApi) {
         seen_worker_decision_events: Arc::new(Mutex::new(BTreeMap::new())),
         enabled: Arc::new(AtomicBool::new(enabled)),
         settings: Arc::new(Mutex::new(settings)),
+        activity_snapshot: Arc::new(Mutex::new(None)),
         settings_persist_notify: Arc::new(Notify::new()),
         price_path_last_checkpoint_requested_at: Arc::new(std::sync::Mutex::new(None)),
         state_updates,
@@ -880,6 +881,7 @@ pub fn router_with_socket() -> (Router, AutoTraderSocketApi) {
         dated_carry_path: settings_path.clone(),
     };
     start_settings_persistence_worker(&state);
+    start_activity_snapshot_worker(&state);
     start_learning_feedback_worker(&state);
     start_post_exit_observation_worker(&state);
     let carry_sync_book = state.dated_carry.clone();

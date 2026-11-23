@@ -1617,17 +1617,29 @@ export class AutoTraderOutcomesModel {
           .map((record) => record.decision_id)
           .filter((id): id is string => typeof id === 'string'),
       );
-      const missingEntryDecisionIds = [
+      const knownExitDecisionIds = new Set(
+        this.auditRows
+          .filter(
+            (record) =>
+              record.stage?.startsWith('exit') &&
+              !record.stage.startsWith('exit:post:'),
+          )
+          .map((record) => record.decision_id)
+          .filter((id): id is string => typeof id === 'string'),
+      );
+      const missingAuditDecisionIds = [
         ...new Set(
           closedLedgerSource
             .map((row) => row.decisionId)
             .filter(
               (id): id is string =>
-                typeof id === 'string' && !knownEntryDecisionIds.has(id),
+                typeof id === 'string' &&
+                (!knownEntryDecisionIds.has(id) ||
+                  !knownExitDecisionIds.has(id)),
             ),
         ),
       ];
-      void this.loadMissingEntryAudits(missingEntryDecisionIds);
+      void this.loadMissingEntryAudits(missingAuditDecisionIds);
       const closedLedgerRows = closedLedgerSource.map((row) => {
         const entryAudit = this.auditRows.find(
           (record) =>

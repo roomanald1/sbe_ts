@@ -231,6 +231,28 @@ async fn reconcile_maker_fills(
             }));
         }
         changed |= order.status != prior_status;
+        if order.status != prior_status && order.purpose == "signal" {
+            if let Some(decision_id) = order.decision_id.as_ref() {
+                queue_auto_trader_audit(state, serde_json::json!({
+                    "decision_id": decision_id,
+                    "trade_id": decision_id,
+                    "stage": "entry_status",
+                    "timestamp": current_time_ms(),
+                    "symbol": order.symbol,
+                    "strategy": order.strategy,
+                    "purpose": order.purpose,
+                    "status": order.status,
+                    "reason": order.failure_reason,
+                    "execution_order_id": order.execution_order_id,
+                    "order_type": order.order_type,
+                    "order_quantity": order.quantity,
+                    "filled_quantity": order.filled_quantity,
+                    "average_price": order.average_price,
+                    "fees": order.fees_paid,
+                    "fill_rate": order.fill_rate,
+                }));
+            }
+        }
         record_execution_order_quality(execution_feedback_outbox, execution_learning_order_ids, order);
     }
     if changed {

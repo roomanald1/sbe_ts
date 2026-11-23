@@ -200,6 +200,7 @@ struct ExplorationRiskAdjustment {
     scale: f64,
     sample_count: usize,
     weighted_net_return_percent: Option<f64>,
+    weighted_net_return_lcb_percent: Option<f64>,
     regime_scoped: bool,
 }
 
@@ -223,9 +224,53 @@ fn weighted_exploration_risk_scale(samples: &[(u64, f64)], now_ms: u64) -> (f64,
     ((1.0 - 0.65 * confidence * shortfall).clamp(0.35, 1.0), mean)
 }
 
+fn weighted_exploration_net_return_lcb_percent(
+    samples: &[(u64, f64)],
+    now_ms: u64,
+) -> Option<f64> {
+    const LOSS_HALF_LIFE_MS: f64 = 3.0 * 60.0 * 60.0 * 1_000.0;
+    const WIN_HALF_LIFE_MS: f64 = 60.0 * 60.0 * 1_000.0;
+    let (weight, squared_weight, weighted_return, weighted_square) = samples.iter().fold(
+        (0.0, 0.0, 0.0, 0.0),
+        |(weight, squared_weight, weighted_return, weighted_square), (timestamp, net)| {
+            if !net.is_finite() {
+                return (weight, squared_weight, weighted_return, weighted_square);
+            }
+            let age = now_ms.saturating_sub(*timestamp) as f64;
+            let half_life = if *net < 0.0 {
+                LOSS_HALF_LIFE_MS
+            } else {
+                WIN_HALF_LIFE_MS
+            };
+            let sample_weight = 0.5_f64.powf(age / half_life);
+            (
+                weight + sample_weight,
+                squared_weight + sample_weight * sample_weight,
+                weighted_return + sample_weight * net,
+                weighted_square + sample_weight * net * net,
+            )
+        },
+    );
+    if weight <= 0.0 || squared_weight <= 0.0 {
+        return None;
+    }
+    let mean = weighted_return / weight;
+    let effective_samples = weight * weight / squared_weight;
+    let variance = (weighted_square / weight - mean * mean).max(0.0);
+    let variance = if variance <= 1e-12 { 0.0 } else { variance };
+    let standard_error = (variance / effective_samples).sqrt();
+    Some(mean - 1.645 * standard_error)
+}
+
 impl ExplorationRiskAdjustment {
     fn neutral() -> Self {
-        Self { scale: 1.0, sample_count: 0, weighted_net_return_percent: None, regime_scoped: false }
+        Self {
+            scale: 1.0,
+            sample_count: 0,
+            weighted_net_return_percent: None,
+            weighted_net_return_lcb_percent: None,
+            regime_scoped: false,
+        }
     }
 }
 
@@ -245,6 +290,7 @@ fn contextual_exploration_risk_adjustment(
         _ => return ExplorationRiskAdjustment::neutral(),
     };
     const WINDOW_MS: u64 = 6 * 60 * 60 * 1_000;
+    let as_of_ms = now_ms.min(signal.timestamp);
     let mut samples = Vec::<(u64, f64, String)>::new();
     for (key, returns) in &settings.recent_profile_context_returns {
         let Some((_, context)) = key.split_once('|') else { continue; };
@@ -256,7 +302,7 @@ fn contextual_exploration_risk_adjustment(
             continue;
         }
         for &(timestamp, net_return) in returns {
-            if timestamp <= now_ms && now_ms.saturating_sub(timestamp) <= WINDOW_MS
+            if timestamp < as_of_ms && as_of_ms.saturating_sub(timestamp) <= WINDOW_MS
                 && net_return.is_finite()
             {
                 samples.push((timestamp, net_return, regime.to_owned()));
@@ -281,10 +327,12 @@ fn contextual_exploration_risk_adjustment(
     }
     let risk_samples = samples.iter().map(|(timestamp, net, _)| (*timestamp, *net)).collect::<Vec<_>>();
     let (scale, mean) = weighted_exploration_risk_scale(&risk_samples, now_ms);
+    let net_return_lcb = weighted_exploration_net_return_lcb_percent(&risk_samples, as_of_ms);
     ExplorationRiskAdjustment {
         scale,
         sample_count: samples.len(),
         weighted_net_return_percent: Some(mean),
+        weighted_net_return_lcb_percent: net_return_lcb,
         regime_scoped,
     }
 }
@@ -317,6 +365,26 @@ mod exploration_risk_tests {
         assert!(one_win_scale > loss_scale);
         assert!(one_win_scale < recovered_scale);
         assert!(recovered_scale <= 1.0);
+    }
+
+    #[test]
+    fn recent_net_edge_lower_bound_requires_a_positive_conservative_estimate() {
+        let now = 20_000_000;
+        let supported_wins = vec![(now, 0.2); 6];
+        assert!(
+            (weighted_exploration_net_return_lcb_percent(&supported_wins, now).unwrap() - 0.2)
+                .abs()
+                < 1e-12
+        );
+
+        let mixed = vec![(now, 0.2); 5]
+            .into_iter()
+            .chain([(now, -1.0)])
+            .collect::<Vec<_>>();
+        assert!(
+            weighted_exploration_net_return_lcb_percent(&mixed, now)
+                .is_some_and(|lower_bound| lower_bound < 0.0)
+        );
     }
 }
 

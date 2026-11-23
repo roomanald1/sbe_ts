@@ -71,6 +71,10 @@ pub struct LearnedExitProtectionPolicy {
 pub struct ScoutParameterVariant {
     pub symbol: String,
     pub strategy: String,
+    #[serde(default)]
+    pub market_regime: Option<String>,
+    #[serde(default)]
+    pub baseline_profile_id: String,
     pub parameter: String,
     pub candidate_value: f64,
     pub sample_count: usize,
