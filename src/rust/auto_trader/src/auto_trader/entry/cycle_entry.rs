@@ -2049,15 +2049,38 @@ async fn run_cycle_inner(
                     score: candidate.score, learning_context: market_context(candidate),
                 };
                 let mut settings = state.settings.lock().await;
-                if settings.feedback_outbox.len() < 10_000
-                    && !settings.feedback_outbox.iter().any(|pending| match pending {
-                        FeedbackEvent::MissedOpportunityCandidate { event_id: pending_id, .. } => pending_id == &event_id,
-                        _ => false,
-                    })
-                {
-                    settings.feedback_outbox.push(event);
-                    drop(settings);
-                    let _ = request_settings_persist(state);
+                match enqueue_scheduled_missed_opportunity_feedback(
+                    &mut settings,
+                    event,
+                    current_time_ms(),
+                ) {
+                    MissedFeedbackEnqueueResult::Queued
+                    | MissedFeedbackEnqueueResult::CoalescedExistingCase => {
+                        drop(settings);
+                        let _ = request_settings_persist(state);
+                    }
+                    MissedFeedbackEnqueueResult::EvictedOldestMissed => {
+                        drop(settings);
+                        record_feedback_terminal_drop(
+                            state,
+                            "missed_opportunity",
+                            &format!("Evicted oldest missed-opportunity candidate for {event_id}"),
+                            FeedbackTerminalDropKind::EvictedOldest,
+                        )
+                        .await;
+                    }
+                    MissedFeedbackEnqueueResult::DroppedOutcomeCapacity => {
+                        drop(settings);
+                        record_feedback_terminal_drop(
+                            state,
+                            "missed_opportunity",
+                            &format!("Dropped missed-opportunity candidate {event_id}: feedback outbox is full of trade/scout outcomes"),
+                            FeedbackTerminalDropKind::OutcomeCapacity,
+                        )
+                        .await;
+                    }
+                    MissedFeedbackEnqueueResult::Duplicate
+                    | MissedFeedbackEnqueueResult::Throttled => {}
                 }
             }
             record_cycle_candidate_blockers(

@@ -294,6 +294,7 @@ async fn update_settings(
     }
     if request.reset_learning {
         settings.learning.clear();
+        settings.missed_opportunity_last_enqueued_at_ms.clear();
         settings.learned_strategy_size_multipliers.clear();
         settings.recent_profile_context_returns.clear();
         settings.strategy_parameter_overrides.clear();

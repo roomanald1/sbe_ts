@@ -238,8 +238,110 @@ const FEEDBACK_OUTBOX_CAPACITY: usize = 10_000;
 enum MissedFeedbackEnqueueResult {
     Queued,
     EvictedOldestMissed,
+    CoalescedExistingCase,
     Duplicate,
+    Throttled,
     DroppedOutcomeCapacity,
+}
+
+fn missed_opportunity_case_key(event: &FeedbackEvent) -> Option<String> {
+    let FeedbackEvent::MissedOpportunityCandidate {
+        profile_id,
+        direction,
+        learning_context,
+        ..
+    } = event
+    else {
+        return None;
+    };
+    Some(format!("{profile_id}|{direction}|{learning_context}"))
+}
+
+fn missed_opportunity_case_cooldown_ms(settings: &Settings, event: &FeedbackEvent) -> u64 {
+    const UNDER_COVERED_COOLDOWN_MS: u64 = 5 * 60 * 1_000;
+    const COVERED_COOLDOWN_MS: u64 = 30 * 60 * 1_000;
+    let FeedbackEvent::MissedOpportunityCandidate {
+        profile_id,
+        parameters,
+        learning_context,
+        ..
+    } = event
+    else {
+        return UNDER_COVERED_COOLDOWN_MS;
+    };
+    let regime = learning_context
+        .split(':')
+        .nth(1)
+        .filter(|regime| matches!(*regime, "range" | "trend" | "volatile" | "mixed"));
+    let evidence_key = regime.map_or_else(
+        || profile_id.clone(),
+        |regime| format!("{profile_id}|regime:{regime}"),
+    );
+    let Some(evidence) = settings.learned_walk_forward_evidence.get(&evidence_key) else {
+        return UNDER_COVERED_COOLDOWN_MS;
+    };
+    let minimum_samples = parameters
+        .get(StrategyParameterKey::ScoutMinimumWalkForwardSamples.as_str())
+        .copied()
+        .filter(|value| value.is_finite() && *value >= 1.0)
+        .map(|value| value.round() as usize)
+        .unwrap_or(10);
+    let maximum_age_ms = parameters
+        .get(StrategyParameterKey::ScoutMaximumEvidenceAgeSeconds.as_str())
+        .copied()
+        .filter(|value| value.is_finite() && *value > 0.0)
+        .map(|value| (value as u64).saturating_mul(1_000))
+        .unwrap_or(24 * 60 * 60 * 1_000);
+    if evidence.sample_count < minimum_samples
+        || evidence.last_sample_timestamp_ms == 0
+        || current_time_ms().saturating_sub(evidence.last_sample_timestamp_ms) > maximum_age_ms
+    {
+        UNDER_COVERED_COOLDOWN_MS
+    } else {
+        COVERED_COOLDOWN_MS
+    }
+}
+
+fn enqueue_scheduled_missed_opportunity_feedback(
+    settings: &mut Settings,
+    event: FeedbackEvent,
+    now_ms: u64,
+) -> MissedFeedbackEnqueueResult {
+    const MAX_SCHEDULED_CASES: usize = 20_000;
+    let Some(case_key) = missed_opportunity_case_key(&event) else {
+        return MissedFeedbackEnqueueResult::Duplicate;
+    };
+    let cooldown_ms = missed_opportunity_case_cooldown_ms(settings, &event);
+    if settings
+        .missed_opportunity_last_enqueued_at_ms
+        .get(&case_key)
+        .is_some_and(|last| now_ms.saturating_sub(*last) < cooldown_ms)
+    {
+        return MissedFeedbackEnqueueResult::Throttled;
+    }
+    let result = enqueue_missed_opportunity_feedback(&mut settings.feedback_outbox, event);
+    if matches!(
+        result,
+        MissedFeedbackEnqueueResult::Queued
+            | MissedFeedbackEnqueueResult::EvictedOldestMissed
+            | MissedFeedbackEnqueueResult::CoalescedExistingCase
+    ) {
+        settings
+            .missed_opportunity_last_enqueued_at_ms
+            .insert(case_key, now_ms);
+        while settings.missed_opportunity_last_enqueued_at_ms.len() > MAX_SCHEDULED_CASES {
+            let Some(oldest) = settings
+                .missed_opportunity_last_enqueued_at_ms
+                .iter()
+                .min_by_key(|(_, timestamp)| *timestamp)
+                .map(|(key, _)| key.clone())
+            else {
+                break;
+            };
+            settings.missed_opportunity_last_enqueued_at_ms.remove(&oldest);
+        }
+    }
+    result
 }
 
 fn enqueue_missed_opportunity_feedback(
@@ -251,6 +353,14 @@ fn enqueue_missed_opportunity_feedback(
     };
     if outbox.iter().any(|pending| feedback_event_id(pending) == event_id) {
         return MissedFeedbackEnqueueResult::Duplicate;
+    }
+    let case_key = missed_opportunity_case_key(&event);
+    if let Some(index) = outbox.iter().position(|pending| {
+        matches!(pending, FeedbackEvent::MissedOpportunityCandidate { .. })
+            && missed_opportunity_case_key(pending) == case_key
+    }) {
+        outbox[index] = event;
+        return MissedFeedbackEnqueueResult::CoalescedExistingCase;
     }
     let mut evicted = false;
     if outbox.len() >= FEEDBACK_OUTBOX_CAPACITY {
@@ -614,7 +724,7 @@ mod strategy_pause_snapshot_tests {
     #[test]
     fn missed_opportunity_retention_evicts_oldest_missed_without_evicting_outcomes() {
         let missed = |id: String| FeedbackEvent::MissedOpportunityCandidate {
-            event_id: id,
+            event_id: id.clone(),
             observed_at_ms: 1,
             symbol: "BTC-USDT".into(),
             strategy: "live-momentum".into(),
@@ -623,7 +733,7 @@ mod strategy_pause_snapshot_tests {
             direction: "bullish".into(),
             strength: 0.5,
             score: 0.5,
-            learning_context: "long:trend:BTC-USDT:live-momentum".into(),
+            learning_context: format!("long:trend:BTC-USDT:live-momentum:{id}"),
         };
         let mut outbox = (0..FEEDBACK_OUTBOX_CAPACITY)
             .map(|index| missed(format!("missed-{index}")))
@@ -1820,6 +1930,10 @@ async fn receive_strategy_decision(
         }
         if report.decision == strategy::LiveStrategyDecision::Reject
             && report.strategy.is_live_insight()
+            && strategy::is_autotrader_symbol_allowed(&report.symbol)
+            && matches!(report.signal.direction.as_str(), "bullish" | "bearish")
+            && report.signal.strength.is_finite()
+            && report.signal.score.is_finite()
         {
             let parameters = report
                 .signal
@@ -1859,8 +1973,16 @@ async fn receive_strategy_decision(
                 learning_context: market_context(&report.signal),
             };
             let mut settings = state.settings.lock().await;
-            match enqueue_missed_opportunity_feedback(&mut settings.feedback_outbox, feedback) {
+            match enqueue_scheduled_missed_opportunity_feedback(
+                &mut settings,
+                feedback,
+                current_time_ms(),
+            ) {
                 MissedFeedbackEnqueueResult::Queued => {
+                    drop(settings);
+                    let _ = request_settings_persist(&state);
+                }
+                MissedFeedbackEnqueueResult::CoalescedExistingCase => {
                     drop(settings);
                     let _ = request_settings_persist(&state);
                 }
@@ -1874,7 +1996,8 @@ async fn receive_strategy_decision(
                     record_feedback_terminal_drop(&state, "missed_opportunity", "Rejected candidate: feedback outbox is full of trade/scout outcomes", FeedbackTerminalDropKind::OutcomeCapacity).await;
                     crate::service_log!("WARN", "Dropped missed-opportunity feedback {}: feedback outbox is full of trade/scout outcomes", event_id);
                 }
-                MissedFeedbackEnqueueResult::Duplicate => {}
+                MissedFeedbackEnqueueResult::Duplicate
+                | MissedFeedbackEnqueueResult::Throttled => {}
             }
         }
         return Ok(StatusCode::ACCEPTED);

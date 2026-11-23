@@ -101,6 +101,8 @@ struct Settings {
     #[serde(default)]
     feedback_outbox: Vec<strategy::FeedbackEvent>,
     #[serde(default)]
+    missed_opportunity_last_enqueued_at_ms: BTreeMap<String, u64>,
+    #[serde(default)]
     post_exit_observations: Vec<serde_json::Value>,
     #[serde(default)]
     post_exit_adaptation_history: Vec<serde_json::Value>,
@@ -375,6 +377,7 @@ impl Default for Settings {
             strategy_positions: BTreeMap::new(),
             learning: BTreeMap::new(),
             feedback_outbox: Vec::new(),
+            missed_opportunity_last_enqueued_at_ms: BTreeMap::new(),
             post_exit_observations: Vec::new(),
             post_exit_adaptation_history: Vec::new(),
             exit_timing_feedback_outbox: Vec::new(),
