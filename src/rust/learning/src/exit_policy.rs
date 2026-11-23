@@ -31,6 +31,8 @@ const MINIMUM_LOCK_KEY: &str = "profit_protection_minimum_lock_percent";
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
 pub(crate) struct ProfitProtectionParameters {
+    pub stop_loss_percent: f64,
+    pub take_profit_percent: f64,
     pub activation_percent: f64,
     pub giveback_percent: f64,
     pub minimum_lock_percent: f64,
@@ -49,6 +51,8 @@ pub(crate) struct ExitPolicyEvidence {
     pub validation_negative_difference_rate: f64,
     pub validation_tenth_percentile_difference_percent: f64,
     pub validation_worst_difference_percent: f64,
+    pub stop_loss_percent: f64,
+    pub take_profit_percent: f64,
     pub parameters: ProfitProtectionParameters,
 }
 
@@ -85,7 +89,161 @@ struct CandidateScore {
     training_mean: f64,
 }
 
-/// Select a bounded, catalog-valid rule only when later chronological
+#[derive(Clone, Copy)]
+enum ExitPolicyDimension {
+    StopLoss,
+    TakeProfit,
+    Activation,
+    Giveback,
+    MinimumLock,
+}
+
+impl ExitPolicyDimension {
+    const ALL: [Self; 5] = [
+        Self::StopLoss,
+        Self::TakeProfit,
+        Self::Activation,
+        Self::Giveback,
+        Self::MinimumLock,
+    ];
+}
+
+impl ProfitProtectionParameters {
+    fn set(&mut self, dimension: ExitPolicyDimension, value: f64) {
+        match dimension {
+            ExitPolicyDimension::StopLoss => self.stop_loss_percent = value,
+            ExitPolicyDimension::TakeProfit => self.take_profit_percent = value,
+            ExitPolicyDimension::Activation => self.activation_percent = value,
+            ExitPolicyDimension::Giveback => self.giveback_percent = value,
+            ExitPolicyDimension::MinimumLock => self.minimum_lock_percent = value,
+        }
+    }
+}
+
+struct EmpiricalPolicyCandidates([Vec<f64>; 5]);
+
+impl EmpiricalPolicyCandidates {
+    fn values(&self, dimension: ExitPolicyDimension) -> &[f64] {
+        match dimension {
+            ExitPolicyDimension::StopLoss => &self.0[0],
+            ExitPolicyDimension::TakeProfit => &self.0[1],
+            ExitPolicyDimension::Activation => &self.0[2],
+            ExitPolicyDimension::Giveback => &self.0[3],
+            ExitPolicyDimension::MinimumLock => &self.0[4],
+        }
+    }
+}
+
+fn median_baseline(samples: &[ReplayObservation]) -> Option<ProfitProtectionParameters> {
+    let median = |mut values: Vec<f64>| {
+        values.sort_by(f64::total_cmp);
+        values.get(values.len() / 2).copied()
+    };
+    Some(ProfitProtectionParameters {
+        stop_loss_percent: median(
+            samples
+                .iter()
+                .map(|sample| sample.stop_loss_percent)
+                .collect(),
+        )?,
+        take_profit_percent: median(
+            samples
+                .iter()
+                .map(|sample| sample.take_profit_percent)
+                .collect(),
+        )?,
+        activation_percent: median(
+            samples
+                .iter()
+                .map(|sample| sample.baseline.activation_percent)
+                .collect(),
+        )?,
+        giveback_percent: median(
+            samples
+                .iter()
+                .map(|sample| sample.baseline.giveback_percent)
+                .collect(),
+        )?,
+        minimum_lock_percent: median(
+            samples
+                .iter()
+                .map(|sample| sample.baseline.minimum_lock_percent)
+                .collect(),
+        )?,
+    })
+}
+
+fn empirical_policy_candidates(samples: &[ReplayObservation]) -> EmpiricalPolicyCandidates {
+    let mut values: [Vec<f64>; 5] = std::array::from_fn(|_| Vec::new());
+    for sample in samples {
+        values[0].push(sample.stop_loss_percent);
+        values[1].push(sample.take_profit_percent);
+        values[2].push(sample.baseline.activation_percent);
+        values[3].push(sample.baseline.giveback_percent);
+        values[4].push(sample.baseline.minimum_lock_percent);
+
+        let mut peak = f64::NEG_INFINITY;
+        for quote in &sample.path {
+            let Some(net) = replay_quote_return(sample, quote) else {
+                continue;
+            };
+            peak = peak.max(net);
+            if net < 0.0 {
+                values[0].push(-net);
+            } else {
+                values[1].push(net);
+                values[2].push(net);
+                values[4].push(net);
+            }
+            let giveback = peak - net;
+            if giveback > 0.0 {
+                values[3].push(giveback);
+            }
+        }
+    }
+    for (index, candidates) in values.iter_mut().enumerate() {
+        candidates.retain(|value| {
+            value.is_finite()
+                && if index == 4 {
+                    *value >= 0.0
+                } else {
+                    *value > 0.0
+                }
+        });
+        candidates.sort_by(f64::total_cmp);
+        candidates.dedup_by(|left, right| (*left - *right).abs() <= f64::EPSILON);
+        if candidates.len() > MAX_CANDIDATES_PER_PARAMETER {
+            let original = std::mem::take(candidates);
+            let last = original.len() - 1;
+            candidates.extend((0..MAX_CANDIDATES_PER_PARAMETER).map(|index| {
+                let position = index * last / (MAX_CANDIDATES_PER_PARAMETER - 1);
+                original[position]
+            }));
+            candidates.dedup_by(|left, right| (*left - *right).abs() <= f64::EPSILON);
+        }
+    }
+    EmpiricalPolicyCandidates(values)
+}
+
+fn valid_policy_parameters(parameters: ProfitProtectionParameters) -> bool {
+    [
+        parameters.stop_loss_percent,
+        parameters.take_profit_percent,
+        parameters.activation_percent,
+        parameters.giveback_percent,
+        parameters.minimum_lock_percent,
+    ]
+    .into_iter()
+    .all(|value| value.is_finite())
+        && parameters.stop_loss_percent > 0.0
+        && parameters.take_profit_percent > 0.0
+        && parameters.activation_percent > 0.0
+        && parameters.giveback_percent > 0.0
+        && parameters.minimum_lock_percent >= 0.0
+        && parameters.minimum_lock_percent <= parameters.activation_percent
+}
+
+/// Select an empirically derived rule only when later chronological
 /// validation beats the captured baseline. `cutoff_timestamp_ms` is the
 /// point-in-time boundary for the caller's profile snapshot.
 pub(crate) fn select_exit_policy<'a, I>(
@@ -97,27 +255,10 @@ pub(crate) fn select_exit_policy<'a, I>(
 where
     I: IntoIterator<Item = &'a Value>,
 {
-    let strategy = strategy::Strategy::from_name(strategy_name)?;
-    let specs = strategy.parameter_specs();
-    let activation_spec = specs
-        .iter()
-        .find(|spec| spec.key.as_str() == ACTIVATION_KEY)?;
-    let giveback_spec = specs
-        .iter()
-        .find(|spec| spec.key.as_str() == GIVEBACK_KEY)?;
-    let lock_spec = specs
-        .iter()
-        .find(|spec| spec.key.as_str() == MINIMUM_LOCK_KEY)?;
-    let defaults = ProfitProtectionParameters {
-        activation_percent: activation_spec.default,
-        giveback_percent: giveback_spec.default,
-        minimum_lock_percent: lock_spec.default,
-    };
+    strategy::Strategy::from_name(strategy_name)?;
     let mut samples = observations
         .into_iter()
-        .filter_map(|value| {
-            parse_observation(value, symbol, strategy_name, cutoff_timestamp_ms, &specs)
-        })
+        .filter_map(|value| parse_observation(value, symbol, strategy_name, cutoff_timestamp_ms))
         .collect::<Vec<_>>();
     samples.sort_by_key(|sample| (sample.exit_timestamp_ms, sample.observed_at_ms));
     let mut seen_event_ids = BTreeSet::new();
@@ -134,27 +275,22 @@ where
     }
     let (training, validation) = samples.split_at(split);
     let historical_baseline_score = baseline_score(training)?;
-    let default_candidate_score = score(training, defaults)?;
+    let baseline_parameters = median_baseline(training)?;
     let mut best = CandidateScore {
-        parameters: defaults,
-        training_mean: default_candidate_score,
+        parameters: baseline_parameters,
+        training_mean: score(training, baseline_parameters)?,
     };
-
-    for activation in candidate_values(
-        activation_spec.min,
-        activation_spec.max,
-        activation_spec.step,
-    ) {
-        for giveback in candidate_values(giveback_spec.min, giveback_spec.max, giveback_spec.step) {
-            for lock in candidate_values(lock_spec.min, lock_spec.max, lock_spec.step) {
-                if lock > activation {
+    let candidates = empirical_policy_candidates(training);
+    let mut improved = true;
+    while improved {
+        improved = false;
+        for dimension in ExitPolicyDimension::ALL {
+            for value in candidates.values(dimension) {
+                let mut parameters = best.parameters;
+                parameters.set(dimension, *value);
+                if !valid_policy_parameters(parameters) {
                     continue;
                 }
-                let parameters = ProfitProtectionParameters {
-                    activation_percent: activation,
-                    giveback_percent: giveback,
-                    minimum_lock_percent: lock,
-                };
                 let Some(candidate_mean) = score(training, parameters) else {
                     continue;
                 };
@@ -163,6 +299,7 @@ where
                         parameters,
                         training_mean: candidate_mean,
                     };
+                    improved = true;
                 }
             }
         }
@@ -227,6 +364,8 @@ where
         validation_negative_difference_rate: negative_difference_rate,
         validation_tenth_percentile_difference_percent: tenth_percentile_difference,
         validation_worst_difference_percent: worst_difference,
+        stop_loss_percent: best.parameters.stop_loss_percent,
+        take_profit_percent: best.parameters.take_profit_percent,
         parameters: best.parameters,
     })
 }
@@ -236,7 +375,6 @@ fn parse_observation(
     symbol: &str,
     strategy_name: &str,
     cutoff_timestamp_ms: u64,
-    specs: &[strategy::StrategyParameterSpec],
 ) -> Option<ReplayObservation> {
     if value["symbol"].as_str()? != symbol || value["strategy"].as_str()? != strategy_name {
         return None;
@@ -276,20 +414,12 @@ fn parse_observation(
     // from current defaults: old/open-position policy can differ.
     let parameters = &value["strategy_decision"]["strategy_parameters"];
     let baseline = ProfitProtectionParameters {
+        stop_loss_percent,
+        take_profit_percent,
         activation_percent: parameters[ACTIVATION_KEY].as_f64()?,
         giveback_percent: parameters[GIVEBACK_KEY].as_f64()?,
         minimum_lock_percent: parameters[MINIMUM_LOCK_KEY].as_f64()?,
     };
-    for (key, value) in [
-        (ACTIVATION_KEY, baseline.activation_percent),
-        (GIVEBACK_KEY, baseline.giveback_percent),
-        (MINIMUM_LOCK_KEY, baseline.minimum_lock_percent),
-    ] {
-        let spec = specs.iter().find(|spec| spec.key.as_str() == key)?;
-        if value < spec.min || value > spec.max {
-            return None;
-        }
-    }
     if ![
         entry_price,
         quantity,
@@ -370,7 +500,7 @@ fn valid_exit_policy_inputs(
         && stop_loss_percent > 0.0
         && take_profit_percent.is_finite()
         && take_profit_percent > 0.0
-        && baseline.minimum_lock_percent <= baseline.activation_percent
+        && valid_policy_parameters(baseline)
 }
 
 fn has_horizon_coverage(path: &[Quote], exit_timestamp_ms: u64, horizon_ms: u64) -> bool {
@@ -452,19 +582,11 @@ fn replay_outcome(
         } else {
             quote.ask
         };
-        let net_percent =
-            ((executable_price - sample.entry_price) * sample.quantity * sample.direction
-                - sample.entry_fees
-                - executable_price * sample.quantity * sample.taker_fee_rate)
-                / notional
-                * 100.0;
-        if !net_percent.is_finite() {
-            return None;
-        }
+        let net_percent = replay_quote_return(sample, quote)?;
         peak = peak.max(net_percent);
         // Mirror live exit priority at sampled quote resolution: stop loss,
         // profit protection, then take profit.
-        if net_percent <= -sample.stop_loss_percent {
+        if net_percent <= -parameters.stop_loss_percent {
             exit = Some((executable_price, ReplayExitReason::StopLoss));
             break;
         }
@@ -475,7 +597,7 @@ fn replay_outcome(
             exit = Some((executable_price, ReplayExitReason::ProfitProtection));
             break;
         }
-        if net_percent >= sample.take_profit_percent {
+        if net_percent >= parameters.take_profit_percent {
             exit = Some((executable_price, ReplayExitReason::TakeProfit));
             break;
         }
@@ -502,6 +624,25 @@ fn replay_outcome(
             * 100.0,
         exit_reason,
     })
+}
+
+fn replay_quote_return(sample: &ReplayObservation, quote: &Quote) -> Option<f64> {
+    let notional = sample.entry_price * sample.quantity;
+    if !notional.is_finite() || notional <= 0.0 {
+        return None;
+    }
+    let executable_price = if sample.direction > 0.0 {
+        quote.bid
+    } else {
+        quote.ask
+    };
+    let net_percent =
+        ((executable_price - sample.entry_price) * sample.quantity * sample.direction
+            - sample.entry_fees
+            - executable_price * sample.quantity * sample.taker_fee_rate)
+            / notional
+            * 100.0;
+    net_percent.is_finite().then_some(net_percent)
 }
 
 fn score(samples: &[ReplayObservation], parameters: ProfitProtectionParameters) -> Option<f64> {
@@ -560,6 +701,7 @@ fn passes_downside_gate(
         && worst_difference >= MIN_VALIDATION_WORST_DIFFERENCE_PERCENT
 }
 
+#[cfg(test)]
 fn candidate_values(min: f64, max: f64, step: f64) -> Vec<f64> {
     if !min.is_finite() || !max.is_finite() || !step.is_finite() || step <= 0.0 || max < min {
         return Vec::new();
@@ -619,6 +761,8 @@ mod tests {
                 let hold = replay_outcome(
                     sample,
                     ProfitProtectionParameters {
+                        stop_loss_percent: 0.5,
+                        take_profit_percent: 0.8,
                         activation_percent: f64::MAX,
                         giveback_percent: 0.3,
                         minimum_lock_percent: 0.0,
@@ -720,6 +864,8 @@ mod tests {
                 replay_outcome(
                     sample,
                     ProfitProtectionParameters {
+                        stop_loss_percent: 0.5,
+                        take_profit_percent: 0.8,
                         activation_percent: f64::MAX,
                         giveback_percent: 0.3,
                         minimum_lock_percent: 0.0,
@@ -893,6 +1039,8 @@ mod tests {
             stop_loss_percent: 5.0,
             take_profit_percent: 5.0,
             baseline: ProfitProtectionParameters {
+                stop_loss_percent: 0.5,
+                take_profit_percent: 0.8,
                 activation_percent: 0.15,
                 giveback_percent: 0.1,
                 minimum_lock_percent: 0.05,
@@ -930,6 +1078,8 @@ mod tests {
             stop_loss_percent: 5.0,
             take_profit_percent: 5.0,
             baseline: ProfitProtectionParameters {
+                stop_loss_percent: 0.5,
+                take_profit_percent: 0.8,
                 activation_percent: 0.15,
                 giveback_percent: 0.1,
                 minimum_lock_percent: 0.05,
@@ -960,6 +1110,8 @@ mod tests {
             stop_loss_percent: 0.65,
             take_profit_percent: 5.0,
             baseline: ProfitProtectionParameters {
+                stop_loss_percent: 0.5,
+                take_profit_percent: 0.8,
                 activation_percent: 0.15,
                 giveback_percent: 0.1,
                 minimum_lock_percent: 0.05,
@@ -999,6 +1151,8 @@ mod tests {
             stop_loss_percent: 5.0,
             take_profit_percent: 0.5,
             baseline: ProfitProtectionParameters {
+                stop_loss_percent: 0.5,
+                take_profit_percent: 0.8,
                 activation_percent: 0.15,
                 giveback_percent: 0.1,
                 minimum_lock_percent: 0.05,
@@ -1043,6 +1197,8 @@ mod tests {
     #[test]
     fn rejects_invalid_fees_exit_thresholds_and_protection_baselines() {
         let baseline = ProfitProtectionParameters {
+            stop_loss_percent: 0.5,
+            take_profit_percent: 0.8,
             activation_percent: 0.15,
             giveback_percent: 0.1,
             minimum_lock_percent: 0.05,

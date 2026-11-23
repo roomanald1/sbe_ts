@@ -1,3 +1,48 @@
+use std::io::Write;
+
+fn compress_live_strategy_update(bytes: &[u8]) -> std::io::Result<Vec<u8>> {
+    let mut encoder = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::fast());
+    encoder.write_all(bytes)?;
+    encoder.finish()
+}
+
+fn ui_snapshot_json(snapshot: &SignalSnapshot) -> serde_json::Value {
+    let components = &snapshot.components;
+    serde_json::json!({
+        "symbol": &snapshot.symbol,
+        "timestamp": snapshot.timestamp,
+        "direction": &snapshot.direction,
+        "score": snapshot.score,
+        "strength": snapshot.strength,
+        "components": {
+            "trend_1m_percent": components.trend_1m_percent,
+            "momentum_10s_percent": components.momentum_10s_percent,
+            "trade_flow_imbalance": components.trade_flow_imbalance,
+            "book_imbalance": components.book_imbalance,
+            "volatility_1m_percent": components.volatility_1m_percent,
+            "trend_5m_percent": components.trend_5m_percent,
+            "trend_5m_volatility_units": components.trend_5m_volatility_units,
+            "mispricing_vs_vwap_bps": components.mispricing_vs_vwap_bps,
+            "pressure_without_price_move": components.pressure_without_price_move,
+            "aggressor_cost_bps": components.aggressor_cost_bps,
+            "momentum_by_window": [],
+            "trend_volatility_units_by_window": [],
+            "trade_flow_by_window": [],
+            "book_imbalance_by_depth": [],
+            "vwap_dislocation_by_window": [],
+            "absorption_pressure_by_window": [],
+        },
+        "reasons": &snapshot.reasons,
+        "news_attribution": &snapshot.news_attribution,
+        "stale": snapshot.stale,
+        "ranging_probability": snapshot.ranging_probability,
+        "range_lower_bound": snapshot.range_lower_bound,
+        "range_upper_bound": snapshot.range_upper_bound,
+        "evidence_coverage": snapshot.evidence_coverage,
+        "estimated_accuracy": snapshot.estimated_accuracy,
+    })
+}
+
 fn encode_market_levels(levels: &[(f64, f64)]) -> Vec<serde_json::Value> {
     levels
         .iter()
@@ -305,6 +350,12 @@ async fn ingest_signal_event(
     admit_runtime_symbol(&runtime, &request.symbol)
         .await
         .map_err(|()| (StatusCode::TOO_MANY_REQUESTS, "Insights active-symbol capacity reached".to_owned()))?;
+    let event_kind = match &request.event {
+        SignalFeedEvent::Price { .. } => "price",
+        SignalFeedEvent::Trade { .. } => "trade",
+        SignalFeedEvent::Book { .. } => "book",
+    };
+    let event_processing_started = Instant::now();
     // Nonblocking snapshot read: market feed handling never waits on RSS/model work.
     let current_news = Arc::clone(&runtime.news.borrow());
     let current_news_weight = runtime
@@ -344,7 +395,9 @@ async fn ingest_signal_event(
                     }
                 }
                 let (price_count_before, previous_price) = engine.price_state();
+                let engine_work_started = Instant::now();
                 let outcomes = engine.on_price(timestamp, price, volatility_1m);
+                crate::latency::record_engine_work("price", engine_work_started.elapsed());
                 let (price_count_after, latest_price) = engine.price_state();
                 let accepted = price.is_finite()
                     && price > 0.0
@@ -455,8 +508,19 @@ async fn ingest_signal_event(
                     );
                 }
                 if let Some(snapshot) = snapshot.as_mut() {
-                    let news_vote =
-                        apply_news_signal(snapshot, &current_news, now_ms(), current_news_weight);
+                    // News is a weak, slowly refreshed signal. Recompute its
+                    // attribution on the research cadence instead of cloning
+                    // article metadata into every two-second live snapshot.
+                    let news_vote = should_capture_research
+                        .then(|| {
+                            apply_news_signal(
+                                snapshot,
+                                &current_news,
+                                now_ms(),
+                                current_news_weight,
+                            )
+                        })
+                        .flatten();
                     if should_capture_research {
                         engine.research_sample_due(snapshot.timestamp);
                         // Reference returns are only consumed by research samples.
@@ -533,7 +597,9 @@ async fn ingest_signal_event(
                 size,
                 is_buy,
             } => {
+                let engine_work_started = Instant::now();
                 engine.on_trade(timestamp, price, size, is_buy);
+                crate::latency::record_engine_work("trade", engine_work_started.elapsed());
                 None
             }
             SignalFeedEvent::Book {
@@ -545,6 +611,7 @@ async fn ingest_signal_event(
                 bid_levels,
                 ask_levels,
             } => {
+                let engine_work_started = Instant::now();
                 engine.on_book(
                     timestamp,
                     best_bid,
@@ -554,6 +621,7 @@ async fn ingest_signal_event(
                     &bid_levels,
                     &ask_levels,
                 );
+                crate::latency::record_engine_work("book", engine_work_started.elapsed());
                 if best_bid.is_finite()
                     && best_ask.is_finite()
                     && best_bid > 0.0
@@ -609,6 +677,7 @@ async fn ingest_signal_event(
                     &cached.ask_levels,
                 )
             });
+        let signal_encoding_started = Instant::now();
         let update = strategy::StrategyInsightUpdate {
             contract_version: strategy::STRATEGY_INSIGHT_UPDATE_VERSION,
             event_id: format!("{}:{}", snapshot.symbol, snapshot.timestamp),
@@ -622,24 +691,37 @@ async fn ingest_signal_event(
             dated_carry_settlement: None,
         };
         if let Ok(encoded) = serde_json::to_vec(&update) {
+            let compressed = compress_live_strategy_update(&encoded);
+            crate::latency::record_strategy_update_encoding(
+                signal_encoding_started.elapsed(),
+                encoded.len(),
+                compressed.as_ref().map_or(0, Vec::len),
+            );
             let encoded = Bytes::from(encoded);
             runtime.latest_strategy_signal_updates.insert(snapshot.symbol.clone(), encoded.clone());
             let _ = runtime.strategy_signal_events.send(encoded.clone());
             let _ = runtime.legacy_strategy_signal_events.send(encoded);
+            match compressed {
+                Ok(compressed) => {
+                    let compressed = Bytes::from(compressed);
+                    runtime
+                        .latest_compressed_strategy_signal_updates
+                        .insert(snapshot.symbol.clone(), compressed.clone());
+                    let _ = runtime.compressed_strategy_signal_events.send(compressed);
+                }
+                Err(error) => crate::service_log!(
+                    "ERROR",
+                    "Could not compress live strategy signal update: {error}"
+                ),
+            }
         }
-        let mut ui_snapshot = snapshot.clone();
-        ui_snapshot.components.momentum_by_window.clear();
-        ui_snapshot.components.trend_volatility_units_by_window.clear();
-        ui_snapshot.components.trade_flow_by_window.clear();
-        ui_snapshot.components.book_imbalance_by_depth.clear();
-        ui_snapshot.components.vwap_dislocation_by_window.clear();
-        ui_snapshot.components.absorption_pressure_by_window.clear();
-        let snapshot_json = serde_json::to_value(ui_snapshot).unwrap_or(serde_json::Value::Null);
+        let snapshot_json = ui_snapshot_json(snapshot);
         runtime
             .ui_snapshot_cache
             .insert(snapshot.symbol.clone(), snapshot_json);
         runtime.ui_snapshot_notify.notify_one();
     }
+    crate::latency::record_event_processing(event_kind, event_processing_started.elapsed());
     Ok(Json(snapshot))
 }
 
@@ -653,10 +735,13 @@ async fn publish_scout_markouts(
         .expect("scout learning delivery semaphore remains open");
     let learning_rsocket_url = std::env::var("LEARNING_RSOCKET_URL")
         .unwrap_or_else(|_| "ws://127.0.0.1:10010".to_owned());
-    for (decision_id, evaluation, observation_only, strategy) in outcomes {
+    for (decision_id, evaluation, observation_only, strategy_name) in outcomes {
+        let strategy_target = strategy_name
+            .as_deref()
+            .and_then(strategy::Strategy::from_name);
         let payload = serde_json::json!({
             "decision_id": decision_id,
-            "strategy": strategy,
+            "strategy": strategy_name,
             "symbol": evaluation.symbol,
             "signal_timestamp_ms": evaluation.signal_timestamp,
             "evaluated_timestamp_ms": evaluation.evaluated_timestamp,
@@ -683,7 +768,7 @@ async fn publish_scout_markouts(
                 &learning_rsocket_url,
                 &strategy::ScoutCoordinatorRouteCommand {
                     request_id: format!("scout-markout:{decision_id}:{}", evaluation.evaluated_timestamp),
-                    strategy: None,
+                    strategy: strategy_target,
                     method: strategy::ScoutWorkerHttpMethod::Post,
                     path: "/scout-markout".into(),
                     payload: payload.clone(),
@@ -697,10 +782,11 @@ async fn publish_scout_markouts(
                 }
                 Ok(response) if attempt == 2 => crate::service_log!(
                     "ERROR",
-                    "Could not deliver scout markout sample_id={} symbol={}: status {}",
+                    "Could not deliver scout markout sample_id={} symbol={}: status {} body={}",
                     decision_id,
                     evaluation.symbol,
-                    response.status
+                    response.status,
+                    response.body
                 ),
                 Err(error) if attempt == 2 => crate::service_log!(
                     "ERROR",

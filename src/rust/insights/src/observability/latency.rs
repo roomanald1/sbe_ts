@@ -11,6 +11,7 @@ const BUCKETS_US: [u64; 10] = [
 struct Histogram {
     buckets: [AtomicU64; 11],
     count: AtomicU64,
+    total_micros: AtomicU64,
 }
 
 impl Histogram {
@@ -18,6 +19,7 @@ impl Histogram {
         Self {
             buckets: [const { AtomicU64::new(0) }; 11],
             count: AtomicU64::new(0),
+            total_micros: AtomicU64::new(0),
         }
     }
 
@@ -28,6 +30,7 @@ impl Histogram {
             .position(|limit| micros <= *limit)
             .unwrap_or(BUCKETS_US.len());
         self.buckets[bucket].fetch_add(1, Ordering::Relaxed);
+        self.total_micros.fetch_add(micros, Ordering::Relaxed);
         self.count.fetch_add(1, Ordering::Relaxed);
     }
 
@@ -48,10 +51,12 @@ impl Histogram {
 
     fn snapshot(&self) -> Value {
         let count = self.count.load(Ordering::Relaxed);
+        let average_micros = (count > 0).then(|| self.total_micros.load(Ordering::Relaxed) / count);
         json!({
             "count": count,
             "p50_us": self.percentile(50, count),
             "p95_us": self.percentile(95, count),
+            "average_us": average_micros,
         })
     }
 }
@@ -59,6 +64,16 @@ impl Histogram {
 static EVENT_QUEUE_WAIT: Histogram = Histogram::new();
 static ENGINE_LOCK_WAIT: Histogram = Histogram::new();
 static SNAPSHOT_COMPUTE: Histogram = Histogram::new();
+static PRICE_EVENT_PROCESSING: Histogram = Histogram::new();
+static TRADE_EVENT_PROCESSING: Histogram = Histogram::new();
+static BOOK_EVENT_PROCESSING: Histogram = Histogram::new();
+static PRICE_ENGINE_WORK: Histogram = Histogram::new();
+static TRADE_ENGINE_WORK: Histogram = Histogram::new();
+static BOOK_ENGINE_WORK: Histogram = Histogram::new();
+static STRATEGY_UPDATE_ENCODING: Histogram = Histogram::new();
+static UI_SNAPSHOT_PUSH: Histogram = Histogram::new();
+static STRATEGY_UPDATE_RAW_BYTES: AtomicU64 = AtomicU64::new(0);
+static STRATEGY_UPDATE_COMPRESSED_BYTES: AtomicU64 = AtomicU64::new(0);
 static DROPPED_RESEARCH_RECORDS: AtomicU64 = AtomicU64::new(0);
 static SIGNAL_FEED_CONNECTED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
@@ -125,6 +140,38 @@ pub fn record_snapshot_compute(duration: Duration) {
     SNAPSHOT_COMPUTE.record(duration);
 }
 
+pub fn record_event_processing(kind: &str, duration: Duration) {
+    match kind {
+        "price" => PRICE_EVENT_PROCESSING.record(duration),
+        "trade" => TRADE_EVENT_PROCESSING.record(duration),
+        "book" => BOOK_EVENT_PROCESSING.record(duration),
+        _ => {}
+    }
+}
+
+pub fn record_engine_work(kind: &str, duration: Duration) {
+    match kind {
+        "price" => PRICE_ENGINE_WORK.record(duration),
+        "trade" => TRADE_ENGINE_WORK.record(duration),
+        "book" => BOOK_ENGINE_WORK.record(duration),
+        _ => {}
+    }
+}
+
+pub fn record_strategy_update_encoding(
+    duration: Duration,
+    raw_bytes: usize,
+    compressed_bytes: usize,
+) {
+    STRATEGY_UPDATE_ENCODING.record(duration);
+    STRATEGY_UPDATE_RAW_BYTES.fetch_add(raw_bytes as u64, Ordering::Relaxed);
+    STRATEGY_UPDATE_COMPRESSED_BYTES.fetch_add(compressed_bytes as u64, Ordering::Relaxed);
+}
+
+pub fn record_ui_snapshot_push(duration: Duration) {
+    UI_SNAPSHOT_PUSH.record(duration);
+}
+
 #[allow(dead_code)]
 pub fn record_dropped_research_records(count: usize) {
     DROPPED_RESEARCH_RECORDS.fetch_add(count as u64, Ordering::Relaxed);
@@ -135,6 +182,20 @@ pub fn snapshot() -> Value {
         "event_queue_wait": EVENT_QUEUE_WAIT.snapshot(),
         "engine_lock_wait": ENGINE_LOCK_WAIT.snapshot(),
         "snapshot_compute": SNAPSHOT_COMPUTE.snapshot(),
+        "event_processing": {
+            "price": PRICE_EVENT_PROCESSING.snapshot(),
+            "trade": TRADE_EVENT_PROCESSING.snapshot(),
+            "book": BOOK_EVENT_PROCESSING.snapshot(),
+        },
+        "engine_work": {
+            "price": PRICE_ENGINE_WORK.snapshot(),
+            "trade": TRADE_ENGINE_WORK.snapshot(),
+            "book": BOOK_ENGINE_WORK.snapshot(),
+        },
+        "strategy_update_encoding": STRATEGY_UPDATE_ENCODING.snapshot(),
+        "strategy_update_raw_bytes": STRATEGY_UPDATE_RAW_BYTES.load(Ordering::Relaxed),
+        "strategy_update_compressed_bytes": STRATEGY_UPDATE_COMPRESSED_BYTES.load(Ordering::Relaxed),
+        "ui_snapshot_push": UI_SNAPSHOT_PUSH.snapshot(),
         "dropped_research_records": DROPPED_RESEARCH_RECORDS.load(Ordering::Relaxed),
     })
 }

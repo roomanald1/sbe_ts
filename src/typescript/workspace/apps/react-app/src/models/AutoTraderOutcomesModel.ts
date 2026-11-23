@@ -99,7 +99,7 @@ export function applyInstanceTodayPnl(
     const fee = trade?.fee;
     if (typeof fee !== 'number' || !Number.isFinite(fee)) return undefined;
     const currency =
-      trade.fee_currency || row.pnlQuoteCurrency || quoteCurrency(row.symbol);
+      trade?.fee_currency || row.pnlQuoteCurrency || quoteCurrency(row.symbol);
     const rate = currency === 'USD' ? 1 : usdRates[currency];
     return typeof rate === 'number' && Number.isFinite(rate)
       ? Math.abs(fee) * rate
@@ -284,6 +284,48 @@ type StrategyGateDecision = {
   secondary_distance_percent?: number | null;
   secondary_passed?: boolean | null;
 };
+
+const ENTRY_THRESHOLD_PARAMETER_KEYS = [
+  'minimum_momentum',
+  'minimum_flow_imbalance',
+  'minimum_book_imbalance',
+  'minimum_vwap_dislocation_bps',
+  'minimum_absorption_pressure',
+] as const;
+
+function entryThresholdRegime(regime?: string): string | undefined {
+  const normalized = regime?.toLowerCase();
+  if (
+    normalized === 'trend' ||
+    normalized === 'trending' ||
+    normalized?.startsWith('btc-above-sma') ||
+    normalized?.startsWith('btc-below-sma')
+  )
+    return 'trend';
+  if (normalized === 'range' || normalized === 'ranging') return 'range';
+  if (normalized === 'volatile' || normalized === 'volatility')
+    return 'volatile';
+  return undefined;
+}
+
+function componentsWithEffectiveEntryThresholds(
+  entry?: AuditRecord,
+): Record<string, number | null> {
+  const components = { ...(entry?.signal_components ?? {}) };
+  const parameters = entry?.strategy_decision?.strategy_parameters;
+  const regime = entryThresholdRegime(entry?.market_regime);
+  for (const key of ENTRY_THRESHOLD_PARAMETER_KEYS) {
+    const regimeValue = regime ? parameters?.[`${key}_${regime}`] : undefined;
+    const value =
+      typeof regimeValue === 'number' && Number.isFinite(regimeValue)
+        ? regimeValue
+        : parameters?.[key];
+    if (typeof value === 'number' && Number.isFinite(value))
+      components[`${key}_floor`] = value;
+  }
+  return components;
+}
+
 export type StrictEntryGateSummary = {
   symbol: string;
   direction: string;
@@ -1501,7 +1543,7 @@ export class AutoTraderOutcomesModel {
                     : entry.exploratory === false
                       ? 'strict'
                       : 'unknown',
-              components: entry.signal_components ?? {},
+              components: componentsWithEffectiveEntryThresholds(entry),
               entryStrategyDecision: entry.strategy_decision,
               explorationRisk: explorationRiskFromAudit(entry),
               latestStrategyEvaluation: latestStrategyEvaluation(
@@ -1592,20 +1634,7 @@ export class AutoTraderOutcomesModel {
             record.decision_id === row.decisionId && record.stage === 'entry',
         );
         if (entryAudit) {
-          const components = { ...(entryAudit.signal_components ?? {}) };
-          const parameters = entryAudit.strategy_decision?.strategy_parameters;
-          const floorKeys = [
-            'minimum_momentum',
-            'minimum_flow_imbalance',
-            'minimum_book_imbalance',
-            'minimum_vwap_dislocation_bps',
-            'minimum_absorption_pressure',
-          ];
-          for (const key of floorKeys) {
-            const value = parameters?.[key];
-            if (typeof value === 'number' && Number.isFinite(value))
-              components[`${key}_floor`] = value;
-          }
+          const components = componentsWithEffectiveEntryThresholds(entryAudit);
           const latestExit = this.auditRows
             .filter(
               (record) =>
@@ -1879,7 +1908,7 @@ export class AutoTraderOutcomesModel {
                   ? 'strict'
                   : 'unknown',
           carryDetails,
-          components: entry?.signal_components ?? {},
+          components: componentsWithEffectiveEntryThresholds(entry),
           entryStrategyDecision: entry?.strategy_decision,
           explorationRisk: explorationRiskFromAudit(entry),
           latestStrategyEvaluation: latestStrategyEvaluation(

@@ -155,6 +155,7 @@ async fn submit_position_exit_order(
                 total_trade_pnl / entry_notional * 100.0,
                 strategy_realized_usd,
                 fees_usd,
+                closed_trade_audit_for_position(&position, &symbol),
             );
             record_strategy_trade_outcome(
                 &mut settings,

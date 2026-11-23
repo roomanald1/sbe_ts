@@ -129,6 +129,14 @@ async fn sync_protective_stops(
                     total_trade_pnl / entry_notional * 100.0,
                     strategy_realized_usd,
                     fees_usd,
+                    closed_trade_audit_for_position(
+                        &TraderPosition {
+                            entry_context: entry_context.clone(),
+                            trade_id: trade_id.clone(),
+                            ..TraderPosition::default()
+                        },
+                        &symbol,
+                    ),
                 );
                 record_strategy_trade_outcome(
                     &mut settings,

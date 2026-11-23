@@ -333,6 +333,7 @@ fn enqueue_strategy_replay(state: &mut LearningState, event: &FeedbackEvent) {
             reason,
             result: None,
             history_cursor: None,
+            history_status: "pending".into(),
             pages_scanned: 0,
             signals_scanned: 0,
             records_scanned: 0,
@@ -487,7 +488,8 @@ fn promote_qualified_scout_candidates(
             &baseline,
         );
         if paired.len() < minimum_parameter_samples
-            || !one_sided_90_lower_bound(&paired).is_some_and(|bound| bound > 0.0)
+            || !paired_candidate_promotion_lower_bound(&paired, &specs)
+                .is_some_and(|bound| bound > 0.0)
         {
             continue;
         }
@@ -841,7 +843,7 @@ fn update_active_profile(
     let promote_candidate = matches!(event, FeedbackEvent::ScoutOutcome { .. })
         && !specs.is_empty()
         && paired.len() >= minimum_parameter_samples
-        && one_sided_90_lower_bound(&paired).is_some_and(|bound| bound > 0.0);
+        && paired_candidate_promotion_lower_bound(&paired, specs).is_some_and(|bound| bound > 0.0);
     if promote_candidate {
         promote_paired_parameters(
             &state.variants,
@@ -1064,6 +1066,17 @@ fn paired_parameter_outcomes(
         .collect()
 }
 
+fn paired_candidate_promotion_lower_bound(
+    outcomes: &[f64],
+    specs: &[ParameterSpec],
+) -> Option<f64> {
+    if specs.iter().any(|spec| spec.key == "stop_loss_percent") {
+        one_sided_80_lower_bound(outcomes)
+    } else {
+        one_sided_90_lower_bound(outcomes)
+    }
+}
+
 fn promote_paired_parameters(
     variants: &BTreeMap<String, RegisteredProfile>,
     active_profiles: &mut BTreeMap<String, StrategyProfile>,
@@ -1152,6 +1165,45 @@ fn one_sided_90_lower_bound(outcomes: &[f64]) -> Option<f64> {
         / (sample_count - 1) as f64;
     let critical = one_sided_90_t_critical(sample_count)?;
     Some(mean - critical * (variance / sample_count as f64).sqrt())
+}
+
+fn one_sided_80_lower_bound(outcomes: &[f64]) -> Option<f64> {
+    if outcomes.len() < 2 || outcomes.iter().any(|value| !value.is_finite()) {
+        return None;
+    }
+    let sample_count = outcomes.len();
+    let mean = outcomes.iter().sum::<f64>() / sample_count as f64;
+    let variance = outcomes
+        .iter()
+        .map(|value| (value - mean).powi(2))
+        .sum::<f64>()
+        / (sample_count - 1) as f64;
+    let critical = one_sided_80_t_critical(sample_count)?;
+    Some(mean - critical * (variance / sample_count as f64).sqrt())
+}
+
+fn one_sided_80_t_critical(sample_count: usize) -> Option<f64> {
+    let degrees = sample_count.checked_sub(1)? as f64;
+    if degrees < 1.0 {
+        return None;
+    }
+    match degrees as usize {
+        1 => return Some(1.376_381_920_471_173_4),
+        2 => return Some(1.060_660_171_779_821_4),
+        3 => return Some(0.978_472_312_363_304_6),
+        4 => return Some(0.940_964_577_189_989_1),
+        _ => {}
+    }
+    let z = 0.841_621_233_572_914_3;
+    let z2 = z * z;
+    let z3 = z2 * z;
+    let z5 = z3 * z2;
+    let z7 = z5 * z2;
+    Some(
+        z + (z3 + z) / (4.0 * degrees)
+            + (5.0 * z5 + 16.0 * z3 + 3.0 * z) / (96.0 * degrees.powi(2))
+            + (3.0 * z7 + 19.0 * z5 + 17.0 * z3 - 15.0 * z) / (384.0 * degrees.powi(3)),
+    )
 }
 
 pub(super) fn should_publish_trade_profile(
@@ -1511,6 +1563,27 @@ mod tests {
         assert!((one_sided_90_t_critical(5).unwrap() - 1.5332).abs() < 0.002);
         assert!(one_sided_90_t_critical(1).is_none());
         assert!((one_sided_90_lower_bound(&[0.02; 6]).unwrap() - 0.02).abs() < 1e-12);
+    }
+
+    #[test]
+    fn stop_loss_scout_successes_use_a_lower_promotion_bound_than_other_parameters() {
+        let mut paired = vec![0.1; MINIMUM_SCOUT_PARAMETER_SAMPLES - 1];
+        paired.push(-0.4);
+        assert!(one_sided_90_lower_bound(&paired).unwrap() < 0.0);
+        assert!(one_sided_80_lower_bound(&paired).unwrap() > 0.0);
+
+        let stop_spec = ParameterSpec {
+            key: "stop_loss_percent".into(),
+            label: "Stop loss".into(),
+            default: 0.5,
+            min: 0.1,
+            max: 1.5,
+            step: 0.05,
+            unit: "%".into(),
+            learning_direction: -1.0,
+        };
+        assert!(paired_candidate_promotion_lower_bound(&paired, &[stop_spec]).unwrap() > 0.0);
+        assert!(paired_candidate_promotion_lower_bound(&paired, &[spec()]).unwrap() < 0.0);
     }
 
     fn spec() -> ParameterSpec {

@@ -98,7 +98,7 @@ fn adapt_exit_policy(settings: &mut Settings) {
     let candidate =
         risk_adjusted_take_profit_percent(settings.stop_loss_percent, settings.risk_appetite);
     settings.take_profit_percent = confidence_adjusted_take_profit_percent(
-        &settings.closed_trade_returns_percent,
+        &closed_trade_learning_returns(settings),
         candidate,
         settings.stop_loss_percent,
     );

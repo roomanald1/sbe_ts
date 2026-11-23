@@ -315,6 +315,8 @@ pub(super) async fn get_decision_snapshot(
             Some(strategy::LearnedExitProtectionPolicy {
                 symbol: profile.symbol.clone(),
                 strategy: profile.strategy.clone(),
+                stop_loss_percent: Some(evidence.stop_loss_percent),
+                take_profit_percent: Some(evidence.take_profit_percent),
                 activation_percent: evidence.parameters.activation_percent,
                 giveback_percent: evidence.parameters.giveback_percent,
                 minimum_lock_percent: evidence.parameters.minimum_lock_percent,

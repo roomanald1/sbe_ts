@@ -225,6 +225,8 @@ struct StrategyReplayJob {
     result: Option<StrategyReplayResult>,
     #[serde(default)]
     history_cursor: Option<String>,
+    #[serde(default = "default_replay_history_status")]
+    history_status: String,
     #[serde(default)]
     pages_scanned: usize,
     #[serde(default)]
@@ -265,6 +267,10 @@ struct StrategyReplayJob {
     horizon_mark_timestamps: BTreeMap<u64, u64>,
     #[serde(default)]
     horizons_ms: Vec<u64>,
+}
+
+fn default_replay_history_status() -> String {
+    "pending".into()
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

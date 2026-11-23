@@ -36,16 +36,22 @@ fn record_closed_trade_outcome(
     return_percent: f64,
     realized_usd: f64,
     fees_usd: f64,
+    audit: ClosedTradeAuditRecord,
 ) {
     // Closed spot trades cannot lose more than their entry notional. Reject
     // malformed returns before they enter the persisted rolling statistics.
-    if !return_percent.is_finite()
-        || return_percent < -100.0
-        || !realized_usd.is_finite()
-        || !fees_usd.is_finite()
-    {
+    if !return_percent.is_finite() || !realized_usd.is_finite() || !fees_usd.is_finite() {
         return;
     }
+    let audit = if return_percent < -100.0 {
+        ClosedTradeAuditRecord {
+            status: ClosedTradeAuditStatus::NeedsAudit,
+            reason: Some("closed_spot_return_below_minus_100_percent".into()),
+            ..audit
+        }
+    } else {
+        audit
+    };
     // These parallel arrays are a persisted legacy format. Discard an already
     // misaligned window rather than attaching new money values to old returns.
     let count = settings.closed_trade_returns_percent.len();
@@ -57,11 +63,15 @@ fn record_closed_trade_outcome(
         settings.closed_trade_timestamps_ms.clear();
         settings.closed_trade_realized_usd.clear();
         settings.closed_trade_fees_usd.clear();
+        settings.closed_trade_audit.clear();
     }
+    settings.closed_trade_audit.resize(count, ClosedTradeAuditRecord::default());
+    settings.closed_trade_audit.truncate(count);
     settings.closed_trade_returns_percent.push(return_percent);
     settings.closed_trade_timestamps_ms.push(current_time_ms());
     settings.closed_trade_realized_usd.push(realized_usd);
     settings.closed_trade_fees_usd.push(fees_usd);
+    settings.closed_trade_audit.push(audit);
     let excess = settings
         .closed_trade_returns_percent
         .len()
@@ -71,6 +81,24 @@ fn record_closed_trade_outcome(
         settings.closed_trade_timestamps_ms.drain(0..excess);
         settings.closed_trade_realized_usd.drain(0..excess);
         settings.closed_trade_fees_usd.drain(0..excess);
+        settings.closed_trade_audit.drain(0..excess);
+    }
+}
+
+fn closed_trade_audit_for_position(
+    position: &TraderPosition,
+    symbol: &str,
+) -> ClosedTradeAuditRecord {
+    let needs_audit = position.entry_context == UNATTRIBUTED_POSITION_MANAGER_CONTEXT;
+    ClosedTradeAuditRecord {
+        status: if needs_audit {
+            ClosedTradeAuditStatus::NeedsAudit
+        } else {
+            ClosedTradeAuditStatus::Eligible
+        },
+        reason: needs_audit.then(|| "unattributed_position_manager_reconciliation".into()),
+        symbol: Some(symbol.to_owned()),
+        trade_id: position.trade_id.clone(),
     }
 }
 
@@ -113,7 +141,17 @@ fn record_strategy_trade_outcome(
     trade_id: Option<&str>,
     replay_context: Option<strategy::TradeReplayContext>,
 ) {
-    let Some(net_return_percent) = net_return_percent.filter(|value| value.is_finite()) else {
+    if strategy == Some("unattributed")
+        || learning_context == Some(UNATTRIBUTED_POSITION_MANAGER_CONTEXT)
+    {
+        return;
+    }
+    // Closed spot trades cannot lose more than their entry notional. Keep
+    // strategy-specific feedback aligned with the legacy closed-trade window
+    // and activity metrics, which already reject returns below -100%.
+    let Some(net_return_percent) = net_return_percent
+        .filter(|value| value.is_finite() && *value >= -100.0)
+    else {
         return;
     };
     if !realized_pnl_usd.is_finite() {
@@ -383,6 +421,109 @@ mod feedback_outbox_tests {
             None,
         );
         assert!(settings.feedback_outbox.is_empty());
+    }
+
+    #[test]
+    fn impossible_spot_loss_is_not_queued_for_strategy_learning() {
+        let mut settings = Settings::default();
+        record_strategy_trade_outcome(
+            &mut settings,
+            "BTC-USDT",
+            Some("live-momentum"),
+            Some("btc:momentum"),
+            false,
+            -101.0,
+            Some(-100.01),
+            Some(&serde_json::json!({"strategy_parameters":{"minimum_momentum":0.003}})),
+            Some("impossible-loss"),
+            None,
+        );
+        assert!(settings.feedback_outbox.is_empty());
+    }
+
+    #[test]
+    fn total_loss_boundary_remains_eligible_for_strategy_learning() {
+        let mut settings = Settings::default();
+        record_strategy_trade_outcome(
+            &mut settings,
+            "BTC-USDT",
+            Some("live-momentum"),
+            Some("btc:momentum"),
+            false,
+            -100.0,
+            Some(-100.0),
+            Some(&serde_json::json!({"strategy_parameters":{"minimum_momentum":0.003}})),
+            Some("total-loss"),
+            None,
+        );
+        assert!(matches!(settings.feedback_outbox.first(), Some(FeedbackEvent::TradeOutcome { .. })));
+    }
+
+    #[test]
+    fn recovered_unattributed_close_is_persisted_for_audit_and_excluded_from_learning() {
+        let mut settings = Settings::default();
+        let position = TraderPosition {
+            entry_context: UNATTRIBUTED_POSITION_MANAGER_CONTEXT.into(),
+            trade_id: Some("recovered-trade-7".into()),
+            strategy: Some("unattributed".into()),
+            ..TraderPosition::default()
+        };
+        record_closed_trade_outcome(
+            &mut settings,
+            -0.5,
+            -0.005,
+            0.002,
+            closed_trade_audit_for_position(&position, "BNB-USDT"),
+        );
+        record_strategy_trade_outcome(
+            &mut settings,
+            "BNB-USDT",
+            Some("unattributed"),
+            Some(UNATTRIBUTED_POSITION_MANAGER_CONTEXT),
+            false,
+            -0.005,
+            Some(-0.5),
+            None,
+            Some("recovered-trade-7"),
+            None,
+        );
+
+        assert_eq!(settings.closed_trade_returns_percent, vec![-0.5]);
+        assert_eq!(settings.closed_trade_realized_usd, vec![-0.005]);
+        assert_eq!(settings.closed_trade_audit.len(), 1);
+        assert_eq!(settings.closed_trade_audit[0].status, ClosedTradeAuditStatus::NeedsAudit);
+        assert_eq!(settings.closed_trade_audit[0].reason.as_deref(), Some("unattributed_position_manager_reconciliation"));
+        assert_eq!(settings.closed_trade_audit[0].trade_id.as_deref(), Some("recovered-trade-7"));
+        assert!(settings.feedback_outbox.is_empty());
+        let metrics = calculate_activity_learning_metrics(&settings, 0);
+        assert_eq!(metrics.exit_learning_samples, 0);
+        assert_eq!(metrics.closed_trade_realized_usd, None);
+        assert_eq!(metrics.closed_trade_needs_audit_count, 1);
+    }
+
+    #[test]
+    fn newly_recorded_return_below_minus_100_percent_is_retained_for_audit_only() {
+        let mut settings = Settings::default();
+        record_closed_trade_outcome(
+            &mut settings,
+            -100.01,
+            -1.01,
+            0.01,
+            ClosedTradeAuditRecord::default(),
+        );
+
+        assert_eq!(settings.closed_trade_returns_percent, vec![-100.01]);
+        assert_eq!(
+            settings.closed_trade_audit[0].status,
+            ClosedTradeAuditStatus::NeedsAudit
+        );
+        assert_eq!(
+            settings.closed_trade_audit[0].reason.as_deref(),
+            Some("closed_spot_return_below_minus_100_percent")
+        );
+        let metrics = calculate_activity_learning_metrics(&settings, 0);
+        assert_eq!(metrics.exit_learning_samples, 0);
+        assert_eq!(metrics.closed_trade_needs_audit_count, 1);
     }
 }
 

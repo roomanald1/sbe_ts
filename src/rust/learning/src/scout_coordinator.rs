@@ -18,7 +18,7 @@ use strategy::{
     ScoutWorkAssignment, ScoutWorkDecision, ScoutWorkMode, ScoutWorkResult, ScoutWorkerHttpMethod,
     ScoutWorkerRequest, ScoutWorkerResponse, ScoutWorkerRouteCommand, ScoutWorkerRouteResult,
     Strategy, StrategyProfile, StrategyReplayPoint, StrategyReplayRequest, StrategyReplayResponse,
-    request_scout_service_route,
+    request_scout_service_route_with_timeouts,
 };
 use tokio::sync::{Mutex as AsyncMutex, broadcast, oneshot};
 use tower::ServiceExt;
@@ -1135,11 +1135,18 @@ impl ScoutCoordinator {
                 path,
                 payload: serde_json::Value::Null,
             };
-            let page = request_scout_service_route(&self.insights_rsocket_url, &route).await?;
+            let page = request_scout_service_route_with_timeouts(
+                &self.insights_rsocket_url,
+                &route,
+                Duration::from_secs(2),
+                self.replay_worker_timeout,
+            )
+            .await?;
             if page.status != 200 {
                 bail!(
-                    "Insights missed-opportunity history returned HTTP {}",
-                    page.status
+                    "Insights missed-opportunity history returned HTTP {}: {}",
+                    page.status,
+                    page.body
                 );
             }
             let records = page.body["records"]
@@ -1306,6 +1313,7 @@ impl ScoutCoordinator {
                 || job.pages_scanned >= MAX_REPLAY_TOTAL_PAGES
                 || job.records_scanned >= MAX_REPLAY_TOTAL_RECORDS_SCANNED
             {
+                job.history_status = "truncated".into();
                 return Ok((
                     crate::StrategyReplayStatus::Unsupported,
                     None,
@@ -1331,9 +1339,27 @@ impl ScoutCoordinator {
                 path,
                 payload: serde_json::Value::Null,
             };
-            let page = request_scout_service_route(&self.insights_rsocket_url, &route).await?;
+            let page = match request_scout_service_route_with_timeouts(
+                &self.insights_rsocket_url,
+                &route,
+                Duration::from_secs(2),
+                self.replay_worker_timeout,
+            )
+            .await
+            {
+                Ok(page) => page,
+                Err(error) => {
+                    job.history_status = "unavailable".into();
+                    return Err(error.context("Insights snapshot history request failed"));
+                }
+            };
             if page.status != 200 {
-                anyhow::bail!("Insights snapshot history returned HTTP {}", page.status);
+                job.history_status = "unavailable".into();
+                anyhow::bail!(
+                    "Insights snapshot history returned HTTP {}: {}",
+                    page.status,
+                    page.body
+                );
             }
             let records = page.body["records"]
                 .as_array()
@@ -1400,6 +1426,7 @@ impl ScoutCoordinator {
                     .as_u64()
                     .unwrap_or_default() as usize,
             );
+            let range_exhausted = page.body["rangeExhausted"].as_bool().unwrap_or(false);
             job.corrupt_history_records = job
                 .corrupt_history_records
                 .saturating_add(page.body["corruptRecords"].as_u64().unwrap_or_default() as usize);
@@ -1461,6 +1488,15 @@ impl ScoutCoordinator {
                 job.counterfactual_entry_found = entry_found;
                 job.signals_scanned = job.signals_scanned.saturating_add(response.evaluated_count);
             }
+            job.history_status = replay_history_status(
+                range_exhausted,
+                more,
+                job.archived_days_unscanned,
+                job.archived_days_unavailable,
+                false,
+                job.signals_scanned,
+            )
+            .into();
             job.pages_scanned = job.pages_scanned.saturating_add(1);
             job.history_cursor = cursor;
             job.updated_at_ms = crate::now_ms();
@@ -1511,7 +1547,18 @@ impl ScoutCoordinator {
             .rev()
             .find_map(|horizon| horizon.estimated_mark_return_percent);
         let reason = if !any_complete_horizon {
-            "snapshot coverage does not reach any complete replay checkpoint".to_owned()
+            match job.history_status.as_str() {
+                "exhausted" => {
+                    "snapshot history was exhausted before any signals were available".to_owned()
+                }
+                "unavailable" => {
+                    "snapshot history includes archived data that is unavailable".to_owned()
+                }
+                "truncated" => {
+                    "snapshot history was truncated by the configured scan cap".to_owned()
+                }
+                _ => "snapshot coverage does not reach any complete replay checkpoint".to_owned(),
+            }
         } else if !job.counterfactual_entry_found {
             "the replay profile did not produce a counterfactual entry".to_owned()
         } else if estimated_mark_return_percent.is_some() {
@@ -2051,6 +2098,29 @@ impl ScoutCoordinator {
         }
         crate::persist(&self.state.path, &state).map_err(|error| anyhow::anyhow!(error.1))?;
         Ok(())
+    }
+}
+
+fn replay_history_status(
+    range_exhausted: bool,
+    more_available: bool,
+    archived_days_unscanned: usize,
+    archived_days_unavailable: usize,
+    hit_cap: bool,
+    signals_scanned: usize,
+) -> &'static str {
+    if archived_days_unavailable > 0 {
+        "unavailable"
+    } else if hit_cap || archived_days_unscanned > 0 {
+        "truncated"
+    } else if more_available {
+        "scanning"
+    } else if range_exhausted && signals_scanned == 0 {
+        "exhausted"
+    } else if range_exhausted {
+        "complete"
+    } else {
+        "incomplete"
     }
 }
 
@@ -3055,6 +3125,34 @@ mod tests {
     use std::sync::{Arc, Mutex as StdMutex};
     use strategy::StrategyProfile;
     use tokio::sync::Mutex;
+
+    #[test]
+    fn replay_history_status_distinguishes_exhaustion_truncation_and_unavailability() {
+        assert_eq!(
+            replay_history_status(true, false, 0, 0, false, 0),
+            "exhausted"
+        );
+        assert_eq!(
+            replay_history_status(false, true, 0, 0, false, 0),
+            "scanning"
+        );
+        assert_eq!(
+            replay_history_status(false, false, 1, 0, false, 0),
+            "truncated"
+        );
+        assert_eq!(
+            replay_history_status(false, false, 0, 1, false, 0),
+            "unavailable"
+        );
+        assert_eq!(
+            replay_history_status(false, false, 0, 0, true, 1),
+            "truncated"
+        );
+        assert_eq!(
+            replay_history_status(true, false, 0, 0, false, 1),
+            "complete"
+        );
+    }
 
     #[tokio::test]
     async fn paired_replay_config_and_fold_assignment_are_persisted_by_run_id() {

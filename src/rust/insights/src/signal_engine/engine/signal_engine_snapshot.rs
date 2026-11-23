@@ -12,23 +12,50 @@ impl SignalEngine {
         self.prune(now);
         let latest = self.prices.back().copied()?;
         let price_count = self.prices.len();
-        let mut price_change_square_prefix = vec![0.0; price_count + 1];
-        for index in 1..price_count {
-            let previous = self.prices[index - 1].1;
-            let current = self.prices[index].1;
-            let change = (current / previous).ln();
-            price_change_square_prefix[index + 1] = price_change_square_prefix[index] + change * change;
+        {
+            let prices = &self.prices;
+            let prefix = &mut self.snapshot_price_change_square_prefix;
+            prefix.clear();
+            prefix.push(0.0);
+            prefix.push(0.0);
+            for index in 1..price_count {
+                let previous = prices[index - 1].1;
+                let current = prices[index].1;
+                let change = (current / previous).ln();
+                let cumulative = prefix[index] + change * change;
+                prefix.push(cumulative);
+            }
         }
         let trade_count = self.trades.len();
-        let (mut trade_buy_prefix, mut trade_sell_prefix) = (vec![0.0; trade_count + 1], vec![0.0; trade_count + 1]);
-        let (mut trade_notional_prefix, mut trade_quantity_prefix) = (vec![0.0; trade_count + 1], vec![0.0; trade_count + 1]);
-        for (index, &(timestamp, price, size, is_buy, _)) in self.trades.iter().enumerate() {
-            let notional = price * size;
-            trade_buy_prefix[index + 1] = trade_buy_prefix[index] + if is_buy { notional } else { 0.0 };
-            trade_sell_prefix[index + 1] = trade_sell_prefix[index] + if is_buy { 0.0 } else { notional };
-            trade_notional_prefix[index + 1] = trade_notional_prefix[index] + notional;
-            trade_quantity_prefix[index + 1] = trade_quantity_prefix[index] + size;
-            let _ = timestamp;
+        {
+            let trades = &self.trades;
+            let buy_prefix = &mut self.snapshot_trade_buy_prefix;
+            let sell_prefix = &mut self.snapshot_trade_sell_prefix;
+            let notional_prefix = &mut self.snapshot_trade_notional_prefix;
+            let quantity_prefix = &mut self.snapshot_trade_quantity_prefix;
+            buy_prefix.clear();
+            sell_prefix.clear();
+            notional_prefix.clear();
+            quantity_prefix.clear();
+            buy_prefix.push(0.0);
+            sell_prefix.push(0.0);
+            notional_prefix.push(0.0);
+            quantity_prefix.push(0.0);
+            for &(timestamp, price, size, is_buy, _) in trades {
+                let notional = price * size;
+                let buy = buy_prefix.last().copied().unwrap_or_default()
+                    + if is_buy { notional } else { 0.0 };
+                let sell = sell_prefix.last().copied().unwrap_or_default()
+                    + if is_buy { 0.0 } else { notional };
+                let cumulative_notional =
+                    notional_prefix.last().copied().unwrap_or_default() + notional;
+                let cumulative_quantity = quantity_prefix.last().copied().unwrap_or_default() + size;
+                buy_prefix.push(buy);
+                sell_prefix.push(sell);
+                notional_prefix.push(cumulative_notional);
+                quantity_prefix.push(cumulative_quantity);
+                let _ = timestamp;
+            }
         }
         let range_cutoff = now.saturating_sub(300_000);
         let range_start = self
@@ -220,7 +247,10 @@ impl SignalEngine {
                 let start = self.prices.partition_point(|sample| sample.0 < cutoff);
                 let sample_count = price_count.saturating_sub(start);
                 let volatility = (sample_count >= 2).then(|| {
-                    (price_change_square_prefix[price_count] - price_change_square_prefix[start + 1]).sqrt() * 100.0
+                    (self.snapshot_price_change_square_prefix[price_count]
+                        - self.snapshot_price_change_square_prefix[start + 1])
+                    .sqrt()
+                        * 100.0
                 });
                 let value = self.price_return(cutoff)
                     .zip(volatility)
@@ -238,8 +268,10 @@ impl SignalEngine {
             .map(|window_seconds| {
                 let cutoff = now.saturating_sub(u64::from(window_seconds) * 1_000);
                 let start = self.trades.partition_point(|sample| sample.0 < cutoff);
-                let buy = trade_buy_prefix[trade_count] - trade_buy_prefix[start];
-                let sell = trade_sell_prefix[trade_count] - trade_sell_prefix[start];
+                let buy = self.snapshot_trade_buy_prefix[trade_count]
+                    - self.snapshot_trade_buy_prefix[start];
+                let sell = self.snapshot_trade_sell_prefix[trade_count]
+                    - self.snapshot_trade_sell_prefix[start];
                 let first = self.trades.get(start).map(|sample| sample.0);
                 let last = self.trades.back().map(|sample| sample.0);
                 WindowedSignalValue {
@@ -268,8 +300,10 @@ impl SignalEngine {
             .map(|window_seconds| {
                 let cutoff = now.saturating_sub(u64::from(window_seconds) * 1_000);
                 let start = self.trades.partition_point(|sample| sample.0 < cutoff);
-                let notional = trade_notional_prefix[trade_count] - trade_notional_prefix[start];
-                let quantity = trade_quantity_prefix[trade_count] - trade_quantity_prefix[start];
+                let notional = self.snapshot_trade_notional_prefix[trade_count]
+                    - self.snapshot_trade_notional_prefix[start];
+                let quantity = self.snapshot_trade_quantity_prefix[trade_count]
+                    - self.snapshot_trade_quantity_prefix[start];
                 let first = self.trades.get(start).map(|sample| sample.0);
                 let last = self.trades.back().map(|sample| sample.0);
                 let span_ms = last.zip(first).map_or(0, |(last, first)| last.saturating_sub(first).min(u64::from(u32::MAX)) as u32);
@@ -283,7 +317,7 @@ impl SignalEngine {
                 }
             })
             .collect::<Vec<_>>();
-        let mut absorption_events = Vec::new();
+        self.snapshot_absorption_events.clear();
         for trade in self.absorption_trades.iter().filter(|trade| trade.timestamp >= now.saturating_sub(60_000)) {
             let (touch, prior_depth, bid_side) = if trade.is_buy {
                 (trade.ask, trade.ask_depth, false)
@@ -302,13 +336,21 @@ impl SignalEngine {
                             .is_some_and(|(_, size)| *size >= prior_depth + trade.size * 0.5))
                         .then_some(book.timestamp.saturating_sub(trade.timestamp).min(u64::from(u32::MAX)) as u32)
                 });
-            absorption_events.push((trade.timestamp, trade.price * trade.size, bid_side, touch_distance_bps, replenishment_delay_ms));
+            self.snapshot_absorption_events.push((
+                trade.timestamp,
+                trade.price * trade.size,
+                bid_side,
+                touch_distance_bps,
+                replenishment_delay_ms,
+            ));
         }
         // Accumulate each qualifying event into all wider windows and looser
         // gates once, rather than rescanning every event for every combination.
-        let mut absorbed_sell = vec![vec![vec![0.0; 5]; 5]; 6];
-        let mut absorbed_buy = vec![vec![vec![0.0; 5]; 5]; 6];
-        for (timestamp, notional, bid_side, touch_distance, replenishment_delay) in &absorption_events {
+        let mut absorbed_sell = [[[0.0; 5]; 5]; 6];
+        let mut absorbed_buy = [[[0.0; 5]; 5]; 6];
+        for (timestamp, notional, bid_side, touch_distance, replenishment_delay) in
+            &self.snapshot_absorption_events
+        {
             let age_ms = now.saturating_sub(*timestamp);
             if age_ms > 60_000 { continue; }
             let minimum_window = age_ms.div_ceil(10_000).saturating_sub(1).min(5) as usize;

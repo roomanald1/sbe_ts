@@ -284,28 +284,57 @@ impl RSocket for ServerResponder {
                 if let Ok(strategy::ScoutCoordinatorRequest::WorkerRoute(command)) =
                     serde_json::from_slice::<strategy::ScoutCoordinatorRequest>(data)
                 {
-                    if command.path != "/internal/signals/snapshot"
-                        || command.method != strategy::ScoutWorkerHttpMethod::Post
-                    {
+                    if command.method != strategy::ScoutWorkerHttpMethod::Post {
                         anyhow::bail!("unsupported FeedHandlers RSocket route: {}", command.path);
                     }
-                    let symbol = command.payload["symbol"]
-                        .as_str()
-                        .ok_or_else(|| anyhow::anyhow!("signal snapshot is missing symbol"))?;
-                    let bytes = serde_json::to_vec(&command.payload)?;
-                    let status = if crate::websocket::publish_signal_snapshot(
-                        symbol,
-                        Bytes::from(bytes),
-                    ) {
-                        202
-                    } else {
-                        404
+                    let (status, body) = match command.path.as_str() {
+                        "/internal/signals/snapshot" => {
+                            let symbol = command.payload["symbol"]
+                                .as_str()
+                                .ok_or_else(|| anyhow::anyhow!("signal snapshot is missing symbol"))?;
+                            let bytes = serde_json::to_vec(&command.payload)?;
+                            let published = crate::websocket::publish_signal_snapshot(
+                                symbol,
+                                Bytes::from(bytes),
+                            );
+                            (
+                                if published { 202 } else { 404 },
+                                serde_json::Value::Null,
+                            )
+                        }
+                        "/internal/signals/snapshots" => {
+                            let snapshots = command.payload["snapshots"]
+                                .as_array()
+                                .ok_or_else(|| anyhow::anyhow!("signal snapshots must be an array"))?;
+                            let total = snapshots.len();
+                            let mut published = 0usize;
+                            for snapshot in snapshots {
+                                let symbol = snapshot["symbol"]
+                                    .as_str()
+                                    .ok_or_else(|| anyhow::anyhow!("signal snapshot is missing symbol"))?;
+                                let bytes = serde_json::to_vec(snapshot)?;
+                                if crate::websocket::publish_signal_snapshot(
+                                    symbol,
+                                    Bytes::from(bytes),
+                                ) {
+                                    published += 1;
+                                }
+                            }
+                            (
+                                if published > 0 || total == 0 { 202 } else { 404 },
+                                serde_json::json!({ "published": published, "total": total }),
+                            )
+                        }
+                        _ => anyhow::bail!(
+                            "unsupported FeedHandlers RSocket route: {}",
+                            command.path
+                        ),
                     };
                     let result = strategy::ScoutCoordinatorResponse::WorkerRoute(
                         strategy::ScoutCoordinatorRouteResult {
                             request_id: command.request_id,
                             status,
-                            body: serde_json::Value::Null,
+                            body,
                         },
                     );
                     return Ok(Some(

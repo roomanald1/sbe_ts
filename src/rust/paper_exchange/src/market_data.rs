@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
     sync::{Arc, RwLock},
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tokio::sync::Mutex;
 
@@ -22,6 +22,9 @@ const BOOK_MESSAGE_LENGTH: usize = 272;
 const TICKER_MESSAGE_LENGTH: usize = 64;
 const MAX_MARKET_BOOK_SUBSCRIPTIONS: usize = 256;
 const MAX_TICKER_HISTORY_SYMBOLS: usize = 128;
+const FEED_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+const BOOK_STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(10);
+const TICKER_STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct BookLevel {
@@ -67,14 +70,17 @@ impl MarketData {
         }
         let url = std::env::var("FEED_HANDLERS_RSOCKET_URL")
             .unwrap_or_else(|_| "ws://127.0.0.1:10001".to_owned());
-        let client = Arc::new(
+        let client = tokio::time::timeout(
+            FEED_CONNECT_TIMEOUT,
             RSocketFactory::connect()
                 .transport(WebsocketClientTransport::from(url.as_str()))
                 .acceptor(Box::new(|| Box::new(EchoRSocket)))
-                .start()
-                .await
-                .context("FeedHandlers RSocket connection failed")?,
-        );
+                .start(),
+        )
+        .await
+        .context("FeedHandlers RSocket connection timed out")?
+        .context("FeedHandlers RSocket connection failed")?;
+        let client = Arc::new(client);
         *slot = Some(Arc::clone(&client));
         Ok(client)
     }
@@ -120,9 +126,11 @@ impl MarketData {
                                 })
                             })
                         });
-                        while let Some(item) = stream.next().await {
-                            match item {
-                                Ok(bytes) => {
+                        loop {
+                            match tokio::time::timeout(BOOK_STREAM_IDLE_TIMEOUT, stream.next())
+                                .await
+                            {
+                                Ok(Some(Ok(bytes))) => {
                                     if let Some(book) = decode_book(&bytes) {
                                         data.books
                                             .write()
@@ -130,9 +138,16 @@ impl MarketData {
                                             .insert(symbol.clone(), Arc::new(book));
                                     }
                                 }
-                                Err(error) => {
+                                Ok(Some(Err(error))) => {
                                     eprintln!(
                                         "Paper Exchange book stream failed for {symbol}: {error:#}"
+                                    );
+                                    break;
+                                }
+                                Ok(None) => break,
+                                Err(_) => {
+                                    eprintln!(
+                                        "Paper Exchange book stream idle for {symbol}; reconnecting"
                                     );
                                     break;
                                 }
@@ -164,8 +179,21 @@ impl MarketData {
                                 })
                             })
                         });
-                        while let Some(Ok(bytes)) = stream.next().await {
-                            data.record_ticker_batch(&bytes).await;
+                        loop {
+                            match tokio::time::timeout(TICKER_STREAM_IDLE_TIMEOUT, stream.next())
+                                .await
+                            {
+                                Ok(Some(Ok(bytes))) => data.record_ticker_batch(&bytes).await,
+                                Ok(Some(Err(error))) => {
+                                    eprintln!("Paper Exchange ticker stream failed: {error:#}");
+                                    break;
+                                }
+                                Ok(None) => break,
+                                Err(_) => {
+                                    eprintln!("Paper Exchange ticker stream idle; reconnecting");
+                                    break;
+                                }
+                            }
                         }
                         data.invalidate_client(&client).await;
                     }

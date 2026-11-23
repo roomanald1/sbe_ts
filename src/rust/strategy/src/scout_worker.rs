@@ -8,7 +8,7 @@ use rsocket_rust_transport_websocket::{WebsocketClientTransport, WebsocketServer
 use rusqlite::{Connection, OptionalExtension, params};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
-use std::{path::PathBuf, pin::Pin, sync::Arc};
+use std::{io::Read, path::PathBuf, pin::Pin, sync::Arc};
 use strategies::{
     MAX_REPLAY_SIGNALS, ScoutCoordinatorRequest, ScoutCoordinatorResponse, ScoutDataUpdate,
     ScoutStreamEnvelope, ScoutStreamSubscription, ScoutWorkAssignment, ScoutWorkDecision,
@@ -808,6 +808,7 @@ async fn connect_scout_insights_stream(
     strategy: Strategy,
 ) -> anyhow::Result<Pin<Box<dyn Stream<Item = anyhow::Result<crate::StrategyInsightUpdate>> + Send>>>
 {
+    let compressed = strategy.is_live_insight();
     let client = RSocketFactory::connect()
         .transport(WebsocketClientTransport::from(url))
         .acceptor(Box::new(|| Box::new(EchoRSocket)))
@@ -816,8 +817,8 @@ async fn connect_scout_insights_stream(
         .context("Insights Scout-stream connection failed")?;
     let source = client.request_stream(
         Payload::builder()
-            .set_data_utf8(if strategy.is_live_insight() {
-                "strategy-signals:live"
+            .set_data_utf8(if compressed {
+                "strategy-signals:live:zlib-v1"
             } else {
                 "strategy-signals:maintenance"
             })
@@ -829,7 +830,14 @@ async fn connect_scout_insights_stream(
         let bytes = payload
             .data()
             .context("Insights returned an empty Scout signal")?;
-        serde_json::from_slice(bytes).context("invalid Insights Scout update")
+        if compressed {
+            let mut decoder = flate2::read::ZlibDecoder::new(bytes.as_ref());
+            let mut decoded = Vec::with_capacity(bytes.len().saturating_mul(4));
+            decoder.read_to_end(&mut decoded)?;
+            serde_json::from_slice(&decoded).context("invalid compressed Insights Scout update")
+        } else {
+            serde_json::from_slice(bytes).context("invalid Insights Scout update")
+        }
     })))
 }
 

@@ -635,6 +635,64 @@ async fn set_scout_configuration(
 const MAX_PARAMETER_VARIANTS_PER_BATCH: usize = 5;
 const MAX_LIVE_PROFILES_PER_SYMBOL_DIRECTION: usize = 2;
 const SCOUT_PARAMETER_SAMPLE_INTERVAL_MS: u64 = 4 * 60 * 60 * 1_000;
+const MIN_BASELINE_LOSS_SAMPLES_FOR_WIDER_STOP_EXPLORATION: usize = 20;
+const MAX_BASELINE_WIN_RATE_FOR_WIDER_STOP_EXPLORATION: f64 = 0.45;
+const WIDER_STOP_VARIANTS_PER_BATCH: usize = 2;
+
+fn baseline_losses_are_obvious(
+    snapshot: &serde_json::Value,
+    profile_symbol: &str,
+    strategy: &str,
+    parameters: &BTreeMap<String, f64>,
+) -> bool {
+    snapshot["profiles"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|profile| {
+            profile["symbol"].as_str() == Some(profile_symbol)
+                && profile["strategy"].as_str() == Some(strategy)
+                && serde_json::from_value::<BTreeMap<String, f64>>(
+                    profile["parameters"].clone(),
+                )
+                .is_ok_and(|profile_parameters| profile_parameters == *parameters)
+        })
+        .is_some_and(|profile| {
+            let samples = profile["learning_samples"].as_u64().unwrap_or_default() as usize;
+            let positive = profile["positive_samples"].as_u64().unwrap_or_default() as usize;
+            let realized_pnl = profile["realized_pnl"].as_f64().unwrap_or_default();
+            samples >= MIN_BASELINE_LOSS_SAMPLES_FOR_WIDER_STOP_EXPLORATION
+                && positive <= samples
+                && positive as f64 / samples as f64
+                    <= MAX_BASELINE_WIN_RATE_FOR_WIDER_STOP_EXPLORATION
+                && realized_pnl.is_finite()
+                && realized_pnl < 0.0
+        })
+}
+
+fn wider_stop_loss_probe(
+    candidate: &ParameterVariant,
+    baseline: &BTreeMap<String, f64>,
+    specs: &[ParameterSpec],
+) -> bool {
+    if candidate.key != "stop_loss_percent" {
+        return false;
+    }
+    let current = baseline
+        .get(&candidate.key)
+        .copied()
+        .or_else(|| {
+            specs
+                .iter()
+                .find(|spec| spec.key == candidate.key)
+                .map(|spec| spec.default)
+        });
+    let step = specs
+        .iter()
+        .find(|spec| spec.key == candidate.key)
+        .map_or(0.0, |spec| spec.step);
+    current.is_some_and(|current| candidate.value >= current + step * 1.5 - 1e-8)
+}
 
 fn ranked_parameter_variants(
     snapshot: &serde_json::Value,
@@ -644,6 +702,8 @@ fn ranked_parameter_variants(
     specs: &[ParameterSpec],
     day: u64,
 ) -> Vec<ParameterVariant> {
+    let baseline_losses_are_obvious =
+        baseline_losses_are_obvious(snapshot, profile_symbol, strategy, parameters);
     let candidates = single_parameter_variants(parameters, specs, day)
         .unwrap_or_default()
         .into_iter()
@@ -659,6 +719,9 @@ fn ranked_parameter_variants(
     let mut known = Vec::<(f64, ParameterVariant)>::new();
     let mut unexplored = Vec::<ParameterVariant>::new();
     for candidate in candidates {
+        if wider_stop_loss_probe(&candidate, parameters, specs) && !baseline_losses_are_obvious {
+            continue;
+        }
         let evidence = snapshot
             .get("scout_parameter_variants")
             .and_then(serde_json::Value::as_array)
@@ -716,13 +779,47 @@ fn ranked_parameter_variants(
     let mut selected = Vec::new();
     let mut selected_ids = BTreeSet::new();
 
+    if baseline_losses_are_obvious {
+        let mut wider_stops = unexplored
+            .iter()
+            .filter(|candidate| wider_stop_loss_probe(candidate, parameters, specs))
+            .cloned()
+            .collect::<Vec<_>>();
+        wider_stops.sort_by(|left, right| left.value.total_cmp(&right.value));
+        if !wider_stops.is_empty() {
+            let start = (day as usize * WIDER_STOP_VARIANTS_PER_BATCH) % wider_stops.len();
+            for offset in 0..wider_stops
+                .len()
+                .min(WIDER_STOP_VARIANTS_PER_BATCH)
+            {
+                if selected.len() >= MAX_PARAMETER_VARIANTS_PER_BATCH {
+                    break;
+                }
+                let candidate = wider_stops[(start + offset) % wider_stops.len()].clone();
+                let id = candidate_id(&candidate);
+                if selected_ids.insert(id.clone()) {
+                    unexplored.retain(|pending| candidate_id(pending) != id);
+                    selected.push(candidate);
+                }
+            }
+        }
+    }
+
     // Keep both sides represented in every live batch whenever each side has
     // an available candidate. Prefer an unexplored value on each side; use
     // the best known result only when that side has no unexplored value.
     for direction in [1_i8, -1_i8] {
         let unexplored_index = unexplored
             .iter()
-            .position(|candidate| direction_of(candidate) == Some(direction));
+            .position(|candidate| {
+                direction_of(candidate) == Some(direction)
+                    && !wider_stop_loss_probe(candidate, parameters, specs)
+            })
+            .or_else(|| {
+                unexplored
+                    .iter()
+                    .position(|candidate| direction_of(candidate) == Some(direction))
+            });
         let candidate = unexplored_index
             .map(|index| unexplored.remove(index))
             .or_else(|| {
@@ -1193,6 +1290,76 @@ mod paired_probe_tests {
             .collect::<BTreeSet<_>>();
         assert_eq!(directions, BTreeSet::from([-1, 1]));
         assert!(selected.iter().any(|variant| variant.key == "a"));
+    }
+
+    #[test]
+    fn obviously_losing_baseline_reserves_scout_slots_for_wider_stop_boundaries() {
+        let spec = ParameterSpec {
+            key: "stop_loss_percent".into(),
+            label: "Stop loss".into(),
+            default: 0.5,
+            min: 0.1,
+            max: 1.5,
+            step: 0.05,
+            unit: "%".into(),
+            learning_direction: -1.0,
+        };
+        let specs = vec![spec];
+        let baseline = BTreeMap::from([("stop_loss_percent".into(), 0.5)]);
+        let profile = |learning_samples, positive_samples, realized_pnl| {
+            serde_json::json!({
+                "symbol": "BTC-USDT",
+                "strategy": "live-momentum",
+                "parameters": baseline,
+                "learning_samples": learning_samples,
+                "positive_samples": positive_samples,
+                "realized_pnl": realized_pnl
+            })
+        };
+        let losing_snapshot = serde_json::json!({"profiles": [profile(40, 16, -2.0)]});
+
+        let selected = ranked_parameter_variants(
+            &losing_snapshot,
+            "BTC-USDT",
+            "live-momentum",
+            &baseline,
+            &specs,
+            0,
+        );
+        let values = selected
+            .iter()
+            .filter(|variant| variant.key == "stop_loss_percent")
+            .map(|variant| variant.value)
+            .collect::<Vec<_>>();
+        assert!(values.contains(&0.65));
+        assert!(values.contains(&0.75));
+        assert!(values.contains(&1.0));
+
+        let profitable_snapshot = serde_json::json!({"profiles": [profile(40, 25, 2.0)]});
+        let selected = ranked_parameter_variants(
+            &profitable_snapshot,
+            "BTC-USDT",
+            "live-momentum",
+            &baseline,
+            &specs,
+            0,
+        );
+        assert!(selected
+            .iter()
+            .all(|variant| variant.value <= 0.55 || variant.key != "stop_loss_percent"));
+
+        let thin_losing_snapshot = serde_json::json!({"profiles": [profile(19, 5, -2.0)]});
+        let selected = ranked_parameter_variants(
+            &thin_losing_snapshot,
+            "BTC-USDT",
+            "live-momentum",
+            &baseline,
+            &specs,
+            0,
+        );
+        assert!(selected
+            .iter()
+            .all(|variant| variant.value <= 0.55 || variant.key != "stop_loss_percent"));
     }
 
     #[test]

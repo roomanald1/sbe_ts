@@ -47,6 +47,10 @@ pub struct LearnedProfileSnapshot {
 pub struct LearnedExitProtectionPolicy {
     pub symbol: String,
     pub strategy: String,
+    #[serde(default)]
+    pub stop_loss_percent: Option<f64>,
+    #[serde(default)]
+    pub take_profit_percent: Option<f64>,
     pub activation_percent: f64,
     pub giveback_percent: f64,
     pub minimum_lock_percent: f64,

@@ -252,21 +252,24 @@ async fn update_settings(
     }
     if let Some(value) = request.closed_trade_window {
         settings.closed_trade_window = value;
+        let closed_count = settings.closed_trade_returns_percent.len();
+        settings
+            .closed_trade_audit
+            .resize(closed_count, ClosedTradeAuditRecord::default());
+        settings.closed_trade_audit.truncate(closed_count);
         let excess = settings
             .closed_trade_returns_percent
             .len()
             .saturating_sub(value);
         if excess > 0 {
             settings.closed_trade_returns_percent.drain(0..excess);
-        }
-        let timestamp_excess = settings
-            .closed_trade_timestamps_ms
-            .len()
-            .saturating_sub(value);
-        if timestamp_excess > 0 {
-            settings
-                .closed_trade_timestamps_ms
-                .drain(0..timestamp_excess);
+            settings.closed_trade_audit.drain(0..excess);
+            let timestamp_excess = excess.min(settings.closed_trade_timestamps_ms.len());
+            let realized_excess = excess.min(settings.closed_trade_realized_usd.len());
+            let fees_excess = excess.min(settings.closed_trade_fees_usd.len());
+            settings.closed_trade_timestamps_ms.drain(0..timestamp_excess);
+            settings.closed_trade_realized_usd.drain(0..realized_excess);
+            settings.closed_trade_fees_usd.drain(0..fees_excess);
         }
     }
     if let Some(value) = request.minimum_scout_parameter_samples {
@@ -298,6 +301,7 @@ async fn update_settings(
         settings.closed_trade_timestamps_ms.clear();
         settings.closed_trade_realized_usd.clear();
         settings.closed_trade_fees_usd.clear();
+        settings.closed_trade_audit.clear();
         let now_ms = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|duration| duration.as_millis() as u64)

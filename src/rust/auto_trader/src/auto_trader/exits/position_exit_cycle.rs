@@ -6,9 +6,15 @@ async fn maybe_exit_auto_position(
     // maintenance work does not inflate cycle-lock hold time. Each in-memory
     // update is serialized by the settings mutex, and the exit path below
     // still takes the cycle lock before mutating orders or positions.
-    sync_protective_stops(state).await?;
-    reconcile_auto_positions_with_ledger(state).await?;
-    ensure_protective_stops(state).await?;
+    sync_protective_stops(state)
+        .await
+        .map_err(|(status, error)| (status, format!("Protective-stop sync: {error}")))?;
+    reconcile_auto_positions_with_ledger(state)
+        .await
+        .map_err(|(status, error)| (status, format!("Position-ledger reconciliation: {error}")))?;
+    ensure_protective_stops(state)
+        .await
+        .map_err(|(status, error)| (status, format!("Protective-stop maintenance: {error}")))?;
     let positions = {
         let settings = state.settings.lock().await;
         settings
@@ -32,8 +38,10 @@ async fn maybe_exit_auto_position(
         input_tasks.spawn(async move {
             let inputs = crate::service_rpc::execution_get(&format!(
                 "/internal/market-mark?symbol={symbol}"
-            )).await.map_err(|error| (StatusCode::BAD_GATEWAY, error.to_string()))?;
-            Ok::<_, (StatusCode, String)>((symbol, inputs))
+            ))
+            .await
+            .map_err(|error| (StatusCode::BAD_GATEWAY, error.to_string()));
+            (symbol, inputs)
         });
     }
     let mut inputs_by_symbol = BTreeMap::new();
@@ -43,21 +51,26 @@ async fn maybe_exit_auto_position(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 format!("Market input task failed: {error}"),
             )
-        })??;
-        inputs_by_symbol.insert(symbol, inputs);
+        })?;
+        match inputs {
+            Ok(inputs) => {
+                inputs_by_symbol.insert(symbol, inputs);
+            }
+            Err((status, error)) => crate::service_log!(
+                "WARN",
+                "Skipping {symbol} exit evaluation because its market mark is unavailable ({status}): {error}"
+            ),
+        }
     }
     // Evaluate positions without the shared cycle lock. Exit submission takes
     // that lock only after an exit is actually required, so routine path sampling
     // and settings persistence do not block incoming signal cycles.
     for (symbol, strategy, position) in positions {
-        if let Some(result) = evaluate_position_exit(
-            state,
-            symbol,
-            strategy,
-            position,
-            &mut inputs_by_symbol,
-        )
-        .await?
+        let evaluation_label = format!("{symbol} ({strategy})");
+        if let Some(result) =
+            evaluate_position_exit(state, symbol, strategy, position, &mut inputs_by_symbol)
+                .await
+                .map_err(|(status, error)| (status, format!("{evaluation_label}: {error}")))?
         {
             return Ok(Some(result));
         }

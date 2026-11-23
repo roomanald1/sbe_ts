@@ -343,17 +343,20 @@ fn attach_final_decision_outcomes(
     let mut statement = connection.prepare(
         "SELECT payload FROM auto_trader_audit WHERE decision_id = ?1 AND stage = 'entry'",
     )?;
+    // The stage/timestamp index makes SQLite scan every retained rejection to
+    // satisfy the time ordering. These prefix ranges are selective by
+    // decision_id, so use the existing (decision_id, stage) primary-key index.
     let mut skipped_statement = connection.prepare(
         "WITH final_entry AS (
-             SELECT payload, timestamp FROM auto_trader_audit
+             SELECT payload, timestamp FROM auto_trader_audit INDEXED BY sqlite_autoindex_auto_trader_audit_1
              WHERE stage = 'strategy_rejection' AND decision_id >= ?1 AND decision_id < ?2
              ORDER BY timestamp DESC LIMIT 1
          ), daily_execution AS (
-             SELECT payload, timestamp FROM auto_trader_audit
+             SELECT payload, timestamp FROM auto_trader_audit INDEXED BY sqlite_autoindex_auto_trader_audit_1
              WHERE stage = 'strategy_rejection' AND decision_id >= ?3 AND decision_id < ?4
              ORDER BY timestamp DESC LIMIT 1
          ), async_submission AS (
-             SELECT payload, timestamp FROM auto_trader_audit
+             SELECT payload, timestamp FROM auto_trader_audit INDEXED BY sqlite_autoindex_auto_trader_audit_1
              WHERE stage = 'strategy_rejection' AND decision_id >= ?5 AND decision_id < ?6
              ORDER BY timestamp DESC LIMIT 1
          ) SELECT payload FROM (

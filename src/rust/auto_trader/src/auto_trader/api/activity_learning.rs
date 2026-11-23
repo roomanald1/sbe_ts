@@ -6,10 +6,36 @@ struct ActivityLearningMetrics {
     closed_trade_flat: usize,
     closed_trade_realized_usd: Option<f64>,
     closed_trade_fees_usd: Option<f64>,
+    closed_trade_needs_audit_count: usize,
+    closed_trade_needs_audit_recent: Vec<ClosedTradeNeedsAuditSummary>,
     learning_samples: usize,
     learning_win_rate: Option<f64>,
     preferred_order_type: Option<String>,
     parameter_profile_samples: [usize; 3],
+}
+
+fn closed_trade_learning_returns(settings: &Settings) -> Vec<f64> {
+    settings
+        .closed_trade_returns_percent
+        .iter()
+        .enumerate()
+        .filter(|(index, value)| {
+            value.is_finite()
+                && **value >= -100.0
+                && !settings.closed_trade_audit.get(*index).is_some_and(|audit| {
+                    audit.status == ClosedTradeAuditStatus::NeedsAudit
+                })
+        })
+        .map(|(_, value)| *value)
+        .collect()
+}
+
+#[derive(Clone, Serialize)]
+struct ClosedTradeNeedsAuditSummary {
+    timestamp_ms: u64,
+    reason: String,
+    symbol: Option<String>,
+    trade_id: Option<String>,
 }
 
 fn calculate_activity_learning_metrics(
@@ -28,6 +54,7 @@ fn calculate_activity_learning_metrics(
                 .closed_trade_timestamps_ms
                 .get(*index)
                 .is_some_and(|timestamp| *timestamp >= today_start)
+                && !closed_trade_needs_audit(settings, *index)
         })
         .map(|(_, value)| *value)
         .filter(|value| value.is_finite() && *value >= -100.0)
@@ -48,7 +75,10 @@ fn calculate_activity_learning_metrics(
         .closed_trade_timestamps_ms
         .iter()
         .enumerate()
-        .filter(|(_, timestamp)| **timestamp >= today_start)
+        .filter(|(index, timestamp)| {
+            **timestamp >= today_start
+                && !closed_trade_needs_audit(settings, *index)
+        })
         .map(|(index, _)| index)
         .collect::<Vec<_>>();
     let closed_trade_realized_usd = (settings.closed_trade_timestamps_ms.len()
@@ -71,6 +101,27 @@ fn calculate_activity_learning_metrics(
             .map(|index| settings.closed_trade_fees_usd[*index])
             .sum()
     });
+    let mut closed_trade_needs_audit_recent = settings
+        .closed_trade_audit
+        .iter()
+        .enumerate()
+        .filter(|(_, audit)| audit.status == ClosedTradeAuditStatus::NeedsAudit)
+        .filter_map(|(index, audit)| {
+            Some(ClosedTradeNeedsAuditSummary {
+                timestamp_ms: *settings.closed_trade_timestamps_ms.get(index)?,
+                reason: audit.reason.clone().unwrap_or_else(|| "unspecified".into()),
+                symbol: audit.symbol.clone(),
+                trade_id: audit.trade_id.clone(),
+            })
+        })
+        .collect::<Vec<_>>();
+    closed_trade_needs_audit_recent.sort_by_key(|audit| std::cmp::Reverse(audit.timestamp_ms));
+    closed_trade_needs_audit_recent.truncate(5);
+    let closed_trade_needs_audit_count = settings
+        .closed_trade_audit
+        .iter()
+        .filter(|audit| audit.status == ClosedTradeAuditStatus::NeedsAudit)
+        .count();
     // The per-strategy and per-context learning maps both record the same
     // completed position. Use the closed-position ledger for a user-facing
     // trade count so a trade is counted once, and its return (including fees)
@@ -110,9 +161,18 @@ fn calculate_activity_learning_metrics(
         closed_trade_flat,
         closed_trade_realized_usd,
         closed_trade_fees_usd,
+        closed_trade_needs_audit_count,
+        closed_trade_needs_audit_recent,
         learning_samples,
         learning_win_rate,
         preferred_order_type,
         parameter_profile_samples,
     }
+}
+
+fn closed_trade_needs_audit(settings: &Settings, index: usize) -> bool {
+    settings
+        .closed_trade_audit
+        .get(index)
+        .is_some_and(|audit| audit.status == ClosedTradeAuditStatus::NeedsAudit)
 }

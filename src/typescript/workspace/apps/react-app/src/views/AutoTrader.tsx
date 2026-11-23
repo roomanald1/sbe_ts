@@ -14,6 +14,10 @@ const finiteFixed = (value: unknown, digits: number) =>
     : 'n/a';
 
 const STALE_AUTO_TRADER_DECISION_MS = 6 * 60_000;
+const pnlMoney = new Intl.NumberFormat(undefined, {
+  minimumFractionDigits: 5,
+  maximumFractionDigits: 5,
+});
 
 export function AutoTrader() {
   const pageModel = useMemo(() => new AutoTraderPageModel(), []);
@@ -179,7 +183,7 @@ export function AutoTrader() {
             >
               {state.realizedPnl == null
                 ? 'Unavailable (position ledger or FX rate)'
-                : 'USD ' + money.format(state.realizedPnl)}
+                : 'USD ' + pnlMoney.format(state.realizedPnl)}
             </strong>
           </span>
           <span>
@@ -195,7 +199,7 @@ export function AutoTrader() {
             >
               {state.unrealizedPnl == null
                 ? 'Unavailable (missing mark or FX rate)'
-                : 'USD ' + money.format(state.unrealizedPnl)}
+                : 'USD ' + pnlMoney.format(state.unrealizedPnl)}
             </strong>
           </span>
           <span>
@@ -212,7 +216,7 @@ export function AutoTrader() {
               {state.realizedPnl == null || state.unrealizedPnl == null
                 ? 'Unavailable'
                 : 'USD ' +
-                  money.format(state.realizedPnl + state.unrealizedPnl)}
+                  pnlMoney.format(state.realizedPnl + state.unrealizedPnl)}
             </strong>
           </span>
         </div>

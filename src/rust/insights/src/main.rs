@@ -100,9 +100,11 @@ struct SignalRuntime {
     rolling_volatility: DashMap<String, rolling_volatility::RollingVolatility>,
     enriched_market_events: broadcast::Sender<Bytes>,
     strategy_signal_events: broadcast::Sender<Bytes>,
+    compressed_strategy_signal_events: broadcast::Sender<Bytes>,
     strategy_maintenance_events: broadcast::Sender<Bytes>,
     legacy_strategy_signal_events: broadcast::Sender<Bytes>,
     latest_strategy_signal_updates: Arc<DashMap<String, Bytes>>,
+    latest_compressed_strategy_signal_updates: Arc<DashMap<String, Bytes>>,
 }
 
 const ENRICHED_MARKET_EVENT_QUEUE_CAPACITY: usize = 16_384;
@@ -121,6 +123,11 @@ async fn queue_metrics(State(runtime): State<Arc<SignalRuntime>>) -> Json<Vec<se
         (
             "insights_strategy_signals_live",
             runtime.strategy_signal_events.len(),
+            STRATEGY_SIGNAL_QUEUE_CAPACITY,
+        ),
+        (
+            "insights_strategy_signals_live_zlib",
+            runtime.compressed_strategy_signal_events.len(),
             STRATEGY_SIGNAL_QUEUE_CAPACITY,
         ),
         (
@@ -306,6 +313,9 @@ async fn admit_runtime_symbol(runtime: &SignalRuntime, symbol: &str) -> Result<(
     for stale_symbol in stale {
         runtime.engines.remove(&stale_symbol);
         runtime.latest_strategy_signal_updates.remove(&stale_symbol);
+        runtime
+            .latest_compressed_strategy_signal_updates
+            .remove(&stale_symbol);
         runtime.market_cache.remove(&stale_symbol);
         runtime.ui_snapshot_cache.remove(&stale_symbol);
         runtime.snapshot_diagnostic_at.remove(&stale_symbol);

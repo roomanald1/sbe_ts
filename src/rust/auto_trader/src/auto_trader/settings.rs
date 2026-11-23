@@ -78,6 +78,10 @@ struct Settings {
     closed_trade_realized_usd: Vec<f64>,
     #[serde(default)]
     closed_trade_fees_usd: Vec<f64>,
+    /// Audit eligibility aligned with the legacy closed-trade metric arrays.
+    /// Missing entries from older settings are treated as eligible history.
+    #[serde(default)]
+    closed_trade_audit: Vec<ClosedTradeAuditRecord>,
     #[serde(default)]
     closed_trade_metrics_version: u32,
     #[serde(default)]
@@ -106,6 +110,9 @@ struct Settings {
     exit_timing_history_backfill_version: u32,
     #[serde(default)]
     profile_registration_outbox: Vec<strategy::StrategyProfileRegistration>,
+    /// Enqueue times for profile registrations; absent entries are legacy/unknown.
+    #[serde(default)]
+    profile_registration_enqueued_at_ms: BTreeMap<String, u64>,
     #[serde(default)]
     registered_profile_ids: BTreeSet<String>,
     #[serde(default)]
@@ -143,6 +150,9 @@ struct Settings {
     execution_learning_order_ids: BTreeSet<String>,
     #[serde(default)]
     execution_feedback_outbox: Vec<strategy::ExecutionOutcomeEvent>,
+    /// Durable delivery lifecycle counters keyed by feedback event class.
+    #[serde(default)]
+    learning_feedback_stats: BTreeMap<String, LearningFeedbackQueueStats>,
     // Retained only long enough to import in-flight state created before
     // Scouts became the owner of paired scout outcomes.
     #[serde(default)]
@@ -168,6 +178,55 @@ struct Settings {
     // Persisted so a service restart cannot replay the same closed-candle signal.
     #[serde(default)]
     daily_strategy_signal_cursors: BTreeMap<String, u64>,
+}
+
+const UNATTRIBUTED_POSITION_MANAGER_CONTEXT: &str =
+    "unattributed:position-manager-reconciliation";
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum ClosedTradeAuditStatus {
+    #[default]
+    Eligible,
+    NeedsAudit,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+struct ClosedTradeAuditRecord {
+    #[serde(default)]
+    status: ClosedTradeAuditStatus,
+    #[serde(default)]
+    reason: Option<String>,
+    #[serde(default)]
+    symbol: Option<String>,
+    #[serde(default)]
+    trade_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+struct LearningFeedbackQueueStats {
+    #[serde(default)]
+    attempts: u64,
+    #[serde(default)]
+    acknowledged: u64,
+    #[serde(default)]
+    rejected: u64,
+    #[serde(default)]
+    transient_errors: u64,
+    #[serde(default)]
+    terminal_drops: u64,
+    #[serde(default)]
+    evicted_oldest: u64,
+    #[serde(default)]
+    outcome_capacity_rejections: u64,
+    #[serde(default)]
+    permanent_rejections: u64,
+    #[serde(default)]
+    last_attempt_at_ms: Option<u64>,
+    #[serde(default)]
+    latest_reason: Option<String>,
+    #[serde(default)]
+    latest_reason_at_ms: Option<u64>,
 }
 
 fn deserialize_strategies<'de, D>(deserializer: D) -> Result<Vec<Strategy>, D::Error>
@@ -305,7 +364,8 @@ impl Default for Settings {
             closed_trade_timestamps_ms: Vec::new(),
             closed_trade_realized_usd: Vec::new(),
             closed_trade_fees_usd: Vec::new(),
-            closed_trade_metrics_version: 3,
+            closed_trade_audit: Vec::new(),
+            closed_trade_metrics_version: 4,
             daily_realized_pnl: 0.0,
             pnl_utc_day: utc_day(),
             utc_day: utc_day(),
@@ -319,6 +379,7 @@ impl Default for Settings {
             exit_timing_feedback_outbox: Vec::new(),
             exit_timing_history_backfill_version: 0,
             profile_registration_outbox: Vec::new(),
+            profile_registration_enqueued_at_ms: BTreeMap::new(),
             registered_profile_ids: BTreeSet::new(),
             learned_profiles: BTreeMap::new(),
             learned_exit_protection_policies: BTreeMap::new(),
@@ -336,6 +397,7 @@ impl Default for Settings {
             execution_learning_imported: false,
             execution_learning_order_ids: BTreeSet::new(),
             execution_feedback_outbox: Vec::new(),
+            learning_feedback_stats: BTreeMap::new(),
             strategy_parameter_overrides: BTreeMap::new(),
             last_hedge_at: BTreeMap::new(),
             last_decision: String::new(),
@@ -354,6 +416,25 @@ impl Default for Settings {
 #[cfg(test)]
 mod strategy_settings_migration_tests {
     use super::*;
+
+    #[test]
+    fn missing_learning_queue_telemetry_fields_migrate_to_defaults() {
+        let mut value = serde_json::to_value(Settings::default()).unwrap();
+        value.as_object_mut().unwrap().remove("learning_feedback_stats");
+        value
+            .as_object_mut()
+            .unwrap()
+            .remove("profile_registration_enqueued_at_ms");
+        value.as_object_mut().unwrap().remove("closed_trade_audit");
+        value["closed_trade_returns_percent"] = serde_json::json!([-0.5]);
+        value["closed_trade_timestamps_ms"] = serde_json::json!([123]);
+        let settings: Settings = serde_json::from_value(value).unwrap();
+        assert!(settings.learning_feedback_stats.is_empty());
+        assert!(settings.profile_registration_enqueued_at_ms.is_empty());
+        assert!(settings.closed_trade_audit.is_empty());
+        assert_eq!(settings.closed_trade_returns_percent, vec![-0.5]);
+        assert_eq!(settings.closed_trade_timestamps_ms, vec![123]);
+    }
 
     #[test]
     fn expands_removed_live_insights_setting_into_component_strategies() {

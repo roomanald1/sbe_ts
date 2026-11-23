@@ -59,6 +59,8 @@ struct ActivityResponse {
     closed_trade_flat: usize,
     closed_trade_realized_usd: Option<f64>,
     closed_trade_fees_usd: Option<f64>,
+    closed_trade_needs_audit_count: usize,
+    closed_trade_needs_audit_recent: Vec<ClosedTradeNeedsAuditSummary>,
     learning_samples: usize,
     learning_win_rate: Option<f64>,
     preferred_order_type: Option<String>,

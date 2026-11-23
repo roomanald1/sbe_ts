@@ -13,18 +13,18 @@ fn exit_protection_parameter_valid(
     key: StrategyParameterKey,
     value: f64,
 ) -> bool {
-    let Some(spec) = strategy
+    if !strategy
         .parameter_specs()
         .into_iter()
-        .find(|spec| spec.key == key)
-    else {
-        return false;
-    };
-    if !value.is_finite() || value < spec.min || value > spec.max || spec.step <= 0.0 {
+        .any(|spec| spec.key == key)
+    {
         return false;
     }
-    let step_position = (value - spec.min) / spec.step;
-    (step_position - step_position.round()).abs() <= 1e-6
+    value.is_finite()
+        && match key {
+            StrategyParameterKey::ProfitProtectionMinimumLockPercent => value >= 0.0,
+            _ => value > 0.0,
+        }
 }
 
 fn valid_exit_protection_policy(
@@ -71,6 +71,12 @@ fn valid_exit_protection_policy(
         && policy.validation_worst_difference_percent >= -0.50
         && policy.validation_worst_difference_percent
             <= policy.validation_tenth_percentile_difference_percent
+        && policy.stop_loss_percent.is_some_and(|value| {
+            exit_protection_parameter_valid(kind, StrategyParameterKey::StopLossPercent, value)
+        })
+        && policy.take_profit_percent.is_some_and(|value| {
+            exit_protection_parameter_valid(kind, StrategyParameterKey::TakeProfitPercent, value)
+        })
         && exit_protection_parameter_valid(
             kind,
             StrategyParameterKey::ProfitProtectionActivationPercent,
@@ -92,7 +98,7 @@ fn valid_exit_protection_policy(
 fn exit_protection_policy_parameters(
     policy: &strategy::LearnedExitProtectionPolicy,
 ) -> BTreeMap<String, f64> {
-    BTreeMap::from([
+    let mut parameters = BTreeMap::from([
         (
             StrategyParameterKey::ProfitProtectionActivationPercent
                 .as_str()
@@ -111,7 +117,14 @@ fn exit_protection_policy_parameters(
                 .to_owned(),
             policy.minimum_lock_percent,
         ),
-    ])
+    ]);
+    if let Some(value) = policy.stop_loss_percent {
+        parameters.insert(StrategyParameterKey::StopLossPercent.as_str().to_owned(), value);
+    }
+    if let Some(value) = policy.take_profit_percent {
+        parameters.insert(StrategyParameterKey::TakeProfitPercent.as_str().to_owned(), value);
+    }
+    parameters
 }
 
 fn active_exit_protection_policy<'a>(
@@ -148,6 +161,8 @@ mod exit_protection_policy_tests {
         strategy::LearnedExitProtectionPolicy {
             symbol: "BTC-USDT".into(),
             strategy: "live-momentum".into(),
+            stop_loss_percent: Some(0.5),
+            take_profit_percent: Some(0.8),
             activation_percent: 0.20,
             giveback_percent: 0.15,
             minimum_lock_percent: 0.10,

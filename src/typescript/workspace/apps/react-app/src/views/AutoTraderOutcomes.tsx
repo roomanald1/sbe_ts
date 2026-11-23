@@ -30,6 +30,10 @@ const theme = themeQuartz.withParams({
 });
 const pct = (v: unknown) =>
   typeof v === 'number' && Number.isFinite(v) ? v.toFixed(3) + '%' : '—';
+const preciseUsd = new Intl.NumberFormat(undefined, {
+  minimumFractionDigits: 5,
+  maximumFractionDigits: 5,
+});
 const entryOrderTypeLabel = (value: string) => {
   const type = value.split(' · ')[0];
   if (['dated-carry', 'ScheduledExecution', 'Twap', 'Vwap'].includes(type))
@@ -1452,17 +1456,9 @@ function AutoTraderOutcomesComponent({
               : data?.status === 'Closed'
                 ? data.totalFees
                 : undefined,
-        valueFormatter: ({ value, data }) =>
-          typeof value === 'number'
-            ? (data?.ledgerTrade?.fee_currency ??
-                data?.pnlQuoteCurrency ??
-                '') +
-              ' ' +
-              value.toFixed(4) +
-              (typeof data?.feesUsd === 'number' &&
-              Number.isFinite(data.feesUsd)
-                ? ' (' + money.format(data.feesUsd) + ')'
-                : '')
+        valueFormatter: ({ data }) =>
+          typeof data?.feesUsd === 'number' && Number.isFinite(data.feesUsd)
+            ? 'USD ' + preciseUsd.format(data.feesUsd)
             : '—',
         minWidth: 150,
       },
@@ -1532,7 +1528,7 @@ function AutoTraderOutcomesComponent({
         cellClassRules: signed,
         valueFormatter: ({ value }) =>
           typeof value === 'number' && Number.isFinite(value)
-            ? money.format(value)
+            ? preciseUsd.format(value)
             : '—',
         minWidth: 145,
       },
@@ -1834,9 +1830,9 @@ function AutoTraderOutcomesComponent({
       {closedOnly && (
         <p className="signal-info-note">
           Today’s realized P&amp;L by strategy instance · closed rows show total
-          net per trade · total {money.format(loadedOutcomesTodayUsd)}. Expand
-          an instance to see today’s individual fills. Totals use the same
-          UTC-day ledger calculation as Realized today.
+          net per trade · total {preciseUsd.format(loadedOutcomesTodayUsd)}.
+          Expand an instance to see today’s individual fills. Totals use the
+          same UTC-day ledger calculation as Realized today.
         </p>
       )}
       {state.error && <div className="positions-error">{state.error}</div>}
@@ -1976,7 +1972,6 @@ function AutoTraderOutcomesComponent({
               .join(' ');
           const floorKeyByComponent: Record<string, string> = {
             momentum_10s_percent: 'minimum_momentum_floor',
-            trend_5m_volatility_units: 'minimum_momentum_floor',
             trade_flow_imbalance: 'minimum_flow_imbalance_floor',
             book_imbalance: 'minimum_book_imbalance_floor',
             mispricing_vs_vwap_bps: 'minimum_vwap_dislocation_bps_floor',
@@ -1999,10 +1994,7 @@ function AutoTraderOutcomesComponent({
             return ` · ${excess >= 0 ? '+' : ''}${gateNumber((excess / Math.abs(floor)) * 100, 1)}% above floor`;
           };
           const strategyGateComponents: Record<string, string[]> = {
-            'live-momentum': [
-              'momentum_10s_percent',
-              'trend_5m_volatility_units',
-            ],
+            'live-momentum': ['momentum_10s_percent'],
             'live-trade-flow': ['trade_flow_imbalance'],
             'live-order-book': ['book_imbalance'],
             'live-vwap-dislocation': ['mispricing_vs_vwap_bps'],
@@ -2020,8 +2012,7 @@ function AutoTraderOutcomesComponent({
               return [];
             const orientedValue = directionAdjusted(name, value);
             const passed =
-              name === 'momentum_10s_percent' ||
-              name === 'trend_5m_volatility_units'
+              name === 'momentum_10s_percent'
                 ? orientedValue > floor
                 : orientedValue >= floor;
             return [

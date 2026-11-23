@@ -101,6 +101,8 @@ async fn get_monitoring_metrics(State(state): State<AutoTraderState>) -> Json<se
         "closed_trade_wins": learning.closed_trade_wins,
         "closed_trade_losses": learning.closed_trade_losses,
         "closed_trade_flat": learning.closed_trade_flat,
+        "closed_trade_needs_audit_count": learning.closed_trade_needs_audit_count,
+        "closed_trade_needs_audit_recent": learning.closed_trade_needs_audit_recent,
         "learning_samples": learning.learning_samples,
         "learning_win_rate": learning.learning_win_rate,
         "insight_processing_latest_ms": insight_processing_latest_ms,

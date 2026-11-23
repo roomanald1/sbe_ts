@@ -37,6 +37,8 @@ async fn main() -> anyhow::Result<()> {
     let (enriched_market_events, _) =
         broadcast::channel(crate::ENRICHED_MARKET_EVENT_QUEUE_CAPACITY);
     let (strategy_signal_events, _) = broadcast::channel(crate::STRATEGY_SIGNAL_QUEUE_CAPACITY);
+    let (compressed_strategy_signal_events, _) =
+        broadcast::channel(crate::STRATEGY_SIGNAL_QUEUE_CAPACITY);
     let (strategy_maintenance_events, _) =
         broadcast::channel(crate::STRATEGY_MAINTENANCE_QUEUE_CAPACITY);
     let (legacy_strategy_signal_events, _) =
@@ -45,6 +47,7 @@ async fn main() -> anyhow::Result<()> {
         tokio::sync::mpsc::channel(crate::SIGNAL_EVENT_INGRESS_QUEUE_CAPACITY);
     let signal_event_shards = Arc::new(std::sync::RwLock::new(Vec::new()));
     let latest_strategy_signal_updates = Arc::new(DashMap::new());
+    let latest_compressed_strategy_signal_updates = Arc::new(DashMap::new());
     let latest_daily_strategy_update = Arc::new(std::sync::RwLock::new(None));
     let signal_runtime = Arc::new(SignalRuntime {
         active_symbols: DashMap::new(),
@@ -68,9 +71,13 @@ async fn main() -> anyhow::Result<()> {
         rolling_volatility: DashMap::new(),
         enriched_market_events,
         strategy_signal_events,
+        compressed_strategy_signal_events,
         strategy_maintenance_events,
         legacy_strategy_signal_events,
         latest_strategy_signal_updates: Arc::clone(&latest_strategy_signal_updates),
+        latest_compressed_strategy_signal_updates: Arc::clone(
+            &latest_compressed_strategy_signal_updates,
+        ),
     });
     tokio::spawn(poll_daily_strategy_signals(
         signal_store.clone(),
@@ -88,9 +95,11 @@ async fn main() -> anyhow::Result<()> {
     tokio::spawn(run_insights_market_event_server(
         signal_runtime.enriched_market_events.clone(),
         signal_runtime.strategy_signal_events.clone(),
+        signal_runtime.compressed_strategy_signal_events.clone(),
         signal_runtime.strategy_maintenance_events.clone(),
         signal_runtime.legacy_strategy_signal_events.clone(),
         Arc::clone(&latest_strategy_signal_updates),
+        Arc::clone(&latest_compressed_strategy_signal_updates),
         Arc::clone(&latest_daily_strategy_update),
     ));
     tokio::spawn(insights::signals::serve_insights_browser_rsocket(

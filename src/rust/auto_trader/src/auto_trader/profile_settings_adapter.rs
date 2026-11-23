@@ -27,13 +27,24 @@ fn inject_learned_parameters(settings: &Settings, signal: &mut Signal) {
             decision.get("scout_parameter_value")?.as_f64()?,
         ))
     });
-    let parameters = effective_parameter_values(
+    let mut parameters = effective_parameter_values(
         strategy,
         &profile_symbol,
         &learned_parameters,
         &settings.strategy_parameter_overrides,
         probe,
     );
+    if let Some(policy) = policy {
+        for (key, value) in exit_protection_policy_parameters(policy) {
+            let explicitly_overridden = settings.strategy_parameter_overrides.contains_key(
+                &strategy_parameter_key(&profile_symbol, strategy, &key),
+            );
+            let probed = probe.is_some_and(|(probe_key, _)| probe_key == key);
+            if !explicitly_overridden && !probed {
+                parameters.insert(key, value);
+            }
+        }
+    }
     let profile_id = strategy::profile_id(&profile_symbol, strategy_name, &parameters);
     let version = profile.map(|profile| profile.version).or_else(|| {
         signal.strategy_decision.as_ref()
@@ -423,8 +434,9 @@ fn learned_strategy_parameter_profile_with_variants(
         let policy_value = active_exit_protection_policy(settings, symbol, strategy.as_str())
             .and_then(|policy| exit_protection_policy_parameters(policy).get(spec.key.as_str()).copied());
         let learned_value = policy_value
-            .or_else(|| learned.and_then(|profile| profile.parameters.get(spec.key.as_str()).copied()))
-            .filter(|value| value.is_finite() && *value >= spec.min && *value <= spec.max)
+            .filter(|value| value.is_finite())
+            .or_else(|| learned.and_then(|profile| profile.parameters.get(spec.key.as_str()).copied())
+                .filter(|value| value.is_finite() && *value >= spec.min && *value <= spec.max))
             .unwrap_or(spec.default);
         let value = configured.unwrap_or(learned_value);
         StrategyParameterValue {

@@ -2,13 +2,21 @@ async fn run_position_maintenance(state: &AutoTraderState) -> Result<(), (Status
     let position_rsocket_url = std::env::var("POSITION_MANAGEMENT_RSOCKET_URL")
         .map_err(|error| (StatusCode::SERVICE_UNAVAILABLE, error.to_string()))?;
     // Consume fills before classifying disappeared resting orders as inactive.
-    reconcile_maker_fills(&position_rsocket_url, state).await?;
+    reconcile_maker_fills(&position_rsocket_url, state)
+        .await
+        .map_err(|(status, error)| (status, format!("Maker-fill reconciliation: {error}")))?;
     if let Err(error) = reconcile_inactive_execution_orders(state).await {
         crate::service_log!("WARN", "Pending-order reconciliation failed: {}", error.1);
     }
-    reconcile_scheduled_fills(state).await?;
-    sync_auto_positions(state).await?;
-    let _ = maybe_exit_auto_position(state).await?;
+    reconcile_scheduled_fills(state)
+        .await
+        .map_err(|(status, error)| (status, format!("Scheduled-fill reconciliation: {error}")))?;
+    sync_auto_positions(state)
+        .await
+        .map_err(|(status, error)| (status, format!("Position-ledger sync: {error}")))?;
+    let _ = maybe_exit_auto_position(state)
+        .await
+        .map_err(|(status, error)| (status, format!("Exit evaluation: {error}")))?;
     Ok(())
 }
 
@@ -22,12 +30,13 @@ struct LedgerRealizedPnl {
     realized_pnl_all_time_usd: Option<f64>,
 }
 
-async fn fetch_ledger_realized_pnl(
-) -> Result<LedgerRealizedPnl, (StatusCode, String)> {
+async fn fetch_ledger_realized_pnl() -> Result<LedgerRealizedPnl, (StatusCode, String)> {
     let value = crate::service_rpc::position_get(&format!(
         "/positions/realized-pnl?source=auto&since_ms={}",
         utc_day_start_ms()
-    )).await.map_err(|error| (StatusCode::BAD_GATEWAY, error.to_string()))?;
+    ))
+    .await
+    .map_err(|error| (StatusCode::BAD_GATEWAY, error.to_string()))?;
     serde_json::from_value(value).map_err(|error| (StatusCode::BAD_GATEWAY, error.to_string()))
 }
 
@@ -40,9 +49,7 @@ struct SourcePositionRecord {
     entry_fees: f64,
 }
 
-async fn sync_auto_positions(
-    state: &AutoTraderState,
-) -> Result<(), (StatusCode, String)> {
+async fn sync_auto_positions(state: &AutoTraderState) -> Result<(), (StatusCode, String)> {
     let ledger_pnl = fetch_ledger_realized_pnl().await?;
     let rates = state.settings.lock().await.usd_rates.clone();
     let realized_all_time_usd = match ledger_pnl.realized_pnl_all_time_usd {
@@ -63,7 +70,11 @@ async fn sync_auto_positions(
         None => {
             return Err((
                 StatusCode::SERVICE_UNAVAILABLE,
-                missing_fx_rate_error("Daily realized P&L", &ledger_pnl.realized_pnl_by_quote, &rates),
+                missing_fx_rate_error(
+                    "Daily realized P&L",
+                    &ledger_pnl.realized_pnl_by_quote,
+                    &rates,
+                ),
             ));
         }
     };
@@ -133,15 +144,17 @@ async fn sync_auto_positions(
             let close_audit = (prior_quantity.abs() > 1e-12
                 && closed_quantity > 1e-12
                 && realized_delta.abs() > 1e-12)
-                .then(|| external_close_audit_payload(
-                    &source_position.symbol,
-                    prior_quantity,
-                    closed_quantity,
-                    prior_average_entry_price,
-                    position,
-                ));
-            let closed_out = prior_quantity.abs() > 1e-12
-                && source_position.quantity.abs() <= 1e-12;
+                .then(|| {
+                    external_close_audit_payload(
+                        &source_position.symbol,
+                        prior_quantity,
+                        closed_quantity,
+                        prior_average_entry_price,
+                        position,
+                    )
+                });
+            let closed_out =
+                prior_quantity.abs() > 1e-12 && source_position.quantity.abs() <= 1e-12;
             if (position.quantity - source_position.quantity).abs() > 1e-12
                 || (position.average_entry_price - source_position.average_entry_price).abs()
                     > 1e-12
@@ -158,18 +171,28 @@ async fn sync_auto_positions(
         };
         if let Some(audit) = close_audit {
             known_exit_order_ids.get_or_insert_with(|| {
-                settings.orders.iter()
+                settings
+                    .orders
+                    .iter()
                     .filter(|order| !matches!(order.purpose.as_str(), "signal" | "scout"))
-                    .flat_map(|order| [Some(order.timestamp.to_string()), order.execution_order_id.clone()])
+                    .flat_map(|order| {
+                        [
+                            Some(order.timestamp.to_string()),
+                            order.execution_order_id.clone(),
+                        ]
+                    })
                     .flatten()
                     .collect::<BTreeSet<_>>()
             });
-            let strategy_lots = settings.strategy_positions
+            let strategy_lots = settings
+                .strategy_positions
                 .get(&source_position.symbol)
-                .map(|lots| lots.iter()
-                    .filter(|(_, lot)| lot.quantity.abs() > 1e-12)
-                    .map(|(strategy, lot)| (strategy.clone(), lot.clone()))
-                    .collect::<Vec<_>>())
+                .map(|lots| {
+                    lots.iter()
+                        .filter(|(_, lot)| lot.quantity.abs() > 1e-12)
+                        .map(|(strategy, lot)| (strategy.clone(), lot.clone()))
+                        .collect::<Vec<_>>()
+                })
                 .unwrap_or_default();
             if closed_out && !scout_entry {
                 for (strategy, lot) in &strategy_lots {
@@ -185,9 +208,19 @@ async fn sync_auto_positions(
             }
             let mut known_barrier_ids = BTreeSet::new();
             for (_, lot) in &strategy_lots {
-                known_barrier_ids.extend(lot.protective_stops.iter().map(|stop| stop.barrier_id.clone()));
+                known_barrier_ids.extend(
+                    lot.protective_stops
+                        .iter()
+                        .map(|stop| stop.barrier_id.clone()),
+                );
             }
-            external_closes.push((audit, realized_delta, strategy_lots, current_time_ms(), known_barrier_ids));
+            external_closes.push((
+                audit,
+                realized_delta,
+                strategy_lots,
+                current_time_ms(),
+                known_barrier_ids,
+            ));
         }
         if realized_delta.is_finite() && realized_delta.abs() > 1e-12 {
             // Manual position-manager fills bypass apply_auto_fill; matched
@@ -224,7 +257,9 @@ async fn sync_auto_positions(
         reconciliation_elapsed,
     );
     let known_exit_order_ids = known_exit_order_ids.unwrap_or_default();
-    for (mut payload, realized_pnl, strategy_lots, closed_at_ms, known_barrier_ids) in external_closes {
+    for (mut payload, realized_pnl, strategy_lots, closed_at_ms, known_barrier_ids) in
+        external_closes
+    {
         let known_exit_ids = KnownExitIds {
             order_ids: &known_exit_order_ids,
             barrier_ids: &known_barrier_ids,
@@ -239,24 +274,49 @@ async fn sync_auto_positions(
         payload["exit_order_type"] = serde_json::json!("external-ledger-fill");
         payload["status"] = serde_json::json!("filled");
         payload["realized_pnl"] = serde_json::json!(realized_pnl);
-        payload["duration_ms"] = serde_json::json!((entry_timestamp > 0).then_some(now.saturating_sub(entry_timestamp)));
+        payload["duration_ms"] =
+            serde_json::json!((entry_timestamp > 0).then_some(now.saturating_sub(entry_timestamp)));
         let trades = crate::service_rpc::position_get(&format!(
             "/positions/trades?symbol={symbol}&source=auto&since_ms={entry_timestamp}"
-        )).await.map_err(|error| (StatusCode::BAD_GATEWAY, error.to_string()))?;
-        let close_side = if payload["entry_position_side"].as_str() == Some("long") { "sell" } else { "buy" };
+        ))
+        .await
+        .map_err(|error| (StatusCode::BAD_GATEWAY, error.to_string()))?;
+        let close_side = if payload["entry_position_side"].as_str() == Some("long") {
+            "sell"
+        } else {
+            "buy"
+        };
         let trade_rows = trades["trades"].as_array().cloned().unwrap_or_default();
         let closed_quantity = payload["close_quantity"].as_f64().unwrap_or(0.0);
         if strategy_lots.is_empty() {
-            let close_fills = external_close_fills(closed_quantity, &close_side, &trade_rows, closed_at_ms, &known_exit_ids);
-            let exit_quantity = close_fills.iter().filter_map(|fill| fill["quantity"].as_f64()).sum::<f64>();
-            let exit_notional = close_fills.iter().filter_map(|fill| Some(fill["quantity"].as_f64()? * fill["price"].as_f64()?)).sum::<f64>();
-            let exit_fees = close_fills.iter().filter_map(|fill| fill["fee"].as_f64()).map(f64::abs).sum::<f64>();
+            let close_fills = external_close_fills(
+                closed_quantity,
+                &close_side,
+                &trade_rows,
+                closed_at_ms,
+                &known_exit_ids,
+            );
+            let exit_quantity = close_fills
+                .iter()
+                .filter_map(|fill| fill["quantity"].as_f64())
+                .sum::<f64>();
+            let exit_notional = close_fills
+                .iter()
+                .filter_map(|fill| Some(fill["quantity"].as_f64()? * fill["price"].as_f64()?))
+                .sum::<f64>();
+            let exit_fees = close_fills
+                .iter()
+                .filter_map(|fill| fill["fee"].as_f64())
+                .map(f64::abs)
+                .sum::<f64>();
             payload["exit_filled_quantity"] = serde_json::json!(exit_quantity);
-            payload["exit_average_price"] = serde_json::json!((exit_quantity > 0.0).then_some(exit_notional / exit_quantity));
+            payload["exit_average_price"] =
+                serde_json::json!((exit_quantity > 0.0).then_some(exit_notional / exit_quantity));
             payload["exit_fees"] = serde_json::json!(exit_fees);
             payload["exit_fills"] = serde_json::json!(close_fills);
             payload["realized_pnl"] = serde_json::json!(realized_pnl);
-            payload["strategy"] = serde_json::json!(payload["strategy"].as_str().unwrap_or("manual"));
+            payload["strategy"] =
+                serde_json::json!(payload["strategy"].as_str().unwrap_or("manual"));
             if let Some(order) = external_close_order(&payload) {
                 let mut settings = state.settings.lock().await;
                 settings.orders.push(order);
@@ -299,16 +359,25 @@ async fn sync_auto_positions(
                             audit["scout"].as_bool().unwrap_or(false),
                             realized_usd,
                             Some(net_return_percent),
-                            audit["strategy_decision"].as_object().map(|_| &audit["strategy_decision"]),
+                            audit["strategy_decision"]
+                                .as_object()
+                                .map(|_| &audit["strategy_decision"]),
                             audit["trade_id"].as_str(),
                             replay_context_from_close_audit(&audit),
                         );
                         request_settings_persist(state)?;
                     }
                 }
-                let has_known_auto_exit = audit["exit_fills"].as_array().into_iter().flatten().any(|fill| {
-                fill["parent_order_id"].as_str().is_some_and(|parent_id| known_exit_ids.contains(parent_id))
-                });
+                let has_known_auto_exit =
+                    audit["exit_fills"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .any(|fill| {
+                            fill["parent_order_id"]
+                                .as_str()
+                                .is_some_and(|parent_id| known_exit_ids.contains(parent_id))
+                        });
                 if !has_known_auto_exit {
                     if let Some(order) = external_close_order(&audit) {
                         let mut settings = state.settings.lock().await;
@@ -327,12 +396,17 @@ async fn sync_auto_positions(
     Ok(())
 }
 
-
 async fn reconcile_inactive_execution_orders(
     state: &AutoTraderState,
 ) -> Result<(), (StatusCode, String)> {
     let response = crate::service_rpc::position_get("/positions/orders")
-        .await.map_err(|error| (StatusCode::BAD_GATEWAY, format!("Could not fetch active orders: {error}")))?;
+        .await
+        .map_err(|error| {
+            (
+                StatusCode::BAD_GATEWAY,
+                format!("Could not fetch active orders: {error}"),
+            )
+        })?;
     let active_ids = response["orders"]
         .as_array()
         .into_iter()
@@ -350,7 +424,10 @@ async fn reconcile_inactive_execution_orders(
         matches!(order.purpose.as_str(), "signal" | "scout")
             && !is_scheduled_execution_order_type(&order.order_type)
             && !is_maker_execution_order_type(&order.order_type)
-            && matches!(order.status.as_str(), "submitting" | "accepted" | "resting" | "partially_filled")
+            && matches!(
+                order.status.as_str(),
+                "submitting" | "accepted" | "resting" | "partially_filled"
+            )
     }) {
         let Some(id) = order.execution_order_id.as_deref() else {
             continue;
@@ -360,24 +437,33 @@ async fn reconcile_inactive_execution_orders(
         }
         let prior_status = order.status.clone();
         order.status = inactive_execution_order_status(order.filled_quantity).into();
-        order.failure_reason = Some(if order.expires_at.is_some_and(|expires| expires <= now_ms) {
-            "expired_without_full_fill".into()
-        } else {
-            "removed_from_execution_ledger".into()
-        });
+        order.failure_reason = Some(
+            if order.expires_at.is_some_and(|expires| expires <= now_ms) {
+                "expired_without_full_fill".into()
+            } else {
+                "removed_from_execution_ledger".into()
+            },
+        );
         changed |= order.status != prior_status;
         completed_orders.push(order.clone());
     }
     for order in completed_orders {
-        let Settings { execution_feedback_outbox, execution_learning_order_ids, .. } = &mut *settings;
-        record_execution_order_quality(execution_feedback_outbox, execution_learning_order_ids, &order);
+        let Settings {
+            execution_feedback_outbox,
+            execution_learning_order_ids,
+            ..
+        } = &mut *settings;
+        record_execution_order_quality(
+            execution_feedback_outbox,
+            execution_learning_order_ids,
+            &order,
+        );
     }
     if changed {
         request_settings_persist(state)?;
     }
     Ok(())
 }
-
 
 fn is_scheduled_execution_order_type(order_type: &str) -> bool {
     order_type.starts_with("Vwap") || order_type.starts_with("Twap")
@@ -398,7 +484,10 @@ mod inactive_execution_order_tests {
     #[test]
     fn removes_unfilled_and_partially_filled_orders_from_pending_state() {
         assert_eq!(inactive_execution_order_status(0.0), "expired_or_cancelled");
-        assert_eq!(inactive_execution_order_status(0.25), "partially_filled_closed");
+        assert_eq!(
+            inactive_execution_order_status(0.25),
+            "partially_filled_closed"
+        );
     }
 
     #[test]

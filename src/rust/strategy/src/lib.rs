@@ -69,7 +69,8 @@ pub use scout_work::{
     StrategyReplayDecisionPoint, StrategyReplayPoint, StrategyReplayRequest,
     StrategyReplayResponse, request_learning_route, request_scout_candidate_batch,
     request_scout_feedback, request_scout_profile_snapshot, request_scout_profile_snapshot_for,
-    request_scout_service_route, request_scout_strategy_replay, request_scout_worker_route,
+    request_scout_service_route, request_scout_service_route_with_timeouts,
+    request_scout_strategy_replay, request_scout_worker_route,
 };
 #[cfg(feature = "live_socket_client")]
 pub use scout_work::{request_learning_snapshot_push, request_live_strategy_socket};

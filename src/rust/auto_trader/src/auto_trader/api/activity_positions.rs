@@ -360,6 +360,7 @@ mod closed_ledger_rows_tests {
 
 fn snapshot_activity_positions(settings: &Settings, today_start: u64) -> ActivityPositionSnapshot {
     let today = utc_day();
+    let eligible_closed_trade_returns = closed_trade_learning_returns(settings);
     let orders = settings
         .orders
         .iter()
@@ -457,16 +458,26 @@ fn snapshot_activity_positions(settings: &Settings, today_start: u64) -> Activit
                                     .map(|target| target.max(settings.take_profit_percent))
                             })
                             .unwrap_or(settings.take_profit_percent);
-                        Some(age_adjusted_take_profit_percent(
-                            Some(strategy.as_str()),
-                            position.entry_timestamp_ms,
-                            now_ms,
+                        let learned_exit_policy = position_uses_learned_exit_policy(position);
+                        let effective_candidate = if learned_exit_policy {
+                            candidate
+                        } else {
                             confidence_adjusted_take_profit_percent(
-                                &settings.closed_trade_returns_percent,
+                                &eligible_closed_trade_returns,
                                 candidate,
                                 effective_stop_loss,
-                            ),
-                        ))
+                            )
+                        };
+                        Some(if learned_exit_policy {
+                            effective_candidate
+                        } else {
+                            age_adjusted_take_profit_percent(
+                                Some(strategy.as_str()),
+                                position.entry_timestamp_ms,
+                                now_ms,
+                                effective_candidate,
+                            )
+                        })
                     } else {
                         None
                     };
@@ -522,7 +533,7 @@ fn snapshot_activity_positions(settings: &Settings, today_start: u64) -> Activit
                 .stop_loss_percent
                 .unwrap_or(settings.stop_loss_percent);
             let take_profit_percent = confidence_adjusted_take_profit_percent(
-                &settings.closed_trade_returns_percent,
+                &eligible_closed_trade_returns,
                 take_profit_candidate,
                 stop_loss_percent,
             );

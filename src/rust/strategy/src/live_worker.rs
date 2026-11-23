@@ -4,6 +4,7 @@ use rsocket_rust::{prelude::*, utils::EchoRSocket};
 use rsocket_rust_transport_websocket::{WebsocketClientTransport, WebsocketServerTransport};
 use std::{
     collections::BTreeMap,
+    io::Read,
     pin::Pin,
     sync::Arc,
     time::{Duration, Instant},
@@ -1691,6 +1692,7 @@ async fn connect_insights_strategy_stream(
     strategy: Strategy,
 ) -> anyhow::Result<Pin<Box<dyn Stream<Item = anyhow::Result<crate::StrategyInsightUpdate>> + Send>>>
 {
+    let compressed = strategy.is_live_insight();
     let client = RSocketFactory::connect()
         .transport(WebsocketClientTransport::from(url))
         .acceptor(Box::new(|| Box::new(EchoRSocket)))
@@ -1699,8 +1701,8 @@ async fn connect_insights_strategy_stream(
         .context("Insights strategy-stream connection failed")?;
     let source = client.request_stream(
         Payload::builder()
-            .set_data_utf8(if strategy.is_live_insight() {
-                "strategy-signals:live"
+            .set_data_utf8(if compressed {
+                "strategy-signals:live:zlib-v1"
             } else {
                 "strategy-signals:maintenance"
             })
@@ -1712,7 +1714,14 @@ async fn connect_insights_strategy_stream(
         let data = payload
             .data()
             .context("Insights returned an empty strategy signal")?;
-        serde_json::from_slice(data).context("invalid Insights strategy update")
+        if compressed {
+            let mut decoder = flate2::read::ZlibDecoder::new(data.as_ref());
+            let mut decoded = Vec::with_capacity(data.len().saturating_mul(4));
+            decoder.read_to_end(&mut decoded)?;
+            serde_json::from_slice(&decoded).context("invalid compressed Insights strategy update")
+        } else {
+            serde_json::from_slice(data).context("invalid Insights strategy update")
+        }
     })))
 }
 

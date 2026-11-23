@@ -183,6 +183,8 @@ async fn get_activity(State(state): State<AutoTraderState>) -> Json<ActivityResp
         closed_trade_flat: learning.closed_trade_flat,
         closed_trade_realized_usd: learning.closed_trade_realized_usd,
         closed_trade_fees_usd: learning.closed_trade_fees_usd,
+        closed_trade_needs_audit_count: learning.closed_trade_needs_audit_count,
+        closed_trade_needs_audit_recent: learning.closed_trade_needs_audit_recent,
         learning_samples: learning.learning_samples,
         learning_win_rate: learning.learning_win_rate,
         preferred_order_type: learning.preferred_order_type,

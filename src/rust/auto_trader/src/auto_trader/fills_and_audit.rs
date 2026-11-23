@@ -276,6 +276,24 @@ fn record_strategy_order_realized_pnl(order: &mut TraderOrder, realized_delta: f
     );
 }
 
+fn effective_audit_entry_threshold(
+    parameters: &serde_json::Map<String, serde_json::Value>,
+    key: StrategyParameterKey,
+    market_regime: Option<&str>,
+) -> Option<f64> {
+    market_regime
+        .and_then(|regime| key.regime_threshold(regime))
+        .and_then(|regime_key| parameters.get(regime_key.as_str()))
+        .and_then(serde_json::Value::as_f64)
+        .filter(|value| value.is_finite())
+        .or_else(|| {
+            parameters
+                .get(key.as_str())
+                .and_then(serde_json::Value::as_f64)
+                .filter(|value| value.is_finite())
+        })
+}
+
 fn signal_audit_payload(
     signal: &Signal,
     stage: &str,
@@ -292,14 +310,27 @@ fn signal_audit_payload(
         audited_components.as_object_mut(),
         signal.strategy_decision.as_ref().and_then(|decision| decision.get("strategy_parameters")).and_then(serde_json::Value::as_object),
     ) {
-        for key in ["minimum_momentum", "minimum_flow_imbalance", "minimum_book_imbalance", "minimum_vwap_dislocation_bps", "minimum_absorption_pressure"] {
-            if let Some(value) = parameters.get(key).and_then(serde_json::Value::as_f64) {
-                component_values.insert(format!("{key}_floor"), serde_json::json!(value));
+        for key in [
+            StrategyParameterKey::MinimumMomentum,
+            StrategyParameterKey::MinimumFlowImbalance,
+            StrategyParameterKey::MinimumBookImbalance,
+            StrategyParameterKey::MinimumVwapDislocationBps,
+            StrategyParameterKey::MinimumAbsorptionPressure,
+        ] {
+            if let Some(value) = effective_audit_entry_threshold(
+                parameters,
+                key,
+                signal.market_regime.as_deref(),
+            ) {
+                component_values.insert(
+                    format!("{}_floor", key.as_str()),
+                    serde_json::json!(value),
+                );
             }
         }
     }
     let mut payload = serde_json::json!({
-        "record_schema_version": 2,
+        "record_schema_version": 3,
         "decision_id": decision_id,
         "stage": stage,
         "timestamp": timestamp,

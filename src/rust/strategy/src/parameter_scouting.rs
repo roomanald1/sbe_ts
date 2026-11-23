@@ -39,18 +39,93 @@ pub fn single_parameter_variants(
 ) -> Option<Vec<BTreeMap<String, f64>>> {
     const MAX_SWEEP_VARIANTS: usize = 64;
     let first_direction = if day % 2 == 0 { 1.0 } else { -1.0 };
-    let candidates = scoutable_specs(specs)
-        .flat_map(|spec| {
-            let current = parameters.get(&spec.key).copied().unwrap_or(spec.default);
-            [first_direction, -first_direction]
-                .into_iter()
-                .filter_map(move |direction| {
-                    candidate_value(spec, current, direction)
-                        .map(|value| BTreeMap::from([(spec.key.clone(), value)]))
-                })
-        })
-        .collect::<Vec<_>>();
+    let mut candidates = Vec::new();
+    for spec in scoutable_specs(specs) {
+        let current = parameters.get(&spec.key).copied().unwrap_or(spec.default);
+        for direction in [first_direction, -first_direction] {
+            if let Some(value) = candidate_value(spec, current, direction) {
+                candidates.push(BTreeMap::from([(spec.key.clone(), value)]));
+            }
+        }
+        if spec.key == "stop_loss_percent" && current.is_finite() && current > 0.0 {
+            for multiplier in [1.25, 1.5, 2.0] {
+                if let Some(value) = wider_stop_loss_candidate(spec, current, multiplier) {
+                    let candidate = BTreeMap::from([(spec.key.clone(), value)]);
+                    if !candidates.contains(&candidate) {
+                        candidates.push(candidate);
+                    }
+                }
+            }
+        }
+    }
     (!candidates.is_empty() && candidates.len() <= MAX_SWEEP_VARIANTS).then_some(candidates)
+}
+
+fn wider_stop_loss_candidate(spec: &ParameterSpec, current: f64, multiplier: f64) -> Option<f64> {
+    if !multiplier.is_finite() || multiplier <= 1.0 || !spec.step.is_finite() || spec.step <= 0.0 {
+        return None;
+    }
+    let requested = current * multiplier;
+    if !requested.is_finite() || requested <= current {
+        return None;
+    }
+    let steps = ((requested - spec.min) / spec.step).ceil();
+    let value = (spec.min + steps * spec.step).min(spec.max);
+    (value.is_finite() && value > current + spec.step * 1.5 && value <= spec.max).then_some(value)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn single_parameter_scouts_include_bounded_wider_stop_boundaries() {
+        let stop = ParameterSpec {
+            key: "stop_loss_percent".into(),
+            label: "Stop loss".into(),
+            default: 0.5,
+            min: 0.1,
+            max: 1.5,
+            step: 0.05,
+            unit: "%".into(),
+            learning_direction: -1.0,
+        };
+        let baseline = BTreeMap::from([(stop.key.clone(), 0.5)]);
+        let variants = single_parameter_variants(&baseline, &[stop.clone()], 0).unwrap();
+        let values = variants
+            .iter()
+            .map(|variant| variant["stop_loss_percent"])
+            .collect::<Vec<_>>();
+
+        assert!(values.contains(&0.45));
+        assert!(values.contains(&0.55));
+        assert!(values.contains(&0.65));
+        assert!(values.contains(&0.75));
+        assert!(values.contains(&1.0));
+        assert!(
+            values
+                .iter()
+                .all(|value| *value >= stop.min && *value <= stop.max)
+        );
+    }
+
+    #[test]
+    fn wider_stop_candidates_snap_up_to_step_and_clamp_to_catalog_maximum() {
+        let stop = ParameterSpec {
+            key: "stop_loss_percent".into(),
+            label: "Stop loss".into(),
+            default: 0.5,
+            min: 0.1,
+            max: 1.5,
+            step: 0.05,
+            unit: "%".into(),
+            learning_direction: -1.0,
+        };
+
+        assert_eq!(wider_stop_loss_candidate(&stop, 0.5, 1.25), Some(0.65));
+        assert_eq!(wider_stop_loss_candidate(&stop, 1.0, 2.0), Some(1.5));
+        assert_eq!(wider_stop_loss_candidate(&stop, 1.5, 2.0), None);
+    }
 }
 
 pub(crate) fn probe_hash(symbol: &str, strategy: &str) -> u64 {

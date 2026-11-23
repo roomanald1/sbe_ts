@@ -35,9 +35,15 @@ impl Default for SignalEngine {
     fn default() -> Self {
         Self {
             prices: VecDeque::with_capacity(512),
+            snapshot_price_change_square_prefix: Vec::new(),
             pending: VecDeque::with_capacity(256),
             pending_scratch: VecDeque::with_capacity(256),
             trades: VecDeque::with_capacity(2_048),
+            snapshot_trade_buy_prefix: Vec::new(),
+            snapshot_trade_sell_prefix: Vec::new(),
+            snapshot_trade_notional_prefix: Vec::new(),
+            snapshot_trade_quantity_prefix: Vec::new(),
+            snapshot_absorption_events: Vec::new(),
             absorption_trades: VecDeque::with_capacity(512),
             book_imbalance: None,
             best_quote: None,

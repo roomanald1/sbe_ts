@@ -3,7 +3,13 @@ use rsocket_rust::{Client, prelude::*, utils::EchoRSocket};
 use rsocket_rust_transport_websocket::WebsocketClientTransport;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::sync::{Arc, Mutex as StdMutex, OnceLock};
+use std::{
+    sync::{Arc, Mutex as StdMutex, OnceLock},
+    time::Duration,
+};
+
+const PAPER_EXCHANGE_CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
+const PAPER_EXCHANGE_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Serialize)]
 struct PaperExchangeRequest {
@@ -34,18 +40,33 @@ async fn get_paper_exchange_client() -> anyhow::Result<Arc<Client>> {
     }
     let endpoint = std::env::var("PAPER_EXCHANGE_RSOCKET_URL")
         .unwrap_or_else(|_| "ws://127.0.0.1:10006".to_owned());
-    let connected = Arc::new(
+    let connected = tokio::time::timeout(
+        PAPER_EXCHANGE_CONNECT_TIMEOUT,
         RSocketFactory::connect()
             .transport(WebsocketClientTransport::from(endpoint.as_str()))
             .acceptor(Box::new(|| Box::new(EchoRSocket)))
-            .start()
-            .await
-            .with_context(|| format!("could not connect to Paper Exchange at {endpoint}"))?,
-    );
+            .start(),
+    )
+    .await
+    .with_context(|| format!("timed out connecting to Paper Exchange at {endpoint}"))?
+    .with_context(|| format!("could not connect to Paper Exchange at {endpoint}"))?;
+    let connected = Arc::new(connected);
     let mut client = paper_exchange_client()
         .lock()
         .unwrap_or_else(|p| p.into_inner());
     Ok(client.get_or_insert(connected).clone())
+}
+
+fn invalidate_paper_exchange_client(failed_client: &Arc<Client>) {
+    let mut slot = paper_exchange_client()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    if slot
+        .as_ref()
+        .is_some_and(|current| Arc::ptr_eq(current, failed_client))
+    {
+        *slot = None;
+    }
 }
 
 async fn paper_exchange_request(
@@ -59,27 +80,30 @@ async fn paper_exchange_request(
         path: path.to_owned(),
         body,
     };
-    let reply = match client
-        .request_response(
+    let response = tokio::time::timeout(
+        PAPER_EXCHANGE_REQUEST_TIMEOUT,
+        client.request_response(
             Payload::builder()
                 .set_data(serde_json::to_vec(&request)?)
                 .build(),
-        )
-        .await
-    {
-        Ok(Some(reply)) => reply,
-        Ok(None) => anyhow::bail!("Paper Exchange returned an empty response"),
-        Err(error) => {
-            let mut slot = paper_exchange_client()
-                .lock()
-                .unwrap_or_else(|p| p.into_inner());
-            if slot
-                .as_ref()
-                .is_some_and(|current| Arc::ptr_eq(current, &client))
-            {
-                *slot = None;
-            }
+        ),
+    )
+    .await;
+    let reply = match response {
+        Ok(Ok(Some(reply))) => reply,
+        Ok(Ok(None)) => {
+            invalidate_paper_exchange_client(&client);
+            anyhow::bail!("Paper Exchange returned an empty response");
+        }
+        Ok(Err(error)) => {
+            invalidate_paper_exchange_client(&client);
             return Err(error).context("Paper Exchange RSocket request failed");
+        }
+        Err(_) => {
+            invalidate_paper_exchange_client(&client);
+            anyhow::bail!(
+                "Paper Exchange {method} {path} RSocket request timed out after {PAPER_EXCHANGE_REQUEST_TIMEOUT:?}"
+            );
         }
     };
     let response: PaperExchangeResponse = serde_json::from_slice(

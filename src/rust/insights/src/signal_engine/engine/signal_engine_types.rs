@@ -74,9 +74,15 @@ struct AbsorptionTrade {
 
 pub struct SignalEngine {
     prices: VecDeque<(u64, f64)>,
+    snapshot_price_change_square_prefix: Vec<f64>,
     pending: VecDeque<PendingOutcome>,
     pending_scratch: VecDeque<PendingOutcome>,
     trades: VecDeque<(u64, f64, f64, bool, Option<f64>)>,
+    snapshot_trade_buy_prefix: Vec<f64>,
+    snapshot_trade_sell_prefix: Vec<f64>,
+    snapshot_trade_notional_prefix: Vec<f64>,
+    snapshot_trade_quantity_prefix: Vec<f64>,
+    snapshot_absorption_events: Vec<(u64, f64, bool, f64, Option<u32>)>,
     absorption_trades: VecDeque<AbsorptionTrade>,
     book_imbalance: Option<f64>,
     best_quote: Option<(u64, f64, f64)>,

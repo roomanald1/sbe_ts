@@ -1,3 +1,28 @@
+fn reconstructed_unattributed_lot(
+    quantity: f64,
+    average_entry_price: f64,
+    entry_fees: f64,
+    last_trade_timestamp: u64,
+) -> TraderPosition {
+    let entry_fees = entry_fees.abs();
+    TraderPosition {
+        quantity,
+        average_entry_price,
+        entry_fees,
+        // This is a fresh open lifecycle. The aggregate position's realized
+        // P&L is account history and must not be carried into one trade.
+        realized_pnl: 0.0,
+        initial_entry_notional: quantity.abs() * average_entry_price,
+        total_fees_paid: entry_fees,
+        total_entry_fees_paid: entry_fees,
+        entries: 1,
+        entry_context: UNATTRIBUTED_POSITION_MANAGER_CONTEXT.into(),
+        strategy: Some("unattributed".into()),
+        entry_timestamp_ms: last_trade_timestamp,
+        ..TraderPosition::default()
+    }
+}
+
 async fn reconcile_auto_positions_with_ledger(
     state: &AutoTraderState,
 ) -> Result<(), (StatusCode, String)> {
@@ -133,21 +158,24 @@ async fn reconcile_auto_positions_with_ledger(
                 changed = true;
             } else if !same_direction {
                 lots.clear();
-                let mut replacement = aggregate.clone();
-                replacement.quantity = *ledger_quantity;
-                replacement.average_entry_price = *ledger_average_price;
-                replacement.entry_fees = *ledger_fees;
-                replacement.strategy = Some("unattributed".into());
+                let replacement = reconstructed_unattributed_lot(
+                    *ledger_quantity,
+                    *ledger_average_price,
+                    *ledger_fees,
+                    *last_trade_timestamp,
+                );
                 lots.insert("unattributed".into(), replacement);
                 changed = true;
             }
         } else {
-            let mut restored = aggregate;
-            restored.quantity = *ledger_quantity;
-            restored.average_entry_price = *ledger_average_price;
-            restored.entry_fees = ledger_fees.abs();
+            let restored = reconstructed_unattributed_lot(
+                *ledger_quantity,
+                *ledger_average_price,
+                *ledger_fees,
+                *last_trade_timestamp,
+            );
             settings.strategy_positions.entry(symbol.clone()).or_default()
-                .insert(restored.strategy.clone().unwrap_or_else(|| "unattributed".into()), restored);
+                .insert("unattributed".into(), restored);
             changed = true;
         }
     }
@@ -166,5 +194,39 @@ async fn reconcile_auto_positions_with_ledger(
         request_settings_persist(state)?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod reconstructed_position_tests {
+    use super::*;
+
+    #[test]
+    fn recovered_lot_starts_a_fresh_unattributed_trade_without_changing_account_pnl() {
+        let aggregate = TraderPosition {
+            quantity: 0.0,
+            realized_pnl: -0.9374,
+            initial_entry_notional: 17.0,
+            total_fees_paid: 2.0,
+            strategy: Some("old-strategy".into()),
+            entry_decision_id: Some("old-decision".into()),
+            ..TraderPosition::default()
+        };
+        let account_realized_pnl = aggregate.realized_pnl;
+
+        let lot = reconstructed_unattributed_lot(0.001881512, 553.2, -0.0008327, 1_795_350_456_402);
+
+        assert_eq!(lot.quantity, 0.001881512);
+        assert_eq!(lot.average_entry_price, 553.2);
+        assert_eq!(lot.realized_pnl, 0.0);
+        assert!((lot.initial_entry_notional - 1.0408524384).abs() < 1e-9);
+        assert_eq!(lot.entry_fees, 0.0008327);
+        assert_eq!(lot.total_fees_paid, 0.0008327);
+        assert_eq!(lot.total_entry_fees_paid, 0.0008327);
+        assert_eq!(lot.strategy.as_deref(), Some("unattributed"));
+        assert_eq!(lot.entry_decision_id, None);
+        assert_eq!(lot.trade_id, None);
+        assert_eq!(lot.strategy_decision, None);
+        assert_eq!(aggregate.realized_pnl, account_realized_pnl);
+    }
 }
 

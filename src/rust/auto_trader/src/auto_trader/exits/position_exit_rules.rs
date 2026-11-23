@@ -79,6 +79,14 @@ fn position_strategy_parameters(position: &TraderPosition) -> BTreeMap<String, f
         .unwrap_or_default()
 }
 
+fn position_uses_learned_exit_policy(position: &TraderPosition) -> bool {
+    position
+        .strategy_decision
+        .as_ref()
+        .and_then(|decision| decision.get("learned_exit_protection_policy"))
+        .is_some_and(serde_json::Value::is_object)
+}
+
 fn next_thesis_failure_confirmation(
     current_count: u32,
     last_signal_timestamp_ms: u64,
@@ -104,20 +112,17 @@ fn profit_protection_parameters(position: &TraderPosition) -> ProfitProtectionPa
         .strategy_decision
         .as_ref()
         .and_then(|decision| decision.get("strategy_parameters"));
-    let parameter = |key: &str, legacy_key: &str, default: f64, min: f64, max: f64| {
+    let parameter = |key: &str, legacy_key: &str, default: f64| {
         strategy_parameters
             .and_then(|parameters| parameters.get(key).or_else(|| parameters.get(legacy_key)))
             .and_then(serde_json::Value::as_f64)
             .filter(|value| value.is_finite())
             .unwrap_or(default)
-            .clamp(min, max)
     };
     let activation_percent = parameter(
         "profit_protection_activation_percent",
         "scout_profit_activation_percent",
         DEFAULT_PROFIT_PROTECTION_ACTIVATION_PERCENT,
-        0.10,
-        0.50,
     );
     ProfitProtectionParameters {
         activation_percent,
@@ -125,16 +130,12 @@ fn profit_protection_parameters(position: &TraderPosition) -> ProfitProtectionPa
             "profit_protection_giveback_percent",
             "scout_profit_giveback_percent",
             DEFAULT_PROFIT_PROTECTION_GIVEBACK_PERCENT,
-            0.05,
-            0.30,
         ),
         minimum_lock_percent: parameter(
             "profit_protection_minimum_lock_percent",
             "scout_profit_minimum_lock_percent",
             DEFAULT_PROFIT_PROTECTION_MINIMUM_LOCK_PERCENT,
-            0.0,
-            activation_percent,
-        ),
+        ).max(0.0).min(activation_percent),
     }
 }
 
@@ -277,7 +278,7 @@ async fn evaluate_position_exit(
         (
             settings.stop_loss_percent,
             settings.take_profit_percent,
-            settings.closed_trade_returns_percent.clone(),
+            closed_trade_learning_returns(&settings),
         )
     };
     let stop_loss_percent = position.stop_loss_percent.unwrap_or(stop_loss_percent);
@@ -289,18 +290,26 @@ async fn evaluate_position_exit(
                 .map(|target| target.max(configured_take_profit_percent))
         })
         .unwrap_or(configured_take_profit_percent);
-    let take_profit_percent =
+    let learned_exit_policy = position_uses_learned_exit_policy(&position);
+    let take_profit_percent = if learned_exit_policy {
+        take_profit_percent
+    } else {
         confidence_adjusted_take_profit_percent(
             &closed_trade_returns,
             take_profit_percent,
             stop_loss_percent,
-        );
-    let take_profit_percent = age_adjusted_take_profit_percent(
-        position.strategy.as_deref(),
-        position.entry_timestamp_ms,
-        observed_at,
-        take_profit_percent,
-    );
+        )
+    };
+    let take_profit_percent = if learned_exit_policy {
+        take_profit_percent
+    } else {
+        age_adjusted_take_profit_percent(
+            position.strategy.as_deref(),
+            position.entry_timestamp_ms,
+            observed_at,
+            take_profit_percent,
+        )
+    };
     let protection_parameters = profit_protection_parameters(&position);
     let net_return_percent = return_fraction * 100.0;
     let previous_protection_peak = position.profit_protection_peak_return_percent;

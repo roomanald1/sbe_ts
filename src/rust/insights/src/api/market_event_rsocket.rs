@@ -5,9 +5,11 @@ use tower::ServiceExt;
 struct InsightsMarketEventResponder {
     events: broadcast::Sender<Bytes>,
     strategy_signals: broadcast::Sender<Bytes>,
+    compressed_strategy_signal_events: broadcast::Sender<Bytes>,
     strategy_maintenance_events: broadcast::Sender<Bytes>,
     legacy_strategy_signals: broadcast::Sender<Bytes>,
     latest_strategy_signals: Arc<DashMap<String, Bytes>>,
+    latest_compressed_strategy_signals: Arc<DashMap<String, Bytes>>,
     latest_daily_strategy: Arc<std::sync::RwLock<Option<Bytes>>>,
     scout_router: Option<Router>,
 }
@@ -159,6 +161,11 @@ impl RSocket for InsightsMarketEventResponder {
             Some("signal-events:*") => (self.events.subscribe(), false, 0),
             Some("tickers:*") => (self.events.subscribe(), true, 0),
             Some("strategy-signals:live") => (self.strategy_signals.subscribe(), false, 1),
+            Some("strategy-signals:live:zlib-v1") => (
+                self.compressed_strategy_signal_events.subscribe(),
+                false,
+                4,
+            ),
             Some("strategy-signals:maintenance") => (
                 self.strategy_maintenance_events.subscribe(),
                 false,
@@ -179,6 +186,12 @@ impl RSocket for InsightsMarketEventResponder {
                 let is_carry_update = entry.key().starts_with("__dated-carry-");
                 (!is_carry_update || initial_kind == 3).then(|| entry.value().clone())
             }));
+        } else if initial_kind == 4 {
+            initial.extend(
+                self.latest_compressed_strategy_signals
+                    .iter()
+                    .map(|entry| entry.value().clone()),
+            );
         } else if initial_kind == 2 {
             initial.extend(self.latest_strategy_signals.iter().filter_map(|entry| {
                 entry
@@ -238,9 +251,11 @@ impl RSocket for InsightsMarketEventResponder {
 async fn run_insights_market_event_server(
     events: broadcast::Sender<Bytes>,
     strategy_signals: broadcast::Sender<Bytes>,
+    compressed_strategy_signal_events: broadcast::Sender<Bytes>,
     strategy_maintenance_events: broadcast::Sender<Bytes>,
     legacy_strategy_signals: broadcast::Sender<Bytes>,
     latest_strategy_signals: Arc<DashMap<String, Bytes>>,
+    latest_compressed_strategy_signals: Arc<DashMap<String, Bytes>>,
     latest_daily_strategy: Arc<std::sync::RwLock<Option<Bytes>>>,
 ) -> anyhow::Result<()> {
     let port = std::env::var("INSIGHTS_RSOCKET_PORT").unwrap_or_else(|_| "10004".to_owned());
@@ -253,9 +268,13 @@ async fn run_insights_market_event_server(
             Ok(Box::new(InsightsMarketEventResponder {
                 events: events.clone(),
                 strategy_signals: strategy_signals.clone(),
+                compressed_strategy_signal_events: compressed_strategy_signal_events.clone(),
                 strategy_maintenance_events: strategy_maintenance_events.clone(),
                 legacy_strategy_signals: legacy_strategy_signals.clone(),
                 latest_strategy_signals: Arc::clone(&latest_strategy_signals),
+                latest_compressed_strategy_signals: Arc::clone(
+                    &latest_compressed_strategy_signals,
+                ),
                 latest_daily_strategy: Arc::clone(&latest_daily_strategy),
                 scout_router: None,
             }))
@@ -278,9 +297,11 @@ pub async fn run_insights_scout_rpc_server(
             Ok(Box::new(InsightsMarketEventResponder {
                 events: broadcast::channel(1).0,
                 strategy_signals: broadcast::channel(1).0,
+                compressed_strategy_signal_events: broadcast::channel(1).0,
                 strategy_maintenance_events: broadcast::channel(1).0,
                 legacy_strategy_signals: broadcast::channel(1).0,
                 latest_strategy_signals: Arc::new(DashMap::new()),
+                latest_compressed_strategy_signals: Arc::new(DashMap::new()),
                 latest_daily_strategy: Arc::new(std::sync::RwLock::new(None)),
                 scout_router: Some(router.clone()),
             }))
@@ -327,9 +348,11 @@ mod market_event_rsocket_tests {
         let responder = InsightsMarketEventResponder {
             events,
             strategy_signals,
+            compressed_strategy_signal_events: broadcast::channel(4).0,
             strategy_maintenance_events: broadcast::channel(4).0,
             legacy_strategy_signals: broadcast::channel(4).0,
             latest_strategy_signals: latest,
+            latest_compressed_strategy_signals: Arc::new(DashMap::new()),
             latest_daily_strategy: Arc::new(std::sync::RwLock::new(None)),
             scout_router: None,
         };
@@ -397,9 +420,11 @@ mod market_event_rsocket_tests {
         let responder = InsightsMarketEventResponder {
             events: broadcast::channel(4).0,
             strategy_signals: broadcast::channel(4).0,
+            compressed_strategy_signal_events: broadcast::channel(4).0,
             strategy_maintenance_events: broadcast::channel(4).0,
             legacy_strategy_signals: broadcast::channel(4).0,
             latest_strategy_signals: latest,
+            latest_compressed_strategy_signals: Arc::new(DashMap::new()),
             latest_daily_strategy: Arc::new(std::sync::RwLock::new(Some(Bytes::from(
                 serde_json::to_vec(&daily).unwrap(),
             )))),
@@ -432,9 +457,11 @@ mod market_event_rsocket_tests {
         let responder = InsightsMarketEventResponder {
             events: broadcast::channel(4).0,
             strategy_signals: broadcast::channel(4).0,
+            compressed_strategy_signal_events: broadcast::channel(4).0,
             strategy_maintenance_events: strategy_maintenance_events.clone(),
             legacy_strategy_signals: broadcast::channel(4).0,
             latest_strategy_signals: Arc::new(DashMap::new()),
+            latest_compressed_strategy_signals: Arc::new(DashMap::new()),
             latest_daily_strategy: Arc::clone(&latest_daily_strategy),
             scout_router: None,
         };

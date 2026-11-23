@@ -433,6 +433,24 @@ pub async fn request_scout_service_route(
     service_rsocket_url: &str,
     request: &ScoutCoordinatorRouteCommand,
 ) -> anyhow::Result<ScoutCoordinatorRouteResult> {
+    request_scout_service_route_with_timeouts(
+        service_rsocket_url,
+        request,
+        std::time::Duration::from_secs(2),
+        std::time::Duration::from_secs(2),
+    )
+    .await
+}
+
+/// Sends a typed service route request with caller-selected connection and
+/// response deadlines. Durable history scans need a longer response deadline
+/// than the small live coordination routes.
+pub async fn request_scout_service_route_with_timeouts(
+    service_rsocket_url: &str,
+    request: &ScoutCoordinatorRouteCommand,
+    connection_timeout: std::time::Duration,
+    request_timeout: std::time::Duration,
+) -> anyhow::Result<ScoutCoordinatorRouteResult> {
     validate_learning_rsocket_url(service_rsocket_url)?;
     let payload = Payload::builder()
         .set_data(serde_json::to_vec(&ScoutCoordinatorRequest::WorkerRoute(
@@ -443,15 +461,24 @@ pub async fn request_scout_service_route(
     let response = pooled_request_with_timeouts(
         service_rsocket_url,
         payload,
-        std::time::Duration::from_secs(2),
-        std::time::Duration::from_secs(2),
+        connection_timeout,
+        request_timeout,
     )
     .await
     .with_context(|| format!("Scout service route request to {} failed", request.path))?;
     #[cfg(not(feature = "live_socket_client"))]
-    let response = pooled_request(service_rsocket_url, payload)
+    let response = {
+        let client = tokio::time::timeout(
+            connection_timeout,
+            pooled_rsocket_client(service_rsocket_url),
+        )
         .await
-        .context("Scout service route request failed")?;
+        .context("Scout service route connection timed out")??;
+        tokio::time::timeout(request_timeout, client.request_response(payload))
+            .await
+            .context("Scout service route request timed out")??
+            .context("Scout service route returned an empty response")?
+    };
     match serde_json::from_slice::<ScoutCoordinatorResponse>(
         response
             .data()
@@ -866,7 +893,7 @@ mod tests {
 
         let endpoint = format!("ws://{address}");
         for request_id in ["insights-1", "insights-2"] {
-            let response = request_scout_service_route(
+            let response = request_scout_service_route_with_timeouts(
                 &endpoint,
                 &ScoutCoordinatorRouteCommand {
                     request_id: request_id.into(),
@@ -875,6 +902,8 @@ mod tests {
                     path: "/internal/auto-trader/signal".into(),
                     payload: serde_json::json!({"symbol":request_id}),
                 },
+                std::time::Duration::from_secs(2),
+                std::time::Duration::from_secs(120),
             )
             .await
             .unwrap();

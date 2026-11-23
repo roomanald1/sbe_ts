@@ -24,7 +24,7 @@ service = [
     "live_socket_client",
     "dep:tower",
 ]
-live_socket_client = ["dep:tokio"]
+live_socket_client = []
 
 [dependencies]
 anyhow = "1.0.104"
@@ -40,7 +40,7 @@ rusqlite = { version = "0.38", features = ["bundled"], optional = true }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 sha2 = { version = "0.10.9", optional = true }
-tokio = { version = "1.53.1", features = ["macros", "net", "rt-multi-thread", "sync", "time"], optional = true }
+tokio = { version = "1.53.1", features = ["macros", "net", "rt-multi-thread", "sync", "time"] }
 tower = { version = "0.5.3", features = ["util"], optional = true }
 
 [dev-dependencies]

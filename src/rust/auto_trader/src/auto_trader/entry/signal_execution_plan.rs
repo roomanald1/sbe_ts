@@ -24,7 +24,7 @@ fn recent_net_pnl_edge(outcomes: &LearningStats) -> Option<f64> {
 
 fn effective_entry_stop(strategy: Option<Strategy>, stop: f64, volatility: Option<f64>) -> f64 {
     if strategy.is_some() {
-        stop.clamp(MIN_STOP_LOSS_PERCENT, MAX_STOP_LOSS_PERCENT)
+        stop
     } else {
         volatility_adjusted_stop_loss_percent(stop, volatility)
     }
@@ -627,7 +627,10 @@ async fn prepare_signal_execution_plan(
     // defaults, with Learning-owned post-exit feedback applied below.
     let configured_stop = baseline_stop;
     let configured_target = baseline_target;
-    let contextual_stop = (!explicit_stop)
+    let learned_exit_policy = strategy.is_some_and(|kind| {
+        active_exit_protection_policy(&settings, &signal.symbol, kind.as_str()).is_some()
+    });
+    let contextual_stop = (!explicit_stop && !learned_exit_policy)
         .then(|| {
             let kind = strategy?;
             let parameters = signal_strategy_parameters(signal);
@@ -827,11 +830,15 @@ async fn prepare_signal_execution_plan(
     );
     let deep_book_ms = deep_book_started.elapsed().as_secs_f64() * 1000.0;
     let horizon_take_profit_percent = None;
-    let effective_take_profit_percent = confidence_adjusted_take_profit_percent(
-        &settings.closed_trade_returns_percent,
-        configured_target,
-        effective_stop_loss_percent,
-    );
+    let effective_take_profit_percent = if learned_exit_policy {
+        configured_target
+    } else {
+        confidence_adjusted_take_profit_percent(
+            &closed_trade_learning_returns(&settings),
+            configured_target,
+            effective_stop_loss_percent,
+        )
+    };
     let context = market_context(&signal);
     let execution_learning_started = Instant::now();
     let execution_learning = execution_learning_decision(

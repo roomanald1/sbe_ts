@@ -289,42 +289,50 @@ async fn run_ui_snapshot_push_worker(
     pending_snapshots: Arc<DashMap<String, serde_json::Value>>,
     notify: Arc<Notify>,
 ) {
+    const SNAPSHOT_PUSH_BATCH_DELAY: Duration = Duration::from_millis(100);
     let feed_rsocket_url = std::env::var("FEED_HANDLERS_RSOCKET_URL")
         .unwrap_or_else(|_| "ws://127.0.0.1:10001".to_owned());
     loop {
         let notified = notify.notified();
         tokio::pin!(notified);
-        let snapshots = drain_latest(&pending_snapshots);
-        if snapshots.is_empty() {
+        if pending_snapshots.is_empty() {
             notified.await;
             continue;
-        };
-        for (_, snapshot) in snapshots {
-            let symbol = snapshot["symbol"].as_str().unwrap_or("unknown");
-            let timestamp = snapshot["timestamp"].as_u64().unwrap_or_default();
-            let result = strategy::request_scout_service_route(
-                &feed_rsocket_url,
-                &strategy::ScoutCoordinatorRouteCommand {
-                    request_id: format!("insights-snapshot:{symbol}:{timestamp}"),
-                    strategy: None,
-                    method: strategy::ScoutWorkerHttpMethod::Post,
-                    path: "/internal/signals/snapshot".into(),
-                    payload: snapshot,
-                },
-            )
-            .await;
-            match result {
-                Ok(response) if response.status < 400 => {}
-                Ok(response) => crate::service_log!(
-                    "WARN",
-                    "Signal snapshot fanout to FeedHandlers failed: status {}",
-                    response.status
-                ),
-                Err(error) => crate::service_log!(
-                    "WARN",
-                    "Signal snapshot fanout to FeedHandlers failed: {error}"
-                ),
-            }
+        }
+        // Snapshots are latest-value updates by symbol. A short coalescing
+        // window batches the current feed burst into one pooled RSocket call.
+        tokio::time::sleep(SNAPSHOT_PUSH_BATCH_DELAY).await;
+        let snapshots = drain_latest(&pending_snapshots)
+            .into_iter()
+            .map(|(_, snapshot)| snapshot)
+            .collect::<Vec<_>>();
+        if snapshots.is_empty() {
+            continue;
+        }
+        let push_started = Instant::now();
+        let result = strategy::request_scout_service_route(
+            &feed_rsocket_url,
+            &strategy::ScoutCoordinatorRouteCommand {
+                request_id: format!("insights-snapshot-batch:{}", now_ms()),
+                strategy: None,
+                method: strategy::ScoutWorkerHttpMethod::Post,
+                path: "/internal/signals/snapshots".into(),
+                payload: serde_json::json!({ "snapshots": snapshots }),
+            },
+        )
+        .await;
+        crate::latency::record_ui_snapshot_push(push_started.elapsed());
+        match result {
+            Ok(response) if response.status < 400 => {}
+            Ok(response) => crate::service_log!(
+                "WARN",
+                "Signal snapshot fanout to FeedHandlers failed: status {}",
+                response.status
+            ),
+            Err(error) => crate::service_log!(
+                "WARN",
+                "Signal snapshot fanout to FeedHandlers failed: {error}"
+            ),
         }
     }
 }
