@@ -21,10 +21,11 @@ fn exit_protection_parameter_valid(
         return false;
     }
     value.is_finite()
-        && match key {
-            StrategyParameterKey::ProfitProtectionMinimumLockPercent => value >= 0.0,
-            _ => value > 0.0,
-        }
+        && strategy
+            .parameter_specs()
+            .into_iter()
+            .find(|spec| spec.key == key)
+            .is_some_and(|spec| value >= spec.min && value <= spec.max)
 }
 
 fn valid_exit_protection_policy(

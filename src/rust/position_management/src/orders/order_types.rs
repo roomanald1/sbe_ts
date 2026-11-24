@@ -59,7 +59,7 @@ enum TradeSide {
     Sell,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize)]
 struct PositionTrade {
     id: String,
     symbol: String,
@@ -99,6 +99,81 @@ struct PositionTrade {
     slippage_bps: Option<f64>,
 }
 
+#[derive(Deserialize)]
+struct PositionTradeWire {
+    id: String,
+    symbol: String,
+    side: TradeSide,
+    quantity: f64,
+    execution_price: f64,
+    #[serde(default)]
+    reference_price: Option<f64>,
+    timestamp: u64,
+    #[serde(default = "default_trade_source")]
+    source: String,
+    #[serde(default)]
+    parent_order_id: Option<String>,
+    fee: Option<f64>,
+    fee_known: Option<bool>,
+    fee_currency: Option<String>,
+    #[serde(default)]
+    fee_rate: f64,
+    #[serde(default)]
+    fee_liquidity: String,
+    #[serde(default)]
+    resting_order_id: Option<String>,
+    #[serde(default)]
+    decision_timestamp: Option<u64>,
+    #[serde(default)]
+    decision_price: Option<f64>,
+    #[serde(default)]
+    decision_mid_price: Option<f64>,
+    #[serde(default)]
+    slippage: Option<f64>,
+    #[serde(default)]
+    slippage_bps: Option<f64>,
+}
+
+impl<'de> Deserialize<'de> for PositionTrade {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let wire = PositionTradeWire::deserialize(deserializer)?;
+        let fee = wire.fee.unwrap_or_default();
+        let fee_currency = wire.fee_currency.unwrap_or_default();
+        // Legacy rows are known only when the serialized record contained both
+        // the fee amount (including an explicit zero) and its currency. Missing
+        // or defaulted placeholders remain unknown; explicit status is retained.
+        let fee_metadata_present = wire.fee.is_some()
+            && !fee_currency.trim().is_empty()
+            && fee.is_finite();
+        let fee_known = wire.fee_known.unwrap_or(fee_metadata_present) && fee_metadata_present;
+        Ok(Self {
+            id: wire.id,
+            symbol: wire.symbol,
+            side: wire.side,
+            quantity: wire.quantity,
+            execution_price: wire.execution_price,
+            reference_price: wire.reference_price,
+            timestamp: wire.timestamp,
+            source: wire.source,
+            parent_order_id: wire.parent_order_id,
+            fee,
+            fee_known,
+            fee_currency,
+            fee_rate: wire.fee_rate,
+            fee_liquidity: wire.fee_liquidity,
+            resting_order_id: wire.resting_order_id,
+            decision_timestamp: wire.decision_timestamp,
+            decision_price: wire.decision_price,
+            decision_mid_price: wire.decision_mid_price,
+            slippage: wire.slippage,
+            slippage_bps: wire.slippage_bps,
+        })
+    }
+}
+
 #[cfg(test)]
 mod position_trade_fee_migration_tests {
     use super::*;
@@ -135,6 +210,35 @@ mod position_trade_fee_migration_tests {
         assert_eq!(serialized["fee_known"], true);
         actual_zero.fee = -0.25;
         assert!(actual_zero.fee_known);
+    }
+
+    #[test]
+    fn legacy_explicit_zero_with_currency_migrates_as_known_but_partial_metadata_does_not() {
+        let explicit_zero = serde_json::json!({
+            "id":"legacy-zero", "symbol":"BTC-USDT", "side":"buy",
+            "quantity":1.0, "execution_price":100.0, "timestamp":9,
+            "fee":0.0, "fee_currency":"USDT"
+        });
+        let trade: PositionTrade = serde_json::from_value(explicit_zero).unwrap();
+        assert_eq!(trade.fee, 0.0);
+        assert!(trade.fee_known);
+
+        let missing_amount = serde_json::json!({
+            "id":"legacy-partial", "symbol":"BTC-USDT", "side":"buy",
+            "quantity":1.0, "execution_price":100.0, "timestamp":10,
+            "fee_currency":"USDT"
+        });
+        let trade: PositionTrade = serde_json::from_value(missing_amount).unwrap();
+        assert_eq!(trade.fee, 0.0);
+        assert!(!trade.fee_known);
+
+        let explicit_unknown = serde_json::json!({
+            "id":"unknown", "symbol":"BTC-USDT", "side":"buy",
+            "quantity":1.0, "execution_price":100.0, "timestamp":11,
+            "fee":0.0, "fee_currency":"USDT", "fee_known":false
+        });
+        let trade: PositionTrade = serde_json::from_value(explicit_unknown).unwrap();
+        assert!(!trade.fee_known);
     }
 }
 

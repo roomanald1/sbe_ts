@@ -123,19 +123,19 @@ fn profit_protection_parameters(position: &TraderPosition) -> ProfitProtectionPa
         "profit_protection_activation_percent",
         "scout_profit_activation_percent",
         DEFAULT_PROFIT_PROTECTION_ACTIVATION_PERCENT,
-    );
+    ).clamp(0.10, 0.50);
     ProfitProtectionParameters {
         activation_percent,
         giveback_percent: parameter(
             "profit_protection_giveback_percent",
             "scout_profit_giveback_percent",
             DEFAULT_PROFIT_PROTECTION_GIVEBACK_PERCENT,
-        ),
+        ).clamp(0.05, 0.30),
         minimum_lock_percent: parameter(
             "profit_protection_minimum_lock_percent",
             "scout_profit_minimum_lock_percent",
             DEFAULT_PROFIT_PROTECTION_MINIMUM_LOCK_PERCENT,
-        ).max(0.0).min(activation_percent),
+        ).clamp(0.0, 0.20).min(activation_percent),
     }
 }
 
@@ -732,7 +732,7 @@ mod position_exit_profit_protection_tests {
         }), None));
         assert_eq!(custom.activation_percent, 0.50);
         assert_eq!(custom.giveback_percent, 0.05);
-        assert_eq!(custom.minimum_lock_percent, 0.50);
+        assert_eq!(custom.minimum_lock_percent, 0.20);
 
         let legacy = profit_protection_parameters(&position(1.0, serde_json::json!({
             "strategy_parameters": {

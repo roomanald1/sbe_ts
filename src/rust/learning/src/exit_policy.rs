@@ -1015,14 +1015,9 @@ mod tests {
     }
 
     fn parsed_synthetic(case: PathCase) -> Vec<ReplayObservation> {
-        let specs = strategy::Strategy::from_name("live-momentum")
-            .unwrap()
-            .parameter_specs();
         synthetic_observations(case)
             .iter()
-            .filter_map(|value| {
-                parse_observation(value, "BTC-USDT", "live-momentum", u64::MAX)
-            })
+            .filter_map(|value| parse_observation(value, "BTC-USDT", "live-momentum", u64::MAX))
             .map(|mut sample| {
                 // Keep actual exit outcomes aligned with the captured baseline
                 // replay, while retaining the intentionally mixed exit reasons.

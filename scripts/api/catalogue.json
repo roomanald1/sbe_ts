@@ -7,7 +7,9 @@
   "autotrader": {
     "feedback-queues": "/internal/learning-feedback-queues",
     "monitoring-metrics": "/internal/monitoring-metrics",
-    "open-position-counts": "/internal/strategy/open-position-counts"
+    "open-position-counts": "/internal/strategy/open-position-counts",
+    "decision-parameters": "/positions/auto-trader/parameters",
+    "activity": "/positions/auto-trader/activity"
   },
   "insights": {
     "dashboard": "/signals/dashboard",
@@ -23,6 +25,7 @@
     "fee-rates": "/positions/fee-rates",
     "usd-rates": "/positions/usd-rates",
     "barriers": "/positions/barriers",
-    "persistence-timing": "/internal/persistence-timing"
+    "persistence-timing": "/internal/persistence-timing",
+    "trades": "/positions/trades"
   }
 }

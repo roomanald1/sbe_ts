@@ -10,7 +10,7 @@ def catalogue():
         (HERE / "catalogue.json").read_text()
     )
 
-def query(service, endpoint, max_bytes=4000000, since=None):
+def query(service, endpoint, max_bytes=4000000, since=None, params=None):
     routes = catalogue()
 
     if service not in routes:
@@ -22,14 +22,20 @@ def query(service, endpoint, max_bytes=4000000, since=None):
     if not 1 <= max_bytes <= 64000000:
         raise RuntimeError("Invalid response size limit")
 
+    request = {
+        "service": service,
+        "route": routes[service][endpoint],
+        "max_bytes": max_bytes,
+        **({"since": since} if since is not None else {})
+    }
+    if params:
+        if (service, endpoint) != ("positions", "trades"):
+            raise RuntimeError("Query parameters are only supported for positions.trades")
+        request["params"] = params
+
     result = subprocess.run(
         ["node", str(HERE / "rsocket_client.cjs")],
-        input=json.dumps({
-            "service": service,
-            "route": routes[service][endpoint],
-            "max_bytes": max_bytes,
-            **({"since": since} if since is not None else {})
-        }),
+        input=json.dumps(request),
         capture_output=True,
         text=True,
         timeout=15

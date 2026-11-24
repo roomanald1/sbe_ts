@@ -34,7 +34,9 @@ const allowedRoutes = {
   "autotrader": [
     "/internal/learning-feedback-queues",
     "/internal/monitoring-metrics",
-    "/internal/strategy/open-position-counts"
+    "/internal/strategy/open-position-counts",
+    "/positions/auto-trader/parameters",
+    "/positions/auto-trader/activity"
   ],
   "insights": [
     "/signals/dashboard",
@@ -50,7 +52,8 @@ const allowedRoutes = {
     "/positions/fee-rates",
     "/positions/usd-rates",
     "/positions/barriers",
-    "/internal/persistence-timing"
+    "/internal/persistence-timing",
+    "/positions/trades"
   ]
 };
 const allowed = Object.fromEntries(Object.entries(allowedRoutes).map(([k,v]) => [k,new Set(v)]));
@@ -89,6 +92,45 @@ async function main() {
         }
 
         route += `?since=${input.since}`;
+    }
+
+    if (input.params !== undefined) {
+        if (service !== 'positions' || route !== '/positions/trades' ||
+            input.params === null || typeof input.params !== 'object' ||
+            Array.isArray(input.params)) {
+            throw new Error('Query parameters unsupported for this route');
+        }
+        const allowedParams = new Set([
+            'symbol', 'source', 'since_ms', 'before_ms', 'limit', 'offset'
+        ]);
+        const query = new URLSearchParams();
+        for (const [key, value] of Object.entries(input.params)) {
+            if (!allowedParams.has(key)) {
+                throw new Error(`Unsupported positions.trades parameter: ${key}`);
+            }
+            if (key === 'symbol') {
+                if (typeof value !== 'string' || !/^[A-Za-z0-9._-]{1,64}$/.test(value)) {
+                    throw new Error('Invalid positions.trades symbol');
+                }
+            } else if (key === 'source') {
+                if (typeof value !== 'string' || !['auto', 'manual'].includes(value)) {
+                    throw new Error('Invalid positions.trades source');
+                }
+            } else {
+                if (!Number.isSafeInteger(value) || value < 0) {
+                    throw new Error(`Invalid positions.trades ${key}`);
+                }
+                if (key === 'limit' && (value < 1 || value > 500)) {
+                    throw new Error('positions.trades limit must be 1-500');
+                }
+                if (key === 'offset' && value > 100000) {
+                    throw new Error('positions.trades offset exceeds the read bound');
+                }
+            }
+            query.set(key, String(value));
+        }
+        const suffix = query.toString();
+        if (suffix) route += `?${suffix}`;
     }
 
     const url = `ws://127.0.0.1:${services[service]}`;

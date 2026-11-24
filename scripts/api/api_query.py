@@ -21,6 +21,8 @@ p.add_argument(
     type=int,
     choices=[1, 6, 24, 168, 720]
 )
+p.add_argument("--param", action="append", default=[], metavar="NAME=VALUE",
+               help="Read-only route query parameter (currently positions.trades only)")
 a = p.parse_args()
 
 since = (
@@ -29,7 +31,16 @@ since = (
 )
 
 try:
-    data = query(a.service, a.endpoint, a.max_bytes, since)
+    params = {}
+    for item in a.param:
+        name, sep, raw_value = item.partition("=")
+        if not sep or not name or name in params:
+            raise RuntimeError("Use unique --param NAME=VALUE entries")
+        try:
+            params[name] = json.loads(raw_value)
+        except ValueError:
+            params[name] = raw_value
+    data = query(a.service, a.endpoint, a.max_bytes, since, params or None)
     body = data["body"]
 
     if a.select:

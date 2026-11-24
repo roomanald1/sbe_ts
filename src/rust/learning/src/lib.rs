@@ -1599,7 +1599,7 @@ mod tests {
     #[tokio::test]
     async fn scout_outcome_delta_is_durable_and_deduplicated_after_restart() {
         let path = std::env::temp_dir().join(format!(
-            "learning-scout-delta-{}-{}.sqlite",
+            "learning-scout-delta-restart-{}-{}.sqlite",
             std::process::id(),
             now_ms()
         ));
@@ -1783,6 +1783,12 @@ mod tests {
 
         let delta_connection = open_state_db(&delta_path).unwrap();
         persist_normalized(&delta_connection, &baseline).unwrap();
+        let baseline_variant_count: i64 = delta_connection
+            .query_row("SELECT COUNT(*) FROM learning_variants", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(baseline_variant_count, 5_001);
         drop(delta_connection);
         persist_scout_outcome_delta(&delta_path, &updated, &event).unwrap();
 
@@ -1810,11 +1816,15 @@ mod tests {
             serde_json::to_string(updated.context_learning.get(&context).unwrap()).unwrap()
         );
         let variant_count: i64 = delta_connection
-            .query_row("SELECT COUNT(*) FROM learning_variants", [], |row| row.get(0))
+            .query_row("SELECT COUNT(*) FROM learning_variants", [], |row| {
+                row.get(0)
+            })
             .unwrap();
         assert_eq!(variant_count, 5_001);
         let event_count: i64 = delta_connection
-            .query_row("SELECT COUNT(*) FROM learning_seen_event_ids", [], |row| row.get(0))
+            .query_row("SELECT COUNT(*) FROM learning_seen_event_ids", [], |row| {
+                row.get(0)
+            })
             .unwrap();
         assert_eq!(event_count, 100_001);
         let historical_profile = StrategyProfile {

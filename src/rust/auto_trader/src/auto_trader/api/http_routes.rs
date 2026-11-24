@@ -627,6 +627,21 @@ mod strategy_pause_snapshot_tests {
             next_feedback_event(&[missed.clone()], true),
             Some(FeedbackEvent::MissedOpportunityCandidate { .. })
         ));
+        let mut later_missed = missed.clone();
+        if let FeedbackEvent::MissedOpportunityCandidate { event_id, .. } = &mut later_missed {
+            *event_id = "missed-later".into();
+        }
+        let mut feedback = vec![missed.clone(), trade.clone(), later_missed];
+        assert_eq!(feedback_event_id(next_feedback_event(&feedback, true).unwrap()), "missed");
+        assert!(rotate_feedback_event_to_back(&mut feedback, "missed"));
+        assert_eq!(
+            feedback_event_id(next_feedback_event(&feedback, true).unwrap()),
+            "missed-later"
+        );
+        assert!(matches!(
+            next_feedback_event(&feedback, false),
+            Some(FeedbackEvent::TradeOutcome { .. })
+        ));
         assert!(next_feedback_event(&[], false).is_none());
     }
 
@@ -1658,7 +1673,22 @@ fn start_learning_feedback_worker(state: &AutoTraderState) {
                             }
                             let _ = request_settings_persist(&publisher_state);
                         }
-                        FeedbackDeliveryOutcome::Retained => {}
+                        FeedbackDeliveryOutcome::Retained => {
+                            // A transient 5xx/queue-full response must not pin
+                            // this event at the head of its lane forever.
+                            // Rotate it so later independent candidates get a
+                            // delivery attempt when Learning capacity returns.
+                            let event_id = feedback_event_id(&event).to_owned();
+                            let mut settings = publisher_state.settings.lock().await;
+                            let rotated = rotate_feedback_event_to_back(
+                                &mut settings.feedback_outbox,
+                                &event_id,
+                            );
+                            drop(settings);
+                            if rotated {
+                                let _ = request_settings_persist(&publisher_state);
+                            }
+                        }
                     }
                 }
             }

@@ -183,6 +183,96 @@ fn walk_forward_evidence_by_regime_for_profile(
         .collect()
 }
 
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct EvidenceCoverageReadiness {
+    subject_type: String,
+    subject_id: String,
+    evidence_present: bool,
+    sample_count: Option<usize>,
+    required_samples: Option<usize>,
+    effective_samples: Option<f64>,
+    age_ms: Option<u64>,
+    stale: Option<bool>,
+    history_coverage: Option<strategy::StrategyWalkForwardCoverage>,
+    cost_coverage: Option<strategy::StrategyWalkForwardCoverage>,
+    search_family_coverage: Option<strategy::StrategyWalkForwardCoverage>,
+    queued_work: Option<usize>,
+    completed_work: Option<usize>,
+    promotion_blockers: Vec<String>,
+}
+
+fn profile_evidence_readiness(
+    symbol: &str,
+    strategy: Strategy,
+    parameters: &BTreeMap<String, f64>,
+    evidence: Option<&strategy::StrategyWalkForwardEvidence>,
+    now_ms: u64,
+) -> EvidenceCoverageReadiness {
+    let specs = strategy.parameter_specs();
+    let bounded_parameter = |key: &str| -> Option<f64> {
+        let spec = specs.iter().find(|spec| spec.key.as_str() == key)?;
+        let value = *parameters.get(key)?;
+        let step_position = (value - spec.min) / spec.step;
+        (value.is_finite() && value >= spec.min && value <= spec.max && spec.step > 0.0
+            && (step_position - step_position.round()).abs() <= 1e-6).then_some(value)
+    };
+    let required_samples = bounded_parameter("scout_minimum_walk_forward_samples")
+        .map(|value| value.round() as usize);
+    let max_age_ms = bounded_parameter("scout_maximum_evidence_age_seconds")
+        .map(|value| (value as u64).saturating_mul(1_000));
+    let mut blockers = Vec::new();
+    let age_ms = evidence.map(|value| now_ms.saturating_sub(value.last_sample_timestamp_ms));
+    let stale = age_ms.zip(max_age_ms).map(|(age, max)| age > max);
+    if evidence.is_none() {
+        blockers.push("evidence_missing".to_owned());
+    }
+    if required_samples.is_none() {
+        blockers.push("required_sample_threshold_unavailable".to_owned());
+    }
+    if max_age_ms.is_none() {
+        blockers.push("maximum_evidence_age_unavailable".to_owned());
+    }
+    if let Some(value) = evidence {
+        if required_samples.is_some_and(|required| value.sample_count < required) {
+            blockers.push("insufficient_samples".to_owned());
+        }
+        let effective = value.effective_sample_size.unwrap_or(value.sample_count as f64);
+        if !effective.is_finite() || required_samples.is_some_and(|required| effective < required as f64) {
+            blockers.push("insufficient_effective_samples".to_owned());
+        }
+        if stale == Some(true) { blockers.push("evidence_stale".to_owned()); }
+        if value.history_coverage != strategy::StrategyWalkForwardCoverage::Complete {
+            blockers.push("history_coverage_incomplete_or_unknown".to_owned());
+        }
+        if value.cost_coverage != strategy::StrategyWalkForwardCoverage::Complete {
+            blockers.push("cost_coverage_incomplete_or_unknown".to_owned());
+        }
+        if value.search_family_coverage != strategy::StrategyWalkForwardCoverage::Complete {
+            blockers.push("search_family_coverage_incomplete_or_unknown".to_owned());
+        }
+        if value.final_holdout_status != strategy::StrategyWalkForwardValidationStatus::Validated {
+            blockers.push("final_holdout_not_validated".to_owned());
+        }
+        if !value.expectancy_ci_low_percent.is_some_and(|lower| lower.is_finite() && lower > 0.0) {
+            blockers.push("positive_expectancy_not_proven".to_owned());
+        }
+        if !matches!(value.evidence_scope, strategy::StrategyWalkForwardEvidenceScope::ExactProfileUnconditioned) {
+            blockers.push("evidence_not_exact_profile".to_owned());
+        }
+    }
+    EvidenceCoverageReadiness {
+        subject_type: "profile".to_owned(), subject_id: format!("{symbol}:{}", strategy.as_str()),
+        evidence_present: evidence.is_some(), sample_count: evidence.map(|value| value.sample_count),
+        required_samples, effective_samples: evidence.map(|value| value.effective_sample_size.unwrap_or(value.sample_count as f64)),
+        age_ms, stale, history_coverage: evidence.map(|value| value.history_coverage),
+        cost_coverage: evidence.map(|value| value.cost_coverage),
+        search_family_coverage: evidence.map(|value| value.search_family_coverage),
+        // AutoTrader receives no per-profile work queue or completed-work totals.
+        queued_work: None, completed_work: None, promotion_blockers: blockers,
+    }
+}
+
 fn live_profile_for_symbol(
     settings: &Settings,
     symbol: &str,
@@ -364,7 +454,7 @@ impl AutoTraderSocketApi {
 
 async fn get_decision_parameters(
     State(state): State<AutoTraderState>,
-) -> Json<DecisionParametersResponse> {
+) -> Json<DecisionParametersWithReadinessResponse> {
     let (max_entries_per_auto_position, risk_appetite, thresholds, strategy_profiles) = {
         let settings = state.settings.lock().await;
         let mut strategy_profiles = strategy_parameter_profiles(&settings);
@@ -402,7 +492,7 @@ async fn get_decision_parameters(
     };
     let bands = state.latest_missed_opportunity_bands.lock().await.clone();
     let floor_scale = risk_floor_scale(risk_appetite);
-    let contexts = thresholds
+    let contexts: Vec<ContextDecisionParameters> = thresholds
         .into_iter()
         .map(|(context, thresholds)| ContextDecisionParameters {
             exploration_allowed: !is_mixed_market_context(&context),
@@ -431,13 +521,39 @@ async fn get_decision_parameters(
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64;
-    Json(DecisionParametersResponse {
+    let mut evidence_readiness = strategy_profiles.iter().map(|profile| {
+        let profile_strategy = Strategy::from_name(&profile.strategy).unwrap_or_default();
+        let parameters = profile.parameters.iter().map(|parameter| (parameter.key.clone(), parameter.value)).collect::<BTreeMap<_, _>>();
+        profile_evidence_readiness(&profile.symbol, profile_strategy, &parameters,
+            profile.walk_forward_evidence.as_ref(), refreshed_at)
+    }).collect::<Vec<_>>();
+    evidence_readiness.extend(contexts.iter().map(|context| EvidenceCoverageReadiness {
+        subject_type: "context".to_owned(), subject_id: context.context.clone(),
+        evidence_present: context.scout_learning_samples > 0,
+        sample_count: Some(context.scout_learning_samples), required_samples: None,
+        effective_samples: None, age_ms: None, stale: None,
+        history_coverage: None, cost_coverage: None, search_family_coverage: None,
+        queued_work: None, completed_work: None,
+        promotion_blockers: vec!["walk_forward_evidence_unavailable_for_context".to_owned()],
+    }));
+    Json(DecisionParametersWithReadinessResponse {
         refreshed_at,
         thresholds,
         contexts,
         latest_execution,
         strategy_profiles,
+        evidence_readiness,
     })
+}
+
+#[derive(Serialize)]
+struct DecisionParametersWithReadinessResponse {
+    refreshed_at: u64,
+    thresholds: Vec<DecisionParameter>,
+    contexts: Vec<ContextDecisionParameters>,
+    latest_execution: Option<LatestExecutionParameters>,
+    strategy_profiles: Vec<StrategyParameterProfile>,
+    evidence_readiness: Vec<EvidenceCoverageReadiness>,
 }
 
 #[derive(Serialize)]
@@ -468,6 +584,7 @@ struct CompactStrategyProfile {
     realized_pnl: f64,
     walk_forward_evidence: Option<strategy::StrategyWalkForwardEvidence>,
     walk_forward_evidence_by_regime: BTreeMap<String, strategy::StrategyWalkForwardEvidence>,
+    evidence_readiness: EvidenceCoverageReadiness,
     parameters: BTreeMap<String, CompactParameterValue>,
 }
 
@@ -480,6 +597,7 @@ struct CompactDecisionParametersResponse {
     latest_execution: Option<LatestExecutionParameters>,
     catalog: BTreeMap<String, Vec<ParameterCatalogEntry>>,
     strategy_profiles: Vec<CompactStrategyProfile>,
+    evidence_readiness: Vec<EvidenceCoverageReadiness>,
 }
 
 async fn get_compact_decision_parameters(
@@ -498,7 +616,7 @@ async fn get_compact_decision_parameters(
         for symbol in symbols {
           for strategy in &strategies {
             let learned = settings.learned_profiles.get(&format!("{symbol}:{}", strategy.as_str()));
-            let parameters = strategy.parameter_specs().iter().map(|spec| {
+            let parameters: BTreeMap<String, CompactParameterValue> = strategy.parameter_specs().iter().map(|spec| {
                 let key = strategy_parameter_key(&symbol, *strategy, spec.key.as_str());
                 let configured = settings.strategy_parameter_overrides.get(&key).copied()
                     .or_else(|| legacy_strategy_parameter_name(spec.key.as_str()).and_then(|name|
@@ -509,12 +627,16 @@ async fn get_compact_decision_parameters(
                 let value = configured.unwrap_or(learned_value);
                 (spec.key.as_str().to_owned(), CompactParameterValue { value, learned_value, configured_value: configured, overridden: configured.is_some() })
             }).collect();
+            let readiness_parameters = parameters.iter().map(|(key, value)| (key.clone(), value.value)).collect::<BTreeMap<_, _>>();
             profiles.push(CompactStrategyProfile { symbol: symbol.clone(), strategy: strategy.as_str().to_owned(),
                 learning_samples: learned.map_or(0, |profile| profile.learning_samples),
                 positive_rate: learned.and_then(|profile| (profile.learning_samples > 0).then_some(profile.positive_samples as f64 / profile.learning_samples as f64)),
                 realized_pnl: learned.map_or(0.0, |profile| profile.realized_pnl),
                 walk_forward_evidence: walk_forward_evidence_for_profile(&settings, &symbol, &symbol, *strategy),
                 walk_forward_evidence_by_regime: walk_forward_evidence_by_regime_for_profile(&settings, &symbol, &symbol, *strategy),
+                evidence_readiness: profile_evidence_readiness(&symbol, *strategy, &readiness_parameters,
+                    walk_forward_evidence_for_profile(&settings, &symbol, &symbol, *strategy).as_ref(),
+                    SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64),
                 parameters });
           }
         }
@@ -522,7 +644,7 @@ async fn get_compact_decision_parameters(
     };
     let bands = state.latest_missed_opportunity_bands.lock().await.clone();
     let floor_scale = risk_floor_scale(risk_appetite);
-    let contexts = thresholds.into_iter().map(|(context, thresholds)| ContextDecisionParameters {
+    let contexts: Vec<ContextDecisionParameters> = thresholds.into_iter().map(|(context, thresholds)| ContextDecisionParameters {
         exploration_allowed: !is_mixed_market_context(&context), context,
         learning_samples: thresholds.learning_samples, positive_rate: thresholds.positive_rate,
         scout_learning_samples: thresholds.scout_outcome_samples, scout_positive_rate: thresholds.scout_outcome_positive_rate,
@@ -532,10 +654,25 @@ async fn get_compact_decision_parameters(
     let thresholds = build_decision_thresholds(risk_appetite, max_entries);
     let latest_execution = state.latest_execution_parameters.lock().await.clone();
     let refreshed_at = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64;
+    let mut evidence_readiness = strategy_profiles.iter().map(|profile| {
+        let profile_strategy = Strategy::from_name(&profile.strategy).unwrap_or_default();
+        let parameters = profile.parameters.iter().map(|(key, value)| (key.clone(), value.value)).collect::<BTreeMap<_, _>>();
+        profile_evidence_readiness(&profile.symbol, profile_strategy, &parameters,
+            profile.walk_forward_evidence.as_ref(), refreshed_at)
+    }).collect::<Vec<_>>();
+    evidence_readiness.extend(contexts.iter().map(|context| EvidenceCoverageReadiness {
+        subject_type: "context".to_owned(), subject_id: context.context.clone(),
+        evidence_present: context.scout_learning_samples > 0,
+        sample_count: Some(context.scout_learning_samples), required_samples: None,
+        effective_samples: None, age_ms: None, stale: None,
+        history_coverage: None, cost_coverage: None, search_family_coverage: None,
+        queued_work: None, completed_work: None,
+        promotion_blockers: vec!["walk_forward_evidence_unavailable_for_context".to_owned()],
+    }));
     Json(CompactDecisionParametersResponse {
         version: 1, refreshed_at, thresholds,
         contexts, latest_execution,
-        catalog, strategy_profiles,
+        catalog, strategy_profiles, evidence_readiness,
     })
 }
 
@@ -793,6 +930,53 @@ mod decision_profile_tests {
             last_sample_timestamp_ms: 10,
             ..Default::default()
         }
+    }
+
+    fn readiness_parameters() -> BTreeMap<String, f64> {
+        Strategy::LiveMomentum.parameter_specs().iter()
+            .map(|spec| (spec.key.as_str().to_owned(), spec.default)).collect()
+    }
+
+    #[test]
+    fn evidence_readiness_distinguishes_missing_zero_stale_incomplete_and_ready() {
+        let now = 100_000_000;
+        let parameters = readiness_parameters();
+        let missing = profile_evidence_readiness("BTC-USDT", Strategy::LiveMomentum, &parameters, None, now);
+        assert!(!missing.evidence_present);
+        assert_eq!(missing.sample_count, None);
+        assert!(missing.promotion_blockers.iter().any(|blocker| blocker == "evidence_missing"));
+
+        let zero = strategy::StrategyWalkForwardEvidence { last_sample_timestamp_ms: now, ..evidence(0) };
+        let zero_view = profile_evidence_readiness("BTC-USDT", Strategy::LiveMomentum, &parameters, Some(&zero), now);
+        assert!(zero_view.evidence_present);
+        assert_eq!(zero_view.sample_count, Some(0));
+        assert!(zero_view.promotion_blockers.iter().any(|blocker| blocker == "insufficient_samples"));
+
+        let mut stale = evidence(100);
+        stale.last_sample_timestamp_ms = 1;
+        let stale_view = profile_evidence_readiness("BTC-USDT", Strategy::LiveMomentum, &parameters, Some(&stale), now);
+        assert_eq!(stale_view.stale, Some(true));
+        assert!(stale_view.promotion_blockers.iter().any(|blocker| blocker == "evidence_stale"));
+
+        let mut partial = evidence(100);
+        partial.last_sample_timestamp_ms = now;
+        partial.history_coverage = strategy::StrategyWalkForwardCoverage::Partial;
+        let partial_view = profile_evidence_readiness("BTC-USDT", Strategy::LiveMomentum, &parameters, Some(&partial), now);
+        assert_eq!(partial_view.history_coverage, Some(strategy::StrategyWalkForwardCoverage::Partial));
+        assert!(partial_view.promotion_blockers.iter().any(|blocker| blocker == "history_coverage_incomplete_or_unknown"));
+
+        let mut ready = evidence(100);
+        ready.last_sample_timestamp_ms = now;
+        ready.effective_sample_size = Some(100.0);
+        ready.history_coverage = strategy::StrategyWalkForwardCoverage::Complete;
+        ready.cost_coverage = strategy::StrategyWalkForwardCoverage::Complete;
+        ready.search_family_coverage = strategy::StrategyWalkForwardCoverage::Complete;
+        ready.final_holdout_status = strategy::StrategyWalkForwardValidationStatus::Validated;
+        ready.expectancy_ci_low_percent = Some(0.01);
+        ready.evidence_scope = strategy::StrategyWalkForwardEvidenceScope::ExactProfileUnconditioned;
+        let ready_view = profile_evidence_readiness("BTC-USDT", Strategy::LiveMomentum, &parameters, Some(&ready), now);
+        assert!(ready_view.promotion_blockers.is_empty(), "blockers: {:?}", ready_view.promotion_blockers);
+        assert_eq!(ready_view.effective_samples, Some(100.0));
     }
 
     #[test]

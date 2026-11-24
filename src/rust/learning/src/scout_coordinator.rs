@@ -592,7 +592,8 @@ impl ScoutCoordinator {
                     snapshot_publisher.state.clone(),
                 ))
                 .await
-                .0;
+                .0
+                .snapshot;
                 let scout_snapshot =
                     serde_json::to_value(&snapshot).unwrap_or(serde_json::Value::Null);
                 for strategy in Strategy::all() {

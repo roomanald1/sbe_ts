@@ -314,7 +314,7 @@ fn existing_order_response(store: &PositionStore, ledger: &Ledger, client_order_
         .iter()
         .map(|trade| trade.quantity * trade.execution_price)
         .sum::<f64>();
-    let (estimated_fee, unknown_fee_fills) = fee_total_and_unknown_count(fills.iter());
+    let (estimated_fee, unknown_fee_fills) = fee_total_and_unknown_count(fills.iter().copied());
     Some(OrderResponse {
         estimated_fee,
         fee_complete: unknown_fee_fills == 0,
@@ -358,7 +358,7 @@ mod order_ledger_contention_tests {
         })).unwrap();
         let known_zero: PositionTrade = serde_json::from_value(serde_json::json!({
             "id":"zero","symbol":"BTC-USDT","side":"sell","quantity":1.0,
-            "execution_price":100.0,"timestamp":2,"fee":0.0,"fee_known":true
+            "execution_price":100.0,"timestamp":2,"fee":0.0,"fee_currency":"USDT","fee_known":true
         })).unwrap();
         let (fee_total, unknown_count) = fee_total_and_unknown_count([&legacy, &known_zero].into_iter());
         assert_eq!(fee_total, 0.0);

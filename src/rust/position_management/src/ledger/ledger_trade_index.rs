@@ -28,7 +28,9 @@ impl LedgerTradeIndex {
                 0.0
             };
             *self.cash_by_quote.entry(quote.to_owned()).or_default() += cash + fee;
-            *self.fees_by_quote.entry(quote.to_owned()).or_default() -= fee;
+            if trade.fee_known {
+                *self.fees_by_quote.entry(quote.to_owned()).or_default() -= fee;
+            }
             for source in [None, Some(trade.source.clone())] {
                 *self.counts.entry(source.clone()).or_default() += 1;
                 let position = self.positions.entry(source).or_default()
@@ -83,7 +85,7 @@ mod trade_index_tests {
         serde_json::from_value(serde_json::json!({
             "id": id, "symbol": "BTC-USDT", "side": side, "quantity": quantity,
             "execution_price": 100.0, "timestamp": 1, "source": source,
-            "parent_order_id": id, "fee": -1.0, "fee_known": true, "fee_rate": 0.001
+            "parent_order_id": id, "fee": -1.0, "fee_currency":"USDT", "fee_known": true, "fee_rate": 0.001
         })).unwrap()
     }
 
@@ -115,14 +117,20 @@ mod trade_index_tests {
         let mut unknown = trade("legacy", "buy", 1.0, "manual");
         unknown.fee = 0.0;
         unknown.fee_known = false;
+        let mut index = LedgerTradeIndex::default();
+        let mut trades = vec![unknown.clone()];
+        index.extend(&trades);
+        assert_eq!(index.fees_by_quote.get("USDT"), None);
+        assert_eq!(index.unknown_fee_fills_by_quote["USDT"], 1);
+
         let mut known_zero = trade("zero", "sell", 1.0, "manual");
         known_zero.fee = 0.0;
         known_zero.fee_known = true;
 
-        let mut index = LedgerTradeIndex::default();
-        index.extend(&[unknown, known_zero]);
+        trades.push(known_zero);
+        index.extend(&trades);
         assert_eq!(index.cash_by_quote["USDT"], 0.0);
-        assert_eq!(index.fees_by_quote.get("USDT"), None);
+        assert_eq!(index.fees_by_quote.get("USDT"), Some(&0.0));
         assert_eq!(index.unknown_fee_fills_by_quote["USDT"], 1);
         let position = &index.positions[&None]["BTC-USDT"];
         assert_eq!(position.unknown_fee_fills, 1);

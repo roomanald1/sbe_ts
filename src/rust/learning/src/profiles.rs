@@ -176,7 +176,7 @@ pub(super) async fn get_profiles(
 
 pub(super) async fn get_decision_snapshot(
     State(service): State<ServiceState>,
-) -> Json<LearnedProfileSnapshot> {
+) -> Json<LearningDecisionSnapshotResponse> {
     let snapshot_now_ms = now_ms();
     let state = service.state.lock().await;
     let profiles = state
@@ -403,7 +403,7 @@ pub(super) async fn get_decision_snapshot(
             (strategy, multiplier)
         })
         .collect();
-    Json(LearnedProfileSnapshot {
+    let snapshot = LearnedProfileSnapshot {
         profiles,
         registered_profile_ids,
         strategy_size_multipliers,
@@ -421,7 +421,214 @@ pub(super) async fn get_decision_snapshot(
         walk_forward_evidence,
         scout_parameter_variants: scout_parameter_variant_snapshots(&state),
         exit_protection_policies,
+    };
+    Json(LearningDecisionSnapshotResponse {
+        snapshot,
+        replay_readiness: replay_readiness_summary(&state, snapshot_now_ms),
     })
+}
+
+#[derive(Serialize)]
+pub(super) struct LearningDecisionSnapshotResponse {
+    #[serde(flatten)]
+    pub(super) snapshot: LearnedProfileSnapshot,
+    #[serde(rename = "replayReadiness")]
+    replay_readiness: ReplayReadinessSummary,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ReplayReadinessSummary {
+    persisted_state_available: bool,
+    scout_replay_runs: PersistedRunSummary,
+    strategy_replay_jobs: ReplayJobSummary,
+    missed_opportunity_jobs: ReplayJobSummary,
+    retention: ReplayRetentionSummary,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PersistedRunSummary {
+    run_count: usize,
+    counts_by_status: BTreeMap<String, usize>,
+    latest_created_at_ms: Option<u64>,
+    latest_age_ms: Option<u64>,
+    timestamped_run_count: usize,
+    at_retention_limit: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ReplayJobSummary {
+    job_count: usize,
+    counts_by_status: BTreeMap<String, usize>,
+    timestamp_source: String,
+    oldest_timestamp_ms: Option<u64>,
+    latest_timestamp_ms: Option<u64>,
+    latest_age_ms: Option<u64>,
+    timestamped_job_count: usize,
+    at_retention_limit: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ReplayRetentionSummary {
+    outcome_history_truncated: bool,
+    seen_event_ids_overflowed: bool,
+    seen_execution_event_ids_overflowed: bool,
+    scout_replay_runs_at_limit: bool,
+    strategy_replay_jobs_at_limit: bool,
+    missed_opportunity_jobs_at_limit: bool,
+}
+
+fn status_counts(
+    statuses: impl IntoIterator<Item = String>,
+    known: &[&str],
+) -> BTreeMap<String, usize> {
+    let mut counts = known
+        .iter()
+        .map(|status| ((*status).to_owned(), 0))
+        .collect::<BTreeMap<_, _>>();
+    for status in statuses {
+        *counts.entry(status).or_default() += 1;
+    }
+    counts
+}
+
+fn timestamp_summary(
+    timestamps: impl Iterator<Item = u64>,
+    now_ms: u64,
+    at_limit: bool,
+) -> (Option<u64>, Option<u64>, Option<u64>, usize, bool) {
+    let values = timestamps
+        .filter(|timestamp| *timestamp > 0)
+        .collect::<Vec<_>>();
+    let oldest = values.iter().copied().min();
+    let latest = values.iter().copied().max();
+    (
+        oldest,
+        latest,
+        latest.map(|timestamp| now_ms.saturating_sub(timestamp)),
+        values.len(),
+        at_limit,
+    )
+}
+
+fn replay_readiness_summary(state: &LearningState, now_ms: u64) -> ReplayReadinessSummary {
+    const SCOUT_REPLAY_LIMIT: usize = 32;
+    const STRATEGY_REPLAY_LIMIT: usize = 10_000;
+    const MISSED_OPPORTUNITY_LIMIT: usize = 10_000;
+    let scout_runs = state.scout_replay_runs.values().collect::<Vec<_>>();
+    let scout_counts = status_counts(
+        scout_runs
+            .iter()
+            .map(|run| run["status"].as_str().unwrap_or("unknown").to_owned()),
+        &["pending", "running", "completed", "failed", "unknown"],
+    );
+    let scout_timestamps = scout_runs
+        .iter()
+        .filter_map(|run| run["createdAtMs"].as_u64());
+    let (_oldest_scout, latest_scout, latest_scout_age, timestamped_scout_count, scout_at_limit) =
+        timestamp_summary(
+            scout_timestamps,
+            now_ms,
+            scout_runs.len() >= SCOUT_REPLAY_LIMIT,
+        );
+    let strategy_counts = status_counts(
+        state
+            .strategy_replay_jobs
+            .values()
+            .map(|job| format!("{:?}", job.status).to_lowercase()),
+        &[
+            "pending",
+            "running",
+            "completed",
+            "failed",
+            "unsupported",
+            "unknown",
+        ],
+    );
+    let (
+        oldest_strategy,
+        latest_strategy,
+        latest_strategy_age,
+        timestamped_strategy_count,
+        strategy_at_limit,
+    ) = timestamp_summary(
+        state
+            .strategy_replay_jobs
+            .values()
+            .map(|job| job.updated_at_ms),
+        now_ms,
+        state.strategy_replay_jobs.len() >= STRATEGY_REPLAY_LIMIT,
+    );
+    let missed_counts = status_counts(
+        state
+            .missed_opportunity_jobs
+            .values()
+            .map(|job| format!("{:?}", job.status).to_lowercase()),
+        &[
+            "pending",
+            "running",
+            "completed",
+            "failed",
+            "unsupported",
+            "unknown",
+        ],
+    );
+    let (
+        oldest_missed,
+        latest_missed,
+        latest_missed_age,
+        timestamped_missed_count,
+        missed_at_limit,
+    ) = timestamp_summary(
+        state
+            .missed_opportunity_jobs
+            .values()
+            .map(|job| job.observed_at_ms),
+        now_ms,
+        state.missed_opportunity_jobs.len() >= MISSED_OPPORTUNITY_LIMIT,
+    );
+    ReplayReadinessSummary {
+        persisted_state_available: true,
+        scout_replay_runs: PersistedRunSummary {
+            run_count: scout_runs.len(),
+            counts_by_status: scout_counts,
+            latest_created_at_ms: latest_scout,
+            latest_age_ms: latest_scout_age,
+            timestamped_run_count: timestamped_scout_count,
+            at_retention_limit: scout_at_limit,
+        },
+        strategy_replay_jobs: ReplayJobSummary {
+            job_count: state.strategy_replay_jobs.len(),
+            counts_by_status: strategy_counts,
+            timestamp_source: "updated_at_ms".to_owned(),
+            oldest_timestamp_ms: oldest_strategy,
+            latest_timestamp_ms: latest_strategy,
+            latest_age_ms: latest_strategy_age,
+            timestamped_job_count: timestamped_strategy_count,
+            at_retention_limit: strategy_at_limit,
+        },
+        missed_opportunity_jobs: ReplayJobSummary {
+            job_count: state.missed_opportunity_jobs.len(),
+            counts_by_status: missed_counts,
+            timestamp_source: "observed_at_ms".to_owned(),
+            oldest_timestamp_ms: oldest_missed,
+            latest_timestamp_ms: latest_missed,
+            latest_age_ms: latest_missed_age,
+            timestamped_job_count: timestamped_missed_count,
+            at_retention_limit: missed_at_limit,
+        },
+        retention: ReplayRetentionSummary {
+            outcome_history_truncated: state.outcome_history_truncated,
+            seen_event_ids_overflowed: state.seen_event_ids_overflowed,
+            seen_execution_event_ids_overflowed: state.seen_execution_event_ids_overflowed,
+            scout_replay_runs_at_limit: scout_at_limit,
+            strategy_replay_jobs_at_limit: strategy_at_limit,
+            missed_opportunity_jobs_at_limit: missed_at_limit,
+        },
+    }
 }
 
 fn walk_forward_identity_allowed(symbol: &str, strategy_name: &str) -> bool {
@@ -900,6 +1107,44 @@ pub(super) fn scout_parameter_variant_snapshots(
 mod tests {
     use super::*;
 
+    fn job_state() -> LearningState {
+        let mut state = LearningState::default();
+        let strategy_job = |event_id: &str, status: &str, timestamp: u64| {
+            serde_json::from_value(serde_json::json!({
+                "event_id": event_id, "symbol": "BTC-USDT", "strategy": "live-momentum",
+                "profile_id": "profile", "parameters": {}, "context": null,
+                "status": status, "attempts": 0, "created_at_ms": timestamp,
+                "updated_at_ms": timestamp, "reason": null, "result": null
+            }))
+            .unwrap()
+        };
+        for (id, status, timestamp) in [
+            ("p", "pending", 100),
+            ("c", "completed", 200),
+            ("f", "failed", 300),
+        ] {
+            state
+                .strategy_replay_jobs
+                .insert(id.into(), strategy_job(id, status, timestamp));
+            let missed: MissedOpportunityJob = serde_json::from_value(serde_json::json!({
+                "event_id": id, "observed_at_ms": timestamp, "symbol": "BTC-USDT",
+                "strategy": "live-momentum", "profile_id": "profile", "parameters": {},
+                "direction": "long", "strength": 0.5, "score": 0.5,
+                "learning_context": "long:trend:BTC-USDT", "status": status,
+                "reason": null, "horizons": {}
+            }))
+            .unwrap();
+            state.missed_opportunity_jobs.insert(id.into(), missed);
+            state.scout_replay_runs.insert(
+                format!("run-{id}"),
+                serde_json::json!({
+                    "runId": format!("run-{id}"), "status": status, "createdAtMs": timestamp
+                }),
+            );
+        }
+        state
+    }
+
     #[test]
     fn sufficiently_sampled_negative_net_trades_pause_daily_strategy_sizing() {
         let now = now_ms();
@@ -913,6 +1158,103 @@ mod tests {
             .map(|index| (now, if index < 18 { 0.01 } else { -0.30 }))
             .collect::<Vec<_>>();
         assert_eq!(strategy_size_multiplier(&mostly_winning, now), 0.0);
+    }
+
+    #[tokio::test]
+    async fn decision_snapshot_reports_empty_and_persisted_replay_work_without_changing_legacy_shape()
+     {
+        let empty_service = ServiceState {
+            state: Arc::new(tokio::sync::Mutex::new(LearningState::default())),
+            path: PathBuf::new(),
+            state_updates: Arc::new(tokio::sync::Notify::new()),
+        };
+        let Json(empty) = get_decision_snapshot(State(empty_service)).await;
+        let empty_json = serde_json::to_value(empty).unwrap();
+        assert!(
+            empty_json.get("profiles").is_some(),
+            "legacy snapshot fields stay at top level"
+        );
+        assert!(
+            empty_json["replayReadiness"]["persistedStateAvailable"]
+                .as_bool()
+                .unwrap()
+        );
+        assert_eq!(
+            empty_json["replayReadiness"]["scoutReplayRuns"]["runCount"],
+            0
+        );
+        assert_eq!(
+            empty_json["replayReadiness"]["strategyReplayJobs"]["countsByStatus"]["pending"],
+            0
+        );
+        assert_eq!(
+            empty_json["replayReadiness"]["missedOpportunityJobs"]["latestTimestampMs"],
+            serde_json::Value::Null
+        );
+
+        let state = job_state();
+        // The state structs and job maps use the same serde representation as persisted state.
+        let restarted: LearningState =
+            serde_json::from_value(serde_json::to_value(state).unwrap()).unwrap();
+        let service = ServiceState {
+            state: Arc::new(tokio::sync::Mutex::new(restarted)),
+            path: PathBuf::new(),
+            state_updates: Arc::new(tokio::sync::Notify::new()),
+        };
+        let Json(response) = get_decision_snapshot(State(service)).await;
+        let value = serde_json::to_value(response).unwrap();
+        let readiness = &value["replayReadiness"];
+        assert_eq!(readiness["scoutReplayRuns"]["runCount"], 3);
+        assert_eq!(readiness["scoutReplayRuns"]["countsByStatus"]["pending"], 1);
+        assert_eq!(
+            readiness["scoutReplayRuns"]["countsByStatus"]["completed"],
+            1
+        );
+        assert_eq!(readiness["scoutReplayRuns"]["countsByStatus"]["failed"], 1);
+        assert_eq!(readiness["strategyReplayJobs"]["jobCount"], 3);
+        assert_eq!(
+            readiness["strategyReplayJobs"]["countsByStatus"]["pending"],
+            1
+        );
+        assert_eq!(
+            readiness["missedOpportunityJobs"]["countsByStatus"]["completed"],
+            1
+        );
+        assert_eq!(readiness["scoutReplayRuns"]["latestCreatedAtMs"], 300);
+        assert!(
+            readiness["scoutReplayRuns"]["latestAgeMs"]
+                .as_u64()
+                .is_some()
+        );
+
+        let missing_fields: LearningState = serde_json::from_value(serde_json::json!({
+            "variants": {}, "active_profiles": {}, "seen_event_ids": [], "accepted_events": 0
+        }))
+        .unwrap();
+        let missing_summary = replay_readiness_summary(&missing_fields, 500);
+        assert_eq!(missing_summary.scout_replay_runs.run_count, 0);
+        assert_eq!(missing_summary.strategy_replay_jobs.job_count, 0);
+        assert!(missing_summary.persisted_state_available);
+
+        let mut incomplete_run = LearningState::default();
+        incomplete_run.scout_replay_runs.insert(
+            "legacy-run".into(),
+            serde_json::json!({"runId": "legacy-run"}),
+        );
+        let incomplete_summary = replay_readiness_summary(&incomplete_run, 500);
+        assert_eq!(incomplete_summary.scout_replay_runs.run_count, 1);
+        assert_eq!(
+            incomplete_summary.scout_replay_runs.counts_by_status["unknown"],
+            1
+        );
+        assert_eq!(
+            incomplete_summary.scout_replay_runs.timestamped_run_count,
+            0
+        );
+        assert_eq!(
+            incomplete_summary.scout_replay_runs.latest_created_at_ms,
+            None
+        );
     }
 
     #[test]
@@ -1226,13 +1568,20 @@ mod tests {
             state_updates: Arc::new(tokio::sync::Notify::new()),
         };
         let Json(snapshot) = get_decision_snapshot(State(service)).await;
-        assert!(snapshot.registered_profile_ids.contains(&profile_id));
+        assert!(
+            snapshot
+                .snapshot
+                .registered_profile_ids
+                .contains(&profile_id)
+        );
         assert!(
             !snapshot
+                .snapshot
                 .registered_profile_ids
                 .contains("different-active-profile")
         );
-        let samples = &snapshot.recent_profile_context_returns[&format!("{profile_id}|{context}")];
+        let samples =
+            &snapshot.snapshot.recent_profile_context_returns[&format!("{profile_id}|{context}")];
         assert_eq!(
             samples.iter().map(|sample| sample.1).collect::<Vec<_>>(),
             vec![-0.3, -0.2, -0.1]

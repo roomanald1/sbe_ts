@@ -384,7 +384,15 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status, StatusCode::OK.as_u16());
-        assert_eq!(response.body.get().len(), RESPONSE_BYTES);
+        // Non-JSON response bodies are represented by the route contract as a
+        // JSON string, so the serialized RawValue includes the surrounding quotes.
+        assert_eq!(response.body.get().len(), RESPONSE_BYTES + 2);
+        assert_eq!(
+            serde_json::from_str::<String>(response.body.get())
+                .unwrap()
+                .len(),
+            RESPONSE_BYTES
+        );
     }
 
     #[tokio::test]
@@ -440,7 +448,11 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(response.status, 200);
-        assert_eq!(serde_json::from_str::<serde_json::Value>(response.body.get()).expect("valid response JSON"), payload);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(response.body.get())
+                .expect("valid response JSON"),
+            payload
+        );
     }
 
     #[test]
