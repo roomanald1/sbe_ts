@@ -67,7 +67,7 @@ Evidence is stored under `~/.cache/sbe-diagnostics/`. Keep raw evidence on disk 
 
 - Treat context as a limited resource. Avoid accumulating unrelated tasks in long-running sessions.
 - Prefer fresh specialist sessions and bounded work packages.
-- Monitor context at major task boundaries; compact or hand off before excessive accumulation.
+- Monitor context at major task boundaries using the advisory indicators below. These are monitoring indicators only, not execution limits or mandatory handoff triggers. Continue beyond them when productive; prefer handoffs at natural implementation boundaries and allow native compaction to operate normally.
 - Before compaction, persist verified reusable discoveries with `bd remember` and record task progress, evidence references, blockers and remaining work.
 - After compaction, restore only essential context.
 - Never reload entire plans, large logs, completed investigations or unrelated work packages without justification.
@@ -77,17 +77,17 @@ Evidence is stored under `~/.cache/sbe-diagnostics/`. Keep raw evidence on disk 
 - Do not accumulate large tool outputs merely because the model supports a large context window.
 - Complete bounded tasks and close specialist sessions when their work is finished.
 
-Advisory context budgets:
+Advisory context monitoring indicators (not execution limits or mandatory handoff triggers):
 
-| Role | Target compaction threshold | Target maximum context |
-|---|---:|---:|
-| Coordinator | 80K | 131K |
-| Architect / Quantitative / Financial | 60K | 98K |
-| Rust / Integration | 40K | 65K |
-| React | 30K | 49K |
-| Explorer / Documentation | 20–30K | 32–49K |
+| Role | Monitoring indicator |
+|---|---:|
+| Coordinator | 200K |
+| Architect / Quantitative / Financial | 150K |
+| Rust / Integration | 120K |
+| React | 100K |
+| Explorer / Documentation | 60K |
 
-These are operational targets, not verified runtime limits. Respect actual model capabilities and effective agent configuration. Adjust for initial context overhead and task complexity. Do not sacrifice correctness or mandatory invariants to meet a token target.
+Continue working beyond these indicators when productive. Do not trigger a handoff or compaction solely because an indicator is reached. Respect actual model capabilities and effective agent configuration; do not sacrifice correctness or mandatory invariants to meet a token target.
 
 ### Repository Navigation
 
@@ -227,7 +227,7 @@ Review context growth, repeated reads, overlapping searches, oversized outputs, 
 - Use the project-scoped named profiles in `.codex/agents/` for delegated work. Give each child one bounded work package, its Beads ID, exact paths/symbols, relevant contracts, acceptance criteria and required evidence; do not pass the full plan by default.
 - Keep no more than two child agents active and default to one high-reasoning child at a time. Concurrent high-reasoning children require documented necessity and resource headroom. Do not allow nested delegation from specialist profiles.
 - The coordinator profile owns dependency order, shared invariants, build scheduling and integration. Keep architecture, risk and concurrency review on the architect profile.
-- Treat per-profile context and compaction thresholds as advisory on runtimes that do not expose effective settings. Check context at work-package boundaries, checkpoint before the profile target, and resume from compact Beads notes rather than deliberately filling context to test a limit.
+- Treat per-profile context and compaction thresholds as advisory monitoring indicators only, not execution limits or mandatory handoff triggers. Continue beyond them when productive, prefer handoffs at natural implementation boundaries, and allow native compaction to operate normally.
 - Record profile name, requested/effective model and reasoning, parent linkage, context evidence, Beads task and start/end usage counters when available. Mark missing runtime or usage fields as unavailable; do not infer them from configuration or cached-token ratios.
 
 ### Handoff Requirements
