@@ -9,6 +9,7 @@ async fn get_fee_rates() -> Json<FeeRatesResponse> {
 struct AccountLedgerSnapshot {
     cash_delta: f64,
     fees_paid: f64,
+    unknown_fee_fills: usize,
     equity_available: bool,
     positions: BTreeMap<String, Position>,
 }
@@ -30,8 +31,9 @@ fn account_snapshot_with_rates(
                 equity_available = false;
             }
         }
+        let unknown_fee_fills = index.unknown_fee_fills_by_quote.values().sum();
         AccountLedgerSnapshot {
-            cash_delta, fees_paid, equity_available,
+            cash_delta, fees_paid, unknown_fee_fills, equity_available,
             positions: index.positions.get(&None).cloned().unwrap_or_default(),
         }
     });
@@ -141,6 +143,8 @@ fn account_snapshot_with_rates(
         realized_pnl,
         unrealized_pnl,
         fees_paid,
+        fees_complete: snapshot.unknown_fee_fills == 0,
+        unknown_fee_fills: snapshot.unknown_fee_fills,
         estimated_exit_fees,
         equity_available,
         initial_cash: ledger.initial_cash,
@@ -175,8 +179,8 @@ mod account_snapshot_tests {
         let ledger = Ledger {
             initial_cash: 1_000.0,
             trades: serde_json::from_value(serde_json::json!([
-                {"id":"b","symbol":"BTC-USDT","side":"buy","quantity":1.0,"execution_price":100.0,"timestamp":1,"fee":-1.0},
-                {"id":"s","symbol":"BTC-USDT","side":"sell","quantity":1.0,"execution_price":120.0,"timestamp":2,"fee":-1.0}
+                {"id":"b","symbol":"BTC-USDT","side":"buy","quantity":1.0,"execution_price":100.0,"timestamp":1,"fee":-1.0,"fee_known":true},
+                {"id":"s","symbol":"BTC-USDT","side":"sell","quantity":1.0,"execution_price":120.0,"timestamp":2,"fee":-1.0,"fee_known":true}
             ])).unwrap(),
             ..Ledger::default()
         };
@@ -203,5 +207,43 @@ mod account_snapshot_tests {
         let rates = BTreeMap::from([("USDT".to_owned(), 1.0)]);
         let account = account_snapshot_with_rates(&store, &ledger, &rates).unwrap();
         assert!(!account.equity_available);
+        assert!(!account.fees_complete);
+        assert_eq!(account.unknown_fee_fills, 1);
+        let account_json = serde_json::to_value(&account).unwrap();
+        assert_eq!(account_json["fees_complete"], false);
+        assert_eq!(account_json["unknown_fee_fills"], 1);
+    }
+
+    #[test]
+    fn legacy_unknown_fees_make_account_values_incomplete_but_known_zero_does_not() {
+        let store = store();
+        let rates = BTreeMap::from([("USDT".to_owned(), 1.0)]);
+        let legacy = Ledger {
+            initial_cash: 1_000.0,
+            trades: serde_json::from_value(serde_json::json!([
+                {"id":"legacy","symbol":"BTC-USDT","side":"buy","quantity":1.0,"execution_price":100.0,"timestamp":1}
+            ])).unwrap(),
+            ..Ledger::default()
+        };
+        let account = account_snapshot_with_rates(&store, &legacy, &rates).unwrap();
+        assert!(account.equity_available);
+        assert_eq!(account.cash, 900.0); // unknown fee omitted from numeric cash
+        assert_eq!(account.fees_paid, 0.0);
+        assert!(!account.fees_complete);
+        assert_eq!(account.unknown_fee_fills, 1);
+
+        let known_zero_store = store();
+        let known_zero = Ledger {
+            initial_cash: 1_000.0,
+            trades: serde_json::from_value(serde_json::json!([
+                {"id":"zero","symbol":"BTC-USDT","side":"buy","quantity":1.0,"execution_price":100.0,"timestamp":1,"fee":0.0,"fee_known":true}
+            ])).unwrap(),
+            ..Ledger::default()
+        };
+        let account = account_snapshot_with_rates(&known_zero_store, &known_zero, &rates).unwrap();
+        assert!(account.equity_available);
+        assert_eq!(account.fees_paid, 0.0);
+        assert!(account.fees_complete);
+        assert_eq!(account.unknown_fee_fills, 0);
     }
 }

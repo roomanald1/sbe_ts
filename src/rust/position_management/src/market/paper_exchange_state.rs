@@ -46,6 +46,8 @@ struct AccountResponse {
     realized_pnl: f64,
     unrealized_pnl: f64,
     fees_paid: f64,
+    fees_complete: bool,
+    unknown_fee_fills: usize,
     estimated_exit_fees: f64,
     equity_available: bool,
     initial_cash: f64,

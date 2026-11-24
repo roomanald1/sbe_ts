@@ -186,6 +186,7 @@ async fn execute_vwap_child(
             source: source.to_owned(),
             parent_order_id: Some(parent_order_id.to_owned()),
             fee: -qty * execution_price * fee_rate.abs(),
+            fee_known: true,
             fee_currency: symbol
                 .split_once('-')
                 .map(|(_, quote)| quote.to_owned())

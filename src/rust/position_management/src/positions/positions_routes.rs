@@ -265,6 +265,7 @@ fn dated_carry_fill(
         source: "auto".into(),
         parent_order_id: Some(parent.to_owned()),
         fee: -fee.abs(),
+        fee_known: true,
         fee_currency: quote.to_owned(),
         fee_rate,
         fee_liquidity: "taker".into(),

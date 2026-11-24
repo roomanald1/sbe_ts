@@ -33,6 +33,8 @@ fn summarize_positions_from<'a>(
             realized_pnl: 0.0,
             entry_fees: 0.0,
             fees_paid: 0.0,
+            known_fee_fills: 0,
+            unknown_fee_fills: 0,
             estimated_exit_fee_rate: 0.0,
             last_trade_timestamp: trade.timestamp,
         });
@@ -51,7 +53,16 @@ fn signed_fee_cashflow(fee: f64) -> f64 {
 }
 fn apply_trade(position: &mut Position, trade: &PositionTrade) {
     let old = position.quantity;
-    let fee = signed_fee_cashflow(trade.fee);
+    // Unknown historical fees are excluded from numeric P&L and fee totals.
+    // Their aggregate coverage is tracked by LedgerTradeIndex; the zero in a
+    // legacy PositionTrade is not an observed fee amount.
+    let fee = if trade.fee_known {
+        position.known_fee_fills += 1;
+        signed_fee_cashflow(trade.fee)
+    } else {
+        position.unknown_fee_fills += 1;
+        0.0
+    };
     position.fees_paid -= fee;
     let incoming = match trade.side {
         TradeSide::Buy => trade.quantity,
@@ -118,5 +129,61 @@ mod ledger_helper_tests {
         assert_eq!(signed_fee_cashflow(0.25), -0.25);
         assert_eq!(signed_fee_cashflow(-0.25), -0.25);
         assert_eq!(signed_fee_cashflow(0.0), 0.0);
+    }
+
+    #[test]
+    fn unknown_fees_are_excluded_but_known_zero_fees_remain_known() {
+        let make_trade = |fee_known| PositionTrade {
+            id: "fee-test".to_owned(),
+            symbol: "BTC-USDT".to_owned(),
+            side: TradeSide::Buy,
+            quantity: 1.0,
+            execution_price: 100.0,
+            reference_price: None,
+            timestamp: 1,
+            source: "manual".to_owned(),
+            parent_order_id: None,
+            fee: 0.0,
+            fee_known,
+            fee_currency: "USDT".to_owned(),
+            fee_rate: 0.0,
+            fee_liquidity: String::new(),
+            resting_order_id: None,
+            decision_timestamp: None,
+            decision_price: None,
+            decision_mid_price: None,
+            slippage: None,
+            slippage_bps: None,
+        };
+
+        let mut unknown_position = Position {
+            symbol: "BTC-USDT".to_owned(), quantity: 0.0,
+            average_entry_price: 0.0, realized_pnl: 0.0, entry_fees: 0.0,
+            fees_paid: 0.0, known_fee_fills: 0, unknown_fee_fills: 0,
+            estimated_exit_fee_rate: 0.0, last_trade_timestamp: 0,
+        };
+        apply_trade(&mut unknown_position, &make_trade(false));
+        assert_eq!(unknown_position.fees_paid, 0.0);
+        assert_eq!(unknown_position.entry_fees, 0.0);
+        assert_eq!(unknown_position.unknown_fee_fills, 1);
+        assert_eq!(unknown_position.known_fee_fills, 0);
+        let unknown_json = serde_json::to_value(&unknown_position).unwrap();
+        assert_eq!(unknown_json["unknown_fee_fills"], 1);
+        assert_eq!(unknown_json["fees_paid"], 0.0);
+
+        let mut known_zero_position = Position {
+            symbol: "BTC-USDT".to_owned(), quantity: 0.0,
+            average_entry_price: 0.0, realized_pnl: 0.0, entry_fees: 0.0,
+            fees_paid: 0.0, known_fee_fills: 0, unknown_fee_fills: 0,
+            estimated_exit_fee_rate: 0.0, last_trade_timestamp: 0,
+        };
+        apply_trade(&mut known_zero_position, &make_trade(true));
+        assert_eq!(known_zero_position.fees_paid, 0.0);
+        assert_eq!(known_zero_position.entry_fees, 0.0);
+        assert_eq!(known_zero_position.known_fee_fills, 1);
+        assert_eq!(known_zero_position.unknown_fee_fills, 0);
+        let known_zero_json = serde_json::to_value(&known_zero_position).unwrap();
+        assert_eq!(known_zero_json["known_fee_fills"], 1);
+        assert_eq!(known_zero_json["unknown_fee_fills"], 0);
     }
 }

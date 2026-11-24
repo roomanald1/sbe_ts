@@ -956,7 +956,12 @@ mod tests {
                         }
                         _ => vec![100.10, 100.35, 100.50, 100.25, 100.40, 100.40, 100.40],
                     },
-                    3 => vec![100.10, 100.50, 101.00, 101.00, 101.00, 101.00, 101.00],
+                    3 => match (holdout, case) {
+                        (true, PathCase::TrainingAndHoldoutImprove) => {
+                            vec![100.10, 100.35, 100.35, 100.35, 100.10, 100.10, 100.10]
+                        }
+                        _ => vec![100.10, 100.50, 101.00, 101.00, 101.00, 101.00, 101.00],
+                    },
                     _ => vec![99.90, 99.50, 99.30, 99.30, 99.30, 99.30, 99.30],
                 };
                 if !is_long {
@@ -977,6 +982,9 @@ mod tests {
                 }
                 let (reason, actual_return) = match exit_kind {
                     0..=2 => ("profit-protection", 0.14),
+                    3 if holdout && matches!(case, PathCase::TrainingAndHoldoutImprove) => {
+                        ("profit-protection", 0.08)
+                    }
                     3 => ("take-profit", 0.89),
                     _ => ("stop-loss", -0.81),
                 };
@@ -1262,12 +1270,12 @@ mod tests {
         let samples = parsed_synthetic(PathCase::TrainingAndHoldoutImprove);
         let report = report_replay(&samples[30..], evidence.parameters);
         assert!(report.selected_mean_net_percent > report.baseline_mean_net_percent);
-        assert_eq!(report.actual_exit_reason_counts, [6, 2, 2]);
+        assert_eq!(report.actual_exit_reason_counts, [8, 0, 2]);
         assert!(report.hold_improvement_mean_percent > 0.0);
         assert!(report.hold_improvement_median_percent > 0.0);
         assert_eq!(report.hold_improvement_positive_rate, 0.6);
-        assert_eq!(report.baseline_replay_exit_reason_counts[1..3], [6, 2]);
-        assert_eq!(report.selected_replay_exit_reason_counts, [2, 0, 2, 6]);
+        assert_eq!(report.baseline_replay_exit_reason_counts[1..3], [8, 0]);
+        assert_eq!(report.selected_replay_exit_reason_counts, [2, 2, 6, 0]);
         assert!(report.selected_max_drawdown_percent <= report.baseline_max_drawdown_percent);
         for direction in [&report.long_holdout, &report.short_holdout] {
             assert_eq!(direction.sample_count, 5);
@@ -1275,7 +1283,7 @@ mod tests {
             assert!(direction.hold_improvement_mean_percent > 0.0);
             assert!(direction.hold_improvement_median_percent >= 0.0);
             assert_eq!(direction.hold_improvement_positive_rate, 0.6);
-            assert_eq!(direction.actual_exit_reason_counts, [3, 1, 1]);
+            assert_eq!(direction.actual_exit_reason_counts, [4, 0, 1]);
         }
     }
 

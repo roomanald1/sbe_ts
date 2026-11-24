@@ -158,7 +158,8 @@ mod coverage_tests {
             .unwrap(),
             serde_json::from_value::<PositionTrade>(serde_json::json!({
                 "id": "b", "symbol": "BTC-USDT", "side": "sell", "quantity": 1.0,
-                "execution_price": 110.0, "timestamp": 20, "source": "manual", "fee": -0.11
+                "execution_price": 110.0, "timestamp": 20, "source": "manual", "fee": -0.11,
+                "fee_known": true, "fee_currency": "USDT"
             }))
             .unwrap(),
         ];
@@ -166,6 +167,14 @@ mod coverage_tests {
         let fees = get_fee_summary(State(Arc::clone(&store))).await.0;
         assert_eq!(fees.fills, 2);
         assert_eq!(fees.rows.len(), 2);
+        let legacy_fee_row = fees.rows.iter().find(|row| row.source == "auto").unwrap();
+        assert_eq!(legacy_fee_row.unknown_fee_fills, 1);
+        assert_eq!(legacy_fee_row.known_fee_fills, 0);
+        assert_eq!(legacy_fee_row.fee_currency, "unknown");
+        assert_eq!(legacy_fee_row.effective_fee_bps, None);
+        let known_fee_row = fees.rows.iter().find(|row| row.source == "manual").unwrap();
+        assert_eq!(known_fee_row.known_fee_fills, 1);
+        assert_eq!(known_fee_row.unknown_fee_fills, 0);
         assert_eq!(fees.first_fill_ms, Some(10));
         assert_eq!(fees.last_fill_ms, Some(20));
 
@@ -179,6 +188,10 @@ mod coverage_tests {
         .unwrap();
         assert_eq!(positions.trade_count, 1);
         assert_eq!(positions.positions[0].quantity, 2.0);
+        assert_eq!(positions.positions[0].unknown_fee_fills, 1);
+        assert_eq!(positions.positions[0].known_fee_fills, 0);
+        let position_json = serde_json::to_value(&positions.positions[0]).unwrap();
+        assert_eq!(position_json["unknown_fee_fills"], 1);
         let page = get_position_trades(
             State(store),
             Query(PositionTradesQuery {

@@ -102,6 +102,8 @@ async fn submit_order(
             // A stale protective barrier must never open or reverse a position.
             return Ok(Json(OrderResponse {
                 estimated_fee: 0.0,
+                fee_complete: true,
+                unknown_fee_fills: 0,
                 filled_quantity: 0.0,
                 remaining_quantity: 0.0,
                 average_execution_price: None,
@@ -114,6 +116,8 @@ async fn submit_order(
         if request.quantity <= EPSILON {
             return Ok(Json(OrderResponse {
                 estimated_fee: 0.0,
+                fee_complete: true,
+                unknown_fee_fills: 0,
                 filled_quantity: 0.0,
                 remaining_quantity: 0.0,
                 average_execution_price: None,
@@ -180,6 +184,7 @@ async fn submit_order(
             source: request.source.clone(),
             parent_order_id: request.client_order_id.clone(),
             fee: -quantity * execution_price * taker_fee_rate.abs(),
+            fee_known: true,
             fee_currency: symbol
                 .split_once('-')
                 .map(|(_, quote)| quote.to_owned())
@@ -271,12 +276,13 @@ async fn submit_order(
         "persistence_enqueue".to_owned(),
         persistence_started.elapsed().as_secs_f64() * 1_000.0,
     );
+    let (estimated_fee, unknown_fee_fills) =
+        fee_total_and_unknown_count(ledger.trades[start..].iter());
     Ok(Json(OrderResponse {
         filled_quantity,
-        estimated_fee: ledger.trades[start..]
-            .iter()
-            .map(|trade| trade.fee.abs())
-            .sum::<f64>(),
+        estimated_fee,
+        fee_complete: unknown_fee_fills == 0,
+        unknown_fee_fills,
         remaining_quantity: remaining,
         average_execution_price,
         order,
@@ -308,9 +314,11 @@ fn existing_order_response(store: &PositionStore, ledger: &Ledger, client_order_
         .iter()
         .map(|trade| trade.quantity * trade.execution_price)
         .sum::<f64>();
-    let estimated_fee = fills.iter().map(|trade| trade.fee.abs()).sum::<f64>();
+    let (estimated_fee, unknown_fee_fills) = fee_total_and_unknown_count(fills.iter());
     Some(OrderResponse {
         estimated_fee,
+        fee_complete: unknown_fee_fills == 0,
+        unknown_fee_fills,
         filled_quantity,
         remaining_quantity: order
             .as_ref()
@@ -325,10 +333,52 @@ fn existing_order_response(store: &PositionStore, ledger: &Ledger, client_order_
     })
 }
 
+fn fee_total_and_unknown_count<'a>(
+    trades: impl Iterator<Item = &'a PositionTrade>,
+) -> (f64, usize) {
+    trades.fold((0.0, 0), |(known_total, unknown_count), trade| {
+        if trade.fee_known {
+            (known_total + trade.fee.abs(), unknown_count)
+        } else {
+            (known_total, unknown_count + 1)
+        }
+    })
+}
+
 
 #[cfg(test)]
 mod order_ledger_contention_tests {
     use super::*;
+
+    #[test]
+    fn historical_order_fee_total_marks_unknown_and_keeps_known_zero() {
+        let legacy: PositionTrade = serde_json::from_value(serde_json::json!({
+            "id":"legacy","symbol":"BTC-USDT","side":"buy","quantity":1.0,
+            "execution_price":100.0,"timestamp":1
+        })).unwrap();
+        let known_zero: PositionTrade = serde_json::from_value(serde_json::json!({
+            "id":"zero","symbol":"BTC-USDT","side":"sell","quantity":1.0,
+            "execution_price":100.0,"timestamp":2,"fee":0.0,"fee_known":true
+        })).unwrap();
+        let (fee_total, unknown_count) = fee_total_and_unknown_count([&legacy, &known_zero].into_iter());
+        assert_eq!(fee_total, 0.0);
+        assert_eq!(unknown_count, 1);
+        let response = OrderResponse {
+            estimated_fee: fee_total,
+            fee_complete: unknown_count == 0,
+            unknown_fee_fills: unknown_count,
+            filled_quantity: 2.0,
+            remaining_quantity: 0.0,
+            average_execution_price: Some(100.0),
+            order: None,
+            barrier_order: None,
+            processing_timings_ms: BTreeMap::new(),
+        };
+        let json = serde_json::to_value(response).unwrap();
+        assert_eq!(json["estimated_fee"], 0.0);
+        assert_eq!(json["fee_complete"], false);
+        assert_eq!(json["unknown_fee_fills"], 1);
+    }
 
     #[tokio::test]
     async fn submission_waits_for_a_busy_ledger() {

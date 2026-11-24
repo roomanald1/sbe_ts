@@ -169,6 +169,7 @@ impl PositionStore {
                     source,
                     parent_order_id,
                     fee: -quantity * execution_price * fee_rate.abs(),
+                    fee_known: true,
                     fee_currency: symbol
                         .split_once('-')
                         .map(|(_, quote)| quote.to_owned())

@@ -75,6 +75,10 @@ struct PositionTrade {
     parent_order_id: Option<String>,
     #[serde(default)]
     fee: f64,
+    /// False when a legacy row omitted fee metadata; fee is then only a
+    /// compatibility placeholder, not evidence of a zero-fee fill.
+    #[serde(default)]
+    fee_known: bool,
     #[serde(default)]
     fee_currency: String,
     #[serde(default)]
@@ -93,6 +97,45 @@ struct PositionTrade {
     slippage: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     slippage_bps: Option<f64>,
+}
+
+#[cfg(test)]
+mod position_trade_fee_migration_tests {
+    use super::*;
+
+    #[test]
+    fn legacy_trade_without_fee_metadata_remains_unknown_on_round_trip() {
+        let legacy = serde_json::json!({
+            "id": "legacy-1", "symbol": "BTC-USDT", "side": "buy",
+            "quantity": 1.0, "execution_price": 100.0, "timestamp": 7
+        });
+        let trade: PositionTrade = serde_json::from_value(legacy).unwrap();
+        assert_eq!(trade.fee, 0.0); // compatibility placeholder only
+        assert!(!trade.fee_known);
+
+        let migrated = serde_json::to_value(trade).unwrap();
+        assert_eq!(migrated["fee"], 0.0);
+        assert_eq!(migrated["fee_known"], false);
+        let reloaded: PositionTrade = serde_json::from_value(migrated).unwrap();
+        assert!(!reloaded.fee_known);
+    }
+
+    #[test]
+    fn known_zero_fee_is_distinct_from_a_legacy_missing_fee() {
+        let mut actual_zero: PositionTrade = serde_json::from_value(serde_json::json!({
+            "id": "zero-1", "symbol": "BTC-USDT", "side": "buy",
+            "quantity": 1.0, "execution_price": 100.0, "timestamp": 8,
+            "fee": 0.0, "fee_known": true, "fee_currency": "USDT"
+        })).unwrap();
+        assert_eq!(actual_zero.fee, 0.0);
+        assert!(actual_zero.fee_known);
+
+        let serialized = serde_json::to_value(&actual_zero).unwrap();
+        assert_eq!(serialized["fee"], 0.0);
+        assert_eq!(serialized["fee_known"], true);
+        actual_zero.fee = -0.25;
+        assert!(actual_zero.fee_known);
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -249,6 +292,8 @@ struct Position {
     realized_pnl: f64,
     entry_fees: f64,
     fees_paid: f64,
+    known_fee_fills: usize,
+    unknown_fee_fills: usize,
     estimated_exit_fee_rate: f64,
     last_trade_timestamp: u64,
 }
@@ -290,6 +335,8 @@ struct OrdersResponse {
 #[derive(Serialize)]
 struct OrderResponse {
     estimated_fee: f64,
+    fee_complete: bool,
+    unknown_fee_fills: usize,
     filled_quantity: f64,
     remaining_quantity: f64,
     average_execution_price: Option<f64>,

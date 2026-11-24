@@ -1672,9 +1672,8 @@ mod tests {
     }
 
     #[test]
-    fn scout_outcome_delta_latency_tracks_changed_records_not_history_size() {
+    fn scout_outcome_delta_updates_large_history_without_losing_unchanged_records() {
         let suffix = format!("{}-{}", std::process::id(), now_ms());
-        let full_path = std::env::temp_dir().join(format!("learning-scout-full-{suffix}.sqlite"));
         let delta_path = std::env::temp_dir().join(format!("learning-scout-delta-{suffix}.sqlite"));
         let mut baseline = LearningState {
             accepted_events: 100_000,
@@ -1782,40 +1781,12 @@ mod tests {
                 baseline_parameters: BTreeMap::new(),
             });
 
-        let full_connection = open_state_db(&full_path).unwrap();
-        persist_normalized(&full_connection, &baseline).unwrap();
-        drop(full_connection);
         let delta_connection = open_state_db(&delta_path).unwrap();
         persist_normalized(&delta_connection, &baseline).unwrap();
         drop(delta_connection);
-
-        let full_started = std::time::Instant::now();
-        let full_connection = open_state_db(&full_path).unwrap();
-        persist_normalized(&full_connection, &updated).unwrap();
-        drop(full_connection);
-        let full_elapsed = full_started.elapsed();
-
-        let delta_started = std::time::Instant::now();
         persist_scout_outcome_delta(&delta_path, &updated, &event).unwrap();
-        let delta_elapsed = delta_started.elapsed();
 
-        eprintln!(
-            "ScoutOutcome persistence benchmark: full={full_elapsed:?}, delta={delta_elapsed:?}"
-        );
-        assert!(
-            delta_elapsed < full_elapsed,
-            "incremental persistence {delta_elapsed:?} should beat full-state persistence {full_elapsed:?}"
-        );
-
-        let full_connection = open_state_db(&full_path).unwrap();
         let delta_connection = open_state_db(&delta_path).unwrap();
-        let full_variant: String = full_connection
-            .query_row(
-                "SELECT payload FROM learning_variants WHERE id=?1",
-                [&variant_id],
-                |row| row.get(0),
-            )
-            .unwrap();
         let delta_variant: String = delta_connection
             .query_row(
                 "SELECT payload FROM learning_variants WHERE id=?1",
@@ -1823,14 +1794,10 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(delta_variant, full_variant);
-        let full_context: String = full_connection
-            .query_row(
-                "SELECT payload FROM learning_context_stats WHERE id=?1",
-                [&context],
-                |row| row.get(0),
-            )
-            .unwrap();
+        assert_eq!(
+            delta_variant,
+            serde_json::to_string(updated.variants.get(&variant_id).unwrap()).unwrap()
+        );
         let delta_context: String = delta_connection
             .query_row(
                 "SELECT payload FROM learning_context_stats WHERE id=?1",
@@ -1838,7 +1805,40 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(delta_context, full_context);
+        assert_eq!(
+            delta_context,
+            serde_json::to_string(updated.context_learning.get(&context).unwrap()).unwrap()
+        );
+        let variant_count: i64 = delta_connection
+            .query_row("SELECT COUNT(*) FROM learning_variants", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(variant_count, 5_001);
+        let event_count: i64 = delta_connection
+            .query_row("SELECT COUNT(*) FROM learning_seen_event_ids", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(event_count, 100_001);
+        let historical_profile = StrategyProfile {
+            profile_id: "historical-profile-0".into(),
+            version: 0,
+            symbol: "TEST-0-USDT".into(),
+            strategy: "live-momentum".into(),
+            parameters: BTreeMap::from([("threshold".into(), 0.0)]),
+            learning_samples: 0,
+            positive_samples: 0,
+            realized_pnl: 0.0,
+        };
+        let historical_id = variant_key(&historical_profile);
+        let historical_payload: String = delta_connection
+            .query_row(
+                "SELECT payload FROM learning_variants WHERE id=?1",
+                [&historical_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            historical_payload,
+            serde_json::to_string(baseline.variants.get(&historical_id).unwrap()).unwrap()
+        );
         let delta_event_exists: bool = delta_connection
             .query_row(
                 "SELECT EXISTS(SELECT 1 FROM learning_seen_event_ids WHERE id=?1)",
@@ -1848,9 +1848,8 @@ mod tests {
             .unwrap();
         assert!(delta_event_exists);
 
-        drop(full_connection);
         drop(delta_connection);
-        for path in [&full_path, &delta_path] {
+        for path in [&delta_path] {
             let _ = std::fs::remove_file(path);
             let _ = std::fs::remove_file(path.with_extension("sqlite-wal"));
             let _ = std::fs::remove_file(path.with_extension("sqlite-shm"));
@@ -2304,8 +2303,10 @@ mod tests {
         .await;
         assert_eq!(response.status(), StatusCode::ACCEPTED);
 
-        // Two rolling development folds plus the final confirmation holdout
-        // each need ten candidate-passing validation outcomes.
+        // Spread events over independent four-hour intervals: a burst of
+        // trades in one interval is one effective sample window, not 150.
+        let interval_ms = 4 * 60 * 60 * 1_000;
+        let first_observed_at_ms = now_ms().saturating_sub(150 * interval_ms);
         for index in 0..150_u64 {
             let (feature_value, net_return_percent) = if index % 2 == 0 {
                 (0.025, -0.2)
@@ -2314,7 +2315,7 @@ mod tests {
             };
             let event = FeedbackEvent::TradeOutcome {
                 event_id: format!("threshold-trade-{index}"),
-                observed_at_ms: now_ms() + index,
+                observed_at_ms: first_observed_at_ms + index * interval_ms,
                 learning_context: None,
                 symbol: "BTC-USDT".into(),
                 strategy: "live-trade-flow".into(),

@@ -5,6 +5,8 @@ struct FeeSummaryRow {
     liquidity: String,
     fee_currency: String,
     fills: usize,
+    known_fee_fills: usize,
+    unknown_fee_fills: usize,
     traded_notional: f64,
     fees_paid: f64,
     effective_fee_bps: Option<f64>,
@@ -29,7 +31,9 @@ async fn get_fee_summary(
     for trade in &ledger.trades {
         let source = if trade.source.is_empty() { "unknown" } else { &trade.source }.to_owned();
         let liquidity = if trade.fee_liquidity.is_empty() { "unknown" } else { &trade.fee_liquidity }.to_owned();
-        let fee_currency = if trade.fee_currency.is_empty() {
+        let fee_currency = if !trade.fee_known {
+            "unknown".to_owned()
+        } else if trade.fee_currency.is_empty() {
             trade.symbol.split_once('-').map(|(_, quote)| quote).unwrap_or("unknown").to_owned()
         } else {
             trade.fee_currency.clone()
@@ -39,6 +43,8 @@ async fn get_fee_summary(
             liquidity,
             fee_currency,
             fills: 0,
+            known_fee_fills: 0,
+            unknown_fee_fills: 0,
             traded_notional: 0.0,
             fees_paid: 0.0,
             effective_fee_bps: None,
@@ -47,7 +53,12 @@ async fn get_fee_summary(
         });
         row.fills += 1;
         row.traded_notional += trade.quantity.abs() * trade.execution_price.abs();
-        row.fees_paid += trade.fee.abs();
+        if trade.fee_known {
+            row.known_fee_fills += 1;
+            row.fees_paid += trade.fee.abs();
+        } else {
+            row.unknown_fee_fills += 1;
+        }
         row.first_fill_ms = row.first_fill_ms.min(trade.timestamp);
         row.last_fill_ms = row.last_fill_ms.max(trade.timestamp);
         first_fill_ms = Some(first_fill_ms.map_or(trade.timestamp, |current| current.min(trade.timestamp)));
@@ -55,7 +66,7 @@ async fn get_fee_summary(
     }
     let mut rows = groups.into_values().collect::<Vec<_>>();
     for row in &mut rows {
-        row.effective_fee_bps = (row.traded_notional > 0.0)
+        row.effective_fee_bps = (row.traded_notional > 0.0 && row.unknown_fee_fills == 0)
             .then_some(row.fees_paid / row.traded_notional * 10_000.0);
     }
     rows.sort_by(|left, right| {
@@ -149,6 +160,8 @@ async fn get_realized_pnl(
                     realized_pnl: 0.0,
                     entry_fees: 0.0,
                     fees_paid: 0.0,
+                    known_fee_fills: 0,
+                    unknown_fee_fills: 0,
                     estimated_exit_fee_rate: 0.0,
                     last_trade_timestamp: trade.timestamp,
                 });

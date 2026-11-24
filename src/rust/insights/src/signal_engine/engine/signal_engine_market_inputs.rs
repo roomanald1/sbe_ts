@@ -628,7 +628,11 @@ mod scout_tests {
             &[(100.2, 1.0)],
         );
         let observations = engine.on_price(3_602_000, 100.1, 0.0);
-        assert_eq!(observations.len(), 4);
+        // The first price after the 1h boundary is much too late to represent
+        // the 1m/5m/15m horizons. Keep only the 1h observation instead of
+        // fabricating three stale horizon measurements.
+        assert_eq!(observations.len(), 1);
+        assert_eq!(observations[0].evaluation.horizon_seconds, 3_600);
         assert!(observations
             .iter()
             .all(|outcome| outcome.scout_observation_only));

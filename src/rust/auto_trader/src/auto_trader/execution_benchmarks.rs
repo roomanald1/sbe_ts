@@ -25,6 +25,126 @@ fn benchmark_signal(strategy: &str, candidate: bool) -> Signal {
     }
 }
 
+/// Per-event latency summary used by the end-to-end benchmark runner. Samples
+/// are recorded before inspecting the operation result, so rejected/error
+/// outcomes remain in the measured population.
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct BenchmarkLatencyDistribution {
+    pub sample_count: usize,
+    pub p50_ms: f64,
+    pub p95_ms: f64,
+    pub p99_ms: f64,
+    pub p999_ms: f64,
+}
+
+impl BenchmarkLatencyDistribution {
+    pub fn from_samples_ms(mut samples: Vec<f64>) -> Self {
+        assert!(!samples.is_empty(), "benchmark needs at least one event");
+        assert!(samples.iter().all(|sample| sample.is_finite() && *sample >= 0.0));
+        samples.sort_by(f64::total_cmp);
+        let percentile = |fraction: f64| {
+            let index = ((samples.len() as f64 * fraction).ceil() as usize)
+                .saturating_sub(1)
+                .min(samples.len() - 1);
+            samples[index]
+        };
+        Self {
+            sample_count: samples.len(),
+            p50_ms: percentile(0.50),
+            p95_ms: percentile(0.95),
+            p99_ms: percentile(0.99),
+            p999_ms: percentile(0.999),
+        }
+    }
+}
+
+/// Measure every invocation, including invocations whose production path
+/// returns an error or a rejected/skipped decision. The returned elapsed time
+/// includes the complete operation boundary and is the denominator for the
+/// sustained workload rate.
+pub async fn measure_async_benchmark_events<T, E, F, Fut>(
+    event_count: usize,
+    mut operation: F,
+) -> (BenchmarkLatencyDistribution, std::time::Duration, usize)
+where
+    F: FnMut(usize) -> Fut,
+    Fut: std::future::Future<Output = Result<T, E>>,
+{
+    use std::time::Instant;
+    assert!(event_count > 0, "benchmark event count must be positive");
+    let mut samples_ms = Vec::with_capacity(event_count);
+    let mut successful_events = 0;
+    let workload_started = Instant::now();
+    for index in 0..event_count {
+        let event_started = Instant::now();
+        let result = operation(index).await;
+        samples_ms.push(event_started.elapsed().as_secs_f64() * 1_000.0);
+        successful_events += usize::from(result.is_ok());
+        std::hint::black_box(result);
+    }
+    let elapsed = workload_started.elapsed();
+    (
+        BenchmarkLatencyDistribution::from_samples_ms(samples_ms),
+        elapsed,
+        successful_events,
+    )
+}
+
+/// Machine-readable evidence shape accepted by scripts/local/performance_gate.py.
+/// The caller supplies the measured production path distributions and metadata;
+/// this type deliberately cannot manufacture values from the proxy benchmarks.
+#[derive(serde::Serialize)]
+pub struct AutoTraderPerformanceEvidence {
+    pub hardware: String,
+    pub git_head: String,
+    pub build_mode: String,
+    pub workload_id: String,
+    pub measurement_definition: String,
+    pub benchmark_config_sha256: String,
+    pub sampling_method: String,
+    pub signals_per_second: f64,
+    pub measurements: std::collections::BTreeMap<String, BenchmarkLatencyDistribution>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exchange_network_latency: Option<BenchmarkLatencyDistribution>,
+}
+
+impl AutoTraderPerformanceEvidence {
+    /// Persist input for performance_gate.py. The writer does not run the gate
+    /// or imply that measurements passed acceptance.
+    pub fn write_json(&self, path: &std::path::Path) -> std::io::Result<()> {
+        let bytes = serde_json::to_vec_pretty(self).map_err(std::io::Error::other)?;
+        std::fs::write(path, bytes)
+    }
+}
+
+#[cfg(test)]
+mod benchmark_measurement_tests {
+    use super::*;
+
+    #[test]
+    fn percentile_summary_uses_nearest_rank_and_preserves_every_sample() {
+        let distribution = BenchmarkLatencyDistribution::from_samples_ms(
+            (1..=1000).rev().map(f64::from).collect(),
+        );
+        assert_eq!(distribution.sample_count, 1000);
+        assert_eq!(distribution.p50_ms, 500.0);
+        assert_eq!(distribution.p95_ms, 950.0);
+        assert_eq!(distribution.p99_ms, 990.0);
+        assert_eq!(distribution.p999_ms, 999.0);
+    }
+
+    #[tokio::test]
+    async fn async_measurement_counts_failed_events_in_the_sample_population() {
+        let (distribution, elapsed, successful) = measure_async_benchmark_events(4, |index| async move {
+            if index == 1 { Err("deterministic rejection") } else { Ok(index) }
+        })
+        .await;
+        assert_eq!(distribution.sample_count, 4);
+        assert_eq!(successful, 3);
+        assert!(!elapsed.is_zero());
+    }
+}
+
 /// Benchmark AutoTrader-only paths that are outside the reusable strategy crate.
 pub fn benchmark_autotrader_paths(iterations: usize) -> Vec<(String, f64)> {
     use std::{hint::black_box, time::Instant};

@@ -156,6 +156,8 @@ async fn submit_barrier_order(
     }
     return Ok(Json(OrderResponse {
         estimated_fee: 0.0,
+        fee_complete: true,
+        unknown_fee_fills: 0,
         filled_quantity: 0.0,
         remaining_quantity: request.quantity,
         average_execution_price: None,

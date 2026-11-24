@@ -8,6 +8,7 @@ struct LedgerTradeIndex {
     counts: HashMap<Option<String>, usize>,
     cash_by_quote: BTreeMap<String, f64>,
     fees_by_quote: BTreeMap<String, f64>,
+    unknown_fee_fills_by_quote: BTreeMap<String, usize>,
 }
 
 impl LedgerTradeIndex {
@@ -20,7 +21,12 @@ impl LedgerTradeIndex {
             let quote = trade.symbol.split_once('-').map(|(_, q)| q).unwrap_or_default();
             let notional = trade.quantity * trade.execution_price;
             let cash = if matches!(trade.side, TradeSide::Buy) { -notional } else { notional };
-            let fee = signed_fee_cashflow(trade.fee);
+            let fee = if trade.fee_known {
+                signed_fee_cashflow(trade.fee)
+            } else {
+                *self.unknown_fee_fills_by_quote.entry(quote.to_owned()).or_default() += 1;
+                0.0
+            };
             *self.cash_by_quote.entry(quote.to_owned()).or_default() += cash + fee;
             *self.fees_by_quote.entry(quote.to_owned()).or_default() -= fee;
             for source in [None, Some(trade.source.clone())] {
@@ -30,6 +36,7 @@ impl LedgerTradeIndex {
                         symbol: trade.symbol.clone(), quantity: 0.0,
                         average_entry_price: 0.0, realized_pnl: 0.0,
                         entry_fees: 0.0, fees_paid: 0.0,
+                        known_fee_fills: 0, unknown_fee_fills: 0,
                         estimated_exit_fee_rate: 0.0, last_trade_timestamp: trade.timestamp,
                     });
                 apply_trade(position, trade);
@@ -76,7 +83,7 @@ mod trade_index_tests {
         serde_json::from_value(serde_json::json!({
             "id": id, "symbol": "BTC-USDT", "side": side, "quantity": quantity,
             "execution_price": 100.0, "timestamp": 1, "source": source,
-            "parent_order_id": id, "fee": -1.0, "fee_rate": 0.001
+            "parent_order_id": id, "fee": -1.0, "fee_known": true, "fee_rate": 0.001
         })).unwrap()
     }
 
@@ -100,5 +107,26 @@ mod trade_index_tests {
         assert_eq!(index.by_parent["b"], vec![1]);
         assert_eq!(index.cash_by_quote["USDT"], 47.0);
         assert_eq!(index.fees_by_quote["USDT"], 3.0);
+        assert_eq!(index.unknown_fee_fills_by_quote.get("USDT"), None);
+    }
+
+    #[test]
+    fn unknown_fees_are_excluded_from_numeric_maps_and_known_zero_stays_known() {
+        let mut unknown = trade("legacy", "buy", 1.0, "manual");
+        unknown.fee = 0.0;
+        unknown.fee_known = false;
+        let mut known_zero = trade("zero", "sell", 1.0, "manual");
+        known_zero.fee = 0.0;
+        known_zero.fee_known = true;
+
+        let mut index = LedgerTradeIndex::default();
+        index.extend(&[unknown, known_zero]);
+        assert_eq!(index.cash_by_quote["USDT"], 0.0);
+        assert_eq!(index.fees_by_quote.get("USDT"), None);
+        assert_eq!(index.unknown_fee_fills_by_quote["USDT"], 1);
+        let position = &index.positions[&None]["BTC-USDT"];
+        assert_eq!(position.unknown_fee_fills, 1);
+        assert_eq!(position.known_fee_fills, 1);
+        assert_eq!(position.fees_paid, 0.0);
     }
 }
