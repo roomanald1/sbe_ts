@@ -222,6 +222,14 @@ Review context growth, repeated reads, overlapping searches, oversized outputs, 
 - Verify that required agent capabilities are available before relying on delegation.
 - Respect actual agent configuration and runtime limits.
 
+### Named profile and resource policy
+
+- Use the project-scoped named profiles in `.codex/agents/` for delegated work. Give each child one bounded work package, its Beads ID, exact paths/symbols, relevant contracts, acceptance criteria and required evidence; do not pass the full plan by default.
+- Keep no more than two child agents active and default to one high-reasoning child at a time. Concurrent high-reasoning children require documented necessity and resource headroom. Do not allow nested delegation from specialist profiles.
+- The coordinator profile owns dependency order, shared invariants, build scheduling and integration. Keep architecture, risk and concurrency review on the architect profile.
+- Treat per-profile context and compaction thresholds as advisory on runtimes that do not expose effective settings. Check context at work-package boundaries, checkpoint before the profile target, and resume from compact Beads notes rather than deliberately filling context to test a limit.
+- Record profile name, requested/effective model and reasoning, parent linkage, context evidence, Beads task and start/end usage counters when available. Mark missing runtime or usage fields as unavailable; do not infer them from configuration or cached-token ratios.
+
 ### Handoff Requirements
 
 Each substantial work-package handoff should identify:
