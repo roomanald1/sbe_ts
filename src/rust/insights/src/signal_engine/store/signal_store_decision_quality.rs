@@ -20,7 +20,7 @@ impl SignalStore {
         since: Option<u64>,
     ) -> Result<AutoTraderDecisionQualitySummary> {
         let (mut records, decision_samples) = tokio::try_join!(
-            self.load_auto_trader_execution_audit(since, 10_000),
+            self.load_auto_trader_decision_quality_audit(since, 10_000),
             self.count_auto_trader_decisions(since),
         )?;
         records.sort_by_key(|record| record.get("timestamp").and_then(serde_json::Value::as_u64).unwrap_or_default());

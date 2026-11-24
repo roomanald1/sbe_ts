@@ -287,23 +287,75 @@ impl SignalStore {
         .map_err(|error| anyhow::anyhow!("execution audit read task failed: {error}"))?
     }
 
+    // Decision quality needs cumulative entry-fill snapshots to reconstruct the
+    // final filled quantity and weighted price. Keep these out of the shared
+    // execution-quality sample, where each snapshot would be counted as an
+    // additional order sample.
+    async fn load_auto_trader_decision_quality_audit(
+        &self,
+        since: Option<u64>,
+        limit: usize,
+    ) -> Result<Vec<serde_json::Value>> {
+        let path = self.audit_path.clone();
+        tokio::task::spawn_blocking(move || {
+            Self::load_auto_trader_decision_quality_audit_sync(&path, since, limit)
+        })
+        .await
+        .map_err(|error| anyhow::anyhow!("decision quality audit read task failed: {error}"))?
+    }
+
+    fn load_auto_trader_decision_quality_audit_sync(
+        path: &PathBuf,
+        since: Option<u64>,
+        limit: usize,
+    ) -> Result<Vec<serde_json::Value>> {
+        let connection = Self::open_database_path(path)?;
+        let sql = if since.is_some() {
+            "SELECT payload FROM auto_trader_audit WHERE (stage = 'entry' OR stage = 'entry_fill' OR stage LIKE 'exit%') AND timestamp >= ?1 ORDER BY timestamp DESC, rowid DESC LIMIT ?2"
+        } else {
+            "SELECT payload FROM auto_trader_audit WHERE (stage = 'entry' OR stage = 'entry_fill' OR stage LIKE 'exit%') ORDER BY timestamp DESC, rowid DESC LIMIT ?1"
+        };
+        let mut statement = connection.prepare(sql)?;
+        let row_limit = limit.clamp(1, 50_000) as i64;
+        let rows = if let Some(since) = since {
+            statement.query_map(params![since as i64, row_limit], |row| row.get::<_, Vec<u8>>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?
+        } else {
+            statement.query_map(params![row_limit], |row| row.get::<_, Vec<u8>>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        drop(statement);
+        drop(connection);
+        let mut result = rows.into_iter().map(|compressed| {
+            let mut decoder = MultiGzDecoder::new(compressed.as_slice());
+            let mut json = Vec::new();
+            decoder.read_to_end(&mut json)?;
+            Ok(serde_json::from_slice(&json)?)
+        }).collect::<Result<Vec<_>>>()?;
+        result.reverse();
+        Ok(result)
+    }
+
     fn load_auto_trader_execution_audit_sync(
         path: &PathBuf,
         since: Option<u64>,
         limit: usize,
     ) -> Result<Vec<serde_json::Value>> {
         let connection = Self::open_database_path(path)?;
-        let mut statement = connection.prepare(
-            "SELECT payload FROM auto_trader_audit WHERE (stage = 'entry' OR stage LIKE 'exit%') AND (?1 IS NULL OR timestamp >= ?1) ORDER BY timestamp DESC LIMIT ?2",
-        )?;
-        let rows = statement.query_map(
-            params![
-                since.map(|value| value as i64),
-                limit.clamp(1, 50_000) as i64
-            ],
-            |row| row.get::<_, Vec<u8>>(0),
-        )?;
-        let compressed_rows = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+        let sql = if since.is_some() {
+            "SELECT payload FROM auto_trader_audit WHERE (stage = 'entry' OR stage LIKE 'exit%') AND timestamp >= ?1 ORDER BY timestamp DESC, rowid DESC LIMIT ?2"
+        } else {
+            "SELECT payload FROM auto_trader_audit WHERE (stage = 'entry' OR stage LIKE 'exit%') ORDER BY timestamp DESC, rowid DESC LIMIT ?1"
+        };
+        let mut statement = connection.prepare(sql)?;
+        let row_limit = limit.clamp(1, 50_000) as i64;
+        let compressed_rows = if let Some(since) = since {
+            statement.query_map(params![since as i64, row_limit], |row| row.get::<_, Vec<u8>>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?
+        } else {
+            statement.query_map(params![row_limit], |row| row.get::<_, Vec<u8>>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?
+        };
         drop(statement);
         drop(connection);
         let mut result = compressed_rows
@@ -323,11 +375,19 @@ impl SignalStore {
         let path = self.audit_path.clone();
         tokio::task::spawn_blocking(move || {
             let connection = Self::open_database_path(&path)?;
-            let count = connection.query_row(
-                "SELECT COUNT(*) FROM auto_trader_audit WHERE stage = 'decision' AND (?1 IS NULL OR timestamp >= ?1)",
-                params![since.map(|value| value as i64)],
-                |row| row.get::<_, i64>(0),
-            )?;
+            let count = if let Some(since) = since {
+                connection.query_row(
+                    "SELECT COUNT(*) FROM auto_trader_audit WHERE stage = 'decision' AND timestamp >= ?1",
+                    params![since as i64],
+                    |row| row.get::<_, i64>(0),
+                )?
+            } else {
+                connection.query_row(
+                    "SELECT COUNT(*) FROM auto_trader_audit WHERE stage = 'decision'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )?
+            };
             Ok(count as usize)
         })
         .await
@@ -705,7 +765,10 @@ mod decision_audit_window_tests {
         let connection = SignalStore::open_database_at(&path).unwrap();
         let (writer, receiver) = mpsc::channel(128);
         tokio::task::spawn_blocking(move || run_database_writer(connection, receiver));
-        let audit_path = audit_database_path(&path);
+        let audit_path = path.with_file_name(format!(
+            "{}-audit.sqlite",
+            path.file_stem().unwrap().to_string_lossy()
+        ));
         let audit_connection = SignalStore::open_audit_database_at(&audit_path).unwrap();
         migrate_legacy_audit_tables(&path, &audit_path).unwrap();
         let (audit_writer, audit_receiver) = mpsc::channel(128);
@@ -821,8 +884,151 @@ mod decision_audit_window_tests {
             .unwrap();
 
         assert_eq!(page.items, vec![payload]);
+        let audit_path = store.audit_path.clone();
         drop(store);
         tokio::time::sleep(Duration::from_millis(10)).await;
         let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_file(audit_path);
+    }
+
+    fn insert_compressed_audit(
+        connection: &Connection,
+        stage: &str,
+        timestamp: u64,
+        id: &str,
+    ) {
+        let payload = serde_json::json!({
+            "stage": stage,
+            "timestamp": timestamp,
+            "trade_id": "trade-1",
+            "record_id": id,
+            "filled_quantity": if id == "partial" { 1.0 } else { 3.0 },
+            "average_price": if id == "partial" { 100.0 } else { 101.0 },
+            "fees": if id == "partial" { 0.1 } else { 0.3 }
+        });
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(&serde_json::to_vec(&payload).unwrap()).unwrap();
+        connection.execute(
+            "INSERT INTO auto_trader_audit (stage, timestamp, payload) VALUES (?1, ?2, ?3)",
+            params![stage, timestamp as i64, encoder.finish().unwrap()],
+        ).unwrap();
+    }
+
+    fn insert_audit_payload(connection: &Connection, payload: serde_json::Value) {
+        let stage = payload["stage"].as_str().unwrap();
+        let timestamp = payload["timestamp"].as_u64().unwrap();
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(&serde_json::to_vec(&payload).unwrap()).unwrap();
+        connection.execute(
+            "INSERT INTO auto_trader_audit (decision_id, stage, timestamp, symbol, payload) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![payload["decision_id"].as_str().unwrap(), stage, timestamp as i64,
+                   payload["symbol"].as_str(), encoder.finish().unwrap()],
+        ).unwrap();
+    }
+
+    #[test]
+    fn decision_quality_loads_cumulative_entry_fills_without_changing_execution_samples() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "insights-entry-fill-audit-{}-{unique}.sqlite",
+            std::process::id()
+        ));
+        let connection = Connection::open(&path).unwrap();
+        connection.execute(
+            "CREATE TABLE auto_trader_audit (stage TEXT, timestamp INTEGER, payload BLOB)",
+            [],
+        ).unwrap();
+        insert_compressed_audit(&connection, "entry", 100, "entry");
+        insert_compressed_audit(&connection, "entry_fill", 110, "partial");
+        insert_compressed_audit(&connection, "entry_fill", 120, "complete");
+        insert_compressed_audit(&connection, "exit_fill", 130, "exit");
+        drop(connection);
+
+        let execution = SignalStore::load_auto_trader_execution_audit_sync(&path, None, 100).unwrap();
+        assert_eq!(execution.iter().map(|row| row["stage"].as_str().unwrap()).collect::<Vec<_>>(),
+            vec!["entry", "exit_fill"]);
+
+        let decision = SignalStore::load_auto_trader_decision_quality_audit_sync(&path, Some(110), 100).unwrap();
+        assert_eq!(decision.iter().map(|row| row["record_id"].as_str().unwrap()).collect::<Vec<_>>(),
+            vec!["partial", "complete", "exit"]);
+        assert_eq!(decision.last().unwrap()["filled_quantity"], 3.0);
+
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn decision_quality_orders_equal_timestamp_fill_snapshots_by_rowid() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "insights-entry-fill-order-{}-{unique}.sqlite",
+            std::process::id()
+        ));
+        let connection = Connection::open(&path).unwrap();
+        connection.execute(
+            "CREATE TABLE auto_trader_audit (stage TEXT, timestamp INTEGER, payload BLOB)",
+            [],
+        ).unwrap();
+        insert_compressed_audit(&connection, "entry_fill", 110, "first");
+        insert_compressed_audit(&connection, "entry_fill", 110, "second");
+        drop(connection);
+
+        let records = SignalStore::load_auto_trader_decision_quality_audit_sync(&path, Some(110), 100).unwrap();
+        assert_eq!(records.iter().map(|row| row["record_id"].as_str().unwrap()).collect::<Vec<_>>(),
+            vec!["first", "second"]);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn decision_quality_uses_final_cumulative_entry_fill_for_closed_trade_return() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "insights-decision-entry-fill-summary-{}-{unique}.sqlite",
+            std::process::id()
+        ));
+        let store = test_store(path.clone());
+        let audit_path = store.audit_path.clone();
+        let connection = Connection::open(&audit_path).unwrap();
+        insert_audit_payload(&connection, serde_json::json!({
+            "decision_id":"decision-1", "trade_id":"trade-1", "stage":"decision", "timestamp":100,
+            "symbol":"BTC-USDT"
+        }));
+        insert_audit_payload(&connection, serde_json::json!({
+            "decision_id":"decision-1", "trade_id":"trade-1", "stage":"entry", "timestamp":101,
+            "symbol":"BTC-USDT", "strategy":"fixture", "side":"buy", "filled_quantity":0.0,
+            "average_price":100.0, "fees":0.0, "quote_currency":"USDT", "direction":"long"
+        }));
+        insert_audit_payload(&connection, serde_json::json!({
+            "decision_id":"decision-1", "trade_id":"trade-1", "stage":"entry_fill", "timestamp":103,
+            "symbol":"BTC-USDT", "filled_quantity":2.0, "average_price":101.0, "fees":0.2
+        }));
+        insert_audit_payload(&connection, serde_json::json!({
+            "decision_id":"decision-1", "trade_id":"trade-1", "stage":"exit_fill", "timestamp":104,
+            "symbol":"BTC-USDT", "exit_filled_quantity":2.0, "realized_pnl":4.0, "trade_closed":true
+        }));
+        drop(connection);
+
+        let summary = store.compute_auto_trader_decision_quality(None).await.unwrap();
+        assert_eq!(summary.decision_samples, 1);
+        assert_eq!(summary.filled_entry_samples, 1);
+        assert_eq!(summary.completed_trade_samples, 1);
+        assert_eq!(summary.unresolved_trade_samples, 0);
+        assert!(summary.cohorts.iter().any(|cohort| {
+            cohort.total_net_pnl == Some(4.0)
+                && (cohort.average_net_return_percent - (4.0 / 202.0 * 100.0)).abs() < 1e-9
+        }));
+
+        drop(store);
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_file(audit_path);
     }
 }
