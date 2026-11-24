@@ -1,0 +1,40 @@
+{
+  "description": "Recent signal metadata without binary payloads",
+  "database": "insights",
+  "file": "signals.sqlite",
+  "sql": "\n      SELECT id, timestamp, kind\n      FROM signal_records\n      WHERE timestamp >= :since_ms\n      ORDER BY timestamp DESC\n      LIMIT :n\n      ",
+  "required_parameters": [
+    "since_ms",
+    "n"
+  ],
+  "example_parameters": {
+    "since_ms": 1795438801781,
+    "n": 20
+  },
+  "verified": false,
+  "schema_tested": true,
+  "verification": "",
+  "units": {},
+  "scope": "docker",
+  "source_path": "/data/insights/signals.sqlite",
+  "limitations": [
+    "Application semantics require verification",
+    "Do not combine local and runtime results",
+    "Do not assume paper/live mode from table names"
+  ],
+  "execution_plan": [
+    [
+      5,
+      0,
+      203,
+      "SEARCH signal_records USING INDEX signal_records_timestamp (timestamp>?)"
+    ]
+  ],
+  "sample_columns": [
+    "id",
+    "timestamp",
+    "kind"
+  ],
+  "sample_rows_returned": 5,
+  "sample_elapsed_ms": 0.27
+}

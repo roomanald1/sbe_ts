@@ -1,0 +1,613 @@
+[
+  {
+    "service": "autotrader",
+    "port": 11005,
+    "method": "GET",
+    "route": "/internal/learning-feedback-queues",
+    "sources": [
+      {
+        "file": "src/rust/auto_trader/src/auto_trader/api/http_routes.rs",
+        "line": 1245
+      }
+    ],
+    "financially_verified": false,
+    "status": "DISCOVERED_NOT_TESTED"
+  },
+  {
+    "service": "autotrader",
+    "port": 11005,
+    "method": "GET",
+    "route": "/internal/monitoring-metrics",
+    "sources": [
+      {
+        "file": "src/rust/auto_trader/src/auto_trader/api/http_routes.rs",
+        "line": 1232
+      }
+    ],
+    "financially_verified": false,
+    "status": "DISCOVERED_NOT_TESTED"
+  },
+  {
+    "service": "autotrader",
+    "port": 11005,
+    "method": "GET",
+    "route": "/internal/strategy/daily-scan-parameters",
+    "sources": [
+      {
+        "file": "src/rust/auto_trader/src/auto_trader/api/http_routes.rs",
+        "line": 1215
+      }
+    ],
+    "financially_verified": false,
+    "status": "DISCOVERED_NOT_TESTED"
+  },
+  {
+    "service": "autotrader",
+    "port": 11005,
+    "method": "GET",
+    "route": "/internal/strategy/open-position-counts",
+    "sources": [
+      {
+        "file": "src/rust/auto_trader/src/auto_trader/api/http_routes.rs",
+        "line": 1233
+      }
+    ],
+    "financially_verified": false,
+    "status": "DISCOVERED_NOT_TESTED"
+  },
+  {
+    "service": "autotrader",
+    "port": 11005,
+    "method": "GET",
+    "route": "/positions/auto-trader",
+    "sources": [
+      {
+        "file": "src/rust/auto_trader/src/auto_trader/api/http_routes.rs",
+        "line": 1198
+      },
+      {
+        "file": "src/rust/auto_trader/src/browser_rsocket.rs",
+        "line": 470
+      },
+      {
+        "file": "src/rust/auto_trader/src/browser_rsocket.rs",
+        "line": 497
+      }
+    ],
+    "financially_verified": false,
+    "status": "DISCOVERED_NOT_TESTED"
+  },
+  {
+    "service": "autotrader",
+    "port": 11005,
+    "method": "GET",
+    "route": "/positions/auto-trader/activity",
+    "sources": [
+      {
+        "file": "src/rust/auto_trader/src/auto_trader/api/http_routes.rs",
+        "line": 1231
+      },
+      {
+        "file": "src/rust/auto_trader/src/browser_rsocket.rs",
+        "line": 363
+      },
+      {
+        "file": "src/rust/auto_trader/src/browser_rsocket.rs",
+        "line": 377
+      },
+      {
+        "file": "src/rust/auto_trader/src/browser_rsocket.rs",
+        "line": 474
+      },
+      {
+        "file": "src/rust/auto_trader/src/browser_rsocket.rs",
+        "line": 501
+      }
+    ],
+    "financially_verified": false,
+    "status": "DISCOVERED_NOT_TESTED"
+  },
+  {
+    "service": "autotrader",
+    "port": 11005,
+    "method": "GET",
+    "route": "/positions/auto-trader/dated-carry",
+    "sources": [
+      {
+        "file": "src/rust/auto_trader/src/auto_trader/api/http_routes.rs",
+        "line": 1199
+      },
+      {
+        "file": "src/rust/auto_trader/src/browser_rsocket.rs",
+        "line": 482
+      },
+      {
+        "file": "src/rust/auto_trader/src/browser_rsocket.rs",
+        "line": 509
+      }
+    ],
+    "financially_verified": false,
+    "status": "DISCOVERED_NOT_TESTED"
+  },
+  {
+    "service": "autotrader",
+    "port": 11005,
+    "method": "GET",
+    "route": "/positions/auto-trader/hedge-candidates",
+    "sources": [
+      {
+        "file": "src/rust/auto_trader/src/auto_trader/api/http_routes.rs",
+        "line": 1237
+      }
+    ],
+    "financially_verified": false,
+    "status": "DISCOVERED_NOT_TESTED"
+  },
+  {
+    "service": "autotrader",
+    "port": 11005,
+    "method": "GET",
+    "route": "/positions/auto-trader/learning-summary",
+    "sources": [
+      {
+        "file": "src/rust/auto_trader/src/auto_trader/api/http_routes.rs",
+        "line": 1241
+      }
+    ],
+    "financially_verified": false,
+    "status": "DISCOVERED_NOT_TESTED"
+  },
+  {
+    "service": "autotrader",
+    "port": 11005,
+    "method": "GET",
+    "route": "/positions/auto-trader/missed-opportunity-bands",
+    "sources": [
+      {
+        "file": "src/rust/auto_trader/src/auto_trader/api/http_routes.rs",
+        "line": 1223
+      }
+    ],
+    "financially_verified": false,
+    "status": "DISCOVERED_NOT_TESTED"
+  },
+  {
+    "service": "autotrader",
+    "port": 11005,
+    "method": "GET",
+    "route": "/positions/auto-trader/parameters",
+    "sources": [
+      {
+        "file": "src/rust/auto_trader/src/auto_trader/api/http_routes.rs",
+        "line": 1203
+      },
+      {
+        "file": "src/rust/auto_trader/src/browser_rsocket.rs",
+        "line": 478
+      },
+      {
+        "file": "src/rust/auto_trader/src/browser_rsocket.rs",
+        "line": 505
+      }
+    ],
+    "financially_verified": false,
+    "status": "DISCOVERED_NOT_TESTED"
+  },
+  {
+    "service": "autotrader",
+    "port": 11005,
+    "method": "GET",
+    "route": "/positions/auto-trader/parameters/scout-variants",
+    "sources": [
+      {
+        "file": "src/rust/auto_trader/src/auto_trader/api/http_routes.rs",
+        "line": 1211
+      }
+    ],
+    "financially_verified": false,
+    "status": "DISCOVERED_NOT_TESTED"
+  },
+  {
+    "service": "autotrader",
+    "port": 11005,
+    "method": "GET",
+    "route": "/positions/auto-trader/parameters/v1",
+    "sources": [
+      {
+        "file": "src/rust/auto_trader/src/auto_trader/api/http_routes.rs",
+        "line": 1207
+      }
+    ],
+    "financially_verified": false,
+    "status": "DISCOVERED_NOT_TESTED"
+  },
+  {
+    "service": "insights",
+    "port": 11004,
+    "method": "GET",
+    "route": "/internal/strategy-snapshot-history",
+    "sources": [
+      {
+        "file": "src/rust/insights/src/signal_engine/store/browser_rsocket.rs",
+        "line": 148
+      }
+    ],
+    "financially_verified": false,
+    "status": "DISCOVERED_NOT_TESTED"
+  },
+  {
+    "service": "insights",
+    "port": 11004,
+    "method": "GET",
+    "route": "/positions/insights",
+    "sources": [
+      {
+        "file": "src/rust/insights/src/signal_engine/store/browser_rsocket.rs",
+        "line": 36
+      }
+    ],
+    "financially_verified": false,
+    "status": "DISCOVERED_NOT_TESTED"
+  },
+  {
+    "service": "insights",
+    "port": 11004,
+    "method": "GET",
+    "route": "/signals/auto-trader-audit",
+    "sources": [
+      {
+        "file": "src/rust/insights/src/signal_engine/store/browser_rsocket.rs",
+        "line": 79
+      }
+    ],
+    "financially_verified": false,
+    "status": "DISCOVERED_NOT_TESTED"
+  },
+  {
+    "service": "insights",
+    "port": 11004,
+    "method": "GET",
+    "route": "/signals/auto-trader-dashboard",
+    "sources": [
+      {
+        "file": "src/rust/insights/src/signal_engine/store/browser_rsocket.rs",
+        "line": 47
+      }
+    ],
+    "financially_verified": false,
+    "status": "HTTP_ERROR",
+    "http_status": 404
+  },
+  {
+    "service": "insights",
+    "port": 11004,
+    "method": "GET",
+    "route": "/signals/auto-trader-decision-quality",
+    "sources": [
+      {
+        "file": "src/rust/insights/src/signal_engine/store/browser_rsocket.rs",
+        "line": 50
+      }
+    ],
+    "financially_verified": false,
+    "status": "DISCOVERED_NOT_TESTED"
+  },
+  {
+    "service": "insights",
+    "port": 11004,
+    "method": "GET",
+    "route": "/signals/auto-trader-execution-audit",
+    "sources": [
+      {
+        "file": "src/rust/insights/src/signal_engine/store/browser_rsocket.rs",
+        "line": 60
+      }
+    ],
+    "financially_verified": false,
+    "status": "DISCOVERED_NOT_TESTED"
+  },
+  {
+    "service": "insights",
+    "port": 11004,
+    "method": "GET",
+    "route": "/signals/auto-trader-execution-quality",
+    "sources": [
+      {
+        "file": "src/rust/insights/src/signal_engine/store/browser_rsocket.rs",
+        "line": 55
+      }
+    ],
+    "financially_verified": false,
+    "status": "DISCOVERED_NOT_TESTED"
+  },
+  {
+    "service": "insights",
+    "port": 11004,
+    "method": "GET",
+    "route": "/signals/best",
+    "sources": [
+      {
+        "file": "src/rust/insights/src/signal_engine/store/browser_rsocket.rs",
+        "line": 98
+      }
+    ],
+    "financially_verified": false,
+    "status": "HTTP_ERROR",
+    "http_status": 404
+  },
+  {
+    "service": "insights",
+    "port": 11004,
+    "method": "GET",
+    "route": "/signals/book-snapshots",
+    "sources": [
+      {
+        "file": "src/rust/insights/src/signal_engine/store/browser_rsocket.rs",
+        "line": 118
+      }
+    ],
+    "financially_verified": false,
+    "status": "DISCOVERED_NOT_TESTED"
+  },
+  {
+    "service": "insights",
+    "port": 11004,
+    "method": "GET",
+    "route": "/signals/dashboard",
+    "sources": [
+      {
+        "file": "src/rust/insights/src/signal_engine/store/browser_rsocket.rs",
+        "line": 42
+      }
+    ],
+    "financially_verified": false,
+    "status": "HTTP_ERROR",
+    "http_status": 404
+  },
+  {
+    "service": "insights",
+    "port": 11004,
+    "method": "GET",
+    "route": "/signals/evaluations",
+    "sources": [
+      {
+        "file": "src/rust/insights/src/signal_engine/store/browser_rsocket.rs",
+        "line": 99
+      }
+    ],
+    "financially_verified": false,
+    "status": "DISCOVERED_NOT_TESTED"
+  },
+  {
+    "service": "insights",
+    "port": 11004,
+    "method": "GET",
+    "route": "/signals/external-market",
+    "sources": [
+      {
+        "file": "src/rust/insights/src/signal_engine/store/browser_rsocket.rs",
+        "line": 138
+      }
+    ],
+    "financially_verified": false,
+    "status": "DISCOVERED_NOT_TESTED"
+  },
+  {
+    "service": "insights",
+    "port": 11004,
+    "method": "GET",
+    "route": "/signals/history",
+    "sources": [
+      {
+        "file": "src/rust/insights/src/signal_engine/store/browser_rsocket.rs",
+        "line": 43
+      }
+    ],
+    "financially_verified": false,
+    "status": "DISCOVERED_NOT_TESTED"
+  },
+  {
+    "service": "insights",
+    "port": 11004,
+    "method": "GET",
+    "route": "/signals/performance",
+    "sources": [
+      {
+        "file": "src/rust/insights/src/signal_engine/store/browser_rsocket.rs",
+        "line": 44
+      }
+    ],
+    "financially_verified": false,
+    "status": "DISCOVERED_NOT_TESTED"
+  },
+  {
+    "service": "insights",
+    "port": 11004,
+    "method": "GET",
+    "route": "/signals/research-features",
+    "sources": [
+      {
+        "file": "src/rust/insights/src/signal_engine/store/browser_rsocket.rs",
+        "line": 128
+      }
+    ],
+    "financially_verified": false,
+    "status": "DISCOVERED_NOT_TESTED"
+  },
+  {
+    "service": "positions",
+    "port": 11002,
+    "method": "GET",
+    "route": "/account",
+    "sources": [
+      {
+        "file": "src/rust/position_management/src/positions/positions_routes.rs",
+        "line": 102
+      }
+    ],
+    "financially_verified": false,
+    "status": "DISCOVERED_NOT_TESTED"
+  },
+  {
+    "service": "positions",
+    "port": 11002,
+    "method": "GET",
+    "route": "/internal/persistence-timing",
+    "sources": [
+      {
+        "file": "src/rust/position_management/src/positions/positions_routes.rs",
+        "line": 97
+      }
+    ],
+    "financially_verified": false,
+    "status": "HTTP_ERROR",
+    "http_status": 404
+  },
+  {
+    "service": "positions",
+    "port": 11002,
+    "method": "GET",
+    "route": "/positions",
+    "sources": [
+      {
+        "file": "src/rust/position_management/src/positions/positions_routes.rs",
+        "line": 98
+      }
+    ],
+    "financially_verified": false,
+    "status": "HTTP_ERROR",
+    "http_status": 404
+  },
+  {
+    "service": "positions",
+    "port": 11002,
+    "method": "GET",
+    "route": "/positions/account",
+    "sources": [
+      {
+        "file": "src/rust/position_management/src/positions/positions_routes.rs",
+        "line": 101
+      }
+    ],
+    "financially_verified": false,
+    "status": "HTTP_ERROR",
+    "http_status": 404
+  },
+  {
+    "service": "positions",
+    "port": 11002,
+    "method": "GET",
+    "route": "/positions/barriers",
+    "sources": [
+      {
+        "file": "src/rust/position_management/src/positions/positions_routes.rs",
+        "line": 119
+      }
+    ],
+    "financially_verified": false,
+    "status": "HTTP_ERROR",
+    "http_status": 404
+  },
+  {
+    "service": "positions",
+    "port": 11002,
+    "method": "GET",
+    "route": "/positions/fee-rates",
+    "sources": [
+      {
+        "file": "src/rust/position_management/src/positions/positions_routes.rs",
+        "line": 108
+      }
+    ],
+    "financially_verified": false,
+    "status": "HTTP_ERROR",
+    "http_status": 404
+  },
+  {
+    "service": "positions",
+    "port": 11002,
+    "method": "GET",
+    "route": "/positions/fee-summary",
+    "sources": [
+      {
+        "file": "src/rust/position_management/src/positions/positions_routes.rs",
+        "line": 100
+      }
+    ],
+    "financially_verified": false,
+    "status": "HTTP_ERROR",
+    "http_status": 404
+  },
+  {
+    "service": "positions",
+    "port": 11002,
+    "method": "GET",
+    "route": "/positions/orders",
+    "sources": [
+      {
+        "file": "src/rust/position_management/src/positions/positions_routes.rs",
+        "line": 113
+      }
+    ],
+    "financially_verified": false,
+    "status": "DISCOVERED_NOT_TESTED"
+  },
+  {
+    "service": "positions",
+    "port": 11002,
+    "method": "GET",
+    "route": "/positions/realized-pnl",
+    "sources": [
+      {
+        "file": "src/rust/position_management/src/positions/positions_routes.rs",
+        "line": 99
+      }
+    ],
+    "financially_verified": false,
+    "status": "HTTP_ERROR",
+    "http_status": 404
+  },
+  {
+    "service": "positions",
+    "port": 11002,
+    "method": "GET",
+    "route": "/positions/trades",
+    "sources": [
+      {
+        "file": "src/rust/position_management/src/positions/positions_routes.rs",
+        "line": 109
+      }
+    ],
+    "financially_verified": false,
+    "status": "DISCOVERED_NOT_TESTED"
+  },
+  {
+    "service": "positions",
+    "port": 11002,
+    "method": "GET",
+    "route": "/positions/usd-rates",
+    "sources": [
+      {
+        "file": "src/rust/position_management/src/positions/positions_routes.rs",
+        "line": 107
+      }
+    ],
+    "financially_verified": false,
+    "status": "HTTP_ERROR",
+    "http_status": 404
+  },
+  {
+    "service": "positions",
+    "port": 11002,
+    "method": "GET",
+    "route": "/positions/vwap",
+    "sources": [
+      {
+        "file": "src/rust/position_management/src/positions/positions_routes.rs",
+        "line": 110
+      }
+    ],
+    "financially_verified": false,
+    "status": "DISCOVERED_NOT_TESTED"
+  }
+]

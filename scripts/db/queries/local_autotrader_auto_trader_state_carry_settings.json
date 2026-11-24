@@ -1,0 +1,36 @@
+{
+  "description": "Stored dated carry configuration and status",
+  "database": "local_autotrader",
+  "file": "auto_trader_state.sqlite",
+  "sql": "\n      SELECT id, enabled, max_spot_notional_usdt,\n             checked_at_ms, last_error\n      FROM dated_carry_settings LIMIT 10\n      ",
+  "required_parameters": [],
+  "example_parameters": {},
+  "verified": false,
+  "schema_tested": true,
+  "verification": "",
+  "units": {},
+  "scope": "local",
+  "source_path": "/home/ronnie/dev/sbe_ts/src/rust/auto_trader/auto_trader_state.sqlite",
+  "limitations": [
+    "Application semantics require verification",
+    "Do not combine local and runtime results",
+    "Do not assume paper/live mode from table names"
+  ],
+  "execution_plan": [
+    [
+      3,
+      0,
+      0,
+      "SCAN dated_carry_settings"
+    ]
+  ],
+  "sample_columns": [
+    "id",
+    "enabled",
+    "max_spot_notional_usdt",
+    "checked_at_ms",
+    "last_error"
+  ],
+  "sample_rows_returned": 1,
+  "sample_elapsed_ms": 0.31
+}

@@ -1,0 +1,34 @@
+{
+  "description": "Latest retained audit record",
+  "database": "research_signals",
+  "file": "signals.sqlite",
+  "sql": "\n      SELECT timestamp, stage, symbol\n      FROM auto_trader_audit\n      ORDER BY timestamp DESC LIMIT 1\n      ",
+  "required_parameters": [],
+  "example_parameters": {},
+  "verified": false,
+  "schema_tested": true,
+  "verification": "",
+  "units": {},
+  "scope": "local",
+  "source_path": "/home/ronnie/dev/sbe_ts/research/autotrader/runtime/cross_asset_paper/signals.sqlite",
+  "limitations": [
+    "Application semantics require verification",
+    "Do not combine local and runtime results",
+    "Do not assume paper/live mode from table names"
+  ],
+  "execution_plan": [
+    [
+      5,
+      0,
+      0,
+      "SCAN auto_trader_audit USING INDEX auto_trader_audit_timestamp"
+    ]
+  ],
+  "sample_columns": [
+    "timestamp",
+    "stage",
+    "symbol"
+  ],
+  "sample_rows_returned": 0,
+  "sample_elapsed_ms": 0.14
+}

@@ -1,0 +1,49 @@
+{
+  "description": "Precomputed daily signal coverage",
+  "database": "insights",
+  "file": "signals.sqlite",
+  "sql": "\n      SELECT day_start_ms, kind, record_count,\n             compressed_payload_bytes,\n             first_timestamp, last_timestamp\n      FROM signal_daily_summary\n      WHERE day_start_ms >= :since_ms\n      ORDER BY day_start_ms DESC, kind\n      LIMIT :n\n      ",
+  "required_parameters": [
+    "since_ms",
+    "n"
+  ],
+  "example_parameters": {
+    "since_ms": 1794920401781,
+    "n": 100
+  },
+  "verified": false,
+  "schema_tested": true,
+  "verification": "",
+  "units": {},
+  "scope": "docker",
+  "source_path": "/data/insights/signals.sqlite",
+  "limitations": [
+    "Application semantics require verification",
+    "Do not combine local and runtime results",
+    "Do not assume paper/live mode from table names"
+  ],
+  "execution_plan": [
+    [
+      5,
+      0,
+      203,
+      "SEARCH signal_daily_summary USING INDEX sqlite_autoindex_signal_daily_summary_1 (day_start_ms>?)"
+    ],
+    [
+      34,
+      0,
+      0,
+      "USE TEMP B-TREE FOR LAST TERM OF ORDER BY"
+    ]
+  ],
+  "sample_columns": [
+    "day_start_ms",
+    "kind",
+    "record_count",
+    "compressed_payload_bytes",
+    "first_timestamp",
+    "last_timestamp"
+  ],
+  "sample_rows_returned": 5,
+  "sample_elapsed_ms": 0.49
+}

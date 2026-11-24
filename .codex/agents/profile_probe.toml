@@ -1,0 +1,12 @@
+name = "profile_probe"
+description = "Temporary agent configuration verification"
+
+model = "gpt-6-luna"
+model_reasoning_effort = "low"
+model_context_window = 32768
+model_auto_compact_token_limit = 20000
+
+developer_instructions = """
+Do not explore the repository or modify files.
+Return only PROFILE_PROBE_OK.
+"""

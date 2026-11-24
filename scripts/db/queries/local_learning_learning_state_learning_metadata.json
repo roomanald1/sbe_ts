@@ -1,0 +1,33 @@
+{
+  "description": "Stored learning accepted-event counter",
+  "database": "local_learning",
+  "file": "learning_state.sqlite",
+  "sql": "\n      SELECT id, accepted_events\n      FROM learning_metadata LIMIT 10\n      ",
+  "required_parameters": [],
+  "example_parameters": {},
+  "verified": false,
+  "schema_tested": true,
+  "verification": "",
+  "units": {},
+  "scope": "local",
+  "source_path": "/home/ronnie/dev/sbe_ts/src/rust/learning/learning_state.sqlite",
+  "limitations": [
+    "Application semantics require verification",
+    "Do not combine local and runtime results",
+    "Do not assume paper/live mode from table names"
+  ],
+  "execution_plan": [
+    [
+      3,
+      0,
+      0,
+      "SCAN learning_metadata"
+    ]
+  ],
+  "sample_columns": [
+    "id",
+    "accepted_events"
+  ],
+  "sample_rows_returned": 1,
+  "sample_elapsed_ms": 0.18
+}

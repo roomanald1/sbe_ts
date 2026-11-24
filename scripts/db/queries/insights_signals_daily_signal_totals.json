@@ -1,0 +1,37 @@
+{
+  "description": "Daily signal counts using precomputed summaries",
+  "database": "insights",
+  "file": "signals.sqlite",
+  "sql": "\n      SELECT day_start_ms, SUM(record_count) AS records\n      FROM signal_daily_summary\n      WHERE day_start_ms >= :since_ms\n      GROUP BY day_start_ms\n      ORDER BY day_start_ms DESC\n      ",
+  "required_parameters": [
+    "since_ms"
+  ],
+  "example_parameters": {
+    "since_ms": 1792933201781
+  },
+  "verified": false,
+  "schema_tested": true,
+  "verification": "",
+  "units": {},
+  "scope": "docker",
+  "source_path": "/data/insights/signals.sqlite",
+  "limitations": [
+    "Application semantics require verification",
+    "Do not combine local and runtime results",
+    "Do not assume paper/live mode from table names"
+  ],
+  "execution_plan": [
+    [
+      8,
+      0,
+      203,
+      "SEARCH signal_daily_summary USING INDEX sqlite_autoindex_signal_daily_summary_1 (day_start_ms>?)"
+    ]
+  ],
+  "sample_columns": [
+    "day_start_ms",
+    "records"
+  ],
+  "sample_rows_returned": 5,
+  "sample_elapsed_ms": 0.37
+}

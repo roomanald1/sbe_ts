@@ -1,0 +1,38 @@
+{
+  "description": "Inspect serialized state inventory for setting_trailing_distance_percent",
+  "database": "local_autotrader",
+  "file": "auto_trader_state.sqlite",
+  "sql": "\n          SELECT id, typeof(\"value\") AS storage_type,\n                 length(\"value\") AS stored_length\n          FROM \"setting_trailing_distance_percent\"\n          LIMIT :n\n          ",
+  "required_parameters": [
+    "n"
+  ],
+  "example_parameters": {
+    "n": 10
+  },
+  "verified": false,
+  "schema_tested": true,
+  "verification": "",
+  "units": {},
+  "scope": "local",
+  "source_path": "/home/ronnie/dev/sbe_ts/src/rust/auto_trader/auto_trader_state.sqlite",
+  "limitations": [
+    "Application semantics require verification",
+    "Do not combine local and runtime results",
+    "Do not assume paper/live mode from table names"
+  ],
+  "execution_plan": [
+    [
+      5,
+      0,
+      0,
+      "SCAN setting_trailing_distance_percent"
+    ]
+  ],
+  "sample_columns": [
+    "id",
+    "storage_type",
+    "stored_length"
+  ],
+  "sample_rows_returned": 1,
+  "sample_elapsed_ms": 0.3
+}

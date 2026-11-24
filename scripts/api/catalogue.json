@@ -1,0 +1,28 @@
+{
+  "learning": {
+    "summary": "/summary",
+    "profiles": "/profiles",
+    "decision-snapshot": "/decision-snapshot"
+  },
+  "autotrader": {
+    "feedback-queues": "/internal/learning-feedback-queues",
+    "monitoring-metrics": "/internal/monitoring-metrics",
+    "open-position-counts": "/internal/strategy/open-position-counts"
+  },
+  "insights": {
+    "dashboard": "/signals/dashboard",
+    "best": "/signals/best",
+    "decision-quality": "/signals/auto-trader-decision-quality",
+    "execution-quality": "/signals/auto-trader-execution-quality"
+  },
+  "positions": {
+    "positions": "/positions",
+    "account": "/positions/account",
+    "realized-pnl": "/positions/realized-pnl",
+    "fee-summary": "/positions/fee-summary",
+    "fee-rates": "/positions/fee-rates",
+    "usd-rates": "/positions/usd-rates",
+    "barriers": "/positions/barriers",
+    "persistence-timing": "/internal/persistence-timing"
+  }
+}

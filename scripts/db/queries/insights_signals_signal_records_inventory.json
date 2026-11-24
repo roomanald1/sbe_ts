@@ -1,0 +1,38 @@
+{
+  "description": "Inspect serialized state inventory for signal_records",
+  "database": "insights",
+  "file": "signals.sqlite",
+  "sql": "\n          SELECT id, typeof(\"payload\") AS storage_type,\n                 length(\"payload\") AS stored_length\n          FROM \"signal_records\"\n          LIMIT :n\n          ",
+  "required_parameters": [
+    "n"
+  ],
+  "example_parameters": {
+    "n": 10
+  },
+  "verified": false,
+  "schema_tested": true,
+  "verification": "",
+  "units": {},
+  "scope": "docker",
+  "source_path": "/data/insights/signals.sqlite",
+  "limitations": [
+    "Application semantics require verification",
+    "Do not combine local and runtime results",
+    "Do not assume paper/live mode from table names"
+  ],
+  "execution_plan": [
+    [
+      3,
+      0,
+      216,
+      "SCAN signal_records"
+    ]
+  ],
+  "sample_columns": [
+    "id",
+    "storage_type",
+    "stored_length"
+  ],
+  "sample_rows_returned": 5,
+  "sample_elapsed_ms": 1.78
+}

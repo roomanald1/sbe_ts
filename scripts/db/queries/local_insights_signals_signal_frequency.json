@@ -1,0 +1,51 @@
+{
+  "description": "Signal counts by kind in a short time window",
+  "database": "local_insights",
+  "file": "signals.sqlite",
+  "sql": "\n      SELECT kind, COUNT(*) AS records\n      FROM signal_records\n      WHERE timestamp >= :since_ms\n        AND timestamp < :until_ms\n      GROUP BY kind\n      ORDER BY records DESC\n      ",
+  "required_parameters": [
+    "since_ms",
+    "until_ms"
+  ],
+  "example_parameters": {
+    "since_ms": 1795525141781,
+    "until_ms": 1795525201781
+  },
+  "verified": false,
+  "schema_tested": true,
+  "verification": "",
+  "units": {},
+  "scope": "local",
+  "source_path": "/home/ronnie/dev/sbe_ts/src/rust/insights/signals.sqlite",
+  "limitations": [
+    "Application semantics require verification",
+    "Do not combine local and runtime results",
+    "Do not assume paper/live mode from table names"
+  ],
+  "execution_plan": [
+    [
+      8,
+      0,
+      0,
+      "SEARCH signal_records USING INDEX signal_records_timestamp (timestamp>? AND timestamp<?)"
+    ],
+    [
+      18,
+      0,
+      0,
+      "USE TEMP B-TREE FOR GROUP BY"
+    ],
+    [
+      53,
+      0,
+      0,
+      "USE TEMP B-TREE FOR ORDER BY"
+    ]
+  ],
+  "sample_columns": [
+    "kind",
+    "records"
+  ],
+  "sample_rows_returned": 0,
+  "sample_elapsed_ms": 0.18
+}

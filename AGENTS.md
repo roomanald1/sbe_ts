@@ -21,6 +21,24 @@
 - Delegate only independent, bounded work. Avoid overlapping investigations and competing Cargo builds.
 - Stay within the requested scope; make the smallest correct change and stop once verified.
 
+## Diagnostic tooling maintenance
+
+Diagnostic tooling is a maintained part of the repository, not disposable implementation scaffolding.
+
+For every implementation task:
+
+- Reuse existing tools under `scripts/local/`, `scripts/diagnostics/`, `scripts/api/` and the existing database utilities.
+- Update affected diagnostic scripts whenever database schemas, API contracts, financial calculations, telemetry, configuration or trading behaviour change.
+- Extend diagnostic coverage when introducing new functionality or metrics.
+- Add regression tests for changed diagnostic contracts.
+- Preserve backwards compatibility where practical.
+- Explicitly reject unsupported schemas rather than silently returning misleading results.
+- Regenerate affected work-package context and repository indexes when their source inputs change.
+- Record reusable architectural discoveries using `bd remember`.
+- Include diagnostic tooling validation in the implementation handoff.
+
+A work package is not complete if its implementation leaves affected diagnostic tooling outdated.
+
 ## Docker and Live Data
 - Never start, stop, restart, recreate or redeploy services without explicit permission. Read-only inspection is allowed.
 - Call `containerToolsConfig` before Docker/Compose commands; use its reported base command.
@@ -40,3 +58,21 @@
 - Use Beads issues for multi-step tasks; close verified work. Use `bd remember` for reusable cross-task knowledge, not task-specific notes.
 - Inspect final `git status` and report changes, checks and outstanding issues.
 - Never commit, push or sync without explicit permission.
+## Deterministic diagnostic tooling
+
+Reuse scripts/agent and scripts/diagnostics for recurring
+investigations. Read scripts/diagnostics/CODEX_INSTRUCTIONS.md
+when performing diagnostics. Prefer deterministic extraction
+and calculation over repeated model calls. Keep detailed
+outputs in /tmp. Validate data adapters against authoritative
+contracts; never invent missing data or financial calculations.
+
+## SQLite diagnostic tooling
+
+Use scripts/db for database discovery, schema searches,
+bounded read-only queries and execution plans.
+Read scripts/db/README.md before database investigations.
+Reuse verified SQL from scripts/db/queries.
+Never substitute local databases for runtime databases.
+Record verified database mappings with bd remember.
+Avoid unbounded queries and large inline results.

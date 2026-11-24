@@ -1,0 +1,40 @@
+{
+  "insights": {
+    "container": "monitoring-app-exporter-1",
+    "directory": "/data/insights"
+  },
+  "learning": {
+    "container": "monitoring-app-exporter-1",
+    "directory": "/data/learning"
+  },
+  "positions": {
+    "container": "monitoring-app-exporter-1",
+    "directory": "/data/position_management"
+  },
+  "autotrader": {
+    "container": "monitoring-app-exporter-1",
+    "directory": "/data/position_management"
+  },
+  "scouts": {
+    "container": "sbe-system-strategy-scout-live-momentum-1",
+    "directory": "/data"
+  },
+  "local_insights": {
+    "path": "src/rust/insights/signals.sqlite"
+  },
+  "local_learning": {
+    "path": "src/rust/learning/learning_state.sqlite"
+  },
+  "local_autotrader": {
+    "path": "src/rust/auto_trader/auto_trader_state.sqlite"
+  },
+  "local_positions": {
+    "path": "src/rust/position_management/positions.sqlite"
+  },
+  "local_scouts": {
+    "path": "src/rust/position_management/scouts_state.sqlite"
+  },
+  "research_signals": {
+    "path": "research/autotrader/runtime/cross_asset_paper/signals.sqlite"
+  }
+}

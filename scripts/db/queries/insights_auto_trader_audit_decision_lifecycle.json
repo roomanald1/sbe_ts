@@ -1,0 +1,45 @@
+{
+  "description": "Trace recorded stages for one decision",
+  "database": "insights",
+  "file": "auto_trader_audit.sqlite",
+  "sql": "\n      SELECT decision_id, stage, timestamp, symbol\n      FROM auto_trader_audit\n      WHERE decision_id = :decision_id\n      ORDER BY timestamp, stage\n      ",
+  "required_parameters": [
+    "decision_id"
+  ],
+  "example_parameters": {
+    "decision_id": "__example__"
+  },
+  "verified": false,
+  "schema_tested": true,
+  "verification": "",
+  "units": {},
+  "scope": "docker",
+  "source_path": "/data/insights/auto_trader_audit.sqlite",
+  "limitations": [
+    "Application semantics require verification",
+    "Do not combine local and runtime results",
+    "Do not assume paper/live mode from table names"
+  ],
+  "execution_plan": [
+    [
+      4,
+      0,
+      62,
+      "SEARCH auto_trader_audit USING INDEX sqlite_autoindex_auto_trader_audit_1 (decision_id=?)"
+    ],
+    [
+      18,
+      0,
+      0,
+      "USE TEMP B-TREE FOR ORDER BY"
+    ]
+  ],
+  "sample_columns": [
+    "decision_id",
+    "stage",
+    "timestamp",
+    "symbol"
+  ],
+  "sample_rows_returned": 0,
+  "sample_elapsed_ms": 3.79
+}

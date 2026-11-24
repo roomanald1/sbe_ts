@@ -1,0 +1,42 @@
+{
+  "description": "Recent signal metadata for a specified kind",
+  "database": "insights",
+  "file": "signals.sqlite",
+  "sql": "\n      SELECT id, kind, timestamp\n      FROM signal_records\n      WHERE kind = :kind\n        AND timestamp >= :since_ms\n      ORDER BY timestamp DESC LIMIT :n\n      ",
+  "required_parameters": [
+    "kind",
+    "since_ms",
+    "n"
+  ],
+  "example_parameters": {
+    "kind": 0,
+    "since_ms": 1795438801781,
+    "n": 20
+  },
+  "verified": false,
+  "schema_tested": true,
+  "verification": "",
+  "units": {},
+  "scope": "docker",
+  "source_path": "/data/insights/signals.sqlite",
+  "limitations": [
+    "Application semantics require verification",
+    "Do not combine local and runtime results",
+    "Do not assume paper/live mode from table names"
+  ],
+  "execution_plan": [
+    [
+      4,
+      0,
+      46,
+      "SEARCH signal_records USING COVERING INDEX signal_records_kind_timestamp (kind=? AND timestamp>?)"
+    ]
+  ],
+  "sample_columns": [
+    "id",
+    "kind",
+    "timestamp"
+  ],
+  "sample_rows_returned": 5,
+  "sample_elapsed_ms": 0.73
+}

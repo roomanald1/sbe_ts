@@ -64,6 +64,7 @@ export function validateWidgets<TType extends string>(
   );
 }
 
+//TODO remove legacy.
 function readVersionTwoWidgets<TType extends string>(
   value: unknown,
   config: DashboardLayoutConfig<TType>,

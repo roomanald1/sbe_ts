@@ -1,0 +1,43 @@
+{
+  "description": "Recent audit records at a specified stage",
+  "database": "insights",
+  "file": "auto_trader_audit.sqlite",
+  "sql": "\n      SELECT decision_id, stage, timestamp, symbol\n      FROM auto_trader_audit\n      WHERE stage = :stage\n        AND timestamp >= :since_ms\n      ORDER BY timestamp DESC LIMIT :n\n      ",
+  "required_parameters": [
+    "stage",
+    "since_ms",
+    "n"
+  ],
+  "example_parameters": {
+    "stage": "__example__",
+    "since_ms": 1795525141781,
+    "n": 20
+  },
+  "verified": false,
+  "schema_tested": true,
+  "verification": "",
+  "units": {},
+  "scope": "docker",
+  "source_path": "/data/insights/auto_trader_audit.sqlite",
+  "limitations": [
+    "Application semantics require verification",
+    "Do not combine local and runtime results",
+    "Do not assume paper/live mode from table names"
+  ],
+  "execution_plan": [
+    [
+      5,
+      0,
+      51,
+      "SEARCH auto_trader_audit USING INDEX auto_trader_audit_stage_timestamp (stage=? AND timestamp>?)"
+    ]
+  ],
+  "sample_columns": [
+    "decision_id",
+    "stage",
+    "timestamp",
+    "symbol"
+  ],
+  "sample_rows_returned": 0,
+  "sample_elapsed_ms": 0.23
+}

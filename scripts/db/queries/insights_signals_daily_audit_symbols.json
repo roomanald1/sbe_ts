@@ -1,0 +1,47 @@
+{
+  "description": "Daily audit coverage by symbol and stage",
+  "database": "insights",
+  "file": "signals.sqlite",
+  "sql": "\n      SELECT day_start_ms, stage, symbol, record_count\n      FROM auto_trader_audit_daily_summary\n      WHERE day_start_ms >= :since_ms\n      ORDER BY day_start_ms DESC, stage, symbol\n      LIMIT :n\n      ",
+  "required_parameters": [
+    "since_ms",
+    "n"
+  ],
+  "example_parameters": {
+    "since_ms": 1794920401781,
+    "n": 100
+  },
+  "verified": false,
+  "schema_tested": true,
+  "verification": "",
+  "units": {},
+  "scope": "docker",
+  "source_path": "/data/insights/signals.sqlite",
+  "limitations": [
+    "Application semantics require verification",
+    "Do not combine local and runtime results",
+    "Do not assume paper/live mode from table names"
+  ],
+  "execution_plan": [
+    [
+      5,
+      0,
+      206,
+      "SEARCH auto_trader_audit_daily_summary USING INDEX sqlite_autoindex_auto_trader_audit_daily_summary_1 (day_start_ms>?)"
+    ],
+    [
+      32,
+      0,
+      0,
+      "USE TEMP B-TREE FOR LAST 2 TERMS OF ORDER BY"
+    ]
+  ],
+  "sample_columns": [
+    "day_start_ms",
+    "stage",
+    "symbol",
+    "record_count"
+  ],
+  "sample_rows_returned": 0,
+  "sample_elapsed_ms": 0.32
+}

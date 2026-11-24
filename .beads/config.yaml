@@ -73,3 +73,6 @@
 
 sync:
     remote: "git+https://github.com/roomanald1/sbe_ts.git"
+prime:
+    max-memories: 5
+    max-memory-chars: 3000

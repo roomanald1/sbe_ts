@@ -14,3 +14,8 @@ npx nx typecheck react-app
 
 The app's original npm scripts remain available when working from this
 directory.
+
+
+## TODO
+
+fix Autotrader closed positions grid keep jumping around ? is it a disconnection message ?

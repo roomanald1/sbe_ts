@@ -45,3 +45,9 @@ cargo run --manifest-path src/rust/learning/Cargo.toml
 cargo test --manifest-path src/rust/learning/Cargo.toml
 cargo fmt --manifest-path src/rust/learning/Cargo.toml --all
 ```
+
+
+
+## TODO
+
+- investigate symbol correlations. Used to use rho as a factor for hedging. See if we can use this to help guide scoring.

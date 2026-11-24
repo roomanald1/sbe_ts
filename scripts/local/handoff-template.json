@@ -1,0 +1,14 @@
+{
+  "work_package": 1,
+  "owner": "REPLACE",
+  "status": "IN_PROGRESS",
+  "git_head": "REPLACE",
+  "plan_sha256": "REPLACE",
+  "changed_files": [],
+  "tests": [],
+  "evidence": [],
+  "blockers": [],
+  "diagnostic_updates": [],
+  "next_action": "REPLACE",
+  "acceptance": "NOT_EVALUATED"
+}

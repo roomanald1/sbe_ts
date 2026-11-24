@@ -1,0 +1,41 @@
+{
+  "description": "Locate a specific execution record",
+  "database": "local_positions",
+  "file": "positions.sqlite",
+  "sql": "\n      SELECT id, symbol, timestamp, side,\n             quantity, execution_price\n      FROM trades WHERE id = :id\n      ",
+  "required_parameters": [
+    "id"
+  ],
+  "example_parameters": {
+    "id": "__example__"
+  },
+  "verified": false,
+  "schema_tested": true,
+  "verification": "",
+  "units": {},
+  "scope": "local",
+  "source_path": "/home/ronnie/dev/sbe_ts/src/rust/position_management/positions.sqlite",
+  "limitations": [
+    "Application semantics require verification",
+    "Do not combine local and runtime results",
+    "Do not assume paper/live mode from table names"
+  ],
+  "execution_plan": [
+    [
+      3,
+      0,
+      0,
+      "SEARCH trades USING INDEX sqlite_autoindex_trades_1 (id=?)"
+    ]
+  ],
+  "sample_columns": [
+    "id",
+    "symbol",
+    "timestamp",
+    "side",
+    "quantity",
+    "execution_price"
+  ],
+  "sample_rows_returned": 0,
+  "sample_elapsed_ms": 0.5
+}

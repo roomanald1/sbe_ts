@@ -1,0 +1,51 @@
+{
+  "description": "Audit record counts by stage in a short window",
+  "database": "insights",
+  "file": "signals.sqlite",
+  "sql": "\n      SELECT stage, COUNT(*) AS records\n      FROM auto_trader_audit\n      WHERE timestamp >= :since_ms\n        AND timestamp < :until_ms\n      GROUP BY stage\n      ORDER BY records DESC\n      ",
+  "required_parameters": [
+    "since_ms",
+    "until_ms"
+  ],
+  "example_parameters": {
+    "since_ms": 1795525141781,
+    "until_ms": 1795525201781
+  },
+  "verified": false,
+  "schema_tested": true,
+  "verification": "",
+  "units": {},
+  "scope": "docker",
+  "source_path": "/data/insights/signals.sqlite",
+  "limitations": [
+    "Application semantics require verification",
+    "Do not combine local and runtime results",
+    "Do not assume paper/live mode from table names"
+  ],
+  "execution_plan": [
+    [
+      8,
+      0,
+      162,
+      "SEARCH auto_trader_audit USING INDEX auto_trader_audit_timestamp (timestamp>? AND timestamp<?)"
+    ],
+    [
+      18,
+      0,
+      0,
+      "USE TEMP B-TREE FOR GROUP BY"
+    ],
+    [
+      53,
+      0,
+      0,
+      "USE TEMP B-TREE FOR ORDER BY"
+    ]
+  ],
+  "sample_columns": [
+    "stage",
+    "records"
+  ],
+  "sample_rows_returned": 0,
+  "sample_elapsed_ms": 0.25
+}

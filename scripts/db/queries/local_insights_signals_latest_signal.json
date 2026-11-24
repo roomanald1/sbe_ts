@@ -1,0 +1,32 @@
+{
+  "description": "Latest stored signal timestamp",
+  "database": "local_insights",
+  "file": "signals.sqlite",
+  "sql": "\n      SELECT timestamp\n      FROM signal_records\n      ORDER BY timestamp DESC LIMIT 1\n      ",
+  "required_parameters": [],
+  "example_parameters": {},
+  "verified": false,
+  "schema_tested": true,
+  "verification": "",
+  "units": {},
+  "scope": "local",
+  "source_path": "/home/ronnie/dev/sbe_ts/src/rust/insights/signals.sqlite",
+  "limitations": [
+    "Application semantics require verification",
+    "Do not combine local and runtime results",
+    "Do not assume paper/live mode from table names"
+  ],
+  "execution_plan": [
+    [
+      4,
+      0,
+      0,
+      "SCAN signal_records USING COVERING INDEX signal_records_timestamp"
+    ]
+  ],
+  "sample_columns": [
+    "timestamp"
+  ],
+  "sample_rows_returned": 1,
+  "sample_elapsed_ms": 0.21
+}
