@@ -106,7 +106,10 @@ def load_snapshot_manifest(filename):
 
         if (
             payload.get("service") != "positions"
-            or payload.get("route") != "/positions/" + endpoint
+            or payload.get("route") != (
+                "/positions" if endpoint == "positions"
+                else "/positions/" + endpoint
+            )
             or payload.get("application_status") != 200
             or "body" not in payload
             or payload.get("bytes") != item.get("bytes")
@@ -212,7 +215,9 @@ def account():
             "residual_if_both_are_gross_and_fees_separate":
                 rounded(equity-initial-realized-unrealized+fees),
             "residual_if_pnl_net_but_exit_fees_separate":
-                rounded(equity-initial-realized-unrealized+exit_fees)
+                rounded(equity-initial-realized-unrealized+exit_fees),
+            "residual_if_equity_excludes_estimated_exit_fees":
+                rounded(equity-initial-realized-unrealized-exit_fees)
         }
 
     result["note"] = (

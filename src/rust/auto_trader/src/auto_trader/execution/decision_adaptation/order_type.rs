@@ -274,6 +274,7 @@ mod order_type_selection_behavior_tests {
 
     fn signal() -> Signal {
         Signal {
+            range_location: None,
             symbol: "BTC-USDT".into(), direction: "bullish".into(), strength: 1.0,
             timestamp: 10, stale: false, score: 1.0, ranging_probability: None,
             components: SignalComponents::default(), strategy_candidate: false,

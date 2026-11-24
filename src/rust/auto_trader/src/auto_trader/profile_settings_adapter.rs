@@ -606,6 +606,7 @@ mod strategy_parameter_bounds_tests {
             learning_samples: 8, positive_samples: 6, realized_pnl: 4.0,
         });
         let mut signal = Signal {
+            range_location: None,
             symbol: "BTC-USDT".into(), direction: "bullish".into(), strength: 1.0,
             timestamp: 1, stale: false, score: 1.0, ranging_probability: None,
             components: SignalComponents::default(), strategy_candidate: true,
@@ -883,6 +884,7 @@ mod threshold_profile_source_tests {
             0.10,
         );
         let mut signal = Signal {
+            range_location: None,
             symbol: "BTC-USDT".into(),
             direction: "bullish".into(),
             strength: 1.0,

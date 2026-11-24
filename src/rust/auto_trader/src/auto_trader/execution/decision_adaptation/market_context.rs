@@ -227,6 +227,7 @@ mod scout_floor_tests {
     #[test]
     fn strategy_candidate_uses_observed_market_regime() {
         let signal = Signal {
+            range_location: None,
             symbol: "BTC-USDT".into(), direction: "bullish".into(), strength: 0.5,
             timestamp: 10, stale: false, score: 0.5, ranging_probability: None,
             components: SignalComponents::default(), strategy_candidate: true,

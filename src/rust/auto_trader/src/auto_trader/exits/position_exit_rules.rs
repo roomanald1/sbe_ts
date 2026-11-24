@@ -852,6 +852,7 @@ mod position_exit_profit_protection_tests {
     fn thesis_failure_uses_only_fresh_opposing_strategy_signals() {
         let signal = |strategy: &str, direction: &str, timestamp, stale| {
             Signal {
+                range_location: None,
                 symbol: "BTC-USDT".into(),
                 direction: direction.into(),
                 strength: 0.8,

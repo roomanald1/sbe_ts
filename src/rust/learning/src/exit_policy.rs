@@ -1013,7 +1013,7 @@ mod tests {
         synthetic_observations(case)
             .iter()
             .filter_map(|value| {
-                parse_observation(value, "BTC-USDT", "live-momentum", u64::MAX, &specs)
+                parse_observation(value, "BTC-USDT", "live-momentum", u64::MAX)
             })
             .map(|mut sample| {
                 // Keep actual exit outcomes aligned with the captured baseline
@@ -1181,8 +1181,8 @@ mod tests {
     #[test]
     fn rejects_future_evidence_and_missing_baseline_parameters() {
         let value = serde_json::json!({"symbol":"BTC-USDT", "strategy":"live-momentum", "exit_timestamp_ms":10, "observed_at_ms":30});
-        assert!(parse_observation(&value, "BTC-USDT", "live-momentum", 29, &[]).is_none());
-        assert!(parse_observation(&value, "BTC-USDT", "live-momentum", 30, &[]).is_none());
+        assert!(parse_observation(&value, "BTC-USDT", "live-momentum", 29).is_none());
+        assert!(parse_observation(&value, "BTC-USDT", "live-momentum", 30).is_none());
     }
 
     #[test]

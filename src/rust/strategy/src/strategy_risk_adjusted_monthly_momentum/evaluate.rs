@@ -42,6 +42,7 @@ mod tests {
 
     fn signal(strategy: &str, candidate: bool) -> Signal {
         Signal {
+            range_location: None,
             symbol: "BTC-USDT".into(),
             direction: "bullish".into(),
             strength: 1.0,

@@ -171,6 +171,7 @@ mod risk_adjusted_monthly_momentum_tests {
 
     fn candidate(anchor: u64) -> Signal {
         Signal {
+            range_location: None,
             symbol: "ETH-USDT".into(),
             direction: "bullish".into(),
             strength: 1.0,

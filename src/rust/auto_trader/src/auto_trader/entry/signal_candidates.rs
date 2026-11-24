@@ -359,6 +359,7 @@ mod live_signal_freshness_tests {
 
     fn live_signal() -> Signal {
         Signal {
+            range_location: None,
             symbol: "XSOXL-USDT".into(),
             direction: "bearish".into(),
             strength: 0.7,
@@ -681,6 +682,7 @@ mod live_scout_direction_tests {
 
     fn source() -> Signal {
         Signal {
+            range_location: None,
             symbol: "ETH-USDT".into(),
             direction: "neutral".into(),
             strength: 0.5,
@@ -864,6 +866,7 @@ mod parallel_daily_candidate_tests {
 
     fn signal(strategy: &str, direction: &str) -> Signal {
         Signal {
+            range_location: None,
             symbol: "ETH-USDT".into(),
             direction: direction.into(),
             strength: 1.0,
@@ -943,6 +946,7 @@ mod signal_freshness_tests {
 
     fn signal(strategy: Option<&str>, timestamp: u64, stale: bool) -> Signal {
         Signal {
+            range_location: None,
             symbol: "ETH-USDT".into(),
             direction: "bullish".into(),
             strength: 1.0,

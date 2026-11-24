@@ -2458,6 +2458,7 @@ mod parallel_daily_cycle_tests {
 
     fn signal(strategy: &str) -> Signal {
         Signal {
+            range_location: None,
             symbol: "ETH-USDT".into(),
             direction: "bullish".into(),
             strength: 1.0,

@@ -949,6 +949,7 @@ mod strategy_signal_contract_tests {
                 _ => continue,
             }
             let signal = Signal {
+                range_location: None,
                 symbol: "BTC-USDT".into(),
                 direction: "bullish".into(),
                 strength: 1.0,
@@ -1097,6 +1098,7 @@ mod strategy_signal_contract_tests {
 
         for (strategy, direction, components, parameter, threshold, expected_value) in cases {
             let signal = Signal {
+                range_location: None,
                 symbol: "XRP-USDC".to_owned(),
                 direction: direction.to_owned(),
                 strength: 1.0,
@@ -1147,6 +1149,7 @@ mod strategy_signal_contract_tests {
             .unwrap_or_default()
             .as_millis() as u64;
         let signal = Signal {
+            range_location: None,
             symbol: "XRP-USDC".to_owned(),
             direction: "bullish".to_owned(),
             strength: 1.0,

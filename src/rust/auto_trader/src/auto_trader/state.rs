@@ -786,6 +786,7 @@ mod pending_signal_queue_tests {
     fn dashboard(daily: bool) -> Dashboard {
         Dashboard {
             best: vec![Signal {
+                range_location: None,
                 symbol: "BNB-USDT".into(),
                 direction: "bullish".into(),
                 strength: 1.0,
@@ -811,6 +812,7 @@ mod pending_signal_queue_tests {
 
     fn strategy_signal(symbol: &str, timestamp: u64) -> Signal {
         Signal {
+            range_location: None,
             symbol: symbol.into(),
             direction: "bullish".into(),
             strength: 1.0,

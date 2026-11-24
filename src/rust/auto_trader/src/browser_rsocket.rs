@@ -440,7 +440,7 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(response.status, 200);
-        assert_eq!(response.body, payload);
+        assert_eq!(serde_json::from_str::<serde_json::Value>(response.body.get()).expect("valid response JSON"), payload);
     }
 
     #[test]

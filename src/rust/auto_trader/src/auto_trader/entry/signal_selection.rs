@@ -311,6 +311,7 @@ mod signal_selection_behavior_tests {
 
     fn signal(strength: f64, score: f64, strategy: Option<&str>, candidate: bool) -> Signal {
         Signal {
+            range_location: None,
             symbol: "BTC-USDT".into(),
             direction: "bullish".into(),
             strength,

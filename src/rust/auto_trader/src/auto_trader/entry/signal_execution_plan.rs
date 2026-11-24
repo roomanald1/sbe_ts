@@ -1068,6 +1068,7 @@ mod signal_execution_budget_tests {
 
     fn signal(strategy: &str, strength: f64, timestamp: u64) -> Signal {
         Signal {
+            range_location: None,
             symbol: "ETH-USDT".into(),
             direction: "bullish".into(),
             strength,

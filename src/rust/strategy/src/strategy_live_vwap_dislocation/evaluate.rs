@@ -101,6 +101,7 @@ mod tests {
 
     fn signal(direction: &str, dislocation: Option<f64>) -> Signal {
         Signal {
+            range_location: None,
             symbol: "BTC-USDT".into(),
             direction: direction.into(),
             strength: 1.0,

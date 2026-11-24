@@ -142,6 +142,7 @@ mod tests {
 
     fn signal(strategy: &str, decision: serde_json::Value) -> Signal {
         Signal {
+            range_location: None,
             symbol: "ETH-USDT".into(),
             direction: "bullish".into(),
             strength: 1.0,

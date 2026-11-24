@@ -152,6 +152,7 @@ mod strategy_walk_forward_tests {
 
     fn signal() -> Signal {
         Signal {
+            range_location: None,
             symbol: "BTC-USDT".into(),
             direction: "bullish".into(),
             strength: 0.8,

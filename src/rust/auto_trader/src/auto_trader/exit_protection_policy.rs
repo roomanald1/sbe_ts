@@ -252,6 +252,7 @@ mod exit_protection_policy_tests {
             0.25,
         );
         let mut signal = Signal {
+            range_location: None,
             symbol: "BTC-USDT".into(),
             direction: "bullish".into(),
             strength: 1.0,
@@ -314,6 +315,7 @@ mod exit_protection_policy_tests {
         let now = current_time_ms();
         let mut settings = Settings::default();
         let mut signal = Signal {
+            range_location: None,
             symbol: "BTC-USDT".into(),
             direction: "bullish".into(),
             strength: 1.0,

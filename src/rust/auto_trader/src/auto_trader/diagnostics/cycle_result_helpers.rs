@@ -24,6 +24,7 @@ mod cycle_result_helper_tests {
     #[test]
     fn skipped_results_preserve_signal_identity_and_reason() {
         let signal = Signal {
+            range_location: None,
             symbol: "ETH-USDT".into(), direction: "bearish".into(), strength: 0.8,
             timestamp: 1, stale: false, score: 0.8, ranging_probability: None,
             components: SignalComponents::default(), strategy_candidate: false,

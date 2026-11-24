@@ -308,6 +308,8 @@ mod strategy_cleanup_integration_tests {
             exploratory: false,
             strategy: Some(strategy.into()),
             decision_id: None,
+            strength: 0.0,
+            ioc_fallback_for: None,
             quantity: 1.0,
             filled_quantity: 0.0,
             fill_rate: 0.0,
