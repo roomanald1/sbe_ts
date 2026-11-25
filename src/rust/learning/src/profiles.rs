@@ -9,7 +9,7 @@ fn outcome_decay_weight(observed_at_ms: u64, now_ms: u64) -> f64 {
     0.5_f64.powf(age_ms as f64 / OUTCOME_HALF_LIFE_MS as f64)
 }
 
-fn scout_context_direction<'a>(
+pub(super) fn scout_context_direction<'a>(
     learning_context: &'a str,
     symbol: &str,
     strategy: &str,

@@ -72,7 +72,7 @@ fn deduplicate_registrations(registrations: Vec<Value>) -> Vec<Value> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ProcessEpochTracker, RegistrationReplayQueue};
+    use super::{ProcessEpochTracker, RegistrationReplayQueue, retryable_http_status};
 
     #[test]
     fn unchanged_process_epoch_is_a_noop_and_changed_epoch_replays_once() {

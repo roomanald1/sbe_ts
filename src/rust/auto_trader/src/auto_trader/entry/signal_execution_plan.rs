@@ -80,8 +80,7 @@ fn signal_confidence_size_multiplier(signal: &Signal) -> f64 {
         })
         .unwrap_or(signal_confidence);
     MIN_SIGNAL_STRENGTH_SIZE_MULTIPLIER
-        + (MAX_SIGNAL_STRENGTH_SIZE_MULTIPLIER - MIN_SIGNAL_STRENGTH_SIZE_MULTIPLIER)
-            * confidence
+        + (MAX_SIGNAL_STRENGTH_SIZE_MULTIPLIER - MIN_SIGNAL_STRENGTH_SIZE_MULTIPLIER) * confidence
 }
 
 fn directional_budget_confidence(signal: &Signal) -> f64 {
@@ -316,7 +315,9 @@ fn allow_bounded_strategy_exploration(signal: &Signal, strategy: Strategy) -> Re
     // Exploration is for profiles without enough prior observations. Never
     // use outcomes from after this signal, or continue probing a profile that
     // already has enough samples and negative net evidence.
-    if evidence.sample_count < minimum_samples || evidence.last_sample_timestamp_ms >= signal.timestamp {
+    if evidence.sample_count < minimum_samples
+        || evidence.last_sample_timestamp_ms >= signal.timestamp
+    {
         return Ok(());
     }
     let now_ms = std::time::SystemTime::now()
@@ -426,7 +427,9 @@ fn strategy_scout_entry_limits(
             .then_some(value)
     };
     let minimum_samples = bounded(StrategyParameterKey::ScoutMinimumWalkForwardSamples)
-        .ok_or_else(|| "Strategy entry is missing its bounded minimum Scout sample count".to_owned())?
+        .ok_or_else(|| {
+            "Strategy entry is missing its bounded minimum Scout sample count".to_owned()
+        })?
         .round() as usize;
     let maximum_age_seconds = bounded(StrategyParameterKey::ScoutMaximumEvidenceAgeSeconds)
         .ok_or_else(|| {
@@ -657,7 +660,8 @@ fn execution_learning_decision(
             );
         }
     }
-    let learned_order_type = learned_execution_order_type(context, baseline, &learning, allow_adaptation);
+    let learned_order_type =
+        learned_execution_order_type(context, baseline, &learning, allow_adaptation);
     let (schedule_depth_threshold, schedule_threshold_samples) =
         learned_schedule_depth_threshold(&learning, context);
     let parameter_profiles = ALL_ORDER_TYPES
@@ -729,7 +733,9 @@ async fn prepare_signal_execution_plan(
         .map(|strategy| learned_strategy_parameter_profile(&settings, &signal.symbol, strategy));
     let is_portfolio_rebalance = is_portfolio_rebalance_signal(signal, strategy);
     if let Some(kind) = strategy.filter(|kind| !kind.is_live_insight() && !kind.is_dated_carry()) {
-        if !is_portfolio_rebalance && daily_strategy_effective_budget(&settings, kind.as_str()) <= 0.0 {
+        if !is_portfolio_rebalance
+            && daily_strategy_effective_budget(&settings, kind.as_str()) <= 0.0
+        {
             return Err(format!(
                 "Daily strategy has no allocated notional budget: {}",
                 kind.as_str()
@@ -1109,13 +1115,15 @@ mod risk_adjusted_monthly_momentum_sizing_tests {
             0.4
         );
         assert!(signal_strategy_order_size_multiplier(strategy, None).is_err());
-        assert!(signal_strategy_order_size_multiplier(
-            strategy,
-            Some(&serde_json::json!({
-                "strategy_order_size_multiplier": 2.0
-            }))
-        )
-        .is_err());
+        assert!(
+            signal_strategy_order_size_multiplier(
+                strategy,
+                Some(&serde_json::json!({
+                    "strategy_order_size_multiplier": 2.0
+                }))
+            )
+            .is_err()
+        );
         assert_eq!(
             signal_strategy_order_size_multiplier(Some(Strategy::Donchian55Btc200), None).unwrap(),
             1.0
@@ -1186,10 +1194,9 @@ mod signal_execution_budget_tests {
     fn selected_exploration_bypasses_absent_or_stale_evidence_but_strict_entry_does_not() {
         let now_ms = current_time_ms();
         let mut settings = Settings::default();
-        settings.learned_strategy_size_multipliers.insert(
-            Strategy::Donchian20Btc200.as_str().to_owned(),
-            0.0,
-        );
+        settings
+            .learned_strategy_size_multipliers
+            .insert(Strategy::Donchian20Btc200.as_str().to_owned(), 0.0);
         let stale_evidence = serde_json::json!({
             "sampleCount": 100,
             "lastSampleTimestampMs": 1,
@@ -1239,10 +1246,8 @@ mod signal_execution_budget_tests {
         assert_eq!(risk_bounded_order_cap(&settings, exploration_cap), 250.0);
 
         settings.exploration_percent = 0.5;
-        let small_probe = risk_bounded_order_cap(
-            &settings,
-            exploratory_notional_cap(&settings, 1.0),
-        );
+        let small_probe =
+            risk_bounded_order_cap(&settings, exploratory_notional_cap(&settings, 1.0));
         assert_eq!(small_probe, 5.0);
         assert_eq!(minimum_book_order_for_entry(true, small_probe), 5.0);
         assert_eq!(minimum_book_order_for_entry(false, small_probe), 10.0);
@@ -1810,11 +1815,13 @@ mod signal_execution_budget_tests {
             .unwrap(),
             0.5
         );
-        assert!(signal_strategy_order_size_multiplier(
-            strategy,
-            Some(&serde_json::json!({"strategy_order_size_multiplier":0.0}))
-        )
-        .is_err());
+        assert!(
+            signal_strategy_order_size_multiplier(
+                strategy,
+                Some(&serde_json::json!({"strategy_order_size_multiplier":0.0}))
+            )
+            .is_err()
+        );
         assert_eq!(
             signal_strategy_order_size_multiplier(None, None).unwrap(),
             1.0
@@ -1831,11 +1838,13 @@ mod signal_execution_budget_tests {
             .unwrap(),
             1.1
         );
-        assert!(signal_agreement_size_multiplier(
-            Some(Strategy::Donchian20Btc200),
-            Some(&serde_json::json!({"strategy_agreement_size_multiplier":1.3}))
-        )
-        .is_err());
+        assert!(
+            signal_agreement_size_multiplier(
+                Some(Strategy::Donchian20Btc200),
+                Some(&serde_json::json!({"strategy_agreement_size_multiplier":1.3}))
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -1877,30 +1886,39 @@ mod signal_execution_budget_tests {
             portfolio_reduction_quantity(&settings, "ETH-USDT", strategy.as_str()),
             2.0
         );
-        assert!(learned_pause_block_reason(
-            &settings,
-            Some(strategy),
-            &signal(strategy.as_str(), 1.0, 0),
-            true,
-            "bullish",
-            0
-        ).is_some());
-        assert!(learned_pause_block_reason(
-            &settings,
-            Some(strategy),
-            &signal(strategy.as_str(), 1.0, 0),
-            false,
-            "bearish",
-            0
-        ).is_some());
-        assert!(learned_pause_block_reason(
-            &settings,
-            Some(strategy),
-            &signal(strategy.as_str(), 1.0, 0),
-            true,
-            "bearish",
-            0
-        ).is_none());
+        assert!(
+            learned_pause_block_reason(
+                &settings,
+                Some(strategy),
+                &signal(strategy.as_str(), 1.0, 0),
+                true,
+                "bullish",
+                0
+            )
+            .is_some()
+        );
+        assert!(
+            learned_pause_block_reason(
+                &settings,
+                Some(strategy),
+                &signal(strategy.as_str(), 1.0, 0),
+                false,
+                "bearish",
+                0
+            )
+            .is_some()
+        );
+        assert!(
+            learned_pause_block_reason(
+                &settings,
+                Some(strategy),
+                &signal(strategy.as_str(), 1.0, 0),
+                true,
+                "bearish",
+                0
+            )
+            .is_none()
+        );
         settings
             .daily_strategy_budgets
             .insert(strategy.as_str().into(), 200.0);
@@ -1925,9 +1943,18 @@ mod signal_execution_budget_tests {
             .insert(strategy.as_str().to_owned(), 0.0);
         settings.paper_learning_exploration_until_ms = 10_000;
 
-        assert_eq!(intraday_strategy_size_multiplier(&settings, strategy, 9_999), 0.20);
-        assert_eq!(intraday_strategy_size_multiplier(&settings, strategy, 10_000), 1.0);
-        assert_eq!(intraday_strategy_size_multiplier(&settings, strategy, 10_001), 1.0);
+        assert_eq!(
+            intraday_strategy_size_multiplier(&settings, strategy, 9_999),
+            0.20
+        );
+        assert_eq!(
+            intraday_strategy_size_multiplier(&settings, strategy, 10_000),
+            1.0
+        );
+        assert_eq!(
+            intraday_strategy_size_multiplier(&settings, strategy, 10_001),
+            1.0
+        );
         assert!(!learned_strategy_entry_paused(&settings, strategy, 10_000));
         assert!(!learned_strategy_entry_paused(&settings, strategy, 9_999));
     }
@@ -1942,22 +1969,28 @@ mod signal_execution_budget_tests {
         settings.paper_learning_exploration_until_ms = 10_000;
         let candidate = signal(strategy.as_str(), 0.8, 100_000);
 
-        assert!(learned_pause_block_reason(
-            &settings,
-            Some(strategy),
-            &candidate,
-            false,
-            "bullish",
-            10_000,
-        ).is_none());
-        assert!(learned_pause_block_reason(
-            &settings,
-            Some(strategy),
-            &candidate,
-            false,
-            "bullish",
-            9_999,
-        ).is_none());
+        assert!(
+            learned_pause_block_reason(
+                &settings,
+                Some(strategy),
+                &candidate,
+                false,
+                "bullish",
+                10_000,
+            )
+            .is_none()
+        );
+        assert!(
+            learned_pause_block_reason(
+                &settings,
+                Some(strategy),
+                &candidate,
+                false,
+                "bullish",
+                9_999,
+            )
+            .is_none()
+        );
     }
 
     #[test]
@@ -2023,8 +2056,8 @@ mod signal_execution_budget_tests {
             &candidate, &settings, 100_000
         ));
         candidate.direction = "bullish".into();
-        candidate.strategy_decision.as_mut().unwrap()["strategy_parameters"]
-            ["minimum_flow_imbalance"] = serde_json::json!(0.3);
+        candidate.strategy_decision.as_mut().unwrap()["strategy_parameters"]["minimum_flow_imbalance"] =
+            serde_json::json!(0.3);
         assert!(!has_recent_profile_loss_cluster(
             &candidate, &settings, 100_000
         ));
@@ -2033,8 +2066,8 @@ mod signal_execution_budget_tests {
             .get_mut(&key)
             .unwrap()[1]
             .1 = 0.1;
-        candidate.strategy_decision.as_mut().unwrap()["strategy_parameters"]
-            ["minimum_flow_imbalance"] = serde_json::json!(0.2);
+        candidate.strategy_decision.as_mut().unwrap()["strategy_parameters"]["minimum_flow_imbalance"] =
+            serde_json::json!(0.2);
         assert!(!has_recent_profile_loss_cluster(
             &candidate, &settings, 100_000
         ));

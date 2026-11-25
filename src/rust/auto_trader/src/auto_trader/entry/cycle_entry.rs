@@ -50,9 +50,7 @@ fn strategy_entry_rejection_reason(
             .map(|days| format!("SMA{days}"))
             .unwrap_or_else(|| "trend average".to_owned());
         return match (
-            details
-                .get("btc_close")
-                .and_then(serde_json::Value::as_f64),
+            details.get("btc_close").and_then(serde_json::Value::as_f64),
             details.get("btc_sma").and_then(serde_json::Value::as_f64),
         ) {
             (Some(close), Some(sma)) => {
@@ -111,8 +109,12 @@ fn strategy_entry_rejection_reason(
             | Strategy::Donchian55Btc200
     ) {
         if let (Some(close), Some(level)) = (
-            details.get("observed_close").and_then(serde_json::Value::as_f64),
-            details.get("primary_level").and_then(serde_json::Value::as_f64),
+            details
+                .get("observed_close")
+                .and_then(serde_json::Value::as_f64),
+            details
+                .get("primary_level")
+                .and_then(serde_json::Value::as_f64),
         ) {
             if close.is_finite() && close > 0.0 && level.is_finite() && level > 0.0 {
                 let distance_percent = (close / level - 1.0) * 100.0;
@@ -129,7 +131,9 @@ fn strategy_entry_rejection_reason(
             }
         }
     }
-    if let Some(reason) = strategy.entry_rejection_reason(&StrategySignal::entry(signal, parameters)) {
+    if let Some(reason) =
+        strategy.entry_rejection_reason(&StrategySignal::entry(signal, parameters))
+    {
         return reason;
     }
     format!(
@@ -233,16 +237,30 @@ fn record_cycle_candidate_blockers(
         }
         let mut candidates = candidates;
         candidates.sort_by(|left, right| right.strength.total_cmp(&left.strength));
-        candidates.dedup_by(|left, right| left.symbol == right.symbol
-            && left.direction == right.direction
-            && left.strategy_decision == right.strategy_decision);
-        let reasons = candidates.iter().map(|candidate| {
-            let detail = candidate_selection_blocker_reason(
-                candidate, dashboard, learning_thresholds, risk_appetite, now, fallback_reason,
-            );
-            format!("{} {}: {}", candidate.symbol, candidate.direction, detail)
-        }).collect::<Vec<_>>();
-        let reason = format!("{} candidate(s) evaluated: {}", reasons.len(), reasons.join("; "));
+        candidates.dedup_by(|left, right| {
+            left.symbol == right.symbol
+                && left.direction == right.direction
+                && left.strategy_decision == right.strategy_decision
+        });
+        let reasons = candidates
+            .iter()
+            .map(|candidate| {
+                let detail = candidate_selection_blocker_reason(
+                    candidate,
+                    dashboard,
+                    learning_thresholds,
+                    risk_appetite,
+                    now,
+                    fallback_reason,
+                );
+                format!("{} {}: {}", candidate.symbol, candidate.direction, detail)
+            })
+            .collect::<Vec<_>>();
+        let reason = format!(
+            "{} candidate(s) evaluated: {}",
+            reasons.len(),
+            reasons.join("; ")
+        );
         let symbol = if candidates.len() == 1 {
             candidates[0].symbol.clone()
         } else {
@@ -309,6 +327,7 @@ async fn submit_cycle_signal(
     context_threshold_refresh_ms: f64,
     cycle_started_at: Instant,
     now: u64,
+    now_ms: u64,
 ) -> Result<CycleResult, (StatusCode, String)> {
     let daily_rule_checks = daily_cold_start_exploration_checks(signal);
     let daily_strategy_classification = signal
@@ -387,7 +406,10 @@ async fn submit_cycle_signal(
                 .entry("checks")
                 .or_insert_with(|| serde_json::json!({}));
             if let Some(checks) = checks.as_object_mut() {
-                checks.insert("cold_start_exploration_pass".into(), serde_json::json!(true));
+                checks.insert(
+                    "cold_start_exploration_pass".into(),
+                    serde_json::json!(true),
+                );
             }
         }
     }
@@ -446,7 +468,7 @@ async fn submit_cycle_signal(
     let selected_payload = signal_audit_payload(
         signal,
         "decision",
-        now.saturating_mul(1000),
+        now_ms,
         "selected",
         Some(if exploratory {
             "exploratory candidate selected for a capped paper entry"
@@ -492,6 +514,7 @@ async fn submit_cycle_signal(
         context_threshold_refresh_ms,
         cycle_started_at,
         now,
+        now_ms,
         market,
         bid,
         ask,
@@ -588,23 +611,31 @@ async fn evaluate_daily_strategy_signals(
     signals: &[Signal],
     enabled_strategies: &[Strategy],
 ) -> Vec<Result<StrategyDecision, String>> {
-    signals.iter().map(|signal| {
-        let strategy = signal.strategy.as_deref().and_then(Strategy::from_name);
-        if !strategy.is_some_and(|strategy| enabled_strategies.contains(&strategy)) {
-            return Err("Daily strategy is not enabled".to_owned());
-        }
-        if !live_worker_pre_evaluated(signal) {
-            return Err("Daily strategy decision is missing its worker result".to_owned());
-        }
-        Ok(if signal.strategy_decision.as_ref()
-            .and_then(|decision| decision.get("live_worker_decision"))
-            .and_then(serde_json::Value::as_str) == Some("enter")
-        {
-            StrategyDecision::Enter
-        } else {
-            StrategyDecision::Reject
+    signals
+        .iter()
+        .map(|signal| {
+            let strategy = signal.strategy.as_deref().and_then(Strategy::from_name);
+            if !strategy.is_some_and(|strategy| enabled_strategies.contains(&strategy)) {
+                return Err("Daily strategy is not enabled".to_owned());
+            }
+            if !live_worker_pre_evaluated(signal) {
+                return Err("Daily strategy decision is missing its worker result".to_owned());
+            }
+            Ok(
+                if signal
+                    .strategy_decision
+                    .as_ref()
+                    .and_then(|decision| decision.get("live_worker_decision"))
+                    .and_then(serde_json::Value::as_str)
+                    == Some("enter")
+                {
+                    StrategyDecision::Enter
+                } else {
+                    StrategyDecision::Reject
+                },
+            )
         })
-    }).collect()
+        .collect()
 }
 
 async fn attach_strategy_walk_forward_evidence(
@@ -632,7 +663,9 @@ async fn attach_strategy_walk_forward_evidence(
             .and_then(|decision| decision.get("learning_profile_id"))
             .and_then(serde_json::Value::as_str)
             .map(str::to_owned)
-            .unwrap_or_else(|| strategy::profile_id(&signal.symbol, strategy.as_str(), &parameters));
+            .unwrap_or_else(|| {
+                strategy::profile_id(&signal.symbol, strategy.as_str(), &parameters)
+            });
         let profile_symbol = signal
             .strategy_decision
             .as_ref()
@@ -640,9 +673,16 @@ async fn attach_strategy_walk_forward_evidence(
             .and_then(serde_json::Value::as_str)
             .unwrap_or(&signal.symbol);
         let evidence = evidence_by_profile
-            .get(&format!("{profile_id}|regime:{}", strategy::market_regime(signal).unwrap_or("mixed")))
+            .get(&format!(
+                "{profile_id}|regime:{}",
+                strategy::market_regime(signal).unwrap_or("mixed")
+            ))
             .or_else(|| {
-                evidence_by_profile.get(&format!("{profile_symbol}|{}|regime:{}", strategy.as_str(), strategy::market_regime(signal).unwrap_or("mixed")))
+                evidence_by_profile.get(&format!(
+                    "{profile_symbol}|{}|regime:{}",
+                    strategy.as_str(),
+                    strategy::market_regime(signal).unwrap_or("mixed")
+                ))
             })
             .or_else(|| evidence_by_profile.get(&profile_id))
             .or_else(|| {
@@ -683,7 +723,11 @@ fn daily_candidate_priority(settings: &Settings, signal: &Signal) -> (u8, f64, f
         .unwrap_or_default();
     // Prefer a normal rule pass; when only probe candidates qualify, choose
     // the least permissive threshold that reaches this observation.
-    (u8::from(is_probe), multiplier - 1.0, if is_probe { -probe_value } else { 0.0 })
+    (
+        u8::from(is_probe),
+        multiplier - 1.0,
+        if is_probe { -probe_value } else { 0.0 },
+    )
 }
 
 fn daily_strategy_candidates<'a>(signals: &[&'a Signal], settings: &Settings) -> Vec<&'a Signal> {
@@ -912,9 +956,15 @@ fn candidate_cycle_blocker(
     } else if candidate_count == 0 {
         (EntryCycleOutcome::NoEligibleCandidates, "candidate_filter")
     } else if fresh_candidate_count == 0 {
-        (EntryCycleOutcome::NoFreshCandidates, "signal_freshness_or_direction")
+        (
+            EntryCycleOutcome::NoFreshCandidates,
+            "signal_freshness_or_direction",
+        )
     } else {
-        (EntryCycleOutcome::CandidatesRejected, "candidate_selection_gates")
+        (
+            EntryCycleOutcome::CandidatesRejected,
+            "candidate_selection_gates",
+        )
     }
 }
 
@@ -977,10 +1027,7 @@ fn update_entry_candidate_diagnostic(
     recompute_entry_candidate_gate_counts(diagnostic);
 }
 
-fn parse_reported_gate_measurements(
-    gate_id: &str,
-    detail: &str,
-) -> Vec<EntryGateMeasurement> {
+fn parse_reported_gate_measurements(gate_id: &str, detail: &str) -> Vec<EntryGateMeasurement> {
     fn parse_number(token: &str) -> Option<f64> {
         let numeric = token.trim_matches(|character: char| {
             !character.is_ascii_digit() && character != '.' && character != '-'
@@ -992,42 +1039,47 @@ fn parse_reported_gate_measurements(
     detail
         .split([';', '|', '·', ','])
         .filter_map(|segment| {
-            [">=", "<=", ">", "<"]
-                .into_iter()
-                .find_map(|operator| {
-                    let (left, right) = segment.split_once(operator)?;
-                    let observed = left.split_whitespace().rev().find_map(parse_number)?;
-                    let required_token = right.split_whitespace().find(|token| {
-                        token.chars().any(|character| character.is_ascii_digit())
-                    })?;
-                    let required = parse_number(required_token)?;
-                    let numeric_end = required_token
-                        .find(|character: char| {
-                            !character.is_ascii_digit() && character != '.' && character != '-'
-                        })
-                        .unwrap_or(required_token.len());
-                    let unit = if numeric_end < required_token.len() {
-                        Some(required_token[numeric_end..].to_owned())
-                    } else {
-                        right
-                            .split_whitespace()
-                            .skip_while(|token| *token != required_token)
-                            .nth(1)
-                            .filter(|unit| {
-                                unit.chars().any(|character| character.is_ascii_alphabetic() || character == '%')
-                            })
-                            .map(|unit| unit.trim_matches(|character: char| !character.is_ascii_alphabetic() && character != '%').to_owned())
-                    };
-                    Some(EntryGateMeasurement {
-                        gate_id: gate_id.to_owned(),
-                        observed: Some(observed),
-                        operator: Some(operator.to_owned()),
-                        required: Some(required),
-                        unit,
-                        status: "reported_comparison".into(),
-                        detail: segment.trim().to_owned(),
+            [">=", "<=", ">", "<"].into_iter().find_map(|operator| {
+                let (left, right) = segment.split_once(operator)?;
+                let observed = left.split_whitespace().rev().find_map(parse_number)?;
+                let required_token = right
+                    .split_whitespace()
+                    .find(|token| token.chars().any(|character| character.is_ascii_digit()))?;
+                let required = parse_number(required_token)?;
+                let numeric_end = required_token
+                    .find(|character: char| {
+                        !character.is_ascii_digit() && character != '.' && character != '-'
                     })
+                    .unwrap_or(required_token.len());
+                let unit = if numeric_end < required_token.len() {
+                    Some(required_token[numeric_end..].to_owned())
+                } else {
+                    right
+                        .split_whitespace()
+                        .skip_while(|token| *token != required_token)
+                        .nth(1)
+                        .filter(|unit| {
+                            unit.chars().any(|character| {
+                                character.is_ascii_alphabetic() || character == '%'
+                            })
+                        })
+                        .map(|unit| {
+                            unit.trim_matches(|character: char| {
+                                !character.is_ascii_alphabetic() && character != '%'
+                            })
+                            .to_owned()
+                        })
+                };
+                Some(EntryGateMeasurement {
+                    gate_id: gate_id.to_owned(),
+                    observed: Some(observed),
+                    operator: Some(operator.to_owned()),
+                    required: Some(required),
+                    unit,
+                    status: "reported_comparison".into(),
+                    detail: segment.trim().to_owned(),
                 })
+            })
         })
         .collect()
 }
@@ -1099,12 +1151,14 @@ fn recompute_entry_candidate_gate_counts(diagnostic: &mut LatestEntryDiagnostic)
     }
     diagnostic.candidate_gate_counts = counts
         .into_iter()
-        .map(|((gate_id, symbol, strategy), count)| EntryGateCandidateCount {
-            gate_id,
-            symbol,
-            strategy,
-            count,
-        })
+        .map(
+            |((gate_id, symbol, strategy), count)| EntryGateCandidateCount {
+                gate_id,
+                symbol,
+                strategy,
+                count,
+            },
+        )
         .collect();
 }
 
@@ -1113,7 +1167,9 @@ async fn run_cycle_inner(
     mut dashboard: Dashboard,
 ) -> Result<CycleResult, (StatusCode, String)> {
     let raw_signal_count = dashboard.best.len();
-    dashboard.best.retain(|signal| strategy::is_autotrader_symbol_allowed(&signal.symbol));
+    dashboard
+        .best
+        .retain(|signal| strategy::is_autotrader_symbol_allowed(&signal.symbol));
     let allowed_signal_count = dashboard.best.len();
     let strategy_candidate_count = dashboard
         .best
@@ -1121,7 +1177,11 @@ async fn run_cycle_inner(
         .filter(|signal| signal.strategy_candidate || signal.strategy.is_some())
         .count();
     let mut missed_bands = (*dashboard.missed_opportunity_bands).clone();
-    missed_bands.retain(|band| band.symbol.as_deref().is_none_or(strategy::is_autotrader_symbol_allowed));
+    missed_bands.retain(|band| {
+        band.symbol
+            .as_deref()
+            .is_none_or(strategy::is_autotrader_symbol_allowed)
+    });
     dashboard.missed_opportunity_bands = Arc::new(missed_bands);
     let cycle_started_at = Instant::now();
     {
@@ -1199,16 +1259,16 @@ async fn run_cycle_inner(
             );
         }
     }
-    entry_diagnostic.candidate_decision_ids = dashboard
-        .best
-        .iter()
-        .map(signal_decision_id)
-        .collect();
+    entry_diagnostic.candidate_decision_ids =
+        dashboard.best.iter().map(signal_decision_id).collect();
     if let Some(result) = enforce_daily_realized_loss_limit(state).await? {
         entry_diagnostic.outcome = EntryCycleOutcome::GlobalRiskBlock;
         entry_diagnostic.primary_gate_id = Some("daily_realized_loss_limit".to_owned());
         entry_diagnostic.primary_blocker = result.reason.clone();
-        entry_diagnostic.detail = result.reason.clone().unwrap_or_else(|| result.status.into());
+        entry_diagnostic.detail = result
+            .reason
+            .clone()
+            .unwrap_or_else(|| result.status.into());
         return Ok(with_entry_diagnostic(result, entry_diagnostic));
     }
     let (live_strategies, strategies_enabled, strategy_settings) = {
@@ -1341,11 +1401,8 @@ async fn run_cycle_inner(
     let mut strategy_filter_details = Vec::new();
     let mut strategy_rejected_count = 0_usize;
     if has_daily_strategy_signals {
-        let daily_decisions = evaluate_daily_strategy_signals(
-            &dashboard.best,
-            &strategy_settings.strategies,
-        )
-        .await;
+        let daily_decisions =
+            evaluate_daily_strategy_signals(&dashboard.best, &strategy_settings.strategies).await;
         let mut retained = Vec::with_capacity(dashboard.best.len());
         for (index, signal) in std::mem::take(&mut dashboard.best).into_iter().enumerate() {
             if !signal.strategy_candidate {
@@ -1366,9 +1423,11 @@ async fn run_cycle_inner(
             if is_scout_probe {
                 continue;
             }
-            match daily_decisions.get(index).cloned().unwrap_or_else(|| {
-                Err("Daily strategy evaluation response was missing".to_owned())
-            }) {
+            match daily_decisions
+                .get(index)
+                .cloned()
+                .unwrap_or_else(|| Err("Daily strategy evaluation response was missing".to_owned()))
+            {
                 Ok(StrategyDecision::Enter) => retained.push(signal),
                 Ok(_) => {
                     strategy_rejected_count = strategy_rejected_count.saturating_add(1);
@@ -1456,7 +1515,11 @@ async fn run_cycle_inner(
             if !live_worker_pre_evaluated(source_signal) {
                 continue;
             }
-            let Some(strategy) = source_signal.strategy.as_deref().and_then(Strategy::from_name) else {
+            let Some(strategy) = source_signal
+                .strategy
+                .as_deref()
+                .and_then(Strategy::from_name)
+            else {
                 continue;
             };
             if live_strategies.contains(&strategy) {
@@ -1470,11 +1533,19 @@ async fn run_cycle_inner(
         let Some(strategy) = signal.strategy.as_deref().and_then(Strategy::from_name) else {
             continue;
         };
-        if signal.strategy_decision.as_ref()
+        if signal
+            .strategy_decision
+            .as_ref()
             .and_then(|decision| decision.get("live_worker_decision"))
-            .and_then(serde_json::Value::as_str) == Some("enter")
+            .and_then(serde_json::Value::as_str)
+            == Some("enter")
         {
-            update_latest_strategy_blocker(state, strategy.as_str(), now.saturating_mul(1000), None);
+            update_latest_strategy_blocker(
+                state,
+                strategy.as_str(),
+                now.saturating_mul(1000),
+                None,
+            );
             live_strategy_signals.push(signal.clone());
         } else {
             strategy_rejected_count = strategy_rejected_count.saturating_add(1);
@@ -1495,7 +1566,10 @@ async fn run_cycle_inner(
             if strategy_filter_details.len() < 20 {
                 strategy_filter_details.push(format!(
                     "{} {} [{}] · {}",
-                    signal.symbol, signal.direction, strategy.as_str(), reason
+                    signal.symbol,
+                    signal.direction,
+                    strategy.as_str(),
+                    reason
                 ));
             }
             queue_strategy_rejection_audit(
@@ -1512,10 +1586,17 @@ async fn run_cycle_inner(
     }
     let active_position_keys = {
         let settings = state.settings.lock().await;
-        settings.strategy_positions.iter().flat_map(|(symbol, lots)| {
-            lots.iter().filter(|(_, position)| position.quantity.abs() > 1e-12 && !position.scout_entry)
-                .map(|(strategy, _)| (symbol.clone(), strategy.clone()))
-        }).collect::<BTreeSet<_>>()
+        settings
+            .strategy_positions
+            .iter()
+            .flat_map(|(symbol, lots)| {
+                lots.iter()
+                    .filter(|(_, position)| {
+                        position.quantity.abs() > 1e-12 && !position.scout_entry
+                    })
+                    .map(|(strategy, _)| (symbol.clone(), strategy.clone()))
+            })
+            .collect::<BTreeSet<_>>()
     };
     {
         let mut latest = state.latest_live_strategy_signals.lock().await;
@@ -1538,10 +1619,7 @@ async fn run_cycle_inner(
             if !active_position_keys.contains(&key) {
                 continue;
             }
-            latest
-                .entry(key)
-                .or_default()
-                .push(signal.clone());
+            latest.entry(key).or_default().push(signal.clone());
         }
         bound_latest_strategy_signals(&mut latest, &active_position_keys, current_time_ms());
     }
@@ -1560,19 +1638,23 @@ async fn run_cycle_inner(
     } else if strategies_enabled {
         entry_diagnostic.outcome = EntryCycleOutcome::WaitingForStrategySignals;
         entry_diagnostic.primary_gate_id = Some("insights_strategy_feed".to_owned());
-        entry_diagnostic.primary_blocker = Some("Waiting for Insights daily strategy signals".into());
+        entry_diagnostic.primary_blocker =
+            Some("Waiting for Insights daily strategy signals".into());
         entry_diagnostic.detail = "No daily strategy signal arrived in the latest cycle".into();
-        return Ok(with_entry_diagnostic(CycleResult {
-            status: "skipped",
-            reason: Some("Waiting for Insights daily strategy signals".into()),
-            symbol: None,
-            side: None,
-            quantity: None,
-            order_type: None,
-            order_response: None,
-            filled_quantity: None,
-            entry_diagnostic: None,
-        }, entry_diagnostic));
+        return Ok(with_entry_diagnostic(
+            CycleResult {
+                status: "skipped",
+                reason: Some("Waiting for Insights daily strategy signals".into()),
+                symbol: None,
+                side: None,
+                quantity: None,
+                order_type: None,
+                order_response: None,
+                filled_quantity: None,
+                entry_diagnostic: None,
+            },
+            entry_diagnostic,
+        ));
     }
     let selection_started = Instant::now();
     let PreparedSignals {
@@ -1593,11 +1675,7 @@ async fn run_cycle_inner(
         .cloned()
         .collect::<Vec<_>>();
     let threshold_refresh_started = Instant::now();
-    let learning_thresholds = request_learning_context_thresholds(
-        state,
-        &learning_signals,
-    )
-    .await;
+    let learning_thresholds = request_learning_context_thresholds(state, &learning_signals).await;
     entry_diagnostic.candidate_details = learning_signals
         .iter()
         .map(|signal| {
@@ -1678,10 +1756,11 @@ async fn run_cycle_inner(
     // Walk-forward and learned-threshold calls can take hundreds of
     // milliseconds. Recheck the input age after those calls before allowing
     // any signal to proceed toward entry.
-    let now = SystemTime::now()
+    let observed_now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
+        .unwrap_or_default();
+    let now_ms = observed_now.as_millis() as u64;
+    let now = observed_now.as_secs();
     let FreshSignalCandidates {
         fresh_directional,
         fresh_directional_count,
@@ -1744,12 +1823,8 @@ async fn run_cycle_inner(
             entry_diagnostic.detail = reason.clone();
             daily_batch_result = Some(skipped(&reason));
         } else {
-            let candidate_dashboard = prefetch_daily_candidate_market_books(
-                &dashboard,
-                &candidates,
-                now,
-            )
-            .await;
+            let candidate_dashboard =
+                prefetch_daily_candidate_market_books(&dashboard, &candidates, now).await;
             let mut submitted = 0;
             let mut last_order = None;
             let mut details = Vec::new();
@@ -1789,8 +1864,11 @@ async fn run_cycle_inner(
                 }
                 let daily_parameter_probe = is_daily_parameter_exploration_probe(signal);
                 let daily_cold_start = is_daily_cold_start_exploration_candidate(signal);
-                let (daily_rule_evidence_available, daily_rule_evidence_eligible, daily_walk_forward_present) =
-                    daily_cold_start_exploration_checks(signal);
+                let (
+                    daily_rule_evidence_available,
+                    daily_rule_evidence_eligible,
+                    daily_walk_forward_present,
+                ) = daily_cold_start_exploration_checks(signal);
                 let exploratory = daily_parameter_probe || daily_cold_start;
                 sized_signal.entry_gate = Some(serde_json::json!({
                     "selection_mode": if daily_parameter_probe {
@@ -1822,6 +1900,7 @@ async fn run_cycle_inner(
                     context_threshold_refresh_ms,
                     cycle_started_at,
                     now,
+                    now_ms,
                 )
                 .await
                 {
@@ -1834,12 +1913,10 @@ async fn run_cycle_inner(
                             "execution_failed",
                             Some(&reason),
                         );
-                        entry_diagnostic.order_attempt_count = entry_diagnostic
-                            .order_attempt_count
-                            .saturating_add(1);
-                        entry_diagnostic.rejected_candidate_count = entry_diagnostic
-                            .rejected_candidate_count
-                            .saturating_add(1);
+                        entry_diagnostic.order_attempt_count =
+                            entry_diagnostic.order_attempt_count.saturating_add(1);
+                        entry_diagnostic.rejected_candidate_count =
+                            entry_diagnostic.rejected_candidate_count.saturating_add(1);
                         details.push(format!("{strategy_name}: request error {status}: {error}"));
                         queue_auto_trader_audit(
                             state,
@@ -1857,9 +1934,8 @@ async fn run_cycle_inner(
                         continue;
                     }
                 };
-                entry_diagnostic.order_attempt_count = entry_diagnostic
-                    .order_attempt_count
-                    .saturating_add(1);
+                entry_diagnostic.order_attempt_count =
+                    entry_diagnostic.order_attempt_count.saturating_add(1);
                 if result.status == "order_submitting" {
                     update_entry_candidate_diagnostic(
                         &mut entry_diagnostic,
@@ -1868,9 +1944,8 @@ async fn run_cycle_inner(
                         None,
                     );
                     submitted += 1;
-                    entry_diagnostic.submitted_order_count = entry_diagnostic
-                        .submitted_order_count
-                        .saturating_add(1);
+                    entry_diagnostic.submitted_order_count =
+                        entry_diagnostic.submitted_order_count.saturating_add(1);
                     last_order = Some(result);
                 } else {
                     update_entry_candidate_diagnostic(
@@ -1879,9 +1954,8 @@ async fn run_cycle_inner(
                         "execution_blocked",
                         result.reason.as_deref(),
                     );
-                    entry_diagnostic.rejected_candidate_count = entry_diagnostic
-                        .rejected_candidate_count
-                        .saturating_add(1);
+                    entry_diagnostic.rejected_candidate_count =
+                        entry_diagnostic.rejected_candidate_count.saturating_add(1);
                     let reason = result.reason.as_deref().unwrap_or(result.status);
                     details.push(format!("{strategy_name}: {reason}"));
                     queue_auto_trader_audit(
@@ -1912,11 +1986,9 @@ async fn run_cycle_inner(
                 entry_diagnostic.detail = details.join("; ");
             } else if rebalance_candidates.is_empty() {
                 entry_diagnostic.outcome = EntryCycleOutcome::ExecutionBlocked;
-                entry_diagnostic.primary_gate_id =
-                    Some("portfolio_rebalance_threshold".into());
-                entry_diagnostic.primary_blocker = Some(
-                    "Portfolio candidate did not cross its rebalance band".into(),
-                );
+                entry_diagnostic.primary_gate_id = Some("portfolio_rebalance_threshold".into());
+                entry_diagnostic.primary_blocker =
+                    Some("Portfolio candidate did not cross its rebalance band".into());
                 entry_diagnostic.detail = entry_diagnostic.primary_blocker.clone().unwrap();
             }
         }
@@ -2029,9 +2101,15 @@ async fn run_cycle_inner(
             // Learning receives at most one actual Strategy candidate per
             // cycle. Generic feed signals and Scout probes are not attributed
             // missed opportunities.
-            if let Some(candidate) = selection_signals.iter()
-                .filter(|signal| signal.strategy.as_deref().and_then(Strategy::from_name)
-                    .is_some_and(|strategy| strategy.is_live_insight()))
+            if let Some(candidate) = selection_signals
+                .iter()
+                .filter(|signal| {
+                    signal
+                        .strategy
+                        .as_deref()
+                        .and_then(Strategy::from_name)
+                        .is_some_and(|strategy| strategy.is_live_insight())
+                })
                 .filter(|signal| {
                     signal.strategy_candidate
                         && strategy::is_autotrader_symbol_allowed(&signal.symbol)
@@ -2046,13 +2124,24 @@ async fn run_cycle_inner(
                 let profile_id = strategy::profile_id(&candidate.symbol, strategy, &parameters);
                 let signal_timestamp_ms = if candidate.timestamp < 1_000_000_000_000 {
                     candidate.timestamp.saturating_mul(1_000)
-                } else { candidate.timestamp };
-                let event_id = format!("missed:{}:{}:{}", candidate.symbol, strategy, signal_timestamp_ms);
+                } else {
+                    candidate.timestamp
+                };
+                let event_id = format!(
+                    "missed:{}:{}:{}",
+                    candidate.symbol, strategy, signal_timestamp_ms
+                );
                 let event = FeedbackEvent::MissedOpportunityCandidate {
-                    event_id: event_id.clone(), observed_at_ms: signal_timestamp_ms,
-                    symbol: candidate.symbol.clone(), strategy: strategy.to_owned(), profile_id,
-                    parameters, direction: candidate.direction.clone(), strength: candidate.strength,
-                    score: candidate.score, learning_context: market_context(candidate),
+                    event_id: event_id.clone(),
+                    observed_at_ms: signal_timestamp_ms,
+                    symbol: candidate.symbol.clone(),
+                    strategy: strategy.to_owned(),
+                    profile_id,
+                    parameters,
+                    direction: candidate.direction.clone(),
+                    strength: candidate.strength,
+                    score: candidate.score,
+                    learning_context: market_context(candidate),
                 };
                 let mut settings = state.settings.lock().await;
                 match enqueue_scheduled_missed_opportunity_feedback(
@@ -2124,15 +2213,10 @@ async fn run_cycle_inner(
                 entry_diagnostic.detail = if strategy_filter_details.is_empty() {
                     cycle_reason
                 } else {
-                    format!(
-                        "{} · {}",
-                        strategy_filter_details.join("; "),
-                        cycle_reason
-                    )
+                    format!("{} · {}", strategy_filter_details.join("; "), cycle_reason)
                 };
-                entry_diagnostic.rejected_candidate_count = entry_diagnostic
-                    .rejected_candidate_count
-                    .saturating_add(
+                entry_diagnostic.rejected_candidate_count =
+                    entry_diagnostic.rejected_candidate_count.saturating_add(
                         selection_signals
                             .iter()
                             .filter(|candidate| {
@@ -2168,6 +2252,7 @@ async fn run_cycle_inner(
         context_threshold_refresh_ms,
         cycle_started_at,
         now,
+        now_ms,
     )
     .await
     {
@@ -2249,7 +2334,10 @@ async fn run_cycle_inner(
                 Some(StrategyBlocker {
                     strategy: strategy.to_owned(),
                     symbol: audited_signal.symbol.clone(),
-                    reason: signal_result.reason.clone().unwrap_or_else(|| signal_result.status.to_owned()),
+                    reason: signal_result
+                        .reason
+                        .clone()
+                        .unwrap_or_else(|| signal_result.status.to_owned()),
                     timestamp_ms: now.saturating_mul(1_000),
                 }),
             );
@@ -2278,6 +2366,7 @@ async fn run_cycle_inner(
             context_threshold_refresh_ms,
             cycle_started_at,
             now,
+            now_ms,
         )
         .await
         {
@@ -2347,14 +2436,12 @@ async fn run_cycle_inner(
         },
         signal_result.reason.as_deref(),
     );
-    entry_diagnostic.selected_candidate_count = entry_diagnostic
-        .selected_candidate_count
-        .saturating_add(1);
+    entry_diagnostic.selected_candidate_count =
+        entry_diagnostic.selected_candidate_count.saturating_add(1);
     entry_diagnostic.order_attempt_count = entry_diagnostic.order_attempt_count.saturating_add(1);
     if signal_result.status == "order_submitting" {
-        entry_diagnostic.submitted_order_count = entry_diagnostic
-            .submitted_order_count
-            .saturating_add(1);
+        entry_diagnostic.submitted_order_count =
+            entry_diagnostic.submitted_order_count.saturating_add(1);
         entry_diagnostic.outcome = EntryCycleOutcome::OrderQueued;
         entry_diagnostic.primary_gate_id = None;
         entry_diagnostic.primary_blocker = None;
@@ -2367,9 +2454,8 @@ async fn run_cycle_inner(
             .reason
             .clone()
             .unwrap_or_else(|| signal_result.status.to_owned());
-        entry_diagnostic.rejected_candidate_count = entry_diagnostic
-            .rejected_candidate_count
-            .saturating_add(1);
+        entry_diagnostic.rejected_candidate_count =
+            entry_diagnostic.rejected_candidate_count.saturating_add(1);
     }
     if signal_result.status != "order_submitting" {
         queue_auto_trader_audit(
@@ -2440,10 +2526,7 @@ mod parallel_daily_cycle_tests {
         ));
         assert!(matches!(
             candidate_cycle_blocker(8, 2, 0, 2),
-            (
-                EntryCycleOutcome::CandidatesRejected,
-                "strategy_entry_gate"
-            )
+            (EntryCycleOutcome::CandidatesRejected, "strategy_entry_gate")
         ));
     }
 
@@ -2490,12 +2573,19 @@ mod parallel_daily_cycle_tests {
             "selection_mode": "exploratory",
             "checks": { "strength_pass": false }
         }));
-        let result = skipped_for_signal(&candidate, "Waiting for a fresh subscribed local order book");
-        let audit = selected_signal_outcome_audit_payload(&candidate, &result, true, 11_000, 0.5, 0.8);
+        let result = skipped_for_signal(
+            &candidate,
+            "Waiting for a fresh subscribed local order book",
+        );
+        let audit =
+            selected_signal_outcome_audit_payload(&candidate, &result, true, 11_000, 0.5, 0.8);
 
         assert_eq!(audit["stage"], "strategy_rejection");
         assert_eq!(audit["status"], "skipped");
-        assert_eq!(audit["reason"], "Waiting for a fresh subscribed local order book");
+        assert_eq!(
+            audit["reason"],
+            "Waiting for a fresh subscribed local order book"
+        );
         assert_eq!(audit["exploratory"], true);
         assert_eq!(audit["entry_gate"]["checks"]["strength_pass"], false);
         assert_eq!(
@@ -2536,10 +2626,7 @@ mod parallel_daily_cycle_tests {
             audit["decision_id"],
             "10|ETH-USDT|bullish|strategy:live-momentum|phase:daily_execution|audit:11000"
         );
-        assert_eq!(
-            audit["entry_gate"]["selection_mode"],
-            "daily_strategy"
-        );
+        assert_eq!(audit["entry_gate"]["selection_mode"], "daily_strategy");
         assert_eq!(audit["entry_gate"]["execution_result_status"], "skipped");
         assert_eq!(audit["entry_gate"]["rejection_reasons"][0], reason);
         assert_eq!(
@@ -2549,10 +2636,7 @@ mod parallel_daily_cycle_tests {
         assert_eq!(audit["execution_gate"]["result_status"], "skipped");
         assert_eq!(audit["execution_gate"]["order_submitted"], false);
         assert_eq!(audit["gate_path"][0]["stage"], "candidate_selection");
-        assert_eq!(
-            audit["gate_path"][0]["selection_mode"],
-            "daily_strategy"
-        );
+        assert_eq!(audit["gate_path"][0]["selection_mode"], "daily_strategy");
         assert_eq!(audit["gate_path"][0]["status"], "selected");
         assert_eq!(audit["gate_path"][1]["stage"], "execution");
         assert_eq!(audit["gate_path"][1]["status"], "blocked");
@@ -2585,10 +2669,7 @@ mod parallel_daily_cycle_tests {
 
         assert_eq!(first_audit["stage"], "strategy_rejection");
         assert_eq!(first_audit["status"], "rejected");
-        assert_eq!(
-            first_audit["reason"],
-            "Strength 0.12 < 0.30"
-        );
+        assert_eq!(first_audit["reason"], "Strength 0.12 < 0.30");
         assert_eq!(
             first_audit["entry_gate"]["selection_mode"],
             "strategy_rejection"
@@ -2627,8 +2708,8 @@ mod parallel_daily_cycle_tests {
         let mut candidate = signal("trend-50-200");
         candidate.score = 0.28;
         candidate.strength = 0.16;
-        let dashboard: Dashboard = serde_json::from_value(serde_json::json!({ "best": [] }))
-            .unwrap();
+        let dashboard: Dashboard =
+            serde_json::from_value(serde_json::json!({ "best": [] })).unwrap();
         let reason = candidate_selection_blocker_reason(
             &candidate,
             &dashboard,
@@ -2652,11 +2733,8 @@ mod parallel_daily_cycle_tests {
             "btc_gate_required": false,
             "btc_gate_passed": true
         }));
-        let reason = strategy_entry_rejection_reason(
-            &candidate,
-            Strategy::Trend50200,
-            &BTreeMap::new(),
-        );
+        let reason =
+            strategy_entry_rejection_reason(&candidate, Strategy::Trend50200, &BTreeMap::new());
         assert!(reason.contains("primary strategy rule not met"), "{reason}");
     }
 

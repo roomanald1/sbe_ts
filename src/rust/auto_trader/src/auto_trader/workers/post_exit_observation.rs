@@ -159,16 +159,15 @@ async fn collect_due_post_exit_observations(state: &AutoTraderState) -> Result<(
         let path_returns = price_path
             .iter()
             .filter_map(|sample| {
-                if sample["source_fresh"] != serde_json::Value::Bool(true)
-                    || sample["symbol_freshness"]["contract_version"] != serde_json::json!(1)
-                {
+                if !post_exit_sample_has_valid_freshness(sample) {
                     return None;
                 }
-                let price = if direction > 0.0 {
-                    sample["bid"].as_f64()?
-                } else {
-                    sample["ask"].as_f64()?
-                };
+                let bid = sample["bid"].as_f64()?;
+                let ask = sample["ask"].as_f64()?;
+                if !bid.is_finite() || !ask.is_finite() || bid <= 0.0 || ask < bid {
+                    return None;
+                }
+                let price = if direction > 0.0 { bid } else { ask };
                 (price.is_finite() && price > 0.0)
                     .then_some((price / exit_price - 1.0) * direction * 100.0)
             })
@@ -197,20 +196,15 @@ async fn collect_due_post_exit_observations(state: &AutoTraderState) -> Result<(
             .unwrap_or_default();
         let expected_last_at_ms = observation["observe_at_ms"].as_u64().unwrap_or_default();
         let max_allowed_gap_ms = POST_EXIT_SAMPLE_INTERVAL_MS.saturating_mul(2);
-        let path_coverage_complete = completed
-            && !path_returns.is_empty()
-            && path_returns.len() == price_path.len()
-            && path_timestamps.len() == price_path.len()
-            && path_timestamps.first().is_some_and(|first| {
-                *first >= expected_first_at_ms
-                    && first.saturating_sub(expected_first_at_ms) <= max_allowed_gap_ms
-            })
-            && path_timestamps.last().is_some_and(|last| {
-                *last <= observed_at
-                    && observed_at.saturating_sub(*last) <= max_allowed_gap_ms
-                    && last.saturating_add(max_allowed_gap_ms) >= expected_last_at_ms
-            })
-            && maximum_path_gap_ms <= max_allowed_gap_ms;
+        let path_coverage_complete = post_exit_path_coverage_complete(
+            &price_path,
+            path_returns.len(),
+            completed,
+            observed_at,
+            expected_first_at_ms,
+            expected_last_at_ms,
+            max_allowed_gap_ms,
+        );
         let price_path_evidence = serde_json::json!({
             "schema_version": 1,
             "scope": "post_exit_executable_bid_ask_relative_to_exit_fill",
@@ -329,6 +323,63 @@ async fn defer_post_exit_observation(
         status,
     );
     request_settings_persist(state).map_err(|error| error.1)
+}
+
+fn post_exit_sample_has_valid_freshness(sample: &serde_json::Value) -> bool {
+    let timestamp = sample["timestamp"].as_u64();
+    let source_updated_at = sample["source_updated_at_ms"].as_u64();
+    let freshness = &sample["symbol_freshness"];
+    let max_age_ms = freshness["max_age_ms"].as_u64();
+    sample["source_fresh"] == serde_json::Value::Bool(true)
+        && freshness["contract_version"] == serde_json::json!(1)
+        && freshness["scope"] == serde_json::json!("symbol")
+        && freshness["state"] == serde_json::json!("fresh")
+        && timestamp.is_some()
+        && source_updated_at.is_some()
+        && max_age_ms.is_some()
+        && source_updated_at <= timestamp
+        && timestamp
+            .zip(source_updated_at)
+            .zip(max_age_ms)
+            .is_some_and(|((timestamp, updated), maximum_age)| {
+                timestamp.saturating_sub(updated) <= maximum_age
+            })
+}
+
+fn post_exit_path_coverage_complete(
+    price_path: &[serde_json::Value],
+    usable_sample_count: usize,
+    completed: bool,
+    observed_at: u64,
+    expected_first_at_ms: u64,
+    expected_last_at_ms: u64,
+    max_allowed_gap_ms: u64,
+) -> bool {
+    let timestamps = price_path
+        .iter()
+        .filter_map(|sample| sample["timestamp"].as_u64())
+        .collect::<Vec<_>>();
+    let strictly_increasing = timestamps.windows(2).all(|window| window[0] < window[1]);
+    let maximum_gap_ms = timestamps
+        .windows(2)
+        .map(|window| window[1].saturating_sub(window[0]))
+        .max()
+        .unwrap_or_default();
+    completed
+        && !price_path.is_empty()
+        && usable_sample_count == price_path.len()
+        && timestamps.len() == price_path.len()
+        && strictly_increasing
+        && timestamps.first().is_some_and(|first| {
+            *first >= expected_first_at_ms
+                && first.saturating_sub(expected_first_at_ms) <= max_allowed_gap_ms
+        })
+        && timestamps.last().is_some_and(|last| {
+            *last <= observed_at
+                && observed_at.saturating_sub(*last) <= max_allowed_gap_ms
+                && last.saturating_add(max_allowed_gap_ms) >= expected_last_at_ms
+        })
+        && maximum_gap_ms <= max_allowed_gap_ms
 }
 
 fn record_post_exit_collection_status(
@@ -657,6 +708,70 @@ fn exit_timing_feedback_queue_lag(settings: &Settings, now_ms: u64) -> (usize, O
 #[cfg(test)]
 mod post_exit_feedback_tests {
     use super::*;
+
+    fn executable_path_sample(timestamp: u64, source_updated_at_ms: u64) -> serde_json::Value {
+        serde_json::json!({
+            "timestamp": timestamp,
+            "bid": 99.9,
+            "ask": 100.1,
+            "source_updated_at_ms": source_updated_at_ms,
+            "source_fresh": true,
+            "symbol_freshness": {
+                "contract_version": 1,
+                "scope": "symbol",
+                "state": "fresh",
+                "max_age_ms": 500
+            }
+        })
+    }
+
+    fn path_is_complete(path: &[serde_json::Value]) -> bool {
+        let usable_sample_count = path
+            .iter()
+            .filter(|sample| post_exit_sample_has_valid_freshness(sample))
+            .count();
+        post_exit_path_coverage_complete(
+            path,
+            usable_sample_count,
+            true,
+            3_000,
+            1_000,
+            3_000,
+            1_000,
+        )
+    }
+
+    #[test]
+    fn executable_post_exit_path_requires_strict_timestamps_and_valid_freshness() {
+        let ordered = vec![
+            executable_path_sample(1_000, 900),
+            executable_path_sample(2_000, 1_900),
+            executable_path_sample(3_000, 2_900),
+        ];
+        assert!(path_is_complete(&ordered));
+
+        let duplicate = vec![
+            executable_path_sample(1_000, 900),
+            executable_path_sample(2_000, 1_900),
+            executable_path_sample(2_000, 1_950),
+        ];
+        assert!(!path_is_complete(&duplicate));
+
+        let reversed = vec![
+            executable_path_sample(1_000, 900),
+            executable_path_sample(3_000, 2_900),
+            executable_path_sample(2_000, 1_900),
+        ];
+        assert!(!path_is_complete(&reversed));
+
+        let mut stale = ordered.clone();
+        stale[1]["source_updated_at_ms"] = serde_json::json!(1_000);
+        assert!(!path_is_complete(&stale));
+
+        let mut invalid_freshness = ordered;
+        invalid_freshness[1]["symbol_freshness"]["state"] = serde_json::json!("stale");
+        assert!(!path_is_complete(&invalid_freshness));
+    }
 
     #[test]
     fn deferred_observation_records_reason_and_next_retry_time() {

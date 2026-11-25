@@ -103,13 +103,9 @@ impl RSocket for LifecycleResponder {
             ("POST", "/internal/orders/match") => {
                 let body = request.body.unwrap_or_default();
                 let quantity = body["quantity"].as_f64().unwrap_or_default();
-                let price = body["limit_price"].as_f64().unwrap_or_else(|| {
-                    if body["side"] == "buy" {
-                        100.0
-                    } else {
-                        101.0
-                    }
-                });
+                let price = body["limit_price"]
+                    .as_f64()
+                    .unwrap_or_else(|| if body["side"] == "buy" { 100.0 } else { 101.0 });
                 (
                     200,
                     serde_json::json!({
@@ -471,6 +467,21 @@ async fn selected_entry_exit_outbox_and_sqlite_restart_keep_one_lifecycle() {
     // persist_settings_snapshot writes SQLite directly at settings_path; the
     // .sqlite sibling is only used by the settings JSON-path resolver.
     let sqlite_path = state.settings_path.clone();
+    let strategy = Strategy::from_name("live-momentum").unwrap();
+    let budget = {
+        let settings = state.settings.lock().await;
+        signal_weighted_strategy_budget(
+            &settings,
+            &dashboard,
+            strategy,
+            StrategyCategory::Intraday,
+            current_time_ms(),
+        )
+    };
+    assert!(
+        budget > 0.0,
+        "fresh active candidate must retain its opportunity floor"
+    );
     let result = run_cycle_inner(&state, dashboard).await.unwrap();
     assert_eq!(
         result.status, "order_submitting",
@@ -579,9 +590,11 @@ async fn selected_entry_exit_outbox_and_sqlite_restart_keep_one_lifecycle() {
         let settings = state.settings.lock().await;
         assert_eq!(settings.orders.len(), order_count_before_replay);
         assert_eq!(settings.exploratory_event_reservations.len(), 1);
-        assert!(settings
-            .exploratory_event_reservations
-            .contains_key(&event_key));
+        assert!(
+            settings
+                .exploratory_event_reservations
+                .contains_key(&event_key)
+        );
     }
     {
         let mut settings = state.settings.lock().await;
@@ -1616,10 +1629,12 @@ async fn lost_pm_ack_replays_durable_entry_once_after_autotrader_settings_restar
     }
     let pending_order = pending_order.expect("durable entry reservation remains present");
     assert_eq!(pending_order.status, "submitting");
-    assert!(pending_order
-        .failure_reason
-        .as_deref()
-        .is_some_and(|reason| reason.starts_with("submission_pending_recovery:")));
+    assert!(
+        pending_order
+            .failure_reason
+            .as_deref()
+            .is_some_and(|reason| reason.starts_with("submission_pending_recovery:"))
+    );
     assert_eq!(
         proxy
             .dropped_submission_responses
@@ -1649,11 +1664,13 @@ async fn lost_pm_ack_replays_durable_entry_once_after_autotrader_settings_restar
         .find(|order| order.timestamp == pending_order.timestamp)
         .expect("restored Settings contains the same pending reservation");
     assert_eq!(restored_order.status, "submitting");
-    assert!(restored_order
-        .revalidation_snapshot
-        .as_ref()
-        .and_then(|snapshot| snapshot.submission_request.as_ref())
-        .is_some());
+    assert!(
+        restored_order
+            .revalidation_snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.submission_request.as_ref())
+            .is_some()
+    );
     drop(state);
 
     let mut restarted_state = benchmark_precomputed_ingress_state("lost-pm-ack-restarted");
@@ -1755,9 +1772,11 @@ async fn lost_pm_ack_replays_durable_entry_once_after_autotrader_settings_restar
             .unwrap();
     let completed_trades = completed_pm_history.body["trades"].as_array().unwrap();
     assert_eq!(completed_trades.len(), 2);
-    assert!(completed_trades
-        .iter()
-        .all(|trade| trade["lifecycle"]["trade_id"] == identity.trade_id));
+    assert!(
+        completed_trades
+            .iter()
+            .all(|trade| trade["lifecycle"]["trade_id"] == identity.trade_id)
+    );
     let fill_ids = completed_trades
         .iter()
         .filter_map(|trade| trade["fill_id"].as_str())

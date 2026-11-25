@@ -1225,6 +1225,58 @@ mod signal_ingestion_tests {
             .expect("deterministic executable quote fixture is valid")
     }
 
+    fn qualifying_cached_strategy_update(
+        runtime: &SignalRuntime,
+        symbol: &str,
+        measured_event_ids: &[String],
+    ) -> Option<serde_json::Value> {
+        let encoded = runtime.latest_strategy_signal_updates.get(symbol)?;
+        let update: serde_json::Value = serde_json::from_slice(encoded.value()).ok()?;
+        let event_id = update["event_id"].as_str()?;
+        if event_id.is_empty()
+            || !measured_event_ids
+                .iter()
+                .any(|expected| expected == event_id)
+        {
+            return None;
+        }
+        let signal = &update["signal"];
+        let timestamp = signal["timestamp"].as_u64()?;
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()?
+            .as_millis() as u64;
+        let positive_finite = |field: &str| {
+            signal["components"][field]
+                .as_f64()
+                .is_some_and(|value| value.is_finite() && value > 0.0)
+        };
+        (timestamp <= now_ms
+            && now_ms.saturating_sub(timestamp) <= 5_000
+            && positive_finite("trade_flow_imbalance")
+            && positive_finite("book_imbalance"))
+        .then_some(update)
+    }
+
+    async fn wait_for_qualifying_cached_strategy_update(
+        runtime: &SignalRuntime,
+        symbol: &str,
+        measured_event_ids: &[String],
+    ) -> anyhow::Result<serde_json::Value> {
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if let Some(update) =
+                    qualifying_cached_strategy_update(runtime, symbol, measured_event_ids)
+                {
+                    return Ok(update);
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .context("no fresh enriched measured raw-market update appeared within one second")?
+    }
+
     #[test]
     fn source_event_identity_is_versioned_stable_and_content_addressed() {
         let first = raw_price_event(42, 100.0);
@@ -1471,7 +1523,6 @@ mod signal_ingestion_tests {
     #[tokio::test]
     async fn correlated_raw_market_to_autotrader_order_ready_fixture() -> anyhow::Result<()> {
         let (runtime, _research_records) = benchmark_runtime();
-        let mut published = runtime.strategy_signal_events.subscribe();
         let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)?
             .as_millis() as u64;
@@ -1497,19 +1548,35 @@ mod signal_ingestion_tests {
                 );
             }
         }
-        while published.try_recv().is_ok() {}
-
         let session = auto_trader::auto_trader::CorrelatedMarketOrderReadySession::start().await?;
         let mut samples = Vec::with_capacity(symbols.len());
         for symbol in symbols {
-            let timestamp = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)?
-                .as_millis() as u64;
+            // Keep raw events monotonic with enough separation for Insights'
+            // feature publication cadence, while making the final event
+            // point-in-time fresh at AutoTrader.
+            const EVENT_STEP_MS: u64 = 1_000;
+            let latest_warmup_timestamp = now_ms.saturating_sub(2_000);
+            let next_live_snapshot_timestamp = latest_warmup_timestamp
+                .saturating_add(insights::signals::LIVE_SIGNAL_SNAPSHOT_INTERVAL_MS);
+            let source_timestamp_base = loop {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)?
+                    .as_millis() as u64;
+                let candidate = now.saturating_sub(EVENT_STEP_MS * 4);
+                if candidate >= next_live_snapshot_timestamp {
+                    break candidate;
+                }
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            };
+            let timestamp = source_timestamp_base;
             let mid = 100.0 + INGEST_BENCHMARK_WARMUP_EVENTS as f64 * 0.05;
             let raw_ingress_started = std::time::Instant::now();
             let price_event = raw_price_event_for_symbol(symbol, timestamp, mid);
             let mut request = decode_signal_event(&price_event)
                 .expect("measured raw price decodes through the production feed codec");
+            let expected_price_event_id =
+                stable_signal_source_event_id(&request.symbol, &request.event);
+            let mut measured_event_ids = vec![expected_price_event_id.clone()];
             request.queued_at = Some(Instant::now());
             let result =
                 ingest_signal_event(axum::extract::State(Arc::clone(&runtime)), Json(request))
@@ -1518,21 +1585,14 @@ mod signal_ingestion_tests {
                 result.is_ok(),
                 "production measured price ingress should accept"
             );
-            let preliminary_update = tokio::time::timeout(Duration::from_secs(1), published.recv())
-                .await?
-                .context("initial measured price publishes its production snapshot")?;
-            let preliminary_value: serde_json::Value = serde_json::from_slice(&preliminary_update)?;
-            assert_eq!(preliminary_value["signal"]["timestamp"], timestamp);
-
-            let trade_event = raw_trade_event_for_symbol(
-                symbol,
-                timestamp.saturating_add(1_000),
-                mid,
-                10.0,
-                true,
-            );
+            let trade_timestamp = source_timestamp_base.saturating_add(EVENT_STEP_MS);
+            let trade_event = raw_trade_event_for_symbol(symbol, trade_timestamp, mid, 10.0, true);
             let mut request = decode_signal_event(&trade_event)
                 .expect("measured raw trade decodes through the production feed codec");
+            measured_event_ids.push(stable_signal_source_event_id(
+                &request.symbol,
+                &request.event,
+            ));
             request.queued_at = Some(Instant::now());
             let result =
                 ingest_signal_event(axum::extract::State(Arc::clone(&runtime)), Json(request))
@@ -1542,10 +1602,21 @@ mod signal_ingestion_tests {
                 "production measured trade ingress should accept"
             );
 
-            let book_timestamp = timestamp.saturating_add(2_000);
+            let book_timestamp = source_timestamp_base.saturating_add(EVENT_STEP_MS * 2);
+            let evaluation_now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)?
+                .as_millis() as u64;
+            assert!(book_timestamp <= evaluation_now_ms);
+            assert!(
+                evaluation_now_ms.saturating_sub(book_timestamp) <= 5_000,
+                "raw-to-order fixture signal must be point-in-time fresh: timestamp={book_timestamp}, now={evaluation_now_ms}"
+            );
             let book_event = raw_book_event_for_symbol(symbol, book_timestamp, mid);
             let mut request = decode_signal_event(&book_event)
                 .expect("measured raw book decodes through the production feed codec");
+            let expected_book_event_id =
+                stable_signal_source_event_id(&request.symbol, &request.event);
+            measured_event_ids.push(expected_book_event_id);
             request.queued_at = Some(Instant::now());
             let result =
                 ingest_signal_event(axum::extract::State(Arc::clone(&runtime)), Json(request))
@@ -1554,9 +1625,14 @@ mod signal_ingestion_tests {
                 result.is_ok(),
                 "production measured book ingress should accept"
             );
-            let final_price_event = raw_price_event_for_symbol(symbol, book_timestamp, mid);
+            let final_price_timestamp = source_timestamp_base.saturating_add(EVENT_STEP_MS * 3);
+            let final_price_event = raw_price_event_for_symbol(symbol, final_price_timestamp, mid);
             let mut request = decode_signal_event(&final_price_event)
                 .expect("final raw price decodes through the production feed codec");
+            measured_event_ids.push(stable_signal_source_event_id(
+                &request.symbol,
+                &request.event,
+            ));
             request.queued_at = Some(Instant::now());
             let result =
                 ingest_signal_event(axum::extract::State(Arc::clone(&runtime)), Json(request))
@@ -1565,16 +1641,31 @@ mod signal_ingestion_tests {
                 result.is_ok(),
                 "final production price ingress should accept"
             );
-            let update = tokio::time::timeout(Duration::from_secs(1), published.recv())
-                .await?
-                .context("final price publishes the trade/book-enriched signal")?;
-            let value: serde_json::Value = serde_json::from_slice(&update)?;
+            let value =
+                wait_for_qualifying_cached_strategy_update(&runtime, symbol, &measured_event_ids)
+                    .await?;
             let signal: strategy::StrategyMarketSignal =
                 serde_json::from_value(value["signal"].clone())?;
             assert_eq!(signal.symbol, symbol);
-            assert_eq!(signal.timestamp, book_timestamp);
+            let published_event_id = value["event_id"]
+                .as_str()
+                .context("qualified update event id missing")?;
+            assert!(
+                measured_event_ids
+                    .iter()
+                    .any(|event_id| event_id == published_event_id)
+            );
             assert!(signal.components.trade_flow_imbalance.unwrap_or_default() > 0.0);
             assert!(signal.components.book_imbalance.unwrap_or_default() > 0.0);
+            let boundary_now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)?
+                .as_millis() as u64;
+            assert!(signal.timestamp <= boundary_now_ms);
+            assert!(
+                boundary_now_ms.saturating_sub(signal.timestamp) <= 5_000,
+                "raw-to-order fixture signal must be fresh at AutoTrader: timestamp={}, now={boundary_now_ms}",
+                signal.timestamp
+            );
             let market = executable_book_market(book_timestamp, mid);
             let sample = session
                 .process_signal(signal, market, raw_ingress_started)

@@ -9,6 +9,7 @@ struct SelectedSignalOrderRequest<'a> {
     context_threshold_refresh_ms: f64,
     cycle_started_at: Instant,
     now: u64,
+    now_ms: u64,
     market: serde_json::Value,
     bid: f64,
     ask: f64,
@@ -274,6 +275,7 @@ async fn submit_selected_signal(
         context_threshold_refresh_ms,
         cycle_started_at,
         now,
+        now_ms,
         market,
         bid,
         ask,
@@ -285,7 +287,6 @@ async fn submit_selected_signal(
     // Don't also hold the shared cycle lock while scanning and cloning Settings:
     // order reservation rechecks the gate under the settings mutex before writing.
     let decision_id = signal_decision_id(signal);
-    let now_ms = now.saturating_mul(1000);
     let SignalSettingsSnapshot {
         settings: settings_snapshot,
         quote_rate,

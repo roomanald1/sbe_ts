@@ -360,7 +360,7 @@ async fn submit_position_exit_order(
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_millis() as u64;
-        let payload = position_exit_audit_payload(
+        let mut payload = position_exit_audit_payload(
             &decision_id,
             now,
             timestamp,

@@ -564,6 +564,7 @@ async fn sync_protective_stops(state: &AutoTraderState) -> Result<(), (StatusCod
                 mark_symbol_entry_floor_lift(&mut settings, &symbol, &strategy, trade_realized_pnl);
             }
             let mut trade_feedback_enqueued = false;
+            let mut authoritative_lineage_complete = false;
             if fully_closed && entry_notional > 0.0 {
                 let total_trade_pnl = trade_realized_pnl;
                 let total_fees = if prior_total_fees > 0.0 {
@@ -609,8 +610,8 @@ async fn sync_protective_stops(state: &AutoTraderState) -> Result<(), (StatusCod
                         outcome_key,
                     ))
                 });
-                let authoritative_lineage_complete =
-                    lifecycle_identity.as_ref().is_none_or(|identity| {
+                authoritative_lineage_complete =
+                    lifecycle_identity.as_ref().is_some_and(|identity| {
                         let Some(trade_id) = trade_id.as_deref().filter(|value| !value.is_empty())
                         else {
                             return false;
@@ -1039,12 +1040,14 @@ mod protective_stop_audit_tests {
         let duplicate =
             protective_stop_fill_evidence(&barrier, &[good.clone(), good.clone()], &stop, &[]);
         assert!(!duplicate.complete);
-        assert!(duplicate
-            .reasons
-            .iter()
-            .any(|reason| reason == "protective_barrier_fill_id_duplicate"));
+        assert!(
+            duplicate
+                .reasons
+                .iter()
+                .any(|reason| reason == "protective_barrier_fill_id_duplicate")
+        );
 
-        let mut misparented = good;
+        let mut misparented = good.clone();
         misparented["parent_order_id"] = serde_json::json!("another-stop");
         let mismatch = protective_stop_fill_evidence(&barrier, &[misparented], &stop, &[]);
         assert!(!mismatch.complete);
@@ -1057,10 +1060,12 @@ mod protective_stop_audit_tests {
         unknown_fee["fee_currency"] = serde_json::Value::Null;
         let incomplete_fee = protective_stop_fill_evidence(&barrier, &[unknown_fee], &stop, &[]);
         assert!(!incomplete_fee.complete);
-        assert!(incomplete_fee
-            .reasons
-            .iter()
-            .any(|reason| reason == "protective_barrier_fill_fee_incomplete"));
+        assert!(
+            incomplete_fee
+                .reasons
+                .iter()
+                .any(|reason| reason == "protective_barrier_fill_fee_incomplete")
+        );
     }
 
     #[test]

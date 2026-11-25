@@ -211,14 +211,14 @@ pub(super) async fn accept_feedback(
         let candidate_family_id = event_candidate_family_id(&event);
         let triggering_block_id = event_independence_block_id(&event);
         promote_qualified_scout_candidates(
-        &mut state,
-        symbol,
-        strategy,
-        minimum_parameter_samples,
+            &mut state,
+            symbol,
+            strategy,
+            minimum_parameter_samples,
             Some(event_id),
             candidate_family_id.as_deref(),
             triggering_block_id,
-    );
+        );
     }
     train_threshold_parameters(&mut state, &event, symbol, strategy, &profile_key, &update);
     enqueue_strategy_replay(&mut state, &event);
@@ -1112,16 +1112,18 @@ fn evidence_gain_scope(
                 },
             learning_context: Some(context),
             ..
-        } => scout_context_direction(context, symbol, strategy, regime).map(|direction| {
-            evidence_request_key_with_direction(
-                symbol,
-                strategy,
-                profile_id,
-                regime,
-                &horizon.to_string(),
-                Some(direction),
-            )
-        }),
+        } => crate::profiles::scout_context_direction(context, symbol, strategy, regime).map(
+            |direction| {
+                evidence_request_key_with_direction(
+                    symbol,
+                    strategy,
+                    profile_id,
+                    regime,
+                    &horizon.to_string(),
+                    Some(direction),
+                )
+            },
+        ),
         FeedbackEvent::TradeOutcome {
             replay_context: Some(context),
             ..
@@ -1153,7 +1155,7 @@ fn record_evidence_gain_event(
     before: EvidenceGainCoverageSnapshot,
     now_ms: u64,
 ) -> bool {
-    let (event_id, symbol, strategy, _, profile_id) = event_parts(event);
+    let (event_id, _, _, _, profile_id) = event_parts(event);
     let (cohort_id, request_id, request_attempt) = evidence_gain_scope(state, event);
     let targeted_exploratory_trade = match event {
         FeedbackEvent::TradeOutcome {
